@@ -49,8 +49,11 @@ log = logging.getLogger(__name__)
 TICK_S = 60.0
 BACKOFF_S = 120.0
 READ_PACING_S = 0.4
-MAX_READS_PER_TICK = 24
-MAX_FOLLOWUP_READS = 8
+# One tick's share of the bucket, plus a little slack so a tick can
+# finish its share when an earlier one fell short. NOT the bucket's
+# whole slice: that was V1's burst.
+MAX_READS_PER_TICK = sc.MAX_MARKETS_PER_TICK + 2
+MAX_FOLLOWUP_READS = 6
 MISS_ABANDON = 6
 
 PREMAP_SQL = """
@@ -102,62 +105,95 @@ def _mid_of(book: dict):
 
 
 async def _candidates(pool) -> list:
+    """Eligible MARKETS, one entry each. NOT one per leg.
+
+    The venue's book endpoint takes a market slug and knows nothing
+    about sides, so the yes and no legs of a market would issue two
+    identical requests for one payload -- double the venue load for no
+    extra information, which is what V1 did. The market is sampled
+    once; its row carries the leg the returned book actually belongs
+    to, and the complement stays absent by name rather than being
+    derived from it.
+
+    Deduplication keeps the FIRST leg by a stable sort on the venue's
+    own side string, so which leg represents a market does not depend
+    on row order from the database.
+    """
     rows = await pool.fetch(PREMAP_SQL, str(int(sc.PREMAP_FRESH_S)))
-    out = []
+    by_market = {}
     for r in rows:
         ok, _why = sc.eligible(dict(r))
         if not ok:
             continue
-        out.append({
-            "identifier": r["identifier"], "symbol": r["market_slug"],
-            "marketId": r["market_slug"], "eventId": r["event_slug"],
-            "outcomeLeg": r["side_norm"], "kind": r["kind"],
-            "sportSourceRaw": r["sports_type"],
+        slug = r["market_slug"]
+        cand = {
+            "identifier": slug, "symbol": slug, "marketId": slug,
+            "eventId": r["event_slug"], "outcomeLeg": r["side_norm"],
+            "kind": r["kind"], "sportSourceRaw": r["sports_type"],
             "leagueSourceRaw": r["team_league"],
             "gameStart": r["game_start"],
-        })
-    return out
+            "legIdentifier": r["identifier"],
+        }
+        prior = by_market.get(slug)
+        if prior is None or str(cand["outcomeLeg"]) < str(
+                prior["outcomeLeg"]):
+            by_market[slug] = cand
+    return list(by_market.values())
 
 
-async def tick(pool, *, last_bucket=None) -> dict:
-    """One cycle. THE SAMPLING PASS RUNS ONCE PER CADENCE BUCKET.
+async def tick(pool) -> dict:
+    """One 60s cycle: this tick's share of the bucket's markets.
 
     The loop ticks every 60s and the sampling cadence is 300s, so five
-    consecutive ticks fall inside one bucket and compute the same
-    rotation cycle. Sampling on every one of them would re-read the
-    same markets five times, write four rows the primary key discards,
-    and spend five times the venue budget to learn nothing. The four
-    non-sampling ticks are spent on follow-up reads instead, which is
-    where the short horizons actually live.
+    ticks fall inside one bucket and compute the same rotation cycle.
+    The bucket's MEMBERSHIP is fixed by the cycle; which of its markets
+    a given tick reads is that tick's share. V1 read the whole slice at
+    the top of the bucket and idled for the other four ticks, putting
+    40 requests through a shared gateway in ~16s -- ten of its first
+    fourteen came back 429. Same markets, same bucket, a fifth of the
+    instantaneous rate.
+
+    The observation bucket is still the primary key, so a market read
+    twice inside one bucket is discarded rather than duplicated.
     """
     at = datetime.now(tz=timezone.utc)
     bucket = sc.bucket_of(at)
-    sampling = bucket != last_bucket
+    tick_i = sc.tick_index(at)
     stats = {"status": "ok", "cycle": sc.cycle_of(at),
-             "bucket": bucket, "sampled": sampling,
+             "bucket": bucket, "tick": tick_i, "sampled": True,
              "universe": sc.UNIVERSE_VERSION,
              "ruleSha": sc.RULE_SHA[:16],
              "rotationSlices": sc.ROTATION_SLICES,
              "eligible": 0, "inSlice": 0, "read": 0, "written": 0,
              "duplicateBucket": 0, "unreadable": 0, "failures": 0,
+             "rateLimited": 0,
              "sliceTruncated": False, "followups": 0, "reads": 0}
 
-    sel = {"SELECTED": []}
-    if sampling:
-        try:
-            cands = await _candidates(pool)
-        except Exception as exc:                               # noqa: BLE001
-            stats["status"] = "premap_unreadable"
-            stats["lastError"] = "%s: %s" % (type(exc).__name__, exc)
-            return stats
-        sel = sc.select(cands, at=at)
-        stats["eligible"] = sel["CANDIDATES_ELIGIBLE"]
-        stats["inSlice"] = sel["CANDIDATES_IN_SLICE"]
-        stats["sliceTruncated"] = sel["SLICE_TRUNCATED"]
-        stats["sliceTruncatedBy"] = sel["SLICE_TRUNCATED_BY"]
+    try:
+        cands = await _candidates(pool)
+    except Exception as exc:                                   # noqa: BLE001
+        stats["status"] = "premap_unreadable"
+        stats["lastError"] = "%s: %s" % (type(exc).__name__, exc)
+        return stats
+    sel = sc.select(cands, at=at, tick=tick_i)
+    stats["eligible"] = sel["CANDIDATES_ELIGIBLE"]
+    stats["inSlice"] = sel["CANDIDATES_IN_SLICE"]
+    stats["bucketShare"] = sel["BUCKET_SHARE"]
+    stats["sliceTruncated"] = sel["SLICE_TRUNCATED"]
+    stats["sliceTruncatedBy"] = sel["SLICE_TRUNCATED_BY"]
+    # A CAP THAT BINDS EVERY PASS IS NOT A ROTATION. V1's did, on every
+    # row it ever wrote, and the loop said nothing. This is loud.
+    if sel["SLICE_TRUNCATED"]:
+        stats["status"] = "slice_truncated"
+        log.error("bettor_state: slice %d holds %d markets against a cap "
+                  "of %d -- the cap is binding, so the rotation is "
+                  "drawing a fixed panel and %d markets are never "
+                  "sampled. The rule needs a version bump.",
+                  sel["CYCLE"], sel["CANDIDATES_IN_SLICE"],
+                  sc.MAX_MARKETS_PER_CYCLE, sel["SLICE_TRUNCATED_BY"])
 
     misses = 0
-    budget = MAX_READS_PER_TICK if sampling else 0
+    budget = MAX_READS_PER_TICK
     for subject in sel["SELECTED"]:
         if budget <= 0:
             stats["status"] = "read_budget_exhausted"
@@ -187,6 +223,12 @@ async def tick(pool, *, last_bucket=None) -> dict:
         if row["BOOK_READABILITY_STATUS"] != "READABLE":
             misses += 1
             stats["unreadable"] += 1
+            # RATE LIMITING IS ABOUT US, NOT THE MARKET. It is counted
+            # apart from a venue that published no book, because the
+            # two call for opposite responses: one means slow down, the
+            # other is a fact about the market and means carry on.
+            if "RateLimit" in str(book.get("error") or ""):
+                stats["rateLimited"] += 1
 
         # A SELECTED MARKET WRITES A ROW EITHER WAY. Dropping the
         # unreadable ones would condition the frame on readability.
@@ -209,11 +251,12 @@ async def tick(pool, *, last_bucket=None) -> dict:
 
     # ── pass 2: the declared horizons ────────────────────────────────
     #
-    # The follow-up budget is independent of the sampling budget on a
-    # non-sampling tick, which is the whole point: four ticks in five
-    # do nothing but chase horizons that have come due.
-    follow_budget = (min(MAX_FOLLOWUP_READS, max(0, budget)) if sampling
-                     else MAX_FOLLOWUP_READS)
+    # A TICK THAT IS BEING RATE LIMITED DOES NOT THEN GO AND READ MORE.
+    # Follow-ups are skipped entirely when the sampling pass hit the
+    # venue's limit; a missing follow-up leaves a visible gap, while
+    # pushing through a 429 makes the next sampling read fail too.
+    follow_budget = 0 if stats["rateLimited"] else min(
+        MAX_FOLLOWUP_READS, max(0, budget))
     for horizon in sc.HORIZONS_OBSERVABLE_S:
         if follow_budget <= 0:
             break
@@ -274,18 +317,10 @@ async def run() -> None:
             await heartbeat("bettor_state", "store_not_ready", boot)
             await asyncio.sleep(BACKOFF_S)
 
-    last_bucket = None
     while True:
         started = time.monotonic()
         try:
-            stats = await tick(pool, last_bucket=last_bucket)
-            # ADVANCED ONLY ON A COMPLETED SAMPLING PASS. A tick that
-            # died reading the premap has not sampled its bucket, and
-            # marking it sampled would drop that bucket from the frame
-            # for good.
-            if stats.get("sampled") and stats["status"] != \
-                    "premap_unreadable":
-                last_bucket = stats.get("bucket")
+            stats = await tick(pool)
         except Exception as exc:                               # noqa: BLE001
             log.warning("bettor_state: tick failed", exc_info=True)
             stats = {"status": "tick_failed",

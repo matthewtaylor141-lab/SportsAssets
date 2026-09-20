@@ -78,7 +78,7 @@ def test_selection_takes_no_book_no_price_and_no_outcome():
     no argument through which economics could enter."""
     import inspect
     params = set(inspect.signature(sc.select).parameters)
-    assert params == {"candidates", "at", "max_markets"}
+    assert params == {"candidates", "at", "max_markets", "tick"}
     src = _code_only(inspect.getsource(sc.select)).lower()
     for forbidden in ("book", "spread", "mid", "depth", "outcome",
                       "settle", "volume", "price"):
@@ -127,12 +127,64 @@ def test_the_rotation_period_is_not_commensurate_with_a_day():
     assert day / max(1, min(drift, p - drift)) < 60   # days to sweep
 
 
-def test_a_slice_fits_inside_the_per_cycle_cap_at_the_real_universe_size():
-    """Otherwise the stable within-slice ordering would draw the SAME
-    markets every rotation and the rest would never be sampled at all
-    -- a fixed panel wearing a rotation's clothes."""
-    eligible_legs = 9_700          # measured 2026-09-20
-    assert eligible_legs / sc.ROTATION_SLICES < sc.MAX_MARKETS_PER_CYCLE
+def test_a_slice_fits_inside_the_per_cycle_cap_at_the_measured_universe():
+    """THE TEST THAT LET V1 SHIP. Its earlier form asserted against an
+    ASSUMED universe of 9,700 legs and passed; the measured figure is
+    47,078 legs / 23,539 markets, so the cap bound on every pass and the
+    stable ordering drew the same markets forever -- a fixed panel
+    wearing a rotation's clothes.
+
+    It now reads the measurement the rule was actually sized against,
+    which is recorded in the module. An assumption asserted against
+    itself proves nothing."""
+    m = sc.MEASURED_UNIVERSE
+    assert m["source"].endswith(".sql"), "the figure must have a source"
+    # Sized on MARKETS: two legs share one book, so one read serves both.
+    assert m["ELIGIBLE_LEGS"] == 2 * m["ELIGIBLE_MARKETS"]
+    per_slice = m["ELIGIBLE_MARKETS"] / sc.ROTATION_SLICES
+    assert per_slice < sc.MAX_MARKETS_PER_CYCLE, per_slice
+    # And with real headroom, so ordinary venue growth does not
+    # silently turn the rotation back into a panel.
+    assert per_slice < 0.85 * sc.MAX_MARKETS_PER_CYCLE, per_slice
+
+
+def test_v1_is_recorded_as_superseded_and_its_rows_are_kept():
+    v1 = sc.SUPERSEDED["BETTOR_UNSELECTED_STATE_V1"]
+    assert v1["rowsRetained"] is True
+    assert v1["rowsAreASampleOfTheUniverse"] is False
+    assert v1["outcomesSeenBeforeTheChange"] is False
+    assert "ROTATION_DID_NOT_COVER_THE_UNIVERSE" in v1["why"]
+    assert sc.UNIVERSE_VERSION not in sc.SUPERSEDED
+
+
+def test_the_bucket_is_read_across_ticks_not_as_one_burst():
+    """V1 put its whole slice through a shared gateway in ~16s and ten
+    of its first fourteen reads came back 429."""
+    cands = _cands(40_000)
+    at = T0
+    whole = sc.select(cands, at=at)["SELECTED"]
+    shares = []
+    for k in range(sc.TICKS_PER_BUCKET):
+        shares += sc.select(cands, at=at, tick=k)["SELECTED"]
+    # The union of the ticks is exactly the bucket, with no market read
+    # twice and none dropped.
+    assert [c["identifier"] for c in shares] == \
+           [c["identifier"] for c in whole]
+    assert len({c["identifier"] for c in shares}) == len(shares)
+    for k in range(sc.TICKS_PER_BUCKET):
+        assert len(sc.select(cands, at=at, tick=k)["SELECTED"]) \
+            <= sc.MAX_MARKETS_PER_TICK
+
+
+def test_the_within_slice_start_advances_each_rotation():
+    """A tick abandoned to rate limiting drops the tail of its ordering.
+    A fixed start would drop the SAME markets on every pass."""
+    cands = _cands(40_000)
+    a = sc.select(cands, at=T0)["SELECTED"]
+    b = sc.select(cands, at=T0 + timedelta(seconds=sc.FULL_ROTATION_S)
+                  )["SELECTED"]
+    assert a and b
+    assert [c["identifier"] for c in a] != [c["identifier"] for c in b]
 
 
 def test_truncation_is_recorded_rather_than_silent():
@@ -407,33 +459,22 @@ def test_the_worker_has_no_order_path():
     assert "mirrorLive" in inspect.getsource(w)
 
 
-def test_the_sampling_pass_runs_once_per_bucket_not_once_per_tick():
-    """The loop ticks at 60s and the cadence is 300s. Sampling on every
-    tick would re-read the same markets five times, write four rows the
-    primary key discards, and spend five times the venue budget."""
+def test_a_tick_reads_at_most_its_share_of_the_bucket():
     import asyncio
 
     from sportsassets.workers import bettor_state as w
 
     class _Pool:
-        def __init__(self):
-            self.fetches = 0
-
         async def fetch(self, *a, **k):
-            self.fetches += 1
             return []
 
-    pool = _Pool()
-    same = sc.bucket_of(datetime.now(tz=timezone.utc))
-    first = asyncio.run(w.tick(pool, last_bucket=None))
-    assert first["sampled"] is True
-    assert first["bucket"] == same
-    again = asyncio.run(w.tick(pool, last_bucket=first["bucket"]))
-    assert again["sampled"] is False
-    assert again["read"] == 0
+    r = asyncio.run(w.tick(_Pool()))
+    assert r["read"] == 0
+    assert 0 <= r["tick"] < sc.TICKS_PER_BUCKET
+    assert w.MAX_READS_PER_TICK < sc.MAX_MARKETS_PER_CYCLE
 
 
-def test_a_failed_sampling_pass_does_not_consume_its_bucket():
+def test_an_unreadable_premap_is_named_rather_than_crashing_the_loop():
     import asyncio
 
     from sportsassets.workers import bettor_state as w
@@ -442,9 +483,46 @@ def test_a_failed_sampling_pass_does_not_consume_its_bucket():
         async def fetch(self, *a, **k):
             raise RuntimeError("premap gone")
 
-    r = asyncio.run(w.tick(_Broken(), last_bucket=None))
+    r = asyncio.run(w.tick(_Broken()))
     assert r["status"] == "premap_unreadable"
-    assert r["sampled"] is True      # it tried; run() checks the status
+    assert "RuntimeError" in r["lastError"]
+
+
+def test_the_worker_reads_one_book_per_market_not_per_leg():
+    """The venue's book endpoint takes a slug and knows nothing about
+    sides, so two legs of one market would issue two identical requests
+    for one payload -- V1's second defect."""
+    import asyncio
+    import inspect
+
+    from sportsassets.workers import bettor_state as w
+
+    rows = [{"identifier": "leg-yes", "market_slug": "m1",
+             "event_slug": "e1", "side_norm": "yes", "kind": "nfl_ml",
+             "sports_type": "football", "team_league": "nfl",
+             "game_start": None},
+            {"identifier": "leg-no", "market_slug": "m1",
+             "event_slug": "e1", "side_norm": "no", "kind": "nfl_ml",
+             "sports_type": "football", "team_league": "nfl",
+             "game_start": None}]
+
+    class _Pool:
+        async def fetch(self, *a, **k):
+            return rows
+
+    got = asyncio.run(w._candidates(_Pool()))
+    assert len(got) == 1, "one market, one read"
+    assert got[0]["identifier"] == "m1"      # the rotation hashes markets
+    assert got[0]["legIdentifier"] in ("leg-yes", "leg-no")
+    assert "NOT one per leg" in inspect.getdoc(w._candidates)
+
+
+def test_the_leg_instrument_survives_the_market_level_rotation():
+    r = sc.state_record(_subject(identifier="m1",
+                                 legIdentifier="leg-yes"),
+                        observed_at=T0, book=BOOK)
+    assert r["INSTRUMENT_ID"] == "leg-yes"
+    assert r["MARKET_ID"] != r["INSTRUMENT_ID"]
 
 
 def test_the_worker_does_not_order_its_universe_by_activity():

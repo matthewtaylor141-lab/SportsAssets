@@ -161,31 +161,113 @@ def forbidden_name(name: str) -> None:
 
 # ── §4. THE FROZEN UNIVERSE RULE ─────────────────────────────────────
 
-UNIVERSE_VERSION = "BETTOR_UNSELECTED_STATE_V1"
+UNIVERSE_VERSION = "BETTOR_UNSELECTED_STATE_V2"
+
+# ── WHY THERE IS A V2, AND WHAT V1's ROWS ARE ────────────────────────
+#
+# V1 ran from 19:23:35Z to 19:31Z on 2026-09-20 and wrote a small number
+# of rows. It was replaced because its ROTATION WAS NOT A ROTATION.
+#
+# V1 sized the rotation on an assumed ~9,700 eligible legs: 277 slices,
+# cap 40, so ~35 per slice and a full pass covering the universe. The
+# measured figure is 47,078 eligible legs -- 170 per slice. The cap
+# therefore bound on EVERY pass, and because the within-slice ordering
+# is a stable hash, the same 40 markets were drawn from each slice
+# forever: a fixed panel of ~11,000 legs with ~36,000 never sampled at
+# all. Every V1 row carries slice_truncated = true, which is how it was
+# caught in the first two buckets.
+#
+# THE SECOND DEFECT. V1 read one book PER LEG. The venue's book endpoint
+# takes a market slug and knows nothing about sides, so the yes and no
+# legs of one market issued two identical requests for one payload --
+# double the venue load for no extra information. V2 samples MARKETS and
+# reads each one once. That halves the requirement from 47,078 to 23,539
+# and removes the hazard of two rows sharing a payload.
+#
+# THE THIRD DEFECT. V1 sampled its whole slice in a burst at the top of
+# each 300s bucket: 40 requests at 0.4s spacing is ~16s at 2.5 req/s on
+# top of every other loop in the process. Ten of V1's first fourteen
+# reads came back 429. V2 spreads the same bucket's reads across the
+# five 60s ticks inside it, which is the same markets at a fifth of the
+# instantaneous rate.
+#
+# V1's ROWS ARE KEPT. They are honest observations of the states they
+# saw, they carry their own universe_version and rule_sha, and deleting
+# them would be a retrospective edit of collected data. They are simply
+# not a sample of the universe, and any analysis must filter to V2.
+#
+# NO OUTCOME WAS SEEN BEFORE THIS CHANGE. At the moment V2 was written
+# every maturation count was 0 and no settlement existed; the status
+# query carries no settlement-minus-quote term by construction. The
+# version bump is required by §4 regardless -- the rule changed, so the
+# version changes -- but it is worth recording that the change was
+# forced by a coverage defect visible in the first two buckets and not
+# by anything about what the data said.
+SUPERSEDED = {
+    "BETTOR_UNSELECTED_STATE_V1": {
+        "ranFrom": "2026-09-20T19:23:35Z",
+        "supersededAt": "2026-09-20T19:31Z",
+        "why": ("ROTATION_DID_NOT_COVER_THE_UNIVERSE: sized for ~9,700 "
+                "eligible legs, measured 47,078. The per-cycle cap bound "
+                "on every pass and the stable ordering drew the same "
+                "markets forever"),
+        "alsoFixed": ("ONE_BOOK_READ_PER_LEG_NOT_PER_MARKET and "
+                      "WHOLE_SLICE_READ_AS_ONE_BURST"),
+        "rowsRetained": True,
+        "rowsAreASampleOfTheUniverse": False,
+        "outcomesSeenBeforeTheChange": False,
+    },
+}
 
 # Rotation: SLICES buckets of markets, one bucket per cadence tick.
 # A full pass over the universe takes SLICES * SAMPLING_CADENCE_S. All
 # three numbers are part of the frozen rule because each changes which
 # markets are observed when.
 #
-# WHY 277 AND NOT 288. 288 * 300s is exactly 24 hours, which would sample
-# every market at the SAME TIME OF DAY forever -- a market drawn at 03:00
-# UTC would never be seen pregame, and time of day is correlated with
-# kickoff times, liquidity and therefore with the economics being
-# measured. That is a selection, arrived at by arithmetic rather than by
-# intent, and it is exactly the kind this frame exists to avoid. 277 is
-# prime, the period is 83,100s = 23.08h, so each market's sampling time
-# precesses ~55 minutes per day and sweeps the whole clock in about 26
-# days.
+# NOT COMMENSURATE WITH A DAY. A period that divides or equals 24h would
+# sample every market at the SAME TIME OF DAY forever -- a market drawn
+# at 03:00 UTC would never be seen pregame, and time of day tracks
+# kickoff times, kickoff times track liquidity, and liquidity tracks the
+# economics being measured. That is a selection reached by arithmetic
+# rather than by intent, and exactly the kind this frame exists to
+# avoid. 787 is prime and the period is 236,100s = 65.58h, which is not
+# a whole number of days, so sampling times precess through the clock.
 #
-# SIZING. At ~9,700 eligible legs a slice holds ~35, comfortably under
-# the per-cycle cap, so a full pass covers the universe rather than
-# repeatedly re-drawing whichever markets happen to sort first.
-ROTATION_SLICES = 277
+# SIZED ON THE MEASURED UNIVERSE, NOT AN ASSUMED ONE. 23,539 eligible
+# MARKETS (47,078 legs, two per market, one book between them) over 787
+# slices is ~30 per slice against a cap of 40 -- headroom for venue
+# growth before the cap binds again. THE CAP MUST NOT BIND ROUTINELY:
+# when it does, the stable within-slice ordering means the same markets
+# are drawn every pass and the rest are never sampled at all. That is a
+# fixed panel wearing a rotation's clothes, and it is what V1 was.
+ROTATION_SLICES = 787
 SAMPLING_CADENCE_S = 300
 MAX_MARKETS_PER_CYCLE = 40
+
+# The bucket's reads are spread across the ticks inside it rather than
+# fired as one burst. Same markets, same bucket, a fifth of the
+# instantaneous rate -- V1 put 40 requests through a shared gateway in
+# ~16s and ten of its first fourteen came back 429.
+TICKS_PER_BUCKET = 5
+MAX_MARKETS_PER_TICK = -(-MAX_MARKETS_PER_CYCLE // TICKS_PER_BUCKET)
+
 FULL_ROTATION_S = ROTATION_SLICES * SAMPLING_CADENCE_S
 SECONDS_PER_DAY = 86_400
+
+# The measurement that sized the above. Recorded so a later reader can
+# see what the rule was sized against and re-check it rather than
+# inheriting the assumption that sank V1.
+MEASURED_UNIVERSE = {
+    "measuredAt": "2026-09-20T19:26Z",
+    "ELIGIBLE_LEGS": 47_078,
+    "ELIGIBLE_MARKETS": 23_539,
+    "ELIGIBLE_EVENTS": 1_493,
+    "source": "research/bettor_unselected_sizing.sql",
+    "note": ("two legs per market share one book, so the rotation is "
+             "sized on MARKETS. Events are what the pre-registration's "
+             "gate counts, because rows within an event are not "
+             "independent"),
+}
 
 # Follow-up mid horizons. Declared HERE, before row 1, so the set of
 # horizons cannot be chosen later on the basis of which one looked
@@ -230,10 +312,14 @@ FROZEN_RULE = {
         "and not how often the loop ran" % SAMPLING_CADENCE_S),
 
     "MAX_MARKETS": (
-        "%d per cycle. When a rotation slice holds more than that, the "
-        "overflow is recorded as SLICE_TRUNCATED with the count, so the "
-        "truncation is visible in the data rather than silent"
-        % MAX_MARKETS_PER_CYCLE),
+        "%d MARKETS per cycle -- markets, not legs: the venue's book "
+        "endpoint takes a slug and knows nothing about sides, so the "
+        "yes and no legs of one market share one read. Delivered as %d "
+        "per 60s tick rather than one burst. When a slice holds more "
+        "than the cap the overflow is recorded as SLICE_TRUNCATED with "
+        "its count. THE CAP MUST NOT BIND ROUTINELY: a binding cap plus "
+        "a stable ordering is a fixed panel, not a rotation"
+        % (MAX_MARKETS_PER_CYCLE, MAX_MARKETS_PER_TICK)),
 
     "MARKET_SELECTION_METHOD": (
         "deterministic. slice(identifier) = "
@@ -244,18 +330,21 @@ FROZEN_RULE = {
         "moment the choice is made" % ROTATION_SLICES),
 
     "ROTATION_METHOD": (
-        "cycle = floor(epoch_seconds / %d) %% %d; the cycle's slice is "
-        "sampled, ONCE per cadence bucket and not once per loop tick. "
-        "Every eligible market is visited once per full rotation of "
-        "%ds regardless of how active it is. The period is deliberately "
-        "NOT commensurate with 24h (%d is prime, %.2fh), so a market's "
-        "sampling time precesses through the clock instead of fixing it "
-        "at one hour of the day -- which would confound the market with "
-        "time of day, and time of day with kickoff times and liquidity. "
-        "Ordering within a slice is by a second stable hash, never by "
-        "updated_at, which would select on recent venue activity"
-        % (SAMPLING_CADENCE_S, ROTATION_SLICES, FULL_ROTATION_S,
-           ROTATION_SLICES, FULL_ROTATION_S / 3600.0)),
+        "cycle = floor(epoch_seconds / %d) %% %d; that cycle's slice is "
+        "the bucket's membership, read across the %d ticks inside the "
+        "bucket rather than in one burst. Every eligible market is "
+        "visited once per full rotation of %ds (%.2fh) regardless of "
+        "how active it is. The period is deliberately NOT commensurate "
+        "with 24h (%d is prime), so sampling times precess through the "
+        "clock instead of fixing each market at one hour of the day -- "
+        "which would confound the market with time of day, and time of "
+        "day with kickoff times and liquidity. Ordering within a slice "
+        "is by a second stable hash, never by updated_at, which would "
+        "select on recent venue activity; the start of that ordering "
+        "advances one place per rotation so a tick abandoned to rate "
+        "limiting does not drop the same tail every pass"
+        % (SAMPLING_CADENCE_S, ROTATION_SLICES, TICKS_PER_BUCKET,
+           FULL_ROTATION_S, FULL_ROTATION_S / 3600.0, ROTATION_SLICES)),
 
     "TIME_TO_EVENT_REQUIREMENTS": (
         "NONE. Time to event is RECORDED on every row and filters "
@@ -347,29 +436,62 @@ def bucket_of(at: datetime) -> datetime:
     return datetime.fromtimestamp(epoch, tz=timezone.utc)
 
 
+def tick_index(at: datetime) -> int:
+    """Which tick within the current bucket this is, 0..TICKS-1."""
+    into = int(at.timestamp()) % SAMPLING_CADENCE_S
+    per = SAMPLING_CADENCE_S // TICKS_PER_BUCKET
+    return min(TICKS_PER_BUCKET - 1, into // per)
+
+
 def select(candidates: list, *, at: datetime,
-           max_markets: int = MAX_MARKETS_PER_CYCLE) -> dict:
+           max_markets: int = MAX_MARKETS_PER_CYCLE,
+           tick: int | None = None) -> dict:
     """The sampling rule, applied. NOTHING HERE READS A BOOK.
 
-    `candidates` are eligible markets from the premap. The return
-    carries the chosen rows AND the truncation state, because a silent
-    cap is a selection nobody can see afterwards.
+    `candidates` are eligible markets from the premap, already deduped
+    to one entry per market. The return carries the chosen rows AND the
+    truncation state, because a silent cap is a selection nobody can
+    see afterwards -- V1's cap bound on every pass and every row said so.
+
+    With `tick`, only that tick's share of the bucket's markets is
+    returned. The bucket's membership does not change; only which of
+    its markets this particular 60s tick reads.
     """
     cycle = cycle_of(at)
     in_slice = [c for c in candidates
                 if slice_of(c["identifier"]) == cycle]
     in_slice.sort(key=lambda c: _order_key(c["identifier"]))
-    chosen = in_slice[:max_markets]
+
+    # THE ROTATING OFFSET. A read that dies to rate limiting abandons
+    # the rest of its tick, so a FIXED starting point would drop the
+    # same tail of the ordering on every pass -- a small permanent
+    # exclusion, uncorrelated with economics but an exclusion all the
+    # same. Advancing the start by the rotation count spreads which
+    # markets lose out. It depends only on the clock.
+    if in_slice:
+        rot = int(at.timestamp() // FULL_ROTATION_S) % len(in_slice)
+        in_slice = in_slice[rot:] + in_slice[:rot]
+
+    bucket_share = in_slice[:max_markets]
+    truncated_by = max(0, len(in_slice) - max_markets)
+    if tick is None:
+        chosen = bucket_share
+    else:
+        per = -(-max_markets // TICKS_PER_BUCKET)
+        chosen = bucket_share[tick * per:(tick + 1) * per]
+
     return {
         "UNIVERSE_VERSION": UNIVERSE_VERSION,
         "RULE_SHA": RULE_SHA,
         "CYCLE": cycle,
+        "TICK": tick,
         "ROTATION_SLICES": ROTATION_SLICES,
         "CANDIDATES_ELIGIBLE": len(candidates),
         "CANDIDATES_IN_SLICE": len(in_slice),
         "SELECTED": chosen,
-        "SLICE_TRUNCATED": len(in_slice) > max_markets,
-        "SLICE_TRUNCATED_BY": max(0, len(in_slice) - max_markets),
+        "BUCKET_SHARE": len(bucket_share),
+        "SLICE_TRUNCATED": truncated_by > 0,
+        "SLICE_TRUNCATED_BY": truncated_by,
         "selectionIndependence": SELECTION_INDEPENDENCE,
     }
 
@@ -542,7 +664,12 @@ def state_record(subject: dict, *, observed_at: datetime,
         # ── identity, venue-native only ──────────────────────────────
         "EVENT_ID": subject.get("eventId") or NOT_IDENTIFIED,
         "MARKET_ID": subject.get("marketId") or NOT_IDENTIFIED,
-        "INSTRUMENT_ID": subject.get("identifier") or NOT_IDENTIFIED,
+        # The venue's LEG instrument, not the rotation key. The rotation
+        # hashes the market slug (one book per market), so `identifier`
+        # is that slug; the instrument this row's leg refers to travels
+        # separately and is not overwritten by it.
+        "INSTRUMENT_ID": (subject.get("legIdentifier")
+                          or subject.get("identifier") or NOT_IDENTIFIED),
         "CONDITION_ID": subject.get("conditionId") or NOT_IDENTIFIED,
         "OUTCOME_LEG": subject.get("outcomeLeg") or NOT_IDENTIFIED,
         "SPORT": subject.get("sport") or NOT_IDENTIFIED,
