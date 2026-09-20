@@ -147,6 +147,42 @@ CANCELLATIONS_NOT_OBSERVABLE = {
             "these feeds at any cadence"),
 }
 
+TAPE_MARKET_JOIN = {
+    "TAPE_MARKET_JOIN_STATUS": "KEY_CONFIRMED_OVERLAP_NOT_YET_AVAILABLE",
+    "key": "tape.Symbol == us_premap.market_slug == "
+           "bettor_opportunities.symbol",
+    "keyIsVenueNative": (
+        "an equality on the venue's own market slug. No fuzzy title "
+        "matching, no team-name matching, no price matching"),
+    "measured": {
+        "tapeSymbolsTested": 7,
+        "matchedPremap": 0,
+        "matchedBettor": 0,
+        "bettorObservationsDated20260918": 0,
+        "bettorObservationsDated20260919": 1981,
+        "bettorObservationsDated20260920": 7145,
+    },
+    "whyZero": (
+        "RETENTION, NOT NAMESPACE, and the difference is the whole "
+        "finding. us_premap carries aec-mlb-det-cws-2026-09-20 and "
+        "aec-mlb-kc-pit-2026-09-20 -- the same shape as the tape's "
+        "aec-mlb-min-laa-2026-09-18 -- so the key is right. The "
+        "fetched file covers business day 2026-09-18, and BETTOR has "
+        "ZERO observations of 2026-09-18 markets because it began "
+        "collecting on 2026-09-19 at 18:23Z. The two windows have not "
+        "overlapped yet"),
+    "whenItWillOverlap": (
+        "the tape file covering business day 2026-09-20 -- markets "
+        "BETTOR observed 7,145 times -- publishes roughly one business "
+        "day later. The overlap arrives on its own; nothing needs "
+        "building for it"),
+    "whatWasNotProven": (
+        "that a specific BETTOR-observed market appears in a specific "
+        "tape file. Shape agreement across three sources is strong "
+        "evidence and is not that proof, and it is recorded as "
+        "NOT_PROVEN rather than assumed"),
+}
+
 # ── grades ───────────────────────────────────────────────────────────
 
 EXACT = "EXACT"
@@ -378,6 +414,7 @@ def matrix() -> dict:
             "CANCELLATIONS_NOT_OBSERVABLE": dict(
                 CANCELLATIONS_NOT_OBSERVABLE),
         },
+        "TAPE_MARKET_JOIN": dict(TAPE_MARKET_JOIN),
         "whatWouldChangeIt": what_would_change_it(),
         "contractUnchanged": (
             "no requirement was edited to reach these verdicts. Where a "

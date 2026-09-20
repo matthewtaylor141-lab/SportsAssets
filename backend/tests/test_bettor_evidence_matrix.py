@@ -111,3 +111,25 @@ def test_what_would_change_it_changes_evidence_never_the_contract():
     assert "out of scope" in w["THE_ONE_THAT_WOULD_SETTLE_EVERYTHING"]
     for v in w.values():
         assert "loosen" not in v.lower()
+
+
+# ── the tape/market join, measured ───────────────────────────────────
+
+def test_the_join_key_is_venue_native_and_the_zero_is_retention():
+    j = em.TAPE_MARKET_JOIN
+    assert j["TAPE_MARKET_JOIN_STATUS"] == \
+        "KEY_CONFIRMED_OVERLAP_NOT_YET_AVAILABLE"
+    assert "no price matching" in j["keyIsVenueNative"]
+    assert "RETENTION, NOT NAMESPACE" in j["whyZero"]
+    assert j["measured"]["bettorObservationsDated20260918"] == 0
+    assert j["measured"]["bettorObservationsDated20260920"] == 7145
+
+
+def test_shape_agreement_is_not_reported_as_proof():
+    j = em.TAPE_MARKET_JOIN
+    assert j["measured"]["matchedPremap"] == 0
+    assert "NOT_PROVEN rather than assumed" in j["whatWasNotProven"]
+
+
+def test_the_join_is_on_the_matrix():
+    assert "TAPE_MARKET_JOIN" in em.matrix()
