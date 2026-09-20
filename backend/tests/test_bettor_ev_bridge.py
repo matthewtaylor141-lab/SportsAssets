@@ -326,3 +326,43 @@ def test_the_no_fill_context_is_a_parameter_not_an_assumption():
                               no_fill_context=evb.PASSIVE_EXIT), "MAKE_YES")
     assert entry["EV_IF_NO_FILL"] == "0"
     assert exit_["EV_IF_NO_FILL"] == evb.NOT_IDENTIFIED
+
+
+# ── §2: vocabulary gaps are exposed, never aliased ───────────────────
+
+def test_settle_is_not_hold_to_settlement():
+    """A decision BETTOR takes vs an event the venue performs."""
+    r = acts.requested_name("SETTLE")
+    assert r["canonical"] == acts.NOT_REPRESENTED
+    assert r["closest"] == "HOLD_TO_SETTLEMENT"
+    assert "cannot choose the second" in r["why"]
+
+
+def test_the_research_modules_settle_label_is_recorded_as_a_collision():
+    """action_ev's own comment defines its SETTLE as 'holding to
+    settlement', so the name denotes a hold, not a settle action."""
+    r = acts.requested_name("SETTLE")
+    assert "denotes the HOLD" in r["namingCollisionInTheResearchVocabularies"]
+
+
+def test_exit_hedge_is_not_mapped_without_proof():
+    r = acts.requested_name("EXIT_HEDGE")
+    assert r["canonical"] == acts.NOT_REPRESENTED
+    assert r["closest"] == "HEDGE"
+    assert "not proven identical" in r["why"]
+    assert r["whatWouldSettleIt"]
+
+
+def test_a_canonical_name_resolves_exactly():
+    for name in ("HEDGE", "HOLD_TO_SETTLEMENT", "MAKE_YES", "NO_TRADE"):
+        r = acts.requested_name(name)
+        assert r["canonical"] == name and r["exact"] is True
+
+
+def test_the_hedge_take_complement_ambiguity_is_recorded_not_hidden():
+    a = acts.KNOWN_AMBIGUITY
+    assert set(a["actions"]) == {"HEDGE", "TAKE_COMPLEMENT"}
+    assert "inventory state" in a["separatedBy"]
+    # Both remain distinct canonical actions; neither was collapsed.
+    assert "HEDGE" in acts.CANONICAL_ACTIONS
+    assert "TAKE_COMPLEMENT" in acts.CANONICAL_ACTIONS

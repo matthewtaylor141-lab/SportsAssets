@@ -266,6 +266,83 @@ UNKNOWN_IS_NEVER_ZERO = (
     "which are exactly the terms that turn an apparent edge negative")
 
 
+# ── §2: names management asked for, answered without aliasing ────────
+#
+# "The management action table should expose vocabulary gaps rather
+# than hide them." A requested name resolves to a canonical action ONLY
+# where the economics are the same action. Where they are not, the
+# answer is NOT_REPRESENTED and the reason is recorded.
+
+REQUESTED_VOCABULARY = {
+    "EXIT_HEDGE": {
+        "canonical": NOT_REPRESENTED,
+        "closest": "HEDGE",
+        "why": (
+            "HEDGE is defined here as buying the complement to "
+            "neutralise exposure. EXIT_HEDGE names an INTENT -- "
+            "hedging in order to leave -- and no definition of it "
+            "exists in this repository to check that intent against. "
+            "Two actions with the same mechanics and different intents "
+            "are not proven identical, and mapping them because the "
+            "words overlap is the false mapping §2 forbids"),
+        "whatWouldSettleIt": (
+            "a definition of EXIT_HEDGE stating whether it differs "
+            "from HEDGE in the book it touches, the quantity it takes, "
+            "or only in why it was chosen"),
+    },
+    "SETTLE": {
+        "canonical": NOT_REPRESENTED,
+        "closest": "HOLD_TO_SETTLEMENT",
+        "why": (
+            "HOLD_TO_SETTLEMENT is a DECISION taken now to carry the "
+            "position; settlement is an EVENT the venue performs at "
+            "expiry. BETTOR chooses the first and cannot choose the "
+            "second, so they are not the same action and one must not "
+            "stand in for the other"),
+        "namingCollisionInTheResearchVocabularies": (
+            "action_ev and ev_core both list an action called SETTLE, "
+            "and action_ev's own comment defines it as 'holding to "
+            "settlement' -- so that label denotes the HOLD, not a "
+            "separate settle action. The collision is recorded rather "
+            "than resolved by adopting the name"),
+        "whatWouldSettleIt": (
+            "a venue mechanism BETTOR can invoke to realise settlement "
+            "early. None is documented; this venue's settlement prose "
+            "is CONFLICTING_VENUE_PROSE"),
+    },
+}
+
+# A GAP INSIDE THE CANONICAL TABLE, recorded because it is real. HEDGE
+# and TAKE_COMPLEMENT both buy the complement aggressively; only the
+# INTENT differs -- neutralise versus complete a pair and keep it.
+# position_state separates them by STATE (HEDGE_AVAILABLE vs
+# PAIR_AVAILABLE) rather than by mechanics, so the two are
+# distinguishable only where inventory state is known.
+KNOWN_AMBIGUITY = {
+    "actions": ("HEDGE", "TAKE_COMPLEMENT"),
+    "sameMechanics": "cross to buy the complement leg",
+    "differentIntent": ("HEDGE neutralises; TAKE_COMPLEMENT completes a "
+                        "pair intended to be held or merged"),
+    "separatedBy": ("inventory state, per position_state's "
+                    "HEDGE_AVAILABLE vs PAIR_AVAILABLE -- not by the "
+                    "order either would send"),
+    "why": ("recorded rather than resolved: collapsing them would lose "
+            "the distinction the exit engine needs, and inventing a "
+            "mechanical difference they do not have would be worse"),
+}
+
+
+def requested_name(name: str) -> dict:
+    """Resolve a name management used, or say it is not represented."""
+    if name in CANONICAL_ACTIONS:
+        return {"requested": name, "canonical": name, "exact": True}
+    spec = REQUESTED_VOCABULARY.get(name)
+    if spec is None:
+        return {"requested": name, "canonical": NOT_REPRESENTED,
+                "why": "no such action is declared"}
+    return {"requested": name, "exact": False, **spec}
+
+
 def leg_of(action: str) -> str:
     spec = CANONICAL_ACTIONS.get(action)
     return spec["leg"] if spec else LEG_NONE
