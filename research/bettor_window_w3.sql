@@ -74,7 +74,83 @@ SELECT 'B_INITIAL_READS', k, v FROM (
       FROM bettor_capture_ticks
      WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
        AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
+    UNION ALL
+    -- RATE LIMITING, reported as its own loss. A refused read is not a
+    -- scheduling decision and must not be pooled with one.
+    SELECT 'RATE_LIMITED_429', coalesce(sum(obs_rate_limited), 0)::text
+      FROM bettor_capture_ticks
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
+    UNION ALL
+    SELECT 'READABLE', coalesce(sum(obs_readable), 0)::text
+      FROM bettor_capture_ticks
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
+    UNION ALL
+    SELECT 'UNREADABLE_OTHER',
+           coalesce(sum(obs_unreadable_other), 0)::text
+      FROM bettor_capture_ticks
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
+    UNION ALL
+    SELECT 'PACING_S_RANGE',
+           coalesce(min(pacing_s) || '..' || max(pacing_s), '-')
+      FROM bettor_capture_ticks
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
 ) b
+
+UNION ALL
+
+-- ── B2. WINDOW ACTIVITY IS NOT COHORT OUTCOME ──────────────────────
+--
+-- A follow-up ATTEMPTED during the window may belong to an
+-- observation made long BEFORE it. At the 3600s horizon that is the
+-- only kind there can be: W3's own cohort is at most 30 minutes old at
+-- window close, so no cohort observation is 3600s due yet, and any
+-- 3600s read in this window necessarily concerns an older population.
+--
+-- These are different populations. Section D counts the COHORT and is
+-- the only place the declared criteria are evaluated. This section
+-- counts WINDOW ACTIVITY and may never be used to pass a cohort
+-- criterion.
+SELECT 'B2_ACTIVITY_VS_COHORT', k, v FROM (
+    SELECT 'FU_ATTEMPTED_IN_WINDOW_TICKS' AS k,
+           coalesce(sum(fu_attempted), 0)::text AS v
+      FROM bettor_capture_ticks
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
+    UNION ALL
+    SELECT 'MID_ROWS_WHOSE_OBSERVATION_IS_IN_COHORT', count(*)::text
+      FROM bettor_state_observations o
+      JOIN bettor_state_mids m ON m.observation_id = o.observation_id
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
+    UNION ALL
+    SELECT 'MID_ROWS_READ_IN_WINDOW_BUT_OBSERVED_EARLIER',
+           count(*)::text
+      FROM bettor_state_observations o
+      JOIN bettor_state_mids m ON m.observation_id = o.observation_id
+     WHERE m.read_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND m.read_at <  '2026-09-20T23:33:17Z'::timestamptz
+       AND o.observed_at < '2026-09-20T23:03:17Z'::timestamptz
+) b2
+
+UNION ALL
+
+-- Of the reads taken in the window that belong to OLDER observations,
+-- which horizons were they? This is where 3600s service shows up, and
+-- it is evidence about the rotation reaching that horizon -- NOT
+-- evidence that the cohort's 3600s outcomes exist.
+SELECT 'B3_OLDER_OBS_SERVED_IN_WINDOW',
+       m.horizon_s::text || 's | ' || coalesce(m.timing_class, '-'),
+       count(*)::text
+  FROM bettor_state_observations o
+  JOIN bettor_state_mids m ON m.observation_id = o.observation_id
+ WHERE m.read_at >= '2026-09-20T23:03:17Z'::timestamptz
+   AND m.read_at <  '2026-09-20T23:33:17Z'::timestamptz
+   AND o.observed_at < '2026-09-20T23:03:17Z'::timestamptz
+ GROUP BY 2
 
 UNION ALL
 
