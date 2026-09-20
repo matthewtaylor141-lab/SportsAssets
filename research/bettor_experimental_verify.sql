@@ -486,3 +486,81 @@ SELECT 'elapsed|' || m.horizon
     ON d.experimental_decision_id = m.experimental_decision_id
  WHERE m.horizon = '30S'
  ORDER BY m.observed_at;
+
+\echo ''
+\echo '--- 24. ROW-LEVEL TIMING: eligibility from the clock, not the label ---'
+-- Owner 2026-09-20 S1/S2: "A row labelled '60S' must not become
+-- performance evidence merely because TARGET_HORIZON = 60S... Do not
+-- assume a label proves its realized horizon. The recorded timestamps
+-- are authoritative."
+--
+-- Every markout with the eight fields the directive names. Note
+-- OBSERVATION_PRESENT: record_markout stores observed_at = observedAt
+-- or targetAt, so a row that observed NOTHING carries observed_at
+-- exactly at its target and would read as a flawless zero-error
+-- measurement on timestamps alone. l2_book_sha is what separates an
+-- observation from a placeholder, and the verdict reads it FIRST.
+SELECT 'timing|' || m.horizon
+       || '|' || d.experiment_id
+       || '|decided=' || to_char(d.decision_timestamp, 'HH24:MI:SS')
+       || '|target=' || to_char(m.target_at, 'HH24:MI:SS')
+       || '|observed=' || to_char(m.observed_at, 'HH24:MI:SS')
+       || '|realized_offset_s=' || round(EXTRACT(EPOCH FROM (
+              m.observed_at - d.decision_timestamp))::numeric, 1)
+       || '|target_error_s=' || round(EXTRACT(EPOCH FROM (
+              m.observed_at - m.target_at))::numeric, 1)
+       || '|tolerance_s=' || round((m.tolerance_ms / 1000.0)::numeric, 1)
+       || '|observation_present=' || (m.l2_book_sha IS NOT NULL)
+       || '|reconstructs=' || (abs(EXTRACT(EPOCH FROM (m.target_at
+              - (d.decision_timestamp + (CASE m.horizon
+                    WHEN '30S' THEN interval '30 seconds'
+                    WHEN '60S' THEN interval '60 seconds'
+                    WHEN '300S' THEN interval '300 seconds' END)))))
+              * 1000.0 <= 1.0)
+       || '|TIMING_STATUS=' || (CASE
+              WHEN m.l2_book_sha IS NULL THEN 'NO_OBSERVATION'
+              WHEN m.target_at IS NULL OR m.tolerance_ms IS NULL
+                  THEN 'TIMING_NOT_RECORDED'
+              WHEN abs(EXTRACT(EPOCH FROM (m.observed_at - m.target_at)))
+                   * 1000.0 <= m.tolerance_ms THEN 'WITHIN_TOLERANCE'
+              ELSE 'OUTSIDE_TOLERANCE' END)
+       || '|PERFORMANCE_ELIGIBLE=' || (
+              m.l2_book_sha IS NOT NULL
+              AND m.target_at IS NOT NULL AND m.tolerance_ms IS NOT NULL
+              AND abs(EXTRACT(EPOCH FROM (m.observed_at - m.target_at)))
+                  * 1000.0 <= m.tolerance_ms
+              AND m.horizon IN ('60S', '300S'))
+       || '|written_status=' || m.status
+       || '|executable=' || COALESCE(round(m.executable_markout_usd::numeric,
+                                           2)::text, 'NULL')
+  FROM bettor_experimental_markouts m
+  JOIN bettor_experimental_decisions d
+    ON d.experimental_decision_id = m.experimental_decision_id
+ ORDER BY m.observed_at DESC, m.horizon
+ LIMIT 40;
+
+\echo ''
+\echo '--- 24b. DOES THE WRITTEN STATUS AGREE WITH THE CLOCK? ---'
+-- Evidence ABOUT THE WRITE PATH, not part of the gate. The gate
+-- ignores `status` entirely. A row stored OBSERVED whose recorded
+-- timestamps fall outside the frozen tolerance would mean the write
+-- path admitted something the contract forbids. Zero disagreements is
+-- the expected result and is itself the finding.
+WITH derived AS (
+    SELECT m.horizon, m.status,
+           (m.l2_book_sha IS NOT NULL
+            AND m.target_at IS NOT NULL AND m.tolerance_ms IS NOT NULL
+            AND abs(EXTRACT(EPOCH FROM (m.observed_at - m.target_at)))
+                * 1000.0 <= m.tolerance_ms) AS within_tolerance
+      FROM bettor_experimental_markouts m
+      JOIN bettor_experimental_decisions d
+        ON d.experimental_decision_id = m.experimental_decision_id
+)
+SELECT 'writer|' || horizon
+       || '|written=' || status
+       || '|derived_within_tolerance=' || within_tolerance
+       || '|AGREES=' || ((status = 'OBSERVED') = within_tolerance)
+       || '|n=' || count(*)
+  FROM derived
+ GROUP BY horizon, status, within_tolerance
+ ORDER BY horizon, status;

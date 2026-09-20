@@ -39,6 +39,7 @@ from .. import shadow as sh
 from .. import shadow_experiment_registry as reg
 from .. import shadow_experimental_markouts as mk
 from .. import shadow_markout_observability as ob
+from .. import shadow_markout_timing as tm
 from .. import shadow_experimental_store as xstore
 from .. import shadow_experiments as xp
 
@@ -109,18 +110,25 @@ async def _guard(pool, what, sql, *args, one=False):
 # than zero P&L, which is the honest place for them.
 _PERFORMANCE_HORIZONS = "', '".join(sorted(ob.observable_horizons()))
 
+# AND EACH ROW MUST HAVE BEEN OBSERVED WHEN IT CLAIMS (owner
+# 2026-09-20): "A row labelled '60S' must not become performance
+# evidence merely because TARGET_HORIZON = 60S." The gate below is
+# re-derived from the recorded timestamps on every read -- it never
+# consults `status`, because a status column is a conclusion written
+# earlier and the directive makes the clock authoritative.
 _MARKED = """
     SELECT DISTINCT ON (m.experimental_decision_id)
            m.experimental_decision_id, m.horizon,
            m.mid_markout_usd, m.executable_markout_usd, m.observed_at
       FROM bettor_experimental_markouts m
-     WHERE m.status = 'OBSERVED'
-       AND m.executable_markout_usd IS NOT NULL
-       AND m.horizon IN ('%s')
+      JOIN bettor_experimental_decisions d
+        ON d.experimental_decision_id = m.experimental_decision_id
+     WHERE m.executable_markout_usd IS NOT NULL
+       AND %s
      ORDER BY m.experimental_decision_id,
               CASE m.horizon WHEN '300S' THEN 3 WHEN '60S' THEN 2
                              ELSE 0 END DESC
-""" % _PERFORMANCE_HORIZONS
+""" % tm.performance_eligible_sql()
 
 
 # ONE ROW PER DECISION WITH EACH HORIZON IN ITS OWN COLUMN. The excess
@@ -141,10 +149,12 @@ _MARKED_WITH_HORIZONS = """
            max(m.executable_markout_usd) FILTER (
                WHERE m.horizon = '300S') AS executable_markout_usd
       FROM bettor_experimental_markouts m
-     WHERE m.status = 'OBSERVED'
-       AND m.executable_markout_usd IS NOT NULL
+      JOIN bettor_experimental_decisions d
+        ON d.experimental_decision_id = m.experimental_decision_id
+     WHERE m.executable_markout_usd IS NOT NULL
+       AND %s
      GROUP BY m.experimental_decision_id
-"""
+""" % tm.TIMING_ELIGIBLE_SQL
 
 _HEADLINE = """
     WITH marked AS (%s)
@@ -458,6 +468,15 @@ async def summary(pool) -> dict:
     except Exception as exc:                                   # noqa: BLE001
         excluded = {"unavailable": "%s: %s" % (type(exc).__name__, exc)}
 
+    # EVERY MARKOUT'S TIMING, ROW BY ROW (owner 2026-09-20). The eight
+    # fields are derived from the recorded timestamps on each read, so
+    # the panel states WHY a row is or is not performance evidence
+    # rather than asserting that it is because of its label.
+    try:
+        timing_rows = await tm.timing_rows(pool)
+    except Exception as exc:                                   # noqa: BLE001
+        timing_rows = {"unavailable": "%s: %s" % (type(exc).__name__, exc)}
+
     try:
         funnel = await xstore.funnel(pool, window_s=FUNNEL_WINDOW_S)
     except Exception as exc:                                   # noqa: BLE001
@@ -525,6 +544,30 @@ async def summary(pool) -> dict:
                    "why": v["why"]}
             for name, v in ob.by_horizon().items()},
         "performanceHorizons": list(ob.observable_horizons()),
+        # §1 OF THE 2026-09-20 DIRECTIVE: a row is eligible because of
+        # WHEN IT WAS OBSERVED, never because of its label. Both gates
+        # are reported separately so a reader can see which one
+        # refused a row -- the horizon's observability, or this row's
+        # own realized timing against the frozen tolerance.
+        "markoutTiming": ({"unavailable": timing_rows["unavailable"]}
+                          if isinstance(timing_rows, dict) else {
+            "rule": ("PERFORMANCE_ELIGIBLE requires the recorded "
+                     "timestamps to satisfy the frozen contract: "
+                     "target_at == decision_timestamp + horizon, and "
+                     "|observed_at - target_at| <= tolerance, and an "
+                     "L2 book actually recorded. The label is never "
+                     "sufficient and the status column is never read."),
+            "noInterpolation": True,
+            "noNearestObservationOutsideTolerance": True,
+            "noZeroPnlSubstitution": True,
+            "noDeletion": True,
+            "census": list(tm.census(timing_rows).values()),
+            # EVIDENCE ABOUT THE WRITE PATH, not part of the gate. An
+            # empty list is the expected state and is itself a result.
+            "writerDisagreements": tm.writer_disagreements(timing_rows),
+            "rows": [{k: (_iso(v) if hasattr(v, "isoformat") else v)
+                      for k, v in r.items()} for r in timing_rows],
+        }),
         # §: THE FROZEN DATA-QUALITY EXCLUSION, with its reason and the
         # sha of the rule text, so a reader can tell that a market left
         # for want of a leg-specific feature -- never for performance.

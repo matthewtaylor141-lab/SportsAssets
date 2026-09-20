@@ -174,7 +174,8 @@ def test_nothing_on_the_observability_path_writes_to_the_ledger():
 def test_the_thirty_second_rows_are_still_counted_in_coverage():
     """Preserved, not hidden. The coverage tile still shows how many
     30S markouts exist -- it just says they are not eligible."""
-    assert "'30S'" not in ce._MARKED          # excluded from P&L...
+    admitted = ce._MARKED.split("m.horizon IN (")[1].split(")")[0]
+    assert "'30S'" not in admitted             # excluded from P&L...
     assert "GROUP BY horizon" in ce._MARKOUT_COVERAGE   # ...counted here
     assert "WHERE" not in ce._MARKOUT_COVERAGE.upper(), (
         "the coverage tile filters nothing: every 30S row ever written "
@@ -186,8 +187,13 @@ def test_the_thirty_second_rows_are_still_counted_in_coverage():
 
 def test_performance_statements_admit_only_the_observable_horizons():
     assert "m.horizon IN ('%s')" % ce._PERFORMANCE_HORIZONS in ce._MARKED
-    assert "'60S'" in ce._MARKED and "'300S'" in ce._MARKED
-    assert "'30S'" not in ce._MARKED, (
+    # SCOPED TO THE ADMISSIBILITY CLAUSE. '30S' also appears in the
+    # row-timing gate's interval CASE, and must: that is what lets a
+    # 30S row's target reconstruct so it is refused on its horizon
+    # rather than on a NULL comparison.
+    admitted = ce._MARKED.split("m.horizon IN (")[1].split(")")[0]
+    assert "'60S'" in admitted and "'300S'" in admitted
+    assert "'30S'" not in admitted, (
         "a 30S markout must not be able to become a P&L figure")
 
 
