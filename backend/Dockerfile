@@ -32,6 +32,16 @@ COPY backend/start.sh ./
 # to prevent.
 COPY research/beta48/shadow ./research/beta48/shadow
 
+# THE FROZEN WHALE PRIORS, which live one level up from shadow/.
+# WHALE_REFERENCE_PRIORS_V1.json carries COMPLETION_HAZARD_BY_ACCOUNT_
+# AND_INTERVAL and -- in the same file, on every row -- the
+# restrictions that govern it: IS_NOT = BETTOR_P_FILL,
+# MAY_SEED_BETTOR_P_FILL = false, the selection condition and the CI95.
+# The data and its limits travel together, so the file is copied whole
+# rather than having its numbers extracted into code where the
+# restrictions would not follow them.
+COPY research/beta48/*.json ./research/beta48/
+
 # The bridge resolves this FIRST, before any parent-directory guess.
 # Source-tree parent arithmetic has no reason to hold inside an image
 # whose layout a Dockerfile chose.

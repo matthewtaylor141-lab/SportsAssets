@@ -37,4 +37,7 @@ research/*
 !research/beta48
 research/beta48/*
 !research/beta48/shadow
+# The frozen whale priors sit beside shadow/, not inside it, and carry
+# the completion-hazard table the pair engine reads.
+!research/beta48/*.json
 research/beta48/shadow/**/__pycache__

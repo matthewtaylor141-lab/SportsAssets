@@ -49,6 +49,28 @@ jobs:
         run: |
           docker run --rm sportsassets-ci \
             test -f /app/research/beta48/shadow/action_ev.py
+          # The frozen whale priors sit BESIDE shadow/, so they are a
+          # separate COPY and a separate .dockerignore negation. The
+          # pair engine degrades to WHALE_PRIORS_UNAVAILABLE without
+          # them, which is honest but silent -- this is what makes it
+          # loud.
+          docker run --rm sportsassets-ci \
+            test -f /app/research/beta48/WHALE_REFERENCE_PRIORS_V1.json
+
+      - name: The pair engine reads the frozen completion hazard
+        run: |
+          docker run --rm sportsassets-ci python -c "
+          import sys
+          from sportsassets import bettor_pair_engine as PE
+          h = PE.completion_hazard(3.0)
+          if h['status'] != 'IDENTIFIED':
+              sys.exit('completion hazard unavailable in image: %s' % h)
+          if h['IS_NOT'] != 'BETTOR_P_FILL':
+              sys.exit('the hazard lost its restrictions in transit')
+          print('HAZARD 0-5s   :', h['WHALE_COMPLETION_HAZARD'])
+          print('IS_NOT        :', h['IS_NOT'])
+          print('MAY_SEED_PFILL:', h['MAY_SEED_BETTOR_P_FILL'])
+          "
 
       # THE PREFLIGHT IS THE POINT. It resolves the explicit
       # BETTOR_RESEARCH_ROOT contract and imports every required
