@@ -54,19 +54,41 @@ DEPLOY_TRANSITION_CONTAMINATION = "DEPLOY_TRANSITION_CONTAMINATION"
 # re-admit anything that happened to fall inside it; a list of ids
 # admits exactly these and nothing else, forever.
 #
-# The ids are filled in from production by `contamination_ids()` below
-# only once they have been read and confirmed; until then the SQL in
-# research section 28g is the authority and this tuple states what is
-# known: two X1C rows, written 2026-09-20T13:11:50Z, one second after
-# the guard's first refusal at 13:11:49Z.
+# READ FROM PRODUCTION AND FROZEN HERE (research section 28g, run
+# 2026-09-20T14:24Z). Both are X1C. The first was written in the SAME
+# SECOND as the guard's first refusal and the second 0.4s later, which
+# is what a worker finishing its tick on the pre-guard revision looks
+# like and is not something a guarded process can produce: one call
+# site reaches open_position and it sits behind an unconditional early
+# return on the version verdict.
 
-CONTAMINATED_POSITION_IDS: tuple = ()
+CONTAMINATED_POSITION_IDS: tuple = (
+    # asc-lg1-olm-psg-2026-09-20-fh-pos-2pt5, 13:11:49Z, $131.15
+    "xpos_0a785213419d56d34d00e5cc33a7fd6565aa",
+    # asc-lal-vil-lev-2026-09-20-neg-2pt5, 13:11:50Z, $1,000.00
+    "xpos_b9ed542546c29a66b2aeb385971b68a79ff5",
+)
+
+# The ledger arithmetic these two account for, stated so the two
+# figures can never drift apart unnoticed:
+#     ALL   47 positions  $18,296.97
+#   − these   2 positions  $ 1,131.15   (131.15 + 1000.00)
+#   = CLEAN  45 positions  $17,165.82
+CONTAMINATED_NOTIONAL_USD = 1131.15
+X1C_ALL_POSITIONS = 47
+X1C_ALL_ENTRY_NOTIONAL_USD = 18296.97
+X1C_CLEAN_PAIRED_POSITIONS = 45
+X1C_CLEAN_PAIRED_ENTRY_NOTIONAL_USD = 17165.82
 
 CONTAMINATION_RECORD = {
     "classification": DEPLOY_TRANSITION_CONTAMINATION,
     "experimentId": "X1C_NULL_CONTROL",
-    "expectedCount": 2,
-    "writtenAt": "2026-09-20T13:11:50Z",
+    "positionIds": list(CONTAMINATED_POSITION_IDS),
+    "count": 2,
+    "notionalUsd": 1131.15,
+    "markets": ["asc-lg1-olm-psg-2026-09-20-fh-pos-2pt5",
+                "asc-lal-vil-lev-2026-09-20-neg-2pt5"],
+    "writtenAt": ["2026-09-20T13:11:49Z", "2026-09-20T13:11:50Z"],
     "guardFirstRefusedAt": "2026-09-20T13:11:49Z",
     "why": (
         "written by a worker process that had not yet restarted onto "

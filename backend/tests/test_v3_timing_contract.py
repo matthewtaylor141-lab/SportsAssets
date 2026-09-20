@@ -247,3 +247,44 @@ def test_the_contamination_is_not_a_timing_allowance():
     assert rec["remainsPartOf"] == "X1C_V1_ALL_RECORDED_EVIDENCE"
     assert rec["excludedFrom"] == "X1_VS_X1C_PAIRED_COMPARISON"
     assert "not a grace interval" in rec["isNotATimingAllowance"]
+
+
+# ── §1: the contamination, by exact identity ─────────────────────────
+
+
+def test_the_two_rows_are_named_by_id():
+    """§1: 'Classify the exact two rows.' By identity, never by a time
+    range -- a range would re-admit anything that fell inside it."""
+    assert len(blk.CONTAMINATED_POSITION_IDS) == 2
+    assert all(i.startswith("xpos_")
+               for i in blk.CONTAMINATED_POSITION_IDS)
+    assert len(set(blk.CONTAMINATED_POSITION_IDS)) == 2
+
+
+def test_the_raw_ledger_is_never_silently_reduced():
+    """§1: 'Never silently subtract the two rows from the raw ledger.'
+    Both figures exist, and their difference is exactly the two rows."""
+    assert blk.X1C_ALL_POSITIONS == 47
+    assert blk.X1C_CLEAN_PAIRED_POSITIONS == 45
+    assert (blk.X1C_ALL_POSITIONS - blk.X1C_CLEAN_PAIRED_POSITIONS
+            == len(blk.CONTAMINATED_POSITION_IDS))
+    assert round(blk.X1C_ALL_ENTRY_NOTIONAL_USD
+                 - blk.X1C_CLEAN_PAIRED_ENTRY_NOTIONAL_USD, 2) == \
+        blk.CONTAMINATED_NOTIONAL_USD
+
+
+def test_x1_has_no_contamination_to_exclude():
+    """X1 was already blocked, so it produced none -- which is why the
+    two X1C rows have no counterpart and cannot be paired."""
+    rec = blk.CONTAMINATION_RECORD
+    assert rec["experimentId"] == "X1C_NULL_CONTROL"
+    assert "no X1 position exists" in rec["whyExcludedFromPairing"]
+
+
+def test_a_third_row_never_inherits_the_exemption():
+    out = blk.leak_verdict(
+        epoch="2026-09-20T13:11:44Z",
+        positions_after_epoch=list(blk.CONTAMINATED_POSITION_IDS)
+        + ["xpos_something_new"])
+    assert out["POST_EPOCH_BLOCK_LEAKS"] == 1
+    assert out["leakedPositionIds"] == ["xpos_something_new"]
