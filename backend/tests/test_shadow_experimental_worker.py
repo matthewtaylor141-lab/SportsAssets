@@ -79,6 +79,7 @@ class FakePool:
         self.requests: list = []
         self.experiments: list = []
         self.markouts: list = []
+        self.position_events: list = []
 
     # -- reads -------------------------------------------------------
     async def fetch(self, sql, *args):
@@ -114,6 +115,22 @@ class FakePool:
         if "FROM bettor_experimental_seals" in sql:
             return [s for s in self.seals.values()
                     if s["status"] == "SEALED"]
+        # §11: THE RE-ENTRY GUARD'S OWN READ, answered from the positions
+        # this fake has actually opened. Modelled rather than stubbed to
+        # [] -- a stub would let the guard pass every check and the
+        # enforcement would look wired while refusing nothing.
+        if "FROM bettor_experimental_positions" in sql \
+                and "max(opened_at)" in sql:
+            experiment, markets = args[0], set(args[1])
+            last: dict = {}
+            for p in self.positions.values():
+                if p[2] != experiment or p[3] not in markets:
+                    continue
+                prev = last.get(p[3])
+                if prev is None or p[6] > prev:
+                    last[p[3]] = p[6]
+            return [{"experiment_id": experiment, "market_id": m,
+                     "last_opened_at": at} for m, at in last.items()]
         raise AssertionError("unexpected fetch: %.60s" % sql)
 
     async def fetchrow(self, sql, *args):
@@ -147,6 +164,16 @@ class FakePool:
         if sql.strip().startswith("INSERT INTO bettor_experimental_markouts"):
             self.markouts.append(args)
             return {"markout_id": args[0]}
+        if sql.strip().startswith(
+                "INSERT INTO bettor_experimental_position_events"):
+            # ON CONFLICT (position_id, event_type, sequence_no) DO
+            # NOTHING, modelled -- the ledger is append-only and a
+            # re-run must not double an event.
+            key = (args[1], args[4], args[6])
+            if key in {(e[1], e[4], e[6]) for e in self.position_events}:
+                return None
+            self.position_events.append(args)
+            return {"position_event_id": args[0]}
         raise AssertionError("unexpected fetchrow: %.60s" % sql)
 
     async def execute(self, sql, *args):
@@ -452,6 +479,18 @@ def test_only_armed_experiments_can_seal():
 # ── a deployment whose migration has not run ─────────────────────────
 
 
+def _constraint_rows(admits=True):
+    """The CHECK definitions the readiness gate reads, as pg prints
+    them. §11's refusal status lives in one of these, not in a
+    column."""
+    return [{"table_name": table, "constraint_name": name,
+             "definition": ("CHECK (execution_status = ANY (ARRAY['EXECUTED'"
+                            "::text%s]))"
+                            % (", '" + wanted + "'::text" if admits else ""))}
+            for table, name, wanted in xstore.REQUIRED_CONSTRAINT_TEXT]
+
+
+
 @pytest.mark.asyncio
 async def test_a_missing_table_is_named_rather_than_crashed_on():
     """The other shadow lanes cost a heartbeat naming the blocker when
@@ -464,6 +503,8 @@ async def test_a_missing_table_is_named_rather_than_crashed_on():
         async def fetch(self, sql, *args):
             if "information_schema.tables" in sql:
                 return [{"table_name": t} for t in args[0] if t in self.have]
+            if "pg_constraint" in sql:
+                return _constraint_rows()
             return [{"table_name": t, "column_name": c}
                     for t, c in xstore.REQUIRED_COLUMNS]
 
@@ -484,6 +525,8 @@ async def test_a_table_without_its_later_columns_is_not_ready():
         async def fetch(self, sql, *args):
             if "information_schema.tables" in sql:
                 return [{"table_name": t} for t in xstore.REQUIRED_TABLES]
+            if "pg_constraint" in sql:
+                return _constraint_rows()
             return [{"table_name": t, "column_name": c}
                     for t, c in xstore.REQUIRED_COLUMNS
                     if c != "walked_book_sha"]
@@ -637,3 +680,141 @@ async def test_the_store_wait_re_checks_and_wakes_when_the_alter_lands():
     assert "while not ready[\"storeReady\"]:" in body
     assert "await xstore.store_ready(pool)" in body.split(
         "while not ready[\"storeReady\"]:")[1]
+
+
+# ── §10/§11: the re-entry clause, enforced in the live loop ──────────
+#
+# Owner directive 2026-09-20 §11: "X1 has zero re-entry violations...
+# but the rule must become actual enforcement rather than accidental
+# compliance caused by the ~65s tick cadence. Do not let polling
+# cadence serve as the risk control."
+#
+# THESE DRIVE THE WORKER, not the guard. A guard that is correct in
+# isolation and never reached from the loop is exactly the failure the
+# directive names: the lane would keep passing because the sampler is
+# slow, and would start violating the instant it got faster.
+
+
+def _second_tick_opportunities(at):
+    """The same market, sampled again in a later 60s bucket."""
+    return [dict(o, experimental_observation_id="xobs_b%d" % i,
+                 observed_at=at - timedelta(seconds=30 * (3 - i)))
+            for i, o in enumerate(RISING, start=1)]
+
+
+@pytest.mark.asyncio
+async def test_a_second_entry_inside_the_frozen_horizon_is_refused():
+    """30s after the first entry, on the same market, in the loop."""
+    first = NOW + timedelta(minutes=6)
+    second = first + timedelta(seconds=30)
+    pool = FakePool(opportunities=RISING, instrument=INSTRUMENT,
+                    retail=RETAIL, evidence=[ev_row(first)])
+    await worker.seal_population(pool, now=NOW)
+    await worker.drain_seals(pool, now=first + timedelta(seconds=30))
+    assert len(pool.positions) == 2                 # X1 and its control
+
+    # THE SECOND TICK. A fresh observation on the same symbol, whose
+    # arrival book lands 30s after the first entry -- inside the frozen
+    # 60s horizon that both lanes declare.
+    later_seal = first + timedelta(seconds=10)
+    pool.opportunities = _second_tick_opportunities(later_seal)
+    pool.evidence = [ev_row(second)]
+    out = await worker.seal_population(pool, now=later_seal)
+    assert out["sealed"] == 2
+    await worker.drain_seals(pool, now=second + timedelta(seconds=30))
+
+    # NO NEW POSITION, ON EITHER LANE. The frozen clause forbids the
+    # entry; it does not delay it, so there is no retry either.
+    assert len(pool.positions) == 2
+    refused = [d for d in pool.decisions.values()
+               if d["execution_status"] == eng.REFUSED_REENTRY]
+    assert len(refused) == 2
+    for d in refused:
+        # §11's whole point: the refusal carries no position and no
+        # economics, or it would be counted as a trade downstream.
+        assert d["position_id"] is None
+        assert d["executed_notional_usd"] is None
+        assert d["filled_qty"] is None
+        assert "horizon" in (d["why"] or "")
+    # AND THE FIRST ENTRIES ARE UNTOUCHED.
+    assert len(pool.position_events) == 2
+    assert {e[4] for e in pool.position_events} == {"POSITION_OPENED"}
+
+
+@pytest.mark.asyncio
+async def test_an_entry_outside_the_frozen_horizon_is_permitted():
+    """The guard must refuse re-entry, not entry. 65s apart -- the
+    cadence that has been doing this work by accident -- still opens."""
+    first = NOW + timedelta(minutes=6)
+    second = first + timedelta(seconds=65)
+    pool = FakePool(opportunities=RISING, instrument=INSTRUMENT,
+                    retail=RETAIL, evidence=[ev_row(first)])
+    await worker.seal_population(pool, now=NOW)
+    await worker.drain_seals(pool, now=first + timedelta(seconds=30))
+
+    later_seal = first + timedelta(seconds=40)
+    pool.opportunities = _second_tick_opportunities(later_seal)
+    pool.evidence = [ev_row(second)]
+    await worker.seal_population(pool, now=later_seal)
+    await worker.drain_seals(pool, now=second + timedelta(seconds=30))
+
+    assert len(pool.positions) == 4
+    assert not [d for d in pool.decisions.values()
+                if d["execution_status"] == eng.REFUSED_REENTRY]
+    assert len(pool.position_events) == 4
+
+
+@pytest.mark.asyncio
+async def test_the_guard_reads_the_registry_not_a_hand_built_dict():
+    """The declaration dict is camelCase. A guard that looked for
+    `exit_rule` would find nothing, govern nothing, and refuse nothing
+    -- while every hand-built-dict test still passed."""
+    decl = worker._declaration_of("X1_SHORT_HORIZON_DIRECTION")
+    assert decl is not None and decl["experimentId"] \
+        == "X1_SHORT_HORIZON_DIRECTION"
+    from sportsassets import shadow_reentry_guard as rg
+    assert rg.governed(decl) is True
+    assert rg.horizon_seconds(decl) == 60
+
+
+@pytest.mark.asyncio
+async def test_a_constraint_that_would_refuse_the_refusal_is_not_ready():
+    """§11 (migration 086). If the CHECK has not been widened, the
+    write that records a re-entry refusal fails -- at the exact moment
+    the rule fires. A readiness gate that only looked at tables and
+    columns would call that deployment ready."""
+    class Catalog:
+        async def fetch(self, sql, *args):
+            if "information_schema.tables" in sql:
+                return [{"table_name": t} for t in xstore.REQUIRED_TABLES]
+            if "pg_constraint" in sql:
+                return _constraint_rows(admits=False)
+            return [{"table_name": t, "column_name": c}
+                    for t, c in xstore.REQUIRED_COLUMNS]
+
+    out = await xstore.store_ready(Catalog())
+    assert out["storeReady"] is False
+    assert out["problems"] == [
+        "bettor_experimental_decisions.bettor_exp_execution_status "
+        "does not admit REFUSED_REENTRY_INSIDE_HORIZON"]
+
+
+@pytest.mark.asyncio
+async def test_the_lifecycle_event_table_is_part_of_readiness():
+    """§1 (migration 085). open_position appends POSITION_OPENED. A
+    worker that booted ahead of the table would write the position and
+    fail on its first lifecycle event -- a position with no history."""
+    class Catalog:
+        async def fetch(self, sql, *args):
+            if "information_schema.tables" in sql:
+                return [{"table_name": t} for t in args[0]
+                        if t != "bettor_experimental_position_events"]
+            if "pg_constraint" in sql:
+                return _constraint_rows()
+            return [{"table_name": t, "column_name": c}
+                    for t, c in xstore.REQUIRED_COLUMNS]
+
+    out = await xstore.store_ready(Catalog())
+    assert out["storeReady"] is False
+    assert out["problems"] == [
+        "table bettor_experimental_position_events is absent"]

@@ -47,6 +47,11 @@ NOT_IDENTIFIED = "NOT_IDENTIFIED"
 BLOCKED_IDENTITY = "BLOCKED_IDENTITY_NOT_EXECUTION_ELIGIBLE"
 BLOCKED_INPUT = "BLOCKED_INPUT_INVALID"
 NO_EXECUTION_INTENDED = "NO_EXECUTION_INTENDED"
+# §11: the frozen re-entry clause refused the ENTRY. Its own status,
+# because the arrival book may have been perfectly readable -- what
+# was unavailable was permission to enter, not liquidity. Migration
+# 086 widened the CHECK for it.
+REFUSED_REENTRY = "REFUSED_REENTRY_INSIDE_HORIZON"
 
 # The actions X1's frozen rule may emit (§6).
 BUY_YES = "BUY_YES"

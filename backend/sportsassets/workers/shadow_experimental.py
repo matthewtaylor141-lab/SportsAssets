@@ -124,11 +124,37 @@ def binding_at_t0(sealed: dict) -> dict:
             "basketWalkable": False}
 
 
+def _declaration_of(experiment_id):
+    """The lane's own frozen declaration, by id. None if not declared."""
+    for e in reg.EXPERIMENTS:
+        if e.get("experimentId") == experiment_id:
+            return e
+    return None
+
+
 async def _persist(pool, sealed, execution, latency=None) -> bool:
+    # §10/§11: THE FROZEN RE-ENTRY CLAUSE IS ASKED FIRST, before
+    # anything is written, from the lane's OWN declaration -- so that
+    # the decision row and the position row cannot disagree about
+    # whether this entry was permitted.
+    verdict = await xstore.reentry_verdict(
+        pool, sealed, execution,
+        declaration=_declaration_of(sealed.get("experimentId")))
+
+    if verdict is not None and verdict["decision"] == xstore.guard.REFUSED:
+        # A REFUSED RE-ENTRY IS STILL RECORDED -- it is evidence about
+        # the rule, not a gap in the tape -- but it is recorded as a
+        # refusal: no position id, no economics, its own status. See
+        # migration 086 for why the position id must not survive.
+        return await xstore.record_decision(
+            pool, sealed, xstore.refused_execution(execution, verdict),
+            latency=latency)
+
     written = await xstore.record_decision(pool, sealed, execution,
                                            latency=latency)
     if written:
-        await xstore.open_position(pool, sealed, execution)
+        await xstore.open_position(pool, sealed, execution,
+                                   reentry=verdict)
     return written
 
 

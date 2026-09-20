@@ -152,6 +152,83 @@ def _delta_ms(row, a, b):
     return round((y - x).total_seconds() * 1000.0, 1)
 
 
+# ── §8: components, never one number ─────────────────────────────────
+#
+# "Do not publish one 'latency' number unless its components are
+# legitimate." Each component is reported on its own and stands or
+# falls on its own two endpoints, so a broken pair does not silence a
+# sound one.
+
+CLOCK_ORDER_INVALID = "CLOCK_ORDER_INVALID"
+
+MODELED_ASSUMPTION_MS = 250
+MODELED_ASSUMPTION_LABEL = "MODELED_EXECUTION_LATENCY_ASSUMPTION"
+OBSERVED_LABEL = "OBSERVED_EXECUTION_LATENCY"
+
+COMPONENTS = (
+    ("SOURCE_TO_RECEIPT_LATENCY", "venue_source_timestamp",
+     "bettor_received_timestamp"),
+    ("FEATURE_PROCESSING_LATENCY", "bettor_received_timestamp",
+     "features_sealed_timestamp"),
+    ("MODEL_COMPUTE_LATENCY", "model_start_timestamp",
+     "model_end_timestamp"),
+    ("DECISION_TO_MODELED_ARRIVAL_LATENCY", "decision_timestamp",
+     "modeled_arrival_timestamp"),
+)
+
+
+def components(row) -> dict:
+    """Each interval on its own, with the status of its OWN endpoints.
+
+    SOURCE_TO_RECEIPT is always NOT_IDENTIFIED today: the venue's
+    source timestamp is a text field in a clock domain we have not
+    established, and parsing it into a comparable instant would be the
+    manufacturing §6 forbids.
+    """
+    out = {}
+    for name, a, b in COMPONENTS:
+        x, y = row.get(a), row.get(b)
+        if isinstance(x, str) or isinstance(y, str):
+            out[name] = {"ms": None, "status": "NOT_IDENTIFIED_CLOCK_DOMAIN",
+                         "why": ("one endpoint is the venue's own string "
+                                 "in an unestablished clock domain")}
+            continue
+        if x is None or y is None:
+            out[name] = {"ms": None, "status": "NOT_RECORDED"}
+            continue
+        ms = round((y - x).total_seconds() * 1000.0, 1)
+        out[name] = {
+            "ms": ms if ms >= 0 else None,
+            # A NEGATIVE INTERVAL IS NOT A FAST ONE. It means the two
+            # endpoints do not share a clock, and the component is
+            # withheld rather than shown as a negative latency.
+            "status": ("OBSERVED" if ms >= 0 else CLOCK_ORDER_INVALID),
+            "why": (None if ms >= 0 else
+                    "%s is %.1fms AFTER %s; the endpoints do not share "
+                    "a clock" % (a, -ms, b)),
+        }
+
+    # §8: the one modelled quantity, labelled as an ASSUMPTION and
+    # never as an observation.
+    out[MODELED_ASSUMPTION_LABEL] = {
+        "ms": MODELED_ASSUMPTION_MS,
+        "status": "CONFIGURED_CONSTANT",
+        "measured": _delta_ms(row, "model_end_timestamp",
+                              "modeled_arrival_timestamp"),
+        "why": ("the frozen arrival latency added to the model's end "
+                "instant; both endpoints share one clock, so it is "
+                "readable even when the lifecycle ordering fails -- but "
+                "it is an assumption, not a measurement"),
+    }
+    out[OBSERVED_LABEL] = {
+        "ms": None,
+        "status": "NOT_IDENTIFIED",
+        "why": ("no order is ever submitted in this lane, so no "
+                "execution latency has ever been observed"),
+    }
+    return out
+
+
 def census(verdicts) -> dict:
     """How many decisions carry a usable latency, and how many do not."""
     out = {OK: 0, CONFLICT: 0, INCOMPLETE: 0}
@@ -188,5 +265,6 @@ async def latency_rows(pool, *, limit=200) -> list:
         v["EXPERIMENTAL_DECISION_ID"] = r["experimental_decision_id"]
         v["EXPERIMENT_ID"] = r["experiment_id"]
         v["LATENCY_REGIME"] = r["latency_regime"]
+        v["components"] = components(r)
         out.append(v)
     return out

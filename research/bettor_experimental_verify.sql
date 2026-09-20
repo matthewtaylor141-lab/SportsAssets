@@ -564,3 +564,177 @@ SELECT 'writer|' || horizon
   FROM derived
  GROUP BY horizon, status, within_tolerance
  ORDER BY horizon, status;
+
+\echo ''
+\echo '--- 25. THE POSITION LIFECYCLE LEDGER (migration 085) ---'
+-- §1: "Implement position lifecycle through append-only events."
+-- The position row is the OPEN event and nothing more; every later
+-- fact lives here. The CURRENT state is folded from these on read and
+-- is never stored, so it cannot drift from its evidence.
+SELECT 'lifecycle_events|' || experiment_id
+       || '|' || event_type
+       || '|n=' || count(*)
+       || '|first=' || to_char(min(event_at), 'YYYY-MM-DD HH24:MI:SSZ')
+       || '|last='  || to_char(max(event_at), 'YYYY-MM-DD HH24:MI:SSZ')
+  FROM bettor_experimental_position_events
+ GROUP BY experiment_id, event_type
+ ORDER BY experiment_id, event_type;
+
+\echo ''
+\echo '--- 25b. EVERY POSITION HAS ITS OPEN EVENT, AND NOTHING EXITED ---'
+-- §3: "Do not pretend they historically exited. Do not create a
+-- backdated exit." Every position that opened under infrastructure
+-- where the exit could not run carries
+-- EXIT_MECHANISM_UNAVAILABLE_AT_ENTRY and no exit event at all. A
+-- non-zero exited count here would mean an exit was manufactured.
+SELECT 'position_coverage|' || p.experiment_id
+       || '|positions=' || count(DISTINCT p.position_id)
+       || '|opened_events=' || count(DISTINCT p.position_id)
+            FILTER (WHERE e.event_type = 'POSITION_OPENED')
+       || '|unavailable_at_entry=' || count(DISTINCT p.position_id)
+            FILTER (WHERE e.event_type
+                    = 'EXIT_MECHANISM_UNAVAILABLE_AT_ENTRY')
+       || '|exit_eligible=' || count(DISTINCT p.position_id)
+            FILTER (WHERE e.event_type = 'EXIT_BECAME_ELIGIBLE')
+       || '|exit_decisions=' || count(DISTINCT p.position_id)
+            FILTER (WHERE e.event_type = 'EXIT_DECISION')
+       || '|closed=' || count(DISTINCT p.position_id)
+            FILTER (WHERE e.event_type = 'POSITION_CLOSED')
+       || '|settled=' || count(DISTINCT p.position_id)
+            FILTER (WHERE e.event_type = 'SETTLED')
+  FROM bettor_experimental_positions p
+  LEFT JOIN bettor_experimental_position_events e
+    ON e.position_id = p.position_id
+ GROUP BY p.experiment_id
+ ORDER BY p.experiment_id;
+
+\echo ''
+\echo '--- 25c. A POSITION WITH NO EVENT AT ALL WOULD BE A GAP ---'
+-- The seed in migration 085 wrote both events for every position that
+-- existed when it ran, and open_position writes POSITION_OPENED for
+-- every position created since. An empty result is the finding.
+SELECT 'position_without_events|' || p.position_id
+       || '|' || p.experiment_id || '|' || p.market_id
+  FROM bettor_experimental_positions p
+ WHERE NOT EXISTS (SELECT 1 FROM bettor_experimental_position_events e
+                    WHERE e.position_id = p.position_id);
+
+\echo ''
+\echo '--- 26. RE-ENTRY: THE HISTORICAL RECORD, NEVER REWRITTEN ---'
+-- §10/§11. X1 has zero violations; X1C has one, at 41.6s. "Do not
+-- alter that historical control row." This reports it; it does not
+-- touch it. The 60s figure is the FROZEN horizon both lanes declare.
+WITH gaps AS (
+    SELECT p.experiment_id, p.market_id, p.position_id, p.opened_at,
+           EXTRACT(EPOCH FROM (p.opened_at - lag(p.opened_at) OVER (
+               PARTITION BY p.experiment_id, p.market_id
+                ORDER BY p.opened_at))) AS gap_s
+      FROM bettor_experimental_positions p
+)
+SELECT 'reentry|' || experiment_id
+       || '|reentries=' || count(*) FILTER (WHERE gap_s IS NOT NULL)
+       || '|inside_60s=' || count(*) FILTER (WHERE gap_s < 60)
+       || '|min_gap_s=' || COALESCE(round(min(gap_s)::numeric, 1)::text,
+                                    'NONE')
+  FROM gaps
+ GROUP BY experiment_id
+ ORDER BY experiment_id;
+
+\echo ''
+\echo '--- 26b. EVERY RE-ENTRY INSIDE THE FROZEN HORIZON, BY NAME ---'
+WITH gaps AS (
+    SELECT p.experiment_id, p.market_id, p.position_id, p.opened_at,
+           EXTRACT(EPOCH FROM (p.opened_at - lag(p.opened_at) OVER (
+               PARTITION BY p.experiment_id, p.market_id
+                ORDER BY p.opened_at))) AS gap_s
+      FROM bettor_experimental_positions p
+)
+SELECT 'violation|' || experiment_id
+       || '|' || position_id
+       || '|' || market_id
+       || '|at=' || to_char(opened_at, 'YYYY-MM-DD HH24:MI:SSZ')
+       || '|gap_s=' || round(gap_s::numeric, 1)
+  FROM gaps
+ WHERE gap_s IS NOT NULL AND gap_s < 60
+ ORDER BY opened_at;
+
+\echo ''
+\echo '--- 26c. THE ENFORCEMENT, PROSPECTIVELY (migration 086) ---'
+-- §11: "the rule must become actual enforcement rather than
+-- accidental compliance caused by the ~65s tick cadence." A refusal
+-- is recorded as a DECISION with its own status, no position id and
+-- no economics -- so it can never be counted as a trade. Zero rows
+-- before the enforcement deploys is the expected result; any row
+-- after it is an entry the frozen rule stopped.
+SELECT 'reentry_refusals|' || experiment_id
+       || '|n=' || count(*)
+       || '|with_a_position=' || count(*) FILTER (WHERE position_id
+                                                  IS NOT NULL)
+       || '|with_economics=' || count(*) FILTER (
+              WHERE executed_notional_usd IS NOT NULL
+                 OR filled_qty IS NOT NULL)
+       || '|first=' || COALESCE(to_char(min(decision_timestamp),
+                                        'YYYY-MM-DD HH24:MI:SSZ'), 'NONE')
+  FROM bettor_experimental_decisions
+ WHERE execution_status = 'REFUSED_REENTRY_INSIDE_HORIZON'
+ GROUP BY experiment_id
+ ORDER BY experiment_id;
+
+\echo ''
+\echo '--- 26d. THE RAILS THE DATABASE ITSELF HOLDS ---'
+-- Stated in the schema rather than only in the writer, because the
+-- writer is the thing most likely to be changed by someone who has
+-- not read the directive.
+SELECT 'constraint|' || con.conname
+       || '|admits_refusal='
+       || (pg_get_constraintdef(con.oid)
+           LIKE '%REFUSED_REENTRY_INSIDE_HORIZON%')
+  FROM pg_constraint con
+  JOIN pg_class rel ON rel.oid = con.conrelid
+ WHERE rel.relname = 'bettor_experimental_decisions'
+   AND con.conname IN ('bettor_exp_execution_status',
+                       'bettor_exp_refusal_has_no_position')
+ ORDER BY con.conname;
+
+\echo ''
+\echo '--- 27. THE EXIT MECHANISM IS STILL BLOCKED, AND WHY ---'
+-- §2 THE GATE: "If the frozen declaration is insufficient to
+-- determine WHEN TO EXIT, WHAT ACTION TO TAKE, WHAT PRICE TO USE, HOW
+-- MUCH QUANTITY TO EXIT, stop and name the missing semantics. Do not
+-- fill them in after seeing results."
+--
+-- Three of the four are answered by EXIT_RULE_HORIZON verbatim. HOW
+-- MUCH QUANTITY TO EXIT is not stated anywhere in the frozen
+-- declaration, and neither is EXIT_BOOK_TOLERANCE (how stale a book
+-- may be and still count as "the book observed at that instant").
+-- Until the owner supplies them, no exit fires and no realized P&L
+-- exists. This query reports the consequence in the data: positions
+-- that are past their horizon and still have no exit event.
+SELECT 'past_horizon_unexited|' || p.experiment_id
+       || '|n=' || count(*)
+       || '|oldest=' || to_char(min(p.opened_at),
+                                'YYYY-MM-DD HH24:MI:SSZ')
+       || '|status=EXIT_MECHANISM_BLOCKED_PENDING_EXIT_SEMANTICS'
+  FROM bettor_experimental_positions p
+ WHERE p.opened_at < now() - interval '60 seconds'
+   AND NOT EXISTS (SELECT 1 FROM bettor_experimental_position_events e
+                    WHERE e.position_id = p.position_id
+                      AND e.event_type IN ('EXIT_EXECUTION',
+                                           'POSITION_CLOSED', 'SETTLED'))
+ GROUP BY p.experiment_id
+ ORDER BY p.experiment_id;
+
+\echo ''
+\echo '--- 27b. NO REALIZED P&L EXISTS, AND NONE IS CLAIMED ---'
+-- §5: "Never classify a horizon markout itself as realized P&L."
+-- REALIZED_PNL requires a real shadow exit. There have been none.
+SELECT 'realized|' || p.experiment_id
+       || '|exit_executions=' || count(*) FILTER (
+              WHERE e.event_type = 'EXIT_EXECUTION')
+       || '|realized_pnl_usd=NOT_APPLICABLE_NO_EXIT_HAS_OCCURRED'
+       || '|settled_pnl_usd=NOT_APPLICABLE_NO_POSITION_HAS_SETTLED'
+  FROM bettor_experimental_positions p
+  LEFT JOIN bettor_experimental_position_events e
+    ON e.position_id = p.position_id
+ GROUP BY p.experiment_id
+ ORDER BY p.experiment_id;

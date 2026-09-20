@@ -42,6 +42,9 @@ from .. import shadow_markout_observability as ob
 from .. import shadow_markout_timing as tm
 from .. import shadow_experimental_capital as cap
 from .. import shadow_latency_integrity as lat
+from .. import shadow_position_lifecycle as lc
+from .. import shadow_reentry_guard as rg
+from .. import shadow_exit_semantics as xsem
 from .. import shadow_experimental_store as xstore
 from .. import shadow_experiments as xp
 
@@ -520,6 +523,9 @@ async def _management(pool) -> dict:
     eligible = await _guard(pool, "eligible markouts by experiment",
                             _ELIGIBLE_BY_EXPERIMENT)
     latency = await lat.latency_rows(pool)
+    # §1/§13: state folded from the append-only event ledger, never
+    # read off the immutable position row's frozen status column.
+    folded = lc.by_position(await lc.events(pool))
 
     by_experiment = {}
     for p in positions:
@@ -568,6 +574,13 @@ async def _management(pool) -> dict:
             # is not_decision_grade.
             "DECISION_GRADE": False,
             "IS_NULL_CONTROL": experiment == X1_CONTROL,
+            # §13: the position lifecycle, folded from the events.
+            "lifecycle": lc.lifecycle(folded, experiment=experiment),
+            # §6: capital that knows a close frees dollars. Identical
+            # to the entry-only walk while nothing has closed, correct
+            # the moment something does.
+            "capitalWithReleases": lc.capital_with_releases(
+                folded, experiment=experiment, now=now),
             "capital": capital,
             "concentration": conc,
             "economics": econ,
@@ -581,6 +594,18 @@ async def _management(pool) -> dict:
 
     return {
         "classes": classes,
+        # §2/§16: the exit rule is declared but two of its semantics are
+        # absent from the frozen spec, so the trigger is not built. The
+        # blockage is on the panel rather than in a comment.
+        "exitMechanism": xsem.exit_mechanism_status(),
+        # §10: the historical re-entry violation, preserved.
+        "reentry": {
+            "X1_REENTRY_ENFORCEMENT_STATUS": "ENFORCED_BEFORE_CREATION",
+            "frozenClause": rg.REENTRY_CLAUSE,
+            "boundary": "gap < horizon is refused; gap == horizon is "
+                        "permitted",
+            "historicalViolations": await rg.historical_violations(pool),
+        },
         "neverCombined": (
             "BETTOR EV SHADOW, BETTOR X1 EXPERIMENTAL and X1C NULL "
             "CONTROL are three separate performance classes. Their "

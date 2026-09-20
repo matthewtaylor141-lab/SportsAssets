@@ -24,8 +24,11 @@ import json
 from datetime import datetime, timezone
 
 from . import shadow as sh
+from . import shadow_experimental_engine as eng
 from . import shadow_experiments as xp
 from . import shadow_l2 as l2
+from . import shadow_position_lifecycle as lc
+from . import shadow_reentry_guard as guard
 
 LANE = xp.EXPERIMENTAL_LANE
 
@@ -84,7 +87,13 @@ REQUIRED_TABLES = ("bettor_eligible_populations", "bettor_experiments",
                    "bettor_experimental_positions",
                    "bettor_experimental_seals", "bettor_l2_requests",
                    "bettor_l2_evidence",
-                   "bettor_experimental_observations")
+                   "bettor_experimental_observations",
+                   # §1 (migration 085). open_position appends the
+                   # POSITION_OPENED event, so a worker that boots
+                   # ahead of this table would write the position row
+                   # and fail on its first lifecycle event -- the
+                   # position would exist with no history at all.
+                   "bettor_experimental_position_events")
 # EVERY COLUMN A LATER MIGRATION ADDED THAT AN INSERT HERE NAMES. An
 # ALTER that has not run leaves a table that exists and a statement
 # that cannot, and the failure would otherwise surface as a tick error
@@ -100,6 +109,16 @@ REQUIRED_COLUMNS = (("bettor_experimental_decisions", "l2_evidence_id"),
                      "experimental_observation_id"),
                     ("bettor_experimental_decisions",
                      "experimental_observation_id"))
+
+# §11 (migration 086). A CHECK constraint is neither a table nor a
+# column, and this one is the difference between a refusal being
+# recorded and the write that records it failing -- at the exact
+# moment the rule fires, which is the worst possible moment to learn
+# that a migration has not run.
+REQUIRED_CONSTRAINT_TEXT = (
+    ("bettor_experimental_decisions", "bettor_exp_execution_status",
+     "REFUSED_REENTRY_INSIDE_HORIZON"),
+)
 
 
 async def store_ready(pool) -> dict:
@@ -125,7 +144,25 @@ async def store_ready(pool) -> dict:
                     list({t for t, _c in REQUIRED_COLUMNS}))}
         problems = ["%s.%s is absent" % pair
                     for pair in REQUIRED_COLUMNS if pair not in cols]
+    if not problems:
+        defs = {(r["table_name"], r["constraint_name"]): r["definition"]
+                for r in await pool.fetch(CONSTRAINT_DEFS_SQL,
+                                          [c[1] for c
+                                           in REQUIRED_CONSTRAINT_TEXT])}
+        problems = [
+            "%s.%s does not admit %s" % (table, name, wanted)
+            for table, name, wanted in REQUIRED_CONSTRAINT_TEXT
+            if wanted not in (defs.get((table, name)) or "")]
     return {"storeReady": not problems, "problems": problems}
+
+
+CONSTRAINT_DEFS_SQL = """
+    SELECT rel.relname AS table_name, con.conname AS constraint_name,
+           pg_get_constraintdef(con.oid) AS definition
+      FROM pg_constraint con
+      JOIN pg_class rel ON rel.oid = con.conrelid
+     WHERE con.conname = ANY($1::text[])
+"""
 
 
 # ── the lane's own sampler, and why it has one ───────────────────────
@@ -925,11 +962,86 @@ async def evidence_nearest(pool, symbol, *, target) -> dict | None:
     return book
 
 
-async def open_position(pool, sealed: dict, execution: dict) -> str | None:
-    """The shadow position an execution opened. Never one without a fill."""
+async def reentry_verdict(pool, sealed: dict, execution: dict,
+                          *, declaration=None) -> dict | None:
+    """The frozen re-entry clause, asked ONCE, before anything is written.
+
+    §10/§11 (owner 2026-09-20): the rule "must become actual enforcement
+    rather than accidental compliance caused by the ~65s tick cadence."
+    X1 has never violated it -- but only because the sampler ticks every
+    ~65s, and a polling interval is not a risk control. X1C, on the same
+    code, re-entered once at 41.6s.
+
+    Returns None when the lane's declaration does not govern re-entry --
+    a lane that does not declare the clause is unaffected by it.
+
+    THE ANSWER IS COMPUTED HERE AND CARRIED, not asked twice. The
+    decision row and the position row must agree about whether this
+    entry was permitted; two independent reads of the positions table,
+    a fill apart, could disagree.
+    """
+    ex = execution or {}
+    if declaration is None or not guard.governed(declaration):
+        return None
+    if not ex.get("positionId") or not ex.get("filledQty"):
+        return None
+    at = _ts(ex.get("arrivalTimestamp")) or _now()
+    prior = await guard.last_opens(pool, sealed["experimentId"],
+                                   [sealed["marketId"]])
+    return guard.check(declaration=declaration,
+                       market_id=sealed["marketId"], at=at,
+                       last_opened_at=prior.get(sealed["marketId"]))
+
+
+def refused_execution(execution: dict, verdict: dict) -> dict:
+    """The execution as it must be RECORDED when the entry was refused.
+
+    THE DEFECT THIS PREVENTS. `record_decision` writes
+    `position_id` straight from the reconstruction, and every query
+    that counts "decisions that became positions" counts
+    `position_id IS NOT NULL`. If a refusal kept its position id, the
+    enforcement would surface in COMMAND as an EXTRA position rather
+    than a refused one -- the guard would make the numbers worse.
+
+    So the refusal carries no position and no economics. The BOOK
+    EVIDENCE STAYS: that book was really observed at that instant, and
+    it is the evidence that the refusal cost something. What is removed
+    is only the claim that an entry happened.
+    """
+    out = dict(execution or {})
+    out["executionStatus"] = eng.REFUSED_REENTRY
+    out["positionId"] = None
+    for key in ("executedNotionalUsd", "unfilledNotionalUsd", "filledQty",
+                "vwap", "slippage", "spreadCost"):
+        out[key] = None
+    out["why"] = verdict.get("why") or eng.REFUSED_REENTRY
+    return out
+
+
+async def open_position(pool, sealed: dict, execution: dict,
+                        *, declaration=None, reentry=None) -> dict | None:
+    """The shadow position an execution opened. Never one without a fill.
+
+    §10/§11: THE FROZEN RE-ENTRY RULE IS ENFORCED HERE, before the row
+    is created. The caller may pass a verdict it already computed; a
+    caller that passes only the declaration gets the same check asked
+    here, so the rail holds on every path into this function.
+    """
     ex = execution or {}
     if not ex.get("positionId") or not ex.get("filledQty"):
         return None
+
+    opened_at = _ts(ex.get("arrivalTimestamp")) or _now()
+
+    if reentry is None:
+        reentry = await reentry_verdict(pool, sealed, execution,
+                                        declaration=declaration)
+    if reentry is not None and reentry["decision"] == guard.REFUSED:
+        # REFUSED BEFORE CREATION. No position row, no capital, and
+        # the refusal is the answer -- not a retry, because the
+        # frozen rule forbids the entry, it does not delay it.
+        return {"positionId": None, "reentry": reentry}
+
     await pool.execute(
         """
         INSERT INTO bettor_experimental_positions (
@@ -942,9 +1054,75 @@ async def open_position(pool, sealed: dict, execution: dict) -> str | None:
         ex["positionId"], ex["experimentalDecisionId"],
         sealed["experimentId"], sealed["marketId"],
         sealed.get("institutionalInstrumentId"), sealed["action"],
-        _ts(ex.get("arrivalTimestamp")) or _now(),
+        opened_at,
         ex["filledQty"], ex["vwap"], ex["executedNotionalUsd"])
-    return ex["positionId"]
+
+    # §1: THE LIFECYCLE'S FIRST EVENT, appended beside the position row
+    # rather than stored on it. The position row is immutable, so every
+    # later fact about it -- eligibility, exit, close, settlement --
+    # lands in the event ledger and the current state is folded from
+    # them on read.
+    await append_position_event(
+        pool, position_id=ex["positionId"],
+        experiment_id=sealed["experimentId"],
+        market_id=sealed["marketId"], event_type=lc.OPENED,
+        event_at=opened_at, qty_delta=ex["filledQty"],
+        notional_delta_usd=ex["executedNotionalUsd"], vwap=ex["vwap"],
+        why="opened by the experimental shadow execution")
+    return {"positionId": ex["positionId"], "reentry": reentry}
+
+
+POSITION_EVENT_INSERT = """
+    INSERT INTO bettor_experimental_position_events (
+        position_event_id, position_id, experiment_id, market_id,
+        event_type, event_at, sequence_no, qty_delta,
+        notional_delta_usd, vwap, intended_qty, filled_qty,
+        unfilled_qty, spread_cost, slippage, book_sha,
+        book_source_timestamp, book_received_timestamp, l2_evidence_id,
+        exit_decision_timestamp, exit_model_start, exit_model_end,
+        exit_arrival_timestamp, latency_status, execution_status, why,
+        provenance)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27)
+    ON CONFLICT (position_id, event_type, sequence_no) DO NOTHING
+    RETURNING position_event_id
+"""
+
+
+async def append_position_event(pool, *, position_id, experiment_id,
+                                market_id, event_type, event_at,
+                                sequence_no=0, qty_delta=None,
+                                notional_delta_usd=None, vwap=None,
+                                intended_qty=None, filled_qty=None,
+                                unfilled_qty=None, spread_cost=None,
+                                slippage=None, book_sha=None,
+                                book_source_timestamp=None,
+                                book_received_timestamp=None,
+                                l2_evidence_id=None,
+                                exit_decision_timestamp=None,
+                                exit_model_start=None, exit_model_end=None,
+                                exit_arrival_timestamp=None,
+                                latency_status=None, execution_status=None,
+                                why=None, provenance=None) -> bool:
+    """Append one lifecycle fact. Never an update -- that is the point."""
+    row = await pool.fetchrow(
+        POSITION_EVENT_INSERT,
+        position_event_id(position_id, event_type, sequence_no),
+        position_id, experiment_id, market_id, event_type, event_at,
+        int(sequence_no), qty_delta, notional_delta_usd, vwap,
+        intended_qty, filled_qty, unfilled_qty, spread_cost, slippage,
+        book_sha, book_source_timestamp, book_received_timestamp,
+        l2_evidence_id, exit_decision_timestamp, exit_model_start,
+        exit_model_end, exit_arrival_timestamp, latency_status,
+        execution_status, why,
+        json.dumps(provenance) if provenance is not None else None)
+    return row is not None
+
+
+def position_event_id(position_id, event_type, sequence_no) -> str:
+    return "xpe_" + hashlib.md5(
+        ("%s|%s|%d" % (position_id, event_type, int(sequence_no))
+         ).encode()).hexdigest()[:32]
 
 
 # ── §1/§2: the PRE-BOUND identity, resolved before the signal ────────
