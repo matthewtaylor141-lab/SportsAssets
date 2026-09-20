@@ -374,6 +374,55 @@ async def run() -> None:
             "disclosure": ready["disclosure"]}
     log.info("shadow_bettor: %s", boot)
 
+    # ── §4: PROVE THE EV MACHINERY FROM INSIDE THE RUNNING WORKER ────
+    #
+    # DIAGNOSTIC ONLY. Nothing below changes a decision, a price or a
+    # permission; it reports what this process can actually see.
+    #
+    # WHY IT HAS TO RUN HERE. CI proves the IMAGE is correct and Render
+    # reporting a deploy live proves the CONTAINER STARTED. Neither
+    # proves that THIS process can import the engines: the image can be
+    # right while the env var is absent, and the deploy can be live
+    # while an older instance is still draining. The only witness that
+    # settles it is the process that would do the importing.
+    #
+    # It is also the answer to a real failure. The stored error read
+    # "no EV machinery at /research/beta48/shadow" -- a LEADING SLASH,
+    # because the old bridge walked up two parents from
+    # /app/sportsassets/bettor_ev_bridge.py and landed on "/". The
+    # explicit BETTOR_RESEARCH_ROOT contract replaced that guess, and
+    # this logs whether the contract is actually present rather than
+    # assuming it arrived.
+    try:
+        import os as _os
+        from .. import bettor_ev_bridge as _evb
+
+        _pre = _evb.preflight()
+        _root = _evb.research_root()
+        probe = {
+            "RUNNING_REVISION": _os.environ.get("RENDER_GIT_COMMIT",
+                                                "NOT_IDENTIFIED"),
+            "BETTOR_RESEARCH_ROOT_ENV_VALUE": _os.environ.get(
+                _evb.RESEARCH_ROOT_ENV, "ABSENT_FROM_PROCESS"),
+            "RESOLVED_RESEARCH_ROOT": str(_root) if _root else "NONE",
+            "PATH_EXISTS_/app/research/beta48/shadow": _os.path.isdir(
+                _evb.DEFAULT_CONTAINER_ROOT),
+            "EV_MACHINERY_AVAILABLE": _pre["ok"],
+        }
+        for _name in _evb.REQUIRED_MODULES:
+            _p = _os.path.join(str(_root), "%s.py" % _name) if _root else ""
+            probe["FILE_EXISTS_%s" % _name] = bool(_p) and _os.path.isfile(_p)
+            probe["IMPORT_%s" % _name] = _pre["modules"].get(
+                _name, "NOT_ATTEMPTED")
+        if not _pre["ok"]:
+            probe["IMPORT_ERROR"] = _pre.get("why")
+        log.info("shadow_bettor EV_PREFLIGHT: %s", probe)
+    except Exception as exc:                                   # noqa: BLE001
+        # A DIAGNOSTIC MUST NEVER TAKE THE LOOP DOWN. If the probe
+        # itself fails, that is reported and collection continues.
+        log.error("shadow_bettor EV_PREFLIGHT failed: %s: %s",
+                  type(exc).__name__, exc)
+
     # THE INTEGRITY VERDICT NEEDS A SOURCE OF ITS OWN, and the write
     # lives in the ops module rather than here. The append-only rule
     # refuses any upserting statement anywhere in the decision writer
