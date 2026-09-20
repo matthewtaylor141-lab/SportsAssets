@@ -815,3 +815,63 @@ SELECT 'constraint|' || con.conname
    AND con.conname IN ('bettor_exp_execution_status',
                        'bettor_exp_refusal_has_no_position')
  ORDER BY con.conname;
+
+\echo ''
+\echo '--- 28e. DID THE BLOCK ACTUALLY STOP THE LAST POSITIONS? ---'
+-- THE QUESTION 28/28b LEAVES OPEN, and it must be answered on ONE
+-- clock. Section 28b reports min(decision_timestamp) and 28 reports
+-- max(opened_at); those are DIFFERENT fields from different clocks --
+-- opened_at is the modelled arrival, decision_timestamp is the tick's
+-- sealed instant -- and the clock-domain conflict on these rows is a
+-- recorded, unresolved defect. Comparing them would repeat exactly the
+-- mistake the latency work exists to prevent.
+--
+-- `written_at` is stamped by the writer at persist time, on one clock,
+-- for BOTH row kinds. So the ordering question is asked on that and
+-- nothing else: was any position PERSISTED after the first blocked
+-- decision was PERSISTED?
+WITH first_block AS (
+    SELECT experiment_id, min(written_at) AS blocking_began
+      FROM bettor_experimental_decisions
+     WHERE execution_status
+           = 'BLOCKED_EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE'
+     GROUP BY experiment_id
+),
+positions AS (
+    SELECT d.experiment_id, d.position_id, d.written_at
+      FROM bettor_experimental_decisions d
+     WHERE d.position_id IS NOT NULL
+)
+SELECT 'block_effective|' || b.experiment_id
+       || '|blocking_began=' || to_char(b.blocking_began,
+                                        'YYYY-MM-DD HH24:MI:SSZ')
+       || '|positions_written_after=' || count(p.position_id)
+       || '|last_position_written='
+       || COALESCE(to_char(max(p.written_at),
+                           'YYYY-MM-DD HH24:MI:SSZ'), 'NONE')
+  FROM first_block b
+  LEFT JOIN positions p
+    ON p.experiment_id = b.experiment_id
+   AND p.written_at > b.blocking_began
+ GROUP BY b.experiment_id, b.blocking_began
+ ORDER BY b.experiment_id;
+
+\echo ''
+\echo '--- 28f. THE BLOCKED ROWS, ON THE WRITER CLOCK ---'
+-- Same clock for both timestamps, so the two are comparable to each
+-- other. A large gap between them is the clock-domain defect showing
+-- through, not evidence about the block.
+SELECT 'blocked_rows|' || experiment_id
+       || '|n=' || count(*)
+       || '|first_written=' || to_char(min(written_at),
+                                       'YYYY-MM-DD HH24:MI:SSZ')
+       || '|last_written='  || to_char(max(written_at),
+                                       'YYYY-MM-DD HH24:MI:SSZ')
+       || '|decision_ts_span=' || to_char(min(decision_timestamp),
+                                          'HH24:MI:SSZ')
+       || '..' || to_char(max(decision_timestamp), 'HH24:MI:SSZ')
+  FROM bettor_experimental_decisions
+ WHERE execution_status
+       = 'BLOCKED_EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE'
+ GROUP BY experiment_id
+ ORDER BY experiment_id;
