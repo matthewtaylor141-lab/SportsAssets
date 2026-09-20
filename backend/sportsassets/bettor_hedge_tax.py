@@ -168,6 +168,192 @@ def hedge_tax(own_leg_basis=None, complement_price=None) -> dict:
     return out
 
 
+# ══════════════════════════════════════════════════════════════════════
+# §11. THE COMPLEMENT ACQUISITION, AND THE FOUR ROUTES IT COMPETES WITH
+#
+# Owner directive:
+#
+#     "If we own YES: DIRECT EXIT means selling YES. HEDGE means buying
+#     NO. These are different economic routes to reducing directional
+#     exposure. For a complement acquisition compute: COMPLEMENT_COST /
+#     PAIR_BASIS / PAIR_VALUE / HEDGE_TAX / CAPITAL_RELEASE_IF_COMPLETED.
+#     Then compare: EV_HOLD / EV_DIRECT_EXIT / EV_HEDGE /
+#     EV_COMPLETE_PAIR. The rule is NOT: always hedge. The rule is: pay
+#     the hedge tax only when doing so dominates the alternatives on
+#     conservative economics."
+# ══════════════════════════════════════════════════════════════════════
+
+# THE TWO ROUTES ARE NOT THE SAME TRADE. Both reduce directional
+# exposure on a held YES and they do it through different books, at
+# different prices, with different leftovers.
+EXIT_VS_HEDGE = {
+    "DIRECT_EXIT": {
+        "what": "SELL the leg we own",
+        "book": "the BID on our own leg",
+        "leaves": "nothing. The position is gone and the capital is back",
+        "priceRisk": "we take whatever the bid is now",
+    },
+    "HEDGE": {
+        "what": "BUY the complementary leg",
+        "book": "the ASK on the other leg",
+        "leaves": ("a matched pair. Directional exposure is gone but "
+                   "the capital is still in it until the venue lets the "
+                   "pair be merged or netted"),
+        "priceRisk": "we pay whatever the complement ask is now",
+    },
+    "whyItMatters": (
+        "these are routinely treated as one decision -- 'reduce the "
+        "exposure' -- and they are not. DIRECT_EXIT returns capital and "
+        "accepts the bid. HEDGE keeps the capital tied up and accepts "
+        "the ask. Which dominates depends on the spread, the hedge tax "
+        "and whether a merge mechanism exists at all"),
+}
+
+ROUTES = ("EV_HOLD", "EV_DIRECT_EXIT", "EV_HEDGE", "EV_COMPLETE_PAIR")
+
+THE_RULE_IS_NOT_ALWAYS_HEDGE = (
+    "pay the hedge tax only when doing so DOMINATES the alternatives on "
+    "conservative economics. A complement existing is not a reason to "
+    "buy it -- the venue always quotes the other leg. Dominance means "
+    "beating HOLD, DIRECT_EXIT and COMPLETE_PAIR on the conservative "
+    "read, not beating them on the mean")
+
+CONSERVATIVE_MEANS = (
+    "the LOWER_CONFIDENCE_VALUE of each route, not its mean. A route "
+    "that wins on the mean and loses on the conservative read has not "
+    "earned a certain cost paid up front")
+
+WHY_CAPITAL_RELEASE_NOT_IDENTIFIED = (
+    "completing a pair only returns capital if the venue lets the "
+    "matched quantity be merged or netted. Retail netting is "
+    "established; the institutional MERGE_MECHANISM is NOT_IDENTIFIED, "
+    "so CAPITAL_RELEASE_IF_COMPLETED is NOT_IDENTIFIED. It is not zero: "
+    "zero would assert that completing frees nothing, which is a claim "
+    "about the venue we have not established")
+
+PAIR_VALUE_BASIS = (
+    "a complete pair pays exactly $1.00 at settlement, which is "
+    "structural rather than estimated. What it is worth BEFORE "
+    "settlement is a different number and it is NOT_IDENTIFIED: "
+    "realising it early needs either a merge mechanism or exit books on "
+    "both legs, and neither is established")
+
+
+def complement_acquisition(*, own_leg=None, own_leg_basis=None,
+                           complement_price=None, qty=None,
+                           fee=None, merge_mechanism=None) -> dict:
+    """§11's five quantities for buying the other leg.
+
+    Per contract AND scaled, because a per-contract number multiplied
+    by the wrong size is how an edge becomes a loss.
+    """
+    a, b, n = _d(own_leg_basis), _d(complement_price), _d(qty)
+    tax = hedge_tax(own_leg_basis=own_leg_basis,
+                    complement_price=complement_price)
+
+    out = {
+        "definitionSha": DEFINITION_SHA,
+        "units": UNITS,
+        "OWN_LEG": own_leg or NOT_IDENTIFIED,
+        "COMPLEMENT_LEG": ({"YES": "NO", "NO": "YES"}.get(own_leg)
+                           or NOT_IDENTIFIED),
+        "QUANTITY": str(n) if n is not None else NOT_IDENTIFIED,
+        # 1. COMPLEMENT_COST
+        "COMPLEMENT_COST_PER_CONTRACT": (str(b) if b is not None
+                                         else NOT_IDENTIFIED),
+        "COMPLEMENT_COST_GROSS": (str(b * n) if b is not None
+                                  and n is not None else NOT_IDENTIFIED),
+        # Net of fees, which are not declared for this venue leg. Left
+        # unidentified rather than zeroed -- a zero fee makes every
+        # break-even look reachable.
+        "COMPLEMENT_COST_NET": NOT_IDENTIFIED,
+        "FEE": str(_d(fee)) if _d(fee) is not None else NOT_IDENTIFIED,
+        "whyCostNetNotIdentified": (
+            "no fee schedule is declared for this venue leg, so the "
+            "net cost of acquiring the complement is not identified. "
+            "It is not the gross cost"),
+        # 2. PAIR_BASIS
+        "PAIR_BASIS": tax["PAIR_BASIS"],
+        # 3. PAIR_VALUE -- structural at settlement, unknown before it
+        "PAIR_VALUE_AT_SETTLEMENT": str(PAR),
+        "PAIR_VALUE_BEFORE_SETTLEMENT": NOT_IDENTIFIED,
+        "pairValueBasis": PAIR_VALUE_BASIS,
+        # 4. HEDGE_TAX -- both definitions, never collapsed into one
+        "HEDGE_TAX_VS_PAR": tax["HEDGE_TAX_VS_PAR"],
+        "HEDGE_TAX_VS_HOLD": tax["HEDGE_TAX_VS_HOLD"],
+        "whyTwo": WHY_TWO,
+        "signConvention": SIGN_CONVENTION,
+        # 5. CAPITAL_RELEASE_IF_COMPLETED
+        "CAPITAL_RELEASE_IF_COMPLETED": NOT_IDENTIFIED,
+        "MERGE_MECHANISM": merge_mechanism or NOT_IDENTIFIED,
+        "whyCapitalReleaseNotIdentified": WHY_CAPITAL_RELEASE_NOT_IDENTIFIED,
+        "capitalReleaseRequires": ("MERGE_MECHANISM", "MATCHED_QTY"),
+        "doNotAutoHedge": DO_NOT_AUTO_HEDGE,
+    }
+    if tax["HEDGE_TAX_VS_PAR"] != NOT_IDENTIFIED and n is not None:
+        out["HEDGE_TAX_VS_PAR_TOTAL"] = str(_d(tax["HEDGE_TAX_VS_PAR"]) * n)
+    else:
+        out["HEDGE_TAX_VS_PAR_TOTAL"] = NOT_IDENTIFIED
+    return out
+
+
+def compare_routes(*, ev_hold=None, ev_direct_exit=None, ev_hedge=None,
+                   ev_complete_pair=None, conservative=True) -> dict:
+    """§11's four-way comparison, and the dominance rule over it.
+
+    Values are LOWER_CONFIDENCE reads, not means (see CONSERVATIVE_MEANS).
+    Any route that is NOT_IDENTIFIED makes the comparison
+    NOT_IDENTIFIED: a missing route cannot be beaten, and treating it
+    as zero would let HEDGE win by default against alternatives nobody
+    measured.
+    """
+    vals = {
+        "EV_HOLD": ev_hold,
+        "EV_DIRECT_EXIT": ev_direct_exit,
+        "EV_HEDGE": ev_hedge,
+        "EV_COMPLETE_PAIR": ev_complete_pair,
+    }
+    parsed = {k: _d(v) for k, v in vals.items()}
+    missing = [k for k, v in parsed.items() if v is None]
+
+    out = {
+        "routes": {k: (str(v) if v is not None else NOT_IDENTIFIED)
+                   for k, v in parsed.items()},
+        "routesMissing": missing,
+        "conservative": bool(conservative),
+        "conservativeMeans": CONSERVATIVE_MEANS,
+        "theRuleIsNotAlwaysHedge": THE_RULE_IS_NOT_ALWAYS_HEDGE,
+        "exitVsHedge": dict(EXIT_VS_HEDGE),
+        "doNotAutoHedge": DO_NOT_AUTO_HEDGE,
+    }
+    if missing:
+        out.update({
+            "DOMINANCE_STATUS": NOT_IDENTIFIED,
+            "HEDGE_PERMITTED": False,
+            "why": ("a missing route cannot be beaten. %s are "
+                    "NOT_IDENTIFIED, so no route dominates and the "
+                    "hedge tax is not paid" % ", ".join(missing)),
+            "whyNotZero": ("treating a missing alternative as zero "
+                           "would let HEDGE win by default against "
+                           "alternatives nobody measured"),
+        })
+        return out
+
+    best = max(parsed, key=lambda k: parsed[k])
+    others = [v for k, v in parsed.items() if k != "EV_HEDGE"]
+    dominates = all(parsed["EV_HEDGE"] > v for v in others)
+    out.update({
+        "DOMINANCE_STATUS": "IDENTIFIED",
+        "BEST_ROUTE": best,
+        "HEDGE_DOMINATES": dominates,
+        "HEDGE_PERMITTED": dominates,
+        "why": ("HEDGE %s the other three routes on the %s read"
+                % ("dominates" if dominates else "does not dominate",
+                   "conservative" if conservative else "mean")),
+    })
+    return out
+
+
 def describe() -> dict:
     return {
         "definitionSha": DEFINITION_SHA,
@@ -177,4 +363,11 @@ def describe() -> dict:
         "vsHold": VS_HOLD_DEFINITION,
         "signConvention": SIGN_CONVENTION,
         "doNotAutoHedge": DO_NOT_AUTO_HEDGE,
+        "routes": list(ROUTES),
+        "exitVsHedge": dict(EXIT_VS_HEDGE),
+        "theRuleIsNotAlwaysHedge": THE_RULE_IS_NOT_ALWAYS_HEDGE,
+        "conservativeMeans": CONSERVATIVE_MEANS,
+        "pairValueBasis": PAIR_VALUE_BASIS,
+        "whyCapitalReleaseNotIdentified": WHY_CAPITAL_RELEASE_NOT_IDENTIFIED,
+        "comparisonToday": compare_routes(),
     }

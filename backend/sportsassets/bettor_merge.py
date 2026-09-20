@@ -176,6 +176,117 @@ def merge_permitted(venue=INSTITUTIONAL) -> dict:
             "noFictionalAction": NO_FICTIONAL_ACTION}
 
 
+# ══════════════════════════════════════════════════════════════════════
+# §12. THE CAPITAL RECYCLING CHAIN, WHICH IS A DIFFERENT QUESTION
+#
+# Owner directive:
+#
+#     "Once merge/netting is legitimately available: PAIR COMPLETE ->
+#     MERGE / NET -> RELEASE CAPITAL -> RECORD LOCKED PAIR PNL ->
+#     CAPITAL RETURNS TO ALLOCATOR. This is a core RN1/Ferrari lesson."
+#
+# `merge_permitted` answers "is there a merge ACTION to call". That is
+# NOT the same question as "does capital come back", and reading the
+# first as the second gets RETAIL exactly backwards: there is no merge
+# call on retail AND capital recycles immediately, because the venue
+# nets at the second fill. An allocator that consulted merge_permitted
+# alone would conclude that retail capital never returns, which is the
+# opposite of the truth.
+#
+# So the chain is answered per step, per venue, and the two questions
+# are kept apart by name.
+# ══════════════════════════════════════════════════════════════════════
+
+RECYCLING_CHAIN = (
+    "PAIR_COMPLETE",
+    "MERGE_OR_NET",
+    "RELEASE_CAPITAL",
+    "RECORD_LOCKED_PAIR_PNL",
+    "CAPITAL_RETURNS_TO_ALLOCATOR",
+)
+
+MERGE_CALL_IS_NOT_CAPITAL_RECYCLING = (
+    "'is there a merge ACTION' and 'does capital come back' are "
+    "different questions. On RETAIL the answers are NO and YES: no "
+    "merge call exists and the capital returns at the second fill, "
+    "because the venue nets. An allocator reading merge availability as "
+    "capital availability would conclude retail capital never returns, "
+    "which is the opposite of the truth")
+
+CHAIN_BY_VENUE = {
+    RETAIL: {
+        "PAIR_COMPLETE": "AVAILABLE",
+        "MERGE_OR_NET": "AVAILABLE_AS_AUTOMATIC_NETTING_NO_CALL",
+        "RELEASE_CAPITAL": "AVAILABLE_AT_SECOND_FILL",
+        "RECORD_LOCKED_PAIR_PNL": "AVAILABLE",
+        "CAPITAL_RETURNS_TO_ALLOCATOR": "AVAILABLE",
+        "CAPITAL_RECYCLING_AVAILABLE": YES,
+        "why": ("the venue nets at the second fill, so the pair's "
+                "profit is realised there and the capital returns "
+                "immediately. No merge call is involved and none is "
+                "invented"),
+    },
+    INSTITUTIONAL: {
+        "PAIR_COMPLETE": "AVAILABLE",
+        # The chain breaks here and everything after it inherits.
+        "MERGE_OR_NET": NOT_IDENTIFIED,
+        "RELEASE_CAPITAL": NOT_IDENTIFIED,
+        "RECORD_LOCKED_PAIR_PNL": "AVAILABLE_INDEPENDENTLY_OF_MERGE",
+        "CAPITAL_RETURNS_TO_ALLOCATOR": NOT_IDENTIFIED,
+        "CAPITAL_RECYCLING_AVAILABLE": NOT_IDENTIFIED,
+        "brokenAt": "MERGE_OR_NET",
+        "why": ("no merge or netting mechanism has been observed, so "
+                "whether completing a pair returns capital is "
+                "NOT_IDENTIFIED. It is not zero and it is not NO: "
+                "either would be a claim about the venue we have not "
+                "established"),
+        "pnlIsStillRecordable": (
+            "RECORD_LOCKED_PAIR_PNL does not wait on the merge. Matched "
+            "inventory has a locked economic outcome whether or not the "
+            "venue lets us realise it early, and §12 requires "
+            "matched-pair accounting to stay independent of merge "
+            "execution"),
+    },
+}
+
+FERRARI_LESSON = (
+    "capital that cannot be recycled is capital that keeps earning the "
+    "residual's risk instead of the next pair's margin. Ferrari's pair "
+    "machine worked; what it could not do was turn completed pairs back "
+    "into deployable capital fast enough to stop the residual book "
+    "growing. A chain that breaks at MERGE_OR_NET is the same failure "
+    "with a different name")
+
+
+def capital_recycling(venue=INSTITUTIONAL) -> dict:
+    """Does completing a pair return capital on this venue, step by step.
+
+    Distinct from `merge_permitted`, which answers whether a merge
+    ACTION exists. See MERGE_CALL_IS_NOT_CAPITAL_RECYCLING.
+    """
+    row = CHAIN_BY_VENUE.get(venue)
+    if row is None:
+        return {
+            "venue": venue,
+            "CAPITAL_RECYCLING_AVAILABLE": NOT_IDENTIFIED,
+            "why": "unknown venue",
+            "chain": list(RECYCLING_CHAIN),
+        }
+    broken = [s for s in RECYCLING_CHAIN if row.get(s) == NOT_IDENTIFIED]
+    return {
+        "venue": venue,
+        "chain": list(RECYCLING_CHAIN),
+        "byStep": {s: row.get(s, NOT_IDENTIFIED) for s in RECYCLING_CHAIN},
+        "CAPITAL_RECYCLING_AVAILABLE": row["CAPITAL_RECYCLING_AVAILABLE"],
+        "stepsNotIdentified": broken,
+        "mergeCallIsNotCapitalRecycling": MERGE_CALL_IS_NOT_CAPITAL_RECYCLING,
+        "matchedIsStillDistinct": MATCHED_IS_STILL_DISTINCT,
+        "noFictionalAction": NO_FICTIONAL_ACTION,
+        "ferrariLesson": FERRARI_LESSON,
+        "why": row.get("why"),
+    }
+
+
 def describe() -> dict:
     return {
         "PMUS_NATIVE_MERGE_AVAILABLE": PMUS_NATIVE_MERGE_AVAILABLE,
@@ -188,4 +299,9 @@ def describe() -> dict:
         "silenceIsNotEvidence": SILENCE_IS_NOT_EVIDENCE,
         "matchedIsStillDistinct": MATCHED_IS_STILL_DISTINCT,
         "noFictionalAction": NO_FICTIONAL_ACTION,
+        "recyclingChain": list(RECYCLING_CHAIN),
+        "mergeCallIsNotCapitalRecycling": MERGE_CALL_IS_NOT_CAPITAL_RECYCLING,
+        "capitalRecycling": {v: capital_recycling(v)
+                             for v in (RETAIL, INSTITUTIONAL)},
+        "ferrariLesson": FERRARI_LESSON,
     }
