@@ -41,6 +41,8 @@ on:
           - env-get       # arg = comma-separated OPERATOR FLAGS (LIVE_COPY_HALT, ...); values of flags only
           - env-set       # confirm=DO: arg = KEY=VALUE (value masked in the log; Render redeploys)
           - env-del       # confirm=DO: arg = KEY
+          - rootdir-get   # the LIVE build config (rootDir, dockerfilePath) -- read-only
+          - rootdir-sync  # confirm=DO: reconcile the live rootDir to what render.yaml declares
       service:
         description: 'Service or database name (sportsassets-api, sportsassets-workers, edge-shadow, sportsassets-db)'
         required: false
@@ -97,6 +99,42 @@ jobs:
           echo "action=$ACTION service=$SERVICE arg='$ARG' at $(date -u +%FT%TZ)"
 
           case "$ACTION" in
+            rootdir-get)
+              # READ-ONLY. What the LIVE service is actually building
+              # from, which is not necessarily what render.yaml says:
+              # rootDir is Blueprint-managed and a plain code deploy
+              # does not re-apply it.
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              echo "== live build config for $SERVICE ($ID) =="
+              get "/services/$ID" > /tmp/svc.json
+              jq -r '.rootDir as $r
+                     | .serviceDetails.envSpecificDetails as $e
+                     | "LIVE_ROOT_DIR       = \($r // "(unset)")\nDOCKERFILE_PATH     = \($e.dockerfilePath // "(unset)")\nDOCKER_CONTEXT      = \($e.dockerContext // "(unset)")\nBRANCH              = \(.branch // "?")\nAUTO_DEPLOY         = \(.autoDeploy // "?")"' \
+                 /tmp/svc.json || { echo "(service read not JSON)"; head -c 600 /tmp/svc.json; }
+              ;;
+            rootdir-sync)
+              # confirm=DO. Reconcile the LIVE service to what
+              # render.yaml ALREADY DECLARES. The values are fixed here
+              # rather than taken from `arg` on purpose: render.yaml is
+              # the source of truth, so this action can only move the
+              # service toward it and can never set an arbitrary root.
+              # A later Blueprint sync produces the same result.
+              need_confirm
+              ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
+              case "$SERVICE" in
+                sportsassets-api|sportsassets-workers) ;;
+                *) echo "refused: rootdir-sync is declared for the backend services only"; exit 1 ;;
+              esac
+              echo "== before =="
+              get "/services/$ID" | jq -r '"LIVE_ROOT_DIR = \(.rootDir // "(unset)")  DOCKERFILE_PATH = \(.serviceDetails.envSpecificDetails.dockerfilePath // "(unset)")"'
+              BODY='{"rootDir":".","serviceDetails":{"envSpecificDetails":{"dockerfilePath":"./backend/Dockerfile","dockerContext":"."}}}'
+              CODE=$(curl -sS --max-time 45 -o /tmp/patch.json -w '%{http_code}' -X PATCH \
+                     -H "Authorization: Bearer $KEY" -H "Accept: application/json" \
+                     -H "Content-Type: application/json" -d "$BODY" "$API/services/$ID")
+              echo "PATCH HTTP $CODE"; head -c 400 /tmp/patch.json 2>/dev/null; echo
+              echo "== after =="
+              get "/services/$ID" | jq -r '"LIVE_ROOT_DIR = \(.rootDir // "(unset)")  DOCKERFILE_PATH = \(.serviceDetails.envSpecificDetails.dockerfilePath // "(unset)")"'
+              ;;
             services)
               echo "== services =="
               get "/services?limit=50" | jq -r '.[]? | .service | "\(.id)  \(.name)  \(.type)  suspended=\(.suspended)  plan=\(.serviceDetails.plan // "?")  branch=\(.branch // "?")  autoDeploy=\(.autoDeploy // "?")"' || echo "(services read failed)"
