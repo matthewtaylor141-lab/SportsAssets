@@ -159,6 +159,48 @@ def forbidden_name(name: str) -> None:
             "Use %s." % (name, UNIVERSE_VERSION, why, MEASURED_QUANTITY))
 
 
+# ── THE POST-DEPLOYMENT MEASUREMENT WINDOW, DECLARED IN ADVANCE ─────
+#
+# Owner 2026-09-20: "Declare the window before inspecting its results."
+#
+# Written and committed BEFORE any query of it was run. Its start is
+# tied to an event -- the deploy that puts the tick telemetry live --
+# rather than to a clock time chosen after seeing data, so the window
+# cannot have been picked to flatter a result.
+#
+# WHY THE 10-MINUTE WARM-UP. The adaptive pacing carries state across
+# ticks: a worker that restarts begins at READ_PACING_BASE_S and has to
+# re-discover the venue's tolerance. Measuring from the instant of
+# deploy would measure the re-discovery, not the steady state. Ten
+# minutes is two full cadence buckets.
+#
+# WHY IT ENDS. An open-ended window can be stopped when the numbers
+# look right. This one has a declared length.
+MEASUREMENT_WINDOW = {
+    "id": "POST_TELEMETRY_DEPLOY_W1",
+    "declaredAt": "2026-09-20T21:15Z",
+    "declaredBeforeAnyQueryOfIt": True,
+    "startRule": ("the completion of the deploy that first carries "
+                  "bettor_capture_ticks and timing_class, PLUS a "
+                  "10-minute warm-up for the adaptive pacer to leave "
+                  "its cold start"),
+    "lengthMinutes": 30,
+    "reportedSeparately": ["initial reads", "follow-up reads",
+                           "429 rate", "throughput"],
+    "missingVsPending": (
+        "an observation is FINALLY_MISSING only once its recovery "
+        "deadline (horizon + HORIZON_DUE_WINDOW_S) has elapsed with no "
+        "read. Before that it is PENDING and must not be counted as a "
+        "loss -- a horizon that has not had time to be read yet is not "
+        "a failure to read it"),
+    "throughputIsNotCoverage": (
+        "rows per minute extrapolated to a full pass does NOT establish "
+        "that every eligible market is visited. Markets that enter and "
+        "resolve between two visits are never seen, and no throughput "
+        "figure detects that"),
+}
+
+
 # ── §4. THE FROZEN UNIVERSE RULE ─────────────────────────────────────
 
 UNIVERSE_VERSION = "BETTOR_UNSELECTED_STATE_V2"
