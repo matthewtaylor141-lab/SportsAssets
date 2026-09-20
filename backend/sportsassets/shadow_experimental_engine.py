@@ -195,8 +195,16 @@ def seal(*, experiment, opportunity, mid_series, binding,
         "experimentSha": experiment["experimentSha"],
         "controlId": experiment.get("controlFor"),
         "eligiblePopulationId": eligible_population_id,
+        # THE SUBJECT, whichever feed it came from. The decision-grade
+        # collector's opportunity id and this lane's own observation id
+        # are kept in separate fields rather than one generic "subject":
+        # a reader must always be able to tell which feed a decision
+        # was made on, because the two sample at different rates and a
+        # rule about short-horizon drift means different things on each.
         "bettorOpportunityId": (opportunity or {}).get(
             "bettorOpportunityId"),
+        "experimentalObservationId": (opportunity or {}).get(
+            "experimentalObservationId"),
         "marketId": (opportunity or {}).get("symbol"),
         "outcomeLeg": (opportunity or {}).get("outcomeLeg"),
         "institutionalInstrumentId": (binding or {}).get(

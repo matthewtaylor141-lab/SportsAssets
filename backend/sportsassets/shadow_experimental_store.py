@@ -30,10 +30,19 @@ from . import shadow_l2 as l2
 LANE = xp.EXPERIMENTAL_LANE
 
 # The eligibility rule, typed once and hashed onto every population.
+#
+# IT CHANGED ONCE, ON PURPOSE, AND THE HASH SAYS SO. The first version
+# read the decision-grade collector's opportunities; that feed samples
+# a market about once an hour, which cannot produce the successive
+# captured samples X1's frozen rule requires. The rule was not tuned to
+# fit the feed -- the feed was replaced, and because the rule string is
+# hashed onto every population, the populations drawn under each
+# version are permanently distinguishable instead of silently merged.
 ELIGIBILITY_RULE = (
-    "a bettor_opportunity whose microstructure carries feature source %s "
-    "and bboBinding %s, observed inside the collection window, with at "
-    "least %d captured mid samples on its symbol"
+    "a bettor_experimental_observation from this lane's own focus-set "
+    "sampler carrying feature source %s and bboBinding %s, readable, "
+    "observed inside the collection window, with at least %d captured "
+    "mid samples on its symbol"
     % (l2.FEATURE_SOURCE_VERSION, l2.BIND_YES, 3))
 ELIGIBILITY_RULE_SHA = hashlib.sha256(
     ELIGIBILITY_RULE.encode()).hexdigest()[:16]
@@ -74,7 +83,8 @@ REQUIRED_TABLES = ("bettor_eligible_populations", "bettor_experiments",
                    "bettor_experimental_decisions",
                    "bettor_experimental_positions",
                    "bettor_experimental_seals", "bettor_l2_requests",
-                   "bettor_l2_evidence")
+                   "bettor_l2_evidence",
+                   "bettor_experimental_observations")
 # EVERY COLUMN A LATER MIGRATION ADDED THAT AN INSERT HERE NAMES. An
 # ALTER that has not run leaves a table that exists and a statement
 # that cannot, and the failure would otherwise surface as a tick error
@@ -85,7 +95,11 @@ REQUIRED_COLUMNS = (("bettor_experimental_decisions", "l2_evidence_id"),
                     ("bettor_experimental_decisions", "why"),
                     ("bettor_experimental_markouts", "target_at"),
                     ("bettor_experimental_markouts", "observed_lag_ms"),
-                    ("bettor_experimental_markouts", "exitable_qty"))
+                    ("bettor_experimental_markouts", "exitable_qty"),
+                    ("bettor_experimental_seals",
+                     "experimental_observation_id"),
+                    ("bettor_experimental_decisions",
+                     "experimental_observation_id"))
 
 
 async def store_ready(pool) -> dict:
@@ -114,25 +128,83 @@ async def store_ready(pool) -> dict:
     return {"storeReady": not problems, "problems": problems}
 
 
+# ── the lane's own sampler, and why it has one ───────────────────────
+#
+# The decision-grade collector selects with `ORDER BY updated_at DESC
+# LIMIT 10` over a churning board, so it sees each market roughly once
+# an hour -- verified in production at 00:01Z: seventeen YES-bound rows
+# across seventeen symbols. X1's frozen rule is the signed drift over
+# the last five CAPTURED SAMPLES against a 60-second horizon, so on
+# that feed it can never fire. The rule is frozen and is not being
+# tuned to fit the feed; the lane samples its own focus set instead.
+
+EVIDENCE_SOURCE_EXPERIMENTAL = "PMUS_BBO_EXPERIMENTAL"
+SELECTION_FOCUS = "EXPERIMENTAL_FOCUS_SET_MOST_RECENTLY_ELIGIBLE"
+
+
+def observation_id(symbol, leg, at, cadence_s) -> str:
+    """One row per market per tick bucket, so a restart mid-tick
+    cannot write the same instant twice."""
+    epoch = int(at.timestamp())
+    if cadence_s:
+        epoch = epoch // int(cadence_s) * int(cadence_s)
+    raw = "|".join([str(symbol), str(leg or ""), str(epoch)])
+    return "xobs_" + hashlib.sha256(raw.encode()).hexdigest()[:36]
+
+
+async def record_observation(pool, obs: dict) -> bool:
+    micro = obs.get("microstructure") or {}
+    row = await pool.fetchrow(
+        """
+        INSERT INTO bettor_experimental_observations (
+            experimental_observation_id, observed_at, symbol, outcome_leg,
+            event_id, selection_reason, evidence_source, cadence_s,
+            readable, why_unreadable, bid, ask, mid, spread,
+            spread_relative, venue_state, bbo_binding,
+            feature_source_version, microstructure)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                $17,$18,$19::jsonb)
+        ON CONFLICT (experimental_observation_id) DO NOTHING
+        RETURNING experimental_observation_id
+        """,
+        obs["experimentalObservationId"], obs["observedAt"], obs["symbol"],
+        obs.get("outcomeLeg"), obs.get("eventId"),
+        obs.get("selectionReason", SELECTION_FOCUS),
+        obs.get("evidenceSource", EVIDENCE_SOURCE_EXPERIMENTAL),
+        obs.get("cadenceS"), bool(obs.get("readable")),
+        obs.get("whyUnreadable"), micro.get("bid"), micro.get("ask"),
+        micro.get("mid"), micro.get("spread"), micro.get("spreadRelative"),
+        obs.get("venueState"), micro.get("bboBinding", l2.BIND_MARKET_LEVEL),
+        micro.get("featureSourceVersion", l2.FEATURE_SOURCE_VERSION),
+        _j(micro))
+    return row is not None
+
+
 ELIGIBLE_SQL = """
-    SELECT bettor_opportunity_id, symbol, outcome_leg, event_id,
+    SELECT experimental_observation_id, symbol, outcome_leg, event_id,
            observed_at, microstructure, evidence_source
-      FROM bettor_opportunities
+      FROM bettor_experimental_observations
      WHERE observed_at > now() - ($1 || ' seconds')::interval
-       AND microstructure->>'featureSourceVersion' = $2
-       AND microstructure->>'bboBinding' = $3
+       AND feature_source_version = $2
+       AND bbo_binding = $3
+       AND readable IS TRUE
      ORDER BY symbol, observed_at
 """
 
 
-async def eligible_opportunities(pool, *, window_s=3600) -> dict:
-    """{symbol: [opportunity, ...]} oldest first, corrected + YES-bound.
+async def eligible_observations(pool, *, window_s=1800) -> dict:
+    """{symbol: [observation, ...]} oldest first, corrected + YES-bound.
 
     THE FILTER IS IN THE QUERY ON PURPOSE. §3 forbids an experiment
-    training or evaluating on the rows written while `yes` and `no`
-    carried the same book. Those rows are still there and are still
-    evidence; they simply never reach an experiment, and a filter the
-    database applies cannot be forgotten by a caller.
+    training or evaluating on rows whose leg binding was wrong. Those
+    rows are still kept as evidence; they simply never reach an
+    experiment, and a filter the database applies cannot be forgotten
+    by a caller.
+
+    ONE FEED, NOT TWO. The decision-grade collector's YES-bound rows
+    are deliberately NOT unioned in here: mixing an hourly sample and a
+    per-minute one into "the last five captured samples" would make the
+    drift measure describe the sampling schedule rather than the market.
     """
     rows = await pool.fetch(ELIGIBLE_SQL, str(int(window_s)),
                             l2.FEATURE_SOURCE_VERSION, l2.BIND_YES)
@@ -140,7 +212,8 @@ async def eligible_opportunities(pool, *, window_s=3600) -> dict:
     for r in rows:
         micro = _load(r["microstructure"]) or {}
         out.setdefault(r["symbol"], []).append({
-            "bettorOpportunityId": r["bettor_opportunity_id"],
+            "experimentalObservationId": r["experimental_observation_id"],
+            "bettorOpportunityId": None,
             "symbol": r["symbol"],
             "outcomeLeg": r["outcome_leg"],
             "eventId": r["event_id"],
@@ -148,6 +221,60 @@ async def eligible_opportunities(pool, *, window_s=3600) -> dict:
             "evidenceSource": r["evidence_source"],
             "microstructure": micro,
         })
+    return out
+
+
+FOCUS_SQL = """
+    SELECT DISTINCT ON (symbol) symbol, outcome_leg, event_id
+      FROM bettor_experimental_observations
+     WHERE observed_at > now() - ($1 || ' seconds')::interval
+       AND readable IS TRUE
+     ORDER BY symbol, observed_at DESC
+"""
+
+FOCUS_TOPUP_SQL = """
+    SELECT DISTINCT ON (symbol) symbol, outcome_leg, event_id
+      FROM bettor_opportunities
+     WHERE observed_at > now() - ($1 || ' seconds')::interval
+       AND microstructure->>'bboBinding' = $2
+       AND microstructure->>'status' = 'MEASURED'
+     ORDER BY symbol, observed_at DESC
+     LIMIT $3
+"""
+
+
+async def focus_set(pool, *, size, hold_s=1800, discover_s=7200) -> list:
+    """The markets this lane samples every tick.
+
+    STICKY FIRST, THEN TOPPED UP. A focus set re-chosen from scratch
+    each tick would never accumulate a series on any market, which is
+    the whole reason it exists -- so markets this lane has already
+    observed keep their place, and the remainder is filled from the
+    markets the decision-grade collector most recently found YES-bound
+    and readable.
+
+    THE SELECTION CANNOT KNOW THE SIGNAL. Recency of observation and
+    readability are the only criteria; nothing here reads a price, a
+    direction or an experiment's output. A population chosen by what
+    the model would say is not a population.
+    """
+    held = [dict(r) for r in await pool.fetch(FOCUS_SQL, str(int(hold_s)))]
+    out = [{"symbol": r["symbol"],
+            "outcomeLeg": r["outcome_leg"] or "yes",
+            "eventId": r["event_id"], "held": True} for r in held[:size]]
+    if len(out) >= size:
+        return out
+    seen = {r["symbol"] for r in out}
+    for r in await pool.fetch(FOCUS_TOPUP_SQL, str(int(discover_s)),
+                              l2.BIND_YES, int(size) * 4):
+        if r["symbol"] in seen:
+            continue
+        out.append({"symbol": r["symbol"],
+                    "outcomeLeg": r["outcome_leg"] or "yes",
+                    "eventId": r["event_id"], "held": False})
+        seen.add(r["symbol"])
+        if len(out) >= size:
+            break
     return out
 
 
@@ -342,8 +469,9 @@ async def record_seal(pool, sealed: dict, *, decision_id) -> bool:
         INSERT INTO bettor_experimental_seals (
             seal_sha, experimental_decision_id, experiment_id,
             experiment_sha, eligible_population_id, bettor_opportunity_id,
-            symbol, outcome_leg, action, sealed_at, seal)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb)
+            symbol, outcome_leg, action, sealed_at, seal,
+            experimental_observation_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11::jsonb,$12)
         ON CONFLICT (experimental_decision_id) DO NOTHING
         RETURNING experimental_decision_id
         """,
@@ -351,28 +479,29 @@ async def record_seal(pool, sealed: dict, *, decision_id) -> bool:
         sealed["experimentSha"], sealed.get("eligiblePopulationId"),
         sealed.get("bettorOpportunityId"), sealed["marketId"],
         sealed.get("outcomeLeg"), sealed["action"],
-        sealed["decisionTimestamp"], _j(sealed))
+        sealed["decisionTimestamp"], _j(sealed),
+        sealed.get("experimentalObservationId"))
     return row is not None
 
 
-async def sealed_already(pool, opportunity_ids) -> set:
-    """{(experimentId, opportunityId)} already sealed.
+async def sealed_already(pool, observation_ids) -> set:
+    """{(experimentId, observationId)} already sealed.
 
-    ONE SEAL PER EXPERIMENT PER OPPORTUNITY, enforced by asking. The
-    collector writes one opportunity per market per 300s bucket while
-    this loop runs every 60s, so without this the same market would be
-    decided five times on one book and the leaderboard would count the
-    tick rate as trades.
+    ONE SEAL PER EXPERIMENT PER OBSERVATION, enforced by asking rather
+    than assumed. Without it a tick that ran twice on one observation
+    -- a restart, an overlapping cycle -- would decide the same book
+    twice and the leaderboard would count the tick rate as trades.
     """
-    if not opportunity_ids:
+    if not observation_ids:
         return set()
     rows = await pool.fetch(
         """
-        SELECT experiment_id, bettor_opportunity_id
+        SELECT experiment_id, experimental_observation_id
           FROM bettor_experimental_seals
-         WHERE bettor_opportunity_id = ANY($1::text[])
-        """, list(opportunity_ids))
-    return {(r["experiment_id"], r["bettor_opportunity_id"]) for r in rows}
+         WHERE experimental_observation_id = ANY($1::text[])
+        """, list(observation_ids))
+    return {(r["experiment_id"], r["experimental_observation_id"])
+            for r in rows}
 
 
 OPEN_SEALS_SQL = """
@@ -438,10 +567,11 @@ DECISION_INSERT = """
         execution_contract, execution_contract_sha, executed_notional_usd,
         unfilled_notional_usd, filled_qty, vwap, slippage, spread_cost,
         position_id, l2_evidence_id, latency_regime,
-        observed_arrival_latency_ms, why)
+        observed_arrival_latency_ms, why, experimental_observation_id)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,
             $17::jsonb,$18,$19,$20,$21,$22,$23,$24::jsonb,$25,$26,$27,$28,
-            $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43)
+            $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,
+            $44)
     ON CONFLICT (experimental_decision_id) DO NOTHING
     RETURNING experimental_decision_id
 """
@@ -504,7 +634,8 @@ async def record_decision(pool, sealed: dict, execution: dict) -> bool:
         # THE REASON, AS ITS OWN COLUMN. "Management should eventually
         # see which blockers prevent the most trades" is a GROUP BY,
         # and a reason inside a JSONB blob is not one.
-        ex.get("why") or sealed.get("why"))
+        ex.get("why") or sealed.get("why"),
+        sealed.get("experimentalObservationId"))
     return row is not None
 
 

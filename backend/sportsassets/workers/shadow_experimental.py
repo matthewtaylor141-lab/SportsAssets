@@ -56,6 +56,7 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 
+from .. import pmus
 from .. import shadow_experiment_registry as reg
 from .. import shadow_experiment_signals as sig
 from .. import shadow_experimental_engine as eng
@@ -65,6 +66,7 @@ from .. import shadow_experiments as xp
 from .. import shadow_identity as ident
 from .. import shadow_l2 as l2
 from ..db import get_pool, heartbeat
+from ..venue_pace import pace
 
 log = logging.getLogger(__name__)
 
@@ -75,8 +77,10 @@ TICK_S = 60.0
 BACKOFF_S = 120.0
 
 # How far back the eligible population is drawn from, and how many
-# markets one tick may decide.
-WINDOW_S = 3600
+# markets one tick may decide. THE WINDOW IS THE LANE'S OWN, not the
+# collector's: at one sample a minute, half an hour is thirty samples
+# and X1 reads the last five of them.
+WINDOW_S = 1800
 MAX_MARKETS_PER_TICK = 10
 MAX_SEALS_PER_TICK = 40
 
@@ -186,6 +190,115 @@ async def drain_seals(pool, *, now=None, expiry_s=SEAL_EXPIRY_S,
     return stats
 
 
+# ── the lane's own sampler ───────────────────────────────────────────
+#
+# WHY THIS EXISTS, found in production rather than reasoned about. At
+# 00:01Z the decision-grade collector's corrected rows read
+# YES_CONTRACT_BOOK n=17 symbols=17 -- one sample per market per hour,
+# because that lane selects with `ORDER BY updated_at DESC LIMIT 10`
+# over a board that churns and so almost never revisits a market. X1's
+# frozen rule is the signed drift over the last five CAPTURED SAMPLES
+# against a 60-second horizon: on that feed it could never fire, and
+# the lane would have sat at zero trades reporting healthy.
+#
+# THE RULE IS NOT TUNED TO FIT THE FEED. Lowering the sample minimum
+# after seeing that the rule cannot fire is tuning a frozen experiment
+# to manufacture activity (§4: "If changed later: X1_V2"), and widening
+# the window would feed a 60-second momentum rule samples an hour
+# apart. So the lane reads its own small focus set every tick instead,
+# and writes to its own table -- never into the decision-grade lane's.
+#
+# VENUE LOAD IS BOUNDED AND SMALL. One paced quote read per focus
+# market per tick: eight reads a minute, about 0.13 req/s against a
+# gateway that 429'd above ~3 req/s. A run of unreadable books
+# abandons the sweep rather than retrying into the limit.
+
+FOCUS_SIZE = 8
+FOCUS_HOLD_S = 1800
+READ_PACING_S = 0.4
+SAMPLE_MISS_ABANDON = 4
+
+
+def _read_quote(slug: str) -> dict:
+    """One paced quote read, off the event loop. Never raises."""
+    pace(READ_PACING_S)
+    try:
+        return pmus.bbo_read(pmus._get_client(), slug)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"bid": None, "ask": None, "state": None,
+                "error": type(exc).__name__}
+
+
+def observation_of(subject, quote, at, *, cadence_s=int(TICK_S)) -> dict:
+    """One focus read -> one observation row. Pure.
+
+    An unreadable book at a known instant is evidence and is written
+    down as one: dropping it would leave a hole indistinguishable from
+    a market nobody looked at, and the eligibility query filters on
+    `readable` rather than on the row's absence.
+    """
+    leg = subject.get("outcomeLeg") or "yes"
+    base = {"experimentalObservationId": xstore.observation_id(
+                subject["symbol"], leg, at, cadence_s),
+            "observedAt": at, "symbol": subject["symbol"],
+            "outcomeLeg": leg, "eventId": subject.get("eventId"),
+            "cadenceS": cadence_s, "venueState": quote.get("state")}
+
+    if quote.get("error") or (quote.get("bid") is None
+                              and quote.get("ask") is None):
+        why = ("QUOTE_READ_FAILED_%s" % quote["error"]) if quote.get("error") \
+            else ("VENUE_MARKET_STATE_%s" % quote["state"]
+                  if quote.get("state") else "VENUE_RETURNED_NO_QUOTE")
+        return dict(base, readable=False, whyUnreadable=why,
+                    microstructure=l2.bind_leg(
+                        {"status": l2.NOT_IDENTIFIED, "why": why}, leg))
+
+    bid, ask = quote.get("bid"), quote.get("ask")
+    mid = None if (bid is None or ask is None) else (bid + ask) / 2.0
+    spread = None if (bid is None or ask is None) else (ask - bid)
+    micro = {"status": l2.MEASURED, "bid": bid, "ask": ask, "mid": mid,
+             "spread": spread,
+             "spreadRelative": (spread / mid) if (spread is not None and mid)
+             else None,
+             # DEPTH IS NOT ESTABLISHED FROM A BBO and is not pretended
+             # to be. The executable depth this lane walks is the
+             # institutional book, fetched at arrival.
+             "depth": l2.NOT_IDENTIFIED,
+             "evidenceSource": xstore.EVIDENCE_SOURCE_EXPERIMENTAL}
+    if bid is None or ask is None:
+        micro["oneSided"] = True
+    return dict(base, readable=True, whyUnreadable=None,
+                microstructure=l2.bind_leg(micro, leg))
+
+
+async def sample_focus(pool, *, now=None, size=FOCUS_SIZE) -> dict:
+    """One paced read per focus market, written to this lane's table."""
+    now = now or _now()
+    stats = {"focus": 0, "written": 0, "unreadable": 0, "held": 0}
+    subjects = await xstore.focus_set(pool, size=size, hold_s=FOCUS_HOLD_S)
+    if not subjects:
+        stats["status"] = "no_focus_set"
+        return stats
+
+    misses = 0
+    for subject in subjects:
+        stats["focus"] += 1
+        stats["held"] += 1 if subject.get("held") else 0
+        quote = await asyncio.to_thread(_read_quote, subject["symbol"])
+        obs = observation_of(subject, quote, _now())
+        if not obs["readable"]:
+            misses += 1
+            stats["unreadable"] += 1
+        if await xstore.record_observation(pool, obs):
+            stats["written"] += 1
+        if misses >= SAMPLE_MISS_ABANDON:
+            # A RUN OF UNREADABLE BOOKS IS THE VENUE, NOT THE MARKET.
+            # Abandoning is cheaper than retrying into a rate limit.
+            stats["status"] = "venue_unreadable"
+            break
+    return stats
+
+
 # ── the seal half ────────────────────────────────────────────────────
 
 
@@ -216,7 +329,7 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
     # this lane never creates.
     requested: set = set()
 
-    by_symbol = await xstore.eligible_opportunities(pool, window_s=window_s)
+    by_symbol = await xstore.eligible_observations(pool, window_s=window_s)
     if not by_symbol:
         stats["status"] = "no_eligible_population"
         return stats
@@ -245,10 +358,10 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
     armed = reg.armed()
     latest = {symbol: rows[-1] for _at, symbol, rows, _s in subjects}
     already = await xstore.sealed_already(
-        pool, [o["bettorOpportunityId"] for o in latest.values()])
+        pool, [o["experimentalObservationId"] for o in latest.values()])
 
     fresh = {s: o for s, o in latest.items()
-             if any((e["experimentId"], o["bettorOpportunityId"])
+             if any((e["experimentId"], o["experimentalObservationId"])
                     not in already for e in armed)}
     stats["eligible"] = len(fresh)
     if not fresh:
@@ -256,7 +369,7 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
         return stats
 
     population_id = eng.population_id(
-        [o["bettorOpportunityId"] for o in fresh.values()],
+        [o["experimentalObservationId"] for o in fresh.values()],
         now.isoformat(), xstore.ELIGIBILITY_RULE_SHA)
     await xstore.record_population(pool, population_id=population_id,
                                    sealed_at=now,
@@ -270,7 +383,7 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
             stats["notIdentified"] += 1
         for experiment in armed:
             if (experiment["experimentId"],
-                    opportunity["bettorOpportunityId"]) in already:
+                    opportunity["experimentalObservationId"]) in already:
                 continue
             try:
                 sealed = eng.seal(experiment=experiment,
@@ -425,6 +538,10 @@ async def take_markouts(pool, *, now=None, window_s=86400,
 async def tick(pool, *, now=None) -> dict:
     now = now or _now()
     stats = {"lane": LANE, "status": "ok"}
+    # SAMPLE FIRST. The newest observation is what the seal half
+    # decides on, so reading before sealing keeps the decision as close
+    # to the book it was made on as this loop can manage.
+    stats["sample"] = await sample_focus(pool, now=now)
     stats["drain"] = await drain_seals(pool, now=now)
     stats["markouts"] = await take_markouts(pool, now=now)
     stats["seal"] = await seal_population(pool, now=now)

@@ -81,11 +81,14 @@ class FakePool:
 
     # -- reads -------------------------------------------------------
     async def fetch(self, sql, *args):
-        if "FROM bettor_opportunities" in sql:
+        if "FROM bettor_experimental_observations" in sql \
+                and "DISTINCT ON (symbol)" not in sql:
             return [r for r in self.opportunities
                     if r["microstructure"].get("featureSourceVersion")
                     == args[1]
                     and r["microstructure"].get("bboBinding") == args[2]]
+        if "DISTINCT ON (symbol)" in sql:
+            return []
         if "FROM bettor_l2_evidence" in sql and "DISTINCT ON" in sql:
             if self.instrument is None:
                 return []
@@ -97,9 +100,10 @@ class FakePool:
             return [] if self.retail is None else [dict(self.retail)]
         if "FROM bettor_experimental_seals" in sql and "ANY(" in sql:
             return [{"experiment_id": s["experiment_id"],
-                     "bettor_opportunity_id": s["bettor_opportunity_id"]}
+                     "experimental_observation_id":
+                         s["experimental_observation_id"]}
                     for s in self.seals.values()
-                    if s["bettor_opportunity_id"] in args[0]]
+                    if s["experimental_observation_id"] in args[0]]
         if "FROM bettor_experimental_seals" in sql:
             return [s for s in self.seals.values()
                     if s["status"] == "SEALED"]
@@ -119,7 +123,8 @@ class FakePool:
                 "seal_sha": args[0], "experimental_decision_id": args[1],
                 "experiment_id": args[2], "bettor_opportunity_id": args[5],
                 "symbol": args[6], "action": args[8], "sealed_at": args[9],
-                "seal": args[10], "status": "SEALED"}
+                "seal": args[10], "experimental_observation_id": args[11],
+                "status": "SEALED"}
             return {"experimental_decision_id": args[1]}
         if sql.strip().startswith("INSERT INTO bettor_experimental_decisions"):
             if args[0] in self.decisions:
@@ -168,9 +173,10 @@ def micro(mid, **kw):
 
 
 def opp(i, mid, **kw):
-    return {"bettor_opportunity_id": "opp%d" % i, "symbol": SYMBOL,
+    return {"experimental_observation_id": "xobs%d" % i,
+            "bettor_opportunity_id": None, "symbol": SYMBOL,
             "outcome_leg": "yes", "event_id": "ev1",
-            "observed_at": NOW - timedelta(seconds=300 * (5 - i)),
+            "observed_at": NOW - timedelta(seconds=60 * (5 - i)),
             "evidence_source": "PMUS_BBO", "microstructure": micro(mid, **kw)}
 
 
@@ -542,3 +548,71 @@ def test_a_position_past_every_horizon_stops_being_asked_about():
                        fromlist=["x"]).HORIZONS}
     assert worker._markout_window_open(
         subject, NOW + timedelta(seconds=400), done) is False
+
+
+# ── the lane's own sampler ───────────────────────────────────────────
+#
+# WHY IT EXISTS, from production at 00:01Z: the decision-grade
+# collector's corrected rows read YES_CONTRACT_BOOK n=17 symbols=17 --
+# one sample per market per hour. X1's frozen rule needs three
+# successive captured samples, so on that feed it could never fire.
+
+
+def test_a_readable_quote_becomes_a_yes_bound_sample():
+    obs = worker.observation_of(
+        {"symbol": SYMBOL, "outcomeLeg": "yes"},
+        {"bid": 0.40, "ask": 0.42, "state": "open"}, NOW)
+    assert obs["readable"] is True
+    assert obs["microstructure"]["mid"] == pytest.approx(0.41)
+    assert obs["microstructure"]["spreadRelative"] == pytest.approx(
+        0.02 / 0.41)
+    assert obs["microstructure"]["bboBinding"] == l2.BIND_YES
+    assert obs["microstructure"]["featureSourceVersion"] == \
+        l2.FEATURE_SOURCE_VERSION
+    # DEPTH IS NOT ESTABLISHED FROM A BBO and is not pretended to be.
+    assert obs["microstructure"]["depth"] == l2.NOT_IDENTIFIED
+
+
+def test_an_unreadable_book_is_written_down_rather_than_dropped():
+    """A hole in the series is indistinguishable from a market nobody
+    looked at. The eligibility query filters on `readable`, not on the
+    row's absence."""
+    for quote, expect in (
+            ({"bid": None, "ask": None, "state": None,
+              "error": "Timeout"}, "QUOTE_READ_FAILED_Timeout"),
+            ({"bid": None, "ask": None, "state": "closed"},
+             "VENUE_MARKET_STATE_closed"),
+            ({"bid": None, "ask": None, "state": None},
+             "VENUE_RETURNED_NO_QUOTE")):
+        obs = worker.observation_of({"symbol": SYMBOL, "outcomeLeg": "yes"},
+                                    quote, NOW)
+        assert obs["readable"] is False
+        assert obs["whyUnreadable"] == expect
+        assert obs["microstructure"]["bboBinding"] == l2.BIND_MARKET_LEVEL
+
+
+def test_one_observation_per_market_per_tick_bucket():
+    """A restart mid-tick must not write the same instant twice."""
+    a = xstore.observation_id(SYMBOL, "yes", NOW, 60)
+    b = xstore.observation_id(SYMBOL, "yes",
+                              NOW + timedelta(seconds=30), 60)
+    c = xstore.observation_id(SYMBOL, "yes",
+                              NOW + timedelta(seconds=90), 60)
+    assert a == b and a != c
+    assert a != xstore.observation_id(SYMBOL, "no", NOW, 60)
+
+
+def test_the_no_leg_is_never_sampled_as_a_yes_book():
+    obs = worker.observation_of({"symbol": SYMBOL, "outcomeLeg": "no"},
+                                {"bid": 0.40, "ask": 0.42}, NOW)
+    assert obs["microstructure"]["bboBinding"] == l2.BIND_NOT_IDENTIFIED
+    assert obs["microstructure"]["bid"] is None
+
+
+def test_the_eligibility_rule_changed_and_its_hash_says_so():
+    """The rule string is hashed onto every population, so populations
+    drawn from the collector's feed and from this lane's own sampler
+    are permanently distinguishable rather than silently merged."""
+    assert "focus-set sampler" in xstore.ELIGIBILITY_RULE
+    assert len(xstore.ELIGIBILITY_RULE_SHA) == 16
+    assert xstore.ELIGIBILITY_RULE_SHA != "9b3d16e000000000"
