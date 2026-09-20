@@ -336,8 +336,19 @@ MEASUREMENT_WINDOW_W3 = {
                   "the exact timestamps are filled from the deploy "
                   "record, not chosen after seeing rows"),
     "lengthMinutes": 30,
-    "startsAt": "PENDING_DEPLOY_RECORD",
-    "endsAt": "PENDING_DEPLOY_RECORD",
+    # Filled 22:58Z from the deploy record, before any W3 row existed.
+    "startsAt": "2026-09-20T23:03:17Z",
+    "endsAt": "2026-09-20T23:33:17Z",
+    "boundsFixedBy": ("workers deploy 0868e3e live 22:53:17Z + 10 min "
+                      "warm-up; the same rule W1 and W2 used, applied "
+                      "before the window opened"),
+    "preflight": (
+        "research/bettor_migration_091_check.sql, run 178 at 22:57:03Z: "
+        "fu_rotation_head, fu_per_horizon_cap and fu_selected all "
+        "present; newest tick 81s old; 10 ticks in the last 10 min; "
+        "rotation heads already observed as 300, 60, 900 (and NULL on "
+        "the V2 ticks the 10-minute window still spans, which write no "
+        "such column). The rotation is cycling in production"),
     "cohort": ("observations whose observed_at falls inside the "
                "window, followed to each horizon's own recovery "
                "deadline. Identical construction to W1 and W2"),

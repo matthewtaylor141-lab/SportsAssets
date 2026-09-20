@@ -25,26 +25,26 @@
 -- ── A. the window, and whether it ran on what it claims to ─────────
 SELECT 'A_WINDOW' AS section, k, v FROM (
     SELECT 'BOUNDS_USED' AS k,
-           '2000-01-01T00:00:00Z'::timestamptz::text || ' -> '
-           || '2000-01-01T00:30:00Z'::timestamptz::text AS v
+           '2026-09-20T23:03:17Z'::timestamptz::text || ' -> '
+           || '2026-09-20T23:33:17Z'::timestamptz::text AS v
     UNION ALL
     SELECT 'TICKS_IN_WINDOW', count(*)::text
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     -- PROVENANCE. If more than one pacing version appears, the window
     -- spans a deploy and its numbers cannot be attributed.
     SELECT 'PACING_VERSIONS_SEEN',
            string_agg(DISTINCT pacing_version, ' + ')
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'COHORT_OBSERVATIONS', count(*)::text
       FROM bettor_state_observations o
-     WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
 ) a
 
 UNION ALL
@@ -54,26 +54,26 @@ UNION ALL
 SELECT 'B_INITIAL_READS', k, v FROM (
     SELECT 'OBS_SCHEDULED' AS k, coalesce(sum(obs_scheduled), 0)::text AS v
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'OBS_ATTEMPTED', coalesce(sum(obs_attempted), 0)::text
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'OBS_SKIPPED_BUDGET', coalesce(sum(obs_skipped_budget), 0)::text
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'ATTEMPTED_PCT_OF_SCHEDULED',
            CASE WHEN coalesce(sum(obs_scheduled), 0) = 0 THEN '-'
                 ELSE round(100.0 * sum(obs_attempted)
                            / sum(obs_scheduled), 1)::text END
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
 ) b
 
 UNION ALL
@@ -88,8 +88,8 @@ SELECT 'C_ROTATION_HEAD',
        coalesce(fu_rotation_head::text, 'NO_FOLLOWUP_BUDGET'),
        count(*)::text || ' ticks'
   FROM bettor_capture_ticks
- WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-   AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+ WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+   AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
  GROUP BY 2
 
 UNION ALL
@@ -101,19 +101,19 @@ SELECT 'D_HORIZON_' || lpad(h.horizon::text, 4, '0'), k, v
  CROSS JOIN LATERAL (
     SELECT 'COHORT_TOTAL' AS k, count(*)::text AS v
       FROM bettor_state_observations o
-     WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'NOT_YET_DUE', count(*)::text
       FROM bettor_state_observations o
-     WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
        AND o.observed_at >= now() - (h.horizon || ' seconds')::interval
     UNION ALL
     SELECT 'ELIGIBLE_HORIZON_DUE', count(*)::text
       FROM bettor_state_observations o
-     WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
        AND o.observed_at < now() - (h.horizon || ' seconds')::interval
     UNION ALL
     -- THE ALLOCATION CRITERION. Zero here at a horizon with standing
@@ -122,30 +122,30 @@ SELECT 'D_HORIZON_' || lpad(h.horizon::text, 4, '0'), k, v
       FROM bettor_state_observations o
       JOIN bettor_state_mids m ON m.observation_id = o.observation_id
                               AND m.horizon_s = h.horizon
-     WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'ON_TIME_GATE_ADMISSIBLE', count(*)::text
       FROM bettor_state_observations o
       JOIN bettor_state_mids m ON m.observation_id = o.observation_id
                               AND m.horizon_s = h.horizon
-     WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
        AND m.timing_class = 'ON_TIME'
     UNION ALL
     SELECT 'LATE_RECOVERY_NOT_IN_GATE', count(*)::text
       FROM bettor_state_observations o
       JOIN bettor_state_mids m ON m.observation_id = o.observation_id
                               AND m.horizon_s = h.horizon
-     WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
        AND m.timing_class = 'LATE_RECOVERY'
     UNION ALL
     -- PENDING: due, unread, recovery deadline still ahead. NOT missing.
     SELECT 'PENDING_RECOVERY_DEADLINE_AHEAD', count(*)::text
       FROM bettor_state_observations o
-     WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
        AND o.observed_at <  now() - (h.horizon || ' seconds')::interval
        AND o.observed_at >= now() - ((h.horizon + 600) || ' seconds')::interval
        AND NOT EXISTS (SELECT 1 FROM bettor_state_mids m
@@ -154,8 +154,8 @@ SELECT 'D_HORIZON_' || lpad(h.horizon::text, 4, '0'), k, v
     UNION ALL
     SELECT 'FINALLY_MISSING', count(*)::text
       FROM bettor_state_observations o
-     WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
        AND o.observed_at <  now() - ((h.horizon + 600) || ' seconds')::interval
        AND NOT EXISTS (SELECT 1 FROM bettor_state_mids m
                         WHERE m.observation_id = o.observation_id
@@ -183,8 +183,8 @@ SELECT 'E_LAG_PLACEMENT',
        count(*)::text
   FROM bettor_state_observations o
   JOIN bettor_state_mids m ON m.observation_id = o.observation_id
- WHERE o.observed_at >= '2000-01-01T00:00:00Z'::timestamptz
-   AND o.observed_at <  '2000-01-01T00:30:00Z'::timestamptz
+ WHERE o.observed_at >= '2026-09-20T23:03:17Z'::timestamptz
+   AND o.observed_at <  '2026-09-20T23:33:17Z'::timestamptz
  GROUP BY 2
 
 UNION ALL
@@ -194,28 +194,28 @@ SELECT 'F_DEMAND_VS_SELECTION', k, v FROM (
     SELECT 'FU_DUE_TRUE_OUTSTANDING' AS k,
            coalesce(sum(fu_due), 0)::text AS v
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'FU_SELECTED_BY_BUDGET', coalesce(sum(fu_selected), 0)::text
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'FU_ATTEMPTED', coalesce(sum(fu_attempted), 0)::text
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'FU_ON_TIME', coalesce(sum(fu_on_time), 0)::text
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
     UNION ALL
     SELECT 'FU_LATE', coalesce(sum(fu_late), 0)::text
       FROM bettor_capture_ticks
-     WHERE tick_at >= '2000-01-01T00:00:00Z'::timestamptz
-       AND tick_at <  '2000-01-01T00:30:00Z'::timestamptz
+     WHERE tick_at >= '2026-09-20T23:03:17Z'::timestamptz
+       AND tick_at <  '2026-09-20T23:33:17Z'::timestamptz
 ) f
 
 ORDER BY 1, 2
