@@ -44,8 +44,13 @@ def test_a_higher_on_time_count_can_mean_worse_coverage():
     than W3 precisely because it serves only the easiest horizon and
     ignores three others. On-time count alone is not a coverage
     measure."""
-    cur = sim.run(ticks=60, spacing=72.0, budget_fn=lambda i: 3, **CURRENT)
-    w3 = sim.run(ticks=60, spacing=72.0, budget_fn=lambda i: 3, **W3)
+    # Both under the CANDIDATE ordering, so the comparison isolates
+    # allocation. Under production ordering neither posts on-time reads
+    # and the trap this test describes is invisible.
+    cur = sim.run(ticks=60, spacing=72.0, budget_fn=lambda i: 3,
+                  order_policy=sim.ORDER_ON_TIME_FIRST, **CURRENT)
+    w3 = sim.run(ticks=60, spacing=72.0, budget_fn=lambda i: 3,
+                 order_policy=sim.ORDER_ON_TIME_FIRST, **W3)
     cur_on = sum(v["on_time"] for v in cur["served"].values())
     w3_on = sum(v["on_time"] for v in w3["served"].values())
     assert cur_on > w3_on            # looks better
@@ -197,9 +202,13 @@ def test_one_fixed_spacing_decides_which_horizons_are_reachable():
     assert pathological["onTimeResults"][900] == 0
     assert pathological["allocatedAttempts"][900] > 0   # served, not starved
 
+    # Reachability is a property of the spacing, so it is shown with
+    # the ordering that can actually take an in-band candidate. Under
+    # production's oldest-first rule a reachable band is still not
+    # reached, which is the separate defect W3 measured.
     for spacing in (65.0, 76.0, 82.0):
         r = sim.run(ticks=80, spacing=spacing, budget_fn=lambda i: 3,
-                    **W3)
+                    order_policy=sim.ORDER_ON_TIME_FIRST, **W3)
         assert r["onTimeResults"][900] > 0, spacing
 
 
@@ -215,17 +224,52 @@ def test_measured_tick_spacing_is_used_not_the_nominal_sixty():
 
 # ── on-time opportunities outrank late recovery ──────────────────────
 
-def test_on_time_candidates_are_served_before_late_recoveries():
-    """A late recovery is still worth taking, but never at the cost of
-    an observation that could still be read on time."""
-    import inspect
-    src = inspect.getsource(sim.run)
-    assert "ON-TIME OPPORTUNITIES FIRST" in src
+def test_production_ordering_loses_on_time_work_to_recovery_backlog():
+    """WHAT THIS TEST USED TO ASSERT, AND WHY IT WAS WRONG.
+
+    It asserted on > late and passed, because this module sorted
+    candidates on-time-first. Production's mids_due orders
+    `ORDER BY o.observed_at` -- oldest first, unconditionally. The
+    simulator was modelling an ordering rule that was never deployed,
+    on precisely the axis it was being used to predict.
+
+    Under the rule that IS deployed, on-time work loses badly: the
+    oldest eligible task is always the one nearest expiry, so every
+    completion is a recovery. W3 measured 1 read inside band out of
+    122 in production. This pins that behaviour rather than hiding it."""
     r = sim.run(ticks=60, spacing=72.0, budget_fn=lambda i: 3,
-                arrivals_per_tick=6, **W3)
+                arrivals_per_tick=6, order_policy=sim.ORDER_OLDEST_FIRST,
+                **W3)
+    on = sum(v["on_time"] for v in r["served"].values())
+    late = sum(v["late"] for v in r["served"].values())
+    assert late > on, (on, late)
+
+
+def test_the_on_time_first_candidate_reverses_that_and_is_not_deployed():
+    """The proposed rule, exercised as a CANDIDATE. Nothing here
+    describes the running system, and the module says so."""
+    assert sim.ORDER_OLDEST_FIRST == "oldest_first"
+    assert "NOT deployed" in inspect_source_of_order_constants()
+    r = sim.run(ticks=60, spacing=72.0, budget_fn=lambda i: 3,
+                arrivals_per_tick=6,
+                order_policy=sim.ORDER_ON_TIME_FIRST, **W3)
     on = sum(v["on_time"] for v in r["served"].values())
     late = sum(v["late"] for v in r["served"].values())
     assert on > late, (on, late)
+    assert "proposal" in sim.ORDERING_DEFAULT_IS_PRODUCTION
+
+
+def inspect_source_of_order_constants():
+    import inspect
+    return inspect.getsource(sim)
+
+
+def test_the_simulator_defaults_to_what_production_actually_does():
+    """The default must never again be a rule the system does not run.
+    A caller that specifies nothing gets production's behaviour."""
+    import inspect
+    sig = inspect.signature(sim.run)
+    assert sig.parameters["order_policy"].default == sim.ORDER_OLDEST_FIRST
 
 
 # ── the tolerance itself is untouched ────────────────────────────────

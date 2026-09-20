@@ -46,7 +46,7 @@ def on_time(lag, horizon):
     return abs(lag - horizon) <= TOLERANCE_S
 
 
-def eligible(now, obs, horizon, *, early_s):
+def eligible(now, obs, horizon, *, early_s, expiry_s=600):
     """Is this observation selectable for this horizon right now?
 
     `early_s` is the VERSIONED SAMPLING CHANGE: how far before the
@@ -58,13 +58,34 @@ def eligible(now, obs, horizon, *, early_s):
     if horizon in obs.done:
         return False
     lag = now - obs.t0
-    return (horizon - early_s) <= lag <= (horizon + 600)
+    return (horizon - early_s) <= lag <= (horizon + expiry_s)
+
+
+ORDER_OLDEST_FIRST = "oldest_first"      # what production actually does
+ORDER_ON_TIME_FIRST = "on_time_first"    # a candidate, NOT deployed
+
+# ── A DEFECT IN THIS SIMULATOR, FOUND BY W3 ─────────────────────────
+#
+# Until 2026-09-21 this module sorted candidates on-time-first and had
+# no way to express anything else. Production's mids_due orders
+#     ORDER BY o.observed_at
+# which is OLDEST FIRST, unconditionally. So the offline validation of
+# W3 modelled an ordering rule that was never deployed, and it did so
+# on exactly the axis it was being used to predict: timing. It forecast
+# on-time reads; production returned zero.
+#
+# The default is now production's rule. On-time-first is available as a
+# CANDIDATE and must be labelled as one wherever it is quoted.
+ORDERING_DEFAULT_IS_PRODUCTION = (
+    "oldest_first is what mids_due does. Any result quoted from "
+    "on_time_first is a proposal, not a description of the system")
 
 
 def run(*, ticks=60, spacing=72.0, budget_fn=None, arrivals_per_tick=2.6,
         early_s=0, rotate=False, per_horizon_cap=False,
         request_duration_s=1.0, rate_limit_every=0,
-        rotate_on_service=False):
+        rotate_on_service=False, order_policy=ORDER_OLDEST_FIRST,
+        expiry_s=600):
     """One deterministic run. Returns per-horizon outcomes and the
     request ledger.
 
@@ -108,6 +129,10 @@ def run(*, ticks=60, spacing=72.0, budget_fn=None, arrivals_per_tick=2.6,
     serving_tick_in_band = {h: set() for h in HORIZONS}
     serving_ticks = 0
     service_ops = 0
+    arrival_credit = 0.0
+    expired = set()
+    expired_by_h = {h: 0 for h in HORIZONS}
+    newly_eligible = set()
 
     for i in range(ticks):
         now += gaps[i % len(gaps)]
@@ -129,8 +154,14 @@ def run(*, ticks=60, spacing=72.0, budget_fn=None, arrivals_per_tick=2.6,
             fu_reserve = max(0, fu_reserve // 2)
 
         spent = 0
-        # sampling pass: each read creates an observation
-        n_new = min(samp, int(arrivals_per_tick) + (1 if i % 2 else 0))
+        # sampling pass: each read creates an observation.
+        # FRACTIONAL ARRIVALS, accumulated deterministically. int() on
+        # the per-tick rate silently quantised intake: 1.64, 1.23 and
+        # 0.82 arrivals/tick all truncate to 1, so an intake sweep
+        # produced identical rows and looked like intake did not matter.
+        arrival_credit += arrivals_per_tick
+        n_new = min(samp, int(arrival_credit))
+        arrival_credit -= n_new
         for _ in range(n_new):
             if spent >= total:
                 break
@@ -144,12 +175,25 @@ def run(*, ticks=60, spacing=72.0, budget_fn=None, arrivals_per_tick=2.6,
         # whether or not the allocation loop ever reaches it.
         cands_by_h = {}
         for h in HORIZONS:
-            c = [o for o in obs if eligible(now, o, h, early_s=early_s)]
-            c.sort(key=lambda o: (not on_time(now - o.t0, h), o.t0))
+            c = [o for o in obs if eligible(now, o, h, early_s=early_s,
+                                            expiry_s=expiry_s)]
+            if order_policy == ORDER_ON_TIME_FIRST:
+                # THE CANDIDATE RULE. Among eligible tasks, those still
+                # inside the tolerance band go before those that can
+                # only ever be late recoveries.
+                c.sort(key=lambda o: (not on_time(now - o.t0, h), o.t0))
+            else:
+                # PRODUCTION: ORDER BY observed_at, oldest first. Under
+                # overload this always selects the task nearest its
+                # expiry, so every completion is a recovery.
+                c.sort(key=lambda o: o.t0)
             cands_by_h[h] = c
             demand_ticks[h] += len(c)
             for o in c:
                 demand_obs[h].add(id(o))
+                # counted ONCE, at first eligibility -- never re-counted
+                # while it waits, which was the defect in summing fu_due
+                newly_eligible.add((h, id(o)))
             for o in obs:
                 if h in o.done:
                     continue
@@ -204,6 +248,17 @@ def run(*, ticks=60, spacing=72.0, budget_fn=None, arrivals_per_tick=2.6,
                 taken += 1
                 spent += 1
 
+        # EXPIRY, counted once per task at the moment it passes its
+        # recovery deadline unread. A task counted as expired is never
+        # counted again, and it is never counted as new demand.
+        for o in obs:
+            for h in HORIZONS:
+                if h in o.done or (h, id(o)) in expired:
+                    continue
+                if now - o.t0 > h + expiry_s:
+                    expired.add((h, id(o)))
+                    expired_by_h[h] += 1
+
         ledger.append({"tick": i, "total": total, "spent": spent,
                        "within": spent <= total})
 
@@ -235,6 +290,11 @@ def run(*, ticks=60, spacing=72.0, budget_fn=None, arrivals_per_tick=2.6,
         # THE ALIASING DIAGNOSTIC. A horizon that is never at the head
         # of the order on a tick that can serve anything is not losing
         # to capacity; it is unreachable by construction.
+        "elapsedMinutes": round(now / 60.0, 2),
+        "tasksNewlyEligible": len(newly_eligible),
+        "tasksExpiredUnread": sum(expired_by_h.values()),
+        "expiredByHorizon": dict(expired_by_h),
+        "orderPolicy": order_policy,
         "ticksWithFollowUpBudget": serving_ticks,
         "rotationHeadOnServingTicks": dict(head_on_serving),
         "horizonsNeverAtRotationHead": [
