@@ -1,0 +1,40 @@
+# THE BUILD CONTEXT IS NOW THE REPOSITORY ROOT, so it has to be trimmed.
+#
+# render.yaml builds the API and workers with `rootDir: .` because the
+# image must contain research/beta48/shadow -- the bridge imports the
+# tested EV modules rather than carrying a copy. Without this file the
+# context is ~271 MB (135 MB of it .git, 195 MB of it research/), all
+# uploaded on every deploy, to ship ~7 MB that matters.
+#
+# WHAT MUST SURVIVE, and what proves it: backend/ and
+# research/beta48/shadow/ are the only trees the Dockerfile COPYs.
+# backend-image-check.yml builds this exact context and then imports
+# every required module INSIDE the container, so an over-broad rule
+# here fails CI rather than silently shipping an image whose bridge
+# can never load.
+
+.git
+.github
+**/.pytest_cache
+**/__pycache__
+**/*.pyc
+**/.DS_Store
+**/node_modules
+*.egg-info
+
+frontend/
+docs/
+ops/
+edge-engine/
+pmus-broker/
+rn1-collector/
+
+# research/ is 195 MB and the image needs one 7 MB subtree of it.
+# Everything is excluded, then that subtree is re-admitted -- each
+# parent has to be re-admitted too, because Docker will not descend
+# into a directory it has already excluded.
+research/*
+!research/beta48
+research/beta48/*
+!research/beta48/shadow
+research/beta48/shadow/**/__pycache__
