@@ -21,7 +21,18 @@ on:
 jobs:
   pytest:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    # RAISED FROM 15 (2026-09-20). The suite outgrew the cap and CI had
+    # stopped being able to finish it: runs 421-427 every one ran 15.3
+    # minutes and reported `cancelled`, which reads exactly like a push
+    # cancelling a superseded run. It was not that. The step "Run the
+    # suite" ran 14m50s and hit the limit, on six consecutive commits.
+    #
+    # A green tick was never the risk -- a timeout cannot report pass.
+    # The cost was subtler: every one of those runs LOOKED like it had
+    # been superseded, so the absence of a CI verdict was attributed to
+    # pushing too often rather than to a cap the suite no longer fits
+    # under. 10,100 tests take ~22 minutes.
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v4
         with:
