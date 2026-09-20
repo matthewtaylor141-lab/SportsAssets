@@ -865,3 +865,92 @@ async def open_position(pool, sealed: dict, execution: dict) -> str | None:
         _ts(ex.get("arrivalTimestamp")) or _now(),
         ex["filledQty"], ex["vwap"], ex["executedNotionalUsd"])
     return ex["positionId"]
+
+
+# ── §1/§2: the PRE-BOUND identity, resolved before the signal ────────
+#
+# Owner directive 2026-09-20 (the identity blocker). The binding used to
+# be recomputed every tick from whatever instrument record the GitHub
+# bridge had written into bettor_l2_evidence; the direct worker writes
+# none, so every lookup returned nothing and every BUY was stamped
+# NOT_IDENTIFIED. These two functions replace that lookup with a table
+# the market-data loop fills ahead of time.
+
+IDENTITY_INSERT = """
+    INSERT INTO bettor_identity_bindings (
+        identity_binding_sha, binding_version, market_id,
+        retail_native_id, outcome_leg, event_slug,
+        institutional_instrument_id, institutional_event_id,
+        outcome_strike, event_outcome, identity_status,
+        execution_eligible, settlement_equivalence, price_scale,
+        quantity_scale, payout_value, agree, why, resolved_at,
+        evidence_environment)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+            $17::jsonb,$18::jsonb,$19,$20)
+    ON CONFLICT (identity_binding_sha) DO NOTHING
+    RETURNING identity_binding_sha
+"""
+
+
+async def record_identity_binding(pool, row: dict, *, at=None) -> bool:
+    """Append one resolved binding. A re-resolution that agrees is a no-op.
+
+    THE SHA IS THE KEY, so a binding re-derived unchanged writes nothing
+    and a binding that has genuinely changed writes a NEW row beside the
+    old one. Decisions carry the sha, so a trade is always readable
+    against the binding it actually executed under.
+    """
+    out = await pool.fetchrow(
+        IDENTITY_INSERT,
+        row["identity_binding_sha"], row["binding_version"],
+        row["market_id"], row.get("retail_native_id"), row["outcome_leg"],
+        row.get("event_slug"), row.get("institutional_instrument_id"),
+        row.get("institutional_event_id"), row.get("outcome_strike"),
+        row.get("event_outcome"), row["identity_status"],
+        bool(row.get("execution_eligible")),
+        row.get("settlement_equivalence"), row.get("price_scale"),
+        row.get("quantity_scale"), row.get("payout_value"),
+        _j(row.get("agree") or []), _j(row.get("why") or []),
+        at or datetime.now(tz=timezone.utc),
+        row.get("evidence_environment", REGIME_DIRECT))
+    return out is not None
+
+
+IDENTITY_SQL = """
+    SELECT DISTINCT ON (market_id, outcome_leg) *
+      FROM bettor_identity_bindings
+     WHERE market_id = ANY($1::text[])
+     ORDER BY market_id, outcome_leg, resolved_at DESC
+"""
+
+
+async def bound_identities(pool, symbols) -> dict:
+    """{(market, leg): the NEWEST binding for it}.
+
+    Newest, not first: a binding is a belief about two venues' keys and
+    the current belief is the one a new decision must be taken under.
+    Older rows stay readable for the decisions that used them.
+    """
+    if not symbols:
+        return {}
+    rows = await pool.fetch(IDENTITY_SQL, list(symbols))
+    out = {}
+    for r in rows:
+        row = dict(r)
+        row["agree"] = _load(row.get("agree")) or []
+        row["why"] = _load(row.get("why")) or []
+        out[(row["market_id"], (row["outcome_leg"] or "").lower())] = row
+    return out
+
+
+IDENTITY_CENSUS_SQL = """
+    SELECT DISTINCT ON (market_id, outcome_leg)
+           market_id, outcome_leg, identity_status, execution_eligible
+      FROM bettor_identity_bindings
+     ORDER BY market_id, outcome_leg, resolved_at DESC
+"""
+
+
+async def identity_census(pool) -> list:
+    """Every market's CURRENT binding, for §6's report."""
+    return [dict(r) for r in await pool.fetch(IDENTITY_CENSUS_SQL)]

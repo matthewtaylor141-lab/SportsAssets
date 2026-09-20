@@ -90,6 +90,12 @@ class FakePool:
                     and r["microstructure"].get("bboBinding") == args[2]]
         if "DISTINCT ON (symbol)" in sql:
             return []
+        # NO PRE-BOUND ROW. These fixtures deliberately exercise the
+        # FALLBACK binding path -- the one that resolves from whatever
+        # instrument record the bridge wrote -- so that both paths stay
+        # covered. The pre-bound path has its own file.
+        if "FROM bettor_identity_bindings" in sql:
+            return []
         if "FROM bettor_l2_evidence" in sql and "DISTINCT ON" in sql:
             if self.instrument is None:
                 return []

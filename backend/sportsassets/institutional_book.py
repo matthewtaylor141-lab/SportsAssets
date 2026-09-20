@@ -150,6 +150,13 @@ class BookStore:
             "book": book,
             "priceScale": inst["priceScale"],
             "qtyScale": inst["qtyScale"],
+            # THE INSTRUMENT RECORD TRAVELS WITH THE BOOK. Without it
+            # the direct evidence row's `instrument_record` is NULL, and
+            # anything resolving identity from evidence sees nothing --
+            # which is exactly how 13 prospective BUY decisions came to
+            # be stamped NOT_IDENTIFIED while the venue had answered
+            # refdata for every one of those symbols.
+            "instrumentRecord": inst.get("record"),
             "venueState": (response or {}).get("state"),
             "venueRequestMs": venue_request_ms,
             "requestId": request_id,

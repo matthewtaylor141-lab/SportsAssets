@@ -45,6 +45,7 @@ from datetime import datetime, timezone
 from .. import institutional_book as ib
 from .. import pmx_institutional as pmx
 from .. import shadow_experimental_store as xstore
+from .. import shadow_identity_resolver as resolver
 from ..db import get_pool, heartbeat
 
 log = logging.getLogger(__name__)
@@ -72,6 +73,12 @@ MAX_INSTRUMENTS = 8
 # actually walked is persisted by the decision path itself; this is the
 # background trail, and it is deliberately sparse.
 EVIDENCE_EVERY_S = 60.0
+
+# HOW OFTEN THE IDENTITY BINDING IS RE-RESOLVED. A binding is a fact
+# about two venues' KEYS; those change when a market is relisted, not
+# between ticks. The write is deduped by the binding's own sha, so a
+# re-resolution that agrees costs one no-op insert.
+IDENTITY_EVERY_S = 60.0
 
 
 def _off(name: str, default: str = "on") -> bool:
@@ -141,6 +148,52 @@ def sweep_once(client, store, symbols) -> dict:
     return stats
 
 
+async def resolve_identities(pool, store, symbols) -> dict:
+    """§2: bind the focus universe BEFORE any signal asks about it.
+
+    THIS LOOP IS THE RIGHT PLACE and it is not a coincidence. It is the
+    only process that holds the institutional credential, and it has
+    already fetched each focus instrument's own refdata record to learn
+    its scales -- so the identity binding costs no extra venue call at
+    all. Resolving it in the experimental hot path instead would put a
+    refdata round trip between a signal and its execution, which §7 of
+    the earlier directive forbids and which is how the binding came to
+    be computed from whatever a book fetch happened to carry.
+
+    BOTH LEGS ARE RESOLVED, YES FIRST. §3: "Do not let unresolved
+    BUY_NO baskets delay BUY_YES." The NO leg's honest verdict is
+    recorded as its own row; it gates nothing on the YES side.
+    """
+    stats = {"resolved": 0, "written": 0, "yesEligible": 0,
+             "noEligible": 0, "unresolved": 0}
+    retail = await xstore.retail_rows(pool, symbols[:MAX_INSTRUMENTS])
+    for symbol in symbols[:MAX_INSTRUMENTS]:
+        inst = store.instrument(symbol) or {}
+        record = inst.get("record")
+        for leg in (resolver.LEG_YES, resolver.LEG_NO):
+            row = resolver.resolve(
+                symbol, leg, instrument_record=record,
+                retail_row=retail.get((symbol, leg)))
+            stats["resolved"] += 1
+            if row["identity_status"] == resolver.ident.NOT_IDENTIFIED:
+                stats["unresolved"] += 1
+            if row["execution_eligible"]:
+                stats["yesEligible" if leg == resolver.LEG_YES
+                      else "noEligible"] += 1
+            try:
+                if await xstore.record_identity_binding(pool, row):
+                    stats["written"] += 1
+                    log.info("institutional_md: bound %s/%s -> %s %s (%s)",
+                             symbol, leg, row["identity_status"],
+                             row.get("institutional_instrument_id"),
+                             "ELIGIBLE" if row["execution_eligible"]
+                             else "; ".join(row.get("why") or [])[:120])
+            except Exception:                                  # noqa: BLE001
+                log.debug("institutional_md: binding write failed",
+                          exc_info=True)
+    return stats
+
+
 async def persist_trail(pool, store, symbols) -> int:
     """The sparse background trail. Append-only, deduped by book sha.
 
@@ -198,6 +251,11 @@ async def run() -> None:
     await heartbeat(SERVICE, str(verdict.get("AUTH_STATUS")), boot)
 
     last_evidence = 0.0
+    # 0.0 rather than time.monotonic(): the FIRST pass through the loop
+    # must bind, not wait a minute to start. Until a market is bound its
+    # decisions are stamped NOT_IDENTIFIED, and a minute of those is a
+    # minute of prospective signals that can never execute.
+    last_identity = 0.0
     beats = 0
     while True:
         started = time.monotonic()
@@ -228,6 +286,24 @@ async def run() -> None:
                         pool, store, symbols)
                 except Exception:                              # noqa: BLE001
                     log.debug("institutional_md: trail failed", exc_info=True)
+
+            # §2: THE BINDING IS RE-RESOLVED ON THE SAME SLOW CADENCE as
+            # the evidence trail, not every sweep. A binding is a fact
+            # about two venues' KEYS, which change on the timescale of a
+            # relisting; re-deriving it thirty times a minute would be
+            # thirty identical shas and thirty no-op writes. It re-runs
+            # anyway (rather than once at boot) so a newly bootstrapped
+            # focus market is bound within a minute of joining.
+            if time.monotonic() - last_identity >= IDENTITY_EVERY_S:
+                last_identity = time.monotonic()
+                try:
+                    stats["identity"] = await resolve_identities(
+                        pool, store, symbols)
+                except Exception as exc:                       # noqa: BLE001
+                    stats["identityError"] = "%s: %s" % (
+                        type(exc).__name__, exc)
+                    log.warning("institutional_md: identity resolve failed",
+                                exc_info=True)
 
         venue_ms = stats.pop("venueMs", []) or []
         if venue_ms:

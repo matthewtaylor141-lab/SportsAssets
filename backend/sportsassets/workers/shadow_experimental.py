@@ -57,6 +57,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from .. import pmus
+from .. import pmx_institutional as pmx
 from .. import institutional_book as ib
 from .. import shadow_experiment_registry as reg
 from .. import shadow_experiment_signals as sig
@@ -65,6 +66,7 @@ from .. import shadow_experimental_markouts as mk
 from .. import shadow_experimental_store as xstore
 from .. import shadow_experiments as xp
 from .. import shadow_identity as ident
+from .. import shadow_identity_resolver as xident
 from .. import shadow_l2 as l2
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
@@ -305,7 +307,16 @@ async def sample_focus(pool, *, now=None, size=FOCUS_SIZE) -> dict:
 
 
 def bind_yes(instrument_record, retail_row) -> dict:
-    """The identity binding for one market's YES leg, or a refusal verdict."""
+    """The identity binding for one market's YES leg, or a refusal verdict.
+
+    THE FALLBACK, not the primary path any more. Owner directive
+    2026-09-20 §2: the binding is resolved for the focus universe
+    BEFORE the signal needs it, by the loop that holds the credential,
+    and `binding_for` reads that. This function stays for the case
+    where no pre-bound row exists yet -- a market bound only seconds
+    after it joined the focus set -- and its honest answer there is
+    still a refusal.
+    """
     if not instrument_record or not retail_row:
         return {"verdict": ident.NOT_IDENTIFIED, "executionEligible": False,
                 "why": ["no institutional instrument record has been "
@@ -314,6 +325,24 @@ def bind_yes(instrument_record, retail_row) -> dict:
     return ident.yes_leg_binding(
         ident.institutional_identity(instrument_record),
         ident.retail_identity(retail_row))
+
+
+def binding_for(symbol, leg, *, bound, instruments, retail) -> dict:
+    """The binding this decision is taken under. PRE-BOUND FIRST.
+
+    WHY THE PRECOMPUTED ROW WINS. §2 asks the hot path to already know
+    whether a market is execution eligible, and the pre-bound row was
+    resolved against refdata the credentialed worker fetched DIRECTLY.
+    The fallback below resolves against `bettor_l2_evidence`'s
+    instrument_record, which only the GitHub bridge ever wrote -- the
+    exact lookup that stamped 13 prospective BUY decisions
+    NOT_IDENTIFIED while every component reported healthy.
+    """
+    leg = (leg or "yes").lower()
+    row = (bound or {}).get((symbol, leg))
+    if row:
+        return xident.binding_for_hot_path(row)
+    return bind_yes(instruments.get(symbol), retail.get((symbol, leg)))
 
 
 async def seal_population(pool, *, now=None, window_s=WINDOW_S,
@@ -338,6 +367,7 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
 
     instruments = await xstore.instrument_records(pool, list(by_symbol))
     retail = await xstore.retail_rows(pool, list(by_symbol))
+    bound = await xstore.bound_identities(pool, list(by_symbol))
 
     # THE SUBJECTS, chosen before any signal is computed. Newest market
     # first is a selection rule that cannot know which way a signal
@@ -389,8 +419,13 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
     for symbol, opportunity in fresh.items():
         direct = books.get(symbol, {}).get(
             "FRESHNESS_STATUS") == ib.CURRENT
-        binding = bind_yes(instruments.get(symbol), retail.get(
-            (symbol, (opportunity.get("outcomeLeg") or "").lower())))
+        # §2: THE BINDING IS ALREADY KNOWN. The market-data loop
+        # resolved it against refdata it fetched directly; the hot path
+        # reads that row rather than re-deriving identity between a
+        # signal and its execution.
+        binding = binding_for(
+            symbol, opportunity.get("outcomeLeg"),
+            bound=bound, instruments=instruments, retail=retail)
         if not binding.get("executionEligible"):
             stats["notIdentified"] += 1
         for experiment in armed:
@@ -804,7 +839,18 @@ async def run() -> None:
                 eligibilityRule=xstore.ELIGIBILITY_RULE,
                 eligibilityRuleSha=xstore.ELIGIBILITY_RULE_SHA,
                 featureSourceRequired=l2.FEATURE_SOURCE_VERSION,
-                latencyRegime="GITHUB_BRIDGE",
+                # §7: THE DIRECT WORKER IS NOW THE PRIMARY REGIME, and
+                # the status line has to say so. It was a hardcoded
+                # "GITHUB_BRIDGE" while the rows it was describing were
+                # already being written DIRECT_INSTITUTIONAL_WORKER --
+                # a boot line that contradicted its own ledger, and
+                # exactly the sort of thing COMMAND would go on to
+                # misclassify. The primary is named, the fallback is
+                # named as a fallback, and neither is inferred.
+                primaryLatencyRegime=DIRECT,
+                fallbackLatencyRegime=xstore.REGIME_BRIDGE,
+                marketDataMechanism=pmx.MARKET_DATA_MECHANISM,
+                streamTarget=pmx.STREAM_TARGET,
                 sealExpiryS=SEAL_EXPIRY_S,
                 disclosure=xp.EXPERIMENTAL_DISCLOSURE)
     log.info("shadow_experimental: %s", boot)
