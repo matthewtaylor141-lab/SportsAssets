@@ -1,0 +1,72 @@
+{
+ "planned_sets": 513,
+ "planned_requests": 5130,
+ "idle_slots": 2064,
+ "stop_reason": "PLAN_EXHAUSTED",
+ "sets_started": 54,
+ "sets_completed": 54,
+ "sets_abandoned_at_segment_end": 0,
+ "http_429": 0,
+ "identity_failures": 0,
+ "grid_reanchors": [],
+ "throttle_events": [],
+ "venue_requests": 540,
+ "book_observations": 270,
+ "bbo_observations": 270,
+ "elapsed_s": 17772.59145753,
+ "achieved_rps": 0.030327753252513703,
+ "gap_stats": {
+  "min": 2.5,
+  "median": 2.5,
+  "max": 357.5
+ },
+ "cross_agree": 270,
+ "cross_disagree": 0,
+ "cross_absent": 0,
+ "retired": {
+  "aec-cfb-portst-ore-2026-09-18": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T10:56:34.797938+00:00"
+  },
+  "aec-nfl-chi-car-2026-09-13": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T10:57:09.798223+00:00"
+  },
+  "asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T10:58:19.798419+00:00"
+  },
+  "aec-cfb-coast-del-2026-09-19": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T10:58:54.798440+00:00"
+  },
+  "aec-nfl-bal-ind-2026-09-13": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T10:59:29.798429+00:00"
+  },
+  "atc-lmx-ame-tij-2026-09-05-tij": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T11:00:04.798434+00:00"
+  },
+  "aec-cfb-kentst-ohiost-2026-09-19": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T11:00:39.798427+00:00"
+  },
+  "aec-nfl-atl-pit-2026-09-13": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T11:01:14.798374+00:00"
+  },
+  "atc-lmx-pue-tol-2026-09-04-draw": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T11:01:49.798431+00:00"
+  },
+  "aec-cfb-uwg-etnst-2026-09-19": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T11:02:24.798434+00:00"
+  },
+  "aec-nfl-cle-jax-2026-09-13": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-20T11:02:59.798607+00:00"
+  }
+ }
+}
