@@ -40,10 +40,17 @@ class FakePool:
     async def fetch(self, sql, *args):
         if self.raise_on and self.raise_on in sql:
             raise RuntimeError("relation does not exist")
-        if "GROUP BY d.latency_regime" in sql:
-            return self.headline
-        if "GROUP BY d.experiment_id" in sql:
+        # THE LEADERBOARD IS THE ONE CARRYING control_id. Discriminated
+        # on that rather than on the GROUP BY text, because the headline
+        # now groups by experiment_id too (owner 2026-09-20: X1 and its
+        # null control must never be summed into one row) and the two
+        # statements' GROUP BY clauses overlap.
+        if "d.control_id" in sql:
             return self.by_exp
+        if "GROUP BY d.experiment_id, d.latency_regime" in sql:
+            return self.headline
+        if "both_sides" in sql:
+            return []
         if "bettor_experimental_positions" in sql:
             return self.positions
         if "WHERE position_id IS NULL" in sql:
@@ -56,7 +63,8 @@ class FakePool:
 
 
 def headline(**kw):
-    base = {"latency_regime": "GITHUB_BRIDGE", "trades": 4, "decisions": 9,
+    base = {"experiment_id": "X1_SHORT_HORIZON_DIRECTION",
+            "latency_regime": "GITHUB_BRIDGE", "trades": 4, "decisions": 9,
             "entry_played": 828.0, "unfilled": 3172.0, "intended": 4000.0,
             "marked_n": 2, "unmarked_n": 2, "pnl_exec": 26.0,
             "pnl_mid": 36.0, "wins": 2, "losses": 0, "pnl_today": 26.0,
@@ -146,7 +154,11 @@ async def test_the_control_is_labelled_as_one():
 @pytest.mark.asyncio
 async def test_an_unreadable_ledger_refuses_by_name_and_is_not_zero():
     with pytest.raises(CX.RetrievalIncomplete) as exc:
-        await CX.summary(FakePool(raise_on="GROUP BY d.latency_regime"))
+        # The headline statement's GROUP BY gained experiment_id when
+        # X1 and its null control were separated; the REFUSAL behaviour
+        # is unchanged, only the string this fixture keys on moved.
+        await CX.summary(
+            FakePool(raise_on="GROUP BY d.experiment_id, d.latency_regime"))
     assert exc.value.what == "experimental headline"
     assert "relation does not exist" in exc.value.cause
 

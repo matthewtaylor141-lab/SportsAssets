@@ -103,9 +103,41 @@ _MARKED = """
                              WHEN '30S' THEN 1 ELSE 0 END DESC
 """
 
+
+# ONE ROW PER DECISION WITH EACH HORIZON IN ITS OWN COLUMN. The excess
+# markouts have to compare like with like: X1's 30S against the
+# control's 30S, never X1's 300S against the control's 30S because one
+# of them happened to be the longest horizon that landed. `_MARKED`
+# deliberately collapses to the longest OBSERVED horizon, which is the
+# right thing for a headline P&L and the wrong thing for a per-horizon
+# difference.
+_MARKED_WITH_HORIZONS = """
+    SELECT m.experimental_decision_id,
+           max(m.executable_markout_usd) FILTER (WHERE m.horizon = '30S')
+               AS h30,
+           max(m.executable_markout_usd) FILTER (WHERE m.horizon = '60S')
+               AS h60,
+           max(m.executable_markout_usd) FILTER (WHERE m.horizon = '300S')
+               AS h300,
+           max(m.executable_markout_usd) FILTER (
+               WHERE m.horizon = '300S') AS executable_markout_usd
+      FROM bettor_experimental_markouts m
+     WHERE m.status = 'OBSERVED'
+       AND m.executable_markout_usd IS NOT NULL
+     GROUP BY m.experimental_decision_id
+"""
+
 _HEADLINE = """
     WITH marked AS (%s)
-    SELECT d.latency_regime,
+    -- EXPERIMENT_ID IS IN THE GROUPING, and this is load-bearing
+    -- (owner 2026-09-20). Grouped by regime alone, this statement
+    -- summed X1_SHORT_HORIZON_DIRECTION and X1C_NULL_CONTROL into one
+    -- set of trades, entry notional and P&L -- and the moment the
+    -- control opened the first production position that combined
+    -- number WAS the panel's headline. X1C is a frozen always-long
+    -- counterfactual, not BETTOR EV performance, and the two must
+    -- never appear as one figure.
+    SELECT d.experiment_id, d.latency_regime,
            count(*) FILTER (WHERE d.position_id IS NOT NULL) AS trades,
            count(*) AS decisions,
            coalesce(sum(d.executed_notional_usd), 0)       AS entry_played,
@@ -127,7 +159,8 @@ _HEADLINE = """
       FROM bettor_experimental_decisions d
       LEFT JOIN marked m ON m.experimental_decision_id
                           = d.experimental_decision_id
-     GROUP BY d.latency_regime
+     GROUP BY d.experiment_id, d.latency_regime
+     ORDER BY d.experiment_id, d.latency_regime
 """ % _MARKED
 
 _BY_EXPERIMENT = """
@@ -148,10 +181,15 @@ _BY_EXPERIMENT = """
 """ % _MARKED
 
 _POSITIONS = """
-    SELECT status, count(*) AS n,
+    -- ALSO SPLIT BY EXPERIMENT. A capital-deployed figure that adds the
+    -- control's notional to the model's describes a portfolio nobody
+    -- runs.
+    SELECT experiment_id, status, count(*) AS n,
            coalesce(sum(entry_notional_usd), 0) AS notional,
            coalesce(sum(entry_qty), 0)          AS qty
-      FROM bettor_experimental_positions GROUP BY status
+      FROM bettor_experimental_positions
+     GROUP BY experiment_id, status
+     ORDER BY experiment_id, status
 """
 
 _REFUSALS = """
@@ -221,7 +259,19 @@ def _headline(r) -> dict:
     pnl = _f(r["pnl_exec"])
     wins = int(r["wins"] or 0)
     decided = wins + int(r["losses"] or 0)
+    experiment = r["experiment_id"]
     return {
+        "experimentId": experiment,
+        # THE CONTROL IS LABELLED ON ITS OWN TILE. A reader who sees
+        # only "TRADES 1 / PLAYED $805" has no way to know that figure
+        # belongs to a frozen always-long counterfactual rather than to
+        # the model, and that is the single most misreadable number on
+        # this panel.
+        "isNullControl": experiment == X1_CONTROL,
+        "portfolio": ("X1C NULL CONTROL" if experiment == X1_CONTROL
+                      else "X1 MODEL" if experiment == X1_MODEL
+                      else experiment),
+        "isBettorEvPerformance": experiment != X1_CONTROL,
         "latencyRegime": r["latency_regime"],
         # §13's tiles, in its own words.
         "netShadowPnlUsd": pnl,
@@ -247,6 +297,111 @@ def _headline(r) -> dict:
     }
 
 
+
+# ── X1 VS CONTROL, ON COMMON SUPPORT ONLY ────────────────────────────
+#
+# Owner 2026-09-20: report COMMON_SUPPORT_N, X1_EXCESS_PNL,
+# X1_EXCESS_RETURN and the excess markouts -- and never sum the two
+# portfolios.
+#
+# COMMON SUPPORT IS THE WHOLE POINT. An "excess" computed over two
+# non-overlapping sets is not an excess; it is a comparison of two
+# different games. X1 and its control decide the SAME opportunity --
+# they share `experimental_observation_id` by construction, because the
+# control exists to be run on exactly the population X1 sees -- so the
+# pairing key is that id and nothing else. An opportunity only one of
+# them acted on is outside common support and contributes to neither
+# side of the difference.
+#
+# THE EXCESS IS A DIFFERENCE, NOT A RATIO OF TOTALS. X1's return minus
+# the control's return on the same opportunities answers "did the model
+# add anything to always being long"; dividing one portfolio's P&L by
+# the other's would answer nothing.
+
+X1_MODEL = "X1_SHORT_HORIZON_DIRECTION"
+X1_CONTROL = "X1C_NULL_CONTROL"
+
+_VS_CONTROL = """
+    WITH marked AS (%s),
+    paired AS (
+        SELECT d.experimental_observation_id AS obs,
+               d.experiment_id,
+               d.executed_notional_usd       AS entry,
+               m.executable_markout_usd      AS pnl,
+               m.h30, m.h60, m.h300
+          FROM bettor_experimental_decisions d
+          LEFT JOIN marked m ON m.experimental_decision_id
+                              = d.experimental_decision_id
+         WHERE d.experimental_observation_id IS NOT NULL
+           AND d.experiment_id IN ($1, $2)
+           AND COALESCE(d.executed_notional_usd, 0) > 0
+    ),
+    both_sides AS (
+        SELECT obs
+          FROM paired
+         GROUP BY obs
+        HAVING count(*) FILTER (WHERE experiment_id = $1) > 0
+           AND count(*) FILTER (WHERE experiment_id = $2) > 0
+    )
+    SELECT count(DISTINCT p.obs)                            AS common_n,
+           sum(p.pnl)    FILTER (WHERE p.experiment_id = $1) AS x1_pnl,
+           sum(p.pnl)    FILTER (WHERE p.experiment_id = $2) AS ctl_pnl,
+           sum(p.entry)  FILTER (WHERE p.experiment_id = $1) AS x1_entry,
+           sum(p.entry)  FILTER (WHERE p.experiment_id = $2) AS ctl_entry,
+           avg(p.h30)    FILTER (WHERE p.experiment_id = $1) AS x1_h30,
+           avg(p.h30)    FILTER (WHERE p.experiment_id = $2) AS ctl_h30,
+           avg(p.h60)    FILTER (WHERE p.experiment_id = $1) AS x1_h60,
+           avg(p.h60)    FILTER (WHERE p.experiment_id = $2) AS ctl_h60,
+           avg(p.h300)   FILTER (WHERE p.experiment_id = $1) AS x1_h300,
+           avg(p.h300)   FILTER (WHERE p.experiment_id = $2) AS ctl_h300
+      FROM paired p
+      JOIN both_sides b ON b.obs = p.obs
+""" % _MARKED_WITH_HORIZONS
+
+
+def _excess(a, b):
+    """a - b, or None if either side has not been measured.
+
+    NEVER treats an unmeasured side as zero. A missing markout is not a
+    markout of nothing, and subtracting it would manufacture an edge
+    out of an absence.
+    """
+    if a is None or b is None:
+        return None
+    return a - b
+
+
+def vs_control(r) -> dict:
+    """The comparison block, or an honest empty one."""
+    r = dict(r or {})
+    n = int(r.get("common_n") or 0)
+    x1_pnl, ctl_pnl = _f(r.get("x1_pnl")), _f(r.get("ctl_pnl"))
+    x1_entry, ctl_entry = _f(r.get("x1_entry")), _f(r.get("ctl_entry"))
+    x1_ret = (None if not x1_entry or x1_pnl is None else x1_pnl / x1_entry)
+    ctl_ret = (None if not ctl_entry or ctl_pnl is None
+               else ctl_pnl / ctl_entry)
+    return {
+        "COMMON_SUPPORT_N": n,
+        "X1_EXCESS_PNL": _excess(x1_pnl, ctl_pnl),
+        "X1_EXCESS_RETURN": _excess(x1_ret, ctl_ret),
+        "EXCESS_30S_MARKOUT": _excess(_f(r.get("x1_h30")),
+                                      _f(r.get("ctl_h30"))),
+        "EXCESS_60S_MARKOUT": _excess(_f(r.get("x1_h60")),
+                                      _f(r.get("ctl_h60"))),
+        "EXCESS_300S_MARKOUT": _excess(_f(r.get("x1_h300")),
+                                       _f(r.get("ctl_h300"))),
+        # THE INPUTS, SO THE DIFFERENCE CAN BE CHECKED rather than
+        # believed -- and so nobody reads the excess as a portfolio.
+        "x1": {"pnlUsd": x1_pnl, "entryNotionalUsd": x1_entry,
+               "return": x1_ret},
+        "control": {"pnlUsd": ctl_pnl, "entryNotionalUsd": ctl_entry,
+                    "return": ctl_ret},
+        "note": ("excess is X1 minus X1C on the SAME opportunities. The "
+                 "two portfolios are never summed: X1C is a frozen "
+                 "always-long counterfactual, not BETTOR EV performance."),
+    }
+
+
 async def summary(pool) -> dict:
     """The panel's headline, its leaderboard and its refusals."""
     regimes = await _guard(pool, "experimental headline", _HEADLINE)
@@ -260,6 +415,13 @@ async def summary(pool) -> dict:
     # computed from the same append-only rows the rest of this panel
     # reads, never from a separate counter that could disagree with
     # them. A window of 24 h so the screen answers about today.
+    try:
+        compare = vs_control(await _guard(
+            pool, "x1 vs control", _VS_CONTROL, X1_MODEL, X1_CONTROL,
+            one=True))
+    except Exception as exc:                                   # noqa: BLE001
+        compare = {"unavailable": "%s: %s" % (type(exc).__name__, exc)}
+
     try:
         funnel = await xstore.funnel(pool, window_s=FUNNEL_WINDOW_S)
     except Exception as exc:                                   # noqa: BLE001
@@ -296,7 +458,9 @@ async def summary(pool) -> dict:
         "registry": reg.registry_report(),
         "regimes": [_headline(r) for r in regimes],
         "leaderboard": leaderboard,
-        "positions": [{"status": r["status"], "n": int(r["n"]),
+        "positions": [{"experimentId": r["experiment_id"],
+                       "isNullControl": r["experiment_id"] == X1_CONTROL,
+                       "status": r["status"], "n": int(r["n"]),
                        "entryNotionalUsd": _f(r["notional"]),
                        "qty": _f(r["qty"])} for r in positions],
         "refusals": [{"executionStatus": r["execution_status"],
@@ -305,6 +469,16 @@ async def summary(pool) -> dict:
         # §11's funnel, in the directive's own names so the screen and
         # the order use one vocabulary.
         "funnel": funnel,
+        # X1 VS CONTROL, as a DIFFERENCE on common support. The two
+        # portfolios appear above under their own names and are never
+        # added together anywhere on this panel.
+        "x1VsControl": compare,
+        "neverCombined": (
+            "X1_SHORT_HORIZON_DIRECTION and X1C_NULL_CONTROL are "
+            "separate portfolios. Their trades, entry notional, capital "
+            "deployed, P&L, return and drawdown are never summed: X1C "
+            "is a frozen always-long counterfactual research portfolio, "
+            "not BETTOR EV performance."),
         "markoutCoverage": [
             {"horizon": r["horizon"], "status": r["status"],
              "n": int(r["n"]), "medianLagMs": _f(r["median_lag_ms"]),

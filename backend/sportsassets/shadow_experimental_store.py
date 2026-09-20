@@ -1070,11 +1070,56 @@ FUNNEL_IDENTITY_SQL = """
 """
 
 
-async def funnel(pool, *, window_s=86400, experiment_id="X1_SHORT_HORIZON_"
-                                                        "DIRECTION") -> dict:
+X1_MODEL = "X1_SHORT_HORIZON_DIRECTION"
+X1_CONTROL = "X1C_NULL_CONTROL"
+
+
+FUNNEL_BY_EXPERIMENT_SQL = """
+    SELECT experiment_id,
+           count(*)                                       AS decisions,
+           count(*) FILTER (WHERE action = 'NO_TRADE'
+                              AND why LIKE 'SPREAD\\_%')  AS no_trade_spread,
+           count(*) FILTER (WHERE action = 'NO_TRADE'
+                              AND (why IS NULL
+                                   OR why NOT LIKE 'SPREAD\\_%'))
+                                                          AS no_trade_signal,
+           count(*) FILTER (WHERE action = 'BUY_YES')     AS buy_yes,
+           count(*) FILTER (WHERE action = 'BUY_NO')      AS buy_no,
+           count(*) FILTER (WHERE action LIKE 'BUY%'
+                              AND execution_status =
+                                  'BLOCKED_IDENTITY_NOT_EXECUTION_ELIGIBLE')
+                                                    AS buy_blocked_identity,
+           count(*) FILTER (WHERE action LIKE 'BUY%'
+                              AND book_freshness_status IN ('STALE','ABSENT'))
+                                                    AS buy_blocked_stale_book,
+           count(*) FILTER (WHERE action LIKE 'BUY%'
+                              AND COALESCE(executed_notional_usd, 0) > 0)
+                                                          AS buy_executed,
+           count(*) FILTER (WHERE COALESCE(executed_notional_usd, 0) > 0
+                              AND COALESCE(unfilled_notional_usd, 0) > 0)
+                                                          AS partial_fills,
+           count(*) FILTER (WHERE COALESCE(executed_notional_usd, 0) > 0
+                              AND COALESCE(unfilled_notional_usd, 0) = 0)
+                                                          AS full_fills,
+           COALESCE(sum(executed_notional_usd), 0)        AS entry_notional
+      FROM bettor_experimental_decisions
+     WHERE decision_timestamp > now() - ($1 || ' seconds')::interval
+     GROUP BY experiment_id
+     ORDER BY experiment_id
+"""
+
+
+async def funnel(pool, *, window_s=86400, experiment_id=X1_MODEL) -> dict:
     """WHY ACTIVITY IS OR IS NOT OCCURRING, in the directive's own names.
 
     Read-only. Every number is a count of rows that already exist.
+
+    THE FILL BUCKETS ARE PER EXPERIMENT (owner 2026-09-20). Counted
+    across the lane, BUY_EXECUTED and PARTIAL_FILLS would have shown 1
+    the moment X1C_NULL_CONTROL opened the first production position,
+    and a reader would have taken that as the model trading. X1C is a
+    frozen always-long counterfactual; its activity is reported under
+    its own name and never added to X1's.
     """
     row = await pool.fetchrow(FUNNEL_SQL, str(int(window_s)), experiment_id)
     ident_row = await pool.fetchrow(FUNNEL_IDENTITY_SQL)
@@ -1112,4 +1157,29 @@ async def funnel(pool, *, window_s=86400, experiment_id="X1_SHORT_HORIZON_"
     }
     out["decisions"] = r.get("decisions") or 0
     out["windowSeconds"] = int(window_s)
+
+    # THE SAME BUCKETS, SPLIT BY PORTFOLIO. The top-level numbers above
+    # describe the LANE; these say which experiment did what, so the
+    # control's first position can never be read as the model's.
+    out["byExperiment"] = {}
+    for e in await pool.fetch(FUNNEL_BY_EXPERIMENT_SQL, str(int(window_s))):
+        e = dict(e)
+        out["byExperiment"][e["experiment_id"]] = {
+            "IS_NULL_CONTROL": e["experiment_id"] == X1_CONTROL,
+            "DECISIONS": e.get("decisions") or 0,
+            "NO_TRADE_SPREAD": e.get("no_trade_spread") or 0,
+            "NO_TRADE_SIGNAL": e.get("no_trade_signal") or 0,
+            "BUY_YES": e.get("buy_yes") or 0,
+            "BUY_NO": e.get("buy_no") or 0,
+            "BUY_BLOCKED_IDENTITY": e.get("buy_blocked_identity") or 0,
+            "BUY_BLOCKED_STALE_BOOK": e.get("buy_blocked_stale_book") or 0,
+            "BUY_EXECUTED": e.get("buy_executed") or 0,
+            "PARTIAL_FILLS": e.get("partial_fills") or 0,
+            "FULL_FILLS": e.get("full_fills") or 0,
+            "ENTRY_NOTIONAL_USD": float(e.get("entry_notional") or 0),
+        }
+    out["neverCombined"] = (
+        "X1 and X1C are separate portfolios and their figures are never "
+        "summed. X1C is a frozen always-long counterfactual, not BETTOR "
+        "EV performance.")
     return out

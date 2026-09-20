@@ -49,6 +49,23 @@ class FunnelPool:
             return self._identity()
         return self._decisions(args)
 
+    async def fetch(self, sql, *args):
+        """The per-experiment split (owner 2026-09-20): the same buckets
+        under the portfolio that produced them, so the control's first
+        position can never be read as the model's."""
+        out = {}
+        for r in self.decisions:
+            e = r.get("experiment_id") or ""
+            out.setdefault(e, []).append(r)
+        rows = []
+        for e, rs in sorted(out.items()):
+            sub = FunnelPool(rs)._decisions(("", e))
+            rows.append(dict(sub, experiment_id=e,
+                             entry_notional=sum(
+                                 r.get("executed_notional_usd") or 0
+                                 for r in rs)))
+        return rows
+
     def _decisions(self, args):
         experiment_id = args[1] if len(args) > 1 else ""
         d = self.decisions
