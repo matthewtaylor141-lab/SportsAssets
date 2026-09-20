@@ -386,6 +386,15 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     # tick that can actually serve something cannot alias, because
     # consecutive serving ticks take consecutive offsets.
     #
+    # AND TO BE EXACT ABOUT WHAT THAT DEFECT WAS: it was found in the
+    # W3 CANDIDATE, offline, before deployment. It was never live. The
+    # deployed budget floors total at 2 and follow_budget at 1, so
+    # every production tick serves follow-ups and a tick-keyed offset
+    # would not have aliased here. This is the correct-by-construction
+    # choice, not the repair of an observed production fault -- the
+    # observed production fault is the FIXED ORDER below it replaces,
+    # which starved three horizons at every budget.
+    #
     # THE CAP is what makes the rotation matter. Without it the head
     # horizon still drains the budget before the next one is reached.
     global _FU_SERVICE_OPS

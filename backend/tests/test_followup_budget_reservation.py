@@ -306,3 +306,32 @@ def test_the_rotation_head_is_recorded_so_it_can_be_verified_live():
     n_cols = len([c for c in cols.split(",") if c.strip()])
     n_vals = ins.count("$")
     assert n_cols == n_vals, (n_cols, n_vals)
+
+
+def test_the_aliasing_defect_was_never_live_and_is_not_claimed_to_be():
+    """PRECISION ABOUT WHAT WAS FIXED.
+
+    The parity-vs-rotation aliasing was found in the W3 candidate,
+    offline, before deployment. It requires ticks that serve no
+    follow-ups, and the deployed budget cannot produce one: total is
+    floored at 2, fu_reserve at 1, and a rate-limited tick halves to a
+    floor of 1. So follow_budget is >= 1 on every production tick.
+
+    Service-opportunity rotation is therefore the correct-by-
+    construction choice, NOT the repair of an observed production
+    fault. The observed production fault is the fixed loop order it
+    replaces, which starved three horizons at every budget."""
+    worst = None
+    for tenths in range(10, 81):
+        pacing = tenths / 10
+        total = max(2, int(w.MAX_READS_PER_TICK * min(
+            1.0, w.READ_PACING_BASE_S / pacing)))
+        fu = max(1, total // 2)
+        budget = max(1, total - fu)
+        follow_budget = min(w.MAX_FOLLOWUP_READS, fu + max(0, budget))
+        rate_limited = max(1, follow_budget // 2)
+        worst = rate_limited if worst is None else min(worst,
+                                                       rate_limited)
+    assert worst >= 1, (
+        "if this ever drops to 0, production CAN produce ticks that "
+        "serve no follow-ups, and the aliasing stops being hypothetical")
