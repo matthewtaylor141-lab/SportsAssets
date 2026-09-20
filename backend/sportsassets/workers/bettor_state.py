@@ -63,6 +63,10 @@ BACKOFF_S = 120.0
 # once reads succeed again. The alternative -- pushing through -- costs
 # the mirror its gaps AND biases this dataset's readable subset toward
 # quiet hours, which is the worse of the two failures.
+# Bumped whenever the pacing behaviour changes, so a coverage figure
+# can be attributed to the regime that produced it rather than pooled
+# across regimes that behaved differently.
+PACING_VERSION = "BETTOR_CAPTURE_PACING_V2_ADAPTIVE"
 READ_PACING_BASE_S = 1.0
 READ_PACING_MAX_S = 8.0
 BACKOFF_GROWTH = 2.0
@@ -85,6 +89,13 @@ PREMAP_SQL = """
 # activity. Here the WHOLE eligible set is fetched and the rotation --
 # a pure function of identifier and clock -- decides. Ordering the
 # query would put a selection upstream of the frozen rule.
+
+
+def _tick_id(at, tick_index) -> str:
+    """Deterministic, so a retried tick cannot double-count itself."""
+    import hashlib
+    raw = "%s|%s|%s" % (sc.UNIVERSE_VERSION, at.isoformat(), tick_index)
+    return "btk_" + hashlib.sha256(raw.encode()).hexdigest()[:40]
 
 
 def _off(name: str, default: str = "on") -> bool:
@@ -200,6 +211,11 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
              "eligible": 0, "inSlice": 0, "read": 0, "written": 0,
              "duplicateBucket": 0, "unreadable": 0, "failures": 0,
              "rateLimited": 0, "pacingS": round(pacing, 2),
+             "pacingVersion": PACING_VERSION,
+             "obsSkippedBudget": 0, "obsSkippedAbandon": 0,
+             "unreadableOther": 0, "fuDue": 0, "fuAttempted": 0,
+             "fuSkippedBudget": 0, "fuOnTime": 0, "fuLate": 0,
+             "fuFailed": 0,
              "sliceTruncated": False, "followups": 0, "reads": 0}
 
     try:
@@ -229,9 +245,14 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     budget = max(1, int(MAX_READS_PER_TICK * min(
         1.0, READ_PACING_BASE_S / pacing)))
     stats["budget"] = budget
-    for subject in sel["SELECTED"]:
+    # SCHEDULED IS THE DENOMINATOR, recorded before any read. Coverage
+    # computed against what was attempted can only ever be 100%.
+    stats["scheduled"] = len(sel["SELECTED"])
+    abandoned = False
+    for idx, subject in enumerate(sel["SELECTED"]):
         if budget <= 0:
             stats["status"] = "read_budget_exhausted"
+            stats["obsSkippedBudget"] = len(sel["SELECTED"]) - idx
             break
         budget -= 1
         stats["reads"] += 1
@@ -265,6 +286,10 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
             # other is a fact about the market and means carry on.
             if "RateLimit" in str(book.get("error") or ""):
                 stats["rateLimited"] += 1
+            else:
+                stats["unreadableOther"] += 1
+        else:
+            stats["readable"] = stats.get("readable", 0) + 1
 
         # A SELECTED MARKET WRITES A ROW EITHER WAY. Dropping the
         # unreadable ones would condition the frame on readability.
@@ -283,6 +308,8 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
 
         if misses >= MISS_ABANDON:
             stats["status"] = "venue_unreadable"
+            stats["obsSkippedAbandon"] = len(sel["SELECTED"]) - idx - 1
+            abandoned = True
             break
 
     # ── pass 2: the declared horizons ────────────────────────────────
@@ -308,23 +335,70 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
                                         pool=pool)
         except Exception:                                      # noqa: BLE001
             break
-        for d in due:
+        stats["fuDue"] += len(due)
+        for j, d in enumerate(due):
             if follow_budget <= 0:
+                stats["fuSkippedBudget"] += len(due) - j
                 break
             follow_budget -= 1
             stats["reads"] += 1
+            stats["fuAttempted"] += 1
             book = await asyncio.to_thread(_read_book, d["market_id"],
                                            pacing)
             read_at = datetime.now(tz=timezone.utc)
             mid = _mid_of(book)
             try:
-                await sstore.record_mid(sc.mid_observation(
+                rec = sc.mid_observation(
                     d["observation_id"], horizon_s=horizon,
                     observed_at=d["observed_at"], read_at=read_at,
-                    mid=mid), pool=pool)
+                    mid=mid)
+                await sstore.record_mid(rec, pool=pool)
                 stats["followups"] += 1
+                # ON TIME AND LATE ARE COUNTED APART. A recovery read is
+                # not a 60-second outcome, and a single "followups"
+                # counter would let it read as one.
+                if rec.get("TIMING_CLASS") == sc.TIMING_ON_TIME:
+                    stats["fuOnTime"] += 1
+                else:
+                    stats["fuLate"] += 1
             except Exception:                                  # noqa: BLE001
                 stats["failures"] += 1
+                stats["fuFailed"] += 1
+
+    # ── the tick's own account, written before it ends ───────────────
+    #
+    # SCHEDULED minus ATTEMPTED is the loss that leaves no observation
+    # row. Recorded here or it is not recorded anywhere.
+    sched = stats.get("scheduled", 0)
+    att = stats.get("read", 0)
+    await sstore.record_tick({
+        "TICK_ID": _tick_id(at, tick_i),
+        "TICK_AT": at,
+        "UNIVERSE_VERSION": sc.UNIVERSE_VERSION,
+        "RULE_SHA": sc.RULE_SHA,
+        "PACING_VERSION": PACING_VERSION,
+        "PACING_S": round(pacing, 3),
+        "SELECTION_CYCLE": sel.get("CYCLE"),
+        "TICK_INDEX": tick_i,
+        "OBS_SCHEDULED": sched,
+        "OBS_ATTEMPTED": att,
+        "OBS_SKIPPED_BUDGET": stats["obsSkippedBudget"],
+        "OBS_SKIPPED_ABANDON": stats["obsSkippedAbandon"],
+        "OBS_READABLE": stats.get("readable", 0),
+        "OBS_RATE_LIMITED": stats["rateLimited"],
+        "OBS_UNREADABLE_OTHER": stats["unreadableOther"],
+        "OBS_WRITTEN": stats["written"],
+        "OBS_DUPLICATE_BUCKET": stats["duplicateBucket"],
+        "FU_DUE": stats["fuDue"],
+        "FU_ATTEMPTED": stats["fuAttempted"],
+        "FU_SKIPPED_BUDGET": stats["fuSkippedBudget"],
+        "FU_ON_TIME": stats["fuOnTime"],
+        "FU_LATE": stats["fuLate"],
+        "FU_FAILED": stats["fuFailed"],
+        "STATUS": stats["status"],
+        "OBS_NEVER_ATTEMPTED": max(0, sched - att),
+    }, pool=pool)
+    stats["neverAttempted"] = max(0, sched - att)
     return stats
 
 

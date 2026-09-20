@@ -64,10 +64,23 @@ ORIGINAL_PLAN_SHA = "5c81ca7b0accf747"
 REGISTERED_AGAINST_UNIVERSE = "BETTOR_UNSELECTED_STATE_V1"
 REGISTERED_AGAINST_RULE_SHA = "552cc26d247732f2"
 
-# ── DISCLOSURE: THE ORIGINAL PLAN_SHA CANNOT BE REPRODUCED ──────────
+# ── DISCLOSURE: THE ORIGINAL PLAN_SHA *DOES* REPRODUCE ─────────────
 #
-# Stated plainly because a pre-registration that quietly loses its own
-# hash is worse than one that never had a hash.
+# CORRECTION. An earlier version of this block said the original hash
+# "cannot be recomputed from the current source". That was true and
+# useless: of course it cannot, the source moved. The question worth
+# asking is whether it reproduces FROM ITS OWN COMMIT, and it does.
+#
+#   git worktree add <dir> 157969c
+#   cd <dir>/backend && python -c \
+#     "from sportsassets import bettor_preregistration as p; \
+#      print(p.plan_sha()[:16])"
+#   -> 5c81ca7b0accf747
+#
+# Verified 2026-09-20T21:0xZ. No missing input: the plan's identity is
+# fully determined by that commit plus the stdlib, with no environment
+# or configuration dependency. The original artifact is preserved at
+# 157969c and the hash is verifiable by anyone with the repository.
 #
 # WHAT HAPPENED. describe_plan() hashed `sc.RULE_SHA` -- a LIVE lookup
 # of the capture's sampling rule. When the sampling rule was legitimately
@@ -91,12 +104,58 @@ REGISTERED_AGAINST_RULE_SHA = "552cc26d247732f2"
 # published. An analysis quoting this plan must quote PLAN_SHA and this
 # disclosure together.
 PLAN_SHA_DISCLOSURE = (
-    "ORIGINAL_PLAN_SHA 5c81ca7b0accf747 was computed over a plan that "
-    "included a LIVE lookup of the capture's rule sha. Amending the "
-    "sampling rule (V1->V2) moved it, though no hypothesis, band, "
-    "test, correction or gate changed. The plan is re-frozen with that "
-    "coupling removed; the scientific content is unchanged and the "
-    "diff is checkable in git at 157969c..HEAD")
+    "ORIGINAL_PLAN_SHA 5c81ca7b0accf747 REPRODUCES EXACTLY from commit "
+    "157969c with no missing input -- it depends only on that commit "
+    "and the stdlib. It was computed over a plan that included a LIVE "
+    "lookup of the capture's rule sha, so amending the sampling rule "
+    "(V1->V2) moved the CURRENT value though no hypothesis, band, "
+    "test, correction or gate changed. The coupling is removed and the "
+    "plan re-frozen; both shas are published, the original artifact is "
+    "preserved at 157969c, and git diff 157969c..HEAD shows no change "
+    "to any frozen scientific field")
+
+# ── DEVIATION 1: THE PLAN WAS FROZEN AFTER CAPTURE BEGAN ───────────
+#
+# Owner 2026-09-20: "The plan was frozen after capture began. Record
+# that chronology as a deviation from the original before-row-one
+# requirement, along with exactly what information had been accessed by
+# the freeze time."
+#
+# Recorded, because the earlier framing ("registered before any row
+# matured") was true but answered a weaker question than the one the
+# directive asked. The directive said BEFORE ROW 1. Row 1 was written
+# at 19:23:35Z. The plan was frozen at 19:25:36Z -- 121 seconds LATE.
+DEVIATION_PLAN_FROZEN_AFTER_ROW_ONE = {
+    "requirement": "§3: freeze the sampling rule BEFORE row 1",
+    "sampling rule": ("MET. The sampling rule was frozen in the same "
+                      "commit as the capture, 0492d54, and no row "
+                      "preceded it"),
+    "analysisPlan": ("DEVIATED. §9's analysis plan was frozen at "
+                     "19:25:36Z; the first captured row landed at "
+                     "19:23:35Z. 121 seconds late, 26 rows existed"),
+    "INFORMATION_ACCESSIBLE_AT_FREEZE_TIME": [
+        "26 state observation rows (V1), of which 3 markets readable",
+        "their book fields: bid, ask, spread, mid, displayed depth",
+        "their readability status, including the first rate limits",
+        "NO settlement rows -- the table was empty and remains empty",
+        "NO mid/outcome rows -- bettor_state_mids was empty",
+        "NO price-band tabulation of any kind had been computed",
+    ],
+    "WHAT_WAS_ACTUALLY_LOOKED_AT_BEFORE_THE_FREEZE": [
+        "the §17 status query at 19:25:57Z -- AFTER the freeze",
+        "no query selecting mid, settlement, or any outcome term was "
+        "run before 19:25:36Z",
+    ],
+    "assessment": (
+        "the 26 rows accessible at freeze time contained no outcome of "
+        "any kind, so no band could have been chosen to fit a result "
+        "-- there was no result. That is an argument about what was "
+        "POSSIBLE, not a claim that the deadline was met. It was not"),
+    "remedy": (
+        "none available retrospectively. The deviation is disclosed "
+        "and the bands remain as registered; they are symmetric on "
+        "round numbers, which is checkable independently of intent"),
+}
 PLAN_REGISTERED_BEFORE_ANY_ROW_MATURED = True
 
 # ── CHRONOLOGY, IN UTC, FROM COMMIT AND DEPLOY RECORDS ───────────────
@@ -191,6 +250,68 @@ AMENDMENTS = (
      "outcomeDataSeenFirst": False,
      "hypothesesChanged": False, "gatesChanged": False},
 )
+
+# ── DEVIATION 2: AN ENDPOINT'S OPERATIONAL MEANING CHANGED ─────────
+#
+# "'No scientific lines changed' is useful evidence, but also check
+# whether follow-up timing, exclusions or cohort handling changed the
+# operational meaning of an endpoint."
+#
+# One did, and it is not visible in a diff of the hypotheses.
+#
+# BEFORE AMENDMENT 3: a row in bettor_state_mids with horizon_s = 60
+# could only exist if the read landed within 30s of the 60s mark. The
+# presence of the row WAS the on-time guarantee.
+#
+# AFTER AMENDMENT 3: the due window is 600s, so a horizon_s = 60 row can
+# now also be a recovery read taken minutes later. THE COLUMN'S MEANING
+# WEAKENED from "an on-time 60s observation" to "an observation
+# scheduled for the 60s horizon". A query written against the old
+# meaning -- filtering only on horizon_s -- would silently pool
+# recovery reads into a 60-second endpoint.
+#
+# WHAT PROTECTS IT: timing_class, stored per row, and
+# ADMISSIBLE_TO_HORIZON_GATE. T2's estimand reads MID_300S and is
+# therefore restricted to timing_class = ON_TIME; that restriction is
+# part of the endpoint's definition, not a filter an analyst may choose
+# to apply. The plan's TESTS are unchanged in wording; this records
+# that their OPERATIONAL reading is now explicitly ON_TIME-only.
+DEVIATION_ENDPOINT_MEANING_CHANGED = {
+    "amendment": "AMENDMENT_3_FOLLOWUP_WINDOW",
+    "endpointAffected": "MID_<horizon> rows in bettor_state_mids",
+    "before": ("a horizon row could only exist if read within the 30s "
+               "tolerance, so the row's existence was the guarantee"),
+    "after": ("the 600s recovery window admits late reads under the "
+              "same horizon_s, so existence no longer implies on time"),
+    "mitigation": ("timing_class ON_TIME / LATE_RECOVERY / "
+                   "NOT_OBSERVABLE stored per row; only ON_TIME is "
+                   "admissible to a horizon's gate; ACTUAL_LAG_S always "
+                   "carries the true elapsed time"),
+    "affectsWhichTests": ["T2_PRICE_BAND_SHORT_HORIZON_DRIFT",
+                          "T3_SPREAD_REGIME_DRIFT",
+                          "T4_DEPTH_IMBALANCE_DRIFT",
+                          "T5_TIME_TO_EVENT_INTERACTION"],
+    "hypothesesRewritten": False,
+    "note": ("the hypotheses are NOT rewritten. This records that "
+             "reading them operationally now requires the ON_TIME "
+             "restriction, which was implicit before and is explicit "
+             "now"),
+}
+
+# ── DEVIATION 3: COHORT EXCLUSION ──────────────────────────────────
+DEVIATION_COHORT_EXCLUSION = {
+    "amendment": "AMENDMENT_1_SAMPLING_V1_TO_V2",
+    "what": ("BETTOR_UNSELECTED_STATE_V1 rows are excluded from every "
+             "analysis under this plan"),
+    "why": ("V1's rotation drew a fixed panel; its rows are honest "
+            "observations but are not a sample of the universe"),
+    "rowsAffected": "26 V1 rows, retained and never deleted",
+    "decidedBeforeAnyOutcomeExisted": True,
+    "note": ("an exclusion decided on a SAMPLING defect visible in the "
+             "first two buckets, with no outcome data in existence. "
+             "Had it been decided later, on data, it would be a "
+             "different and much weaker thing"),
+}
 
 FROZEN_ACROSS_ALL_AMENDMENTS = (
     "H0", "H1", "PRICE_BANDS", "TESTS", "MULTIPLICITY",

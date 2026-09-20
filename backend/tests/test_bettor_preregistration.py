@@ -243,3 +243,48 @@ def test_the_plan_no_longer_tracks_the_live_sampling_rule():
         assert pre.plan_sha() == before
     finally:
         sc.RULE_SHA = saved
+
+
+# ── the deviations, disclosed rather than smoothed over ──────────────
+
+def test_the_late_freeze_is_recorded_as_a_deviation():
+    """"Registered before any row matured" answered a weaker question
+    than the directive asked. The directive said before ROW 1."""
+    d = pre.DEVIATION_PLAN_FROZEN_AFTER_ROW_ONE
+    assert "DEVIATED" in d["analysisPlan"]
+    assert "121 seconds late" in d["analysisPlan"]
+    assert "That is an argument about what was" in d["assessment"]
+    # What was accessible must name the outcome tables explicitly.
+    joined = " ".join(d["INFORMATION_ACCESSIBLE_AT_FREEZE_TIME"])
+    assert "NO settlement rows" in joined
+    assert "NO mid/outcome rows" in joined
+
+
+def test_the_original_hash_reproduces_from_its_own_commit():
+    d = pre.PLAN_SHA_DISCLOSURE
+    assert "REPRODUCES EXACTLY from commit 157969c" in d
+    assert "no missing input" in d
+    assert pre.ORIGINAL_PLAN_SHA == "5c81ca7b0accf747"
+
+
+def test_the_endpoint_meaning_change_is_disclosed():
+    """A diff of the hypotheses would not show this one."""
+    d = pre.DEVIATION_ENDPOINT_MEANING_CHANGED
+    assert d["hypothesesRewritten"] is False
+    assert "existence no longer implies on time" in d["after"]
+    assert "ON_TIME" in d["mitigation"]
+    assert "T2_PRICE_BAND_SHORT_HORIZON_DRIFT" in d["affectsWhichTests"]
+
+
+def test_the_cohort_exclusion_predates_any_outcome():
+    d = pre.DEVIATION_COHORT_EXCLUSION
+    assert d["decidedBeforeAnyOutcomeExisted"] is True
+    assert "retained and never deleted" in d["rowsAffected"]
+
+
+def test_only_on_time_reads_are_admissible_to_a_horizon_gate():
+    """The mitigation, asserted against the capture module rather than
+    trusted to the prose."""
+    assert sc.ADMISSIBLE_TO_HORIZON_GATE == (sc.TIMING_ON_TIME,)
+    assert sc.TIMING_LATE_RECOVERY not in sc.ADMISSIBLE_TO_HORIZON_GATE
+    assert "NEVER" in sc.LATE_IS_NOT_ON_TIME

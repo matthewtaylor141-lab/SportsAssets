@@ -294,6 +294,42 @@ HORIZON_NOT_OBSERVABLE_REASON = (
 HORIZON_TOLERANCE_S = 30
 HORIZON_DUE_WINDOW_S = 600
 
+# ── LATE IS NOT ON TIME, AND IS NEVER COUNTED AS IT ─────────────────
+#
+# The wider due window buys RECOVERY, not validity. A read that lands
+# 400s after T0 is evidence about t+400s; it is not a 60-second
+# outcome, and nothing may present it as one.
+#
+# Three classes, and only the first is admissible to a horizon's gate.
+TIMING_ON_TIME = "ON_TIME"
+TIMING_LATE_RECOVERY = "LATE_RECOVERY"
+TIMING_NOT_OBSERVABLE = "NOT_OBSERVABLE"
+TIMING_CLASSES = (TIMING_ON_TIME, TIMING_LATE_RECOVERY,
+                  TIMING_NOT_OBSERVABLE)
+
+ADMISSIBLE_TO_HORIZON_GATE = (TIMING_ON_TIME,)
+
+LATE_IS_NOT_ON_TIME = (
+    "a read inside the recovery window but outside the original "
+    "tolerance is LATE_RECOVERY. Its true elapsed time is preserved in "
+    "ACTUAL_LAG_S, it is kept because a late observation is still an "
+    "observation of the market at that later instant, and it is NEVER "
+    "counted toward the horizon it was scheduled for. Only ON_TIME "
+    "reads are admissible to a horizon's gate")
+
+
+def timing_class(horizon_s: int, lag_s) -> str:
+    """Which class a read falls in. The ONLY place the rule lives."""
+    if horizon_s in HORIZONS_NOT_OBSERVABLE_S:
+        return TIMING_NOT_OBSERVABLE
+    try:
+        lag = float(lag_s)
+    except (TypeError, ValueError):
+        return TIMING_NOT_OBSERVABLE
+    return (TIMING_ON_TIME
+            if abs(lag - horizon_s) <= HORIZON_TOLERANCE_S
+            else TIMING_LATE_RECOVERY)
+
 FROZEN_RULE = {
     "UNIVERSE_VERSION": UNIVERSE_VERSION,
 
@@ -574,42 +610,91 @@ FRAME_CLAIM = (
     "The realised sample is NOT yet established to be an unbiased "
     "sample of the universe, and must not be described as one")
 
-# ── THE READABILITY CAVEAT, WITH ITS MECHANISM CORRECTED ────────────
+# ── GATEWAY CONSUMERS, SEPARATED BY HOST AND BY QUOTA ──────────────
 #
-# AN EARLIER VERSION SAID the refusals come from "the live mirror,
-# which is busiest when games are live". THE WORKER LOGS REFUTE THE
-# MECHANISM (2026-09-20 20:32Z), and mirror_live = false made it
-# suspect in the first place.
+# TWO EARLIER ACCOUNTS OF THIS WERE WRONG, IN THE SAME WAY.
 #
-# What the logs actually show sharing gateway.polymarket.us:
-#   - dense data-api.polymarket.com /trades polling across many watched
-#     wallets, repeatedly, several per second;
-#   - polygon-mainnet chain reads;
-#   - api.polymarket.us /portfolio/positions, /orders/open,
-#     /portfolio/activities, /order/{id} reconciliation;
-#   - gateway.polymarket.us /book and /bbo -- ours and mirror_shadow's,
-#     both refused in the same second for the same market.
+# First I wrote that refusals come from "the live mirror, busiest when
+# games are live". mirror_live = false made that suspect, and the logs
+# refuted it: the copy lane runs its full evaluation and refuses only at
+# the submit step ("LIVE refused: homerunhazard not funded"), so the
+# pause gates SUBMISSION, not reads.
 #
-# AND mirror_live = false DOES NOT STOP READS. The log line "LIVE
-# refused: homerunhazard not funded (edge-not-demonstrated)" shows the
-# copy lane running its full evaluation -- reading books, classifying
-# exits, computing conviction -- and refusing only at the SUBMIT step.
-# The pause gates ORDER SUBMISSION, not market-data reads.
+# Then I listed the busy hosts from the log and called them all gateway
+# consumers. THAT WAS THE SAME ERROR AGAIN -- pooling things that share
+# a log file but not a quota. Activity on another domain does not
+# consume the PMUS gateway's budget.
 #
-# The corrected mechanism: gateway load is driven by the copy lane's
-# EVALUATION AND RECONCILIATION traffic, which intensifies when watched
-# wallets trade. Those wallets trade during games. So the CONCLUSION --
-# refusal probability may rise when markets are live -- can still hold,
-# but by a different route than was claimed, and it remains a
-# hypothesis to be measured rather than a mechanism to be asserted.
+# SEPARATED, from the worker log of 2026-09-20T20:32Z:
+#
+#   gateway.polymarket.us      THE ONLY HOST OBSERVED RETURNING 429.
+#                              /v1/markets/{slug}/book  <- this capture
+#                              /v1/markets/{slug}/bbo   <- mirror_shadow,
+#                                shadow_bettor, shadow_rn1, price_path,
+#                                shadow_experimental, institutional_md
+#                              Both refused in the same second for the
+#                              same market, so the limit is shared
+#                              across path families on this host.
+#
+#   api.polymarket.us          PMUS, same domain, different path family
+#                              (/portfolio/positions, /orders/open,
+#                              /portfolio/activities, /order/{id}).
+#                              ALL 200 in the observed window. WHETHER
+#                              IT SHARES THE GATEWAY QUOTA IS NOT
+#                              ESTABLISHED by these logs and must not be
+#                              assumed either way.
+#
+#   data-api.polymarket.com    POLYMARKET GLOBAL. A different venue.
+#   clob.polymarket.com        Consumes NO PMUS quota. The dense
+#   gamma-api.polymarket.com   /trades polling across watched wallets
+#                              lives here, not on the PMUS gateway.
+#
+#   polygon-mainnet.g.alchemy  Chain RPC. Unrelated to either venue.
+#
+# WHAT SURVIVES. The observed PMUS-gateway consumers are the book and
+# bbo readers -- seven loops including this one. What drives their
+# aggregate rate, and whether that rate tracks the sporting day, is NOT
+# established. The measurement (bettor_unselected_readability.sql) is
+# the only evidence, and it runs OPPOSITE to the live-hours story:
+# LIVE 32.8% of 122 refused, PREGAME 43.8% of 73.
+GATEWAY_CONSUMERS = {
+    "gateway.polymarket.us": {
+        "quota": "THE OBSERVED 429 SOURCE",
+        "consumers": ["bettor_state (book)", "mirror_shadow (bbo)",
+                      "shadow_bettor (bbo)", "shadow_rn1 (bbo)",
+                      "price_path (bbo)", "shadow_experimental (bbo)",
+                      "institutional_md"],
+    },
+    "api.polymarket.us": {
+        "quota": "SHARED_WITH_GATEWAY_NOT_ESTABLISHED",
+        "consumers": ["copy lane portfolio/orders reconciliation"],
+        "observed": "all 200 in the 20:32Z window",
+    },
+    "data-api.polymarket.com": {
+        "quota": "DIFFERENT_VENUE_NO_PMUS_QUOTA",
+        "consumers": ["watched-wallet trade polling"],
+    },
+    "clob.polymarket.com": {"quota": "DIFFERENT_VENUE_NO_PMUS_QUOTA"},
+    "gamma-api.polymarket.com": {"quota": "DIFFERENT_VENUE_NO_PMUS_QUOTA"},
+    "polygon-mainnet.g.alchemy.com": {"quota": "CHAIN_RPC_UNRELATED"},
+}
+
+MIRROR_PAUSE_DOES_NOT_STOP_READS = (
+    "mirror_live = false gates ORDER SUBMISSION, not market-data reads. "
+    "The copy lane continues to read books, classify exits and compute "
+    "conviction, refusing only at the submit step. Its read traffic is "
+    "unchanged by the pause")
+
 READABILITY_IS_NOT_MISSING_AT_RANDOM = (
     "a refused read writes a row, so refusals are VISIBLE -- but the "
     "READABLE SUBSET is still not established to be missing at random. "
-    "Refusals come from the shared gateway's aggregate rate, driven by "
-    "the copy lane's evaluation and reconciliation traffic, which "
-    "intensifies when watched wallets trade, which happens during "
-    "games. So refusal probability may rise with LIVE_STATUS, which is "
-    "correlated with the dynamics being measured. SIMILAR REFUSAL "
+    "Refusals come from gateway.polymarket.us, whose observed "
+    "consumers are the seven book/bbo readers -- NOT from the other "
+    "hosts in the same log, which belong to a different venue or to "
+    "the chain and consume no PMUS quota. What drives the aggregate "
+    "rate is not established, and the measurement runs OPPOSITE to the "
+    "live-hours hypothesis: LIVE 32.8% of 122 refused against PREGAME "
+    "43.8% of 73. SIMILAR REFUSAL "
     "RATES ACROSS OBSERVED CATEGORIES WOULD NOT PROVE RANDOMNESS -- "
     "they would fail to detect a difference on the categories looked "
     "at, which is weaker. The limitation stands on any readable-only "
@@ -884,21 +969,27 @@ def mid_observation(observation_id_: str, *, horizon_s: int,
                 "HORIZON_S": horizon_s,
                 "MID": NOT_IDENTIFIED,
                 "STATUS": HORIZON_NOT_OBSERVABLE_REASON,
+                "TIMING_CLASS": TIMING_NOT_OBSERVABLE,
+                "ADMISSIBLE_TO_HORIZON_GATE": False,
                 "isNotAFill": A_FUTURE_READ_IS_NOT_A_FILL}
     lag = (read_at - observed_at).total_seconds()
     # WITHIN_TOLERANCE stays judged against the TIGHT tolerance even
-    # though the due window is wider. Widening the window buys coverage;
+    # though the due window is wider. Widening the window buys recovery;
     # it must not quietly widen what counts as on time.
+    cls = timing_class(horizon_s, lag)
     return {
         "outcomeVersion": OUTCOME_VERSION,
         "OBSERVATION_ID": observation_id_,
         "HORIZON_S": horizon_s,
         "READ_AT": read_at,
         "ACTUAL_LAG_S": str(round(lag, 3)),
-        "WITHIN_TOLERANCE": abs(lag - horizon_s) <= HORIZON_TOLERANCE_S,
+        "WITHIN_TOLERANCE": cls == TIMING_ON_TIME,
+        "TIMING_CLASS": cls,
+        "ADMISSIBLE_TO_HORIZON_GATE": cls in ADMISSIBLE_TO_HORIZON_GATE,
         "MID": _s(_d(mid)),
         "STATUS": "OBSERVED" if _d(mid) is not None else NOT_IDENTIFIED,
         "isNotAFill": A_FUTURE_READ_IS_NOT_A_FILL,
+        "lateIsNotOnTime": LATE_IS_NOT_ON_TIME,
     }
 
 

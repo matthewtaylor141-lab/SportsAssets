@@ -98,8 +98,8 @@ async def record_state(row: dict, pool=None) -> tuple[str, bool]:
 _MID_INSERT = """
     INSERT INTO bettor_state_mids (
         observation_id, horizon_s, read_at, actual_lag_s,
-        within_tolerance, mid, status)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)
+        within_tolerance, mid, status, timing_class)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)
     ON CONFLICT DO NOTHING
 """
 
@@ -110,7 +110,48 @@ async def record_mid(row: dict, pool=None) -> None:
         _MID_INSERT, row["OBSERVATION_ID"], int(row["HORIZON_S"]),
         row.get("READ_AT"), _text(row.get("ACTUAL_LAG_S")),
         row.get("WITHIN_TOLERANCE"), _text(row.get("MID")),
-        str(row["STATUS"]))
+        str(row["STATUS"]), _text(row.get("TIMING_CLASS")))
+
+
+_TICK_INSERT = """
+    INSERT INTO bettor_capture_ticks (
+        tick_id, tick_at, universe_version, rule_sha, pacing_version,
+        pacing_s, selection_cycle, tick_index,
+        obs_scheduled, obs_attempted, obs_skipped_budget,
+        obs_skipped_abandon, obs_readable, obs_rate_limited,
+        obs_unreadable_other, obs_written, obs_duplicate_bucket,
+        fu_due, fu_attempted, fu_skipped_budget, fu_on_time, fu_late,
+        fu_failed, status, obs_never_attempted)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+            $17,$18,$19,$20,$21,$22,$23,$24,$25)
+    ON CONFLICT DO NOTHING
+"""
+
+
+async def record_tick(row: dict, pool=None) -> None:
+    """The tick's own account of what it intended and what it managed.
+
+    NEVER RAISES INTO THE CAPTURE. A telemetry write that could take
+    down the collection loop would trade the thing being measured for
+    the measurement of it.
+    """
+    try:
+        pool = pool or await get_pool()
+        await pool.execute(
+            _TICK_INSERT, row["TICK_ID"], row["TICK_AT"],
+            row["UNIVERSE_VERSION"], row["RULE_SHA"],
+            row["PACING_VERSION"], _text(row["PACING_S"]),
+            row.get("SELECTION_CYCLE"), row.get("TICK_INDEX"),
+            row["OBS_SCHEDULED"], row["OBS_ATTEMPTED"],
+            row["OBS_SKIPPED_BUDGET"], row["OBS_SKIPPED_ABANDON"],
+            row["OBS_READABLE"], row["OBS_RATE_LIMITED"],
+            row["OBS_UNREADABLE_OTHER"], row["OBS_WRITTEN"],
+            row["OBS_DUPLICATE_BUCKET"], row["FU_DUE"],
+            row["FU_ATTEMPTED"], row["FU_SKIPPED_BUDGET"],
+            row["FU_ON_TIME"], row["FU_LATE"], row["FU_FAILED"],
+            str(row["STATUS"]), row["OBS_NEVER_ATTEMPTED"])
+    except Exception:                                          # noqa: BLE001
+        pass
 
 
 _SETTLEMENT_INSERT = """
@@ -194,7 +235,7 @@ _READY_SQL = """
 """
 
 REQUIRED_TABLES = ("bettor_state_observations", "bettor_state_mids",
-                   "bettor_state_settlements")
+                   "bettor_state_settlements", "bettor_capture_ticks")
 
 
 async def store_ready(pool=None) -> dict:

@@ -546,11 +546,56 @@ def test_the_readable_subset_is_not_assumed_missing_at_random():
     t = sc.READABILITY_IS_NOT_MISSING_AT_RANDOM
     assert "refusals are VISIBLE" in t
     assert "not established to be missing at random" in t
-    assert "LIVE_STATUS" in t
     # Similar rates across the categories looked at would be a failure
     # to detect, not a proof of randomness.
     assert "WOULD NOT PROVE RANDOMNESS" in t
     assert "limitation stands" in t
+    # And the measurement must be quoted as running AGAINST the
+    # hypothesis, not omitted because it was inconvenient.
+    assert "runs OPPOSITE to the" in t
+    assert "32.8%" in t and "43.8%" in t
+
+
+def test_gateway_consumers_are_separated_by_quota_not_by_log_file():
+    """Activity on another domain does not consume the PMUS gateway's
+    budget. Two earlier accounts pooled hosts that share a log."""
+    g = sc.GATEWAY_CONSUMERS
+    assert g["gateway.polymarket.us"]["quota"] == "THE OBSERVED 429 SOURCE"
+    assert g["api.polymarket.us"]["quota"] == \
+        "SHARED_WITH_GATEWAY_NOT_ESTABLISHED"
+    for other in ("data-api.polymarket.com", "clob.polymarket.com",
+                  "gamma-api.polymarket.com"):
+        assert g[other]["quota"] == "DIFFERENT_VENUE_NO_PMUS_QUOTA", other
+    assert g["polygon-mainnet.g.alchemy.com"]["quota"] == \
+        "CHAIN_RPC_UNRELATED"
+
+
+def test_the_mirror_pause_is_documented_as_not_stopping_reads():
+    m = sc.MIRROR_PAUSE_DOES_NOT_STOP_READS
+    assert "gates ORDER SUBMISSION, not market-data reads" in m
+    assert "unchanged by the pause" in m
+
+
+def test_late_reads_are_never_admissible_to_a_horizon_gate():
+    from datetime import timedelta
+    for lag, expected in ((58, sc.TIMING_ON_TIME),
+                          (95, sc.TIMING_LATE_RECOVERY),
+                          (400, sc.TIMING_LATE_RECOVERY)):
+        m = sc.mid_observation("x", horizon_s=60, observed_at=T0,
+                               read_at=T0 + timedelta(seconds=lag),
+                               mid="0.5")
+        assert m["TIMING_CLASS"] == expected, lag
+        assert m["ADMISSIBLE_TO_HORIZON_GATE"] == \
+            (expected == sc.TIMING_ON_TIME), lag
+        # The true elapsed time survives either way.
+        assert m["ACTUAL_LAG_S"] == "%.1f" % lag
+
+
+def test_the_recovery_window_is_wider_than_the_tolerance():
+    """The window buys recovery; the tolerance decides validity. If
+    they were equal the fix would have bought nothing."""
+    assert sc.HORIZON_DUE_WINDOW_S > sc.HORIZON_TOLERANCE_S
+    assert sc.ADMISSIBLE_TO_HORIZON_GATE == (sc.TIMING_ON_TIME,)
 
 
 def test_the_frame_claim_is_narrow_and_the_unbiased_claim_is_withdrawn():
