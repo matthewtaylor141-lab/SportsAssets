@@ -45,6 +45,7 @@ recorded per market instead of a blanket "no record observed".
 
 from __future__ import annotations
 
+from . import shadow_contract_family as cf
 from . import shadow_identity as ident
 
 EVIDENCE_ENVIRONMENT = "DIRECT_INSTITUTIONAL_WORKER"
@@ -70,12 +71,16 @@ def _int_or_none(value):
     return out if out > 0 else None
 
 
-def settlement_equivalence(binding: dict) -> str | None:
+def settlement_equivalence(binding: dict, family=None) -> str | None:
     """WHY these two keys name one economic contract, in words.
 
     Returned only for a verdict that actually established it. A
     sentence attached to an AMBIGUOUS binding would read as though
     something had been proven.
+
+    THE SENTENCE IS PER FAMILY, because the two families establish
+    equivalence differently and one sentence covering both would be
+    true of neither.
     """
     verdict = (binding or {}).get("verdict")
     if verdict != ident.EXACT_ONE_TO_ONE:
@@ -83,6 +88,19 @@ def settlement_equivalence(binding: dict) -> str | None:
     inst = (binding or {}).get("institutional") or {}
     outcome = inst.get("outcomeStrike")
     symbol = inst.get("symbol")
+
+    if family == cf.BINARY_PROPOSITION:
+        return (
+            "the registered contract %r is a single binary proposition: "
+            "the venue's own settlement rule settles it to Yes on one "
+            "stated condition at strike %s, and the retail YES leg of the "
+            "same registered id buys exactly that. Established from the "
+            "cftc_instrument_id both venues quote, from the venue's own "
+            "eventId + direction + strike composing to this key, and from "
+            "both venues naming the same signed strike -- not from a "
+            "title, a team name or a price."
+            % (symbol, outcome))
+
     return (
         "the retail market %r is a binary over the single outcome %r, and "
         "the institutional instrument %r IS that outcome; buying the "
@@ -117,6 +135,17 @@ def resolve(market_id, outcome_leg, *, instrument_record, retail_row) -> dict:
         "payout_value": None,
         "settlement_equivalence": None,
         "agree": [],
+        # ── the contract-family columns, present on EVERY row ────────
+        # A row that simply omits them would be indistinguishable from
+        # one resolved before this rule existed.
+        "contract_family": cf.FAMILY_UNKNOWN,
+        "settlement_rule": None,
+        "settlement_prose_conflict": None,
+        "strike_value": None,
+        "evaluation_type": None,
+        "long_participant_id": None,
+        "short_participant_id": None,
+        "complement_instrument_id": None,
     }
 
     if not instrument_record:
@@ -152,10 +181,27 @@ def resolve(market_id, outcome_leg, *, instrument_record, retail_row) -> dict:
     # happens to carry: this function resolves a named (market, leg).
     rt = dict(rt, outcomeLeg=leg)
 
-    # §3: the YES path has its own established reading; everything else
-    # goes through the general gate, which refuses by default.
-    binding = (ident.yes_leg_binding(inst, rt) if leg in ("yes", "long")
-               else ident.classify(inst, rt))
+    # ── WHICH FAMILY, AS THE VENUE DECLARES IT ───────────────────────
+    #
+    # The venue's own eventAttributes.eventOutcome says whether this is
+    # a DIRECTIONAL binary proposition or a MUTUALLY_EXCLUSIVE set, and
+    # the two need different proofs. Applying the multi-outcome rule to
+    # a binary is what refused all 16 production bindings with "retail
+    # leg 'yes' does not name outcome '1.5'": on a spread there is no
+    # outcome NAME to match, because the contract is one proposition.
+    fam = cf.family_of(instrument_record)
+    row["contract_family"] = fam["family"]
+    row["event_outcome"] = fam["eventOutcome"]
+
+    if fam["family"] == cf.BINARY_PROPOSITION:
+        binding = _binary_binding(instrument_record, retail_row, inst, rt,
+                                  leg, row)
+    else:
+        # MULTI_OUTCOME_SET and anything unrecognised keep the stricter
+        # rule exactly as it was. A family we have not seen is refused,
+        # never assumed binary.
+        binding = (ident.yes_leg_binding(inst, rt) if leg in ("yes", "long")
+                   else ident.classify(inst, rt))
 
     row.update(_institutional_columns(binding.get("institutional") or inst))
     row.update({
@@ -164,7 +210,8 @@ def resolve(market_id, outcome_leg, *, instrument_record, retail_row) -> dict:
         "identity_status": binding["verdict"],
         "execution_eligible": bool(binding.get("executionEligible")),
         "identity_binding_sha": binding.get("identityBindingSha"),
-        "settlement_equivalence": settlement_equivalence(binding),
+        "settlement_equivalence": settlement_equivalence(
+            binding, fam["family"]),
         "agree": list(binding.get("agree") or []),
         "why": list(binding.get("why") or []),
     })
@@ -179,6 +226,62 @@ def resolve(market_id, outcome_leg, *, instrument_record, retail_row) -> dict:
             "the binding is exact but the instrument's scales are not "
             "readable, so its book cannot be converted to money"]
     return row
+
+
+def _binary_binding(instrument_record, retail_row, inst, rt, leg, row) -> dict:
+    """§3: the YES leg of a directional contract, or an honest refusal.
+
+    YES BINDS ONE-TO-ONE when the proof holds. `shadow_contract_family`
+    establishes it from the registered contract id, the composition of
+    the venue's own eventId + direction + strike, the signed strike
+    agreeing across both venues, the participants belonging to this
+    event, and a settlement rule that settles to Yes. Not from a title,
+    not from a price, and not from slug equality on its own.
+
+    NO STAYS HONEST. §4: "Do not convert it into NO_TRADE. Do not
+    manufacture a NO book as 1-YES." The retail NO leg corresponds to
+    the OPPOSITE directional instrument, which is a different contract
+    the institutional venue may or may not list. Until that instrument
+    is confirmed and priceable the NO side is recorded as structurally
+    identified and pending -- with the candidate symbol named, so the
+    next reader knows exactly what to go and confirm.
+    """
+    proof = cf.binary_identity(instrument_record, retail_row)
+    prop = proof["proposition"]
+    row["settlement_prose_conflict"] = proof.get("settlementProseConflict")
+    row["settlement_rule"] = prop.get("settlementRule")
+    row["strike_value"] = prop.get("strikeValue")
+    row["evaluation_type"] = prop.get("evaluationType")
+    row["long_participant_id"] = prop.get("longParticipantId")
+    row["short_participant_id"] = prop.get("shortParticipantId")
+
+    if leg not in ("yes", "long"):
+        candidate = cf.complement_symbol(prop, rt.get("marketSlug"))
+        row["complement_instrument_id"] = candidate
+        verdict = (ident.STRUCTURAL_COMPLEMENT_PENDING if proof["proven"]
+                   else ident.AMBIGUOUS)
+        why = (["the retail NO leg of this binary proposition is the "
+                "OPPOSITE directional instrument %r, which the "
+                "institutional venue has not been asked to confirm; one "
+                "side of a spread is not the complement of the other "
+                "until the venue lists it and its book can be walked"
+                % candidate]
+               if proof["proven"] else list(proof["why"]))
+        return {"bindingVersion": ident.BINDING_VERSION,
+                "verdict": verdict, "executionEligible": False,
+                "agree": list(proof["agree"]), "why": why,
+                "institutional": inst, "retail": rt,
+                "identityBindingSha": ident.binding_sha(
+                    inst, rt, verdict)}
+
+    verdict = (ident.EXACT_ONE_TO_ONE if proof["proven"]
+               else ident.AMBIGUOUS)
+    return {"bindingVersion": ident.BINDING_VERSION,
+            "verdict": verdict,
+            "executionEligible": verdict in ident.EXECUTION_ELIGIBLE,
+            "agree": list(proof["agree"]), "why": list(proof["why"]),
+            "institutional": inst, "retail": rt,
+            "identityBindingSha": ident.binding_sha(inst, rt, verdict)}
 
 
 def _institutional_columns(inst: dict) -> dict:

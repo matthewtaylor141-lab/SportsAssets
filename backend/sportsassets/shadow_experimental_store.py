@@ -884,9 +884,13 @@ IDENTITY_INSERT = """
         outcome_strike, event_outcome, identity_status,
         execution_eligible, settlement_equivalence, price_scale,
         quantity_scale, payout_value, agree, why, resolved_at,
-        evidence_environment)
+        evidence_environment, contract_family, settlement_rule,
+        settlement_prose_conflict, strike_value, evaluation_type,
+        long_participant_id, short_participant_id,
+        complement_instrument_id)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-            $17::jsonb,$18::jsonb,$19,$20)
+            $17::jsonb,$18::jsonb,$19,$20,$21,$22,$23,$24,$25,$26,$27,
+            $28)
     ON CONFLICT (identity_binding_sha) DO NOTHING
     RETURNING identity_binding_sha
 """
@@ -912,7 +916,13 @@ async def record_identity_binding(pool, row: dict, *, at=None) -> bool:
         row.get("quantity_scale"), row.get("payout_value"),
         _j(row.get("agree") or []), _j(row.get("why") or []),
         at or datetime.now(tz=timezone.utc),
-        row.get("evidence_environment", REGIME_DIRECT))
+        row.get("evidence_environment", REGIME_DIRECT),
+        # ── the contract family, and the venue fields that proved it ──
+        row.get("contract_family"), row.get("settlement_rule"),
+        row.get("settlement_prose_conflict"), row.get("strike_value"),
+        row.get("evaluation_type"), row.get("long_participant_id"),
+        row.get("short_participant_id"),
+        row.get("complement_instrument_id"))
     return out is not None
 
 
