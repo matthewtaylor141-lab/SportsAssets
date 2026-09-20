@@ -78,7 +78,9 @@ jobs:
           # The raw jsonl carries whole page bodies; only the probe
           # block is printed, and its symbol sample is already capped.
           if [ -f /tmp/tape/tape_probe.json ]; then
-            python3 -c "import json;d=json.load(open('/tmp/tape/tape_probe.json'));print(json.dumps(d,indent=1)[:60000])"
+            python3 ../../../research/beta48/tape/tape_report.py \
+              /tmp/tape/tape_probe.json 2>/dev/null \
+              || python3 research/beta48/tape/tape_report.py /tmp/tape/tape_probe.json
           else
             echo "no probe output -- the run failed before it was written"
           fi
