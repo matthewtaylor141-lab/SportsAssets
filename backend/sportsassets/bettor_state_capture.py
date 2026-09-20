@@ -503,14 +503,21 @@ STATE_VERSION = "BETTOR_STATE_OBSERVATION_V1"
 # Reasons a field is absent. A field is absent for a NAMED reason or it
 # is present; it is never zero, and never quietly missing.
 R_NO_BOOK = "BOOK_UNREADABLE"
+# A book that PARSED but has no two-sided market has no mid, and that
+# is a fact about the market, not about our read. Production rows
+# marked READABLE were carrying BOOK_UNREADABLE in their reasons
+# because the mid-derived features reused R_NO_BOOK for "no mid".
+# Two different absences must not share one reason code: one says the
+# venue refused us, the other says nobody is quoting both sides.
+R_NO_MID = "NO_TWO_SIDED_MARKET_SO_NO_MID"
 R_NO_LADDER = "NO_LADDER_PUBLISHED"
 R_NO_HISTORY = "NO_PRIOR_OBSERVATION_OF_THIS_MARKET_IN_THIS_DATASET"
 R_NO_GAME_START = "VENUE_PUBLISHED_NO_GAME_START"
 R_SIDE_ABSENT = "VENUE_PUBLISHED_ONE_SIDE_ONLY"
 R_SIBLING_NOT_READ = "COMPLEMENT_INSTRUMENT_NOT_READ_THIS_CYCLE"
 
-MISSING_REASONS = (R_NO_BOOK, R_NO_LADDER, R_NO_HISTORY, R_NO_GAME_START,
-                   R_SIDE_ABSENT, R_SIBLING_NOT_READ)
+MISSING_REASONS = (R_NO_BOOK, R_NO_MID, R_NO_LADDER, R_NO_HISTORY,
+                   R_NO_GAME_START, R_SIDE_ABSENT, R_SIBLING_NOT_READ)
 
 NEVER_MANUFACTURED = (
     "a value that was not observed is NOT_IDENTIFIED with a reason from "
@@ -618,7 +625,7 @@ def _move(mid, history):
     """
     m = _d(mid)
     if m is None:
-        return NOT_IDENTIFIED, NOT_IDENTIFIED, R_NO_BOOK
+        return NOT_IDENTIFIED, NOT_IDENTIFIED, R_NO_MID
     prior = [(_d(h.get("mid")), h.get("observedAt")) for h in (history or [])]
     prior = [(v, t) for v, t in prior if v is not None]
     if not prior:

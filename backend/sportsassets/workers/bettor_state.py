@@ -38,6 +38,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+from .. import bettor_sport_mapping as sportmap
 from .. import bettor_state_capture as sc
 from .. import bettor_state_store as sstore
 from .. import pmus
@@ -143,11 +144,26 @@ async def _candidates(pool) -> list:
         if not ok:
             continue
         slug = r["market_slug"]
+        # THE VENUE'S OWN SPORT AND LEAGUE, MAPPED. Every row written
+        # before this carried sport = NOT_IDENTIFIED, because the
+        # subject was built here without ever calling the mapper --
+        # exactly the defect the sibling lane was fixed for on
+        # 2026-09-20, reintroduced in a new worker. The raw strings
+        # travel alongside so a row can be re-derived when the mapping
+        # changes, and it will: the venue adds leagues.
+        cls = sportmap.classify(sports_type=r["sports_type"],
+                                team_league=r["team_league"])
         cand = {
             "identifier": slug, "symbol": slug, "marketId": slug,
             "eventId": r["event_slug"], "outcomeLeg": r["side_norm"],
-            "kind": r["kind"], "sportSourceRaw": r["sports_type"],
+            "kind": r["kind"],
+            "sport": (cls["SPORT"] if cls["SPORT"] != sc.NOT_IDENTIFIED
+                      else None),
+            "league": (cls["LEAGUE"] if cls["LEAGUE"] != sc.NOT_IDENTIFIED
+                       else None),
+            "sportSourceRaw": r["sports_type"],
             "leagueSourceRaw": r["team_league"],
+            "sportUnresolvedReason": cls["UNRESOLVED_MAPPING_REASON"],
             "gameStart": r["game_start"],
             "legIdentifier": r["identifier"],
         }
