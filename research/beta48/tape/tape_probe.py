@@ -302,9 +302,30 @@ def landing_shape(text, url):
     }
 
 
+def _file_date(url):
+    m = re.search(r"/(\d{8})-time-and-sales\.csv", url or "")
+    return m.group(1) if m else None
+
+
 def probe(outdir: Path, max_files: int = 1) -> dict:
-    """Fetch, then measure. Returns the §B block."""
-    summary = TC.capture(outdir, max_files=max_files)
+    """Fetch, then measure. Returns the §B block.
+
+    NEWEST FIRST, AND SAID SO. The manifest lists 651 daily files
+    oldest-first, and the first fetch took the oldest -- 2025-10-29,
+    eleven months back, header only and zero rows. That is a fact about
+    that day, not about the tape, and reading it as "the tape is empty"
+    would have been exactly the wrong conclusion.
+    ORDER IS NOT SELECTION: every fetched file's row count is reported,
+    so a run that happens to hit empty days shows them rather than
+    hiding them behind whichever file had data.
+    """
+    summary = TC.capture(outdir, max_files=0)
+    links = list(summary.get("csv_links_found") or [])
+    tape_links = [u for u in links if _file_date(u)]
+    tape_links.sort(key=_file_date)
+    if tape_links and max_files:
+        chosen = list(reversed(tape_links))[:int(max_files)]
+        summary = TC.capture_specific(outdir, chosen, summary)
     raw = outdir / "tape_raw.jsonl"
     csv_rows = []
     if raw.exists():
@@ -347,6 +368,22 @@ def probe(outdir: Path, max_files: int = 1) -> dict:
         "TAPE_VOLUME_IS_UPPER_BOUND_ON_CLOB_VOLUME":
             summary.get("TAPE_VOLUME_IS_UPPER_BOUND_ON_CLOB_VOLUME"),
         "landingPageShape": landings,
+        "TAPE_FILE_DATE_RANGE": {
+            "earliest": min((_file_date(u) for u in
+                             (summary.get("csv_links_found") or [])
+                             if _file_date(u)), default=NOT_IDENTIFIED),
+            "latest": max((_file_date(u) for u in
+                           (summary.get("csv_links_found") or [])
+                           if _file_date(u)), default=NOT_IDENTIFIED),
+            "timeAndSalesFiles": sum(
+                1 for u in (summary.get("csv_links_found") or [])
+                if _file_date(u)),
+        },
+        "perFileRows": [
+            {"url": r.get("url"), "bytes": r.get("bytes"),
+             "rows": max(0, len((r.get("text") or "").strip()
+                                .splitlines()) - 1)}
+            for r in csv_rows if r.get("http_status") == 200],
         "attemptedFiles": [
             {"url": r.get("url"), "http_status": r.get("http_status"),
              "bytes": r.get("bytes"), "error": r.get("error")}

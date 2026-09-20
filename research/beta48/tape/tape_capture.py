@@ -364,6 +364,34 @@ def capture(outdir: Path, max_files: int = 0) -> dict:
     return summary
 
 
+def capture_specific(outdir: Path, urls, summary) -> dict:
+    """Fetch these exact URLs, which discovery already produced.
+
+    Separate from `capture` so the discovery walk is not repeated for
+    every file, and so the URL list is visibly one the venue's own
+    manifest named rather than one this function invented -- the host
+    assertion on every request still enforces that.
+    """
+    outdir.mkdir(parents=True, exist_ok=True)
+    pacer = Pacer()
+    raw = outdir / "tape_raw.jsonl"
+    with httpx.Client(headers={"User-Agent": CAPTURE_VERSION}) as client, \
+            raw.open("a") as fh:
+        for url in urls:
+            row = fetch(client, pacer, url)
+            hdr = parse_header(row.get("text"))
+            fh.write(json.dumps({"kind": "CSV", **row, **hdr}) + "\n")
+            summary.setdefault("files_fetched", []).append(
+                {"url": url, "http_status": row["http_status"],
+                 "bytes": row["bytes"], "sha256": row["sha256"], **hdr})
+            if summary.get("HEADER_MATCHES_DOCUMENTATION") in (
+                    None, "NOT_IDENTIFIED"):
+                summary["HEADER_MATCHES_DOCUMENTATION"] = \
+                    hdr["HEADER_MATCHES_DOCUMENTATION"]
+    (outdir / "tape_summary.json").write_text(json.dumps(summary, indent=1))
+    return summary
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--out", required=True)
