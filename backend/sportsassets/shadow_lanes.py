@@ -3,6 +3,23 @@
 Owner directive 2026-09-19: build both, do not choose mirror-only, and
 do not invent P_BETTOR merely to make the BETTOR lane produce trades.
 
+WHERE THIS SITS (owner hierarchy correction, 2026-09-20):
+
+  BETTOR EV ENGINE            primary
+  BETTOR EXPERIMENTAL LAB     primary research
+  WHALE INTELLIGENCE          the multi-whale research layer
+  RN1                         ONE SPECIALIST inside it
+
+RN1_SHADOW below is a lane name and an evidence key, frozen because
+rows carry it; it is NOT the name of the whale layer. The studied
+population is a roster -- FerrariChampions2026, RN1, SwissTony,
+HomeRunHazard, kch123, w2c33 and the tracked roster beside them -- and
+their economics differ in ways that must not be collapsed into one
+RN1-shaped mechanism: pair/completion, directional/hold, residual
+inventory, settlement leakage, exit behaviour, capital recycling.
+`whale_roster.py` holds those distinctions; the lineage rule below
+speaks about WHALE provenance, with RN1 as one member.
+
   LANE A  RN1_SHADOW        "what would have happened if BETTOR
                             prospectively observed RN1 and applied its
                             OWN latency, execution, pairing, cash-out
@@ -82,6 +99,46 @@ RN1_PROVENANCES = frozenset({
     PROV_RN1_ACTION, PROV_RN1_ACCOUNT_IDENTITY, PROV_RN1_FUTURE_ACTION,
     PROV_RN1_DERIVED_TARGET, PROV_RN1_MIRROR_DECISION})
 
+# ── THE SAME FIVE KINDS, FOR ANY WHALE ───────────────────────────────
+#
+# HIERARCHY CORRECTION (owner, 2026-09-20). RN1 is ONE SPECIALIST
+# inside WHALE INTELLIGENCE, not the name of the layer. The five
+# provenances above describe KINDS of whale evidence -- an action, an
+# account identity, a future action, a derived target, a mirror
+# decision -- and nothing about them was ever specific to RN1. Written
+# as RN1-only, this registry could not express a feature derived from
+# FerrariChampions2026 or SwissTony at all.
+#
+# WHY THE RN1 STRINGS ARE NOT RENAMED. They are on rows already
+# written, and a provenance is a claim about where a feature came from.
+# Rewriting "RN1_ACTION" to "WHALE_ACTION" on historical evidence would
+# make every one of those rows say something slightly less true than
+# what was actually recorded. So the five stay exactly as they are, as
+# the RN1 member of the set, and the general kinds are added beside
+# them. A feature derived from another whale declares the general kind
+# plus that whale's identity; it never borrows RN1's word.
+#
+# WHAT THIS DOES NOT CHANGE: the rule still fails closed. Before this,
+# a SwissTony-derived feature was refused as AMBIGUOUS -- safe, but for
+# the wrong reason, and indistinguishable from a typo. Now it is
+# refused as WHALE provenance in the independent lane, which is the
+# true reason.
+
+PROV_WHALE_ACTION = "WHALE_ACTION"
+PROV_WHALE_ACCOUNT_IDENTITY = "WHALE_ACCOUNT_IDENTITY"
+PROV_WHALE_FUTURE_ACTION = "WHALE_FUTURE_ACTION"
+PROV_WHALE_DERIVED_TARGET = "WHALE_DERIVED_TARGET"
+PROV_WHALE_MIRROR_DECISION = "WHALE_MIRROR_DECISION"
+
+GENERIC_WHALE_PROVENANCES = frozenset({
+    PROV_WHALE_ACTION, PROV_WHALE_ACCOUNT_IDENTITY,
+    PROV_WHALE_FUTURE_ACTION, PROV_WHALE_DERIVED_TARGET,
+    PROV_WHALE_MIRROR_DECISION})
+
+# EVERY provenance that carries another trader's opinion, whoever the
+# trader is. This is the set the independent lane must refuse.
+WHALE_PROVENANCES = RN1_PROVENANCES | GENERIC_WHALE_PROVENANCES
+
 # The independent lane's admissible sources. Note what is NOT here.
 PROV_MARKET_MICROSTRUCTURE = "MARKET_MICROSTRUCTURE"
 PROV_L2 = "L2"
@@ -102,7 +159,7 @@ INDEPENDENT_PROVENANCES = frozenset({
     PROV_SPORT_FUNDAMENTALS, PROV_PLAYER_DATA, PROV_MODEL_DISAGREEMENT,
     PROV_SHORT_HORIZON_PRICE, PROV_EXECUTION_STATE})
 
-DECLARED_PROVENANCES = RN1_PROVENANCES | INDEPENDENT_PROVENANCES
+DECLARED_PROVENANCES = WHALE_PROVENANCES | INDEPENDENT_PROVENANCES
 
 
 def assert_lineage(lane: str, features, specialist=None) -> dict:
@@ -114,9 +171,16 @@ def assert_lineage(lane: str, features, specialist=None) -> dict:
     unknown case is the refused case, not the permitted one.
 
     The one exception management allowed: a model explicitly registered
-    as an RN1 specialist may carry RN1 provenance. When it does, the
-    fact travels on the record as `rn1FeaturesUsed`, so nothing is
+    as a WHALE SPECIALIST may carry whale provenance. When it does, the
+    fact travels on the record as `whaleFeaturesUsed`, so nothing is
     silently reclassified as independent later.
+
+    THE SPECIALIST IS NAMED, not merely flagged (2026-09-20). A model
+    registered as an RN1 specialist has no business reading
+    FerrariChampions2026's flow under that registration; `whaleSpecialist`
+    carries WHICH whale, and a specialist registered for one whale does
+    not license another's evidence. `rn1Specialist: True` keeps working
+    and means exactly the RN1 registration it always meant.
     """
     if lane not in LANES:
         raise LaneViolation("refused: %r is not a lane" % lane)
@@ -136,24 +200,54 @@ def assert_lineage(lane: str, features, specialist=None) -> dict:
             "contamination enters a dataset meant to prove independence."
             % ", ".join(sorted(undeclared)))
 
+    whale_used = sorted(name for name, prov in declared.items()
+                        if prov in WHALE_PROVENANCES)
     rn1_used = sorted(name for name, prov in declared.items()
                       if prov in RN1_PROVENANCES)
+    generic_used = sorted(name for name, prov in declared.items()
+                          if prov in GENERIC_WHALE_PROVENANCES)
 
-    if lane == BETTOR_EV_SHADOW and rn1_used:
-        registered = bool(specialist
-                          and specialist.get("rn1Specialist") is True)
-        if not registered:
+    spec = specialist or {}
+    # WHICH WHALE this model is registered to read. The legacy boolean
+    # is read as the RN1 registration it always was.
+    of_whale = str(spec.get("whaleSpecialist") or "").strip()
+    if not of_whale and spec.get("rn1Specialist") is True:
+        of_whale = SIGNAL_RN1
+
+    if lane == BETTOR_EV_SHADOW and whale_used:
+        if not of_whale:
+            # NAME THE WHALE WHEN THE PROVENANCE NAMES ONE. "did not
+            # look at another trader" is true but vague; "did not look
+            # at RN1" is the sentence somebody can check.
+            whose = (SIGNAL_RN1 if rn1_used and not generic_used
+                     else "another trader")
             raise LineageViolation(
-                "refused: %s carries RN1 provenance (%s) and no model is "
-                "registered as an RN1 specialist. The independent lane's "
-                "whole claim is that it did not look at RN1."
-                % (BETTOR_EV_SHADOW, ", ".join(rn1_used)))
+                "refused: %s carries whale provenance (%s) and no model "
+                "is registered as a whale specialist. The independent "
+                "lane's whole claim is that it did not look at %s."
+                % (BETTOR_EV_SHADOW, ", ".join(whale_used), whose))
+        # A SPECIALIST IN ONE WHALE IS NOT A SPECIALIST IN ANOTHER.
+        # RN1's provenances name RN1 explicitly, so a registration for
+        # somebody else does not license them.
+        if rn1_used and of_whale != SIGNAL_RN1:
+            raise LineageViolation(
+                "refused: %s carries RN1 provenance (%s) under a "
+                "specialist registered for %r. A specialist in one whale "
+                "is not a specialist in another, and RN1's flow is not "
+                "evidence that registration asked for."
+                % (BETTOR_EV_SHADOW, ", ".join(rn1_used), of_whale))
 
     return {"lane": lane,
             "featureLineage": declared,
+            # THE GENERAL FACT FIRST, the RN1 one kept beside it so no
+            # existing reader of this record changes meaning.
+            "whaleFeaturesUsed": bool(whale_used),
+            "whaleFeatures": whale_used,
+            "whaleSpecialist": of_whale or None,
             "rn1FeaturesUsed": bool(rn1_used),
             "rn1Features": rn1_used,
-            "specialist": (specialist or {}).get("specialistId")}
+            "genericWhaleFeatures": generic_used,
+            "specialist": spec.get("specialistId")}
 
 
 # ── 4. THREE PROBABILITY OBJECTS, NEVER COLLAPSED ────────────────────
