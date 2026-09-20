@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from .. import shadow as sh
 from .. import shadow_experiment_registry as reg
 from .. import shadow_experimental_markouts as mk
+from .. import shadow_experimental_store as xstore
 from .. import shadow_experiments as xp
 
 LANE = xp.EXPERIMENTAL_LANE
@@ -62,6 +63,11 @@ class RetrievalIncomplete(RuntimeError):
         super().__init__("%s: %s" % (what, cause))
         self.what = what
         self.cause = cause
+
+
+# THE FUNNEL'S WINDOW. A day, so the screen answers "why is there no
+# activity TODAY" rather than averaging today into a week.
+FUNNEL_WINDOW_S = 86400
 
 
 def _f(v):
@@ -249,6 +255,20 @@ async def summary(pool) -> dict:
     refusals = await _guard(pool, "experimental refusals", _REFUSALS)
     coverage = await _guard(pool, "markout coverage", _MARKOUT_COVERAGE)
 
+    # THE FUNNEL (owner 2026-09-20): "instrument the funnel so
+    # management can see why activity is or is not occurring." It is
+    # computed from the same append-only rows the rest of this panel
+    # reads, never from a separate counter that could disagree with
+    # them. A window of 24 h so the screen answers about today.
+    try:
+        funnel = await xstore.funnel(pool, window_s=FUNNEL_WINDOW_S)
+    except Exception as exc:                                   # noqa: BLE001
+        # A PANEL THAT LOSES ONE SECTION STILL SHOWS THE REST. The
+        # failure is named on the screen rather than rendering zeros,
+        # because a funnel of zeros and an unavailable funnel are
+        # different facts and only one of them means "no activity".
+        funnel = {"unavailable": "%s: %s" % (type(exc).__name__, exc)}
+
     leaderboard = []
     for r in by_exp:
         marked = int(r["marked_n"] or 0)
@@ -282,6 +302,9 @@ async def summary(pool) -> dict:
         "refusals": [{"executionStatus": r["execution_status"],
                       "action": r["action"], "n": int(r["n"]),
                       "why": r["why"] or None} for r in refusals],
+        # §11's funnel, in the directive's own names so the screen and
+        # the order use one vocabulary.
+        "funnel": funnel,
         "markoutCoverage": [
             {"horizon": r["horizon"], "status": r["status"],
              "n": int(r["n"]), "medianLagMs": _f(r["median_lag_ms"]),

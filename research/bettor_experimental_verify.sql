@@ -300,3 +300,88 @@ SELECT 'STALE_BOOK_FILLED|' || count(*) FILTER (
              WHERE model_compute_ms < 0)
   FROM bettor_experimental_decisions
  WHERE evidence_environment = 'DIRECT_INSTITUTIONAL_WORKER';
+
+\echo ''
+\echo '--- 19. THE FUNNEL: why activity is or is not occurring ---'
+-- Owner 2026-09-20. Every bucket is a predicate over rows that already
+-- exist, so the funnel cannot disagree with the ledger it describes.
+-- The NO_TRADE split is exhaustive because X1's frozen gate emits
+-- exactly two reasons (SPREAD_NOT_IDENTIFIED, SPREAD_ABOVE_FROZEN_MAX)
+-- and returns nothing otherwise; the remainder is printed so the
+-- partition can be checked rather than trusted.
+SELECT 'FUNNEL_24H'
+       || '|OPPORTUNITIES=' || (
+              SELECT count(*) FROM bettor_experimental_observations
+               WHERE observed_at > now() - interval '24 hours')
+       || '|X1_ELIGIBLE=' || count(*) FILTER (
+              WHERE experiment_id = 'X1_SHORT_HORIZON_DIRECTION')
+       || '|NO_TRADE_SPREAD=' || count(*) FILTER (
+              WHERE action = 'NO_TRADE' AND why LIKE 'SPREAD\_%')
+       || '|NO_TRADE_SIGNAL=' || count(*) FILTER (
+              WHERE action = 'NO_TRADE'
+                AND (why IS NULL OR why NOT LIKE 'SPREAD\_%'))
+       || '|BUY_YES=' || count(*) FILTER (WHERE action = 'BUY_YES')
+       || '|BUY_NO=' || count(*) FILTER (WHERE action = 'BUY_NO')
+       || '|BUY_BLOCKED_IDENTITY=' || count(*) FILTER (
+              WHERE action LIKE 'BUY%'
+                AND execution_status =
+                    'BLOCKED_IDENTITY_NOT_EXECUTION_ELIGIBLE')
+       || '|BUY_BLOCKED_STALE_BOOK=' || count(*) FILTER (
+              WHERE action LIKE 'BUY%'
+                AND book_freshness_status IN ('STALE', 'ABSENT'))
+       || '|BUY_EXECUTED=' || count(*) FILTER (
+              WHERE action LIKE 'BUY%'
+                AND COALESCE(executed_notional_usd, 0) > 0)
+       || '|PARTIAL_FILLS=' || count(*) FILTER (
+              WHERE COALESCE(executed_notional_usd, 0) > 0
+                AND COALESCE(unfilled_notional_usd, 0) > 0)
+       || '|FULL_FILLS=' || count(*) FILTER (
+              WHERE COALESCE(executed_notional_usd, 0) > 0
+                AND COALESCE(unfilled_notional_usd, 0) = 0)
+       || '|UNACCOUNTED_BUYS=' || count(*) FILTER (
+              WHERE action LIKE 'BUY%'
+                AND COALESCE(executed_notional_usd, 0) = 0
+                AND execution_status <>
+                    'BLOCKED_IDENTITY_NOT_EXECUTION_ELIGIBLE'
+                AND (book_freshness_status IS NULL
+                     OR book_freshness_status NOT IN ('STALE', 'ABSENT')))
+  FROM bettor_experimental_decisions
+ WHERE decision_timestamp > now() - interval '24 hours';
+
+\echo ''
+\echo '--- 20. THE IDENTITY CENSUS: is the funnel quiet or is it empty? ---'
+-- Zero trades with zero eligible markets and zero trades with eight
+-- eligible markets are different situations. This says which.
+WITH current_binding AS (
+    SELECT DISTINCT ON (market_id, outcome_leg) *
+      FROM bettor_identity_bindings
+     ORDER BY market_id, outcome_leg, resolved_at DESC
+)
+SELECT 'IDENTITY'
+       || '|MARKETS_BOUND=' || count(DISTINCT market_id)
+       || '|YES_EXECUTION_ELIGIBLE=' || count(*) FILTER (
+              WHERE execution_eligible AND outcome_leg IN ('yes', 'long'))
+       || '|NO_EXECUTION_ELIGIBLE=' || count(*) FILTER (
+              WHERE execution_eligible AND outcome_leg IN ('no', 'short'))
+       || '|EXACT=' || count(*) FILTER (
+              WHERE identity_status = 'EXACT_SAME_CONTRACT')
+       || '|COMPLEMENT_PENDING=' || count(*) FILTER (
+              WHERE identity_status LIKE 'STRUCTURALLY%')
+       || '|AMBIGUOUS=' || count(*) FILTER (
+              WHERE identity_status = 'AMBIGUOUS')
+       || '|UNRESOLVED=' || count(*) FILTER (
+              WHERE identity_status = 'NOT_IDENTIFIED')
+       || '|PROSE_CONFLICTS=' || count(*) FILTER (
+              WHERE settlement_prose_conflict IS NOT NULL)
+  FROM current_binding;
+
+\echo ''
+\echo '--- 21. THE NO_TRADE REASONS, in the frozen rule own words ---'
+SELECT 'why|' || COALESCE(why, 'NULL')
+       || '|n=' || count(*)
+       || '|markets=' || count(DISTINCT market_id)
+  FROM bettor_experimental_decisions
+ WHERE action = 'NO_TRADE'
+   AND decision_timestamp > now() - interval '24 hours'
+ GROUP BY why
+ ORDER BY count(*) DESC LIMIT 12;

@@ -964,3 +964,152 @@ IDENTITY_CENSUS_SQL = """
 async def identity_census(pool) -> list:
     """Every market's CURRENT binding, for §6's report."""
     return [dict(r) for r in await pool.fetch(IDENTITY_CENSUS_SQL)]
+
+
+# ── THE FUNNEL: why activity is or is not occurring ──────────────────
+#
+# Owner directive 2026-09-20: "instrument the funnel so management can
+# see why activity is or is not occurring."
+#
+# DERIVED FROM THE LEDGER, NOT COUNTED ALONGSIDE IT. Every bucket below
+# is a predicate over rows that already exist, so the funnel cannot
+# drift from the evidence it describes and cannot be wrong in a way the
+# rows are right. A counter incremented in the worker would be a second
+# account of the same events, and the two would disagree the first time
+# a tick died between the increment and the insert.
+#
+# THE NO_TRADE SPLIT IS EXHAUSTIVE AND COMES FROM THE CODE. X1's frozen
+# gate (`shadow_experiment_signals.m1_gate`) emits exactly two reasons,
+# SPREAD_NOT_IDENTIFIED and SPREAD_ABOVE_FROZEN_MAX, and returns None
+# otherwise; every other NO_TRADE therefore came from the direction
+# signal. So `why LIKE 'SPREAD_%'` partitions the two with nothing left
+# over, and the SQL asserts that by also counting the remainder.
+#
+# NOTHING HERE TUNES ANYTHING. It reads. The frozen spread threshold,
+# the lookback and the thresholds are untouched by this file.
+
+FUNNEL_SQL = """
+    WITH d AS (
+        SELECT * FROM bettor_experimental_decisions
+         WHERE decision_timestamp > now() - ($1 || ' seconds')::interval
+    ),
+    obs AS (
+        SELECT count(*) AS n
+          FROM bettor_experimental_observations
+         WHERE observed_at > now() - ($1 || ' seconds')::interval
+    )
+    SELECT
+      (SELECT n FROM obs)                                AS opportunities,
+      count(*)                                           AS decisions,
+      count(*) FILTER (WHERE experiment_id = $2)         AS x1_eligible,
+      count(*) FILTER (WHERE action = 'NO_TRADE'
+                         AND why LIKE 'SPREAD\\_%')       AS no_trade_spread,
+      count(*) FILTER (WHERE action = 'NO_TRADE'
+                         AND (why IS NULL
+                              OR why NOT LIKE 'SPREAD\\_%')) AS no_trade_signal,
+      count(*) FILTER (WHERE action = 'BUY_YES')         AS buy_yes,
+      count(*) FILTER (WHERE action = 'BUY_NO')          AS buy_no,
+      count(*) FILTER (WHERE action LIKE 'BUY%'
+                         AND execution_status =
+                             'BLOCKED_IDENTITY_NOT_EXECUTION_ELIGIBLE')
+                                                         AS buy_blocked_identity,
+      count(*) FILTER (WHERE action LIKE 'BUY%'
+                         AND book_freshness_status IN ('STALE', 'ABSENT'))
+                                                         AS buy_blocked_stale_book,
+      count(*) FILTER (WHERE action LIKE 'BUY%'
+                         AND COALESCE(executed_notional_usd, 0) > 0)
+                                                         AS buy_executed,
+      count(*) FILTER (WHERE COALESCE(executed_notional_usd, 0) > 0
+                         AND COALESCE(unfilled_notional_usd, 0) > 0)
+                                                         AS partial_fills,
+      count(*) FILTER (WHERE COALESCE(executed_notional_usd, 0) > 0
+                         AND COALESCE(unfilled_notional_usd, 0) = 0)
+                                                         AS full_fills,
+      -- THE REMAINDER, printed so the partition can be checked rather
+      -- than trusted: a BUY that is neither executed nor blocked by
+      -- identity nor blocked by a stale book is a bucket nobody named.
+      count(*) FILTER (WHERE action LIKE 'BUY%'
+                         AND COALESCE(executed_notional_usd, 0) = 0
+                         AND execution_status <>
+                             'BLOCKED_IDENTITY_NOT_EXECUTION_ELIGIBLE'
+                         AND (book_freshness_status IS NULL
+                              OR book_freshness_status NOT IN
+                                 ('STALE', 'ABSENT')))   AS buy_unaccounted,
+      count(*) FILTER (WHERE action NOT IN ('NO_TRADE', 'BUY_YES', 'BUY_NO'))
+                                                         AS action_unaccounted
+      FROM d
+"""
+
+# The identity side of the funnel is a different table, and a market
+# that is eligible but has produced no decision yet is exactly the
+# thing management wants to see BEFORE a trade appears.
+FUNNEL_IDENTITY_SQL = """
+    WITH current_binding AS (
+        SELECT DISTINCT ON (market_id, outcome_leg) *
+          FROM bettor_identity_bindings
+         ORDER BY market_id, outcome_leg, resolved_at DESC
+    )
+    SELECT count(DISTINCT market_id)                     AS markets,
+           count(*) FILTER (WHERE execution_eligible
+                              AND outcome_leg IN ('yes', 'long'))
+                                                         AS yes_eligible,
+           count(*) FILTER (WHERE execution_eligible
+                              AND outcome_leg IN ('no', 'short'))
+                                                         AS no_eligible,
+           count(*) FILTER (WHERE identity_status = 'EXACT_SAME_CONTRACT')
+                                                         AS exact,
+           count(*) FILTER (WHERE identity_status LIKE 'STRUCTURALLY%')
+                                                         AS complement_pending,
+           count(*) FILTER (WHERE identity_status = 'AMBIGUOUS')
+                                                         AS ambiguous,
+           count(*) FILTER (WHERE identity_status = 'NOT_IDENTIFIED')
+                                                         AS unresolved,
+           count(*) FILTER (WHERE settlement_prose_conflict IS NOT NULL)
+                                                         AS prose_conflicts
+      FROM current_binding
+"""
+
+
+async def funnel(pool, *, window_s=86400, experiment_id="X1_SHORT_HORIZON_"
+                                                        "DIRECTION") -> dict:
+    """WHY ACTIVITY IS OR IS NOT OCCURRING, in the directive's own names.
+
+    Read-only. Every number is a count of rows that already exist.
+    """
+    row = await pool.fetchrow(FUNNEL_SQL, str(int(window_s)), experiment_id)
+    ident_row = await pool.fetchrow(FUNNEL_IDENTITY_SQL)
+    r, i = dict(row or {}), dict(ident_row or {})
+
+    out = {
+        "OPPORTUNITIES": r.get("opportunities") or 0,
+        "X1_ELIGIBLE": r.get("x1_eligible") or 0,
+        "NO_TRADE_SPREAD": r.get("no_trade_spread") or 0,
+        "NO_TRADE_SIGNAL": r.get("no_trade_signal") or 0,
+        "BUY_YES": r.get("buy_yes") or 0,
+        "BUY_NO": r.get("buy_no") or 0,
+        "BUY_BLOCKED_IDENTITY": r.get("buy_blocked_identity") or 0,
+        "BUY_BLOCKED_STALE_BOOK": r.get("buy_blocked_stale_book") or 0,
+        "BUY_EXECUTED": r.get("buy_executed") or 0,
+        "PARTIAL_FILLS": r.get("partial_fills") or 0,
+        "FULL_FILLS": r.get("full_fills") or 0,
+    }
+    out["identity"] = {
+        "MARKETS_BOUND": i.get("markets") or 0,
+        "YES_EXECUTION_ELIGIBLE": i.get("yes_eligible") or 0,
+        "NO_EXECUTION_ELIGIBLE": i.get("no_eligible") or 0,
+        "EXACT_SAME_CONTRACT": i.get("exact") or 0,
+        "COMPLEMENT_PENDING": i.get("complement_pending") or 0,
+        "AMBIGUOUS": i.get("ambiguous") or 0,
+        "UNRESOLVED": i.get("unresolved") or 0,
+        "SETTLEMENT_PROSE_CONFLICTS": i.get("prose_conflicts") or 0,
+    }
+    # THE PARTITION, CHECKED RATHER THAN ASSUMED. If either remainder is
+    # non-zero a decision landed in a bucket nobody named, and the
+    # funnel says so instead of quietly losing it.
+    out["unaccounted"] = {
+        "BUY_ROWS_IN_NO_NAMED_BUCKET": r.get("buy_unaccounted") or 0,
+        "ACTIONS_OUTSIDE_THE_THREE": r.get("action_unaccounted") or 0,
+    }
+    out["decisions"] = r.get("decisions") or 0
+    out["windowSeconds"] = int(window_s)
+    return out
