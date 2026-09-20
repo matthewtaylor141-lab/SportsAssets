@@ -23,12 +23,12 @@ from collections.abc import Awaitable, Callable
 
 from .. import procmem
 from ..db import heartbeat
-from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
-               institutional_md, metadata_refresher, mirror_live,
-               mirror_shadow, poller, premap, price_path, reconciler,
-               retention, rn1_observability, roster, roster_auto,
-               shadow_bettor, shadow_experimental, shadow_rn1, underdog,
-               whale_exits)
+from . import (analytics, bettor_state, chain_listener, copy_sweep,
+               dispatcher, edge_marks, institutional_md,
+               metadata_refresher, mirror_live, mirror_shadow, poller,
+               premap, price_path, reconciler, retention,
+               rn1_observability, roster, roster_auto, shadow_bettor,
+               shadow_experimental, shadow_rn1, underdog, whale_exits)
 
 # THE ARENA CAP, AT IMPORT (2026-09-05). sportsassets-workers was
 # OOM-killed at 2 GiB thirteen times between 17:59:41 and 20:21:49:
@@ -348,6 +348,25 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # universe and keeps collecting while RN1 is idle, or while fill
     # detection itself is down. MEASUREMENT ONLY, same guarantees.
     ("shadow_bettor", shadow_bettor.run),
+    # THE UNSELECTED PROSPECTIVE STATE CAPTURE (2026-09-20, approved).
+    # READ ONLY: no order path in its import graph, no capital, no
+    # mandate, and nothing it writes is a fill.
+    #
+    # It is a SEPARATE loop from shadow_bettor and not a mode of it,
+    # because the two have incompatible sampling rules and merging them
+    # would mean one of the rules quietly winning. shadow_bettor orders
+    # its universe by updated_at DESC, which selects on recent venue
+    # activity -- correct for a decision lane watching live markets,
+    # fatal for a frame whose whole value is that selection is
+    # independent of economics. This loop takes the WHOLE eligible set
+    # and lets a hash of the identifier decide.
+    #
+    # It measures object A -- E[SETTLEMENT - QUOTE | STATE] -- and no
+    # other object. It does not observe whether a hypothetical resting
+    # order would have filled, so it leaves FILL-selection bias exactly
+    # where it was, and the name that would claim otherwise is refused
+    # in code.
+    ("bettor_state", bettor_state.run),
     # BETTOR_EXPERIMENTAL_SHADOW -- the research lane, registered AFTER
     # the decision-grade one and deliberately not a member of
     # lanes.LANES. It may not write a decision-grade row, and the

@@ -203,26 +203,74 @@ compound or be measured. It does not tell us the sign of the edge.
 
 ---
 
+## CORRECTION 2: BOOK + SETTLEMENT DOES NOT IDENTIFY MAKER
+## ADVERSE SELECTION
+
+An earlier revision of this section said:
+
+```
+"Prospective PMUS capture of book + settlement on an unselected
+ universe would measure unconditional adverse selection and does
+ not need P_FILL."                                   <-- RETRACTED
+```
+
+**Too strong.** Adverse selection for a maker is conditional on
+execution:
+
+```
+E[FUTURE VALUE - QUOTE PRICE | OUR RESTING QUOTE FILLED]
+```
+
+An unselected book + settlement dataset observes STATE, QUOTE and
+FUTURE VALUE. It does **not** observe whether our hypothetical resting
+order would have filled. So it removes STATE-selection bias and leaves
+**FILL-selection bias exactly where it was**.
+
+The quantity such a capture yields is therefore named
+
+```
+UNCONDITIONAL_QUOTE_TO_SETTLEMENT_VALUE
+```
+
+and the name `UNCONDITIONAL_MAKER_ADVERSE_SELECTION` is refused in code
+(`bettor_state_capture.forbidden_name`), because the name is the part
+of a statistic that survives into a summary.
+
+### The four objects, kept apart
+
+| | estimand | status |
+|---|---|---|
+| **A** state economics | `E[SETTLEMENT − QUOTE \| STATE]` | measurable prospectively, without P_FILL |
+| **B** fill probability | `P(FILL \| STATE, QUOTE)` | NOT_IDENTIFIED |
+| **C** fill-conditional adverse selection | `E[SETTLEMENT − QUOTE \| FILLED, STATE]` | NOT_IDENTIFIED |
+| **D** maker EV | combination of B, C, fees, rebates, inventory | NOT_IDENTIFIED |
+
+**Never substitute A for C. Never substitute A for D.**
+
+---
+
 ## WHAT WOULD ACTUALLY RESOLVE A AND B
 
-The binding unknown is **unconditional adverse selection on PMUS**:
-what a resting order earns against the mix of flow it actually meets,
-not against a specifically informed trader.
+The binding unknown for classes A and B is object **C** -- what a
+resting order earns against the flow it actually meets. Nothing
+currently available identifies it.
 
-On disk it cannot be measured. The PMUS book/outcome join is literally
-zero rows (`TRACK_P_DATA_ARCHAEOLOGY.md:15-19`: 30 slugs with a
-two-sided book, 10,257 with an outcome, intersection 0), and the only
+On disk it cannot be measured at all. The PMUS book/outcome join is
+literally zero rows (`TRACK_P_DATA_ARCHAEOLOGY.md:15-19`: 30 slugs with
+a two-sided book, 10,257 with an outcome, intersection 0), and the only
 depth+settlement dataset is ask-side only, on a different venue, and
 selected by RN1's trades.
 
-Options, none taken here:
+Two paths, and only the first is open:
 
-1. Prospective PMUS capture of book + settlement on an **unselected**
-   universe. Does not need P_FILL: it measures what happens to the
-   touch price after it is quoted, which is the adverse-selection term
-   itself. This is the cheapest open path and it is read-only.
-2. BETTOR's own admitted fills -- settles it exactly, requires an order
-   path and capital.
+1. **Prospective unselected PMUS capture** (`BETTOR_UNSELECTED_STATE_V1`,
+   started 2026-09-20). Read-only. It identifies object **A** and
+   builds the clean state frame -- which states later move adversely,
+   which price levels and spread regimes precede adverse movement. It
+   does **not** identify C, and it is not a substitute for it.
+2. **BETTOR's own admitted fills.** The only thing that identifies C
+   exactly. Requires an order path and capital, and neither is
+   authorised.
 
 ---
 
