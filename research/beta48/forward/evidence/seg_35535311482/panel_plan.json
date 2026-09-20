@@ -1,0 +1,81 @@
+{
+ "DATASET": "INCENTIVE_DEPTH_PANEL",
+ "NEVER_POOLED_WITH": "BREADTH_CENSUS",
+ "SAMPLING_FROZEN_BEFORE_ECONOMICS": "YES",
+ "SELECTION_INPUTS": [
+  "PROGRAM_TYPE",
+  "REWARD_POOL",
+  "TARGET_SIZE",
+  "DISCOUNT_FACTOR",
+  "PROGRAM_PERIOD",
+  "orderPriceMinTickSize",
+  "sportsMarketTypeV2"
+ ],
+ "PANEL_SELECTION_METHOD": "LEXICOGRAPHIC_WITHIN_FROZEN_STRATA",
+ "PANEL_SALT": null,
+ "SALT_FROZEN_BEFORE_OUTCOMES": "N/A",
+ "OUTCOME_LEAKAGE": "NO",
+ "per_stratum": 4,
+ "strata": 1,
+ "STRATUM_SLOTS_FILLED": 1,
+ "DISTINCT_MARKETS_READ": 1,
+ "OBSERVATION_UNIT": "ONE_BOOK_READ_PER_MARKET_PER_ROUND",
+ "ELIGIBILITY_NEVER_POOLED_ACROSS": "TARGET_SIZE",
+ "COMPOSITION": {
+  "SPORT_DISTRIBUTION": [
+   [
+    "cfb",
+    1
+   ]
+  ],
+  "LEAGUE_DISTRIBUTION": [
+   [
+    "aec-cfb-army",
+    1
+   ]
+  ],
+  "PROGRAM_TYPE_DISTRIBUTION": [
+   [
+    [
+     "liquidityProgram"
+    ],
+    1
+   ]
+  ],
+  "TARGET_SIZE_DISTRIBUTION": [
+   [
+    [
+     "15000"
+    ],
+    1
+   ]
+  ],
+  "TICK_SIZE_DISTRIBUTION": [
+   [
+    0.005,
+    1
+   ]
+  ],
+  "UNIQUE_MARKETS": 1,
+  "UNIQUE_EVENTS": 1,
+  "MAX_SINGLE_SPORT_SHARE": "100.0%",
+  "MAX_SINGLE_LEAGUE_SHARE": "100.0%",
+  "CONCENTRATION_IS_REPORTED_NOT_RESAMPLED": "YES"
+ },
+ "rounds": 3,
+ "plan": [
+  {
+   "stratum": [
+    "liquidityProgram",
+    "1450",
+    "15000",
+    "0.15",
+    "live",
+    "0.005",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 1,
+   "taken": 1
+  }
+ ]
+}
