@@ -68,11 +68,27 @@ and none even landed within 90s of it.
 
 ### Window activity is not cohort outcome
 
-| | |
-|---|---:|
-| follow-ups attempted in window ticks | 59 |
-| …belonging to the W3 cohort | 32 |
-| …belonging to **older** observations | 42 |
+**CORRECTED.** I first reported this as "59 window follow-ups = 32
+cohort + 42 older". Those do not reconcile — 32 + 42 = 74. They were
+counted on **different cutoffs**: 32 filtered on `observed_at` with no
+bound on `read_at`, while 42 filtered on `read_at`. A row observed
+inside the window but read after it lands in the 32 and in neither part
+of the 59.
+
+Re-counted on one cutoff, as distinct `(observation_id, horizon_s)`
+(run 180, 23:53:41Z):
+
+| | observed in window | observed earlier |
+|---|---:|---:|
+| **read in window** | **17** | **42** |
+| read after window | 27 | 18 |
+
+- read-in-window total = 17 + 42 = **59** = `fu_attempted` exactly.
+- `fu_failed` = **0**, so every attempt stored an outcome; attempts and
+  stored outcomes differ by nothing here, and that is measured rather
+  than assumed.
+- cohort outcomes = 17 collected **during** the window + 27 collected
+  **after** it = 44 at the time of that read.
 
 Older observations served in-window, by horizon — all LATE_RECOVERY:
 60s **9**, 300s **7**, 900s **10**, **3600s 16**.
@@ -83,18 +99,36 @@ cohort is at most 30 minutes old at close, so no cohort observation is
 3600s-due. Those 16 reads are evidence the rotation reaches 3600s. They
 are **not** cohort outcomes and are not used to pass any criterion.
 
-### Demand against capacity
+### Backlog and demand — the 17× claim is withdrawn
 
-| | W2 | **W3** |
-|---|---:|---:|
-| FU_DUE (true outstanding, summed over ticks) | 190 | **1010** |
-| FU_SELECTED | 64 | 59 |
-| FU_ATTEMPTED | 64 | 59 |
-| FU_ON_TIME | 13 | **0** |
-| FU_LATE | 51 | 59 |
+**I divided a sum of levels by a count of events.** `fu_due` is the
+outstanding backlog *at each tick*; summing it over 25 ticks counts the
+same waiting task up to 25 times. The 1010 is not demand, it cannot be
+compared with an attempt count, and the "17× shortfall" derived from it
+is withdrawn.
 
-Roughly 40 outstanding eligible reads per tick against ~2.4 attempted —
-a **17× shortfall**, against W2's 3×.
+**Backlog is a level**, measured once (23:53:41Z): 60s **5**, 300s
+**15**, 900s **12**, 3600s **12** — **44 tasks outstanding**, not 1010.
+
+**Demand is a flow.** Per minute over the preceding 60 minutes, each
+task counted once at the instant it opens or expires:
+
+| | per minute |
+|---|---:|
+| intake (observations admitted) | **1.43** |
+| follow-up tasks becoming newly eligible | **5.85** |
+| attempts completed | **2.03** |
+| tasks expiring unread | **4.02** |
+| ticks | 0.87 |
+
+These are comparable with each other. Intake creates **5.85** eligible
+tasks/min (≈ 1.43 × 4 horizons) against **2.03** completed — a **2.9×**
+shortfall, and **4.02 tasks/min expire unread**, about 69% of all
+follow-up work. Creation minus completion (3.82) matches expiry (4.02)
+to within transients, so the flows close.
+
+**Admitted observations do generate more follow-up work than capacity
+sustains**, and by a factor that no ordering rule can change.
 
 ---
 
@@ -103,8 +137,8 @@ a **17× shortfall**, against W2's 3×.
 | criterion | result |
 |---|---|
 | `COVERAGE_EVERY_HORIZON` — attempts > 0 at every horizon with eligible cohort demand | **PASS** for 60s (14), 300s (11), 900s (7). **3600s not yet evaluable** — 0 eligible, 49 not-yet-due. Deferred to Part 2, not scored as failure. |
-| `ON_TIME_300S` — ≥ 40% | **FAIL**, 0/49 = 0% |
-| `ON_TIME_900S` — > 0% | **FAIL**, 0/38 = 0% |
+| `ON_TIME_300S` — ≥ 40% | **PENDING** at window close, 0/49 observed. 10 tasks were still inside their recovery window. Re-scored at maturity. |
+| `ON_TIME_900S` — > 0% | **PENDING** at window close, 0/38 observed. **11 of 49 were not yet due** and 14 pending, so a zero here cannot establish final failure. Re-scored at maturity. |
 | `FAIL_IF` — any horizon with standing eligible demand receives zero attempts | **not triggered** |
 
 ## What W3 improves, and what remains inadequate
@@ -114,22 +148,33 @@ horizon with eligible demand received attempts, including 900s, which
 got zero in W2 against 22 eligible observations. 3600s was reached for
 the first time. Initial-read coverage also recovered, 35.3% → 41.5%.
 
-**Degrades timing.** On-time reads went **16 → 0**. Missing outcomes at
-60s went **0/41 → 28/49**. Every cohort read landed more than 90
-seconds past its horizon.
+**Degrades timing** — on the evidence available at window close, which
+for the timing criteria is provisional. Observed on-time reads went
+**16 → 0** and every cohort read landed more than 90 seconds past its
+horizon. Missing at 60s went 0/41 → 28/49. The timing criteria are
+scored PENDING above, not FAIL: immature observations could still
+change them, and are re-read in Part 2.
+
+**The queue trace says why.** Across the last 60 minutes, reads were
+taken at a median **538–549 seconds past their horizon at every
+horizon** — right at the 600-second expiry edge — and **1 read in 122
+landed inside its band**. `mids_due` orders oldest-first, so under
+overload it always selects the task nearest expiry. Every completion is
+a recovery.
 
 **What this does and does not establish.** Allocation and eligibility
 shipped together. The attempts and timing columns diagnose *behaviour*
 — they do not isolate each change's *causal contribution*, and I do not
 claim they do. The 60s on-time loss is consistent with at least three
 non-exclusive explanations: the per-horizon cap cutting 60s attempts
-from 41 to 14, the eligibility change, and a backlog that grew 5× per
-tick. This window cannot separate them.
+from 41 to 14, the eligibility change, and a standing backlog the
+queue serves at its expiry edge. This window cannot separate them.
 
-**A hypothesis for W4, not a conclusion.** `mids_due` orders
-oldest-first. With ~40 outstanding per tick and ~2.4 served, the oldest
-eligible observation is always far past its band, so a widened
-selectable window may never be reached — every read is a recovery of
+**Now supported by the queue trace, no longer only a hypothesis.**
+`mids_due` orders oldest-first. With 44 tasks outstanding and 2.03
+completed per minute, the oldest eligible task is always far past its
+band, so a widened selectable window is never reached — every read is a
+recovery of
 something long overdue. In W1 I tested the ordering hypothesis and
 **refuted** it, correctly: the queue was not being serviced at all then,
 so its order could not matter. It is now serviced, which is exactly the
