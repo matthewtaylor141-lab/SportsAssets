@@ -123,6 +123,26 @@ SELECT 'D_HORIZON_' || lpad(h.horizon::text, 4, '0'), k, v
        AND o.observed_at <  '2026-09-20T22:48:17Z'::timestamptz
        AND o.observed_at < now() - (h.horizon || ' seconds')::interval
     UNION ALL
+    -- NOT_YET_DUE completes the denominator: eligible + not-yet-due is
+    -- the whole cohort at every horizon, so nothing is dropped by
+    -- being too young to count.
+    SELECT 'NOT_YET_DUE', count(*)::text
+      FROM bettor_state_observations o
+     WHERE o.observed_at >= '2026-09-20T22:18:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T22:48:17Z'::timestamptz
+       AND o.observed_at >= now() - (h.horizon || ' seconds')::interval
+    UNION ALL
+    -- ALLOCATED ATTEMPTS, separate from their outcome. The owner's
+    -- distinction: a horizon receiving no attempts is a scheduling
+    -- defect; a horizon receiving attempts that land late is a timing
+    -- limitation. These are never the same finding.
+    SELECT 'ATTEMPTS_ANY_TIMING_CLASS', count(*)::text
+      FROM bettor_state_observations o
+      JOIN bettor_state_mids m ON m.observation_id = o.observation_id
+                              AND m.horizon_s = h.horizon
+     WHERE o.observed_at >= '2026-09-20T22:18:17Z'::timestamptz
+       AND o.observed_at <  '2026-09-20T22:48:17Z'::timestamptz
+    UNION ALL
     SELECT 'ON_TIME_GATE_ADMISSIBLE',
            count(*)::text
       FROM bettor_state_observations o
