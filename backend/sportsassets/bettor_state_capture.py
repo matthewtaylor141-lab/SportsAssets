@@ -281,9 +281,16 @@ MEASUREMENT_WINDOW_W2 = {
 
     # ── WHAT W2 CANNOT ESTABLISH ────────────────────────────────────
     "capacityRemainsInsufficient": (
-        "measured demand is ~14.6 reads/tick (8 sampling + ~6.6 "
-        "follow-up at the observed 2.2 arrivals/tick across the 60s, "
-        "300s and 900s horizons) against a capacity of 1-7 reads/tick. "
+        "CORRECTED. The earlier figure counted 3 follow-ups per "
+        "arrival, which is the number that come DUE inside a 30-minute "
+        "window, not the number an arrival eventually needs. Steady "
+        "state is 4 -- the 3600s horizon is not exempt, it is merely "
+        "not yet due when a short window closes. In actual tick units "
+        "(p50 spacing 72s, not the nominal 60s): arrivals 2.64/tick, "
+        "so WITHIN-WINDOW follow-up demand is 7.9/tick and STEADY "
+        "STATE is 10.6/tick, against 8 sampling wanted and a capacity "
+        "of 1-7 reads/tick. Short-window demand understates the "
+        "standing requirement by one horizon's worth. 
         "The system is CAPACITY-BOUND, not merely mis-scheduled. A "
         "reservation can only decide WHICH reads are lost, never "
         "eliminate the loss. Closing the gap needs fewer horizons, a "
