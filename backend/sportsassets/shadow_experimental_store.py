@@ -232,15 +232,95 @@ FOCUS_SQL = """
      ORDER BY symbol, observed_at DESC
 """
 
+# ── A FROZEN DATA-QUALITY EXCLUSION ──────────────────────────────────
+#
+# Owner 2026-09-20: two focus markets were sampled every tick and came
+# back MARKET_LEVEL_NOT_LEG_SPECIFIC with zero readable rows every
+# time. The decision-grade board lists them as YES-bound, so the
+# top-up kept re-adding them, they kept producing nothing usable, and
+# they kept occupying slots a market with a leg-specific book could
+# have had.
+#
+# "EXCLUDED ONLY AS A FROZEN DATA-QUALITY RULE INDEPENDENT OF MODEL
+# OUTPUT / P&L. Do not remove them because they perform badly; they
+# simply cannot provide the required leg-specific feature."
+#
+# THE RULE READS NO PRICE AND NO OUTCOME. It reads the BINDING and the
+# READABILITY of this lane's own samples, both of which are properties
+# of the feed. A market that has produced enough samples to judge and
+# not one leg-specific readable row among them cannot supply the
+# feature X1 requires, whatever it would have paid.
+#
+# IT IS EVIDENCE-BASED AND SELF-REVERSING. A market excluded today
+# re-enters the moment it produces a single leg-bound readable sample,
+# because the rule is a query over the samples rather than a list
+# somebody maintains.
+
+FOCUS_EXCLUSION_MIN_SAMPLES = 10
+FOCUS_EXCLUSION_RULE = (
+    "a focus market is excluded when it has produced at least %d "
+    "experimental samples in the window and NONE of them is both "
+    "readable and bound to the YES contract book; the market cannot "
+    "supply the leg-specific feature the frozen rule requires. Reads "
+    "binding and readability only -- never a price, a signal or a P&L."
+    % FOCUS_EXCLUSION_MIN_SAMPLES)
+FOCUS_EXCLUSION_RULE_SHA = hashlib.sha256(
+    FOCUS_EXCLUSION_RULE.encode()).hexdigest()[:16]
+
+# The symbols the rule removes, as a subquery both focus statements use.
+_NO_LEG_SPECIFIC_FEATURE = """
+        SELECT symbol
+          FROM bettor_experimental_observations
+         WHERE observed_at > now() - ($1 || ' seconds')::interval
+         GROUP BY symbol
+        HAVING count(*) >= {min_samples}
+           AND count(*) FILTER (WHERE readable IS TRUE
+                                  AND bbo_binding = '{bind_yes}') = 0
+""".format(min_samples=FOCUS_EXCLUSION_MIN_SAMPLES, bind_yes=l2.BIND_YES)
+
 FOCUS_TOPUP_SQL = """
     SELECT DISTINCT ON (symbol) symbol, outcome_leg, event_id
       FROM bettor_opportunities
      WHERE observed_at > now() - ($1 || ' seconds')::interval
        AND microstructure->>'bboBinding' = $2
        AND microstructure->>'status' = 'MEASURED'
+       AND symbol NOT IN (%s)
      ORDER BY symbol, observed_at DESC
      LIMIT $3
-"""
+""" % _NO_LEG_SPECIFIC_FEATURE
+
+
+FOCUS_EXCLUDED_SQL = """
+    SELECT symbol, count(*) AS samples,
+           count(*) FILTER (WHERE readable IS TRUE) AS readable,
+           max(bbo_binding) AS binding,
+           max(observed_at)  AS newest
+      FROM bettor_experimental_observations
+     WHERE observed_at > now() - ($1 || ' seconds')::interval
+     GROUP BY symbol
+    HAVING count(*) >= {min_samples}
+       AND count(*) FILTER (WHERE readable IS TRUE
+                              AND bbo_binding = '{bind_yes}') = 0
+     ORDER BY count(*) DESC
+""".format(min_samples=FOCUS_EXCLUSION_MIN_SAMPLES, bind_yes=l2.BIND_YES)
+
+
+async def focus_excluded(pool, *, window_s=7200) -> list:
+    """WHICH markets the data-quality rule is holding out, and why.
+
+    Reported rather than silent: a market quietly dropped from the
+    focus set looks identical to a market nobody ever found.
+    """
+    rows = await pool.fetch(FOCUS_EXCLUDED_SQL, str(int(window_s)))
+    return [{"symbol": r["symbol"], "samples": int(r["samples"]),
+             "readable": int(r["readable"] or 0),
+             "bboBinding": r["binding"],
+             "newest": r["newest"],
+             "why": "no readable YES-contract-book sample in %d "
+                    "observations; cannot supply the leg-specific "
+                    "feature" % int(r["samples"]),
+             "ruleSha": FOCUS_EXCLUSION_RULE_SHA}
+            for r in rows]
 
 
 async def focus_set(pool, *, size, hold_s=1800, discover_s=7200) -> list:

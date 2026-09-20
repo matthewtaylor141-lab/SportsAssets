@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from .. import shadow as sh
 from .. import shadow_experiment_registry as reg
 from .. import shadow_experimental_markouts as mk
+from .. import shadow_markout_observability as ob
 from .. import shadow_experimental_store as xstore
 from .. import shadow_experiments as xp
 
@@ -91,6 +92,23 @@ async def _guard(pool, what, sql, *args, one=False):
 # so a position with a 300S mark is valued on it rather than on its
 # 30S; a position with NO observed mark appears here not at all, which
 # is what keeps it out of the P&L rather than in it at zero.
+# WHICH HORIZONS MAY CARRY A P&L NUMBER. Owner 2026-09-20, from a
+# measured capture cadence of P50 60.95s / P95 63.98s: the 30S horizon
+# is UNOBSERVABLE at that frequency, because its 30s tolerance reaches
+# its 30s horizon and the admissible window therefore opens at the
+# decision instant -- a "30-second markout" is permitted to be the
+# entry book at zero elapsed time.
+#
+# THE ROWS ARE NOT TOUCHED. Every 30S markout ever written stays
+# exactly as written: not deleted, not rewritten, not converted to
+# zero. They simply stop being eligible to produce a performance
+# conclusion, and this statement is where that takes effect.
+#
+# A POSITION WHOSE ONLY MARK IS 30S BECOMES UNMARKED, not flat. The
+# panel already reports unmarked positions as having NO P&L rather
+# than zero P&L, which is the honest place for them.
+_PERFORMANCE_HORIZONS = "', '".join(sorted(ob.observable_horizons()))
+
 _MARKED = """
     SELECT DISTINCT ON (m.experimental_decision_id)
            m.experimental_decision_id, m.horizon,
@@ -98,10 +116,11 @@ _MARKED = """
       FROM bettor_experimental_markouts m
      WHERE m.status = 'OBSERVED'
        AND m.executable_markout_usd IS NOT NULL
+       AND m.horizon IN ('%s')
      ORDER BY m.experimental_decision_id,
               CASE m.horizon WHEN '300S' THEN 3 WHEN '60S' THEN 2
-                             WHEN '30S' THEN 1 ELSE 0 END DESC
-"""
+                             ELSE 0 END DESC
+""" % _PERFORMANCE_HORIZONS
 
 
 # ONE ROW PER DECISION WITH EACH HORIZON IN ITS OWN COLUMN. The excess
@@ -384,8 +403,15 @@ def vs_control(r) -> dict:
         "COMMON_SUPPORT_N": n,
         "X1_EXCESS_PNL": _excess(x1_pnl, ctl_pnl),
         "X1_EXCESS_RETURN": _excess(x1_ret, ctl_ret),
-        "EXCESS_30S_MARKOUT": _excess(_f(r.get("x1_h30")),
-                                      _f(r.get("ctl_h30"))),
+        # 30S IS NOT REPORTED AS A DIFFERENCE. The horizon is
+        # unobservable at the current capture frequency, so an "excess"
+        # built from it would be arithmetic on two numbers that cannot
+        # both be trusted to describe 30 seconds. The status is
+        # returned in its place.
+        "EXCESS_30S_MARKOUT": (
+            _excess(_f(r.get("x1_h30")), _f(r.get("ctl_h30")))
+            if "30S" in ob.observable_horizons() else None),
+        "EXCESS_30S_MARKOUT_STATUS": ob.by_horizon()["30S"]["status"],
         "EXCESS_60S_MARKOUT": _excess(_f(r.get("x1_h60")),
                                       _f(r.get("ctl_h60"))),
         "EXCESS_300S_MARKOUT": _excess(_f(r.get("x1_h300")),
@@ -421,6 +447,16 @@ async def summary(pool) -> dict:
             one=True))
     except Exception as exc:                                   # noqa: BLE001
         compare = {"unavailable": "%s: %s" % (type(exc).__name__, exc)}
+
+    # WHICH FOCUS MARKETS THE DATA-QUALITY RULE IS HOLDING OUT. Named
+    # on the panel rather than silently absent: a market dropped from
+    # the focus set with no explanation is indistinguishable from a
+    # market nobody ever found, and the difference is the whole point
+    # of the rule.
+    try:
+        excluded = await xstore.focus_excluded(pool)
+    except Exception as exc:                                   # noqa: BLE001
+        excluded = {"unavailable": "%s: %s" % (type(exc).__name__, exc)}
 
     try:
         funnel = await xstore.funnel(pool, window_s=FUNNEL_WINDOW_S)
@@ -479,8 +515,39 @@ async def summary(pool) -> dict:
             "deployed, P&L, return and drawdown are never summed: X1C "
             "is a frozen always-long counterfactual research portfolio, "
             "not BETTOR EV performance."),
+        # §: EACH HORIZON CARRIES ITS OWN OBSERVABILITY VERDICT, so
+        # 30S never reads as a measurement beside 60S and 300S.
+        "markoutObservability": {
+            name: {"status": v["status"],
+                   "eligibleForPerformance": v["eligibleForPerformance"],
+                   "captureGuaranteed": v["captureGuaranteed"],
+                   "earliestElapsedS": v["earliestElapsedS"],
+                   "why": v["why"]}
+            for name, v in ob.by_horizon().items()},
+        "performanceHorizons": list(ob.observable_horizons()),
+        # §: THE FROZEN DATA-QUALITY EXCLUSION, with its reason and the
+        # sha of the rule text, so a reader can tell that a market left
+        # for want of a leg-specific feature -- never for performance.
+        "focusExclusions": {
+            "rule": xstore.FOCUS_EXCLUSION_RULE,
+            "ruleSha": xstore.FOCUS_EXCLUSION_RULE_SHA,
+            "minSamples": xstore.FOCUS_EXCLUSION_MIN_SAMPLES,
+            "basis": "DATA_QUALITY_ONLY",
+            "readsNoModelOutput": True,
+            "excluded": ([] if isinstance(excluded, dict)
+                         else [dict(e, newest=_iso(e["newest"]))
+                               for e in excluded]),
+            "unavailable": (excluded.get("unavailable")
+                            if isinstance(excluded, dict) else None),
+        },
+        "captureCadence": ob.observability(
+            300, 150)["capture"],
         "markoutCoverage": [
             {"horizon": r["horizon"], "status": r["status"],
+             "observability": ob.by_horizon().get(
+                 r["horizon"], {}).get("status"),
+             "eligibleForPerformance": ob.by_horizon().get(
+                 r["horizon"], {}).get("eligibleForPerformance", False),
              "n": int(r["n"]), "medianLagMs": _f(r["median_lag_ms"]),
              "toleranceMs": _f(r["tolerance_ms"]),
              "horizonOrder": [h for h, _s in mk.HORIZONS].index(r["horizon"])

@@ -156,7 +156,13 @@ def test_the_excess_is_a_difference_and_never_a_sum():
     assert out["COMMON_SUPPORT_N"] == 4
     assert out["X1_EXCESS_PNL"] == 20.0           # 30 - 10, never 40
     assert out["X1_EXCESS_RETURN"] == pytest.approx(0.02)
-    assert out["EXCESS_30S_MARKOUT"] == 3.0
+    # 30S IS NOT A DIFFERENCE ANY MORE. Owner's measurement of the
+    # direct L2 cadence (P50 ~61s) made that horizon unobservable, so
+    # an excess built from it would be arithmetic on two numbers
+    # neither of which describes 30 seconds. Pinned in
+    # test_markout_observability.py; here only so this file is not
+    # asserting the superseded expectation.
+    assert out["EXCESS_30S_MARKOUT"] is None
     assert out["EXCESS_60S_MARKOUT"] == 6.0
     assert out["EXCESS_300S_MARKOUT"] == 10.0
     # The inputs travel with the difference so it can be checked.

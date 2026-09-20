@@ -385,3 +385,79 @@ SELECT 'why|' || COALESCE(why, 'NULL')
    AND decision_timestamp > now() - interval '24 hours'
  GROUP BY why
  ORDER BY count(*) DESC LIMIT 12;
+
+\echo ''
+\echo '--- 22. THE CAPTURE GRID, measured from the ledger itself ---'
+-- The owner measured direct L2 arrival spacing at P50 ~60.95s,
+-- P95 ~63.98s, MAX ~64.70s and ruled the 30S horizon unobservable.
+-- This re-derives the same number from the same rows so the verdict
+-- can be checked rather than believed. NOTHING HERE WRITES.
+WITH spacing AS (
+    SELECT instrument_id,
+           EXTRACT(EPOCH FROM (received_timestamp
+               - lag(received_timestamp) OVER (
+                     PARTITION BY instrument_id
+                      ORDER BY received_timestamp))) AS gap_s
+      FROM bettor_l2_evidence
+     WHERE latency_regime = 'DIRECT_INSTITUTIONAL_WORKER'
+       AND received_timestamp > now() - interval '6 hours'
+)
+SELECT 'cadence|regime=DIRECT_INSTITUTIONAL_WORKER'
+       || '|n=' || count(*)
+       || '|p50_s=' || round(percentile_cont(0.5)
+              WITHIN GROUP (ORDER BY gap_s)::numeric, 2)
+       || '|p95_s=' || round(percentile_cont(0.95)
+              WITHIN GROUP (ORDER BY gap_s)::numeric, 2)
+       || '|max_s=' || round(max(gap_s)::numeric, 2)
+       -- The structural test: a 30s horizon carries a 30s tolerance,
+       -- so its admissible window opens at the decision instant.
+       || '|30S_MARKOUT_STATUS='
+       || 'UNOBSERVABLE_AT_CURRENT_DIRECT_L2_CAPTURE_FREQUENCY'
+       || '|60S_MARKOUT_STATUS=OBSERVABLE'
+       || '|300S_MARKOUT_STATUS=OBSERVABLE'
+  FROM spacing
+ WHERE gap_s IS NOT NULL;
+
+\echo ''
+\echo '--- 22b. THE 30S ROWS ARE PRESERVED, not deleted or zeroed ---'
+-- "Preserve all existing 30S rows append-only... Do not delete or
+-- rewrite them. Do not convert them to zero." The row count and the
+-- distinct markout values prove nothing was flattened; the rows are
+-- simply not eligible for a performance conclusion.
+SELECT 'preserved|' || horizon
+       || '|status=' || status
+       || '|n=' || count(*)
+       || '|distinct_executable=' || count(DISTINCT executable_markout_usd)
+       || '|zeros=' || count(*) FILTER (WHERE executable_markout_usd = 0)
+       || '|eligible_for_performance='
+       || (horizon IN ('60S', '300S'))
+       || '|oldest=' || COALESCE(to_char(min(observed_at),
+                                         'MM-DD HH24:MI:SS'), 'NONE')
+  FROM bettor_experimental_markouts
+ GROUP BY horizon, status
+ ORDER BY horizon, status;
+
+\echo ''
+\echo '--- 23. THE FROZEN FOCUS-SET DATA-QUALITY EXCLUSION ---'
+-- A focus market is held out ONLY when it has produced >= 10 samples
+-- and NONE of them is both readable and bound to the YES contract
+-- book -- i.e. it cannot supply the leg-specific feature the frozen
+-- rule requires. The predicate reads `readable` and `bbo_binding` and
+-- nothing else: no price, no signal, no P&L. It is a standing query
+-- over a moving window, so one readable YES-bound sample returns the
+-- market to eligibility with nobody editing anything.
+SELECT 'focus_quality|' || symbol
+       || '|samples=' || count(*)
+       || '|readable=' || count(*) FILTER (WHERE readable)
+       || '|readable_yes_bound=' || count(*) FILTER (
+              WHERE readable IS TRUE AND bbo_binding = 'YES_CONTRACT_BOOK')
+       || '|binding=' || COALESCE(max(bbo_binding), 'NULL')
+       || '|EXCLUDED=' || (count(*) >= 10
+              AND count(*) FILTER (WHERE readable IS TRUE
+                                     AND bbo_binding = 'YES_CONTRACT_BOOK')
+                  = 0)
+       || '|newest=' || to_char(max(observed_at), 'HH24:MI:SS')
+  FROM bettor_experimental_observations
+ WHERE observed_at > now() - interval '2 hours'
+ GROUP BY symbol
+ ORDER BY count(*) DESC LIMIT 20;
