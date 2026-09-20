@@ -1183,3 +1183,80 @@ async def accounting_all(pool) -> dict:
         # EVERY PANEL STAYS VISIBLY SHADOW.
         "disclosure": head["disclosure"],
     }
+
+
+async def bettor_engine(pool) -> dict:
+    """§18. THE BETTOR EV ENGINE PANEL. The product, not the research.
+
+    Reads what production actually holds -- market observations, book
+    readability, live per-leg inventory -- and hands it to
+    `bettor_command_view`, which owns the panel's shape. This function
+    fetches; it does not compute economics, and it never substitutes a
+    zero for a figure the database does not carry.
+    """
+    from .. import bettor_applicability as applic
+    from .. import bettor_command_view as cview
+
+    # MARKETS OBSERVED and READABLE MARKETS, measured the same way §16
+    # measures them: a readable book is TWO-SIDED. The book lives on
+    # shadow_market_states, not on the opportunity row -- an opportunity
+    # records that BETTOR looked, and the market state records what it
+    # saw. Joining is what makes ONE_SIDED distinguishable from
+    # UNREADABLE, and §16 needs both separately.
+    row = await _guard(
+        pool, "BETTOR_READABILITY_UNREAD", pool.fetchrow,
+        "SELECT count(*) AS total, "
+        "       count(*) FILTER (WHERE s.bid IS NOT NULL "
+        "                          AND s.ask IS NOT NULL) AS two_sided, "
+        "       count(*) FILTER (WHERE s.market_state_id IS NULL "
+        "                           OR s.readable IS NOT TRUE) "
+        "           AS unreadable, "
+        "       count(*) FILTER (WHERE s.readable IS TRUE "
+        "                          AND (s.bid IS NULL) <> (s.ask IS NULL)) "
+        "           AS one_sided "
+        "  FROM bettor_opportunities o "
+        "  LEFT JOIN shadow_market_states s "
+        "         ON s.market_state_id = o.market_state_id")
+    total = int((row["total"] if row else 0) or 0)
+    two_sided = int((row["two_sided"] if row else 0) or 0)
+    unreadable = int((row["unreadable"] if row else 0) or 0)
+    one_sided = int((row["one_sided"] if row else 0) or 0)
+
+    # CURRENT INVENTORY STATE. A lane with no positions is FLAT and a
+    # lane we could not read is NOT_IDENTIFIED -- never forced to FLAT.
+    held = await _guard(
+        pool, "BETTOR_POSITIONS_UNREAD", pool.fetchval,
+        "SELECT count(*) FROM shadow_positions "
+        "WHERE lane = 'BETTOR_EV_SHADOW' AND closed_at IS NULL")
+    state = (applic.FLAT if held == 0
+             else applic.STATE_NOT_IDENTIFIED)
+
+    panel = cview.panel(
+        inventory_state=state,
+        markets_observed=total or None,
+        readable_markets=two_sided or None)
+    panel["environment"] = environment()
+    panel["disclosure"] = DISCLOSURE
+    panel["readability"] = {
+        "TOTAL": total,
+        "TWO_SIDED": two_sided,
+        "RATE": (round(two_sided / total, 4) if total else NOT_IDENTIFIED),
+        # §16 wants these apart. UNREADABLE means we saw no usable book;
+        # ONE_SIDED means we saw a book with one side missing. They have
+        # different causes and a single "not readable" number hides that.
+        "UNREADABLE": unreadable,
+        "ONE_SIDED": one_sided,
+        "whyThreeNumbers": (
+            "UNREADABLE is no usable book at all; ONE_SIDED is a book "
+            "with one side missing. A single 'not readable' figure "
+            "would merge a capture problem with a liquidity problem"),
+    }
+    panel["openPositions"] = int(held or 0)
+    panel["whyStateIsWhatItIs"] = (
+        "FLAT because the lane holds no open position, not because the "
+        "read failed. A lane we could not read is STATE_NOT_IDENTIFIED "
+        "and is never shown as FLAT"
+        if held == 0 else
+        "the lane holds open positions; the per-leg state is resolved "
+        "per market by bettor_inventory, not summarised here")
+    return panel

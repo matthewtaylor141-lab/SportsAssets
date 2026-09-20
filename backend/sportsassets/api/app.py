@@ -958,6 +958,25 @@ async def command_shadow_summary(response: Response) -> dict:
         raise _shadow_unavailable(inc) from inc
 
 
+@app.get("/api/command/shadow/bettor-engine",
+         dependencies=[Depends(require_command)])
+async def command_shadow_bettor_engine(response: Response) -> dict:
+    """§18. The BETTOR EV ENGINE panel -- the product, not the X-series.
+
+    Every declared line is present whether or not it has a value, and
+    an unmeasured figure reads NOT IDENTIFIED rather than 0. §19's
+    plain-English "HOW BETTOR DECIDES" panel travels with it.
+    """
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.bettor_engine(await get_pool())
+    except CS.RetrievalIncomplete as inc:
+        raise _shadow_unavailable(inc) from inc
+
+
 @app.get("/api/command/shadow/decisions",
          dependencies=[Depends(require_command)])
 async def command_shadow_decisions(response: Response, lane: str = "",
