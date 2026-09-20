@@ -1,95 +1,119 @@
 # SPRINT VERDICT: IS THERE A BETTOR STRATEGY WORTH TINY-CAPITAL VALIDATION?
 
-Owner directive 2026-09-20: "optimize for TIME TO ECONOMIC EVIDENCE...
-If the evidence is bad, tell me quickly."
+Owner directive 2026-09-20: "optimize for TIME TO ECONOMIC EVIDENCE."
 
-**Answer: EVIDENCE_DOES_NOT_SUPPORT_TINY_CAPITAL_VALIDATION.**
-
-The passive-maker hypothesis is falsified by a measurement that already
-existed in this repository, confirmed by a live production measurement
-taken today, and it cannot be rescued by the venue's verified maker
-rebate because that rebate is arithmetically too small.
+**Answer for the maker classes: INSUFFICIENT_EVIDENCE_TO_DECIDE.**
+**Answer for the taker pair: falsified, on same-venue arithmetic.**
 
 ---
 
-## THE ARITHMETIC THAT DECIDES IT
+## CORRECTION TO AN EARLIER VERSION OF THIS FILE
 
-Per share, on the maker leg:
+An earlier revision reported:
 
 ```
-GROSS_EDGE (half-spread captured)              +0.0050
-ADVERSE_SELECTION                              -0.0140
-                                               -------
-NET before fees                                -0.0090
-  95% CI [-0.0143, -0.0038], clustered by condition, n = 9,337
+BASE_CASE_EV = -0.0059/share          <-- RETRACTED
+STRATEGY CLASS A = FALSIFIED          <-- RETRACTED
+STRATEGY CLASS B = FALSIFIED          <-- RETRACTED
 ```
 
-Source: `research/beta48/MAKER_FIRST_FINDINGS.md` — 112,553 trades
-across 9,337 independent conditions with one-hot settlement whose
-`resolved_at` is strictly after the trade (1,684 already-resolved rows
-dropped).
+**All three are withdrawn.** They were produced by combining two
+measurements that do not belong in the same arithmetic:
 
-The venue's verified maker rebate cannot close that gap:
+| term | venue | population | window |
+|---|---|---|---|
+| gross half-spread +0.0050 | **PMUS** | BETTOR's own observed universe | 2026-09-19..20 |
+| adverse selection -0.0140 | **Polymarket global CLOB** | rows that exist *because RN1 traded them* | 2026-08-06..09-11 |
+
+Different venues, different populations, different time windows,
+different flow-selection regimes. Subtracting one from the other
+produces a number that describes no population that exists.
+
+The earlier version named both facts as limitations and then put the
+combined figure in the headline and labelled the classes FALSIFIED.
+Naming a limitation does not license the claim. The scope discipline
+this programme runs on was broken in the one place it mattered most --
+the conclusion.
+
+`MAKER_FIRST_FINDINGS.md:85-87` states the scope of its own result,
+and it is preserved here verbatim:
+
+> "Nothing here says market making is unprofitable in general; it says
+> **making a market to this particular informed flow, at the touch,
+> loses money.**"
+
+---
+
+## THE CLASSIFICATION, BY EVIDENCE CLASS
+
+### Current PMUS — BETTOR's actual venue and universe
+
+```
+CURRENT_PMUS_GROSS_MAKER_SPREAD              MEASURED
+    median half-spread 0.0050/share
+    1,644 observations, 980 distinct markets
+    cohort: spread <= 5c, mid 0.05..0.95
+    p25/p75 spread 0.0100 / 0.0200, median mid 0.4450
+
+CURRENT_PMUS_UNCONDITIONAL_ADVERSE_SELECTION NOT_IDENTIFIED
+CURRENT_PMUS_P_FILL                          NOT_IDENTIFIED
+CURRENT_PMUS_MAKER_NET_EV                    NOT_IDENTIFIED
+```
+
+The net EV is NOT_IDENTIFIED because two of its three terms are. That
+is the honest state and it is not a negative result.
+
+### Historical Polymarket CLOB — a different, selected population
+
+```
+RN1_CONDITIONAL_ADVERSE_SELECTION            -0.0140/share
+    MEASURED_HISTORICAL_SELECTED_FLOW
+RN1_CONDITIONAL_MAKER_NET_BEFORE_REBATE      -0.0090/share
+    95% CI [-0.0143, -0.0038], clustered by condition
+    n = 9,337 independent conditions, 112,553 trades
+    settlement strictly after trade; 1,684 already-resolved dropped
+    SELECTION_MECHANISM = RN1 traded that token
+    SELECTION_BIAS = SEVERE, not the tradable universe
+```
+
+This is used as **TOXIC_FLOW_STRESS_CASE** -- what the maker leg earns
+when the counterparty is a specifically informed trader lifting at the
+touch. It is a stress bound on one flow regime, not BETTOR's expected
+economics, and it is not evidence about the unconditional population.
+
+*(The owner's directive was cut off mid-token at `TOXIC_FLOW_ST`. The
+name above is an inference from that prefix and should be corrected if
+a different one was intended.)*
+
+### The rebate arithmetic, which is venue-clean
 
 ```
 Fee = THETA * C * p * (1 - p),  THETA_MAKER = -0.0125   [PMUS, VERIFIED]
-
-MAX rebate, at p = 0.50:   0.0125 * 0.25       = 0.003125/share (0.31 c)
-BREAK-EVEN rebate required                     = 0.009000/share (0.90 c)
-SHORTFALL                                      = 0.005875/share (0.59 c)
+MAX rebate at p = 0.50:  0.0125 * 0.25 = 0.003125/share (0.3125 c)
 ```
 
-The rebate covers **34.7%** of the deficit. It is capped by the
-`p(1-p)` term and is largest exactly at p = 0.50.
+This is a fact about PMUS's published schedule and stands on its own.
+What it does **not** do is settle any EV, because the term it would
+offset is NOT_IDENTIFIED on PMUS.
 
-**Even at the most favourable end of the 95% CI, with the maximum
-possible rebate applied, the strategy is still negative:**
+Against the RN1 stress case specifically, the rebate covers 34.7% of
+that case's 0.0090 deficit. That statement is scoped to the stress
+case and to no other population.
 
-```
--0.0038 + 0.003125 = -0.000675 per share
-```
-
-The entire confidence interval, shifted by the best available rebate,
-remains below zero.
+Also verified and relevant at small size: fees round to the nearest
+$0.01, banker's rounding, **per fill**. A 1-contract fill at p=0.445
+earns a $0.00 rebate; a 10-contract fill earns $0.03.
 
 ---
 
-## THE LIVE CROSS-CHECK
+## WHAT IS FALSIFIED, ON ITS OWN EVIDENCE
 
-Measured today against production, 1,644 observations over 980
-distinct markets (spread <= 5c, mid 0.05..0.95):
+### Class C — taker complementary pair: FALSIFIED
 
-```
-median spread            0.0100
-median HALF-spread       0.0050    <-- the gross maker edge
-p25 / p75 spread         0.0100 / 0.0200
-median mid               0.4450
-```
-
-The live PMUS half-spread (0.0050) matches the historical CLOB
-`SPREAD_CAPTURE` (+0.0050) exactly. Two independent venues and
-datasets agree on the gross term. Nothing in the live data suggests a
-wider spread is available: the book is bimodal, and the wide half is
-not a wide market but an EMPTY one.
+Same venue, same population, no cross-venue term:
 
 ```
-A_TIGHT_LE_5C     2,011 obs   median spread 0.0100   median mid 0.39
-B_WIDE_5_TO_20C     488 obs   median spread 0.1000   median mid 0.30
-C_EMPTY_GT_20C    1,233 obs   median spread 0.8800   median mid 0.50
-```
-
-Regime C is books quoted 0.03/0.97 -- no liquidity at all. Pooling
-them with genuine 1c markets produces a "median spread" of 0.94 in the
-0.40-0.50 price band, which describes neither population.
-
----
-
-## THE TAKER PAIR IS STRUCTURALLY NEGATIVE
-
-Counted, not asserted, over 3,732 two-sided production observations:
-
-```
-observations   3,732
+observations   3,732      (PMUS, BETTOR's own two-sided observations)
 below par          0
 at par             0
 median basis  1.0400
@@ -97,28 +121,76 @@ min basis     1.0050
 ```
 
 `ask + (1 - bid) = 1 + spread`. The cheapest pair observed cost half a
-cent above par. There is no crossing arbitrage on this venue.
+cent above par. No crossing arbitrage exists on this venue, and this
+needs no fill model and no external population.
+
+### Class D — Phase X cross-venue PMUS/Kalshi: FALSIFIED, LOCKED
+
+`TRACK_P_GATE = P-C`: +10.5% TRAIN -> +0.5% VALIDATION -> **-11.1%
+HOLDOUT**, 95% CI [-15.5%, -6.6%], 1,170 independent markets, negative
+at **zero fees**. Its own holdout, its own population. Preserved as a
+locked negative; must not be retuned.
 
 ---
 
-## WHY THE MAKER STRATEGY ALSO CANNOT BE PROSPECTIVELY VALIDATED
+## WHAT REMAINS OPEN, AND WHY
 
-The frozen P_FILL evidence contract is **not satisfiable** from PMUS
-public feeds (`bettor_evidence_matrix.py`, measured today):
+### Classes A and B — passive maker pair, maker first leg
+
+```
+A. passive same-venue complementary maker pair   INSUFFICIENT_EVIDENCE
+B. maker first leg + controlled completion       INSUFFICIENT_EVIDENCE
+```
+
+Measured: the gross term, on PMUS, today -- 0.0050/share half-spread.
+Not measured: adverse selection on an unselected PMUS population, and
+P_FILL.
+
+The missing term is not small relative to the gross term, so its sign
+and size decide the answer. Nothing in the current evidence base fixes
+it.
+
+### Class E — directional taker on independent fair value
+
+`FV_BETTOR_INDEPENDENT = NOT_IDENTIFIED`; delta log loss -0.00926;
+`INCREMENTAL_SIGNAL_STATUS = NOT_DETECTED_AT_THIS_SAMPLE_SIZE`.
+**NOT_COMPARABLE** -- no edge estimate exists to rank.
+
+---
+
+## THE OBSERVABILITY CONSTRAINT, UNCHANGED
+
+The frozen P_FILL contract is not satisfiable from PMUS public feeds
+(`bettor_evidence_matrix.py`, measured 2026-09-20):
 
 - POSITIVE blocked by one fact: `PRINT_WAS_A_CLOB_EXECUTION_NOT_A_BLOCK`.
-  The tape has no block flag and `block-trade-data.html` is HTTP 404.
-- NEGATIVE blocked by five of seven, the binding one being
+  No block flag on the tape; `block-trade-data.html` is HTTP 404.
+- NEGATIVE blocked by five of seven, binding one
   `QUEUE_DEPLETION_FROM_CANCELLATIONS`. The book publishes SNAPSHOTS,
-  not order events, and the tape's volume is market-wide and sideless,
-  so the mix of trades and cancels cannot be recovered by subtraction.
+  not order events; the tape's volume is market-wide and sideless, so
+  the mix of trades and cancels is not recoverable by subtraction.
 
-So even a long prospective capture would produce mostly
-`INTERVAL_CENSORED` rows, not fill labels.
+This bounds how fast the open questions can be closed from public data
+alone. It is not itself an economic result.
 
 ---
 
-## TURNOVER MAKES IT WORSE, NOT BETTER
+## THE BOOK IS BIMODAL, AND THE WIDE HALF IS EMPTY
+
+```
+A_TIGHT_LE_5C     2,011 obs   median spread 0.0100   median mid 0.39
+B_WIDE_5_TO_20C     488 obs   median spread 0.1000   median mid 0.30
+C_EMPTY_GT_20C    1,233 obs   median spread 0.8800   median mid 0.50
+```
+
+Regime C is books quoted ~0.03/0.97 -- no liquidity. Pooled with
+genuine 1c markets they produce a "median spread" of 0.94 in the
+0.40-0.50 price band, describing neither population. Every figure in
+this file is taken on the tight cohort, not the pooled book.
+
+---
+
+## TURNOVER, MEASURED, AND NOT A VERDICT ON EV
 
 - `BETA48_STATE.md` BLOCK_4: 22,297-share displayed bid queue against
   180 shares traded in 16 minutes, **zero touches**.
@@ -126,77 +198,36 @@ So even a long prospective capture would produce mostly
   bid-side queue implies **on the order of three hours to reach the
   front of the queue**.
 
-A negative per-share edge realised a few times a day is a slow bleed,
-not a business. And a positive edge at that turnover would not compound
-either.
+This constrains how fast any edge -- positive or negative -- would
+compound or be measured. It does not tell us the sign of the edge.
 
 ---
 
-## LIMITATIONS, INCLUDING THE ONE THAT COULD CHANGE THE ANSWER
+## WHAT WOULD ACTUALLY RESOLVE A AND B
 
-1. **Venue mismatch, stated plainly.** The -0.0140 adverse selection is
-   measured on Polymarket **global CLOB**; the rebate is **PMUS**-
-   verified. Mixing them is exactly what we normally refuse. It is done
-   here as an argument *a fortiori*: the strategy is given the benefit
-   of a favourable, unjustified cross-venue assumption and still fails.
+The binding unknown is **unconditional adverse selection on PMUS**:
+what a resting order earns against the mix of flow it actually meets,
+not against a specifically informed trader.
 
-2. **THE ONE THAT COULD RESCUE IT.** The CLOB rows exist because RN1 --
-   an informed trader -- traded that token. `SELECTION_BIAS = SEVERE`.
-   The flow that lifted the resting offer was therefore informed flow
-   specifically, and a random resting order faces a mix of informed and
-   uninformed. So -0.0140 may **overstate** the adverse selection a
-   neutral maker would face. This is the single assumption whose
-   failure would change the verdict, and it is not settled by anything
-   on disk.
+On disk it cannot be measured. The PMUS book/outcome join is literally
+zero rows (`TRACK_P_DATA_ARCHAEOLOGY.md:15-19`: 30 slugs with a
+two-sided book, 10,257 with an outcome, intersection 0), and the only
+depth+settlement dataset is ask-side only, on a different venue, and
+selected by RN1's trades.
 
-   What would settle it: adverse selection measured on a population
-   that is NOT selected by an informed trader's actions. That requires
-   either a different historical dataset (none exists on disk -- see
-   the archaeology below) or BETTOR's own admitted fills, which
-   requires an order path and capital.
+Options, none taken here:
 
-3. **Sample independence.** 9,337 conditions, clustered CIs. Adequate.
-
-4. **Fee rounding at tiny size.** Fees round to the nearest $0.01 with
-   banker's rounding **per fill**. A 10-contract fill at p=0.445 earns
-   $0.03; a 1-contract fill earns **$0.00**. Tiny-capital validation is
-   the size at which the rebate is worth least.
-
----
-
-## WHAT DOES NOT EXIST ON DISK
-
-From the data archaeology (confirmed today):
-
-- PMUS two-sided book (30 slugs, 6,952 obs) vs PMUS resolved outcomes
-  (10,257 slugs): **INTERSECTION = 0**
-  (`research/TRACK_P_DATA_ARCHAEOLOGY.md:15-19`).
-- The only dataset pairing depth + executions + settlement is
-  `u2_events_v1` + `settlement_v1`, and it is **ask-side only** on a
-  different venue, selected by RN1's trades.
-- No dataset on disk pairs an **observed resting bid with size**
-  against a settled outcome, on either venue.
-
-So no better historical replay is available today than the one already
-performed.
-
----
-
-## STRATEGY CLASSES COMPARED
-
-| Class | Evidence | Verdict |
-|---|---|---|
-| A. Passive same-venue complementary pair | half-spread +0.0050 live and historical; adverse selection -0.0140; net -0.0090, CI excludes zero | **FALSIFIED at current evidence** |
-| B. Maker first leg + controlled completion | same entry economics as A, plus residual inventory cost and ~3h queue time | **FALSIFIED (dominated by A)** |
-| C. Taker complementary pair | basis 1 + spread; 0 of 3,732 below par | **FALSIFIED by arithmetic** |
-| D. Phase X cross-venue PMUS/Kalshi | `TRACK_P_GATE = P-C`: +10.5% TRAIN -> +0.5% VALIDATION -> **-11.1% HOLDOUT**, CI [-15.5%, -6.6%], 1,170 markets, **at zero fees** | **FALSIFIED, locked, must not be retuned** |
-| E. Directional taker on independent fair value | `FV_BETTOR_INDEPENDENT = NOT_IDENTIFIED`; delta log loss -0.00926, `INCREMENTAL_SIGNAL_STATUS = NOT_DETECTED_AT_THIS_SAMPLE_SIZE` | **NOT_COMPARABLE** -- no edge estimate exists to compare |
+1. Prospective PMUS capture of book + settlement on an **unselected**
+   universe. Does not need P_FILL: it measures what happens to the
+   touch price after it is quoted, which is the adverse-selection term
+   itself. This is the cheapest open path and it is read-only.
+2. BETTOR's own admitted fills -- settles it exactly, requires an order
+   path and capital.
 
 ---
 
 ## NO ML
 
-Track 8's precondition is not met. Simple frozen cohorts show no
-economic signal, labels are not defensible (the contract is not
-identifiable), and there is nothing worth modelling. No model was
-trained.
+Track 8's precondition is not met: the decisive term is unmeasured,
+labels are not identifiable, and there is nothing worth modelling. No
+model was trained.
