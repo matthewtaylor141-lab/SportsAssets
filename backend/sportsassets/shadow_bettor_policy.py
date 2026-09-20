@@ -178,7 +178,7 @@ DECLARATION = {
     "consideredActionSet": CONSIDERED_ACTION_SET,
     "actionEvEngine": "research/beta48/shadow/action_ev.py",
     "actionEvEngineIsImportedNotCopied": True,
-    "supersedes": "BETTOR_EV_SHADOW_V2",
+    "supersedes": "BETTOR_EV_SHADOW_V3",
     "latencyPolicy": NOT_ESTABLISHED,
     "latencyPolicyVersion": LATENCY_POLICY_VERSION,
     # Scoring belongs to outcomes, and this lane has produced no action

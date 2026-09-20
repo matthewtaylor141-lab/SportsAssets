@@ -158,7 +158,7 @@ def test_lineage_change_moves_the_hash():
 def test_policy_version_change_moves_the_hash():
     """A decision claiming a different version is a different decision."""
     mutated = mutate("shadow_bettor.py",
-                     'POLICY_VERSION = "BETTOR_EV_SHADOW_V3"',
+                     'POLICY_VERSION = "BETTOR_EV_SHADOW_V4"',
                      'POLICY_VERSION = "BETTOR_EV_SHADOW_V9"')
     assert sha(**{"shadow_bettor.py": mutated}) != BASE
 

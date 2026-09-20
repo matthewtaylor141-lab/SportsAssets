@@ -45,12 +45,30 @@ from . import shadow_store as store
 log = logging.getLogger(__name__)
 
 MODEL_VERSION = "bettor_ev_v0_collecting"
-# V2 -> V3: the action table is now COMPUTED rather than stubbed. The
-# policy version moves because what the lane does has changed, and the
-# 4,503 rows written under V2 must stay readable as what BETTOR
-# believed under V2. They are not revised -- the bump is the whole
-# mechanism by which they are not.
-POLICY_VERSION = "BETTOR_EV_SHADOW_V3"
+# V3 -> V4. V3 WAS FROZEN AGAINST CODE THAT NO LONGER EXISTS.
+#
+# An unintended deploy of the first bridge froze V3 at 15:07:07 with
+# that version's code sha (8247f618e2a0777e). The corrections that
+# followed -- carrying FILL_SELECTION_EFFECT as a prior instead of
+# zeroing it, and renaming the crossing result to an execution cost
+# rather than a refuted EV -- changed `decide`, so the running sha
+# became a09a6c2aad2e8c39 and the production worker refused to write:
+#
+#     policyIntegrity   POLICY_CODE_DRIFT
+#     decision writing  BLOCKED
+#
+# That is the guard working, not failing. A version whose rows claim
+# one set of rules must not be extended by code implementing another,
+# and freeze_policy says the remedy in as many words: bump the version.
+#
+# WHAT THE BOUNDARY NOW MEANS, which is worth more than the fix. V3 is
+# exactly the cohort written while the EV machinery could not load --
+# every one of its rows reads EV_MACHINERY_UNAVAILABLE. V4 is the first
+# version able to load the engines at all. The two regimes are
+# separated by a version rather than by a timestamp anyone has to
+# remember, and V3's rows stay immutable evidence of the period before
+# the packaging landed.
+POLICY_VERSION = "BETTOR_EV_SHADOW_V4"
 
 # THE SELECTION RULE, FROZEN. A dataset whose selection rule is
 # unrecorded cannot be reasoned about later -- every measurement over it

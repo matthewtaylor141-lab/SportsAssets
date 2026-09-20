@@ -292,7 +292,7 @@ def test_the_lane_does_not_invent_an_order_size():
 
 def test_the_policy_version_moved_with_the_behaviour():
     """V2's 4,503 rows must stay readable as what V2 believed."""
-    assert sb.POLICY_VERSION == "BETTOR_EV_SHADOW_V3"
+    assert sb.POLICY_VERSION == "BETTOR_EV_SHADOW_V4"
     assert sb.POLICY_VERSION != "BETTOR_EV_SHADOW_V2"
 
 
