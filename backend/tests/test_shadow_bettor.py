@@ -565,7 +565,7 @@ BPOL_SRC = (BACKEND / "sportsassets" / "shadow_bettor_policy.py").read_text()
 
 def test_the_bettor_policy_is_its_own_and_not_rn1s():
     p = bpol.frozen_policy()
-    assert p["policyVersion"] == "BETTOR_EV_SHADOW_V2"
+    assert p["policyVersion"] == "BETTOR_EV_SHADOW_V3"
     assert p["policyVersion"] != rn1pol.RN1_SHADOW_POLICY_VERSION
     assert p["lane"] == lanes.BETTOR_EV_SHADOW
     assert p["policySha"] != rn1pol.POLICY_SHA
@@ -740,10 +740,30 @@ import sportsassets.workers.shadow_bettor as W
 from sportsassets import shadow_bettor_codesha as codesha
 
 
-def test_v2_is_the_running_policy_version():
-    assert bettor.POLICY_VERSION == "BETTOR_EV_SHADOW_V2"
-    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V2"
-    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V1"
+def test_v3_is_the_running_policy_version():
+    """V3 computes the action table; V2 stubbed it.
+
+    THE BUMP IS WHAT KEEPS DECISIONS WRITING. `decide` is inside the
+    semantic code boundary, so changing it moves the running code sha.
+    Had the version stayed V2, freeze_policy would have compared the
+    new sha against the one stored on V2's row, reported
+    codeShaMatches=False, and the worker would have entered
+    POLICY_CODE_DRIFT with decision writing blocked. A new version gets
+    a fresh row whose stored sha IS the running one, and V2's row --
+    with the 4,503 rows that mean what V2's rules said -- is left
+    exactly as it was.
+    """
+    assert bettor.POLICY_VERSION == "BETTOR_EV_SHADOW_V3"
+    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V3"
+    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V2"
+
+
+def test_v3_considers_more_than_it_can_produce():
+    """The lane still emits only NO_TRADE -- now after weighing 15."""
+    assert bpol.ACTION_SET == [sh.NO_TRADE]
+    assert len(bpol.CONSIDERED_ACTION_SET) == 15
+    assert "MAKE_YES" in bpol.DECLARATION["consideredActionSet"]
+    assert bpol.DECLARATION["actionEvEngineIsImportedNotCopied"] is True
 
 
 def test_v1s_recorded_hashes_are_kept_and_never_recomputed():

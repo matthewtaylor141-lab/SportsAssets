@@ -92,11 +92,15 @@ def test_the_sizing_policy_does_not_confer_eligibility():
     # edit. Owner: "No sizing change."
     #
     # The CLAIM the field makes is unaffected: eligibility rests with
-    # the EV policy rather than with sizing, and V2 supersedes V1.
+    # the EV policy rather than with sizing, and the EV policy has
+    # since moved V1 -> V2 -> V3. The sizing literal still names V1 and
+    # still must: it is the frozen text whose hash production recorded,
+    # and chasing the EV lane's version through it would answer REFUSED
+    # at the next boot for a cosmetic edit.
     assert szpol.DECLARATION["eligibilityRemainsWith"] == \
         "BETTOR_EV_SHADOW_V1"
-    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V1"
-    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V2"
+    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V2"
+    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V3"
     # The EV policy still emits exactly one action, so nothing can be
     # sized today at all.
     assert bpol.ACTION_SET == [sh.NO_TRADE]

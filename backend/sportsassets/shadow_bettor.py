@@ -37,6 +37,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from . import bettor_ev_bridge as evb
 from . import shadow as sh
 from . import shadow_lanes as lanes
 from . import shadow_store as store
@@ -44,7 +45,12 @@ from . import shadow_store as store
 log = logging.getLogger(__name__)
 
 MODEL_VERSION = "bettor_ev_v0_collecting"
-POLICY_VERSION = "BETTOR_EV_SHADOW_V2"
+# V2 -> V3: the action table is now COMPUTED rather than stubbed. The
+# policy version moves because what the lane does has changed, and the
+# 4,503 rows written under V2 must stay readable as what BETTOR
+# believed under V2. They are not revised -- the bump is the whole
+# mechanism by which they are not.
+POLICY_VERSION = "BETTOR_EV_SHADOW_V3"
 
 # THE SELECTION RULE, FROZEN. A dataset whose selection rule is
 # unrecorded cannot be reasoned about later -- every measurement over it
@@ -317,6 +323,25 @@ def decide(opportunity: dict, market_state: dict | None, *,
     """
     decision_ts = decision_ts or _now()
     blocks = blockers_for(opportunity, market_state)
+
+    # THE ACTION TABLE IS NOW COMPUTED (§1, §23). Every canonical
+    # action is priced or refused BY NAME against the observed book.
+    # NO_TRADE below is unchanged as an ANSWER and completely changed
+    # as a CLAIM: it is now the conclusion of a comparison that is
+    # written down and auditable, not an assertion that no comparison
+    # was possible.
+    #
+    # THE GATE DOES NOT MOVE. Nothing here can produce a BUY or a SELL.
+    # The table is evidence, and a positive EV in it is a research
+    # finding, never an instruction.
+    # NO SIZE IS PASSED, DELIBERATELY. BETTOR has no sizing policy --
+    # SIZING_POLICY_VERSION is NOT_APPLICABLE -- so the order size is
+    # genuinely not identified. Handing the book's availableDepth in as
+    # though it were our intended size would invent an order spanning
+    # the entire book and report its dollars as if we meant to send it.
+    # The per-contract economics, which the book DOES determine, are
+    # reported in full.
+    ev = evb.evaluate(market_state)
     record = lanes.not_yet_eligible(
         features=opportunity.get("featureLineage") or {},
         shadowDecisionId=_id("bdec", opportunity["bettorOpportunityId"],
@@ -336,11 +361,24 @@ def decide(opportunity: dict, market_state: dict | None, *,
         blockers=blocks,
         gateResults={"marketState": bool(
             market_state and market_state.get("readable"))},
+        # EVERY CANONICAL ACTION, WITH ITS OWN VERDICT. The old list
+        # named three actions and said the same sentence about each --
+        # that nothing could be ranked. That sentence was true when it
+        # was written and is no longer: the aggressive actions carry
+        # real numbers, the passive ones carry a refutable lower bound
+        # on the fill rate they would need, and the rest name the
+        # precondition they are missing.
         alternatives=[
-            {"action": a,
-             "why": ("not evaluated: independent Action EV is not "
-                     "established, so no alternative can be ranked")}
-            for a in (sh.BUY, sh.SELL, sh.HOLD)],
+            {"action": r["action"], "leg": r["leg"],
+             "status": r["status"],
+             "expectedNetDollarsPerContract": r.get(
+                 "expectedNetDollarsPerContract", NOT_IDENTIFIED),
+             "breakEvenPFillLowerBound": r.get(
+                 "BREAK_EVEN_P_FILL_LOWER_BOUND"),
+             "why": r.get("whyNot") or r.get("whyIdentified")
+                    or r.get("whyNotRecommended")}
+            for r in ev["table"]],
+        actionEvComponents=ev,
         # NOT_IDENTIFIED, NOT NOT_ESTABLISHED. The two words are not
         # interchangeable: a BELIEF is something we have not yet
         # ESTABLISHED, while a QUANTITY is something we could not
@@ -361,7 +399,11 @@ def decide(opportunity: dict, market_state: dict | None, *,
         # exactly the retrospective edit the ledger exists to prevent.
         # The 112 V1 rows carrying NOT_ESTABLISHED stay as they are.
         pFillStatus=lanes.NOT_IDENTIFIED,
-        actionEvStatus=NOT_IDENTIFIED,
+        # PARTIALLY_IDENTIFIED WHEN IT IS, AND NOT BEFORE. Some actions
+        # now carry real numbers, so the blanket NOT_IDENTIFIED would
+        # itself be inaccurate. It stays NOT_IDENTIFIED when the EV
+        # machinery is absent or the book is unreadable.
+        actionEvStatus=ev["actionEvStatus"],
         marketBid=(market_state or {}).get("bid"),
         marketAsk=(market_state or {}).get("ask"),
         mid=(market_state or {}).get("mid"),

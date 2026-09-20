@@ -41,6 +41,7 @@ import hashlib
 import json
 import os
 
+from . import bettor_ev_actions as evacts
 from . import shadow as sh
 from . import shadow_bettor as bettor
 from . import shadow_bettor_codesha as codesha
@@ -70,8 +71,16 @@ EXECUTION_RECONSTRUCTION_VERSION = NOT_APPLICABLE
 # anything on the basis of them.
 LATENCY_POLICY_VERSION = NOT_ESTABLISHED
 
-# The only action this policy can produce today.
+# The only action this policy can PRODUCE today. Unchanged by V3: the
+# lane still cannot emit a BUY or a SELL.
 ACTION_SET = [sh.NO_TRADE]
+
+# What V3 EVALUATES before producing it, which is the part that
+# changed. The two lists are deliberately separate: an engine that
+# considered one action and an engine that considered fifteen both
+# produce NO_TRADE, and only this distinction tells them apart in the
+# ledger.
+CONSIDERED_ACTION_SET = list(evacts.ACTIONS)
 
 # ── the declaration ──────────────────────────────────────────────────
 
@@ -163,7 +172,13 @@ DECLARATION = {
     # written is itself frozen rather than merely current practice.
     "codeBoundary": codesha.BOUNDARY_VERSION,
     "codeShaEnforced": True,
-    "supersedes": "BETTOR_EV_SHADOW_V1",
+    # WHAT V3 WEIGHS BEFORE REFUSING. Frozen in the declaration so the
+    # breadth of the comparison is part of the policy rather than a
+    # property of whatever the code happened to loop over that day.
+    "consideredActionSet": CONSIDERED_ACTION_SET,
+    "actionEvEngine": "research/beta48/shadow/action_ev.py",
+    "actionEvEngineIsImportedNotCopied": True,
+    "supersedes": "BETTOR_EV_SHADOW_V2",
     "latencyPolicy": NOT_ESTABLISHED,
     "latencyPolicyVersion": LATENCY_POLICY_VERSION,
     # Scoring belongs to outcomes, and this lane has produced no action
