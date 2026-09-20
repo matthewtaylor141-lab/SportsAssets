@@ -178,6 +178,41 @@ def script_pathish(script_text):
     return out
 
 
+def manifest_csvs(text, manifest_url):
+    """CSV entries a manifest lists, whatever shape it takes.
+
+    A manifest may be a list of names, a list of objects, or an object
+    with a list inside. Rather than assume one, every string anywhere
+    in the parsed JSON is examined and the ones ending .csv are
+    resolved against the manifest's own URL. Shape-agnostic on purpose:
+    a parser that knew the shape would break silently when the venue
+    changed it, and report NO FILES rather than an unreadable index.
+    """
+    try:
+        doc = json.loads(text or "")
+    except ValueError:
+        return []
+    found, seen = [], set()
+
+    def walk(node):
+        if isinstance(node, str):
+            if node.lower().endswith(".csv") and node not in seen:
+                seen.add(node)
+                u = urljoin(manifest_url, node)
+                p = urlparse(u)
+                if p.scheme == "https" and p.hostname == TAPE_HOST:
+                    found.append(u)
+        elif isinstance(node, dict):
+            for v in node.values():
+                walk(v)
+        elif isinstance(node, list):
+            for v in node:
+                walk(v)
+
+    walk(doc)
+    return found
+
+
 def parse_header(csv_text):
     """The first line's columns, verbatim, with no renaming or reordering.
 
@@ -277,9 +312,39 @@ def capture(outdir: Path, max_files: int = 0) -> dict:
                             and cu not in links):
                         links.append(cu)
             summary["script_assets"] = scripts
+            # THE SCRIPTS NAME A MANIFEST, NOT A FILE. Production:
+            # daily-market-report.js names
+            # /files/daily-market-report/manifest.json. A manifest is
+            # the venue's own INDEX of what it publishes, so following
+            # it is still reading what the venue points at -- one more
+            # level of the same discipline, and not a constructed URL.
+            manifests = []
+            for sc in scripts:
+                for cand in sc.get("pathsNamed") or ():
+                    mu = urljoin(sc["url"], cand)
+                    pu = urlparse(mu)
+                    if (pu.scheme == "https" and pu.hostname == TAPE_HOST
+                            and pu.path.lower().endswith(".json")
+                            and mu not in [m["url"] for m in manifests]):
+                        row = fetch(client, pacer, mu)
+                        fh.write(json.dumps(
+                            {"kind": "MANIFEST", **row}) + "\n")
+                        named = manifest_csvs(row.get("text"), mu)
+                        manifests.append({
+                            "url": mu, "http_status": row["http_status"],
+                            "bytes": row["bytes"],
+                            "csvEntriesFound": len(named),
+                            "csvSample": named[:10],
+                        })
+                        for cu in named:
+                            if cu not in links:
+                                links.append(cu)
+            summary["manifests"] = manifests
             summary["csv_links_found"] = links
             if links:
-                summary["CSV_LINK_DISCOVERY"] = "FOUND_VIA_PAGE_SCRIPT"
+                summary["CSV_LINK_DISCOVERY"] = (
+                    "FOUND_VIA_PAGE_SCRIPT_MANIFEST" if manifests
+                    else "FOUND_VIA_PAGE_SCRIPT")
         for url in links[:int(max_files)]:
             row = fetch(client, pacer, url)
             hdr = parse_header(row.get("text"))

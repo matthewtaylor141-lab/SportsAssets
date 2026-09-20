@@ -336,6 +336,7 @@ def probe(outdir: Path, max_files: int = 1) -> dict:
         "CSV_LINK_DISCOVERY": summary.get("CSV_LINK_DISCOVERY",
                                           "FOUND_IN_PAGE_HREF"),
         "scriptAssets": summary.get("script_assets", []),
+        "manifests": summary.get("manifests", []),
         "csvLinksFound": len(summary.get("csv_links_found") or []),
         "csvLinkSample": (summary.get("csv_links_found") or [])[:10],
         "PUBLIC_TIME_SALES_AVAILABLE":
