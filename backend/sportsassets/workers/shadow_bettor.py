@@ -217,6 +217,13 @@ async def tick(pool, *, decision_writing_allowed: bool = True,
             # inventory. Absent, the portfolio state is unidentified and
             # nothing is priced -- correctly, but uselessly.
             market_id=subject.get("marketId"),
+            # THE VENUE'S OWN SPORT AND LEAGUE. Both were NULL on all
+            # 9,702 rows written before this, because universe() never
+            # selected the columns that carried them. They are passed
+            # through here; the mapping and its raw sources live on the
+            # subject, built by bettor_sport_mapping from us_premap.
+            sport=subject.get("sport"),
+            league=subject.get("league"),
             evidence_source=EVIDENCE_SOURCE,
             market_state=state if state["readable"] else None,
             features=features,

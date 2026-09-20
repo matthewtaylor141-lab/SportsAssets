@@ -39,6 +39,7 @@ from datetime import datetime, timezone
 
 from . import bettor_ev_bridge as evb
 from . import bettor_inventory as binv
+from . import bettor_sport_mapping as sportmap
 from . import shadow as sh
 from . import shadow_lanes as lanes
 from . import shadow_store as store
@@ -485,9 +486,14 @@ async def write_decision(opportunity: dict, market_state: dict | None, *,
 # filter on expected profitability: a dataset selected by what BETTOR
 # already believes cannot be used to test what BETTOR believes.
 
+# sports_type, team_league and game_start were on us_premap the whole
+# time and this SELECT did not ask for them, which is the entire reason
+# `sport` and `league` were NULL on all 9,702 observation rows. See
+# bettor_sport_mapping for the trace and the venue-native mapping.
 UNIVERSE_SQL = """
     SELECT p.identifier, p.market_slug, p.event_slug, p.event_title,
-           p.side_norm, p.kind
+           p.side_norm, p.kind,
+           p.sports_type, p.team_league, p.game_start
       FROM us_premap p
      WHERE p.updated_at > now() - ($1 || ' seconds')::interval
        AND p.market_slug IS NOT NULL
@@ -498,14 +504,37 @@ UNIVERSE_SQL = """
 
 async def universe(pool, *, fresh_s=7200, limit=40) -> list:
     rows = await pool.fetch(UNIVERSE_SQL, str(int(fresh_s)), int(limit))
-    # marketId IS the venue's market slug, carried under its own name.
-    # Without it the decision path cannot look up the per-leg inventory
-    # for this market, and every action falls to
-    # STATE_NOT_IDENTIFIED -- which is what production showed: 210 V5
-    # action rows, not one of them in a decided state.
-    return [{"identifier": r["identifier"], "symbol": r["market_slug"],
-             "marketId": r["market_slug"],
-             "eventId": r["event_slug"], "eventTitle": r["event_title"],
-             "outcomeLeg": r["side_norm"], "kind": r["kind"]}
-            for r in rows]
+    out = []
+    for r in rows:
+        # THE VENUE'S OWN WORDS, MAPPED AND NEVER GUESSED. The raw
+        # strings travel beside the mapped values so a row can be
+        # re-derived when the mapping changes -- and it will, because
+        # the venue adds leagues.
+        cls = sportmap.classify(sports_type=r["sports_type"],
+                                team_league=r["team_league"])
+        # marketId IS the venue's market slug, carried under its own
+        # name. Without it the decision path cannot look up the per-leg
+        # inventory for this market, and every action falls to
+        # STATE_NOT_IDENTIFIED -- which is what production showed: 210
+        # V5 action rows, not one of them in a decided state.
+        out.append({
+            "identifier": r["identifier"], "symbol": r["market_slug"],
+            "marketId": r["market_slug"],
+            "eventId": r["event_slug"], "eventTitle": r["event_title"],
+            "outcomeLeg": r["side_norm"], "kind": r["kind"],
+            # None rather than the string NOT_IDENTIFIED: these become
+            # nullable columns, and a column holding the literal text
+            # 'NOT_IDENTIFIED' is worse than a NULL for every query
+            # that ever groups by it.
+            "sport": (cls["SPORT"] if cls["SPORT"] != NOT_IDENTIFIED
+                      else None),
+            "league": (cls["LEAGUE"] if cls["LEAGUE"] != NOT_IDENTIFIED
+                       else None),
+            "sportSourceRaw": r["sports_type"],
+            "leagueSourceRaw": r["team_league"],
+            "sportSource": cls["SPORT_SOURCE"],
+            "sportUnresolvedReason": cls["UNRESOLVED_MAPPING_REASON"],
+            "gameStart": r["game_start"],
+        })
+    return out
 
