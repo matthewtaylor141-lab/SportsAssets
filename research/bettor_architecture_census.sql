@@ -147,3 +147,29 @@ SELECT 'calibration|' || COALESCE(state, 'NULL') || '|n=' || count(*)
   FROM calibration_lifecycles
  GROUP BY state
  ORDER BY count(*) DESC;
+
+\echo ''
+\echo '--- C10. THE 169 LOST DECISIONS: WHICH CONSTRAINT? ---'
+-- C3 showed 169 DECISION_WRITE / ForeignKeyViolationError. Those are
+-- BETTOR EV decisions that were COMPUTED AND THEN LOST -- not declined,
+-- not refused, lost. shadow_decisions carries two foreign keys
+-- (policy_version -> shadow_policy_versions, bettor_opportunity_id ->
+-- bettor_opportunities) and the writer's ordering makes either
+-- reachable, so the database's own error text is the authority rather
+-- than a reading of the code.
+SELECT 'fk_detail|' || stage
+       || '|' || left(regexp_replace(error_text, '\s+', ' ', 'g'), 220)
+       || '|n=' || count(*)
+       || '|first=' || to_char(min(failed_at), 'YYYY-MM-DD HH24:MI:SSZ')
+       || '|last=' || to_char(max(failed_at), 'YYYY-MM-DD HH24:MI:SSZ')
+  FROM bettor_decision_failures
+ WHERE error_class = 'ForeignKeyViolationError'
+ GROUP BY stage, left(regexp_replace(error_text, '\s+', ' ', 'g'), 220)
+ ORDER BY count(*) DESC
+ LIMIT 10;
+
+\echo ''
+\echo '--- C10b. WHICH POLICY VERSIONS WERE EVER FROZEN? ---'
+SELECT 'policy_frozen|' || policy_version || '|lane=' || COALESCE(lane, 'NULL')
+  FROM shadow_policy_versions
+ ORDER BY policy_version;
