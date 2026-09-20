@@ -252,6 +252,56 @@ def analyse(csv_text, *, url=None, fetched_at=None, sha256=None,
     return out
 
 
+_TAG = re.compile(r"<\s*(script|form|table|iframe|a)\b", re.I)
+_ANY_URL = re.compile(r"""(?:href|src|action|data-[a-z-]+)\s*=\s*["\']([^"\']+)["\']""", re.I)
+_CSVISH = re.compile(r"[A-Za-z0-9_./-]*\.csv\b", re.I)
+
+
+def landing_shape(text, url):
+    """WHY a page offered no CSV link, measured rather than guessed.
+
+    A page that links nothing and a page whose links are rendered by
+    JavaScript after load look identical to an href scan. They are
+    different findings: the first says the venue does not publish
+    downloadable files at this path, the second says our reader is
+    wrong. So the page's structure is reported -- tag counts, every
+    URL-bearing attribute, any .csv string anywhere in the body -- and
+    the question is answered from that rather than from the absence.
+    """
+    t = text or ""
+    tags = {}
+    for m in _TAG.finditer(t):
+        k = m.group(1).lower()
+        tags[k] = tags.get(k, 0) + 1
+    urls = []
+    for u in _ANY_URL.findall(t):
+        if u not in urls:
+            urls.append(u)
+    csvish = sorted(set(_CSVISH.findall(t)))
+    return {
+        "url": url,
+        "bytes": len(t),
+        "tagCounts": tags,
+        "urlBearingAttributes": len(urls),
+        "urlSample": urls[:40],
+        "csvStringsAnywhereInBody": csvish[:40],
+        "anchorCount": tags.get("a", 0),
+        "scriptCount": tags.get("script", 0),
+        "WHY_NO_CSV_LINK": (
+            "NO_ANCHORS_AT_ALL" if not tags.get("a") and not urls
+            else "CSV_STRINGS_PRESENT_BUT_NOT_IN_AN_HREF" if csvish
+            else "ANCHORS_PRESENT_NONE_POINT_AT_A_CSV" if tags.get("a")
+            else "NOT_IDENTIFIED"),
+        "javascriptRenderingPossible": (
+            "YES" if tags.get("script") else "NO"),
+        "whyThisMatters": (
+            "a page that links nothing and a page whose links are "
+            "rendered after load look identical to an href scan. The "
+            "first is a fact about the venue; the second is a defect "
+            "in our reader"),
+    }
+
+
 def probe(outdir: Path, max_files: int = 1) -> dict:
     """Fetch, then measure. Returns the §B block."""
     summary = TC.capture(outdir, max_files=max_files)
@@ -265,6 +315,16 @@ def probe(outdir: Path, max_files: int = 1) -> dict:
                 continue
             if r.get("kind") == "CSV":
                 csv_rows.append(r)
+
+    landings = []
+    if raw.exists():
+        for line in raw.read_text().splitlines():
+            try:
+                r = json.loads(line)
+            except ValueError:
+                continue
+            if r.get("kind") == "LANDING" and r.get("http_status") == 200:
+                landings.append(landing_shape(r.get("text"), r.get("url")))
 
     ok = [r for r in csv_rows
           if r.get("http_status") == 200 and r.get("text")]
@@ -282,6 +342,7 @@ def probe(outdir: Path, max_files: int = 1) -> dict:
             summary.get("BLOCK_TRADE_PAGE_HTTP_STATUS"),
         "TAPE_VOLUME_IS_UPPER_BOUND_ON_CLOB_VOLUME":
             summary.get("TAPE_VOLUME_IS_UPPER_BOUND_ON_CLOB_VOLUME"),
+        "landingPageShape": landings,
         "attemptedFiles": [
             {"url": r.get("url"), "http_status": r.get("http_status"),
              "bytes": r.get("bytes"), "error": r.get("error")}
