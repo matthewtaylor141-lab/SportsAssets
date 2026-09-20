@@ -170,10 +170,10 @@ UNION ALL
 -- ── E. the actual delay distribution for the cohort ─────────────────
 SELECT 'E_DELAY',
        m.horizon_s::text || 's',
-       'p50=' || coalesce(round(percentile_cont(0.5) WITHIN GROUP (
-           ORDER BY m.actual_lag_s::numeric), 1)::text, '-')
-       || ' p90=' || coalesce(round(percentile_cont(0.9) WITHIN GROUP (
-           ORDER BY m.actual_lag_s::numeric), 1)::text, '-')
+       'p50=' || coalesce(round((percentile_cont(0.5) WITHIN GROUP (
+           ORDER BY m.actual_lag_s::numeric))::numeric, 1)::text, '-')
+       || ' p90=' || coalesce(round((percentile_cont(0.9) WITHIN GROUP (
+           ORDER BY m.actual_lag_s::numeric))::numeric, 1)::text, '-')
        || ' max=' || coalesce(round(max(m.actual_lag_s::numeric), 1)::text, '-')
        || ' n=' || count(*)::text
   FROM bettor_state_observations o
