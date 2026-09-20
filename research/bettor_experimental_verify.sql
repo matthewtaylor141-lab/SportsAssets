@@ -890,3 +890,86 @@ SELECT 'blocked_rows|' || experiment_id
        = 'BLOCKED_EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE'
  GROUP BY experiment_id
  ORDER BY experiment_id;
+
+\echo ''
+\echo '--- 29. WHAT THE ~62s SPACING ACTUALLY MEASURES ---'
+-- THE CORRECTION THIS SECTION EXISTS FOR. The exit-delay bound in V2
+-- was derived from the spacing of rows in bettor_l2_evidence. That
+-- spacing is NOT the market-data capture cadence. It is
+-- institutional_md.EVIDENCE_EVERY_S = 60.0 -- a deliberately sparse
+-- background TRAIL, written once a minute per symbol so there is a
+-- record that the process was reading the venue at all.
+--
+-- The DIRECT execution path never reads that table. It reads the
+-- IN-MEMORY book (institutional_book.STORE), refreshed every
+-- SWEEP_S = 2.0s over MAX_INSTRUMENTS = 8 symbols. So a bound built
+-- on trail spacing bounds the wrong thing by a factor of ~20.
+--
+-- Rows per symbol per hour tells the two apart: a 60s trail gives ~60,
+-- a 2s capture would give ~1800.
+SELECT 'evidence_rate|' || e.instrument_id
+       || '|rows=' || count(*)
+       || '|hours=' || round(EXTRACT(EPOCH FROM (max(e.received_timestamp)
+                                    - min(e.received_timestamp)))::numeric
+                             / 3600.0, 2)
+       || '|rows_per_hour=' || round((count(*) / GREATEST(
+              EXTRACT(EPOCH FROM (max(e.received_timestamp)
+                                  - min(e.received_timestamp))) / 3600.0,
+              0.01))::numeric, 1)
+  FROM bettor_l2_evidence e
+ WHERE e.received_timestamp > now() - interval '3 hours'
+ GROUP BY e.instrument_id
+ ORDER BY count(*) DESC
+ LIMIT 10;
+
+\echo ''
+\echo '--- 29b. THE QUANTITY AN EXIT BOUND ACTUALLY NEEDS ---'
+-- How stale was the IN-MEMORY book at the instant the DIRECT path
+-- walked it? That is `book_age_ms`, recorded on every decision. It is
+-- the same read the exit would make, so it is the same distribution
+-- the exit's admissibility must be bounded on.
+--
+-- institutional_book.FRESHNESS_LIMIT_S = 5.0 already refuses anything
+-- older: executable() returns nothing past it and the decision is
+-- recorded NOT_IDENTIFIED. So this distribution should sit entirely
+-- under 5,000ms -- and if it does, the execution-admissibility bound
+-- is already frozen, already enforced, and needs no new free parameter.
+SELECT 'book_age|' || COALESCE(d.evidence_environment, 'NULL')
+       || '|n=' || count(*)
+       || '|p50=' || round(percentile_cont(0.50) WITHIN GROUP (
+              ORDER BY d.book_age_ms)::numeric, 1)
+       || '|p95=' || round(percentile_cont(0.95) WITHIN GROUP (
+              ORDER BY d.book_age_ms)::numeric, 1)
+       || '|max=' || round(max(d.book_age_ms)::numeric, 1)
+       || '|over_5000ms=' || count(*) FILTER (WHERE d.book_age_ms > 5000)
+  FROM bettor_experimental_decisions d
+ WHERE d.book_age_ms IS NOT NULL
+ GROUP BY d.evidence_environment
+ ORDER BY count(*) DESC;
+
+\echo ''
+\echo '--- 29c. THE FRESHNESS VERDICT THE STORE ALREADY APPLIES ---'
+SELECT 'freshness|' || COALESCE(d.book_freshness_status, 'NULL')
+       || '|n=' || count(*)
+       || '|filled=' || count(*) FILTER (WHERE d.filled_qty IS NOT NULL)
+       || '|not_identified=' || count(*) FILTER (
+              WHERE d.execution_status = 'NOT_IDENTIFIED')
+  FROM bettor_experimental_decisions d
+ GROUP BY d.book_freshness_status
+ ORDER BY count(*) DESC;
+
+\echo ''
+\echo '--- 29d. THE COLLECTOR SAYS ITS OWN CYCLE TIME ---'
+SELECT 'collector|' || service
+       || '|status=' || status
+       || '|beat_at=' || to_char(beat_at, 'YYYY-MM-DD HH24:MI:SSZ')
+       || '|sweepS=' || COALESCE(detail->>'sweepS', 'NONE')
+       || '|symbols=' || COALESCE(detail->>'symbols', 'NONE')
+       || '|venueMsP50=' || COALESCE(detail->>'venueMsP50', 'NONE')
+       || '|venueMsMax=' || COALESCE(detail->>'venueMsMax', 'NONE')
+       || '|read=' || COALESCE(detail->>'read', 'NONE')
+       || '|failed=' || COALESCE(detail->>'failed', 'NONE')
+       || '|mechanism=' || COALESCE(detail->>'marketDataMechanism', 'NONE')
+  FROM service_heartbeats
+ WHERE service IN ('institutional_md', 'shadow_experimental')
+ ORDER BY service;
