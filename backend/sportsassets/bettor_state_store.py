@@ -199,6 +199,21 @@ async def history(market_id, leg, *, limit=12, pool=None) -> list:
             for r in rows]
 
 
+def _opens_at(horizon_s: int) -> int:
+    """Age at which an observation becomes SELECTABLE for a horizon.
+
+    Eligibility used to open at exactly the horizon, while the ON_TIME
+    band closes 30s later -- a 30-second target hit by ticks 65 to 82
+    seconds apart. Opening 30s early makes the selectable window the
+    whole tolerance band and nothing wider.
+
+    It does not touch what counts as on time. sc.HORIZON_TOLERANCE_S is
+    unchanged, and sc.timing_class() classifies the read it returns
+    exactly as before.
+    """
+    return int(horizon_s) - int(sc.HORIZON_EARLY_ELIGIBILITY_S)
+
+
 _DUE_SQL = """
     SELECT o.observation_id, o.observed_at, o.market_id, o.outcome_leg
       FROM bettor_state_observations o
@@ -224,7 +239,7 @@ async def mids_due(horizon_s: int, *, limit=8, pool=None) -> list:
     """
     pool = pool or await get_pool()
     rows = await pool.fetch(
-        _DUE_SQL, str(int(horizon_s)),
+        _DUE_SQL, str(_opens_at(horizon_s)),
         str(int(horizon_s + sc.HORIZON_DUE_WINDOW_S)),
         int(horizon_s), int(limit))
     return [dict(r) for r in rows]
@@ -251,7 +266,7 @@ async def mids_outstanding(horizon_s: int, *, pool=None) -> int:
     pool = pool or await get_pool()
     try:
         row = await pool.fetchrow(
-            _OUTSTANDING_SQL, str(int(horizon_s)),
+            _OUTSTANDING_SQL, str(_opens_at(horizon_s)),
             str(int(horizon_s + sc.HORIZON_DUE_WINDOW_S)),
             int(horizon_s))
         return int(row["n"]) if row else 0

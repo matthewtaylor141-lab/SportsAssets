@@ -66,7 +66,15 @@ BACKOFF_S = 120.0
 # Bumped whenever the pacing behaviour changes, so a coverage figure
 # can be attributed to the regime that produced it rather than pooled
 # across regimes that behaved differently.
-PACING_VERSION = "BETTOR_CAPTURE_PACING_V2_ADAPTIVE"
+PACING_VERSION = "BETTOR_CAPTURE_PACING_V3_ROTATED_FOLLOWUPS"
+# V2 -> V3 changes the FOLLOW-UP ALLOCATION only: the horizon order now
+# rotates on service opportunities and each horizon is capped at its
+# share of the tick's follow-up budget. The gateway pacing arithmetic
+# -- base, max, growth, recovery and the per-tick read ceiling -- is
+# byte-for-byte the same, and V3 issues no more requests per tick than
+# V2 did. Coverage figures must not be pooled across the two versions
+# because WHICH horizon a read went to changed, not how many were sent.
+_FU_SERVICE_OPS = 0
 READ_PACING_BASE_S = 1.0
 READ_PACING_MAX_S = 8.0
 BACKOFF_GROWTH = 2.0
@@ -359,9 +367,38 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
                         fu_reserve + max(0, budget))
     if stats["rateLimited"]:
         follow_budget = max(1, follow_budget // 2)
-    for horizon in sc.HORIZONS_OBSERVABLE_S:
+    # ── W3: WHICH HORIZON GOES FIRST, AND HOW MUCH IT MAY TAKE ───────
+    #
+    # A fixed order meant the first horizon in the tuple took the whole
+    # follow-up budget on every tick and the other three were starved
+    # deterministically -- not by capacity. That is the W1 shape: reads
+    # at 60s, zero at 300s, 900s and 3600s.
+    #
+    # ROTATE THE START, AND ON SERVICE OPPORTUNITIES, NOT ON THE CLOCK.
+    # Keying the rotation to a tick counter aliases against any rule
+    # that makes follow-ups run on only some ticks: offline, with the
+    # budget at one read per tick, follow-ups run on odd ticks only, so
+    # a tick-keyed offset uses only odd values and two of the four
+    # horizons are NEVER at the head. A counter that advances once per
+    # tick that can actually serve something cannot alias, because
+    # consecutive serving ticks take consecutive offsets.
+    #
+    # THE CAP is what makes the rotation matter. Without it the head
+    # horizon still drains the budget before the next one is reached.
+    global _FU_SERVICE_OPS
+    order = list(sc.HORIZONS_OBSERVABLE_S)
+    if follow_budget > 0:
+        k = _FU_SERVICE_OPS % len(order)
+        order = order[k:] + order[:k]
+        _FU_SERVICE_OPS += 1
+    per_horizon_cap = max(1, follow_budget // len(order))
+    stats["fuRotationHead"] = order[0]
+    stats["fuPerHorizonCap"] = per_horizon_cap
+
+    for horizon in order:
         if follow_budget <= 0:
             break
+        taken_this_horizon = 0
         try:
             # DEMAND IS COUNTED BEFORE THE LIMIT. Previously fu_due was
             # len(due) AFTER mids_due applied the budget as a LIMIT, so
@@ -370,17 +407,19 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
             # reconciliation. True demand had never been recorded.
             outstanding = await sstore.mids_outstanding(horizon,
                                                         pool=pool)
-            due = await sstore.mids_due(horizon, limit=follow_budget,
-                                        pool=pool)
+            due = await sstore.mids_due(
+                horizon, limit=min(follow_budget, per_horizon_cap),
+                pool=pool)
         except Exception:                                      # noqa: BLE001
             break
         stats["fuDue"] += outstanding
         stats["fuSelected"] += len(due)
         for j, d in enumerate(due):
-            if follow_budget <= 0:
+            if follow_budget <= 0 or taken_this_horizon >= per_horizon_cap:
                 stats["fuSkippedBudget"] += len(due) - j
                 break
             follow_budget -= 1
+            taken_this_horizon += 1
             stats["reads"] += 1
             stats["fuAttempted"] += 1
             book = await asyncio.to_thread(_read_book, d["market_id"],

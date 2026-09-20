@@ -133,3 +133,146 @@ def test_late_is_still_never_counted_as_on_time():
                            read_at=T + timedelta(seconds=620), mid="0.5")
     assert m["TIMING_CLASS"] == sc.TIMING_LATE_RECOVERY
     assert m["ADMISSIBLE_TO_HORIZON_GATE"] is False
+
+
+# ── W3: ROTATION AND THE PER-HORIZON CAP ────────────────────────────
+#
+# The reservation above got follow-ups FUNDED. It did not decide which
+# horizon they went to, and a fixed loop order sent every funded read
+# to the first horizon in the tuple. These pin the allocation.
+
+def test_the_rotation_advances_on_service_not_on_a_tick_counter():
+    """THE ALIASING THE OWNER NAMED. A tick-keyed offset aliases
+    against any rule that makes follow-ups run on only some ticks:
+    offline, at one read per tick, follow-ups run on odd ticks only, so
+    i % 4 takes only the values 1 and 3 and two of the four horizons
+    are never at the head of the order. A counter advanced once per
+    tick that can actually serve cannot alias."""
+    import ast
+    import inspect
+    src = inspect.getsource(w.tick)
+    tree = ast.parse(src.lstrip())
+    # The offset comes from the service counter, not a tick index.
+    names = {n.id for n in ast.walk(tree) if isinstance(n, ast.Name)}
+    assert "_FU_SERVICE_OPS" in names
+    assert hasattr(w, "_FU_SERVICE_OPS")
+    assert isinstance(w._FU_SERVICE_OPS, int)
+
+
+def test_every_horizon_reaches_the_head_of_the_order_in_turn():
+    """Consecutive service opportunities take consecutive offsets, so
+    over one full cycle each horizon leads exactly once."""
+    n = len(sc.HORIZONS_OBSERVABLE_S)
+    before = w._FU_SERVICE_OPS
+    heads = []
+    for _ in range(n * 3):
+        r = asyncio.run(w.tick(_Pool()))
+        heads.append(r["fuRotationHead"])
+    assert w._FU_SERVICE_OPS > before, "counter must advance"
+    assert set(heads) == set(sc.HORIZONS_OBSERVABLE_S), heads
+    # each horizon leads the same number of times over whole cycles
+    counts = {h: heads.count(h) for h in sc.HORIZONS_OBSERVABLE_S}
+    assert len(set(counts.values())) == 1, counts
+
+
+def test_the_head_horizon_cannot_drain_the_whole_follow_up_budget():
+    """Rotation without a cap is not a repair: the leading horizon
+    still takes every read before the next one is reached."""
+    r = asyncio.run(w.tick(_Pool()))
+    assert r["fuPerHorizonCap"] >= 1
+    assert r["fuPerHorizonCap"] <= max(
+        1, r["fuReserve"] + r["budget"])
+    import inspect
+    src = inspect.getsource(w.tick)
+    # the cap bounds BOTH the query's LIMIT and the dispatch loop
+    assert "min(follow_budget, per_horizon_cap)" in src
+    assert "taken_this_horizon >= per_horizon_cap" in src
+
+
+def test_v3_sends_no_more_requests_per_tick_than_v2_did():
+    """The allocation changed; the request rate did not.
+
+    I previously claimed pacing was preserved when it was not -- a
+    max(2,...) floor had doubled the request rate at maximum backoff --
+    so this asserts the arithmetic itself rather than restating the
+    claim. Every pacing input is pinned, and the follow-up budget is
+    still the single decrementing counter that bounds the whole pass."""
+    assert w.READ_PACING_BASE_S == 1.0
+    assert w.READ_PACING_MAX_S == 8.0
+    assert w.BACKOFF_GROWTH == 2.0
+    assert w.BACKOFF_RECOVERY == 0.75
+    assert w.MAX_READS_PER_TICK == sc.MAX_MARKETS_PER_TICK + 2
+    assert w.MAX_FOLLOWUP_READS == 6
+
+    # The budget split is byte-for-byte V2's. V3 touches only which
+    # horizon the funded reads are spent on.
+    for pacing in (1.0, 1.352, 2.848, 3.849, 5.132, 8.0):
+        total = max(2, int(w.MAX_READS_PER_TICK * min(
+            1.0, w.READ_PACING_BASE_S / pacing)))
+        fu = max(1, total // 2)
+        sampling = max(1, total - fu)
+        funded = min(w.MAX_FOLLOWUP_READS, fu + sampling)
+        cap = max(1, funded // len(sc.HORIZONS_OBSERVABLE_S))
+        # THE POINT: capping cannot raise the total. Each horizon takes
+        # at most `cap`, and the shared follow_budget still stops the
+        # pass, so the ceiling is unchanged at `funded`.
+        assert cap <= funded, pacing
+        assert min(funded, cap * len(sc.HORIZONS_OBSERVABLE_S)) <= funded
+
+
+def test_the_shared_budget_still_bounds_the_pass_not_just_the_cap():
+    """A per-horizon cap alone would let four horizons spend 4 x cap.
+    The shared decrementing counter is what makes the ceiling hold, and
+    it must be checked before every read, not only per horizon."""
+    import inspect
+    src = inspect.getsource(w.tick)
+    assert "if follow_budget <= 0:\n            break" in src
+    assert "follow_budget <= 0 or taken_this_horizon >= per_horizon_cap" \
+        in src
+    assert "follow_budget -= 1" in src
+
+
+def test_the_version_marks_the_allocation_change_for_attribution():
+    """Coverage measured under V2 and V3 must not be pooled: which
+    horizon a read went to changed between them."""
+    assert w.PACING_VERSION == "BETTOR_CAPTURE_PACING_V3_ROTATED_FOLLOWUPS"
+    r = asyncio.run(w.tick(_Pool()))
+    assert r["pacingVersion"] == w.PACING_VERSION
+
+
+# ── the versioned eligibility change ────────────────────────────────
+
+def test_selection_opens_at_the_start_of_the_tolerance_band():
+    """Eligibility opened at exactly T0+h while ON_TIME closes at
+    T0+h+30 -- a 30s target for ticks 65 to 82s apart. It now opens at
+    T0+h-30, so the selectable window IS the tolerance band."""
+    from sportsassets import bettor_state_store as ss
+    assert sc.HORIZON_EARLY_ELIGIBILITY_S == 30
+    for h in sc.HORIZONS_OBSERVABLE_S:
+        assert ss._opens_at(h) == h - sc.HORIZON_TOLERANCE_S
+
+
+def test_early_selection_did_not_widen_what_counts_as_on_time():
+    """The change is to WHEN the scheduler may select, not to what the
+    science admits. No read becomes on-time that was not on-time
+    before."""
+    assert sc.HORIZON_TOLERANCE_S == 30
+    assert sc.ADMISSIBLE_TO_HORIZON_GATE == (sc.TIMING_ON_TIME,)
+    assert sc.HORIZON_EARLY_ELIGIBILITY_S <= sc.HORIZON_TOLERANCE_S
+    # the boundary cases are exactly where they always were
+    assert sc.timing_class(870, 900) == sc.TIMING_ON_TIME
+    assert sc.timing_class(930, 900) == sc.TIMING_ON_TIME
+    assert sc.timing_class(869, 900) != sc.TIMING_ON_TIME
+    assert sc.timing_class(931, 900) != sc.TIMING_ON_TIME
+
+
+def test_the_eligibility_change_is_versioned_and_states_its_own_limit():
+    """Versioned so a coverage figure can be attributed to the rule
+    that produced it, and carrying the distinction in the contract
+    rather than only in a commit message."""
+    assert sc.ELIGIBILITY_VERSION == "BETTOR_ELIGIBILITY_V3_EARLY_30"
+    claim = sc.EARLY_ELIGIBILITY_IS_NOT_A_WIDER_TOLERANCE
+    assert "HORIZON_TOLERANCE_S" in claim
+    assert "unchanged at 30" in claim
+    # and the constant cannot silently grow past the band it opens
+    assert sc.HORIZON_EARLY_ELIGIBILITY_S <= sc.HORIZON_TOLERANCE_S

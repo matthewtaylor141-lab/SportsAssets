@@ -299,6 +299,125 @@ MEASUREMENT_WINDOW_W2 = {
     "notAClaimOfCompleteness": (
         "the collection system is NOT complete and W2 cannot make it "
         "so. W2 measures one specific repair"),
+
+    # ── A DEFECT IN THIS DECLARATION, RECORDED RATHER THAN QUIETLY ──
+    # ── DROPPED WHEN THE RESULT CAME IN ─────────────────────────────
+    #
+    # PASS_IF.ON_TIME_300S justifies its 50% bar with "the 300s window
+    # is [270,330]s -- 60s wide against a 60s tick". That window did
+    # not exist in the code W2 ran. Under the V2 eligibility rule the
+    # scheduler could not SELECT an observation until T0+300, while
+    # ON_TIME closes at T0+330, so the selectable window was [300,330]
+    # -- 30s wide, against ticks 65 to 82s apart. The criterion assumed
+    # the eligibility change that ships in V3.
+    #
+    # The W2 result is therefore reported against the criterion AS
+    # DECLARED, and this miscalibration is reported beside it. It
+    # explains a shortfall; it does not excuse one, and W2's numbers
+    # are not restated against a bar invented afterwards.
+    "declarationDefect_ON_TIME_300S": (
+        "the 50% bar was justified by a [270,330]s selectable window "
+        "that the V2 eligibility rule did not provide -- it was "
+        "[300,330]s. The criterion described V3's sampling rule before "
+        "V3 existed. Reported, not retrofitted"),
+}
+
+
+# ── W3: THE DEPLOYABLE CHANGE AND ITS MEASUREMENT PLAN ──────────────
+#
+# Declared BEFORE the deploy and before any W3 row exists.
+MEASUREMENT_WINDOW_W3 = {
+    "id": "POST_ROTATION_AND_EARLY_ELIGIBILITY_W3",
+    "declaredAt": "2026-09-20T22:40Z",
+    "declaredBeforeDeploy": True,
+    "startRule": ("completion of the deploy carrying PACING_VERSION "
+                  "BETTOR_CAPTURE_PACING_V3_ROTATED_FOLLOWUPS, plus a "
+                  "10-minute warm-up. Identical to W1's and W2's rule; "
+                  "the exact timestamps are filled from the deploy "
+                  "record, not chosen after seeing rows"),
+    "lengthMinutes": 30,
+    "startsAt": "PENDING_DEPLOY_RECORD",
+    "endsAt": "PENDING_DEPLOY_RECORD",
+    "cohort": ("observations whose observed_at falls inside the "
+               "window, followed to each horizon's own recovery "
+               "deadline. Identical construction to W1 and W2"),
+
+    # ── WHAT CHANGED, AND WHY IT IS ONE CHANGE AND NOT TWO ──────────
+    #
+    # TWO MECHANISMS SHIP TOGETHER, DELIBERATELY, AND THE BUNDLING IS
+    # A COST I AM CHOOSING TO PAY RATHER THAN HIDE.
+    #
+    #   ALLOCATION  the follow-up horizon order rotates on service
+    #               opportunities and each horizon is capped at its
+    #               share of the tick's follow-up budget
+    #   ELIGIBILITY an observation becomes selectable at T0+h-30
+    #               instead of T0+h, so the selectable window is the
+    #               whole tolerance band
+    #
+    # Offline the allocation change ALONE lifts every horizon out of
+    # starvation and still returns ZERO on-time reads at 300s and 900s:
+    # every one of those attempts lands late, because a 30s selectable
+    # window cannot be hit reliably by ticks 65-82s apart. Shipping
+    # allocation alone would therefore have spent a window to measure a
+    # result that was already predictable and uninformative.
+    #
+    # THEY REMAIN ATTRIBUTABLE because they move different recorded
+    # quantities: allocation moves FU_ATTEMPTED per horizon (coverage),
+    # eligibility moves TIMING_CLASS (on-time share). A result showing
+    # coverage without on-time isolates the allocation change; a result
+    # showing both isolates the pair.
+    "changes": {
+        "ALLOCATION": "PACING_VERSION BETTOR_CAPTURE_PACING_V3_ROTATED_FOLLOWUPS",
+        "ELIGIBILITY": "ELIGIBILITY_VERSION BETTOR_ELIGIBILITY_V3_EARLY_30",
+    },
+    "attributionRule": (
+        "FU_ATTEMPTED per horizon attributes to the allocation change; "
+        "TIMING_CLASS attributes to the eligibility change. They are "
+        "separate columns and are never pooled"),
+
+    # ── ACCEPTANCE CRITERIA, FIXED IN ADVANCE ───────────────────────
+    "PASS_IF": {
+        "COVERAGE_EVERY_HORIZON": (
+            "FU_ATTEMPTED > 0 at all four horizons among observations "
+            "whose horizon came due inside the window. This is the "
+            "allocation criterion and it is the one the rotation must "
+            "satisfy. Zero at any horizon that had standing eligible "
+            "demand falsifies the rotation repair"),
+        "ON_TIME_300S": (
+            ">= 40% of the 300s-due cohort is ON_TIME. The selectable "
+            "window is now [270,330]s -- 60s wide against ticks of "
+            "65-82s -- so a tick should usually fall inside it when "
+            "budget exists. The bar is 40 and not 50 because a tick "
+            "gap can exceed the band's width"),
+        "ON_TIME_900S": (
+            "> 0% of the 900s-due cohort is ON_TIME. Stated weakly on "
+            "purpose: 900s on-time coverage depends on where ticks "
+            "fall relative to T0+900, and at some spacings no tick can "
+            "land inside the band at all"),
+    },
+    "FAIL_IF": (
+        "any horizon with standing eligible demand receives zero "
+        "attempts, which would mean the rotation does not reach it"),
+
+    # ── WHAT W3 CANNOT ESTABLISH ────────────────────────────────────
+    "noPromiseOfFullCoverage": (
+        "W3 does NOT promise on-time coverage at every horizon. "
+        "Measured demand exceeds measured capacity -- steady-state "
+        "follow-up demand is 10.6 reads/tick against a capacity of "
+        "1-7 -- so reads will still be lost. The rotation changes "
+        "WHICH are lost; it cannot change THAT some are. Under "
+        "overload, selective loss becomes spread loss, and that is the "
+        "whole of the claim"),
+    "toleranceUnchanged": (
+        "HORIZON_TOLERANCE_S remains 30 and ADMISSIBLE_TO_HORIZON_GATE "
+        "remains ON_TIME only. No criterion here is met by widening "
+        "either"),
+    "simulationIsNotMeasurement": (
+        "the offline decomposition above comes from "
+        "bettor_schedule_sim, which exercises the allocation rule and "
+        "observes no venue. Reproducing W1's qualitative shape is not "
+        "reproducing W1's production behaviour, and no simulated "
+        "number may be reported as a W3 result"),
 }
 
 
@@ -436,6 +555,101 @@ HORIZON_NOT_OBSERVABLE_REASON = (
 # analysis can still select on-time reads only.
 HORIZON_TOLERANCE_S = 30
 HORIZON_DUE_WINDOW_S = 600
+
+# ── WHEN AN OBSERVATION BECOMES SELECTABLE. A SAMPLING CHANGE. ──────
+#
+# Eligibility opened at exactly T0 + horizon while the ON_TIME band
+# closes at T0 + horizon + 30, so the scheduler could only ever pick an
+# observation up inside a 30-SECOND window -- and ticks are 65 to 82
+# seconds apart. The first eligible tick therefore landed past the band
+# more often than not, which is why W1 and W2 returned late recoveries
+# at horizons that were being served.
+#
+# Opening eligibility 30s EARLY makes the selectable window
+# [T0+h-30, T0+h+30]: the full tolerance band, and nothing wider.
+#
+# THIS IS A VERSIONED SAMPLING CHANGE, NOT A CHANGE TO THE SCIENCE.
+# HORIZON_TOLERANCE_S is untouched. A read at lag 870 for the 900s
+# horizon was ALWAYS on time by the unchanged rule |lag - h| <= 30; the
+# only thing that changed is that the scheduler is now permitted to
+# issue it. No read becomes on-time that was not on-time before, and
+# timing_class() is not consulted differently.
+HORIZON_EARLY_ELIGIBILITY_S = 30
+ELIGIBILITY_VERSION = "BETTOR_ELIGIBILITY_V3_EARLY_30"
+
+# ── AND THE MEASUREMENT THAT JUSTIFIES IT, NOT AN ARGUMENT ──────────
+#
+# research/bettor_ontime_opportunity.sql, run 176 on ecb0928, against
+# the W1 cohort. For each observation and horizon: did a tick actually
+# occur inside the selectable window?
+#
+#   horizon  band elapsed  had a tick in band  ...with follow-up budget
+#      60          66            66 (100%)              31
+#     300          66             2 (3.0%)               1
+#     900          66             9 (13.6%)              8
+#    3600          18             0 (0%)                 0
+#
+# I HAD ESTIMATED 30/72 = 42% BY A PHASE ARGUMENT. Measured, 300s was
+# 3%. The estimate was wrong because it assumed T0 is uniformly
+# distributed against tick boundaries, and it is not: THE SAME TICK
+# LOOP THAT WRITES AN OBSERVATION RUNS THE FOLLOW-UP PASS, so T0 sits a
+# measured 3.7s median after its own tick and every later tick is
+# ~71.4s further on. The achievable lags are therefore QUANTISED to
+# k*71.4 - 3.7, and a horizon is reachable only if some integer k lands
+# in its window:
+#
+#     h=60    k in [0.89, 1.31]   -> k=1     reachable
+#     h=300   k in [4.25, 4.67]   -> none    UNREACHABLE
+#     h=900   k in [12.66, 13.08] -> k=13    reachable
+#     h=3600  k in [50.47, 50.89] -> none    UNREACHABLE
+#
+# which reproduces the measured 100% / 3% / 13.6% / 0% exactly. The 3%
+# and the handful at 900s are tick-spacing JITTER, not phase luck.
+#
+# WIDENING THE SELECTABLE WINDOW TO THE FULL TOLERANCE BAND changes
+# h=300 to k in [3.83, 4.67], which contains k=4. That is the whole
+# mechanism of the eligibility change, and it is why the change is
+# necessary rather than merely tidy.
+#
+# IT DOES NOT FIX 3600s: k in [50.05, 50.89] still contains no integer
+# at the median spacing. That horizon depends on jitter (measured
+# spacing ranges 21.6s to 82.5s) and no allocation rule can supply it.
+# THE STRUCTURAL FIX WOULD BE TO DECOUPLE T0 FROM TICK BOUNDARIES so
+# lags stop being quantised. That is a separate change to the sampling
+# rule, it is NOT taken here, and it must not be made silently.
+MEASURED_ONTIME_OPPORTUNITY = {
+    "source": "research/bettor_ontime_opportunity.sql",
+    "run": "research-sql 176 on ecb0928, 2026-09-20T22:39:05Z",
+    "cohort": "W1, 66 observations",
+    "bandElapsed": {60: 66, 300: 66, 900: 66, 3600: 18},
+    "hadATickInBand": {60: 66, 300: 2, 900: 9, 3600: 0},
+    "andHadFollowUpBudget": {60: 31, 300: 1, 900: 8, 3600: 0},
+    "tickSpacingP50S": 71.4,
+    "tickSpacingMinS": 21.6,
+    "tickSpacingMaxS": 82.5,
+    "obsOffsetFromItsTickP50S": 3.7,
+    "aTickInBandIsNotAReadInBand": (
+        "HAD_A_TICK_IN_BAND counts scheduling CHANCES. Whether a "
+        "request also completed inside the band is a separate and "
+        "smaller number, and the follow-up budget column separates a "
+        "third loss again. At 60s, 66 observations had a tick in band, "
+        "31 had one with budget, and W1 recorded zero on-time reads"),
+    "phaseApproximationWithdrawn": (
+        "30/72 = 42% assumed T0 independent of tick boundaries. "
+        "Measured 3% at 300s. The estimate is withdrawn; the quantised "
+        "model above reproduces all four measured figures"),
+}
+
+EARLY_ELIGIBILITY_IS_NOT_A_WIDER_TOLERANCE = (
+    "HORIZON_EARLY_ELIGIBILITY_S moves when the SCHEDULER may select an "
+    "observation. HORIZON_TOLERANCE_S decides what counts as ON_TIME "
+    "and is unchanged at 30. Selecting early can only produce reads "
+    "that the original tolerance already admitted; it cannot reclassify "
+    "a late read, and no analysis gate is relaxed by it")
+
+# Selection may open early; it may NEVER open earlier than the
+# tolerance band itself, which would admit reads the science rejects.
+assert HORIZON_EARLY_ELIGIBILITY_S <= HORIZON_TOLERANCE_S
 
 # ── LATE IS NOT ON TIME, AND IS NEVER COUNTED AS IT ─────────────────
 #
