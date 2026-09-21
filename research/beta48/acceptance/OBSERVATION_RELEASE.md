@@ -124,7 +124,44 @@ the build if they drift.
 | cursors in memory | 5,000 | terminal-first eviction; evicting a non-terminal cursor is **counted by name** |
 | outbox | 20,000 records | overflow counted as `record_dropped_outbox_full` |
 | **recovery time** | **O(cursors), not O(journal)** | recovery reads the cursor table and one ledger row; **the journal is never replayed** |
-| write loss on SIGKILL | one flush interval (2 s) | cancellation flushes in a `finally` |
+| write loss, flushes succeeding | one flush interval (2 s) | batched outbox |
+| write loss, **SIGTERM** | **one flush interval, measured** | see below |
+| write loss, **database outage** | **grows until the outbox overflows, then records DROP** | counted, and the window is marked incomplete |
+
+### The guarantee, stated accurately
+
+"At most two seconds" assumed every flush succeeds. It does not hold
+during an outage, and `durability_report()` says so rather than
+implying otherwise. It reports **oldest uncommitted record age**,
+**uncommitted count**, **flush failures**, **records dropped**,
+**seconds since the last commit**, and marks measurement windows
+`windows_incomplete` from the first drop to the last — because a rate
+computed over a window with an unrecorded gap is wrong in a direction
+nobody can see.
+
+**A lost acknowledgment cannot inflate the count.** A commit can
+succeed and its acknowledgment be lost; a dropped connection after
+`COMMIT` looks exactly like a failed write. Every record carries a
+**content-derived key** and the insert is `ON CONFLICT (lane,
+record_key) DO NOTHING`, so the retry is a no-op. Demonstrated against
+a real server: replaying a 120-record batch leaves **120 rows, not
+240**.
+
+**On SIGTERM the final flush does NOT run.** Measured, not assumed:
+`workers/all.py` installs no SIGTERM handler, and Python's default
+disposition terminates the process without running `finally` blocks
+(verified in this container — exit 143, the `finally` never ran). A
+Render restart or redeploy arrives as SIGTERM, so up to one flush
+interval is lost, and `oldest_uncommitted_age_s` in the last report
+before the restart is the size of it. The `finally` covers
+**cancellation** and the kill-switch exit, not SIGTERM. The one-line
+remedy — a SIGTERM handler in `all.py` — changes shutdown behaviour
+for all eighteen loops and is **not** in this release.
+
+**The schema is verified, not assumed.** `CREATE TABLE IF NOT EXISTS`
+is a no-op against a table that already exists with an older shape, so
+`PgStore.start()` checks the columns it needs and **refuses to run**
+naming the missing ones rather than failing at the first write.
 
 ### Demonstrated, not asserted
 
@@ -236,36 +273,61 @@ evidence class now belongs to the **transport**:
 `ms.MarketStream.evidence_class` is `PROSPECTIVE_SHADOW`; a replaying
 transport overrides it to `REPLAY_DECISION`.
 
-## 5. SETTLEMENT SCHEDULING MAKES PROGRESS
+## 5. SETTLEMENT SCHEDULING — CORRECTED TWICE
 
-**The defect.** Reading "the 25 oldest observed" means a contract that
-never resolves is permanently the oldest. A hundred pending contracts
-hold the batch forever and a market that settled an hour ago is never
-read.
+**First defect.** Reading "the 25 oldest observed" cannot make
+progress: a contract that never resolves is permanently the oldest.
 
-**The fix.** Per-contract state, persisted in `bettor_live_cursor`:
+**Second and third defects, found in review of the first fix**, and
+both worse than what they replaced:
 
-| field | |
-|---|---|
-| `settle_status` | `NULL` → `PENDING` / `UNREADABLE` / `UNMATCHED` → retryable; `RESOLVED` / `RESOLVED_DERIVED` / `ABANDONED` → **terminal** |
-| `settle_attempts` | drives the backoff |
-| `settle_next_at` | `min(600 × 2^attempts, 21,600)` seconds, deterministic, no jitter |
+* the first fix **retired `RESOLVED_DERIVED` as terminal**, so outcome
+  collection closed on an *inference from converged prices* and the
+  venue's own settlement endpoint could never confirm or contradict
+  it;
+* it advanced **one attempt counter on every result, `PENDING`
+  included**, and abandoned the contract at twelve — but a market may
+  legitimately stay open far longer than twelve checks.
 
-* **never-attempted contracts sort ahead of every attempted one**, so a
-  newly observed contract is read on the next pass however large the
-  pending population;
-* an authoritative resolution is **retired** — a settled price does not
-  change, so reading it again spends a REST call on a fact we hold;
-* a contract we can never read is **`ABANDONED` by name** after twelve
-  attempts (~2 days of backoff), counted, not silently retried forever;
-* `RESOLVED_DERIVED` stays distinct from `RESOLVED`.
+### What it does now
 
-Tested as properties, not examples:
-`test_a_pending_population_cannot_monopolize_the_batch`,
-`test_a_new_contract_is_read_in_the_next_pass_however_many_pend`,
-`test_every_contract_is_eventually_attempted` (no starvation over 64
-scheduler passes), `test_an_authoritative_resolution_is_retired`, and
-`test_the_settlement_schedule_survives_the_restart`.
+| status | terminal? | schedule |
+|---|---|---|
+| `NULL` (never attempted) | no | **sorts first**, always |
+| `PENDING` | **no** | event timing where the venue gives one (`event_at + 300 s`), else capped backoff 600 s → 6 h. **Never retires.** |
+| `RESOLVED_DERIVED` | **no** | preserved in `settle_derived_outcome` / `settle_derived_at`, **never** in the authoritative `settle_outcome`; re-checked on its own cadence, 900 s → 6 h, **forever** |
+| `UNREADABLE` / `UNMATCHED` | no | failure backoff 600 s → 6 h |
+| `READ_FAILURE_ESCALATED` | **no** | after 6 **consecutive** failures: visible, still queued, longest interval, **back of the queue** |
+| **`RESOLVED`** | **YES** | outcome collection complete. Nothing else is terminal. |
+
+**Two counters, not one.** `settle_attempts` records every read;
+`settle_failures` counts **consecutive** failed reads and is cleared by
+any successful one. A `PENDING` answer is a successful read.
+
+**There is no `ABANDONED` status any more**, and a test asserts the
+constant does not exist.
+
+### Retention and the cache
+
+* The seven-day prune deletes **only `RESOLVED`** cursors. It
+  previously ignored settlement status, which deleted exactly the
+  markets that had been open longest — the obligations retention
+  exists for. It reports `cursors_retained_unresolved`.
+* The in-memory cursor map is a **cache**. The queue is read from the
+  store (`store.due_for_settlement`), so an eviction is a cache miss,
+  not lost work — and an **unflushed** cursor is never evicted,
+  because that would lose the update rather than the cache entry.
+* Found while fixing that: **`FileStore.flush` wrote the cursors it
+  was handed as the whole file**, so every flush of a dirty subset
+  deleted every contract that had not changed in that batch.
+
+Pinned by test: a pending population cannot hold the batch; a newly
+observed contract is read next pass; every contract is attempted over
+64 scheduler passes; a hundred consecutive `PENDING` reads retire
+nothing; a derived outcome stays queued and never writes the
+authoritative field; an escalated contract stays queued but sorts last;
+the queue survives an emptied cache; and a one-cursor flush does not
+delete the others.
 
 ## 6. TWO MORE DEFECTS FIXED ALONG THE WAY
 
