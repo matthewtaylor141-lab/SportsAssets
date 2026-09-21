@@ -1,0 +1,142 @@
+# Reconcile the internal ledgers against the venue. READ ONLY.
+#
+# The internal ledger reports 52 rows in status='filled' carrying
+# $16,180.53. That is a sum of acquisition costs over fill records, and
+# it was quoted as current exposure. Two internal facts already say it
+# is not: 37 of the 52 sit on markets our own table marks closed, and
+# mirror_books reports nothing open. Neither fact proves the positions
+# settled or that cash arrived -- only the venue can say that, so this
+# asks the venue.
+#
+# WHAT RUNS. sportsassets.venue_reconcile, which imports no order
+# function; test_venue_reconcile_is_read_only.py proves that by AST over
+# the module's own source and is run here BEFORE the reconciliation, so
+# a job that reaches the account has already demonstrated it cannot
+# trade through it.
+#
+# NO CREDENTIAL IS PRINTED. The keys arrive as secrets, are consumed by
+# the SDK client, and appear in no output. The JSON artifact carries
+# positions, orders and trade ids -- account data, not credentials.
+name: venue-reconcile
+
+on:
+  workflow_dispatch:
+    inputs:
+      since_days:
+        description: 'How far back to page venue activity (the book starts 2026-08-04)'
+        required: false
+        default: '75'
+      head:
+        description: 'Max lines of row detail to print'
+        required: false
+        default: '80'
+
+permissions:
+  contents: read
+
+concurrency:
+  # THE GLOBAL PMUS VENUE-ACCESS DOMAIN. Every workflow that can reach
+  # gateway.polymarket.us shares this group so two collectors can never
+  # read the venue at once and contaminate each other's measurements.
+  # An account read is still a read against that gateway.
+  group: pmus-public-read-global
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  reconcile:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        working-directory: backend
+        run: |
+          set -e
+          python -m pip install --quiet --upgrade pip
+          pip install --quiet -r requirements.txt
+          pip install --quiet pytest pytest-asyncio
+
+      - name: Prove the reconciler cannot trade, BEFORE giving it keys
+        working-directory: backend
+        run: |
+          set -e
+          # This ordering is the control. The credentials are not in the
+          # environment of this step, and the job does not reach the
+          # account until these pass.
+          python -m pytest -q -p no:randomly \
+            tests/test_venue_reconcile_is_read_only.py
+
+      - name: Reconcile
+        working-directory: backend
+        env:
+          PMUS_DOMAIN_RESERVATION: pmus-public-read-global
+          PMUS_KEY_ID: ${{ secrets.PMUS_KEY_ID }}
+          PMUS_SECRET_KEY: ${{ secrets.PMUS_SECRET_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RECONCILE_OUT: reconcile_${{ github.run_id }}.json
+          SINCE_DAYS: ${{ inputs.since_days }}
+          HEAD: ${{ inputs.head }}
+        run: |
+          set -o pipefail
+          set +e
+          python -m sportsassets.venue_reconcile > recon_stdout.txt 2> recon_stderr.txt
+          RC=$?
+          set -e
+
+          echo "== SUMMARY =="
+          cat recon_stdout.txt
+
+          echo
+          echo "== ROW DETAIL (first ${HEAD:-80}) =="
+          python - <<'PY' || true
+          import json, os, glob
+          f = sorted(glob.glob("reconcile_*.json"))
+          if not f:
+              print("no JSON produced")
+              raise SystemExit(0)
+          d = json.load(open(f[-1]))
+          rows = d.get("rows") or []
+          n = int(os.environ.get("HEAD") or 80)
+          print("%-6s %-26s %-22s %-12s %10s %10s %10s"
+                % ("id", "verdict", "slug", "status", "int_sh",
+                   "ven_sh", "d_usd"))
+          for r in rows[:n]:
+              print("%-6s %-26s %-22s %-12s %10s %10s %10s"
+                    % (r.get("live_order_id"), r.get("verdict"),
+                       str(r.get("slug"))[:22], r.get("status"),
+                       r.get("internal_shares"), r.get("venue_shares", "-"),
+                       r.get("delta_usd", "-")))
+          print()
+          print("VENUE ORDERS WITH NO live_orders ROW:")
+          for o in (d.get("venue_orders_not_in_live_orders") or [])[:20]:
+              print("   ", o.get("order_id"), o.get("slug"),
+                    o.get("shares"), o.get("avg_price"))
+          print()
+          print("SETTLEMENTS SEEN AT THE VENUE:")
+          for s in (d.get("settled") or [])[:20]:
+              print("   ", s.get("slug"), "events", s.get("events"),
+                    "proceeds", round(s.get("proceeds") or 0, 2))
+          PY
+
+          if [ "$RC" -ne 0 ]; then
+            echo "::error::the reconciliation did not complete -- treat every figure above as absent, not as zero"
+            sed -n '1,40p' recon_stderr.txt
+          fi
+          exit "$RC"
+
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: venue-reconciliation-${{ github.run_id }}
+          path: |
+            backend/reconcile_*.json
+            backend/recon_stdout.txt
+            backend/recon_stderr.txt
+          retention-days: 30
