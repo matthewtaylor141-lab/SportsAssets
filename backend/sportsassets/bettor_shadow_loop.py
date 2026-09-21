@@ -61,6 +61,13 @@ CANCELLED = "CANCELLED"
 REPRICED = "REPRICED"
 REJECTED = "REJECTED"
 
+# A quote in either of these states is a LIVE ORDER. Its unfilled
+# remainder is still working, still reserves cash, and is still
+# eligible for a fill, a cancel or a replace. Treating PARTIAL as
+# finished is how a half-filled order stops being tracked while it is
+# still in the market.
+LIVE_QUOTE_STATES = ("RESTING", "PARTIAL")
+
 
 @dataclass
 class Position:
@@ -540,64 +547,125 @@ class ShadowLoop:
             # deciding on the market that no longer exists. A caller
             # supplies the re-read; absent one, the entry book stands in
             # and the record says which was used.
-            rb = recovery_book if recovery_book is not None else book
-            out["recovery_book"] = ("RE_READ" if recovery_book is not None
-                                    else "ENTRY_BOOK_REUSED")
-            out["recovery"] = self._recover_one_leg(rb, pos, filled[0],
-                                                    evidence_class)
+            fresh = recovery_book is not None
+            rb = recovery_book if fresh else book
+            out["recovery_book"] = ("RE_READ:%s@%s"
+                                    % (rb.market_id, rb.age_s) if fresh
+                                    else "ENTRY_BOOK_REUSED_STALE")
+            out["recovery"] = self._recover_one_leg(
+                rb, pos, filled[0], evidence_class, fresh=fresh)
         return out
 
     # ── autonomous recovery from a one-leg fill ──────────────────────
 
-    def _recover_one_leg(self, book: de.Book, pos: Position, leg: dict,
-                         evidence_class: str) -> dict:
-        """Decide and ACT on naked exposure. Recording is not handling.
+    def _recover_one_leg(self, book, pos: Position, leg: dict,
+                         evidence_class: str, *,
+                         fresh: bool = False) -> dict:
+        """Decide and ACT on naked exposure, from INCREMENTAL cash only.
 
-        The policy is explicit and ordered, because "hold" and "exit"
-        are different bets and picking between them silently is how a
-        stub position becomes a directional one nobody chose:
+        TWO DEFECTS THIS REPLACES, both found by review.
 
-          1. COMPLETE  retry the missing leg if it is still executable
-                       at a price that keeps the pair worth completing.
-          2. EXIT      otherwise flatten at the bid. Directional
-                       exposure is not permitted deliberately, so the
-                       default is OUT, not hope.
-          3. HOLD      only when there is no executable exit, in which
-                       case the exposure is named and carried rather
-                       than pretended away.
+        The old threshold was `own_basis + other_ask < 1`. `own_basis`
+        is what the held leg COST, which is sunk: it is identical under
+        every action available now and therefore cannot discriminate
+        between them. Including it meant an expensive entry made the
+        engine less willing to complete, which is backwards. The
+        completion FEE was missing from the threshold as well.
 
-        HEDGE is deliberately absent: hedging this exposure means buying
-        the complement, which IS step 1. There is no third instrument.
+        The comparison is now between the two feasible actions, from the
+        state we are actually in:
+
+            COMPLETE   pay (other_ask x qty + fee) now, receive par at
+                       settlement:   +qty - qty x other_ask - fee
+            EXIT       receive (own_bid x qty - fee) now and give up the
+                       held leg's settlement value, which is
+                       NOT_IDENTIFIED for a single leg -- that is
+                       exactly the exposure we are trying to remove.
+
+        So COMPLETE is chosen when its incremental cash is positive AND
+        beats the exit's certain proceeds. A COMPLETION THAT LOCKS AN
+        OVERALL LOSS MAY STILL BE THE BETTER ACTION, because the loss is
+        already incurred; what is being chosen is only what happens
+        next.
+
+        AND THE PAIR ARITHMETIC IS GATED ON THE ACCOUNT. If the venue
+        NETS the complement against the held leg instead of creating an
+        independent pair, buying it CLOSES rather than completes and the
+        par model does not describe the cash at all.
         """
         side = leg["leg"]
         other = "no" if side == "yes" else "yes"
-        other_ask = de._f(getattr(book, "%s_ask" % other))
-        other_depth = getattr(book, "%s_ask_size" % other)
         qty = leg["filled"]
 
-        # 1. COMPLETE
-        if other_ask is not None and other_depth >= qty:
-            own = (pos.yes_basis / pos.yes) if side == "yes" and pos.yes \
-                else (pos.no_basis / pos.no) if pos.no else None
-            if own is not None and (own + other_ask) < 1.0:
-                fee = self.fees.fill_fee(qty, maker=False)
-                cost = qty * other_ask + fee
-                pos.buy(other, qty, other_ask, fee)
-                self.ledger.fees_paid += fee
-                self.ledger.move("RECOVER_BUY_%s" % other.upper(), -cost,
-                                 "completed the pair at %.4f" % other_ask,
-                                 book.market_id)
-                return {"action": "COMPLETE", "leg": other, "qty": qty,
-                        "price": other_ask, "fee": round(fee, 6),
-                        "why": ("completing costs %.4f against a basis of "
-                                "%.4f, so the pair is still worth holding"
-                                % (other_ask, own)),
-                        "evidence_class": evidence_class}
+        # STALE OR UNIDENTIFIED RECOVERY DATA IS NOT A DECISION INPUT.
+        # The second leg failed because the price moved; recovering on
+        # the book that was already wrong is deciding on a market that
+        # no longer exists.
+        if not fresh:
+            return {"action": "UNRESOLVED_EXPOSURE", "leg": side, "qty": qty,
+                    "blocker": "NO_FRESH_RECOVERY_OBSERVATION",
+                    "why": ("recovery requires its own observation with an "
+                            "identity and a timestamp; the entry book is "
+                            "known to be stale because the second leg was "
+                            "rejected on it"),
+                    "directional_contracts": pos.directional,
+                    "evidence_class": evidence_class}
+        bad = book.unreadable_reason() if hasattr(book, "unreadable_reason") \
+            else "recovery observation is not a book"
+        if bad:
+            return {"action": "UNRESOLVED_EXPOSURE", "leg": side, "qty": qty,
+                    "blocker": "RECOVERY_OBSERVATION_UNUSABLE",
+                    "why": "recovery read rejected: %s" % bad,
+                    "directional_contracts": pos.directional,
+                    "evidence_class": evidence_class}
 
-        # 2. EXIT
+        caps = vc.capabilities(self.venue, self.account_class)
+        pair_ok = caps.permits("holds_both_legs_independently")
+
+        other_ask = de._f(getattr(book, "%s_ask" % other))
+        other_depth = getattr(book, "%s_ask_size" % other)
         own_bid = de._f(getattr(book, "%s_bid" % side))
         own_bid_depth = getattr(book, "%s_bid_size" % side)
+
+        complete_net = None
+        if pair_ok and other_ask is not None and other_depth >= qty:
+            fee = self.fees.fill_fee(qty, maker=False)
+            complete_net = qty * (1.0 - other_ask) - fee
+        exit_net = None
         if own_bid is not None and own_bid_depth > 0:
+            sell_qty = min(qty, own_bid_depth)
+            exit_net = sell_qty * own_bid - self.fees.fill_fee(
+                sell_qty, maker=False)
+
+        considered = {
+            "complete_net_incremental": (round(complete_net, 6)
+                                         if complete_net is not None else None),
+            "exit_net_proceeds": (round(exit_net, 6)
+                                  if exit_net is not None else None),
+            "pair_capability": caps.holds_both_legs_independently,
+            "sunk_basis_excluded": round(pos.basis, 6),
+        }
+
+        if complete_net is not None and (exit_net is None
+                                         or complete_net > exit_net):
+            fee = self.fees.fill_fee(qty, maker=False)
+            cost = qty * other_ask + fee
+            pos.buy(other, qty, other_ask, fee)
+            self.ledger.fees_paid += fee
+            self.ledger.move("RECOVER_BUY_%s" % other.upper(), -cost,
+                             "completed the pair at %.4f" % other_ask,
+                             book.market_id)
+            return {"action": "COMPLETE", "leg": other, "qty": qty,
+                    "price": other_ask, "fee": round(fee, 6),
+                    "considered": considered,
+                    "why": ("completing nets %+.6f incremental against an "
+                            "exit worth %s; sunk basis excluded"
+                            % (complete_net,
+                               ("%+.6f" % exit_net) if exit_net is not None
+                               else "nothing executable")),
+                    "evidence_class": evidence_class}
+
+        if exit_net is not None:
             sell_qty = min(qty, own_bid_depth)
             fee = self.fees.fill_fee(sell_qty, maker=False)
             realized = pos.sell(side, sell_qty, own_bid, fee)
@@ -605,25 +673,43 @@ class ShadowLoop:
             self.ledger.fees_paid += fee
             self.ledger.realized_pnl += realized
             self.ledger.move("RECOVER_SELL_%s" % side.upper(), proceeds,
-                             "flattened naked exposure at %.4f, "
-                             "realized %+.4f" % (own_bid, realized),
+                             "flattened %.4g at %.4f, realized %+.4f"
+                             % (sell_qty, own_bid, realized),
                              book.market_id)
-            return {"action": "EXIT", "leg": side, "qty": sell_qty,
-                    "price": own_bid, "realized": round(realized, 6),
-                    "why": ("the complement was not executable, and "
-                            "directional exposure is not held "
-                            "deliberately"),
-                    "evidence_class": evidence_class}
+            # A PARTIAL EXIT IS NOT A RESOLUTION. If depth covered only
+            # part of the stub, the rest is still naked and the policy
+            # keeps running on it.
+            remaining = qty - sell_qty
+            out = {"action": "EXIT", "leg": side, "qty": sell_qty,
+                   "price": own_bid, "realized": round(realized, 6),
+                   "considered": considered,
+                   "remaining_exposed": remaining,
+                   "resolved": remaining <= 1e-9,
+                   "why": ("exiting nets %+.6f against completion worth %s"
+                           % (exit_net,
+                              ("%+.6f" % complete_net)
+                              if complete_net is not None else "unavailable")),
+                   "evidence_class": evidence_class}
+            if remaining > 1e-9:
+                out["next"] = {
+                    "action": "UNRESOLVED_EXPOSURE",
+                    "qty": remaining,
+                    "why": ("only %.4g of %.4g cleared at the bid; the "
+                            "remainder is still naked and the policy "
+                            "continues on it" % (sell_qty, qty)),
+                    "directional_contracts": pos.directional}
+            return out
 
-        # 3. HOLD, named
-        return {"action": "HOLD_EXPOSED", "leg": side, "qty": qty,
-                "why": ("no executable exit: complement unavailable and "
-                        "no bid depth on the held leg. The exposure is "
-                        "carried and named, not netted away"),
+        return {"action": "UNRESOLVED_EXPOSURE", "leg": side, "qty": qty,
+                "blocker": "NO_EXECUTABLE_ACTION",
+                "considered": considered,
+                "why": ("neither completion nor exit is executable: "
+                        "complement %s, own bid %s"
+                        % ("unavailable" if other_ask is None
+                           else "capability %s" % caps.holds_both_legs_independently,
+                           "absent" if own_bid is None else "no depth")),
                 "directional_contracts": pos.directional,
                 "evidence_class": evidence_class}
-
-    # ── maker path ───────────────────────────────────────────────────
 
     def quote(self, book: de.Book, *, side: str, price: float,
               size: float, evidence_class: str = SYNTHETIC) -> dict:
@@ -638,12 +724,7 @@ class ShadowLoop:
         against limits on creation and released when it resolves.
         """
         qid = "q%d" % (len(self.quotes) + 1)
-        held = self.position(book.market_id)
-        blocked = self.limits.check(
-            pos=held, add_contracts=size,
-            add_cash=size * price + self.fees.fill_fee(size, maker=True),
-            deployed=self.deployed + self.quoted_exposure,
-            open_markets=self.open_markets, cash=self.ledger.cash)
+        blocked = self._admit_quote(book.market_id, price, size)
         rec = {"loop": LOOP_VERSION, "market_id": book.market_id,
                "evidence_class": evidence_class, "quote_id": qid,
                "decision": "MAKE_%s" % side.upper(), "price": price,
@@ -665,10 +746,69 @@ class ShadowLoop:
 
     @property
     def quoted_exposure(self) -> float:
-        """Cash a resting quote would consume if it filled."""
-        return sum(q["price"] * (q["size"] - q["filled"])
-                   for q in self.quotes.values()
-                   if q["state"] == "RESTING")
+        """Cash every LIVE quote would consume if its remainder filled.
+
+        Two defects, both reproduced. PARTIAL was excluded, so filling 6
+        of 10 dropped the reservation on the remaining 4 to zero while
+        that remainder was still working in the market. And the fee that
+        the remainder would incur was never reserved, so a quote could
+        fill into a cash balance that could not pay for it.
+        """
+        total = 0.0
+        for q in self.quotes.values():
+            if q["state"] not in LIVE_QUOTE_STATES:
+                continue
+            rem = q["size"] - q["filled"]
+            if rem <= 0:
+                continue
+            total += rem * q["price"] + self.fees.fill_fee(rem, maker=True)
+        return total
+
+    def quote_reservation(self, price: float, size: float) -> float:
+        """What one quote of this size reserves, fee included."""
+        return size * price + self.fees.fill_fee(size, maker=True)
+
+    def _admit_quote(self, market_id: str, price: float,
+                     size: float) -> str | None:
+        """One admission check, used by BOTH creation and replacement.
+
+        A replacement used to bypass this entirely: repricing ten shares
+        from 0.45 to 0.99 with five dollars of cash was accepted and
+        reserved 9.90. A cancel/replace is a NEW order and has to clear
+        the same bar the original did.
+
+        Aggregate reservations are included, so a second quote cannot be
+        admitted against cash the first one has already spoken for.
+        """
+        if size is None or not math.isfinite(size) or size <= 0:
+            return "RISK_QUOTE_INVALID_SIZE"
+        if price is None or not math.isfinite(price) or not 0 < price < 1:
+            return "RISK_QUOTE_INVALID_PRICE"
+        held = self.position(market_id)
+        reserve = self.quote_reservation(price, size)
+        # Per-market and position limits must see the market's own live
+        # quotes as well as its inventory.
+        market_quoted = sum(
+            self.quote_reservation(q["price"], q["size"] - q["filled"])
+            for q in self.quotes.values()
+            if q["market_id"] == market_id
+            and q["state"] in LIVE_QUOTE_STATES
+            and q["size"] - q["filled"] > 0)
+        market_quoted_contracts = sum(
+            q["size"] - q["filled"] for q in self.quotes.values()
+            if q["market_id"] == market_id
+            and q["state"] in LIVE_QUOTE_STATES)
+        quoted_markets = {q["market_id"] for q in self.quotes.values()
+                          if q["state"] in LIVE_QUOTE_STATES}
+        open_markets = len(
+            {k for k, v in self.positions.items() if not v.flat}
+            | quoted_markets)
+        return self.limits.check(
+            pos=held,
+            add_contracts=size + market_quoted_contracts,
+            add_cash=reserve + market_quoted,
+            deployed=self.deployed + self.quoted_exposure,
+            open_markets=open_markets, cash=self.ledger.cash)
 
     def touch(self, quote_id: str) -> dict:
         """The market traded at our price. THAT IS NOT A FILL."""
@@ -695,8 +835,11 @@ class ShadowLoop:
         simulated fill real.
         """
         q = self.quotes[quote_id]
-        if q["state"] != "RESTING":
-            return {"quote_id": quote_id, "refused": "NOT_RESTING",
+        if q["state"] not in LIVE_QUOTE_STATES:
+            return {"quote_id": quote_id, "refused": "NOT_LIVE",
+                    "state": q["state"]}
+        if q["size"] - q["filled"] <= 0:
+            return {"quote_id": quote_id, "refused": "NO_REMAINDER",
                     "state": q["state"]}
         qty = min(qty, q["size"] - q["filled"])
         pos = self.position(q["market_id"])
@@ -753,6 +896,26 @@ class ShadowLoop:
             return {"quote_id": quote_id, "refused": "NOT_REPRICEABLE",
                     "state": old["state"]}
         remaining = old["size"] - old["filled"]
+        if remaining <= 0:
+            return {"quote_id": quote_id, "refused": "NO_REMAINDER"}
+        # THE REPLACEMENT IS A NEW ORDER. Check it as one -- but exclude
+        # the order being replaced from the aggregate, since its
+        # reservation is released by the cancel half of cancel/replace.
+        held_state = old["state"]
+        old["state"] = "REPLACING"
+        blocked = self._admit_quote(old["market_id"], new_price, remaining)
+        if blocked:
+            old["state"] = held_state
+            rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
+                   "market_id": old["market_id"], "decision": "REPRICE",
+                   "evidence_class": old["evidence_class"],
+                   "refused": blocked, "from": old["price"],
+                   "to": new_price, "size": remaining,
+                   "why": ("a cancel/replace is a NEW order and must clear "
+                           "the same checks the original did"),
+                   "cash_after": round(self.ledger.cash, 6)}
+            self.trace.append(rec)
+            return rec
         old["state"] = REPRICED
         old["history"].append("REPRICED to %.4f" % new_price)
         nid = "q%d" % (len(self.quotes) + 1)
@@ -858,8 +1021,8 @@ class ShadowLoop:
                                for k, v in self.positions.items()
                                if not v.flat},
             "unsettled_cost_basis": round(self.deployed, 6),
-            "resting_quotes": {k: v for k, v in self.quotes.items()
-                               if v["state"] in ("RESTING", "PARTIAL")},
+            "live_quotes": {k: v for k, v in self.quotes.items()
+                            if v["state"] in LIVE_QUOTE_STATES},
             "quoted_exposure": round(self.quoted_exposure, 6),
             "ledger": self.ledger.reconciles(),
             "profitability_claim": (
