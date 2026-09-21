@@ -11,7 +11,8 @@ remains unactivated.
 > analysis in §6 is now bounded by **traded volume**, which had never been
 > queried.
 
-Three commands, all exit 0, all outputs committed.
+**264 tests pass** across the seven modules this work touches
+(`release_tests.xml`). Three commands, all exit 0, all outputs committed.
 
 | # | command | artifact |
 |---|---|---|
@@ -250,7 +251,7 @@ touches.
 | 3 | Freshness: required receipt stamp, transport ≠ skew, per-observation decision time | **DONE** |
 | 4 | One combined exposure limit; pre-trade worst-case loss budget | **DONE** — enforced in the loop |
 | 5 | Two-phase cancel so a replacement never overlaps what it replaces | **DONE** |
-| 6 | Fee schedule `VERIFIED_APPLIED` from a settled statement | **missing** — needs a fill |
+| 6 | Fee schedule `VERIFIED_APPLIED` from a settled statement | **missing** — needs a fill. But `feeCoefficient` is on the public market payload and is a direct check on which schedule is in force (0.06 = 2026-07-01, 0.0695 = 2026-09-17), for one public read |
 | 7 | `holds_both_legs_independently` resolved | **UNKNOWN** — probe RUN 2026-09-21, blocked: `PMUS_KEY_ID`/`PMUS_SECRET_KEY` are empty in CI, so the client is public-only and all four account reads return `AuthenticationError` |
 | 8 | Account identity verified | **blocked, same cause** — verdict `unreadable`, `identity_fields_found: []` |
 | 9 | Decision-latency read path | **written, not deployed** — `bettor_live_read.read_book`; the capture feed's median delay is 549.6 s and the live path's is unmeasured |
