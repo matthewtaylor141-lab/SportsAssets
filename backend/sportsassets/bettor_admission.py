@@ -59,11 +59,44 @@ class TickCapacity:
     tick_period_s: float         # seconds between ticks
     tolerance_s: float           # how late a read may be and still count
 
+    # ── added after review found the fractional-intake defect ────────
+
+    # FORWARD OBLIGATIONS, NOT JUST DUE ONES. backlog_tasks counts what
+    # is due NOW. An observation admitted thirty seconds ago owes reads
+    # at 60s, 300s, 900s and 3600s and none of them is due yet, so it
+    # contributes nothing to backlog while contributing four reads of
+    # future demand. Admitting against backlog alone therefore keeps
+    # admitting right up until the obligations land together.
+    #
+    # None means the caller did not supply it. The account then says so
+    # in `why` rather than silently substituting backlog_tasks, which
+    # would understate demand and be the permissive choice.
+    outstanding_tasks: int | None = None
+
+    # The longest deadline any outstanding task carries. With it, total
+    # outstanding work can be compared against the time available to
+    # do it.
+    longest_horizon_s: float = 3600.0
+
+    # MEASURED, NOT ASSUMED. The fraction of attempted follow-up reads
+    # that produce a usable observation. Failures and retries consume
+    # reserve without discharging an obligation, so nominal reserve
+    # overstates service by exactly this factor. Default 1.0 is the
+    # optimistic value and production must pass the measured one; the
+    # harness varies it deliberately.
+    service_success_rate: float = 1.0
+
     # ── derived, and every one of these is a rate or a time ──────────
 
     @property
+    def effective_reserve_reads(self) -> float:
+        """Reserve that actually discharges obligations."""
+        return self.fu_reserve_reads * max(0.0, min(1.0,
+                                                    self.service_success_rate))
+
+    @property
     def service_reads_per_s(self) -> float:
-        return self.fu_reserve_reads / self.tick_period_s
+        return self.effective_reserve_reads / self.tick_period_s
 
     @property
     def sustainable_obs_per_s(self) -> float:
@@ -75,15 +108,42 @@ class TickCapacity:
 
     @property
     def sustainable_obs_per_tick(self) -> float:
+        """USUALLY LESS THAN ONE, AND THAT IS THE POINT.
+
+        At the recommended configuration -- 45s tick, reserve 2, four
+        horizons -- this is (2/45)/4 * 45 = 0.5. Any rule that turns
+        0.5 into an integer admission per tick admits twice what the
+        reserve can serve. int() then max(1, ...) did exactly that.
+        """
         return self.sustainable_obs_per_s * self.tick_period_s
 
     @property
     def drain_time_s(self) -> float:
-        """How long the CURRENT queue takes to clear at the CURRENT
-        service rate. A time, so it can be compared with a deadline."""
-        if self.fu_reserve_reads <= 0:
+        """How long the DUE queue takes to clear at the CURRENT service
+        rate. A time, so it can be compared with a deadline."""
+        if self.effective_reserve_reads <= 0:
             return float("inf")
-        return (self.backlog_tasks / self.fu_reserve_reads) * self.tick_period_s
+        return (self.backlog_tasks
+                / self.effective_reserve_reads) * self.tick_period_s
+
+    @property
+    def commitment_window_s(self) -> float:
+        """By when every outstanding obligation must have been met."""
+        return self.longest_horizon_s + self.tolerance_s
+
+    @property
+    def obligation_time_s(self) -> float | None:
+        """How long ALL outstanding work would take at current service.
+
+        None when outstanding_tasks was not supplied -- an absence the
+        account reports rather than papering over.
+        """
+        if self.outstanding_tasks is None:
+            return None
+        if self.effective_reserve_reads <= 0:
+            return float("inf")
+        return (self.outstanding_tasks
+                / self.effective_reserve_reads) * self.tick_period_s
 
 
 @dataclass(frozen=True)
@@ -174,9 +234,25 @@ ADMIT_FLOOR_OBS = 1
 
 
 def policy_v3(cap: TickCapacity) -> Decision:
-    """Candidate. Compares a time with a time, and cannot latch shut.
+    """THE SECOND REGRESSION, KEPT ON PURPOSE -- like V1 above.
 
-    Two questions, in order:
+    NOT A CANDIDATE. It was proposed as one and it is wrong, found by
+    independent review and reproduced: at the configuration the report
+    itself recommended -- 45s tick, reserve 2, four horizons -- it
+    admits ONE OBSERVATION EVERY TICK even with a backlog of 100,
+    because
+
+        max(ADMIT_FLOOR_OBS, int(0.5))  ==  max(1, 0)  ==  1
+
+    which is 1.333 obs/min creating 5.333 tasks/min against 2.667
+    reserved reads/min. Twice capacity, and twice the 0.667 obs/min the
+    report claimed for it. See AdmissionAccount (V5) for the repair and
+    for why a floor cannot express a rate below one per tick.
+
+    Retained so the replacement can be run against the scenario that
+    broke it, which is the same reason V1 is still here.
+
+    Its two questions, which were the right two:
 
       1. STEADY STATE. Admit no faster than service/horizons, which is
          the rate at which the queue neither grows nor shrinks. V1 had
@@ -209,6 +285,154 @@ def policy_v3(cap: TickCapacity) -> Decision:
 
     return Decision(max(0, min(cap.sample_budget_reads, admit)),
                     saturated, why, V3)
+
+
+# ── V5: FRACTIONAL ADMISSION, WITH STATE ─────────────────────────────
+#
+# WHAT V3 GOT WRONG, found by independent review and reproduced:
+#
+#     max(ADMIT_FLOOR_OBS, int(cap.sustainable_obs_per_tick))
+#
+# At a 45-second tick, a reserve of two reads and four horizons,
+# sustainable_obs_per_tick is 0.5. int(0.5) is 0, and the floor turns
+# that 0 into 1 -- ON EVERY TICK, INCLUDING WITH A BACKLOG OF 100.
+# That is 1.333 observations/minute creating 5.333 follow-up tasks per
+# minute against 2.667 reserved reads per minute. TWICE CAPACITY.
+#
+# So the report's "0.667 observations/minute" was arithmetic I did on
+# paper and never implemented. The code admitted double it.
+#
+# THE FLOOR WAS THE RIGHT ANSWER TO THE WRONG QUESTION. V1 latched at
+# zero FOREVER because integer division floored and nothing could
+# reopen it. The fix for that is not "always admit at least one" -- it
+# is "never lose the fraction". Those differ exactly where it matters:
+#
+#     permanent latch    admits 0 on every tick, no state of the queue
+#                        changes it, the collector stops. THE BUG.
+#     fractional pacing  admits 0 on some ticks and 1 on others, and
+#                        the long-run average is the sustainable rate.
+#                        CORRECT, and at this capacity it means one
+#                        observation every two ticks.
+#
+# A floor cannot express a rate below one per tick. An accumulator can,
+# so the credits are kept and ADMIT_FLOOR_OBS is not applied.
+#
+# WHAT ELSE THE ACCOUNT HAS TO DO, beyond not overshooting:
+#
+#   * count FORWARD obligations, not just due ones. Four horizons means
+#     an observation admitted now is four reads of demand that has not
+#     arrived yet (see TickCapacity.outstanding_tasks);
+#   * bound the credits, so a long saturated stretch cannot bank an
+#     admission burst that lands the moment capacity returns;
+#   * leave recovery headroom, so a backlog DRAINS rather than merely
+#     stops growing. Arrivals exactly equal to nominal service is a
+#     queue that never recovers from any excursion, and calling that
+#     stable is what the review objected to.
+
+# Intake targets this share of effective service. The remainder is what
+# drains an existing backlog. At 1.0 the queue is marginally stable in
+# theory and never recovers in practice, because any excursion is
+# permanent.
+TARGET_UTILISATION = 0.85
+
+# How much of the commitment window outstanding work may already fill
+# before admission stops entirely. Below 1.0 so the brake acts while
+# there is still time to act.
+COMMITMENT_HEADROOM = 0.80
+
+# Credits carried across ticks, as a multiple of one tick's earnings.
+# THIS IS THE BURST BOUND. Without it a policy that admits nothing for
+# an hour banks an hour of credits and dumps them into a queue that has
+# just started recovering.
+MAX_CARRY_TICKS = 1.0
+
+V5 = "BETTOR_ADMISSION_V5_FRACTIONAL"
+
+
+class AdmissionAccount:
+    """Stateful fractional admission. One instance per collector.
+
+    Not a pure function, which is why it is a class and not another
+    entry in POLICIES: the whole repair is that the fraction survives
+    between ticks. A stateless call cannot admit 0.5 observations, and
+    every rounding of 0.5 is either 0 (V1's latch) or 1 (V3's double).
+    """
+
+    def __init__(self):
+        self.credits_obs = 0.0
+        self.ticks = 0
+        self.admitted_total = 0
+        self.zero_ticks = 0
+
+    def decide(self, cap: TickCapacity) -> Decision:
+        self.ticks += 1
+
+        earn = cap.sustainable_obs_per_tick * TARGET_UTILISATION
+        notes = []
+
+        # 1. FORWARD OBLIGATIONS. Can the work already committed be
+        #    finished inside the window it was committed for?
+        obligation_s = cap.obligation_time_s
+        if obligation_s is None:
+            notes.append("outstanding_tasks not supplied, so the forward "
+                         "obligation check did NOT run")
+            overcommitted = False
+        else:
+            limit_s = cap.commitment_window_s * COMMITMENT_HEADROOM
+            overcommitted = obligation_s > limit_s
+            if overcommitted:
+                notes.append("outstanding work needs %.0fs against a %.0fs "
+                             "commitment window" % (obligation_s, limit_s))
+
+        # 2. THE DUE QUEUE. Seconds against seconds, as V1 failed to do.
+        deadline_s = cap.tolerance_s * DRAIN_HEADROOM
+        saturated = cap.drain_time_s > deadline_s
+        if saturated:
+            notes.append("due queue needs %.0fs to drain against a %.0fs "
+                         "deadline" % (cap.drain_time_s, deadline_s))
+
+        # 3. EARN. A tick with no effective reserve earns nothing: there
+        #    is no service to pace against, so there is no rate to bank.
+        if cap.effective_reserve_reads <= 0:
+            earn = 0.0
+            notes.append("no effective follow-up reserve this tick")
+        self.credits_obs += earn
+
+        # 4. SPEND -- or not. Either brake holds the admission back but
+        #    does NOT burn the credits, so a recovering collector
+        #    resumes at its proper rate rather than from zero.
+        if overcommitted or saturated:
+            admit = 0
+            why = "admitting 0: " + "; ".join(notes)
+        else:
+            admit = int(self.credits_obs)
+            admit = max(0, min(admit, cap.sample_budget_reads))
+            self.credits_obs -= admit
+            why = ("credits %.2f/tick, admitting %d"
+                   % (earn, admit))
+            if notes:
+                why += " (" + "; ".join(notes) + ")"
+
+        # 5. BOUND THE CARRY. At most one tick's earnings survive, so an
+        #    outage cannot bank a burst. The bound is never below 1.0,
+        #    or a sub-unit earn rate could never reach a whole
+        #    observation and this would be V1's latch wearing a float.
+        ceiling = max(1.0, earn * MAX_CARRY_TICKS)
+        if self.credits_obs > ceiling:
+            why += " (credits capped %.2f -> %.2f)" % (self.credits_obs,
+                                                       ceiling)
+            self.credits_obs = ceiling
+
+        self.admitted_total += admit
+        if admit == 0:
+            self.zero_ticks += 1
+        return Decision(admit, saturated or overcommitted, why, V5)
+
+    @property
+    def admitted_obs_per_tick(self) -> float:
+        """The realised long-run rate. This is the number to compare
+        against sustainable_obs_per_tick, not any single tick."""
+        return self.admitted_total / self.ticks if self.ticks else 0.0
 
 
 POLICIES = {V4: policy_v4, V1: policy_v1, V2: policy_v2, V3: policy_v3}

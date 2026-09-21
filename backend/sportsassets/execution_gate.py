@@ -34,18 +34,42 @@ the caller's own event loop. Work that was queued, retried, or slept
 before a pause therefore cannot submit on the strength of a check made
 before it -- there is nothing to carry.
 
+A CACHED SNAPSHOT NEVER AUTHORIZES. 2026-09-21, found by review, and it
+was mine: _current() fell back to a snapshot up to MAX_STALE_S old
+whenever the live read failed, and returned the cached snapshot outright
+when called on the loop thread. A reproduction installed a recent
+ALLOWED snapshot, made run_coroutine_threadsafe raise TimeoutError, and
+authorize("submit", lane="manual") RETURNED SUCCESSFULLY. The module
+said unreadable authorization denies; the code said a five-second-old
+yes is good enough. A kill switch that keeps saying yes for five seconds
+after it stops being readable is not a kill switch.
+
+The two are now separate functions and they are not interchangeable:
+
+    _authorize_read()   fresh read, or a denial. Never cached. The ONLY
+                        input to authorize().
+    _last_known()       whatever was last read, with its age. Feeds
+                        describe() and nothing else. Diagnostics may be
+                        stale; permission may not.
+
+And the loop-thread caller no longer gets a cached yes. A synchronous
+submission that cannot obtain a fresh read is denied, and async callers
+have authorize_async(), which awaits the real read on their own loop.
+
 FAIL CLOSED MEANS EVERY UNCERTAINTY DENIES:
 
     state never read            DENY  (nothing bound the gate)
     read raised                 DENY  (a database blip is not consent)
-    read timed out              DENY
+    read timed out              DENY  (no cached fallback, at all)
     value malformed             DENY  (somebody wrote something we do
                                        not understand into the switch)
+    value not a JSON boolean    DENY  (0, [], {}, null and "" are not
+                                       false -- see _parse_switch)
     value missing               DENY  (absence is not permission -- this
                                        is the exact defect that armed
                                        WHALE_EXIT_ENABLED and left
                                        live_trading_paused unset)
-    snapshot older than bound   DENY
+    called where no fresh read  DENY  (the loop thread, synchronously)
 
 GLOBAL vs COPY-SPECIFIC. Documented in CONTROLS below and enforced by
 `lane`. Global controls bind every route. Copy controls bind only the
@@ -68,13 +92,15 @@ log = logging.getLogger(__name__)
 
 PAUSE_KEY = "live_trading_paused"
 
-# How old a cached read may be before it stops counting as knowledge.
-# Short, because its only job is to cover the microseconds between a
-# bound loop answering and this thread using the answer.
+# DIAGNOSTICS ONLY. How old the last known snapshot may be before
+# describe() stops calling it current. It has no part in authorization:
+# there is no age at which a cached snapshot may approve a submission.
+# It used to be the staleness allowance on the authorization fallback,
+# which is the fail-open the review reproduced.
 MAX_STALE_S = 5.0
 
 # How long to wait for the authoritative read before giving up. A gate
-# that hangs is a gate that gets removed.
+# that hangs is a gate that gets removed. Giving up DENIES.
 READ_TIMEOUT_S = 2.5
 
 CONTROLS = {
@@ -232,19 +258,57 @@ def unbind() -> None:
 
 
 def _parse_switch(val) -> bool:
-    """A pause value. Anything we do not understand means PAUSED.
+    """A pause value. It must BE a boolean. Anything else is PAUSED.
 
-    Somebody wrote something into the kill switch. Refusing is the only
-    reading of that which cannot lose money.
+    THE DEFECT THIS REPLACES, found by review 2026-09-21: the old body
+    ended `return bool(parsed)`, and Python's truthiness is not JSON's
+    boolean. Every one of these decoded to a falsy value and therefore
+    to NOT PAUSED -- the permissive answer:
+
+        "0"      -> 0     -> False     trading allowed
+        "[]"     -> []    -> False     trading allowed
+        "{}"     -> {}    -> False     trading allowed
+        "null"   -> None  -> False     trading allowed
+        '""'     -> ""    -> False     trading allowed
+
+    None of those is `false`. They are a number, two empty containers
+    and a null, and the honest reading of each is "the switch does not
+    say anything I understand", which the module's own contract says
+    must deny. A truthiness cast turned five kinds of nonsense into
+    permission.
+
+    Production writes 'true'::jsonb / 'false'::jsonb through render-ops
+    pause-on / pause-off, so a real boolean is what the switch actually
+    holds; this rejects everything that is not one.
+
+    Returns True (paused) or False (not paused). Raises Denied for
+    anything that is not a JSON boolean, which the caller turns into an
+    unreadable -- and therefore denying -- snapshot.
     """
     if val is None:
         return False                    # absent row: handled by caller
+    if isinstance(val, bool):
+        return val                      # a driver that decodes jsonb
+    if isinstance(val, (bytes, bytearray)):
+        try:
+            val = val.decode("utf-8")
+        except UnicodeDecodeError:
+            raise Denied("kill_switch_malformed",
+                         "value is not decodable text")
+    if not isinstance(val, str):
+        raise Denied("kill_switch_not_boolean",
+                     "value is %s, not a boolean" % type(val).__name__)
     try:
-        parsed = json.loads(val) if isinstance(val, str) else val
+        parsed = json.loads(val)
     except (TypeError, ValueError):
         raise Denied("kill_switch_malformed",
                      "value is not JSON; treating as paused")
-    return bool(parsed)
+    if not isinstance(parsed, bool):
+        raise Denied("kill_switch_not_boolean",
+                     "value decodes to %s, and only true or false may "
+                     "release the kill switch"
+                     % ("null" if parsed is None else type(parsed).__name__))
+    return parsed
 
 
 async def read_state(pool) -> Snapshot:
@@ -300,11 +364,27 @@ async def read_state(pool) -> Snapshot:
     return snap
 
 
-def _current() -> Snapshot:
-    """Read now, through the bound loop. Falls back to a fresh-enough
-    snapshot only to cover the instant between the two."""
+def _last_known() -> Snapshot:
+    """The last snapshot anyone read, whatever its age. DIAGNOSTICS ONLY.
+
+    describe() calls this so an operator can see what the gate last
+    saw and how long ago. It is deliberately not reachable from
+    authorize(): a stale reading is information, not consent.
+    """
     with _B.lock:
-        loop, pool, snap = _B.loop, _B.pool, _B.snapshot
+        return _B.snapshot
+
+
+def _authorize_read() -> Snapshot:
+    """A snapshot THIS CALL read, or a denying one. Never cached.
+
+    Every path out of here is either a read that just succeeded, or a
+    Snapshot with ok=False. There is no branch that returns _B.snapshot.
+    That is the whole point: the previous version had two such branches
+    and both granted permission after a failed read.
+    """
+    with _B.lock:
+        loop, pool = _B.loop, _B.pool
 
     if loop is None or pool is None:
         s = Snapshot()
@@ -315,17 +395,16 @@ def _current() -> Snapshot:
     # CALLED FROM THE LOOP'S OWN THREAD? Then a blocking read is not
     # available: run_coroutine_threadsafe would schedule the coroutine
     # on the very loop this thread is blocking, and .result() would wait
-    # for something that can never run. It does not hang -- the timeout
-    # catches it -- but it denies for the wrong reason and burns
-    # READ_TIMEOUT_S doing it.
+    # for something that can never run.
     #
-    # Production never lands here: every order path calls submit_fok
+    # This used to return the cached snapshot here, which is a fail-open
+    # wearing a comment about diagnostics. It now denies, and the caller
+    # who legitimately needs to authorize from async code uses
+    # authorize_async(), which awaits the real read on its own loop.
+    #
+    # Production does not land here: every order path calls submit_fok
     # through asyncio.to_thread, so authorization happens on a worker
-    # thread. This is for the caller who checks early from async code,
-    # and for any future path that forgets. Such a caller gets the
-    # snapshot if it is inside the staleness bound, and a denial if it
-    # is not. The authoritative read still happens at the submission
-    # itself, on the worker thread, which is the check that matters.
+    # thread and takes the real read below.
     try:
         asyncio.get_running_loop()
         on_loop_thread = True
@@ -333,45 +412,29 @@ def _current() -> Snapshot:
         on_loop_thread = False
 
     if on_loop_thread:
-        age = time.time() - snap.read_at
-        if snap.ok and age <= MAX_STALE_S:
-            return snap
         s = Snapshot()
-        s.why = ("authorization was requested on the event loop's own "
-                 "thread, where a blocking read is impossible, and no "
-                 "snapshot is within %.0fs" % MAX_STALE_S)
+        s.why = ("synchronous authorization was requested on the event "
+                 "loop's own thread, where a fresh read is impossible; "
+                 "use authorize_async() from async code")
         return s
 
     try:
         fut = asyncio.run_coroutine_threadsafe(read_state(pool), loop)
         fresh = fut.result(timeout=READ_TIMEOUT_S)
-        with _B.lock:
-            _B.snapshot = fresh
-        return fresh
     except Exception as exc:                               # noqa: BLE001
-        # The live read failed. A very recent snapshot is allowed to
-        # stand in, and nothing older is.
-        age = time.time() - snap.read_at
-        if snap.ok and age <= MAX_STALE_S:
-            return snap
         s = Snapshot()
-        s.why = ("authorization read failed (%s) and no snapshot is "
-                 "within %.0fs" % (type(exc).__name__, MAX_STALE_S))
+        s.why = ("authorization read failed (%s); a previous answer does "
+                 "not authorize a later submission"
+                 % type(exc).__name__)
         return s
+    with _B.lock:
+        _B.snapshot = fresh
+    return fresh
 
 
-def authorize(operation: str, *, lane: str = "unknown",
-              slug: str | None = None) -> Snapshot:
-    """Authorize one submission, or raise Denied. Safe from any thread.
-
-    `operation` is what is being attempted ('submit', 'close_position').
-    `lane` selects the copy controls. Anything not in COPY_LANES gets
-    the global controls only -- including 'manual', because a loss
-    breaker on the copy sleeve must not stop an operator flattening a
-    position by hand.
-    """
-    snap = _current()
-
+def _decide(snap: Snapshot, operation: str, lane: str,
+            slug: str | None) -> Snapshot:
+    """The control checks, given a snapshot that was just read."""
     if not snap.ok:
         raise Denied("authorization_unavailable", snap.why)
     if snap.paused:
@@ -398,9 +461,60 @@ def authorize(operation: str, *, lane: str = "unknown",
     return snap
 
 
+def authorize(operation: str, *, lane: str = "unknown",
+              slug: str | None = None) -> Snapshot:
+    """Authorize one submission, or raise Denied. Safe from any thread.
+
+    `operation` is what is being attempted ('submit', 'close_position').
+    `lane` selects the copy controls. Anything not in GLOBAL_ONLY_LANES
+    gets the copy controls too -- including 'unknown', because a route
+    that never declared itself must not be the one that escapes.
+
+    Called on the event loop's own thread this DENIES rather than
+    falling back to anything; async callers want authorize_async().
+    """
+    return _decide(_authorize_read(), operation, lane, slug)
+
+
+async def authorize_async(operation: str, *, lane: str = "unknown",
+                          slug: str | None = None) -> Snapshot:
+    """The same decision, from async code, on a read taken right now.
+
+    THE FRESH ASYNCHRONOUS PATH. A coroutine cannot block on
+    run_coroutine_threadsafe against its own loop, so before this
+    existed the only answer available on the loop thread was a cached
+    one -- and a cached yes is what the review reproduced. This awaits
+    read_state directly: same authority, same controls, no cache.
+    """
+    with _B.lock:
+        pool = _B.pool
+    if pool is None:
+        snap = Snapshot()
+        snap.why = ("execution gate is not bound to a pool, so the kill "
+                    "switch cannot be read from this process")
+        return _decide(snap, operation, lane, slug)
+    try:
+        snap = await asyncio.wait_for(read_state(pool),
+                                      timeout=READ_TIMEOUT_S)
+    except Exception as exc:                               # noqa: BLE001
+        snap = Snapshot()
+        snap.why = ("authorization read failed (%s); a previous answer "
+                    "does not authorize a later submission"
+                    % type(exc).__name__)
+        return _decide(snap, operation, lane, slug)
+    with _B.lock:
+        _B.snapshot = snap
+    return _decide(snap, operation, lane, slug)
+
+
 def describe() -> dict:
-    """For the operator endpoint and the tests. No credentials."""
-    snap = _current()
+    """For the operator endpoint and the tests. No credentials.
+
+    Reads the LAST KNOWN snapshot, not a fresh one, and says how old it
+    is. Diagnostics are allowed to be stale; this function cannot
+    authorize anything.
+    """
+    snap = _last_known()
     return {
         "bound": _B.loop is not None and _B.pool is not None,
         "readable": snap.ok,
@@ -411,6 +525,11 @@ def describe() -> dict:
         "loss_stop": snap.loss_stop,
         "overspend": snap.overspend,
         "age_s": round(time.time() - snap.read_at, 3) if snap.read_at else None,
+        "stale": (snap.read_at == 0.0
+                  or (time.time() - snap.read_at) > MAX_STALE_S),
+        "note": ("readable/paused/venue describe the LAST READ, not a "
+                 "fresh one. A submission is authorized against a read "
+                 "taken at the moment of the call; this view never is."),
         "controls": CONTROLS,
         "lane_now": current_lane(),
         "global_only_lanes": sorted(GLOBAL_ONLY_LANES),
@@ -423,6 +542,13 @@ def describe() -> dict:
 # TESTS ONLY. Production binds a real loop and pool; this exists so the
 # behavioural suite can drive every denial without a database, and it is
 # the only way to install a snapshot the gate did not read itself.
+#
+# IT REPLACES THE AUTHORIZATION READ, which is exactly why it is
+# allowlisted to a named set of modules in conftest rather than applied
+# suite-wide: under it, bind(), read_state() and every fail-closed
+# branch above are dead code, so a test running under it proves nothing
+# about them. test_execution_gate_integration.py runs with it OFF and
+# asserts so on its first line.
 def _install_snapshot_for_tests(snap: Snapshot) -> None:
     if not os.environ.get("PYTEST_CURRENT_TEST"):
         raise RuntimeError("snapshot injection is test-only")
@@ -434,12 +560,12 @@ def _install_snapshot_for_tests(snap: Snapshot) -> None:
     def _fixed():
         return snap
 
-    globals()["_current"] = _fixed
+    globals()["_authorize_read"] = _fixed
 
 
 def _restore_for_tests() -> None:
-    globals()["_current"] = _current_real
+    globals()["_authorize_read"] = _authorize_read_real
     unbind()
 
 
-_current_real = _current
+_authorize_read_real = _authorize_read

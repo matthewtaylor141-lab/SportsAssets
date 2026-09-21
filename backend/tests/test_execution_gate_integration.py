@@ -4,7 +4,8 @@ WHY THIS FILE IS SEPARATE FROM test_execution_gate.py.
 
 That file installs a snapshot per test through
 `execution_gate._install_snapshot_for_tests`, and that helper does more
-than supply a value: it REPLACES the module global `_current`. Under it,
+than supply a value: it REPLACES the module global `_authorize_read`.
+Under it,
 `bind()`, `read_state()` and the live read are never called. So a suite
 armed that way proves the *decision* logic and proves nothing about
 whether production ever binds the gate, whether the read works, or
@@ -140,8 +141,8 @@ def test_the_fixture_is_off_in_this_module():
     d = gate.describe()
     assert d["bound"] is False
     assert d["readable"] is False
-    assert gate._current is gate._current_real, (
-        "_current has been replaced -- the live read path is not being "
+    assert gate._authorize_read is gate._authorize_read_real, (
+        "_authorize_read has been replaced -- the live read path is not being "
         "exercised and these tests prove nothing about it")
 
 
@@ -570,24 +571,45 @@ def test_authorize_on_the_loop_thread_denies_without_a_fresh_snapshot(
     assert elapsed < 1.0, "it stalled instead of refusing"
 
 
-def test_the_loop_thread_may_use_a_snapshot_inside_the_bound(
+def test_the_loop_thread_never_uses_a_snapshot_however_fresh(
         venue_settings):
-    """Having read successfully a moment ago on a worker thread, an
-    async caller may use that answer -- and only within MAX_STALE_S."""
+    """REPLACES A TEST THAT ASSERTED THE DEFECT.
+
+    This test used to read: "having read successfully a moment ago on a
+    worker thread, an async caller may use that answer -- and only
+    within MAX_STALE_S". It passed, and it was wrong. It encoded the
+    fail-open the review later reproduced: a cached ALLOW, served to a
+    caller that could not read, for up to five seconds.
+
+    A test that pins the wrong behaviour is worse than no test, because
+    it makes the fix look like a regression. The corrected assertion is
+    that there is NO age at which the cache authorizes -- zero seconds
+    included -- and that the supported async path reads for itself.
+    """
     pool = FakePool(paused="false")
 
     async def go():
         gate.bind(asyncio.get_running_loop(), pool)
+        # A real, successful, allowing read from a worker thread.
         await asyncio.to_thread(gate.authorize, "submit", lane="copy")
-        fresh = gate.authorize("submit", lane="copy")   # loop thread
-        with gate._B.lock:
-            gate._B.snapshot.read_at -= (gate.MAX_STALE_S + 60)
-        try:
-            gate.authorize("submit", lane="copy")
-            return fresh.ok, None
-        except gate.Denied as d:
-            return fresh.ok, d.reason
+        assert gate._last_known().ok, "the cache is primed and allowing"
+        age = time.time() - gate._last_known().read_at
+        assert age < gate.MAX_STALE_S, "well inside the old allowance"
 
-    ok, stale_reason = asyncio.run(go())
-    assert ok is True
-    assert stale_reason == "authorization_unavailable"
+        try:                                   # SYNC, on the loop thread
+            gate.authorize("submit", lane="copy")
+            sync = "ALLOWED"
+        except gate.Denied as d:
+            sync = d.reason
+
+        # The supported path, which takes its own read.
+        reads_before = pool.reads
+        fresh = await gate.authorize_async("submit", lane="copy")
+        return sync, fresh.ok, pool.reads > reads_before
+
+    sync, async_ok, async_did_read = asyncio.run(go())
+    assert sync == "authorization_unavailable", (
+        "a zero-second-old cached snapshot authorized a submission")
+    assert async_ok is True, "authorize_async must still allow a legitimate "\
+                             "submission"
+    assert async_did_read, "authorize_async served a cached answer"

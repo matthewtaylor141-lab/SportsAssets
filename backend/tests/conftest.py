@@ -223,7 +223,7 @@ def _override_state_does_not_leak():
 #
 # An explicit allowlist, not a suite-wide default, and the difference
 # matters. _install_snapshot_for_tests does not merely supply a
-# snapshot: it REPLACES execution_gate._current, so bind(), read_state()
+# snapshot: it REPLACES execution_gate._authorize_read, so bind(), read_state()
 # and the whole live read path are never exercised by anything running
 # under it. Armed suite-wide, a broken production binding would look
 # exactly like a working one -- no test would ever call the code that
