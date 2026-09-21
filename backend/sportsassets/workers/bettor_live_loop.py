@@ -69,6 +69,7 @@ import logging
 import os
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 
@@ -113,7 +114,13 @@ class LiveLoop:
 
     def __init__(self, stream, *, store=None, fees=None,
                  opening_cash: float = 0.0, max_contracts: float = 0.0,
-                 leg_of=None):
+                 leg_of=None, boot_id: str | None = None):
+        # ONE IDENTITY PER PROCESS BOOT, stamped on every record and on
+        # the ledger. Without it "the worker restarted and kept its
+        # records" cannot be checked: a stream epoch increments on a
+        # RECONNECT, which is not a restart, and a row count that rose
+        # says nothing about which process wrote the new rows.
+        self.boot_id = boot_id or uuid.uuid4().hex[:16]
         self.stream = stream
         self.store = store or store_mod.MemoryStore()
         self.fees = fees or de.Fees.published_pmus(
@@ -346,6 +353,7 @@ class LiveLoop:
         This used to open the journal and fsync it, on the event loop
         shared with eighteen sibling worker loops, once per decision.
         """
+        rec.setdefault("boot_id", self.boot_id)
         rec.setdefault("record_key", store_mod.record_key(rec))
         rec.setdefault("enqueued_at", time.time())
         self.records.append(rec)
@@ -418,6 +426,7 @@ class LiveLoop:
             if first is not None:
                 oldest = round(now - first, 3)
         return {
+            "boot_id": self.boot_id,
             "backend": getattr(self.store, "backend", None),
             "durable_across": list(getattr(self.store, "durable_across",
                                            ()) or ()),
@@ -696,6 +705,7 @@ class LiveLoop:
         rc = led.reconciles()
         return {
             "loop": LOOP_VERSION,
+            "boot_id": self.boot_id,
             "started_at": self.started_at, "stopped_at": self.stopped_at,
             "runtime_s": _elapsed(self.started_at, self.stopped_at),
             "stream": self.stream.stats() if self.stream else None,
@@ -747,7 +757,8 @@ def _elapsed(a, b):
 
 
 def build(key_id: str, secret_key: str, *, slugs, leg_of=None, store=None,
-          opening_cash: float = 0.0, stream_factory=None):
+          opening_cash: float = 0.0, stream_factory=None,
+          boot_id: str | None = None):
     """Wire a stream to a loop. Subscribes; does not start the socket.
 
     `on_trade` IS NOT INSTALLED as a stream callback. It used to be,
@@ -759,7 +770,9 @@ def build(key_id: str, secret_key: str, *, slugs, leg_of=None, store=None,
     and gets `ms.MarketStream`.
     """
     loop = LiveLoop(None, store=store, leg_of=leg_of,
-                    opening_cash=opening_cash)
+                    opening_cash=opening_cash, boot_id=boot_id)
+    if store is not None and getattr(store, "boot_id", None) is None:
+        store.boot_id = loop.boot_id
     factory = stream_factory or ms.MarketStream
     stream = factory(key_id, secret_key, on_book=loop.on_book)
     loop.stream = stream
@@ -925,8 +938,9 @@ async def main(*, client=None, stream_factory=None, store=None,
                   "environment; not starting")
         return {"started": False, "why": "NO_CREDENTIALS"}
 
+    boot_id = uuid.uuid4().hex[:16]
     if store is None:
-        chosen = store_mod.choose()
+        chosen = store_mod.choose(boot_id=boot_id)
         if not chosen.get("ok"):
             # REFUSING IS THE POINT. A run whose evidence dies on the
             # next deploy is a run that produced nothing.
@@ -980,7 +994,7 @@ async def main(*, client=None, stream_factory=None, store=None,
     loop, stream = build(
         key_id, secret, slugs=first["slugs"],
         leg_of={s: legs.get(s) for s in first["slugs"]},
-        store=store, stream_factory=stream_factory,
+        store=store, stream_factory=stream_factory, boot_id=boot_id,
         opening_cash=float(os.environ.get("BETTOR_LIVE_OPENING_CASH", "0")))
     loop.max_contracts = float(
         os.environ.get("BETTOR_LIVE_MAX_CONTRACTS", "0"))
@@ -990,8 +1004,9 @@ async def main(*, client=None, stream_factory=None, store=None,
 
     rec = await loop.recover()
     loop.started_at = _now().isoformat()
-    log.info("bettor_live_loop: store %s, recovered %s",
-             json.dumps(started, default=str), json.dumps(rec, default=str))
+    log.info("bettor_live_loop: boot %s, store %s, recovered %s",
+             loop.boot_id, json.dumps(started, default=str),
+             json.dumps(rec, default=str))
     log.info("bettor_live_loop: %d markets subscribed of %d considered "
              "over %s pages, fees %s (%s)",
              len(first["slugs"]), first.get("considered", 0),

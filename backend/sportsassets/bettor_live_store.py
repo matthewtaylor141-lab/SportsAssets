@@ -336,6 +336,7 @@ DDL = """
 CREATE TABLE IF NOT EXISTS bettor_live_journal (
     id            BIGSERIAL   PRIMARY KEY,
     lane          TEXT        NOT NULL,
+    boot_id       TEXT,
     record_key    TEXT        NOT NULL,
     written_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     loop_version  TEXT        NOT NULL,
@@ -381,6 +382,7 @@ CREATE INDEX IF NOT EXISTS bettor_live_cursor_due_idx
 CREATE TABLE IF NOT EXISTS bettor_live_ledger (
     lane          TEXT        PRIMARY KEY,
     saved_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    boot_id       TEXT,
     loop_version  TEXT        NOT NULL,
     schema_version INTEGER    NOT NULL,
     snapshot      TEXT        NOT NULL
@@ -454,6 +456,7 @@ class MemoryStore:
 
     backend = BACKEND_MEMORY
     durable_across = ()
+    boot_id = None
 
     def __init__(self):
         self.records: list = []
@@ -510,7 +513,9 @@ class FileStore:
     backend = BACKEND_FILE
 
     def __init__(self, directory: str, *, max_bytes: int = 64 * 1024 * 1024,
-                 durable_across_redeploy: bool = False):
+                 durable_across_redeploy: bool = False,
+                 boot_id: str | None = None):
+        self.boot_id = boot_id
         self.dir = directory
         self.journal = os.path.join(directory, "decisions.jsonl")
         self.cursor_path = os.path.join(directory, "cursors.json")
@@ -711,10 +716,12 @@ class PgStore:
     backend = BACKEND_PG
     durable_across = ("restart", "service_restart", "redeploy")
 
-    def __init__(self, pool=None, *, dsn: str | None = None):
+    def __init__(self, pool=None, *, dsn: str | None = None,
+                 boot_id: str | None = None):
         self._pool = pool
         self._dsn = dsn
         self._own_pool = False
+        self.boot_id = boot_id
 
     async def _get_pool(self):
         if self._pool is not None:
@@ -761,10 +768,12 @@ class PgStore:
 
     async def _missing_columns(self, con) -> list:
         want = {
-            "bettor_live_journal": ("lane", "record_key", "kind",
-                                    "market_id", "source_ts", "record"),
+            "bettor_live_journal": ("lane", "boot_id", "record_key",
+                                    "kind", "market_id", "source_ts",
+                                    "record"),
             "bettor_live_cursor": ("lane", "market_id") + CURSOR_FIELDS,
-            "bettor_live_ledger": ("lane", "snapshot", "schema_version"),
+            "bettor_live_ledger": ("lane", "boot_id", "snapshot",
+                                   "schema_version"),
         }
         rows = await con.fetch(
             "SELECT table_name, column_name FROM information_schema.columns "
@@ -793,13 +802,14 @@ class PgStore:
                         # every rate derived from it.
                         await con.executemany(
                             "INSERT INTO bettor_live_journal "
-                            "(lane, record_key, loop_version, kind, "
-                            " market_id, source_ts, decided_at, status, "
-                            " selected, record) "
-                            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,"
-                            "        $10::jsonb) "
+                            "(lane, boot_id, record_key, loop_version, "
+                            " kind, market_id, source_ts, decided_at, "
+                            " status, selected, record) "
+                            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,"
+                            "        $11::jsonb) "
                             "ON CONFLICT (lane, record_key) DO NOTHING",
-                            [(LANE, r.get("record_key") or record_key(r),
+                            [(LANE, r.get("boot_id"),
+                              r.get("record_key") or record_key(r),
                               r.get("loop") or "", r.get("kind")
                               or "DECISION", r.get("market_id"),
                               r.get("source_ts"), r.get("decided_at"),
@@ -854,13 +864,16 @@ class PgStore:
             async with pool.acquire() as con:
                 await con.execute(
                     "INSERT INTO bettor_live_ledger "
-                    "(lane, saved_at, loop_version, schema_version, "
-                    " snapshot) VALUES ($1, now(), $2, $3, $4) "
+                    "(lane, saved_at, boot_id, loop_version, "
+                    " schema_version, snapshot) "
+                    "VALUES ($1, now(), $2, $3, $4, $5) "
                     "ON CONFLICT (lane) DO UPDATE SET "
-                    " saved_at = now(), loop_version = EXCLUDED.loop_version,"
+                    " saved_at = now(), boot_id = EXCLUDED.boot_id, "
+                    " loop_version = EXCLUDED.loop_version,"
                     " schema_version = EXCLUDED.schema_version, "
                     " snapshot = EXCLUDED.snapshot",
-                    LANE, STORE_VERSION, SCHEMA_VERSION, snapshot)
+                    LANE, self.boot_id, STORE_VERSION, SCHEMA_VERSION,
+                    snapshot)
             return True
         except Exception as exc:  # noqa: BLE001
             log.warning("bettor_live_store: ledger save failed: %s",
@@ -1045,7 +1058,7 @@ ALLOW_EPHEMERAL_ENV = "BETTOR_LIVE_ALLOW_EPHEMERAL"
 
 
 def choose(*, backend: str | None = None, directory: str | None = None,
-           pool=None, dsn: str | None = None,
+           pool=None, dsn: str | None = None, boot_id: str | None = None,
            disk_declared: bool = False) -> dict:
     """Which store, and whether it is allowed to be this one.
 
@@ -1057,7 +1070,7 @@ def choose(*, backend: str | None = None, directory: str | None = None,
          or BACKEND_PG).strip().lower()
     if b == BACKEND_PG:
         return {"ok": True, "backend": b,
-                "store": PgStore(pool=pool, dsn=dsn)}
+                "store": PgStore(pool=pool, dsn=dsn, boot_id=boot_id)}
     if b == BACKEND_FILE:
         d = directory or os.environ.get("BETTOR_LIVE_STATE_DIR")
         if not d:
@@ -1078,7 +1091,8 @@ def choose(*, backend: str | None = None, directory: str | None = None,
                            "%s=1 to accept losing the evidence"
                            % ALLOW_EPHEMERAL_ENV}
         return {"ok": True, "backend": b,
-                "store": FileStore(d, durable_across_redeploy=declared)}
+                "store": FileStore(d, durable_across_redeploy=declared,
+                                   boot_id=boot_id)}
     if b == BACKEND_MEMORY:
         if not _ephemeral_allowed():
             return {"ok": False, "backend": b,

@@ -27,6 +27,7 @@
 CREATE TABLE IF NOT EXISTS bettor_live_journal (
     id            BIGSERIAL   PRIMARY KEY,
     lane          TEXT        NOT NULL,
+    boot_id       TEXT,
     record_key    TEXT        NOT NULL,
     written_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     loop_version  TEXT        NOT NULL,
@@ -72,6 +73,7 @@ CREATE INDEX IF NOT EXISTS bettor_live_cursor_due_idx
 CREATE TABLE IF NOT EXISTS bettor_live_ledger (
     lane          TEXT        PRIMARY KEY,
     saved_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
+    boot_id       TEXT,
     loop_version  TEXT        NOT NULL,
     schema_version INTEGER    NOT NULL,
     snapshot      TEXT        NOT NULL
