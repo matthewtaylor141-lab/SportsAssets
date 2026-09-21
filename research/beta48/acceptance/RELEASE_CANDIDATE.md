@@ -142,11 +142,11 @@ relaxed.
 
 ### Technical throughput (software)
 
-Decision path measured at **~15,000 observations/second** single-threaded
-(15 rows through normalize+decide in under 1 ms). At 10 contracts × $0.50,
+Decision path **measured at 21,917 observations/second** single-threaded
+(7,200 normalize+decide cycles in 0.329 s). At 10 contracts × $0.50,
 sustaining $500k/day needs ~100,000 contracts/day ≈ **1.2 contracts/second**.
-**The software is not the constraint — it is roughly four orders of magnitude
-clear.**
+**The software is not the constraint — it clears the requirement by about
+four orders of magnitude.**
 
 ### Economically eligible turnover (observations)
 
