@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from sportsassets import bettor_decision_engine as de
 from sportsassets import bettor_observation_adapter as oa
 from sportsassets import bettor_venue_contract as vc
 
@@ -124,22 +125,56 @@ class TestRefusals:
 
 
 class TestAgainstTheRealCapturedSample:
-    def test_every_real_row_is_rejected_and_says_why(self):
-        recs = [oa.normalize(x) for x in REAL]
-        rep = oa.report(recs)
-        assert rep["rows"] == 16
-        assert rep["accepted"] == 0, (
-            "a real row became usable; re-read the staleness finding")
-        assert rep["rejection_reasons"][oa.R_STALE] == 16
+    """Properties of the real sample, not counts.
 
-    def test_the_real_book_ages_are_reported(self):
-        rep = oa.report([oa.normalize(x) for x in REAL])
-        ages = rep["book_age_s"]
-        assert ages["within_bound"] == 0
-        assert ages["min"] > ages["decision_bound_s"]
-        assert ages["max"] > 25000
+    The first version asserted 16 rows and 0 accepted, which pinned one
+    snapshot of the export. When the export was re-run ordered by
+    freshness the sample changed and the tests failed for a reason that
+    had nothing to do with the adapter. Assert what must be true of ANY
+    real capture instead.
+    """
 
     def test_no_real_row_carries_a_complement(self):
+        """The sibling instrument has never been read, in any export."""
         rep = oa.report([oa.normalize(x) for x in REAL])
         assert rep["complement_sources"][vc.OBSERVED] == 0
-        assert rep["complement_sources"][vc.ABSENT] == 16
+        assert rep["complement_sources"][vc.DERIVED] == 0
+        assert rep["complement_sources"][vc.ABSENT] == rep["rows"]
+
+    def test_every_rejection_names_a_reason(self):
+        recs = [oa.normalize(x) for x in REAL]
+        for r in recs:
+            if r.status == oa.REJECTED:
+                assert r.reasons, "%s rejected with no reason" % r.market_id
+            else:
+                assert not r.reasons
+
+    def test_acceptance_is_exactly_the_staleness_bound(self):
+        """Nothing else in this capture disqualifies a row: the books are
+        readable, open and two-sided, so age is the whole filter."""
+        recs = [oa.normalize(x) for x in REAL]
+        for r in recs:
+            fresh = r.age_s is not None and r.age_s <= de.MAX_BOOK_AGE_S
+            assert (r.status == oa.ACCEPTED) == fresh, (
+                "%s age=%s status=%s" % (r.market_id, r.age_s, r.status))
+
+    def test_the_age_distribution_is_reported(self):
+        rep = oa.report([oa.normalize(x) for x in REAL])
+        ages = rep["book_age_s"]
+        assert ages["decision_bound_s"] == de.MAX_BOOK_AGE_S
+        assert ages["min"] <= ages["median"] <= ages["max"]
+        assert 0 <= ages["within_bound"] <= rep["rows"]
+
+    def test_a_real_accepted_row_reaches_a_decision(self):
+        """End to end on REAL data: normalize -> Book -> decide."""
+        recs = [oa.normalize(x) for x in REAL]
+        accepted = [r for r in recs if r.status == oa.ACCEPTED]
+        assert accepted, "no real row survived; the replay would be empty"
+        for r in accepted[:5]:
+            d = de.decide(oa.to_book(r), fees=de.Fees(source=r.fee_source),
+                          max_contracts=10, venue=r.venue,
+                          account_class=r.account_class)
+            assert d["data_quality"] == "OK"
+            assert d["selected"] == de.NO_TRADE, (
+                "a real row produced an action; every path is blocked or "
+                "unidentified on this venue contract")

@@ -1,38 +1,122 @@
-==========================================================================
-REAL-OBSERVATION REPLAY  |  16 captured rows from research/beta48/acceptance/replay_sample_rows.json
-==========================================================================
 
-VENUE CONTRACT IN FORCE (not the demo fixture):
-   holds_both_legs_independently      UNKNOWN
-   complement_quote_source            ABSENT
-   native_merge                       UNSUPPORTED
-   maker_orders                       UNKNOWN
-   verified_fee_schedule              False
+============================================================================
+BETTOR INTEGRATED REPLAY  |  36 REAL captured observations
+============================================================================
+VENUE CONTRACT (institutional; the demo fixture is NOT used)
+   holds_both_legs_independently    UNKNOWN
+   complement_quote_source          ABSENT
+   native_merge                     UNSUPPORTED
+   maker_orders                     UNKNOWN
+   cancel_replace                   UNKNOWN
+   verified_fee_schedule            False
+FEE SCHEDULE: HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS  (verified=False)
 
-NORMALIZATION
-   rows 16 | accepted 0 | rejected 16
-   complement sources: {"OBSERVED": 0, "DERIVED": 0, "ABSENT": 16}
+============================================================================
+1. NORMALIZATION -- accepted and rejected, with reasons
+============================================================================
+   rows 36 | accepted 15 | rejected 21
+   book age s: min 5.776  median 11.495  max 27.985  (bound 10)
+   complement provenance: {"OBSERVED": 0, "DERIVED": 0, "ABSENT": 36}
    rejection reasons:
-      BOOK_OLDER_THAN_DECISION_BOUND                  16
-      PRICE_IS_NOT_IDENTIFIED_SENTINEL_BID             5
-      MARKET_STATE_EXPIRED                             2
-      COLLECTOR_MARKED_UNREADABLE:NO_BOOK_LEVELS_PUBLISHED     2
-      PRICE_IS_NOT_IDENTIFIED_SENTINEL_ASK             2
+      BOOK_OLDER_THAN_DECISION_BOUND                   21
 
-PAIRING (same market_id + two distinct outcome legs)
-   genuine complement pairs formed: 0
-   contracts that could not be paired: 0
+   STALENESS SENSITIVITY -- how many rows survive each bound:
+      <=     10s    15 of 36 rows
+      <=     30s    36 of 36 rows
+      <=     60s    36 of 36 rows
+      <=    300s    36 of 36 rows
+      <=    900s    36 of 36 rows
+   The engine uses 10s. The others are shown so the eligibility
+   curve is visible, NOT to justify relaxing it.
 
-DECISIONS (real engine, institutional capabilities, no fills)
+============================================================================
+2. CONTRACT PAIRING -- same market_id, two distinct legs
+============================================================================
+   genuine complement pairs: 0
+   unpaired contracts: 15  (an unpaired leg is a finding, not a gap to fill)
 
-   decision counts: {}
+============================================================================
+3. DECISIONS -- every alternative and its economic inputs
+============================================================================
+   EXAMPLE -- astatc-wta-evalys-gabrus-2026-09-20-sw1 (no @ 0.01/0.99)
+   ACTION       STATUS           EV          BLOCKER
+   NO_TRADE     IDENTIFIED       0.0000      
+   PAIR_SELL    UNSUPPORTED      -           NO_PAIRED_INVENTORY
+   SELL_YES     BLOCKED          -           FV_BETTOR_INDEPENDENT_NOT_VALIDATED
+   SELL_NO      BLOCKED          -           FV_BETTOR_INDEPENDENT_NOT_VALIDATED
+   PAIR_BUY     NOT_IDENTIFIED   -           COMPLEMENT_ABSENT
+   TAKE_YES     BLOCKED          -           FV_BETTOR_INDEPENDENT_NOT_VALIDATED
+   TAKE_NO      BLOCKED          -           FV_BETTOR_INDEPENDENT_NOT_VALIDATED
+   MAKE_YES     NOT_IDENTIFIED   -           P_FILL_NOT_IDENTIFIED
+   MAKE_NO      NOT_IDENTIFIED   -           P_FILL_NOT_IDENTIFIED
+   MERGE        UNSUPPORTED      -           MERGE_NOT_OBSERVED_ON_INSTITUTIONAL
+   -> NO_TRADE : no action has an identified EV. Blockers: COMPLEMENT_ABS
+
+   decisions over 15 accepted rows: {"NO_TRADE": 15}
    blockers encountered:
+      FV_BETTOR_INDEPENDENT_NOT_VALIDATED                    60
+      P_FILL_NOT_IDENTIFIED                                  30
+      NO_PAIRED_INVENTORY                                    15
+      COMPLEMENT_ABSENT                                      15
+      MERGE_NOT_OBSERVED_ON_INSTITUTIONAL                    15
 
-==========================================================================
-WHAT THIS ESTABLISHES, AND WHAT IT DOES NOT
-==========================================================================
-   Establishes: the engine consumes REAL captured observations,
-   normalizes them under institutional semantics, and reaches a
-   decision on every accepted row without fabricating anything.
-   Does NOT establish: any edge, any fill, any profitability.
-   No order was simulated and no performance number exists here.
+============================================================================
+4. EXECUTION, INVENTORY AND ACCOUNTING
+============================================================================
+   observations stepped through the loop: 15
+   orders executed: 0
+   NO ORDER WAS EXECUTED, and the reason is not a bug:
+   every action is blocked or unidentified on this data.
+   Manufacturing a fill to produce a number is exactly what
+   this run must not do.
+
+   RECONCILED ACCOUNTING
+      {"opening_cash": 10000.0, "movements": 0, "sum_of_movements": 0, "closing_cash": 10000.0, "residual_must_be_0": 0.0, "reconciled": true}
+      fees paid        0.0000
+      realized P&L     +0.0000
+      remaining basis  0.0000
+      open positions   0
+      live quotes      0
+      evidence classes {"REPLAYED_OBSERVATION": 15}
+
+============================================================================
+5. SETTLEMENT
+============================================================================
+   observations with a settlement outcome: 0 of 36
+   bettor_state_settlements holds 0 rows venue-wide, so NO
+   outcome has matured for ANY observation. Nothing is settled
+   here, and no realized result is available to report.
+
+============================================================================
+6. MAKER ECONOMICS ON THE REAL BOOKS (frozen grid)
+============================================================================
+   Per PREREGISTRATION_MAKER_V1: p_fill and
+   conditional_reference_move are NOT_IDENTIFIED, so each real
+   book is evaluated across the frozen grid instead of at a
+   chosen value. Conservative corner = move -0.020.
+
+   MOVE      ROUTE     POSITIVE    NEGATIVE    MEDIAN/CONTRACT
+   +0.000    cross     0           15          -0.010000
+   +0.000    rest      12          3           +0.000000
+   -0.005    cross     0           15          -0.015000
+   -0.005    rest      7           8           -0.005000
+   -0.010    cross     0           15          -0.020000
+   -0.010    rest      7           8           -0.010000
+   -0.020    cross     0           15          -0.030000
+   -0.020    rest      6           9           -0.020000
+
+   Every figure above carries HYPOTHETICAL inputs. Under the
+   frozen acceptance rule a candidate needing a NOT_IDENTIFIED
+   term to clear zero is UNRESOLVED -- never SUPPORTED.
+
+============================================================================
+7. OBSERVED / ASSUMED / SYNTHETIC
+============================================================================
+   OBSERVED   36 real books: quotes, ages, states, identities.
+   ASSUMED    the fee schedule (HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS),
+              plus every grid value in section 6.
+   SYNTHETIC  every fill. BETTOR has never rested an order.
+
+   This run establishes that the engine consumes real venue
+   data and decides on it without fabricating inputs.
+   It establishes NO edge, NO fill rate and NO profitability.
