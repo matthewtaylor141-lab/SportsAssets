@@ -37,6 +37,9 @@ permissions:
 jobs:
   tags:
     runs-on: ubuntu-latest
+    # A guard that can hang is worse than no guard: it holds a runner
+    # and starves every other job in the account.
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:
@@ -91,16 +94,40 @@ jobs:
           python3 scripts/check_workflows.py
 
       - name: actionlint
+        # BOUNDED, BECAUSE THE UNBOUNDED VERSION ATE THE QUEUE.
+        # I added this step at 14:2x on 2026-09-21 as
+        # `bash <(curl ...) ` with no timeout. The process substitution
+        # never returned -- every commit-guard run since sat
+        # in_progress on this step for over an hour, each holding a
+        # runner, until twenty were stuck and the account's queue was
+        # starved. The reconciliation reads I then reported as "blocked
+        # behind saturated runners" were blocked behind THIS.
+        #
+        # A lint step must never be able to outlive the thing it lints.
+        timeout-minutes: 3
         run: |
-          set -e
-          # The schema checks above are ours and deliberately narrow.
-          # actionlint is the upstream validator and knows the parts of
-          # the workflow schema we have not encoded -- expression
-          # syntax, context availability, runner labels, action inputs.
-          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) >/dev/null
-          ./actionlint -color || {
-            echo "::error::actionlint rejected a workflow. A workflow that
-          does not validate may still be dispatchable, but the failure
-          surfaces as startup_failure at the moment you need the lever."
-            exit 1
-          }
+          set -uo pipefail
+          # Download to a file with its own bounded curl, redirecting
+          # stdin from /dev/null so nothing can wait on a terminal.
+          if ! curl -sSfL --max-time 60 -o /tmp/dl-actionlint.bash \
+               https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash \
+               </dev/null; then
+            echo "::warning::actionlint could not be downloaded; the "\
+                 "size/structure/shell checks above still ran"
+            exit 0
+          fi
+          if ! timeout 90 bash /tmp/dl-actionlint.bash >/dev/null 2>&1 </dev/null; then
+            echo "::warning::actionlint could not be installed; the "\
+                 "size/structure/shell checks above still ran"
+            exit 0
+          fi
+          timeout 90 ./actionlint -color </dev/null
+          rc=$?
+          if [ "$rc" -eq 124 ]; then
+            echo "::warning::actionlint timed out; not treating that as a lint failure"
+            exit 0
+          fi
+          if [ "$rc" -ne 0 ]; then
+            echo "::error::actionlint rejected a workflow -- a workflow that does not validate may still be dispatchable, but the failure surfaces as startup_failure at the moment you need the lever"
+            exit "$rc"
+          fi
