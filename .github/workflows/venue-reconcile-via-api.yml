@@ -172,7 +172,46 @@ jobs:
 
           print()
           if isinstance(acc, dict):
-              pm = acc.get("pm") or {}
+              pm = acc.get("pm") or acc.get("polymarket") or {}
+              # FRESHNESS AND SCOPE. A snapshot without its timestamp is
+              # not evidence about now; account_snapshot caches, so the
+              # figures may be up to the cache TTL old.
+              print()
+              print("  as_of  : %s" % acc.get("as_of"))
+              print("  role   : %s" % acc.get("role"))
+              t = acc.get("totals") or {}
+              for k in sorted(t):
+                  print("  totals.%-18s %s" % (k, t[k]))
+              # RECENT TRADES -- actual venue activity. I previously said
+              # this endpoint carried none; it carries this.
+              rt = pm.get("recent_trades")
+              if isinstance(rt, list):
+                  print()
+                  print("  RECENT TRADES: %d rows (venue activity)" % len(rt))
+                  if rt:
+                      print("  keys: %s" % sorted(rt[0])[:16])
+                  for r in rt[:40]:
+                      if not isinstance(r, dict):
+                          continue
+                      print("     %-34s %-6s qty=%-9s px=%-8s %s" % (
+                          str(r.get("market_slug") or r.get("slug")
+                              or r.get("title") or "?")[:34],
+                          r.get("side") or r.get("outcome"),
+                          r.get("qty") or r.get("quantity") or r.get("shares"),
+                          r.get("price") or r.get("fill_price"),
+                          r.get("ts") or r.get("time") or r.get("created_at")
+                          or r.get("traded_at") or ""))
+              # ACCOUNT IDENTITY. Nothing in account_snapshot names the
+              # account, so this prints whatever identity-ish key exists
+              # rather than assuming none does.
+              ident = [k for k in pm
+                       if any(w in k.lower() for w in
+                              ("account_id", "wallet", "address", "proxy",
+                               "owner", "user"))]
+              print()
+              print("  identity keys present in pm: %s"
+                    % (ident or "NONE -- the account cannot be identified "
+                                "from this payload"))
               print()
               print("  DOES EMPTY MEAN EMPTY, OR MEAN THE READ FAILED?")
               print("     configured : %s" % pm.get("configured"))
@@ -185,9 +224,12 @@ jobs:
               print("        Anything else and the read is inconclusive.")
 
           print()
-          print("  SCOPE: this is CURRENT state. It does not match the 52")
-          print("  historical fills row by row and carries no settlement")
-          print("  events -- those need the activities read.")
+          print("  SCOPE, CORRECTED: /api/admin/open-orders is a DATABASE")
+          print("  read of live_orders WHERE whale_username='manual' AND")
+          print("  status='open'. It is NOT a venue read of resting orders,")
+          print("  so it does not establish outstanding venue commitments.")
+          print("  recent_trades IS venue activity, but it is a recent")
+          print("  window, not the full history the 52 fills need.")
           PY
 
       - name: Keep the evidence
