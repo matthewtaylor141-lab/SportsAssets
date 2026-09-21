@@ -245,42 +245,55 @@ twenty minutes and then stopped advancing. This is a property of the
 environment, not of this branch.
 
 So regressions were separated from pre-existing failures by **diffing
-the failure set against a baseline worktree at `fc80f95`**, file by
-file. That method found four real regressions, all mine, all fixed:
+the failure set against a baseline worktree at `fc80f95`**, block by
+block, across the whole 228-file regression surface. That method found
+**six regressions, 89 tests, all mine, all fixed**:
 
 | Where | Tests | Cause | Fix |
 |---|---|---|---|
 | `test_calibration_adapter.py` | 10 | bench called `submit_fok` against an unbound gate | autouse fixture arms the gate |
-| `test_e31_maker_only.py` | 1 | sha256 pin on `submit_fok`/`close_position` | re-pinned, reason recorded |
-| `test_e31_maker_only.py` | 1 | the `*)` help arm never listed the pause switches | help arm and description matched to the case arms |
-| `test_e24_hand_fills.py` | 1 | a counted comment moved to `RENDER_OPS_NOTES.md` | count corrected 3 → 2 |
+| `test_exit_fraction_is_a_stock.py` | 8 | `mirror_exit` now calls `active_venue()`; bench had a partial `settings()` | bench represents an authorized system |
+| `test_in_flight_entry_is_pending.py` | 7 | same | same |
+| `test_mirror_live_le_consumers.py` | 7 | same | same |
+| `test_pmus.py` + 4 others | 54 | `submit_fok` benches against an unbound gate | one conftest fixture arms the suite |
+| `test_e31` / `test_e24` | 3 | sha pins, the `*)` help arm, a moved comment | re-pinned; help arm matched; count corrected |
 
-The second one is worth dwelling on: the hash pins **did their job**.
-They exist so an edit nobody meant to make is caught, and they caught
-mine. The pins moved and the reason is recorded beside the table; the
-guard was not loosened.
+Two of these deserve naming rather than burying.
 
-The third was a real operator-facing defect I had shipped without
-noticing — `render-ops` lists the `sql` action's values in three
-places, and I had updated two. The lever had three switches an operator
-could use and could not discover.
+**The hash pins did their job.** `test_e31` pins the sha256 of
+`submit_fok` and `close_position` so an edit nobody meant to make is
+caught, and it caught mine. The pins moved and the reason sits beside
+the table; the guard was not loosened.
 
-**Verified clean against baseline:**
+**The three benches had been broken in production since `1fbfb26`
+deployed.** I reported at the time that the R5 `active_venue()` repair
+broke one test file. It broke four. I fixed one and verified only the
+executor subset, so three went out with the deploy and stayed broken
+for hours. Sweeping the rest is what found them.
 
-| Scope | Result |
+**The conftest default does not weaken the control.** Tests whose
+subject is the gate install their own snapshot and override it;
+`test_an_unbound_gate_denies` unbinds inside the test body and still
+denies; and the structural guarantee never lived in a snapshot —
+`test_order_route_census.py` walks the AST and fails if any order path
+stops being gated.
+
+**Verified clean against baseline, whole surface:**
+
+| Block | Result |
 |---|---|
-| surface slice 1 (60 files) | 1,737 passed; 19 failures **identical** at baseline |
-| e-series (7 files) | 165 passed; 7 failures **identical** at baseline |
-| this package's 9 suites | 230 passed |
-| collector subset | 1,055 passed |
-| executor / mirror / whale subset | 309 passed, only the 8 known ladder failures |
+| files 1–60 | 1,737 passed; 19 failures **identical** at baseline |
+| files 61–70 (e-series) | 165 passed; 7 failures **identical** |
+| files 71–90 | clean; no file fails alone |
+| files 91–150 | 6 and 38 failures, **identical** at baseline |
+| files 151–228 | 54 new → 1, and that one fails identically at baseline |
+| this package's 13 suites | 303 passed, 1 pre-existing |
 
-**The gap, stated plainly.** Roughly files 71–228 of the 228-file
-regression surface were not swept to completion, because the sweep
-cannot finish here. Every file in the *direct* blast radius of the
-changed symbols is inside the verified set above; the unswept remainder
-is the part that merely mentions `pmus` somewhere. I am not claiming a
-green full suite, and nobody should read one into this.
+**One environmental note, not a gap in coverage.** Files 71–90 hang
+when run *together* with others, though every one passes alone — a
+cross-file isolation problem in the repo (leaked database state), not a
+regression of this branch. It is why the suite cannot be run in one
+process here, and why the sweep was done in blocks.
 
 ### Pre-existing environment failures, reported separately
 
@@ -534,8 +547,9 @@ stderr), 30-day retention. No secret appears in any of it.
    shipped since V2 measure-only.
 5. **`test_pmus_post_only.py` and 8 ladder tests** cannot run here, so
    the end-to-end copy path is not validated in this environment.
-6. **The full suite cannot be run to completion here** — pytest hangs on
-   DB-connection retries and `timeout -k` does not kill it. ~3,300 tests
-   verified against a baseline worktree; files 71–228 of the regression
-   surface were not swept. Four regressions were found and fixed by that
-   method; a fifth cannot be ruled out in the unswept remainder.
+6. **The full suite cannot be run in one process here** — some files
+   hang when run together though each passes alone, a repo test-isolation
+   problem, not a regression of this branch. The whole 228-file
+   regression surface was swept in blocks and diffed against baseline;
+   six regressions (89 tests) were found and fixed, and every block now
+   matches baseline exactly.
