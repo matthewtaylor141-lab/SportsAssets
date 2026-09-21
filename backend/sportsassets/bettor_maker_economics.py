@@ -1,73 +1,69 @@
-"""Maker economics: what a passive quote is worth, term by term.
+"""Maker economics from ACTUAL ENTRY AND EXIT PRICES. No spread algebra.
 
-A LARGE SPREAD IS NOT AN EDGE, and the decision engine's refusal to act
-on one was right but incomplete. "P_FILL is NOT_IDENTIFIED" is a true
-statement that does no work: it names one missing input and leaves the
-other three unexamined. A maker decision has four terms and only one of
-them is the spread.
+WHAT THIS REPLACES, AND WHY THE OLD VERSION WAS WRONG.
 
-    E[maker] = p_fill x ( half_spread
-                        - adverse_selection
-                        - inventory_carry(duration)
-                        - exit_cost )
-             + (1 - p_fill) x quote_cost
+The previous model read
 
-WHY EACH TERM IS THERE, and why leaving any of them out flatters the
-answer:
+    value_if_filled = half_spread - adverse_selection - carry - exit_cost
 
-  half_spread          what the quote is paid IF it fills and nothing
-                       moves. This is the only term a naive model has.
-                       Measured on PMUS: 0.0050 per share.
+and concluded that a quote exited by crossing is negative for any
+non-negative adverse selection, "because a maker earns half a spread and
+a taker exit pays a whole one". Review supplied the counterexample and it
+is decisive:
 
-  adverse_selection    THE REASON THE FILL HAPPENED. A resting quote is
-                       hit precisely when someone wants the other side,
-                       so fills are not a random sample of the book --
-                       they are conditioned on the taker's information.
-                       E[value | filled] is strictly worse than
-                       E[value], and the difference is not small on a
-                       venue where the taker chooses the moment. A model
-                       that omits it earns the half-spread on paper and
-                       loses it in the markout.
+    bid 0.485, ask 0.515, book unchanged, no fees
+    our passive buy fills at            0.485
+    we immediately sell at the bid      0.485
+    actual cash P&L                     0.0000
+    the old model reported             -0.0150
 
-  inventory_carry      a filled quote is a POSITION, held until it is
-                       exited or settles. Capital is occupied for that
-                       duration and the position carries risk the whole
-                       time. Duration is not free even when the price
-                       does not move.
+The error is a mixed reference. `half_spread` credits the entry against
+the MIDPOINT (0.500 - 0.485 = +0.015) and `exit_cost = spread` charges
+the exit against the BID (0.515 - 0.485 = 0.030). The same 0.015 is
+earned once and paid twice. Buying at 0.485 and selling at 0.485 is zero,
+and no amount of spread algebra changes that.
 
-  exit_cost            the position has to come back. On this venue,
-                       crossing the spread to exit costs the full
-                       spread -- so a round trip that earns half a
-                       spread and pays a full one is negative before
-                       anything else happens. THIS IS THE TERM MOST
-                       OFTEN FORGOTTEN, and it is the one that decides
-                       whether Class A/B can work at all.
+BOTH FINDINGS FROM THE OLD MODEL ARE WITHDRAWN:
 
-  quote_cost           what an unfilled quote costs. Not zero: it
-                       occupies risk budget, it can be picked off on a
-                       fast move, and cancel/replace consumes API
-                       allowance. Small, but not nothing.
+  * "a crossed round trip is necessarily negative" -- FALSE. Passive in,
+    aggressive out is ZERO gross on an unchanged book. What makes it
+    negative is fees, an adverse move, and carry -- each of which has to
+    be sourced, not assumed.
+  * "breakeven p_fill = 0.0092 held to settlement" -- WITHDRAWN. It was
+    computed from the broken filled-value term and from inputs I never
+    sourced.
 
-WHAT IS MEASURED AND WHAT IS NOT, from the sprint verdict:
+THE CORRECT MODEL IS THE ONE THE CASH ACTUALLY FOLLOWS:
 
-    Class A  passive same-venue complementary maker pair
-             INSUFFICIENT_EVIDENCE, gross term 0.0050/share half-spread
-    Class B  maker first leg + controlled completion
-             INSUFFICIENT_EVIDENCE, gross term 0.0050/share half-spread
+    round_trip = (exit_price - entry_price) x qty
+               - fees_total
+               + verified_rebates
+               - carry(duration)
 
-The GROSS term is measured. p_fill, adverse selection, duration and exit
-cost are not. So this module computes the decomposition and returns
-NOT_IDENTIFIED for the total, while making it possible to ask "what
-would p_fill have to be for this to clear zero?" -- which is a
-falsifiable question and a far more useful one than the spread alone.
+Every term is a price or a dated cash amount. There is no "spread
+captured" line, because spread capture is not a cash flow -- it is a
+DESCRIPTION of the difference between two prices that are already in the
+formula.
 
-SHADOW EVALUATION WITHOUT LIVE AUTHORITY. `evaluate()` accepts a
-candidate parameter set and returns what it implies. A candidate carries
-`authority="SHADOW"` and nothing in this module can change that. A
-candidate's number is never returned as the engine's belief -- it is
-returned as that candidate's claim, labelled with the candidate's own
-validation status, so candidates can be compared in shadow and promoted
-only by a separate, frozen, pre-registered decision.
+HOW ADVERSE SELECTION ENTERS -- ONCE. It is not a separate subtraction.
+A resting buy fills when someone chooses to sell to us, so the reference
+price CONDITIONAL ON OUR FILL is not the reference price we quoted
+against. That shows up as `conditional_reference_move`, a signed change
+in the midpoint given a fill, and the exit price is then built from the
+MOVED reference. Subtracting an "adverse selection" term on top of an
+exit price that already embeds the move would double-count it, which is
+the same mistake in a different place.
+
+HOLDING TO SETTLEMENT IS NOT A HALF-SPREAD. The payoff is
+E[settlement | our fill], a conditional expectation over outcomes
+selected by whoever traded with us. A fill may select precisely the
+markets where our quote was mispriced. That expectation is
+NOT_IDENTIFIED and this module will not substitute anything for it.
+
+EVERY INPUT IS SOURCED OR THE ANSWER IS NOT_IDENTIFIED. `Assumption`
+carries a value AND where it came from. MEASURED, HYPOTHETICAL and
+NOT_IDENTIFIED are different things and a result built on a HYPOTHETICAL
+is labelled hypothetical all the way out.
 """
 
 from __future__ import annotations
@@ -77,213 +73,288 @@ from dataclasses import dataclass, field, asdict
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 IDENTIFIED = "IDENTIFIED"
+HYPOTHETICAL = "HYPOTHETICAL"
+MEASURED = "MEASURED"
 SHADOW = "SHADOW"
-LIVE = "LIVE"
 
-# Measured on PMUS and recorded in the sprint verdict. The one term that
-# is not a guess.
+# Exit routes. The price each one gets is different, and the difference
+# is the whole question -- so it is a choice the caller states, never a
+# default this module picks.
+EXIT_PASSIVE = "PASSIVE_AT_ASK"        # rest on the other side; may not fill
+EXIT_AGGRESSIVE = "AGGRESSIVE_AT_BID"  # cross out; fills now
+EXIT_SETTLEMENT = "HOLD_TO_SETTLEMENT"  # no exit trade at all
+
+# The one term with a measurement behind it: PMUS half-spread, from the
+# sprint verdict. It is NOT used as a P&L term -- it is a book statistic.
 MEASURED_HALF_SPREAD_PER_SHARE = 0.0050
 
 
 @dataclass(frozen=True)
-class MakerParams:
-    """One candidate parameter set. SHADOW authority, always.
+class Assumption:
+    """A number and where it came from. The source travels with it."""
+    value: float | None
+    source: str = NOT_IDENTIFIED        # MEASURED | HYPOTHETICAL | ...
+    note: str = ""
 
-    Every field defaults to None, meaning NOT_IDENTIFIED. A None does
-    not become a zero anywhere in this module -- it propagates, and the
-    total comes back NOT_IDENTIFIED with the missing terms named.
-    """
+    @property
+    def known(self) -> bool:
+        return self.value is not None and math.isfinite(self.value)
+
+
+def measured(v: float, note: str = "") -> Assumption:
+    return Assumption(v, MEASURED, note)
+
+
+def hypothetical(v: float, note: str = "") -> Assumption:
+    return Assumption(v, HYPOTHETICAL, note)
+
+
+def unknown(note: str = "") -> Assumption:
+    return Assumption(None, NOT_IDENTIFIED, note)
+
+
+@dataclass(frozen=True)
+class MakerQuote:
+    """One passive quote and the assumptions needed to value it."""
     name: str = "unnamed"
-    p_fill: float | None = None
-    adverse_selection_per_share: float | None = None
-    carry_per_share_per_hour: float | None = None
-    expected_duration_hours: float | None = None
-    exit_cost_per_share: float | None = None
-    quote_cost_per_share: float | None = None
-    validation_status: str = NOT_IDENTIFIED
-    authority: str = SHADOW              # never LIVE from this module
+    side: str = "BUY"                   # BUY rests at the bid
+    entry_price: float | None = None    # what we actually pay / receive
+    qty: float = 1.0
+    exit_route: str = EXIT_AGGRESSIVE
 
-    def missing(self) -> list[str]:
-        out = []
-        for f in ("p_fill", "adverse_selection_per_share",
-                  "carry_per_share_per_hour", "expected_duration_hours",
-                  "exit_cost_per_share", "quote_cost_per_share"):
-            if getattr(self, f) is None:
-                out.append(f)
-        return out
+    # Book at entry.
+    bid: float | None = None
+    ask: float | None = None
+
+    # Conditional on OUR FILL, how does the midpoint move? Negative is
+    # adverse for a buy. This is where adverse selection lives, and it
+    # lives here ONLY -- the exit price is built from the moved
+    # reference, so there is no second subtraction anywhere.
+    conditional_reference_move: Assumption = field(default_factory=unknown)
+
+    # Spread at the moment of exit. Not necessarily the entry spread.
+    exit_spread: Assumption = field(default_factory=unknown)
+
+    p_fill: Assumption = field(default_factory=unknown)
+    fee_per_contract: Assumption = field(default_factory=unknown)
+    rebate_verified_per_contract: Assumption = field(default_factory=unknown)
+    carry_per_contract_per_hour: Assumption = field(default_factory=unknown)
+    duration_hours: Assumption = field(default_factory=unknown)
+
+    # E[settlement payout | our fill]. Only for EXIT_SETTLEMENT, and
+    # there is no substitute for it.
+    conditional_settlement_value: Assumption = field(default_factory=unknown)
+
+    authority: str = SHADOW
 
 
 @dataclass
-class MakerEvaluation:
+class RoundTrip:
     status: str
-    per_share_net: float | None = None
+    per_contract: float | None = None
+    total: float | None = None
+    entry_price: float | None = None
+    exit_price: float | None = None
     terms: dict = field(default_factory=dict)
-    missing: list[str] = field(default_factory=list)
+    missing: list = field(default_factory=list)
+    evidence: str = NOT_IDENTIFIED      # MEASURED if every source is
     why: str = ""
-    authority: str = SHADOW
-    candidate: str = ""
 
     def to_dict(self) -> dict:
         return asdict(self)
 
 
-def half_spread(bid: float | None, ask: float | None) -> float | None:
-    """Half the quoted spread, or None. Never negative.
-
-    A crossed or locked book (ask <= bid) has no half-spread to earn and
-    returns None rather than a negative number that would read as a cost.
-    """
+def mid(bid: float | None, ask: float | None) -> float | None:
     if bid is None or ask is None:
         return None
-    if not (math.isfinite(bid) and math.isfinite(ask)):
+    if not (math.isfinite(bid) and math.isfinite(ask)) or ask <= bid:
         return None
-    if ask <= bid:
-        return None
-    return (ask - bid) / 2.0
+    return (bid + ask) / 2.0
 
 
-def round_trip_is_negative_before_anything_else(bid: float | None,
-                                                ask: float | None) -> bool:
-    """Does crossing out cost more than resting in earns?
+def exit_price(q: MakerQuote) -> tuple[float | None, list]:
+    """The price the exit actually gets, from the MOVED reference.
 
-    The structural question, answerable from the book alone with no
-    probability at all: a maker earns at most half the spread and a
-    taker exit pays the whole spread. If the position must be exited by
-    crossing rather than by settling, the round trip starts at minus
-    half a spread and every other term makes it worse.
+    One reference for both legs: the midpoint at entry, plus the move
+    conditional on our fill, plus or minus half the exit spread
+    depending on which side of it we have to trade.
     """
-    hs = half_spread(bid, ask)
-    if hs is None:
-        return True
-    return (2.0 * hs) > hs               # always true: exit > entry earn
+    missing = []
+    m0 = mid(q.bid, q.ask)
+    if m0 is None:
+        missing.append("book (bid/ask) at entry")
+    if not q.conditional_reference_move.known:
+        missing.append("conditional_reference_move")
+    if q.exit_route == EXIT_SETTLEMENT:
+        if not q.conditional_settlement_value.known:
+            missing.append("conditional_settlement_value "
+                           "(E[settlement | our fill]) -- a half-spread is "
+                           "not a substitute for this")
+        return ((q.conditional_settlement_value.value
+                 if q.conditional_settlement_value.known else None), missing)
+
+    if not q.exit_spread.known:
+        missing.append("exit_spread")
+    if missing:
+        return None, missing
+
+    m1 = m0 + q.conditional_reference_move.value
+    half = q.exit_spread.value / 2.0
+    if q.side.upper() == "BUY":
+        # We are long and must sell: passive sells at the ask, aggressive
+        # hits the bid.
+        return (m1 + half if q.exit_route == EXIT_PASSIVE else m1 - half), []
+    return (m1 - half if q.exit_route == EXIT_PASSIVE else m1 + half), []
 
 
-def evaluate(params: MakerParams, *, bid: float | None = None,
-             ask: float | None = None,
-             size_contracts: float = 1.0,
-             hold_to_settlement: bool = False) -> MakerEvaluation:
-    """The decomposition, with every missing term named.
+def round_trip(q: MakerQuote) -> RoundTrip:
+    """Conditional round-trip P&L, given a fill. Actual prices only."""
+    terms: dict = {"exit_route": q.exit_route, "side": q.side}
+    missing: list = []
 
-    `hold_to_settlement=True` removes the exit cost -- a position held to
-    settlement is not crossed out, it resolves. That is the single
-    change that can make Class A/B viable, and it is why the flag is
-    explicit rather than assumed either way.
-    """
-    hs = half_spread(bid, ask)
-    terms: dict = {"half_spread_per_share": hs,
-                   "half_spread_source": ("BOOK" if hs is not None
-                                          else "UNAVAILABLE")}
-    missing = list(params.missing())
-    if hs is None:
-        missing.append("half_spread (book is crossed, locked or absent)")
+    entry = q.entry_price
+    if entry is None:
+        missing.append("entry_price")
+    xp, xmiss = exit_price(q)
+    missing.extend(xmiss)
 
-    if hold_to_settlement:
-        terms["exit_cost_per_share"] = 0.0
-        terms["exit_note"] = ("held to settlement, so no crossing cost; "
-                              "this removes the exit term and ONLY that one")
-        if "exit_cost_per_share" in missing:
-            missing.remove("exit_cost_per_share")
-    else:
-        terms["exit_cost_per_share"] = params.exit_cost_per_share
-        terms["exit_note"] = ("exited by crossing, which costs the FULL "
-                              "spread against a half-spread earned")
-
-    terms["adverse_selection_per_share"] = params.adverse_selection_per_share
-    terms["p_fill"] = params.p_fill
-    carry = None
-    if (params.carry_per_share_per_hour is not None
-            and params.expected_duration_hours is not None):
-        carry = (params.carry_per_share_per_hour
-                 * params.expected_duration_hours)
-    terms["inventory_carry_per_share"] = carry
-    terms["quote_cost_per_share"] = params.quote_cost_per_share
+    for label, a in (("fee_per_contract", q.fee_per_contract),
+                     ("carry_per_contract_per_hour",
+                      q.carry_per_contract_per_hour),
+                     ("duration_hours", q.duration_hours)):
+        if not a.known:
+            missing.append(label)
+    # A rebate that is not verified is ZERO, not missing. Absence of a
+    # verified incentive is a known quantity: nothing.
+    rebate = (q.rebate_verified_per_contract.value
+              if q.rebate_verified_per_contract.known else 0.0)
+    terms["rebate_per_contract"] = rebate
+    terms["rebate_source"] = q.rebate_verified_per_contract.source
 
     if missing:
-        return MakerEvaluation(
-            status=NOT_IDENTIFIED, per_share_net=None, terms=terms,
-            missing=sorted(set(missing)),
-            why=("%d of the terms are unmeasured, so the total is not a "
-                 "number. A large spread is not an edge: the fill is "
-                 "conditioned on the taker's information and the exit "
-                 "costs more than the entry earns"
-                 % len(set(missing))),
-            authority=params.authority, candidate=params.name)
+        return RoundTrip(status=NOT_IDENTIFIED, terms=terms,
+                         entry_price=entry, exit_price=xp,
+                         missing=sorted(set(missing)),
+                         why=("%d input(s) unsourced. The model is "
+                              "(exit - entry) x qty - fees + rebates - "
+                              "carry; every term must come from somewhere"
+                              % len(set(missing))))
 
-    exit_c = terms["exit_cost_per_share"]
-    filled = (hs - params.adverse_selection_per_share - carry - exit_c)
-    net = (params.p_fill * filled
-           + (1.0 - params.p_fill) * -abs(params.quote_cost_per_share))
-    terms["value_if_filled_per_share"] = filled
-    return MakerEvaluation(
-        status=IDENTIFIED, per_share_net=net * size_contracts, terms=terms,
-        missing=[],
-        why=("p_fill %.4f x (%.6f filled) + %.4f x (-%.6f quote cost)"
-             % (params.p_fill, filled, 1 - params.p_fill,
-                abs(params.quote_cost_per_share))),
-        authority=params.authority, candidate=params.name)
+    carry = (q.carry_per_contract_per_hour.value * q.duration_hours.value)
+    gross = xp - entry if q.side.upper() == "BUY" else entry - xp
+    per = gross - q.fee_per_contract.value + rebate - carry
+
+    terms.update({
+        "gross_per_contract": gross,
+        "fee_per_contract": q.fee_per_contract.value,
+        "carry_per_contract": carry,
+        "mid_at_entry": mid(q.bid, q.ask),
+        "conditional_reference_move": q.conditional_reference_move.value,
+    })
+    sources = {q.conditional_reference_move.source, q.exit_spread.source,
+               q.fee_per_contract.source, q.carry_per_contract_per_hour.source,
+               q.duration_hours.source}
+    evidence = (MEASURED if sources == {MEASURED}
+                else (HYPOTHETICAL if HYPOTHETICAL in sources
+                      else NOT_IDENTIFIED))
+    return RoundTrip(status=IDENTIFIED, per_contract=per,
+                     total=per * q.qty, entry_price=entry, exit_price=xp,
+                     terms=terms, missing=[], evidence=evidence,
+                     why=("(%.6f exit - %.6f entry) = %.6f gross, less %.6f "
+                          "fee, plus %.6f rebate, less %.6f carry"
+                          % (xp, entry, gross, q.fee_per_contract.value,
+                             rebate, carry)))
 
 
-def breakeven_p_fill(params: MakerParams, *, bid: float | None,
-                     ask: float | None,
-                     hold_to_settlement: bool = False) -> dict:
-    """What would p_fill have to be for this quote to clear zero?
+def expected_value(q: MakerQuote) -> dict:
+    """p_fill x round_trip + (1 - p_fill) x 0.
 
-    THE USEFUL QUESTION. p_fill is unmeasured, but the OTHER terms can
-    be supplied and the threshold solved for. A breakeven above 1.0
-    means no fill probability rescues it and the structure is dead
-    without measuring anything further -- which is a real, falsifiable
-    finding obtainable today.
+    An unfilled quote has no cash flow. Its real cost is opportunity and
+    risk-budget occupancy, which are not cash and are not modelled as
+    cash here -- inventing a number for them would be the same class of
+    error as the half-spread credit.
     """
-    probe = MakerParams(
-        name=params.name, p_fill=0.5,
-        adverse_selection_per_share=params.adverse_selection_per_share,
-        carry_per_share_per_hour=params.carry_per_share_per_hour,
-        expected_duration_hours=params.expected_duration_hours,
-        exit_cost_per_share=params.exit_cost_per_share,
-        quote_cost_per_share=params.quote_cost_per_share,
-        validation_status=params.validation_status,
-        authority=params.authority)
-    ev = evaluate(probe, bid=bid, ask=ask,
-                  hold_to_settlement=hold_to_settlement)
-    if ev.status != IDENTIFIED:
-        return {"status": NOT_IDENTIFIED, "missing": ev.missing,
-                "why": "the other terms are not all supplied"}
+    rt = round_trip(q)
+    if rt.status != IDENTIFIED:
+        return {"status": NOT_IDENTIFIED, "missing": rt.missing,
+                "round_trip": rt.to_dict(),
+                "why": "the conditional round trip is not identified"}
+    if not q.p_fill.known:
+        return {"status": NOT_IDENTIFIED, "missing": ["p_fill"],
+                "conditional_round_trip_per_contract": rt.per_contract,
+                "round_trip": rt.to_dict(),
+                "why": ("the conditional round trip IS identified at "
+                        "%.6f/contract; only the probability of reaching it "
+                        "is not" % rt.per_contract)}
+    ev = q.p_fill.value * rt.total
+    return {"status": IDENTIFIED, "expected_value": ev,
+            "evidence": rt.evidence, "round_trip": rt.to_dict(),
+            "why": "p_fill %.4f x %.6f" % (q.p_fill.value, rt.total)}
 
-    filled = ev.terms["value_if_filled_per_share"]
-    quote_cost = abs(params.quote_cost_per_share)
-    denom = filled + quote_cost
-    if denom <= 0:
+
+def breakeven_p_fill(q: MakerQuote) -> dict:
+    """What p_fill makes this zero?
+
+    WITH AN UNFILLED QUOTE COSTING NOTHING IN CASH, the answer is
+    degenerate and saying so is more honest than producing a number: if
+    the conditional round trip is positive, ANY p_fill > 0 has positive
+    expected value; if it is negative, no p_fill does. The interesting
+    quantity is therefore the SIGN of the round trip, not a threshold.
+
+    The old 0.0092 came from a quote-cost term I never sourced and a
+    filled-value term that was wrong. Both are withdrawn.
+    """
+    rt = round_trip(q)
+    if rt.status != IDENTIFIED:
+        return {"status": NOT_IDENTIFIED, "missing": rt.missing}
+    if rt.per_contract > 0:
+        return {"status": IDENTIFIED, "breakeven_p_fill": 0.0,
+                "verdict": "POSITIVE_FOR_ANY_NONZERO_FILL_RATE",
+                "conditional_round_trip_per_contract": rt.per_contract,
+                "evidence": rt.evidence,
+                "why": ("a fill is worth %+.6f, so any fill rate above zero "
+                        "is positive in expectation. The binding question "
+                        "is SIZE and opportunity cost, not probability"
+                        % rt.per_contract)}
+    if rt.per_contract < 0:
         return {"status": IDENTIFIED, "breakeven_p_fill": None,
-                "verdict": "NO_FILL_PROBABILITY_RESCUES_THIS",
-                "value_if_filled_per_share": filled,
-                "why": ("a fill is worth %.6f per share, which is not "
-                        "positive. Filling more often makes it worse, so "
-                        "the structure fails without measuring p_fill at "
-                        "all" % filled)}
-    p = quote_cost / denom
-    return {"status": IDENTIFIED, "breakeven_p_fill": p,
-            "verdict": ("REQUIRES_P_FILL_ABOVE_ONE" if p > 1.0
-                        else "FEASIBLE_IF_P_FILL_EXCEEDS_BREAKEVEN"),
-            "value_if_filled_per_share": filled,
-            "why": ("needs p_fill > %.4f for the expected value to clear "
-                    "zero" % p)}
+                "verdict": "NEGATIVE_AT_ANY_FILL_RATE",
+                "conditional_round_trip_per_contract": rt.per_contract,
+                "evidence": rt.evidence,
+                "why": ("a fill is worth %+.6f, so filling more often is "
+                        "worse. This is a statement about THESE sourced "
+                        "inputs, not a universal claim about crossing out"
+                        % rt.per_contract)}
+    return {"status": IDENTIFIED, "breakeven_p_fill": None,
+            "verdict": "EXACTLY_ZERO", "evidence": rt.evidence,
+            "conditional_round_trip_per_contract": 0.0}
 
 
 def describe() -> dict:
     return {
-        "model": "E[maker] = p_fill x (half_spread - adverse_selection "
-                 "- carry(duration) - exit_cost) + (1-p_fill) x quote_cost",
-        "measured_terms": {"half_spread_per_share":
-                           MEASURED_HALF_SPREAD_PER_SHARE},
-        "unmeasured_terms": ["p_fill", "adverse_selection_per_share",
-                             "carry_per_share_per_hour",
-                             "expected_duration_hours",
-                             "exit_cost_per_share", "quote_cost_per_share"],
-        "structural_fact": ("a maker earns at most HALF a spread and a "
-                            "taker exit pays a WHOLE one, so a crossed "
-                            "round trip starts negative"),
-        "candidate_authority": SHADOW,
-        "promotion": ("a candidate is promoted only by a separate frozen "
-                      "pre-registered decision; nothing in this module can "
-                      "grant live authority"),
+        "model": ("round_trip = (exit_price - entry_price) x qty "
+                  "- fees + verified_rebates - carry(duration)"),
+        "reference_discipline": ("one reference for both legs: the midpoint "
+                                 "at entry, moved by "
+                                 "conditional_reference_move. Adverse "
+                                 "selection enters there and NOWHERE else"),
+        "withdrawn": {
+            "universal_negative_crossing": (
+                "FALSE. bid 0.485 / ask 0.515: passive buy at 0.485, sell at "
+                "the unchanged bid 0.485, P&L 0.0000. The old model said "
+                "-0.0150 by crediting entry against the mid and charging "
+                "exit against the bid"),
+            "breakeven_p_fill_0.0092": (
+                "WITHDRAWN. Computed from the broken filled-value term and "
+                "from inputs that were never sourced"),
+        },
+        "settlement": ("E[settlement | our fill] is a conditional "
+                       "expectation over outcomes selected by whoever "
+                       "traded with us. NOT_IDENTIFIED, and a half-spread "
+                       "is not a substitute"),
+        "measured_book_statistic": {
+            "pmus_half_spread_per_share": MEASURED_HALF_SPREAD_PER_SHARE,
+            "note": "a book statistic, NOT a P&L term",
+        },
+        "authority": SHADOW,
     }

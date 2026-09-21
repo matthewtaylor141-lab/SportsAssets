@@ -156,6 +156,20 @@ class Fees:
         return cls(verified=False, hypothetical=True,
                    source="HYPOTHETICAL_DEMONSTRATION_NOT_A_LIVE_SCHEDULE")
 
+    def fill_fee(self, contracts: float, *, maker: bool) -> float:
+        """Fee on ONE fill, rounded the way the venue rounds it.
+
+        PMUS rounds to the nearest cent with banker's rounding PER FILL,
+        so a fee is not linear in size: a 1-contract fill can round its
+        whole rebate away while a 10-contract fill does not. Rounding at
+        the fill is therefore part of the schedule, not a display
+        convention.
+        """
+        per = self.maker_per_contract if maker else self.taker_per_contract
+        gross = contracts * (per - self.rebate_verified_per_contract)
+        # round() is banker's rounding in Python, which is what PMUS does.
+        return round(gross, 2)
+
     def entry_cost(self, contracts: float, *, maker: bool) -> float:
         per = self.maker_per_contract if maker else self.taker_per_contract
         return contracts * (per - self.rebate_verified_per_contract)

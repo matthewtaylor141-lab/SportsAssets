@@ -1,0 +1,101 @@
+
+========================================================================
+1. NONZERO-FEE ENTRY  (the fee reproduction)
+========================================================================
+   engine said NOT_IDENTIFIED / P_BOTH_LEGS_FILL_NOT_IDENTIFIED; executed under a declared assumption
+      yes  FILLED_FULL  qty    10 @ 0.4700  fee 0.20
+      no   FILLED_FULL  qty    10 @ 0.5000  fee 0.20
+      cash                                        89.9000  expected      89.9000  OK
+      fees_paid                                    0.4000  expected       0.4000  OK
+      inventory yes                               10.0000  expected      10.0000  OK
+      inventory no                                10.0000  expected      10.0000  OK
+      basis                                       10.1000  expected      10.1000  OK
+      deployed                                    10.1000  expected      10.1000  OK
+
+========================================================================
+2. PARTIAL SALE  (basis removed proportionally)
+========================================================================
+      sold 4 of 10 YES at 0.60; 4/10 of the 4.90 yes basis out
+      yes remaining                                6.0000  expected       6.0000  OK
+      yes basis remaining                          2.9400  expected       2.9400  OK
+      realized on the sale                         0.4000  expected       0.4000  OK
+      deployed (never negative)                    8.1400  expected       8.1400  OK
+
+========================================================================
+3. COMPLETE SALE  (a closed position has zero basis)
+========================================================================
+      yes contracts                                0.0000  expected       0.0000  OK
+      no contracts                                 0.0000  expected       0.0000  OK
+      yes basis                                    0.0000  expected       0.0000  OK
+      no basis                                     0.0000  expected       0.0000  OK
+      deployed                                     0.0000  expected       0.0000  OK
+      realized P&L is booked separately and NEVER reduces basis:
+      position realized_pnl                        1.2000  expected       1.2000  OK
+
+========================================================================
+4. ONE-LEG FILL -> AUTONOMOUS RECOVERY
+========================================================================
+   complement still executable -> COMPLETE    -> COMPLETE       OK (ENTRY_BOOK_REUSED)
+        completing costs 0.5000 against a basis of 0.4900, so the pair is 
+        inventory yes=10 no=10 directional=0
+   complement gone, bid present -> EXIT       -> EXIT           OK (RE_READ)
+        the complement was not executable, and directional exposure is not
+        inventory yes=0 no=0 directional=0
+   complement gone, no bid -> HOLD_EXPOSED    -> HOLD_EXPOSED   OK (RE_READ)
+        no executable exit: complement unavailable and no bid depth on the
+        inventory yes=10 no=0 directional=10
+
+========================================================================
+5. QUOTE LIFECYCLE: rest -> touch -> reprice -> fill -> cancel
+========================================================================
+   q1 RESTING at 0.4500, quoted exposure 4.5000
+   TOUCH -> NO_FILL (queue UNKNOWN): a touch is not a fill; whether we filled depen
+   REPRICE q1 -> q2 at 0.4550: cancel/replace: the new quote starts at 
+   FILL q2 state=PARTIAL qty=6 fee=0.06  evidence=SYNTHETIC_SCENARIO
+      cash after maker fill                       97.2100  expected      97.2100  OK
+      inventory yes                                6.0000  expected       6.0000  OK
+   CANCEL q2, released 1.8200
+      quoted exposure after cancel                 0.0000  expected       0.0000  OK
+
+========================================================================
+6. SETTLEMENT
+========================================================================
+      payout 6.0000 - basis 2.7900 = realised +3.2100
+      payout                                       6.0000  expected       6.0000  OK
+      basis after settle                           0.0000  expected       0.0000  OK
+
+========================================================================
+7. RESTART: balances, inventory, quotes AND provenance
+========================================================================
+      cash                                        89.9000  expected      89.9000  OK
+      inventory yes                               10.0000  expected      10.0000  OK
+      basis                                       10.1000  expected      10.1000  OK
+      quoted exposure                              3.5200  expected       3.5200  OK
+      resting quotes recovered: 1
+
+========================================================================
+8. MAKER MATHEMATICS: the review's counterexample
+========================================================================
+      passive buy 0.485, sell at the unchanged bid 0.485
+      round trip per contract                      0.0000  expected       0.0000  OK
+      (the withdrawn model reported -0.0150)
+      settlement route -> NOT_IDENTIFIED
+      missing: conditional_settlement_value (E[settlement | our fill]) -- a hal
+
+========================================================================
+9. LEDGER RECONCILIATION (necessary, NOT sufficient)
+========================================================================
+   scenario 1-3   True  residual 0.0  fees 0.44  realized +1.2000
+   lifecycle      True  residual 0.0  fees 0.06  realized +3.2100
+   restart        True  residual 0.0  fees 0.40  realized +0.0000
+
+========================================================================
+EVIDENCE CLASSES PRODUCED
+========================================================================
+    {"SYNTHETIC_SCENARIO": 6}
+    Every record above is SYNTHETIC_SCENARIO. No PROSPECTIVE_SHADOW
+    record exists, so nothing here supports a profitability claim.
+
+========================================================================
+ALL INDEPENDENT ASSERTIONS PASSED
+========================================================================

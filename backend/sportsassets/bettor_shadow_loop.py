@@ -64,11 +64,33 @@ REJECTED = "REJECTED"
 
 @dataclass
 class Position:
-    """Inventory on one market, with the cash that created it."""
+    """Inventory, its REMAINING basis, and realized P&L kept apart.
+
+    THE DEFECT THIS REPLACES, reproduced by review. The old version held
+    one `cash_spent` field and subtracted sale proceeds from it. Buy 10
+    YES at 0.47 and 10 NO at 0.50 (9.70 spent), sell at 0.55 and 0.48
+    (10.30 proceeds), and cash_spent became -0.60: inventory zero,
+    DEPLOYED CAPITAL NEGATIVE. Profit was being recorded as unspent
+    capital, which then EXPANDED the risk limits -- a winning trade
+    bought itself more room to trade.
+
+    Four quantities, separated, because they answer four questions:
+
+        yes / no            how many contracts we hold
+        *_basis             what the REMAINING contracts cost. Removed
+                            proportionally on a sale, so a fully closed
+                            position has exactly zero basis.
+        realized_pnl        profit, which is NOT capital available to
+                            deploy and never reduces basis
+        deployed            sum of remaining basis, floored at zero
+    """
     market_id: str
     yes: float = 0.0
     no: float = 0.0
-    cash_spent: float = 0.0          # positive = paid out
+    yes_basis: float = 0.0           # cost of the REMAINING yes contracts
+    no_basis: float = 0.0
+    realized_pnl: float = 0.0
+    fees_paid: float = 0.0
     opened_at: float | None = None
 
     @property
@@ -78,6 +100,44 @@ class Position:
     @property
     def flat(self) -> bool:
         return self.yes == 0.0 and self.no == 0.0
+
+    @property
+    def basis(self) -> float:
+        """Remaining acquisition cost. Never negative."""
+        return max(0.0, self.yes_basis + self.no_basis)
+
+    @property
+    def directional(self) -> float:
+        """Unmatched contracts. A pair is flat; a stub is exposure."""
+        return abs(self.yes - self.no)
+
+    def buy(self, leg: str, qty: float, px: float, fee: float) -> None:
+        setattr(self, leg, getattr(self, leg) + qty)
+        b = "%s_basis" % leg
+        setattr(self, b, getattr(self, b) + qty * px + fee)
+        self.fees_paid += fee
+
+    def sell(self, leg: str, qty: float, px: float, fee: float) -> float:
+        """Remove basis PROPORTIONALLY and book the difference as P&L."""
+        held = getattr(self, leg)
+        if held <= 0 or qty <= 0:
+            return 0.0
+        qty = min(qty, held)
+        b = "%s_basis" % leg
+        basis_total = getattr(self, b)
+        basis_out = basis_total * (qty / held)
+        proceeds = qty * px - fee
+        realized = proceeds - basis_out
+        setattr(self, leg, held - qty)
+        setattr(self, b, basis_total - basis_out)
+        # Float residue must not leave a phantom basis behind a zero
+        # position: a closed position has zero basis, exactly.
+        if getattr(self, leg) <= 1e-12:
+            setattr(self, leg, 0.0)
+            setattr(self, b, 0.0)
+        self.realized_pnl += realized
+        self.fees_paid += fee
+        return realized
 
 
 @dataclass
@@ -93,6 +153,7 @@ class Ledger:
     opening_cash: float
     cash: float = 0.0
     fees_paid: float = 0.0
+    realized_pnl: float = 0.0
     settlements: float = 0.0
     movements: list = field(default_factory=list)
 
@@ -137,7 +198,7 @@ class RiskLimits:
             return "RISK_INVALID_SIZE"
         if pos.yes + pos.no + add_contracts > self.max_position_contracts:
             return "RISK_MAX_POSITION_CONTRACTS"
-        if pos.cash_spent + add_cash > self.max_cash_per_market:
+        if pos.basis + add_cash > self.max_cash_per_market:
             return "RISK_MAX_CASH_PER_MARKET"
         if deployed + add_cash > self.max_total_deployed:
             return "RISK_MAX_TOTAL_DEPLOYED"
@@ -145,6 +206,32 @@ class RiskLimits:
             return "RISK_MAX_OPEN_MARKETS"
         if cash - add_cash < self.min_cash_reserve:
             return "RISK_MIN_CASH_RESERVE"
+        return None
+
+    def check_reduction(self, *, pos: Position, action: str, qty: float,
+                        book) -> str | None:
+        """Checks that still apply when the action REDUCES exposure.
+
+        Entry limits are exempt -- an entry limit that blocks an exit
+        freezes the position at exactly the moment the limit says it is
+        too large. These are different checks, and skipping them was the
+        overcorrection: a sell can still be invalid, oversized, or
+        exposure-INCREASING in disguise.
+        """
+        if qty is None or not math.isfinite(qty) or qty <= 0:
+            return "RISK_REDUCTION_INVALID_QUANTITY"
+        if action in ("SELL_YES", "SELL_NO"):
+            leg = "yes" if action == "SELL_YES" else "no"
+            if qty > getattr(pos, leg) + 1e-9:
+                return "RISK_REDUCTION_EXCEEDS_HOLDING"
+            # SELLING ONE SIDE OF A MATCHED PAIR CREATES DIRECTIONAL
+            # EXPOSURE. The position gets smaller and riskier at once.
+            after = abs((pos.yes - qty if leg == "yes" else pos.yes)
+                        - (pos.no - qty if leg == "no" else pos.no))
+            if after > pos.directional + 1e-9:
+                return "RISK_REDUCTION_CREATES_DIRECTIONAL_EXPOSURE"
+        if action == "PAIR_SELL" and qty > pos.paired + 1e-9:
+            return "RISK_REDUCTION_EXCEEDS_PAIRED_HOLDING"
         return None
 
 
@@ -235,13 +322,17 @@ class ShadowLoop:
         self.account_class = account_class
         self.positions: dict[str, Position] = {}
         self.trace: list[dict] = []
+        self.quotes: dict = {}
         self.settled: set[str] = set()
 
     # ── state ────────────────────────────────────────────────────────
 
     @property
     def deployed(self) -> float:
-        return sum(p.cash_spent for p in self.positions.values())
+        # Remaining basis only. Realized profit is NOT capital
+        # available to deploy, so it can never reduce this and can
+        # never widen a limit.
+        return sum(p.basis for p in self.positions.values())
 
     @property
     def open_markets(self) -> int:
@@ -255,7 +346,8 @@ class ShadowLoop:
     def step(self, book: de.Book, *, evidence_class: str = SYNTHETIC,
              max_contracts: float = 10.0,
              assume_unidentified_terms: str | None = None,
-             reject_legs: tuple = ()) -> dict:
+             reject_legs: tuple = (),
+             recovery_book: de.Book | None = None) -> dict:
         """One observation through the whole chain.
 
         `assume_unidentified_terms` exists because the engine's honest
@@ -336,11 +428,18 @@ class ShadowLoop:
         reduces = decision["selected"] in (de.PAIR_SELL, de.SELL_YES,
                                            de.SELL_NO)
         if reduces:
-            blocked = None
-            rec["risk"] = "NOT_APPLIED_ACTION_REDUCES_EXPOSURE"
+            # EXEMPT FROM ENTRY LIMITS, NOT FROM ALL CHECKS. A sell is
+            # not automatically safe: selling ONE side of a matched pair
+            # converts a flat book into directional exposure, and a
+            # quantity larger than the holding is not a reduction at all.
+            blocked = self.limits.check_reduction(
+                pos=pos, action=decision["selected"], qty=size, book=book)
+            rec["risk"] = (blocked or
+                           "REDUCTION_CHECKS_PASSED_ENTRY_LIMITS_EXEMPT")
         else:
-            est_cash = size * ((de._f(book.yes_ask) or 0)
-                               + (de._f(book.no_ask) or 0))
+            est_cash = (size * ((de._f(book.yes_ask) or 0)
+                                + (de._f(book.no_ask) or 0))
+                        + self.fees.fill_fee(size, maker=False) * 2)
             blocked = self.limits.check(
                 pos=pos, add_contracts=2 * size, add_cash=est_cash,
                 deployed=self.deployed, open_markets=self.open_markets,
@@ -354,14 +453,16 @@ class ShadowLoop:
             return rec
 
         rec["execution"] = self._execute(decision, book, pos,
-                                         evidence_class, reject_legs)
+                                         evidence_class, reject_legs,
+                                         recovery_book)
         rec["inventory_after"] = {"yes": pos.yes, "no": pos.no}
         rec["cash_after"] = round(self.ledger.cash, 6)
         self.trace.append(rec)
         return rec
 
     def _execute(self, decision: dict, book: de.Book, pos: Position,
-                 evidence_class: str, reject_legs: tuple = ()) -> dict:
+                 evidence_class: str, reject_legs: tuple = (),
+                 recovery_book: de.Book | None = None) -> dict:
         # `reject_legs` injects a venue rejection on a named leg. It is
         # how the ONE-LEG FILL branch gets exercised: in reality the
         # second leg fails because the price moved between the two
@@ -386,11 +487,17 @@ class ShadowLoop:
                 r["leg"] = leg
                 legs.append(r)
                 if r["filled"] > 0:
-                    cost = r["filled"] * px
-                    setattr(pos, leg, getattr(pos, leg) + r["filled"])
-                    pos.cash_spent += cost
+                    # FEES ARE APPLIED PER FILL. The old path moved only
+                    # qty x price and left fees_paid at zero whatever
+                    # schedule was supplied.
+                    fee = self.fees.fill_fee(r["filled"], maker=False)
+                    cost = r["filled"] * px + fee
+                    r["fee"] = round(fee, 6)
+                    pos.buy(leg, r["filled"], px, fee)
+                    self.ledger.fees_paid += fee
                     self.ledger.move("BUY_%s" % leg.upper(), -cost,
-                                     "bought %.4g at %.4f" % (r["filled"], px),
+                                     "bought %.4g at %.4f, fee %.4f"
+                                     % (r["filled"], px, fee),
                                      book.market_id)
         elif action == de.PAIR_SELL:
             for leg, px, depth in (("yes", de._f(book.yes_bid),
@@ -402,11 +509,17 @@ class ShadowLoop:
                 r["leg"] = leg
                 legs.append(r)
                 if r["filled"] > 0:
-                    proceeds = r["filled"] * px
-                    setattr(pos, leg, getattr(pos, leg) - r["filled"])
-                    pos.cash_spent -= proceeds
+                    fee = self.fees.fill_fee(r["filled"], maker=False)
+                    proceeds = r["filled"] * px - fee
+                    realized = pos.sell(leg, r["filled"], px, fee)
+                    r["fee"] = round(fee, 6)
+                    r["realized"] = round(realized, 6)
+                    self.ledger.fees_paid += fee
+                    self.ledger.realized_pnl += realized
                     self.ledger.move("SELL_%s" % leg.upper(), proceeds,
-                                     "sold %.4g at %.4f" % (r["filled"], px),
+                                     "sold %.4g at %.4f, fee %.4f, "
+                                     "realized %+.4f"
+                                     % (r["filled"], px, fee, realized),
                                      book.market_id)
 
         # A ONE-LEG FILL IS THE FAILURE MODE, and it is named rather than
@@ -414,30 +527,250 @@ class ShadowLoop:
         # directional exposure is not permitted deliberately.
         filled = [l for l in legs if l["filled"] > 0]
         one_leg = len(filled) == 1
-        return {"legs": legs, "one_leg_only": one_leg,
-                "unwound_exposure_required": one_leg,
-                "note": ("a single-leg fill leaves naked directional "
-                         "exposure; the loop records it rather than "
-                         "netting it out of the average"
-                         if one_leg else "")}
+        out = {"legs": legs, "one_leg_only": one_leg,
+               "unwound_exposure_required": one_leg,
+               "note": ("a single-leg fill leaves naked directional "
+                        "exposure; the loop records it rather than "
+                        "netting it out of the average"
+                        if one_leg else "")}
+        if one_leg:
+            # RECOVERY READS THE MARKET AGAIN. The second leg failed
+            # because the price moved, so recovering against the book
+            # that was already stale when the leg was rejected would be
+            # deciding on the market that no longer exists. A caller
+            # supplies the re-read; absent one, the entry book stands in
+            # and the record says which was used.
+            rb = recovery_book if recovery_book is not None else book
+            out["recovery_book"] = ("RE_READ" if recovery_book is not None
+                                    else "ENTRY_BOOK_REUSED")
+            out["recovery"] = self._recover_one_leg(rb, pos, filled[0],
+                                                    evidence_class)
+        return out
+
+    # ── autonomous recovery from a one-leg fill ──────────────────────
+
+    def _recover_one_leg(self, book: de.Book, pos: Position, leg: dict,
+                         evidence_class: str) -> dict:
+        """Decide and ACT on naked exposure. Recording is not handling.
+
+        The policy is explicit and ordered, because "hold" and "exit"
+        are different bets and picking between them silently is how a
+        stub position becomes a directional one nobody chose:
+
+          1. COMPLETE  retry the missing leg if it is still executable
+                       at a price that keeps the pair worth completing.
+          2. EXIT      otherwise flatten at the bid. Directional
+                       exposure is not permitted deliberately, so the
+                       default is OUT, not hope.
+          3. HOLD      only when there is no executable exit, in which
+                       case the exposure is named and carried rather
+                       than pretended away.
+
+        HEDGE is deliberately absent: hedging this exposure means buying
+        the complement, which IS step 1. There is no third instrument.
+        """
+        side = leg["leg"]
+        other = "no" if side == "yes" else "yes"
+        other_ask = de._f(getattr(book, "%s_ask" % other))
+        other_depth = getattr(book, "%s_ask_size" % other)
+        qty = leg["filled"]
+
+        # 1. COMPLETE
+        if other_ask is not None and other_depth >= qty:
+            own = (pos.yes_basis / pos.yes) if side == "yes" and pos.yes \
+                else (pos.no_basis / pos.no) if pos.no else None
+            if own is not None and (own + other_ask) < 1.0:
+                fee = self.fees.fill_fee(qty, maker=False)
+                cost = qty * other_ask + fee
+                pos.buy(other, qty, other_ask, fee)
+                self.ledger.fees_paid += fee
+                self.ledger.move("RECOVER_BUY_%s" % other.upper(), -cost,
+                                 "completed the pair at %.4f" % other_ask,
+                                 book.market_id)
+                return {"action": "COMPLETE", "leg": other, "qty": qty,
+                        "price": other_ask, "fee": round(fee, 6),
+                        "why": ("completing costs %.4f against a basis of "
+                                "%.4f, so the pair is still worth holding"
+                                % (other_ask, own)),
+                        "evidence_class": evidence_class}
+
+        # 2. EXIT
+        own_bid = de._f(getattr(book, "%s_bid" % side))
+        own_bid_depth = getattr(book, "%s_bid_size" % side)
+        if own_bid is not None and own_bid_depth > 0:
+            sell_qty = min(qty, own_bid_depth)
+            fee = self.fees.fill_fee(sell_qty, maker=False)
+            realized = pos.sell(side, sell_qty, own_bid, fee)
+            proceeds = sell_qty * own_bid - fee
+            self.ledger.fees_paid += fee
+            self.ledger.realized_pnl += realized
+            self.ledger.move("RECOVER_SELL_%s" % side.upper(), proceeds,
+                             "flattened naked exposure at %.4f, "
+                             "realized %+.4f" % (own_bid, realized),
+                             book.market_id)
+            return {"action": "EXIT", "leg": side, "qty": sell_qty,
+                    "price": own_bid, "realized": round(realized, 6),
+                    "why": ("the complement was not executable, and "
+                            "directional exposure is not held "
+                            "deliberately"),
+                    "evidence_class": evidence_class}
+
+        # 3. HOLD, named
+        return {"action": "HOLD_EXPOSED", "leg": side, "qty": qty,
+                "why": ("no executable exit: complement unavailable and "
+                        "no bid depth on the held leg. The exposure is "
+                        "carried and named, not netted away"),
+                "directional_contracts": pos.directional,
+                "evidence_class": evidence_class}
 
     # ── maker path ───────────────────────────────────────────────────
 
     def quote(self, book: de.Book, *, side: str, price: float,
-              size: float, touched: bool = False,
-              evidence_class: str = SYNTHETIC) -> dict:
-        """Post a maker quote and record what happened to it."""
-        econ = me.evaluate(
-            me.MakerParams(name="live_book"),
-            bid=de._f(book.yes_bid), ask=de._f(book.yes_ask))
-        r = self.adapter.rest(price=price, want=size, touched=touched,
-                              evidence_class=evidence_class)
+              size: float, evidence_class: str = SYNTHETIC) -> dict:
+        """Post a maker quote. STATEFUL: it lives until it resolves.
+
+        The old version called a simulator that always returned NO_FILL
+        and returned a message; cancel and reprice returned their own
+        isolated messages touching nothing. A quote that cannot change
+        state is not a lifecycle.
+
+        A live quote holds risk budget while it rests, so it is counted
+        against limits on creation and released when it resolves.
+        """
+        qid = "q%d" % (len(self.quotes) + 1)
+        held = self.position(book.market_id)
+        blocked = self.limits.check(
+            pos=held, add_contracts=size,
+            add_cash=size * price + self.fees.fill_fee(size, maker=True),
+            deployed=self.deployed + self.quoted_exposure,
+            open_markets=self.open_markets, cash=self.ledger.cash)
         rec = {"loop": LOOP_VERSION, "market_id": book.market_id,
-               "evidence_class": evidence_class, "decision": "MAKE_%s"
-               % side.upper(), "execution": r,
-               "maker_economics": {"status": econ.status,
-                                   "missing": econ.missing},
+               "evidence_class": evidence_class, "quote_id": qid,
+               "decision": "MAKE_%s" % side.upper(), "price": price,
+               "size": size, "risk": blocked,
                "cash_before": round(self.ledger.cash, 6),
+               "cash_after": round(self.ledger.cash, 6)}
+        if blocked:
+            rec["state"] = "REFUSED"
+            self.trace.append(rec)
+            return rec
+        self.quotes[qid] = {"id": qid, "market_id": book.market_id,
+                            "side": side, "price": price, "size": size,
+                            "state": "RESTING", "filled": 0.0,
+                            "evidence_class": evidence_class,
+                            "history": ["RESTING at %.4f" % price]}
+        rec["state"] = "RESTING"
+        self.trace.append(rec)
+        return rec
+
+    @property
+    def quoted_exposure(self) -> float:
+        """Cash a resting quote would consume if it filled."""
+        return sum(q["price"] * (q["size"] - q["filled"])
+                   for q in self.quotes.values()
+                   if q["state"] == "RESTING")
+
+    def touch(self, quote_id: str) -> dict:
+        """The market traded at our price. THAT IS NOT A FILL."""
+        q = self.quotes[quote_id]
+        q["history"].append("TOUCHED (queue position NOT_IDENTIFIED)")
+        rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
+               "market_id": q["market_id"], "decision": "TOUCH",
+               "evidence_class": q["evidence_class"], "state": q["state"],
+               "outcome": NO_FILL, "queue_ahead": vc.UNKNOWN,
+               "why": ("a touch is not a fill; whether we filled depends "
+                       "on queue position, which is NOT_IDENTIFIED"),
+               "cash_before": round(self.ledger.cash, 6),
+               "cash_after": round(self.ledger.cash, 6)}
+        self.trace.append(rec)
+        return rec
+
+    def fill_quote(self, quote_id: str, *, qty: float, reason: str) -> dict:
+        """Fill a resting quote and carry it into inventory and cash.
+
+        ALWAYS SYNTHETIC. Queue position is NOT_IDENTIFIED, so no fill
+        this simulator produces is an observed execution -- and the
+        record says so even when the BOOK it was quoted against was a
+        real captured observation. A fresh observation does not make its
+        simulated fill real.
+        """
+        q = self.quotes[quote_id]
+        if q["state"] != "RESTING":
+            return {"quote_id": quote_id, "refused": "NOT_RESTING",
+                    "state": q["state"]}
+        qty = min(qty, q["size"] - q["filled"])
+        pos = self.position(q["market_id"])
+        leg = "yes" if q["side"].lower() == "yes" else "no"
+        fee = self.fees.fill_fee(qty, maker=True)
+        cost = qty * q["price"] + fee
+        pos.buy(leg, qty, q["price"], fee)
+        self.ledger.fees_paid += fee
+        self.ledger.move("MAKER_FILL_%s" % leg.upper(), -cost,
+                         "maker fill %.4g at %.4f, fee %.4f"
+                         % (qty, q["price"], fee), q["market_id"])
+        q["filled"] += qty
+        q["state"] = "FILLED" if q["filled"] >= q["size"] else "PARTIAL"
+        q["history"].append("%s %.4g at %.4f" % (q["state"], qty, q["price"]))
+        rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
+               "market_id": q["market_id"], "decision": "MAKER_FILL",
+               # The FILL is synthetic whatever the book's provenance.
+               "evidence_class": SYNTHETIC,
+               "book_evidence_class": q["evidence_class"],
+               "synthetic_fill": True, "why": "DECLARED SYNTHETIC: %s" % reason,
+               "state": q["state"], "filled": qty, "fee": round(fee, 6),
+               "inventory_after": {"yes": pos.yes, "no": pos.no},
+               "cash_after": round(self.ledger.cash, 6)}
+        self.trace.append(rec)
+        return rec
+
+    def cancel_quote(self, quote_id: str) -> dict:
+        q = self.quotes[quote_id]
+        if q["state"] not in ("RESTING", "PARTIAL"):
+            return {"quote_id": quote_id, "refused": "NOT_CANCELLABLE",
+                    "state": q["state"]}
+        q["state"] = CANCELLED
+        q["history"].append("CANCELLED with %.4g unfilled"
+                            % (q["size"] - q["filled"]))
+        rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
+               "market_id": q["market_id"], "decision": "CANCEL",
+               "evidence_class": q["evidence_class"], "state": CANCELLED,
+               "released_exposure": round(q["price"]
+                                          * (q["size"] - q["filled"]), 6),
+               "cash_after": round(self.ledger.cash, 6)}
+        self.trace.append(rec)
+        return rec
+
+    def reprice_quote(self, quote_id: str, *, new_price: float) -> dict:
+        """Cancel/replace. QUEUE POSITION IS LOST, and that is the cost.
+
+        A reprice is not an edit. It is a cancel and a new order at the
+        back of the queue, so the new quote's fill probability is not
+        the old one's, and the lifecycle records it as a NEW quote
+        rather than a changed field.
+        """
+        old = self.quotes[quote_id]
+        if old["state"] not in ("RESTING", "PARTIAL"):
+            return {"quote_id": quote_id, "refused": "NOT_REPRICEABLE",
+                    "state": old["state"]}
+        remaining = old["size"] - old["filled"]
+        old["state"] = REPRICED
+        old["history"].append("REPRICED to %.4f" % new_price)
+        nid = "q%d" % (len(self.quotes) + 1)
+        self.quotes[nid] = {"id": nid, "market_id": old["market_id"],
+                            "side": old["side"], "price": new_price,
+                            "size": remaining, "state": "RESTING",
+                            "filled": 0.0,
+                            "evidence_class": old["evidence_class"],
+                            "history": ["RESTING at %.4f (repriced from %s, "
+                                        "queue position lost)"
+                                        % (new_price, quote_id)]}
+        rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
+               "new_quote_id": nid, "market_id": old["market_id"],
+               "decision": "REPRICE", "evidence_class": old["evidence_class"],
+               "from": old["price"], "to": new_price, "size": remaining,
+               "why": ("cancel/replace: the new quote starts at the BACK "
+                       "of the queue, so its fill probability is not the "
+                       "old one's"),
                "cash_after": round(self.ledger.cash, 6)}
         self.trace.append(rec)
         return rec
@@ -455,16 +788,19 @@ class ShadowLoop:
                          "yes=%.4g no=%.4g, yes_wins=%s"
                          % (pos.yes, pos.no, yes_wins), market_id)
         self.ledger.settlements += payout
-        realised = payout - pos.cash_spent
+        basis = pos.basis
+        realised = payout - basis
+        pos.realized_pnl += realised
+        self.ledger.realized_pnl += realised
         rec = {"loop": LOOP_VERSION, "market_id": market_id,
-               "evidence_class": SYNTHETIC if market_id not in self.settled
-               else SYNTHETIC,
+               "evidence_class": SYNTHETIC,
                "decision": "SETTLE", "payout": round(payout, 6),
-               "cost_basis": round(pos.cash_spent, 6),
+               "cost_basis": round(basis, 6),
                "realised": round(realised, 6),
+               "position_realized_pnl": round(pos.realized_pnl, 6),
                "cash_after": round(self.ledger.cash, 6)}
         pos.yes = pos.no = 0.0
-        pos.cash_spent = 0.0
+        pos.yes_basis = pos.no_basis = 0.0
         self.settled.add(market_id)
         self.trace.append(rec)
         return rec
@@ -478,6 +814,7 @@ class ShadowLoop:
             "opening_cash": self.ledger.opening_cash,
             "movements": self.ledger.movements,
             "settled": sorted(self.settled),
+            "quotes": self.quotes,
             "positions": {k: asdict(v) for k, v in self.positions.items()},
         }, sort_keys=True)
 
@@ -493,6 +830,7 @@ class ShadowLoop:
         loop.ledger.cash = d["cash"]
         loop.ledger.movements = list(d["movements"])
         loop.settled = set(d["settled"])
+        loop.quotes = dict(d.get("quotes") or {})
         loop.positions = {k: Position(**v) for k, v in d["positions"].items()}
         return loop
 
@@ -511,11 +849,18 @@ class ShadowLoop:
             "steps": len(self.trace),
             "decisions": decisions,
             "by_evidence_class": by_class,
+            "fees_paid": round(self.ledger.fees_paid, 6),
+            "realized_pnl": round(self.ledger.realized_pnl, 6),
             "open_positions": {k: {"yes": v.yes, "no": v.no,
-                                   "cash_spent": round(v.cash_spent, 6)}
+                                       "basis": round(v.basis, 6),
+                                   "realized_pnl": round(v.realized_pnl, 6),
+                                   "directional": v.directional}
                                for k, v in self.positions.items()
                                if not v.flat},
             "unsettled_cost_basis": round(self.deployed, 6),
+            "resting_quotes": {k: v for k, v in self.quotes.items()
+                               if v["state"] in ("RESTING", "PARTIAL")},
+            "quoted_exposure": round(self.quoted_exposure, 6),
             "ledger": self.ledger.reconciles(),
             "profitability_claim": (
                 "NONE. Synthetic scenarios demonstrate software behaviour "
