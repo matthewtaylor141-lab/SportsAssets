@@ -16,6 +16,25 @@ SELECT 'EXPOSURE' AS section, k, v FROM (
            coalesce(round(sum(filled_usd)::numeric, 2), 0)::text
       FROM live_orders WHERE status = 'filled' AND settled_at IS NULL
     UNION ALL
+    -- NET IS SIGNED BY SIDE. Gross adds a long and a short together and
+    -- calls the sum exposure; net subtracts what a sell has already
+    -- taken back off the table.
+    SELECT 'CURRENT_REAL_NET_EXPOSURE_USD',
+           coalesce(round(sum(CASE WHEN upper(side) LIKE 'B%'
+                                   THEN filled_usd
+                                   ELSE -filled_usd END)::numeric,
+                          2), 0)::text
+      FROM live_orders WHERE status = 'filled' AND settled_at IS NULL
+    UNION ALL
+    -- CAPITAL AT RISK ON A PREDICTION MARKET LONG IS WHAT WAS PAID: the
+    -- contract settles at 1 or 0, so the most a filled BUY can lose is
+    -- its own cost. Sells return cash and cannot lose more.
+    SELECT 'CURRENT_REAL_CAPITAL_AT_RISK_USD',
+           coalesce(round(sum(filled_usd)::numeric, 2), 0)::text
+      FROM live_orders
+     WHERE status = 'filled' AND settled_at IS NULL
+       AND upper(side) LIKE 'B%'
+    UNION ALL
     SELECT 'UNSETTLED_SIDES_PRESENT',
            coalesce(string_agg(DISTINCT side, ' | '), 'NONE')
       FROM live_orders WHERE status = 'filled' AND settled_at IS NULL
