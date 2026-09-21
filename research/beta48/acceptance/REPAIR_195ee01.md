@@ -350,7 +350,8 @@ excluded by anything measured so far.
 
 ## 5. DELIVERY
 
-Branch `claude/session-njaewf`, **all artifacts pinned to the same reviewed
+Branch `claude/session-njaewf`, final SHA **`1152b97`** (this document and
+its patch both include themselves). All artifacts pinned to the same reviewed
 SHA**. The previous handoff named an earlier SHA than the document containing
 it; `FINAL_HANDOFF.md` is superseded by this file for everything above.
 

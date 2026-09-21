@@ -1304,6 +1304,29 @@ index 0000000..9dc36b8
 +        c = cap()
 +        assert c.horizons_per_obs == 4
 +        assert c.longest_horizon_s == 3600.0
+diff --git a/backend/tests/test_execution_gate.py b/backend/tests/test_execution_gate.py
+index 2cc6f84..f6ab96b 100644
+--- a/backend/tests/test_execution_gate.py
++++ b/backend/tests/test_execution_gate.py
+@@ -346,9 +346,16 @@ def test_an_undeclared_lane_gets_the_strictest_treatment(venue):
+ 
+ 
+ def test_global_only_lanes_is_an_allowlist_not_a_blocklist():
++    """The control checks moved from authorize() into _decide() when the
++    fail-open repair split the read from the decision, so BOTH entry
++    points share one copy of this rule. Inspect the decision itself, and
++    assert both doors reach it -- a blocklist creeping into only one of
++    them is exactly what this test exists to catch."""
+     import inspect
+-    src = inspect.getsource(gate.authorize)
+-    assert "lane not in GLOBAL_ONLY_LANES" in src
++
++    assert "lane not in GLOBAL_ONLY_LANES" in inspect.getsource(gate._decide)
++    for entry in (gate.authorize, gate.authorize_async):
++        assert "_decide(" in inspect.getsource(entry), entry.__name__
+ 
+ 
+ # ── 6. cancellation stays available ──────────────────────────────────
 diff --git a/backend/tests/test_execution_gate_fail_open.py b/backend/tests/test_execution_gate_fail_open.py
 new file mode 100644
 index 0000000..973b8d3
@@ -2171,6 +2194,3153 @@ index 0000000..9e7fb13
 +        for forbidden in ("pmus_secret_key", "pmus_key_id", "os.environ"):
 +            assert forbidden not in src, (
 +                "%s appears; credentials must stay where they are" % forbidden)
+diff --git a/research/beta48/acceptance/FINAL_HANDOFF.md b/research/beta48/acceptance/FINAL_HANDOFF.md
+index ac99087..4386362 100644
+--- a/research/beta48/acceptance/FINAL_HANDOFF.md
++++ b/research/beta48/acceptance/FINAL_HANDOFF.md
+@@ -461,3 +461,30 @@ job carries `timeout-minutes: 10`, and 18 stuck runs were cancelled.
+ **A cosmetic psql defect**, recorded so it does not recur: `\echo` treats an
+ apostrophe as an unterminated quoted string. `VENUE'S` in a heading printed an
+ error mid-file. Results were unaffected; later files avoid apostrophes.
++
++---
++
++# SUPERSEDED IN PART — see REPAIR_195ee01.md
++
++An independent review of 195ee01 reproduced four concrete defects, all of
++them mine. The following statements above are **withdrawn or corrected** by
++[`REPAIR_195ee01.md`](REPAIR_195ee01.md):
++
++* **The execution-gate implementation PASS is withdrawn.** Two fail-open
++  paths let a cached ALLOW authorize a submission after a failed read, and
++  `_parse_switch` read `"0"`, `"[]"`, `"{}"` and `"null"` as *not paused*.
++* **"21.9% of created work never serviced" is withdrawn.** It was a
++  difference of two rates over one window, not a completion rate. Cohort
++  accounting puts it at **49.5% of obligations never read** and on-time at
++  **10.6–16.0%** — worse than reported, not better.
++* **"at ≤6 reads per tick refusals stay ≤3%" is withdrawn.** My own
++  seven-day table gives 6 reads 7.00%, and the buckets are confounded with
++  adaptive pacing, so they support no causal claim.
++* **"0.667 observations/minute" is corrected to 0.567**, and the code that
++  was supposed to implement it admitted **double** capacity.
++* **Two of the three reconciliation blockers are retracted.** Paginated
++  history and venue resting orders both already exist in the SDK; I called
++  the wrong endpoints. Only account identity remains a genuine blocker.
++* **$16,180.53 and $8,911.89 are unverified recorded amounts**, and
++  $15,036.19 is recorded value on rows lacking a recorded closure — not a
++  verified cash discrepancy.
+diff --git a/research/beta48/acceptance/REPAIR_195ee01.md b/research/beta48/acceptance/REPAIR_195ee01.md
+new file mode 100644
+index 0000000..832771c
+--- /dev/null
++++ b/research/beta48/acceptance/REPAIR_195ee01.md
+@@ -0,0 +1,383 @@
++# REPAIRS TO 195ee01 — four defects an independent review reproduced
++
++Production remains **3349219**. This candidate is **not deployed**, no flag
++was changed, no trading enabled, and **no accounting record altered**.
++`mirror_live=false`, COMMAND undeployed, no Phase X re-dispatch, no Track A
++modification.
++
++All four findings were correct. All four were mine.
++
++| | status |
++|---|---|
++| 1. Execution gate fail-open paths | **fixed**, reproductions now fail safely |
++| 2. Admission accounting | **fixed**, V3 retained as a regression fixture |
++| 3. Capacity evidence | **corrected** — the repair makes the numbers worse, not better |
++| 4. Reconciliation precision + capability prep | **corrected and built** — two of my three "blockers" were my own wiring |
++
++**The unqualified execution-gate implementation PASS is withdrawn**, as
++instructed, and replaced by: *implementation verified against the specific
++reproductions below; production verification still pending; the gate remains
++undeployed.*
++
++---
++
++## 1. EXECUTION GATE — both fail-open paths closed
++
++### 1.1 What was wrong
++
++`_current()` had two branches that returned a cached snapshot instead of a
++fresh read, and `authorize()` accepted whatever it returned:
++
++```python
++except Exception:                       # the live read failed
++    if snap.ok and age <= MAX_STALE_S:  #  <-- a five-second-old YES
++        return snap
++...
++if on_loop_thread:
++    if snap.ok and age <= MAX_STALE_S:  #  <-- and again, unconditionally
++        return snap
++```
++
++The review's reproduction — install a recent allowed snapshot, make
++`run_coroutine_threadsafe` raise `TimeoutError`, call
++`authorize("submit", lane="manual")` — **returned successfully**. The module
++docstring said unreadable authorization denies. The code said a five-second-old
++yes was good enough. A kill switch that keeps saying yes for five seconds after
++it stops being readable is not a kill switch.
++
++Separately, `_parse_switch()` ended `return bool(parsed)`. Python truthiness is
++not JSON's boolean, so every one of these decoded to falsy and therefore to
++**NOT PAUSED**:
++
++| stored value | decodes to | old verdict |
++|---|---|---|
++| `"0"` | `0` | trading allowed |
++| `"1"` | `1` | trading allowed |
++| `"[]"` | `[]` | trading allowed |
++| `"{}"` | `{}` | trading allowed |
++| `"null"` | `None` | trading allowed |
++| `'""'` | `""` | trading allowed |
++| `'"false"'` | `"false"` | trading allowed |
++
++### 1.2 The repair
++
++**Cached state and authorization are now different functions and are not
++interchangeable.**
++
++| | |
++|---|---|
++| `_authorize_read()` | fresh read, or a denying snapshot. **No branch returns the cache.** The only input to `authorize()`. |
++| `_last_known()` | whatever was last read, with its age. Feeds `describe()` and nothing else. |
++
++`describe()` keeps the cache — diagnostics may be stale — and now carries
++`stale` and a note saying the view never authorizes anything.
++
++The loop-thread caller no longer gets a cached yes. A synchronous submission
++that cannot obtain a fresh read is **denied**, and the denial names the
++supported path: **`authorize_async()`**, which `await`s `read_state(pool)`
++directly on the caller's own loop. Same authority, same controls, no cache.
++The control checks moved into a shared `_decide()` so both entry points enforce
++one copy of the lane allowlist.
++
++`_parse_switch()` now requires an actual boolean after decoding. Production
++writes `'true'::jsonb` / `'false'::jsonb` via render-ops `pause-on`/`pause-off`,
++so this rejects nothing real — and the legitimate-path test asserts an explicit
++`false` still trades.
++
++### 1.3 Reproduction results
++
++`backend/tests/test_execution_gate_fail_open.py` — 26 tests. **Every test
++counts mocked venue submissions and asserts zero**, because a denial that
++raises the right exception while the adapter has already sent an order is not a
++fix.
++
++Against the repaired code: **26 passed**.
++
++Against the defective code — I reintroduced all three defects and re-ran:
++**13 of 26 failed**, and the 13 that failed are exactly the ones targeting a
++defect. Artifact: `gate_tests_against_defective_code.xml`.
++
++```
++FAILED  TestFailedReadDoesNotAuthorize::test_the_exact_reproduction_from_the_review
++FAILED  TestFailedReadDoesNotAuthorize::test_a_failed_read_immediately_after_an_allowed_read
++FAILED  TestLoopThreadDoesNotAuthorizeFromCache::test_sync_authorize_on_the_loop_thread_denies
++FAILED  TestKillSwitchMustBeABoolean::test_non_boolean_values_deny  [0, 1, [], {}, null, "", "false", 0.0, [false]]
++FAILED  TestKillSwitchMustBeABoolean::test_parse_switch_directly
++```
++
++The failed-read-immediately-after-an-allowed-read case is explicit: the allowed
++read is microseconds old and the submission is still refused. **There is no
++window, not a shorter one.**
++
++### 1.4 A test that asserted the defect, removed
++
++`test_the_loop_thread_may_use_a_snapshot_inside_the_bound` read: *"having read
++successfully a moment ago on a worker thread, an async caller may use that
++answer — and only within MAX_STALE_S."* It passed, and it was wrong. It pinned
++the fail-open as intended behaviour, which makes the fix look like a
++regression. Replaced with
++`test_the_loop_thread_never_uses_a_snapshot_however_fresh`, which asserts the
++opposite and additionally asserts `authorize_async` takes its own read.
++
++Cancellation stays ungated — re-asserted, since the repair touched the read
++path every control goes through.
++
++---
++
++## 2. ADMISSION ACCOUNTING — the fractional intake now exists
++
++### 2.1 The defect, reproduced
++
++```
++V3 : 1 obs/tick -> 5.333 tasks/min      (backlog=100, saturated=True)
++service                                  2.667 reads/min
++```
++
++`max(ADMIT_FLOOR_OBS, int(cap.sustainable_obs_per_tick))` at 45 s / reserve 2 /
++four horizons is `max(1, int(0.5))` = **1, on every tick, whatever the queue**.
++1.333 obs/min creating 5.333 tasks/min against 2.667 reserved reads/min —
++**twice capacity**, and twice the 0.667 obs/min I reported. The report's
++fractional intake was arithmetic on paper that the code never implemented.
++
++### 2.2 The repair
++
++**The floor was the right answer to the wrong question.** V1 latched at zero
++forever because integer division floored and nothing could reopen it. The fix
++for that is not *"always admit at least one"* — a floor cannot express a rate
++below one per tick — it is *"never lose the fraction"*. Those differ exactly
++where it matters:
++
++| | |
++|---|---|
++| permanent latch | 0 on every tick, no queue state reopens it. **The V1 bug.** |
++| fractional pacing | 0 on some ticks, 1 on others, long-run average = the sustainable rate. **Correct** — one observation every two ticks at this capacity. |
++
++`AdmissionAccount` (V5) keeps credits between ticks. Both properties are
++asserted separately: `zero_ticks > 0` **and** `admitted_total > 0`.
++
++Three things it does that V3 did not:
++
++- **Forward obligations across all four horizons.** `outstanding_tasks` and
++  `longest_horizon_s` are new: an observation admitted a moment ago owes four
++  reads, none of them due yet, so `backlog_tasks` understates demand. If
++  outstanding work cannot be cleared inside `longest_horizon + tolerance`
++  (×`COMMITMENT_HEADROOM` 0.80), admission stops. A caller that does not supply
++  `outstanding_tasks` gets the check **skipped and said so in `why`** — silently
++  substituting `backlog_tasks` would be the permissive choice.
++- **Bounded credits.** Carry is capped at one tick's earnings, so a long
++  saturated stretch cannot bank a burst. Tested: 100 blocked ticks, then
++  recovery admits ≤ 1 on the first clear tick.
++- **Recovery headroom.** `TARGET_UTILISATION = 0.85`. Arrivals exactly equal to
++  nominal service is a queue that never recovers from an excursion, and calling
++  that stable is what the review objected to. Also `service_success_rate` — a
++  **measured** input, because failed reads consume reserve without discharging
++  an obligation.
++
++### 2.3 What it actually does now
++
++```
++V5, clear queue : 0.4250 obs/tick = 0.567 obs/min = 2.267 tasks/min
++service                                              2.667 reads/min
++V5, backlog 100 : 0 admitted over 200 ticks
++```
++
++**Correction to the report:** implemented intake is **0.567 obs/min**, not the
++0.667 I wrote. The 15% gap is the recovery headroom, deliberately reserved.
++
++`test_a_backlog_actually_drains` initially asserted the backlog reached exactly
++zero. It settles at 2 and holds. My assertion was wrong, not the code — a
++collector that is admitting at all always has work in flight, and an empty queue
++would mean it had stopped. The test now asserts the excursion is *removed* and
++the residual *bounded*.
++
++V3 is retained beside V1 as a regression fixture. `ADMIT_FLOOR_OBS` stays in the
++module as the record of why V1 failed, and a test asserts it is **not** in the
++admission path.
++
++`backend/tests/test_admission_fractional.py` — 19 tests covering varying
++capacity, measured read failures, backlog drainage, credit bounding and
++recovery. All four horizons preserved.
++
++---
++
++## 3. CAPACITY EVIDENCE — corrected, and the corrected numbers are worse
++
++### 3.1 The 21.9% does not follow
++
++I took a six-hour window, computed arrivals 3.286/min and service 2.565/min,
++subtracted, and called the difference work that was never serviced. Two things
++are wrong with that: an observation admitted at minute 355 of a 359-minute
++window owes reads at 60 s, 300 s, 900 s and 3600 s, and three of those are not
++due yet; and reads completed inside the window belong to observations admitted
++*before* it. **A difference of two rates over one window is not a completion
++rate.**
++
++### 3.2 The flow identity, reconciled
++
++`research/bettor_cohort_accounting.sql`, run
++[35625548145](https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/35625548145):
++
++| opening | new | completed | expired | closing | inflow | outflow | **residual** |
++|---|---|---|---|---|---|---|---|
++| 65 | 1,168 | 908 | 278 | 47 | 1,233 | 1,233 | **0** |
++
++Obligations are implied by missing rows — `bettor_state_mids` is written when a
++read is attempted and never pre-created, and `PRIMARY KEY (observation_id,
++horizon_s)` confirmed one row per task (2,802 rows, 2,802 distinct). **That also
++means a retry overwrites rather than appends, so attempt counts are not
++recoverable from this table** and no attempt-based rate is quoted.
++
++PENDING and EXPIRED are separated by `last_chance = T0 + h + 30 + 600`.
++Conflating them is what produced the 21.9%.
++
++### 3.3 Deadline performance on an eligible cohort
++
++Only observations where all four horizons have had their full chance
++(`observed_at <= now() - 4230s`): 1,352 eligible, 40 too young to judge.
++
++| horizon | obligations | read at all | never read | on-time | pct of obligations | pct of reads taken |
++|---|---|---|---|---|---|---|
++| 60 s | 1,352 | 802 | 550 | 216 | **15.98%** | 26.93% |
++| 300 s | 1,352 | 668 | 684 | 149 | **11.02%** | 22.31% |
++| 900 s | 1,352 | 617 | 735 | 153 | **11.32%** | 24.80% |
++| 3600 s | 1,352 | 644 | 708 | 143 | **10.58%** | 22.20% |
++
++**49.5% of obligations were never read**, and on-time against obligations is
++10.6–16.0%. I had reported 22.9% on-time and 21.9% unserviced. **The correct
++method makes both numbers materially worse.** The 6-hour flow window is kinder
++(908 of 1,168 new obligations completed) than the 24-hour cohort, which is worth
++stating rather than smoothing: recent hours are performing better than the day.
++
++### 3.4 The refusal buckets prove nothing about causation
++
++I wrote *"at ≤6 reads per tick refusals stay ≤3%"* directly beneath my own
++seven-day table giving **6 reads a 7.00% refusal rate**. The claim contradicted
++the evidence printed beside it.
++
++Worse, the bucket is not an experiment. `reads_in_tick` is an **outcome** of
++adaptive pacing and early stopping. Section 7 measures the confound:
++
++| reads in tick | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 |
++|---|---|---|---|---|---|---|---|---|---|
++| avg pacing (s) | 5.175 | 3.521 | 2.072 | 1.595 | 1.690 | 1.356 | 1.111 | 1.093 | 1.005 |
++| avg skipped-budget | 1.73 | 1.57 | 0.86 | 0.64 | 2.56 | 2.60 | 2.31 | 2.15 | 2.07 |
++
++Pacing falls monotonically with read count — the two are nearly collinear, and
++low-read buckets are partly populated *by* refusals that caused a back-off.
++And the 6-read bucket is 7.00% over 7 days but 0.00% over 6 hours.
++
++**Nothing in this data establishes that seven requests cause throttling or that
++six is safe.** The configuration proposal stays conditional, and the corrected
++admission implementation is demonstrated offline (§2) before any bounded
++production experiment is proposed.
++
++---
++
++## 4. RECONCILIATION — precise, and two blockers retracted
++
++### 4.1 Retained, unchanged
++
++The venue snapshot was a **successful read returning no holdings**:
++`configured` true, no `error`, `positions` present and empty. Account identity
++**unresolved**. The conclusion stays bounded to *no holdings were reported for
++that account in that snapshot*.
++
++### 4.2 Relabelled, as instructed
++
++| | |
++|---|---|
++| **$16,180.53** | **unverified recorded amount** — ledger `filled_usd` across 52 rows. Not a verified acquisition cost. |
++| **$8,911.89** | **unverified recorded amount** — the six mirror rows. It resembles `requested_usd` (to the cent on three rows), and **similarity to a requested amount does not establish provenance**. It is equally consistent with a request figure copied forward and with a coincidence of rounding. |
++| **$15,036.19** | **recorded value associated with rows lacking a recorded closure.** Not a verified cash discrepancy, and not a loss. |
++
++The ~30% `filled_usd` vs `filled_shares × fill_price` mismatch is ledger-wide
++(70.5% of 5,267 settled rows reconcile, against 71.2% of the 52), so it says
++nothing special about the unclosed rows.
++
++### 4.3 Two of my three blockers were my own wiring
++
++| | what I said | what is true |
++|---|---|---|
++| **Paginated history** | "capability gap" | `client.portfolio.activities({"cursor": …, "types": [TRADE, POSITION_RESOLUTION]})` pages fine. `pmus_account._fetch_sync` bounds it at **six pages**. That bound, not the venue, is why the card showed 25 trades. `aggregate_tennis_week`'s own docstring calls the feed "every fill and every resolution". |
++| **Resting orders** | "no venue read exists" | `client.orders.list(params)` does, and `pmus.open_orders` has wrapped it since 2026-08-28. I called `/api/admin/open-orders` — a DB read of `live_orders WHERE whale_username='manual'` — and then reported the venue as lacking an endpoint. |
++| **Account identity** | blocker | **still a blocker.** Unestablished either way; the probe below is built to find out rather than assume. |
++
++### 4.4 The prepared capability — `backend/sportsassets/api/reconcile_read.py`
++
++The smallest authenticated read-only implementation, 27 tests. Credentials stay
++in the service's own environment via `pmus._get_client()`; a test asserts no
++`os.environ`, no key names, no submit path, no SQL write.
++
++- **`capability_probe()`** — *establish before coding*. Returns **key names
++  only** from each payload: envelope keys, row keys, which look like identity
++  fields, whether paging is supported. One page of each endpoint. Tests assert a
++  balance, an account id and an order id are all absent from the result.
++- **`account_identity(expected)`** — compares **inside the service** and returns
++  a **verdict**: `match` / `mismatch` / `no_identity` / `unreadable` /
++  `no_expected`, plus the field name used. **It never returns the identifier**,
++  so reconciliation can record whether the authenticated account generated our
++  fills without an account identifier reaching a CI log or an artifact. Asserted
++  in every branch.
++- **`historical_activity()`** — pages to eof, bounded at 200, reports `complete`
++  and a stop reason. Tested to page past six; a bound hit is reported, never
++  returned as a whole book.
++- **`resting_orders()`** — the venue, not the manual-lane table. `pmus.open_orders`
++  does `client.orders.list(params) or {}` then `.get("orders") or []`, so `None`
++  and an error envelope have **already become `[]`** before a caller sees them —
++  and `[]` is precisely the value that would let "no outstanding commitments" be
++  written down. This raises `VenueUnreadable` for `None`, a non-mapping, a
++  missing key or a non-list, and returns `count=0, ok=True` only when the venue
++  said so.
++
++### 4.5 The unexplained recent activity — explanation not narrowed
++
++The ledger has no row of any status after 2026-09-10; the venue reported 25
++trades on 2026-09-20/21 on markets the ledger has never seen. I previously gave
++two explanations. That was too narrow. At least four remain open:
++
++1. the authenticated account is not the account that generated our fills;
++2. our account was traded from outside this system;
++3. **incomplete logging** — the activity happened through a path that records
++   nothing to `live_orders`;
++4. **another execution path** — including the CLOB submission route found
++   earlier in this session, which is a separate venue and a separate ledger
++   label.
++
++`account_identity()` decides between (1) and the rest. (3) and (4) are not
++excluded by anything measured so far.
++
++---
++
++## 5. DELIVERY
++
++Branch `claude/session-njaewf`, **all artifacts pinned to the same reviewed
++SHA**. The previous handoff named an earlier SHA than the document containing
++it; `FINAL_HANDOFF.md` is superseded by this file for everything above.
++
++| artifact | path |
++|---|---|
++| Repair patch (195ee01 → here) | `research/beta48/acceptance/repair_diff_from_195ee01.patch` |
++| Diff stat | `research/beta48/acceptance/repair_diff_stat.txt` |
++| Focused test results | `research/beta48/acceptance/repair_tests.xml` — **217 passed, 0 failures** |
++| Reproductions vs defective code | `research/beta48/acceptance/gate_tests_against_defective_code.xml` — **13 of 26 fail** |
++| Cohort accounting SQL | `research/bettor_cohort_accounting.sql` |
++| Cohort run | [35625548145](https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/35625548145) |
++
++Modules changed: `execution_gate.py`, `bettor_admission.py`; added
++`api/reconcile_read.py`, `tests/test_execution_gate_fail_open.py`,
++`tests/test_admission_fractional.py`, `tests/test_reconcile_read.py`,
++`research/bettor_cohort_accounting.sql`.
++
++No whole-suite sweep was run. `tests/test_pmus.py::test_resolve_direct_slug_parity`
++fails both here and at 195ee01 with these changes stashed — **pre-existing and
++unrelated**, verified by stashing rather than asserted.
++
++### Status
++
++| | |
++|---|---|
++| Execution gate | implementation verified against the specific reproductions; **production verification pending; undeployed** |
++| Admission accounting | implementation verified offline; **not deployed**; no production experiment proposed yet |
++| Account reconciliation | **one blocker remains** (identity); the other two were my wiring and the reads are now built and tested |
++| Collector recommendation | **conditional** — the refusal buckets do not support a causal claim, §3.4 |
++| Strategy readiness | **not assessed** (not reopened) |
+diff --git a/research/beta48/acceptance/gate_tests_against_defective_code.xml b/research/beta48/acceptance/gate_tests_against_defective_code.xml
+new file mode 100644
+index 0000000..2cb2d98
+--- /dev/null
++++ b/research/beta48/acceptance/gate_tests_against_defective_code.xml
+@@ -0,0 +1,243 @@
++<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="13" skipped="0" tests="26" time="0.337" timestamp="2026-09-21T16:30:05.909081+00:00" hostname="vm"><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_the_exact_reproduction_from_the_review" time="0.158"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize object at 0x7f0f7690f110&gt;
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75fe6bd0&gt;
++allowing_env = None
++monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x7f0f7691d550&gt;
++
++    def test_the_exact_reproduction_from_the_review(self, venue,
++                                                    allowing_env,
++                                                    monkeypatch):
++        """Recent allowed snapshot + TimeoutError on the read = DENY.
++    
++        This is the review's reproduction, run against the repaired
++        code. Before the fix it returned successfully.
++        """
++        loop, t = _loop_in_thread()
++        try:
++            pool = FakePool({"live_trading_paused": "false"})
++            gate.bind(loop, pool)
++    
++            # A real, successful, ALLOWED read lands in the cache.
++            ok = gate.authorize("submit", lane="manual")
++            assert ok.ok and not ok.paused
++            assert gate._last_known().ok, "the cache is primed and allowing"
++    
++            # Now the authoritative read stops working.
++            def _boom(coro, _loop):
++                coro.close()                 # no 'never awaited' warning
++                raise asyncio.TimeoutError("read unavailable")
++    
++            monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _boom)
++    
++&gt;           with pytest.raises(gate.Denied) as e:
++E           Failed: DID NOT RAISE Denied
++
++tests/test_execution_gate_fail_open.py:160: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_a_failed_read_immediately_after_an_allowed_read" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize object at 0x7f0f76910610&gt;
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f7691ced0&gt;
++allowing_env = None
++monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x7f0f76912310&gt;
++
++    def test_a_failed_read_immediately_after_an_allowed_read(self, venue,
++                                                             allowing_env,
++                                                             monkeypatch):
++        """Zero seconds of staleness is still not permission.
++    
++        The old code's window was MAX_STALE_S. This asserts there is no
++        window at all: the allowed read is microseconds old and the
++        submission is still refused.
++        """
++        loop, t = _loop_in_thread()
++        try:
++            pool = FakePool({"live_trading_paused": "false"})
++            gate.bind(loop, pool)
++            first = gate.authorize("submit", lane="manual")
++            age = time.time() - first.read_at
++            assert age &lt; gate.MAX_STALE_S, "the cache is well inside the "\
++                                           "old staleness allowance"
++    
++            def _boom(coro, _loop):
++                coro.close()
++                raise RuntimeError("database gone")
++    
++            monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _boom)
++&gt;           with pytest.raises(gate.Denied):
++E           Failed: DID NOT RAISE Denied
++
++tests/test_execution_gate_fail_open.py:194: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_the_read_raising_inside_read_state_also_denies" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_describe_may_be_stale_and_says_so" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache" name="test_sync_authorize_on_the_loop_thread_denies" time="0.002"><failure message="AssertionError: assert 'ALLOWED' == 'denied'&#10;  &#10;  - denied&#10;  + ALLOWED">self = &lt;tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache object at 0x7f0f769118d0&gt;
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75c6b4d0&gt;
++allowing_env = None
++
++    def test_sync_authorize_on_the_loop_thread_denies(self, venue,
++                                                      allowing_env):
++        """The second fail-open: on the loop's own thread the old code
++        returned the cached snapshot outright."""
++        results = {}
++    
++        async def main():
++            pool = FakePool({"live_trading_paused": "false"})
++            gate.bind(asyncio.get_running_loop(), pool)
++            # Prime the cache with a real allowed read, from this loop.
++            await gate.authorize_async("submit", lane="manual")
++            assert gate._last_known().ok
++    
++            try:
++                _submit_through_gate(venue)         # SYNC, on the loop
++                results["outcome"] = "ALLOWED"
++            except gate.Denied as d:
++                results["outcome"] = "denied"
++                results["reason"] = d.reason
++                results["detail"] = d.detail
++    
++        asyncio.run(main())
++&gt;       assert results["outcome"] == "denied"
++E       AssertionError: assert 'ALLOWED' == 'denied'
++E         
++E         - denied
++E         + ALLOWED
++
++tests/test_execution_gate_fail_open.py:260: AssertionError</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache" name="test_authorize_async_is_the_supported_path_and_is_fresh" time="0.001" /><testcase classname="tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache" name="test_authorize_async_denies_when_the_read_fails" time="0.001" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[0-zero is a number, not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76913d50&gt;
++raw = '0', why = 'zero is a number, not false'
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75c4b810&gt;
++allowing_env = None
++
++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
++        loop, t = _loop_in_thread()
++        try:
++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
++&gt;           with pytest.raises(gate.Denied) as e:
++E           Failed: DID NOT RAISE Denied
++
++tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[1-one is a number, not true]" time="0.002"><failure message="AssertionError: one is a number, not true&#10;assert 'live_trading_paused' == 'authorization_unavailable'&#10;  &#10;  - authorization_unavailable&#10;  + live_trading_paused">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76913f90&gt;
++raw = '1', why = 'one is a number, not true'
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75c80610&gt;
++allowing_env = None
++
++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
++        loop, t = _loop_in_thread()
++        try:
++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
++            with pytest.raises(gate.Denied) as e:
++                _submit_through_gate(venue)
++&gt;           assert e.value.reason == "authorization_unavailable", why
++E           AssertionError: one is a number, not true
++E           assert 'live_trading_paused' == 'authorization_unavailable'
++E             
++E             - authorization_unavailable
++E             + live_trading_paused
++
++tests/test_execution_gate_fail_open.py:338: AssertionError</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[[]-an empty list is not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76912890&gt;
++raw = '[]', why = 'an empty list is not false'
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75cdb410&gt;
++allowing_env = None
++
++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
++        loop, t = _loop_in_thread()
++        try:
++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
++&gt;           with pytest.raises(gate.Denied) as e:
++E           Failed: DID NOT RAISE Denied
++
++tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[{}-an empty object is not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f769115d0&gt;
++raw = '{}', why = 'an empty object is not false'
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75c4a4d0&gt;
++allowing_env = None
++
++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
++        loop, t = _loop_in_thread()
++        try:
++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
++&gt;           with pytest.raises(gate.Denied) as e:
++E           Failed: DID NOT RAISE Denied
++
++tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[null-null is not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f769106d0&gt;
++raw = 'null', why = 'null is not false'
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75cadf10&gt;
++allowing_env = None
++
++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
++        loop, t = _loop_in_thread()
++        try:
++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
++&gt;           with pytest.raises(gate.Denied) as e:
++E           Failed: DID NOT RAISE Denied
++
++tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[&quot;&quot;-an empty string is not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f769180d0&gt;
++raw = '""', why = 'an empty string is not false'
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75311250&gt;
++allowing_env = None
++
++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
++        loop, t = _loop_in_thread()
++        try:
++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
++&gt;           with pytest.raises(gate.Denied) as e:
++E           Failed: DID NOT RAISE Denied
++
++tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[&quot;false&quot;-the WORD false, quoted, is a string]" time="0.002"><failure message="AssertionError: the WORD false, quoted, is a string&#10;assert 'live_trading_paused' == 'authorization_unavailable'&#10;  &#10;  - authorization_unavailable&#10;  + live_trading_paused">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f769182d0&gt;
++raw = '"false"', why = 'the WORD false, quoted, is a string'
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75ce3c90&gt;
++allowing_env = None
++
++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
++        loop, t = _loop_in_thread()
++        try:
++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
++            with pytest.raises(gate.Denied) as e:
++                _submit_through_gate(venue)
++&gt;           assert e.value.reason == "authorization_unavailable", why
++E           AssertionError: the WORD false, quoted, is a string
++E           assert 'live_trading_paused' == 'authorization_unavailable'
++E             
++E             - authorization_unavailable
++E             + live_trading_paused
++
++tests/test_execution_gate_fail_open.py:338: AssertionError</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[0.0-a float is not a boolean]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76918410&gt;
++raw = '0.0', why = 'a float is not a boolean'
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75cd4110&gt;
++allowing_env = None
++
++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
++        loop, t = _loop_in_thread()
++        try:
++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
++&gt;           with pytest.raises(gate.Denied) as e:
++E           Failed: DID NOT RAISE Denied
++
++tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[[false]-a list containing false is not false]" time="0.002"><failure message="AssertionError: a list containing false is not false&#10;assert 'live_trading_paused' == 'authorization_unavailable'&#10;  &#10;  - authorization_unavailable&#10;  + live_trading_paused">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76918550&gt;
++raw = '[false]', why = 'a list containing false is not false'
++venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75cfc210&gt;
++allowing_env = None
++
++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
++        loop, t = _loop_in_thread()
++        try:
++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
++            with pytest.raises(gate.Denied) as e:
++                _submit_through_gate(venue)
++&gt;           assert e.value.reason == "authorization_unavailable", why
++E           AssertionError: a list containing false is not false
++E           assert 'live_trading_paused' == 'authorization_unavailable'
++E             
++E             - authorization_unavailable
++E             + live_trading_paused
++
++tests/test_execution_gate_fail_open.py:338: AssertionError</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_malformed_values_deny[not json at all]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_malformed_values_deny[{]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_malformed_values_deny[tru]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_an_absent_row_denies" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_the_two_real_values_work[true-True]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_the_two_real_values_work[false-False]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_a_real_python_bool_from_a_decoding_driver" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_parse_switch_directly" time="0.001"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f7691b210&gt;
++
++    def test_parse_switch_directly(self):
++        """The unit, so the reason is visible without a loop."""
++        assert gate._parse_switch("true") is True
++        assert gate._parse_switch("false") is False
++        assert gate._parse_switch(True) is True
++        for raw, _why in NOT_BOOLEANS:
++&gt;           with pytest.raises(gate.Denied) as e:
++E           Failed: DID NOT RAISE Denied
++
++tests/test_execution_gate_fail_open.py:407: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestCancellationStaysOpen" name="test_cancel_is_not_gated_even_when_everything_denies" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestCancellationStaysOpen" name="test_submit_and_close_are_gated" time="0.004" /></testsuite></testsuites>
+\ No newline at end of file
+diff --git a/research/beta48/acceptance/repair_diff_from_195ee01.patch b/research/beta48/acceptance/repair_diff_from_195ee01.patch
+new file mode 100644
+index 0000000..aeb4b62
+--- /dev/null
++++ b/research/beta48/acceptance/repair_diff_from_195ee01.patch
+@@ -0,0 +1,2443 @@
++diff --git a/backend/sportsassets/api/reconcile_read.py b/backend/sportsassets/api/reconcile_read.py
++new file mode 100644
++index 0000000..0135c5c
++--- /dev/null
+++++ b/backend/sportsassets/api/reconcile_read.py
++@@ -0,0 +1,339 @@
+++"""The three venue reads reconciliation needs. Read-only, authenticated.
+++
+++WHAT THIS CORRECTS. I reported three blockers as "capability gaps in the
+++endpoints". Two of them were not. Reading the adapter shows the venue SDK
+++already offers what I said it did not:
+++
+++  * client.portfolio.activities({"cursor": ..., "types": [...]}) pages
+++    TRADE and POSITION_RESOLUTION rows. pmus_account._fetch_sync already
+++    walks it -- bounded at SIX pages of 100. That bound, not the venue, is
+++    why the account card showed 25 recent trades. aggregate_tennis_week's
+++    own docstring says the activities feed is "every fill and every
+++    resolution".
+++
+++  * client.orders.list(params) returns the account's RESTING orders, and
+++    pmus.open_orders has wrapped it since 2026-08-28. The reconciliation
+++    workflow called /api/admin/open-orders instead, which is a DATABASE
+++    read of live_orders WHERE whale_username='manual'. That was my wiring
+++    choosing the wrong endpoint, not the venue lacking one.
+++
+++So the honest restatement is: blockers 2 and 3 were MINE. Only account
+++identity is still unestablished, and this module is built to find out
+++what the venue offers rather than to assume either way.
+++
+++ESTABLISH BEFORE CODING. capability_probe() returns KEY NAMES ONLY from
+++each venue payload -- never a value, never a credential, never an account
+++payload. Nothing else here is worth building until that says what exists.
+++
+++IDENTITY IS COMPARED INSIDE THE SERVICE, NOT PRINTED. account_identity()
+++returns a VERDICT -- matched / did not match / no identity field -- and
+++the name of the field it used. It never returns the identifier. The
+++reconciliation job therefore learns whether the authenticated account is
+++the one that generated our fills without an account identifier ever
+++reaching a CI log or an artifact.
+++
+++UNREADABLE IS NOT EMPTY, everywhere in this module. A failed read raises
+++or sets ok=False; an account with nothing returns an empty list with
+++ok=True. Collapsing those is how "the venue holds no positions" nearly
+++got written down as a fact when it might have been a failed call.
+++
+++INCOMPLETE IS NOT COMPLETE. Every paged read reports `complete`, the page
+++count and the stop reason. A walk that hits its page bound says so rather
+++than returning a short book as if it were the whole one -- which is the
+++defect that produced "25 recent trades".
+++
+++NOTHING HERE SUBMITS, CANCELS, OR WRITES. No order path, no database
+++write, no accounting record touched. The only credentials used are the
+++ones already in the API service's own environment, reached through
+++pmus._get_client(), and none of them is returned, logged or copied.
+++"""
+++
+++from __future__ import annotations
+++
+++import logging
+++import re
+++from typing import Any
+++
+++log = logging.getLogger(__name__)
+++
+++# Page bounds. Generous, because the point of this module is to FINISH
+++# the book, but bounded, because an unbounded walk against a paging bug
+++# is a denial of service against our own venue budget.
+++MAX_ACTIVITY_PAGES = 200
+++MAX_ORDER_PAGES = 50
+++PAGE_SIZE = 100
+++
+++# Field names that would identify an account. Checked by name only; the
+++# value is never returned by any function here.
+++_IDENTITY_HINTS = ("accountid", "account_id", "wallet", "address", "proxy",
+++                   "owner", "userid", "user_id", "subject", "principal")
+++
+++
+++class VenueUnreadable(Exception):
+++    """The read failed. NOT the same as the account holding nothing."""
+++
+++
+++def _looks_like_identity(key: str) -> bool:
+++    k = re.sub(r"[^a-z]", "", (key or "").lower())
+++    return any(h.replace("_", "") in k for h in _IDENTITY_HINTS)
+++
+++
+++def _client():
+++    from .. import pmus
+++
+++    return pmus._get_client()
+++
+++
+++def _keys(obj: Any) -> list[str]:
+++    return sorted(obj.keys()) if isinstance(obj, dict) else []
+++
+++
+++# ── 1. ESTABLISH WHAT THE VENUE SUPPORTS ─────────────────────────────
+++
+++def capability_probe() -> dict:
+++    """What each venue payload actually contains. KEY NAMES ONLY.
+++
+++    Returns no values at all. The point is to answer "does an account
+++    identifier exist, and what is it called" before anything is written
+++    that depends on the answer -- and to answer it without an identifier,
+++    a balance or a position ever leaving the service.
+++
+++    One page of each endpoint. This is the smallest possible read.
+++    """
+++    out: dict[str, Any] = {"read_values": False,
+++                           "note": "key names only; no values are returned"}
+++    c = _client()
+++
+++    for name, call in (
+++        ("balances", lambda: (c.account.balances() or {})),
+++        ("positions", lambda: (c.portfolio.positions({"limit": 1}) or {})),
+++        ("activities", lambda: (c.portfolio.activities(
+++            {"limit": 1, "sortOrder": "SORT_ORDER_DESCENDING"}) or {})),
+++        ("orders", lambda: (c.orders.list(None) or {})),
+++    ):
+++        try:
+++            resp = call()
+++        except Exception as exc:                           # noqa: BLE001
+++            out[name] = {"ok": False, "error": type(exc).__name__}
+++            continue
+++
+++        envelope = _keys(resp)
+++        rows = None
+++        for k in ("balances", "positions", "activities", "orders"):
+++            v = resp.get(k) if isinstance(resp, dict) else None
+++            if isinstance(v, list) and v:
+++                rows = _keys(v[0])
+++                break
+++            if isinstance(v, dict) and v:
+++                rows = _keys(next(iter(v.values())))
+++                break
+++        out[name] = {
+++            "ok": True,
+++            "envelope_keys": envelope,
+++            "row_keys": rows,
+++            "identity_keys": sorted(
+++                k for k in (envelope + (rows or []))
+++                if _looks_like_identity(k)),
+++            "pages_supported": "nextCursor" in envelope or "eof" in envelope,
+++        }
+++
+++    ident = sorted({k for v in out.values()
+++                    if isinstance(v, dict)
+++                    for k in v.get("identity_keys") or []})
+++    out["identity_fields_found"] = ident
+++    out["identity_available"] = bool(ident)
+++    return out
+++
+++
+++# ── 2. ACCOUNT IDENTITY, AS A VERDICT ────────────────────────────────
+++
+++def account_identity(expected: str | None) -> dict:
+++    """Is the authenticated account the one we think it is?
+++
+++    `expected` comes from the service's own configuration, never from a
+++    caller and never from a CI input. The return value says whether it
+++    MATCHED and which field was used. It does not contain the
+++    identifier, so a reconciliation log can record the answer without
+++    recording the account.
+++
+++    verdict:
+++        "match"          the authenticated account is `expected`
+++        "mismatch"       it is a different account -- reconciliation
+++                         against our ledger is meaningless until this is
+++                         resolved
+++        "no_identity"    the venue exposes no identifying field, so the
+++                         question cannot be answered here. THIS IS THE
+++                         BLOCKER, and it stays a blocker rather than
+++                         becoming a shrug.
+++        "unreadable"     the read failed
+++        "no_expected"    nothing to compare against was configured
+++    """
+++    try:
+++        c = _client()
+++        resp = c.account.balances() or {}
+++    except Exception as exc:                               # noqa: BLE001
+++        return {"verdict": "unreadable", "error": type(exc).__name__}
+++
+++    rows = resp.get("balances") or []
+++    row = rows[0] if rows and isinstance(rows[0], dict) else {}
+++    candidates = {k: v for k, v in list(resp.items()) + list(row.items())
+++                  if _looks_like_identity(k) and isinstance(v, (str, int))}
+++
+++    if not candidates:
+++        return {"verdict": "no_identity",
+++                "checked_keys": sorted(set(_keys(resp) + _keys(row))),
+++                "note": ("no identifying field on the balances payload; "
+++                         "the authenticated account cannot be tied to the "
+++                         "ledger through this endpoint")}
+++    if not expected:
+++        return {"verdict": "no_expected",
+++                "identity_fields": sorted(candidates),
+++                "note": "an identity field exists and nothing was "
+++                        "configured to compare it against"}
+++
+++    want = str(expected).strip().lower()
+++    for key, val in sorted(candidates.items()):
+++        if str(val).strip().lower() == want:
+++            return {"verdict": "match", "field": key}
+++    return {"verdict": "mismatch",
+++            "identity_fields": sorted(candidates),
+++            "note": ("the authenticated account is not the configured "
+++                     "one; no value is reported")}
+++
+++
+++# ── 3. PAGINATED HISTORICAL ACTIVITY ─────────────────────────────────
+++
+++def historical_activity(*, since_iso: str | None = None,
+++                        max_pages: int = MAX_ACTIVITY_PAGES) -> dict:
+++    """Every trade and resolution the venue will serve, paged to eof.
+++
+++    THE SIX-PAGE BOUND IS THE BUG THIS REPLACES. _fetch_sync stops after
+++    six pages because it feeds an account card, which is correct for a
+++    card and wrong for a reconciliation. The 52 fills run 2026-08-04 to
+++    2026-09-10, so a reconciliation read has to finish the book or say
+++    that it did not.
+++
+++    `complete` is False whenever the walk stopped for any reason other
+++    than the venue saying eof. A short book is never returned as if it
+++    were the whole one.
+++    """
+++    rows: list[dict] = []
+++    cursor = ""
+++    pages = 0
+++    stop = "eof"
+++    complete = True
+++    try:
+++        c = _client()
+++        for _ in range(max_pages):
+++            params: dict[str, Any] = {
+++                "limit": PAGE_SIZE,
+++                "sortOrder": "SORT_ORDER_DESCENDING",
+++                "types": ["ACTIVITY_TYPE_TRADE",
+++                          "ACTIVITY_TYPE_POSITION_RESOLUTION"],
+++            }
+++            if cursor:
+++                params["cursor"] = cursor
+++            resp = c.portfolio.activities(params) or {}
+++            page = resp.get("activities") or []
+++            rows.extend(r for r in page if isinstance(r, dict))
+++            pages += 1
+++            cursor = resp.get("nextCursor") or ""
+++            if resp.get("eof") or not cursor:
+++                break
+++        else:
+++            stop = "page bound reached"
+++            complete = False
+++    except Exception as exc:                               # noqa: BLE001
+++        raise VenueUnreadable("activities read failed after %d page(s): %s"
+++                              % (pages, type(exc).__name__)) from exc
+++
+++    kinds: dict[str, int] = {}
+++    for r in rows:
+++        k = str(r.get("type") or "UNKNOWN")
+++        kinds[k] = kinds.get(k, 0) + 1
+++
+++    return {
+++        "ok": True,
+++        "rows": rows,
+++        "count": len(rows),
+++        "pages": pages,
+++        "complete": complete,
+++        "stop_reason": stop,
+++        "by_type": kinds,
+++        "since_requested": since_iso,
+++        "note": ("complete=False means the walk stopped before the venue "
+++                 "said eof; the result is a PREFIX of the book, not the "
+++                 "book"),
+++    }
+++
+++
+++# ── 4. ACTUAL VENUE RESTING ORDERS ───────────────────────────────────
+++
+++def resting_orders(*, max_pages: int = MAX_ORDER_PAGES) -> dict:
+++    """The account's open orders AT THE VENUE.
+++
+++    NOT /api/admin/open-orders, which reads live_orders WHERE
+++    whale_username='manual' AND status='open' -- a database view of one
+++    lane. This asks the venue.
+++
+++    A NOTED FAIL-SOFT UPSTREAM, DELIBERATELY NOT INHERITED:
+++    pmus.open_orders does `client.orders.list(params) or {}` then
+++    `.get("orders") or []`, so a None or an error envelope has already
+++    become an empty list before the caller sees it. An empty list is the
+++    answer that would let "no outstanding commitments" be written down.
+++    This reads the raw response and refuses to turn an absent key into
+++    an empty book.
+++    """
+++    rows: list[dict] = []
+++    pages = 0
+++    cursor = ""
+++    stop = "single page"
+++    complete = True
+++    try:
+++        c = _client()
+++        for _ in range(max_pages):
+++            params: dict[str, Any] | None = (
+++                {"limit": PAGE_SIZE, "cursor": cursor} if cursor else None)
+++            resp = c.orders.list(params)
+++            pages += 1
+++            if resp is None:
+++                raise VenueUnreadable(
+++                    "orders.list returned None on page %d; that is a failed "
+++                    "read, not an empty book" % pages)
+++            if not isinstance(resp, dict):
+++                raise VenueUnreadable(
+++                    "orders.list returned %s, not a mapping"
+++                    % type(resp).__name__)
+++            if "orders" not in resp:
+++                raise VenueUnreadable(
+++                    "orders.list response has no 'orders' key (keys: %s); "
+++                    "an absent key is not an empty book" % _keys(resp))
+++            page = resp.get("orders")
+++            if not isinstance(page, list):
+++                raise VenueUnreadable(
+++                    "orders is %s, not a list" % type(page).__name__)
+++            rows.extend(o for o in page if isinstance(o, dict))
+++            cursor = resp.get("nextCursor") or ""
+++            if resp.get("eof") or not cursor:
+++                stop = "eof"
+++                break
+++        else:
+++            stop = "page bound reached"
+++            complete = False
+++    except VenueUnreadable:
+++        raise
+++    except Exception as exc:                               # noqa: BLE001
+++        raise VenueUnreadable("orders read failed after %d page(s): %s"
+++                              % (pages, type(exc).__name__)) from exc
+++
+++    return {
+++        "ok": True,
+++        "orders": rows,
+++        "count": len(rows),
+++        "pages": pages,
+++        "complete": complete,
+++        "stop_reason": stop,
+++        "note": ("count=0 with ok=True means the venue reported NO resting "
+++                 "orders. An unreadable venue raises VenueUnreadable and "
+++                 "never reaches this return."),
+++    }
++diff --git a/backend/sportsassets/bettor_admission.py b/backend/sportsassets/bettor_admission.py
++index 83fcf0a..7c9b84c 100644
++--- a/backend/sportsassets/bettor_admission.py
+++++ b/backend/sportsassets/bettor_admission.py
++@@ -59,11 +59,44 @@ class TickCapacity:
++     tick_period_s: float         # seconds between ticks
++     tolerance_s: float           # how late a read may be and still count
++ 
+++    # ── added after review found the fractional-intake defect ────────
+++
+++    # FORWARD OBLIGATIONS, NOT JUST DUE ONES. backlog_tasks counts what
+++    # is due NOW. An observation admitted thirty seconds ago owes reads
+++    # at 60s, 300s, 900s and 3600s and none of them is due yet, so it
+++    # contributes nothing to backlog while contributing four reads of
+++    # future demand. Admitting against backlog alone therefore keeps
+++    # admitting right up until the obligations land together.
+++    #
+++    # None means the caller did not supply it. The account then says so
+++    # in `why` rather than silently substituting backlog_tasks, which
+++    # would understate demand and be the permissive choice.
+++    outstanding_tasks: int | None = None
+++
+++    # The longest deadline any outstanding task carries. With it, total
+++    # outstanding work can be compared against the time available to
+++    # do it.
+++    longest_horizon_s: float = 3600.0
+++
+++    # MEASURED, NOT ASSUMED. The fraction of attempted follow-up reads
+++    # that produce a usable observation. Failures and retries consume
+++    # reserve without discharging an obligation, so nominal reserve
+++    # overstates service by exactly this factor. Default 1.0 is the
+++    # optimistic value and production must pass the measured one; the
+++    # harness varies it deliberately.
+++    service_success_rate: float = 1.0
+++
++     # ── derived, and every one of these is a rate or a time ──────────
++ 
+++    @property
+++    def effective_reserve_reads(self) -> float:
+++        """Reserve that actually discharges obligations."""
+++        return self.fu_reserve_reads * max(0.0, min(1.0,
+++                                                    self.service_success_rate))
+++
++     @property
++     def service_reads_per_s(self) -> float:
++-        return self.fu_reserve_reads / self.tick_period_s
+++        return self.effective_reserve_reads / self.tick_period_s
++ 
++     @property
++     def sustainable_obs_per_s(self) -> float:
++@@ -75,15 +108,42 @@ class TickCapacity:
++ 
++     @property
++     def sustainable_obs_per_tick(self) -> float:
+++        """USUALLY LESS THAN ONE, AND THAT IS THE POINT.
+++
+++        At the recommended configuration -- 45s tick, reserve 2, four
+++        horizons -- this is (2/45)/4 * 45 = 0.5. Any rule that turns
+++        0.5 into an integer admission per tick admits twice what the
+++        reserve can serve. int() then max(1, ...) did exactly that.
+++        """
++         return self.sustainable_obs_per_s * self.tick_period_s
++ 
++     @property
++     def drain_time_s(self) -> float:
++-        """How long the CURRENT queue takes to clear at the CURRENT
++-        service rate. A time, so it can be compared with a deadline."""
++-        if self.fu_reserve_reads <= 0:
+++        """How long the DUE queue takes to clear at the CURRENT service
+++        rate. A time, so it can be compared with a deadline."""
+++        if self.effective_reserve_reads <= 0:
+++            return float("inf")
+++        return (self.backlog_tasks
+++                / self.effective_reserve_reads) * self.tick_period_s
+++
+++    @property
+++    def commitment_window_s(self) -> float:
+++        """By when every outstanding obligation must have been met."""
+++        return self.longest_horizon_s + self.tolerance_s
+++
+++    @property
+++    def obligation_time_s(self) -> float | None:
+++        """How long ALL outstanding work would take at current service.
+++
+++        None when outstanding_tasks was not supplied -- an absence the
+++        account reports rather than papering over.
+++        """
+++        if self.outstanding_tasks is None:
+++            return None
+++        if self.effective_reserve_reads <= 0:
++             return float("inf")
++-        return (self.backlog_tasks / self.fu_reserve_reads) * self.tick_period_s
+++        return (self.outstanding_tasks
+++                / self.effective_reserve_reads) * self.tick_period_s
++ 
++ 
++ @dataclass(frozen=True)
++@@ -174,9 +234,25 @@ ADMIT_FLOOR_OBS = 1
++ 
++ 
++ def policy_v3(cap: TickCapacity) -> Decision:
++-    """Candidate. Compares a time with a time, and cannot latch shut.
+++    """THE SECOND REGRESSION, KEPT ON PURPOSE -- like V1 above.
+++
+++    NOT A CANDIDATE. It was proposed as one and it is wrong, found by
+++    independent review and reproduced: at the configuration the report
+++    itself recommended -- 45s tick, reserve 2, four horizons -- it
+++    admits ONE OBSERVATION EVERY TICK even with a backlog of 100,
+++    because
+++
+++        max(ADMIT_FLOOR_OBS, int(0.5))  ==  max(1, 0)  ==  1
++ 
++-    Two questions, in order:
+++    which is 1.333 obs/min creating 5.333 tasks/min against 2.667
+++    reserved reads/min. Twice capacity, and twice the 0.667 obs/min the
+++    report claimed for it. See AdmissionAccount (V5) for the repair and
+++    for why a floor cannot express a rate below one per tick.
+++
+++    Retained so the replacement can be run against the scenario that
+++    broke it, which is the same reason V1 is still here.
+++
+++    Its two questions, which were the right two:
++ 
++       1. STEADY STATE. Admit no faster than service/horizons, which is
++          the rate at which the queue neither grows nor shrinks. V1 had
++@@ -211,6 +287,154 @@ def policy_v3(cap: TickCapacity) -> Decision:
++                     saturated, why, V3)
++ 
++ 
+++# ── V5: FRACTIONAL ADMISSION, WITH STATE ─────────────────────────────
+++#
+++# WHAT V3 GOT WRONG, found by independent review and reproduced:
+++#
+++#     max(ADMIT_FLOOR_OBS, int(cap.sustainable_obs_per_tick))
+++#
+++# At a 45-second tick, a reserve of two reads and four horizons,
+++# sustainable_obs_per_tick is 0.5. int(0.5) is 0, and the floor turns
+++# that 0 into 1 -- ON EVERY TICK, INCLUDING WITH A BACKLOG OF 100.
+++# That is 1.333 observations/minute creating 5.333 follow-up tasks per
+++# minute against 2.667 reserved reads per minute. TWICE CAPACITY.
+++#
+++# So the report's "0.667 observations/minute" was arithmetic I did on
+++# paper and never implemented. The code admitted double it.
+++#
+++# THE FLOOR WAS THE RIGHT ANSWER TO THE WRONG QUESTION. V1 latched at
+++# zero FOREVER because integer division floored and nothing could
+++# reopen it. The fix for that is not "always admit at least one" -- it
+++# is "never lose the fraction". Those differ exactly where it matters:
+++#
+++#     permanent latch    admits 0 on every tick, no state of the queue
+++#                        changes it, the collector stops. THE BUG.
+++#     fractional pacing  admits 0 on some ticks and 1 on others, and
+++#                        the long-run average is the sustainable rate.
+++#                        CORRECT, and at this capacity it means one
+++#                        observation every two ticks.
+++#
+++# A floor cannot express a rate below one per tick. An accumulator can,
+++# so the credits are kept and ADMIT_FLOOR_OBS is not applied.
+++#
+++# WHAT ELSE THE ACCOUNT HAS TO DO, beyond not overshooting:
+++#
+++#   * count FORWARD obligations, not just due ones. Four horizons means
+++#     an observation admitted now is four reads of demand that has not
+++#     arrived yet (see TickCapacity.outstanding_tasks);
+++#   * bound the credits, so a long saturated stretch cannot bank an
+++#     admission burst that lands the moment capacity returns;
+++#   * leave recovery headroom, so a backlog DRAINS rather than merely
+++#     stops growing. Arrivals exactly equal to nominal service is a
+++#     queue that never recovers from any excursion, and calling that
+++#     stable is what the review objected to.
+++
+++# Intake targets this share of effective service. The remainder is what
+++# drains an existing backlog. At 1.0 the queue is marginally stable in
+++# theory and never recovers in practice, because any excursion is
+++# permanent.
+++TARGET_UTILISATION = 0.85
+++
+++# How much of the commitment window outstanding work may already fill
+++# before admission stops entirely. Below 1.0 so the brake acts while
+++# there is still time to act.
+++COMMITMENT_HEADROOM = 0.80
+++
+++# Credits carried across ticks, as a multiple of one tick's earnings.
+++# THIS IS THE BURST BOUND. Without it a policy that admits nothing for
+++# an hour banks an hour of credits and dumps them into a queue that has
+++# just started recovering.
+++MAX_CARRY_TICKS = 1.0
+++
+++V5 = "BETTOR_ADMISSION_V5_FRACTIONAL"
+++
+++
+++class AdmissionAccount:
+++    """Stateful fractional admission. One instance per collector.
+++
+++    Not a pure function, which is why it is a class and not another
+++    entry in POLICIES: the whole repair is that the fraction survives
+++    between ticks. A stateless call cannot admit 0.5 observations, and
+++    every rounding of 0.5 is either 0 (V1's latch) or 1 (V3's double).
+++    """
+++
+++    def __init__(self):
+++        self.credits_obs = 0.0
+++        self.ticks = 0
+++        self.admitted_total = 0
+++        self.zero_ticks = 0
+++
+++    def decide(self, cap: TickCapacity) -> Decision:
+++        self.ticks += 1
+++
+++        earn = cap.sustainable_obs_per_tick * TARGET_UTILISATION
+++        notes = []
+++
+++        # 1. FORWARD OBLIGATIONS. Can the work already committed be
+++        #    finished inside the window it was committed for?
+++        obligation_s = cap.obligation_time_s
+++        if obligation_s is None:
+++            notes.append("outstanding_tasks not supplied, so the forward "
+++                         "obligation check did NOT run")
+++            overcommitted = False
+++        else:
+++            limit_s = cap.commitment_window_s * COMMITMENT_HEADROOM
+++            overcommitted = obligation_s > limit_s
+++            if overcommitted:
+++                notes.append("outstanding work needs %.0fs against a %.0fs "
+++                             "commitment window" % (obligation_s, limit_s))
+++
+++        # 2. THE DUE QUEUE. Seconds against seconds, as V1 failed to do.
+++        deadline_s = cap.tolerance_s * DRAIN_HEADROOM
+++        saturated = cap.drain_time_s > deadline_s
+++        if saturated:
+++            notes.append("due queue needs %.0fs to drain against a %.0fs "
+++                         "deadline" % (cap.drain_time_s, deadline_s))
+++
+++        # 3. EARN. A tick with no effective reserve earns nothing: there
+++        #    is no service to pace against, so there is no rate to bank.
+++        if cap.effective_reserve_reads <= 0:
+++            earn = 0.0
+++            notes.append("no effective follow-up reserve this tick")
+++        self.credits_obs += earn
+++
+++        # 4. SPEND -- or not. Either brake holds the admission back but
+++        #    does NOT burn the credits, so a recovering collector
+++        #    resumes at its proper rate rather than from zero.
+++        if overcommitted or saturated:
+++            admit = 0
+++            why = "admitting 0: " + "; ".join(notes)
+++        else:
+++            admit = int(self.credits_obs)
+++            admit = max(0, min(admit, cap.sample_budget_reads))
+++            self.credits_obs -= admit
+++            why = ("credits %.2f/tick, admitting %d"
+++                   % (earn, admit))
+++            if notes:
+++                why += " (" + "; ".join(notes) + ")"
+++
+++        # 5. BOUND THE CARRY. At most one tick's earnings survive, so an
+++        #    outage cannot bank a burst. The bound is never below 1.0,
+++        #    or a sub-unit earn rate could never reach a whole
+++        #    observation and this would be V1's latch wearing a float.
+++        ceiling = max(1.0, earn * MAX_CARRY_TICKS)
+++        if self.credits_obs > ceiling:
+++            why += " (credits capped %.2f -> %.2f)" % (self.credits_obs,
+++                                                       ceiling)
+++            self.credits_obs = ceiling
+++
+++        self.admitted_total += admit
+++        if admit == 0:
+++            self.zero_ticks += 1
+++        return Decision(admit, saturated or overcommitted, why, V5)
+++
+++    @property
+++    def admitted_obs_per_tick(self) -> float:
+++        """The realised long-run rate. This is the number to compare
+++        against sustainable_obs_per_tick, not any single tick."""
+++        return self.admitted_total / self.ticks if self.ticks else 0.0
+++
+++
++ POLICIES = {V4: policy_v4, V1: policy_v1, V2: policy_v2, V3: policy_v3}
++ 
++ 
++diff --git a/backend/sportsassets/execution_gate.py b/backend/sportsassets/execution_gate.py
++index 6a0c2ac..c488868 100644
++--- a/backend/sportsassets/execution_gate.py
+++++ b/backend/sportsassets/execution_gate.py
++@@ -34,18 +34,42 @@ the caller's own event loop. Work that was queued, retried, or slept
++ before a pause therefore cannot submit on the strength of a check made
++ before it -- there is nothing to carry.
++ 
+++A CACHED SNAPSHOT NEVER AUTHORIZES. 2026-09-21, found by review, and it
+++was mine: _current() fell back to a snapshot up to MAX_STALE_S old
+++whenever the live read failed, and returned the cached snapshot outright
+++when called on the loop thread. A reproduction installed a recent
+++ALLOWED snapshot, made run_coroutine_threadsafe raise TimeoutError, and
+++authorize("submit", lane="manual") RETURNED SUCCESSFULLY. The module
+++said unreadable authorization denies; the code said a five-second-old
+++yes is good enough. A kill switch that keeps saying yes for five seconds
+++after it stops being readable is not a kill switch.
+++
+++The two are now separate functions and they are not interchangeable:
+++
+++    _authorize_read()   fresh read, or a denial. Never cached. The ONLY
+++                        input to authorize().
+++    _last_known()       whatever was last read, with its age. Feeds
+++                        describe() and nothing else. Diagnostics may be
+++                        stale; permission may not.
+++
+++And the loop-thread caller no longer gets a cached yes. A synchronous
+++submission that cannot obtain a fresh read is denied, and async callers
+++have authorize_async(), which awaits the real read on their own loop.
+++
++ FAIL CLOSED MEANS EVERY UNCERTAINTY DENIES:
++ 
++     state never read            DENY  (nothing bound the gate)
++     read raised                 DENY  (a database blip is not consent)
++-    read timed out              DENY
+++    read timed out              DENY  (no cached fallback, at all)
++     value malformed             DENY  (somebody wrote something we do
++                                        not understand into the switch)
+++    value not a JSON boolean    DENY  (0, [], {}, null and "" are not
+++                                       false -- see _parse_switch)
++     value missing               DENY  (absence is not permission -- this
++                                        is the exact defect that armed
++                                        WHALE_EXIT_ENABLED and left
++                                        live_trading_paused unset)
++-    snapshot older than bound   DENY
+++    called where no fresh read  DENY  (the loop thread, synchronously)
++ 
++ GLOBAL vs COPY-SPECIFIC. Documented in CONTROLS below and enforced by
++ `lane`. Global controls bind every route. Copy controls bind only the
++@@ -68,13 +92,15 @@ log = logging.getLogger(__name__)
++ 
++ PAUSE_KEY = "live_trading_paused"
++ 
++-# How old a cached read may be before it stops counting as knowledge.
++-# Short, because its only job is to cover the microseconds between a
++-# bound loop answering and this thread using the answer.
+++# DIAGNOSTICS ONLY. How old the last known snapshot may be before
+++# describe() stops calling it current. It has no part in authorization:
+++# there is no age at which a cached snapshot may approve a submission.
+++# It used to be the staleness allowance on the authorization fallback,
+++# which is the fail-open the review reproduced.
++ MAX_STALE_S = 5.0
++ 
++ # How long to wait for the authoritative read before giving up. A gate
++-# that hangs is a gate that gets removed.
+++# that hangs is a gate that gets removed. Giving up DENIES.
++ READ_TIMEOUT_S = 2.5
++ 
++ CONTROLS = {
++@@ -232,19 +258,57 @@ def unbind() -> None:
++ 
++ 
++ def _parse_switch(val) -> bool:
++-    """A pause value. Anything we do not understand means PAUSED.
++-
++-    Somebody wrote something into the kill switch. Refusing is the only
++-    reading of that which cannot lose money.
+++    """A pause value. It must BE a boolean. Anything else is PAUSED.
+++
+++    THE DEFECT THIS REPLACES, found by review 2026-09-21: the old body
+++    ended `return bool(parsed)`, and Python's truthiness is not JSON's
+++    boolean. Every one of these decoded to a falsy value and therefore
+++    to NOT PAUSED -- the permissive answer:
+++
+++        "0"      -> 0     -> False     trading allowed
+++        "[]"     -> []    -> False     trading allowed
+++        "{}"     -> {}    -> False     trading allowed
+++        "null"   -> None  -> False     trading allowed
+++        '""'     -> ""    -> False     trading allowed
+++
+++    None of those is `false`. They are a number, two empty containers
+++    and a null, and the honest reading of each is "the switch does not
+++    say anything I understand", which the module's own contract says
+++    must deny. A truthiness cast turned five kinds of nonsense into
+++    permission.
+++
+++    Production writes 'true'::jsonb / 'false'::jsonb through render-ops
+++    pause-on / pause-off, so a real boolean is what the switch actually
+++    holds; this rejects everything that is not one.
+++
+++    Returns True (paused) or False (not paused). Raises Denied for
+++    anything that is not a JSON boolean, which the caller turns into an
+++    unreadable -- and therefore denying -- snapshot.
++     """
++     if val is None:
++         return False                    # absent row: handled by caller
+++    if isinstance(val, bool):
+++        return val                      # a driver that decodes jsonb
+++    if isinstance(val, (bytes, bytearray)):
+++        try:
+++            val = val.decode("utf-8")
+++        except UnicodeDecodeError:
+++            raise Denied("kill_switch_malformed",
+++                         "value is not decodable text")
+++    if not isinstance(val, str):
+++        raise Denied("kill_switch_not_boolean",
+++                     "value is %s, not a boolean" % type(val).__name__)
++     try:
++-        parsed = json.loads(val) if isinstance(val, str) else val
+++        parsed = json.loads(val)
++     except (TypeError, ValueError):
++         raise Denied("kill_switch_malformed",
++                      "value is not JSON; treating as paused")
++-    return bool(parsed)
+++    if not isinstance(parsed, bool):
+++        raise Denied("kill_switch_not_boolean",
+++                     "value decodes to %s, and only true or false may "
+++                     "release the kill switch"
+++                     % ("null" if parsed is None else type(parsed).__name__))
+++    return parsed
++ 
++ 
++ async def read_state(pool) -> Snapshot:
++@@ -300,11 +364,27 @@ async def read_state(pool) -> Snapshot:
++     return snap
++ 
++ 
++-def _current() -> Snapshot:
++-    """Read now, through the bound loop. Falls back to a fresh-enough
++-    snapshot only to cover the instant between the two."""
+++def _last_known() -> Snapshot:
+++    """The last snapshot anyone read, whatever its age. DIAGNOSTICS ONLY.
+++
+++    describe() calls this so an operator can see what the gate last
+++    saw and how long ago. It is deliberately not reachable from
+++    authorize(): a stale reading is information, not consent.
+++    """
++     with _B.lock:
++-        loop, pool, snap = _B.loop, _B.pool, _B.snapshot
+++        return _B.snapshot
+++
+++
+++def _authorize_read() -> Snapshot:
+++    """A snapshot THIS CALL read, or a denying one. Never cached.
+++
+++    Every path out of here is either a read that just succeeded, or a
+++    Snapshot with ok=False. There is no branch that returns _B.snapshot.
+++    That is the whole point: the previous version had two such branches
+++    and both granted permission after a failed read.
+++    """
+++    with _B.lock:
+++        loop, pool = _B.loop, _B.pool
++ 
++     if loop is None or pool is None:
++         s = Snapshot()
++@@ -315,17 +395,16 @@ def _current() -> Snapshot:
++     # CALLED FROM THE LOOP'S OWN THREAD? Then a blocking read is not
++     # available: run_coroutine_threadsafe would schedule the coroutine
++     # on the very loop this thread is blocking, and .result() would wait
++-    # for something that can never run. It does not hang -- the timeout
++-    # catches it -- but it denies for the wrong reason and burns
++-    # READ_TIMEOUT_S doing it.
+++    # for something that can never run.
++     #
++-    # Production never lands here: every order path calls submit_fok
+++    # This used to return the cached snapshot here, which is a fail-open
+++    # wearing a comment about diagnostics. It now denies, and the caller
+++    # who legitimately needs to authorize from async code uses
+++    # authorize_async(), which awaits the real read on its own loop.
+++    #
+++    # Production does not land here: every order path calls submit_fok
++     # through asyncio.to_thread, so authorization happens on a worker
++-    # thread. This is for the caller who checks early from async code,
++-    # and for any future path that forgets. Such a caller gets the
++-    # snapshot if it is inside the staleness bound, and a denial if it
++-    # is not. The authoritative read still happens at the submission
++-    # itself, on the worker thread, which is the check that matters.
+++    # thread and takes the real read below.
++     try:
++         asyncio.get_running_loop()
++         on_loop_thread = True
++@@ -333,45 +412,29 @@ def _current() -> Snapshot:
++         on_loop_thread = False
++ 
++     if on_loop_thread:
++-        age = time.time() - snap.read_at
++-        if snap.ok and age <= MAX_STALE_S:
++-            return snap
++         s = Snapshot()
++-        s.why = ("authorization was requested on the event loop's own "
++-                 "thread, where a blocking read is impossible, and no "
++-                 "snapshot is within %.0fs" % MAX_STALE_S)
+++        s.why = ("synchronous authorization was requested on the event "
+++                 "loop's own thread, where a fresh read is impossible; "
+++                 "use authorize_async() from async code")
++         return s
++ 
++     try:
++         fut = asyncio.run_coroutine_threadsafe(read_state(pool), loop)
++         fresh = fut.result(timeout=READ_TIMEOUT_S)
++-        with _B.lock:
++-            _B.snapshot = fresh
++-        return fresh
++     except Exception as exc:                               # noqa: BLE001
++-        # The live read failed. A very recent snapshot is allowed to
++-        # stand in, and nothing older is.
++-        age = time.time() - snap.read_at
++-        if snap.ok and age <= MAX_STALE_S:
++-            return snap
++         s = Snapshot()
++-        s.why = ("authorization read failed (%s) and no snapshot is "
++-                 "within %.0fs" % (type(exc).__name__, MAX_STALE_S))
+++        s.why = ("authorization read failed (%s); a previous answer does "
+++                 "not authorize a later submission"
+++                 % type(exc).__name__)
++         return s
+++    with _B.lock:
+++        _B.snapshot = fresh
+++    return fresh
++ 
++ 
++-def authorize(operation: str, *, lane: str = "unknown",
++-              slug: str | None = None) -> Snapshot:
++-    """Authorize one submission, or raise Denied. Safe from any thread.
++-
++-    `operation` is what is being attempted ('submit', 'close_position').
++-    `lane` selects the copy controls. Anything not in COPY_LANES gets
++-    the global controls only -- including 'manual', because a loss
++-    breaker on the copy sleeve must not stop an operator flattening a
++-    position by hand.
++-    """
++-    snap = _current()
++-
+++def _decide(snap: Snapshot, operation: str, lane: str,
+++            slug: str | None) -> Snapshot:
+++    """The control checks, given a snapshot that was just read."""
++     if not snap.ok:
++         raise Denied("authorization_unavailable", snap.why)
++     if snap.paused:
++@@ -398,9 +461,60 @@ def authorize(operation: str, *, lane: str = "unknown",
++     return snap
++ 
++ 
+++def authorize(operation: str, *, lane: str = "unknown",
+++              slug: str | None = None) -> Snapshot:
+++    """Authorize one submission, or raise Denied. Safe from any thread.
+++
+++    `operation` is what is being attempted ('submit', 'close_position').
+++    `lane` selects the copy controls. Anything not in GLOBAL_ONLY_LANES
+++    gets the copy controls too -- including 'unknown', because a route
+++    that never declared itself must not be the one that escapes.
+++
+++    Called on the event loop's own thread this DENIES rather than
+++    falling back to anything; async callers want authorize_async().
+++    """
+++    return _decide(_authorize_read(), operation, lane, slug)
+++
+++
+++async def authorize_async(operation: str, *, lane: str = "unknown",
+++                          slug: str | None = None) -> Snapshot:
+++    """The same decision, from async code, on a read taken right now.
+++
+++    THE FRESH ASYNCHRONOUS PATH. A coroutine cannot block on
+++    run_coroutine_threadsafe against its own loop, so before this
+++    existed the only answer available on the loop thread was a cached
+++    one -- and a cached yes is what the review reproduced. This awaits
+++    read_state directly: same authority, same controls, no cache.
+++    """
+++    with _B.lock:
+++        pool = _B.pool
+++    if pool is None:
+++        snap = Snapshot()
+++        snap.why = ("execution gate is not bound to a pool, so the kill "
+++                    "switch cannot be read from this process")
+++        return _decide(snap, operation, lane, slug)
+++    try:
+++        snap = await asyncio.wait_for(read_state(pool),
+++                                      timeout=READ_TIMEOUT_S)
+++    except Exception as exc:                               # noqa: BLE001
+++        snap = Snapshot()
+++        snap.why = ("authorization read failed (%s); a previous answer "
+++                    "does not authorize a later submission"
+++                    % type(exc).__name__)
+++        return _decide(snap, operation, lane, slug)
+++    with _B.lock:
+++        _B.snapshot = snap
+++    return _decide(snap, operation, lane, slug)
+++
+++
++ def describe() -> dict:
++-    """For the operator endpoint and the tests. No credentials."""
++-    snap = _current()
+++    """For the operator endpoint and the tests. No credentials.
+++
+++    Reads the LAST KNOWN snapshot, not a fresh one, and says how old it
+++    is. Diagnostics are allowed to be stale; this function cannot
+++    authorize anything.
+++    """
+++    snap = _last_known()
++     return {
++         "bound": _B.loop is not None and _B.pool is not None,
++         "readable": snap.ok,
++@@ -411,6 +525,11 @@ def describe() -> dict:
++         "loss_stop": snap.loss_stop,
++         "overspend": snap.overspend,
++         "age_s": round(time.time() - snap.read_at, 3) if snap.read_at else None,
+++        "stale": (snap.read_at == 0.0
+++                  or (time.time() - snap.read_at) > MAX_STALE_S),
+++        "note": ("readable/paused/venue describe the LAST READ, not a "
+++                 "fresh one. A submission is authorized against a read "
+++                 "taken at the moment of the call; this view never is."),
++         "controls": CONTROLS,
++         "lane_now": current_lane(),
++         "global_only_lanes": sorted(GLOBAL_ONLY_LANES),
++@@ -423,6 +542,13 @@ def describe() -> dict:
++ # TESTS ONLY. Production binds a real loop and pool; this exists so the
++ # behavioural suite can drive every denial without a database, and it is
++ # the only way to install a snapshot the gate did not read itself.
+++#
+++# IT REPLACES THE AUTHORIZATION READ, which is exactly why it is
+++# allowlisted to a named set of modules in conftest rather than applied
+++# suite-wide: under it, bind(), read_state() and every fail-closed
+++# branch above are dead code, so a test running under it proves nothing
+++# about them. test_execution_gate_integration.py runs with it OFF and
+++# asserts so on its first line.
++ def _install_snapshot_for_tests(snap: Snapshot) -> None:
++     if not os.environ.get("PYTEST_CURRENT_TEST"):
++         raise RuntimeError("snapshot injection is test-only")
++@@ -434,12 +560,12 @@ def _install_snapshot_for_tests(snap: Snapshot) -> None:
++     def _fixed():
++         return snap
++ 
++-    globals()["_current"] = _fixed
+++    globals()["_authorize_read"] = _fixed
++ 
++ 
++ def _restore_for_tests() -> None:
++-    globals()["_current"] = _current_real
+++    globals()["_authorize_read"] = _authorize_read_real
++     unbind()
++ 
++ 
++-_current_real = _current
+++_authorize_read_real = _authorize_read
++diff --git a/backend/tests/conftest.py b/backend/tests/conftest.py
++index 34833b5..6c68699 100644
++--- a/backend/tests/conftest.py
+++++ b/backend/tests/conftest.py
++@@ -223,7 +223,7 @@ def _override_state_does_not_leak():
++ #
++ # An explicit allowlist, not a suite-wide default, and the difference
++ # matters. _install_snapshot_for_tests does not merely supply a
++-# snapshot: it REPLACES execution_gate._current, so bind(), read_state()
+++# snapshot: it REPLACES execution_gate._authorize_read, so bind(), read_state()
++ # and the whole live read path are never exercised by anything running
++ # under it. Armed suite-wide, a broken production binding would look
++ # exactly like a working one -- no test would ever call the code that
++diff --git a/backend/tests/test_admission_fractional.py b/backend/tests/test_admission_fractional.py
++new file mode 100644
++index 0000000..9dc36b8
++--- /dev/null
+++++ b/backend/tests/test_admission_fractional.py
++@@ -0,0 +1,308 @@
+++"""Admission accounting: the V3 defect, and what replaces it.
+++
+++THE DEFECT, reproduced by independent review at 195ee01. V3 read
+++
+++    max(ADMIT_FLOOR_OBS, int(cap.sustainable_obs_per_tick))
+++
+++and at the configuration the capacity report itself recommended -- a
+++45-second tick, two reserved follow-up reads, four horizons --
+++sustainable_obs_per_tick is 0.5, int(0.5) is 0, and the floor turns that
+++into 1. Every tick. Backlog 100 included.
+++
+++    admitted        1 obs/tick  = 1.333 obs/min
+++    tasks created   x 4 horizons = 5.333 tasks/min
+++    service          2 reads/45s = 2.667 reads/min
+++
+++Twice capacity, and twice the 0.667 obs/min the report claimed. The
+++fractional intake in the report was never implemented.
+++
+++WHAT THESE TESTS HOLD THE REPLACEMENT TO:
+++  * the long-run rate matches the sustainable rate, not a rounding of it
+++  * zero admissions on some ticks -- necessary, and different from a
+++    permanent latch, which is asserted separately
+++  * forward obligations across all four horizons are counted
+++  * banked credits are bounded, so an outage cannot burst on recovery
+++  * recovery happens after capacity returns, without shoving new work
+++    into a queue that is still draining
+++  * varying capacity, read failures and backlog drainage
+++"""
+++
+++from __future__ import annotations
+++
+++import pytest
+++
+++from sportsassets import bettor_admission as adm
+++
+++HORIZONS = 4
+++LONGEST_HORIZON_S = 3600.0
+++
+++
+++def cap(*, reserve=2, tick_s=45.0, backlog=0, outstanding=0, sample=2,
+++        success=1.0, total=4):
+++    return adm.TickCapacity(
+++        total_budget_reads=total,
+++        fu_reserve_reads=reserve,
+++        sample_budget_reads=sample,
+++        backlog_tasks=backlog,
+++        horizons_per_obs=HORIZONS,
+++        tick_period_s=tick_s,
+++        tolerance_s=30.0,
+++        outstanding_tasks=outstanding,
+++        longest_horizon_s=LONGEST_HORIZON_S,
+++        service_success_rate=success,
+++    )
+++
+++
+++# ── the defect, kept as a fixture ────────────────────────────────────
+++
+++class TestV3IsARecordedDefect:
+++
+++    def test_v3_admits_one_per_tick_with_a_backlog_of_one_hundred(self):
+++        """The review's exact reproduction. V3 stays in the module so
+++        any replacement can be run against it."""
+++        c = cap(backlog=100, outstanding=400)
+++        assert c.sustainable_obs_per_tick == pytest.approx(0.5)
+++
+++        d = adm.policy_v3(c)
+++        assert d.admit_obs == 1, "V3's defect has been edited away; the "\
+++                                 "regression fixture no longer reproduces"
+++        assert d.saturated is True, "and it knew the queue was saturated"
+++
+++    def test_v3_creates_exactly_twice_the_service_rate(self):
+++        c = cap(backlog=100, outstanding=400)
+++        admit = adm.policy_v3(c).admit_obs
+++
+++        obs_per_min = admit * 60.0 / c.tick_period_s
+++        tasks_per_min = obs_per_min * HORIZONS
+++        service_per_min = c.fu_reserve_reads * 60.0 / c.tick_period_s
+++
+++        assert obs_per_min == pytest.approx(1.333, abs=0.001)
+++        assert tasks_per_min == pytest.approx(5.333, abs=0.001)
+++        assert service_per_min == pytest.approx(2.667, abs=0.001)
+++        assert tasks_per_min == pytest.approx(2 * service_per_min, abs=0.01)
+++
+++    def test_the_v1_latch_is_still_reproducible_too(self):
+++        """Both regressions, not just the newest one."""
+++        c = cap(reserve=2, backlog=100)
+++        assert adm.policy_v1(c).admit_obs == 0, "2 // 4 == 0"
+++
+++
+++# ── the replacement: the rate is right over the long run ─────────────
+++
+++class TestFractionalRateIsTheSustainableRate:
+++
+++    def test_one_observation_every_two_ticks_at_the_example_capacity(self):
+++        """The theoretical maximum the review names, before headroom."""
+++        acct = adm.AdmissionAccount()
+++        c = cap()
+++        admits = [acct.decide(c).admit_obs for _ in range(40)]
+++
+++        assert set(admits) <= {0, 1}, "no tick may admit more than the "\
+++                                      "credits earned"
+++        # 0.5/tick nominal, x TARGET_UTILISATION for recovery headroom.
+++        expected = 0.5 * adm.TARGET_UTILISATION
+++        assert acct.admitted_obs_per_tick == pytest.approx(expected,
+++                                                           abs=0.03)
+++
+++    def test_intake_never_exceeds_service(self):
+++        """The property the whole thing exists for, stated in reads."""
+++        acct = adm.AdmissionAccount()
+++        c = cap()
+++        for _ in range(200):
+++            acct.decide(c)
+++
+++        tasks_per_tick = acct.admitted_obs_per_tick * HORIZONS
+++        service_per_tick = c.effective_reserve_reads
+++        assert tasks_per_tick <= service_per_tick, (
+++            "%.3f tasks/tick created against %.3f reads/tick of service"
+++            % (tasks_per_tick, service_per_tick))
+++
+++    def test_zero_ticks_happen_and_are_not_a_latch(self):
+++        """Zero on SOME ticks is necessary. Zero on ALL ticks is V1."""
+++        acct = adm.AdmissionAccount()
+++        c = cap()
+++        for _ in range(40):
+++            acct.decide(c)
+++
+++        assert acct.zero_ticks > 0, "a sub-unit rate must produce zero "\
+++                                    "ticks; otherwise it is rounding up"
+++        assert acct.admitted_total > 0, "it admitted nothing at all -- "\
+++                                        "that is the V1 latch"
+++
+++    def test_a_larger_reserve_admits_more_than_one_per_tick(self):
+++        """The accumulator is not a cap of one. At reserve 5 on a 71s
+++        tick the sustainable rate is 1.25/tick and it must reach it."""
+++        acct = adm.AdmissionAccount()
+++        c = cap(reserve=5, tick_s=71.0, sample=5, total=10)
+++        for _ in range(200):
+++            acct.decide(c)
+++
+++        expected = c.sustainable_obs_per_tick * adm.TARGET_UTILISATION
+++        assert expected > 1.0
+++        assert acct.admitted_obs_per_tick == pytest.approx(expected,
+++                                                           abs=0.05)
+++
+++
+++# ── forward obligations across all four horizons ─────────────────────
+++
+++class TestForwardObligations:
+++
+++    def test_obligations_not_yet_due_still_stop_admission(self):
+++        """An observation admitted a moment ago owes four reads and
+++        none is due yet, so backlog is 0 while demand is real."""
+++        acct = adm.AdmissionAccount()
+++        # 400 committed reads at 2 effective reads per 45s tick is
+++        # 9,000s of work against a 3,630s window.
+++        c = cap(backlog=0, outstanding=400)
+++        assert c.obligation_time_s > c.commitment_window_s
+++
+++        d = acct.decide(c)
+++        assert d.admit_obs == 0
+++        assert d.saturated is True
+++        assert "commitment window" in d.why
+++
+++    def test_a_modest_forward_book_still_admits(self):
+++        acct = adm.AdmissionAccount()
+++        c = cap(backlog=0, outstanding=40)
+++        for _ in range(10):
+++            acct.decide(c)
+++        assert acct.admitted_total > 0
+++
+++    def test_a_missing_outstanding_count_is_reported_not_assumed(self):
+++        """Silently substituting backlog_tasks would understate demand,
+++        which is the permissive choice. It says so instead."""
+++        acct = adm.AdmissionAccount()
+++        c = adm.TickCapacity(
+++            total_budget_reads=4, fu_reserve_reads=2, sample_budget_reads=2,
+++            backlog_tasks=0, horizons_per_obs=4, tick_period_s=45.0,
+++            tolerance_s=30.0)          # outstanding_tasks left unset
+++        assert c.obligation_time_s is None
+++        d = acct.decide(c)
+++        assert "did NOT run" in d.why
+++
+++
+++# ── bounded credits: an outage must not bank a burst ─────────────────
+++
+++class TestCreditsAreBounded:
+++
+++    def test_a_long_saturated_stretch_does_not_bank_a_burst(self):
+++        acct = adm.AdmissionAccount()
+++        blocked = cap(backlog=1000, outstanding=4000)
+++        for _ in range(100):
+++            assert acct.decide(blocked).admit_obs == 0
+++
+++        assert acct.credits_obs <= max(1.0, 0.5 * adm.TARGET_UTILISATION), (
+++            "100 blocked ticks banked %.2f observations of credit"
+++            % acct.credits_obs)
+++
+++        clear = cap(backlog=0, outstanding=0)
+++        first = acct.decide(clear).admit_obs
+++        assert first <= 1, "recovery admitted a burst of %d" % first
+++
+++    def test_recovery_reaches_the_steady_rate_after_the_queue_clears(self):
+++        acct = adm.AdmissionAccount()
+++        blocked = cap(backlog=1000, outstanding=4000)
+++        for _ in range(50):
+++            acct.decide(blocked)
+++        assert acct.admitted_total == 0
+++
+++        clear = cap(backlog=0, outstanding=0)
+++        admitted_before = acct.admitted_total
+++        for _ in range(100):
+++            acct.decide(clear)
+++        recovered = acct.admitted_total - admitted_before
+++
+++        expected = 100 * 0.5 * adm.TARGET_UTILISATION
+++        assert recovered == pytest.approx(expected, abs=3), (
+++            "recovered rate %d over 100 ticks, expected about %.0f"
+++            % (recovered, expected))
+++
+++    def test_no_reserve_earns_no_credit(self):
+++        """Capacity gone means no rate to bank, not a debt to repay."""
+++        acct = adm.AdmissionAccount()
+++        dead = cap(reserve=0, sample=0)
+++        for _ in range(50):
+++            assert acct.decide(dead).admit_obs == 0
+++        assert acct.credits_obs == 0.0
+++
+++
+++# ── varying capacity, failures, drainage ─────────────────────────────
+++
+++class TestVaryingConditions:
+++
+++    def test_measured_read_failures_reduce_intake(self):
+++        """Failed reads consume reserve without discharging an
+++        obligation, so nominal reserve overstates service by exactly
+++        the success rate."""
+++        good = adm.AdmissionAccount()
+++        bad = adm.AdmissionAccount()
+++        for _ in range(300):
+++            good.decide(cap(success=1.0))
+++            bad.decide(cap(success=0.5))
+++
+++        assert bad.admitted_obs_per_tick == pytest.approx(
+++            good.admitted_obs_per_tick * 0.5, abs=0.03)
+++
+++    def test_capacity_that_rises_and_falls(self):
+++        acct = adm.AdmissionAccount()
+++        created = 0
+++        served = 0.0
+++        for i in range(400):
+++            reserve = [1, 2, 3, 5][i % 4]
+++            c = cap(reserve=reserve, sample=reserve, total=reserve * 2)
+++            created += acct.decide(c).admit_obs * HORIZONS
+++            served += c.effective_reserve_reads
+++        assert created <= served, (
+++            "%d tasks created against %.0f reads of service" % (created,
+++                                                                served))
+++
+++    def test_a_backlog_actually_drains(self):
+++        """Arrivals equal to nominal service is not a stable queue -- an
+++        excursion never recovers. Headroom is what drains it.
+++
+++        THE ASSERTION IS NOT "REACHES ZERO", and my first version of it
+++        was. This run drains 60 to 2 and holds at 2, which is correct:
+++        a collector that is admitting at all always has work in flight,
+++        and an empty queue would mean it had stopped. What has to be
+++        true is that the excursion is REMOVED and the residual is
+++        BOUNDED -- one observation's worth of obligations, not a
+++        backlog that merely stops growing.
+++        """
+++        acct = adm.AdmissionAccount()
+++        backlog = 60.0
+++        peak = backlog
+++        for _ in range(400):
+++            c = cap(backlog=int(backlog), outstanding=int(backlog))
+++            backlog += acct.decide(c).admit_obs * HORIZONS
+++            backlog = max(0.0, backlog - c.effective_reserve_reads)
+++            peak = max(peak, backlog)
+++
+++        assert backlog <= HORIZONS, (
+++            "backlog settled at %.1f, above one observation's worth of "
+++            "obligations" % backlog)
+++        assert peak <= 60.0, "the backlog grew to %.1f before draining" % peak
+++        assert acct.admitted_total > 0, "it drained by refusing to collect"
+++
+++    def test_admission_never_exceeds_the_sample_budget(self):
+++        acct = adm.AdmissionAccount()
+++        acct.credits_obs = 50.0                     # absurd, on purpose
+++        d = acct.decide(cap(sample=2, reserve=5, tick_s=71.0))
+++        assert d.admit_obs <= 2
+++
+++
+++class TestTheFloorIsNoLongerMandatory:
+++
+++    def test_admit_floor_is_not_applied_by_the_account(self):
+++        """ADMIT_FLOOR_OBS stays in the module as the record of why V1
+++        failed. It must not be in the admission path."""
+++        import inspect
+++
+++        src = inspect.getsource(adm.AdmissionAccount)
+++        assert "ADMIT_FLOOR_OBS" not in src, (
+++            "the mandatory per-tick floor is back; it cannot express a "
+++            "rate below one observation per tick")
+++
+++    def test_all_four_horizons_are_still_assumed(self):
+++        c = cap()
+++        assert c.horizons_per_obs == 4
+++        assert c.longest_horizon_s == 3600.0
++diff --git a/backend/tests/test_execution_gate_fail_open.py b/backend/tests/test_execution_gate_fail_open.py
++new file mode 100644
++index 0000000..973b8d3
++--- /dev/null
+++++ b/backend/tests/test_execution_gate_fail_open.py
++@@ -0,0 +1,436 @@
+++"""The two fail-open paths an independent review reproduced at 195ee01.
+++
+++BOTH LET AN ORDER THROUGH. Neither was hypothetical:
+++
+++  1. `_current()` fell back to a cached snapshot up to MAX_STALE_S old
+++     whenever the authoritative read failed, and returned the cache
+++     outright when called on the loop thread. Install a recent ALLOWED
+++     snapshot, make `run_coroutine_threadsafe` raise TimeoutError, call
+++     `authorize("submit", lane="manual")` -- and it returned
+++     successfully. The module's contract says unreadable authorization
+++     denies. The code said a five-second-old yes was good enough.
+++
+++  2. `_parse_switch()` ended `return bool(parsed)`. Python truthiness is
+++     not JSON's boolean, so "0", "[]", "{}", "null" and '""' all decoded
+++     to falsy and therefore to NOT PAUSED. Five kinds of nonsense in the
+++     kill switch read as permission.
+++
+++EVERY TEST HERE COUNTS MOCKED VENUE SUBMISSIONS AND ASSERTS ZERO. A
+++denial that raises the right exception while the adapter has already
+++sent an order is not a fix, so the assertion is on the adapter, not on
+++the exception type alone.
+++
+++THE FIXTURE IS OFF in this module -- it is not in conftest's allowlist.
+++Under `_install_snapshot_for_tests` the live read path is replaced
+++wholesale and none of this would be exercised.
+++"""
+++
+++from __future__ import annotations
+++
+++import asyncio
+++import threading
+++import time
+++
+++import pytest
+++
+++from sportsassets import execution_gate as gate
+++
+++
+++# ── a pool and a venue that record whether they were used ────────────
+++
+++class FakePool:
+++    """Returns whatever the test puts in `values`, by key."""
+++
+++    def __init__(self, values=None, raises=None):
+++        self.values = values if values is not None else {}
+++        self.raises = raises
+++        self.reads = 0
+++
+++    async def fetchval(self, sql, *args):
+++        self.reads += 1
+++        if self.raises is not None:
+++            raise self.raises
+++        if args:
+++            return self.values.get(args[0])
+++        if "mirror_loss_stop" in sql:
+++            return self.values.get("mirror_loss_stop")
+++        return None
+++
+++
+++class CountingVenue:
+++    """Stands in for the pmus adapter. Counts orders it was asked to
+++    send. The number this ends on is the only thing that matters."""
+++
+++    def __init__(self):
+++        self.submissions = []
+++
+++    def submit(self, slug, **kw):
+++        self.submissions.append((slug, kw))
+++        return {"ok": True}
+++
+++
+++@pytest.fixture
+++def venue():
+++    return CountingVenue()
+++
+++
+++@pytest.fixture(autouse=True)
+++def _unbound_between_tests():
+++    gate.unbind()
+++    yield
+++    gate.unbind()
+++
+++
+++@pytest.fixture
+++def allowing_env(monkeypatch):
+++    """Everything else says yes, so the only thing under test is the
+++    switch. Without this a denial could come from the venue gate and
+++    the test would pass for the wrong reason."""
+++    from sportsassets import live_executor as le
+++
+++    monkeypatch.setattr(le, "active_venue", lambda: "polymarket-us")
+++    monkeypatch.setattr(le, "copy_halted", lambda: False)
+++
+++    async def _no_overspend(pool):
+++        return False
+++
+++    monkeypatch.setattr(le, "overspend_halt", _no_overspend)
+++    return None
+++
+++
+++def _loop_in_thread():
+++    """A real event loop on its own thread, as production has."""
+++    loop = asyncio.new_event_loop()
+++    ready = threading.Event()
+++
+++    def run():
+++        asyncio.set_event_loop(loop)
+++        loop.call_soon(ready.set)
+++        loop.run_forever()
+++
+++    t = threading.Thread(target=run, daemon=True)
+++    t.start()
+++    ready.wait(5)
+++    return loop, t
+++
+++
+++def _stop(loop, t):
+++    loop.call_soon_threadsafe(loop.stop)
+++    t.join(timeout=5)
+++    loop.close()
+++
+++
+++def _submit_through_gate(venue, slug="any-slug", lane="manual"):
+++    """What a real order route does: authorize, then send. If the gate
+++    raises, the adapter is never reached -- which is the property under
+++    test."""
+++    gate.authorize("submit", lane=lane, slug=slug)
+++    return venue.submit(slug)
+++
+++
+++# ── DEFECT 1: a cached yes must not survive a failed read ────────────
+++
+++class TestFailedReadDoesNotAuthorize:
+++
+++    def test_the_exact_reproduction_from_the_review(self, venue,
+++                                                    allowing_env,
+++                                                    monkeypatch):
+++        """Recent allowed snapshot + TimeoutError on the read = DENY.
+++
+++        This is the review's reproduction, run against the repaired
+++        code. Before the fix it returned successfully.
+++        """
+++        loop, t = _loop_in_thread()
+++        try:
+++            pool = FakePool({"live_trading_paused": "false"})
+++            gate.bind(loop, pool)
+++
+++            # A real, successful, ALLOWED read lands in the cache.
+++            ok = gate.authorize("submit", lane="manual")
+++            assert ok.ok and not ok.paused
+++            assert gate._last_known().ok, "the cache is primed and allowing"
+++
+++            # Now the authoritative read stops working.
+++            def _boom(coro, _loop):
+++                coro.close()                 # no 'never awaited' warning
+++                raise asyncio.TimeoutError("read unavailable")
+++
+++            monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _boom)
+++
+++            with pytest.raises(gate.Denied) as e:
+++                _submit_through_gate(venue)
+++            assert e.value.reason == "authorization_unavailable"
+++            assert "does not authorize a later submission" in e.value.detail
+++        finally:
+++            _stop(loop, t)
+++
+++        assert venue.submissions == [], (
+++            "an order was sent on the strength of a cached snapshot "
+++            "after the authorization read failed")
+++
+++    def test_a_failed_read_immediately_after_an_allowed_read(self, venue,
+++                                                             allowing_env,
+++                                                             monkeypatch):
+++        """Zero seconds of staleness is still not permission.
+++
+++        The old code's window was MAX_STALE_S. This asserts there is no
+++        window at all: the allowed read is microseconds old and the
+++        submission is still refused.
+++        """
+++        loop, t = _loop_in_thread()
+++        try:
+++            pool = FakePool({"live_trading_paused": "false"})
+++            gate.bind(loop, pool)
+++            first = gate.authorize("submit", lane="manual")
+++            age = time.time() - first.read_at
+++            assert age < gate.MAX_STALE_S, "the cache is well inside the "\
+++                                           "old staleness allowance"
+++
+++            def _boom(coro, _loop):
+++                coro.close()
+++                raise RuntimeError("database gone")
+++
+++            monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _boom)
+++            with pytest.raises(gate.Denied):
+++                _submit_through_gate(venue)
+++        finally:
+++            _stop(loop, t)
+++        assert venue.submissions == []
+++
+++    def test_the_read_raising_inside_read_state_also_denies(self, venue,
+++                                                            allowing_env):
+++        """A pool that raises produces ok=False, not a fallback."""
+++        loop, t = _loop_in_thread()
+++        try:
+++            good = FakePool({"live_trading_paused": "false"})
+++            gate.bind(loop, good)
+++            gate.authorize("submit", lane="manual")          # prime cache
+++
+++            gate.bind(loop, FakePool(raises=RuntimeError("connection reset")))
+++            with pytest.raises(gate.Denied) as e:
+++                _submit_through_gate(venue)
+++            assert e.value.reason == "authorization_unavailable"
+++        finally:
+++            _stop(loop, t)
+++        assert venue.submissions == []
+++
+++    def test_describe_may_be_stale_and_says_so(self, allowing_env):
+++        """Diagnostics keep the cache. They just cannot authorize.
+++
+++        The split is the fix: describe() still shows the last reading,
+++        and labels it.
+++        """
+++        loop, t = _loop_in_thread()
+++        try:
+++            gate.bind(loop, FakePool({"live_trading_paused": "false"}))
+++            gate.authorize("submit", lane="manual")
+++            d = gate.describe()
+++            assert d["readable"] is True
+++            assert d["paused"] is False
+++            assert d["stale"] is False
+++            assert "never is" in d["note"]
+++        finally:
+++            _stop(loop, t)
+++
+++
+++class TestLoopThreadDoesNotAuthorizeFromCache:
+++
+++    def test_sync_authorize_on_the_loop_thread_denies(self, venue,
+++                                                      allowing_env):
+++        """The second fail-open: on the loop's own thread the old code
+++        returned the cached snapshot outright."""
+++        results = {}
+++
+++        async def main():
+++            pool = FakePool({"live_trading_paused": "false"})
+++            gate.bind(asyncio.get_running_loop(), pool)
+++            # Prime the cache with a real allowed read, from this loop.
+++            await gate.authorize_async("submit", lane="manual")
+++            assert gate._last_known().ok
+++
+++            try:
+++                _submit_through_gate(venue)         # SYNC, on the loop
+++                results["outcome"] = "ALLOWED"
+++            except gate.Denied as d:
+++                results["outcome"] = "denied"
+++                results["reason"] = d.reason
+++                results["detail"] = d.detail
+++
+++        asyncio.run(main())
+++        assert results["outcome"] == "denied"
+++        assert "authorize_async" in results["detail"]
+++        assert venue.submissions == []
+++
+++    def test_authorize_async_is_the_supported_path_and_is_fresh(self,
+++                                                                allowing_env):
+++        """And it really reads: flip the switch under it and it flips."""
+++        seen = {}
+++
+++        async def main():
+++            pool = FakePool({"live_trading_paused": "false"})
+++            gate.bind(asyncio.get_running_loop(), pool)
+++            snap = await gate.authorize_async("submit", lane="manual")
+++            seen["first"] = snap.ok
+++            seen["reads_after_first"] = pool.reads
+++
+++            pool.values["live_trading_paused"] = "true"
+++            try:
+++                await gate.authorize_async("submit", lane="manual")
+++                seen["second"] = "ALLOWED"
+++            except gate.Denied as d:
+++                seen["second"] = d.reason
+++
+++        asyncio.run(main())
+++        assert seen["first"] is True
+++        assert seen["reads_after_first"] >= 1, "it did a real read"
+++        assert seen["second"] == "live_trading_paused", (
+++            "authorize_async served a stale answer instead of reading")
+++
+++    def test_authorize_async_denies_when_the_read_fails(self, venue,
+++                                                        allowing_env):
+++        outcome = {}
+++
+++        async def main():
+++            good = FakePool({"live_trading_paused": "false"})
+++            gate.bind(asyncio.get_running_loop(), good)
+++            await gate.authorize_async("submit", lane="manual")
+++
+++            gate.bind(asyncio.get_running_loop(),
+++                      FakePool(raises=RuntimeError("gone")))
+++            try:
+++                await gate.authorize_async("submit", lane="manual")
+++                venue.submit("slug")
+++                outcome["r"] = "ALLOWED"
+++            except gate.Denied as d:
+++                outcome["r"] = d.reason
+++
+++        asyncio.run(main())
+++        assert outcome["r"] == "authorization_unavailable"
+++        assert venue.submissions == []
+++
+++
+++# ── DEFECT 2: the switch must hold an actual JSON boolean ────────────
+++
+++# Every one of these decoded to a falsy Python value under the old
+++# `bool(parsed)` and therefore read as NOT PAUSED.
+++NOT_BOOLEANS = [
+++    ("0", "zero is a number, not false"),
+++    ("1", "one is a number, not true"),
+++    ("[]", "an empty list is not false"),
+++    ("{}", "an empty object is not false"),
+++    ("null", "null is not false"),
+++    ('""', "an empty string is not false"),
+++    ('"false"', "the WORD false, quoted, is a string"),
+++    ("0.0", "a float is not a boolean"),
+++    ("[false]", "a list containing false is not false"),
+++]
+++
+++
+++class TestKillSwitchMustBeABoolean:
+++
+++    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+++    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+++        loop, t = _loop_in_thread()
+++        try:
+++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+++            with pytest.raises(gate.Denied) as e:
+++                _submit_through_gate(venue)
+++            assert e.value.reason == "authorization_unavailable", why
+++        finally:
+++            _stop(loop, t)
+++        assert venue.submissions == [], (
+++            "%r released the kill switch: %s" % (raw, why))
+++
+++    @pytest.mark.parametrize("raw", ["not json at all", "{", "tru"])
+++    def test_malformed_values_deny(self, raw, venue, allowing_env):
+++        loop, t = _loop_in_thread()
+++        try:
+++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+++            with pytest.raises(gate.Denied):
+++                _submit_through_gate(venue)
+++        finally:
+++            _stop(loop, t)
+++        assert venue.submissions == []
+++
+++    def test_an_absent_row_denies(self, venue, allowing_env):
+++        """Unchanged, and re-asserted here because it is the same family
+++        of defect: absence is not permission."""
+++        loop, t = _loop_in_thread()
+++        try:
+++            gate.bind(loop, FakePool({}))       # no row
+++            with pytest.raises(gate.Denied) as e:
+++                _submit_through_gate(venue)
+++            assert e.value.reason == "authorization_unavailable"
+++        finally:
+++            _stop(loop, t)
+++        assert venue.submissions == []
+++
+++    @pytest.mark.parametrize("raw,paused", [("true", True), ("false", False)])
+++    def test_the_two_real_values_work(self, raw, paused, venue,
+++                                      allowing_env):
+++        """THE LEGITIMATE PATH, KEPT. render-ops pause-on/pause-off write
+++        'true'::jsonb and 'false'::jsonb, so these are what the switch
+++        actually holds. A gate that denies everything is not fixed."""
+++        loop, t = _loop_in_thread()
+++        try:
+++            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+++            if paused:
+++                with pytest.raises(gate.Denied) as e:
+++                    _submit_through_gate(venue)
+++                assert e.value.reason == "live_trading_paused"
+++                assert venue.submissions == []
+++            else:
+++                _submit_through_gate(venue)
+++                assert venue.submissions == [("any-slug", {})], (
+++                    "an explicit false must still allow trading")
+++        finally:
+++            _stop(loop, t)
+++
+++    def test_a_real_python_bool_from_a_decoding_driver(self, venue,
+++                                                       allowing_env):
+++        """asyncpg with a jsonb codec hands back real objects, not text.
+++        A True/False that never went through json.loads still works."""
+++        loop, t = _loop_in_thread()
+++        try:
+++            gate.bind(loop, FakePool({"live_trading_paused": False}))
+++            _submit_through_gate(venue)
+++            assert len(venue.submissions) == 1
+++        finally:
+++            _stop(loop, t)
+++
+++    def test_parse_switch_directly(self):
+++        """The unit, so the reason is visible without a loop."""
+++        assert gate._parse_switch("true") is True
+++        assert gate._parse_switch("false") is False
+++        assert gate._parse_switch(True) is True
+++        for raw, _why in NOT_BOOLEANS:
+++            with pytest.raises(gate.Denied) as e:
+++                gate._parse_switch(raw)
+++            assert e.value.reason in ("kill_switch_not_boolean",
+++                                      "kill_switch_malformed")
+++
+++
+++# ── the controls that must NOT have been broken by the repair ────────
+++
+++class TestCancellationStaysOpen:
+++
+++    def test_cancel_is_not_gated_even_when_everything_denies(self):
+++        """A kill switch that traps resting orders is worse than none.
+++        Re-asserted here because the repair touched the read path that
+++        every other control goes through."""
+++        import inspect
+++
+++        from sportsassets import pmus
+++
+++        src = inspect.getsource(pmus.cancel_order)
+++        assert "authorize" not in src, (
+++            "cancel_order acquired a gate call; cancels reduce exposure "
+++            "and must stay available while paused")
+++
+++    def test_submit_and_close_are_gated(self):
+++        import inspect
+++
+++        from sportsassets import pmus
+++
+++        for fn in (pmus.submit_fok, pmus.close_position):
+++            assert "_gate.authorize" in inspect.getsource(fn), fn.__name__
++diff --git a/backend/tests/test_execution_gate_integration.py b/backend/tests/test_execution_gate_integration.py
++index 3d37e26..9ffc3fe 100644
++--- a/backend/tests/test_execution_gate_integration.py
+++++ b/backend/tests/test_execution_gate_integration.py
++@@ -4,7 +4,8 @@ WHY THIS FILE IS SEPARATE FROM test_execution_gate.py.
++ 
++ That file installs a snapshot per test through
++ `execution_gate._install_snapshot_for_tests`, and that helper does more
++-than supply a value: it REPLACES the module global `_current`. Under it,
+++than supply a value: it REPLACES the module global `_authorize_read`.
+++Under it,
++ `bind()`, `read_state()` and the live read are never called. So a suite
++ armed that way proves the *decision* logic and proves nothing about
++ whether production ever binds the gate, whether the read works, or
++@@ -140,8 +141,8 @@ def test_the_fixture_is_off_in_this_module():
++     d = gate.describe()
++     assert d["bound"] is False
++     assert d["readable"] is False
++-    assert gate._current is gate._current_real, (
++-        "_current has been replaced -- the live read path is not being "
+++    assert gate._authorize_read is gate._authorize_read_real, (
+++        "_authorize_read has been replaced -- the live read path is not being "
++         "exercised and these tests prove nothing about it")
++ 
++ 
++@@ -570,24 +571,45 @@ def test_authorize_on_the_loop_thread_denies_without_a_fresh_snapshot(
++     assert elapsed < 1.0, "it stalled instead of refusing"
++ 
++ 
++-def test_the_loop_thread_may_use_a_snapshot_inside_the_bound(
+++def test_the_loop_thread_never_uses_a_snapshot_however_fresh(
++         venue_settings):
++-    """Having read successfully a moment ago on a worker thread, an
++-    async caller may use that answer -- and only within MAX_STALE_S."""
+++    """REPLACES A TEST THAT ASSERTED THE DEFECT.
+++
+++    This test used to read: "having read successfully a moment ago on a
+++    worker thread, an async caller may use that answer -- and only
+++    within MAX_STALE_S". It passed, and it was wrong. It encoded the
+++    fail-open the review later reproduced: a cached ALLOW, served to a
+++    caller that could not read, for up to five seconds.
+++
+++    A test that pins the wrong behaviour is worse than no test, because
+++    it makes the fix look like a regression. The corrected assertion is
+++    that there is NO age at which the cache authorizes -- zero seconds
+++    included -- and that the supported async path reads for itself.
+++    """
++     pool = FakePool(paused="false")
++ 
++     async def go():
++         gate.bind(asyncio.get_running_loop(), pool)
+++        # A real, successful, allowing read from a worker thread.
++         await asyncio.to_thread(gate.authorize, "submit", lane="copy")
++-        fresh = gate.authorize("submit", lane="copy")   # loop thread
++-        with gate._B.lock:
++-            gate._B.snapshot.read_at -= (gate.MAX_STALE_S + 60)
++-        try:
+++        assert gate._last_known().ok, "the cache is primed and allowing"
+++        age = time.time() - gate._last_known().read_at
+++        assert age < gate.MAX_STALE_S, "well inside the old allowance"
+++
+++        try:                                   # SYNC, on the loop thread
++             gate.authorize("submit", lane="copy")
++-            return fresh.ok, None
+++            sync = "ALLOWED"
++         except gate.Denied as d:
++-            return fresh.ok, d.reason
++-
++-    ok, stale_reason = asyncio.run(go())
++-    assert ok is True
++-    assert stale_reason == "authorization_unavailable"
+++            sync = d.reason
+++
+++        # The supported path, which takes its own read.
+++        reads_before = pool.reads
+++        fresh = await gate.authorize_async("submit", lane="copy")
+++        return sync, fresh.ok, pool.reads > reads_before
+++
+++    sync, async_ok, async_did_read = asyncio.run(go())
+++    assert sync == "authorization_unavailable", (
+++        "a zero-second-old cached snapshot authorized a submission")
+++    assert async_ok is True, "authorize_async must still allow a legitimate "\
+++                             "submission"
+++    assert async_did_read, "authorize_async served a cached answer"
++diff --git a/backend/tests/test_reconcile_read.py b/backend/tests/test_reconcile_read.py
++new file mode 100644
++index 0000000..9e7fb13
++--- /dev/null
+++++ b/backend/tests/test_reconcile_read.py
++@@ -0,0 +1,335 @@
+++"""The reconciliation reads: unreadable is not empty, short is not whole.
+++
+++The properties that matter here are the ones whose absence let me write
+++down a wrong conclusion the first time:
+++
+++  * an empty list with ok=True and a failed read must never be the same
+++    value, because "the venue holds nothing" was nearly recorded as a
+++    fact when it could have been a failed call;
+++  * a paged walk that stops early must say so, because a SIX-PAGE bound
+++    in pmus_account._fetch_sync is the entire reason the account card
+++    showed 25 trades and I reported that as the venue's trade history;
+++  * no function here may return an account identifier, a balance or a
+++    credential.
+++"""
+++
+++from __future__ import annotations
+++
+++import pytest
+++
+++from sportsassets import pmus
+++from sportsassets.api import reconcile_read as rr
+++
+++
+++# ── a fake venue client ──────────────────────────────────────────────
+++
+++class FakeOrders:
+++    def __init__(self, pages=None, raises=None):
+++        self.pages = pages if pages is not None else [{"orders": [],
+++                                                       "eof": True}]
+++        self.raises = raises
+++        self.calls = 0
+++
+++    def list(self, params=None):
+++        if self.raises:
+++            raise self.raises
+++        i = min(self.calls, len(self.pages) - 1)
+++        self.calls += 1
+++        return self.pages[i]
+++
+++
+++class FakePortfolio:
+++    def __init__(self, activity_pages=None, positions=None):
+++        self.activity_pages = activity_pages or [{"activities": [],
+++                                                  "eof": True}]
+++        self._positions = positions if positions is not None else {
+++            "positions": {}, "eof": True}
+++        self.activity_calls = 0
+++
+++    def activities(self, params=None):
+++        i = min(self.activity_calls, len(self.activity_pages) - 1)
+++        self.activity_calls += 1
+++        return self.activity_pages[i]
+++
+++    def positions(self, params=None):
+++        return self._positions
+++
+++
+++class FakeAccount:
+++    def __init__(self, balances=None, raises=None):
+++        self._balances = balances if balances is not None else {
+++            "balances": [{"currentBalance": "10", "assetNotional": "0"}]}
+++        self.raises = raises
+++
+++    def balances(self):
+++        if self.raises:
+++            raise self.raises
+++        return self._balances
+++
+++
+++class FakeClient:
+++    def __init__(self, account=None, portfolio=None, orders=None):
+++        self.account = account or FakeAccount()
+++        self.portfolio = portfolio or FakePortfolio()
+++        self.orders = orders or FakeOrders()
+++
+++
+++@pytest.fixture
+++def client(monkeypatch):
+++    c = FakeClient()
+++    monkeypatch.setattr(pmus, "_get_client", lambda: c)
+++    return c
+++
+++
+++def _page(n, cursor=None, eof=False, key="activities"):
+++    return {key: [{"type": "ACTIVITY_TYPE_TRADE", "i": i} for i in range(n)],
+++            "nextCursor": cursor or "", "eof": eof}
+++
+++
+++# ── resting orders: unreadable is not empty ──────────────────────────
+++
+++class TestRestingOrdersDistinguishUnreadableFromEmpty:
+++
+++    def test_a_genuinely_empty_book_is_ok_with_zero(self, client):
+++        client.orders.pages = [{"orders": [], "eof": True}]
+++        r = rr.resting_orders()
+++        assert r["ok"] is True
+++        assert r["count"] == 0
+++        assert r["complete"] is True
+++
+++    def test_none_is_a_failed_read_not_an_empty_book(self, client):
+++        """pmus.open_orders does `client.orders.list(params) or {}` and
+++        turns this into []. That is the value that would have let 'no
+++        outstanding commitments' be written down."""
+++        client.orders.pages = [None]
+++        with pytest.raises(rr.VenueUnreadable) as e:
+++            rr.resting_orders()
+++        assert "not an empty book" in str(e.value)
+++
+++    def test_an_absent_orders_key_is_a_failed_read(self, client):
+++        client.orders.pages = [{"error": "upstream unavailable"}]
+++        with pytest.raises(rr.VenueUnreadable) as e:
+++            rr.resting_orders()
+++        assert "not an empty book" in str(e.value)
+++
+++    def test_a_non_mapping_response_is_a_failed_read(self, client):
+++        client.orders.pages = ["<html>502</html>"]
+++        with pytest.raises(rr.VenueUnreadable):
+++            rr.resting_orders()
+++
+++    def test_orders_not_a_list_is_a_failed_read(self, client):
+++        client.orders.pages = [{"orders": {"weird": 1}}]
+++        with pytest.raises(rr.VenueUnreadable):
+++            rr.resting_orders()
+++
+++    def test_an_exception_propagates_as_unreadable(self, client):
+++        client.orders.raises = ConnectionError("reset")
+++        with pytest.raises(rr.VenueUnreadable):
+++            rr.resting_orders()
+++
+++    def test_real_orders_come_back(self, client):
+++        client.orders.pages = [{"orders": [{"orderId": "a"},
+++                                           {"orderId": "b"}], "eof": True}]
+++        r = rr.resting_orders()
+++        assert r["count"] == 2 and r["complete"] is True
+++
+++    def test_it_is_the_venue_not_the_manual_lane_table(self):
+++        """The endpoint I previously presented as outstanding venue
+++        commitments was a database read. This one must reach the SDK."""
+++        import inspect
+++
+++        src = inspect.getsource(rr.resting_orders)
+++        # The docstring NAMES the database endpoint in order to say this
+++        # is not it, so strip the prose and check the code.
+++        code = src.split('"""')[2] if src.count('"""') >= 2 else src
+++        assert "orders.list" in code
+++        assert "live_orders" not in code
+++        assert "whale_username" not in code
+++
+++
+++# ── activity paging: short is not whole ──────────────────────────────
+++
+++class TestHistoricalActivityFinishesOrSaysItDidNot:
+++
+++    def test_it_pages_past_six(self, client):
+++        """SIX is the bound in _fetch_sync, and it is why the account
+++        card showed 25 trades while the ledger needed five weeks."""
+++        pages = [_page(100, cursor="c%d" % i) for i in range(9)]
+++        pages.append(_page(7, eof=True))
+++        client.portfolio.activity_pages = pages
+++
+++        r = rr.historical_activity()
+++        assert r["pages"] == 10, "it stopped at %d pages" % r["pages"]
+++        assert r["count"] == 907
+++        assert r["complete"] is True
+++        assert r["stop_reason"] == "eof"
+++
+++    def test_hitting_the_page_bound_is_reported_not_hidden(self, client):
+++        client.portfolio.activity_pages = [_page(100, cursor="more")]
+++        r = rr.historical_activity(max_pages=3)
+++        assert r["complete"] is False
+++        assert r["stop_reason"] == "page bound reached"
+++        assert r["pages"] == 3
+++        assert "PREFIX" in r["note"]
+++
+++    def test_eof_without_a_cursor_stops_cleanly(self, client):
+++        client.portfolio.activity_pages = [_page(4, eof=True)]
+++        r = rr.historical_activity()
+++        assert r["complete"] is True and r["count"] == 4
+++
+++    def test_an_empty_book_is_complete_not_broken(self, client):
+++        client.portfolio.activity_pages = [{"activities": [], "eof": True}]
+++        r = rr.historical_activity()
+++        assert r["ok"] is True and r["count"] == 0 and r["complete"] is True
+++
+++    def test_a_failure_mid_walk_raises_rather_than_truncating(self,
+++                                                              monkeypatch,
+++                                                              client):
+++        calls = {"n": 0}
+++
+++        def boom(params=None):
+++            calls["n"] += 1
+++            if calls["n"] > 2:
+++                raise ConnectionError("reset")
+++            return _page(100, cursor="c")
+++
+++        client.portfolio.activities = boom
+++        with pytest.raises(rr.VenueUnreadable) as e:
+++            rr.historical_activity()
+++        assert "after 2 page(s)" in str(e.value)
+++
+++    def test_it_asks_for_trades_and_resolutions(self, client):
+++        seen = {}
+++
+++        def capture(params=None):
+++            seen.update(params or {})
+++            return _page(1, eof=True)
+++
+++        client.portfolio.activities = capture
+++        rr.historical_activity()
+++        assert "ACTIVITY_TYPE_TRADE" in seen["types"]
+++        assert "ACTIVITY_TYPE_POSITION_RESOLUTION" in seen["types"]
+++
+++
+++# ── identity: a verdict, never the identifier ────────────────────────
+++
+++class TestAccountIdentityNeverLeaksTheIdentifier:
+++
+++    def test_no_identity_field_stays_a_blocker(self, client):
+++        client.account._balances = {
+++            "balances": [{"currentBalance": "10", "assetNotional": "0"}]}
+++        r = rr.account_identity("0xabc")
+++        assert r["verdict"] == "no_identity"
+++        assert "cannot be tied to the ledger" in r["note"]
+++
+++    def test_a_match_reports_the_field_not_the_value(self, client):
+++        client.account._balances = {
+++            "balances": [{"currentBalance": "10",
+++                          "accountId": "0xDEADBEEF"}]}
+++        r = rr.account_identity("0xdeadbeef")
+++        assert r["verdict"] == "match"
+++        assert r["field"] == "accountId"
+++        assert "0xDEADBEEF" not in str(r), "the identifier was returned"
+++        assert "deadbeef" not in str(r).lower()
+++
+++    def test_a_mismatch_reports_the_field_not_the_value(self, client):
+++        client.account._balances = {
+++            "balances": [{"walletAddress": "0xAAA"}]}
+++        r = rr.account_identity("0xBBB")
+++        assert r["verdict"] == "mismatch"
+++        assert "0xAAA" not in str(r)
+++        assert r["identity_fields"] == ["walletAddress"]
+++
+++    def test_an_unreadable_account_is_not_a_mismatch(self, client):
+++        client.account.raises = ConnectionError("reset")
+++        r = rr.account_identity("0xabc")
+++        assert r["verdict"] == "unreadable"
+++
+++    def test_nothing_configured_says_so(self, client):
+++        client.account._balances = {"balances": [{"proxyAddress": "0xAAA"}]}
+++        r = rr.account_identity(None)
+++        assert r["verdict"] == "no_expected"
+++        assert "0xAAA" not in str(r)
+++
+++    def test_the_verdict_is_the_whole_public_answer(self, client):
+++        """Whatever the outcome, a balance never comes back either."""
+++        client.account._balances = {
+++            "balances": [{"currentBalance": "20972.89",
+++                          "accountId": "0xAAA"}]}
+++        for expected in ("0xaaa", "0xbbb", None):
+++            r = rr.account_identity(expected)
+++            assert "20972.89" not in str(r)
+++            assert "0xAAA" not in str(r)
+++
+++
+++# ── the probe: key names only ────────────────────────────────────────
+++
+++class TestCapabilityProbeReturnsNoValues:
+++
+++    def test_it_returns_key_names_and_no_values(self, client):
+++        client.account._balances = {
+++            "balances": [{"currentBalance": "20972.89",
+++                          "accountId": "0xSECRETACCOUNT"}]}
+++        client.orders.pages = [{"orders": [{"orderId": "ord-123"}],
+++                                "eof": True}]
+++        p = rr.capability_probe()
+++        blob = str(p)
+++        assert "20972.89" not in blob
+++        assert "0xSECRETACCOUNT" not in blob
+++        assert "ord-123" not in blob
+++        assert p["read_values"] is False
+++
+++    def test_it_names_the_identity_field_when_one_exists(self, client):
+++        client.account._balances = {"balances": [{"accountId": "x"}]}
+++        p = rr.capability_probe()
+++        assert p["identity_available"] is True
+++        assert "accountId" in p["identity_fields_found"]
+++
+++    def test_it_reports_absence_as_absence(self, client):
+++        client.account._balances = {"balances": [{"currentBalance": "1"}]}
+++        p = rr.capability_probe()
+++        assert p["identity_available"] is False
+++        assert p["identity_fields_found"] == []
+++
+++    def test_one_endpoint_failing_does_not_fail_the_probe(self, client):
+++        client.orders.raises = ConnectionError("reset")
+++        p = rr.capability_probe()
+++        assert p["orders"]["ok"] is False
+++        assert p["balances"]["ok"] is True
+++
+++    def test_it_reads_one_page_of_each(self, client):
+++        seen = {}
+++
+++        def cap_positions(params=None):
+++            seen["positions"] = dict(params or {})
+++            return {"positions": {}, "eof": True}
+++
+++        def cap_acts(params=None):
+++            seen["activities"] = dict(params or {})
+++            return {"activities": [], "eof": True}
+++
+++        client.portfolio.positions = cap_positions
+++        client.portfolio.activities = cap_acts
+++        rr.capability_probe()
+++        assert seen["positions"]["limit"] == 1
+++        assert seen["activities"]["limit"] == 1
+++
+++
+++class TestNothingHereCanWrite:
+++
+++    def test_no_submission_or_write_path_is_reachable(self):
+++        import inspect
+++
+++        src = inspect.getsource(rr)
+++        for forbidden in ("orders.create", "orders.close_position",
+++                          "submit_fok", "INSERT", "UPDATE ", "DELETE "):
+++            assert forbidden not in src, forbidden
+++
+++    def test_it_uses_the_existing_runtime_credentials_only(self):
+++        import inspect
+++
+++        src = inspect.getsource(rr)
+++        assert "pmus._get_client" in src
+++        for forbidden in ("pmus_secret_key", "pmus_key_id", "os.environ"):
+++            assert forbidden not in src, (
+++                "%s appears; credentials must stay where they are" % forbidden)
++diff --git a/research/bettor_cohort_accounting.sql b/research/bettor_cohort_accounting.sql
++new file mode 100644
++index 0000000..5e570f8
++--- /dev/null
+++++ b/research/bettor_cohort_accounting.sql
++@@ -0,0 +1,264 @@
+++-- COHORT ACCOUNTING. The arrivals-minus-service subtraction was wrong.
+++--
+++-- WHAT I CLAIMED AND WHY IT DOES NOT FOLLOW. I took a six-hour window,
+++-- computed arrivals 3.286 and achieved service 2.565 follow-up reads per
+++-- minute, subtracted, and called the 0.721/min difference "21.9% of created
+++-- work never serviced". Review is right that this does not follow:
+++--
+++--   * an observation admitted at minute 355 of a 359-minute window owes
+++--     reads at 60s, 300s, 900s and 3600s. Three of those four are not due
+++--     yet. Counting them as created-and-unserviced counts work that is
+++--     simply in the future;
+++--   * reads completed INSIDE the window belong to observations admitted
+++--     BEFORE it, so the numerator and the denominator are not the same
+++--     cohort at all.
+++--
+++-- The difference of two rates measured over one window is not a
+++-- completion rate. A flow identity is.
+++--
+++-- THE IDENTITY THIS FILE RECONCILES, over a window [A, B]:
+++--
+++--     opening_outstanding + new_obligations
+++--         = completed + terminal + closing_outstanding
+++--
+++-- HOW AN OBLIGATION IS COUNTED. bettor_state_mids rows are written when a
+++-- read is ATTEMPTED, never pre-created as pending, so outstanding work is
+++-- implied by the (observation_id, horizon_s) pairs that have no row. For
+++-- each observation at T0 and each of the four horizons h:
+++--
+++--     due(h)         = T0 + h
+++--     last_chance(h) = T0 + h + tolerance(30s) + recovery(600s)
+++--
+++--     row present                   -> RESOLVED, classified by timing_class
+++--     no row, B <  last_chance(h)   -> PENDING   (not yet failed)
+++--     no row, B >= last_chance(h)   -> EXPIRED   (never read, and now
+++--                                                 never will be)
+++--
+++-- PENDING IS NOT MISSING. Conflating them is what produced the 21.9%.
+++--
+++-- ELIGIBLE COHORT FOR DEADLINE PERFORMANCE: only observations old enough
+++-- that ALL FOUR horizons have had their full chance --
+++-- T0 <= B - (3600 + 30 + 600) = B - 4230s. A younger observation cannot
+++-- fail its 3600s read yet, so including it flatters the rate.
+++--
+++-- Read only.
+++\echo == 0. WHAT STATUSES AND TIMING CLASSES EXIST, AND HOW MANY ==
+++-- Attempts, successes and retries are different things. Before any rate is
+++-- computed, show what the status column actually holds.
+++SELECT status, timing_class, count(*) AS rows,
+++       count(*) FILTER (WHERE read_at IS NULL) AS no_read_at,
+++       count(*) FILTER (WHERE actual_lag_s IS NULL) AS no_lag,
+++       count(*) FILTER (WHERE actual_lag_s !~ '^[0-9]+(\.[0-9]+)?$'
+++                          AND actual_lag_s IS NOT NULL) AS lag_unparsable
+++  FROM bettor_state_mids
+++ WHERE written_at > now() - interval '24 hours'
+++ GROUP BY 1, 2
+++ ORDER BY 3 DESC;
+++
+++\echo
+++\echo == 1. IS ONE ROW ONE ATTEMPT, OR ONE TASK ==
+++-- PRIMARY KEY (observation_id, horizon_s) means a retry OVERWRITES rather
+++-- than appending, so the table cannot show retry counts. If that is so,
+++-- attempts are not recoverable from here and the report must say so
+++-- instead of quoting an attempt-based rate.
+++SELECT count(*) AS mid_rows,
+++       count(DISTINCT (observation_id, horizon_s)) AS distinct_tasks,
+++       count(*) = count(DISTINCT (observation_id, horizon_s))
+++           AS one_row_per_task
+++  FROM bettor_state_mids
+++ WHERE written_at > now() - interval '24 hours';
+++
+++\echo
+++\echo == 2. THE FLOW IDENTITY OVER A SIX-HOUR WINDOW ==
+++WITH bounds AS (
+++  SELECT now() - interval '6 hours' AS a, now() AS b,
+++         30.0 AS tol_s, 600.0 AS recovery_s
+++), h AS (
+++  SELECT unnest(ARRAY[60, 300, 900, 3600]) AS horizon_s
+++), ob AS (
+++  SELECT o.observation_id, o.observed_at, h.horizon_s,
+++         o.observed_at + make_interval(secs => h.horizon_s)      AS due_at,
+++         o.observed_at + make_interval(
+++             secs => h.horizon_s + bounds.tol_s + bounds.recovery_s)
+++                                                                 AS last_chance
+++    FROM bettor_state_observations o
+++   CROSS JOIN h
+++   CROSS JOIN bounds
+++   WHERE o.observed_at > bounds.a - interval '3 hours'
+++), j AS (
+++  SELECT ob.*, m.written_at AS resolved_at, m.timing_class
+++    FROM ob
+++    LEFT JOIN bettor_state_mids m
+++           ON m.observation_id = ob.observation_id
+++          AND m.horizon_s = ob.horizon_s
+++)
+++SELECT
+++  -- outstanding at A: created before A, not resolved by A, not yet expired
+++  count(*) FILTER (
+++    WHERE observed_at < (SELECT a FROM bounds)
+++      AND (resolved_at IS NULL OR resolved_at >= (SELECT a FROM bounds))
+++      AND last_chance >= (SELECT a FROM bounds))        AS opening_outstanding,
+++  count(*) FILTER (
+++    WHERE observed_at >= (SELECT a FROM bounds)
+++      AND observed_at <  (SELECT b FROM bounds))        AS new_obligations,
+++  count(*) FILTER (
+++    WHERE resolved_at >= (SELECT a FROM bounds)
+++      AND resolved_at <  (SELECT b FROM bounds))        AS completed_in_window,
+++  count(*) FILTER (
+++    WHERE resolved_at IS NULL
+++      AND last_chance >= (SELECT a FROM bounds)
+++      AND last_chance <  (SELECT b FROM bounds))        AS expired_in_window,
+++  count(*) FILTER (
+++    WHERE resolved_at IS NULL
+++      AND last_chance >= (SELECT b FROM bounds))        AS closing_outstanding
+++  FROM j;
+++
+++\echo
+++\echo == 3. THE SAME NUMBERS, RECONCILED, SO A GAP CANNOT HIDE ==
+++-- opening + new - completed - expired - closing must be 0. Anything else
+++-- means an obligation is being counted twice or not at all, and the
+++-- residual is printed rather than assumed away.
+++WITH bounds AS (
+++  SELECT now() - interval '6 hours' AS a, now() AS b,
+++         30.0 AS tol_s, 600.0 AS recovery_s
+++), h AS (
+++  SELECT unnest(ARRAY[60, 300, 900, 3600]) AS horizon_s
+++), j AS (
+++  SELECT o.observation_id, o.observed_at, h.horizon_s,
+++         o.observed_at + make_interval(
+++             secs => h.horizon_s + 30.0 + 600.0) AS last_chance,
+++         m.written_at AS resolved_at
+++    FROM bettor_state_observations o
+++   CROSS JOIN h
+++   CROSS JOIN bounds
+++    LEFT JOIN bettor_state_mids m
+++           ON m.observation_id = o.observation_id AND m.horizon_s = h.horizon_s
+++   WHERE o.observed_at > bounds.a - interval '3 hours'
+++), t AS (
+++  SELECT
+++    count(*) FILTER (WHERE observed_at < (SELECT a FROM bounds)
+++                       AND (resolved_at IS NULL
+++                            OR resolved_at >= (SELECT a FROM bounds))
+++                       AND last_chance >= (SELECT a FROM bounds)) AS opening,
+++    count(*) FILTER (WHERE observed_at >= (SELECT a FROM bounds)
+++                       AND observed_at <  (SELECT b FROM bounds))  AS new_ob,
+++    count(*) FILTER (WHERE resolved_at >= (SELECT a FROM bounds)
+++                       AND resolved_at <  (SELECT b FROM bounds))  AS done,
+++    count(*) FILTER (WHERE resolved_at IS NULL
+++                       AND last_chance >= (SELECT a FROM bounds)
+++                       AND last_chance <  (SELECT b FROM bounds))  AS expired,
+++    count(*) FILTER (WHERE resolved_at IS NULL
+++                       AND last_chance >= (SELECT b FROM bounds))  AS closing
+++    FROM j
+++)
+++SELECT opening, new_ob, done, expired, closing,
+++       opening + new_ob AS inflow,
+++       done + expired + closing AS outflow,
+++       (opening + new_ob) - (done + expired + closing) AS residual_must_be_0
+++  FROM t;
+++
+++\echo
+++\echo == 4. DEADLINE PERFORMANCE ON AN ELIGIBLE COHORT ONLY ==
+++-- Only observations where every horizon has had its full chance:
+++-- observed_at <= now() - (3600 + 30 + 600) = now() - 4230s. Pending is
+++-- excluded by construction here, not by a filter that might drop it
+++-- silently -- an eligible observation has no pending horizons left.
+++WITH h AS (
+++  SELECT unnest(ARRAY[60, 300, 900, 3600]) AS horizon_s
+++), cohort AS (
+++  SELECT o.observation_id, o.observed_at
+++    FROM bettor_state_observations o
+++   WHERE o.observed_at <= now() - interval '4230 seconds'
+++     AND o.observed_at >  now() - interval '24 hours'
+++), j AS (
+++  SELECT c.observation_id, h.horizon_s, m.timing_class, m.status,
+++         m.written_at IS NOT NULL AS was_read
+++    FROM cohort c
+++   CROSS JOIN h
+++    LEFT JOIN bettor_state_mids m
+++           ON m.observation_id = c.observation_id AND m.horizon_s = h.horizon_s
+++)
+++SELECT horizon_s,
+++       count(*)                                            AS obligations,
+++       count(*) FILTER (WHERE was_read)                    AS read_at_all,
+++       count(*) FILTER (WHERE NOT was_read)                AS never_read,
+++       count(*) FILTER (WHERE timing_class = 'ON_TIME')        AS on_time,
+++       count(*) FILTER (WHERE timing_class = 'LATE_RECOVERY')  AS late,
+++       count(*) FILTER (WHERE timing_class = 'NOT_OBSERVABLE') AS not_obs,
+++       round((100.0 * count(*) FILTER (WHERE timing_class = 'ON_TIME')
+++              / nullif(count(*), 0))::numeric, 2)
+++           AS pct_on_time_of_obligations,
+++       round((100.0 * count(*) FILTER (WHERE timing_class = 'ON_TIME')
+++              / nullif(count(*) FILTER (WHERE was_read), 0))::numeric, 2)
+++           AS pct_on_time_of_reads_taken
+++  FROM j
+++ GROUP BY 1
+++ ORDER BY 1;
+++
+++\echo
+++\echo == 5. HOW BIG IS THE ELIGIBLE COHORT, AND WHAT IS STILL PENDING ==
+++SELECT count(*) FILTER (WHERE observed_at <= now() - interval '4230 seconds')
+++           AS eligible_observations,
+++       count(*) FILTER (WHERE observed_at >  now() - interval '4230 seconds')
+++           AS too_young_to_judge,
+++       count(*) AS observations_24h,
+++       min(observed_at) AS earliest, max(observed_at) AS latest
+++  FROM bettor_state_observations
+++ WHERE observed_at > now() - interval '24 hours';
+++
+++\echo
+++\echo == 6. THE REFUSAL BUCKETS, WITH WHAT THEY CANNOT SHOW ==
+++-- I wrote "at <=6 reads per tick refusals stay <=3%". My own seven-day
+++-- table gives 6 reads a 7.00% refusal rate. The claim contradicted the
+++-- evidence printed beside it and I did not notice.
+++--
+++-- Worse, the bucket is not an experiment. reads_in_tick is an OUTCOME of
+++-- adaptive pacing and early stopping: a tick that got refused issues
+++-- fewer reads and backs off, so low-read buckets are partly populated BY
+++-- refusals rather than being the conditions that avoided them. Nothing
+++-- here establishes that 7 requests CAUSE throttling or that 6 is safe.
+++--
+++-- What it can show: the joint distribution, with sample sizes, over both
+++-- windows, so the difference between them is visible.
+++SELECT win, reads_in_tick, ticks, reads_issued, rate_limited, pct_429
+++  FROM (
+++    SELECT '7d' AS win, (obs_attempted + fu_attempted) AS reads_in_tick,
+++           count(*) AS ticks,
+++           sum(obs_attempted + fu_attempted) AS reads_issued,
+++           sum(obs_rate_limited) AS rate_limited,
+++           round((100.0 * sum(obs_rate_limited)
+++                  / nullif(sum(obs_attempted + fu_attempted), 0))::numeric, 2)
+++               AS pct_429
+++      FROM bettor_capture_ticks
+++     WHERE tick_at > now() - interval '7 days'
+++     GROUP BY 1, 2
+++    UNION ALL
+++    SELECT '6h', (obs_attempted + fu_attempted),
+++           count(*), sum(obs_attempted + fu_attempted),
+++           sum(obs_rate_limited),
+++           round((100.0 * sum(obs_rate_limited)
+++                  / nullif(sum(obs_attempted + fu_attempted), 0))::numeric, 2)
+++      FROM bettor_capture_ticks
+++     WHERE tick_at > now() - interval '6 hours'
+++     GROUP BY 1, 2
+++  ) t
+++ ORDER BY reads_in_tick, win DESC;
+++
+++\echo
+++\echo == 7. THE CONFOUND, MADE VISIBLE ==
+++-- If reads_in_tick were an independent treatment, the pacing in force
+++-- would not vary systematically with it. It does: a refused tick backs
+++-- off and issues fewer reads next time, so each bucket carries its own
+++-- pacing distribution. Print it, so nobody reads the bucket table as an
+++-- experiment.
+++SELECT (obs_attempted + fu_attempted) AS reads_in_tick,
+++       count(*) AS ticks,
+++       round(avg(nullif(pacing_s, '')::numeric), 3) AS avg_pacing_s,
+++       round(min(nullif(pacing_s, '')::numeric), 2) AS min_pacing_s,
+++       round(max(nullif(pacing_s, '')::numeric), 2) AS max_pacing_s,
+++       round(avg(obs_skipped_budget)::numeric, 2)   AS avg_skipped_budget
+++  FROM bettor_capture_ticks
+++ WHERE tick_at > now() - interval '7 days'
+++   AND pacing_s IS NOT NULL AND pacing_s <> ''
+++ GROUP BY 1
+++ ORDER BY 1;
+diff --git a/research/beta48/acceptance/repair_diff_stat.txt b/research/beta48/acceptance/repair_diff_stat.txt
+new file mode 100644
+index 0000000..e6f6e63
+--- /dev/null
++++ b/research/beta48/acceptance/repair_diff_stat.txt
+@@ -0,0 +1,10 @@
++ backend/sportsassets/api/reconcile_read.py       | 339 ++++++++++++++++++
++ backend/sportsassets/bettor_admission.py         | 238 ++++++++++++-
++ backend/sportsassets/execution_gate.py           | 242 ++++++++++---
++ backend/tests/conftest.py                        |   2 +-
++ backend/tests/test_admission_fractional.py       | 308 ++++++++++++++++
++ backend/tests/test_execution_gate_fail_open.py   | 436 +++++++++++++++++++++++
++ backend/tests/test_execution_gate_integration.py |  54 ++-
++ backend/tests/test_reconcile_read.py             | 335 +++++++++++++++++
++ research/bettor_cohort_accounting.sql            | 264 ++++++++++++++
++ 9 files changed, 2136 insertions(+), 82 deletions(-)
+diff --git a/research/beta48/acceptance/repair_tests.xml b/research/beta48/acceptance/repair_tests.xml
+new file mode 100644
+index 0000000..12c7221
+--- /dev/null
++++ b/research/beta48/acceptance/repair_tests.xml
+@@ -0,0 +1 @@
++<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="0" skipped="0" tests="217" time="4.203" timestamp="2026-09-21T16:29:50.811048+00:00" hostname="vm"><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_the_exact_reproduction_from_the_review" time="0.041" /><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_a_failed_read_immediately_after_an_allowed_read" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_the_read_raising_inside_read_state_also_denies" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_describe_may_be_stale_and_says_so" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache" name="test_sync_authorize_on_the_loop_thread_denies" time="0.001" /><testcase classname="tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache" name="test_authorize_async_is_the_supported_path_and_is_fresh" time="0.001" /><testcase classname="tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache" name="test_authorize_async_denies_when_the_read_fails" time="0.001" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[0-zero is a number, not false]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[1-one is a number, not true]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[[]-an empty list is not false]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[{}-an empty object is not false]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[null-null is not false]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[&quot;&quot;-an empty string is not false]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[&quot;false&quot;-the WORD false, quoted, is a string]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[0.0-a float is not a boolean]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[[false]-a list containing false is not false]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_malformed_values_deny[not json at all]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_malformed_values_deny[{]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_malformed_values_deny[tru]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_an_absent_row_denies" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_the_two_real_values_work[true-True]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_the_two_real_values_work[false-False]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_a_real_python_bool_from_a_decoding_driver" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_parse_switch_directly" time="0.001" /><testcase classname="tests.test_execution_gate_fail_open.TestCancellationStaysOpen" name="test_cancel_is_not_gated_even_when_everything_denies" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestCancellationStaysOpen" name="test_submit_and_close_are_gated" time="0.006" /><testcase classname="tests.test_execution_gate_integration" name="test_the_fixture_is_off_in_this_module" time="0.001" /><testcase classname="tests.test_execution_gate_integration" name="test_cold_start_denies" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_cold_start_denies_close_too" time="0.001" /><testcase classname="tests.test_execution_gate_integration" name="test_an_authorized_bound_gate_permits_the_submission" time="0.005" /><testcase classname="tests.test_execution_gate_integration" name="test_the_switch_is_read_at_every_submission_not_once" time="0.005" /><testcase classname="tests.test_execution_gate_integration" name="test_bad_control_state_denies_through_the_real_path[paused true-pool0-live_trading_paused]" time="0.005" /><testcase classname="tests.test_execution_gate_integration" name="test_bad_control_state_denies_through_the_real_path[row absent-pool1-authorization_unavailable]" time="0.004" /><testcase classname="tests.test_execution_gate_integration" name="test_bad_control_state_denies_through_the_real_path[malformed-pool2-authorization_unavailable]" time="0.004" /><testcase classname="tests.test_execution_gate_integration" name="test_bad_control_state_denies_through_the_real_path[read raises-pool3-authorization_unavailable]" time="0.004" /><testcase classname="tests.test_execution_gate_integration" name="test_a_read_that_never_returns_denies" time="2.504" /><testcase classname="tests.test_execution_gate_integration" name="test_no_active_venue_denies_through_the_real_path" time="0.003" /><testcase classname="tests.test_execution_gate_integration" name="test_a_pause_between_queueing_and_submitting_blocks_it" time="0.003" /><testcase classname="tests.test_execution_gate_integration" name="test_a_retry_after_a_halt_is_blocked" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_stale_snapshot_is_not_reused_past_its_bound" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_the_workers_service_binds_the_gate_before_any_loop_runs" time="0.001" /><testcase classname="tests.test_execution_gate_integration" name="test_the_binding_helper_actually_binds" time="0.001" /><testcase classname="tests.test_execution_gate_integration" name="test_a_binding_failure_leaves_the_gate_denying" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_the_api_service_binds_the_gate_in_its_lifespan" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_every_order_capable_entry_point_is_covered_by_a_binding" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_an_undeclared_lane_gets_the_copy_controls" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[]" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[MANUAL]" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[manual ]" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[ manual]" time="0.004" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[admin]" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[root]" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[manual;copy]" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[global]" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[none]" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_a_lane_that_is_not_exactly_manual_gets_the_copy_controls[bypass]" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_the_manual_lane_is_still_bound_by_the_global_controls" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_the_lane_does_not_leak_out_of_its_scope" time="0.003" /><testcase classname="tests.test_execution_gate_integration" name="test_cancel_works_while_paused" time="0.002" /><testcase classname="tests.test_execution_gate_integration" name="test_this_file_injects_no_snapshot" time="0.006" /><testcase classname="tests.test_execution_gate_integration" name="test_authorize_on_the_loop_thread_denies_without_a_fresh_snapshot" time="0.001" /><testcase classname="tests.test_execution_gate_integration" name="test_the_loop_thread_never_uses_a_snapshot_however_fresh" time="0.002" /><testcase classname="tests.test_admission_fractional.TestV3IsARecordedDefect" name="test_v3_admits_one_per_tick_with_a_backlog_of_one_hundred" time="0.001" /><testcase classname="tests.test_admission_fractional.TestV3IsARecordedDefect" name="test_v3_creates_exactly_twice_the_service_rate" time="0.001" /><testcase classname="tests.test_admission_fractional.TestV3IsARecordedDefect" name="test_the_v1_latch_is_still_reproducible_too" time="0.001" /><testcase classname="tests.test_admission_fractional.TestFractionalRateIsTheSustainableRate" name="test_one_observation_every_two_ticks_at_the_example_capacity" time="0.001" /><testcase classname="tests.test_admission_fractional.TestFractionalRateIsTheSustainableRate" name="test_intake_never_exceeds_service" time="0.001" /><testcase classname="tests.test_admission_fractional.TestFractionalRateIsTheSustainableRate" name="test_zero_ticks_happen_and_are_not_a_latch" time="0.001" /><testcase classname="tests.test_admission_fractional.TestFractionalRateIsTheSustainableRate" name="test_a_larger_reserve_admits_more_than_one_per_tick" time="0.002" /><testcase classname="tests.test_admission_fractional.TestForwardObligations" name="test_obligations_not_yet_due_still_stop_admission" time="0.001" /><testcase classname="tests.test_admission_fractional.TestForwardObligations" name="test_a_modest_forward_book_still_admits" time="0.001" /><testcase classname="tests.test_admission_fractional.TestForwardObligations" name="test_a_missing_outstanding_count_is_reported_not_assumed" time="0.001" /><testcase classname="tests.test_admission_fractional.TestCreditsAreBounded" name="test_a_long_saturated_stretch_does_not_bank_a_burst" time="0.001" /><testcase classname="tests.test_admission_fractional.TestCreditsAreBounded" name="test_recovery_reaches_the_steady_rate_after_the_queue_clears" time="0.001" /><testcase classname="tests.test_admission_fractional.TestCreditsAreBounded" name="test_no_reserve_earns_no_credit" time="0.001" /><testcase classname="tests.test_admission_fractional.TestVaryingConditions" name="test_measured_read_failures_reduce_intake" time="0.004" /><testcase classname="tests.test_admission_fractional.TestVaryingConditions" name="test_capacity_that_rises_and_falls" time="0.003" /><testcase classname="tests.test_admission_fractional.TestVaryingConditions" name="test_a_backlog_actually_drains" time="0.003" /><testcase classname="tests.test_admission_fractional.TestVaryingConditions" name="test_admission_never_exceeds_the_sample_budget" time="0.001" /><testcase classname="tests.test_admission_fractional.TestTheFloorIsNoLongerMandatory" name="test_admit_floor_is_not_applied_by_the_account" time="0.004" /><testcase classname="tests.test_admission_fractional.TestTheFloorIsNoLongerMandatory" name="test_all_four_horizons_are_still_assumed" time="0.001" /><testcase classname="tests.test_admission_control" name="test_the_gate_measures_and_does_not_enforce" time="0.001" /><testcase classname="tests.test_admission_control" name="test_the_threshold_that_latched_shut_is_recorded" time="0.001" /><testcase classname="tests.test_admission_control" name="test_one_observation_creates_one_task_per_horizon" time="0.001" /><testcase classname="tests.test_admission_control" name="test_the_backlog_is_still_counted_across_every_horizon" time="0.001" /><testcase classname="tests.test_admission_control" name="test_declined_work_is_never_counted_as_lost_work" time="0.005" /><testcase classname="tests.test_admission_control" name="test_the_throttle_is_visible_in_telemetry_or_it_does_not_exist" time="0.003" /><testcase classname="tests.test_admission_control" name="test_the_sampling_change_is_versioned_so_rows_stay_separable" time="0.001" /><testcase classname="tests.test_admission_control" name="test_admission_does_not_touch_the_scientific_tolerances" time="0.001" /><testcase classname="tests.test_admission_control" name="test_requests_still_never_exceed_the_tick_budget" time="0.002" /><testcase classname="tests.test_admission_policies" name="test_drain_time_is_a_time_and_sustainable_intake_is_a_rate" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_sustainable_intake_is_service_divided_by_horizons" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_never_admits_zero[0]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_never_admits_zero[5]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_never_admits_zero[20]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_never_admits_zero[100]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_never_admits_zero[10000]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_never_admits_zero[1000000]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v1_does_admit_zero_and_that_is_why_it_is_kept" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_brakes_when_the_queue_misses_its_deadline" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_explains_itself_in_seconds" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_harness_reproduces_the_v1_blackout" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_an_empty_queue_hides_the_regression" time="0.003" /><testcase classname="tests.test_admission_policies" name="test_v3_keeps_collecting_through_the_same_scenario" time="0.002" /><testcase classname="tests.test_admission_policies" name="test_v1_recovers_if_left_alone_and_the_harness_says_so" time="0.002" /><testcase classname="tests.test_admission_policies" name="test_every_task_created_has_exactly_one_end[BETTOR_ADMISSION_V0_NONE]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_every_task_created_has_exactly_one_end[BETTOR_ADMISSION_V1_CAPACITY_AWARE]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_every_task_created_has_exactly_one_end[BETTOR_ADMISSION_V2_MEASURE_ONLY]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_every_task_created_has_exactly_one_end[BETTOR_ADMISSION_V3_DRAIN_TIME]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_rate_is_taken_over_created_not_over_attempts[BETTOR_ADMISSION_V0_NONE]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_rate_is_taken_over_created_not_over_attempts[BETTOR_ADMISSION_V1_CAPACITY_AWARE]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_rate_is_taken_over_created_not_over_attempts[BETTOR_ADMISSION_V2_MEASURE_ONLY]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_rate_is_taken_over_created_not_over_attempts[BETTOR_ADMISSION_V3_DRAIN_TIME]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_declined_observations_are_reported_outside_the_rate" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_every_policy_sees_the_same_workload" time="0.003" /><testcase classname="tests.test_admission_policies" name="test_the_classification_rules_are_not_retuned_per_policy" time="0.003" /><testcase classname="tests.test_admission_policies" name="test_an_oversubscribed_workload_is_reported_infeasible" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_feasible_choices_are_quantified_not_gestured_at" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_a_workload_within_budget_is_reported_feasible" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_no_policy_is_described_as_fixing_an_infeasible_workload" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v1_admits_nothing_at_the_real_budget_whatever_the_backlog[6-3]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v1_admits_nothing_at_the_real_budget_whatever_the_backlog[4-2]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v1_admits_nothing_at_the_real_budget_whatever_the_backlog[2-1]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_admits_at_every_budget_whatever_the_backlog[10-5]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_admits_at_every_budget_whatever_the_backlog[6-3]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_admits_at_every_budget_whatever_the_backlog[4-2]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v3_admits_at_every_budget_whatever_the_backlog[2-1]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_measured_budget_is_the_one_that_matters" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v1_failure_one_integer_division_reduces_admission_to_zero" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_v1_failure_two_a_level_is_compared_with_a_per_tick_flow" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_candidate_survives_both_failures_independently[1]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_candidate_survives_both_failures_independently[2]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_candidate_survives_both_failures_independently[3]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_candidate_survives_both_failures_independently[8]" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_every_option_names_what_it_costs" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_the_sampling_change_is_named_as_one" time="0.001" /><testcase classname="tests.test_admission_policies" name="test_no_option_claims_to_be_free" time="0.001" /><testcase classname="tests.test_reconcile_read.TestRestingOrdersDistinguishUnreadableFromEmpty" name="test_a_genuinely_empty_book_is_ok_with_zero" time="0.001" /><testcase classname="tests.test_reconcile_read.TestRestingOrdersDistinguishUnreadableFromEmpty" name="test_none_is_a_failed_read_not_an_empty_book" time="0.001" /><testcase classname="tests.test_reconcile_read.TestRestingOrdersDistinguishUnreadableFromEmpty" name="test_an_absent_orders_key_is_a_failed_read" time="0.001" /><testcase classname="tests.test_reconcile_read.TestRestingOrdersDistinguishUnreadableFromEmpty" name="test_a_non_mapping_response_is_a_failed_read" time="0.001" /><testcase classname="tests.test_reconcile_read.TestRestingOrdersDistinguishUnreadableFromEmpty" name="test_orders_not_a_list_is_a_failed_read" time="0.001" /><testcase classname="tests.test_reconcile_read.TestRestingOrdersDistinguishUnreadableFromEmpty" name="test_an_exception_propagates_as_unreadable" time="0.001" /><testcase classname="tests.test_reconcile_read.TestRestingOrdersDistinguishUnreadableFromEmpty" name="test_real_orders_come_back" time="0.001" /><testcase classname="tests.test_reconcile_read.TestRestingOrdersDistinguishUnreadableFromEmpty" name="test_it_is_the_venue_not_the_manual_lane_table" time="0.002" /><testcase classname="tests.test_reconcile_read.TestHistoricalActivityFinishesOrSaysItDidNot" name="test_it_pages_past_six" time="0.001" /><testcase classname="tests.test_reconcile_read.TestHistoricalActivityFinishesOrSaysItDidNot" name="test_hitting_the_page_bound_is_reported_not_hidden" time="0.001" /><testcase classname="tests.test_reconcile_read.TestHistoricalActivityFinishesOrSaysItDidNot" name="test_eof_without_a_cursor_stops_cleanly" time="0.001" /><testcase classname="tests.test_reconcile_read.TestHistoricalActivityFinishesOrSaysItDidNot" name="test_an_empty_book_is_complete_not_broken" time="0.001" /><testcase classname="tests.test_reconcile_read.TestHistoricalActivityFinishesOrSaysItDidNot" name="test_a_failure_mid_walk_raises_rather_than_truncating" time="0.001" /><testcase classname="tests.test_reconcile_read.TestHistoricalActivityFinishesOrSaysItDidNot" name="test_it_asks_for_trades_and_resolutions" time="0.001" /><testcase classname="tests.test_reconcile_read.TestAccountIdentityNeverLeaksTheIdentifier" name="test_no_identity_field_stays_a_blocker" time="0.001" /><testcase classname="tests.test_reconcile_read.TestAccountIdentityNeverLeaksTheIdentifier" name="test_a_match_reports_the_field_not_the_value" time="0.001" /><testcase classname="tests.test_reconcile_read.TestAccountIdentityNeverLeaksTheIdentifier" name="test_a_mismatch_reports_the_field_not_the_value" time="0.001" /><testcase classname="tests.test_reconcile_read.TestAccountIdentityNeverLeaksTheIdentifier" name="test_an_unreadable_account_is_not_a_mismatch" time="0.001" /><testcase classname="tests.test_reconcile_read.TestAccountIdentityNeverLeaksTheIdentifier" name="test_nothing_configured_says_so" time="0.001" /><testcase classname="tests.test_reconcile_read.TestAccountIdentityNeverLeaksTheIdentifier" name="test_the_verdict_is_the_whole_public_answer" time="0.001" /><testcase classname="tests.test_reconcile_read.TestCapabilityProbeReturnsNoValues" name="test_it_returns_key_names_and_no_values" time="0.001" /><testcase classname="tests.test_reconcile_read.TestCapabilityProbeReturnsNoValues" name="test_it_names_the_identity_field_when_one_exists" time="0.001" /><testcase classname="tests.test_reconcile_read.TestCapabilityProbeReturnsNoValues" name="test_it_reports_absence_as_absence" time="0.001" /><testcase classname="tests.test_reconcile_read.TestCapabilityProbeReturnsNoValues" name="test_one_endpoint_failing_does_not_fail_the_probe" time="0.001" /><testcase classname="tests.test_reconcile_read.TestCapabilityProbeReturnsNoValues" name="test_it_reads_one_page_of_each" time="0.001" /><testcase classname="tests.test_reconcile_read.TestNothingHereCanWrite" name="test_no_submission_or_write_path_is_reachable" time="0.001" /><testcase classname="tests.test_reconcile_read.TestNothingHereCanWrite" name="test_it_uses_the_existing_runtime_credentials_only" time="0.001" /><testcase classname="tests.test_gate_fails_closed" name="test_state_1_a_stored_row_is_what_the_order_path_uses" time="0.002" /><testcase classname="tests.test_gate_fails_closed" name="test_state_2_no_row_is_the_env_then_the_default" time="0.001" /><testcase classname="tests.test_gate_fails_closed" name="test_state_3_a_failed_read_is_closed_not_the_last_value_and_not_the_default" time="0.002" /><testcase classname="tests.test_gate_fails_closed" name="test_a_failure_at_boot_is_closed_not_the_default" time="0.002" /><testcase classname="tests.test_gate_fails_closed" name="test_an_unreadable_empty_set_does_not_disable_the_gate" time="0.002" /><testcase classname="tests.test_gate_fails_closed" name="test_the_clips_failing_alone_closes_the_pair" time="0.002" /><testcase classname="tests.test_gate_fails_closed" name="test_a_stored_roster_that_is_not_a_roster_stays_closed" time="0.002" /><testcase classname="tests.test_gate_fails_closed" name="test_a_later_successful_read_reopens_on_the_stored_value" time="0.002" /><testcase classname="tests.test_gate_fails_closed" name="test_reopening_onto_no_row_is_state_2_not_a_stuck_close" time="0.001" /><testcase classname="tests.test_gate_fails_closed" name="test_the_closed_value_is_cached_and_the_retry_is_paced" time="0.004" /><testcase classname="tests.test_gate_fails_closed" name="test_a_failure_does_not_start_the_open_ttl" time="0.002" /><testcase classname="tests.test_gate_fails_closed" name="test_the_read_is_bounded_by_a_timeout" time="0.102" /><testcase classname="tests.test_gate_fails_closed" name="test_nothing_is_adopted_until_both_reads_return" time="0.002" /><testcase classname="tests.test_gate_fails_closed" name="test_a_concurrent_edge_is_logged_once" time="0.022" /><testcase classname="tests.test_gate_fails_closed" name="test_no_pool_is_a_failed_read_at_both_money_paths" time="0.021" /><testcase classname="tests.test_gate_fails_closed" name="test_mirror_live_refreshes_the_pair_every_tick" time="0.040" /><testcase classname="tests.test_gate_fails_closed" name="test_the_transitions_are_logged_once_each" time="0.003" /><testcase classname="tests.test_gate_fails_closed" name="test_the_gates_payload_says_what_the_executor_will_do" time="0.368" /><testcase classname="tests.test_gate_fails_closed" name="test_no_order_path_reads_the_roster_or_clips_around_the_closed_state" time="0.242" /><testcase classname="tests.test_gate_fails_closed" name="test_the_gates_payload_reads_nothing_around_the_closed_state" time="0.004" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_submit_never_reaches_the_venue[kill switch engaged]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_submit_never_reaches_the_venue[no active venue]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_submit_never_reaches_the_venue[copy halted]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_submit_never_reaches_the_venue[loss breaker tripped]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_submit_never_reaches_the_venue[spend breaker tripped]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_submit_never_reaches_the_venue[state unreadable]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_close_never_reaches_the_venue[kill switch engaged]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_close_never_reaches_the_venue[no active venue]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_close_never_reaches_the_venue[copy halted]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_close_never_reaches_the_venue[loss breaker tripped]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_close_never_reaches_the_venue[spend breaker tripped]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_blocked_close_never_reaches_the_venue[state unreadable]" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_an_authorized_submit_still_submits" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_an_authorized_close_still_closes" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_an_unbound_gate_denies" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_an_absent_switch_row_denies" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_malformed_switch_value_denies" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_an_unreadable_switch_denies" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_denying_snapshot_is_the_default_shape" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_stale_snapshot_does_not_authorize" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_the_gate_takes_no_caller_supplied_authorization" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_pausing_between_check_and_submit_blocks_the_submit" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_manual_lanes_face_every_global_control" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_a_manual_sell_is_stopped_by_the_kill_switch" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_the_copy_loss_breaker_does_not_stop_a_manual_operator" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_the_same_breaker_does_stop_the_copy_lane" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_an_undeclared_lane_gets_the_strictest_treatment" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_global_only_lanes_is_an_allowlist_not_a_blocklist" time="0.002" /><testcase classname="tests.test_execution_gate" name="test_cancel_is_not_gated" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_cancellation_is_a_separate_explicit_path" time="0.001" /><testcase classname="tests.test_execution_gate" name="test_both_venue_submitting_functions_are_gated" time="0.005" /><testcase classname="tests.test_execution_gate" name="test_the_gate_runs_before_the_client_is_built" time="0.005" /><testcase classname="tests.test_execution_gate" name="test_no_test_here_changed_a_production_flag" time="0.001" /></testsuite></testsuites>
+\ No newline at end of file
 diff --git a/research/bettor_cohort_accounting.sql b/research/bettor_cohort_accounting.sql
 new file mode 100644
 index 0000000..5e570f8

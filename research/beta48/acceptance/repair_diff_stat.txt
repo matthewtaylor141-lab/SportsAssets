@@ -1,10 +1,17 @@
- backend/sportsassets/api/reconcile_read.py       | 339 ++++++++++++++++++
- backend/sportsassets/bettor_admission.py         | 238 ++++++++++++-
- backend/sportsassets/execution_gate.py           | 242 ++++++++++---
- backend/tests/conftest.py                        |   2 +-
- backend/tests/test_admission_fractional.py       | 308 ++++++++++++++++
- backend/tests/test_execution_gate_fail_open.py   | 436 +++++++++++++++++++++++
- backend/tests/test_execution_gate_integration.py |  54 ++-
- backend/tests/test_reconcile_read.py             | 335 +++++++++++++++++
- research/bettor_cohort_accounting.sql            | 264 ++++++++++++++
- 9 files changed, 2136 insertions(+), 82 deletions(-)
+ backend/sportsassets/api/reconcile_read.py         |  339 +++
+ backend/sportsassets/bettor_admission.py           |  238 +-
+ backend/sportsassets/execution_gate.py             |  242 +-
+ backend/tests/conftest.py                          |    2 +-
+ backend/tests/test_admission_fractional.py         |  308 +++
+ backend/tests/test_execution_gate.py               |   11 +-
+ backend/tests/test_execution_gate_fail_open.py     |  436 ++++
+ backend/tests/test_execution_gate_integration.py   |   54 +-
+ backend/tests/test_reconcile_read.py               |  335 +++
+ research/beta48/acceptance/FINAL_HANDOFF.md        |   27 +
+ research/beta48/acceptance/REPAIR_195ee01.md       |  383 +++
+ .../gate_tests_against_defective_code.xml          |  243 ++
+ .../acceptance/repair_diff_from_195ee01.patch      | 2443 ++++++++++++++++++++
+ research/beta48/acceptance/repair_diff_stat.txt    |   10 +
+ research/beta48/acceptance/repair_tests.xml        |    1 +
+ research/bettor_cohort_accounting.sql              |  264 +++
+ 16 files changed, 5252 insertions(+), 84 deletions(-)
