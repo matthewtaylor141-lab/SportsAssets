@@ -2,7 +2,7 @@
 
 | | |
 |---|---|
-| **prepared on** | `claude/bettor-observation-repair` |
+| **prepared on** | `claude/bettor-observation-repair` @ **`f13f9474`** |
 | **based on** | production `255a7d38a1b3d72ddc33625370d8c0af2023b5b5` |
 | **auto-deploys** | **NO** — verified, see §5 |
 | current production | `claude/session-njaewf` @ `255a7d38`, loop DEREGISTERED |
@@ -335,7 +335,7 @@ separately reversible:
 
 | | |
 |---|---|
-| **activation SHA** | see below |
+| **activation SHA** | `f13f9474c71289856a3e5a04bf0e3aa7305b5849` |
 | branch | `claude/bettor-observation-repair` |
 | destination when authorized | `claude/session-njaewf` |
 | force | **never** |
