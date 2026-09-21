@@ -625,6 +625,73 @@ ELIGIBILITY_VERSION = "BETTOR_ELIGIBILITY_V3_EARLY_30"
 # declaration before row one. Bundling it with a scheduling repair
 # would make neither attributable, and changing a frozen sampling rule
 # quietly is the one thing this contract exists to prevent.
+MEASUREMENT_WINDOW_W4 = {
+    "id": "POST_ALLOWANCE_RESTORE_AND_ONTIME_ORDERING_W4",
+    "declaredAt": "2026-09-21T01:06Z",
+    "deployed": "af6ddf1, workers live 2026-09-21T00:54:41Z",
+    "startsAt": "2026-09-21T01:15:00Z",
+    "endsAt": "2026-09-21T01:45:00Z",
+    # WHY THE START IS NOT DEPLOY + 10 MINUTES THIS TIME.
+    # I ran a deployment-verification read at 01:04:16Z covering
+    # 00:54:41Z onward, so I have ALREADY SEEN the first ten minutes of
+    # V4 behaviour -- 11 of 37 reads inside band. A window whose
+    # criteria I set after seeing its data is not a test. W4 therefore
+    # starts after that, and the verification interval is excluded from
+    # the cohort rather than folded into it.
+    "boundsFixedBy": (
+        "deliberately LATER than the usual deploy+10min rule, because "
+        "a verification read at 01:04:16Z already exposed V4's first "
+        "ten minutes. Those rows are excluded, not reused"),
+    "earlyObservationNotAResult": (
+        "the verification read showed 11 of 37 reads inside band "
+        "against 1 of 122 before V4, and median overdue 327s against "
+        "538-549s. THAT IS TEN MINUTES, spanning a deploy, on a "
+        "draining backlog, including observations created under V3. It "
+        "is an indication that the ordering change is live and doing "
+        "something. It is NOT a measurement and is not scored"),
+    "cohort": ("observations whose observed_at falls inside the "
+               "window, followed to each horizon's own recovery "
+               "deadline -- fully mature at 02:55:00Z. Identical "
+               "construction to W1, W2 and W3"),
+    "PASS_IF": {
+        "ON_TIME_300S": (
+            ">= 40% of the 300s cohort ON_TIME. Unchanged from W3's "
+            "bar, deliberately: W3 scored 0% against it and the bar is "
+            "not moved because the result was bad"),
+        "ON_TIME_ANY_HORIZON": (
+            "> 0% at every horizon with eligible cohort demand. W3 "
+            "returned zero at all four; anything above zero is the "
+            "first gate-admissible evidence this capture has produced"),
+        "SERVICE_NOT_REGRESSED": (
+            "attempts > 0 at all four horizons, as W3 achieved. The "
+            "ordering change must not buy timing by re-starving a "
+            "horizon"),
+        "REQUEST_RATE_NOT_INCREASED": (
+            "reads per tick at any given pacing no higher than W3's. "
+            "The allowance was restored, so at pacing >= 5.063 it must "
+            "be strictly LOWER -- one read where V3 sent two"),
+    },
+    "FAIL_IF": (
+        "on-time remains 0 at every horizon after maturity, which "
+        "would mean ordering is not the binding constraint either and "
+        "the diagnosis is wrong"),
+    "whatW4CannotEstablish": (
+        "W4 cannot fix loss. Intake creates ~5.85 eligible tasks/min "
+        "against ~2.03 completed and ~4.02 expire unread; ordering "
+        "changes WHICH tasks are served, not how many. Expect roughly "
+        "two thirds of follow-up work still to expire. A W4 that "
+        "raises on-time share while loss stays flat is the PREDICTED "
+        "result, not a partial failure"),
+    "budgetCorrectionNotYetExercised": (
+        "the restored floor differs from the old one only at pacing "
+        ">= 5.063. Pacing since deploy has stayed in 1.0-2.0, so the "
+        "correction is present in the code and proven by arithmetic "
+        "and tests, but has NOT yet been exercised in production. It "
+        "must not be reported as confirmed in the field until a tick "
+        "at that pacing is observed"),
+}
+
+
 INTAKE_REDUCTION_PROPOSED_NOT_APPLIED = {
     "status": "DEFINED_PROSPECTIVELY_NOT_APPLIED",
     "problem": (
