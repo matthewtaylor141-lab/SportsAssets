@@ -25,28 +25,30 @@ SELECT table_name
 
 \echo
 \echo ===== 1. ai_trades by hour, last 36 hours (the paper/copy plane)
-SELECT date_trunc('hour', created_at) AS hour,
-       count(*)                       AS rows,
-       count(DISTINCT status)         AS distinct_statuses,
-       string_agg(DISTINCT status, ',' ORDER BY status) AS statuses
+SELECT date_trunc('hour', placed_at) AS hour,
+       count(*)                       AS n,
+       string_agg(DISTINCT status, ',' ORDER BY status) AS statuses,
+       round(sum(filled_notional), 2) AS filled_usd,
+       round(sum(shares), 4)          AS shares
   FROM ai_trades
- WHERE created_at > now() - interval '36 hours'
+ WHERE placed_at > now() - interval '36 hours'
  GROUP BY 1 ORDER BY 1;
 
 \echo
 \echo ===== 2. anything that reached a venue today, by status
 SELECT status, count(*) AS n,
-       min(created_at) AS first_at, max(created_at) AS last_at
+       round(sum(filled_notional), 2) AS filled_usd,
+       min(placed_at) AS first_at, max(placed_at) AS last_at
   FROM ai_trades
- WHERE created_at > now() - interval '36 hours'
+ WHERE placed_at > now() - interval '36 hours'
  GROUP BY 1 ORDER BY 2 DESC;
 
 \echo
-\echo ===== 3. engine_fills, last 36 hours
-SELECT count(*) AS fills, min(created_at) AS first_at,
-       max(created_at) AS last_at
-  FROM engine_fills
- WHERE created_at > now() - interval '36 hours';
+\echo ===== 3. engine_fills: its timestamp columns, so the next read can be written
+SELECT column_name FROM information_schema.columns
+ WHERE table_schema = 'public' AND table_name = 'engine_fills'
+   AND data_type LIKE 'timestamp%'
+ ORDER BY 1;
 
 \echo
 \echo ===== 4. the control plane, as stored
