@@ -116,11 +116,94 @@ def test_demand_and_selection_are_separate_columns():
     assert r["fuDue"] == 0 and r["fuSelected"] == 0   # empty pool
 
 
-def test_the_ordering_hypothesis_is_recorded_as_refuted():
-    """So the next reader does not re-propose it."""
+def test_the_w1_ordering_refutation_and_why_it_no_longer_applies():
+    """THIS GUARD EXISTED TO STOP ME RE-PROPOSING THE ORDERING CHANGE,
+    AND IT CAUGHT ME DOING EXACTLY THAT.
+
+    It was right to fire, and the refutation was right for W1: reads
+    were late because they waited for a rare spare-budget tick, and
+    reordering a queue that is never serviced changes nothing.
+
+    THE CONDITION IT DEPENDED ON HAS SINCE CHANGED, MEASURABLY. W2
+    funded the queue and W3 spread it across horizons, so the queue is
+    serviced now -- and W3 then measured reads taken at a median
+    538-549s past their horizon against a 600s expiry, 1 read in 122
+    inside its band, and zero on-time reads in 68 matured attempts.
+    Ordering binds once servicing exists.
+
+    So the guard is not deleted, it is restated: the code must carry
+    both the original refutation and the measured reason it lapsed, so
+    the next reader sees a superseded finding rather than a reversal."""
     import inspect
     src = inspect.getsource(w.tick)
-    assert "ORDERING HYPOTHESIS IS REFUTED" in src
+    assert "ORDERING HYPOTHESIS WAS REFUTED IN W1" in src
+    assert "CONDITION IT DEPENDED ON HAS SINCE CHANGED" in src
+    # and the measured evidence that changed it, not just an assertion
+    assert "538-549s" in src
+    assert "1 read in 122" in src
+
+
+def test_the_restored_budget_floor_can_never_overspend_the_tick():
+    """The max(2,...) floor was masking an over-spend: at total 1,
+    fu_reserve = max(1, 0) = 1 and budget = max(1, 0) = 1, which is two
+    reads against a budget of one. Restoring the allowance required
+    handling that case, not just changing a constant."""
+    import inspect
+    src = inspect.getsource(w.tick)
+    assert "max(1, int(MAX_READS_PER_TICK" in src
+    assert "must never exceed the tick budget" in src
+
+    for tenths in range(10, 81):
+        pacing = tenths / 10
+        for seq in (0, 1):
+            total = max(1, int(w.MAX_READS_PER_TICK * min(
+                1.0, w.READ_PACING_BASE_S / pacing)))
+            if total <= 1:
+                fu = 1 if (seq % 2) else 0
+                budget = total - fu
+            else:
+                fu = max(1, total // 2)
+                budget = max(1, total - fu)
+            assert fu + budget <= total, (pacing, seq, total, fu, budget)
+            assert fu >= 0 and budget >= 0
+
+
+def test_the_original_request_allowance_is_actually_restored():
+    """Verified against the arithmetic, not asserted. At maximum
+    backoff the restored floor issues ONE read per tick where the
+    deployed floor issued two."""
+    at_max_backoff = max(1, int(w.MAX_READS_PER_TICK * min(
+        1.0, w.READ_PACING_BASE_S / w.READ_PACING_MAX_S)))
+    assert at_max_backoff == 1
+    # the regression this undoes
+    assert max(2, int(w.MAX_READS_PER_TICK * min(
+        1.0, w.READ_PACING_BASE_S / w.READ_PACING_MAX_S))) == 2
+
+
+def test_the_queue_puts_in_band_candidates_before_recovery_work():
+    """The ordering change, checked on the SQL literal rather than the
+    prose that explains it."""
+    import ast
+    import inspect
+    from sportsassets import bettor_state_store as ss
+    lits = [n.value for n in ast.walk(ast.parse(inspect.getsource(ss)))
+            if isinstance(n, ast.Constant) and isinstance(n.value, str)]
+    # THE DUE QUERY SPECIFICALLY -- the one that selects unread tasks
+    # for a horizon. A looser filter matched the history query, whose
+    # ORDER BY is unrelated and would have passed or failed for no
+    # reason connected to this change.
+    due = [s for s in lits
+           if "bettor_state_observations" in s
+           and "bettor_state_mids" in s
+           and "NOT EXISTS" in s.upper()
+           and "LIMIT" in s.upper()]
+    assert len(due) == 1, [s[:60] for s in due]
+    sql = due[0]
+    # in-band term sorts first, oldest-first still breaks ties
+    assert "ORDER BY" in sql
+    order = sql.upper().split("ORDER BY", 1)[1]
+    assert "ABS(" in order, order
+    assert order.index("ABS(") < order.index("O.OBSERVED_AT"), order
 
 
 def test_late_is_still_never_counted_as_on_time():

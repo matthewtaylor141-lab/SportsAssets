@@ -75,6 +75,7 @@ PACING_VERSION = "BETTOR_CAPTURE_PACING_V3_ROTATED_FOLLOWUPS"
 # V2 did. Coverage figures must not be pooled across the two versions
 # because WHICH horizon a read went to changed, not how many were sent.
 _FU_SERVICE_OPS = 0
+_TICK_SEQ = 0
 READ_PACING_BASE_S = 1.0
 READ_PACING_MAX_S = 8.0
 BACKOFF_GROWTH = 2.0
@@ -267,19 +268,47 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     # floor max(1, 0//2) = 1, an accident of that branch rather than a
     # design. Zero reads were ON_TIME at any horizon.
     #
-    # THE ORDERING HYPOTHESIS IS REFUTED. Reads that happened were late
+    # THE ORDERING HYPOTHESIS WAS REFUTED IN W1, CORRECTLY, AND THE
+    # CONDITION IT DEPENDED ON HAS SINCE CHANGED. In W1 reads were late
     # because they waited for a rare spare-budget tick, not because the
-    # queue was sorted oldest-first. Reordering a queue that is never
-    # serviced changes nothing.
+    # queue was sorted oldest-first: reordering a queue that is never
+    # serviced changes nothing. W2 funded the queue and W3 spread it
+    # across horizons, so the queue IS serviced now -- and W3 measured
+    # reads taken at a median 538-549s past their horizon against a
+    # 600s expiry, with 1 read in 122 inside its band. Ordering binds
+    # once servicing exists. It did not bind then; it does now.
     #
-    # THE FIX IS A RESERVATION, NOT AN INCREASE. Total reads per tick
-    # are unchanged, so gateway pacing is preserved exactly; the split
-    # happens before either pass and the follow-up share can no longer
-    # be consumed by sampling.
-    total_budget = max(2, int(MAX_READS_PER_TICK * min(
+    # THE BUDGET FLOOR IS RESTORED TO ONE. max(2, ...) issued TWO reads
+    # per tick where the original issued one, at pacing >= 5.063 --
+    # a 2x increase in request rate exactly when the venue is refusing.
+    # W3's pacing reached 5.695, so this was live.
+    #
+    # RESTORING IT IS NOT A ONE-CONSTANT CHANGE. The floor was masking
+    # an over-spend: at total_budget = 1,
+    #     fu_reserve = max(1, 1 // 2) = 1
+    #     budget     = max(1, 1 - 1)  = 1
+    # which is TWO reads against a budget of one. The single-read tick
+    # must alternate instead, and the assertion below is what stops
+    # this from being re-introduced quietly.
+    #
+    # ALTERNATION IS SAFE ONLY BECAUSE THE ROTATION ADVANCES ON SERVICE
+    # OPPORTUNITIES. Gating follow-ups to alternate ticks is exactly
+    # the parity that aliases against a tick-keyed rotation offset and
+    # leaves two horizons permanently unreachable. _FU_SERVICE_OPS
+    # advances once per serving tick, so it cannot alias.
+    global _TICK_SEQ
+    _TICK_SEQ += 1
+    total_budget = max(1, int(MAX_READS_PER_TICK * min(
         1.0, READ_PACING_BASE_S / pacing)))
-    fu_reserve = max(1, total_budget // 2)
-    budget = max(1, total_budget - fu_reserve)
+    if total_budget <= 1:
+        fu_reserve = 1 if (_TICK_SEQ % 2) else 0
+        budget = total_budget - fu_reserve
+    else:
+        fu_reserve = max(1, total_budget // 2)
+        budget = max(1, total_budget - fu_reserve)
+    assert fu_reserve + budget <= total_budget, (
+        "the split must never exceed the tick budget", total_budget,
+        fu_reserve, budget)
     stats["budget"] = budget
     stats["fuReserve"] = fu_reserve
     stats["totalBudget"] = total_budget

@@ -228,13 +228,37 @@ _DUE_SQL = """
        AND NOT EXISTS (SELECT 1 FROM bettor_state_mids m
                         WHERE m.observation_id = o.observation_id
                           AND m.horizon_s = $3)
-     ORDER BY o.observed_at
+     ORDER BY (abs(extract(epoch FROM (now() - o.observed_at)) - $3)
+               > $5) ,
+              o.observed_at
      LIMIT $4
 """
 
 
 async def mids_due(horizon_s: int, *, limit=8, pool=None) -> list:
     """Observations whose horizon has come and gone unrecorded.
+
+    ORDERED ON-TIME FIRST, THEN OLDEST. This used to be plain
+    `ORDER BY o.observed_at`, and under overload that always selects
+    the task nearest its expiry: W3 measured reads taken at a median
+    538-549 seconds past their horizon against a 600-second recovery
+    window, with 1 read in 122 landing inside its tolerance band, and
+    ZERO on-time reads across 68 matured cohort attempts.
+
+    The leading term is FALSE for a task still inside |lag - h| <= 30
+    and TRUE otherwise, so in-band candidates sort ahead; oldest-first
+    still decides within each group, which keeps recovery work in FIFO
+    order rather than reordering it arbitrarily.
+
+    THIS TRADES RECOVERY READS FOR ON-TIME READS, deliberately. A late
+    recovery is never admissible to a horizon's gate, so a read moved
+    from the recovery pile into the band is a strict gain for the
+    measurement; the reads it displaces were not usable evidence for
+    the horizon they were scheduled for.
+
+    IT DOES NOT REDUCE LOSS. Roughly 65% of follow-up tasks expire
+    unread because intake creates more work than capacity completes,
+    and ordering cannot change a rate.
 
     The upper bound is the horizon plus HORIZON_DUE_WINDOW_S. A late
     read is still recorded with its ACTUAL lag and with
@@ -247,7 +271,8 @@ async def mids_due(horizon_s: int, *, limit=8, pool=None) -> list:
     rows = await pool.fetch(
         _DUE_SQL, str(_opens_at(horizon_s)),
         str(int(horizon_s + sc.HORIZON_DUE_WINDOW_S)),
-        int(horizon_s), int(limit))
+        int(horizon_s), int(limit),
+        int(sc.HORIZON_TOLERANCE_S))
     return [dict(r) for r in rows]
 
 
