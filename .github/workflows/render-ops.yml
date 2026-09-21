@@ -36,7 +36,7 @@ on:
           - restart       # confirm=DO
           - deploy        # confirm=DO: deploy the latest commit of the service's branch
           - metrics       # a service's memory (MB) and CPU per instance over the last N minutes (arg, default 120)
-          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | mirror-preflight | mirror-rearm (DO) | mirror-register (DO) | mirror-frozen
+          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | mirror-preflight | mirror-rearm (DO) | mirror-register (DO) | mirror-frozen | pause-on (DO) | pause-off (DO) | pause-state
           - env-keys      # the service's env var KEYS (never values)
           - env-get       # arg = comma-separated OPERATOR FLAGS (LIVE_COPY_HALT, ...); values of flags only
           - env-set       # confirm=DO: arg = KEY=VALUE (value masked in the log; Render redeploys)
@@ -234,6 +234,32 @@ jobs:
                 mirror-on)  need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('mirror_live', 'true'::jsonb) ON CONFLICT (key) DO UPDATE SET value = 'true'::jsonb; SELECT key, value FROM ingestion_state WHERE key LIKE 'mirror_%' ORDER BY key;"; TO=30000 ;;
                 mirror-off) need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('mirror_live', 'false'::jsonb) ON CONFLICT (key) DO UPDATE SET value = 'false'::jsonb; SELECT key, value FROM ingestion_state WHERE key LIKE 'mirror_%' ORDER BY key;"; TO=30000 ;;
                 mirror-state) SQL="SELECT key, value FROM ingestion_state WHERE key LIKE 'mirror_%' ORDER BY key;"; TO=30000 ;;
+                # THE ADMIN KILL SWITCH, WRITTEN WHERE THE CODE READS IT
+                # (R5, 2026-09-21). live_executor._is_paused reads exactly
+                # one thing: ingestion_state where key = PAUSE_KEY =
+                # 'live_trading_paused', json.loads'd and passed through
+                # bool(). api/live_executor_state.set_paused writes that
+                # same row as jsonb via the same upsert. This is that
+                # write, not a second mechanism -- the statement below is
+                # byte-for-byte what set_paused(True) produces, and the
+                # worker cannot tell which one wrote it.
+                #
+                # WHY IT IS NEEDED AT ALL: the row was ABSENT. _is_paused
+                # returns False on None, so the kill switch documented as
+                # "no further orders" had never been armed -- it failed
+                # open on absence exactly as WHALE_EXIT_ENABLED did. The
+                # function is otherwise strict (unreadable and malformed
+                # both count as PAUSED); only missing was permissive.
+                #
+                # POST /api/admin/live/pause is the ordinary lever and
+                # stays the ordinary lever. This one exists because that
+                # endpoint needs a reachable API and an operator session,
+                # and an audited Actions run is the path this environment
+                # has. Both write the same row. pause-state reads it back
+                # from the row the worker reads rather than assuming.
+                pause-on)   need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('live_trading_paused', 'true'::jsonb) ON CONFLICT (key) DO UPDATE SET value = 'true'::jsonb; SELECT key, value, pg_typeof(value) AS type FROM ingestion_state WHERE key = 'live_trading_paused';"; TO=30000 ;;
+                pause-off)  need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('live_trading_paused', 'false'::jsonb) ON CONFLICT (key) DO UPDATE SET value = 'false'::jsonb; SELECT key, value, pg_typeof(value) AS type FROM ingestion_state WHERE key = 'live_trading_paused';"; TO=30000 ;;
+                pause-state) SQL="SELECT coalesce((SELECT value::text FROM ingestion_state WHERE key = 'live_trading_paused'), 'ROW ABSENT -- _is_paused() returns False -- NOT PAUSED') AS live_trading_paused;"; TO=30000 ;;
                 # THE PRE-FLIGHT READ (2026-09-05). The pre-flight review of
                 # the switch named the rows the first ON tick reads before a
                 # dollar moves: the mapping quarantine, the premap gate, the
