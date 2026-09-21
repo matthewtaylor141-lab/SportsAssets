@@ -10,17 +10,41 @@ volume figure -- so the harness demonstrated downstream processing with
 supplied inputs. It never ran discovery, never ran selection, and never
 subscribed to anything it had chosen.
 
-WHAT THIS RUNS. `bettor_live_loop.main()`, the same function
-`workers/all.py` calls, with two seams:
+AND WHAT THIS RUNNER ITSELF GOT WRONG. Its first version fixed that by
+paging a listing built from 250 CAPTURED OBSERVATION ROWS -- our own
+schema, carrying `yes_bid`, `yes_ask` and `stats_shares_traded`, all
+spellings `bettor_universe.assess` happens to accept. So it passed,
+and production did not: the venue's real `MarketDetail` listing has
+none of those fields, and on 2026-09-21 the worker excluded all 3,000
+listed markets as ONE_SIDED_BOOK, every five seconds, until it was
+deregistered. A runner whose inputs are shaped like our database
+proves nothing about a worker whose inputs come from the venue.
 
-    client          a paginated market listing built from REAL rows
-    stream_factory  a transport that replays REAL captured books
+SO THE INPUTS ARE NOW THE ENDPOINTS' OWN SHAPES:
+
+    markets.list   `MarketDetail` and nothing more -- slug, outcome,
+                   active, closed, volume. NO quote, NO state, NO
+                   sharesTraded.
+    markets.bbo    `{"marketData": {...}}`, VERBATIM HTTP 200 bodies
+                   from the capture archive. Wrapped, as the real
+                   responses are; the SDK's flat `MarketBBO` is not
+                   what the venue sends.
+    the socket     the paired VERBATIM `/book` bodies, which already
+                   ARE the websocket payload shape.
+
+WHAT THIS RUNS. `bettor_live_loop.main()`, the same function
+`workers/all.py` calls, with three seams:
+
+    client          the two read endpoints above
+    stream_factory  a transport that replays the REAL captured books
+    control_pool    the database stop control, which fails closed
 
 Everything between them is the worker: `_discover` pages the listing,
-`bettor_universe.select` applies the FROZEN rule, `build` subscribes at
-the documented 100-market ceiling, the stream's own handler parses the
-payloads, eligibility applies both clock bounds, and the engine
-decides.
+`bettor_universe_probe` enriches a bounded, deterministically rotated
+batch, `bettor_universe.select` applies the FROZEN rule to rows that
+finally contain what it asks for, `build` subscribes at the documented
+100-market ceiling, the stream's own handler parses the payloads,
+eligibility applies both clock bounds, and the engine decides.
 
 THE RULE IS NOT RELAXED. If the universe comes out empty, `main()`
 refuses to start and this script reports the exclusion histogram. That
@@ -51,8 +75,30 @@ from sportsassets import bettor_market_stream as ms       # noqa: E402
 from sportsassets import bettor_universe as uni           # noqa: E402
 from sportsassets.workers import bettor_live_loop as bl   # noqa: E402
 
-ROWS = "research/beta48/acceptance/startup_rows_250.json"
+PAIRS = "research/beta48/acceptance/bbo_book_real_400.json"
 FAILS: list = []
+
+
+class RunPool:
+    """The database stop control, saying observation may run.
+
+    The loop reads `ingestion_state` before it does anything else and
+    FAILS CLOSED, so a runner that wants to reach discovery has to
+    supply a control that says yes -- exactly as production will.
+    """
+
+    async def fetchval(self, _sql, *_a):
+        return "true"
+
+
+class StopPool:
+    def __init__(self, value=None, raises=None):
+        self.value, self.raises = value, raises
+
+    async def fetchval(self, _sql, *_a):
+        if self.raises is not None:
+            raise self.raises
+        return self.value
 
 
 def rule(t=""):
@@ -81,15 +127,32 @@ def atleast(label, got, floor):
 # ── the venue's listing, paginated ───────────────────────────────────
 
 class FakeMarkets:
-    """`markets.list({active, closed, limit, offset})`, over real rows.
+    """The venue's two read endpoints, in the shapes it really answers.
+
+    `list` ANSWERS `MarketDetail` AND NOTHING MORE. This is the whole
+    point of the rewrite: the listing carries `id, slug, title,
+    outcome, description, active, closed, liquidity, volume,
+    eventSlug` and NO quote, NO state and NO traded-share counter. The
+    previous version of this runner handed the worker CAPTURED
+    OBSERVATION ROWS -- our own schema, carrying `yes_bid`, `yes_ask`
+    and `stats_shares_traded` -- which the selection rule also accepts.
+    It therefore proved the rule against a payload production never
+    delivers, and on 2026-09-21 production excluded all 3,000 listed
+    markets as ONE_SIDED_BOOK.
+
+    `bbo` answers `{"marketData": {...}}` -- the WRAPPED form real
+    responses use, not the flat `MarketBBO` the SDK declares -- and the
+    object inside is a VERBATIM captured body.
 
     Pagination is real: the worker asks for a page, gets `limit` rows,
     and asks again until a short page ends it or its page bound is hit.
     """
 
-    def __init__(self, rows):
-        self.rows = rows
+    def __init__(self, bodies):
+        self.bodies = {b["marketSlug"]: b for b in bodies}
+        self.rows = [_listing_row(b) for b in bodies]
         self.calls: list = []
+        self.bbo_calls: list = []
 
     def list(self, params):
         limit = int(params.get("limit") or 500)
@@ -99,10 +162,33 @@ class FakeMarkets:
                            "returned": len(page)})
         return {"markets": page}
 
+    def bbo(self, slug):
+        self.bbo_calls.append(slug)
+        body = self.bodies.get(slug)
+        return {"marketData": body} if body is not None else None
+
+
+def _listing_row(body):
+    """A `MarketDetail`, built from what a listing CAN know.
+
+    Deliberately lossy: the quote, the state and the counter that the
+    rule needs are dropped, because the real listing does not have
+    them. `volume` is present because `MarketDetail` has one -- and it
+    is NOT `sharesTraded`, which is exactly why nothing is allowed to
+    substitute it.
+    """
+    return {"id": abs(hash(body["marketSlug"])) % 10 ** 7,
+            "slug": body["marketSlug"],
+            "title": body["marketSlug"].replace("-", " "),
+            "outcome": "over",
+            "active": True, "closed": False, "archived": False,
+            "liquidity": 1000.0, "volume": 5000.0,
+            "eventSlug": body["marketSlug"].rsplit("-", 1)[0]}
+
 
 class FakeClient:
-    def __init__(self, rows):
-        self.markets = FakeMarkets(rows)
+    def __init__(self, bodies):
+        self.markets = FakeMarkets(bodies)
 
 
 # ── the transport, replaying real books ──────────────────────────────
@@ -160,39 +246,25 @@ class ReplayStream(ms.MarketStream):
             self.replayed += 1
 
 
-def as_payload(row):
-    """A captured observation -> the venue's own websocket shape.
+def as_payload(book_md):
+    """A VERBATIM captured `/book` marketData -> the websocket shape.
 
-    `_MarketDataPayload`: marketSlug, bids, offers, state, stats,
-    transactTime. `offers`, not `asks` -- the payload has no `asks`
-    key.
+    `_MarketDataPayload` is `marketSlug, bids, offers, state, stats,
+    transactTime` -- `offers`, not `asks`; the payload has no `asks`
+    key. A real book body already IS that shape, so nothing is
+    constructed here: the ladders, their `px`/`qty`, the state and
+    `stats.sharesTraded` are the venue's own, passed straight through.
     """
-    lad = row.get("multi_level_depth") or {}
-    if isinstance(lad, str):
-        lad = json.loads(lad)
-
-    def side(key):
-        out = []
-        for lv in sorted(lad.get(key) or [],
-                         key=lambda x: int(x.get("level", 0))):
-            out.append({"px": {"value": str(lv["price"]), "currency": "USD"},
-                        "qty": str(lv["qty"])})
-        return out
-
-    return {"marketData": {
-        "marketSlug": row["market_id"],
-        "transactTime": row.get("book_source_ts"),
-        "state": row.get("venue_state"),
-        "bids": side("bid"), "offers": side("ask"),
-        "stats": {"sharesTraded": row.get("stats_shares_traded")}}}
+    return {"marketData": dict(book_md)}
 
 
 # ── a run of main() ──────────────────────────────────────────────────
 
-def run_main(rows, *, page_size, pages, rebase, run_for_s=1.5,
-             store=None):
-    client = FakeClient(rows)
-    ReplayStream.payloads = {r["market_id"]: as_payload(r) for r in rows}
+def run_main(pairs, *, page_size, pages, rebase, run_for_s=1.5,
+             store=None, control_pool=None):
+    client = FakeClient([p["bbo"] for p in pairs])
+    ReplayStream.payloads = {p["bbo"]["marketSlug"]: as_payload(p["book"])
+                             for p in pairs}
     ReplayStream.rebase = rebase
     os.environ["BETTOR_LIVE_DISCOVERY_PAGE_SIZE"] = str(page_size)
     os.environ["BETTOR_LIVE_DISCOVERY_PAGES"] = str(pages)
@@ -207,10 +279,12 @@ def run_main(rows, *, page_size, pages, rebase, run_for_s=1.5,
 
     bl.build = capture
     try:
+        bl._reset_backoff()
         out = asyncio.run(bl.main(client=client,
                                   stream_factory=ReplayStream,
                                   store=store or store_mod.FileStore(
                                       _tmpdir(), durable_across_redeploy=True),
+                                  control_pool=control_pool or RunPool(),
                                   run_for_s=run_for_s))
     finally:
         bl.build = real_build
@@ -232,18 +306,26 @@ def main() -> int:
     import sportsassets.config as cfgmod
     cfgmod.settings = lambda: Cfg()     # noqa: E731 -- no real credential
 
-    rows = json.load(open(ROWS))
-    rule("BETTOR STARTUP PATH  |  discovery -> selection -> subscription "
-         "-> decisions")
+    doc = json.load(open(PAIRS))
+    rows = doc["pairs"]
+    rule("BETTOR STARTUP PATH  |  listing -> ENRICHMENT -> selection -> "
+         "subscription -> decisions")
     print("   ENTRY      bettor_live_loop.main(), the function "
           "workers/all.py calls")
-    print("   LISTING    %d real market rows from "
-          "bettor_state_observations" % len(rows))
-    print("   SEAMS      an injected listing client and an injected "
-          "transport.\n              Production passes neither.")
+    print("   LISTING    %d MarketDetail rows -- slug, outcome, active, "
+          "closed, volume.\n              NO quote, NO state, NO "
+          "sharesTraded. That is the real shape." % len(rows))
+    print("   ENRICHED   markets.bbo(slug)['marketData'], %d VERBATIM "
+          "HTTP 200 bodies\n              from %s"
+          % (len(rows), doc["_source"]))
+    print("   BOOKS      the paired VERBATIM /book bodies, replayed as "
+          "the websocket\n              shape they already are")
+    print("   CORPUS     %s" % json.dumps(doc["_corpus_totals"]))
+    print("   SEAMS      an injected client, transport and control pool."
+          "\n              Production passes none of them.")
 
     # ── 1 ────────────────────────────────────────────────────────────
-    rule("1. PAGINATED DISCOVERY AND THE FROZEN SELECTION RULE")
+    rule("1. PAGINATED DISCOVERY, ENRICHMENT, AND THE FROZEN RULE")
     made = run_main(rows, page_size=100, pages=6, rebase=True)
     out, client = made["out"], made["client"]
     disc = out["report"]["discovery"]
@@ -254,15 +336,18 @@ def main() -> int:
                               "listing_truncated_at_page_bound")}))
     print("   excluded     : %s" % json.dumps(disc["excluded_by_reason"]))
     check("the worker started", out["started"], True)
-    check("pages actually requested", len(client.markets.calls), 3)
-    check("pages the worker reports reading", disc["pages_read"], 3)
-    check("rows listed across pages", disc["rows_listed"], 250)
+    check("pages actually requested", len(client.markets.calls), 5)
+    check("pages the worker reports reading", disc["pages_read"], 5)
+    check("rows listed across pages", disc["rows_listed"], 400)
     check("a short final page ended pagination",
           disc["listing_truncated_at_page_bound"], False)
-    check("markets considered", disc["considered"], 250)
-    check("markets SELECTED by the frozen rule", disc["selected"], 18)
+    check("every candidate was ENRICHED before the rule saw it",
+          disc["coverage"]["distinct_enriched"], 400)
+    check("BBO reads issued", len(client.markets.bbo_calls), 480)
+    check("markets considered", disc["considered"], 400)
+    check("markets SELECTED by the frozen rule", disc["selected"], 34)
     check("every exclusion is counted",
-          sum(disc["excluded_by_reason"].values()), 250 - 18)
+          sum(disc["excluded_by_reason"].values()), 400 - 34)
     check("the rule is the frozen one", disc["universe"],
           uni.UNIVERSE_VERSION)
 
@@ -274,37 +359,49 @@ def main() -> int:
         {k: rep[k] for k in ("connected", "books", "epoch")
          if k in rep}))
     print("   subscriptions: %s" % json.dumps(rep.get("subscriptions")))
-    check("markets subscribed", len(stream._subs), 18)
+    check("markets subscribed", len(stream._subs), 34)
     check("subscribed set == selected set",
           sorted(stream._subs) == sorted(disc["slugs"]), True)
     subs = rep.get("subscriptions") or {}
     check("subscriptions confirmed by arriving data", subs.get("confirmed"),
-          18)
+          34)
     check("subscriptions that failed", subs.get("failed"), 0)
     print("   There is no positive acknowledgment in this protocol: "
           "MarketMessage\n   carries no 'subscribed' reply, so the "
           "arrival of data IS the\n   confirmation.")
     print("   The ceiling is %d per subscription, documented by the "
-          "venue;\n   18 is what the rule chose, not what the cap "
+          "venue;\n   34 is what the rule chose, not what the cap "
           "allowed." % uni.MAX_MARKETS)
 
     # ── 3 ────────────────────────────────────────────────────────────
     rule("3. AN EMPTY UNIVERSE IS REPORTED, NEVER BYPASSED")
-    thin = [dict(r, stats_shares_traded="1.0") for r in rows]
+    # The BBO bodies are the venue's, with ONE counter overwritten: a
+    # traded-share figure under the floor. Everything the rule needs is
+    # still present and still real, so the universe empties for an
+    # ECONOMIC reason and not because a field went missing.
+    thin = [{"bbo": dict(p["bbo"], sharesTraded="1.0000"),
+             "book": p["book"]} for p in rows]
     made2 = run_main(thin, page_size=100, pages=6, rebase=True)
     o2 = made2["out"]
     print("   result       : %s" % json.dumps(
         {k: o2.get(k) for k in ("started", "why", "considered",
-                                "pages_read")}))
+                                "candidates", "pages_read")}))
+    print("   coverage     : %s" % json.dumps(o2.get("coverage")))
     print("   excluded     : %s" % json.dumps(o2.get("excluded_by_reason")))
     check("it refuses to start", o2["started"], False)
     check("and names why", o2["why"], "EMPTY_UNIVERSE")
+    check("every candidate was still ENRICHED",
+          o2["coverage"]["distinct_enriched"], 400)
     check("volume is the binding reason",
-          o2["excluded_by_reason"].get("TRADED_VOLUME_BELOW_MIN"), 34)
-    check("and it is exactly the 18 selected plus the 16 already "
-          "short", 18 + 16, 34)
+          o2["excluded_by_reason"].get("TRADED_VOLUME_BELOW_MIN"),
+          34 + 3)
+    check("NOT ONE_SIDED_BOOK -- nothing was missing",
+          o2["excluded_by_reason"].get("ONE_SIDED_BOOK"), 12)
     print("   MIN_SHARES_TRADED is still %.0f. Nothing was relaxed to "
-          "find\n   something to watch." % uni.MIN_SHARES_TRADED)
+          "find\n   something to watch -- and COVERAGE is reported "
+          "beside the verdict, so\n   'we did not look' can never be "
+          "read as 'the market is one-sided'."
+          % uni.MIN_SHARES_TRADED)
 
     # ── 4 ────────────────────────────────────────────────────────────
     rule("4. THE CAPTURED CLOCK, UNTOUCHED -- the freshness gate")
@@ -354,12 +451,42 @@ def main() -> int:
           "as observation.")
 
     # ── summary ──────────────────────────────────────────────────────
+    # ── 7 ────────────────────────────────────────────────────────────
+    rule("7. THE STOP CONTROL, AND EVERY WAY IT SAYS NO")
+    print("   BETTOR_LIVE_LOOP=off was set and acknowledged on "
+          "2026-09-21, the\n   service was demonstrably restarted "
+          "(server_restarted 22:43:40.131647Z),\n   and the restarted "
+          "process still ran discovery. The stop now lives in\n   "
+          "ingestion_state, where changing it needs no deploy.")
+    for label, pool, why in (
+            ("an explicit false", StopPool("false"), "STOPPED_BY_CONTROL"),
+            ("an absent row", StopPool(None), "CONTROL_ROW_ABSENT"),
+            ("an unparsable value", StopPool("maybe"), "CONTROL_MALFORMED"),
+            ("a database that will not answer",
+             StopPool(raises=ConnectionError("down")),
+             "CONTROL_UNREADABLE")):
+        made7 = run_main(rows, page_size=100, pages=6, rebase=True,
+                         control_pool=pool)
+        o7 = made7["out"]
+        check("%-32s -> refuses" % label, o7["started"], False)
+        check("%-32s -> names why" % label, o7["why"], why)
+        check("%-32s -> no venue read at all" % label,
+              len(made7["client"].markets.calls)
+              + len(made7["client"].markets.bbo_calls), 0)
+    print("   ONE way to run, FOUR ways to stop. A stopped loop costs "
+          "nothing:\n   no listing page, no BBO read, no schema "
+          "initialization.")
+
     rule("WHAT THIS RUN IS")
-    print("   REAL       250 venue market rows with their own ladders, "
-          "clocks,\n              states and traded-volume counters; the "
-          "frozen universe\n              rule; the real stream handler "
-          "and eligibility; the real\n              engine and its "
-          "refusals.")
+    print("   REAL       %d MarketDetail listing rows carrying NO quote, "
+          "NO state\n              and NO sharesTraded -- the shape the "
+          "venue really answers;\n              %d VERBATIM HTTP 200 "
+          "/bbo bodies as the enrichment; their\n              paired "
+          "VERBATIM /book bodies with real ladders, clocks and\n"
+          "              counters; the frozen universe rule; the real "
+          "stream\n              handler and eligibility; the real "
+          "engine and its refusals."
+          % (len(rows), len(rows)))
     print("   REAL CODE  bettor_live_loop.main(), start to finally.")
     print("   REPLACED   the socket and the listing HTTP call. Nothing "
           "between\n              them.")

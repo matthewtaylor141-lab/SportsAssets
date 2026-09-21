@@ -311,8 +311,16 @@ def _run_worker_and_journal():
     os.environ["BETTOR_LIVE_DISCOVERY_PAGE_SIZE"] = "250"
     d = tempfile.mkdtemp(prefix="bettor-measures-")
     store = store_mod.FileStore(d, durable_across_redeploy=True)
+    # THE STOP CONTROL IS READ BEFORE ANYTHING ELSE AND FAILS CLOSED,
+    # so a runner that wants the worker to start has to supply one that
+    # says run -- exactly as production will, out of `ingestion_state`.
+    class _RunControl:
+        async def fetchval(self, _sql, *_a):
+            return "true"
+
     out = asyncio.run(bl.main(client=_Client(rows),
                               stream_factory=RepeatStream, store=store,
+                              control_pool=_RunControl(),
                               run_for_s=RepeatStream.rounds
                               * RepeatStream.spacing_s + 0.6))
     if not out.get("started"):
@@ -337,13 +345,40 @@ def _run_worker_and_journal():
 
 
 class _Markets:
+    """The venue's two read endpoints, in the shapes it really answers.
+
+    `list` returns `MarketDetail` -- slug, outcome, active, closed --
+    and NOT the quote, state or traded-share counter the selection rule
+    needs. Those come from `bbo`, wrapped in `marketData` as the real
+    responses are. The runner used to hand its capture rows straight to
+    `list`, which is the defect that made the first live run select
+    nothing.
+    """
+
     def __init__(self, rows):
         self.rows = rows
+        self.by_slug = {r["market_id"]: r for r in rows}
 
     def list(self, params):
         off = int(params.get("offset") or 0)
         lim = int(params.get("limit") or 500)
-        return {"markets": self.rows[off:off + lim]}
+        page = self.rows[off:off + lim]
+        return {"markets": [{"slug": r["market_id"],
+                             "outcome": r.get("outcome_leg"),
+                             "active": True, "closed": False}
+                            for r in page]}
+
+    def bbo(self, slug):
+        r = self.by_slug.get(slug)
+        if r is None:
+            return None
+        return {"marketData": {
+            "marketSlug": slug,
+            "bestBid": {"value": str(r.get("yes_bid")), "currency": "USD"},
+            "bestAsk": {"value": str(r.get("yes_ask")), "currency": "USD"},
+            "sharesTraded": str(r.get("stats_shares_traded")),
+            "state": r.get("venue_state"),
+            "bidDepth": 1, "askDepth": 1}}
 
 
 class _Client:

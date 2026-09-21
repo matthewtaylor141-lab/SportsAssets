@@ -58,7 +58,36 @@ called back; `_dirty` behind a lock; `stream.stop()` in a finally;
 discovery refreshed with expired subscriptions pruned; a failed
 discovery refusing to start rather than running over an empty universe.
 
-Kill: BETTOR_LIVE_LOOP=off.
+--------------------------------------------------------------------
+WHAT THE FIRST LIVE RUN FOUND, 2026-09-21
+--------------------------------------------------------------------
+
+A UNIVERSE THAT WAS EMPTY BY CONSTRUCTION. `_discover` fed the venue's
+LISTING straight into the selection rule. `MarketDetail` carries no
+quote, no state and no traded-share counter, so all 3,000 listed
+markets were excluded as ONE_SIDED_BOOK -- a reason about the market,
+for a fact about the payload. Discovery now ENRICHES first, through
+`bettor_universe_probe`, and the rule only ever sees a row that has a
+real bid, ask, state and `sharesTraded` in it. COVERAGE is reported
+beside the verdict so "we have not read it yet" can never again be
+counted as "the book is one-sided".
+
+A FIVE-SECOND RETRY LOOP. `workers/all.py:run_forever` restarts a
+clean return after five seconds, forever, so refusing to start cost
+about 73 rounds of six listing pages and one advisory-locked DDL
+transaction each. `main()` now HOLDS before it returns, on an
+escalating schedule, and a run that starts resets it.
+
+A KILL SWITCH THAT DID NOT KILL. `BETTOR_LIVE_LOOP=off` was set and
+acknowledged, the service was demonstrably restarted
+(`server_restarted` 22:43:40.131647Z), and the restarted process still
+ran discovery. The authoritative stop is now a database row --
+`bettor_live_control` -- read before anything else and re-read while
+running. It FAILS CLOSED four ways and needs no deploy to change.
+
+Stop: `bettor_live_observation` in `ingestion_state` (authoritative).
+The `BETTOR_LIVE_LOOP=off` environment variable is kept as a cheap
+pre-check only, and is NOT a demonstrated control on this service.
 """
 
 from __future__ import annotations
@@ -74,12 +103,14 @@ from collections import deque
 from datetime import datetime, timezone
 
 from .. import bettor_decision_engine as de
+from .. import bettor_live_control as ctl
 from .. import bettor_live_store as store_mod
 from .. import bettor_market_stream as ms
 from .. import bettor_observation_adapter as oa
 from .. import bettor_settlement_ingest as si
 from .. import bettor_shadow_loop as sl
 from .. import bettor_universe as uni
+from .. import bettor_universe_probe as probe_mod
 
 log = logging.getLogger(__name__)
 
@@ -99,6 +130,43 @@ DISCOVERY_EVERY_S = 900.0
 SETTLEMENT_EVERY_S = 600.0
 SETTLEMENT_BATCH = 25
 LEDGER_EVERY_S = 60.0
+
+# THE SUPERVISOR RESTARTS A CLEAN RETURN AFTER FIVE SECONDS, FOREVER.
+# `workers/all.py:run_forever` is a `while True`, so on 2026-09-21 a
+# `main()` that returned EMPTY_UNIVERSE immediately became a five-second
+# cycle: about 73 rounds of six listing pages and one advisory-locked
+# DDL transaction each, roughly 440 venue requests, for nothing.
+#
+# That loop is shared by twenty-five workers and is not this release's
+# to change, so the bound lives HERE: a `main()` that cannot start
+# waits before returning, and the wait escalates. The supervisor's five
+# seconds are then added to a minute or more, not to zero.
+#
+# Reset to the first rung whenever a run actually starts, so a
+# transient venue outage does not leave the loop on the long rung for
+# the rest of the day.
+NOSTART_BACKOFF_S = (60.0, 120.0, 300.0, 900.0)
+_nostart_rung = 0
+
+
+def _reset_backoff() -> None:
+    global _nostart_rung
+    _nostart_rung = 0
+
+
+async def _backoff(why: str, *, sleep=None) -> float:
+    """Hold a non-starting `main()` before it returns to the supervisor.
+
+    `sleep` is injectable so the tests can assert the SCHEDULE without
+    spending it.
+    """
+    global _nostart_rung
+    delay = NOSTART_BACKOFF_S[min(_nostart_rung, len(NOSTART_BACKOFF_S) - 1)]
+    _nostart_rung = min(_nostart_rung + 1, len(NOSTART_BACKOFF_S) - 1)
+    log.info("bettor_live_loop: not starting (%s); holding %.0fs before "
+             "the supervisor's own restart delay", why, delay)
+    await (sleep or asyncio.sleep)(delay)
+    return delay
 
 
 def enabled() -> bool:
@@ -172,6 +240,9 @@ class LiveLoop:
         self.recovered: dict | None = None
         self.store_started: dict | None = None
         self.discovery: dict | None = None
+        # The last read of the database stop control, so `report()` can
+        # say on whose authority the loop is still observing.
+        self.control: dict | None = None
         self.settlement_runs: list = []
         self.outcomes: dict | None = None
         self.prunes: list = []
@@ -710,6 +781,7 @@ class LiveLoop:
             "runtime_s": _elapsed(self.started_at, self.stopped_at),
             "stream": self.stream.stats() if self.stream else None,
             "discovery": self.discovery,
+            "control": self.control,
             "counters": dict(self.counters),
             "decisions_in_ring": len(self.records),
             "durability": self.durability_report(),
@@ -814,13 +886,12 @@ def describe() -> dict:
 
 # ── the worker entry point ───────────────────────────────────────────
 
-async def _discover(client=None) -> dict:
-    """The bounded universe, PAGINATED, from the venue's own listing.
+async def _list_candidates(client=None) -> dict:
+    """The venue's listing, PAGINATED, reduced to CANDIDATES.
 
-    Returns a result dict with `ok`. A FAILED DISCOVERY IS NOT AN EMPTY
-    UNIVERSE: the old version logged and returned `[]`, and the loop
-    then ran forever reporting zero decisions as though the market were
-    quiet.
+    Identity only. The listing cannot answer a single question the
+    selection rule asks, so nothing here judges a market -- see
+    `bettor_universe_probe.candidates_from_listing`.
     """
     from .. import pmus
 
@@ -848,16 +919,93 @@ async def _discover(client=None) -> dict:
         rows, pages, truncated = await asyncio.to_thread(_list)
     except Exception as exc:  # noqa: BLE001 -- named, never swallowed
         return {"ok": False, "error": type(exc).__name__,
-                "why": "market discovery failed"}
+                "why": "market listing failed"}
 
-    sel = uni.select(rows)
-    sel.update({"ok": True, "pages_read": pages,
-                "listing_truncated_at_page_bound": truncated,
-                "rows_listed": len(rows), "page_size": page_size})
+    cands = probe_mod.candidates_from_listing(rows)
     if truncated:
         log.warning("bettor_live_loop: listing hit the %d-page bound; "
-                    "the universe is drawn from a PREFIX of the venue",
+                    "the candidate set is a PREFIX of the venue",
                     max_pages)
+    return {"ok": True, "candidates": cands, "pages_read": pages,
+            "rows_listed": len(rows), "page_size": page_size,
+            "listing_truncated_at_page_bound": truncated}
+
+
+async def _discover(client=None, *, candidates=None, offset: int = 0,
+                    rounds: int = probe_mod.PROBE_ROUNDS_AT_START,
+                    batch: int = probe_mod.PROBE_BATCH) -> dict:
+    """Listing -> ENRICHMENT -> the frozen selection rule.
+
+    THE RULE RUNS ONLY AFTER ENRICHMENT. It used to run on listing
+    rows, which carry no quote, no state and no traded-share counter,
+    so all 3,000 of them were excluded as ONE_SIDED_BOOK and the
+    universe was empty by construction. A missing field in a listing is
+    not a one-sided market, and the rule never sees an unenriched row
+    from here.
+
+    A FAILED DISCOVERY IS NOT AN EMPTY UNIVERSE, and neither is an
+    UNPROBED one: `coverage` says how much of the candidate set was
+    actually read and is reported apart from `excluded_by_reason`,
+    which is the rule's verdict on what we did read.
+    """
+    if candidates is None:
+        listed = await _list_candidates(client=client)
+        if not listed.get("ok"):
+            return {"ok": False, "error": listed.get("error"),
+                    "why": listed.get("why")}
+        candidates = listed["candidates"]
+        meta = {k: listed[k] for k in
+                ("pages_read", "rows_listed", "page_size",
+                 "listing_truncated_at_page_bound")}
+    else:
+        meta = {}
+
+    if not candidates:
+        return dict(meta, ok=True, candidates=0, slugs=[], detail=[],
+                    considered=0, eligible=0, selected=0, over_cap=0,
+                    excluded_by_reason={}, coverage={},
+                    next_offset=offset, rule=uni.describe()["rule"],
+                    why="listing produced no candidates")
+
+    # BY SLUG, so a round that wraps past the end of the candidate list
+    # cannot enrich the same market twice. It did: four rounds of 240
+    # over 400 candidates read 480 markets, `considered` came out
+    # larger than the candidate set, and the duplicate rows reached
+    # `select` as separate entries -- 46 "selected" collapsing to 34
+    # subscriptions. The later read of a market wins, being the fresher
+    # book.
+    by_slug: dict = {}
+    coverage, nxt, swept = {}, offset, 0
+    for _ in range(max(1, rounds)):
+        r = await probe_mod.probe(client, candidates, offset=nxt,
+                                  batch=batch)
+        for row in r["rows"]:
+            by_slug[row["slug"]] = row
+        coverage = probe_mod.merge_coverage(coverage, r["coverage"])
+        nxt = r["next_offset"]
+        swept += r["probed"]
+        if swept >= len(candidates):
+            # A FULL SWEEP IS THE END OF THE ROUND BUDGET. Going round
+            # again would re-read markets already covered and inflate
+            # every count derived from it.
+            break
+        if len(by_slug) >= uni.MAX_MARKETS * 3:
+            # Enough enriched rows that the cap will bind. Reading more
+            # markets would only lengthen the tail we then discard.
+            break
+
+    rows = list(by_slug.values())
+    # `probed` counts READS ATTEMPTED and `distinct_enriched` counts
+    # MARKETS COVERED; a wrapped round makes the first larger than the
+    # second, and only the second says how much of the venue we have
+    # actually looked at.
+    coverage = dict(coverage, distinct_enriched=len(rows))
+    sel = uni.select(rows)
+    sel.update(meta)
+    sel.update({"ok": True, "candidates": len(candidates),
+                "enriched_rows": len(rows), "coverage": coverage,
+                "next_offset": nxt,
+                "enrichment": probe_mod.PROBE_VERSION})
     return sel
 
 
@@ -909,7 +1057,8 @@ async def _final_flush(loop) -> None:
 
 
 async def main(*, client=None, stream_factory=None, store=None,
-               run_for_s: float | None = None) -> dict | None:
+               run_for_s: float | None = None, control_pool=None,
+               sleep=None) -> dict | None:
     """The supervised loop `workers/all.py` runs.
 
     Every keyword is None in production: `workers/all.py` calls
@@ -923,9 +1072,33 @@ async def main(*, client=None, stream_factory=None, store=None,
     """
     from ..config import settings
 
+    # A BOUNDED RUN DOES NOT SERVE A BACKOFF. `run_for_s` is set only by
+    # the harnesses and the startup-path runner, which are asking what
+    # `main()` DECIDES, not waiting out the supervisor on its behalf.
+    # Production passes neither keyword and gets the real hold; the
+    # schedule itself is asserted against an injected `sleep`.
+    if sleep is None and run_for_s is not None:
+        async def sleep(_delay):        # noqa: F811 -- deliberate shadow
+            return
+
     if not enabled():
         log.info("bettor_live_loop: disabled by %s=off", KILL_ENV)
+        await _backoff("KILL_SWITCH", sleep=sleep)
         return {"started": False, "why": "KILL_SWITCH"}
+
+    # THE AUTHORITATIVE STOP, AND IT IS READ FIRST. Before a venue
+    # request, before the schema, before credentials: a loop that is
+    # stopped must cost nothing. The environment variable above is kept
+    # as a cheap pre-check only -- it was set and acknowledged on
+    # 2026-09-21 and the restarted process still did not read it, so it
+    # is not what holds this loop off.
+    control = await ctl.read_control(control_pool)
+    if ctl.is_closed(control):
+        log.info("bettor_live_loop: not observing (%s: %s)",
+                 control["why"], control.get("detail"))
+        await _backoff(control["why"], sleep=sleep)
+        return {"started": False, "why": control["why"],
+                "control": control}
 
     cfg = settings()
     key_id = getattr(cfg, "pmus_key_id", None)
@@ -936,6 +1109,7 @@ async def main(*, client=None, stream_factory=None, store=None,
         # look like "a quiet market".
         log.error("bettor_live_loop: no PMUS credentials in this "
                   "environment; not starting")
+        await _backoff("NO_CREDENTIALS", sleep=sleep)
         return {"started": False, "why": "NO_CREDENTIALS"}
 
     boot_id = uuid.uuid4().hex[:16]
@@ -946,6 +1120,7 @@ async def main(*, client=None, stream_factory=None, store=None,
             # next deploy is a run that produced nothing.
             log.error("bettor_live_loop: no durable store (%s); not "
                       "starting", chosen.get("why"))
+            await _backoff("NO_DURABLE_STORE", sleep=sleep)
             return {"started": False, "why": "NO_DURABLE_STORE",
                     "detail": chosen.get("why")}
         store = chosen["store"]
@@ -954,9 +1129,11 @@ async def main(*, client=None, stream_factory=None, store=None,
     except Exception as exc:  # noqa: BLE001
         log.error("bettor_live_loop: durable store would not start (%s); "
                   "not starting", type(exc).__name__)
+        await _backoff("STORE_START_FAILED", sleep=sleep)
         return {"started": False, "why": "STORE_START_FAILED",
                 "detail": type(exc).__name__}
     if not started.get("ok"):
+        await _backoff("STORE_START_REFUSED", sleep=sleep)
         return {"started": False, "why": "STORE_START_REFUSED",
                 "detail": started}
 
@@ -964,18 +1141,32 @@ async def main(*, client=None, stream_factory=None, store=None,
     if not first.get("ok"):
         log.error("bettor_live_loop: %s (%s); not starting",
                   first.get("why"), first.get("error"))
+        await _backoff("DISCOVERY_FAILED", sleep=sleep)
         return {"started": False, "why": "DISCOVERY_FAILED",
                 "detail": first}
     if not first.get("slugs"):
         # AN EMPTY UNIVERSE IS REPORTED, NOT BYPASSED. The rule is not
         # relaxed to find something to watch.
-        log.error("bettor_live_loop: discovery returned 0 eligible "
-                  "markets of %d considered; not starting. Excluded: %s",
+        #
+        # COVERAGE IS REPORTED BESIDE THE VERDICT, because "of 3,000
+        # candidates we read 960 and none qualified" and "we read none
+        # of them" are different facts, and the first version of this
+        # message could not tell them apart -- it counted 3,000
+        # unenriched listing rows as 3,000 one-sided books.
+        cov = first.get("coverage") or {}
+        log.error("bettor_live_loop: no eligible markets; not starting. "
+                  "COVERAGE candidates=%s probed=%s enriched=%s %s | "
+                  "RULE considered=%s excluded=%s",
+                  cov.get("candidates"), cov.get("probed"),
+                  cov.get("enriched"), json.dumps(cov.get("by_status", {})),
                   first.get("considered", 0),
                   json.dumps(first.get("excluded_by_reason", {})))
+        await _backoff("EMPTY_UNIVERSE", sleep=sleep)
         return {"started": False, "why": "EMPTY_UNIVERSE",
                 "considered": first.get("considered", 0),
                 "excluded_by_reason": first.get("excluded_by_reason", {}),
+                "coverage": cov,
+                "candidates": first.get("candidates"),
                 "pages_read": first.get("pages_read")}
 
     # THE OUTCOME LEG COMES FROM THE LISTING. It used to be None for
@@ -1007,14 +1198,28 @@ async def main(*, client=None, stream_factory=None, store=None,
     log.info("bettor_live_loop: boot %s, store %s, recovered %s",
              loop.boot_id, json.dumps(started, default=str),
              json.dumps(rec, default=str))
-    log.info("bettor_live_loop: %d markets subscribed of %d considered "
-             "over %s pages, fees %s (%s)",
-             len(first["slugs"]), first.get("considered", 0),
-             first.get("pages_read"), loop.fees.source, loop.fees.status)
+    cov0 = first.get("coverage") or {}
+    log.info("bettor_live_loop: %d markets subscribed; %d eligible of %d "
+             "ENRICHED; covered %s of %s candidates in %s reads over %s "
+             "pages (%s); fees %s (%s)",
+             len(first["slugs"]), first.get("eligible", 0),
+             first.get("considered", 0), cov0.get("distinct_enriched"),
+             cov0.get("candidates"), cov0.get("probed"),
+             first.get("pages_read"), first.get("enrichment"),
+             loop.fees.source, loop.fees.status)
+
+    # A RUN THAT STARTED CLEARS THE BACKOFF. Otherwise one bad morning
+    # leaves every later restart on the fifteen-minute rung.
+    _reset_backoff()
 
     stream.start()
     t_start = time.time()
+    probe_offset = first.get("next_offset", 0)
+    candidates = None
     last_discovery = last_settlement = last_save = last_flush = t_start
+    last_control = t_start
+    loop.control = control
+    stop_reason = None
     last_prune = t_start
     cycle = 0
     try:
@@ -1028,9 +1233,27 @@ async def main(*, client=None, stream_factory=None, store=None,
                 last_flush = now
                 await loop.flush()
 
+            # THE STOP IS RE-READ WHILE RUNNING, which is what makes it
+            # a control rather than a startup option. Flipping one row
+            # stops this loop within CONTROL_EVERY_S -- no deploy, no
+            # restart, no environment change. An unreadable control
+            # stops it too; see `bettor_live_control`.
+            if now - last_control >= ctl.CONTROL_EVERY_S:
+                last_control = now
+                live = await ctl.read_control(control_pool)
+                loop.control = live
+                if ctl.is_closed(live):
+                    log.warning("bettor_live_loop: stopping on the "
+                                "control (%s: %s)", live["why"],
+                                live.get("detail"))
+                    stop_reason = live["why"]
+                    break
+
             if now - last_discovery >= DISCOVERY_EVERY_S:
                 last_discovery = now
-                nxt = await _discover(client=client)
+                nxt = await _discover(client=client, candidates=candidates,
+                                      offset=probe_offset, rounds=1)
+                probe_offset = nxt.get("next_offset", probe_offset)
                 if nxt.get("ok") and nxt.get("slugs"):
                     loop.event_at.update(_event_times(nxt))
                     keep = set(nxt["slugs"])
@@ -1109,4 +1332,5 @@ async def main(*, client=None, stream_factory=None, store=None,
         log.info("bettor_live_loop: stopped; stream stop requested, "
                  "%d records written, %d persist failures",
                  loop.records_written, loop.persist_failures)
-    return {"started": True, "report": loop.report()}
+    return {"started": True, "stopped_by": stop_reason,
+            "report": loop.report()}

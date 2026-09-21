@@ -33,6 +33,41 @@ from sportsassets import bettor_settlement_ingest as si
 from sportsassets.workers import bettor_live_loop as bl
 
 
+class FakeControlPool:
+    """`pool.fetchval` over one stored value, or a raise.
+
+    Small enough to stand in for asyncpg wherever `main()` and
+    `read_control` only ever ask the one question they ask.
+    """
+
+    def __init__(self, value=None, *, raises=None):
+        self.value, self.raises, self.calls = value, raises, 0
+
+    async def fetchval(self, _sql, *args):
+        self.calls += 1
+        if self.raises is not None:
+            raise self.raises
+        return self.value
+
+
+def RunningControl():
+    """A control that says, in so many words, that observation may run."""
+    return FakeControlPool("true")
+
+
+class SleepSpy:
+    """An awaitable stand-in for `asyncio.sleep` that records the delays.
+
+    The backoff SCHEDULE is the thing under test; spending it is not.
+    """
+
+    def __init__(self):
+        self.delays = []
+
+    async def __call__(self, delay):
+        self.delays.append(delay)
+
+
 def md(slug="m1", *, source_ts, state="MARKET_STATE_OPEN"):
     return {"marketData": {
         "marketSlug": slug, "transactTime": source_ts, "state": state,
@@ -795,7 +830,7 @@ class TestTheEntryPointLifecycle:
         import sportsassets.config as cfgmod
         monkeypatch.setattr(cfgmod, "settings", lambda: Cfg(), raising=False)
 
-        async def fake_discover(client=None):
+        async def fake_discover(client=None, **kw):
             return discovery
 
         monkeypatch.setattr(bl, "_discover", fake_discover)
@@ -815,6 +850,16 @@ class TestTheEntryPointLifecycle:
         return made
 
     def run_main(self, made, **kw):
+        # THE CONTROL IS NOW PART OF STARTING. `main()` reads the
+        # database stop control before anything else and fails closed,
+        # so a test that wants to reach discovery has to supply a
+        # control that says run -- exactly as production will.
+        # `sleep` is a spy so the non-start backoff is asserted rather
+        # than served: these cases return in milliseconds and the
+        # schedule is checked in TestTheNoStartBackoff.
+        kw.setdefault("control_pool", RunningControl())
+        kw.setdefault("sleep", made.setdefault("sleep", SleepSpy()))
+        bl._reset_backoff()
         return asyncio.run(bl.main(store=made["store"], **kw))
 
     def test_a_failed_discovery_refuses_to_start(self, monkeypatch, tmp_path):
@@ -861,7 +906,8 @@ class TestTheEntryPointLifecycle:
         monkeypatch.setenv("BETTOR_LIVE_STATE_DIR", str(tmp_path))
         monkeypatch.delenv("BETTOR_LIVE_STATE_DISK", raising=False)
         monkeypatch.delenv(store_mod.ALLOW_EPHEMERAL_ENV, raising=False)
-        out = asyncio.run(bl.main())          # no injected store
+        out = asyncio.run(bl.main(control_pool=RunningControl(),
+                                  sleep=SleepSpy()))   # no store
         assert out["why"] == "NO_DURABLE_STORE"
 
     def test_a_store_that_will_not_start_refuses_the_run(self, monkeypatch,
@@ -875,7 +921,9 @@ class TestTheEntryPointLifecycle:
             async def start(self):
                 raise OSError("read-only file system")
 
-        out = asyncio.run(bl.main(store=Broken()))
+        out = asyncio.run(bl.main(store=Broken(),
+                                  control_pool=RunningControl(),
+                                  sleep=SleepSpy()))
         assert out["why"] == "STORE_START_FAILED"
         assert out["detail"] == "OSError"
         assert "started" not in made
@@ -888,7 +936,9 @@ class TestTheEntryPointLifecycle:
                                       "considered": 1})
 
         async def run():
-            task = asyncio.create_task(bl.main(store=made["store"]))
+            task = asyncio.create_task(bl.main(
+                store=made["store"], control_pool=RunningControl(),
+                sleep=SleepSpy()))
             await asyncio.sleep(0.4)
             task.cancel()
             with pytest.raises(asyncio.CancelledError):
@@ -908,7 +958,9 @@ class TestTheEntryPointLifecycle:
                                       "considered": 1})
 
         async def run():
-            task = asyncio.create_task(bl.main(store=made["store"]))
+            task = asyncio.create_task(bl.main(
+                store=made["store"], control_pool=RunningControl(),
+                sleep=SleepSpy()))
             await asyncio.sleep(0.3)
             loop = made["loop"]
             loop._record({"loop": "L", "kind": "DECISION",
@@ -930,7 +982,9 @@ class TestTheEntryPointLifecycle:
                                       "considered": 1})
 
         async def run():
-            task = asyncio.create_task(bl.main(store=made["store"]))
+            task = asyncio.create_task(bl.main(
+                store=made["store"], control_pool=RunningControl(),
+                sleep=SleepSpy()))
             await asyncio.sleep(0.4)
             os.environ[bl.KILL_ENV] = "off"
             await asyncio.wait_for(task, timeout=10)
@@ -959,7 +1013,9 @@ class TestTheEntryPointLifecycle:
         made["store"] = filestore(tmp_path)
 
         async def run():
-            task = asyncio.create_task(bl.main(store=made["store"]))
+            task = asyncio.create_task(bl.main(
+                store=made["store"], control_pool=RunningControl(),
+                sleep=SleepSpy()))
             await asyncio.sleep(0.3)
             task.cancel()
             try:
@@ -1075,3 +1131,222 @@ class TestNoOrderCapability:
     def test_the_report_states_zero_orders(self, tmp_path):
         loop, _ = wired(tmp_path)
         assert loop.report()["orders_submitted"] == 0
+
+
+# ── 9. the no-start backoff ──────────────────────────────────────────
+
+class TestTheNoStartBackoff:
+    """THE DEFECT: `workers/all.py:run_forever` is a `while True`, so a
+    `main()` that returned immediately became a five-second cycle. On
+    2026-09-21 that was about 73 rounds of six listing pages and one
+    advisory-locked DDL transaction each -- roughly 440 venue requests
+    -- in the sixteen minutes before the loop was deregistered.
+
+    That supervisor is shared by twenty-five workers and is not this
+    release's to change, so the bound lives in `main()`."""
+
+    def test_the_schedule_escalates_and_then_holds(self):
+        bl._reset_backoff()
+        spy = SleepSpy()
+
+        async def drive():
+            for _ in range(6):
+                await bl._backoff("EMPTY_UNIVERSE", sleep=spy)
+
+        asyncio.run(drive())
+        assert spy.delays == [60.0, 120.0, 300.0, 900.0, 900.0, 900.0]
+        assert spy.delays[-1] == max(bl.NOSTART_BACKOFF_S), "capped"
+
+    def test_the_first_hold_already_dwarfs_the_supervisors_five_seconds(self):
+        assert min(bl.NOSTART_BACKOFF_S) >= 60.0
+
+    def test_a_run_that_started_clears_the_backoff(self, monkeypatch,
+                                                   tmp_path):
+        """Otherwise one bad morning leaves every later restart on the
+        fifteen-minute rung."""
+        bl._reset_backoff()
+        asyncio.run(bl._backoff("x", sleep=SleepSpy()))
+        asyncio.run(bl._backoff("x", sleep=SleepSpy()))
+        assert bl._nostart_rung > 0
+
+        made = self._started(monkeypatch, tmp_path)
+        spy = SleepSpy()
+        asyncio.run(bl.main(store=made["store"], run_for_s=0.0,
+                            control_pool=RunningControl(), sleep=spy))
+        assert bl._nostart_rung == 0
+        assert spy.delays == [], "a run that started served no backoff"
+
+    def test_every_refusal_holds_before_it_returns(self, monkeypatch,
+                                                   tmp_path):
+        """Each of these used to return in microseconds, straight back
+        into the supervisor's five-second restart."""
+        for why, kw in (
+            ("DISCOVERY_FAILED", {"discovery": {"ok": False,
+                                                "error": "TimeoutError"}}),
+            ("EMPTY_UNIVERSE", {"discovery": {"ok": True, "slugs": [],
+                                              "considered": 900,
+                                              "coverage": {}}}),
+            ("NO_CREDENTIALS", {"discovery": {"ok": True, "slugs": ["m1"]},
+                                "creds": (None, None)}),
+        ):
+            bl._reset_backoff()
+            made = self._patch_for(monkeypatch, tmp_path, **kw)
+            spy = SleepSpy()
+            out = asyncio.run(bl.main(store=made["store"],
+                                      control_pool=RunningControl(),
+                                      sleep=spy))
+            assert out["why"] == why
+            assert spy.delays == [60.0], "%s returned without holding" % why
+
+    # -- helpers ------------------------------------------------------
+
+    def _patch_for(self, monkeypatch, tmp_path, *, discovery,
+                   creds=("k", "s")):
+        return TestTheEntryPointLifecycle()._patch(
+            monkeypatch, tmp_path, discovery=discovery, creds=creds)
+
+    def _started(self, monkeypatch, tmp_path):
+        return self._patch_for(
+            monkeypatch, tmp_path,
+            discovery={"ok": True, "slugs": ["m1"], "considered": 1,
+                       "detail": [{"slug": "m1", "outcome_leg": "yes"}],
+                       "coverage": {"candidates": 1, "probed": 1,
+                                    "enriched": 1}})
+
+
+# ── 10. the database stop control, through main() ────────────────────
+
+class TestTheStopControlGovernsTheLoop:
+    """THE DEFECT: BETTOR_LIVE_LOOP=off was set and acknowledged, the
+    service was demonstrably restarted (`server_restarted`
+    2026-09-21T22:43:40.131647Z), and the restarted process still ran
+    the discovery path. The stop had to stop depending on the
+    environment."""
+
+    def _spying(self, monkeypatch, tmp_path):
+        made = TestTheEntryPointLifecycle()._patch(
+            monkeypatch, tmp_path,
+            discovery={"ok": True, "slugs": ["m1"], "considered": 1,
+                       "detail": [{"slug": "m1", "outcome_leg": "yes"}],
+                       "coverage": {}})
+        calls = {"discover": 0, "store_start": 0}
+        real_discover = bl._discover
+
+        async def counting(*a, **kw):
+            calls["discover"] += 1
+            return await real_discover(*a, **kw)
+
+        monkeypatch.setattr(bl, "_discover", counting)
+        store = made["store"]
+        real_start = store.start
+
+        async def counting_start():
+            calls["store_start"] += 1
+            return await real_start()
+
+        store.start = counting_start
+        return made, calls
+
+    def test_a_closed_control_costs_nothing_at_all(self, monkeypatch,
+                                                   tmp_path):
+        """No venue request, no schema initialization, no credential
+        read. A loop that is stopped must be free."""
+        made, calls = self._spying(monkeypatch, tmp_path)
+        out = asyncio.run(bl.main(store=made["store"],
+                                  control_pool=FakeControlPool("false"),
+                                  sleep=SleepSpy()))
+        assert out["started"] is False
+        assert out["why"] == "STOPPED_BY_CONTROL"
+        assert calls == {"discover": 0, "store_start": 0}
+        assert "started" not in made, "the stream never opened"
+
+    @pytest.mark.parametrize("pool,why", [
+        (FakeControlPool(None), "CONTROL_ROW_ABSENT"),
+        (FakeControlPool("maybe"), "CONTROL_MALFORMED"),
+        (FakeControlPool(raises=ConnectionError("down")),
+         "CONTROL_UNREADABLE"),
+    ])
+    def test_it_fails_closed_through_main(self, monkeypatch, tmp_path,
+                                          pool, why):
+        made, calls = self._spying(monkeypatch, tmp_path)
+        out = asyncio.run(bl.main(store=made["store"], control_pool=pool,
+                                  sleep=SleepSpy()))
+        assert out["started"] is False and out["why"] == why
+        assert calls["discover"] == 0 and calls["store_start"] == 0
+
+    def test_a_closed_control_also_serves_the_backoff(self, monkeypatch,
+                                                      tmp_path):
+        bl._reset_backoff()
+        made, _ = self._spying(monkeypatch, tmp_path)
+        spy = SleepSpy()
+        asyncio.run(bl.main(store=made["store"],
+                            control_pool=FakeControlPool("false"),
+                            sleep=spy))
+        assert spy.delays == [60.0], (
+            "a stopped loop must not re-poll every five seconds either")
+
+    def test_a_running_control_lets_the_loop_start(self, monkeypatch,
+                                                  tmp_path):
+        made, calls = self._spying(monkeypatch, tmp_path)
+        out = asyncio.run(bl.main(store=made["store"], run_for_s=0.0,
+                                  control_pool=RunningControl(),
+                                  sleep=SleepSpy()))
+        assert out["started"] is True
+        assert calls["store_start"] == 1 and calls["discover"] == 1
+        assert made.get("started") is True
+
+    def test_flipping_the_row_stops_a_running_loop_with_no_deploy(
+            self, monkeypatch, tmp_path):
+        """THE DEMONSTRATION. One row changes; the running process
+        notices on its own timer and stops. No restart, no redeploy, no
+        environment change -- which is exactly what the environment
+        variable failed to deliver."""
+        monkeypatch.setattr(bl.ctl, "CONTROL_EVERY_S", 0.0)
+        made, _ = self._spying(monkeypatch, tmp_path)
+        pool = FakeControlPool("true")
+
+        async def drive():
+            task = asyncio.create_task(bl.main(
+                store=made["store"], control_pool=pool, sleep=SleepSpy()))
+            for _ in range(200):                # let it get running
+                await asyncio.sleep(0.01)
+                if made.get("started"):
+                    break
+            assert made.get("started") is True, "never started"
+            pool.value = "false"                # <- the whole change
+            return await asyncio.wait_for(task, timeout=5)
+
+        out = asyncio.run(drive())
+        assert out["started"] is True
+        assert out["stopped_by"] == "STOPPED_BY_CONTROL"
+        assert made.get("stopped") is True, "the stream was stopped too"
+
+    def test_an_unreadable_control_stops_a_running_loop_too(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setattr(bl.ctl, "CONTROL_EVERY_S", 0.0)
+        made, _ = self._spying(monkeypatch, tmp_path)
+        pool = FakeControlPool("true")
+
+        async def drive():
+            task = asyncio.create_task(bl.main(
+                store=made["store"], control_pool=pool, sleep=SleepSpy()))
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if made.get("started"):
+                    break
+            pool.raises = ConnectionError("db went away")
+            return await asyncio.wait_for(task, timeout=5)
+
+        out = asyncio.run(drive())
+        assert out["stopped_by"] == "CONTROL_UNREADABLE"
+        assert made.get("stopped") is True
+
+    def test_the_report_names_the_control_it_is_running_on(
+            self, monkeypatch, tmp_path):
+        made, _ = self._spying(monkeypatch, tmp_path)
+        out = asyncio.run(bl.main(store=made["store"], run_for_s=0.0,
+                                  control_pool=RunningControl(),
+                                  sleep=SleepSpy()))
+        ctl_state = out["report"]["control"]
+        assert ctl_state["why"] == "RUNNING"
+        assert ctl_state["key"] == "bettor_live_observation"
