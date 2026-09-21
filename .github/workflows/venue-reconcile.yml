@@ -81,12 +81,38 @@ jobs:
           PMUS_DOMAIN_RESERVATION: pmus-public-read-global
           PMUS_KEY_ID: ${{ secrets.PMUS_KEY_ID }}
           PMUS_SECRET_KEY: ${{ secrets.PMUS_SECRET_KEY }}
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          RENDER_KEY: ${{ secrets.RENDER_API_KEY }}
           RECONCILE_OUT: reconcile_${{ github.run_id }}.json
           SINCE_DAYS: ${{ inputs.since_days }}
           HEAD: ${{ inputs.head }}
         run: |
           set -o pipefail
+          # THE DSN COMES FROM RENDER, NOT FROM A SECRET. There is no
+          # DATABASE_URL secret in this repository; research-sql reaches
+          # the database by asking Render's API for the connection
+          # string, and so does this. Without it asyncpg silently falls
+          # back to localhost and the job reports "could not connect to
+          # Postgres" after six retries against 127.0.0.1, which is what
+          # the first run did.
+          #
+          # The string and its password are masked before they can reach
+          # a log line.
+          set -e
+          [ -z "$RENDER_KEY" ] && { echo "::error::RENDER_API_KEY is not set; cannot resolve the database"; exit 1; }
+          echo "::add-mask::$RENDER_KEY"
+          API=https://api.render.com/v1
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $RENDER_KEY" -H "Accept: application/json" "$API$1"; }
+          PG=$(get "/postgres?name=sportsassets-db&limit=20" | jq -r '.[]? | select(.postgres.name=="sportsassets-db") | .postgres.id' | head -1)
+          [ -z "$PG" ] && { echo "::error::no database named sportsassets-db"; exit 1; }
+          get "/postgres/$PG/connection-info" > /tmp/ci.json
+          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
+          PW=$(jq -r '.password // empty' /tmp/ci.json)
+          [ -n "$PW" ] && echo "::add-mask::$PW"
+          [ -n "$EXT" ] && echo "::add-mask::$EXT"
+          [ -z "$EXT" ] && { echo "::error::no external connection string returned"; exit 1; }
+          export DATABASE_URL="$EXT"
+          echo "database resolved: sportsassets-db ($PG)"
+
           set +e
           python -m sportsassets.venue_reconcile > recon_stdout.txt 2> recon_stderr.txt
           RC=$?

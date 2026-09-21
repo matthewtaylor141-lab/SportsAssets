@@ -442,7 +442,36 @@ async def _record_boot() -> None:
         log.exception("workers_boot marker write failed")
 
 
+async def _bind_execution_gate() -> None:
+    """Give the order gate a loop and a pool to read the kill switch.
+
+    UNTIL THIS RUNS, EVERY SUBMISSION IN THIS PROCESS IS DENIED. That is
+    the intended failure mode -- a process that cannot read the kill
+    switch has no business sending orders -- but it means binding is not
+    optional, it is what makes the gate a control rather than an outage.
+
+    It is awaited BEFORE the loops start. The workers service registers
+    whale_exits, the mirror reconciler and underdog, all of which can
+    reach pmus.submit_fok; none of them may run a tick against an
+    unbound gate, because "denied because nothing was bound" and
+    "denied because we are paused" would be indistinguishable in the
+    logs at exactly the wrong moment.
+    """
+    from .. import execution_gate as gate
+    from ..db import get_pool
+
+    try:
+        pool = await get_pool()
+        gate.bind(asyncio.get_running_loop(), pool)
+    except Exception:  # noqa: BLE001 — unbound denies, so boot continues
+        log.exception("execution gate NOT bound -- every order this "
+                      "process attempts will be refused until it is")
+
+
 async def main() -> None:
+    # The gate is bound first and awaited. Everything else in this
+    # function is deliberately concurrent; this one is not.
+    await _bind_execution_gate()
     # The marker runs CONCURRENTLY with the loops (leak-hunt find
     # 2026-08-24): awaiting it first serialized a DB connect retry in
     # front of every worker — a slow DB would have delayed the chain

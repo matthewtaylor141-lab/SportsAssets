@@ -103,6 +103,28 @@ async def lifespan(_: FastAPI):
     except Exception:  # noqa: BLE001
         logging.getLogger(__name__).exception(
             "DB unavailable at boot — serving anyway, will retry lazily")
+
+    # BIND THE ORDER GATE. This service hosts the manual desk --
+    # _execute_manual, _execute_manual_limit and _execute_manual_sell --
+    # and every one of them reaches pmus.submit_fok or
+    # pmus.close_position. The manual sell in particular consulted
+    # active_venue() and nothing else, so the kill switch documented as
+    # "no further orders" did not stop an operator-invoked sale.
+    #
+    # An operator-invoked endpoint is still an order route. Unbound, the
+    # gate denies, so a failure here costs the desk its ability to trade
+    # and costs nothing else.
+    try:
+        import asyncio as _aio
+
+        from .. import execution_gate as _gate
+        from ..db import get_pool as _gp
+        _gate.bind(_aio.get_running_loop(), await _gp())
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "execution gate NOT bound — the desk will refuse every order "
+            "until it is, which is the safe direction but not a working "
+            "desk")
     # INGESTION FALLBACK (2026-08-02). The workers service died on Jul 27
     # and stayed dead for six days because nothing else could do its job;
     # whale detection is the platform's heartbeat and must not depend on a

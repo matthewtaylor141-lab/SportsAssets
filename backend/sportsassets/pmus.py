@@ -28,10 +28,18 @@ import unicodedata
 from difflib import SequenceMatcher
 from typing import Any
 
+from . import execution_gate as _gate
 from . import procmem as _procmem
 from .config import settings
 
 log = logging.getLogger(__name__)
+
+
+def _lane() -> str:
+    """Which lane is submitting. Carried on the task's context by the
+    route; "unknown" when nobody said, and unknown is treated as the
+    strictest case rather than the most permissive one."""
+    return _gate.current_lane()
 
 _client = None
 MATCH_FLOOR = 0.85  # minimum similarity for a verified outcome match
@@ -2788,6 +2796,19 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
     both omitted the params are byte-identical to before; the fixture
     in tests/test_pmus_post_only.py pins that for every existing
     caller's shape."""
+    # THE AUTHORIZATION BOUNDARY (2026-09-21). Every order this system
+    # can place arrives here or at close_position -- copy entry, both
+    # manual desk paths, the manual sell, whale exits, the mirror
+    # reconciler, underdog, calibration, and every retry of any of them.
+    # There were eleven call sites across four modules and each carried
+    # its own idea of what "allowed" meant; the audit found three that
+    # were wrong in three different ways.
+    #
+    # Read HERE, at the moment of submission, and never carried in by a
+    # caller: work that was queued or retried before a pause has no
+    # token to present. Denial raises, so a route cannot proceed by
+    # ignoring a return value.
+    _gate.authorize("submit", lane=_lane(), slug=us_market_slug)
     client = _get_client()
     # THE SIDE SELECTOR (venue ground truth 2026-08-24): on market
     # families whose two sides share one identifier — every aec- match
@@ -3042,6 +3063,13 @@ def close_position(us_slug: str, *, slippage_bips: int) -> dict:
                 "raw": {"why": "close-position carries no limit price; "
                                "refusing to send an unbounded market "
                                "order"}}
+    # THE AUTHORIZATION BOUNDARY. close_position sends an unpriced
+    # market exit, bounded only by slippage -- the single most powerful
+    # order this system can place. It is gated on exactly the same terms
+    # as submit_fok, and for the same reason: mirror_exit's full-exit
+    # branch reaches this line and, until the R5 repair, reached it
+    # without consulting the master switch at all.
+    _gate.authorize("close_position", lane=_lane(), slug=us_slug)
     client = _get_client()
     try:
         resp = client.orders.close_position({

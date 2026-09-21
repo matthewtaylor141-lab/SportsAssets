@@ -392,9 +392,18 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     # which is 5. Comparing them asks "is there more than one tick's
     # work waiting", and since every admitted observation owes reads at
     # 60s, 300s, 900s and 3600s, any steady state holds more than five
-    # due at once. So the gate latched shut on the first tick and had no
-    # path back open: with intake at zero the only thing that could
-    # drain it was the pre-existing commitment, and that takes an hour.
+    # due at once. So the gate shut on the first tick and stayed shut
+    # for every tick production ran.
+    #
+    # CORRECTED 2026-09-21, after the capacity harness replayed it: this
+    # is a long transient, not a permanent latch. Given fifty ticks
+    # instead of seven the brake releases around tick nineteen, once the
+    # inherited pipeline drains. Production was rolled back before that
+    # could happen, so the measurement was real and my explanation of it
+    # was not. Twenty-three minutes of zero intake is still the wrong
+    # answer to a full queue -- which is why the replacement carries an
+    # admission floor -- but it is a different fault from the one I
+    # named.
     #
     # This is the same level-versus-flow confusion I named in the W3
     # write-up -- summing a level across ticks double-counts the same

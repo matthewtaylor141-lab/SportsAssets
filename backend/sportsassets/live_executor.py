@@ -37,6 +37,7 @@ import asyncpg
 from datetime import datetime, timezone
 from typing import Any
 
+from . import execution_gate as _gate
 from .config import settings
 from .db import get_pool
 
@@ -108,6 +109,7 @@ async def execute_copy(payload: dict) -> str | None:
     None otherwise. The BUY path's return is unchanged and unread; every
     existing caller ignores the value.
     """
+    _gate.set_lane("copy")
     try:
         # HIS SELL IS A SIGNAL TOO (owner order 2026-08-25). This path
         # returned early on anything that was not a BUY, so his exits
@@ -879,6 +881,7 @@ async def mirror_exit(payload: dict) -> str:
     # operational pause and this is an authorization question. A system
     # that is not authorized to trade must refuse before it asks
     # whether it is currently paused.
+    _gate.set_lane("whale_exit")
     venue = active_venue()
     if not venue:
         return _exit_done("mx_not_authorized_no_active_venue")
@@ -4658,8 +4661,11 @@ async def execute_manual(asset: str, usd: float, note: str = "",
     sourced from the venue's own event listing executes DIRECTLY by
     its orderable slug — no catalog asset required."""
     try:
-        return await _execute_manual(asset, usd, note, us_slug=us_slug,
-                                     ask_hint=ask_hint)
+        # LANE. Manual desk: every global control, including the kill
+        # switch, and not the copy sleeve's loss breaker.
+        with _gate.lane("manual"):
+            return await _execute_manual(asset, usd, note, us_slug=us_slug,
+                                         ask_hint=ask_hint)
     except Exception as exc:  # noqa: BLE001 — the desk reports, never 500s
         log.exception("manual order failed pre-flight")
         return {"ok": False,
@@ -4919,8 +4925,9 @@ async def execute_manual_limit(usd: float, limit_price: float,
     counts this order's commitment the moment it rests), venue-named
     side or refusal. Returns a UI-ready dict, never raises."""
     try:
-        return await _execute_manual_limit(usd, limit_price, asset,
-                                           us_slug, note)
+        with _gate.lane("manual"):
+            return await _execute_manual_limit(usd, limit_price, asset,
+                                               us_slug, note)
     except Exception as exc:  # noqa: BLE001 — the desk reports, never 500s
         log.exception("manual limit order failed pre-flight")
         return {"ok": False,
@@ -5430,7 +5437,11 @@ async def execute_manual_sell(us_slug: str, qty: int | None = None,
     contract as execute_manual). Fails closed: refuses more than held,
     refuses with no live bid, limit floored at $0.01."""
     try:
-        return await _execute_manual_sell(us_slug, qty, min_price)
+        # THE ROUTE THAT READ active_venue() AND NOTHING ELSE. An
+        # operator-invoked endpoint is still an order route; the kill
+        # switch now reaches it through the gate at the venue boundary.
+        with _gate.lane("manual"):
+            return await _execute_manual_sell(us_slug, qty, min_price)
     except Exception as exc:  # noqa: BLE001 — the desk reports, never 500s
         log.exception("manual sell failed pre-flight")
         return {"ok": False,
@@ -7976,6 +7987,10 @@ async def _mirror_owns_asset(pool, asset: str | None) -> bool:
 async def maybe_execute(payload: dict, reaction: float | None) -> None:
     """Called on every fresh detection (after the paper trade). All guards
     re-checked here; failure of any guard is a silent no-op or logged skip."""
+    # LANE, for the record in the logs. "unknown" already receives the
+    # copy controls -- the gate's allowlist makes strict the default --
+    # so this names the lane rather than changing what it faces.
+    _gate.set_lane("copy")
     if COPY_MODE == "off":
         return _copy_stop("mode_off")
     cfg = settings()
