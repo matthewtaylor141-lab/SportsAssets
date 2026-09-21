@@ -562,6 +562,95 @@ class TestThePostgresBackend:
             await s.close()
         asyncio.run(go())
 
+    def test_concurrent_starts_all_succeed(self):
+        """MEASURED FIRST: twelve sessions running this DDL at once gave
+        2 successes and 10 failures. The API's migration runner and this
+        worker boot in the SAME deployment, so that race is the normal
+        case, not the corner case."""
+        async def go():
+            pool = await st.PgStore(dsn=PG_DSN)._get_pool()
+            async with pool.acquire() as con:
+                for t in reversed(st.OWN_TABLES):
+                    await con.execute("DROP TABLE IF EXISTS %s CASCADE" % t)
+            stores = [st.PgStore(dsn=PG_DSN, boot_id="b%d" % i)
+                      for i in range(10)]
+            outs = await asyncio.gather(*(x.start() for x in stores))
+            for x in stores:
+                await x.close()
+            return outs
+
+        outs = asyncio.run(go())
+        assert all(o["ok"] for o in outs), [o for o in outs if not o["ok"]]
+        assert all(o["schema_attempts"] <= st.SCHEMA_ATTEMPTS for o in outs)
+
+    def test_a_concurrent_migration_runner_does_not_break_the_worker(self):
+        """The real pairing: migration 093 applied by the API's runner
+        while the worker calls start(). Both take the same advisory
+        lock, so whoever is second waits and finds the tables there."""
+        here = os.path.dirname(os.path.abspath(__file__))
+        sql = open(os.path.normpath(os.path.join(
+            here, "..", "migrations",
+            "093_bettor_live_observation.sql"))).read()
+        assert "pg_advisory_xact_lock(%d)" % st.SCHEMA_LOCK_KEY in sql
+
+        async def runner():
+            # exactly what sportsassets/scripts/migrate.py does
+            import asyncpg
+            con = await asyncpg.connect(PG_DSN)
+            try:
+                async with con.transaction():
+                    await con.execute(sql)
+                return "ok"
+            except Exception as exc:  # noqa: BLE001
+                return type(exc).__name__
+            finally:
+                await con.close()
+
+        async def go():
+            pool = await st.PgStore(dsn=PG_DSN)._get_pool()
+            async with pool.acquire() as con:
+                for t in reversed(st.OWN_TABLES):
+                    await con.execute("DROP TABLE IF EXISTS %s CASCADE" % t)
+            worker = st.PgStore(dsn=PG_DSN, boot_id="w")
+            a, b, c = await asyncio.gather(runner(), worker.start(),
+                                           runner())
+            await worker.close()
+            return a, b, c
+
+        a, b, c = asyncio.run(go())
+        assert b["ok"] is True, b
+        assert (a, c) == ("ok", "ok"), (a, c)
+
+    def test_a_schema_that_never_arrives_is_an_explicit_refusal(self):
+        """The failure path is named and bounded, not a hang."""
+        async def go():
+            s = st.PgStore(dsn=PG_DSN)
+            await s.start()
+            pool = await s._get_pool()
+            async with pool.acquire() as con:
+                await con.execute("DROP TABLE IF EXISTS bettor_live_cursor "
+                                  " CASCADE")
+                await con.execute("CREATE TABLE bettor_live_cursor "
+                                  " (lane TEXT, market_id TEXT)")
+            out = await st.PgStore(dsn=PG_DSN).start()
+            async with pool.acquire() as con:
+                await con.execute("DROP TABLE IF EXISTS bettor_live_cursor "
+                                  " CASCADE")
+            await s.close()
+            return out
+
+        out = asyncio.run(go())
+        assert out["ok"] is False
+        assert out["why"] == "SCHEMA_NOT_READY"
+        assert out["attempts"] == st.SCHEMA_ATTEMPTS
+        assert any("settle_failures" in m for m in out["missing"])
+        assert "093" in out["remedy"]
+
+    def test_the_bounded_wait_is_actually_bounded(self):
+        assert st.SCHEMA_LOCK_TIMEOUT_MS <= 30_000
+        assert st.SCHEMA_ATTEMPTS <= 8
+        assert sum(st.SCHEMA_BACKOFF_S) <= 30.0
+
     def test_the_schema_creates_itself_idempotently(self):
         async def go():
             for _ in range(2):
