@@ -1,6 +1,6 @@
 # THE ACTIVATION REQUEST
 
-Prepared merge: **`claude/bettor-observation-activation` @ `e293344`**
+Prepared merge: **`claude/bettor-observation-activation` @ `31ff849`**
 Release branch: **`claude/bettor-observation-release`**
 `OBSERVATION_RELEASE.md` is what is in the release and why. **This is
 the action, its measured scope, the baseline, and the acceptance
@@ -55,7 +55,7 @@ git fetch origin
 git push origin origin/claude/bettor-observation-activation:claude/session-njaewf
 ```
 
-`claude/bettor-observation-activation` (`e293344`) is
+`claude/bettor-observation-activation` (`31ff849`) is
 `claude/session-njaewf` with `claude/bettor-observation-release`
 merged into it, conflicts resolved and the result verified. Pushing it
 is a fast-forward of the tracked branch; Render's auto-deploy does the
@@ -64,7 +64,7 @@ rest. **That push is the activation.** Nothing else is required.
 ### The marginal change it deploys
 
 ```
-git diff --stat origin/claude/session-njaewf..e293344
+git diff --stat origin/claude/session-njaewf..31ff849
 → 24 files changed, 7,238 insertions, 410 deletions
 ```
 
@@ -310,7 +310,7 @@ accept the infrastructure.
 
 **I am asking for one production action:**
 
-> Push `claude/bettor-observation-activation` (`e293344`) to
+> Push `claude/bettor-observation-activation` (`31ff849`) to
 > `claude/session-njaewf`, which starts the decision-only observation
 > loop on `sportsassets-workers` and redeploys `sportsassets-api` with
 > inert modules and migration 093.
