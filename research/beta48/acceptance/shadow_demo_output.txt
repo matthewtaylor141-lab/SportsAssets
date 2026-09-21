@@ -3,25 +3,25 @@
 1. NONZERO-FEE ENTRY  (the fee reproduction)
 ========================================================================
    engine said NOT_IDENTIFIED / P_BOTH_LEGS_FILL_NOT_IDENTIFIED; executed under a declared assumption
-      yes  FILLED_FULL  qty    10 @ 0.4700  fee 0.20
-      no   FILLED_FULL  qty    10 @ 0.5000  fee 0.20
-      cash                                        89.9000  expected      89.9000  OK
-      fees_paid                                    0.4000  expected       0.4000  OK
+      yes  FILLED_FULL  qty    10 @ 0.4700  fee 0.17
+      no   FILLED_FULL  qty    10 @ 0.5000  fee 0.17
+      cash                                        89.9600  expected      89.9600  OK
+      fees_paid                                    0.3400  expected       0.3400  OK
       inventory yes                               10.0000  expected      10.0000  OK
       inventory no                                10.0000  expected      10.0000  OK
-      basis                                       10.1000  expected      10.1000  OK
-      deployed                                    10.1000  expected      10.1000  OK
+      basis                                       10.0400  expected      10.0400  OK
+      deployed                                    10.0400  expected      10.0400  OK
 
 ========================================================================
 2. PARTIAL SALE THROUGH THE ENGINE  (depth-limited)
 ========================================================================
       engine decided PAIR_SELL for 4 contracts (bid depth 4)
-      yes  FILLED_FULL    qty     4 @ 0.6000  fee 0.08  realized +0.3600
-      no   FILLED_FULL    qty     4 @ 0.5500  fee 0.08  realized +0.0400
+      yes  FILLED_FULL    qty     4 @ 0.6000  fee 0.07  realized +0.3820
+      no   FILLED_FULL    qty     4 @ 0.5500  fee 0.07  realized +0.0620
       yes remaining                                6.0000  expected       6.0000  OK
-      yes basis remaining                          2.9400  expected       2.9400  OK
-      no basis remaining                           3.1200  expected       3.1200  OK
-      deployed (never negative)                    6.0600  expected       6.0600  OK
+      yes basis remaining                          2.9220  expected       2.9220  OK
+      no basis remaining                           3.1020  expected       3.1020  OK
+      deployed (never negative)                    6.0240  expected       6.0240  OK
 
 ========================================================================
 3. COMPLETE SALE THROUGH THE ENGINE  (zero remaining basis)
@@ -33,21 +33,21 @@
       no basis                                     0.0000  expected       0.0000  OK
       deployed                                     0.0000  expected       0.0000  OK
       realized P&L is booked separately and NEVER reduces basis:
-      ledger realized_pnl                          1.0000  expected       1.0000  OK
-      TOTAL fees_paid (independent)                0.8000  expected       0.8000  OK
-      position fees_paid agrees                    0.8000  expected       0.8000  OK
+      ledger realized_pnl                          1.1200  expected       1.1200  OK
+      TOTAL fees_paid (independent)                0.6800  expected       0.6800  OK
+      position fees_paid agrees                    0.6800  expected       0.6800  OK
 
 ========================================================================
 4. ONE-LEG FILL -> AUTONOMOUS RECOVERY
 ========================================================================
    complement executable, fresh read -> COMPLETE -> COMPLETE       OK (RE_READ:m2@1.0)
-        completing nets +4.800000 incremental against an exit worth +4.300
+        completing nets +4.830000 incremental against an exit worth +4.330
         inventory yes=10 no=10 directional=0
    no fresh recovery read -> UNRESOLVED       -> UNRESOLVED_EXPOSURE OK (ENTRY_BOOK_REUSED_STALE)
         recovery requires its own observation with an identity and a times
         inventory yes=10 no=0 directional=10
    complement gone, bid present -> EXIT       -> EXIT           OK (RE_READ:m3@1.0)
-        exiting nets +4.400000 against completion worth unavailable
+        exiting nets +4.430000 against completion worth unavailable
         inventory yes=0 no=0 directional=0
    complement gone, no bid -> UNRESOLVED      -> UNRESOLVED_EXPOSURE OK (RE_READ:m4@1.0)
         neither completion nor exit is executable: complement unavailable,
@@ -56,29 +56,34 @@
 ========================================================================
 5. QUOTE LIFECYCLE: rest -> touch -> reprice -> fill -> cancel
 ========================================================================
-   q1 RESTING at 0.4500, quoted exposure 4.6000
+   q1 RESTING at 0.4500, quoted exposure 4.5000
    TOUCH -> NO_FILL (queue UNKNOWN): a touch is not a fill; whether we filled depen
-   REPRICE q1 -> q2 at 0.4550: cancel/replace: the new quote starts at 
-   FILL q2 state=PARTIAL qty=6 fee=0.06  evidence=SYNTHETIC_SCENARIO
-      cash after maker fill                       97.2100  expected      97.2100  OK
+   REPRICE REQUESTED q1 -> 0.4550, replacement DEFERRED: the original is still working; the replaceme
+   state=CANCEL_PENDING  still reserved 4.5000  live orders now: 1
+   CANCEL CONFIRMED, released 4.5000; replacement q2 rests at 0.4550
+      live orders after replacement                1.0000  expected       1.0000  OK
+   FILL q2 state=PARTIAL qty=6 fee=-0.02  evidence=SYNTHETIC_SCENARIO
+      cash after maker fill                       97.2900  expected      97.2900  OK
       inventory yes                                6.0000  expected       6.0000  OK
-   CANCEL q2, released 1.8200
-      quoted exposure after cancel                 0.0000  expected       0.0000  OK
+   CANCEL REQUESTED q2: still live, still reserved 1.8200
+      exposure while the cancel is in flight       1.8200  expected       1.8200  OK
+   CANCEL CONFIRMED, released 1.8200
+      quoted exposure after confirmation           0.0000  expected       0.0000  OK
 
 ========================================================================
 6. SETTLEMENT
 ========================================================================
-      payout 6.0000 - basis 2.7900 = realised +3.2100
+      payout 6.0000 - basis 2.7100 = realised +3.2900
       payout                                       6.0000  expected       6.0000  OK
       basis after settle                           0.0000  expected       0.0000  OK
 
 ========================================================================
 7. RESTART: balances, inventory, quotes AND provenance
 ========================================================================
-      cash                                        89.9000  expected      89.9000  OK
+      cash                                        89.9600  expected      89.9600  OK
       inventory yes                               10.0000  expected      10.0000  OK
-      basis                                       10.1000  expected      10.1000  OK
-      quoted exposure                              3.6000  expected       3.6000  OK
+      basis                                       10.0400  expected      10.0400  OK
+      quoted exposure                              3.5200  expected       3.5200  OK
       resting quotes recovered: 1
 
 ========================================================================
@@ -90,17 +95,25 @@
       settlement route -> NOT_IDENTIFIED
       missing: conditional_settlement_value (E[settlement | our fill]) -- a hal
 
+      THE SAME QUOTE UNDER THE PUBLISHED SCHEDULE
+      qty   1  round-trip fee/contract +0.02000  net/contract -0.02000  evidence HYPOTHETICAL
+      qty  10  round-trip fee/contract +0.01400  net/contract -0.01400  evidence HYPOTHETICAL
+      qty 100  round-trip fee/contract +0.01430  net/contract -0.01430  evidence HYPOTHETICAL
+      The per-contract fee CHANGES WITH SIZE because each fill
+      rounds to a cent. A flat per-contract constant cannot
+      express that, and the 1-contract row is the pilot's.
+
 ========================================================================
 9. LEDGER RECONCILIATION (necessary, NOT sufficient)
 ========================================================================
-   scenario 1-3   True  residual 0.0  fees 0.80  realized +1.0000
-   lifecycle      True  residual 0.0  fees 0.06  realized +3.2100
-   restart        True  residual 0.0  fees 0.40  realized +0.0000
+   scenario 1-3   True  residual 0.0  fees 0.68  realized +1.1200
+   lifecycle      True  residual 0.0  fees -0.02  realized +3.2900
+   restart        True  residual 0.0  fees 0.34  realized +0.0000
 
 ========================================================================
 EVIDENCE CLASSES PRODUCED
 ========================================================================
-    {"SYNTHETIC_SCENARIO": 6}
+    {"SYNTHETIC_SCENARIO": 9}
     Every record above is SYNTHETIC_SCENARIO. No PROSPECTIVE_SHADOW
     record exists, so nothing here supports a profitability claim.
 

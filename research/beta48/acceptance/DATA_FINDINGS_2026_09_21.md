@@ -177,3 +177,105 @@ listed as a reconciliation blocker while it existed.
 
 Checking costs one read-only query. Each assertion cost a false entry in an
 acceptance package that a person was expected to rely on.
+
+---
+
+# PART II — THE OPPORTUNITY, BOUNDED BY MEASUREMENT
+
+`research/bettor_traded_volume.sql` and `research/bettor_opportunity_bound.sql`,
+runs
+[35640158450](https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/35640158450)
+and
+[35640056878](https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/35640056878).
+Observation window 2026-09-20 19:23 → 2026-09-21 18:26 UTC, about 23 hours.
+
+## 8. TRADED VOLUME — THE CEILING ON TURNOVER
+
+`stats_shares_traded` is the venue's own traded-volume statistic, captured per
+observation. **It was never used.** The capacity analysis costed a
+$500,000/day target against software throughput and never asked whether the
+markets trade that much.
+
+| per observation (609 rows) | p10 | median | p90 | p99 | max |
+|---|---|---|---|---|---|
+| shares traded | 2.23 | **100.00** | 4,401 | 109,822 | 3,627,618 |
+
+Across **distinct markets**, taking each market's largest observed figure so
+repeated observations are not summed into more than the market ever traded:
+
+| markets | total shares | **total traded notional** | mean shares/market |
+|---|---|---|---|
+| 396 | 1,106,312 | **$396,361** | 2,794 |
+
+| markets trading ≥ | 1 | 10 | 100 | 1,000 | 10,000 |
+|---|---|---|---|---|---|
+| count (of 606) | 573 | 481 | 303 | 116 | 36 |
+
+## 9. THE CORRECTED CAPACITY ANALYSIS
+
+### 9.1 Turnover definitions, because the earlier one was ambiguous
+
+| term | meaning |
+|---|---|
+| **executed notional** | Σ (price × contracts) over every fill, **both sides of a round trip counted**. This is what "$500,000/day turnover" normally means. |
+| **position notional** | Σ (price × contracts) over ENTRIES only. A buy-then-sell round trip is $X of position notional and $2X of executed notional. |
+| **working capital** | position notional ÷ turns per day. Needs a **holding period**. |
+
+### 9.2 The arithmetic, corrected
+
+$500,000/day of executed notional at ~$0.50/contract:
+
+| | |
+|---|---|
+| contract executions/day | **1,000,000** (≈ **11.57/sec**) |
+| at 10 contracts/order, orders/day | 100,000 (≈ 1.16/sec) |
+| position notional implied (round trips) | ~$250,000/day |
+
+**The earlier version labelled the ORDER count as the CONTRACT count and was
+10× wrong.** That correction stands.
+
+### 9.3 The binding constraint is the market, not the software
+
+| requirement | measured | verdict |
+|---|---|---|
+| Decision throughput | 21,917 obs/sec, single-threaded | **clears by ~4 orders of magnitude** |
+| **Traded notional available** | **$396,361/day across all 396 observed markets** | **$500k executed notional needs ~63% of every dollar traded in the observed universe** (or ~126% if measured as executed rather than position notional) |
+| Books meeting every pilot condition | **130 rows / 130 markets** | of 1,526 markets observed |
+| Eligible books fresh enough to decide on | **18 of 449 within 10 s** (4.0%); median eligible age **406.5 s** | the feed is the constraint |
+| Executable size at the touch | p10 **2**, median **75**, p90 3,000 contracts | 1,000,000 executions/day needs ~2,540 per market per day across 396 markets |
+| Spread distribution (795 rows) | p10 0.0100, median **0.0300**, p90 **0.9400** | 451 rows ≥ 2 ticks; the top decile is effectively untradeable |
+| **Measured holding period** | **NONE EXISTS** — 0 settlement rows, **0 fills**, 0 settled | working capital is **NOT_IDENTIFIED** |
+
+**The conclusion is not "narrow the gap by scaling."** To execute $500,000/day
+of notional, BETTOR would have to be a majority of everything that trades in
+the markets it observes. That is a market-share statement, not a throughput
+one, and no amount of engineering changes it.
+
+### 9.4 "One hour and one day are scenarios, not bounds" — confirmed
+
+Working capital = position notional ÷ turns per day, and turns per day is the
+reciprocal of the holding period. **The repository contains zero fills**
+(`bettor_state_settlements`: 0 rows, `is_not_a_fill IS FALSE`: 0). There is no
+measured holding period anywhere, so there is no capital figure — only a
+formula with an unmeasured denominator. Any capital number quoted for this
+strategy is a scenario.
+
+### 9.5 What these figures do NOT establish
+
+- **Our observed universe is not the venue.** 1,526 markets were observed by a
+  research sampler that was not built for coverage. The venue may be larger.
+  Expanding the universe is now a **specific, measurable requirement** rather
+  than an assumption — but nothing here measures the whole venue.
+- **Traded volume is what the market did WITHOUT us.** Our participation would
+  change it, in either direction, by an unknown amount.
+- **Displayed depth is a loose upper bound on executable depth.** Track B-L
+  BLOCK_4: a 22,297-share displayed bid queue against 180 shares traded in 16
+  minutes, with zero touches.
+- **The volume figure is a snapshot statistic**, taken at observation time. It
+  is the best bound available and it is not a flow measurement.
+
+## 10. THE SINGLE MOST USEFUL NUMBER IN THIS DOCUMENT
+
+**$396,361.** The total traded notional across every market BETTOR observed in
+a day. Every capacity claim in the acceptance package was made without it, and
+it was one query away the whole time.

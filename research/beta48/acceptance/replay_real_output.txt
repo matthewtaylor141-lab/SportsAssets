@@ -81,13 +81,16 @@ FEE SCHEDULE: PMUS_PUBLISHED_2026_09_17  (verified=False)
 5. SETTLEMENT
 ============================================================================
    observations with a settlement outcome: 0 of 16
-   bettor_state_settlements holds 0 rows venue-wide -- but
+   bettor_state_settlements holds 0 rows, 0 fills, 0 settled.
    record_settlement() is DEFINED AND NEVER CALLED, so that is
    a MISSING INGESTION PATH, not evidence that nothing has
-   resolved. Which it is cannot be determined from our data;
-   it needs a venue resolution read. (Separately: all 1,469
-   observed markets are under 48h old, so many genuinely may
-   not have resolved -- we simply cannot tell.)
+   resolved.
+   MEASURED 2026-09-21: 552 of 1,538 observations are of events
+   that had ALREADY STARTED (time_to_event_s negative,
+   live_status LIVE). An event starting is not an event
+   resolving and the capture records no end time, so how many
+   concluded is still not readable -- but the earlier claim
+   that NO outcome has matured was never supported.
 
 ============================================================================
 6. MAKER ECONOMICS ON THE REAL BOOKS (frozen grid)
@@ -96,6 +99,9 @@ FEE SCHEDULE: PMUS_PUBLISHED_2026_09_17  (verified=False)
    conditional_reference_move are NOT_IDENTIFIED, so each real
    book is evaluated across the frozen grid instead of at a
    chosen value. Conservative corner = move -0.020.
+
+   Quoted at 10 contracts: fee rounding is PER FILL, so the
+   per-contract figure does not carry to another clip size.
 
    MOVE      ROUTE     POSITIVE    NEGATIVE    MEDIAN/CONTRACT
    +0.000    cross     0           16          -0.013000
@@ -111,17 +117,28 @@ FEE SCHEDULE: PMUS_PUBLISHED_2026_09_17  (verified=False)
    {AGGRESSIVE, SETTLEMENT} and a p_fill grid. This ran
    AGGRESSIVE and PASSIVE with no p_fill grid, so it does NOT
    implement that protocol. Recorded, not retrofitted.
-   Every figure carries HYPOTHETICAL fees and ASSUMED moves:
-   these are SCENARIO results, not an empirical refutation of
-   maker trading. Under rule 2 a candidate needing a
-   NOT_IDENTIFIED term is UNRESOLVED -- never REFUTED.
+   FEES ARE NOW PUBLISHED, NOT HYPOTHETICAL: PMUS_PUBLISHED_2026_09_17,
+   at 10 contracts, entry rebate and exit charge each at their
+   OWN price. The maker term is a REBATE, which is why the
+   'rest' row moved from negative to positive -- the superseded
+   schedule charged +0.01/contract where the venue PAYS about
+   0.003. That is an input correction, NOT an edge.
+   THE MOVES ARE STILL ASSUMED, and the 'rest' route assumes
+   the EXIT quote also fills passively -- a SECOND unmeasured
+   fill probability on top of the entry's. Two NOT_IDENTIFIED
+   terms, not one. Under rule 2 a candidate needing a
+   NOT_IDENTIFIED term is UNRESOLVED -- never SUPPORTED and
+   never REFUTED.
 
 ============================================================================
 7. OBSERVED / ASSUMED / SYNTHETIC
 ============================================================================
    OBSERVED   16 real books: quotes, ages, states, identities.
-   ASSUMED    the fee schedule (PMUS_PUBLISHED_2026_09_17),
-              plus every grid value in section 6.
+   PUBLISHED  the fee schedule (PMUS_PUBLISHED_2026_09_17),
+              documented by the venue, never seen applied to
+              this account.
+   ASSUMED    every grid value in section 6, and that a resting
+              exit fills at all.
    SYNTHETIC  every fill. BETTOR has never rested an order.
 
    This run establishes that the engine consumes real venue

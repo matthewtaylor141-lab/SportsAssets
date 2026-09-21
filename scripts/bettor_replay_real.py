@@ -172,13 +172,16 @@ def main() -> int:
     settled = [r for r in rows if r.get("settlement_status")]
     print("   observations with a settlement outcome: %d of %d"
           % (len(settled), len(rows)))
-    print("   bettor_state_settlements holds 0 rows venue-wide -- but")
+    print("   bettor_state_settlements holds 0 rows, 0 fills, 0 settled.")
     print("   record_settlement() is DEFINED AND NEVER CALLED, so that is")
     print("   a MISSING INGESTION PATH, not evidence that nothing has")
-    print("   resolved. Which it is cannot be determined from our data;")
-    print("   it needs a venue resolution read. (Separately: all 1,469")
-    print("   observed markets are under 48h old, so many genuinely may")
-    print("   not have resolved -- we simply cannot tell.)")
+    print("   resolved.")
+    print("   MEASURED 2026-09-21: 552 of 1,538 observations are of events")
+    print("   that had ALREADY STARTED (time_to_event_s negative,")
+    print("   live_status LIVE). An event starting is not an event")
+    print("   resolving and the capture records no end time, so how many")
+    print("   concluded is still not readable -- but the earlier claim")
+    print("   that NO outcome has matured was never supported.")
 
     # ── 6. MAKER ECONOMICS ON REAL BOOKS ────────────────────────────
     rule("6. MAKER ECONOMICS ON THE REAL BOOKS (frozen grid)")
@@ -186,6 +189,9 @@ def main() -> int:
     print("   conditional_reference_move are NOT_IDENTIFIED, so each real")
     print("   book is evaluated across the frozen grid instead of at a")
     print("   chosen value. Conservative corner = move -0.020.\n")
+    print("   Quoted at %g contracts: fee rounding is PER FILL, so the"
+          % MAKER_GRID_QTY)
+    print("   per-contract figure does not carry to another clip size.\n")
     print("   %-9s %-9s %-11s %-11s %s"
           % ("MOVE", "ROUTE", "POSITIVE", "NEGATIVE", "MEDIAN/CONTRACT"))
     for move in (0.000, -0.005, -0.010, -0.020):
@@ -230,17 +236,29 @@ def main() -> int:
     print("   {AGGRESSIVE, SETTLEMENT} and a p_fill grid. This ran")
     print("   AGGRESSIVE and PASSIVE with no p_fill grid, so it does NOT")
     print("   implement that protocol. Recorded, not retrofitted.")
-    print("   Every figure carries HYPOTHETICAL fees and ASSUMED moves:")
-    print("   these are SCENARIO results, not an empirical refutation of")
-    print("   maker trading. Under rule 2 a candidate needing a")
-    print("   NOT_IDENTIFIED term is UNRESOLVED -- never REFUTED.")
+    print("   FEES ARE NOW PUBLISHED, NOT HYPOTHETICAL: %s," % FEES.source)
+    print("   at %g contracts, entry rebate and exit charge each at their"
+          % MAKER_GRID_QTY)
+    print("   OWN price. The maker term is a REBATE, which is why the")
+    print("   'rest' row moved from negative to positive -- the superseded")
+    print("   schedule charged +0.01/contract where the venue PAYS about")
+    print("   0.003. That is an input correction, NOT an edge.")
+    print("   THE MOVES ARE STILL ASSUMED, and the 'rest' route assumes")
+    print("   the EXIT quote also fills passively -- a SECOND unmeasured")
+    print("   fill probability on top of the entry's. Two NOT_IDENTIFIED")
+    print("   terms, not one. Under rule 2 a candidate needing a")
+    print("   NOT_IDENTIFIED term is UNRESOLVED -- never SUPPORTED and")
+    print("   never REFUTED.")
 
     # ── 7. WHAT THIS RUN IS AND IS NOT ──────────────────────────────
     rule("7. OBSERVED / ASSUMED / SYNTHETIC")
     print("   OBSERVED   %d real books: quotes, ages, states, identities."
           % len(rows))
-    print("   ASSUMED    the fee schedule (%s)," % FEES.source)
-    print("              plus every grid value in section 6.")
+    print("   PUBLISHED  the fee schedule (%s)," % FEES.source)
+    print("              documented by the venue, never seen applied to")
+    print("              this account.")
+    print("   ASSUMED    every grid value in section 6, and that a resting")
+    print("              exit fills at all.")
     print("   SYNTHETIC  every fill. BETTOR has never rested an order.")
     print("\n   This run establishes that the engine consumes real venue")
     print("   data and decides on it without fabricating inputs.")
