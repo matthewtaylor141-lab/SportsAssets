@@ -182,6 +182,29 @@ class MarketStream:
         return {"queued": len(fresh), "dropped_over_cap": dropped,
                 "cap": MAX_SUBSCRIPTIONS}
 
+    def prune(self, keep) -> int:
+        """Drop every slug outside `keep`. Returns how many went.
+
+        Without this the subscription set only ever grows: ended games
+        hold their last book forever, dead slugs are resubscribed on
+        every reconnect, and because the cap is measured against the
+        LIFETIME count, new markets eventually stop streaming
+        altogether.
+
+        A straggler update for a pruned slug just re-caches one entry
+        that the next prune removes again -- and it cannot be decided
+        on, because `decide_slug` only looks at slugs the worker
+        marked dirty from a live subscription.
+        """
+        keep = set(keep)
+        with self._lock:
+            gone = [s for s in self._subs if s not in keep]
+            for s in gone:
+                self._subs.pop(s, None)
+                self._books.pop(s, None)
+            self._pending = [s for s in self._pending if s in keep]
+        return len(gone)
+
     # ── reads ────────────────────────────────────────────────────────
 
     def book_at(self, slug: str, *, decided_at=None,

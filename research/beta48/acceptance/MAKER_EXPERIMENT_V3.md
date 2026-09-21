@@ -12,31 +12,52 @@ The directive asks me to translate the RN1/Ferrari research into
 hypotheses about entry, completion, exits and capital recycling. Doing
 that honestly produces an uncomfortable result, and it belongs first:
 
-> **RN1 was the TAKER. The maker facing him lost 0.90¢ per share.**
-> — `BETA48_CLOSEOUT.md` §2, measured on Polymarket CLOB 2026-08-06..09-11
+> **RN1 was the TAKER. Against him, an anonymous resting offer lost
+> −$0.0090/share net, 95% CI [−0.0143, −0.0038], MARKED TO SETTLEMENT.**
+> — 112,553 trades over 9,337 conditions, clustered by condition, fills
+> observed not modelled, **Polymarket CLOB — a different venue**,
+> 2026-08-06..09-11, **one counterparty**, and the repository's own
+> verdict on it is `THIS_IS_ACTUAL_BETTOR_ADVERSE_SELECTION = NO`.
+> (`BETA48_CLOSEOUT.md` §5.2; full provenance `MAKER_ENGINE_GATE_V2.md`.)
 
-RN1: 78,500 merges, **zero sells**, "pure taker", "informed entry",
-exits only by buying the complement. Ferrari: pair-positive, ρ −1.000,
-best total ROI **+7.06%**, sells ≤0.54% of stake, merge-driven
-recycling — and under `MAKER / REBATE`, **"none observed."**
+**THAT IS A SETTLEMENT PAYOFF, NOT A MARKOUT, AND NOT A REALIZED P&L.**
+The three are different quantities and I used the third-hand one to
+argue about the first. A settlement mark includes the whole path to
+resolution; a markout includes sixty seconds of it; a realized P&L is
+cash from a round trip that actually happened. **One counterparty on
+one other venue, marked to settlement, does not establish that every
+maker policy loses** — see `CORRECTIONS_ACTIVATION.md` §1.
+
+RN1: 78,500 merges, "pure taker", "informed entry". **He did sell** —
+234 sells, $583,580 stake, 0.153% of activity, `SELL_PNL` **+$370,281,
+ROI +63.4%**; the closeout table's "zero sells" is wrong and the audit
+has the figures. Ferrari: pair-positive, ρ −1.000, best total ROI
+**+7.06%** — and under `MAKER / REBATE`, **"none observed."**
 
 **Neither account earned a maker rebate. Both made money by crossing
 the spread against somebody who was quoting.**
 
-So the naive translation — "RN1 did well, quote like RN1" — is not just
-unsupported, it is **backwards**. A BETTOR maker quote resting in front
-of flow that resembles RN1's is on the **measured losing side** of the
-only maker-versus-taker number this research produced.
+So the naive translation — "RN1 did well, quote like RN1" — is
+unsupported: he was on the other side of the trade from the policy it
+would have us run, and the one quoter we can see facing him lost money
+over that window on that venue.
 
-That does not kill maker quoting. It does define what the experiment
-has to be about:
+**That is a reason to design the experiment around adverse selection.
+It is not evidence that our quoting loses.** One anonymous counterparty
+against one informed taker, on a different venue, marked to settlement,
+is a single observation of a single pairing. It bounds nothing about a
+selected universe, our clip size, our 300-second cancel, or PMUS.
+
+What it does is set the experiment's subject:
 
 > **H0: BETTOR cannot passively quote into this venue's flow without
-> being adversely selected at a rate that exceeds the spread plus the
+> being adversely selected at a rate exceeding the spread plus the
 > rebate.**
 
-Everything below is built to give H0 a fair chance to survive, because
-the measured evidence currently favours it.
+Everything below is built to give H0 a fair chance to survive — and to
+give it a fair chance to FAIL, which is the point. The evidence
+currently neither favours nor refutes it for BETTOR, because BETTOR has
+never rested an order.
 
 ## 1. VENUE DIFFERENCES THAT BREAK THE TRANSLATION
 
@@ -48,14 +69,17 @@ the measured evidence currently favours it.
 | RESIDUAL_INVENTORY_RISK | STRONG | one-sided exposure is one-sided exposure |
 | COMPLETION | **PARTIAL** | legacy Polymarket: two tokens, complete by holding both and **merging**. PMUS: one book per market with a long and a short side. Same payoff, different implementation, fill behaviour and queue mechanics. |
 | TWO_SIDED_PASSIVE_MM | **PARTIAL** | the archive's makers are not on PMUS's book |
-| CAPITAL_RECYCLING | **PARTIAL** | RN1 recycles **via merge/redeem only**. PMUS has no merge mechanism we have observed: `bettor_merge` returns `permitted=False` for retail AND institutional. **RN1's recycling mechanism does not exist for us.** |
+| CAPITAL_RECYCLING | **PARTIAL** | RN1 recycles via merge/redeem. On PMUS **institutional** `capital_recycling()` reports the chain breaking at `MERGE_OR_NET`, so whether completing a pair returns capital is **`NOT_IDENTIFIED` — not `NO`**. On **retail** the venue nets at the second fill and capital returns *immediately with no merge call at all*, which is direct evidence that a missing merge action does not imply missing recycling. |
 | HEDGE_INVENTORY_CLOSE | NOT_IDENTIFIED | no external hedge instrument established for PMUS |
 
-**The capital-recycling row is the one that bites.** RN1 turns capital
-over by merging a completed pair back into cash. We have not observed
-that mechanism on PMUS, so a completed pair is held to settlement
-unless it is **sold**, and RN1 — who sold nothing — tells us nothing
-about what selling costs.
+**The capital-recycling row is the one that bites, and I had it
+wrong.** I read `merge_permitted()` returning `permitted=False` as
+"capital never comes back". `bettor_merge.py` §12 warns against exactly
+that reading — *"reading the first as the second gets RETAIL exactly
+backwards"* — and `capital_recycling(INSTITUTIONAL)` gives the real
+answer: `CAPITAL_RECYCLING_AVAILABLE = NOT_IDENTIFIED`, *"not zero and
+not NO: either would be a claim about the venue we have not
+established."* Establishing it is a named task, not a settled fact.
 
 ## 2. FOUR HYPOTHESES, EACH WITH ITS MEASUREMENT PATH
 
@@ -83,12 +107,14 @@ moves if any parameter does, so the two arms stay comparable.
 
 ### H2 — ADVERSE SELECTION. The 0.90¢ is not a law of nature.
 
-> Post-fill markout at 60 s, conditional on our fill, is **less
-> adverse than −0.90¢/share** in the selected universe.
+> Post-fill markout at 60 s, conditional on our fill, is **not more
+> adverse than the spread plus the rebate** in the selected universe.
 
-*This is the direct test of the finding in §0*, restated as something
-that can fail. −0.90¢ is the loss the maker facing RN1 took, on a
-different venue, against one account's informed flow.
+**The threshold is our own economics, not the 0.90¢.** That figure is a
+settlement-marked loss for an anonymous quoter against one counterparty
+on another venue; using it as a bar would be comparing a markout to a
+settlement payoff. It is cited as a reason to take adverse selection
+seriously and as an order of magnitude, never as our prior.
 *Why it might be true:* we quote in a selected universe, at a size
 below the touch, and cancel at 300 s. RN1's counterparties quoted into
 whatever he hit.
@@ -127,10 +153,14 @@ a second stream subscription on the sibling slug for the quote.
 > available to us.
 
 *Measurement:* fill timestamp → flat timestamp, per contract.
-*Status:* **ZERO fills exist anywhere in this repository**
-(`bettor_state_settlements`: 0 rows, `is_not_a_fill IS FALSE`: 0), so
-no holding period has ever been measured and every capital figure for
-this strategy is a scenario. **Path: the pilot.**
+*Status:* **no BETTOR-native strategy has ever had a fill, and no
+BETTOR order has ever rested.** (The firm's ledger *does* hold 52
+filled rows carrying $16,180.53 from the mirror lane — "zero fills
+anywhere" was wrong; the scope that matters is BETTOR-native.) So no
+BETTOR holding period has been measured. RN1's is, on another venue:
+t25 = 120 s, **t50 = 600 s**, t75 = 1800 s, with 76.51% exiting by
+settlement and 23.49% of first legs never completing — a reference
+point, not a transfer. **Path: the pilot.**
 
 ## 3. WHAT IS EVALUATED, AND HOW
 
@@ -205,11 +235,13 @@ A candidate is **SUPPORTED** only if all hold:
 3. ≥ 200 filled contracts across ≥ 50 contracts.
 4. A 95% event-clustered interval excluding zero.
 5. The fee term is `VERIFIED_APPLIED`, not merely `PUBLISHED`.
-6. **NEW — H2 must be rejected.** If post-fill markout is not
-   distinguishable from −0.90¢/share, the strategy is the losing side
-   of the one maker/taker measurement we have, and no fill rate saves
-   it. **Fill probability alone cannot establish profitability**; fill
-   behaviour and markout are evaluated **jointly** or not at all.
+6. **NEW — H2 must be rejected on our OWN markout.** If post-fill
+   markout is not distinguishably better than the spread plus the
+   rebate, no fill rate saves the strategy. **Fill probability alone
+   cannot establish profitability**; fill behaviour and markout are
+   evaluated **jointly** or not at all. The 0.90¢ is not the bar —
+   it is a settlement-marked figure from another venue and another
+   counterparty.
 
 ## 5. WHAT BLOCKS EACH HYPOTHESIS TODAY
 

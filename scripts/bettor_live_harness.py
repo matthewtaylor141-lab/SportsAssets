@@ -32,6 +32,7 @@ the new connection.
 from __future__ import annotations
 
 import json
+import os
 import sys
 import time
 from datetime import datetime, timedelta, timezone
@@ -126,12 +127,22 @@ def main() -> int:
     print("   never applied: a market that does not trade cannot fill a")
     print("   quote however wide its book looks.")
 
+    slugs_all = [r["market_id"] for r in rows]
+    slugs = slugs_all
+
     # ── 2. subscription is not a claim ──────────────────────────────
     rule("2. SUBSCRIPTION LIFECYCLE -- requested, then confirmed by data")
-    stream = ms.MarketStream("NO_KEY", "NO_SECRET")
-    loop = bl.LiveLoop(stream, leg_of=legs, opening_cash=1000.0)
-    stream._book_cb = loop.on_book
-    slugs = [r["market_id"] for r in rows]
+    # THROUGH build(), the same wiring main() uses -- so the harness
+    # cannot pass while the worker's own wiring is broken. It was: the
+    # old build() installed a trade callback AND the caller drained
+    # into it, counting every trade twice.
+    import tempfile
+    d = tempfile.mkdtemp(prefix="bettor-harness-")
+    loop, stream = bl.build("NO_KEY", "NO_SECRET", slugs=slugs_all,
+                            leg_of=legs,
+                            state_path=os.path.join(d, bl.JOURNAL_NAME),
+                            ledger_path=os.path.join(d, bl.LEDGER_NAME),
+                            opening_cash=1000.0)
     q = stream.subscribe(slugs)
     print("   queued %d (cap %d, batch %d -- the documented ceiling)"
           % (q["queued"], q["cap"], ms.SUB_BATCH))
@@ -310,17 +321,37 @@ def main() -> int:
     print("   ARE NOT ASSUMED: a value outside [0,1] is reported as")
     print("   UNITS_UNVERIFIED rather than divided by 100 on a hunch.")
 
-    # ── 10. restart ─────────────────────────────────────────────────
-    rule("10. RESTART -- balances, inventory and quotes recovered")
-    blob = loop.shadow.snapshot()
-    back = type(loop.shadow).restore(blob, fees=loop.fees,
-                                     venue="polymarket-us",
-                                     account_class="institutional")
-    check("cash after restart", back.ledger.cash, loop.shadow.ledger.cash)
-    check("positions after restart", len(back.positions),
-          len(loop.shadow.positions))
-    check("reconciles after restart", back.ledger.reconciles()["reconciled"],
-          True)
+    # ── 10. durable records and worker recovery ─────────────────────
+    rule("10. DURABILITY AND RECOVERY -- through the worker, not around it")
+    written = sum(1 for _ in open(loop.state_path))
+    print("   journal            %s" % loop.state_path)
+    check("records written to disk", written, len(loop.records))
+    check("persist failures", loop.journal_failures, 0)
+    loop.save_ledger()
+
+    # A SECOND PROCESS over the same directory, wired by build() and
+    # recovered by the loop's own recover() -- the call main() makes.
+    loop2, stream2 = bl.build("NO_KEY", "NO_SECRET", slugs=slugs_all,
+                              leg_of=legs, state_path=loop.state_path,
+                              ledger_path=loop.ledger_path)
+    rec = loop2.recover()
+    print("   recovered          %s" % json.dumps(
+        {k: rec[k] for k in ("journal_lines", "journal_bad_lines",
+                             "slugs_recovered", "ledger_restored")}))
+    check("ledger restored", rec["ledger_restored"], True)
+    check("cash after recovery", loop2.shadow.ledger.cash,
+          loop.shadow.ledger.cash)
+    check("dedup keys recovered", rec["slugs_recovered"], len(loop._last_ts))
+
+    stream2.epoch += 1
+    stream2.connected = True
+    for r in rows:
+        stream2._on_market_data(as_stream_message(r, source_ts=r.get(
+            "book_source_ts")))
+    loop2.drain()
+    check("re-deciding recovered observations", loop2.counters.get("decided"),
+          None)
+    print("   A restart does not re-decide what it already recorded.")
 
     rule("WHAT THIS RUN IS")
     print("   REAL       the books, their clocks, their states, their")
