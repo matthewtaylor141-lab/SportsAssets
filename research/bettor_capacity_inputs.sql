@@ -23,7 +23,7 @@ SELECT coalesce(admission_version, 'V4 (pre-admission)') AS version,
        round(avg(EXTRACT(epoch FROM gap))::numeric, 2) AS avg_tick_gap_s,
        round(min(EXTRACT(epoch FROM gap))::numeric, 2) AS min_gap_s,
        round(max(EXTRACT(epoch FROM gap))::numeric, 2) AS max_gap_s,
-       round(avg(pacing_s)::numeric, 3) AS avg_pacing_s
+       round(avg(nullif(pacing_s, '')::numeric), 3) AS avg_pacing_s
   FROM (SELECT admission_version, pacing_s,
                tick_at - lag(tick_at) OVER (ORDER BY tick_at) AS gap
           FROM bettor_capture_ticks
