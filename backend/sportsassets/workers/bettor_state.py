@@ -86,7 +86,12 @@ _TICK_SEQ = 0
 # scheduler decided which follow-ups to serve; this decides how much
 # work is created in the first place, which is a property of the
 # sampling frame and not of the scheduler.
-ADMISSION_VERSION = "BETTOR_ADMISSION_V1_CAPACITY_AWARE"
+# V2 MEASURES THE SAME THING AND ENFORCES NOTHING. V1's gate shut on
+# all seven of its production ticks and wrote zero observations; its
+# threshold compared a queue depth against a per-tick rate. The 27
+# follow-up reads taken under V1 must stay distinguishable from
+# everything after, because they were taken while intake was stopped.
+ADMISSION_VERSION = "BETTOR_ADMISSION_V2_MEASURE_ONLY"
 READ_PACING_BASE_S = 1.0
 READ_PACING_MAX_S = 8.0
 BACKOFF_GROWTH = 2.0
@@ -370,12 +375,49 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
             backlog += await sstore.mids_outstanding(_h, pool=pool)
     except Exception:                                          # noqa: BLE001
         backlog = 0
+    # MEASURED IN PRODUCTION, NOT ENFORCED. 2026-09-21 12:07:34Z-12:14Z,
+    # seven ticks, and the gate closed on every one of them:
+    #
+    #     saturated_ticks 7/7   admit_cap 0.00   obs_written 0
+    #     ON_TIME 3/27 = 11.1%  against V4's 246/796 = 30.9%
+    #
+    # Intake stopped completely and timing got WORSE. The replay's
+    # 254/256 on time did not reproduce, and the reason is a unit error
+    # in the line below as it was first written:
+    #
+    #     saturated = backlog > max(1, fu_reserve)
+    #
+    # `backlog` is a LEVEL -- tasks due right now, summed across all four
+    # horizons. `fu_reserve` is a FLOW -- reads available in ONE tick,
+    # which is 5. Comparing them asks "is there more than one tick's
+    # work waiting", and since every admitted observation owes reads at
+    # 60s, 300s, 900s and 3600s, any steady state holds more than five
+    # due at once. So the gate latched shut on the first tick and had no
+    # path back open: with intake at zero the only thing that could
+    # drain it was the pre-existing commitment, and that takes an hour.
+    #
+    # This is the same level-versus-flow confusion I named in the W3
+    # write-up -- summing a level across ticks double-counts the same
+    # waiting task -- and then encoded into the repair for it.
+    #
+    # The threshold has to compare time-to-drain against the deadline,
+    # not a queue depth against a per-tick rate. I am not guessing at
+    # that here: the replay harness is what establishes such a number,
+    # and a second unverified threshold is how this cycle repeats.
+    #
+    # So the measurement stays and the enforcement goes. backlog_tasks
+    # and admission_saturated keep recording the oversubscription that
+    # is genuinely there -- 15 to 26 tasks due against 5 reads a tick --
+    # while the allowance returns to V4, which is the only configuration
+    # this system has measured doing better.
     saturated = backlog > max(1, fu_reserve)
-    admit_cap = 0 if saturated else sustainable
+    admit_cap = budget
     stats["admissionVersion"] = ADMISSION_VERSION
     stats["backlogTasks"] = backlog
     stats["admitCap"] = admit_cap
     stats["admissionSaturated"] = saturated
+    stats["admissionEnforced"] = False
+    stats["admissionSustainableWas"] = sustainable
     # THE CAP IS APPLIED AS ITS OWN LIMIT, NOT BY SHRINKING `budget`.
     # Lowering budget would make the sampling loop below report every
     # declined market as `read_budget_exhausted` /

@@ -44,14 +44,45 @@ class _Pool:
         return None
 
 
-def test_admission_is_derived_from_capacity_not_a_magic_number():
-    """Sustainable intake is the follow-up reserve divided by the
-    number of horizons each admitted observation obliges us to read.
-    Both terms are measured on the same tick, in the same unit."""
+def test_the_gate_measures_and_does_not_enforce():
+    """V2, AND THE REASON IS A PRODUCTION MEASUREMENT.
+
+    V1 ran for seven ticks (2026-09-21 12:07:34Z-12:14:31Z) and its gate
+    closed on all seven: admit_cap 0.00 every tick, obs_written 0,
+    ON_TIME 3/27 = 11.1% against V4's 246/796 = 30.9%. Intake stopped
+    and timing got worse.
+
+    Note which tests passed while that happened: every one of them. They
+    checked that the rule behaved as designed, and the rule as designed
+    was wrong. So this file now pins the production consequence, not
+    just the intended arithmetic.
+
+    The cap no longer restricts the budget. backlogTasks and
+    admissionSaturated keep recording the oversubscription, which is
+    real -- 15 to 26 tasks due against 5 reads a tick."""
     r = asyncio.run(w.tick(_Pool()))
-    horizons = len(sc.HORIZONS_OBSERVABLE_S)
-    assert r["admitCap"] == r["fuReserve"] // horizons
+    assert r["admitCap"] == r["budget"]
+    assert r["admissionEnforced"] is False
     assert r["admissionVersion"] == w.ADMISSION_VERSION
+
+
+def test_the_threshold_that_latched_shut_is_recorded():
+    """WHY IT COULD NEVER REOPEN, in one line of arithmetic.
+
+    `saturated = backlog > max(1, fu_reserve)` compares a LEVEL against
+    a FLOW: tasks due right now against reads available in ONE tick.
+    fu_reserve is 5. Every admitted observation owes a read at 60, 300,
+    900 and 3600 seconds, so any steady state carries more than five due
+    at once -- the gate shuts on the first tick, and with intake at zero
+    the only thing left to drain it is an hour of prior commitment.
+
+    Same level-versus-flow confusion named in the W3 write-up, then
+    written into the repair for it."""
+    deep = asyncio.run(w.tick(_Pool(backlog=10_000)))
+    assert deep["admissionSaturated"] is True
+    # measured, and NOT acted on
+    assert deep["admitCap"] == deep["budget"]
+    assert deep["budget"] > 0, "a saturated queue must not stop intake"
 
 
 def test_one_observation_creates_one_task_per_horizon():
@@ -61,19 +92,16 @@ def test_one_observation_creates_one_task_per_horizon():
     assert sc.HORIZONS_OBSERVABLE_S == (60, 300, 900, 3600)
 
 
-def test_a_deep_backlog_stops_intake_entirely():
-    """Capacity already owed to outstanding work is not available for
-    new work. Admitting into a saturated queue does not collect more
-    data -- it converts reads that would have completed on time into
-    reads that expire."""
+def test_the_backlog_is_still_counted_across_every_horizon():
+    """The measurement survives the rollback -- it is the thing that
+    showed the system is genuinely oversubscribed, and dropping it would
+    lose the only evidence for the fix that still has to be built."""
     deep = asyncio.run(w.tick(_Pool(backlog=10_000)))
-    assert deep["admissionSaturated"] is True
-    assert deep["admitCap"] == 0
     assert deep["backlogTasks"] == 10_000 * len(sc.HORIZONS_OBSERVABLE_S)
 
     shallow = asyncio.run(w.tick(_Pool(backlog=0)))
     assert shallow["admissionSaturated"] is False
-    assert shallow["admitCap"] >= 0
+    assert shallow["backlogTasks"] == 0
 
 
 def test_declined_work_is_never_counted_as_lost_work():
@@ -123,7 +151,7 @@ def test_the_sampling_change_is_versioned_so_rows_stay_separable():
     governs. Rows admitted under the throttle must be distinguishable
     from every row admitted before it, or the broad research cohort and
     the narrower throttled sample get pooled."""
-    assert w.ADMISSION_VERSION == "BETTOR_ADMISSION_V1_CAPACITY_AWARE"
+    assert w.ADMISSION_VERSION == "BETTOR_ADMISSION_V2_MEASURE_ONLY"
     r = asyncio.run(w.tick(_Pool()))
     assert r["admissionVersion"] == w.ADMISSION_VERSION
 
