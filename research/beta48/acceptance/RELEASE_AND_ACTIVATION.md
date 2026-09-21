@@ -161,7 +161,19 @@ order-stream | order-preview`, plus `order` and `cancel` behind
 `confirm=DO`. Its secrets are namespaced `PMX_PREPROD_*` precisely so
 the preprod lane can never pick up the production `PMX_*` slots.
 
-**The missing thing is the secret, not the entitlement.** The exact
+**THE ENTITLEMENT IS PROVEN, NOT INFERRED.** `pmx-preprod` **run 24
+succeeded on 2026-09-10** — the venue accepted our credentials and
+returned positions and the USD balance. Runs 25 (2026-09-19) and 26
+(today) both failed, and the workflow's own header explains why: the
+credentials **used to be `workflow_dispatch` inputs** and were moved
+into `PMX_PREPROD_*` secret slots for security, because runs 1–24 had
+printed the client id, participant id and key id into the logs. Run 25
+died on `base64: invalid input` — "the secret was set but was not
+decodable" — and run 26 dies earlier still, on `SECRET_MISSING`.
+
+**So the lane has been non-functional since the migration, and the
+cause is an unpopulated secret slot rather than anything about our
+access.** The missing thing is the secret, not the entitlement. The exact
 requirement: `PMX_PREPROD_CLIENT_ID`, `PMX_PREPROD_PARTICIPANT_ID`,
 `PMX_PREPROD_KEY_ID` and `PMX_PREPROD_PRIVATE_KEY_B64` present in the
 repository secret store. With those, the execution-lifecycle
@@ -267,7 +279,7 @@ returned `AuthenticationError` for the reason in §3.
 |---|---|---|---|
 | 1 | live decision-only observation | the §2 merge | owner approval |
 | 2 | account identity / activity / resting orders | PMUS secrets absent in CI *or* the §2 deploy | owner |
-| 3 | execution lifecycle in preprod | `PMX_PREPROD_*` secrets absent | owner |
+| 3 | execution lifecycle in preprod | `PMX_PREPROD_*` secrets absent since the 2026-09-19 migration — **entitlement proven by run 24** | owner |
 | 4 | `p_fill`, markout, holding period | no resting orders have ever existed | funded pilot |
 | 5 | `holds_both_legs_independently`; complement identity | #2, plus **no leg-level venue identifier in the capture** | #2, then a capture change |
 
