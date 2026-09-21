@@ -29,10 +29,7 @@ needs_pg = pytest.mark.skipif(not PG_DSN,
 
 
 def cur(**kw):
-    base = {"first_seen_at": 0.0, "last_seen_at": 0.0,
-            "last_source_ts": None, "last_decided_at": None,
-            "settle_status": None, "settle_attempts": 0,
-            "settle_next_at": None, "settle_last_at": None}
+    base = st.new_cursor(0.0)
     base.update(kw)
     return base
 
@@ -106,7 +103,12 @@ class TestNoOtherTableIsTouched:
         # `excluded` is the UPSERT alias; `set` is the keyword in
         # "DO UPDATE SET", which the UPDATE branch of the pattern sees
         # as a table name. Neither is a table.
-        allowed = set(st.OWN_TABLES) | {"excluded", "set"}
+        # `excluded` is the UPSERT alias; `set` is the keyword in
+        # "DO UPDATE SET", which the UPDATE branch of the pattern sees
+        # as a table name. `information_schema.columns` is a CATALOG
+        # READ -- the startup schema check -- and writes nothing.
+        allowed = set(st.OWN_TABLES) | {"excluded", "set",
+                                        "information_schema"}
         names = set()
         for sql in self._sql_strings():
             for m in re.finditer(
@@ -141,10 +143,10 @@ class TestSettlementSchedulingMakesProgress:
         first = st.due_for_settlement(cursors, now=now, limit=25)
         assert len(first) == 25
 
-        # Every one answers PENDING and backs off.
         for s in first:
             t = st.settle_transition(st.SETTLE_PENDING,
-                                     cursors[s]["settle_attempts"], now=now)
+                                     cursors[s]["settle_attempts"], now=now,
+                                     failures=cursors[s]["settle_failures"])
             t.pop("retired")
             cursors[s].update(t)
 
@@ -154,8 +156,6 @@ class TestSettlementSchedulingMakesProgress:
             "very next pass")
 
     def test_a_new_contract_is_read_in_the_next_pass_however_many_pend(self):
-        """The progress property, stated as a test: never-attempted
-        contracts sort ahead of every attempted one."""
         now = 1000.0
         cursors = {"p%03d" % i: cur(first_seen_at=i,
                                     settle_status=st.SETTLE_PENDING,
@@ -163,15 +163,10 @@ class TestSettlementSchedulingMakesProgress:
                                     settle_next_at=now - 1)   # all DUE
                    for i in range(500)}
         cursors["fresh"] = cur(first_seen_at=now)
-        due = st.due_for_settlement(cursors, now=now, limit=25)
-        assert due[0] == "fresh"
+        assert st.due_for_settlement(cursors, now=now, limit=25)[0] == "fresh"
 
     def test_every_contract_is_eventually_attempted(self):
-        """No starvation: run the scheduler until the tracked set is
-        exhausted and assert the set of attempted slugs is the whole
-        population."""
-        now = 1000.0
-        n = 120
+        now, n = 1000.0, 120
         cursors = {"m%03d" % i: cur(first_seen_at=i) for i in range(n)}
         attempted: set = set()
         for _ in range(64):
@@ -183,59 +178,198 @@ class TestSettlementSchedulingMakesProgress:
             for s in due:
                 t = st.settle_transition(st.SETTLE_PENDING,
                                          cursors[s]["settle_attempts"],
-                                         now=now)
+                                         now=now,
+                                         failures=cursors[s]["settle_failures"])
                 t.pop("retired")
                 cursors[s].update(t)
             now += 1.0
         assert attempted == set(cursors), "some contract was never read"
 
+
+class TestOnlyAnAuthoritativeResolutionCompletesCollection:
+    """THE DEFECT: RESOLVED_DERIVED was retired alongside RESOLVED, so
+    outcome collection closed on an INFERENCE FROM A PRICE and the
+    venue's own settlement endpoint could never confirm or contradict
+    it."""
+
+    def test_only_resolved_is_terminal(self):
+        assert st.TERMINAL_STATUSES == (st.SETTLE_RESOLVED,)
+        assert st.SETTLE_RESOLVED_DERIVED not in st.TERMINAL_STATUSES
+
     def test_an_authoritative_resolution_is_retired(self):
         now = 1000.0
-        c = cur()
-        t = st.settle_transition(st.SETTLE_RESOLVED, 0, now=now)
+        t = st.settle_transition(st.SETTLE_RESOLVED, 0, now=now,
+                                 outcome="1.0000")
         assert t["retired"] is True
         assert t["settle_next_at"] is None
+        assert t["settle_outcome"] == "1.0000"
         t.pop("retired")
+        c = cur()
         c.update(t)
         assert st.due_for_settlement({"m": c}, now=now + 10 ** 9,
                                      limit=25) == []
+        assert st.has_outstanding_obligation(c) is False
 
-    def test_a_derived_resolution_is_retired_too_but_stays_distinct(self):
-        t = st.settle_transition(st.SETTLE_RESOLVED_DERIVED, 3, now=0.0)
-        assert t["retired"] is True
+    def test_a_derived_outcome_is_preserved_and_still_scheduled(self):
+        now = 1000.0
+        t = st.settle_transition(st.SETTLE_RESOLVED_DERIVED, 0, now=now,
+                                 outcome="1.0000")
+        assert t["retired"] is False
         assert t["settle_status"] == st.SETTLE_RESOLVED_DERIVED
-        assert t["settle_status"] != st.SETTLE_RESOLVED
+        # PRESERVED SEPARATELY. It is never written to settle_outcome,
+        # which is the authoritative field.
+        assert t["settle_derived_outcome"] == "1.0000"
+        assert t["settle_derived_at"] == now
+        assert "settle_outcome" not in t
+        assert t["settle_next_at"] > now
+        c = cur()
+        c.update({k: v for k, v in t.items() if k != "retired"})
+        assert st.has_outstanding_obligation(c) is True
+        assert st.due_for_settlement({"m": c}, now=t["settle_next_at"],
+                                     limit=9) == ["m"]
 
-    def test_retries_back_off_and_are_capped(self):
-        delays = [st.settle_backoff_s(i) for i in range(0, 20)]
-        assert delays[0] == st.SETTLE_BASE_S
-        assert delays == sorted(delays)
-        assert max(delays) == st.SETTLE_MAX_S
+    def test_the_first_derivation_time_is_not_overwritten(self):
+        t = st.settle_transition(st.SETTLE_RESOLVED_DERIVED, 3, now=9000.0,
+                                 derived_at=100.0,
+                                 derived_outcome="1.0000",
+                                 outcome="0.0000")
+        assert t["settle_derived_at"] == 100.0
+        assert t["settle_derived_outcome"] == "1.0000"
 
-    def test_a_contract_that_never_reads_is_abandoned_by_name(self):
-        """Not silently retried forever: a slug we can never read would
-        otherwise consume its share of the budget indefinitely."""
-        now, attempts, status = 0.0, 0, None
-        for _ in range(st.SETTLE_MAX_ATTEMPTS + 2):
-            t = st.settle_transition(st.SETTLE_UNREADABLE, attempts, now=now)
-            attempts, status = t["settle_attempts"], t["settle_status"]
-            if t["retired"]:
-                break
-        assert status == st.SETTLE_ABANDONED
-        assert attempts == st.SETTLE_MAX_ATTEMPTS
-
-    def test_terminal_contracts_are_never_candidates(self):
-        cursors = {"a": cur(settle_status=st.SETTLE_RESOLVED),
-                   "b": cur(settle_status=st.SETTLE_ABANDONED),
-                   "c": cur()}
-        assert st.due_for_settlement(cursors, now=0.0, limit=9) == ["c"]
+    def test_a_derived_outcome_can_still_become_authoritative(self):
+        c = cur()
+        c.update({k: v for k, v in st.settle_transition(
+            st.SETTLE_RESOLVED_DERIVED, 0, now=0.0,
+            outcome="1.0000").items() if k != "retired"})
+        later = st.settle_transition(
+            st.SETTLE_RESOLVED, c["settle_attempts"], now=500.0,
+            derived_at=c["settle_derived_at"],
+            derived_outcome=c["settle_derived_outcome"],
+            outcome="1.0000")
+        assert later["retired"] is True
+        assert later["settle_outcome"] == "1.0000"
 
 
-# ── 3. bounded cursors ───────────────────────────────────────────────
+class TestAHealthyOpenMarketIsNotAFailure:
+    """THE DEFECT: one attempt counter advanced on every result,
+    PENDING included, and the contract was ABANDONED at twelve. A
+    market may legitimately stay open far longer than that."""
 
-class TestCursorsAreBounded:
+    def test_there_is_no_abandoned_status_at_all(self):
+        assert not hasattr(st, "SETTLE_ABANDONED")
 
-    def test_eviction_prefers_terminal_cursors(self):
+    def test_a_hundred_pending_reads_never_retire_a_contract(self):
+        now, c = 0.0, cur()
+        for _ in range(100):
+            t = st.settle_transition(st.SETTLE_PENDING, c["settle_attempts"],
+                                     now=now, failures=c["settle_failures"])
+            assert t["retired"] is False
+            assert t["settle_status"] == st.SETTLE_PENDING
+            c.update({k: v for k, v in t.items() if k != "retired"})
+            now = t["settle_next_at"]
+        assert c["settle_attempts"] == 100
+        assert c["settle_failures"] == 0
+        assert st.has_outstanding_obligation(c) is True
+
+    def test_pending_backoff_is_capped_not_terminal(self):
+        c, now = cur(), 0.0
+        gaps = []
+        for _ in range(20):
+            t = st.settle_transition(st.SETTLE_PENDING, c["settle_attempts"],
+                                     now=now, failures=c["settle_failures"])
+            gaps.append(t["settle_next_at"] - now)
+            c.update({k: v for k, v in t.items() if k != "retired"})
+            now = t["settle_next_at"]
+        assert gaps[0] == st.PENDING_BASE_S
+        assert gaps == sorted(gaps)
+        assert max(gaps) == st.PENDING_MAX_S
+
+    def test_event_timing_beats_a_blind_backoff(self):
+        """A market resolving in an hour should be looked at shortly
+        after that, not on whatever rung of a backoff we happen to be
+        on."""
+        now = 1000.0
+        event_at = now + 3600.0
+        t = st.settle_transition(st.SETTLE_PENDING, 8, now=now,
+                                 event_at=event_at)
+        assert t["settle_next_at"] == event_at + st.EVENT_GRACE_S
+
+    def test_a_past_event_falls_back_to_the_backoff(self):
+        now = 10_000.0
+        t = st.settle_transition(st.SETTLE_PENDING, 0, now=now,
+                                 event_at=now - 10_000.0)
+        assert t["settle_next_at"] == now + st.PENDING_BASE_S
+
+    def test_a_successful_read_clears_the_failure_run(self):
+        t = st.settle_transition(st.SETTLE_PENDING, 9, now=0.0, failures=4)
+        assert t["settle_failures"] == 0
+        assert t["settle_status"] == st.SETTLE_PENDING
+
+
+class TestFailedReadsEscalateVisiblyAndAreNeverDropped:
+
+    def test_failures_are_counted_apart_from_attempts(self):
+        c, now = cur(), 0.0
+        for _ in range(3):
+            t = st.settle_transition(st.SETTLE_UNREADABLE,
+                                     c["settle_attempts"], now=now,
+                                     failures=c["settle_failures"])
+            c.update({k: v for k, v in t.items() if k != "retired"})
+        assert c["settle_attempts"] == 3 and c["settle_failures"] == 3
+
+    def test_a_run_of_failures_escalates_by_name(self):
+        c, now = cur(), 0.0
+        for _ in range(st.READ_FAILURE_ESCALATE_AT):
+            t = st.settle_transition(st.SETTLE_UNREADABLE,
+                                     c["settle_attempts"], now=now,
+                                     failures=c["settle_failures"])
+            c.update({k: v for k, v in t.items() if k != "retired"})
+        assert c["settle_status"] == st.SETTLE_READ_ESCALATED
+
+    def test_an_escalated_contract_is_still_scheduled(self):
+        """Dropping it would be losing an obligation quietly."""
+        c = cur(settle_status=st.SETTLE_READ_ESCALATED,
+                settle_failures=9, settle_next_at=100.0)
+        assert st.has_outstanding_obligation(c) is True
+        assert st.due_for_settlement({"m": c}, now=200.0, limit=9) == ["m"]
+
+    def test_an_escalated_contract_sorts_behind_every_healthy_one(self):
+        """A broken slug spends only the budget left over."""
+        cursors = {"broken": cur(settle_status=st.SETTLE_READ_ESCALATED,
+                                 settle_next_at=0.0),
+                   "healthy": cur(settle_status=st.SETTLE_PENDING,
+                                  settle_next_at=50.0),
+                   "new": cur(first_seen_at=99.0)}
+        assert st.due_for_settlement(cursors, now=100.0, limit=9) == [
+            "new", "healthy", "broken"]
+
+    def test_a_failing_contract_that_recovers_leaves_escalation(self):
+        c, now = cur(), 0.0
+        for _ in range(st.READ_FAILURE_ESCALATE_AT + 2):
+            t = st.settle_transition(st.SETTLE_UNREADABLE,
+                                     c["settle_attempts"], now=now,
+                                     failures=c["settle_failures"])
+            c.update({k: v for k, v in t.items() if k != "retired"})
+        assert c["settle_status"] == st.SETTLE_READ_ESCALATED
+        t = st.settle_transition(st.SETTLE_PENDING, c["settle_attempts"],
+                                 now=now, failures=c["settle_failures"])
+        assert t["settle_status"] == st.SETTLE_PENDING
+        assert t["settle_failures"] == 0
+
+
+# ── 3. bounded cursors, without losing obligations ───────────────────
+
+class TestCursorsAreBoundedAsACacheNotAsTheRecord:
+    """THE DEFECT: an in-memory cap that dropped a cursor dropped that
+    contract's settlement schedule with it, so a market stopped being
+    checked because the process was busy."""
+
+    def test_the_queue_is_read_from_the_store_not_from_memory(self):
+        for cls in (st.PgStore, st.FileStore, st.MemoryStore):
+            assert hasattr(cls, "due_for_settlement"), cls.__name__
+            assert hasattr(cls, "outcome_report"), cls.__name__
+
+    def test_eviction_prefers_contracts_with_no_outstanding_obligation(self):
         cursors = {"keep": cur(last_seen_at=1.0),
                    "done": cur(last_seen_at=999.0,
                                settle_status=st.SETTLE_RESOLVED)}
@@ -249,11 +383,26 @@ class TestCursorsAreBounded:
         out = st.evict_to(cursors, 1)
         assert out["evicted"] == 1 and out["evicted_unresolved"] == 1
 
+    def test_an_unflushed_cursor_is_never_evicted(self):
+        """Dropping a cached row loses nothing; dropping an UNWRITTEN
+        update loses the update."""
+        cursors = {"dirty": cur(last_seen_at=1.0),
+                   "clean": cur(last_seen_at=2.0)}
+        out = st.evict_to(cursors, 1, dirty={"dirty"})
+        assert "dirty" in cursors and "clean" not in cursors
+        assert out["kept_dirty"] == 1
+
     def test_under_the_cap_nothing_moves(self):
         cursors = {"a": cur()}
-        assert st.evict_to(cursors, 10) == {"evicted": 0,
-                                            "evicted_unresolved": 0}
+        out = st.evict_to(cursors, 10)
+        assert out["evicted"] == 0 and out["evicted_unresolved"] == 0
         assert cursors
+
+    def test_a_derived_outcome_still_counts_as_an_obligation(self):
+        assert st.has_outstanding_obligation(
+            cur(settle_status=st.SETTLE_RESOLVED_DERIVED)) is True
+        assert st.has_outstanding_obligation(
+            cur(settle_status=st.SETTLE_RESOLVED)) is False
 
 
 # ── 4. choosing a backend ────────────────────────────────────────────
@@ -313,8 +462,8 @@ class TestTheFileBackend:
         asyncio.run(s.start())
         out = asyncio.run(s.flush([{"market_id": "m1", "kind": "DECISION"}],
                                   {"m1": cur(last_source_ts="T1")}))
-        assert out == {"records": 1, "cursors": 1, "failures": 0,
-                       "rotated": 0}
+        assert out == {"records": 1, "cursors": 1, "cursors_total": 1,
+                       "failures": 0, "rotated": 0}
         got = asyncio.run(self.store(tmp_path).load())
         assert got["cursors"]["m1"]["last_source_ts"] == "T1"
 
@@ -331,6 +480,21 @@ class TestTheFileBackend:
             self, tmp_path):
         got = asyncio.run(self.store(tmp_path).load())
         assert got["cursors"] == {} and got["cursor_error"] is None
+
+    def test_a_flush_of_one_cursor_does_not_delete_the_others(self,
+                                                              tmp_path):
+        """THE DEFECT: the caller hands over the DIRTY cursors, not all
+        of them -- it cannot hand over all of them, because the cache
+        is bounded. Writing what was handed over replaced the file with
+        a subset and deleted every contract that had not changed in
+        that batch."""
+        s = self.store(tmp_path)
+        asyncio.run(s.start())
+        asyncio.run(s.flush([], {"a": cur(), "b": cur(), "c": cur()}))
+        asyncio.run(s.flush([], {"b": cur(last_source_ts="T2")}))
+        got = asyncio.run(self.store(tmp_path).load())
+        assert set(got["cursors"]) == {"a", "b", "c"}
+        assert got["cursors"]["b"]["last_source_ts"] == "T2"
 
     def test_a_corrupt_cursor_file_is_named(self, tmp_path):
         s = self.store(tmp_path)
@@ -437,8 +601,12 @@ class TestThePostgresBackend:
         async def go():
             s = st.PgStore(dsn=PG_DSN)
             await s.start()
+            # DISTINCT observations: the retry guard keys on content,
+            # so 3,000 identical records are one record by design.
             await s.flush([{"loop": "L", "kind": "DECISION",
-                            "market_id": "m%d" % (i % 3)}
+                            "market_id": "m%d" % (i % 3),
+                            "source_ts": "T%d" % i,
+                            "decided_at": "D%d" % i}
                            for i in range(3000)],
                           {"m%d" % i: cur() for i in range(3)})
             got = await s.load()
@@ -457,7 +625,9 @@ class TestThePostgresBackend:
             s = st.PgStore(dsn=PG_DSN)
             await s.start()
             await s.flush([{"loop": "L", "kind": "DECISION",
-                            "market_id": "m"} for _ in range(400)], {})
+                            "market_id": "m", "source_ts": "T%d" % i,
+                            "decided_at": "D%d" % i}
+                           for i in range(400)], {})
             pruned = await s.prune(max_rows=100, cursor_retention_days=7)
             got = await s.load()
             await s.close()
@@ -467,23 +637,120 @@ class TestThePostgresBackend:
         assert pruned["journal_rows_deleted"] == 300
         assert got["journal_rows"] == 100
 
-    def test_stale_cursors_are_pruned_by_age(self):
+    def test_only_a_completed_contract_ages_out_of_the_cursor_table(self):
+        """THE DEFECT: the age prune ignored settlement status, so it
+        deleted exactly the markets that had been open longest -- the
+        unresolved obligations retention exists FOR."""
         self.fresh()
+        import time
+        old = time.time() - 30 * 86400
 
         async def go():
-            import time
             s = st.PgStore(dsn=PG_DSN)
             await s.start()
-            await s.flush([], {"old": cur(last_seen_at=time.time() - 30 * 86400),
-                               "new": cur(last_seen_at=time.time())})
+            await s.flush([], {
+                "old_done": cur(last_seen_at=old,
+                                settle_status=st.SETTLE_RESOLVED),
+                "old_pending": cur(last_seen_at=old,
+                                   settle_status=st.SETTLE_PENDING),
+                "old_derived": cur(last_seen_at=old,
+                                   settle_status=st.SETTLE_RESOLVED_DERIVED),
+                "old_escalated": cur(last_seen_at=old,
+                                     settle_status=st.SETTLE_READ_ESCALATED),
+                "old_never": cur(last_seen_at=old),
+                "new": cur(last_seen_at=time.time())})
             pruned = await s.prune(max_rows=10 ** 9, cursor_retention_days=7)
             got = await s.load()
             await s.close()
             return pruned, got
 
         pruned, got = asyncio.run(go())
-        assert pruned["cursors_deleted"] == 1
-        assert set(got["cursors"]) == {"new"}
+        assert pruned["cursors_deleted"] == 1, "only the RESOLVED one"
+        assert pruned["cursors_retained_unresolved"] == 4
+        assert set(got["cursors"]) == {"old_pending", "old_derived",
+                                       "old_escalated", "old_never", "new"}
+
+    def test_a_replayed_batch_does_not_inflate_the_record_count(self):
+        """A commit can succeed and its acknowledgment be lost. The
+        retry must be a no-op, or every such event silently inflates
+        the observation count and every rate derived from it."""
+        self.fresh()
+        batch = [{"loop": "L", "kind": "DECISION", "market_id": "m1",
+                  "source_ts": "T%d" % i, "decided_at": "D%d" % i,
+                  "status": "DECIDED", "selected": "NO_TRADE"}
+                 for i in range(50)]
+        for r in batch:
+            r["record_key"] = st.record_key(r)
+
+        async def go():
+            s = st.PgStore(dsn=PG_DSN)
+            await s.start()
+            a = await s.flush(list(batch), {})
+            b = await s.flush(list(batch), {})     # the lost-ack retry
+            got = await s.load()
+            await s.close()
+            return a, b, got
+
+        a, b, got = asyncio.run(go())
+        assert a["failures"] == 0 and b["failures"] == 0
+        assert got["journal_rows"] == 50, (
+            "the retry inserted a second copy of every record")
+
+    def test_two_records_of_the_same_market_at_different_times_both_land(self):
+        """The retry guard must not deduplicate genuine observations."""
+        self.fresh()
+
+        async def go():
+            s = st.PgStore(dsn=PG_DSN)
+            await s.start()
+            rows = []
+            for i in range(10):
+                r = {"loop": "L", "kind": "DECISION", "market_id": "m1",
+                     "source_ts": "T%d" % i, "decided_at": "D%d" % i,
+                     "status": "DECIDED"}
+                r["record_key"] = st.record_key(r)
+                rows.append(r)
+            await s.flush(rows, {})
+            got = await s.load()
+            await s.close()
+            return got
+
+        assert asyncio.run(go())["journal_rows"] == 10
+
+    def test_the_settlement_queue_comes_from_the_store(self):
+        self.fresh()
+        now = 5000.0
+
+        async def go():
+            s = st.PgStore(dsn=PG_DSN)
+            await s.start()
+            await s.flush([], {
+                "done": cur(settle_status=st.SETTLE_RESOLVED),
+                "new": cur(first_seen_at=1.0),
+                "due": cur(settle_status=st.SETTLE_PENDING,
+                           settle_next_at=now - 10),
+                "later": cur(settle_status=st.SETTLE_PENDING,
+                             settle_next_at=now + 10_000),
+                "derived": cur(settle_status=st.SETTLE_RESOLVED_DERIVED,
+                               settle_next_at=now - 5),
+                "broken": cur(settle_status=st.SETTLE_READ_ESCALATED,
+                              settle_next_at=now - 900)})
+            got = await s.due_for_settlement(now=now, limit=10)
+            rep = await s.outcome_report()
+            await s.close()
+            return got, rep
+
+        got, rep = asyncio.run(go())
+        assert got["slugs"][0] == "new", "never-attempted must sort first"
+        assert got["slugs"][-1] == "broken", "escalated must sort last"
+        assert "done" not in got["slugs"], "an authoritative read is done"
+        assert "later" not in got["slugs"], "not due yet"
+        assert "derived" in got["slugs"], (
+            "a derived outcome is still owed an authoritative one")
+        assert got["outstanding"] == 5
+        assert rep["authoritative"] == 1
+        assert rep["awaiting_authoritative"] == 1
+        assert rep["read_escalated"] == 1
 
     def test_a_failed_flush_is_counted_rather_than_raised(self):
         async def go():

@@ -109,9 +109,13 @@ async def go():
     n = int(os.environ["PROOF_N"])
     live_ts = os.environ["PROOF_TS"]
     now = time.time()
+    # One venue timestamp (phase 3 checks the recovered dedup position
+    # against it) but a DISTINCT decision clock per record, because the
+    # retry guard keys on content and identical records are one record
+    # by design.
     recs = [{"loop": "PROOF", "kind": "DECISION",
              "market_id": "m{:03d}".format(i % 7),
-             "source_ts": live_ts,
+             "source_ts": live_ts, "decided_at": "D{:04d}".format(i),
              "status": "DECIDED", "selected": "NO_TRADE"}
             for i in range(n)]
     cursors = {}
@@ -286,9 +290,14 @@ def main() -> int:
     async def bounded():
         s = st.PgStore(dsn=args.dsn)
         await s.start()
+        # DISTINCT observations. The retry guard keys on CONTENT, so
+        # 5,000 identical records are one record by design -- which is
+        # the point of phase 6 and would make this phase measure
+        # nothing.
         big = [{"loop": "PROOF", "kind": "DECISION",
                 "market_id": "m%03d" % (i % 7),
-                "source_ts": "T", "status": "DECIDED"} for i in range(5000)]
+                "source_ts": "T%d" % i, "decided_at": "D%d" % i,
+                "status": "DECIDED"} for i in range(5000)]
         for i in range(0, 5000, 1000):
             await s.flush(big[i:i + 1000], {})
         # Touch the cursors so the AGE prune is not what removes them:
@@ -319,6 +328,124 @@ def main() -> int:
     print("   Recovery reads the CURSOR table and one ledger row. It "
           "never\n   replays the journal, so a month of evidence costs "
           "what an hour does.")
+
+    # ── 6 ────────────────────────────────────────────────────────────
+    rule("6. A LOST ACKNOWLEDGMENT CANNOT INFLATE THE RECORD COUNT")
+    print("   A commit can succeed and its acknowledgment be lost -- a")
+    print("   dropped connection after COMMIT looks exactly like a failed")
+    print("   write. The retry that follows must be a NO-OP.")
+
+    async def replay():
+        s = st.PgStore(dsn=args.dsn)
+        await s.start()
+        pool = await s._get_pool()
+        async with pool.acquire() as con:
+            await con.execute("DELETE FROM bettor_live_journal "
+                              " WHERE lane = $1", st.LANE)
+        batch = []
+        for i in range(120):
+            r = {"loop": "PROOF", "kind": "DECISION", "market_id": "m",
+                 "source_ts": "T%d" % i, "decided_at": "D%d" % i,
+                 "status": "DECIDED"}
+            r["record_key"] = st.record_key(r)
+            batch.append(r)
+        a = await s.flush(list(batch), {})
+        once = (await s.load())["journal_rows"]
+        b = await s.flush(list(batch), {})      # the lost-ack retry
+        twice = (await s.load())["journal_rows"]
+        await s.close()
+        return a, b, once, twice
+
+    a, b, once, twice = asyncio.run(replay())
+    print("   first flush reported  : %s records" % a["records"])
+    print("   rows after first      : %s" % once)
+    print("   retry reported        : %s records" % b["records"])
+    print("   rows after the retry  : %s" % twice)
+    check("the retry did not fail", b["failures"], 0)
+    check("rows after the first flush", once, 120)
+    check("rows after replaying the SAME batch", twice, 120)
+    print("   The key is content-derived, so the retry computes the same")
+    print("   key the first attempt did and ON CONFLICT DO NOTHING makes")
+    print("   the second insert a no-op. Without it, every lost ack adds")
+    print("   a full copy and every rate derived from the count is wrong")
+    print("   in a direction nobody can see.")
+
+    # ── 7 ────────────────────────────────────────────────────────────
+    rule("7. AN OUTAGE, AND WHAT THE GUARANTEE ACTUALLY SAYS")
+    print("   'at most one flush interval' holds WHILE FLUSHES SUCCEED.")
+
+    class Down:
+        backend, durable_across = "down", ("redeploy",)
+
+        async def start(self):
+            return {"ok": True, "backend": self.backend}
+
+        async def flush(self, records, cursors):
+            return {"records": 0, "cursors": 0, "failures": 1,
+                    "error": "ConnectionDoesNotExistError"}
+
+        async def save_ledger(self, snapshot):
+            return False
+
+        async def load(self):
+            return {"cursors": {}, "ledger": None, "backend": self.backend}
+
+        async def due_for_settlement(self, *, now, limit):
+            return {"slugs": [], "cursors": {}, "outstanding": 0}
+
+        async def outcome_report(self):
+            return {}
+
+        async def prune(self, **_):
+            return {}
+
+        async def close(self):
+            return None
+
+    from sportsassets import bettor_live_store as _st
+    keep_max = _st.OUTBOX_MAX
+    _st.OUTBOX_MAX = 50
+    try:
+        down = Down()
+        loop3, _s3 = bl.build("k", "s", slugs=["m"], store=down,
+                              leg_of={"m": "yes"},
+                              stream_factory=ms.MarketStream)
+        for i in range(30):
+            loop3._record({"loop": "PROOF", "kind": "DECISION",
+                           "market_id": "m", "decided_at": "D%d" % i})
+        loop3._outbox[0]["enqueued_at"] = time.time() - 240.0
+        asyncio.run(loop3.flush())
+        d1 = loop3.durability_report()
+        print("   after a failed flush  : %s" % json.dumps(
+            {k: d1[k] for k in ("uncommitted_records", "flush_failures",
+                                "records_written", "records_dropped",
+                                "windows_incomplete")}))
+        print("   oldest uncommitted    : %.1f s" %
+              d1["oldest_uncommitted_age_s"])
+        check("the batch was KEPT, not lost", d1["uncommitted_records"], 30)
+        check("nothing was written", d1["records_written"], 0)
+        check("no window is incomplete yet", d1["windows_incomplete"], False)
+
+        for i in range(60):
+            loop3._record({"loop": "PROOF", "kind": "DECISION",
+                           "market_id": "m", "decided_at": "X%d" % i})
+        d2 = loop3.durability_report()
+        print("   after overflow        : %s" % json.dumps(
+            {k: d2[k] for k in ("uncommitted_records", "records_dropped",
+                                "windows_incomplete")}))
+        check("the outbox held its bound", d2["uncommitted_records"],
+              _st.OUTBOX_MAX)
+        check("the overflow was DROPPED and counted",
+              d2["records_dropped"], 40)
+        check("and the windows are marked INCOMPLETE",
+              d2["windows_incomplete"], True)
+        print("   incomplete from %s to %s" % (d2["incomplete_from"],
+                                               d2["incomplete_to"]))
+        print("   A rate computed over a window with an unrecorded gap is")
+        print("   wrong in a direction nobody can see, so the window says")
+        print("   so rather than the operator having to notice.")
+    finally:
+        _st.OUTBOX_MAX = keep_max
 
     # ── summary ──────────────────────────────────────────────────────
     rule("WHAT THIS RUN IS")

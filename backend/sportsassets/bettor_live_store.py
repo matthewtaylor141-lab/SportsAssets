@@ -86,17 +86,41 @@ OUTBOX_MAX = 20_000
 
 # ── settlement scheduling policy ─────────────────────────────────────
 #
-# The previous scheduler sorted by first-observed time and took the
-# oldest 25. A contract that stays PENDING stays oldest, so a hundred
-# never-resolving contracts hold the whole batch forever and a market
-# that settled an hour ago is never read. That is not a slow scheduler;
-# it is a scheduler that cannot make progress.
+# THREE DEFECTS THIS SECTION EXISTS TO NOT HAVE.
 #
-# The fix is per-contract state: attempts, a next-attempt time, and a
-# terminal status. Never-attempted contracts sort first, then contracts
-# whose next-attempt time has passed, oldest first. A contract that
-# answers PENDING backs off, so it leaves the queue head for its own
-# backoff and cannot hold it.
+# 1. "THE 25 OLDEST OBSERVED" CANNOT MAKE PROGRESS. A contract that
+#    never resolves is permanently the oldest, so a hundred pending
+#    contracts hold the batch forever and a market that settled an hour
+#    ago is never read.
+#
+# 2. A DERIVED OUTCOME IS NOT AN AUTHORITATIVE ONE. The first fix
+#    retired RESOLVED_DERIVED alongside RESOLVED, which would have
+#    closed outcome collection on an INFERENCE FROM A PRICE and made
+#    later confirmation through the venue's own settlement endpoint
+#    impossible. A derived outcome is now PRESERVED SEPARATELY --
+#    `settle_derived_outcome` and `settle_derived_at` -- and the
+#    contract stays scheduled for the authoritative read. ONLY
+#    `RESOLVED` completes outcome collection.
+#
+# 3. A HEALTHY OPEN MARKET IS NOT A FAILURE. The first fix incremented
+#    one attempt counter for every result, PENDING included, and
+#    abandoned the contract at twelve. A market may legitimately stay
+#    open far longer than twelve checks. Successful reads and FAILED
+#    reads are now counted separately:
+#
+#      settle_attempts   every read, successful or not (a record)
+#      settle_failures   CONSECUTIVE failed reads, reset by any
+#                        successful one (the escalation trigger)
+#
+#    A PENDING answer is a SUCCESSFUL read. It never advances the
+#    failure count and can never abandon a contract. It is scheduled
+#    from the event's own timing where the venue gives one, and from a
+#    bounded backoff where it does not.
+#
+#    A run of failed reads escalates to READ_FAILURE_ESCALATED, which
+#    is VISIBLE and STILL SCHEDULED -- at the maximum interval and at
+#    the back of the queue, so a broken slug cannot starve a healthy
+#    one, and nothing is ever silently dropped.
 
 SETTLE_NEW = None
 SETTLE_PENDING = "PENDING"
@@ -104,60 +128,138 @@ SETTLE_UNREADABLE = "UNREADABLE"
 SETTLE_UNMATCHED = "UNMATCHED"
 SETTLE_RESOLVED = "RESOLVED"
 SETTLE_RESOLVED_DERIVED = "RESOLVED_DERIVED"
-SETTLE_ABANDONED = "ABANDONED"
+# A run of failed reads, surfaced for an operator. NOT terminal: the
+# contract keeps its place in the schedule, at the longest interval.
+SETTLE_READ_ESCALATED = "READ_FAILURE_ESCALATED"
 
-# AUTHORITATIVE RESOLUTIONS ARE RETIRED. A settled market's price does
-# not change, so reading it again spends a REST call on a fact we hold.
-TERMINAL_STATUSES = (SETTLE_RESOLVED, SETTLE_RESOLVED_DERIVED,
-                     SETTLE_ABANDONED)
-RETRYABLE_STATUSES = (SETTLE_PENDING, SETTLE_UNREADABLE, SETTLE_UNMATCHED)
+# ONLY AN AUTHORITATIVE RESOLUTION COMPLETES OUTCOME COLLECTION.
+# A settled price does not change, so re-reading it would spend a REST
+# call on a fact we hold. Nothing else is terminal -- not a derived
+# outcome, not a long-open market, not a slug we cannot read.
+TERMINAL_STATUSES = (SETTLE_RESOLVED,)
+AUTHORITATIVE_STATUSES = (SETTLE_RESOLVED,)
+FAILED_READ_STATUSES = (SETTLE_UNREADABLE, SETTLE_UNMATCHED)
+SUCCESSFUL_READ_STATUSES = (SETTLE_PENDING, SETTLE_RESOLVED_DERIVED,
+                            SETTLE_RESOLVED)
 
-SETTLE_BASE_S = 600.0        # first retry after ten minutes
-SETTLE_MAX_S = 21_600.0      # and never further apart than six hours
-SETTLE_MAX_ATTEMPTS = 12     # ~ two days of backoff, then ABANDONED
+# Pending markets: bounded backoff when nothing better is known.
+PENDING_BASE_S = 600.0            # ten minutes
+PENDING_MAX_S = 21_600.0          # never further apart than six hours
+# ... and when the venue tells us when the event is, look shortly after
+# it rather than walking a backoff to the cap.
+EVENT_GRACE_S = 300.0
+
+# A derived outcome means the market has almost certainly settled, so
+# the authoritative endpoint should catch up soon. Re-checked on its
+# own, shorter schedule -- and forever, because giving up here is
+# exactly what turns an inference into a recorded outcome.
+DERIVED_RECHECK_BASE_S = 900.0
+DERIVED_RECHECK_MAX_S = 21_600.0
+
+# Failed reads: their own backoff, and a visible escalation.
+FAILURE_BASE_S = 600.0
+FAILURE_MAX_S = 21_600.0
+READ_FAILURE_ESCALATE_AT = 6      # consecutive failures
 
 
-def settle_backoff_s(attempts: int) -> float:
-    """Exponential, capped. Deterministic: no jitter, because two runs
-    of the same scheduler must be comparable."""
-    n = max(0, int(attempts))
+def _capped_backoff(n: int, base: float, cap: float) -> float:
+    """Exponential, capped, deterministic. No jitter: two runs of the
+    same scheduler must be comparable."""
+    n = max(0, int(n))
     if n >= 40:                       # 2**40 overflows nothing but time
-        return SETTLE_MAX_S
-    return min(SETTLE_BASE_S * (2 ** n), SETTLE_MAX_S)
+        return cap
+    return min(base * (2 ** n), cap)
 
 
-def settle_transition(status: str | None, attempts: int, *,
-                      now: float) -> dict:
+def settle_backoff_s(n: int) -> float:
+    return _capped_backoff(n, PENDING_BASE_S, PENDING_MAX_S)
+
+
+def settle_transition(status: str | None, attempts: int, *, now: float,
+                      failures: int = 0, event_at: float | None = None,
+                      derived_at: float | None = None,
+                      derived_outcome=None,
+                      outcome=None) -> dict:
     """One settlement read's outcome -> the contract's next schedule.
 
-    Returns the fields to store. A terminal status carries no next
-    attempt at all, which is what retiring means.
+    `attempts` counts every read. `failures` counts CONSECUTIVE failed
+    reads and is what escalates; any successful read clears it.
+
+    Returns the fields to store plus `retired`, which is true only for
+    an AUTHORITATIVE resolution.
     """
     attempts = max(0, int(attempts)) + 1
-    if status in (SETTLE_RESOLVED, SETTLE_RESOLVED_DERIVED):
-        return {"settle_status": status, "settle_attempts": attempts,
-                "settle_next_at": None, "settle_last_at": now,
-                "retired": True}
-    if attempts >= SETTLE_MAX_ATTEMPTS:
-        # NOT SILENT. A contract we could never read is retired with a
-        # status that says so, and the count is reported.
-        return {"settle_status": SETTLE_ABANDONED,
-                "settle_attempts": attempts, "settle_next_at": None,
-                "settle_last_at": now, "retired": True}
-    return {"settle_status": status or SETTLE_PENDING,
-            "settle_attempts": attempts,
-            "settle_next_at": now + settle_backoff_s(attempts),
-            "settle_last_at": now, "retired": False}
+    failures = max(0, int(failures))
+    base = {"settle_attempts": attempts, "settle_last_at": now}
+
+    if status == SETTLE_RESOLVED:
+        # THE ONLY TERMINAL CASE. Outcome collection is complete for
+        # this contract, and only the venue's own settlement endpoint
+        # can say so.
+        return dict(base, settle_status=SETTLE_RESOLVED,
+                    settle_failures=0, settle_next_at=None,
+                    settle_outcome=outcome, retired=True)
+
+    if status == SETTLE_RESOLVED_DERIVED:
+        # PRESERVED, NOT ACCEPTED. The derived outcome and the time we
+        # first inferred it are kept; the contract stays scheduled for
+        # the authoritative read that can confirm or contradict it.
+        first = derived_at if derived_at is not None else now
+        n_derived = 0 if derived_at is None else attempts
+        return dict(base, settle_status=SETTLE_RESOLVED_DERIVED,
+                    settle_failures=0,
+                    settle_derived_at=first,
+                    settle_derived_outcome=(derived_outcome
+                                            if derived_at is not None
+                                            else outcome),
+                    settle_next_at=now + _capped_backoff(
+                        n_derived, DERIVED_RECHECK_BASE_S,
+                        DERIVED_RECHECK_MAX_S),
+                    retired=False)
+
+    if status in FAILED_READ_STATUSES:
+        failures += 1
+        escalated = failures >= READ_FAILURE_ESCALATE_AT
+        return dict(base,
+                    settle_status=(SETTLE_READ_ESCALATED if escalated
+                                   else status),
+                    settle_failures=failures,
+                    settle_next_at=now + _capped_backoff(
+                        failures, FAILURE_BASE_S, FAILURE_MAX_S),
+                    retired=False)
+
+    # PENDING, or anything else a successful read returned. A market
+    # that is legitimately open is not a problem to be counted down.
+    if event_at is not None and event_at + EVENT_GRACE_S > now:
+        # THE EVENT'S OWN TIMING. Looking again shortly after the event
+        # is expected to conclude beats walking a blind backoff to six
+        # hours and then missing the resolution by five of them.
+        nxt = event_at + EVENT_GRACE_S
+    else:
+        # Backoff on the number of PENDING reads, which is attempts
+        # minus the failures already spent, and it is CAPPED -- a
+        # long-open market settles into a six-hourly check and stays
+        # there for as long as it stays open.
+        nxt = now + _capped_backoff(max(0, attempts - failures - 1),
+                                    PENDING_BASE_S, PENDING_MAX_S)
+    return dict(base, settle_status=SETTLE_PENDING, settle_failures=0,
+                settle_next_at=nxt, retired=False)
 
 
 def due_for_settlement(cursors: dict, *, now: float, limit: int) -> list:
     """Which contracts to read this pass, in order.
 
-    THE PROGRESS PROPERTY. A never-attempted contract (`settle_next_at`
-    is None and status is None) sorts ahead of every contract that has
-    been attempted, so however many contracts are permanently pending,
-    a newly observed one is read on the next pass. Terminal contracts
-    are not candidates at all.
+    THE PROGRESS PROPERTY. A never-attempted contract sorts ahead of
+    every attempted one, so however many contracts are pending, a newly
+    observed one is read on the next pass.
+
+    THE STARVATION PROPERTY. A contract whose reads keep failing sorts
+    BEHIND every healthy one, so a broken slug spends only the budget
+    left over -- and it is still in the queue, because dropping it
+    would be losing an obligation quietly.
+
+    Only an AUTHORITATIVE resolution is excluded. A derived outcome is
+    still a candidate: confirming it is the whole point.
     """
     due = []
     for slug, c in cursors.items():
@@ -168,29 +270,54 @@ def due_for_settlement(cursors: dict, *, now: float, limit: int) -> list:
         if st is None and nxt is None:
             due.append((0, c.get("first_seen_at") or 0.0, slug))
             continue
-        if nxt is None or nxt <= now:
-            due.append((1, nxt or 0.0, slug))
+        if nxt is not None and nxt > now:
+            continue
+        rank = 2 if st == SETTLE_READ_ESCALATED else 1
+        due.append((rank, nxt if nxt is not None else 0.0, slug))
     due.sort()
     return [slug for _, _, slug in due[:max(0, int(limit))]]
 
 
-def evict_to(cursors: dict, cap: int) -> dict:
-    """Hold the cursor map under a cap. Terminal cursors go first --
-    they carry no future work -- then the least recently seen.
+def has_outstanding_obligation(c: dict) -> bool:
+    """Does this cursor still owe us an authoritative outcome?
 
-    Evicting a cursor that is NOT terminal loses that contract's
-    settlement schedule, so it is counted separately and by name.
+    Everything that is not an authoritative resolution does, including
+    a derived one. Used by the pruner, which must never delete an
+    obligation because it is old -- an old unresolved market is the
+    case retention exists FOR.
     """
+    return c.get("settle_status") not in TERMINAL_STATUSES
+
+
+def evict_to(cursors: dict, cap: int, *, dirty: set = None) -> dict:
+    """Hold the IN-MEMORY cursor map under a cap.
+
+    THIS IS A CACHE, NOT THE RECORD. The settlement queue is read from
+    the STORE (`store.due_for_settlement`), so dropping a cursor from
+    memory loses no future work -- the row is still there and comes
+    back when it is due. What it must never drop is a cursor whose
+    updates have NOT been flushed yet, because that would lose the
+    update rather than the cache entry.
+
+    Order: authoritative-resolved first (no future work at all), then
+    least recently seen. Unflushed cursors are never evicted.
+    """
+    dirty = dirty or set()
+    out = {"evicted": 0, "evicted_unresolved": 0, "kept_dirty": 0}
     over = len(cursors) - max(0, int(cap))
-    out = {"evicted": 0, "evicted_unresolved": 0}
     if over <= 0:
         return out
+    candidates = [(s, c) for s, c in cursors.items() if s not in dirty]
+    out["kept_dirty"] = len(cursors) - len(candidates)
     ranked = sorted(
-        cursors.items(),
-        key=lambda kv: (0 if kv[1].get("settle_status") in TERMINAL_STATUSES
-                        else 1, kv[1].get("last_seen_at") or 0.0))
+        candidates,
+        key=lambda kv: (0 if not has_outstanding_obligation(kv[1]) else 1,
+                        kv[1].get("last_seen_at") or 0.0))
     for slug, c in ranked[:over]:
-        if c.get("settle_status") not in TERMINAL_STATUSES:
+        if has_outstanding_obligation(c):
+            # A CACHE MISS, NOT A LOSS. Counted because a persistently
+            # full cache means the working set is larger than the cap
+            # and every settlement pass pays a store read for it.
             out["evicted_unresolved"] += 1
         del cursors[slug]
         out["evicted"] += 1
@@ -209,6 +336,7 @@ DDL = """
 CREATE TABLE IF NOT EXISTS bettor_live_journal (
     id            BIGSERIAL   PRIMARY KEY,
     lane          TEXT        NOT NULL,
+    record_key    TEXT        NOT NULL,
     written_at    TIMESTAMPTZ NOT NULL DEFAULT now(),
     loop_version  TEXT        NOT NULL,
     kind          TEXT        NOT NULL,
@@ -217,28 +345,38 @@ CREATE TABLE IF NOT EXISTS bettor_live_journal (
     decided_at    TEXT,
     status        TEXT,
     selected      TEXT,
-    record        JSONB       NOT NULL
+    record        JSONB       NOT NULL,
+    UNIQUE (lane, record_key)
 );
 
 CREATE INDEX IF NOT EXISTS bettor_live_journal_lane_id_idx
     ON bettor_live_journal (lane, id DESC);
 
 CREATE TABLE IF NOT EXISTS bettor_live_cursor (
-    lane            TEXT        NOT NULL,
-    market_id       TEXT        NOT NULL,
-    first_seen_at   DOUBLE PRECISION,
-    last_seen_at    DOUBLE PRECISION,
-    last_source_ts  TEXT,
-    last_decided_at TEXT,
-    settle_status   TEXT,
-    settle_attempts INTEGER     NOT NULL DEFAULT 0,
-    settle_next_at  DOUBLE PRECISION,
-    settle_last_at  DOUBLE PRECISION,
+    lane                   TEXT        NOT NULL,
+    market_id              TEXT        NOT NULL,
+    first_seen_at          DOUBLE PRECISION,
+    last_seen_at           DOUBLE PRECISION,
+    last_source_ts         TEXT,
+    last_decided_at        TEXT,
+    event_at               DOUBLE PRECISION,
+    settle_status          TEXT,
+    settle_attempts        INTEGER     NOT NULL DEFAULT 0,
+    settle_failures        INTEGER     NOT NULL DEFAULT 0,
+    settle_next_at         DOUBLE PRECISION,
+    settle_last_at         DOUBLE PRECISION,
+    settle_derived_at      DOUBLE PRECISION,
+    settle_derived_outcome TEXT,
+    settle_outcome         TEXT,
     PRIMARY KEY (lane, market_id)
 );
 
 CREATE INDEX IF NOT EXISTS bettor_live_cursor_seen_idx
     ON bettor_live_cursor (lane, last_seen_at);
+
+CREATE INDEX IF NOT EXISTS bettor_live_cursor_due_idx
+    ON bettor_live_cursor (lane, settle_next_at)
+    WHERE settle_status IS DISTINCT FROM 'RESOLVED';
 
 CREATE TABLE IF NOT EXISTS bettor_live_ledger (
     lane          TEXT        PRIMARY KEY,
@@ -253,15 +391,58 @@ OWN_TABLES = ("bettor_live_journal", "bettor_live_cursor",
               "bettor_live_ledger")
 
 CURSOR_FIELDS = ("first_seen_at", "last_seen_at", "last_source_ts",
-                 "last_decided_at", "settle_status", "settle_attempts",
-                 "settle_next_at", "settle_last_at")
+                 "last_decided_at", "event_at", "settle_status",
+                 "settle_attempts", "settle_failures", "settle_next_at",
+                 "settle_last_at", "settle_derived_at",
+                 "settle_derived_outcome", "settle_outcome")
+
+_INT_CURSOR_FIELDS = ("settle_attempts", "settle_failures")
+
+
+def new_cursor(now: float) -> dict:
+    c = {k: None for k in CURSOR_FIELDS}
+    c.update(first_seen_at=now, last_seen_at=now,
+             settle_attempts=0, settle_failures=0)
+    return c
 
 
 def _cursor_row(slug, c):
     return (LANE, slug, c.get("first_seen_at"), c.get("last_seen_at"),
             c.get("last_source_ts"), c.get("last_decided_at"),
-            c.get("settle_status"), int(c.get("settle_attempts") or 0),
-            c.get("settle_next_at"), c.get("settle_last_at"))
+            c.get("event_at"), c.get("settle_status"),
+            int(c.get("settle_attempts") or 0),
+            int(c.get("settle_failures") or 0),
+            c.get("settle_next_at"), c.get("settle_last_at"),
+            c.get("settle_derived_at"),
+            _txt(c.get("settle_derived_outcome")),
+            _txt(c.get("settle_outcome")))
+
+
+def _txt(v):
+    return None if v is None else str(v)
+
+
+def record_key(rec: dict) -> str:
+    """A STABLE IDENTITY FOR ONE RECORD, so a retry cannot double it.
+
+    A commit can succeed and its acknowledgment be lost -- a dropped
+    connection after COMMIT looks exactly like a failed write. The
+    retry that follows must not insert the record a second time, or
+    every such event silently inflates the observation count and every
+    rate derived from it.
+
+    The key is content-derived, so the retry of a record computes the
+    same key the first attempt did, and `ON CONFLICT DO NOTHING` makes
+    the second insert a no-op.
+    """
+    import hashlib
+    parts = [LANE, str(rec.get("kind") or "DECISION"),
+             str(rec.get("market_id") or ""),
+             str(rec.get("source_ts") or ""),
+             str(rec.get("decided_at") or rec.get("at") or ""),
+             str(rec.get("status") or ""),
+             str(rec.get("observation_id") or "")]
+    return hashlib.sha1("\x1f".join(parts).encode()).hexdigest()
 
 
 # ── backends ─────────────────────────────────────────────────────────
@@ -296,8 +477,18 @@ class MemoryStore:
         return {"cursors": {}, "ledger": None, "backend": self.backend,
                 "note": "a memory store recovers nothing, by construction"}
 
+    async def due_for_settlement(self, *, now: float, limit: int) -> dict:
+        return {"slugs": [], "cursors": {}, "outstanding": 0,
+                "note": "a memory store keeps no schedule"}
+
+    async def outcome_report(self) -> dict:
+        return {"by_status": {}, "authoritative": 0,
+                "awaiting_authoritative": 0, "read_escalated": 0,
+                "outstanding": 0}
+
     async def prune(self, **_) -> dict:
-        return {"journal_rows_deleted": 0, "cursors_deleted": 0}
+        return {"journal_rows_deleted": 0, "cursors_deleted": 0,
+                "cursors_retained_unresolved": 0}
 
     async def close(self) -> None:
         return None
@@ -378,14 +569,22 @@ class FileStore:
                 out["failures"] += 1
                 out["error"] = type(exc).__name__
         if cursors:
-            # THE WHOLE MAP, ATOMICALLY. It is bounded by
-            # CURSOR_MAX_IN_MEMORY, so rewriting it is bounded work,
-            # and a partial cursor file is a corrupt position.
+            # MERGED, THEN WRITTEN WHOLE AND ATOMICALLY.
+            #
+            # The caller hands us the DIRTY cursors, not all of them --
+            # it cannot hand us all of them, because the in-memory map
+            # is a bounded cache. Writing what we were handed replaced
+            # the file with a subset and silently deleted every
+            # contract that had not changed in this batch, which is a
+            # settlement obligation lost to a flush.
             try:
+                existing = self._load_sync().get("cursors") or {}
+                existing.update(cursors)
                 self._write_atomic(self.cursor_path, json.dumps(
                     {"lane": LANE, "schema": SCHEMA_VERSION,
-                     "cursors": cursors}, default=str))
+                     "cursors": existing}, default=str))
                 out["cursors"] = len(cursors)
+                out["cursors_total"] = len(existing)
             except OSError as exc:  # noqa: BLE001
                 out["failures"] += 1
                 out["cursor_error"] = type(exc).__name__
@@ -430,11 +629,67 @@ class FileStore:
             out["ledger_error"] = type(exc).__name__
         return out
 
-    async def prune(self, **_) -> dict:
-        # Rotation IS the prune for a file journal; cursors are pruned
-        # in memory before they are written.
-        return {"journal_rows_deleted": 0, "cursors_deleted": 0,
-                "bound": "two files of %d bytes" % self.max_bytes}
+    async def due_for_settlement(self, *, now: float, limit: int) -> dict:
+        """The same queue, over the cursor file. One implementation of
+        the ORDERING (`due_for_settlement`, the pure function); two
+        implementations of where the rows come from."""
+        loaded = await self.load()
+        cursors = loaded.get("cursors") or {}
+        slugs = due_for_settlement(cursors, now=now, limit=limit)
+        out = {"slugs": slugs,
+               "cursors": {s: cursors[s] for s in slugs},
+               "outstanding": sum(1 for c in cursors.values()
+                                  if has_outstanding_obligation(c))}
+        if loaded.get("cursor_error"):
+            out["error"] = loaded["cursor_error"]
+        return out
+
+    async def outcome_report(self) -> dict:
+        cursors = (await self.load()).get("cursors") or {}
+        by: dict = {}
+        for c in cursors.values():
+            k = c.get("settle_status") or "NEVER_ATTEMPTED"
+            by[k] = by.get(k, 0) + 1
+        return {"by_status": by,
+                "authoritative": by.get(SETTLE_RESOLVED, 0),
+                "awaiting_authoritative": by.get(SETTLE_RESOLVED_DERIVED, 0),
+                "read_escalated": by.get(SETTLE_READ_ESCALATED, 0),
+                "outstanding": sum(n for st, n in by.items()
+                                   if st != SETTLE_RESOLVED)}
+
+    async def prune(self, *, max_rows: int = JOURNAL_MAX_ROWS,
+                    cursor_retention_days: int = CURSOR_RETENTION_DAYS
+                    ) -> dict:
+        """Rotation IS the prune for a file journal. Cursors age out
+        ONLY when outcome collection is complete for them -- the same
+        rule the Postgres backend applies, because deleting an
+        unresolved obligation because it is old deletes exactly the
+        markets retention exists for."""
+        import asyncio
+
+        def _go():
+            loaded = self._load_sync()
+            cursors = loaded.get("cursors") or {}
+            horizon = time.time() - cursor_retention_days * 86400.0
+            keep, dropped = {}, 0
+            for slug, c in cursors.items():
+                seen = c.get("last_seen_at")
+                if (c.get("settle_status") == SETTLE_RESOLVED
+                        and seen is not None and seen < horizon):
+                    dropped += 1
+                    continue
+                keep[slug] = c
+            if dropped:
+                self._write_atomic(self.cursor_path, json.dumps(
+                    {"lane": LANE, "schema": SCHEMA_VERSION,
+                     "cursors": keep}, default=str))
+            return {"journal_rows_deleted": 0, "cursors_deleted": dropped,
+                    "cursors_retained_unresolved": sum(
+                        1 for c in keep.values()
+                        if has_outstanding_obligation(c)),
+                    "bound": "two files of %d bytes" % self.max_bytes}
+
+        return await asyncio.to_thread(_go)
 
     async def close(self) -> None:
         return None
@@ -475,16 +730,51 @@ class PgStore:
         return self._pool
 
     async def start(self) -> dict:
+        """Create the schema, then VERIFY it.
+
+        `CREATE TABLE IF NOT EXISTS` is a no-op against a table that
+        already exists with an OLDER SHAPE -- it adds no column and
+        raises nothing, so a schema change would half-apply and the
+        first write would fail at runtime instead of at startup. The
+        verification below turns that into a refusal to start, which
+        `main()` reports as STORE_START_REFUSED.
+        """
         pool = await self._get_pool()
         async with pool.acquire() as con:
-            # THE WORKERS NEVER RUN MIGRATIONS. This is idempotent and
-            # additive: three CREATE TABLE IF NOT EXISTS and two
+            # THE WORKERS NEVER RUN MIGRATIONS. Idempotent and
+            # additive: three CREATE TABLE IF NOT EXISTS and three
             # indexes, touching no existing table.
             await con.execute(DDL)
+            missing = await self._missing_columns(con)
+        if missing:
+            return {"ok": False, "backend": self.backend,
+                    "why": "SCHEMA_MISMATCH", "missing": missing,
+                    "remedy": ("these tables exist with an older shape. "
+                               "Apply migrations/093_bettor_live_"
+                               "observation.sql, or drop the three "
+                               "bettor_live_* tables if they hold "
+                               "nothing worth keeping")}
         return {"ok": True, "backend": self.backend, "lane": LANE,
                 "schema_version": SCHEMA_VERSION,
                 "tables": list(OWN_TABLES),
                 "durable_across": list(self.durable_across)}
+
+    async def _missing_columns(self, con) -> list:
+        want = {
+            "bettor_live_journal": ("lane", "record_key", "kind",
+                                    "market_id", "source_ts", "record"),
+            "bettor_live_cursor": ("lane", "market_id") + CURSOR_FIELDS,
+            "bettor_live_ledger": ("lane", "snapshot", "schema_version"),
+        }
+        rows = await con.fetch(
+            "SELECT table_name, column_name FROM information_schema.columns "
+            " WHERE table_schema = current_schema() "
+            "   AND table_name = ANY($1::text[])", list(want))
+        have: dict = {}
+        for r in rows:
+            have.setdefault(r["table_name"], set()).add(r["column_name"])
+        return sorted("%s.%s" % (t, c) for t, cols in want.items()
+                      for c in cols if c not in have.get(t, set()))
 
     async def flush(self, records, cursors) -> dict:
         out = {"records": 0, "cursors": 0, "failures": 0}
@@ -495,13 +785,22 @@ class PgStore:
             async with pool.acquire() as con:
                 async with con.transaction():
                     if records:
+                        # ON CONFLICT DO NOTHING, against the CONTENT
+                        # KEY. A commit whose acknowledgment was lost
+                        # is retried by the loop, and without this the
+                        # retry would insert every record a second
+                        # time -- inflating the observation count and
+                        # every rate derived from it.
                         await con.executemany(
                             "INSERT INTO bettor_live_journal "
-                            "(lane, loop_version, kind, market_id, "
-                            " source_ts, decided_at, status, selected, "
-                            " record) "
-                            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9::jsonb)",
-                            [(LANE, r.get("loop") or "", r.get("kind")
+                            "(lane, record_key, loop_version, kind, "
+                            " market_id, source_ts, decided_at, status, "
+                            " selected, record) "
+                            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,"
+                            "        $10::jsonb) "
+                            "ON CONFLICT (lane, record_key) DO NOTHING",
+                            [(LANE, r.get("record_key") or record_key(r),
+                              r.get("loop") or "", r.get("kind")
                               or "DECISION", r.get("market_id"),
                               r.get("source_ts"), r.get("decided_at"),
                               r.get("status"), r.get("selected"),
@@ -513,18 +812,33 @@ class PgStore:
                             "INSERT INTO bettor_live_cursor "
                             "(lane, market_id, first_seen_at, "
                             " last_seen_at, last_source_ts, "
-                            " last_decided_at, settle_status, "
-                            " settle_attempts, settle_next_at, "
-                            " settle_last_at) "
-                            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10) "
+                            " last_decided_at, event_at, settle_status, "
+                            " settle_attempts, settle_failures, "
+                            " settle_next_at, settle_last_at, "
+                            " settle_derived_at, settle_derived_outcome, "
+                            " settle_outcome) "
+                            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,"
+                            "        $11,$12,$13,$14,$15) "
                             "ON CONFLICT (lane, market_id) DO UPDATE SET "
                             " last_seen_at = EXCLUDED.last_seen_at, "
                             " last_source_ts = EXCLUDED.last_source_ts, "
                             " last_decided_at = EXCLUDED.last_decided_at, "
+                            " event_at = COALESCE(EXCLUDED.event_at, "
+                            "                     bettor_live_cursor.event_at), "
                             " settle_status = EXCLUDED.settle_status, "
                             " settle_attempts = EXCLUDED.settle_attempts, "
+                            " settle_failures = EXCLUDED.settle_failures, "
                             " settle_next_at = EXCLUDED.settle_next_at, "
-                            " settle_last_at = EXCLUDED.settle_last_at",
+                            " settle_last_at = EXCLUDED.settle_last_at, "
+                            " settle_derived_at = COALESCE("
+                            "     bettor_live_cursor.settle_derived_at, "
+                            "     EXCLUDED.settle_derived_at), "
+                            " settle_derived_outcome = COALESCE("
+                            "     bettor_live_cursor.settle_derived_outcome, "
+                            "     EXCLUDED.settle_derived_outcome), "
+                            " settle_outcome = COALESCE("
+                            "     EXCLUDED.settle_outcome, "
+                            "     bettor_live_cursor.settle_outcome)",
                             [_cursor_row(s, c) for s, c in cursors.items()])
                         out["cursors"] = len(cursors)
         except Exception as exc:  # noqa: BLE001 -- counted, never swallowed
@@ -566,10 +880,14 @@ class PgStore:
             async with pool.acquire() as con:
                 rows = await con.fetch(
                     "SELECT market_id, first_seen_at, last_seen_at, "
-                    "       last_source_ts, last_decided_at, "
+                    "       last_source_ts, last_decided_at, event_at, "
                     "       settle_status, settle_attempts, "
-                    "       settle_next_at, settle_last_at "
-                    "  FROM bettor_live_cursor WHERE lane = $1", LANE)
+                    "       settle_failures, settle_next_at, "
+                    "       settle_last_at, settle_derived_at, "
+                    "       settle_derived_outcome, settle_outcome "
+                    "  FROM bettor_live_cursor WHERE lane = $1 "
+                    " ORDER BY last_seen_at DESC NULLS LAST LIMIT $2",
+                    LANE, CURSOR_MAX_IN_MEMORY)
                 for r in rows:
                     out["cursors"][r["market_id"]] = {
                         k: r[k] for k in CURSOR_FIELDS}
@@ -611,11 +929,106 @@ class PgStore:
                         " WHERE lane = $1 AND id <= $2", LANE, cutoff)
                     ).split()[-1])
                 horizon = time.time() - cursor_retention_days * 86400.0
+                # AN OBLIGATION IS NEVER DELETED BY AGE. The previous
+                # version deleted any cursor older than the retention
+                # window regardless of settlement status, which would
+                # have thrown away exactly the markets that had been
+                # open longest -- the unresolved ones retention exists
+                # FOR. Only an AUTHORITATIVELY RESOLVED contract, whose
+                # outcome collection is complete, can age out.
                 out["cursors_deleted"] = int((await con.execute(
                     "DELETE FROM bettor_live_cursor "
                     " WHERE lane = $1 AND last_seen_at IS NOT NULL "
-                    "   AND last_seen_at < $2", LANE, horizon)
+                    "   AND last_seen_at < $2 "
+                    "   AND settle_status = $3",
+                    LANE, horizon, SETTLE_RESOLVED)
                 ).split()[-1])
+                out["cursors_retained_unresolved"] = await con.fetchval(
+                    "SELECT count(*) FROM bettor_live_cursor "
+                    " WHERE lane = $1 AND last_seen_at < $2 "
+                    "   AND settle_status IS DISTINCT FROM $3",
+                    LANE, horizon, SETTLE_RESOLVED)
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = type(exc).__name__
+        return out
+
+    async def due_for_settlement(self, *, now: float, limit: int) -> dict:
+        """THE SCHEDULE LIVES IN THE STORE, NOT IN MEMORY.
+
+        The in-memory cursor map is a bounded CACHE. If the settlement
+        queue were read from it, hitting the cap would silently drop
+        obligations -- a market would stop being checked because the
+        process was busy, which is not a reason.
+
+        Same ordering as the pure policy: never-attempted first, then
+        due-by-backoff, escalated last. Only an AUTHORITATIVE
+        resolution is excluded, so a derived outcome is still queued
+        for the confirmation that can complete it.
+        """
+        pool = await self._get_pool()
+        out = {"slugs": [], "cursors": {}}
+        try:
+            async with pool.acquire() as con:
+                rows = await con.fetch(
+                    "SELECT market_id, first_seen_at, last_seen_at, "
+                    "       last_source_ts, last_decided_at, event_at, "
+                    "       settle_status, settle_attempts, "
+                    "       settle_failures, settle_next_at, "
+                    "       settle_last_at, settle_derived_at, "
+                    "       settle_derived_outcome, settle_outcome "
+                    "  FROM bettor_live_cursor "
+                    " WHERE lane = $1 "
+                    "   AND settle_status IS DISTINCT FROM $2 "
+                    "   AND (settle_next_at IS NULL "
+                    "        OR settle_next_at <= $3) "
+                    " ORDER BY (CASE "
+                    "             WHEN settle_status IS NULL "
+                    "                  AND settle_next_at IS NULL THEN 0 "
+                    "             WHEN settle_status = $4 THEN 2 "
+                    "             ELSE 1 END), "
+                    "          COALESCE(settle_next_at, first_seen_at, 0) "
+                    " LIMIT $5",
+                    LANE, SETTLE_RESOLVED, now, SETTLE_READ_ESCALATED,
+                    max(0, int(limit)))
+                for r in rows:
+                    out["slugs"].append(r["market_id"])
+                    out["cursors"][r["market_id"]] = {
+                        k: r[k] for k in CURSOR_FIELDS}
+                out["outstanding"] = await con.fetchval(
+                    "SELECT count(*) FROM bettor_live_cursor "
+                    " WHERE lane = $1 AND settle_status IS DISTINCT FROM $2",
+                    LANE, SETTLE_RESOLVED)
+        except Exception as exc:  # noqa: BLE001
+            out["error"] = type(exc).__name__
+            log.warning("bettor_live_store: due_for_settlement failed: %s",
+                        type(exc).__name__)
+        return out
+
+    async def outcome_report(self) -> dict:
+        """What outcome collection has and has not completed.
+
+        DERIVED IS NOT DONE. `awaiting_authoritative` counts contracts
+        whose only outcome is an inference from converged prices; they
+        stay in the queue until the venue's own endpoint answers.
+        """
+        pool = await self._get_pool()
+        out = {}
+        try:
+            async with pool.acquire() as con:
+                rows = await con.fetch(
+                    "SELECT settle_status, count(*) AS n "
+                    "  FROM bettor_live_cursor WHERE lane = $1 "
+                    " GROUP BY settle_status", LANE)
+                out["by_status"] = {(r["settle_status"] or "NEVER_ATTEMPTED"):
+                                    r["n"] for r in rows}
+                out["authoritative"] = out["by_status"].get(SETTLE_RESOLVED, 0)
+                out["awaiting_authoritative"] = out["by_status"].get(
+                    SETTLE_RESOLVED_DERIVED, 0)
+                out["read_escalated"] = out["by_status"].get(
+                    SETTLE_READ_ESCALATED, 0)
+                out["outstanding"] = sum(
+                    n for st, n in out["by_status"].items()
+                    if st != SETTLE_RESOLVED)
         except Exception as exc:  # noqa: BLE001
             out["error"] = type(exc).__name__
         return out
@@ -710,10 +1123,46 @@ def describe() -> dict:
             "write_loss_on_sigkill": "at most one flush interval",
         },
         "settlement_schedule": {
-            "base_s": SETTLE_BASE_S, "max_s": SETTLE_MAX_S,
-            "max_attempts": SETTLE_MAX_ATTEMPTS,
+            "pending": {"base_s": PENDING_BASE_S, "max_s": PENDING_MAX_S,
+                        "from_event_timing": "next check at event_at + "
+                                             "%g s where the venue gives "
+                                             "one" % EVENT_GRACE_S,
+                        "never_abandoned": (
+                            "a PENDING answer is a SUCCESSFUL read. A "
+                            "market may legitimately stay open far "
+                            "longer than any attempt count")},
+            "derived": {"base_s": DERIVED_RECHECK_BASE_S,
+                        "max_s": DERIVED_RECHECK_MAX_S,
+                        "terminal": False,
+                        "why": ("a derived outcome is an INFERENCE FROM "
+                                "A PRICE. It is preserved in "
+                                "settle_derived_outcome and the contract "
+                                "stays scheduled, because only the "
+                                "venue's settlement endpoint can "
+                                "complete outcome collection")},
+            "failed_reads": {"base_s": FAILURE_BASE_S,
+                             "max_s": FAILURE_MAX_S,
+                             "escalate_at": READ_FAILURE_ESCALATE_AT,
+                             "escalated_status": SETTLE_READ_ESCALATED,
+                             "policy": ("consecutive failures escalate to "
+                                        "a VISIBLE status and keep their "
+                                        "place in the queue, at the "
+                                        "longest interval and at the "
+                                        "back, so a broken slug cannot "
+                                        "starve a healthy one and "
+                                        "nothing is dropped")},
             "terminal": list(TERMINAL_STATUSES),
-            "retryable": list(RETRYABLE_STATUSES),
+            "completes_outcome_collection": "RESOLVED, and only RESOLVED",
+            "counters": {"settle_attempts": "every read",
+                         "settle_failures": "CONSECUTIVE failed reads, "
+                                            "cleared by any successful "
+                                            "one"},
+            "queue_lives_in": ("the STORE, not the in-memory cache: "
+                               "store.due_for_settlement(). An in-memory "
+                               "cap must never erase future work"),
+            "retention": ("only an AUTHORITATIVELY RESOLVED cursor ages "
+                          "out. An unresolved obligation is retained "
+                          "regardless of age"),
             "progress": ("never-attempted contracts sort ahead of every "
                          "attempted one, so a permanently pending "
                          "population cannot hold the batch"),

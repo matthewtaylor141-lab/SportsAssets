@@ -173,6 +173,156 @@ class TestEvidenceIsDurable:
         assert loop2.shadow.ledger.cash == 41.0
 
 
+class TestDurabilityIsReportedHonestly:
+    """THE DEFECT: "at most two seconds lost" assumes every flush
+    succeeds. Under a database outage the uncommitted interval grows
+    until the outbox overflows, and then records are DROPPED."""
+
+    class Outage:
+        backend = "outage"
+        durable_across = ("redeploy",)
+
+        def __init__(self):
+            self.up = False
+            self.rows = []
+
+        async def start(self):
+            return {"ok": True, "backend": self.backend}
+
+        async def flush(self, records, cursors):
+            if not self.up:
+                return {"records": 0, "cursors": 0, "failures": 1,
+                        "error": "ConnectionDoesNotExistError"}
+            self.rows.extend(records)
+            return {"records": len(records), "cursors": len(cursors),
+                    "failures": 0}
+
+        async def save_ledger(self, snapshot):
+            return self.up
+
+        async def load(self):
+            return {"cursors": {}, "ledger": None, "backend": self.backend}
+
+        async def due_for_settlement(self, *, now, limit):
+            return {"slugs": [], "cursors": {}, "outstanding": 0}
+
+        async def outcome_report(self):
+            return {}
+
+        async def prune(self, **_):
+            return {}
+
+        async def close(self):
+            return None
+
+    def test_the_guarantee_names_its_own_precondition(self, tmp_path):
+        loop, _ = wired(tmp_path)
+        g = loop.durability_report()["guarantee"]
+        assert "WHILE FLUSHES SUCCEED" in g
+        assert "DROPPED" in g
+
+    def test_the_sigterm_case_is_stated_rather_than_claimed_away(
+            self, tmp_path):
+        """MEASURED: Python's default SIGTERM disposition terminates
+        without running finally blocks, and `workers/all.py` installs
+        no handler. The final flush therefore does NOT run on a Render
+        restart, and the report says so instead of implying it does."""
+        loop, _ = wired(tmp_path)
+        note = loop.durability_report()["on_sigterm"]
+        assert "does NOT run" in note
+        assert "oldest_uncommitted_age_s" in note
+
+        here = os.path.dirname(os.path.abspath(__file__))
+        allpy = open(os.path.normpath(os.path.join(
+            here, "..", "sportsassets", "workers", "all.py"))).read()
+        assert "SIGTERM" not in allpy, (
+            "workers/all.py now handles SIGTERM -- the durability note "
+            "in bettor_live_loop is stale and must be re-measured")
+
+    def test_an_outage_grows_the_uncommitted_interval_visibly(self,
+                                                              tmp_path):
+        store = self.Outage()
+        loop, stream = wired(tmp_path, store=store)
+        for i in range(5):
+            loop._record({"loop": "L", "kind": "DECISION",
+                          "market_id": "m", "decided_at": "D%d" % i})
+        loop._outbox[0]["enqueued_at"] = time.time() - 90.0
+        out = asyncio.run(loop.flush())
+        assert out["failures"] == 1
+
+        d = loop.durability_report()
+        assert d["uncommitted_records"] == 5, "the batch was kept"
+        assert d["oldest_uncommitted_age_s"] > 89
+        assert d["flush_failures"] == 1
+        assert d["last_flush_error"] == "ConnectionDoesNotExistError"
+        assert d["records_written"] == 0
+        assert d["records_dropped"] == 0
+        assert d["windows_incomplete"] is False
+
+    def test_overflow_drops_records_and_marks_windows_incomplete(
+            self, tmp_path, monkeypatch):
+        monkeypatch.setattr(store_mod, "OUTBOX_MAX", 10)
+        store = self.Outage()
+        loop, _ = wired(tmp_path, store=store)
+        for i in range(25):
+            loop._record({"loop": "L", "kind": "DECISION",
+                          "market_id": "m", "decided_at": "D%d" % i})
+        d = loop.durability_report()
+        assert d["uncommitted_records"] == 10
+        assert d["records_dropped"] == 15
+        assert d["windows_incomplete"] is True
+        assert d["incomplete_from"] and d["incomplete_to"]
+        assert loop.counters["record_dropped_outbox_full"] == 15
+
+    def test_recovery_from_the_outage_commits_the_kept_batch(self,
+                                                             tmp_path):
+        store = self.Outage()
+        loop, _ = wired(tmp_path, store=store)
+        for i in range(4):
+            loop._record({"loop": "L", "kind": "DECISION",
+                          "market_id": "m", "decided_at": "D%d" % i})
+        asyncio.run(loop.flush())
+        store.up = True
+        asyncio.run(loop.flush())
+        d = loop.durability_report()
+        assert d["records_written"] == 4
+        assert d["uncommitted_records"] == 0
+        assert d["seconds_since_last_commit"] is not None
+        assert [r["decided_at"] for r in store.rows] == [
+            "D0", "D1", "D2", "D3"], "the batch was reordered"
+
+    def test_a_lost_acknowledgment_cannot_inflate_the_count(self,
+                                                            tmp_path):
+        """A commit can succeed and its acknowledgment be lost. The
+        retry must be a no-op, not a second copy of every record."""
+        loop, stream = wired(tmp_path)
+        for i in range(6):
+            stream._on_market_data(md("m%d" % i, source_ts=fresh(-1)))
+        loop.drain()
+        first = list(loop._outbox)
+        asyncio.run(loop.flush())
+
+        # The commit landed; the acknowledgment did not. The loop
+        # replays exactly what it kept.
+        for r in reversed(first):
+            loop._outbox.appendleft(r)
+        asyncio.run(loop.flush())
+
+        keys = [r["record_key"] for r in journal_lines(tmp_path)]
+        assert len(keys) == 12, "the file journal appends both copies"
+        assert len(set(keys)) == 6, (
+            "the two copies must be the SAME six keys, so a store that "
+            "enforces the key collapses them")
+
+    def test_every_record_carries_a_stable_content_key(self, tmp_path):
+        loop, stream = wired(tmp_path)
+        stream._on_market_data(md(source_ts=fresh(-1)))
+        loop.drain()
+        rec = loop.records[-1]
+        assert rec["record_key"] == store_mod.record_key(rec)
+        assert rec["record_key"] == store_mod.record_key(dict(rec))
+
+
 # ── 2. recovery IN THE ENTRY POINT ───────────────────────────────────
 
 class TestRecoveryHappensInTheWorker:
@@ -249,8 +399,31 @@ class TestRecoveryHappensInTheWorker:
 
         loop2, _ = wired(tmp_path)
         out = asyncio.run(loop2.recover())
-        assert out["settlements_retired_at_recovery"] == 1
-        assert loop2.settlement_due(limit=25) == []
+        assert out["settlements_completed_at_recovery"] == 1
+        assert asyncio.run(loop2.settlement_due(limit=25))["slugs"] == []
+
+    def test_an_unresolved_obligation_survives_the_restart_too(self,
+                                                               tmp_path):
+        """The case the age-based prune used to delete: a market that
+        has been open a long time is the one retention exists for."""
+        loop, stream = wired(tmp_path, slugs=("m1",))
+        stream._on_market_data(md(source_ts=fresh(-1)))
+        loop.drain()
+        loop.cursors["m1"].update(
+            settle_status=store_mod.SETTLE_RESOLVED_DERIVED,
+            settle_derived_outcome="1.0000", settle_derived_at=1.0,
+            settle_attempts=9, settle_next_at=1.0)
+        loop._cursor_dirty.add("m1")
+        asyncio.run(loop.flush())
+        asyncio.run(loop.prune())
+
+        loop2, _ = wired(tmp_path)
+        asyncio.run(loop2.recover())
+        due = asyncio.run(loop2.settlement_due(limit=25))
+        assert due["slugs"] == ["m1"], (
+            "a derived outcome must stay queued for the authoritative "
+            "read that can confirm it")
+        assert loop2.cursors["m1"]["settle_derived_outcome"] == "1.0000"
 
 
 # ── 3. bounded collections ───────────────────────────────────────────
@@ -281,15 +454,29 @@ class TestCollectionsAreBounded:
         assert len(loop._outbox) == 50
         assert loop.counters["record_dropped_outbox_full"] == 70
 
-    def test_cursors_are_bounded_and_unresolved_eviction_is_named(
+    def test_the_cursor_cache_is_bounded_and_a_miss_is_named(
             self, tmp_path, monkeypatch):
+        """The cache is bounded; the SCHEDULE is not, because it lives
+        in the store. An eviction is a cache miss, not lost work."""
         monkeypatch.setattr(store_mod, "CURSOR_MAX_IN_MEMORY", 10)
         loop, _ = wired(tmp_path)
         for i in range(25):
             loop._cursor("m%03d" % i)
+            loop._cursor_dirty.discard("m%03d" % i)
         assert len(loop.cursors) == 10
         assert loop.counters["cursor_evicted"] == 15
-        assert loop.counters["cursor_evicted_unresolved"] == 15
+        assert loop.counters["cursor_cache_miss_unresolved"] == 15
+
+    def test_an_unflushed_cursor_is_never_evicted(self, tmp_path,
+                                                  monkeypatch):
+        """Dropping a cached row loses nothing. Dropping an UNWRITTEN
+        update loses the update."""
+        monkeypatch.setattr(store_mod, "CURSOR_MAX_IN_MEMORY", 5)
+        loop, _ = wired(tmp_path)
+        for i in range(20):
+            loop._cursor("m%03d" % i)          # every one left dirty
+        assert len(loop.cursors) == 20, "an unflushed cursor was evicted"
+        assert loop.counters["cursor_kept_unflushed"] > 0
 
     def test_dedup_keeps_one_cursor_per_slug_not_every_observation(
             self, tmp_path):
@@ -382,8 +569,9 @@ class TestTheDirtySetIsSynchronized:
 # ── 6. settlement scheduling in the worker ───────────────────────────
 
 class TestSettlementSchedulingInTheLoop:
-    """THE DEFECT: "the 25 oldest observed" means a contract that never
-    resolves is permanently the oldest."""
+    """THE DEFECTS: "the 25 oldest observed" cannot make progress; a
+    derived outcome was retired as though authoritative; and a healthy
+    open market was abandoned after twelve checks."""
 
     def observed(self, tmp_path, n):
         loop, stream = wired(tmp_path, slugs=tuple("m%03d" % i
@@ -391,6 +579,7 @@ class TestSettlementSchedulingInTheLoop:
         for i in range(n):
             stream._on_market_data(md("m%03d" % i, source_ts=fresh(-1)))
         loop.drain()
+        asyncio.run(loop.flush())
         assert len(loop.cursors) == n
         return loop
 
@@ -399,44 +588,50 @@ class TestSettlementSchedulingInTheLoop:
             return {"status": status, "error": "TimeoutError"}
         return reader
 
-    def test_a_pending_population_does_not_hold_the_batch(self, tmp_path):
-        loop = self.observed(tmp_path, 60)
-        t = time.time()
-
-        async def pass_(now):
-            return await self.run_pass(loop, si.PENDING, now)
-
-        first = asyncio.run(pass_(t))
-        second = asyncio.run(pass_(t + 1))
-        assert first["contracts_read"] == bl.SETTLEMENT_BATCH
-        assert second["contracts_read"] == bl.SETTLEMENT_BATCH
-        assert not (set(first["slugs"]) & set(second["slugs"]))
-
     async def run_pass(self, loop, status, now):
-        slugs = loop.settlement_due(now=now)
+        q = await loop.settlement_due(now=now)
+        slugs = q["slugs"]
         out = await si.ingest([("o:%s" % s, s) for s in slugs],
                               reader=self.reader_all(status),
                               writer=loop._settlement_writer)
         for rec in out["detail"]:
             c = loop.cursors[rec["slug"]]
             nxt = store_mod.settle_transition(
-                rec["status"], c["settle_attempts"], now=now)
+                rec["status"], c["settle_attempts"], now=now,
+                failures=c["settle_failures"] or 0)
             nxt.pop("retired")
             c.update(nxt)
+            loop._cursor_dirty.add(rec["slug"])
+        await loop.flush()
         return {"contracts_read": len(slugs), "slugs": slugs}
 
-    def test_a_newly_observed_contract_is_read_next_pass(self, tmp_path):
-        """Once every tracked contract has been attempted and answered
-        PENDING, a contract first seen a second ago is read NEXT --
-        however large the pending population is. That is the progress
-        property the old `oldest 25 observed` rule did not have."""
-        loop = self.observed(tmp_path, bl.SETTLEMENT_BATCH)
+    def test_a_pending_population_does_not_hold_the_batch(self, tmp_path):
+        loop = self.observed(tmp_path, 60)
         t = time.time()
         first = asyncio.run(self.run_pass(loop, si.PENDING, t))
+        second = asyncio.run(self.run_pass(loop, si.PENDING, t + 1))
         assert first["contracts_read"] == bl.SETTLEMENT_BATCH
-        assert all(c["settle_next_at"] > t for c in loop.cursors.values())
+        assert second["contracts_read"] == bl.SETTLEMENT_BATCH
+        assert not (set(first["slugs"]) & set(second["slugs"]))
+
+    def test_a_newly_observed_contract_is_read_next_pass(self, tmp_path):
+        loop = self.observed(tmp_path, bl.SETTLEMENT_BATCH)
+        t = time.time()
+        asyncio.run(self.run_pass(loop, si.PENDING, t))
         loop._cursor("brand-new")
-        assert loop.settlement_due(now=t + 1)[0] == "brand-new"
+        asyncio.run(loop.flush())
+        due = asyncio.run(loop.settlement_due(now=t + 1))
+        assert due["slugs"][0] == "brand-new"
+
+    def test_the_queue_is_read_from_the_store_not_the_cache(self, tmp_path):
+        """A market must not stop being checked because the process was
+        busy enough to evict it from memory."""
+        loop = self.observed(tmp_path, 8)
+        loop.cursors.clear()                       # the cache, emptied
+        due = asyncio.run(loop.settlement_due(now=time.time()))
+        assert len(due["slugs"]) == 8
+        assert due["outstanding"] == 8
+        assert len(loop.cursors) == 8, "the rows come back from the store"
 
     def test_the_loop_reads_and_reschedules_through_its_own_method(
             self, tmp_path):
@@ -460,20 +655,95 @@ class TestSettlementSchedulingInTheLoop:
         assert out["counts"][si.RESOLVED] == 1
         assert out["counts"][si.INGESTED] == 1
         assert out["reconciled"] is True
-        assert out["retired_this_pass"] == 1
-        assert out["still_scheduled"] == 3
+        assert out["completed_authoritatively"] == 1
         assert loop.cursors["m000"]["settle_next_at"] is None
+        # A PENDING answer is a successful read: it schedules forward
+        # and NEVER advances the failure count.
         assert loop.cursors["m001"]["settle_next_at"] > 1000.0
-        # EVERY touched cursor is queued for persistence.
+        assert loop.cursors["m001"]["settle_failures"] == 0
+        # Failed reads do.
+        assert loop.cursors["m002"]["settle_failures"] == 1
+        assert loop.cursors["m003"]["settle_failures"] == 1
         assert loop._cursor_dirty >= {"m000", "m001", "m002", "m003"}
+
+    def test_a_derived_outcome_does_not_complete_collection(self, tmp_path):
+        """THE DEFECT: RESOLVED_DERIVED was retired alongside RESOLVED,
+        so an inference from a price closed the contract and the
+        venue's own endpoint could never confirm it."""
+        loop = self.observed(tmp_path, 1)
+        import sportsassets.bettor_live_read as live
+        orig = live.read_resolution
+        live.read_resolution = lambda _c, slug: {
+            "status": si.RESOLVED_DERIVED, "outcome": "1.0000"}
+        try:
+            out = asyncio.run(loop.ingest_settlements(now=1000.0))
+        finally:
+            live.read_resolution = orig
+
+        assert out["completed_authoritatively"] == 0
+        assert out["awaiting_authoritative"] == 1
+        c = loop.cursors["m000"]
+        assert c["settle_status"] == store_mod.SETTLE_RESOLVED_DERIVED
+        assert c["settle_derived_outcome"] == "1.0000"
+        assert c["settle_outcome"] is None, (
+            "a derived outcome must never be written to the "
+            "authoritative field")
+        assert c["settle_next_at"] > 1000.0
+        assert store_mod.has_outstanding_obligation(c) is True
+
+    def test_a_long_open_market_is_never_abandoned(self, tmp_path):
+        """A market may legitimately stay open far longer than any
+        attempt count. The first fix abandoned it at twelve."""
+        loop = self.observed(tmp_path, 1)
+        import sportsassets.bettor_live_read as live
+        orig = live.read_resolution
+        live.read_resolution = lambda _c, slug: {"status": si.PENDING}
+        t = 1000.0
+        try:
+            for _ in range(30):
+                asyncio.run(loop.ingest_settlements(now=t))
+                t = max(t + 1.0, loop.cursors["m000"]["settle_next_at"])
+        finally:
+            live.read_resolution = orig
+        c = loop.cursors["m000"]
+        assert c["settle_status"] == store_mod.SETTLE_PENDING
+        assert c["settle_attempts"] == 30
+        assert c["settle_failures"] == 0
+        assert store_mod.has_outstanding_obligation(c) is True
+
+    def test_a_run_of_failed_reads_escalates_and_stays_queued(self,
+                                                              tmp_path):
+        loop = self.observed(tmp_path, 1)
+        import sportsassets.bettor_live_read as live
+        orig = live.read_resolution
+        live.read_resolution = lambda _c, slug: {
+            "status": si.UNREADABLE, "error": "TimeoutError"}
+        t = 1000.0
+        try:
+            for _ in range(store_mod.READ_FAILURE_ESCALATE_AT):
+                out = asyncio.run(loop.ingest_settlements(now=t))
+                t = max(t + 1.0, loop.cursors["m000"]["settle_next_at"])
+        finally:
+            live.read_resolution = orig
+        c = loop.cursors["m000"]
+        assert c["settle_status"] == store_mod.SETTLE_READ_ESCALATED
+        assert out["read_escalated"] == 1
+        assert loop.counters["settlement_read_escalated"] >= 1
+        # STILL QUEUED. Dropping it would lose an obligation quietly.
+        due = asyncio.run(loop.settlement_due(now=c["settle_next_at"] + 1))
+        assert due["slugs"] == ["m000"]
 
     def test_an_authoritative_resolution_is_never_read_again(self,
                                                              tmp_path):
         loop = self.observed(tmp_path, 1)
         c = loop.cursors["m000"]
-        c.update(store_mod.settle_transition(si.RESOLVED, 0, now=0.0))
-        c.pop("retired")
-        assert loop.settlement_due(now=10 ** 12) == []
+        t = store_mod.settle_transition(si.RESOLVED, 0, now=0.0)
+        t.pop("retired")
+        c.update(t)
+        loop._cursor_dirty.add("m000")
+        asyncio.run(loop.flush())
+        due = asyncio.run(loop.settlement_due(now=10 ** 12))
+        assert due["slugs"] == []
 
     def test_a_settlement_row_is_journalled_not_written_to_accounting(
             self, tmp_path):
@@ -503,13 +773,15 @@ class TestSettlementSchedulingInTheLoop:
         assert "bettor_state_settlements" not in bl.describe()[
             "writes_database"]
 
-    def test_the_schedule_is_reported(self, tmp_path):
+    def test_the_schedule_is_reported_with_its_scope(self, tmp_path):
         loop = self.observed(tmp_path, 3)
         rep = loop.report()["settlement"]["schedule"]
-        assert rep["contracts_tracked"] == 3
+        assert "cache" in rep["scope"]
+        assert rep["contracts_cached"] == 3
         assert rep["by_status"]["NEVER_ATTEMPTED"] == 3
-        assert rep["due_now"] == 3
-        assert rep["retired"] == 0
+        assert rep["outstanding"] == 3
+        assert rep["completed_authoritatively"] == 0
+        assert rep["awaiting_authoritative"] == 0
 
 
 # ── 7. lifecycle in main() ───────────────────────────────────────────
