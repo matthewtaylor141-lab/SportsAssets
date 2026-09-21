@@ -77,6 +77,11 @@ jobs:
 
           echo
           echo "== WHAT THE VENUE SAYS, THROUGH THE API'S OWN CREDENTIALS =="
+          echo "   NOTE: committed_usd is settings().committed_capital_pm_usd,"
+          echo "   an OWNER-SET CONSTANT, not a venue reading. It must not be"
+          echo "   compared with the ledger's acquisition cost. What IS venue-"
+          echo "   derived here: the open_positions list and the platform /"
+          echo "   external split computed from it."
           python3 - <<'PY'
           import json, os
 
@@ -100,10 +105,22 @@ jobs:
               # the composite the endpoint already labels, and no
               # account identifiers.
               pm = acc.get("pm") or acc.get("polymarket") or {}
-              for k in ("committed_usd", "trading_capital",
-                        "position_count", "external_count"):
-                  if k in pm:
-                      print("  pm.%-18s %s" % (k, pm[k]))
+              # THE SHAPE FIRST. The previous run printed external_count
+              # = 0 and nothing else, and zero externals is ambiguous:
+              # either every venue position matches our ledger, or the
+              # venue holds no open positions at all. Those are opposite
+              # findings. Print the keys and every list length so the
+              # answer is not inferred from a missing field.
+              print("  top-level keys: %s" % sorted(acc)[:20])
+              print("  pm keys       : %s" % sorted(pm)[:30])
+              for k, v in sorted(pm.items()):
+                  if isinstance(v, list):
+                      print("  pm.%-22s list of %d" % (k, len(v)))
+                  elif isinstance(v, (int, float, str, bool)):
+                      print("  pm.%-22s %s" % (k, v))
+              for k, v in sorted(acc.items()):
+                  if isinstance(v, list):
+                      print("  %-25s list of %d" % (k, len(v)))
               for key in ("positions", "external_positions",
                           "externals"):
                   rows = pm.get(key) or acc.get(key)
