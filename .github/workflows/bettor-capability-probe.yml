@@ -1,0 +1,130 @@
+# What does the venue actually offer? READ ONLY, KEY NAMES ONLY.
+#
+# Three questions the acceptance package has been answering by assertion:
+#
+#   1. Does the institutional account hold both legs of a pair
+#      independently? `holds_both_legs_independently` is UNKNOWN, and
+#      UNKNOWN blocks PAIR_BUY on every decision.
+#   2. Is the authenticated account the one that generated our fills?
+#      `account_snapshot()` returns no wallet, address or account id.
+#   3. Does a market payload carry a RESOLUTION field at all? The
+#      settlement table is empty because `record_settlement()` was never
+#      called -- but the ingestion now written guesses at the outcome
+#      field name, and one read replaces the guess.
+#
+# NOTHING PRINTS A VALUE. `capability_probe()` and `resolution_fields()`
+# return KEY NAMES ONLY. `account_identity()` returns a VERDICT -- matched
+# / did not match / no identity field -- and the name of the field it
+# used, never the identifier. So this job can answer "is this our
+# account" without an account identifier reaching a log or an artifact.
+#
+# NO ORDER PATH, PROVEN BEFORE THE KEYS ARE HANDED OVER. The read-only
+# tests run in a step whose environment holds no credentials, and the
+# job does not reach the venue until they pass. That ordering is the
+# control, not a formality.
+#
+# THIS DEPLOYS NOTHING. It runs on dispatch, reads, prints names, and
+# exits. bettor_prospective is not started, bettor_state is not changed,
+# mirror_live stays false.
+name: bettor-capability-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      resolution_slug:
+        description: "Optional market slug to probe for resolution fields"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # THE GLOBAL PMUS VENUE-ACCESS DOMAIN. Every workflow that can reach
+  # gateway.polymarket.us shares this group, so two readers can never
+  # contend for the same rate budget and contaminate each other.
+  group: pmus-public-read-global
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install
+        run: |
+          set -e
+          python -m pip install --quiet --upgrade pip
+          python -m pip install --quiet -r research/beta48/shadow/requirements-test.txt
+          python -m pip install --quiet -e ./backend
+          python -m pip install --quiet pytest pytest-asyncio
+
+      - name: Prove the readers cannot trade, BEFORE giving them keys
+        working-directory: backend
+        run: |
+          set -e
+          # No credential is in this step's environment. The job does
+          # not reach the account until these pass.
+          python -m pytest -q -p no:randomly tests/test_bettor_live_read.py
+
+      - name: Probe
+        working-directory: backend
+        env:
+          PMUS_DOMAIN_RESERVATION: pmus-public-read-global
+          PMUS_KEY_ID: ${{ secrets.PMUS_KEY_ID }}
+          PMUS_SECRET_KEY: ${{ secrets.PMUS_SECRET_KEY }}
+          RESOLUTION_SLUG: ${{ inputs.resolution_slug }}
+        run: |
+          set -e
+          python - <<'PY'
+          import json, os, sys
+
+          from sportsassets.api import reconcile_read as rr
+          from sportsassets import bettor_live_read as lr
+
+          def show(title, obj):
+              print("\n== %s ==" % title)
+              print(json.dumps(obj, indent=1, sort_keys=True, default=str))
+
+          # 1. WHAT EXISTS. Key names only -- never a value, never a
+          #    credential, never an account payload.
+          try:
+              show("CAPABILITY PROBE (key names only)", rr.capability_probe())
+          except Exception as exc:
+              show("CAPABILITY PROBE FAILED", {"error": type(exc).__name__})
+
+          # 2. IDENTITY AS A VERDICT. The identifier never leaves the
+          #    process; only whether it matched and which field was used.
+          try:
+              show("ACCOUNT IDENTITY (verdict only)",
+                   rr.account_identity(expected=None))
+          except Exception as exc:
+              show("ACCOUNT IDENTITY FAILED", {"error": type(exc).__name__})
+
+          # 3. DOES A RESOLUTION FIELD EXIST. This is what replaces the
+          #    settlement ingestion's OUTCOME_FIELDS guess with a fact.
+          slug = (os.environ.get("RESOLUTION_SLUG") or "").strip()
+          if slug:
+              try:
+                  show("RESOLUTION FIELDS (key names only)",
+                       lr.resolution_fields(None, slug))
+              except Exception as exc:
+                  show("RESOLUTION FIELDS FAILED",
+                       {"error": type(exc).__name__})
+          else:
+              print("\n== RESOLUTION FIELDS: no slug supplied, skipped ==")
+
+          show("WHAT THIS RUN DID NOT DO", {
+              "submitted_orders": 0,
+              "accounting_records_touched": 0,
+              "workers_deployed": 0,
+              "mirror_live": False,
+              "values_printed": "none -- key names and verdicts only",
+          })
+          PY

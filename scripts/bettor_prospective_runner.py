@@ -214,19 +214,32 @@ def live_freshness(source_ts, received_at, decided_at):
 
 
 def read_live_book(market_id: str) -> dict:
-    """Read one book NOW through the existing authenticated read path.
+    """Read one book NOW. NOT AVAILABLE FROM THIS SCRIPT, by design.
 
-    NOT IMPLEMENTED HERE, DELIBERATELY. The read that would populate this
-    is pmus.bbo_read / pmus.book_read behind the API service's own
-    credentials. Wiring it into a standalone script would put a venue
-    client in a process that must never hold one, so the live mode is
-    driven by an injected reader and the deployment supplies it.
+    The reader is IMPLEMENTED -- `sportsassets.bettor_live_read.read_book`
+    -- and it is not reachable from here. It needs an authenticated
+    client, and a standalone script that could build one would be a
+    process holding venue credentials with no reason to. So the live
+    mode takes an INJECTED reader and the deployment supplies it,
+    which is a different statement from the one this function used to
+    make: the connection is written, tested and reviewable; what is
+    withheld is the credential and the schedule.
 
-    Returns a raw row in the adapter's input shape.
+    The three things this separation keeps apart, per the owner
+    directive:
+
+      IMPLEMENTATION   bettor_live_read.read_book. Written. Activates
+                       nothing.
+      READ-ONLY RUN    calling it with a real client. Reads a public
+                       book. Submits nothing.
+      DEPLOYMENT       running it on a schedule in production. NOT
+                       DONE. PILOT_PROPOSAL.md section 7.
     """
     raise NotImplementedError(
         "live reader must be injected by the deployment; this script "
-        "holds no venue client and no credentials")
+        "holds no venue client and no credentials. The reader itself "
+        "is sportsassets.bettor_live_read.read_book -- implemented, "
+        "not deployed")
 
 
 def run(rows, state, *, mode=REPLAY, now=None) -> dict:
