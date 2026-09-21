@@ -43,6 +43,7 @@ parse reports a clean run over an arbitrary subset.
 
 from __future__ import annotations
 
+import json
 import math
 from dataclasses import dataclass, field, asdict
 
@@ -67,6 +68,15 @@ R_PRICE_OUT_OF_RANGE = "PRICE_OUTSIDE_0_1"
 R_CROSSED = "BOOK_CROSSED_OR_LOCKED"
 R_NO_STATE = "NO_MARKET_STATE"
 R_NO_DEPTH = "NO_DEPTH_REPORTED"
+# yes_depth.ask/.bid are CUMULATIVE ACROSS levelsCaptured LEVELS, not the
+# quantity at the quoted price. Measured on a real row (bsv_4d941e01...,
+# 2026-09-21): yes_depth.ask = 4903.69 while the ladder's level 0 holds
+# 17.00 at the quoted 0.7200 -- 288x. The remaining 4886 sit at 0.73 to
+# 0.76, so the cumulative figure misstates the PRICE as well as the size.
+# A row with the cumulative number and no ladder cannot be sized and is
+# rejected rather than sized from the wrong quantity.
+R_DEPTH_LADDER_ABSENT = "DEPTH_IS_CUMULATIVE_ONLY_NO_LADDER"
+R_DEPTH_PRICE_MISMATCH = "DEPTH_LADDER_TOP_PRICE_DISAGREES_WITH_QUOTE"
 R_UNREADABLE = "COLLECTOR_MARKED_UNREADABLE"
 R_STALE = "BOOK_OLDER_THAN_DECISION_BOUND"
 
@@ -85,8 +95,15 @@ class NormalizedObservation:
     venue_state: str | None = None
     bid: float | None = None
     ask: float | None = None
+    # EXECUTABLE size at the quoted price -- the ladder's top level.
     bid_size: float = 0.0
     ask_size: float = 0.0
+    # The five-level SUM. Kept because it bounds what the book holds in
+    # total, and kept SEPARATE because an order sized against it would
+    # be sized at a price the venue is not showing.
+    cumulative_bid_size: float = 0.0
+    cumulative_ask_size: float = 0.0
+    depth_levels: int = 0
     depth_source: str = SENTINEL
     complement_source: str = vc.ABSENT
     complement_market_id: str | None = None
@@ -113,6 +130,47 @@ def _num(v):
     except ValueError:
         return None
     return f if math.isfinite(f) else None
+
+
+def _as_obj(v):
+    """A dict/list from a JSONB column, whether it arrived parsed or not.
+
+    psycopg returns JSONB already decoded; a JSON export file hands back
+    a string. Both reach this adapter and only one of them was handled.
+    """
+    if v in (None, SENTINEL, "null"):
+        return None
+    if isinstance(v, (dict, list)):
+        return v
+    if isinstance(v, str):
+        try:
+            return json.loads(v)
+        except ValueError:
+            return None
+    return None
+
+
+def _top_level(levels):
+    """(quantity, price) of the BEST level, or (None, None).
+
+    The best level is the one the venue marks lowest -- `level` 0 or 1
+    depending on the capture -- NOT the first element of the array. An
+    array whose order is assumed rather than read is how a mid-book
+    level gets treated as the touch.
+    """
+    if not isinstance(levels, list) or not levels:
+        return None, None
+    best, rank = None, None
+    for i, lv in enumerate(levels):
+        if not isinstance(lv, dict):
+            continue
+        r = _num(lv.get("level"))
+        r = i if r is None else r
+        if rank is None or r < rank:
+            best, rank = lv, r
+    if best is None:
+        return None, None
+    return _num(best.get("qty") or best.get("size")), _num(best.get("price"))
 
 
 def normalize(row: dict, *, venue: str = "polymarket-us",
@@ -174,34 +232,59 @@ def normalize(row: dict, *, venue: str = "polymarket-us",
     if bid is not None and ask is not None and ask <= bid:
         reasons.append(R_CROSSED)
 
-    # DEPTH. The capture schema records no size column, so depth is
-    # ABSENT -- and absent depth is not infinite depth. A record with no
-    # depth can still be decided on; it simply cannot produce an
-    # executable size, and the engine already refuses on that.
-    # DEPTH IS IN THE SCHEMA AND I SAID IT WAS NOT. Migration 088
-    # declares yes_depth / no_depth / multi_level_depth as JSONB and
-    # bettor_state_store INSERTs all three. I read the base table, saw no
-    # size column, and declared a venue limitation without querying the
-    # columns that hold it.
+    # DEPTH: TOP OF BOOK, NOT THE FIVE-LEVEL SUM.
+    #
+    # `yes_depth` carries {"ask", "bid", "levelsCaptured": 5}. I read
+    # those two numbers as the executable size at the quote. They are
+    # the SUM ACROSS ALL FIVE LEVELS. On the row measured above the
+    # quoted ask is 0.7200 with 17 contracts behind it and yes_depth.ask
+    # reports 4903.69 -- the other 4886 sit at 0.73, 0.74, 0.75 and
+    # 0.76. An order sized from that number is not merely 288x too
+    # large, it is priced at a level the venue never showed.
+    #
+    # So the executable size comes from `multi_level_depth`, whose top
+    # level must AGREE WITH THE QUOTE, and the cumulative figure is
+    # carried separately where nothing can mistake it for executable.
     raw_depth = g("yes_depth") or g("YES_DEPTH")
-    bid_size, ask_size, depth_source = 0.0, 0.0, "NOT_PRESENT_IN_ROW"
-    if raw_depth not in (None, SENTINEL, "null"):
-        parsed = raw_depth
-        if isinstance(parsed, str):
-            try:
-                import json as _json
-                parsed = _json.loads(parsed)
-            except ValueError:
-                parsed = None
-        if isinstance(parsed, dict):
-            bid_size = _num(parsed.get("bid") or parsed.get("bidSize")) or 0.0
-            ask_size = _num(parsed.get("ask") or parsed.get("askSize")) or 0.0
-            depth_source = "DISPLAYED_DEPTH_AT_T0"
-        elif _num(parsed) is not None:
-            ask_size = bid_size = _num(parsed)
-            depth_source = "DISPLAYED_DEPTH_AT_T0_SCALAR"
+    raw_ladder = g("multi_level_depth") or g("MULTI_LEVEL_DEPTH")
+    bid_size = ask_size = 0.0
+    cum_bid = cum_ask = 0.0
+    depth_levels = 0
+    depth_source = "NOT_PRESENT_IN_ROW"
+
+    parsed = _as_obj(raw_depth)
+    if isinstance(parsed, dict) and "status" not in parsed:
+        cum_bid = _num(parsed.get("bid") or parsed.get("bidSize")) or 0.0
+        cum_ask = _num(parsed.get("ask") or parsed.get("askSize")) or 0.0
+        depth_levels = int(_num(parsed.get("levelsCaptured")) or 0)
+        depth_source = "CUMULATIVE_ONLY"
+
+    ladder = _as_obj(raw_ladder)
+    if isinstance(ladder, dict):
+        top_ask, ask_px = _top_level(ladder.get("ask") or ladder.get("asks"))
+        top_bid, bid_px = _top_level(ladder.get("bid") or ladder.get("bids"))
+        if top_ask is not None or top_bid is not None:
+            # THE LADDER MUST DESCRIBE THE QUOTE IT SITS UNDER. If its
+            # top level is at a different price the two were captured at
+            # different instants, and neither the size nor the price can
+            # be trusted for sizing.
+            mism = ((ask is not None and ask_px is not None
+                     and abs(ask_px - ask) > 1e-9)
+                    or (bid is not None and bid_px is not None
+                        and abs(bid_px - bid) > 1e-9))
+            if mism:
+                reasons.append(R_DEPTH_PRICE_MISMATCH)
+            else:
+                ask_size = top_ask or 0.0
+                bid_size = top_bid or 0.0
+                depth_source = "TOP_OF_BOOK_FROM_LADDER"
+                if not depth_levels:
+                    depth_levels = int(_num(ladder.get("levels")) or 0)
+
     if depth_source == "NOT_PRESENT_IN_ROW":
         reasons.append(R_NO_DEPTH)
+    elif depth_source == "CUMULATIVE_ONLY":
+        reasons.append(R_DEPTH_LADDER_ABSENT)
 
     # COMPLEMENT. Never derived. bettor_state_capture is explicit that
     # deriving 1 - YES would assert a no-arbitrage identity Class C
@@ -221,7 +304,8 @@ def normalize(row: dict, *, venue: str = "polymarket-us",
         source_timestamp=src_ts if src_ts != SENTINEL else None,
         age_s=age, venue_state=state if state != SENTINEL else None,
         bid=bid, ask=ask, bid_size=bid_size, ask_size=ask_size,
-        depth_source=depth_source,
+        cumulative_bid_size=cum_bid, cumulative_ask_size=cum_ask,
+        depth_levels=depth_levels, depth_source=depth_source,
         complement_source=complement, venue=venue,
         account_class=account_class, fee_source=fee_source,
         reasons=reasons)

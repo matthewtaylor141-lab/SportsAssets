@@ -22,6 +22,21 @@ def row(**kw):
              yes_bid="0.3800", yes_ask="0.3900",
              yes_depth='{"bid": "2565.0000", "ask": "2702.0000",'
                        ' "levelsCaptured": 5}',
+             # THE LADDER IS WHAT MAKES A ROW SIZEABLE. yes_depth above
+             # is the FIVE-LEVEL SUM; the executable size at the quote
+             # is the ladder's top level -- 12 at 0.3900, not 2702.
+             multi_level_depth=json.dumps({
+                 "levels": 5,
+                 "ask": [{"level": 0, "qty": "12.0000", "price": "0.3900"},
+                         {"level": 1, "qty": "690.0000", "price": "0.4000"},
+                         {"level": 2, "qty": "1000.0000", "price": "0.4100"},
+                         {"level": 3, "qty": "500.0000", "price": "0.4200"},
+                         {"level": 4, "qty": "500.0000", "price": "0.4300"}],
+                 "bid": [{"level": 0, "qty": "65.0000", "price": "0.3800"},
+                         {"level": 1, "qty": "900.0000", "price": "0.3700"},
+                         {"level": 2, "qty": "800.0000", "price": "0.3600"},
+                         {"level": 3, "qty": "400.0000", "price": "0.3500"},
+                         {"level": 4, "qty": "400.0000", "price": "0.3400"}]}),
              no_bid="NOT_IDENTIFIED", no_ask="NOT_IDENTIFIED")
     d.update(kw)
     return d
@@ -94,18 +109,32 @@ class TestIdentityAndProvenance:
     def test_depth_is_read_from_the_row(self):
         """I declared depth absent from the schema after reading the base
         table and never querying yes_depth. It is there, with a
-        five-level ladder."""
+        five-level ladder.
+
+        THIS TEST PINNED THE WRONG QUANTITY. It asserted ask_size ==
+        2702.0, which is `yes_depth.ask` -- the SUM of the five ask
+        levels, not what is executable at the quote. Having found the
+        column I then read the wrong field out of it, and wrote a test
+        that locked the mistake in. The executable size is the ladder's
+        top level: 12 at 0.3900. See
+        TestDepthIsTopOfBookNotTheFiveLevelSum.
+        """
         r = oa.normalize(row())
-        assert r.depth_source == "DISPLAYED_DEPTH_AT_T0"
-        assert r.ask_size == 2702.0
-        assert oa.to_book(r).yes_ask_size == 2702.0
+        assert r.depth_source == "TOP_OF_BOOK_FROM_LADDER"
+        assert r.ask_size == 12.0
+        assert r.cumulative_ask_size == 2702.0
+        assert oa.to_book(r).yes_ask_size == 12.0
 
     def test_a_row_without_depth_is_rejected_not_zeroed(self):
         """Zero depth and unrecorded depth are different facts and only
         one of them is about the market."""
-        r = oa.normalize(row(yes_depth=None))
+        d = row()
+        d.pop("yes_depth")
+        d.pop("multi_level_depth")
+        r = oa.normalize(d)
         assert r.status == oa.REJECTED
         assert oa.R_NO_DEPTH in r.reasons
+        assert r.ask_size == 0.0
 
     def test_complement_family_is_required_not_mere_difference(self):
         a = oa.normalize(row(outcome_leg="over"))
@@ -234,3 +263,107 @@ class TestAgainstTheRealCapturedSample:
             assert d["selected"] == de.NO_TRADE, (
                 "a real row produced an action; every path is blocked or "
                 "unidentified on this venue contract")
+
+
+class TestDepthIsTopOfBookNotTheFiveLevelSum:
+    """Measured on a real capture row, 2026-09-21:
+
+        yes_ask            0.7200
+        ladder level 0     17.00 at 0.7200
+        yes_depth.ask      4903.69  == the sum of all five ask levels
+
+    The adapter read 4903.69 as the executable size at 0.7200. The other
+    4886 contracts sit at 0.73, 0.74, 0.75 and 0.76, so the cumulative
+    figure misstates the PRICE as well as the size -- 288x here, and a
+    different multiple on every row, which is why no single number
+    reveals the error.
+    """
+
+    REAL_LADDER = {
+        "levels": 5,
+        "ask": [{"level": 0, "qty": "17.0000", "price": "0.7200"},
+                {"level": 1, "qty": "1267.0000", "price": "0.7300"},
+                {"level": 2, "qty": "3248.0000", "price": "0.7400"},
+                {"level": 3, "qty": "20.0000", "price": "0.7500"},
+                {"level": 4, "qty": "351.6900", "price": "0.7600"}],
+        "bid": [{"level": 0, "qty": "11308.1900", "price": "0.7100"},
+                {"level": 1, "qty": "1371.0000", "price": "0.7000"},
+                {"level": 2, "qty": "2030.0000", "price": "0.6900"},
+                {"level": 3, "qty": "341.0000", "price": "0.6800"},
+                {"level": 4, "qty": "241.9300", "price": "0.6200"}]}
+
+    def real_row(self, **kw):
+        d = row(yes_bid="0.7100", yes_ask="0.7200",
+                yes_depth=json.dumps({"ask": "4903.6900",
+                                      "bid": "15292.1200",
+                                      "levelsCaptured": 5}),
+                multi_level_depth=json.dumps(self.REAL_LADDER))
+        d.update(kw)
+        return d
+
+    def test_executable_size_is_the_top_level_not_the_sum(self):
+        r = oa.normalize(self.real_row())
+        assert r.status == oa.ACCEPTED, r.reasons
+        assert r.ask_size == 17.0
+        assert r.bid_size == 11308.19
+        assert r.depth_source == "TOP_OF_BOOK_FROM_LADDER"
+
+    def test_the_cumulative_figure_is_kept_but_kept_separate(self):
+        r = oa.normalize(self.real_row())
+        assert r.cumulative_ask_size == 4903.69
+        assert r.cumulative_bid_size == 15292.12
+        assert r.depth_levels == 5
+        # The whole defect in one assertion.
+        assert r.ask_size != r.cumulative_ask_size
+        assert round(r.cumulative_ask_size / r.ask_size) == 288
+
+    def test_the_cumulative_sum_really_is_the_sum_of_the_ladder(self):
+        """Not an inference about the column -- arithmetic on the row."""
+        total = sum(float(lv["qty"]) for lv in self.REAL_LADDER["ask"])
+        assert round(total, 4) == 4903.69
+
+    def test_the_engine_sizes_from_the_executable_quantity(self):
+        b = oa.to_book(oa.normalize(self.real_row()))
+        assert b.yes_ask_size == 17.0
+
+    def test_a_row_with_only_the_cumulative_figure_is_rejected(self):
+        """Rejected, not sized from the wrong number. A five-level sum
+        is not a quantity anyone can trade at the quoted price."""
+        d = self.real_row()
+        d.pop("multi_level_depth")
+        r = oa.normalize(d)
+        assert r.status == oa.REJECTED
+        assert oa.R_DEPTH_LADDER_ABSENT in r.reasons
+        assert r.ask_size == 0.0
+
+    def test_a_ladder_whose_top_price_disagrees_with_the_quote_is_rejected(self):
+        """The ladder and the quote must describe one instant."""
+        lad = json.loads(json.dumps(self.REAL_LADDER))
+        lad["ask"][0]["price"] = "0.7300"
+        r = oa.normalize(self.real_row(multi_level_depth=json.dumps(lad)))
+        assert r.status == oa.REJECTED
+        assert oa.R_DEPTH_PRICE_MISMATCH in r.reasons
+
+    def test_the_best_level_is_the_lowest_marked_level_not_the_first(self):
+        """An array whose order is assumed is how a mid-book level gets
+        treated as the touch. The capture marks levels explicitly."""
+        lad = json.loads(json.dumps(self.REAL_LADDER))
+        lad["ask"] = list(reversed(lad["ask"]))
+        r = oa.normalize(self.real_row(multi_level_depth=json.dumps(lad)))
+        assert r.status == oa.ACCEPTED, r.reasons
+        assert r.ask_size == 17.0
+
+    def test_no_depth_at_all_is_a_different_refusal_from_cumulative_only(self):
+        d = self.real_row()
+        d.pop("multi_level_depth")
+        d.pop("yes_depth")
+        r = oa.normalize(d)
+        assert oa.R_NO_DEPTH in r.reasons
+        assert oa.R_DEPTH_LADDER_ABSENT not in r.reasons
+
+    def test_a_ladder_arriving_already_decoded_is_read_the_same_way(self):
+        """psycopg hands back decoded JSONB; a file hands back a string.
+        Both reach this adapter and only one was handled."""
+        r = oa.normalize(self.real_row(multi_level_depth=self.REAL_LADDER))
+        assert r.status == oa.ACCEPTED, r.reasons
+        assert r.ask_size == 17.0

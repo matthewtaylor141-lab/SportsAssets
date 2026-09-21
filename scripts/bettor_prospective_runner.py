@@ -68,9 +68,12 @@ REPLAY = "REPLAY_DECISION"
 # A live decision may not be taken on a book older than this measured
 # from the VENUE's own source clock at the moment of decision.
 LIVE_FRESHNESS_BOUND_S = 10.0
-# How far our clock may disagree with the venue's before the reading is
-# unverifiable rather than merely stale.
-MAX_CLOCK_SKEW_S = 120.0
+# How far a source stamp may sit in our receipt's FUTURE before the two
+# clocks are held to disagree. Small, because transport cannot produce a
+# negative delay at all -- this is tolerance for stamp resolution, not
+# for latency. A positive delay of any size is latency and is judged by
+# the age bound instead.
+CLOCK_DISAGREEMENT_TOLERANCE_S = 0.5
 
 # The PUBLISHED PMUS schedule for the date being decided. PUBLISHED,
 # not VERIFIED_APPLIED: the venue documents these terms and we have
@@ -78,6 +81,12 @@ MAX_CLOCK_SKEW_S = 120.0
 # the engine will compute with them and still refuse to select on them.
 FEE_DATE = "2026-09-21"
 FEES = de.Fees.published_pmus(FEE_DATE)
+
+
+def _now_iso():
+    """Decision time, aware, measured at the instant it is called."""
+    from datetime import datetime, timezone
+    return datetime.now(timezone.utc).isoformat()
 
 
 def load_state(path):
@@ -97,46 +106,96 @@ def save_state(path, state):
 
 
 def _parse_ts(x):
+    """An AWARE datetime, or None. A NAIVE stamp is refused, not assumed.
+
+    The previous version appended "+00:00" to any stamp that carried no
+    offset. That is not parsing, it is asserting the venue publishes in
+    UTC -- and if it does not, a book hours old reads as fresh (or a
+    fresh one as stale) with nothing in the record to show it.
+
+    Real formats this must handle, all sampled from the capture:
+        2026-09-21T18:20:25.743291447Z     nine fractional digits, Z
+        2026-09-21T18:26:06.772+00:00      three digits, explicit offset
+        2026-09-21 18:26:04.058844+00      space separator, two-digit tz
+    """
     from datetime import datetime
-    if not x:
+    if x is None:
         return None
-    t = str(x).replace("Z", "+00:00")
+    t = str(x).strip()
+    if not t or t == "NOT_IDENTIFIED":
+        return None
+    if t.endswith(("Z", "z")):
+        t = t[:-1] + "+00:00"
+    # Trim sub-microsecond precision, which fromisoformat rejects on
+    # some versions. The offset is preserved exactly as written.
     if "." in t:
         head, rest = t.split(".", 1)
-        d = "".join(c for c in rest if c.isdigit())[:6]
-        tail = rest[len(d):]
-        tz = tail if tail.startswith(("+", "-")) else "+00:00"
-        t = "%s.%s%s" % (head, d.ljust(6, "0"), tz)
+        digits = ""
+        for ch in rest:
+            if ch.isdigit():
+                digits += ch
+            else:
+                break
+        t = "%s.%s%s" % (head, digits[:6].ljust(6, "0"), rest[len(digits):])
     try:
-        return datetime.fromisoformat(t)
+        dt = datetime.fromisoformat(t)
     except ValueError:
         return None
+    if dt.tzinfo is None or dt.tzinfo.utcoffset(dt) is None:
+        # Refused rather than defaulted. An unlabelled stamp is a stamp
+        # whose meaning we do not know.
+        return None
+    return dt
 
 
 def live_freshness(source_ts, received_at, decided_at):
     """Age at the MOMENT OF DECISION, from the venue's own clock.
 
-    Three timestamps, because two of them can lie in different ways.
-    `source_ts` is the venue's; `received_at` is when we got it;
-    `decided_at` is now. The age that matters is decided_at - source_ts,
-    and the gap between received_at and source_ts is the clock-skew
-    check: a source timestamp far from our receipt time is not a fresh
-    book, it is an unverifiable one.
+    THREE CLOCKS, AND THE RECEIPT CLOCK IS REQUIRED. It used to be
+    optional -- `if r_ts is not None` -- so a row that carried no
+    receipt time skipped the check entirely and was treated as verified
+    rather than as unverifiable. `book_received_ts` is in the capture
+    schema on every row, so requiring it costs nothing and closes the
+    one path that silently passed.
+
+    A SOURCE-TO-RECEIPT DELAY IS NOT CLOCK SKEW. The old check took
+    abs(received - source) and called anything large "skew". A positive
+    delay -- the normal case -- is the venue's stamp, plus transport,
+    plus our own processing, and it demonstrates nothing about whether
+    the two clocks agree. Only a NEGATIVE delay does: a source stamp in
+    our receipt's future cannot be explained by transport, because
+    transport only ever runs forward. So the two are reported
+    separately and only the negative tail is called skew.
+
+    A large positive delay is still disqualifying, but for its own
+    reason: the reading is OLD, which `age_at_decision_s` already says.
     """
-    s_ts, r_ts = _parse_ts(source_ts), _parse_ts(received_at)
+    s_ts = _parse_ts(source_ts)
+    r_ts = _parse_ts(received_at)
     d_ts = _parse_ts(decided_at)
     if s_ts is None:
         return {"ok": False, "reason": "NO_VENUE_SOURCE_TIMESTAMP"}
+    if r_ts is None:
+        return {"ok": False, "reason": "NO_RECEIPT_TIMESTAMP"}
     if d_ts is None:
         return {"ok": False, "reason": "NO_DECISION_TIMESTAMP"}
+
     age = (d_ts - s_ts).total_seconds()
+    transport = (r_ts - s_ts).total_seconds()
     out = {"age_at_decision_s": round(age, 4),
-           "source_ts": source_ts, "decided_at": decided_at}
-    if r_ts is not None:
-        skew = abs((r_ts - s_ts).total_seconds())
-        out["receipt_skew_s"] = round(skew, 4)
-        if skew > MAX_CLOCK_SKEW_S:
-            return dict(out, ok=False, reason="CLOCK_SKEW_UNVERIFIABLE")
+           "source_to_receipt_s": round(transport, 4),
+           "receipt_to_decision_s": round((d_ts - r_ts).total_seconds(), 4),
+           "source_ts": str(source_ts), "received_at": str(received_at),
+           "decided_at": str(decided_at),
+           "transport_is_not_skew": ("a positive source-to-receipt delay is "
+                                     "latency; only a negative one shows "
+                                     "the clocks disagree")}
+
+    if transport < -CLOCK_DISAGREEMENT_TOLERANCE_S:
+        # The venue stamped this AFTER we received it. Transport cannot
+        # do that, so the clocks genuinely disagree and every age
+        # computed from this stamp is unverifiable.
+        return dict(out, ok=False, reason="SOURCE_TIMESTAMP_AFTER_RECEIPT")
     if age < 0:
         return dict(out, ok=False, reason="SOURCE_TIMESTAMP_IN_FUTURE")
     if age > LIVE_FRESHNESS_BOUND_S:
@@ -182,8 +241,15 @@ def run(rows, state, *, mode=REPLAY, now=None) -> dict:
         if mode == PROSPECTIVE:
             # LIVE: freshness is computed HERE, from the venue clock and
             # the decision clock -- never from a stored age.
+            # DECISION TIME IS MEASURED FOR EACH OBSERVATION. One
+            # timestamp taken at the top of a batch is the time the
+            # BATCH started; by the last row it understates the age by
+            # however long the batch took, which is precisely the
+            # interval a freshness bound exists to catch.
+            decided_at = now if now is not None else _now_iso()
             freshness = live_freshness(
-                row.get("book_source_ts"), row.get("book_received_ts"), now)
+                row.get("book_source_ts"), row.get("book_received_ts"),
+                decided_at)
             if not freshness["ok"]:
                 bump("rejected")
                 bump("reject:%s" % freshness["reason"])
