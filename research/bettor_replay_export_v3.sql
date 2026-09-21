@@ -39,14 +39,18 @@ WITH lad AS (
          (o.yes_depth->>'ask')::numeric AS reported,
          (SELECT (lv->>'qty')::numeric
             FROM jsonb_array_elements(o.multi_level_depth->'ask') AS lv
-           WHERE (lv->>'level')::int = 0)                   AS top_qty,
+           WHERE (lv->>'level')::int = 0
+             AND lv->>'qty' ~ '^[0-9.]+$')                  AS top_qty,
          (SELECT sum((lv->>'qty')::numeric)
-            FROM jsonb_array_elements(o.multi_level_depth->'ask') AS lv)
-                                                            AS sum_qty
+            FROM jsonb_array_elements(o.multi_level_depth->'ask') AS lv
+           WHERE lv->>'qty' ~ '^[0-9.]+$')                  AS sum_qty
     FROM bettor_state_observations o
    WHERE o.observed_at > now() - interval '7 days'
      AND o.yes_depth ? 'ask'
-     AND o.multi_level_depth ? 'ask')
+     AND o.multi_level_depth ? 'ask'
+     -- Some rows carry {"status": "NOT_IDENTIFIED"} instead of a
+     -- number, so every cast is guarded rather than assumed.
+     AND o.yes_depth->>'ask' ~ '^[0-9.]+$')
 SELECT count(*)                                              AS compared,
        count(*) FILTER (WHERE reported = top_qty)            AS equals_top,
        count(*) FILTER (WHERE reported = sum_qty)            AS equals_sum,
@@ -70,7 +74,8 @@ SELECT count(*) AS rows,
        round(sum(q)::numeric, 0) AS total_top_of_book_contracts
   FROM (SELECT (SELECT (lv->>'qty')::numeric
                   FROM jsonb_array_elements(o.multi_level_depth->'ask') AS lv
-                 WHERE (lv->>'level')::int = 0) AS q
+                 WHERE (lv->>'level')::int = 0
+                   AND lv->>'qty' ~ '^[0-9.]+$') AS q
           FROM bettor_state_observations o
          WHERE o.observed_at > now() - interval '7 days'
            AND o.multi_level_depth ? 'ask') t

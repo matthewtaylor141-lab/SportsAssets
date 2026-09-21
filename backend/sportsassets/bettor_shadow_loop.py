@@ -61,12 +61,26 @@ CANCELLED = "CANCELLED"
 REPRICED = "REPRICED"
 REJECTED = "REJECTED"
 
-# A quote in either of these states is a LIVE ORDER. Its unfilled
-# remainder is still working, still reserves cash, and is still
-# eligible for a fill, a cancel or a replace. Treating PARTIAL as
-# finished is how a half-filled order stops being tracked while it is
-# still in the market.
-LIVE_QUOTE_STATES = ("RESTING", "PARTIAL")
+# A CANCEL IS A REQUEST, NOT AN EVENT. Between sending it and the venue
+# acknowledging it the order is STILL IN THE MARKET and can still fill.
+# The loop used to treat a cancel as instantaneous -- reprice set the old
+# quote to REPRICED and rested the replacement in the same call -- so a
+# replacement could be working while the order it replaced was also
+# working, and both could fill. That is double exposure created by the
+# act of managing exposure.
+CANCEL_PENDING = "CANCEL_PENDING"
+
+# A quote in any of these states is a LIVE ORDER. Its unfilled remainder
+# is still working, still reserves cash, and is still eligible for a
+# fill. Treating PARTIAL as finished is how a half-filled order stops
+# being tracked while it is still in the market; treating CANCEL_PENDING
+# as finished is the same error at the other end of the lifecycle.
+LIVE_QUOTE_STATES = ("RESTING", "PARTIAL", CANCEL_PENDING)
+
+# States from which a cancel may be REQUESTED. A cancel already in
+# flight is not re-requested -- a second cancel does not make the first
+# arrive sooner and it hides which acknowledgement matched which order.
+CANCELLABLE_STATES = ("RESTING", "PARTIAL")
 
 
 @dataclass
@@ -199,10 +213,30 @@ class RiskLimits:
     max_open_markets: int = 10
     min_cash_reserve: float = 0.0
 
+    # ONE COMBINED LIMIT. `max_total_deployed` counts filled inventory
+    # only, so a book could sit at the deployment limit in inventory and
+    # carry live quotes, cancel-pending orders and an unrecovered leg on
+    # top of it, each admitted against a different number. Exposure is
+    # one quantity and it gets one limit.
+    max_combined_exposure: float = 2000.0
+
+    # THE LOSS BUDGET IS FORWARD-LOOKING. A trigger on realized loss
+    # alone is always breached after the fact: by the time cumulative
+    # loss reaches the stop, everything still outstanding can lose more.
+    # This is checked against realized loss PLUS the worst case on
+    # everything outstanding, BEFORE the next order.
+    max_worst_case_loss: float = float("inf")
+
     def check(self, *, pos: Position, add_contracts: float, add_cash: float,
-              deployed: float, open_markets: int, cash: float) -> str | None:
+              deployed: float, open_markets: int, cash: float,
+              combined_exposure: float = 0.0,
+              worst_case_loss: float = 0.0) -> str | None:
         if add_contracts < 0 or not math.isfinite(add_contracts):
             return "RISK_INVALID_SIZE"
+        if combined_exposure > self.max_combined_exposure:
+            return "RISK_MAX_COMBINED_EXPOSURE"
+        if worst_case_loss > self.max_worst_case_loss:
+            return "RISK_WORST_CASE_LOSS_BUDGET"
         if pos.yes + pos.no + add_contracts > self.max_position_contracts:
             return "RISK_MAX_POSITION_CONTRACTS"
         if pos.basis + add_cash > self.max_cash_per_market:
@@ -345,6 +379,75 @@ class ShadowLoop:
     def open_markets(self) -> int:
         return sum(1 for p in self.positions.values() if not p.flat)
 
+    @property
+    def recovery_commitment(self) -> float:
+        """Cash the recovery policy may still have to spend.
+
+        An unpaired leg is not a finished position. Policy will either
+        complete the pair -- buying the complement, which costs up to
+        1.00 per contract -- or exit at the bid. Until one of those
+        happens the completion cost is COMMITTED even though no order
+        exists for it, and a limit that cannot see it will admit a new
+        position against cash that is already spoken for.
+
+        Bounded at 1.00/contract because that is the most the complement
+        can cost; the actual ask is lower and unknowable until the
+        recovery read happens.
+        """
+        return sum(p.directional for p in self.positions.values())
+
+    @property
+    def combined_exposure(self) -> float:
+        """ONE NUMBER covering everything that is not flat.
+
+        filled inventory (remaining basis)
+          + live quote reservations, which include PARTIAL remainders
+            and CANCEL_PENDING orders still working in the market
+          + recovery commitments on unpaired legs
+
+        These were three separate checks against three separate limits,
+        so a book at its deployment limit could still add quotes, and a
+        quote could be admitted while an unrecovered leg waited. The
+        pilot's "$5 worst case" was computed from the first term alone.
+        """
+        return (self.deployed + self.quoted_exposure
+                + self.recovery_commitment)
+
+    @property
+    def worst_case_loss(self) -> float:
+        """Realized loss so far PLUS the worst case still outstanding.
+
+        This is what a pre-trade budget check needs, and a cumulative
+        realized-loss trigger is not it: by the time realized loss
+        reaches the stop, the outstanding book can lose more on top and
+        the stop has already been passed. Worst case here means every
+        live quote fills at its own price and every holding settles
+        against us, except that a MATCHED PAIR pays par whatever
+        happens, so only its cost above par can be lost.
+        """
+        realized_loss = max(0.0, -self.ledger.realized_pnl)
+        outstanding = 0.0
+        for pos in self.positions.values():
+            if pos.flat:
+                continue
+            paired = min(pos.yes, pos.no)
+            total = pos.yes + pos.no
+            if total <= 0:
+                continue
+            # A pair returns 1.00 per matched unit; only the basis above
+            # that can be lost. The unpaired remainder can lose all of
+            # its basis.
+            paired_basis = pos.basis * (2 * paired / total) if total else 0.0
+            outstanding += max(0.0, paired_basis - paired)
+            outstanding += max(0.0, pos.basis - paired_basis)
+        for q in self.quotes.values():
+            if q["state"] not in LIVE_QUOTE_STATES:
+                continue
+            rem = q["size"] - q["filled"]
+            if rem > 0:
+                outstanding += self.quote_reservation(q["price"], rem)
+        return realized_loss + outstanding
+
     def position(self, market_id: str) -> Position:
         return self.positions.setdefault(market_id, Position(market_id))
 
@@ -458,7 +561,9 @@ class ShadowLoop:
             blocked = self.limits.check(
                 pos=pos, add_contracts=2 * size, add_cash=est_cash,
                 deployed=self.deployed, open_markets=self.open_markets,
-                cash=self.ledger.cash)
+                cash=self.ledger.cash,
+                combined_exposure=self.combined_exposure + est_cash,
+                worst_case_loss=self.worst_case_loss + est_cash)
         if blocked:
             rec["risk"] = blocked
             rec["decision"] = "%s_REFUSED_BY_RISK" % decision["selected"]
@@ -836,7 +941,11 @@ class ShadowLoop:
             add_cash=reserve + market_quoted,
             deployed=self.deployed + self.quoted_exposure,
             open_markets=open_markets,
-            cash=self.ledger.cash - self.quoted_exposure)
+            cash=self.ledger.cash - self.quoted_exposure,
+            # The SAME combined limit the entry path uses. A quote and a
+            # fill are the same exposure at different moments.
+            combined_exposure=self.combined_exposure + reserve,
+            worst_case_loss=self.worst_case_loss + reserve)
 
     def touch(self, quote_id: str) -> dict:
         """The market traded at our price. THAT IS NOT A FILL."""
@@ -880,7 +989,15 @@ class ShadowLoop:
                          "maker fill %.4g at %.4f, fee %.4f"
                          % (qty, q["price"], fee), q["market_id"])
         q["filled"] += qty
-        q["state"] = "FILLED" if q["filled"] >= q["size"] else "PARTIAL"
+        # A FILL DOES NOT CANCEL A PENDING CANCEL. If a cancel is in
+        # flight it stays in flight -- the venue will answer it, late,
+        # and that answer is what confirm_cancel records. Overwriting
+        # CANCEL_PENDING here would lose the request and leave the
+        # deferred replacement stranded.
+        if q["state"] == CANCEL_PENDING:
+            pass
+        else:
+            q["state"] = "FILLED" if q["filled"] >= q["size"] else "PARTIAL"
         q["history"].append("%s %.4g at %.4f" % (q["state"], qty, q["price"]))
         rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
                "market_id": q["market_id"], "decision": "MAKER_FILL",
@@ -895,78 +1012,171 @@ class ShadowLoop:
         return rec
 
     def cancel_quote(self, quote_id: str) -> dict:
+        """REQUEST a cancel. The order stays live until it is confirmed.
+
+        A cancel is a message to the venue, not an event at our end. The
+        old version flipped the state to CANCELLED and released the
+        reservation the instant it was called, which asserts that every
+        cancel arrives and arrives immediately. Neither is true, and the
+        gap is exactly where a replacement can end up working alongside
+        the order it was meant to replace.
+
+        The remainder stays reserved and stays fillable in
+        CANCEL_PENDING. `confirm_cancel` is what releases it.
+        """
         q = self.quotes[quote_id]
-        if q["state"] not in ("RESTING", "PARTIAL"):
+        if q["state"] not in CANCELLABLE_STATES:
             return {"quote_id": quote_id, "refused": "NOT_CANCELLABLE",
                     "state": q["state"]}
-        q["state"] = CANCELLED
-        q["history"].append("CANCELLED with %.4g unfilled"
+        q["state"] = CANCEL_PENDING
+        q["cancel_requested_from"] = q["state"]
+        q["history"].append("CANCEL_REQUESTED with %.4g unfilled"
                             % (q["size"] - q["filled"]))
         rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
-               "market_id": q["market_id"], "decision": "CANCEL",
-               "evidence_class": q["evidence_class"], "state": CANCELLED,
-               "released_exposure": round(q["price"]
-                                          * (q["size"] - q["filled"]), 6),
+               "market_id": q["market_id"], "decision": "CANCEL_REQUESTED",
+               "evidence_class": q["evidence_class"], "state": CANCEL_PENDING,
+               "still_live": True,
+               "still_reserved": round(
+                   self.quote_reservation(q["price"],
+                                          q["size"] - q["filled"]), 6),
+               "why": ("a cancel is a request; the order is still working "
+                       "and can still fill until the venue acknowledges"),
+               "combined_exposure": round(self.combined_exposure, 6),
                "cash_after": round(self.ledger.cash, 6)}
         self.trace.append(rec)
         return rec
 
-    def reprice_quote(self, quote_id: str, *, new_price: float) -> dict:
-        """Cancel/replace. QUEUE POSITION IS LOST, and that is the cost.
+    def confirm_cancel(self, quote_id: str) -> dict:
+        """The venue acknowledged. NOW the reservation is released.
 
-        A reprice is not an edit. It is a cancel and a new order at the
-        back of the queue, so the new quote's fill probability is not
-        the old one's, and the lifecycle records it as a NEW quote
-        rather than a changed field.
+        If a replacement was deferred by `reprice_quote`, this is where
+        it is admitted -- after the original is confirmed gone, never
+        before.
         """
-        old = self.quotes[quote_id]
-        if old["state"] not in ("RESTING", "PARTIAL"):
-            return {"quote_id": quote_id, "refused": "NOT_REPRICEABLE",
-                    "state": old["state"]}
-        remaining = old["size"] - old["filled"]
-        if remaining <= 0:
-            return {"quote_id": quote_id, "refused": "NO_REMAINDER"}
-        # THE REPLACEMENT IS A NEW ORDER. Check it as one -- but exclude
-        # the order being replaced from the aggregate, since its
-        # reservation is released by the cancel half of cancel/replace.
-        held_state = old["state"]
-        old["state"] = "REPLACING"
+        q = self.quotes[quote_id]
+        if q["state"] != CANCEL_PENDING:
+            return {"quote_id": quote_id, "refused": "NO_CANCEL_IN_FLIGHT",
+                    "state": q["state"]}
+        unfilled = q["size"] - q["filled"]
+        released = self.quote_reservation(q["price"], unfilled) if unfilled > 0 \
+            else 0.0
+        # An order that filled entirely while its cancel was in flight
+        # is FILLED, not CANCELLED. The cancel arrived too late, and
+        # recording it as a cancellation would misstate what happened to
+        # the contracts.
+        q["state"] = CANCELLED if unfilled > 0 else "FILLED"
+        q["history"].append("CANCEL_CONFIRMED with %.4g unfilled" % unfilled)
+        rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
+               "market_id": q["market_id"], "decision": "CANCEL_CONFIRMED",
+               "evidence_class": q["evidence_class"], "state": CANCELLED,
+               "released_exposure": round(released, 6),
+               "combined_exposure": round(self.combined_exposure, 6),
+               "cash_after": round(self.ledger.cash, 6)}
+        pending = q.pop("deferred_replacement", None)
+        if pending and unfilled > 0:
+            rec["replacement"] = self._place_replacement(q, pending, unfilled)
+        elif pending:
+            rec["replacement"] = {"refused": "NO_REMAINDER_TO_REPLACE"}
+        self.trace.append(rec)
+        return rec
+
+    def _place_replacement(self, old: dict, new_price: float,
+                           remaining: float) -> dict:
+        """Admit and rest a deferred replacement. Called only after the
+        original cancel is CONFIRMED, so the two never overlap."""
         blocked = self._admit_quote(old["market_id"], new_price, remaining)
         if blocked:
-            old["state"] = held_state
-            rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
-                   "market_id": old["market_id"], "decision": "REPRICE",
-                   "evidence_class": old["evidence_class"],
-                   "refused": blocked, "from": old["price"],
-                   "to": new_price, "size": remaining,
-                   "why": ("a cancel/replace is a NEW order and must clear "
-                           "the same checks the original did"),
-                   "cash_after": round(self.ledger.cash, 6)}
-            self.trace.append(rec)
-            return rec
-        old["state"] = REPRICED
-        old["history"].append("REPRICED to %.4f" % new_price)
+            return {"refused": blocked, "to": new_price, "size": remaining,
+                    "why": ("a cancel/replace is a NEW order and must clear "
+                            "the same checks the original did")}
         nid = "q%d" % (len(self.quotes) + 1)
         self.quotes[nid] = {"id": nid, "market_id": old["market_id"],
                             "side": old["side"], "price": new_price,
                             "size": remaining, "state": "RESTING",
                             "filled": 0.0,
                             "evidence_class": old["evidence_class"],
-                            "history": ["RESTING at %.4f (repriced from %s, "
-                                        "queue position lost)"
-                                        % (new_price, quote_id)]}
+                            "history": ["RESTING at %.4f (replaced %s after "
+                                        "its cancel was CONFIRMED; queue "
+                                        "position lost)"
+                                        % (new_price, old["id"])]}
+        return {"new_quote_id": nid, "to": new_price, "size": remaining,
+                "state": "RESTING"}
+
+    def reprice_quote(self, quote_id: str, *, new_price: float) -> dict:
+        """Cancel/replace. THE REPLACEMENT WAITS FOR THE CANCEL.
+
+        A reprice is not an edit. It is a cancel and a new order at the
+        back of the queue, so the new quote's fill probability is not
+        the old one's -- and, more importantly, the old order is still
+        working until the venue says otherwise.
+
+        The previous version placed the replacement in the same call
+        that requested the cancel. Two orders for one intended position
+        were live at once and both could fill, doubling exposure through
+        the act of reducing it. Now the replacement is DEFERRED and
+        `confirm_cancel` places it.
+
+        The replacement is still admitted as a NEW order when it is
+        placed, which is the separate defect that repricing ten shares
+        from 0.45 to 0.99 on five dollars of cash used to walk through.
+        """
+        old = self.quotes[quote_id]
+        if old["state"] == CANCEL_PENDING:
+            return {"quote_id": quote_id, "refused": "CANCEL_ALREADY_IN_FLIGHT",
+                    "state": old["state"],
+                    "why": ("a second cancel does not make the first arrive "
+                            "sooner and hides which acknowledgement matched "
+                            "which order")}
+        if old["state"] not in CANCELLABLE_STATES:
+            return {"quote_id": quote_id, "refused": "NOT_REPRICEABLE",
+                    "state": old["state"]}
+        remaining = old["size"] - old["filled"]
+        if remaining <= 0:
+            return {"quote_id": quote_id, "refused": "NO_REMAINDER"}
+        if new_price is None or not math.isfinite(new_price) \
+                or not 0 < new_price < 1:
+            return {"quote_id": quote_id, "refused": "RISK_QUOTE_INVALID_PRICE"}
+
+        # PRE-CHECK, so an inadmissible replacement never causes a
+        # cancel at all. Checked against exposure AS IT WILL BE once the
+        # cancel confirms -- the old order is excluded, because its
+        # reservation is the one being handed over. Checked AGAIN at
+        # placement, since anything may have filled in between.
+        held = old["state"]
+        old["state"] = "REPLACING"
+        blocked = self._admit_quote(old["market_id"], new_price, remaining)
+        old["state"] = held
+        if blocked:
+            rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
+                   "market_id": old["market_id"], "decision": "REPRICE",
+                   "evidence_class": old["evidence_class"],
+                   "refused": blocked, "from": old["price"],
+                   "to": new_price, "size": remaining,
+                   "why": ("a cancel/replace is a NEW order and must clear "
+                           "the same checks the original did; the original "
+                           "is left working rather than cancelled into a "
+                           "replacement that cannot be placed"),
+                   "state": old["state"],
+                   "cash_after": round(self.ledger.cash, 6)}
+            self.trace.append(rec)
+            return rec
+
+        cancel = self.cancel_quote(quote_id)
+        old["deferred_replacement"] = new_price
         rec = {"loop": LOOP_VERSION, "quote_id": quote_id,
-               "new_quote_id": nid, "market_id": old["market_id"],
-               "decision": "REPRICE", "evidence_class": old["evidence_class"],
+               "market_id": old["market_id"], "decision": "REPRICE_REQUESTED",
+               "evidence_class": old["evidence_class"],
                "from": old["price"], "to": new_price, "size": remaining,
-               "why": ("cancel/replace: the new quote starts at the BACK "
-                       "of the queue, so its fill probability is not the "
-                       "old one's"),
+               "state": CANCEL_PENDING,
+               "replacement_deferred": True,
+               "why": ("the original is still working; the replacement is "
+                       "placed by confirm_cancel and not before, so the two "
+                       "are never live at the same time"),
+               "still_reserved": cancel["still_reserved"],
+               "combined_exposure": round(self.combined_exposure, 6),
                "cash_after": round(self.ledger.cash, 6)}
         self.trace.append(rec)
         return rec
-
-    # ── settlement ───────────────────────────────────────────────────
 
     def settle(self, market_id: str, *, yes_wins: bool) -> dict:
         """Resolve a market. A pair pays par; a naked leg pays 0 or 1."""

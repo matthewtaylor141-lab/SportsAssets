@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import pytest
 
+from sportsassets import bettor_fee_schedule as fs
 from sportsassets import bettor_decision_engine as de
 from sportsassets import bettor_shadow_loop as sl
 from sportsassets import bettor_venue_contract as vc
@@ -370,7 +371,12 @@ class TestQuoteLifecycle:
         assert q["state"] == "RESTING"
         # 10 x 0.45 notional plus the maker fee the fill would incur
         assert lp.quoted_exposure == pytest.approx(4.5 + 0.10)
+        # A CANCEL IS A REQUEST. The order stays live and stays reserved
+        # until the venue acknowledges it.
         lp.cancel_quote(q["quote_id"])
+        assert lp.quotes[q["quote_id"]]["state"] == sl.CANCEL_PENDING
+        assert lp.quoted_exposure == pytest.approx(4.5 + 0.10)
+        lp.confirm_cancel(q["quote_id"])
         assert lp.quoted_exposure == 0.0
 
     def test_a_touch_does_not_change_inventory_or_cash(self):
@@ -383,12 +389,28 @@ class TestQuoteLifecycle:
         assert lp.positions["m"].flat
 
     def test_a_reprice_creates_a_new_quote_at_the_back(self):
+        """And not until the cancel is CONFIRMED. The replacement used
+        to be rested in the same call that requested the cancel, so two
+        orders for one intended position were live at once and both
+        could fill."""
         lp = loop()
         q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
         rp = lp.reprice_quote(q["quote_id"], new_price=0.455)
-        assert rp["new_quote_id"] != q["quote_id"]
-        assert lp.quotes[q["quote_id"]]["state"] == sl.REPRICED
-        assert "BACK" in rp["why"] or "back" in rp["why"]
+        assert rp["replacement_deferred"] is True
+        assert "new_quote_id" not in rp
+        assert lp.quotes[q["quote_id"]]["state"] == sl.CANCEL_PENDING
+        # Exactly one live order for this market, not two.
+        assert sum(1 for x in lp.quotes.values()
+                   if x["state"] in sl.LIVE_QUOTE_STATES) == 1
+
+        done = lp.confirm_cancel(q["quote_id"])
+        nid = done["replacement"]["new_quote_id"]
+        assert nid != q["quote_id"]
+        assert lp.quotes[q["quote_id"]]["state"] == sl.CANCELLED
+        assert lp.quotes[nid]["state"] == "RESTING"
+        assert "queue position lost" in lp.quotes[nid]["history"][0]
+        assert sum(1 for x in lp.quotes.values()
+                   if x["state"] in sl.LIVE_QUOTE_STATES) == 1
 
     def test_a_maker_fill_reaches_inventory_and_cash(self):
         lp = loop()
@@ -451,7 +473,11 @@ class TestReservationsSurvivePartialFills:
         q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
         lp.fill_quote(q["quote_id"], qty=6, reason="t")
         c = lp.cancel_quote(q["quote_id"])
-        assert c["state"] == sl.CANCELLED
+        assert c["state"] == sl.CANCEL_PENDING
+        assert c["still_live"] is True
+        # The 4 unfilled are STILL WORKING, so still reserved.
+        assert lp.quoted_exposure == pytest.approx(4 * 0.45 + 0.04)
+        lp.confirm_cancel(q["quote_id"])
         assert lp.quoted_exposure == 0.0
 
     def test_a_partial_quote_can_still_be_repriced(self):
@@ -503,3 +529,148 @@ class TestReplacementIsANewOrder:
                                      venue="demo-venue")
         assert back.quoted_exposure == pytest.approx(lp.quoted_exposure)
         assert back.quotes[q["quote_id"]]["state"] == "PARTIAL"
+
+
+class TestCombinedExposureAndTheLossBudget:
+    """The pilot's contract, enforced by the loop rather than described.
+
+    `max_total_deployed` counted filled inventory only, so a book could
+    sit at the deployment limit and still carry live quotes, a
+    cancel-pending order and an unrecovered leg, each admitted against a
+    different number. And a trigger on realized loss alone is always
+    breached after the fact: by the time cumulative loss reaches the
+    stop, everything outstanding can lose more on top of it.
+    """
+
+    PUBLISHED = de.Fees(verified=True, schedule=fs.PMUS_2026_09_17,
+                        source="TEST_FIXTURE_NOT_A_REAL_VERIFICATION")
+
+    def lp(self, **kw):
+        return sl.ShadowLoop(opening_cash=100.0, fees=self.PUBLISHED,
+                             venue="demo", **kw)
+
+    def test_combined_exposure_counts_quotes_as_well_as_inventory(self):
+        lp = self.lp()
+        assert lp.quote(bk("m"), side="yes", price=0.45,
+                        size=10)["risk"] is None
+        assert lp.deployed == 0.0          # nothing filled
+        assert lp.combined_exposure == pytest.approx(4.5)
+
+    def test_a_cancel_pending_order_still_counts(self):
+        """It is still in the market until the venue says otherwise."""
+        lp = self.lp()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.cancel_quote(q["quote_id"])
+        assert lp.quotes[q["quote_id"]]["state"] == sl.CANCEL_PENDING
+        assert lp.combined_exposure == pytest.approx(4.5)
+        lp.confirm_cancel(q["quote_id"])
+        assert lp.combined_exposure == 0.0
+
+    def test_a_cancel_pending_order_can_still_fill(self):
+        """Which is exactly why it still counts."""
+        lp = self.lp()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.cancel_quote(q["quote_id"])
+        f = lp.fill_quote(q["quote_id"], qty=3, reason="race")
+        assert f.get("refused") is None
+        assert lp.positions["m"].yes == 3
+
+    def test_an_unrecovered_leg_is_a_commitment_not_a_finished_position(self):
+        lp = self.lp()
+        pos = lp.position("m")
+        pos.buy("yes", 10, 0.45, 0.0)
+        assert pos.directional == 10
+        # basis 4.50 plus up to 1.00/contract to complete the pair.
+        assert lp.recovery_commitment == 10
+        assert lp.combined_exposure == pytest.approx(4.5 + 10)
+
+    def test_the_combined_limit_refuses_what_three_separate_ones_allowed(self):
+        lp = self.lp()
+        lp.limits.max_combined_exposure = 5.0
+        assert lp.quote(bk("m1"), side="yes", price=0.45,
+                        size=10)["risk"] is None
+        r = lp.quote(bk("m2"), side="yes", price=0.45, size=10)
+        assert r["risk"] == "RISK_MAX_COMBINED_EXPOSURE"
+        assert r["state"] == "REFUSED"
+
+    def test_the_loss_budget_is_forward_looking_not_a_realized_trigger(self):
+        """A live quote that has not filled can still lose money."""
+        lp = self.lp()
+        lp.limits.max_worst_case_loss = 5.0
+        assert lp.quote(bk("m1"), side="yes", price=0.45,
+                        size=10)["risk"] is None
+        # Nothing has been realized, but 4.50 is already at risk.
+        assert lp.ledger.realized_pnl == 0.0
+        assert lp.worst_case_loss == pytest.approx(4.5)
+        r = lp.quote(bk("m2"), side="yes", price=0.45, size=10)
+        assert r["risk"] == "RISK_WORST_CASE_LOSS_BUDGET"
+
+    def test_a_matched_pair_can_only_lose_its_cost_above_par(self):
+        """Par settlement is the whole reason a pair is not naked."""
+        lp = self.lp()
+        pos = lp.position("m")
+        pos.buy("yes", 10, 0.47, 0.17)
+        pos.buy("no", 10, 0.50, 0.17)
+        # basis 10.04 on 10 matched pairs that return 10.00.
+        assert lp.worst_case_loss == pytest.approx(0.04, abs=1e-9)
+
+    def test_an_unpaired_leg_can_lose_its_whole_basis(self):
+        lp = self.lp()
+        pos = lp.position("m")
+        pos.buy("yes", 10, 0.45, 0.0)
+        assert lp.worst_case_loss == pytest.approx(4.5)
+
+
+class TestAReplacementNeverOverlapsTheOrderItReplaces:
+
+    def test_the_replacement_is_not_placed_until_the_cancel_confirms(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.reprice_quote(q["quote_id"], new_price=0.455)
+        live = [x for x in lp.quotes.values()
+                if x["state"] in sl.LIVE_QUOTE_STATES]
+        assert len(live) == 1
+        assert live[0]["price"] == 0.45          # the ORIGINAL, not the new
+        assert live[0]["state"] == sl.CANCEL_PENDING
+
+    def test_a_second_cancel_while_one_is_in_flight_is_refused(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.reprice_quote(q["quote_id"], new_price=0.455)
+        again = lp.reprice_quote(q["quote_id"], new_price=0.46)
+        assert again["refused"] == "CANCEL_ALREADY_IN_FLIGHT"
+
+    def test_an_inadmissible_replacement_does_not_cancel_the_original(self):
+        """Reproduced: 10 shares 0.45 -> 0.99 with $5 cash was accepted
+        and reserved 9.90. It must also not leave us flat by cancelling
+        into a replacement that cannot be placed."""
+        lp = loop(cash=5.0)
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        rp = lp.reprice_quote(q["quote_id"], new_price=0.99)
+        assert rp["refused"] is not None
+        assert lp.quotes[q["quote_id"]]["state"] == "RESTING"
+
+    def test_a_fill_between_request_and_confirmation_shrinks_the_replacement(self):
+        """The race the two-phase protocol exists to make visible."""
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.reprice_quote(q["quote_id"], new_price=0.44)
+        lp.fill_quote(q["quote_id"], qty=6, reason="filled while cancelling")
+        done = lp.confirm_cancel(q["quote_id"])
+        assert done["replacement"]["size"] == pytest.approx(4.0)
+        assert lp.positions["m"].yes == 6
+
+    def test_a_full_fill_before_confirmation_leaves_nothing_to_replace(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.reprice_quote(q["quote_id"], new_price=0.44)
+        lp.fill_quote(q["quote_id"], qty=10, reason="filled entirely")
+        done = lp.confirm_cancel(q["quote_id"])
+        assert done["replacement"]["refused"] == "NO_REMAINDER_TO_REPLACE"
+        assert lp.quoted_exposure == 0.0
+
+    def test_confirming_a_cancel_nobody_requested_is_refused(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        assert lp.confirm_cancel(q["quote_id"])["refused"] == \
+            "NO_CANCEL_IN_FLIGHT"
