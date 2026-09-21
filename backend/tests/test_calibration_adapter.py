@@ -19,6 +19,35 @@ import pytest
 
 from sportsassets import calibration_adapter as ad
 from sportsassets import calibration_execute as ex
+from sportsassets import execution_gate as _gate
+
+
+@pytest.fixture(autouse=True)
+def _authorized_system():
+    """THIS FILE'S SUBJECT IS WHAT REACHES THE VENUE, so it has to run
+    as a system that is allowed to send something.
+
+    pmus.submit_fok gained a fail-closed authorization check at the
+    venue boundary on 2026-09-21. Unbound, it denies -- correctly, since
+    a process that cannot read the kill switch has no business placing
+    an order -- and these ten tests then assert on params that were
+    never built.
+
+    The gate is armed here with a permissive snapshot, so a refusal
+    inside this file still means what it has always meant: the adapter
+    or the preview guard refused, not the kill switch. Tests that the
+    gate itself should stop live in test_execution_gate.py, where the
+    denial IS the subject.
+
+    The injection hook refuses to run outside pytest and no production
+    flag is touched."""
+    import time
+    _gate._install_snapshot_for_tests(_gate.Snapshot(
+        paused=False, venue="polymarket-us", copy_halted=False,
+        loss_stop=False, overspend=False, read_at=time.time(),
+        ok=True, why="test: authorized"))
+    yield
+    _gate._restore_for_tests()
 
 
 # ── a recording stand-in for the venue SDK ───────────────────────────
