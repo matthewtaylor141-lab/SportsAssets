@@ -217,3 +217,45 @@ def _override_state_does_not_leak():
     yield
     for n, v in saved.items():
         setattr(_le, n, v)
+
+
+@pytest.fixture(autouse=True)
+def _the_suite_runs_as_an_authorized_system():
+    """Arm the order gate by default, and restore after every test.
+
+    Since 2026-09-21 pmus.submit_fok and pmus.close_position consult
+    execution_gate.authorize() before they touch the venue. Unbound --
+    which is what a test process is -- the gate DENIES, because a
+    process that cannot read the kill switch has no business placing an
+    order. That is right in production and wrong as a default here: it
+    turned 54 benches across five files into failures about
+    authorization when their subject is what the adapter puts on the
+    wire.
+
+    So the suite runs as a system that is permitted to trade, exactly
+    as those benches already assume settings().copy_probe_enabled is
+    True. A refusal inside an ordinary test then still means what it
+    always meant -- the adapter, the preview guard or a breaker refused
+    -- rather than "the gate was never bound".
+
+    WHAT THIS DOES NOT WEAKEN. Tests whose SUBJECT is the gate install
+    their own snapshot per test (test_execution_gate.py) and override
+    this one; test_an_unbound_gate_denies unbinds inside the test body
+    and still sees a denial. And the structural guarantee does not live
+    in a snapshot at all: test_order_route_census.py walks the AST and
+    fails if any order path stops being gated, which no fixture can
+    paper over.
+
+    Same stance as the two fixtures above: snapshot, then restore, so a
+    test inherits nothing and leaves nothing.
+    """
+    import time
+
+    from sportsassets import execution_gate as _gate
+
+    _gate._install_snapshot_for_tests(_gate.Snapshot(
+        paused=False, venue="polymarket-us", copy_halted=False,
+        loss_stop=False, overspend=False, read_at=time.time(),
+        ok=True, why="test suite: authorized"))
+    yield
+    _gate._restore_for_tests()
