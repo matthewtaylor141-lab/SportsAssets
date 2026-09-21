@@ -200,6 +200,30 @@ def bind(loop, pool) -> None:
              "against the live kill switch")
 
 
+async def bind_current_loop() -> bool:
+    """Bind the gate to the running loop and the service's pool.
+
+    LIVES HERE, NOT IN THE SERVICES, so it can be exercised without
+    importing a workers package that pulls in the whole notification
+    stack. The test that proves production binding should not be
+    skippable because an unrelated dependency is missing from the
+    environment -- which is exactly what happened on 2026-09-21.
+
+    Never raises: a service that cannot bind still starts, and starts
+    refusing orders rather than permitting them.
+    """
+    from .db import get_pool
+
+    try:
+        pool = await get_pool()
+        bind(asyncio.get_running_loop(), pool)
+        return True
+    except Exception:  # noqa: BLE001 — unbound denies, so boot continues
+        log.exception("execution gate NOT bound -- every order this "
+                      "process attempts will be refused until it is")
+        return False
+
+
 def unbind() -> None:
     with _B.lock:
         _B.loop = None
@@ -286,6 +310,36 @@ def _current() -> Snapshot:
         s = Snapshot()
         s.why = ("execution gate is not bound to a loop and pool, so the "
                  "kill switch cannot be read from this process")
+        return s
+
+    # CALLED FROM THE LOOP'S OWN THREAD? Then a blocking read is not
+    # available: run_coroutine_threadsafe would schedule the coroutine
+    # on the very loop this thread is blocking, and .result() would wait
+    # for something that can never run. It does not hang -- the timeout
+    # catches it -- but it denies for the wrong reason and burns
+    # READ_TIMEOUT_S doing it.
+    #
+    # Production never lands here: every order path calls submit_fok
+    # through asyncio.to_thread, so authorization happens on a worker
+    # thread. This is for the caller who checks early from async code,
+    # and for any future path that forgets. Such a caller gets the
+    # snapshot if it is inside the staleness bound, and a denial if it
+    # is not. The authoritative read still happens at the submission
+    # itself, on the worker thread, which is the check that matters.
+    try:
+        asyncio.get_running_loop()
+        on_loop_thread = True
+    except RuntimeError:
+        on_loop_thread = False
+
+    if on_loop_thread:
+        age = time.time() - snap.read_at
+        if snap.ok and age <= MAX_STALE_S:
+            return snap
+        s = Snapshot()
+        s.why = ("authorization was requested on the event loop's own "
+                 "thread, where a blocking read is impossible, and no "
+                 "snapshot is within %.0fs" % MAX_STALE_S)
         return s
 
     try:

@@ -114,14 +114,9 @@ async def lifespan(_: FastAPI):
     # An operator-invoked endpoint is still an order route. Unbound, the
     # gate denies, so a failure here costs the desk its ability to trade
     # and costs nothing else.
-    try:
-        import asyncio as _aio
-
-        from .. import execution_gate as _gate
-        from ..db import get_pool as _gp
-        _gate.bind(_aio.get_running_loop(), await _gp())
-    except Exception:  # noqa: BLE001
-        logging.getLogger(__name__).exception(
+    from .. import execution_gate as _gate
+    if not await _gate.bind_current_loop():
+        logging.getLogger(__name__).error(
             "execution gate NOT bound — the desk will refuse every order "
             "until it is, which is the safe direction but not a working "
             "desk")

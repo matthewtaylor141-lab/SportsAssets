@@ -219,43 +219,60 @@ def _override_state_does_not_leak():
         setattr(_le, n, v)
 
 
+# MODULES WHOSE SUBJECT IS WHAT THE ADAPTER PUTS ON THE WIRE.
+#
+# An explicit allowlist, not a suite-wide default, and the difference
+# matters. _install_snapshot_for_tests does not merely supply a
+# snapshot: it REPLACES execution_gate._current, so bind(), read_state()
+# and the whole live read path are never exercised by anything running
+# under it. Armed suite-wide, a broken production binding would look
+# exactly like a working one -- no test would ever call the code that
+# binds.
+#
+# So the default is the production default: unbound, which denies. Only
+# the modules below opt in, each because its subject is the params the
+# adapter builds rather than whether the system may trade. Every other
+# test in the suite -- including any future one that accidentally
+# reaches a submission path -- meets the real gate and fails loudly.
+#
+# The live initialization and refresh path is exercised, with this
+# fixture explicitly off, in test_execution_gate_integration.py.
+_GATE_ARMED_MODULES = frozenset({
+    "test_pmus",                 # what submit_fok sends
+    "test_pmus_commission",      # fee fields on the created order
+    "test_preview_guard",        # the venue-cost guard, before the create
+    "test_s4_review_pins",       # pinned wire shapes
+    "test_side_intent",          # which side the intent selects
+    "test_calibration_adapter",  # the adapter's own wire contract
+})
+
+
 @pytest.fixture(autouse=True)
-def _the_suite_runs_as_an_authorized_system():
-    """Arm the order gate by default, and restore after every test.
+def _gate_default_is_the_production_default(request):
+    """Arm the order gate ONLY for the allowlisted modules above.
 
-    Since 2026-09-21 pmus.submit_fok and pmus.close_position consult
-    execution_gate.authorize() before they touch the venue. Unbound --
-    which is what a test process is -- the gate DENIES, because a
-    process that cannot read the kill switch has no business placing an
-    order. That is right in production and wrong as a default here: it
-    turned 54 benches across five files into failures about
-    authorization when their subject is what the adapter puts on the
-    wire.
-
-    So the suite runs as a system that is permitted to trade, exactly
-    as those benches already assume settings().copy_probe_enabled is
-    True. A refusal inside an ordinary test then still means what it
-    always meant -- the adapter, the preview guard or a breaker refused
-    -- rather than "the gate was never bound".
-
-    WHAT THIS DOES NOT WEAKEN. Tests whose SUBJECT is the gate install
-    their own snapshot per test (test_execution_gate.py) and override
-    this one; test_an_unbound_gate_denies unbinds inside the test body
-    and still sees a denial. And the structural guarantee does not live
-    in a snapshot at all: test_order_route_census.py walks the AST and
-    fails if any order path stops being gated, which no fixture can
-    paper over.
-
-    Same stance as the two fixtures above: snapshot, then restore, so a
-    test inherits nothing and leaves nothing.
+    Everything else runs with the gate unbound, which is what a process
+    that cannot read the kill switch should be: refusing. Restoration
+    is unconditional, so an armed module leaves nothing behind for the
+    next one -- the same snapshot-and-restore stance as the two fixtures
+    above.
     """
-    import time
-
     from sportsassets import execution_gate as _gate
 
+    mod = getattr(request.node, "module", None)
+    name = mod.__name__.rsplit(".", 1)[-1] if mod else ""
+    if name not in _GATE_ARMED_MODULES:
+        # Production default. Make sure a previous module's arming
+        # cannot leak in: restore before yielding as well as after.
+        _gate._restore_for_tests()
+        yield
+        _gate._restore_for_tests()
+        return
+
+    import time
     _gate._install_snapshot_for_tests(_gate.Snapshot(
         paused=False, venue="polymarket-us", copy_halted=False,
         loss_stop=False, overspend=False, read_at=time.time(),
-        ok=True, why="test suite: authorized"))
+        ok=True, why="allowlisted adapter-behaviour test"))
     yield
     _gate._restore_for_tests()

@@ -450,22 +450,20 @@ async def _bind_execution_gate() -> None:
     switch has no business sending orders -- but it means binding is not
     optional, it is what makes the gate a control rather than an outage.
 
-    It is awaited BEFORE the loops start. The workers service registers
+    It is awaited BEFORE the loops start. This service registers
     whale_exits, the mirror reconciler and underdog, all of which can
     reach pmus.submit_fok; none of them may run a tick against an
     unbound gate, because "denied because nothing was bound" and
     "denied because we are paused" would be indistinguishable in the
     logs at exactly the wrong moment.
+
+    The work is in execution_gate.bind_current_loop so it can be tested
+    without importing this module, which pulls in the notification
+    stack and fails on a missing dependency in some environments.
     """
     from .. import execution_gate as gate
-    from ..db import get_pool
 
-    try:
-        pool = await get_pool()
-        gate.bind(asyncio.get_running_loop(), pool)
-    except Exception:  # noqa: BLE001 — unbound denies, so boot continues
-        log.exception("execution gate NOT bound -- every order this "
-                      "process attempts will be refused until it is")
+    await gate.bind_current_loop()
 
 
 async def main() -> None:
