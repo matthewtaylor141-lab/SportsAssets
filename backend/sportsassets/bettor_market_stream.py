@@ -118,6 +118,14 @@ class MarketStream:
     the lock and returns plain data.
     """
 
+    # THE EVIDENCE CLASS BELONGS TO THE TRANSPORT, NOT THE DECISION.
+    # A socket carrying live venue bytes produces PROSPECTIVE_SHADOW; a
+    # replaying transport reading a file produces REPLAY_DECISION. The
+    # loop used to stamp PROSPECTIVE_SHADOW on every record it made,
+    # which would have labelled a replayed book as a live one. A
+    # subclass that does not speak to the venue must override this.
+    evidence_class = "PROSPECTIVE_SHADOW"
+
     def __init__(self, key_id: str, secret_key: str, *,
                  on_book=None, on_trade=None, autostart: bool = False) -> None:
         self._key_id = key_id
@@ -236,6 +244,17 @@ class MarketStream:
         out.update({"book": rec["book"], "source_ts": rec["source_ts"],
                     "received_at": rec["received_at_iso"],
                     "venue_state": rec["state"],
+                    # THE VENUE'S OWN TRADED-VOLUME COUNTER, carried on
+                    # every observation so the decision journal becomes
+                    # a TIME SERIES of it. The research capture samples
+                    # each market roughly once (617 of 620 markets seen
+                    # exactly once in 24 h), so the counter there can
+                    # never be differenced and no day's volume can be
+                    # derived from it. Differencing needs repeated
+                    # observation of the SAME market, which is what
+                    # this loop does and the sampler does not.
+                    "stats_shares_traded": (rec.get("stats") or {}).get(
+                        "sharesTraded"),
                     "receipt_age_s": round(now - rec["received_at"], 4)})
 
         # 4. A BOOK FROM A PREVIOUS CONNECTION IS NOT A LIVE BOOK.

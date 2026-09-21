@@ -92,6 +92,14 @@ def assess(row: dict, *, tick: float = DEFAULT_TICK) -> dict:
            "state": state, "included": False, "reason": None,
            "spread": None, "spread_ticks": None,
            "top_of_book_qty": _f(row.get("bidDepth")),
+           # CARRIED, NOT FILTERED ON. Which side of the contract these
+           # prices describe is needed downstream -- an observation
+           # whose leg is unnamed is refused as NO_OUTCOME_IDENTITY by
+           # the adapter, and that refusal is counted there. The
+           # SELECTION RULE is untouched: adding a leg test here would
+           # be a new rule under an old version.
+           "outcome_leg": (row.get("outcomeLeg") or row.get("outcome_leg")
+                           or row.get("leg")),
            "universe": UNIVERSE_VERSION}
 
     if row.get("closed") or row.get("archived"):
@@ -140,6 +148,12 @@ def select(rows, *, max_markets: int = MAX_MARKETS,
         "considered": len(assessed),
         "eligible": len(included),
         "selected": len(chosen),
+        # VISIBLE BEFORE THE LOOP STARTS. A selected market whose side
+        # is unnamed produces a REJECTED record on every update, and
+        # discovering that from the refusal histogram after an hour is
+        # too late.
+        "selected_without_outcome_leg": sum(
+            1 for a in chosen if not a.get("outcome_leg")),
         "over_cap": max(0, len(included) - len(chosen)),
         "slugs": [a["slug"] for a in chosen],
         "detail": chosen,

@@ -23,12 +23,13 @@ from collections.abc import Awaitable, Callable
 
 from .. import procmem
 from ..db import heartbeat
-from . import (analytics, bettor_state, chain_listener, copy_sweep,
-               dispatcher, edge_marks, institutional_md,
-               metadata_refresher, mirror_live, mirror_shadow, poller,
-               premap, price_path, reconciler, retention,
-               rn1_observability, roster, roster_auto, shadow_bettor,
-               shadow_experimental, shadow_rn1, underdog, whale_exits)
+from . import (analytics, bettor_live_loop, bettor_state,
+               chain_listener, copy_sweep, dispatcher, edge_marks,
+               institutional_md, metadata_refresher, mirror_live,
+               mirror_shadow, poller, premap, price_path, reconciler,
+               retention, rn1_observability, roster, roster_auto,
+               shadow_bettor, shadow_experimental, shadow_rn1,
+               underdog, whale_exits)
 
 # THE ARENA CAP, AT IMPORT (2026-09-05). sportsassets-workers was
 # OOM-killed at 2 GiB thirteen times between 17:59:41 and 20:21:49:
@@ -393,6 +394,24 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     ("institutional_md", institutional_md.run),
     ("shadow_experimental", shadow_experimental.run),
     ("shadow_rn1", shadow_rn1.run),
+    # BETTOR LIVE OBSERVATION -- DECISION ONLY (isolated release).
+    #
+    # Streams a selected universe of at most 100 markets, decides on
+    # every book update, and writes every decision AND every refusal to
+    # its own three tables. It holds no order path: MAX_CONTRACTS
+    # defaults to 0, no submit/cancel/close call is reachable from its
+    # import closure, and a test asserts that over the source rather
+    # than over behaviour.
+    #
+    # REGISTERED LAST AMONG THE VENUE READERS, so a cold boot fires the
+    # existing loops' opening reads before this one's discovery listing.
+    #
+    # INERT WITHOUT THE CREDENTIAL, and inert without a durable store:
+    # absent PMUS_KEY_ID / PMUS_SECRET_KEY it logs and returns, and if
+    # no store survives a redeploy it REFUSES TO START rather than
+    # producing evidence that the next deploy deletes.
+    # BETTOR_LIVE_LOOP=off stops it outright, with no deploy.
+    ("bettor_live", bettor_live_loop.main),
     ("memory", memory_watch),
 ]
 

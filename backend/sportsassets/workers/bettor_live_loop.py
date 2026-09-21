@@ -20,48 +20,43 @@ establish that our order filled -- we hold no order and queue position
 is unobservable. Trades are counted as TOUCHES.
 
 --------------------------------------------------------------------
-WHAT THE ACTIVATION REVIEW FOUND, AND WHERE EACH FIX LIVES
+WHAT THE SECOND ACTIVATION REVIEW FOUND, AND WHERE EACH FIX LIVES
 --------------------------------------------------------------------
 
-DURABILITY. `BETTOR_LIVE_STATE` defaulted to unset, so the proposed
-deployment would have kept every decision in memory and lost all of it
-on the first redeploy. There is now a default path under a declared
-directory, writes are flushed and fsync'd, failures are COUNTED rather
-than logged and forgotten, and `main()` RECOVERS from the journal on
-start. The harness's restart section exercised `ShadowLoop.restore`; it
-said nothing about whether the worker's own entry point recovers, and
-it did not.
+STORAGE THAT DELETES ITSELF. `/var/tmp/bettor` passes every fsync and
+every atomic replace, and a REDEPLOY throws the whole container away.
+Durability now lives in `bettor_live_store`: the default backend is
+POSTGRES on the database the target service already holds, and a file
+backend is REFUSED unless the path is declared to be a mounted disk.
+Recovery is O(cursors), not O(journal) -- the journal is evidence, the
+cursor table is position, and a month of evidence costs nothing to
+restart against.
 
-UNBOUNDED COLLECTIONS. `records`, `touches` and `decided_ids` all grew
-without limit in a process with a hard memory ceiling -- and
-`sportsassets-workers` was OOM-killed thirteen times in one evening at
-2 GiB. `records` and `touches` are now bounded rings kept only for
-reporting; the journal on disk is the record. Dedup no longer keeps a
-set of every observation ever seen: it keeps ONE source timestamp per
-slug and refuses anything not strictly newer, which is bounded by the
-subscription count and is also stricter.
+BLOCKING I/O ON THE SHARED EVENT LOOP. The previous version's docstring
+claimed journal writes ran in a thread. They did not: `_record` fsynced
+inline inside `decide_slug`, which `main()` calls directly. Records now
+go to a bounded OUTBOX and are flushed in batches; the flush is the
+only thing that touches storage, and a full outbox is COUNTED rather
+than silently dropped.
 
-DOUBLE COUNTING. `build()` installed `on_trade=loop.on_trade` AND
-`main()` drained trades into the same handler, so every trade was
-counted twice -- reproduced: one trade, `trades_seen=2`. The stream
-callback is no longer installed for trades. Draining is the single
-path, which also keeps the work off the socket thread.
+A SETTLEMENT SCHEDULER THAT COULD NOT MAKE PROGRESS. Reading "the 25
+oldest observed" means a permanently pending contract is permanently
+the oldest. Scheduling state is now per contract and persisted:
+never-attempted first, then due-by-backoff, terminal contracts retired
+and never read again.
 
-THREAD SAFETY. `_dirty` was a bare set written by the stream thread and
-read-and-cleared by the worker. It is now guarded by the same kind of
-lock the stream uses for its own state.
+A SELECTION PATH NOBODY HAD RUN. The harness supplied 16 books that the
+universe rule rejects, so it demonstrated the decision chain with
+inputs handed to it, not discovery and selection. `main()` now accepts
+an injected client and stream factory -- production passes neither --
+so `scripts/bettor_startup_path.py` can drive paginated discovery ->
+selection -> subscription -> decisions through this entry point.
 
-LIFECYCLE. `stream.stop()` is in a `finally`, so cancellation -- which
-is how `workers/all.py` shuts a loop down -- cannot orphan the socket
-thread.
-
-DISCOVERY. A failed discovery used to leave the loop running forever
-over an empty universe, reporting zero decisions as though the market
-were quiet. It now refuses to start, and discovery is REFRESHED on a
-clock with expired subscriptions dropped.
-
-THE EVENT LOOP. Journal writes and `report()` are blocking; both now
-run in a thread so eighteen sibling loops are not stalled by our I/O.
+Earlier review, fixes retained: durable-by-default rather than
+memory-only; bounded rings; trades drained once rather than drained and
+called back; `_dirty` behind a lock; `stream.stop()` in a finally;
+discovery refreshed with expired subscriptions pruned; a failed
+discovery refusing to start rather than running over an empty universe.
 
 Kill: BETTOR_LIVE_LOOP=off.
 """
@@ -74,11 +69,12 @@ import logging
 import os
 import threading
 import time
+import uuid
 from collections import deque
 from datetime import datetime, timezone
 
 from .. import bettor_decision_engine as de
-from .. import bettor_live_read as live
+from .. import bettor_live_store as store_mod
 from .. import bettor_market_stream as ms
 from .. import bettor_observation_adapter as oa
 from .. import bettor_settlement_ingest as si
@@ -87,7 +83,7 @@ from .. import bettor_universe as uni
 
 log = logging.getLogger(__name__)
 
-LOOP_VERSION = "BETTOR_LIVE_LOOP_V2"
+LOOP_VERSION = "BETTOR_LIVE_LOOP_V3"
 PROSPECTIVE = "PROSPECTIVE_SHADOW"
 KILL_ENV = "BETTOR_LIVE_LOOP"
 
@@ -95,24 +91,14 @@ MAX_SOURCE_AGE_S = 10.0
 MAX_RECEIPT_AGE_S = 5.0
 POLL_S = 0.2
 
-# DURABLE BY DEFAULT. Unset meant memory-only, and memory-only meant the
-# deployment's whole deliverable vanished on redeploy.
-DEFAULT_STATE_DIR = "/var/tmp/bettor"
-JOURNAL_NAME = "decisions.jsonl"
-LEDGER_NAME = "ledger.json"
-
-# In-memory rings, for REPORTING ONLY. The journal is the record.
+# In-memory rings, for REPORTING ONLY. The store holds the record.
 RECORD_RING = 2000
 TOUCH_RING = 5000
 
-# Discovery is refreshed, and subscriptions that leave the universe are
-# dropped. Without this the subscription set only ever grows: ended
-# games hold their last book forever and new markets stop streaming.
 DISCOVERY_EVERY_S = 900.0
-# Settlement is read on a slower clock and in bounded batches: it is a
-# REST call per contract and it shares a gateway with the money path.
 SETTLEMENT_EVERY_S = 600.0
 SETTLEMENT_BATCH = 25
+LEDGER_EVERY_S = 60.0
 
 
 def enabled() -> bool:
@@ -123,54 +109,72 @@ def _now():
     return datetime.now(timezone.utc)
 
 
-def state_dir() -> str:
-    return os.environ.get("BETTOR_LIVE_STATE_DIR") or DEFAULT_STATE_DIR
-
-
 class LiveLoop:
     """Stream in, decisions out, accounting reconciled. Never trades."""
 
-    def __init__(self, stream, *, fees=None, opening_cash: float = 0.0,
-                 max_contracts: float = 0.0, leg_of=None,
-                 state_path: str | None = None,
-                 ledger_path: str | None = None):
+    def __init__(self, stream, *, store=None, fees=None,
+                 opening_cash: float = 0.0, max_contracts: float = 0.0,
+                 leg_of=None, boot_id: str | None = None):
+        # ONE IDENTITY PER PROCESS BOOT, stamped on every record and on
+        # the ledger. Without it "the worker restarted and kept its
+        # records" cannot be checked: a stream epoch increments on a
+        # RECONNECT, which is not a restart, and a row count that rose
+        # says nothing about which process wrote the new rows.
+        self.boot_id = boot_id or uuid.uuid4().hex[:16]
         self.stream = stream
+        self.store = store or store_mod.MemoryStore()
         self.fees = fees or de.Fees.published_pmus(
             os.environ.get("BETTOR_FEE_DATE")
             or _now().strftime("%Y-%m-%d"))
         self.max_contracts = max_contracts
         self.leg_of = dict(leg_of or {})
-        self.state_path = state_path
-        self.ledger_path = ledger_path
 
         self.shadow = sl.ShadowLoop(opening_cash=opening_cash,
                                     fees=self.fees,
                                     venue="polymarket-us",
                                     account_class="institutional")
         # _dirty CROSSES THREADS: the socket thread adds, the worker
-        # takes. A bare set was being iterated and cleared while another
-        # thread mutated it.
+        # takes.
         self._lock = threading.Lock()
         self._dirty: set = set()
 
-        # BOUNDED. Reporting rings, not the record.
         self.records: deque = deque(maxlen=RECORD_RING)
         self.touches: deque = deque(maxlen=TOUCH_RING)
         self.counters: dict = {}
 
-        # DEDUP WITHOUT AN UNBOUNDED SET. One source timestamp per slug,
-        # and anything not strictly newer is refused. Bounded by the
-        # subscription count, and stricter than a seen-set: an old
-        # observation redelivered after a newer one is refused too.
-        self._last_ts: dict = {}
+        # THE OUTBOX. Records wait here for a batched flush instead of
+        # fsyncing inline on the shared event loop. Bounded, and
+        # overflow is counted by name.
+        self._outbox: deque = deque()
+        self._cursor_dirty: set = set()
+
+        # ONE CURSOR PER MARKET: the dedup position AND the settlement
+        # schedule. Bounded, persisted, and the only thing recovery
+        # needs to read.
+        self.cursors: dict = {}
+
+        self.event_at: dict = {}
 
         self.started_at: str | None = None
         self.stopped_at: str | None = None
-        self.journal_written = 0
-        self.journal_failures = 0
+        self.records_written = 0
+        self.persist_failures = 0
+        # DURABILITY IS NOT A CONSTANT. "At most two seconds lost"
+        # assumes every flush succeeds. Under a database outage the
+        # uncommitted interval grows until the outbox overflows, and
+        # these are the numbers that say so.
+        self.flush_failures = 0
+        self.records_dropped = 0
+        self.first_drop_at: str | None = None
+        self.last_drop_at: str | None = None
+        self.last_commit_at: float | None = None
+        self.last_flush_error: str | None = None
         self.recovered: dict | None = None
+        self.store_started: dict | None = None
+        self.discovery: dict | None = None
         self.settlement_runs: list = []
-        self._seen_contracts: dict = {}
+        self.outcomes: dict | None = None
+        self.prunes: list = []
 
     # ── counters ─────────────────────────────────────────────────────
 
@@ -185,13 +189,53 @@ class LiveLoop:
     def on_trade(self, rec: dict) -> None:
         """A trade is a TOUCH at most, never a fill.
 
-        THE ONLY PATH. `build()` no longer installs this as a stream
+        THE ONLY PATH. `build()` does not install this as a stream
         callback: it was installed AND drained, so one trade counted
-        twice. Draining is also the right place -- it keeps the work
-        off the socket thread.
+        twice.
         """
         self.bump("trades_seen")
         self.touches.append(rec)
+
+    # ── cursors ──────────────────────────────────────────────────────
+
+    def _cursor(self, slug: str) -> dict:
+        c = self.cursors.get(slug)
+        if c is None:
+            c = store_mod.new_cursor(time.time())
+            ev = self.event_at.get(slug)
+            if ev is not None:
+                # THE EVENT'S OWN TIMING, from the venue listing, so a
+                # settlement check can be scheduled shortly after the
+                # event rather than on whatever rung of a blind backoff
+                # the contract happens to be on.
+                c["event_at"] = ev
+            self.cursors[slug] = c
+            # A NEW CURSOR IS NEW DURABLE STATE, not a cached copy of
+            # something the store already has, so it is dirty until it
+            # is flushed and cannot be evicted before that.
+            self._cursor_dirty.add(slug)
+            self._evict_cursors()
+        return c
+
+    def _evict_cursors(self) -> None:
+        """The in-memory map is a CACHE. The settlement queue is read
+        from the STORE, so evicting here loses no future work -- but an
+        UNFLUSHED cursor is an update, not a cache entry, so it is
+        never evicted."""
+        ev = store_mod.evict_to(self.cursors,
+                                store_mod.CURSOR_MAX_IN_MEMORY,
+                                dirty=self._cursor_dirty)
+        if ev["evicted"]:
+            self.bump("cursor_evicted", ev["evicted"])
+            if ev["evicted_unresolved"]:
+                # A CACHE MISS, NOT A LOSS: the row is still in the
+                # store and comes back when it is due. Counted because
+                # a persistently full cache means every settlement pass
+                # pays a store read.
+                self.bump("cursor_cache_miss_unresolved",
+                          ev["evicted_unresolved"])
+        if ev["kept_dirty"]:
+            self.bump("cursor_kept_unflushed", ev["kept_dirty"])
 
     # ── the loop ─────────────────────────────────────────────────────
 
@@ -215,7 +259,13 @@ class LiveLoop:
                                  max_source_age_s=MAX_SOURCE_AGE_S,
                                  max_receipt_age_s=MAX_RECEIPT_AGE_S)
         self.bump("books_examined")
-        base = {"loop": LOOP_VERSION, "evidence_class": PROSPECTIVE,
+        base = {"loop": LOOP_VERSION, "kind": "DECISION",
+                # FROM THE TRANSPORT. A replaying transport says
+                # REPLAY_DECISION; only a live socket says
+                # PROSPECTIVE_SHADOW. This was hard-coded, so a replay
+                # would have been journalled as live observation.
+                "evidence_class": getattr(self.stream, "evidence_class",
+                                          PROSPECTIVE),
                 "market_id": slug, "decided_at": decided_at,
                 "source_ts": at.get("source_ts"),
                 "received_at": at.get("received_at"),
@@ -223,6 +273,14 @@ class LiveLoop:
                 "receipt_age_s": at.get("receipt_age_s"),
                 "venue_state": at.get("venue_state"),
                 "stream_epoch": at.get("epoch"),
+                # CARRIED ON EVERY RECORD so the journal is a time
+                # series of the venue's traded-volume counter. The
+                # research capture cannot be differenced -- 617 of its
+                # 620 markets were observed exactly once in 24 hours --
+                # and that is why no day's volume can be derived from
+                # it. This loop observes the same market on every
+                # update, so its journal can.
+                "stats_shares_traded": at.get("stats_shares_traded"),
                 "fee_schedule": self.fees.source,
                 "fee_status": self.fees.status}
 
@@ -234,12 +292,15 @@ class LiveLoop:
             return rec
 
         src = at.get("source_ts")
-        prev = self._last_ts.get(slug)
+        cur = self._cursor(slug)
+        prev = cur.get("last_source_ts")
         if prev is not None and src is not None and src <= prev:
             self.bump("duplicate_observation_refused")
             return None
-        self._last_ts[slug] = src
-        self._seen_contracts[slug] = decided_at
+        cur["last_source_ts"] = src
+        cur["last_decided_at"] = decided_at
+        cur["last_seen_at"] = time.time()
+        self._cursor_dirty.add(slug)
 
         leg = self.leg_of.get(slug)
         row = ms.to_observation(slug, at, outcome_leg=leg)
@@ -287,142 +348,318 @@ class LiveLoop:
     # ── durability ───────────────────────────────────────────────────
 
     def _record(self, rec: dict) -> None:
-        self.records.append(rec)
-        if not self.state_path:
-            # NAMED. A loop with nowhere to write is a loop whose whole
-            # deliverable dies with the process, and that must not be a
-            # silent default.
-            self.bump("record_not_persisted_no_path")
-            return
-        try:
-            with open(self.state_path, "a") as fh:
-                fh.write(json.dumps(rec, default=str) + "\n")
-                fh.flush()
-                os.fsync(fh.fileno())
-            self.journal_written += 1
-        except OSError as exc:  # noqa: BLE001
-            self.journal_failures += 1
-            self.bump("persist_failed")
-            self.bump("persist_failed:%s" % type(exc).__name__)
-            log.warning("decision persist failed: %s", exc)
+        """Ring for reporting, outbox for the store. NO I/O HERE.
 
-    def save_ledger(self) -> bool:
-        """The shadow ledger, atomically. A crash cannot truncate it."""
-        if not self.ledger_path:
-            return False
-        try:
-            tmp = self.ledger_path + ".tmp"
-            with open(tmp, "w") as fh:
-                fh.write(self.shadow.snapshot())
-                fh.flush()
-                os.fsync(fh.fileno())
-            os.replace(tmp, self.ledger_path)
-            return True
-        except OSError as exc:  # noqa: BLE001
-            self.journal_failures += 1
-            self.bump("ledger_persist_failed")
-            log.warning("ledger persist failed: %s", exc)
-            return False
-
-    def recover(self) -> dict:
-        """Rebuild dedup state and the ledger from disk. IN THE WORKER.
-
-        The harness proved `ShadowLoop.restore` works. It did not prove
-        that the worker's entry point calls it, and it did not.
-
-        The journal is replayed for its LATEST source timestamp per
-        slug, so a restart cannot re-decide an observation it already
-        recorded. A malformed line is counted and skipped: a journal
-        truncated by a kill must not stop recovery.
+        This used to open the journal and fsync it, on the event loop
+        shared with eighteen sibling worker loops, once per decision.
         """
-        out = {"journal_lines": 0, "journal_bad_lines": 0,
-               "slugs_recovered": 0, "ledger_restored": False,
-               "journal_path": self.state_path,
-               "ledger_path": self.ledger_path}
-        if self.state_path and os.path.exists(self.state_path):
-            try:
-                with open(self.state_path) as fh:
-                    for line in fh:
-                        line = line.strip()
-                        if not line:
-                            continue
-                        out["journal_lines"] += 1
-                        try:
-                            r = json.loads(line)
-                        except ValueError:
-                            out["journal_bad_lines"] += 1
-                            continue
-                        slug, src = r.get("market_id"), r.get("source_ts")
-                        if slug and src:
-                            prev = self._last_ts.get(slug)
-                            if prev is None or src > prev:
-                                self._last_ts[slug] = src
-                            self._seen_contracts.setdefault(
-                                slug, r.get("decided_at"))
-            except OSError as exc:  # noqa: BLE001
-                out["journal_error"] = type(exc).__name__
-        out["slugs_recovered"] = len(self._last_ts)
+        rec.setdefault("boot_id", self.boot_id)
+        rec.setdefault("record_key", store_mod.record_key(rec))
+        rec.setdefault("enqueued_at", time.time())
+        self.records.append(rec)
+        if len(self._outbox) >= store_mod.OUTBOX_MAX:
+            # COUNTED, NEVER SILENT. A full outbox means the store is
+            # not keeping up, and a record dropped without a name is a
+            # gap nobody can see. It also marks every measurement
+            # window that overlaps it INCOMPLETE.
+            self._outbox.popleft()
+            self._note_drop(1)
+        self._outbox.append(rec)
 
-        if self.ledger_path and os.path.exists(self.ledger_path):
+    def _note_drop(self, n: int) -> None:
+        self.records_dropped += n
+        self.bump("record_dropped_outbox_full", n)
+        at = _now().isoformat()
+        if self.first_drop_at is None:
+            self.first_drop_at = at
+        self.last_drop_at = at
+
+    async def flush(self) -> dict:
+        """Batch the outbox and the dirty cursors into the store."""
+        if not self._outbox and not self._cursor_dirty:
+            return {"records": 0, "cursors": 0, "failures": 0}
+        recs = list(self._outbox)
+        self._outbox.clear()
+        dirty = {s: self.cursors[s] for s in self._cursor_dirty
+                 if s in self.cursors}
+        self._cursor_dirty.clear()
+        out = await self.store.flush(recs, dirty)
+        if out.get("failures"):
+            self.persist_failures += int(out["failures"])
+            self.flush_failures += 1
+            self.last_flush_error = out.get("error")
+            self.bump("persist_failed")
+            if out.get("error"):
+                self.bump("persist_failed:%s" % out["error"])
+            # PUT THEM BACK, KEYS AND ALL. A failed flush must not lose
+            # the batch. The records carry a CONTENT KEY, so if the
+            # commit actually succeeded and only its acknowledgment was
+            # lost, the retry is a no-op rather than a second copy.
+            dropped = 0
+            for r in reversed(recs):
+                if len(self._outbox) < store_mod.OUTBOX_MAX:
+                    self._outbox.appendleft(r)
+                else:
+                    dropped += 1
+            if dropped:
+                self._note_drop(dropped)
+            self._cursor_dirty.update(dirty)
+        else:
+            self.records_written += int(out.get("records") or 0)
+            self.last_commit_at = time.time()
+        return out
+
+    def durability_report(self) -> dict:
+        """WHAT IS ACTUALLY GUARANTEED RIGHT NOW, not in the happy case.
+
+        "At most one flush interval" holds only while flushes succeed.
+        During a database outage the uncommitted interval grows until
+        the outbox overflows, and then records are DROPPED. Every
+        measurement window that overlaps a drop is INCOMPLETE and says
+        so, because a rate computed over a window with an unrecorded
+        gap is wrong in a direction nobody can see.
+        """
+        now = time.time()
+        oldest = None
+        if self._outbox:
+            first = self._outbox[0].get("enqueued_at")
+            if first is not None:
+                oldest = round(now - first, 3)
+        return {
+            "boot_id": self.boot_id,
+            "backend": getattr(self.store, "backend", None),
+            "durable_across": list(getattr(self.store, "durable_across",
+                                           ()) or ()),
+            "store_started": self.store_started,
+            "records_written": self.records_written,
+            "uncommitted_records": len(self._outbox),
+            "oldest_uncommitted_age_s": oldest,
+            "uncommitted_cursors": len(self._cursor_dirty),
+            "flush_failures": self.flush_failures,
+            "persist_failures": self.persist_failures,
+            "last_flush_error": self.last_flush_error,
+            "seconds_since_last_commit": (
+                None if self.last_commit_at is None
+                else round(now - self.last_commit_at, 3)),
+            "records_dropped": self.records_dropped,
+            "windows_incomplete": self.records_dropped > 0,
+            "incomplete_from": self.first_drop_at,
+            "incomplete_to": self.last_drop_at,
+            "guarantee": (
+                "at most one flush interval (%.1f s) of decisions is "
+                "uncommitted WHILE FLUSHES SUCCEED. A failed flush "
+                "keeps its batch and the uncommitted interval grows; "
+                "beyond %d records the oldest are DROPPED and every "
+                "window overlapping a drop is marked incomplete"
+                % (store_mod.FLUSH_EVERY_S, store_mod.OUTBOX_MAX)),
+            "on_sigterm": (
+                "MEASURED, not assumed: `workers/all.py` installs no "
+                "SIGTERM handler, and Python's default disposition "
+                "terminates the process WITHOUT running finally blocks "
+                "(verified: exit 143, the finally never ran). A Render "
+                "restart or redeploy arrives as SIGTERM, so the final "
+                "flush does NOT run and up to one flush interval is "
+                "lost. `oldest_uncommitted_age_s` in the last report "
+                "before a restart is the size of that loss. The finally "
+                "covers CANCELLATION -- a supervisor stopping the loop "
+                "-- and the kill-switch exit, not SIGTERM"),
+            "retry_is_idempotent": (
+                "every record carries a content-derived key and the "
+                "insert is ON CONFLICT DO NOTHING, so a commit whose "
+                "acknowledgment was lost cannot be counted twice"),
+            "recovered_at_start": self.recovered,
+            "prunes": list(self.prunes),
+            "bounds": {"records_ring": RECORD_RING,
+                       "touches_ring": TOUCH_RING,
+                       "outbox_max": store_mod.OUTBOX_MAX,
+                       "cursors_cached": len(self.cursors),
+                       "cursor_cache_max": store_mod.CURSOR_MAX_IN_MEMORY},
+        }
+
+    async def save_ledger(self) -> bool:
+        ok = await self.store.save_ledger(self.shadow.snapshot())
+        if not ok:
+            self.persist_failures += 1
+            self.bump("ledger_persist_failed")
+        return ok
+
+    async def recover(self) -> dict:
+        """Rebuild position and ledger from the store. IN THE WORKER.
+
+        READS THE CURSOR TABLE, NOT THE JOURNAL. Restart time is
+        bounded by the number of markets, not by how long the worker
+        has been recording.
+        """
+        t0 = time.time()
+        loaded = await self.store.load()
+        out = {"backend": loaded.get("backend"),
+               "cursors_recovered": 0, "ledger_restored": False,
+               "journal_rows": loaded.get("journal_rows"),
+               "store_load_seconds": loaded.get("load_seconds")}
+        if loaded.get("error"):
+            out["load_error"] = loaded["error"]
+            self.bump("recover_load_failed")
+        for slug, c in (loaded.get("cursors") or {}).items():
+            self.cursors[slug] = {k: c.get(k)
+                                  for k in store_mod.CURSOR_FIELDS}
+        store_mod.evict_to(self.cursors, store_mod.CURSOR_MAX_IN_MEMORY,
+                           dirty=self._cursor_dirty)
+        out["cursors_recovered"] = len(self.cursors)
+        out["settlements_completed_at_recovery"] = sum(
+            1 for c in self.cursors.values()
+            if c.get("settle_status") in store_mod.TERMINAL_STATUSES)
+        out["settlements_outstanding_at_recovery"] = sum(
+            1 for c in self.cursors.values()
+            if store_mod.has_outstanding_obligation(c))
+
+        snap = loaded.get("ledger")
+        if snap:
             try:
-                with open(self.ledger_path) as fh:
-                    self.shadow = sl.ShadowLoop.restore(
-                        fh.read(), fees=self.fees, venue="polymarket-us",
-                        account_class="institutional")
+                self.shadow = sl.ShadowLoop.restore(
+                    snap, fees=self.fees, venue="polymarket-us",
+                    account_class="institutional")
                 out["ledger_restored"] = True
                 out["cash"] = self.shadow.ledger.cash
             except Exception as exc:  # noqa: BLE001 -- a corrupt ledger
                 out["ledger_error"] = type(exc).__name__   # must not stop
                 self.bump("ledger_restore_failed")         # the loop
+        out["recover_seconds"] = round(time.time() - t0, 4)
         self.recovered = out
+        return out
+
+    async def prune(self) -> dict:
+        out = await self.store.prune(
+            max_rows=int(os.environ.get("BETTOR_LIVE_JOURNAL_MAX_ROWS",
+                                        store_mod.JOURNAL_MAX_ROWS)),
+            cursor_retention_days=int(
+                os.environ.get("BETTOR_LIVE_CURSOR_RETENTION_DAYS",
+                               store_mod.CURSOR_RETENTION_DAYS)))
+        out["at"] = _now().isoformat()
+        self.prunes.append(out)
+        del self.prunes[:-10]
         return out
 
     # ── settlement ───────────────────────────────────────────────────
 
-    async def ingest_settlements(self, *, client=None, limit=None) -> dict:
-        """Bounded settlement reads over contracts we have observed.
+    async def settlement_due(self, *, limit=None, now=None) -> dict:
+        """THE QUEUE LIVES IN THE STORE, NOT IN THE CACHE.
 
-        BOUNDED because it is one REST call per contract against a
-        gateway shared with the money path. The oldest-seen contracts
-        go first, so a busy universe cannot starve the ones that have
-        had time to resolve.
-
-        Four outcomes stay apart, and a fifth counts what was STORED:
-        RESOLVED (the venue's settlement endpoint), RESOLVED_DERIVED
-        (converged prices -- an inference, never counted as RESOLVED),
-        PENDING, UNREADABLE, UNMATCHED, and INGESTED.
+        Reading it from `self.cursors` would mean a market stopped
+        being checked because the process was busy enough to evict it,
+        which is not a reason. The store answers, and the rows it
+        returns are merged back into the cache so the pass can update
+        them.
         """
-        n = limit or SETTLEMENT_BATCH
-        oldest = sorted(self._seen_contracts.items(),
-                        key=lambda kv: kv[1] or "")[:n]
-        if not oldest:
-            return {"counts": {}, "skipped": "no contracts observed yet"}
-        pairs = [("%s@%s" % (s, self._last_ts.get(s) or "NO_TS"), s)
-                 for s, _ in oldest]
+        t = now if now is not None else time.time()
+        got = await self.store.due_for_settlement(
+            now=t, limit=limit or SETTLEMENT_BATCH)
+        if got.get("error"):
+            self.bump("settlement_queue_read_failed")
+        for slug, c in (got.get("cursors") or {}).items():
+            if slug in self._cursor_dirty:
+                # THE CACHE IS NEWER. A cursor with unflushed updates
+                # must not be overwritten by the store's older copy, or
+                # this pass's reschedule is undone by the next pass's
+                # queue read and the contract is attempted forever at
+                # the same attempt count.
+                self.bump("settlement_cursor_kept_unflushed")
+                continue
+            merged = dict(store_mod.new_cursor(t))
+            merged.update({k: v for k, v in c.items() if v is not None})
+            existing = self.cursors.get(slug)
+            if existing is not None:
+                # The cache is newer for observation fields; the store
+                # is authoritative for the schedule.
+                merged["last_source_ts"] = existing.get("last_source_ts")
+                merged["last_decided_at"] = existing.get("last_decided_at")
+                merged["last_seen_at"] = existing.get("last_seen_at")
+            self.cursors[slug] = merged
+        self._evict_cursors()
+        return got
+
+    async def ingest_settlements(self, *, client=None, limit=None,
+                                 now=None) -> dict:
+        """Bounded settlement reads, SCHEDULED so they make progress.
+
+        THREE RULES THIS ENFORCES:
+
+        1. Only an AUTHORITATIVE resolution completes collection. A
+           derived outcome is preserved separately and the contract
+           stays queued for the venue's own answer.
+        2. A PENDING answer is a SUCCESSFUL read. It never advances the
+           failure count and can never retire a contract; a market may
+           legitimately stay open far longer than any attempt count.
+        3. A run of FAILED reads escalates to a visible status and
+           keeps its place in the queue, at the back.
+        """
+        t = now if now is not None else time.time()
+        q = await self.settlement_due(limit=limit, now=t)
+        slugs = q.get("slugs") or []
+        if not slugs:
+            return {"counts": {}, "contracts_read": 0,
+                    "outstanding": q.get("outstanding"),
+                    "skipped": ("nothing due: %s contracts still owe an "
+                                "authoritative outcome"
+                                % q.get("outstanding"))}
+        pairs = [("%s@%s" % (s, (self.cursors.get(s) or {}).get(
+            "last_source_ts") or "NO_TS"), s) for s in slugs]
         out = await si.ingest(pairs, client=client,
                               writer=self._settlement_writer)
+
+        retired = escalated = derived = 0
+        for rec in out.get("detail") or []:
+            slug = rec.get("slug")
+            c = self.cursors.get(slug)
+            if c is None:
+                continue
+            nxt = store_mod.settle_transition(
+                rec.get("status"), c.get("settle_attempts") or 0, now=t,
+                failures=c.get("settle_failures") or 0,
+                event_at=c.get("event_at"),
+                derived_at=c.get("settle_derived_at"),
+                derived_outcome=c.get("settle_derived_outcome"),
+                outcome=rec.get("outcome"))
+            retired += 1 if nxt.pop("retired") else 0
+            if nxt.get("settle_status") == store_mod.SETTLE_READ_ESCALATED:
+                escalated += 1
+            if nxt.get("settle_status") == store_mod.SETTLE_RESOLVED_DERIVED:
+                derived += 1
+            c.update(nxt)
+            self._cursor_dirty.add(slug)
+
         out["at"] = _now().isoformat()
         out["contracts_read"] = len(pairs)
+        out["completed_authoritatively"] = retired
+        out["awaiting_authoritative"] = derived
+        out["read_escalated"] = escalated
+        out["outstanding_before_pass"] = q.get("outstanding")
         self.settlement_runs.append(
             {"at": out["at"], "counts": out["counts"],
              "reconciled": out["reconciled"],
+             "contracts_read": out["contracts_read"],
+             "completed_authoritatively": retired,
+             "awaiting_authoritative": derived,
+             "read_escalated": escalated,
              "unreadable_reasons": out["unreadable_reasons"]})
         del self.settlement_runs[:-20]
         for k, v in out["counts"].items():
             self.bump("settlement:%s" % k, v)
+        self.bump("settlement_completed_authoritatively", retired)
+        if escalated:
+            self.bump("settlement_read_escalated", escalated)
         return out
 
     async def _settlement_writer(self, row: dict) -> None:
         """Settlements land in the journal beside the decisions.
 
-        The database writer (`bettor_state_store.record_settlement`) is
-        the production path and needs a pool this loop deliberately
-        does not hold. Journalling them keeps the evidence durable
-        without giving a decision-only loop a database handle.
+        The production accounting writer (`bettor_state_store.
+        record_settlement`) is deliberately NOT used: a decision-only
+        worker must not write an accounting table, and this journal is
+        the evidence it is allowed to keep.
         """
-        rec = {"loop": LOOP_VERSION, "kind": "SETTLEMENT",
-               "at": _now().isoformat(), "settlement": row}
-        await asyncio.to_thread(self._record, rec)
+        self._record({"loop": LOOP_VERSION, "kind": "SETTLEMENT",
+                      "at": _now().isoformat(), "settlement": row,
+                      "market_id": row.get("market_id") or row.get("slug")})
 
     # ── reporting ────────────────────────────────────────────────────
 
@@ -441,26 +678,41 @@ class LiveLoop:
                 "bound_s": MAX_SOURCE_AGE_S,
                 "window": "the last %d records held in memory" % len(ages)}
 
+    def settlement_schedule_report(self) -> dict:
+        """Over the CACHE, and labelled as such -- the authoritative
+        counts come from `store.outcome_report()`, which the loop logs
+        beside this one."""
+        by: dict = {}
+        for c in self.cursors.values():
+            k = c.get("settle_status") or "NEVER_ATTEMPTED"
+            by[k] = by.get(k, 0) + 1
+        return {
+            "scope": "the in-memory cursor cache, not the whole store",
+            "contracts_cached": len(self.cursors),
+            "by_status": by,
+            "completed_authoritatively": by.get(
+                store_mod.SETTLE_RESOLVED, 0),
+            "awaiting_authoritative": by.get(
+                store_mod.SETTLE_RESOLVED_DERIVED, 0),
+            "read_escalated": by.get(store_mod.SETTLE_READ_ESCALATED, 0),
+            "outstanding": sum(1 for c in self.cursors.values()
+                               if store_mod.has_outstanding_obligation(c)),
+            "policy": store_mod.describe()["settlement_schedule"],
+        }
+
     def report(self) -> dict:
         led = self.shadow.ledger
         rc = led.reconciles()
         return {
             "loop": LOOP_VERSION,
+            "boot_id": self.boot_id,
             "started_at": self.started_at, "stopped_at": self.stopped_at,
             "runtime_s": _elapsed(self.started_at, self.stopped_at),
             "stream": self.stream.stats() if self.stream else None,
+            "discovery": self.discovery,
             "counters": dict(self.counters),
             "decisions_in_ring": len(self.records),
-            "durability": {
-                "journal_path": self.state_path,
-                "ledger_path": self.ledger_path,
-                "records_written": self.journal_written,
-                "persist_failures": self.journal_failures,
-                "recovered_at_start": self.recovered,
-                "ring_bounds": {"records": RECORD_RING,
-                                "touches": TOUCH_RING,
-                                "dedup_keys": len(self._last_ts)},
-            },
+            "durability": self.durability_report(),
             "by_action": {k[7:]: v for k, v in self.counters.items()
                           if k.startswith("action:")},
             "ineligible_by_reason": {k[11:]: v
@@ -471,7 +723,8 @@ class LiveLoop:
             "blockers": {k[8:]: v for k, v in self.counters.items()
                          if k.startswith("blocker:")},
             "settlement": {"runs": list(self.settlement_runs),
-                           "contracts_observed": len(self._seen_contracts)},
+                           "schedule": self.settlement_schedule_report(),
+                           "outcomes": self.outcomes},
             "freshness": self.freshness_distribution(),
             "accounting": {
                 "ledger": rc, "fees_paid": led.fees_paid,
@@ -503,18 +756,25 @@ def _elapsed(a, b):
                   - datetime.fromisoformat(a)).total_seconds(), 3)
 
 
-def build(key_id: str, secret_key: str, *, slugs, leg_of=None,
-          state_path=None, ledger_path=None, opening_cash: float = 0.0):
+def build(key_id: str, secret_key: str, *, slugs, leg_of=None, store=None,
+          opening_cash: float = 0.0, stream_factory=None,
+          boot_id: str | None = None):
     """Wire a stream to a loop. Subscribes; does not start the socket.
 
     `on_trade` IS NOT INSTALLED as a stream callback. It used to be,
     while the caller ALSO drained trades into the same handler, so one
-    trade was counted twice -- reproduced before this was changed.
-    Draining is the single path.
+    trade was counted twice.
+
+    `stream_factory` exists so the startup-path runner can drive this
+    exact function with a replaying transport. Production passes None
+    and gets `ms.MarketStream`.
     """
-    loop = LiveLoop(None, leg_of=leg_of, state_path=state_path,
-                    ledger_path=ledger_path, opening_cash=opening_cash)
-    stream = ms.MarketStream(key_id, secret_key, on_book=loop.on_book)
+    loop = LiveLoop(None, store=store, leg_of=leg_of,
+                    opening_cash=opening_cash, boot_id=boot_id)
+    if store is not None and getattr(store, "boot_id", None) is None:
+        store.boot_id = loop.boot_id
+    factory = stream_factory or ms.MarketStream
+    stream = factory(key_id, secret_key, on_book=loop.on_book)
     loop.stream = stream
     stream.subscribe(list(slugs)[:uni.MAX_MARKETS])
     return loop, stream
@@ -529,19 +789,21 @@ def describe() -> dict:
         "driven_by": "book updates, not a timer",
         "submits_orders": False,
         "writes_accounting": False,
-        "writes_database": False,
+        "writes_database": ("its own three tables only: %s"
+                            % ", ".join(store_mod.OWN_TABLES)),
         "default_max_contracts": 0.0,
-        "deployed": False,
-        "in_workers_all": False,
         "max_source_age_s": MAX_SOURCE_AGE_S,
         "max_receipt_age_s": MAX_RECEIPT_AGE_S,
-        "durable": {"journal": JOURNAL_NAME, "ledger": LEDGER_NAME,
-                    "dir_env": "BETTOR_LIVE_STATE_DIR",
-                    "default_dir": DEFAULT_STATE_DIR,
-                    "recovered_by": "main() calls loop.recover() on start"},
+        "durable": store_mod.describe(),
+        "outcome_collection_completed_by": (
+            "an AUTHORITATIVE settlement read, and nothing else. A "
+            "derived outcome is preserved separately and the contract "
+            "stays scheduled"),
         "bounded": {"records": RECORD_RING, "touches": TOUCH_RING,
-                    "dedup": "one source timestamp per slug, not a "
-                             "set of every observation ever seen"},
+                    "outbox": store_mod.OUTBOX_MAX,
+                    "cursors": store_mod.CURSOR_MAX_IN_MEMORY,
+                    "recovery": "O(cursors); the journal is never "
+                                "replayed"},
         "trade_delivery": ("drained, never also a callback. Installing "
                            "both counted every trade twice"),
         "fills_are_simulated": (
@@ -555,10 +817,6 @@ def describe() -> dict:
 async def _discover(client=None) -> dict:
     """The bounded universe, PAGINATED, from the venue's own listing.
 
-    One page of 500 was a sample of the venue, not the venue. Discovery
-    now pages to a declared bound and reports how far it got, so a
-    universe built from a truncated listing says so.
-
     Returns a result dict with `ok`. A FAILED DISCOVERY IS NOT AN EMPTY
     UNIVERSE: the old version logged and returned `[]`, and the loop
     then ran forever reporting zero decisions as though the market were
@@ -567,7 +825,7 @@ async def _discover(client=None) -> dict:
     from .. import pmus
 
     max_pages = int(os.environ.get("BETTOR_LIVE_DISCOVERY_PAGES", "6"))
-    page_size = 500
+    page_size = int(os.environ.get("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "500"))
 
     def _list():
         client_ = client or pmus._get_client()
@@ -595,22 +853,69 @@ async def _discover(client=None) -> dict:
     sel = uni.select(rows)
     sel.update({"ok": True, "pages_read": pages,
                 "listing_truncated_at_page_bound": truncated,
-                "rows_listed": len(rows)})
+                "rows_listed": len(rows), "page_size": page_size})
     if truncated:
-        # A universe chosen from a truncated listing is a universe
-        # chosen from a prefix of the venue, and ranking by volume over
-        # a prefix is not ranking by volume.
         log.warning("bettor_live_loop: listing hit the %d-page bound; "
                     "the universe is drawn from a PREFIX of the venue",
                     max_pages)
     return sel
 
 
-async def main() -> None:
-    """The supervised loop `workers/all.py` would run. NOT REGISTERED.
+def _event_times(sel: dict) -> dict:
+    """When each selected market's event is expected to conclude.
 
-    DELIBERATELY ABSENT from `LOOPS`, and a test asserts it. Adding it
-    is the deployment and the deployment is a separate authorization.
+    Used to schedule the settlement check shortly after the event
+    rather than on whatever rung of a blind backoff the contract
+    happens to be on. Absent or unparsable means None, and the
+    scheduler falls back to the bounded backoff -- a guessed event time
+    would be worse than none.
+    """
+    out: dict = {}
+    now = time.time()
+    for d in sel.get("detail") or []:
+        slug = d.get("slug")
+        if not slug:
+            continue
+        raw = d.get("event_at") or d.get("time_to_event_s")
+        if raw is None:
+            continue
+        try:
+            v = float(raw)
+        except (TypeError, ValueError):
+            continue
+        # `time_to_event_s` is a delta; an absolute epoch is not.
+        out[slug] = now + v if abs(v) < 10 ** 8 else v
+    return out
+
+
+async def _final_flush(loop) -> None:
+    """The last batch, even though this task is being cancelled.
+
+    `workers/all.py` stops a loop by CANCELLING it. A `finally` that
+    awaits inside an already-cancelled task has its first await
+    re-raise CancelledError, so the batch the shutdown existed to save
+    is exactly the batch that is lost. `uncancel()` clears the pending
+    request for the duration of the flush; the CancelledError that
+    brought us here still propagates out of the finally.
+    """
+    t = asyncio.current_task()
+    if t is not None and t.cancelling():
+        t.uncancel()
+    try:
+        await loop.flush()
+        await loop.save_ledger()
+    except asyncio.CancelledError:      # a second cancel while flushing
+        loop.bump("final_flush_cancelled")
+
+
+async def main(*, client=None, stream_factory=None, store=None,
+               run_for_s: float | None = None) -> dict | None:
+    """The supervised loop `workers/all.py` runs.
+
+    Every keyword is None in production: `workers/all.py` calls
+    `main()`. They exist so the startup-path runner can drive discovery
+    -> selection -> subscription -> decisions through THIS function
+    rather than around it.
 
     Credentials come from the service's own environment -- the same
     `PMUS_KEY_ID` / `PMUS_SECRET_KEY` the workers already hold. Never
@@ -620,7 +925,7 @@ async def main() -> None:
 
     if not enabled():
         log.info("bettor_live_loop: disabled by %s=off", KILL_ENV)
-        return
+        return {"started": False, "why": "KILL_SWITCH"}
 
     cfg = settings()
     key_id = getattr(cfg, "pmus_key_id", None)
@@ -631,51 +936,86 @@ async def main() -> None:
         # look like "a quiet market".
         log.error("bettor_live_loop: no PMUS credentials in this "
                   "environment; not starting")
-        return
+        return {"started": False, "why": "NO_CREDENTIALS"}
 
-    d = state_dir()
+    boot_id = uuid.uuid4().hex[:16]
+    if store is None:
+        chosen = store_mod.choose(boot_id=boot_id)
+        if not chosen.get("ok"):
+            # REFUSING IS THE POINT. A run whose evidence dies on the
+            # next deploy is a run that produced nothing.
+            log.error("bettor_live_loop: no durable store (%s); not "
+                      "starting", chosen.get("why"))
+            return {"started": False, "why": "NO_DURABLE_STORE",
+                    "detail": chosen.get("why")}
+        store = chosen["store"]
     try:
-        os.makedirs(d, exist_ok=True)
-    except OSError as exc:  # noqa: BLE001
-        log.error("bettor_live_loop: state dir %s unusable (%s); "
-                  "refusing to run without durable records", d,
-                  type(exc).__name__)
-        return
+        started = await store.start()
+    except Exception as exc:  # noqa: BLE001
+        log.error("bettor_live_loop: durable store would not start (%s); "
+                  "not starting", type(exc).__name__)
+        return {"started": False, "why": "STORE_START_FAILED",
+                "detail": type(exc).__name__}
+    if not started.get("ok"):
+        return {"started": False, "why": "STORE_START_REFUSED",
+                "detail": started}
 
-    first = await _discover()
+    first = await _discover(client=client)
     if not first.get("ok"):
-        # A FAILED DISCOVERY IS NOT AN EMPTY UNIVERSE.
         log.error("bettor_live_loop: %s (%s); not starting",
                   first.get("why"), first.get("error"))
-        return
+        return {"started": False, "why": "DISCOVERY_FAILED",
+                "detail": first}
     if not first.get("slugs"):
+        # AN EMPTY UNIVERSE IS REPORTED, NOT BYPASSED. The rule is not
+        # relaxed to find something to watch.
         log.error("bettor_live_loop: discovery returned 0 eligible "
                   "markets of %d considered; not starting. Excluded: %s",
                   first.get("considered", 0),
                   json.dumps(first.get("excluded_by_reason", {})))
-        return
+        return {"started": False, "why": "EMPTY_UNIVERSE",
+                "considered": first.get("considered", 0),
+                "excluded_by_reason": first.get("excluded_by_reason", {}),
+                "pages_read": first.get("pages_read")}
 
+    # THE OUTCOME LEG COMES FROM THE LISTING. It used to be None for
+    # every market, so every observation was REJECTED as
+    # NO_OUTCOME_IDENTITY and the worker would have run for an hour
+    # producing nothing but refusals about its own wiring. Found by
+    # running the startup path end to end rather than by reading it.
+    legs = {d["slug"]: d.get("outcome_leg")
+            for d in (first.get("detail") or [])}
+    if first.get("selected_without_outcome_leg"):
+        log.warning("bettor_live_loop: %d of %d selected markets carry no "
+                    "outcome leg; their observations will be refused as "
+                    "NO_OUTCOME_IDENTITY",
+                    first["selected_without_outcome_leg"],
+                    len(first["slugs"]))
     loop, stream = build(
         key_id, secret, slugs=first["slugs"],
-        leg_of={s: None for s in first["slugs"]},
-        state_path=os.path.join(d, JOURNAL_NAME),
-        ledger_path=os.path.join(d, LEDGER_NAME),
+        leg_of={s: legs.get(s) for s in first["slugs"]},
+        store=store, stream_factory=stream_factory, boot_id=boot_id,
         opening_cash=float(os.environ.get("BETTOR_LIVE_OPENING_CASH", "0")))
     loop.max_contracts = float(
         os.environ.get("BETTOR_LIVE_MAX_CONTRACTS", "0"))
+    loop.store_started = started
+    loop.discovery = {k: v for k, v in first.items() if k != "detail"}
+    loop.event_at.update(_event_times(first))
 
-    # RECOVERY, IN THE ENTRY POINT. The harness proved ShadowLoop can
-    # restore; it said nothing about whether this function calls it.
-    rec = await asyncio.to_thread(loop.recover)
+    rec = await loop.recover()
     loop.started_at = _now().isoformat()
-    log.info("bettor_live_loop: recovered %s", json.dumps(rec, default=str))
-    log.info("bettor_live_loop: %d markets subscribed of %d considered, "
-             "fees %s (%s), journal %s",
+    log.info("bettor_live_loop: boot %s, store %s, recovered %s",
+             loop.boot_id, json.dumps(started, default=str),
+             json.dumps(rec, default=str))
+    log.info("bettor_live_loop: %d markets subscribed of %d considered "
+             "over %s pages, fees %s (%s)",
              len(first["slugs"]), first.get("considered", 0),
-             loop.fees.source, loop.fees.status, loop.state_path)
+             first.get("pages_read"), loop.fees.source, loop.fees.status)
 
     stream.start()
-    last_discovery = last_settlement = last_save = time.time()
+    t_start = time.time()
+    last_discovery = last_settlement = last_save = last_flush = t_start
+    last_prune = t_start
     cycle = 0
     try:
         while enabled():
@@ -684,10 +1024,15 @@ async def main() -> None:
                 loop.on_trade(t)
 
             now = time.time()
+            if now - last_flush >= store_mod.FLUSH_EVERY_S:
+                last_flush = now
+                await loop.flush()
+
             if now - last_discovery >= DISCOVERY_EVERY_S:
                 last_discovery = now
-                nxt = await _discover()
+                nxt = await _discover(client=client)
                 if nxt.get("ok") and nxt.get("slugs"):
+                    loop.event_at.update(_event_times(nxt))
                     keep = set(nxt["slugs"])
                     dropped = stream.prune(keep)
                     added = stream.subscribe(nxt["slugs"])
@@ -704,38 +1049,64 @@ async def main() -> None:
             if now - last_settlement >= SETTLEMENT_EVERY_S:
                 last_settlement = now
                 try:
-                    out = await loop.ingest_settlements()
-                    log.info("bettor_live_loop: settlement %s",
-                             json.dumps(out.get("counts", {})))
+                    out = await loop.ingest_settlements(client=client)
+                    loop.outcomes = await loop.store.outcome_report()
+                    log.info("bettor_live_loop: settlement %s outcomes %s",
+                             json.dumps(out.get("counts", {})),
+                             json.dumps(loop.outcomes, default=str))
                 except Exception as exc:  # noqa: BLE001
                     loop.bump("settlement_pass_failed")
                     log.warning("settlement pass failed: %s",
                                 type(exc).__name__)
 
-            if now - last_save >= 60.0:
+            if now - last_save >= LEDGER_EVERY_S:
                 last_save = now
-                # BLOCKING I/O OFF THE SHARED EVENT LOOP. Eighteen
-                # sibling loops run in this process.
-                await asyncio.to_thread(loop.save_ledger)
+                await loop.save_ledger()
+
+            if now - last_prune >= store_mod.PRUNE_EVERY_S:
+                last_prune = now
+                p = await loop.prune()
+                if p.get("journal_rows_deleted") or p.get("cursors_deleted"):
+                    log.info("bettor_live_loop: pruned %s",
+                             json.dumps(p, default=str))
 
             cycle += 1
             if cycle % 150 == 0:
-                rep = await asyncio.to_thread(loop.report)
+                rep = loop.report()
+                d = rep["durability"]
+                if d["windows_incomplete"]:
+                    log.error("bettor_live_loop: %d records DROPPED; "
+                              "measurement windows %s..%s are INCOMPLETE",
+                              d["records_dropped"], d["incomplete_from"],
+                              d["incomplete_to"])
+                if (d["oldest_uncommitted_age_s"] or 0) > 60:
+                    log.warning("bettor_live_loop: oldest uncommitted "
+                                "record is %.1f s old, %d pending, %d "
+                                "flush failures (%s)",
+                                d["oldest_uncommitted_age_s"],
+                                d["uncommitted_records"],
+                                d["flush_failures"], d["last_flush_error"])
                 log.info("bettor_live_loop: %s", json.dumps(
                     {"stream": rep["stream"], "by_action": rep["by_action"],
                      "ineligible": rep["ineligible_by_reason"],
                      "freshness": rep["freshness"],
-                     "durability": rep["durability"],
+                     "durability": d,
+                     "settlement": rep["settlement"]["schedule"],
+                     "outcomes": rep["settlement"]["outcomes"],
                      "orders_submitted": rep["orders_submitted"]},
                     default=str))
+            if run_for_s is not None and time.time() - t_start >= run_for_s:
+                break
             await asyncio.sleep(POLL_S)
     finally:
         # IN A FINALLY. `workers/all.py` shuts a loop down by
         # CANCELLING it, and a CancelledError raised at the await above
-        # would otherwise leave the socket thread running forever.
+        # would otherwise leave the socket thread running forever and
+        # the last batch of records unwritten.
         loop.stopped_at = _now().isoformat()
         stream.stop()
-        await asyncio.to_thread(loop.save_ledger)
+        await _final_flush(loop)
         log.info("bettor_live_loop: stopped; stream stop requested, "
-                 "ledger saved, %d records written, %d persist failures",
-                 loop.journal_written, loop.journal_failures)
+                 "%d records written, %d persist failures",
+                 loop.records_written, loop.persist_failures)
+    return {"started": True, "report": loop.report()}

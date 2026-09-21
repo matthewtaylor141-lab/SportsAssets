@@ -142,6 +142,11 @@ async def ingest(pairs, *, reader=None, writer=None, client=None) -> dict:
         counts[status] += 1
         rec = {"observation_id": observation_id, "slug": slug,
                "status": status, "outcome_field": res.get("outcome_field"),
+               # THE OUTCOME VALUE ITSELF, carried so a caller keeping
+               # its own schedule can store an AUTHORITATIVE outcome
+               # apart from a DERIVED one without reading the venue a
+               # second time.
+               "outcome": res.get("outcome"),
                "settled_at": res.get("settled_at"),
                "closed": res.get("closed"), "ingested": False}
         if status == UNREADABLE:

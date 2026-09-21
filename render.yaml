@@ -198,6 +198,40 @@ services:
     rootDir: .
     dockerfilePath: ./backend/Dockerfile
     dockerCommand: python -m sportsassets.workers.all
+    # NO DISK, DELIBERATELY. The decision-only observation loop
+    # (workers/bettor_live_loop) needs storage that survives a REDEPLOY,
+    # and its first design wrote to /var/tmp -- which is part of this
+    # container's writable layer and is replaced on every deploy. fsync
+    # and atomic rename say the bytes reached the device; they say
+    # nothing about whether the device is still attached to the next
+    # container.
+    #
+    # It uses POSTGRES instead, on sportsassets-db, which this service
+    # already has a connection string for. Three new tables of its own
+    # (bettor_live_journal / _cursor / _ledger), lane in every primary
+    # key, pruned to a row cap on a clock. No service change, no new
+    # credential, no new dependency.
+    #
+    # IF A DISK IS EVER PREFERRED, this is the exact block, and the
+    # consequences are stated rather than discovered:
+    #
+    #   disk:
+    #     name: bettor-live-data
+    #     mountPath: /var/bettor-data
+    #     sizeGB: 1
+    #
+    #   * a Render service with a disk CANNOT run more than one
+    #     instance, and its deploys stop the old instance before
+    #     starting the new one. That changes the deploy behaviour of
+    #     ALL EIGHTEEN loops in this process, not just the new one.
+    #   * a disk cannot be shrunk afterwards, the same permanent
+    #     commitment the database's diskSizeGB carries above.
+    #   * the worker must then also be told the path is durable:
+    #       BETTOR_LIVE_STATE=file
+    #       BETTOR_LIVE_STATE_DIR=/var/bettor-data
+    #       BETTOR_LIVE_STATE_DISK=1
+    #     Without that last flag it REFUSES to start on a file backend,
+    #     because an undeclared path is the /var/tmp mistake again.
     envVars: *backend_env
 
   # Edge-engine shadow runner (logs would-be fills; never places orders).
