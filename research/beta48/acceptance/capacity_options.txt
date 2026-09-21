@@ -1,0 +1,130 @@
+=== baseline  (minutes=240) ===
+WORKLOAD  0.78 obs/min, 240-min run, 6 reads/tick, horizons [60, 300, 900, 3600]
+          tolerance 30s, recovery 600s, read failure 0%, inherited backlog 0 tasks
+
+FEASIBILITY
+  tasks created/min : 3.11
+  tasks served/min  : 2.61
+  sustainable intake: 0.65 obs/min (now 0.78)
+  oversubscription  : 1.19x     FEASIBLE: False
+  the workload cannot be served at this budget. choices:
+      admit_less             cut intake to 0.65 observations/min, which is 84% of the current rate
+      read_more              raise the follow-up reserve from 3 to 4 reads per tick
+      watch_fewer_horizons   drop from 4 horizons to 3
+
+policy                                    obs  tasks on_time    late expired deferred    rate    sat
+BETTOR_ADMISSION_V0_NONE                  185    824     604      20     133       67   73.3%  0/208
+BETTOR_ADMISSION_V1_CAPACITY_AWARE          0     84      55      14      15        0   65.5%  8/208
+BETTOR_ADMISSION_V2_MEASURE_ONLY          185    824     604      20     133       67   73.3% 208/208
+BETTOR_ADMISSION_V3_DRAIN_TIME            185    824     604      20     133       67   73.3% 208/208
+
+COVERAGE IS NOT TIMING. Observations declined at admission:
+  BETTOR_ADMISSION_V0_NONE               0 declined, 185 admitted
+  BETTOR_ADMISSION_V1_CAPACITY_AWARE     185 declined, 0 admitted
+  BETTOR_ADMISSION_V2_MEASURE_ONLY       0 declined, 185 admitted
+  BETTOR_ADMISSION_V3_DRAIN_TIME         0 declined, 185 admitted
+
+=== read_more  (total_budget_reads=12) ===
+WORKLOAD  0.78 obs/min, 240-min run, 12 reads/tick, horizons [60, 300, 900, 3600]
+          tolerance 30s, recovery 600s, read failure 0%, inherited backlog 0 tasks
+
+FEASIBILITY
+  tasks created/min : 3.11
+  tasks served/min  : 5.22
+  sustainable intake: 1.30 obs/min (now 0.78)
+  oversubscription  : 0.60x     FEASIBLE: True
+
+policy                                    obs  tasks on_time    late expired deferred    rate    sat
+BETTOR_ADMISSION_V0_NONE                  185    824     735      27       2       60   89.2%  0/208
+BETTOR_ADMISSION_V1_CAPACITY_AWARE        180    804     715      29       0       60   88.9%  6/208
+BETTOR_ADMISSION_V2_MEASURE_ONLY          185    824     735      27       2       60   89.2%  7/208
+BETTOR_ADMISSION_V3_DRAIN_TIME            185    824     735      27       2       60   89.2% 208/208
+
+COVERAGE IS NOT TIMING. Observations declined at admission:
+  BETTOR_ADMISSION_V0_NONE               0 declined, 185 admitted
+  BETTOR_ADMISSION_V1_CAPACITY_AWARE     5 declined, 180 admitted
+  BETTOR_ADMISSION_V2_MEASURE_ONLY       0 declined, 185 admitted
+  BETTOR_ADMISSION_V3_DRAIN_TIME         0 declined, 185 admitted
+
+{
+  "arrivals_obs_per_min": 0.777,
+  "sustainable_obs_per_min": 1.304,
+
+=== fewer_horizons  (horizons_s=60,300,900) ===
+WORKLOAD  0.78 obs/min, 240-min run, 6 reads/tick, horizons [60, 300, 900]
+          tolerance 30s, recovery 600s, read failure 0%, inherited backlog 0 tasks
+
+FEASIBILITY
+  tasks created/min : 2.33
+  tasks served/min  : 2.61
+  sustainable intake: 0.87 obs/min (now 0.78)
+  oversubscription  : 0.89x     FEASIBLE: True
+
+policy                                    obs  tasks on_time    late expired deferred    rate    sat
+BETTOR_ADMISSION_V0_NONE                  185    593     556       5      18       14   93.8%  0/208
+BETTOR_ADMISSION_V1_CAPACITY_AWARE        178    572     535      14       9       14   93.5%  8/208
+BETTOR_ADMISSION_V2_MEASURE_ONLY          185    593     556       5      18       14   93.8%  8/208
+BETTOR_ADMISSION_V3_DRAIN_TIME            185    593     556       5      18       14   93.8% 208/208
+
+COVERAGE IS NOT TIMING. Observations declined at admission:
+  BETTOR_ADMISSION_V0_NONE               0 declined, 185 admitted
+  BETTOR_ADMISSION_V1_CAPACITY_AWARE     7 declined, 178 admitted
+  BETTOR_ADMISSION_V2_MEASURE_ONLY       0 declined, 185 admitted
+  BETTOR_ADMISSION_V3_DRAIN_TIME         0 declined, 185 admitted
+
+{
+  "arrivals_obs_per_min": 0.777,
+  "sustainable_obs_per_min": 0.869,
+
+=== shorter_tick  (tick_period_s=50) ===
+WORKLOAD  0.78 obs/min, 240-min run, 6 reads/tick, horizons [60, 300, 900, 3600]
+          tolerance 30s, recovery 600s, read failure 0%, inherited backlog 0 tasks
+
+FEASIBILITY
+  tasks created/min : 3.11
+  tasks served/min  : 3.60
+  sustainable intake: 0.90 obs/min (now 0.78)
+  oversubscription  : 0.86x     FEASIBLE: True
+
+policy                                    obs  tasks on_time    late expired deferred    rate    sat
+BETTOR_ADMISSION_V0_NONE                  186    828     643     105      16       64   77.7%  0/288
+BETTOR_ADMISSION_V1_CAPACITY_AWARE          0     84      62      15       7        0   73.8% 11/288
+BETTOR_ADMISSION_V2_MEASURE_ONLY          186    828     643     105      16       64   77.7% 168/288
+BETTOR_ADMISSION_V3_DRAIN_TIME            186    828     643     105      16       64   77.7% 270/288
+
+COVERAGE IS NOT TIMING. Observations declined at admission:
+  BETTOR_ADMISSION_V0_NONE               0 declined, 186 admitted
+  BETTOR_ADMISSION_V1_CAPACITY_AWARE     186 declined, 0 admitted
+  BETTOR_ADMISSION_V2_MEASURE_ONLY       0 declined, 186 admitted
+  BETTOR_ADMISSION_V3_DRAIN_TIME         0 declined, 186 admitted
+
+{
+  "arrivals_obs_per_min": 0.777,
+  "sustainable_obs_per_min": 0.9,
+
+=== admit_less  (arrivals_obs_per_min=0.65) ===
+WORKLOAD  0.65 obs/min, 240-min run, 6 reads/tick, horizons [60, 300, 900, 3600]
+          tolerance 30s, recovery 600s, read failure 0%, inherited backlog 0 tasks
+
+FEASIBILITY
+  tasks created/min : 2.60
+  tasks served/min  : 2.61
+  sustainable intake: 0.65 obs/min (now 0.65)
+  oversubscription  : 1.00x     FEASIBLE: True
+
+policy                                    obs  tasks on_time    late expired deferred    rate    sat
+BETTOR_ADMISSION_V0_NONE                  155    691     533      89      16       53   77.1%  0/208
+BETTOR_ADMISSION_V1_CAPACITY_AWARE          0     71      48      14       9        0   67.6%  8/208
+BETTOR_ADMISSION_V2_MEASURE_ONLY          155    691     533      89      16       53   77.1% 152/208
+BETTOR_ADMISSION_V3_DRAIN_TIME            155    691     533      89      16       53   77.1% 208/208
+
+COVERAGE IS NOT TIMING. Observations declined at admission:
+  BETTOR_ADMISSION_V0_NONE               0 declined, 155 admitted
+  BETTOR_ADMISSION_V1_CAPACITY_AWARE     155 declined, 0 admitted
+  BETTOR_ADMISSION_V2_MEASURE_ONLY       0 declined, 155 admitted
+  BETTOR_ADMISSION_V3_DRAIN_TIME         0 declined, 155 admitted
+
+{
+  "arrivals_obs_per_min": 0.65,
+  "sustainable_obs_per_min": 0.652,
+

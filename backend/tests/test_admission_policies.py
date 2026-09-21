@@ -264,3 +264,77 @@ def test_the_measured_budget_is_the_one_that_matters():
     assert pol.policy_v1(full).admit_obs == 1
     assert pol.policy_v1(real).admit_obs == 0
     assert pol.policy_v3(real).admit_obs >= 1
+
+
+# ── BOTH V1 FAILURES, PRESERVED SEPARATELY ───────────────────────────
+#
+# They are two distinct defects and a candidate has to survive each on
+# its own. Collapsing them into one test would let a policy that fixed
+# only the brake look like it had fixed both.
+
+def test_v1_failure_one_integer_division_reduces_admission_to_zero():
+    """FAILURE 1: `fu_reserve // horizons_per_obs`.
+
+    Nothing to do with the backlog. At any reserve below the number of
+    horizons the quotient is 0, so admission is 0 on every tick of every
+    queue state. Production ran at a reserve of 2 against 4 horizons."""
+    for fu in (1, 2, 3):
+        c = cap(backlog=0, fu=fu, sample=5)      # an EMPTY queue
+        assert not pol.policy_v1(c).saturated, "the brake is not engaged"
+        assert pol.policy_v1(c).admit_obs == 0, (
+            "reserve=%d: admission is zero with no backlog at all, so "
+            "this is the divisor, not the brake" % fu)
+
+
+def test_v1_failure_two_a_level_is_compared_with_a_per_tick_flow():
+    """FAILURE 2: `backlog_tasks > fu_reserve_reads`.
+
+    Tasks against reads-per-tick. Shown at a reserve LARGE enough that
+    the divisor cannot be the cause -- so what trips here can only be
+    the dimension error."""
+    fu = 8                                        # 8 // 4 == 2, not 0
+    assert pol.policy_v1(cap(backlog=0, fu=fu)).admit_obs == 2
+    deep = pol.policy_v1(cap(backlog=fu + 1, fu=fu))
+    assert deep.saturated is True
+    assert deep.admit_obs == 0, (
+        "one more task than a single tick's reads zeroes admission, "
+        "though a queue of 9 against 8 reads a tick drains in seconds")
+
+
+@pytest.mark.parametrize("fu", [1, 2, 3, 8])
+def test_the_candidate_survives_both_failures_independently(fu):
+    """Neither defect can reach V3: the floor covers the divisor, and
+    the brake compares seconds with seconds."""
+    assert pol.policy_v3(cap(backlog=0, fu=fu)).admit_obs >= 1
+    assert pol.policy_v3(cap(backlog=fu + 1, fu=fu)).admit_obs >= 1
+    assert pol.policy_v3(cap(backlog=10_000, fu=fu)).admit_obs >= 1
+
+
+# ── the four options are stated with their costs ─────────────────────
+
+def test_every_option_names_what_it_costs():
+    """An option without a cost is a wish. Each must say what it does
+    to intake, to timing, to the evidence, and to the resources."""
+    assert set(pol.OPTIONS) == {"admit_less", "read_more",
+                                "fewer_horizons", "shorter_tick"}
+    for name, o in pol.OPTIONS.items():
+        for field in ("change", "intake", "timing", "evidence_cost",
+                      "resource_cost", "operational_cost"):
+            assert o.get(field), "%s: %s is empty" % (name, field)
+
+
+def test_the_sampling_change_is_named_as_one():
+    """Admitting less changes WHICH markets enter the sample, which is
+    what the frozen rule governs. It has to be versioned, and the
+    option has to say so."""
+    assert "version" in pol.OPTIONS["admit_less"]["evidence_cost"].lower()
+
+
+def test_no_option_claims_to_be_free():
+    """read_more and shorter_tick both push on a gateway the money path
+    shares and that already returns 429s. If either is described as
+    costless, the pacing backoff exists for no reason."""
+    for name in ("read_more", "shorter_tick"):
+        o = pol.OPTIONS[name]
+        blob = (o["resource_cost"] + o["operational_cost"]).lower()
+        assert "429" in blob or "gateway" in blob, name

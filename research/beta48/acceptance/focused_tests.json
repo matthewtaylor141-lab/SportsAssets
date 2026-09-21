@@ -1,0 +1,215 @@
+{
+  "baseline_sha": "fc80f95",
+  "by_file": {
+    "tests/test_admission_control.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 9,
+      "skipped": 0
+    },
+    "tests/test_admission_policies.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 47,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestAmbiguityIsNeverResolvedByCancelling.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 2,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestAttributionWithoutAClientIdentifier.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 2,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestOneNewIdIsOnlyACandidate.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 15,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestOpenOrdersUnreadableVersusEmpty.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 5,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestPaginationIsNotInferredFromAnException.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 4,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestPaginationIsVerifiedNotAssumed.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 3,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestTheMappingIsExplicit.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 9,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestTheNativeIntentThatReachesTheVenue.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 6,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestTheStubIsGone.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 2,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestUnreadableNeverBecomesEmpty.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 13,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestWhatActuallyReachesTheVenue.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 5,
+      "skipped": 0
+    },
+    "tests/test_calibration_adapter/TestWriterIsolationIsJustifiedNotAssumed.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 7,
+      "skipped": 0
+    },
+    "tests/test_execution_gate.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 33,
+      "skipped": 0
+    },
+    "tests/test_execution_gate_integration.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 36,
+      "skipped": 0
+    },
+    "tests/test_mirror_exit_quantity/TestAPartiallyFilledFullExitKeepsItsShares.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 5,
+      "skipped": 0
+    },
+    "tests/test_mirror_exit_quantity/TestItSellsOnlyOurShares.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 5,
+      "skipped": 0
+    },
+    "tests/test_mirror_exit_quantity/TestPnLIsBookedOnOurSharesOnly.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 3,
+      "skipped": 0
+    },
+    "tests/test_mirror_exit_quantity/TestTheGatesStillRefuse.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 6,
+      "skipped": 0
+    },
+    "tests/test_mirror_exit_quantity/TestTheVenueGateRefuses.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 5,
+      "skipped": 0
+    },
+    "tests/test_order_route_census.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 12,
+      "skipped": 0
+    },
+    "tests/test_venue_reconcile_is_read_only.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 12,
+      "skipped": 0
+    },
+    "tests/test_whale_exit_fail_closed.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 19,
+      "skipped": 0
+    },
+    "tests/test_workflow_size_guard.py": {
+      "errors": 0,
+      "failed": 0,
+      "failures": [],
+      "passed": 10,
+      "skipped": 0
+    }
+  },
+  "commands": {
+    "capacity_harness": "cd backend && python -m sportsassets.bettor_capacity_harness arrivals_obs_per_min=0.777 tick_period_s=69.03 total_budget_reads=6 minutes=240 inflight_obs_minutes=60",
+    "deploy_manifest": "python3 scripts/deploy_manifest.py 3349219 HEAD",
+    "focused": "cd backend && python -m pytest -q -p no:randomly tests/test_admission_control.py tests/test_admission_policies.py tests/test_calibration_adapter/TestAmbiguityIsNeverResolvedByCancelling.py tests/test_calibration_adapter/TestAttributionWithoutAClientIdentifier.py tests/test_calibration_adapter/TestOneNewIdIsOnlyACandidate.py tests/test_calibration_adapter/TestOpenOrdersUnreadableVersusEmpty.py tests/test_calibration_adapter/TestPaginationIsNotInferredFromAnException.py tests/test_calibration_adapter/TestPaginationIsVerifiedNotAssumed.py tests/test_calibration_adapter/TestTheMappingIsExplicit.py tests/test_calibration_adapter/TestTheNativeIntentThatReachesTheVenue.py tests/test_calibration_adapter/TestTheStubIsGone.py tests/test_calibration_adapter/TestUnreadableNeverBecomesEmpty.py tests/test_calibration_adapter/TestWhatActuallyReachesTheVenue.py tests/test_calibration_adapter/TestWriterIsolationIsJustifiedNotAssumed.py tests/test_execution_gate.py tests/test_execution_gate_integration.py tests/test_mirror_exit_quantity/TestAPartiallyFilledFullExitKeepsItsShares.py tests/test_mirror_exit_quantity/TestItSellsOnlyOurShares.py tests/test_mirror_exit_quantity/TestPnLIsBookedOnOurSharesOnly.py tests/test_mirror_exit_quantity/TestTheGatesStillRefuse.py tests/test_mirror_exit_quantity/TestTheVenueGateRefuses.py tests/test_order_route_census.py tests/test_venue_reconcile_is_read_only.py tests/test_whale_exit_fail_closed.py tests/test_workflow_size_guard.py",
+    "gate_integration_only": "cd backend && python -m pytest -q -p no:randomly tests/test_execution_gate_integration.py",
+    "v1_regression_window": "cd backend && python -m sportsassets.bettor_capacity_harness arrivals_obs_per_min=2.1 inflight_obs_minutes=60 minutes=9",
+    "workflow_guard": "python3 scripts/check_workflows.py"
+  },
+  "deployed_sha": "3349219",
+  "gate_fixture": {
+    "allowlist": [
+      "test_pmus",
+      "test_pmus_commission",
+      "test_preview_guard",
+      "test_s4_review_pins",
+      "test_side_intent",
+      "test_calibration_adapter"
+    ],
+    "default_for_every_other_module": "unbound gate, denies",
+    "file": "backend/tests/conftest.py",
+    "mitigation": "test_execution_gate_integration.py is not on the allowlist and asserts _current has not been replaced before testing anything",
+    "name": "_gate_default_is_the_production_default",
+    "restoration": "_restore_for_tests() unconditionally after, and also BEFORE yielding on the non-allowlisted branch, so a previous module's arming cannot leak in",
+    "scope": "opt-in allowlist, six modules",
+    "why_it_could_conceal": "_install_snapshot_for_tests replaces execution_gate._current, so bind(), read_state() and the live read path are not executed under it"
+  },
+  "head_sha": "6f5dad08fa89bf111a2edacf41ea347c13479799",
+  "note": "Focused suites only. The gate-integration suite runs with the conftest arming fixture OFF; see gate_fixture below.",
+  "package": "acceptance-2026-09-21",
+  "totals": {
+    "errors": 0,
+    "failed": 0,
+    "passed": 275,
+    "skipped": 0
+  }
+}

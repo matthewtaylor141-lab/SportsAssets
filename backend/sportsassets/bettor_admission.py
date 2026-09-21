@@ -214,6 +214,65 @@ def policy_v3(cap: TickCapacity) -> Decision:
 POLICIES = {V4: policy_v4, V1: policy_v1, V2: policy_v2, V3: policy_v3}
 
 
+# THE FOUR WAYS OUT, AND WHAT EACH COSTS.
+#
+# An admission policy chooses what to drop. It cannot create read
+# budget, and the workload is over budget, so one of these has to be
+# chosen -- none of them is free and none of them is a scheduling fix.
+#
+# Each entry states the change, what it does to intake, and what it
+# costs somewhere else. `evidence_cost` is the one that matters for a
+# research collector: the frozen sampling rule governs WHICH markets
+# enter the sample, so anything that admits less narrows the frame and
+# has to be versioned.
+OPTIONS = {
+    "admit_less": {
+        "change": "cap intake at the sustainable rate",
+        "intake": "falls to service/horizons observations per minute",
+        "timing": "on-time rises: the queue stops growing",
+        "evidence_cost": ("the sampling frame narrows. Fewer markets "
+                          "per unit time, so a fixed-length window "
+                          "covers less of the universe. This is a "
+                          "sampling change and must be versioned."),
+        "resource_cost": "none; it uses less",
+        "operational_cost": "none",
+    },
+    "read_more": {
+        "change": "raise the follow-up reserve per tick",
+        "intake": "unchanged",
+        "timing": "on-time rises if the venue serves the extra reads",
+        "evidence_cost": "none",
+        "resource_cost": ("more requests on a gateway the money path "
+                          "shares and that already returns 429s. The "
+                          "pacing backoff exists because of those."),
+        "operational_cost": ("contends with the mirror lane for gaps; "
+                             "the collector is the lowest-priority "
+                             "consumer by design"),
+    },
+    "fewer_horizons": {
+        "change": "watch three horizons instead of four",
+        "intake": "unchanged",
+        "timing": "on-time rises: each observation owes fewer reads",
+        "evidence_cost": ("a declared horizon disappears from the "
+                          "design. 3600s is the one the EV work leans "
+                          "on least per observation but it is also the "
+                          "one that cannot be reconstructed later."),
+        "resource_cost": "none",
+        "operational_cost": "none",
+    },
+    "shorter_tick": {
+        "change": "tick faster than the tolerance window is wide",
+        "intake": "unchanged",
+        "timing": ("addresses the part capacity cannot: with a gap "
+                   "below 2x tolerance every due moment has a tick "
+                   "inside its window"),
+        "evidence_cost": "none",
+        "resource_cost": "same reads, more often; same gateway pressure",
+        "operational_cost": "more frequent wakeups, same 429 exposure",
+    },
+}
+
+
 def feasibility(cap: TickCapacity, arrivals_obs_per_min: float) -> dict:
     """Can this workload be served at all? Answer before tuning.
 

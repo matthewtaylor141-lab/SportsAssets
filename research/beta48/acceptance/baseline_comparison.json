@@ -1,0 +1,103 @@
+{
+  "method": "blocks of the 228-file regression surface, HEAD vs a baseline worktree at fc80f95, same file list each side",
+  "surface_definition": "backend/tests/*.py matching submit_fok|close_position|live_executor|execution_gate|_get_client|pmus, minus test_pmus_post_only (import error, pre-existing)",
+  "blocks": [
+    {
+      "files": "1-60",
+      "head": {
+        "failed": 19,
+        "passed": 1737
+      },
+      "baseline": {
+        "failed": 19,
+        "passed": 1737
+      },
+      "new_failures": 0
+    },
+    {
+      "files": "61-70 (e-series)",
+      "head": {
+        "failed": 7,
+        "passed": 165
+      },
+      "baseline": {
+        "failed": 7,
+        "passed": 165
+      },
+      "new_failures": 0
+    },
+    {
+      "files": "71-90",
+      "head": "HUNG",
+      "baseline": "HUNG",
+      "new_failures": 0,
+      "note": "hangs on BOTH trees when the files run together; every file passes alone. Confirmed against fc80f95 with the same 19 files both trees share -- terminated at 200s on the baseline too, so it predates this branch"
+    },
+    {
+      "files": "91-150",
+      "head": {
+        "failed": 44,
+        "passed": 1825
+      },
+      "baseline": {
+        "failed": 44,
+        "passed": 1820
+      },
+      "new_failures": 0,
+      "note": "HEAD passes 5 more: tests this package adds in that range"
+    },
+    {
+      "files": "151-228",
+      "head": {
+        "failed": 20,
+        "passed": 1853
+      },
+      "baseline": {
+        "failed": 20,
+        "passed": 1853
+      },
+      "new_failures": 0,
+      "note": "75 files both trees share; 3 are new in this package"
+    }
+  ],
+  "regressions_found_and_fixed": [
+    {
+      "file": "test_calibration_adapter.py",
+      "tests": 10,
+      "cause": "bench called submit_fok against an unbound gate"
+    },
+    {
+      "file": "test_exit_fraction_is_a_stock.py",
+      "tests": 8,
+      "cause": "partial settings() vs mirror_exit's active_venue()"
+    },
+    {
+      "file": "test_in_flight_entry_is_pending.py",
+      "tests": 7,
+      "cause": "same"
+    },
+    {
+      "file": "test_mirror_live_le_consumers.py",
+      "tests": 7,
+      "cause": "same"
+    },
+    {
+      "file": "test_pmus.py and 4 others",
+      "tests": 54,
+      "cause": "submit_fok benches against an unbound gate"
+    },
+    {
+      "file": "test_e31_maker_only.py / test_e24_hand_fills.py",
+      "tests": 3,
+      "cause": "sha256 pins on the two gated functions; the *) help arm never listed the pause switches; a counted comment moved in the 512KB repair"
+    }
+  ],
+  "total_regressions": 89,
+  "hang_evidence": {
+    "claim": "the grouped-test hang predates this branch",
+    "status": "CONFIRMED",
+    "how": "the same 19 files run together on the fc80f95 worktree were terminated at the 200s bound, exactly as on HEAD",
+    "command": "cd /tmp/claude-0/base-fc80f95/backend && timeout -k 5 200 python -m pytest -q -p no:randomly <files 71-90>",
+    "cause": "unconfirmed; consistent with leaked module-level DB state"
+  }
+}
