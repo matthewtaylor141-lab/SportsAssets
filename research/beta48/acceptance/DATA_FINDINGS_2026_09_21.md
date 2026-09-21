@@ -279,3 +279,69 @@ strategy is a scenario.
 **$396,361.** The total traded notional across every market BETTOR observed in
 a day. Every capacity claim in the acceptance package was made without it, and
 it was one query away the whole time.
+
+---
+
+# PART III — THE ACCOUNT READS, AND THE ONE BLOCKER THAT IS NOT MINE
+
+`bettor-capability-probe.yml`, run
+[35641228446](https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/35641228446),
+conclusion **success**, every venue read **failed**.
+
+## 11. `capability_probe()` AND `account_identity()` — RUN, AND BLOCKED
+
+| read | result |
+|---|---|
+| `portfolio.activities` | `AuthenticationError` |
+| `portfolio.balances` | `AuthenticationError` |
+| `orders.list` | `AuthenticationError` |
+| `portfolio.positions` | `AuthenticationError` |
+| `account_identity()` | verdict **`unreadable`** |
+| `identity_fields_found` | `[]` |
+
+**The cause is in the job's own environment block:**
+
+```
+PMUS_KEY_ID:
+PMUS_SECRET_KEY:
+```
+
+**Both empty.** `secrets.PMUS_KEY_ID` and `secrets.PMUS_SECRET_KEY` are not
+set for this repository, or not exposed to this workflow. With neither
+present, `pmus._get_client()` takes its documented public-only branch —
+`PolymarketUS()` with no credentials — and every account endpoint rejects the
+call. One cause, four failures.
+
+**This is a precise access blocker, not a capability gap.** The reads are
+built, they are proven order-free by an AST test that runs in a step holding
+no credentials, and they execute. What is missing is a credential, and
+supplying one is an owner action, not an engineering one.
+
+**What it does NOT tell us**, and must not be reported as if it did:
+
+- It does **not** establish `holds_both_legs_independently`. That stays
+  UNKNOWN and keeps blocking `PAIR_BUY` on every decision.
+- It does **not** establish account identity. That stays unverified, and
+  §2 of the pilot proposal still holds: *a pilot on an account we cannot
+  name is not a pilot.*
+- It does **not** establish that the credentials are wrong. Absent and
+  rejected are different failures; this one is absent.
+
+**What is needed:** `PMUS_KEY_ID` and `PMUS_SECRET_KEY` present in the
+repository secrets, or the same probe run inside the API service, which
+already holds them in its own environment. Either answers all three
+questions in one read. Nothing else in the account path is blocked on
+anything I can write.
+
+## 12. THE RESOLUTION FIELD IS STILL A GUESS
+
+The probe's third question — does a market payload carry a resolution field,
+and what is it called — was skipped because no slug was supplied, and would
+have been answerable without credentials since `markets.list` is public. That
+is a gap in **my dispatch**, not in the code: `resolution_fields()` takes a
+slug and returns key names only.
+
+Until it runs, `bettor_settlement_ingest`'s `OUTCOME_FIELDS` remains a
+hypothesis, and the module says so — a payload matching none of them returns
+`UNREADABLE` **with the key names that were present**, which corrects the list
+with one read instead of more guessing.

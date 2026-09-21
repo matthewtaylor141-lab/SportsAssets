@@ -31,6 +31,9 @@ Three commands, all exit 0, all outputs committed.
 | Maker economics | `backend/sportsassets/bettor_maker_economics.py` | working |
 | Observation adapter | `backend/sportsassets/bettor_observation_adapter.py` | working |
 | Shadow loop | `backend/sportsassets/bettor_shadow_loop.py` | working |
+| **Live venue read** | `backend/sportsassets/bettor_live_read.py` | **working — new, not deployed** |
+| **Settlement ingestion** | `backend/sportsassets/bettor_settlement_ingest.py` | **working — new, not deployed** |
+| **Decision-only worker** | `backend/sportsassets/workers/bettor_prospective.py` | **working — new, ABSENT from `workers/all.py` by design** |
 | Prospective runner | `scripts/bettor_prospective_runner.py` | working, **not deployed** |
 
 Chain: `observation → normalize → decide → simulated execution → inventory →
@@ -248,10 +251,10 @@ touches.
 | 4 | One combined exposure limit; pre-trade worst-case loss budget | **DONE** — enforced in the loop |
 | 5 | Two-phase cancel so a replacement never overlaps what it replaces | **DONE** |
 | 6 | Fee schedule `VERIFIED_APPLIED` from a settled statement | **missing** — needs a fill |
-| 7 | `holds_both_legs_independently` resolved | **UNKNOWN** — `capability_probe()` built, unrun |
-| 8 | Account identity verified | **blocked** — no identifier on the snapshot |
-| 9 | Decision-latency read path | **missing** — median feed delay 549.6 s |
-| 10 | `record_settlement()` wired | **missing** — defined, never called |
+| 7 | `holds_both_legs_independently` resolved | **UNKNOWN** — probe RUN 2026-09-21, blocked: `PMUS_KEY_ID`/`PMUS_SECRET_KEY` are empty in CI, so the client is public-only and all four account reads return `AuthenticationError` |
+| 8 | Account identity verified | **blocked, same cause** — verdict `unreadable`, `identity_fields_found: []` |
+| 9 | Decision-latency read path | **written, not deployed** — `bettor_live_read.read_book`; the capture feed's median delay is 549.6 s and the live path's is unmeasured |
+| 10 | `record_settlement()` wired | **written, not deployed** — `bettor_settlement_ingest`; the table is still empty because nothing has run |
 | 11 | `p_fill` measured | **impossible without a pilot** |
 | 12 | Execution gate deployed | built, tested, **undeployed** |
 | 13 | A candidate SUPPORTED under frozen rules | **none** |
@@ -260,6 +263,32 @@ touches.
 resting orders, and resting orders require a pilot. The smallest honest break
 is [`PILOT_PROPOSAL.md`](PILOT_PROPOSAL.md) v2, whose sole deliverable is a
 `p_fill` measurement.
+
+### 7.1 The live connection — implementation, read-only run, deployment
+
+The directive draws this line and so does the code:
+
+| | what it is | status |
+|---|---|---|
+| **IMPLEMENTATION** | `bettor_live_read`, `bettor_settlement_ingest`, `workers/bettor_prospective`. Code that, given an authenticated client, reads. | **DONE.** Writing it activates nothing. |
+| **READ-ONLY RUN** | Calling it against the venue. Reads a public book and a market listing; submits nothing; writes no accounting record. | `bettor-capability-probe.yml`, dispatch-only, proof-before-keys, key names and verdicts only. |
+| **DEPLOYMENT** | Running it on a schedule in production. | **NOT DONE and not requested by writing the files.** `bettor_prospective` is deliberately absent from `workers/all.py` and a test asserts it. |
+
+**Exact deployment, if and when authorized** — `PILOT_PROPOSAL.md` §7: add
+`bettor_prospective` to `sportsassets-workers`; migrate
+`bettor_prospective_decisions` keyed by `observation_id`. **No new credential,
+no new permission, no order path. Rollback: remove the worker from the
+service.** It writes only its own table.
+
+**The settlement ingestion's outcome-field list is a hypothesis.** The SDK is
+not documented to carry a resolution field and our capture has never held one,
+so a market payload with none comes back `UNREADABLE` **with the key names
+that were present** — which corrects the list with one read rather than more
+guessing. Four statuses are reported separately (`RESOLVED` / `PENDING` /
+`UNREADABLE` / `UNMATCHED`) plus `INGESTED`, and **`INGESTED` is not
+`RESOLVED`**: a resolution read and not written is a resolution we do not
+have, and reporting the read count as the stored count is exactly how a
+pipeline looks like it works while its table stays empty.
 
 ## 8. WHAT IS AND IS NOT ESTABLISHED
 

@@ -323,8 +323,8 @@ Stated in advance so it cannot be rationalised afterwards:
 | 3 | Freshness with required receipt timestamp, transport separated from skew | **DONE** |
 | 4 | Combined exposure limit and pre-trade loss budget | **DONE** — enforced in the loop |
 | 5 | Two-phase cancel so replacements never overlap | **DONE** |
-| 6 | Run `capability_probe()` / `account_identity()` | **built, unrun** — needs the authenticated read path |
-| 7 | **Wire `record_settlement()`** | **NOT DONE** — defined and never called, which is why `bettor_state_settlements` is empty |
+| 6 | Run `capability_probe()` / `account_identity()` | **built; `bettor-capability-probe.yml` dispatches them read-only, key names and verdicts only** |
+| 7 | **Wire `record_settlement()`** | **WRITTEN, NOT RUN** — `bettor_settlement_ingest`. The table is still empty because nothing has executed it, which is now a deployment question rather than a code one |
 | 8 | Bound the opportunity from public data (§1) | **NOT DONE** |
 | 9 | Verify the 11 two-label contracts as genuine complements | **PARTIAL** — the capture holds no venue outcome id and no settlement predicate, so this is checkable only against `instrument_id` / `condition_id` |
 
