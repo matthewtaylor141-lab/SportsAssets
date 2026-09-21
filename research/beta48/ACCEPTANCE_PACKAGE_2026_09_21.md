@@ -235,6 +235,53 @@ a recorder that counts calls.
 
 Census: 12 tests. Total for item 2: **45 passing**.
 
+### Regression verification — method, results, and the gap
+
+**The full suite does not complete in this environment.** Several test
+files hang retrying a database connection, and `timeout` does not
+terminate pytest while it sleeps in that retry — not even with `-k`,
+which should send SIGKILL. A single `pytest tests/` run reached 37% in
+twenty minutes and then stopped advancing. This is a property of the
+environment, not of this branch.
+
+So regressions were separated from pre-existing failures by **diffing
+the failure set against a baseline worktree at `fc80f95`**, file by
+file. That method found four real regressions, all mine, all fixed:
+
+| Where | Tests | Cause | Fix |
+|---|---|---|---|
+| `test_calibration_adapter.py` | 10 | bench called `submit_fok` against an unbound gate | autouse fixture arms the gate |
+| `test_e31_maker_only.py` | 1 | sha256 pin on `submit_fok`/`close_position` | re-pinned, reason recorded |
+| `test_e31_maker_only.py` | 1 | the `*)` help arm never listed the pause switches | help arm and description matched to the case arms |
+| `test_e24_hand_fills.py` | 1 | a counted comment moved to `RENDER_OPS_NOTES.md` | count corrected 3 → 2 |
+
+The second one is worth dwelling on: the hash pins **did their job**.
+They exist so an edit nobody meant to make is caught, and they caught
+mine. The pins moved and the reason is recorded beside the table; the
+guard was not loosened.
+
+The third was a real operator-facing defect I had shipped without
+noticing — `render-ops` lists the `sql` action's values in three
+places, and I had updated two. The lever had three switches an operator
+could use and could not discover.
+
+**Verified clean against baseline:**
+
+| Scope | Result |
+|---|---|
+| surface slice 1 (60 files) | 1,737 passed; 19 failures **identical** at baseline |
+| e-series (7 files) | 165 passed; 7 failures **identical** at baseline |
+| this package's 9 suites | 230 passed |
+| collector subset | 1,055 passed |
+| executor / mirror / whale subset | 309 passed, only the 8 known ladder failures |
+
+**The gap, stated plainly.** Roughly files 71–228 of the 228-file
+regression surface were not swept to completion, because the sweep
+cannot finish here. Every file in the *direct* blast radius of the
+changed symbols is inside the verified set above; the unswept remainder
+is the part that merely mentions `pmus` somewhere. I am not claiming a
+green full suite, and nobody should read one into this.
+
 ### Pre-existing environment failures, reported separately
 
 `tests/test_pmus_post_only.py` fails to import and
@@ -487,3 +534,8 @@ stderr), 30-day retention. No secret appears in any of it.
    shipped since V2 measure-only.
 5. **`test_pmus_post_only.py` and 8 ladder tests** cannot run here, so
    the end-to-end copy path is not validated in this environment.
+6. **The full suite cannot be run to completion here** — pytest hangs on
+   DB-connection retries and `timeout -k` does not kill it. ~3,300 tests
+   verified against a baseline worktree; files 71–228 of the regression
+   surface were not swept. Four regressions were found and fixed by that
+   method; a fifth cannot be ruled out in the unswept remainder.
