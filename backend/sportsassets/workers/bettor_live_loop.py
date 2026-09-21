@@ -221,7 +221,12 @@ class LiveLoop:
                                  max_receipt_age_s=MAX_RECEIPT_AGE_S)
         self.bump("books_examined")
         base = {"loop": LOOP_VERSION, "kind": "DECISION",
-                "evidence_class": PROSPECTIVE,
+                # FROM THE TRANSPORT. A replaying transport says
+                # REPLAY_DECISION; only a live socket says
+                # PROSPECTIVE_SHADOW. This was hard-coded, so a replay
+                # would have been journalled as live observation.
+                "evidence_class": getattr(self.stream, "evidence_class",
+                                          PROSPECTIVE),
                 "market_id": slug, "decided_at": decided_at,
                 "source_ts": at.get("source_ts"),
                 "received_at": at.get("received_at"),
@@ -772,9 +777,22 @@ async def main(*, client=None, stream_factory=None, store=None,
                 "excluded_by_reason": first.get("excluded_by_reason", {}),
                 "pages_read": first.get("pages_read")}
 
+    # THE OUTCOME LEG COMES FROM THE LISTING. It used to be None for
+    # every market, so every observation was REJECTED as
+    # NO_OUTCOME_IDENTITY and the worker would have run for an hour
+    # producing nothing but refusals about its own wiring. Found by
+    # running the startup path end to end rather than by reading it.
+    legs = {d["slug"]: d.get("outcome_leg")
+            for d in (first.get("detail") or [])}
+    if first.get("selected_without_outcome_leg"):
+        log.warning("bettor_live_loop: %d of %d selected markets carry no "
+                    "outcome leg; their observations will be refused as "
+                    "NO_OUTCOME_IDENTITY",
+                    first["selected_without_outcome_leg"],
+                    len(first["slugs"]))
     loop, stream = build(
         key_id, secret, slugs=first["slugs"],
-        leg_of={s: None for s in first["slugs"]},
+        leg_of={s: legs.get(s) for s in first["slugs"]},
         store=store, stream_factory=stream_factory,
         opening_cash=float(os.environ.get("BETTOR_LIVE_OPENING_CASH", "0")))
     loop.max_contracts = float(

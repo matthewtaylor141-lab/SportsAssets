@@ -118,6 +118,14 @@ class MarketStream:
     the lock and returns plain data.
     """
 
+    # THE EVIDENCE CLASS BELONGS TO THE TRANSPORT, NOT THE DECISION.
+    # A socket carrying live venue bytes produces PROSPECTIVE_SHADOW; a
+    # replaying transport reading a file produces REPLAY_DECISION. The
+    # loop used to stamp PROSPECTIVE_SHADOW on every record it made,
+    # which would have labelled a replayed book as a live one. A
+    # subclass that does not speak to the venue must override this.
+    evidence_class = "PROSPECTIVE_SHADOW"
+
     def __init__(self, key_id: str, secret_key: str, *,
                  on_book=None, on_trade=None, autostart: bool = False) -> None:
         self._key_id = key_id

@@ -31,6 +31,7 @@ the new connection.
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import os
 import sys
@@ -40,6 +41,7 @@ from datetime import datetime, timedelta, timezone
 sys.path.insert(0, "backend")
 
 from sportsassets import bettor_decision_engine as de           # noqa: E402
+from sportsassets import bettor_live_store as store_mod         # noqa: E402
 from sportsassets import bettor_fee_schedule as fs              # noqa: E402
 from sportsassets import bettor_market_stream as ms             # noqa: E402
 from sportsassets import bettor_settlement_ingest as si         # noqa: E402
@@ -137,11 +139,15 @@ def main() -> int:
     # old build() installed a trade callback AND the caller drained
     # into it, counting every trade twice.
     import tempfile
-    d = tempfile.mkdtemp(prefix="bettor-harness-")
+    state_dir = tempfile.mkdtemp(prefix="bettor-harness-")
+    # A DECLARED DISK, stated as one. `bettor_live_store.choose()`
+    # REFUSES a file backend on an undeclared path, because that is
+    # exactly the /var/tmp mistake: fsync says the bytes reached the
+    # device, not that the device survives the next deploy.
+    store = store_mod.FileStore(state_dir, durable_across_redeploy=True)
+    asyncio.run(store.start())
     loop, stream = bl.build("NO_KEY", "NO_SECRET", slugs=slugs_all,
-                            leg_of=legs,
-                            state_path=os.path.join(d, bl.JOURNAL_NAME),
-                            ledger_path=os.path.join(d, bl.LEDGER_NAME),
+                            leg_of=legs, store=store,
                             opening_cash=1000.0)
     q = stream.subscribe(slugs)
     print("   queued %d (cap %d, batch %d -- the documented ceiling)"
@@ -288,7 +294,6 @@ def main() -> int:
 
     # ── 9. settlement ingestion ─────────────────────────────────────
     rule("9. SETTLEMENT INGESTION -- the venue's own endpoint")
-    import asyncio
     written: list = []
 
     async def writer(row):
@@ -323,25 +328,28 @@ def main() -> int:
 
     # ── 10. durable records and worker recovery ─────────────────────
     rule("10. DURABILITY AND RECOVERY -- through the worker, not around it")
-    written = sum(1 for _ in open(loop.state_path))
-    print("   journal            %s" % loop.state_path)
+    asyncio.run(loop.flush())
+    asyncio.run(loop.save_ledger())
+    written = sum(1 for _ in open(store.journal))
+    print("   journal            %s" % store.journal)
+    print("   backend            %s, durable across %s"
+          % (store.backend, list(store.durable_across)))
     check("records written to disk", written, len(loop.records))
-    check("persist failures", loop.journal_failures, 0)
-    loop.save_ledger()
+    check("persist failures", loop.persist_failures, 0)
 
-    # A SECOND PROCESS over the same directory, wired by build() and
+    # A SECOND PROCESS over the same store, wired by build() and
     # recovered by the loop's own recover() -- the call main() makes.
+    store2 = store_mod.FileStore(state_dir, durable_across_redeploy=True)
     loop2, stream2 = bl.build("NO_KEY", "NO_SECRET", slugs=slugs_all,
-                              leg_of=legs, state_path=loop.state_path,
-                              ledger_path=loop.ledger_path)
-    rec = loop2.recover()
+                              leg_of=legs, store=store2)
+    rec = asyncio.run(loop2.recover())
     print("   recovered          %s" % json.dumps(
-        {k: rec[k] for k in ("journal_lines", "journal_bad_lines",
-                             "slugs_recovered", "ledger_restored")}))
+        {k: rec[k] for k in ("backend", "cursors_recovered",
+                             "ledger_restored", "recover_seconds")}))
     check("ledger restored", rec["ledger_restored"], True)
     check("cash after recovery", loop2.shadow.ledger.cash,
           loop.shadow.ledger.cash)
-    check("dedup keys recovered", rec["slugs_recovered"], len(loop._last_ts))
+    check("cursors recovered", rec["cursors_recovered"], len(loop.cursors))
 
     stream2.epoch += 1
     stream2.connected = True
@@ -352,6 +360,10 @@ def main() -> int:
     check("re-deciding recovered observations", loop2.counters.get("decided"),
           None)
     print("   A restart does not re-decide what it already recorded.")
+    print("   RECOVERY READS THE CURSORS, NOT THE JOURNAL, so restart")
+    print("   time does not grow with the record count. A REDEPLOY is a")
+    print("   different event: scripts/bettor_durability_proof.py kills a")
+    print("   process with SIGKILL and recovers in a second one.")
 
     rule("WHAT THIS RUN IS")
     print("   REAL       the books, their clocks, their states, their")
