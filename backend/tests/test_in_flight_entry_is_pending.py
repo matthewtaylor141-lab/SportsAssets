@@ -103,7 +103,14 @@ def _drive(pool, monkeypatch):
     monkeypatch.setattr(le, "overspend_halt", _false)
     monkeypatch.setattr(le, "_pm_held", _held)
     monkeypatch.setattr(le, "settings", lambda: types.SimpleNamespace(
-        copy_probe_enabled=True))
+        copy_probe_enabled=True,
+        # AUTHORIZED SYSTEM (2026-09-21). mirror_exit consults
+        # active_venue() before anything order-capable -- the R5 repair
+        # -- so a bench that means to exercise the sell path has to
+        # represent a system permitted to sell. These are fixture
+        # literals, not credentials.
+        live_trading_enabled=True, pmus_key_id="bench-key",
+        pmus_secret_key="bench-secret", pm_private_key=None))
     payload = {"side": "SELL", "whale_username": "rn1", "asset": "0xasset",
                "closed_frac": 1.0}
     try:

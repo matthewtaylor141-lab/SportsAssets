@@ -113,8 +113,14 @@ def bench(monkeypatch):
     monkeypatch.setattr(le, "_is_paused", _false)
     monkeypatch.setattr(le, "overspend_halt", _false)
     monkeypatch.setattr(le, "settings",
-                        lambda: types.SimpleNamespace(
-                            copy_probe_enabled=True))
+                        lambda: types.SimpleNamespace(copy_probe_enabled=True,
+        # AUTHORIZED SYSTEM (2026-09-21). mirror_exit consults
+        # active_venue() before anything order-capable -- the R5 repair
+        # -- so a bench that means to exercise the sell path has to
+        # represent a system permitted to sell. These are fixture
+        # literals, not credentials.
+        live_trading_enabled=True, pmus_key_id="bench-key",
+        pmus_secret_key="bench-secret", pm_private_key=None))
 
     async def _pool():
         return le._TEST_POOL
