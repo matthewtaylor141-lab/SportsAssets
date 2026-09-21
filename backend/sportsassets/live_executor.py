@@ -2575,6 +2575,23 @@ def _submit_fok(token_id: str, price: float, shares: float,
     from py_clob_client.clob_types import OrderArgs, OrderType
     from py_clob_client.order_builder.constants import BUY, SELL
 
+    # THE SECOND VENUE, AND IT WAS NOT COVERED (found 2026-09-21 by the
+    # order-route census). This function does not go through
+    # pmus.submit_fok. It builds a py_clob_client of its own and calls
+    # post_order directly, which is a complete second submission path to
+    # polymarket-clob -- a different venue from the one every other
+    # control in this file talks about.
+    #
+    # Gating pmus.submit_fok and pmus.close_position covers every route
+    # to polymarket-us. It covered nothing here. The census found it by
+    # walking the AST for venue-client constructors outside the adapter,
+    # which is the only reason it was found at all: no hand-written
+    # inventory had ever listed it, including the one I wrote the day
+    # before.
+    #
+    # Same gate, same terms, same reasons.
+    _gate.authorize("submit_clob", lane=_gate.current_lane(),
+                    slug=token_id)
     client = _get_client()
     order = client.create_order(
         OrderArgs(token_id=token_id, price=price, size=shares,

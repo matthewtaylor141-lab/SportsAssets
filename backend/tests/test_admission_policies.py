@@ -116,10 +116,20 @@ def test_v3_keeps_collecting_through_the_same_scenario():
 
 
 def test_v1_recovers_if_left_alone_and_the_harness_says_so():
-    """THE CORRECTION. I reported V1's zero as absorbing. Given fifty
-    ticks instead of seven the brake releases and intake resumes, so it
-    was a long blackout and not a latch. The floor is justified by the
-    blackout's length, not by a permanence it does not have."""
+    """AT FULL BUDGET ONLY, AND THAT CAVEAT IS THE POINT.
+
+    Workload() defaults to 10 reads a tick. There the brake does release
+    around tick 19 and intake resumes. I took that for the whole story
+    and corrected myself to "a long blackout, not a latch".
+
+    It is not the whole story: at the budget production actually runs
+    -- pacing 2.054, so a reserve of 2 -- V1's divisor floors it to zero
+    unconditionally and nothing reopens it. See
+    test_v1_admits_nothing_at_the_real_budget_whatever_the_backlog.
+
+    Both tests are kept because the difference between them IS the
+    finding: a policy evaluated only at full budget is evaluated in a
+    regime the collector is rarely in."""
     long_run = h.run_policy(pol.V1, h.Workload(
         arrivals_obs_per_min=2.1, inflight_obs_minutes=60.0, minutes=60))
     assert long_run.observations > 0, (
@@ -207,3 +217,50 @@ def test_no_policy_is_described_as_fixing_an_infeasible_workload():
     import inspect
     src = inspect.getsource(pol.policy_v3)
     assert "does not make an infeasible" in src
+
+
+# ── the defect that only shows at the budget production runs ─────────
+
+@pytest.mark.parametrize("total,fu", [(6, 3), (4, 2), (2, 1)])
+def test_v1_admits_nothing_at_the_real_budget_whatever_the_backlog(total,
+                                                                   fu):
+    """THE ARITHMETIC THAT ACTUALLY STOPPED THE COLLECTOR.
+
+    Measured pacing is 2.054, so the tick budget is int(10/2.054) = 4
+    and the follow-up reserve is 2. V1's sustainable term is
+
+        fu_reserve // horizons_per_obs  ==  2 // 4  ==  0
+
+    Integer division floors to zero whenever the reserve falls below the
+    number of horizons, which under backoff is most of the time. The
+    brake is never even reached, and no backlog -- including none --
+    makes it admit again.
+
+    I described this failure twice before getting the mechanism right:
+    first as a latching brake, then, after running the harness at an
+    assumed budget of 10, as a twenty-three-minute transient. Both were
+    about a budget production rarely has."""
+    for backlog in (0, 1, 5, 50, 10_000):
+        c = cap(backlog, fu=fu, sample=max(1, total - fu))
+        assert pol.policy_v1(c).admit_obs == 0, (total, fu, backlog)
+
+
+@pytest.mark.parametrize("total,fu", [(10, 5), (6, 3), (4, 2), (2, 1)])
+def test_v3_admits_at_every_budget_whatever_the_backlog(total, fu):
+    """The floor makes both of V1's faults unreachable: the brake
+    cannot zero it and neither can the divisor."""
+    for backlog in (0, 1, 5, 50, 10_000):
+        c = cap(backlog, fu=fu, sample=max(1, total - fu))
+        assert pol.policy_v3(c).admit_obs >= 1, (total, fu, backlog)
+
+
+def test_the_measured_budget_is_the_one_that_matters():
+    """A policy evaluated only at full budget is evaluated in a regime
+    the collector spends little time in. Pacing backoff is the normal
+    condition, not the exception: avg_pacing_s was 2.054 over twelve
+    hours and 568 ticks."""
+    full = cap(0, fu=5, sample=5)
+    real = cap(0, fu=2, sample=2)
+    assert pol.policy_v1(full).admit_obs == 1
+    assert pol.policy_v1(real).admit_obs == 0
+    assert pol.policy_v3(real).admit_obs >= 1

@@ -26,13 +26,13 @@ tick of work waiting", and since every observation owes a read at 60s,
 tick of work. So it was true on the first tick and on every tick
 production ran.
 
-How long it STAYS true is a separate question, and one I answered wrong
-before this harness existed: I called the zero state absorbing. Replayed
-against the queue V1 actually inherited, the brake releases around tick
-nineteen. V1 is a twenty-three-minute blackout, not a permanent latch.
-That is still the wrong answer to a full queue -- which is why the
-candidate carries an admission floor -- but it is a different fault from
-the one I named, and the harness is what told me so.
+That brake is the SECOND defect. The first is plainer and was hiding
+under it: `fu_reserve // horizons_per_obs` is integer division, and at
+the budget production actually runs -- pacing 2.054, so four reads a
+tick and a reserve of two -- it is 2 // 4 == 0. V1 admits nothing on
+every tick whatever the backlog, and no state of the queue changes it.
+See ADMIT_FLOOR_OBS below for the full arithmetic and for the two
+earlier accounts of this that I got wrong.
 
 Every quantity here therefore carries its unit in its name, and any
 comparison is between two of the same kind. Times are compared with
@@ -139,26 +139,37 @@ DRAIN_HEADROOM = 0.75
 
 # THE FLOOR. Admission may be reduced, never switched off.
 #
-# CORRECTION TO WHAT I FIRST WROTE HERE. I described V1's zero as
-# absorbing -- "nothing the collector did could reopen the gate". The
-# harness says that is wrong, and the correction matters because it
-# changes what the defect actually is. Replaying V1 against the state
-# it inherited:
+# THIRD STATEMENT OF V1'S DEFECT, AND THIS ONE HAS THE ARITHMETIC.
 #
-#     7 ticks   (what production ran)   0 admitted, saturated 7/7
-#     50 ticks  (left alone)           31 admitted, saturated 19/50
+# I first said the brake latched and could never reopen. Then the
+# harness, run at an ASSUMED budget of 10 reads a tick, showed the brake
+# releasing around tick 19, and I corrected myself to "a twenty-three
+# minute blackout, not a latch". Both accounts were built on a budget
+# production does not have.
 #
-# The brake DOES release, after about nineteen ticks -- some twenty-three
-# minutes -- once the inherited pipeline drains. V1 was a long transient,
-# not a permanent latch, and production was rolled back before it could
-# recover.
+# The measured pacing is 2.054, and the tick's budget is
+# int(10 * 1/pacing) = 4, so fu_reserve is 2. V1's sustainable term is
 #
-# The floor is still right, for the reason that survives the correction:
-# twenty-three minutes of collecting nothing is not an acceptable
-# response to a full queue, and it arrives silently every time the
-# policy meets a backlog. A floor of one keeps the collector collecting
-# while it catches up, and makes the zero state unreachable rather than
-# merely temporary.
+#     fu_reserve // horizons_per_obs   ==   2 // 4   ==   0
+#
+# Integer division floors to zero whenever the reserve drops below the
+# number of horizons, which under backoff is most of the time. At that
+# budget V1 admits nothing on EVERY tick REGARDLESS OF BACKLOG -- the
+# brake is not even reached, and there is no state of the queue that
+# makes it admit again:
+#
+#     budget 10, fu 5   ->  admits 1  (brake can still zero it)
+#     budget  6, fu 3   ->  admits 0  always
+#     budget  4, fu 2   ->  admits 0  always     <- production
+#     budget  2, fu 1   ->  admits 0  always
+#
+# So the effect I described first was right and the mechanism was not,
+# and my correction was right only at a budget production rarely sees.
+# The level-versus-flow brake is a real defect and it is the second one.
+#
+# THE FLOOR ANSWERS BOTH. max(1, ...) makes zero unreachable whatever
+# the budget, the backlog or the divisor, so neither fault can stop the
+# collector again.
 ADMIT_FLOOR_OBS = 1
 
 

@@ -118,6 +118,17 @@ jobs:
           RC=$?
           set -e
 
+          # STDERR FIRST, ALWAYS. A failure printed after two hundred
+          # lines of summary is a failure nobody reads, and the last two
+          # runs each cost a round trip because the traceback was buried
+          # behind an artifact upload in the log tail.
+          if [ "$RC" -ne 0 ]; then
+            echo "== RECONCILIATION FAILED (rc=$RC) =="
+            sed -n '1,60p' recon_stderr.txt
+            echo "== end of error =="
+            echo
+          fi
+
           echo "== SUMMARY =="
           cat recon_stdout.txt
 
@@ -155,7 +166,6 @@ jobs:
 
           if [ "$RC" -ne 0 ]; then
             echo "::error::the reconciliation did not complete -- treat every figure above as absent, not as zero"
-            sed -n '1,40p' recon_stderr.txt
           fi
           exit "$RC"
 
