@@ -55,12 +55,15 @@ jobs:
           python-version: '3.11'
 
       - name: Install
-        working-directory: backend
         run: |
           set -e
+          # backend is a pyproject package; there is no requirements.txt
+          # here. The shadow pin file carries the venue SDK, same as
+          # calibration-evidence installs it.
           python -m pip install --quiet --upgrade pip
-          pip install --quiet -r requirements.txt
-          pip install --quiet pytest pytest-asyncio
+          python -m pip install --quiet -r research/beta48/shadow/requirements-test.txt
+          python -m pip install --quiet -e ./backend
+          python -m pip install --quiet pytest pytest-asyncio
 
       - name: Prove the reconciler cannot trade, BEFORE giving it keys
         working-directory: backend
