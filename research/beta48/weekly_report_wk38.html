@@ -1,0 +1,294 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>BettorToken Weekly Report</title>
+<style>
+  /* Single-theme edition, continuing the series' dark ledger look: every colour painted explicitly. */
+  :root{
+    --bg:#0A1428; --panel:#101E36; --panel2:#0D1930; --line:#1E3050; --line2:#294067;
+    --ink:#F2F5FA; --ink2:#9FB0C9; --ink3:#64748B;
+    --gold:#E5C56B; --gold-deep:#B07F1F; --site:#4E8FE8;
+    --pos:#2EE6A8; --neg:#F06D6D; --warn:#E8A33D;
+    --serif:Georgia,'Times New Roman',serif;
+    --mono:ui-monospace,'SF Mono',Menlo,Consolas,monospace;
+    --sans:system-ui,-apple-system,'Segoe UI',Roboto,sans-serif;
+  }
+  *{box-sizing:border-box}
+  body{background:var(--bg);color:var(--ink);font-family:var(--sans);margin:0;line-height:1.55;
+       background-image:linear-gradient(rgba(30,48,80,.45) 1px,transparent 1px),linear-gradient(90deg,rgba(30,48,80,.45) 1px,transparent 1px);
+       background-size:72px 72px;background-position:center top}
+  .wrap{max-width:1080px;margin:0 auto;padding:0 28px 80px}
+  a{color:var(--gold)}
+  header.mast{display:flex;align-items:center;justify-content:space-between;gap:16px;
+    padding:22px 0 18px;border-bottom:1px solid var(--line2);flex-wrap:wrap}
+  .brand .word{font-family:var(--mono);font-weight:700;font-size:19px;letter-spacing:.34em;color:var(--ink)}
+  .brand .tag{font-family:var(--mono);font-size:9.5px;letter-spacing:.30em;color:var(--ink2);margin-top:2px}
+  .mast .stamp{text-align:right;font-family:var(--mono);font-size:11px;letter-spacing:.18em;color:var(--ink2)}
+  .mast .stamp b{display:block;color:var(--gold);font-size:12.5px;letter-spacing:.22em;margin-bottom:3px}
+  .hero{padding:44px 0 8px}
+  .eyebrow{font-family:var(--mono);font-size:11.5px;letter-spacing:.28em;color:var(--gold);text-transform:uppercase;margin:0 0 14px}
+  h1{font-family:var(--serif);font-size:clamp(30px,4.6vw,46px);line-height:1.14;margin:0 0 14px;font-weight:700;text-wrap:balance}
+  h1 .neg{color:var(--neg)} h1 .warn{color:var(--warn)}
+  .dek{color:var(--ink2);max-width:68ch;font-size:16.5px;margin:0 0 8px}
+  .halt{display:flex;gap:12px;align-items:flex-start;background:rgba(232,163,61,.08);border:1px solid rgba(232,163,61,.4);
+        border-radius:10px;padding:14px 18px;margin-top:22px}
+  .halt .dot{width:10px;height:10px;border-radius:50%;background:var(--warn);margin-top:6px;flex:none}
+  .halt b{color:var(--warn)}
+  .halt p{margin:0;font-size:14px;color:var(--ink2)}
+  .halt + .halt{margin-top:12px}
+  section{margin-top:54px}
+  h2{font-family:var(--serif);font-size:26px;margin:0 0 6px;text-wrap:balance}
+  h3{margin:0 0 4px;font-size:16.5px;font-family:var(--sans);font-weight:650}
+  .sub{color:var(--ink2);max-width:72ch;margin:0 0 18px;font-size:14.5px}
+  .lbl{font-family:var(--mono);font-size:10.5px;letter-spacing:.24em;text-transform:uppercase;color:var(--ink3)}
+  .kpis{display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:1px;background:var(--line);
+        border:1px solid var(--line);border-radius:10px;overflow:hidden;margin-top:26px}
+  .kpi{background:var(--panel);padding:14px 16px}
+  .kpi .v{font-family:var(--mono);font-size:21px;font-weight:700;font-variant-numeric:tabular-nums;margin-top:5px}
+  .kpi .d{color:var(--ink3);font-size:11.5px;margin-top:3px}
+  .pos{color:var(--pos)} .neg{color:var(--neg)} .muted{color:var(--ink2)} .warn{color:var(--warn)}
+  .mono{font-family:var(--mono);font-size:.92em}
+  .panel{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin-top:18px}
+  .grid2{display:grid;grid-template-columns:repeat(auto-fit,minmax(320px,1fr));gap:18px}
+  .tbl-wrap{overflow-x:auto;margin-top:10px}
+  table{border-collapse:collapse;width:100%;font-size:13.5px}
+  th{font-family:var(--mono);font-size:10.5px;letter-spacing:.14em;text-transform:uppercase;color:var(--ink3);
+     text-align:right;padding:7px 10px;border-bottom:1px solid var(--line2);white-space:nowrap}
+  th:first-child,td:first-child{text-align:left}
+  td{padding:7px 10px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;text-align:right;white-space:nowrap}
+  td.name{font-family:var(--sans);white-space:normal;min-width:14ch}
+  tr.total td{border-top:2px solid var(--line2);font-weight:700}
+  tr.gap td{color:var(--warn)}
+  .chart{margin-top:14px}
+  .legend{display:flex;gap:18px;font-size:12px;color:var(--ink2);margin-top:8px;flex-wrap:wrap}
+  .legend .sw{display:inline-block;width:11px;height:11px;border-radius:3px;margin-right:6px;vertical-align:-1px}
+  .anchors li{margin:8px 0;color:var(--ink2);font-size:13.5px;line-height:1.6}
+  .anchors b{color:var(--ink);font-variant-numeric:tabular-nums}
+  ul.plain{padding-left:20px}
+  ul.plain li{margin:8px 0;color:var(--ink2);font-size:13.5px;line-height:1.6}
+  ul.plain b{color:var(--ink)}
+  footer{margin-top:70px;padding-top:16px;border-top:1px solid var(--line2);color:var(--ink3);
+         font-size:12px;font-family:var(--mono);letter-spacing:.06em;line-height:1.8}
+  @media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header class="mast">
+  <div class="brand"><div><div class="word">BETTORTOKEN</div><div class="tag">WEEKLY MANAGEMENT REPORT</div></div></div>
+  <div class="stamp"><b>WEEK 38 · 2026</b>MON SEP 14 — SUN SEP 20 (ET)<br>ISSUED MON SEP 21 · 06:40 ET</div>
+</header>
+
+<div class="hero">
+  <p class="eyebrow">The week the book went quiet</p>
+  <h1>Six measured days settled <span class="neg">−$58.18</span> on 58 markets. Two weeks ago it was 966.</h1>
+  <p class="dek">Venue truth for Mon&nbsp;Sep&nbsp;14 – Sat&nbsp;Sep&nbsp;19 is essentially flat: <b>−$58.18</b> realized on
+  <b>$129,478.82</b> of settled cost, 46&nbsp;wins to 12&nbsp;losses. The striking number is not the P&amp;L, it is the
+  <b>volume</b>. Week&nbsp;36 settled 966 markets; this week settled 58 — <b>6% of the activity</b> on 71% of the cost,
+  which is the signature of a book that has stopped taking small positions and is running down a handful of large ones.
+  The copy sleeves settled <b>nothing at all</b>.</p>
+
+  <div class="halt"><div class="dot"></div>
+    <p><b>THIS EDITION COVERS SIX DAYS, NOT SEVEN.</b> The venue-truth table holds no row for
+    <b>Sunday Sep&nbsp;20</b>. Its most recent write was 2026-09-21&nbsp;01:57&nbsp;UTC, before the Sunday ET day had
+    closed, and nothing has run since — 8.4&nbsp;hours stale at the time of this report. Every figure here is therefore
+    a <b>six-day</b> figure and is labelled as such. Sunday is absent, not zero.</p></div>
+
+  <div class="halt"><div class="dot"></div>
+    <p><b>THE USUAL DETAIL SECTIONS ARE NOT IN THIS EDITION.</b> The by-sport split, position-size buckets, largest
+    wins and losses, per-whale sleeve detail and the whale-upstream curves are all folded from engine-diagnostic
+    export blobs. Those logs download from <span class="mono">results-receiver.actions.githubusercontent.com</span>,
+    which this environment's egress policy denies — the same unreachable host the Week&nbsp;36 edition flagged. Rather
+    than estimate them, this edition reports only what the database can be made to prove.</p></div>
+</div>
+
+<div class="kpis">
+  <div class="kpi"><div class="lbl">Six-day P&amp;L · venue truth</div><div class="v neg">−$58.18</div><div class="d">uncapped · 46W–12L · Sep 14–19</div></div>
+  <div class="kpi"><div class="lbl">Settled markets</div><div class="v">58</div><div class="d">vs 966 in Week 36 · −94%</div></div>
+  <div class="kpi"><div class="lbl">Settled cost</div><div class="v">$129,478.82</div><div class="d">ROI −0.045%</div></div>
+  <div class="kpi"><div class="lbl">Win rate</div><div class="v pos">79.3%</div><div class="d">46 of 58 · flat P&amp;L regardless</div></div>
+  <div class="kpi"><div class="lbl">Copy sleeves</div><div class="v muted">$0.00</div><div class="d">0 settled · 0 staked · dormant</div></div>
+  <div class="kpi"><div class="lbl">Sunday Sep 20</div><div class="v warn">NO DATA</div><div class="d">crawl stale 8.4h · row absent</div></div>
+</div>
+
+<section>
+  <h2>The week, day by day</h2>
+  <p class="sub">Venue truth dated by the venue's own convention — the event day carried in the market slug (ET).
+  Read directly from <span class="mono">venue_truth_days</span>, the table that serves
+  <span class="mono">/api/venue-truth</span>, rather than from a probe-log blob.</p>
+  <div class="panel">
+    <div class="lbl">Daily realized P&amp;L · USD · venue truth</div>
+    <div class="chart" style="overflow-x:auto">
+<svg viewBox="0 0 760 300" width="100%" style="max-width:760px;display:block" role="img" aria-label="Daily realized P and L, venue truth, Mon Sep 14 to Sat Sep 19, with Sunday Sep 20 absent">
+<line x1="70" y1="40" x2="744" y2="40" stroke="#1E3050" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="62" y="44" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">5,000</text>
+<line x1="70" y1="90" x2="744" y2="90" stroke="#1E3050" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="62" y="94" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">2,500</text>
+<line x1="70" y1="140" x2="744" y2="140" stroke="#294067" stroke-width="1"/>
+<text x="62" y="144" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">0</text>
+<line x1="70" y1="190" x2="744" y2="190" stroke="#1E3050" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="62" y="194" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">−2,500</text>
+<line x1="70" y1="240" x2="744" y2="240" stroke="#1E3050" stroke-width="1" stroke-dasharray="3 4"/>
+<text x="62" y="244" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">−5,000</text>
+
+<rect x="96" y="47.5" width="44" height="92.5" rx="3" fill="#2EE6A8" opacity=".85"><title>Mon Sep 14 · +$4,625.22 · 10 settled · 10W–0L</title></rect>
+<text x="118" y="42" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">+4,625</text>
+<text x="118" y="272" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Mon 14</text>
+
+<rect x="186" y="128.8" width="44" height="11.2" rx="3" fill="#2EE6A8" opacity=".85"><title>Tue Sep 15 · +$561.38 · 6 settled · 5W–1L</title></rect>
+<text x="208" y="123" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">+561</text>
+<text x="208" y="272" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Tue 15</text>
+
+<rect x="276" y="140" width="44" height="55.5" rx="3" fill="#F06D6D" opacity=".85"><title>Wed Sep 16 · −$2,774.37 · 14 settled · 9W–5L</title></rect>
+<text x="298" y="209" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">−2,774</text>
+<text x="298" y="272" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Wed 16</text>
+
+<rect x="366" y="111.4" width="44" height="28.6" rx="3" fill="#2EE6A8" opacity=".85"><title>Thu Sep 17 · +$1,428.75 · 11 settled · 11W–0L</title></rect>
+<text x="388" y="105" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">+1,428</text>
+<text x="388" y="272" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Thu 17</text>
+
+<rect x="456" y="123.4" width="44" height="16.6" rx="3" fill="#2EE6A8" opacity=".85"><title>Fri Sep 18 · +$827.38 · 4 settled · 3W–1L</title></rect>
+<text x="478" y="117" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">+827</text>
+<text x="478" y="272" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Fri 18</text>
+
+<rect x="546" y="140" width="44" height="94.5" rx="3" fill="#F06D6D" opacity=".85"><title>Sat Sep 19 · −$4,726.54 · 13 settled · 8W–5L</title></rect>
+<text x="568" y="248" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">−4,726</text>
+<text x="568" y="272" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Sat 19</text>
+
+<rect x="636" y="120" width="44" height="40" rx="3" fill="none" stroke="#E8A33D" stroke-width="1.5" stroke-dasharray="4 4"/>
+<text x="658" y="114" fill="#E8A33D" font-size="10" font-family="monospace" text-anchor="middle">no row</text>
+<text x="658" y="272" fill="#E8A33D" font-size="11" font-family="monospace" text-anchor="middle">Sun 20</text>
+</svg>
+    </div>
+    <div class="legend">
+      <span><span class="sw" style="background:#2EE6A8"></span>Gain</span>
+      <span><span class="sw" style="background:#F06D6D"></span>Loss</span>
+      <span><span class="sw" style="border:1.5px dashed #E8A33D;background:transparent"></span>Absent from the venue-truth table</span>
+    </div>
+    <div class="tbl-wrap"><table>
+      <tr><th>Day (ET)</th><th>Realized</th><th>Settled</th><th>W–L</th><th>Cost</th><th>Row written</th></tr>
+      <tr><td class="name">Mon Sep 14</td><td class="pos">4,625.22</td><td>10</td><td>10–0</td><td>23,780.62</td><td class="muted">09-21 01:57</td></tr>
+      <tr><td class="name">Tue Sep 15</td><td class="pos">561.38</td><td>6</td><td>5–1</td><td>7,161.46</td><td class="muted">09-21 01:57</td></tr>
+      <tr><td class="name">Wed Sep 16</td><td class="neg">−2,774.37</td><td>14</td><td>9–5</td><td>27,890.61</td><td class="muted">09-21 01:57</td></tr>
+      <tr><td class="name">Thu Sep 17</td><td class="pos">1,428.75</td><td>11</td><td>11–0</td><td>27,691.72</td><td class="muted">09-21 01:57</td></tr>
+      <tr><td class="name">Fri Sep 18</td><td class="pos">827.38</td><td>4</td><td>3–1</td><td>10,949.22</td><td class="muted">09-21 01:57</td></tr>
+      <tr><td class="name">Sat Sep 19</td><td class="neg">−4,726.54</td><td>13</td><td>8–5</td><td>32,005.19</td><td class="muted">09-21 01:57</td></tr>
+      <tr class="gap"><td class="name">Sun Sep 20</td><td>—</td><td>—</td><td>—</td><td>—</td><td>no row</td></tr>
+      <tr class="total"><td class="name">Six days</td><td class="neg">−58.18</td><td>58</td><td>46–12</td><td>129,478.82</td><td class="muted">ROI −0.045%</td></tr>
+    </table></div>
+    <p class="sub" style="margin:12px 0 0;font-size:12.5px">Monday's +$4,625.22 on a 10–0 card and Saturday's
+    −$4,726.54 very nearly cancel. Strip those two days and the remaining four settled −$0.71 between them on
+    $73,692.99 of cost. A 79.3% win rate that produces a flat week is a book whose losses are larger than its wins.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Copy sleeves</h2>
+  <p class="sub">Settled copy orders on the audit table, by whale, for the full ET week including Sunday.</p>
+  <div class="panel">
+    <div class="tbl-wrap"><table>
+      <tr><th>Sleeve</th><th>Settled</th><th>W–L</th><th>Staked</th><th>P&amp;L</th></tr>
+      <tr class="total"><td class="name">All sleeves · Sep 14–20</td><td>0</td><td>0–0</td><td>0.00</td><td class="muted">0.00</td></tr>
+    </table></div>
+    <p class="sub" style="margin:12px 0 0">Not a rounding artefact and not a missing export: the query covers the whole
+    ET week (2026-09-14T04:00Z → 2026-09-21T04:00Z) against <span class="mono">live_orders.settled_at</span> and returns
+    <b>zero rows with a P&amp;L</b>. The sleeves settled nothing. This is consistent with the mirror being switched off —
+    the database switch <span class="mono">mirror_live</span> reads <b>false</b> — and with the account's overall
+    collapse in settled volume.</p>
+  </div>
+</section>
+
+<section>
+  <h2>Reconciliation anchors</h2>
+  <p class="sub">The exact figures a reader can check, and where each came from:</p>
+  <div class="panel"><ul class="anchors">
+    <li><b>Venue-truth daily lines</b> (<span class="mono">venue_truth_days</span>, research-sql run 190):
+      Sep 14 <b>+$4,625.22</b> 10W–0L of 10, cost $23,780.62; Sep 15 <b>+$561.38</b> 5W–1L of 6, cost $7,161.46;
+      Sep 16 <b>−$2,774.37</b> 9W–5L of 14, cost $27,890.61; Sep 17 <b>+$1,428.75</b> 11W–0L of 11, cost $27,691.72;
+      Sep 18 <b>+$827.38</b> 3W–1L of 4, cost $10,949.22; Sep 19 <b>−$4,726.54</b> 8W–5L of 13, cost $32,005.19.</li>
+    <li><b>Six-day fold</b>: realized <b>−$58.18</b>, settled <b>58</b>, <b>46W–12L</b>, cost <b>$129,478.82</b>,
+      ROI <b>−0.045%</b>. The database's own SUM and an independent recompute of the six printed lines agree to the
+      cent on all four figures.</li>
+    <li><b>Sunday Sep 20</b>: no row exists. <span class="mono">max(day)</span> = <b>2026-09-19</b>;
+      <span class="mono">max(updated_at)</span> = <b>2026-09-21 01:57:52 UTC</b>, <b>8.4 hours</b> before this report.
+      The crawl last ran before the Sunday ET day closed and has not run since.</li>
+    <li><b>Copy sleeves</b> (<span class="mono">live_orders</span>, settled_at in
+      2026-09-14T04:00Z → 2026-09-21T04:00Z, research-sql run 192): settled <b>0</b>, staked <b>$0.00</b>,
+      P&amp;L <b>$0.00</b>.</li>
+    <li><b>Mirror switch</b> (<span class="mono">ingestion_state.mirror_live</span>, research-sql run 187):
+      <b>false</b>. Read from the database, not inferred from code, environment or a prior report.</li>
+    <li><b>Week-over-week</b>: Week 36 (Aug 31 – Sep 6) settled 966 markets on $183,285.84. This week's six measured
+      days settled <b>58</b> on <b>$129,478.82</b> — <b>6.0%</b> of the market count on <b>70.6%</b> of the cost.</li>
+  </ul></div>
+</section>
+
+<section>
+  <h2>Operational and safety notes</h2>
+  <p class="sub">Material to management, found while this report was being prepared. These are engineering findings,
+  not P&amp;L, and they are reported here because they bear on what the account is capable of doing unattended.</p>
+  <div class="panel"><ul class="plain">
+    <li><b>An order route is enabled by default and does not read the master switch.</b>
+      <span class="mono">workers/whale_exits.py</span> → <span class="mono">live_executor.mirror_exit</span> is
+      registered in the running workers service; its env flag <span class="mono">WHALE_EXIT_ENABLED</span> is
+      <b>absent</b> from that service and defaults to on; its whale allowlist is populated; PMUS credentials are
+      present; the pause row <span class="mono">live_trading_paused</span> is <b>absent</b>, and the code treats an
+      absent row as <i>not paused</i>. <span class="mono">mirror_exit</span> never calls
+      <span class="mono">active_venue()</span>, so <span class="mono">LIVE_TRADING_ENABLED</span> does not gate it.
+      One gate remains unread — <span class="mono">LIVE_COPY_HALT</span>, set to a single character whose value is not
+      visible from here. <b>It has not fired</b>: filled orders stood at 52 at 01:57Z and at 52 again at 10:11Z.</li>
+    <li><b>There is no global execution gate.</b> Six order-capable routes were inventoried; they consult three
+      disjoint stop mechanisms and no single switch reaches all of them. Recommended remedy is one authoritative
+      fail-closed check above every order function, defaulting to refuse.</li>
+    <li><b>A second engine exists and is configured live.</b> The <span class="mono">edge-shadow</span> service holds
+      its own venue credentials and reads <span class="mono">mode: LIVE_BETA</span>. It is currently
+      <b>suspended</b> and has produced no logs, so there is no exposure today; it would resume in that configuration.</li>
+    <li><b>Standing constraints hold.</b> <span class="mono">mirror_live=false</span>, COMMAND undeployed, and the
+      BETTOR research lane has no order path in its import graph — real-order activity <b>NONE</b>, real capital at
+      risk <b>0</b> for that lane. That statement is scoped to BETTOR and is not a claim about the whole system.</li>
+  </ul></div>
+</section>
+
+<section>
+  <h2>What this edition could not verify</h2>
+  <div class="panel"><ul class="plain">
+    <li><b>Sunday Sep 20</b> — no venue-truth row, as above. Reported absent rather than zero.</li>
+    <li><b>By-sport split, size buckets, largest wins and losses, per-whale sleeve detail, whale upstream curves</b> —
+      all sourced from engine-diagnostic export blobs. The log archive downloads from a host this environment's egress
+      policy denies, so they were not rebuilt. They are omitted, not estimated.</li>
+    <li><b>Account balances</b> (Polymarket US cash, Kalshi) — unchanged from Week 36: they live in the probe log head
+      and the artifact, neither reachable here.</li>
+    <li><b>Kalshi</b> — no figures, same as Week 36.</li>
+    <li><b>The public site record</b> — the site-cap comparison that normally sits beside venue truth is not in this
+      edition; it is served from the homepage rather than the database, and this environment cannot reach it.
+      The venue-truth basis is therefore presented alone, uncapped.</li>
+    <li><b>Week 37 (Sep 7–13) was never published.</b> The artifact's previous version is Week 36, issued Sep 7. This
+      edition does not backfill it.</li>
+  </ul></div>
+</section>
+
+<section>
+  <h2>Method</h2>
+  <div class="grid2">
+    <div class="panel"><h3>Sources</h3>
+      <p class="sub" style="margin:6px 0 0">Four read-only SQL runs against the production replica via the
+      <span class="mono">research-sql</span> workflow: runs <b>187</b> (mirror switch), <b>189</b> (table shape and
+      coverage), <b>190</b> (daily lines and crawl freshness) and <b>192</b> (sleeve P&amp;L). No figure in this
+      edition comes from a probe-log blob, and none was carried forward from a previous week.</p></div>
+    <div class="panel"><h3>Verification</h3>
+      <p class="sub" style="margin:6px 0 0">The six daily lines were re-added independently of the database's own
+      aggregate: realized, settled, wins, losses and cost all agree to the cent. Where a figure could not be verified
+      it is marked absent rather than estimated, and the week is labelled six days throughout rather than presented as
+      a full week.</p></div>
+  </div>
+</section>
+
+<footer>
+  BETTORTOKEN · WEEKLY MANAGEMENT REPORT · WEEK 38 (SEP 14 – SEP 20, 2026) · VENUE-TRUTH BASIS · SIX DAYS MEASURED<br>
+  Settled figures from venue_truth_days, the table serving /api/venue-truth. Sleeve figures from live_orders.
+  Sunday Sep 20 absent from the source. Issued Mon Sep 21, 06:40 ET.
+</footer>
+</div>
+</body>
+</html>
