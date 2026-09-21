@@ -178,7 +178,30 @@ def normalize(row: dict, *, venue: str = "polymarket-us",
     # ABSENT -- and absent depth is not infinite depth. A record with no
     # depth can still be decided on; it simply cannot produce an
     # executable size, and the engine already refuses on that.
-    depth_source = "ABSENT_IN_CAPTURE_SCHEMA"
+    # DEPTH IS IN THE SCHEMA AND I SAID IT WAS NOT. Migration 088
+    # declares yes_depth / no_depth / multi_level_depth as JSONB and
+    # bettor_state_store INSERTs all three. I read the base table, saw no
+    # size column, and declared a venue limitation without querying the
+    # columns that hold it.
+    raw_depth = g("yes_depth") or g("YES_DEPTH")
+    bid_size, ask_size, depth_source = 0.0, 0.0, "NOT_PRESENT_IN_ROW"
+    if raw_depth not in (None, SENTINEL, "null"):
+        parsed = raw_depth
+        if isinstance(parsed, str):
+            try:
+                import json as _json
+                parsed = _json.loads(parsed)
+            except ValueError:
+                parsed = None
+        if isinstance(parsed, dict):
+            bid_size = _num(parsed.get("bid") or parsed.get("bidSize")) or 0.0
+            ask_size = _num(parsed.get("ask") or parsed.get("askSize")) or 0.0
+            depth_source = "DISPLAYED_DEPTH_AT_T0"
+        elif _num(parsed) is not None:
+            ask_size = bid_size = _num(parsed)
+            depth_source = "DISPLAYED_DEPTH_AT_T0_SCALAR"
+    if depth_source == "NOT_PRESENT_IN_ROW":
+        reasons.append(R_NO_DEPTH)
 
     # COMPLEMENT. Never derived. bettor_state_capture is explicit that
     # deriving 1 - YES would assert a no-arbitrage identity Class C
@@ -197,24 +220,65 @@ def normalize(row: dict, *, venue: str = "polymarket-us",
         observed_at=str(g("observed_at") or g("OBSERVED_AT") or ""),
         source_timestamp=src_ts if src_ts != SENTINEL else None,
         age_s=age, venue_state=state if state != SENTINEL else None,
-        bid=bid, ask=ask, depth_source=depth_source,
+        bid=bid, ask=ask, bid_size=bid_size, ask_size=ask_size,
+        depth_source=depth_source,
         complement_source=complement, venue=venue,
         account_class=account_class, fee_source=fee_source,
         reasons=reasons)
     return rec
 
 
+# How far apart two legs' source timestamps may be and still describe one
+# instant. A pair built from quotes seconds apart is a pair of two
+# different markets.
+PAIR_ALIGNMENT_S = 2.0
+
+# Outcome labels the venue uses for genuine two-sided contracts. A pair
+# must be one FROM each side of one of these families -- not merely two
+# strings that happen to differ.
+COMPLEMENT_FAMILIES = (
+    frozenset({"yes", "no"}),
+    frozenset({"over", "under"}),
+)
+
+
+def _family_of(a: str, b: str):
+    la, lb = str(a).strip().lower(), str(b).strip().lower()
+    for fam in COMPLEMENT_FAMILIES:
+        if {la, lb} == fam:
+            return "/".join(sorted(fam))
+    return None
+
+
 def pair_legs(records: list) -> dict:
-    """Group accepted legs into genuine complements of the SAME contract.
+    """Genuine complements of one contract, at one instant.
 
-    SHARING AN EVENT OR A BUCKET IS NOT ENOUGH, and this is the check
-    that keeps a totals line from being paired against a moneyline. Two
-    legs are complements only when they carry the SAME market_id and two
-    DISTINCT outcome legs of it.
+    THREE DEFECTS THIS REPLACES, all found by review.
 
-    Returns the pairs it could form and, separately, every leg it could
-    not pair and why -- because an unpaired leg is a finding, not a gap
-    to be filled by loosening the rule.
+    1. IT COULD PAIR TWO ROWS OF ONE LABEL. The old body sorted the legs
+       by outcome and took the first two, so a contract observed twice
+       on the 'no' side produced a 'pair' of no/no. Distinctness was
+       checked on the SET of labels and then thrown away by the slice.
+
+    2. IT NEVER CHECKED COMPLEMENT SEMANTICS. Two labels differing is
+       not two labels complementing. 'over' and 'no' are both real
+       outcome labels and are not each other's complement; a player
+       name and 'no' are not a two-sided market. Pairing now requires
+       both labels to come from one declared family.
+
+    3. IT NEVER CHECKED TIME. Two quotes hours apart describe two
+       different markets, and summing them is meaningless. Legs must
+       share an instant within PAIR_ALIGNMENT_S of SOURCE timestamps --
+       the venue's clock, not ours.
+
+    Everything it cannot pair is returned with the reason, because an
+    unpaired leg is a finding.
+
+    NOTE ON THE 11 CONTRACTS. A venue-wide query found 11 contracts with
+    two distinct outcome labels. That is a count of LABEL DIVERSITY and
+    nothing more: none of them has been checked for complement family,
+    timestamp alignment, or executable depth. They are candidates for
+    verification, not verified executable pairs.
     """
     by_market: dict = {}
     for r in records:
@@ -224,37 +288,91 @@ def pair_legs(records: list) -> dict:
 
     pairs, unpaired = [], []
     for mid, legs in sorted(by_market.items()):
-        distinct = {l.outcome_leg for l in legs}
+        best = None
+        for i in range(len(legs)):
+            for j in range(i + 1, len(legs)):
+                a, b = legs[i], legs[j]
+                fam = _family_of(a.outcome_leg, b.outcome_leg)
+                if fam is None:
+                    continue
+                skew = _skew_s(a.source_timestamp, b.source_timestamp)
+                if skew is None or skew > PAIR_ALIGNMENT_S:
+                    continue
+                if best is None or skew < best[0]:
+                    best = (skew, a, b, fam)
+        if best is not None:
+            skew, a, b, fam = best
+            pairs.append({
+                "market_id": mid, "family": fam,
+                "legs": [a.outcome_leg, b.outcome_leg],
+                "observations": [a.observation_id, b.observation_id],
+                "source_skew_s": round(skew, 4),
+                "provenance": [a.complement_source, b.complement_source],
+                "depth": [a.ask_size, b.ask_size],
+                "executable": bool(a.ask_size > 0 and b.ask_size > 0),
+            })
+            continue
+
+        labels = sorted({str(l.outcome_leg) for l in legs})
         if len(legs) == 1:
-            unpaired.append({"market_id": mid, "legs": 1,
-                             "why": "only one leg of this contract was "
-                                    "observed; the sibling was never read"})
-        elif len(distinct) < 2:
-            unpaired.append({"market_id": mid, "legs": len(legs),
-                             "why": ("%d rows but only %d distinct outcome "
-                                     "leg(s); these are repeats of one "
-                                     "side, not complements"
-                                     % (len(legs), len(distinct)))})
+            why = "only one leg of this contract was observed"
+        elif len(labels) < 2:
+            why = ("%d rows but one label (%s): repeats of one side, not "
+                   "complements" % (len(legs), labels[0]))
+        elif not any(_family_of(x, y)
+                     for x in labels for y in labels if x != y):
+            why = ("labels %s are not a declared complement family; two "
+                   "labels differing is not two labels complementing"
+                   % labels)
         else:
-            ordered = sorted(legs, key=lambda l: str(l.outcome_leg))[:2]
-            pairs.append({"market_id": mid,
-                          "legs": [l.outcome_leg for l in ordered],
-                          "observations": [l.observation_id for l in ordered]})
-    return {"pairs": pairs, "unpaired": unpaired}
+            why = ("complement family present but source timestamps are "
+                   "not within %.1fs" % PAIR_ALIGNMENT_S)
+        unpaired.append({"market_id": mid, "legs": len(legs),
+                         "labels": labels, "why": why})
+    return {"pairs": pairs, "unpaired": unpaired,
+            "alignment_bound_s": PAIR_ALIGNMENT_S,
+            "note": ("a pair here is a CANDIDATE: same contract, declared "
+                     "complement family, aligned source clocks. Executable "
+                     "still requires depth on both legs.")}
+
+
+def _skew_s(a: str | None, b: str | None) -> float | None:
+    """Seconds between two venue SOURCE timestamps, or None."""
+    from datetime import datetime
+
+    def parse(x):
+        if not x:
+            return None
+        t = str(x).replace("Z", "+00:00")
+        if "." in t:                      # trim ns to us
+            head, rest = t.split(".", 1)
+            digits = "".join(c for c in rest if c.isdigit())[:6]
+            tail = rest[len(digits):] if len(rest) > len(digits) else ""
+            tz = tail if tail.startswith(("+", "-")) else "+00:00"
+            t = "%s.%s%s" % (head, digits.ljust(6, "0"), tz)
+        try:
+            return datetime.fromisoformat(t)
+        except ValueError:
+            return None
+
+    pa, pb = parse(a), parse(b)
+    if pa is None or pb is None:
+        return None
+    return abs((pa - pb).total_seconds())
 
 
 def to_book(rec: NormalizedObservation) -> de.Book:
     """A normalized record as the decision engine's Book.
 
-    Depth is zero because the capture schema has none, which means the
-    engine will refuse for NO_EXECUTABLE_DEPTH rather than size a trade
-    against a quantity nobody recorded. That refusal is correct and it
-    is the honest state of this dataset.
+    Depth comes from DISPLAYED_DEPTH_AT_T0 when the row carries it, and
+    a row without it is REJECTED rather than given a zero -- zero depth
+    and unrecorded depth are different facts and only one of them is
+    about the market.
     """
     return de.Book(
         market_id=rec.market_id or "UNKNOWN",
         yes_bid=rec.bid, yes_ask=rec.ask,
-        yes_bid_size=0.0, yes_ask_size=0.0,
+        yes_bid_size=rec.bid_size, yes_ask_size=rec.ask_size,
         no_bid=None, no_ask=None, no_bid_size=0.0, no_ask_size=0.0,
         age_s=rec.age_s, venue_state=rec.venue_state,
         complement_source=rec.complement_source)

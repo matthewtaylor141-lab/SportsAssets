@@ -41,6 +41,7 @@ SELECT o.observation_id, o.market_id, o.event_id, o.outcome_leg,
        o.observed_at, o.book_source_ts, o.book_age_s, o.venue_state,
        o.book_readability_status, o.yes_bid, o.yes_ask, o.no_bid, o.no_ask,
        o.sport, o.league, o.market_type,
+       o.yes_depth, o.no_depth,
        s.settlement_outcome, s.settlement_status
   FROM bettor_state_observations o
   LEFT JOIN bettor_state_settlements s USING (observation_id)
