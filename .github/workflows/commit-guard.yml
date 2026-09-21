@@ -71,3 +71,36 @@ jobs:
             exit 1
           fi
           echo "all pushed commits declare their deploy intent"
+
+      - name: every workflow is startable, and has room to be edited
+        run: |
+          set -e
+          # 2026-09-21: render-ops.yml crossed GitHub's 512,000-byte
+          # ceiling and every dispatch returned startup_failure. The
+          # lever that operates Render, reads the production database
+          # and holds the trading kill switch was taken down by a
+          # comment, and two runs were sent at the corpse before anyone
+          # checked. yaml.safe_load passed the whole time -- the file
+          # was valid YAML and always had been.
+          #
+          # This checks size against the ceiling AND against a headroom
+          # minimum, the structure GitHub requires, and `bash -n` over
+          # every run: block. Headroom is the real control: the file
+          # that "passed" was 192 bytes from death.
+          python3 -m pip install --quiet pyyaml
+          python3 scripts/check_workflows.py
+
+      - name: actionlint
+        run: |
+          set -e
+          # The schema checks above are ours and deliberately narrow.
+          # actionlint is the upstream validator and knows the parts of
+          # the workflow schema we have not encoded -- expression
+          # syntax, context availability, runner labels, action inputs.
+          bash <(curl -sSf https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash) >/dev/null
+          ./actionlint -color || {
+            echo "::error::actionlint rejected a workflow. A workflow that
+          does not validate may still be dispatchable, but the failure
+          surfaces as startup_failure at the moment you need the lever."
+            exit 1
+          }
