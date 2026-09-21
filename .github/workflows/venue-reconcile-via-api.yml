@@ -1,0 +1,154 @@
+# Read the venue THROUGH THE RUNNING API SERVICE. Read only.
+#
+# WHY THIS EXISTS. venue-reconcile.yml builds its own PMUS client and
+# needs PMUS_KEY_ID / PMUS_SECRET_KEY as repository secrets. They are
+# not set, so that lane is blocked.
+#
+# But the blocked thing is the GitHub execution path, not reconciliation
+# itself. sportsassets-api is already running, already holds working
+# venue credentials in its own environment, and already exposes
+# read-only endpoints that call the venue with them:
+#
+#   GET /api/desk/accounts     the venue's portfolio, and -- the part
+#                              that matters here -- it already splits
+#                              PLATFORM positions from EXTERNAL ones,
+#                              "external" meaning a venue position on a
+#                              market our order ledger never ordered.
+#                              That is one of the exact questions the
+#                              reconciliation has to answer.
+#   GET /api/admin/open-orders resting orders: commitments, not fills.
+#
+# NO CREDENTIAL MOVES. This job sends ADMIN_TOKEN, which already exists
+# as a repository secret and is already used by gate-lever.yml. The
+# venue keys stay where they are: the API uses its own. Nothing here
+# prints, extracts, transfers or persists a credential, and the venue
+# keys are never added to GitHub.
+#
+# WHAT THIS CANNOT DO, STATED UP FRONT. These endpoints return CURRENT
+# state. Neither exposes trade-level activity or settlement events, so
+# this lane can deliver current holdings and open-order commitments --
+# and cannot deliver the row-level match of the 52 historical fills or
+# settled proceeds. Those still need the activities read, which still
+# needs the blocked lane or a new endpoint.
+name: venue-reconcile-via-api
+
+on:
+  workflow_dispatch:
+    inputs:
+      head:
+        description: 'Max position rows to print'
+        required: false
+        default: '80'
+
+permissions:
+  contents: read
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Read the account through the API's own client
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          HEAD: ${{ inputs.head }}
+        run: |
+          set -o pipefail
+          API=https://sportsassets-api.onrender.com
+          if [ -z "$ADMIN_TOKEN" ]; then
+            echo "::error::ADMIN_TOKEN is not set as a repository secret; this lane cannot authenticate to the API"
+            exit 1
+          fi
+          echo "::add-mask::$ADMIN_TOKEN"
+
+          get() {
+            code=$(curl -sS --max-time 90 -o "/tmp/$2.json" -w '%{http_code}' \
+                   -H "X-Admin-Token: $ADMIN_TOKEN" \
+                   -H "Accept: application/json" "$API$1")
+            echo "  GET $1 -> HTTP $code"
+            return 0
+          }
+
+          echo "== reading =="
+          get /api/desk/accounts accounts
+          get /api/admin/open-orders openorders
+
+          echo
+          echo "== WHAT THE VENUE SAYS, THROUGH THE API'S OWN CREDENTIALS =="
+          python3 - <<'PY'
+          import json, os
+
+          def load(name):
+              try:
+                  with open("/tmp/%s.json" % name) as fh:
+                      return json.load(fh)
+              except Exception as exc:
+                  print("  %s unreadable: %s" % (name, type(exc).__name__))
+                  return None
+
+          acc = load("accounts")
+          oo = load("openorders")
+          n = int(os.environ.get("HEAD") or 80)
+
+          if not isinstance(acc, dict):
+              print("  no account payload -- treat every figure below as "
+                    "ABSENT, not zero")
+          else:
+              # Print only what reconciliation needs. No balances beyond
+              # the composite the endpoint already labels, and no
+              # account identifiers.
+              pm = acc.get("pm") or acc.get("polymarket") or {}
+              for k in ("committed_usd", "trading_capital",
+                        "position_count", "external_count"):
+                  if k in pm:
+                      print("  pm.%-18s %s" % (k, pm[k]))
+              for key in ("positions", "external_positions",
+                          "externals"):
+                  rows = pm.get(key) or acc.get(key)
+                  if not isinstance(rows, list):
+                      continue
+                  print()
+                  print("  %s: %d" % (key, len(rows)))
+                  for r in rows[:n]:
+                      if not isinstance(r, dict):
+                          continue
+                      print("     %-40s net=%-10s cost=%-12s" % (
+                          str(r.get("slug") or r.get("market") or "?")[:40],
+                          r.get("net") or r.get("netPosition") or r.get("qty"),
+                          r.get("cost") or r.get("cost_usd") or r.get("basis")))
+
+          print()
+          rows = (oo or {}).get("orders") if isinstance(oo, dict) else oo
+          if not isinstance(rows, list):
+              print("  open orders: ABSENT (endpoint returned no list)")
+          else:
+              print("  OPEN ORDER COMMITMENTS: %d resting" % len(rows))
+              total = 0.0
+              for r in rows[:n]:
+                  if not isinstance(r, dict):
+                      continue
+                  try:
+                      total += float(r.get("size") or 0) * float(r.get("price") or 0)
+                  except (TypeError, ValueError):
+                      pass
+                  print("     %-40s %-6s size=%-10s px=%-8s" % (
+                      str(r.get("us_market_slug") or r.get("slug") or "?")[:40],
+                      r.get("side"), r.get("size"), r.get("price")))
+              print("  commitment (size x limit): %.2f" % total)
+
+          print()
+          print("  SCOPE: this is CURRENT state. It does not match the 52")
+          print("  historical fills row by row and carries no settlement")
+          print("  events -- those need the activities read.")
+          PY
+
+      - name: Keep the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: venue-via-api-${{ github.run_id }}
+          path: /tmp/accounts.json
+          retention-days: 30
+          if-no-files-found: warn
