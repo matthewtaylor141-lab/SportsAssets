@@ -84,6 +84,7 @@ from dataclasses import dataclass, field, asdict
 from . import bettor_fair_value as fv
 from . import bettor_merge as merge
 from . import bettor_p_fill as pf
+from . import bettor_venue_contract as vc
 
 ENGINE_VERSION = "BETTOR_DECISION_ENGINE_V1"
 
@@ -122,16 +123,38 @@ class Unsupported(Exception):
 
 @dataclass(frozen=True)
 class Fees:
-    """Charged per contract, per side, unless the venue says otherwise.
+    """An EXPLICIT fee schedule. There is no default.
 
-    `rebate_verified_per_contract` is deliberately separate and defaults
-    to zero: an incentive that has not been seen on a settled statement
-    contributes nothing to a base-case EV.
+    REVIEW REPRODUCED THIS: omitting fees produced PAIR_BUY with
+    data_quality "OK". `Fees()` with all-zero fields is not "no fees
+    apply" -- it is FREE EXECUTION, the most optimistic assumption
+    available, applied silently because nobody passed anything.
+
+    So a schedule now has to declare itself verified. An unverified one
+    is treated as an unknown cost, which blocks the action rather than
+    pricing it at zero. `Fees.free_for_demonstration()` exists for the
+    hypothetical arithmetic examples and is marked so it can never be
+    mistaken for a live schedule.
+
+    `rebate_verified_per_contract` stays separate and zero by default:
+    an incentive not seen on a settled statement contributes nothing.
+    PMUS rounds fees to the nearest cent with banker's rounding PER
+    FILL, so a rebate is not linear in size and a small fill can round
+    the whole incentive away.
     """
     taker_per_contract: float = 0.0
     maker_per_contract: float = 0.0
     settlement_per_contract: float = 0.0
     rebate_verified_per_contract: float = 0.0
+    verified: bool = False
+    hypothetical: bool = False
+    source: str = "UNVERIFIED"
+
+    @classmethod
+    def free_for_demonstration(cls) -> "Fees":
+        """Zero fees, labelled. For arithmetic demonstrations only."""
+        return cls(verified=False, hypothetical=True,
+                   source="HYPOTHETICAL_DEMONSTRATION_NOT_A_LIVE_SCHEDULE")
 
     def entry_cost(self, contracts: float, *, maker: bool) -> float:
         per = self.maker_per_contract if maker else self.taker_per_contract
@@ -158,22 +181,60 @@ class Book:
     age_s: float | None = None
     venue_state: str | None = None
 
+    # HOW THE COMPLEMENT PRICE GOT HERE. OBSERVED means the sibling
+    # instrument's own book was read. DERIVED means it was computed from
+    # this book (1 - bid), in which case ask_yes + ask_no is 1 + spread
+    # BY CONSTRUCTION and no pair is ever positive. ABSENT means there is
+    # no complement price at all, which is the state of every captured
+    # row today.
+    complement_source: str = vc.ABSENT
+
     @property
     def fresh(self) -> bool:
-        return self.age_s is not None and self.age_s <= MAX_BOOK_AGE_S
+        return (self.age_s is not None and 0.0 <= self.age_s
+                <= MAX_BOOK_AGE_S)
 
     @property
     def tradeable(self) -> bool:
-        return (self.venue_state or "OPEN").upper() in ("OPEN", "ACTIVE")
+        return (self.venue_state or "").upper() in ("OPEN", "ACTIVE")
 
     def unreadable_reason(self) -> str | None:
+        """Every way this book fails to be usable evidence about now.
+
+        REVIEW REPRODUCED THREE HOLES HERE, all of which returned
+        data_quality "OK": age_s=-20 (a book from the future), a price
+        of -0.1, and an unverified venue. The checks below are the
+        repair, and they are deliberately exhaustive rather than
+        minimal -- a validator that only rejects what somebody thought
+        of is the shape of the original defect.
+        """
         if self.age_s is None:
             return "book age is unknown, so the book cannot be dated"
-        if not self.fresh:
+        if not math.isfinite(self.age_s):
+            return "book age is not finite"
+        if self.age_s < 0:
+            return ("book age is %.1fs, which is in the future; a negative "
+                    "age is a clock fault, not a fresh book" % self.age_s)
+        if self.age_s > MAX_BOOK_AGE_S:
             return ("book is %.1fs old, past the %.0fs bound"
                     % (self.age_s, MAX_BOOK_AGE_S))
+        # VENUE STATE MUST BE STATED. It used to default to OPEN when
+        # absent, so a row that never said whether the market was
+        # tradeable was treated as tradeable.
+        if not self.venue_state:
+            return ("venue_state is absent; an unstated market state is "
+                    "not an open one")
         if not self.tradeable:
             return "venue_state is %r" % (self.venue_state,)
+        for name in ("yes_bid", "yes_ask", "no_bid", "no_ask"):
+            bad = _bad_price(getattr(self, name), name)
+            if bad:
+                return bad
+        for name in ("yes_bid_size", "yes_ask_size", "no_bid_size",
+                     "no_ask_size"):
+            bad = _bad_size(getattr(self, name), name)
+            if bad:
+                return bad
         return None
 
 
@@ -209,6 +270,12 @@ class Candidate:
     size_contracts: float = 0.0
     cash_now: float | None = None     # negative = paid out
     cash_at_settlement: float | None = None
+    # CONDITIONAL PAYOFF IS NOT EXECUTABLE EV. Kept as its own field so
+    # a reader cannot mistake one for the other, and so a candidate can
+    # report "this is what it pays IF it completes" while still scoring
+    # NOT_IDENTIFIED overall.
+    conditional_payoff: float | None = None
+    leg_risk_cost: float | None = None
     why: str = ""
     blocker: str | None = None
     assumptions: list[str] = field(default_factory=list)
@@ -216,6 +283,39 @@ class Candidate:
 
     def to_dict(self) -> dict:
         return asdict(self)
+
+
+def _bad_price(v, name: str) -> str | None:
+    """A price must be absent, or a real probability. Nothing else.
+
+    A contract that settles at 0 or 1 cannot trade at -0.1 or at 2.5,
+    and both of those were accepted. 0.0 and 1.0 are excluded too: a
+    quote at a settlement bound is either a stale artefact or a market
+    that has already resolved, and in neither case is it executable.
+    """
+    if v is None:
+        return None
+    x = _f(v)
+    if x is None:
+        return None                      # unparsable: handled per action
+    if not math.isfinite(x):
+        return "%s is not finite" % name
+    if x <= 0.0 or x >= 1.0:
+        return ("%s is %.4f, outside (0, 1); a contract settling at 0 or 1 "
+                "cannot trade there" % (name, x))
+    return None
+
+
+def _bad_size(v, name: str) -> str | None:
+    """Depth must be a finite, non-negative number of contracts."""
+    x = _f(v)
+    if x is None:
+        return "%s is not a number" % name
+    if not math.isfinite(x):
+        return "%s is not finite; infinite depth is not a quantity" % name
+    if x < 0:
+        return "%s is %.4g, and negative depth is not a quantity" % (name, x)
+    return None
 
 
 def _f(v) -> float | None:
@@ -256,13 +356,76 @@ def _eval_hold(inv: Inventory) -> Candidate:
         uncertainty="none as a baseline; it carries the position's own risk")
 
 
-def _eval_pair_buy(book: Book, fees: Fees, max_contracts: float) -> Candidate:
-    """The one action whose EV contains no forecast.
+def _eval_pair_buy(book: Book, fees: Fees, max_contracts: float,
+                   caps) -> Candidate:
+    """A COMPLETED pair's conditional payoff is 1.00. That is not its EV.
 
-    One YES plus one NO pays exactly PAIR_SETTLEMENT_PAR at settlement,
-    whatever the outcome. So the entire cash flow is known at decision
-    time and the only unknowns are executable size and fees.
+    THE CORRECTION. I wrote `EV = 1 - yes_ask - no_ask - fees` and called
+    it forecast-free. It is the payoff of a pair that ALREADY EXISTS,
+    conditional on both legs having filled and on the account being able
+    to hold both independently to settlement. None of those conditions
+    was checked, and listing partial-fill risk in the explanation text
+    priced nothing.
+
+    Four gates now sit in front of it, in order of how badly each one
+    bites:
+
+    1. PROVENANCE. If the complement ask is DERIVED as 1 - yes_bid then
+       yes_ask + no_ask == 1 + spread identically, and there is no fee
+       schedule or size at which that is positive. Class C measured it:
+       3,732 observations, 0 at or below par, min basis 1.0050. A
+       derived complement is arithmetic, not an opportunity.
+    2. CAPABILITY. If the account cannot hold both legs independently,
+       buying the complement NETS or CLOSES rather than acquiring, and
+       the par-settlement model does not describe the cash flow at all.
+       UNKNOWN blocks; it does not permit.
+    3. FEE SCHEDULE. An unverified schedule is an unknown cost, not a
+       zero one.
+    4. EXECUTION. Two legs, so two fills, and the failure mode is a
+       naked directional position the engine is not permitted to hold
+       deliberately. Priced below, not narrated.
     """
+    # 1. The identity check comes first because it is unconditional.
+    if vc.pair_is_an_identity(book.complement_source):
+        return Candidate(
+            action=PAIR_BUY, status=BLOCKED,
+            blocker="COMPLEMENT_IS_DERIVED_NOT_OBSERVED",
+            why=("the complement ask is derived from this book, so "
+                 "yes_ask + no_ask = 1 + spread by construction. Class C "
+                 "measured 3,732 such pairs: 0 at or below par, minimum "
+                 "basis 1.0050"),
+            assumptions=["a derived complement cannot disagree with par"],
+            uncertainty="none; this is an identity, not an estimate")
+    if book.complement_source != vc.OBSERVED:
+        return Candidate(
+            action=PAIR_BUY, status=NOT_IDENTIFIED,
+            blocker="COMPLEMENT_%s" % book.complement_source,
+            why=("no independently observed complement book; the sibling "
+                 "instrument was not read this cycle"),
+            uncertainty="the complement price is unknown, not absent")
+
+    # 2. Can this ACCOUNT even hold the resulting position?
+    blk = caps.blocker_for("holds_both_legs_independently")
+    if blk:
+        return Candidate(
+            action=PAIR_BUY, status=BLOCKED, blocker=blk,
+            why=("it is not established that this account holds both legs "
+                 "independently. If buying the complement nets against the "
+                 "existing leg the cash flow is a CLOSE, not an "
+                 "acquisition, and the par model does not apply"),
+            assumptions=["a reference account's token-pair mechanics are "
+                         "not inherited by the institutional account"],
+            uncertainty="unknown capability, which blocks rather than permits")
+
+    # 3. An unverified fee schedule is an unknown cost.
+    if not fees.verified:
+        return Candidate(
+            action=PAIR_BUY, status=NOT_IDENTIFIED,
+            blocker="FEE_SCHEDULE_UNVERIFIED",
+            why=("fees are %s; an unverified schedule is an unknown cost "
+                 "and must not be priced at zero" % fees.source),
+            uncertainty="execution cost unknown, so net EV is unknown")
+
     ya, na = _f(book.yes_ask), _f(book.no_ask)
     if ya is None or na is None:
         return Candidate(
@@ -284,26 +447,46 @@ def _eval_pair_buy(book: Book, fees: Fees, max_contracts: float) -> Candidate:
     cash_now = -(ya + na) * size - fees.entry_cost(2 * size, maker=False)
     cash_settle = (PAIR_SETTLEMENT_PAR * size
                    - fees.settlement_per_contract * size)
-    ev = cash_now + cash_settle
+    conditional_payoff = cash_now + cash_settle
+
+    # EXECUTABLE EV IS NOT THE CONDITIONAL PAYOFF. Two legs means two
+    # fills. The bad branch is not "we get nothing" -- it is a NAKED
+    # DIRECTIONAL POSITION on a venue where directional action is
+    # blocked, which must then be unwound across the spread.
+    #
+    #   p_both    * conditional_payoff
+    # + p_one_leg * (-unwind_cost)
+    #
+    # p_both is a conditional fill probability and P_FILL is
+    # NOT_IDENTIFIED, so the product is NOT_IDENTIFIED too. Naming the
+    # decomposition is worth doing; pretending the first term is the
+    # answer is not.
+    spread_y = (ya - _f(book.yes_bid)) if _f(book.yes_bid) is not None else None
+    unwind = (spread_y * size) if spread_y is not None else None
     return Candidate(
         action=PAIR_BUY,
-        status=IDENTIFIED,
-        ev_net=ev,
+        status=NOT_IDENTIFIED,
+        blocker="P_BOTH_LEGS_FILL_NOT_IDENTIFIED",
+        ev_net=None,
+        conditional_payoff=conditional_payoff,
+        leg_risk_cost=unwind,
         size_contracts=size,
         cash_now=cash_now,
         cash_at_settlement=cash_settle,
-        why=("pays %.4f at settlement for %.4f now; the pair settles at par "
-             "whatever the outcome, so no forecast enters this"
-             % (cash_settle, -cash_now)),
+        why=("CONDITIONAL payoff %.4f if BOTH legs fill. Executable EV is "
+             "p_both x %.4f - p_one_leg x %s, and p_both is not identified, "
+             "so the product is not either"
+             % (conditional_payoff, conditional_payoff,
+                ("%.4f" % unwind) if unwind is not None else "unwind_cost")),
         assumptions=[
-            "both legs fill at the quoted ask for the quoted size",
             "the venue settles YES+NO at exactly %.2f" % PAIR_SETTLEMENT_PAR,
             "verified rebate per contract = %.4f (unverified incentives are 0)"
             % fees.rebate_verified_per_contract,
         ],
-        uncertainty=("execution risk only: a partial fill on one leg leaves "
-                     "a directional position the engine is not permitted to "
-                     "hold deliberately"))
+        uncertainty=("a one-leg fill leaves a naked directional position on "
+                     "a venue where directional action is blocked; unwinding "
+                     "it costs the spread and that cost is real whether or "
+                     "not it is estimated"))
 
 
 def _eval_pair_sell(book: Book, inv: Inventory, fees: Fees) -> Candidate:
@@ -406,7 +589,8 @@ def _eval_merge(venue: str) -> Candidate:
 
 def decide(book: Book, *, inventory: Inventory | None = None,
            fees: Fees | None = None, max_contracts: float = 0.0,
-           venue: str = "institutional",
+           venue: str = "polymarket-us",
+           account_class: str = "institutional",
            min_ev_to_act: float = 0.0) -> dict:
     """Rank every feasible action and select one. Never raises.
 
@@ -421,7 +605,11 @@ def decide(book: Book, *, inventory: Inventory | None = None,
     callers are expected to set it from measured execution variance.
     """
     inv = inventory or Inventory()
-    fee = fees or Fees()
+    # AN OMITTED FEE SCHEDULE IS NOT A FREE ONE. Fees() with all-zero
+    # fields and verified=False is an UNKNOWN cost, and every action
+    # that needs a cost refuses on it.
+    fee = fees if fees is not None else Fees(source="OMITTED_BY_CALLER")
+    caps = vc.capabilities(venue, account_class)
     baseline = BASELINE_HELD if not inv.flat else BASELINE_FLAT
 
     record: dict = {
@@ -431,6 +619,11 @@ def decide(book: Book, *, inventory: Inventory | None = None,
         "book_age_s": book.age_s,
         "inventory": {"yes": inv.yes_contracts, "no": inv.no_contracts,
                       "paired": inv.paired_contracts},
+        "venue": venue,
+        "account_class": account_class,
+        "complement_source": book.complement_source,
+        "fee_schedule": {"verified": fee.verified, "source": fee.source,
+                         "hypothetical": fee.hypothetical},
     }
 
     # A book we cannot date or trade produces no action at all, and the
@@ -463,12 +656,12 @@ def decide(book: Book, *, inventory: Inventory | None = None,
     cands.append(_eval_pair_sell(book, inv, fee))
     cands.append(_eval_directional(SELL_YES))
     cands.append(_eval_directional(SELL_NO))
-    cands.append(_eval_pair_buy(book, fee, max_contracts))
+    cands.append(_eval_pair_buy(book, fee, max_contracts, caps))
     cands.append(_eval_directional(TAKE_YES))
     cands.append(_eval_directional(TAKE_NO))
     cands.append(_eval_maker(MAKE_YES, book))
     cands.append(_eval_maker(MAKE_NO, book))
-    cands.append(_eval_merge(venue))
+    cands.append(_eval_merge(account_class))
 
     # SELECTION. Only an IDENTIFIED candidate may win, and it must beat
     # the baseline by more than the threshold. A NOT_IDENTIFIED action is

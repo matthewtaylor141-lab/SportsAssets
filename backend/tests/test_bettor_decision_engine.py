@@ -25,10 +25,34 @@ from sportsassets import bettor_decision_engine as de
 from sportsassets.bettor_decision_engine import Book, Fees, Inventory
 
 
+# THE CORRECTED CONTRACT. Review reproduced three holes in the old one:
+# an unverified venue, a negative price and a negative age all returned
+# data_quality "OK". So a usable book must now state its venue_state and
+# the provenance of its complement, and a pair action additionally needs
+# a VERIFIED fee schedule and an account capability. These helpers supply
+# them explicitly -- which is the point: nothing is usable by default.
+from sportsassets import bettor_venue_contract as vc
+
+VERIFIED_FEES = Fees(verified=True, source="TEST_VERIFIED_SCHEDULE")
+
+
 def book(**kw):
     kw.setdefault("market_id", "m")
     kw.setdefault("age_s", 1.0)
+    kw.setdefault("venue_state", "OPEN")
+    kw.setdefault("complement_source", vc.OBSERVED)
     return Book(**kw)
+
+
+def capable(monkeypatch):
+    """An account that CAN hold both legs. Declared, never assumed."""
+    vc.CAPABILITIES[("test-venue", "institutional")] = vc.VenueCapabilities(
+        venue="test-venue", account_class="institutional",
+        holds_both_legs_independently=vc.SUPPORTED,
+        complement_quote_source=vc.OBSERVED, native_merge=vc.UNSUPPORTED,
+        maker_orders=vc.SUPPORTED, cancel_replace=vc.SUPPORTED,
+        verified_fee_schedule=True)
+    return {"venue": "test-venue", "fees": VERIFIED_FEES}
 
 
 def cand(record, action):
@@ -38,71 +62,85 @@ def cand(record, action):
 # ── the model-free pair, which is the only identified EV ─────────────
 
 class TestPairArithmeticIsForecastFree:
+    """RENAMED IN SPIRIT: it is not forecast-free and never was.
 
-    def test_asks_under_par_are_a_positive_ev_buy(self):
-        r = de.decide(book(yes_ask=.47, no_ask=.50,
+    1 - yes_ask - no_ask - fees is a COMPLETED pair's conditional
+    payoff. Calling it the EV assumed both legs fill, which is a
+    conditional fill probability, which is P_FILL, which is
+    NOT_IDENTIFIED. The corrected engine reports the conditional payoff
+    and refuses to call it executable.
+    """
+
+    def test_the_conditional_payoff_is_computed_but_not_selected(self,
+                                                                 monkeypatch):
+        kw = capable(monkeypatch)
+        r = de.decide(book(yes_ask=.47, no_ask=.50, yes_bid=.45, no_bid=.48,
                            yes_ask_size=300, no_ask_size=800),
-                      max_contracts=1000)
-        assert r["selected"] == de.PAIR_BUY
-        assert r["size_contracts"] == 300
+                      max_contracts=1000, **kw)
         c = cand(r, de.PAIR_BUY)
-        # 300 x (1.00 - 0.97) = 9.00, and nothing else.
-        assert c["ev_net"] == pytest.approx(9.0)
+        assert c["status"] == de.NOT_IDENTIFIED
+        assert c["blocker"] == "P_BOTH_LEGS_FILL_NOT_IDENTIFIED"
+        assert c["ev_net"] is None, "a conditional payoff is not an EV"
+        assert c["conditional_payoff"] == pytest.approx(9.0)
         assert c["cash_now"] == pytest.approx(-291.0)
         assert c["cash_at_settlement"] == pytest.approx(300.0)
+        assert r["selected"] == de.NO_TRADE
 
-    def test_the_ev_is_exactly_the_cash_flows_and_nothing_added(self):
-        """ONE RECONCILED MODEL. If spread capture were added to the
-        pairing benefit this would come out at roughly double."""
-        r = de.decide(book(yes_bid=.40, yes_ask=.47, no_bid=.40, no_ask=.50,
+    def test_the_leg_risk_is_priced_not_narrated(self, monkeypatch):
+        kw = capable(monkeypatch)
+        r = de.decide(book(yes_ask=.47, no_ask=.50, yes_bid=.45, no_bid=.48,
                            yes_ask_size=100, no_ask_size=100),
-                      max_contracts=100)
+                      max_contracts=100, **kw)
         c = cand(r, de.PAIR_BUY)
-        assert c["ev_net"] == pytest.approx(c["cash_now"]
-                                            + c["cash_at_settlement"])
-        assert c["ev_net"] == pytest.approx(3.0)
+        assert c["leg_risk_cost"] == pytest.approx(2.0)  # 100 x 0.02 spread
 
-    def test_asks_over_par_are_negative_and_lose_to_no_trade(self):
-        r = de.decide(book(yes_ask=.47, no_ask=.56,
-                           yes_ask_size=500, no_ask_size=500),
-                      max_contracts=1000)
-        assert r["selected"] == de.NO_TRADE
-        assert cand(r, de.PAIR_BUY)["ev_net"] == pytest.approx(-15.0)
+    def test_a_derived_complement_is_blocked_as_an_identity(self,
+                                                            monkeypatch):
+        """Class C: 3,732 observations, 0 at or below par, min basis
+        1.0050. ask + (1 - bid) = 1 + spread, by construction."""
+        kw = capable(monkeypatch)
+        r = de.decide(book(yes_ask=.47, no_ask=.50, yes_ask_size=100,
+                           no_ask_size=100, complement_source=vc.DERIVED),
+                      max_contracts=100, **kw)
+        c = cand(r, de.PAIR_BUY)
+        assert c["status"] == de.BLOCKED
+        assert c["blocker"] == "COMPLEMENT_IS_DERIVED_NOT_OBSERVED"
 
-    def test_fees_can_turn_a_positive_pair_negative(self):
-        cheap = de.decide(book(yes_ask=.47, no_ask=.50, yes_ask_size=300,
-                               no_ask_size=300), max_contracts=300)
-        dear = de.decide(book(yes_ask=.47, no_ask=.50, yes_ask_size=300,
-                              no_ask_size=300), max_contracts=300,
-                         fees=Fees(taker_per_contract=0.02))
-        assert cheap["selected"] == de.PAIR_BUY
-        assert dear["selected"] == de.NO_TRADE
+    def test_an_absent_complement_is_not_identified(self, monkeypatch):
+        kw = capable(monkeypatch)
+        r = de.decide(book(yes_ask=.47, no_ask=.50, yes_ask_size=100,
+                           no_ask_size=100, complement_source=vc.ABSENT),
+                      max_contracts=100, **kw)
+        assert cand(r, de.PAIR_BUY)["blocker"] == "COMPLEMENT_ABSENT"
 
-    def test_an_unverified_rebate_contributes_nothing_by_default(self):
-        """Fees() has rebate 0.0. An incentive nobody has seen on a
-        settled statement must not rescue a losing trade."""
-        assert Fees().rebate_verified_per_contract == 0.0
-        r = de.decide(book(yes_ask=.50, no_ask=.51, yes_ask_size=100,
-                           no_ask_size=100), max_contracts=100)
-        assert r["selected"] == de.NO_TRADE
-
-    def test_a_verified_rebate_does_count_when_supplied(self):
-        r = de.decide(book(yes_ask=.50, no_ask=.51, yes_ask_size=100,
+    def test_an_unknown_account_capability_blocks(self):
+        """UNVERIFIED_VENUE returned PAIR_BUY with data_quality OK."""
+        r = de.decide(book(yes_ask=.47, no_ask=.50, yes_ask_size=100,
                            no_ask_size=100), max_contracts=100,
-                      fees=Fees(rebate_verified_per_contract=0.02))
-        assert r["selected"] == de.PAIR_BUY
+                      venue="UNVERIFIED_VENUE", fees=VERIFIED_FEES)
+        c = cand(r, de.PAIR_BUY)
+        assert c["status"] == de.BLOCKED
+        assert "HOLDS_BOTH_LEGS_INDEPENDENTLY_UNKNOWN" in c["blocker"]
 
-    def test_size_is_the_lesser_depth_not_the_greater(self):
-        r = de.decide(book(yes_ask=.47, no_ask=.50,
-                           yes_ask_size=12, no_ask_size=9000),
-                      max_contracts=9000)
-        assert r["size_contracts"] == 12
+    def test_omitted_fees_are_an_unknown_cost_not_a_free_one(self,
+                                                             monkeypatch):
+        kw = capable(monkeypatch)
+        r = de.decide(book(yes_ask=.47, no_ask=.50, yes_ask_size=100,
+                           no_ask_size=100), max_contracts=100,
+                      venue=kw["venue"])          # fees deliberately omitted
+        c = cand(r, de.PAIR_BUY)
+        assert c["blocker"] == "FEE_SCHEDULE_UNVERIFIED"
 
-    def test_max_contracts_binds(self):
-        r = de.decide(book(yes_ask=.47, no_ask=.50,
-                           yes_ask_size=9000, no_ask_size=9000),
-                      max_contracts=25)
-        assert r["size_contracts"] == 25
+    def test_the_hypothetical_schedule_is_labelled(self):
+        f = Fees.free_for_demonstration()
+        assert f.hypothetical is True and f.verified is False
+        assert "NOT_A_LIVE_SCHEDULE" in f.source
+
+
+
+
+
+
 
 
 class TestPairSellFromInventory:
@@ -180,12 +218,12 @@ class TestUnscoredNeverWins:
         c = cand(r, de.TAKE_YES)
         assert "not a refutation" in c["uncertainty"]
 
-    def test_merge_is_unsupported_on_both_venues(self):
-        for venue in ("institutional", "retail"):
-            r = de.decide(book(yes_ask=.5, no_ask=.6), venue=venue)
+    def test_merge_is_unsupported_on_both_account_classes(self):
+        for klass in ("institutional", "retail"):
+            r = de.decide(book(yes_ask=.5, no_ask=.6), account_class=klass)
             c = cand(r, de.MERGE)
             assert c["status"] == de.UNSUPPORTED
-            assert venue.upper() in c["blocker"]
+            assert klass.upper() in c["blocker"]
 
     def test_a_reference_account_mechanism_is_not_inherited(self):
         r = de.decide(book(yes_ask=.5, no_ask=.6), venue="institutional")
@@ -217,19 +255,23 @@ class TestBadDataRefusesRatherThanGuesses:
         assert r["data_quality"] == "REJECTED"
 
     @pytest.mark.parametrize("bad", [None, "", "None", "n/a", float("nan")])
-    def test_an_unparsable_price_is_not_a_price_of_zero(self, bad):
+    def test_an_unparsable_price_is_not_a_price_of_zero(self, bad,
+                                                        monkeypatch):
         """A price of 0.0 would make every broken book look like free
         money, which is the single most dangerous parse bug available."""
-        r = de.decide(book(yes_ask=bad, no_ask=.50,
+        kw = capable(monkeypatch)
+        r = de.decide(book(yes_ask=bad, no_ask=.50, yes_bid=.45, no_bid=.48,
                            yes_ask_size=999, no_ask_size=999),
-                      max_contracts=999)
+                      max_contracts=999, **kw)
         assert r["selected"] == de.NO_TRADE
-        assert cand(r, de.PAIR_BUY)["blocker"] == "ASK_UNREADABLE"
+        assert cand(r, de.PAIR_BUY)["conditional_payoff"] is None, (
+            "an unreadable price produced a cash figure")
 
-    def test_a_price_with_no_depth_is_not_an_opportunity(self):
-        r = de.decide(book(yes_ask=.10, no_ask=.10,
+    def test_a_price_with_no_depth_is_not_an_opportunity(self, monkeypatch):
+        kw = capable(monkeypatch)
+        r = de.decide(book(yes_ask=.10, no_ask=.10, yes_bid=.09, no_bid=.09,
                            yes_ask_size=0, no_ask_size=9999),
-                      max_contracts=9999)
+                      max_contracts=9999, **kw)
         assert r["selected"] == de.NO_TRADE
         assert cand(r, de.PAIR_BUY)["blocker"] == "NO_EXECUTABLE_DEPTH"
 
@@ -258,14 +300,18 @@ class TestEveryDecisionIsAuditable:
         assert r["uncertainty"]
         assert r["reason"]
 
-    def test_the_threshold_is_respected(self):
-        cheap = de.decide(book(yes_ask=.499, no_ask=.50, yes_ask_size=100,
-                               no_ask_size=100), max_contracts=100)
-        assert cheap["selected"] == de.PAIR_BUY
-        strict = de.decide(book(yes_ask=.499, no_ask=.50, yes_ask_size=100,
-                                no_ask_size=100), max_contracts=100,
-                           min_ev_to_act=5.0)
-        assert strict["selected"] == de.NO_TRADE
+    def test_the_threshold_is_respected_on_a_scorable_action(self):
+        """PAIR_SELL from inventory is still IDENTIFIED -- it unwinds a
+        position at known prices with no second-leg entry risk -- so it
+        is what exercises the threshold now."""
+        inv = Inventory(yes_contracts=200, no_contracts=200)
+        cheap = de.decide(book(yes_bid=.55, no_bid=.48, yes_bid_size=200,
+                               no_bid_size=200), inventory=inv)
+        assert cheap["selected"] == de.PAIR_SELL
+        strict = de.decide(book(yes_bid=.55, no_bid=.48, yes_bid_size=200,
+                                no_bid_size=200), inventory=inv,
+                           min_ev_to_act=100.0)
+        assert strict["selected"] == de.HOLD
         assert "threshold" in strict["reason"]
 
     def test_fair_value_basis_is_named_and_is_never_a_belief(self):
