@@ -1,6 +1,6 @@
 
 ============================================================================
-BETTOR INTEGRATED REPLAY  |  36 REAL captured observations
+BETTOR INTEGRATED REPLAY  |  16 REAL captured observations
 ============================================================================
 VENUE CONTRACT (institutional; the demo fixture is NOT used)
    holds_both_legs_independently    UNKNOWN
@@ -9,24 +9,21 @@ VENUE CONTRACT (institutional; the demo fixture is NOT used)
    maker_orders                     UNKNOWN
    cancel_replace                   UNKNOWN
    verified_fee_schedule            False
-FEE SCHEDULE: HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS  (verified=False)
+FEE SCHEDULE: PMUS_PUBLISHED_2026_09_17  (verified=False)
 
 ============================================================================
 1. NORMALIZATION -- accepted and rejected, with reasons
 ============================================================================
-   rows 36 | accepted 0 | rejected 36
-   book age s: min 5.776  median 11.495  max 27.985  (bound 10)
-   complement provenance: {"OBSERVED": 0, "DERIVED": 0, "ABSENT": 36}
-   rejection reasons:
-      NO_DEPTH_REPORTED                                36
-      BOOK_OLDER_THAN_DECISION_BOUND                   21
+   rows 16 | accepted 16 | rejected 0
+   book age s: min 0.307  median 2.448  max 3.878  (bound 10)
+   complement provenance: {"OBSERVED": 0, "DERIVED": 0, "ABSENT": 16}
 
    STALENESS SENSITIVITY -- how many rows survive each bound:
-      <=     10s    15 of 36 rows
-      <=     30s    36 of 36 rows
-      <=     60s    36 of 36 rows
-      <=    300s    36 of 36 rows
-      <=    900s    36 of 36 rows
+      <=     10s    16 of 16 rows
+      <=     30s    16 of 16 rows
+      <=     60s    16 of 16 rows
+      <=    300s    16 of 16 rows
+      <=    900s    16 of 16 rows
    The engine uses 10s. The others are shown so the eligibility
    curve is visible, NOT to justify relaxing it.
 
@@ -34,19 +31,37 @@ FEE SCHEDULE: HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS  (verified=False)
 2. CONTRACT PAIRING -- same market_id, two distinct legs
 ============================================================================
    genuine complement pairs: 0
-   unpaired contracts: 0  (an unpaired leg is a finding, not a gap to fill)
+   unpaired contracts: 16  (an unpaired leg is a finding, not a gap to fill)
 
 ============================================================================
 3. DECISIONS -- every alternative and its economic inputs
 ============================================================================
+   EXAMPLE -- asc-nfl-was-dal-2026-09-20-2h-pos-8pt5 (no @ 0.67/0.76)
+   ACTION       STATUS           EV          BLOCKER
+   NO_TRADE     IDENTIFIED       0.0000      
+   PAIR_SELL    UNSUPPORTED      -           NO_PAIRED_INVENTORY
+   SELL_YES     BLOCKED          -           FV_BETTOR_INDEPENDENT_NOT_VALIDATED
+   SELL_NO      BLOCKED          -           FV_BETTOR_INDEPENDENT_NOT_VALIDATED
+   PAIR_BUY     NOT_IDENTIFIED   -           COMPLEMENT_ABSENT
+   TAKE_YES     BLOCKED          -           FV_BETTOR_INDEPENDENT_NOT_VALIDATED
+   TAKE_NO      BLOCKED          -           FV_BETTOR_INDEPENDENT_NOT_VALIDATED
+   MAKE_YES     NOT_IDENTIFIED   -           P_FILL_NOT_IDENTIFIED
+   MAKE_NO      NOT_IDENTIFIED   -           P_FILL_NOT_IDENTIFIED
+   MERGE        UNSUPPORTED      -           MERGE_NOT_OBSERVED_ON_INSTITUTIONAL
+   -> NO_TRADE : no action has an identified EV. Blockers: COMPLEMENT_ABS
 
-   decisions over 0 accepted rows: {}
+   decisions over 16 accepted rows: {"NO_TRADE": 16}
    blockers encountered:
+      FV_BETTOR_INDEPENDENT_NOT_VALIDATED                    64
+      P_FILL_NOT_IDENTIFIED                                  32
+      NO_PAIRED_INVENTORY                                    16
+      COMPLEMENT_ABSENT                                      16
+      MERGE_NOT_OBSERVED_ON_INSTITUTIONAL                    16
 
 ============================================================================
 4. EXECUTION, INVENTORY AND ACCOUNTING
 ============================================================================
-   observations stepped through the loop: 0
+   observations stepped through the loop: 16
    orders executed: 0
    NO ORDER WAS EXECUTED, and the reason is not a bug:
    every action is blocked or unidentified on this data.
@@ -60,12 +75,12 @@ FEE SCHEDULE: HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS  (verified=False)
       remaining basis  0.0000
       open positions   0
       live quotes      0
-      evidence classes {}
+      evidence classes {"REPLAYED_OBSERVATION": 16}
 
 ============================================================================
 5. SETTLEMENT
 ============================================================================
-   observations with a settlement outcome: 0 of 36
+   observations with a settlement outcome: 0 of 16
    bettor_state_settlements holds 0 rows venue-wide -- but
    record_settlement() is DEFINED AND NEVER CALLED, so that is
    a MISSING INGESTION PATH, not evidence that nothing has
@@ -83,6 +98,14 @@ FEE SCHEDULE: HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS  (verified=False)
    chosen value. Conservative corner = move -0.020.
 
    MOVE      ROUTE     POSITIVE    NEGATIVE    MEDIAN/CONTRACT
+   +0.000    cross     0           16          -0.013000
+   +0.000    rest      16          0           +0.055000
+   -0.005    cross     0           16          -0.018000
+   -0.005    rest      16          0           +0.050000
+   -0.010    cross     0           16          -0.023000
+   -0.010    rest      15          1           +0.045000
+   -0.020    cross     0           16          -0.033000
+   -0.020    rest      9           7           +0.035000
 
    DEVIATION: the frozen protocol declares exit routes
    {AGGRESSIVE, SETTLEMENT} and a p_fill grid. This ran
@@ -96,8 +119,8 @@ FEE SCHEDULE: HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS  (verified=False)
 ============================================================================
 7. OBSERVED / ASSUMED / SYNTHETIC
 ============================================================================
-   OBSERVED   36 real books: quotes, ages, states, identities.
-   ASSUMED    the fee schedule (HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS),
+   OBSERVED   16 real books: quotes, ages, states, identities.
+   ASSUMED    the fee schedule (PMUS_PUBLISHED_2026_09_17),
               plus every grid value in section 6.
    SYNTHETIC  every fill. BETTOR has never rested an order.
 

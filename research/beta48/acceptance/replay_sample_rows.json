@@ -1,722 +1,1283 @@
 [
  {
-  "observation_id": "bsv_ab2ce693",
-  "market_id": "astatc-wta-evalys-gabrus-2026-09-20-sw1",
-  "event_id": "wta-evalys-gabrus-2026-09-20",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 01:11:06.914366+00",
-  "book_source_ts": "2026-09-21T01:11:02.630159420Z",
-  "book_age_s": "5.776",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.0100",
-  "yes_ask": "0.9900",
-  "sport": "tennis",
-  "league": "wta",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_007a4384",
-  "market_id": "atc-intf-gib-stp-2026-09-23-draw",
-  "event_id": "intf-gib-stp-2026-09-23",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 15:05:55.092902+00",
-  "book_source_ts": "2026-09-21T15:05:50.964564371Z",
-  "book_age_s": "5.807",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.0300",
-  "yes_ask": "0.4800",
-  "sport": "soccer",
-  "league": "NOT_IDENTIFIED",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_6a196db0",
-  "market_id": "aec-npb-nhf-trge-2026-09-22",
-  "event_id": "npb-nhf-trge-2026-09-22",
-  "outcome_leg": "nippon ham fighters",
-  "observed_at": "2026-09-20 21:58:35.25192+00",
-  "book_source_ts": "2026-09-20T21:58:32.501605446Z",
-  "book_age_s": "5.824",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.3900",
-  "yes_ask": "0.6900",
-  "sport": "baseball",
-  "league": "npb",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_126f987b",
-  "market_id": "astatc-dota2-gl-pips4-2026-09-21-game1",
-  "event_id": "dota2-gl-pips4-2026-09-21",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 05:16:00.392641+00",
-  "book_source_ts": "2026-09-21T05:15:56.896403963Z",
-  "book_age_s": "5.825",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.4800",
-  "yes_ask": "0.4900",
-  "sport": "esports",
-  "league": "dota2",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_fed2d928",
-  "market_id": "astatc-nfl-nyg-lar-2026-09-21-recyd-isalik-gte60",
-  "event_id": "nfl-nyg-lar-2026-09-21",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 11:25:25.190539+00",
-  "book_source_ts": "2026-09-21T11:25:19.762011607Z",
-  "book_age_s": "6.533",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.3000",
-  "yes_ask": "0.3100",
   "sport": "football",
   "league": "nfl",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
   "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_fdc1716e",
-  "market_id": "tsc-nfl-atl-gb-2026-09-24-tt1h-atl-17pt5",
-  "event_id": "nfl-atl-gb-2026-09-24",
-  "outcome_leg": "over",
-  "observed_at": "2026-09-21 02:55:19.089832+00",
-  "book_source_ts": "2026-09-21T02:55:14.045684123Z",
-  "book_age_s": "6.614",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.0500",
-  "yes_ask": "0.1800",
-  "sport": "football",
-  "league": "nfl",
-  "market_type": "side",
   "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_b0e75c11",
-  "market_id": "tsc-wnba-por-la-2026-09-20-168pt5",
-  "event_id": "wnba-por-la-2026-09-20",
-  "outcome_leg": "over",
-  "observed_at": "2026-09-21 00:46:33.713568+00",
-  "book_source_ts": "2026-09-21T00:46:29.542687051Z",
-  "book_age_s": "6.868",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.9700",
-  "yes_ask": "0.9800",
-  "sport": "basketball",
-  "league": "NOT_IDENTIFIED",
+  "yes_ask": "0.7600",
+  "yes_bid": "0.6700",
+  "event_id": "nfl-was-dal-2026-09-20",
+  "market_id": "asc-nfl-was-dal-2026-09-20-2h-pos-8pt5",
+  "yes_depth": {
+   "ask": "445.5000",
+   "bid": "194.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "0.307",
+  "live_status": "LIVE",
   "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_1268b1a7",
-  "market_id": "astatc-nfl-lv-lac-2026-09-20-ryd-ashjea-gte50",
-  "event_id": "nfl-lv-lac-2026-09-20",
+  "observed_at": "2026-09-20T22:05:55.304299+00:00",
   "outcome_leg": "no",
-  "observed_at": "2026-09-20 21:00:39.579528+00",
-  "book_source_ts": "2026-09-20T21:00:36.111420468Z",
-  "book_age_s": "7.785",
   "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.6800",
-  "yes_ask": "0.6900",
-  "sport": "football",
-  "league": "nfl",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
+  "instrument_id": "asc-nfl-was-dal-2026-09-20-2h-pos-8pt5",
+  "book_source_ts": "2026-09-20T22:05:57.446629864Z",
+  "observation_id": "bsv_1a10c1c9804a05a47549a9aa9a9564b8d3f3fcde",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "-6055",
+  "book_received_ts": "2026-09-20T22:05:57.754123+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "3.0000",
+     "level": 0,
+     "price": "0.7600"
+    },
+    {
+     "qty": "2.0000",
+     "level": 1,
+     "price": "0.7700"
+    },
+    {
+     "qty": "394.0000",
+     "level": 2,
+     "price": "0.7800"
+    },
+    {
+     "qty": "1.5000",
+     "level": 3,
+     "price": "0.8000"
+    },
+    {
+     "qty": "45.0000",
+     "level": 4,
+     "price": "0.9600"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "12.0000",
+     "level": 0,
+     "price": "0.6700"
+    },
+    {
+     "qty": "134.0000",
+     "level": 1,
+     "price": "0.6600"
+    },
+    {
+     "qty": "1.0000",
+     "level": 2,
+     "price": "0.1000"
+    },
+    {
+     "qty": "2.0000",
+     "level": 3,
+     "price": "0.0500"
+    },
+    {
+     "qty": "45.0000",
+     "level": 4,
+     "price": "0.0400"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
  },
  {
-  "observation_id": "bsv_d2017898",
-  "market_id": "astatc-mlb-min-sf-2026-09-21-hrr-lukkea-gte4",
-  "event_id": "mlb-min-sf-2026-09-21",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 17:16:28.535589+00",
-  "book_source_ts": "2026-09-21T17:16:22.251193779Z",
-  "book_age_s": "8.255",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.1400",
-  "yes_ask": "0.2300",
-  "sport": "baseball",
-  "league": "mlb",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_b90ee7e1",
-  "market_id": "aec-atpcq-pavlag-svygul-2026-09-21",
-  "event_id": "atpcq-pavlag-svygul-2026-09-21",
-  "outcome_leg": "pavel lagutin",
-  "observed_at": "2026-09-21 08:40:20.425761+00",
-  "book_source_ts": "2026-09-21T08:40:14.458722930Z",
-  "book_age_s": "8.537",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.4600",
-  "yes_ask": "0.4700",
-  "sport": "tennis",
-  "league": "atpcq",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_483c6bb5",
-  "market_id": "asc-nfl-atl-gb-2026-09-24-pos-10pt5",
-  "event_id": "nfl-atl-gb-2026-09-24",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 03:05:54.783654+00",
-  "book_source_ts": "2026-09-21T03:05:48.149839899Z",
-  "book_age_s": "8.94",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.6100",
-  "yes_ask": "0.6150",
-  "sport": "football",
-  "league": "nfl",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_7b621c70",
-  "market_id": "astatc-mlb-tor-bal-2026-09-21-rbi-gunhen-gte2",
-  "event_id": "mlb-tor-bal-2026-09-21",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 07:35:05.63968+00",
-  "book_source_ts": "2026-09-21T07:34:58.125293105Z",
-  "book_age_s": "9.057",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.0300",
-  "yes_ask": "0.1400",
-  "sport": "baseball",
-  "league": "mlb",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_98e59446",
-  "market_id": "aec-cs2-leo-g2a-2026-09-21",
-  "event_id": "cs2-leo-g2a-2026-09-21",
-  "outcome_leg": "g2 ares",
-  "observed_at": "2026-09-21 05:10:02.743145+00",
-  "book_source_ts": "2026-09-21T05:09:56.882320222Z",
-  "book_age_s": "9.066",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.5100",
-  "yes_ask": "0.5300",
   "sport": "esports",
   "league": "cs2",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
   "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_009a2b3d",
-  "market_id": "aec-lol-bar-bub-2026-09-21",
-  "event_id": "lol-bar-bub-2026-09-21",
-  "outcome_leg": "barca esports",
-  "observed_at": "2026-09-21 16:11:47.096411+00",
-  "book_source_ts": "2026-09-21T16:11:45.678409092Z",
-  "book_age_s": "9.478",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.9600",
-  "yes_ask": "0.9700",
-  "sport": "esports",
-  "league": "lol",
-  "market_type": "side",
   "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_6998d64d",
-  "market_id": "asc-nfl-sea-ari-2026-09-20-2h-neg-9pt5",
-  "event_id": "nfl-sea-ari-2026-09-20",
+  "yes_ask": "0.6000",
+  "yes_bid": "0.5500",
+  "event_id": "cs2-b8-lg-2026-09-22",
+  "market_id": "astatc-cs2-b8-lg-2026-09-22-map1",
+  "yes_depth": {
+   "ask": "528.0000",
+   "bid": "389.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "0.633",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T01:15:31.090606+00:00",
   "outcome_leg": "no",
-  "observed_at": "2026-09-20 20:41:07.759185+00",
-  "book_source_ts": "2026-09-20T20:40:59.796430421Z",
-  "book_age_s": "9.572",
   "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.2000",
-  "yes_ask": "0.2100",
+  "instrument_id": "astatc-cs2-b8-lg-2026-09-22-map1",
+  "book_source_ts": "2026-09-21T01:15:31.577648383Z",
+  "observation_id": "bsv_8d92f3015836e32a1f0c4baf4c31729c0d423def",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "128668",
+  "book_received_ts": "2026-09-21T01:15:32.210382+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "1.0000",
+     "level": 0,
+     "price": "0.6000"
+    },
+    {
+     "qty": "4.0000",
+     "level": 1,
+     "price": "0.6100"
+    },
+    {
+     "qty": "385.0000",
+     "level": 2,
+     "price": "0.6200"
+    },
+    {
+     "qty": "66.0000",
+     "level": 3,
+     "price": "0.6300"
+    },
+    {
+     "qty": "72.0000",
+     "level": 4,
+     "price": "0.6600"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "18.0000",
+     "level": 0,
+     "price": "0.5500"
+    },
+    {
+     "qty": "20.0000",
+     "level": 1,
+     "price": "0.5000"
+    },
+    {
+     "qty": "29.0000",
+     "level": 2,
+     "price": "0.4900"
+    },
+    {
+     "qty": "50.0000",
+     "level": 3,
+     "price": "0.4800"
+    },
+    {
+     "qty": "272.0000",
+     "level": 4,
+     "price": "0.4700"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
+  "sport": "table_tennis",
+  "league": "setkamecz",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.4900",
+  "yes_bid": "0.4800",
+  "event_id": "setkamecz-vanmir-plyole-2026-09-21",
+  "market_id": "aec-setkamecz-vanmir-plyole-2026-09-21",
+  "yes_depth": {
+   "ask": "4593.0000",
+   "bid": "4587.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "0.723",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T14:35:43.080127+00:00",
+  "outcome_leg": "plyska oleh",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "aec-setkamecz-vanmir-plyole-2026-09-21",
+  "book_source_ts": "2026-09-21T14:35:43.929244162Z",
+  "observation_id": "bsv_98a3148e121775fb67bed76546ec5e3129f0873d",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "15856",
+  "book_received_ts": "2026-09-21T14:35:44.652312+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "4315.0000",
+     "level": 0,
+     "price": "0.4900"
+    },
+    {
+     "qty": "50.0000",
+     "level": 1,
+     "price": "0.5400"
+    },
+    {
+     "qty": "50.0000",
+     "level": 2,
+     "price": "0.8000"
+    },
+    {
+     "qty": "22.0000",
+     "level": 3,
+     "price": "0.8300"
+    },
+    {
+     "qty": "156.0000",
+     "level": 4,
+     "price": "0.8400"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "4309.0000",
+     "level": 0,
+     "price": "0.4800"
+    },
+    {
+     "qty": "50.0000",
+     "level": 1,
+     "price": "0.3000"
+    },
+    {
+     "qty": "50.0000",
+     "level": 2,
+     "price": "0.2000"
+    },
+    {
+     "qty": "22.0000",
+     "level": 3,
+     "price": "0.1700"
+    },
+    {
+     "qty": "156.0000",
+     "level": 4,
+     "price": "0.1600"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
+  "sport": "esports",
+  "league": "cs2",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.5900",
+  "yes_bid": "0.5100",
+  "event_id": "cs2-aimc-ign-2026-09-23",
+  "market_id": "aec-cs2-aimc-ign-2026-09-23",
+  "yes_depth": {
+   "ask": "1726.0000",
+   "bid": "1632.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "1.153",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T17:57:02.000655+00:00",
+  "outcome_leg": "aimclub",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "aec-cs2-aimc-ign-2026-09-23",
+  "book_source_ts": "2026-09-21T17:57:01.967532500Z",
+  "observation_id": "bsv_6d99181321f17707c23001e61fa566200e65e8b3",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "147777",
+  "book_received_ts": "2026-09-21T17:57:03.120463+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "5.0000",
+     "level": 0,
+     "price": "0.5900"
+    },
+    {
+     "qty": "10.0000",
+     "level": 1,
+     "price": "0.6000"
+    },
+    {
+     "qty": "70.0000",
+     "level": 2,
+     "price": "0.6700"
+    },
+    {
+     "qty": "1621.0000",
+     "level": 3,
+     "price": "0.8800"
+    },
+    {
+     "qty": "20.0000",
+     "level": 4,
+     "price": "0.9500"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "5.0000",
+     "level": 0,
+     "price": "0.5100"
+    },
+    {
+     "qty": "10.0000",
+     "level": 1,
+     "price": "0.5000"
+    },
+    {
+     "qty": "217.0000",
+     "level": 2,
+     "price": "0.4300"
+    },
+    {
+     "qty": "1380.0000",
+     "level": 3,
+     "price": "0.0900"
+    },
+    {
+     "qty": "20.0000",
+     "level": 4,
+     "price": "0.0500"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
   "sport": "football",
   "league": "nfl",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
   "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.3900",
+  "yes_bid": "0.3800",
+  "event_id": "nfl-nyg-lar-2026-09-21",
+  "market_id": "astatc-nfl-nyg-lar-2026-09-21-ryd-camska-gte60",
+  "yes_depth": {
+   "ask": "5043.0800",
+   "bid": "2802.9200",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "1.238",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T03:57:00.577519+00:00",
+  "outcome_leg": "no",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "astatc-nfl-nyg-lar-2026-09-21-ryd-camska-gte60",
+  "book_source_ts": "2026-09-21T03:57:01.704282428Z",
+  "observation_id": "bsv_a88d5d8bbdb317ad1f85d53c44fc9a7d399750b1",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "73079",
+  "book_received_ts": "2026-09-21T03:57:02.942344+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "312.0000",
+     "level": 0,
+     "price": "0.3900"
+    },
+    {
+     "qty": "793.1400",
+     "level": 1,
+     "price": "0.4000"
+    },
+    {
+     "qty": "2504.6000",
+     "level": 2,
+     "price": "0.4100"
+    },
+    {
+     "qty": "1428.3400",
+     "level": 3,
+     "price": "0.4200"
+    },
+    {
+     "qty": "5.0000",
+     "level": 4,
+     "price": "0.4300"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "210.0100",
+     "level": 0,
+     "price": "0.3800"
+    },
+    {
+     "qty": "423.1400",
+     "level": 1,
+     "price": "0.3700"
+    },
+    {
+     "qty": "2000.0000",
+     "level": 2,
+     "price": "0.3400"
+    },
+    {
+     "qty": "112.7700",
+     "level": 3,
+     "price": "0.3200"
+    },
+    {
+     "qty": "57.0000",
+     "level": 4,
+     "price": "0.2900"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
  },
  {
-  "observation_id": "bsv_b8acbe9d",
-  "market_id": "aec-modus-chupul-stewes-2026-09-22",
-  "event_id": "modus-chupul-stewes-2026-09-22",
-  "outcome_leg": "chuck puleo",
-  "observed_at": "2026-09-21 08:55:21.971039+00",
-  "book_source_ts": "2026-09-21T08:55:12.507466168Z",
-  "book_age_s": "10.444",
+  "sport": "esports",
+  "league": "cs2",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.7500",
+  "yes_bid": "0.7000",
+  "event_id": "cs2-gls-yaw-2026-09-23",
+  "market_id": "aec-cs2-gls-yaw-2026-09-23",
+  "yes_depth": {
+   "ask": "1289.4300",
+   "bid": "816.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "1.405",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T16:50:06.228341+00:00",
+  "outcome_leg": "galorys",
   "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.0200",
-  "yes_ask": "0.0300",
+  "instrument_id": "aec-cs2-gls-yaw-2026-09-23",
+  "book_source_ts": "2026-09-21T16:50:06.653225088Z",
+  "observation_id": "bsv_d0a65a8af272cc387e5e63bf21c7fb54f4894798",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "171593",
+  "book_received_ts": "2026-09-21T16:50:08.058315+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "160.0000",
+     "level": 0,
+     "price": "0.7500"
+    },
+    {
+     "qty": "111.0000",
+     "level": 1,
+     "price": "0.7600"
+    },
+    {
+     "qty": "686.4300",
+     "level": 2,
+     "price": "0.7700"
+    },
+    {
+     "qty": "111.0000",
+     "level": 3,
+     "price": "0.7800"
+    },
+    {
+     "qty": "221.0000",
+     "level": 4,
+     "price": "0.8000"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "182.0000",
+     "level": 0,
+     "price": "0.7000"
+    },
+    {
+     "qty": "131.0000",
+     "level": 1,
+     "price": "0.6900"
+    },
+    {
+     "qty": "192.0000",
+     "level": 2,
+     "price": "0.6800"
+    },
+    {
+     "qty": "90.0000",
+     "level": 3,
+     "price": "0.6700"
+    },
+    {
+     "qty": "221.0000",
+     "level": 4,
+     "price": "0.6500"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
+  "sport": "football",
+  "league": "nfl",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.3000",
+  "yes_bid": "0.0600",
+  "event_id": "nfl-lv-lac-2026-09-20",
+  "market_id": "astatc-nfl-lv-lac-2026-09-20-rec-ladmcc-gte4",
+  "yes_depth": {
+   "ask": "112.9900",
+   "bid": "19.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "2.038",
+  "live_status": "LIVE",
+  "market_type": "side",
+  "observed_at": "2026-09-20T23:07:38.785932+00:00",
+  "outcome_leg": "no",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "astatc-nfl-lv-lac-2026-09-20-rec-ladmcc-gte4",
+  "book_source_ts": "2026-09-20T23:07:38.136125768Z",
+  "observation_id": "bsv_67ccaf66f9a22502df8cb1e3fec6fffd68b2d3f4",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "-10958",
+  "book_received_ts": "2026-09-20T23:07:40.173662+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "60.9900",
+     "level": 0,
+     "price": "0.3000"
+    },
+    {
+     "qty": "2.0000",
+     "level": 1,
+     "price": "0.4000"
+    },
+    {
+     "qty": "50.0000",
+     "level": 2,
+     "price": "0.9900"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "17.0000",
+     "level": 0,
+     "price": "0.0600"
+    },
+    {
+     "qty": "2.0000",
+     "level": 1,
+     "price": "0.0500"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
   "sport": "darts",
   "league": "modus",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
   "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_79832cbf",
-  "market_id": "aec-setkameua-hryste-osaole-2026-09-21",
-  "event_id": "setkameua-hryste-osaole-2026-09-21",
-  "outcome_leg": "hryhorenko stepan",
-  "observed_at": "2026-09-21 00:20:16.560014+00",
-  "book_source_ts": "2026-09-21T00:20:07.185127900Z",
-  "book_age_s": "10.955",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.2700",
-  "yes_ask": "0.6900",
-  "sport": "table_tennis",
-  "league": "setkameua",
-  "market_type": "side",
   "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_0f70a813",
-  "market_id": "astatc-mlb-min-sf-2026-09-21-hrr-josbel-gte6",
-  "event_id": "mlb-min-sf-2026-09-21",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 08:32:01.495212+00",
-  "book_source_ts": "2026-09-21T08:31:53.353533957Z",
-  "book_age_s": "11.434",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
+  "yes_ask": "0.0300",
   "yes_bid": "0.0200",
-  "yes_ask": "0.2800",
-  "sport": "baseball",
-  "league": "mlb",
+  "event_id": "modus-scotay-scorob-2026-09-22",
+  "market_id": "aec-modus-scotay-scorob-2026-09-22",
+  "yes_depth": {
+   "ask": "5500.0100",
+   "bid": "5500.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "2.166",
+  "live_status": "PREGAME",
   "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
+  "observed_at": "2026-09-21T01:00:38.8662+00:00",
+  "outcome_leg": "scott robertson",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "aec-modus-scotay-scorob-2026-09-22",
+  "book_source_ts": "2026-09-21T01:00:36.870605553Z",
+  "observation_id": "bsv_2fdac179cdcb4da31d4b1f07fbd344d3e69ebe20",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "122361",
+  "book_received_ts": "2026-09-21T01:00:39.03665+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "0.0100",
+     "level": 0,
+     "price": "0.0300"
+    },
+    {
+     "qty": "200.0000",
+     "level": 1,
+     "price": "0.7400"
+    },
+    {
+     "qty": "75.0000",
+     "level": 2,
+     "price": "0.9800"
+    },
+    {
+     "qty": "5225.0000",
+     "level": 3,
+     "price": "0.9900"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "195.0000",
+     "level": 0,
+     "price": "0.0200"
+    },
+    {
+     "qty": "5305.0000",
+     "level": 1,
+     "price": "0.0100"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
  },
  {
-  "observation_id": "bsv_3018e7fb",
-  "market_id": "tsc-mlb-az-col-2026-09-22-f5-2pt5",
-  "event_id": "mlb-az-col-2026-09-22",
-  "outcome_leg": "over",
-  "observed_at": "2026-09-21 14:55:15.088535+00",
-  "book_source_ts": "2026-09-21T14:55:04.739305901Z",
-  "book_age_s": "11.495",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.9300",
-  "yes_ask": "0.9400",
-  "sport": "baseball",
-  "league": "NOT_IDENTIFIED",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_b22ce909",
-  "market_id": "astatc-nfl-ind-kc-2026-09-20-ratt-jontay-gte16",
-  "event_id": "nfl-ind-kc-2026-09-20",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 02:01:54.058482+00",
-  "book_source_ts": "2026-09-21T02:01:42.691790416Z",
-  "book_age_s": "12.382",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.9700",
-  "yes_ask": "0.9800",
-  "sport": "football",
-  "league": "nfl",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_a13b1e4f",
-  "market_id": "aec-itfme-russer-artlen-2026-09-21",
-  "event_id": "itfme-russer-artlen-2026-09-21",
-  "outcome_leg": "arthur lenglet",
-  "observed_at": "2026-09-21 09:06:08.367342+00",
-  "book_source_ts": "2026-09-21T09:05:57.265984347Z",
-  "book_age_s": "12.644",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.6300",
-  "yes_ask": "0.6400",
-  "sport": "tennis",
-  "league": "itfme",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_5a088392",
-  "market_id": "asc-nfl-mia-sf-2026-09-20-pos-6pt5",
-  "event_id": "nfl-mia-sf-2026-09-20",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-20 20:04:08.136777+00",
-  "book_source_ts": "2026-09-20T20:03:59.752901063Z",
-  "book_age_s": "12.712",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.2900",
-  "yes_ask": "0.2950",
-  "sport": "NOT_IDENTIFIED",
-  "league": "NOT_IDENTIFIED",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_164d52a6",
-  "market_id": "atc-mlb-ath-cle-2026-09-20-i5-draw",
-  "event_id": "mlb-ath-cle-2026-09-20",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-20 20:07:41.083734+00",
-  "book_source_ts": "2026-09-20T20:07:29.926678270Z",
-  "book_age_s": "12.928",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.5800",
-  "yes_ask": "0.5900",
-  "sport": "NOT_IDENTIFIED",
-  "league": "NOT_IDENTIFIED",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_a020f8ab",
-  "market_id": "aec-lol-piv-lds-2026-09-21",
-  "event_id": "lol-piv-lds-2026-09-21",
-  "outcome_leg": "lodis",
-  "observed_at": "2026-09-21 16:55:43.687661+00",
-  "book_source_ts": "2026-09-21T16:55:31.919404626Z",
-  "book_age_s": "13.019",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.2000",
-  "yes_ask": "0.2100",
-  "sport": "esports",
-  "league": "lol",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_1bba3bf8",
-  "market_id": "atc-mlb-wsh-det-2026-09-21-i9-wsh",
-  "event_id": "mlb-wsh-det-2026-09-21",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 17:16:32.650227+00",
-  "book_source_ts": "2026-09-21T17:16:21.550300043Z",
-  "book_age_s": "13.246",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.2500",
-  "yes_ask": "0.2600",
-  "sport": "baseball",
-  "league": "mlb",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_969cbcd7",
-  "market_id": "tsc-nfl-jax-den-2026-09-20-tt1h-den-9pt5",
-  "event_id": "nfl-jax-den-2026-09-20",
-  "outcome_leg": "over",
-  "observed_at": "2026-09-20 20:17:09.297593+00",
-  "book_source_ts": "2026-09-20T20:16:56.937258376Z",
-  "book_age_s": "13.754",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.5500",
-  "yes_ask": "0.5600",
-  "sport": "NOT_IDENTIFIED",
-  "league": "NOT_IDENTIFIED",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_a5415a75",
-  "market_id": "asc-nfl-lv-lac-2026-09-20-neg-6pt5",
-  "event_id": "nfl-lv-lac-2026-09-20",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-20 22:08:14.389406+00",
-  "book_source_ts": "2026-09-20T22:08:01.636206092Z",
-  "book_age_s": "13.764",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.1450",
-  "yes_ask": "0.1500",
-  "sport": "football",
-  "league": "nfl",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_c292f243",
-  "market_id": "tsc-nfl-was-dal-2026-09-20-1h-28pt5",
-  "event_id": "nfl-was-dal-2026-09-20",
-  "outcome_leg": "over",
-  "observed_at": "2026-09-20 21:21:23.265298+00",
-  "book_source_ts": "2026-09-20T21:21:10.314762730Z",
-  "book_age_s": "15.595",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.6300",
-  "yes_ask": "0.7500",
-  "sport": "football",
-  "league": "NOT_IDENTIFIED",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_03ba08dd",
-  "market_id": "astatc-wta-alicha-sofken-2026-09-20-sw1",
-  "event_id": "wta-alicha-sofken-2026-09-20",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 03:20:33.308408+00",
-  "book_source_ts": "2026-09-21T03:20:18.721845152Z",
-  "book_age_s": "15.728",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.3800",
-  "yes_ask": "0.5000",
-  "sport": "tennis",
-  "league": "wta",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_93dbec67",
-  "market_id": "asc-wta-talgib-fiofer-2026-09-20-ss-neg-1pt5",
-  "event_id": "wta-talgib-fiofer-2026-09-20",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-20 22:05:57.780109+00",
-  "book_source_ts": "2026-09-20T22:05:47.283590893Z",
-  "book_age_s": "15.822",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.3200",
-  "yes_ask": "0.5300",
-  "sport": "tennis",
-  "league": "wta",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_9c4ac1e4",
-  "market_id": "asc-wta-talgib-fiofer-2026-09-20-ss-pos-1pt5",
-  "event_id": "wta-talgib-fiofer-2026-09-20",
-  "outcome_leg": "yes",
-  "observed_at": "2026-09-21 02:00:44.143222+00",
-  "book_source_ts": "2026-09-21T02:00:17.918741389Z",
-  "book_age_s": "27.985",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.4900",
-  "yes_ask": "0.9800",
-  "sport": "tennis",
-  "league": "wta",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_62a4f967",
-  "market_id": "astatc-mlb-wsh-det-2026-09-21-tb-spetor-gte4",
-  "event_id": "mlb-wsh-det-2026-09-21",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-21 17:25:28.83594+00",
-  "book_source_ts": "2026-09-21T17:25:13.866781277Z",
-  "book_age_s": "16.152",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.1600",
-  "yes_ask": "0.1700",
-  "sport": "baseball",
-  "league": "mlb",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_17f6be2b",
-  "market_id": "asc-nfl-sea-ari-2026-09-20-neg-8pt5",
-  "event_id": "nfl-sea-ari-2026-09-20",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-20 20:56:57.314815+00",
-  "book_source_ts": "2026-09-20T20:56:43.105649138Z",
-  "book_age_s": "16.672",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.4400",
-  "yes_ask": "0.4450",
-  "sport": "football",
-  "league": "nfl",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_7866ef30",
-  "market_id": "tsc-mlb-min-sf-2026-09-21-6pt5",
-  "event_id": "mlb-min-sf-2026-09-21",
-  "outcome_leg": "over",
-  "observed_at": "2026-09-21 01:46:52.667178+00",
-  "book_source_ts": "2026-09-21T01:46:37.513732025Z",
-  "book_age_s": "17.494",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.6700",
-  "yes_ask": "0.6750",
-  "sport": "baseball",
-  "league": "NOT_IDENTIFIED",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
-  "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
- },
- {
-  "observation_id": "bsv_d22e1427",
-  "market_id": "aec-setkameua-ishpav-fommyk-2026-09-21",
-  "event_id": "setkameua-ishpav-fommyk-2026-09-21",
-  "outcome_leg": "fomin mykyta",
-  "observed_at": "2026-09-21 16:55:42.531709+00",
-  "book_source_ts": "2026-09-21T16:55:25.984369945Z",
-  "book_age_s": "17.687",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.4800",
-  "yes_ask": "0.4900",
   "sport": "table_tennis",
   "league": "setkameua",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
   "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.7700",
+  "yes_bid": "0.2700",
+  "event_id": "setkameua-koloole-bokrom-2026-09-21",
+  "market_id": "astatc-setkameua-koloole-bokrom-2026-09-21-sw1",
+  "yes_depth": {
+   "ask": "4140.0000",
+   "bid": "3000.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "2.448",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T01:05:13.859778+00:00",
+  "outcome_leg": "no",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "astatc-setkameua-koloole-bokrom-2026-09-21-sw1",
+  "book_source_ts": "2026-09-21T01:05:11.834446639Z",
+  "observation_id": "bsv_2e604552853a5b501171d39703b57638492abae2",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "39286",
+  "book_received_ts": "2026-09-21T01:05:14.282247+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "150.0000",
+     "level": 0,
+     "price": "0.7700"
+    },
+    {
+     "qty": "3990.0000",
+     "level": 1,
+     "price": "0.9900"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "150.0000",
+     "level": 0,
+     "price": "0.2700"
+    },
+    {
+     "qty": "2850.0000",
+     "level": 1,
+     "price": "0.0100"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
  },
  {
-  "observation_id": "bsv_2e38ad2c",
-  "market_id": "asc-nfl-cle-tb-2026-09-20-pos-1pt5",
-  "event_id": "nfl-cle-tb-2026-09-20",
-  "outcome_leg": "no",
-  "observed_at": "2026-09-20 21:27:14.470871+00",
-  "book_source_ts": "2026-09-20T21:26:49.496527438Z",
-  "book_age_s": "26.211",
-  "venue_state": "MARKET_STATE_OPEN",
-  "book_readability_status": "READABLE",
-  "yes_bid": "0.5000",
-  "yes_ask": "0.5050",
-  "sport": "football",
-  "league": "nfl",
-  "market_type": "side",
-  "no_bid": "NOT_IDENTIFIED",
+  "sport": "table_tennis",
+  "league": "setkamemd",
   "no_ask": "NOT_IDENTIFIED",
-  "settlement_outcome": null,
-  "settlement_status": null
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.7000",
+  "yes_bid": "0.5500",
+  "event_id": "setkamemd-ciumir-corrad-2026-09-21",
+  "market_id": "astatc-setkamemd-ciumir-corrad-2026-09-21-sw1",
+  "yes_depth": {
+   "ask": "202.0000",
+   "bid": "2913.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "2.449",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T10:25:56.457146+00:00",
+  "outcome_leg": "no",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "astatc-setkamemd-ciumir-corrad-2026-09-21-sw1",
+  "book_source_ts": "2026-09-21T10:25:54.122194047Z",
+  "observation_id": "bsv_391977b841d331d1729b4a462f831e140eb1d9ff",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "20043",
+  "book_received_ts": "2026-09-21T10:25:56.57157+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "50.0000",
+     "level": 0,
+     "price": "0.7000"
+    },
+    {
+     "qty": "100.0000",
+     "level": 1,
+     "price": "0.7400"
+    },
+    {
+     "qty": "52.0000",
+     "level": 2,
+     "price": "0.9900"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "5.0000",
+     "level": 0,
+     "price": "0.5500"
+    },
+    {
+     "qty": "7.0000",
+     "level": 1,
+     "price": "0.5400"
+    },
+    {
+     "qty": "1.0000",
+     "level": 2,
+     "price": "0.5300"
+    },
+    {
+     "qty": "50.0000",
+     "level": 3,
+     "price": "0.3000"
+    },
+    {
+     "qty": "2850.0000",
+     "level": 4,
+     "price": "0.0100"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
+  "sport": "NOT_IDENTIFIED",
+  "league": "NOT_IDENTIFIED",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.2300",
+  "yes_bid": "0.2200",
+  "event_id": "nfl-ind-kc-2026-09-20",
+  "market_id": "tsc-nfl-ind-kc-2026-09-20-2h-29pt5",
+  "yes_depth": {
+   "ask": "677.8900",
+   "bid": "55415.8100",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "2.835",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-20T20:31:44.212707+00:00",
+  "outcome_leg": "over",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "tsc-nfl-ind-kc-2026-09-20-2h-29pt5",
+  "book_source_ts": "2026-09-20T20:31:43.416379543Z",
+  "observation_id": "bsv_e0dbb384cee35ea8e717b9316740f6f084f777b0",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "13695",
+  "book_received_ts": "2026-09-20T20:31:46.251583+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "155.0000",
+     "level": 0,
+     "price": "0.2300"
+    },
+    {
+     "qty": "77.0000",
+     "level": 1,
+     "price": "0.2400"
+    },
+    {
+     "qty": "283.0000",
+     "level": 2,
+     "price": "0.2700"
+    },
+    {
+     "qty": "10.0000",
+     "level": 3,
+     "price": "0.3000"
+    },
+    {
+     "qty": "152.8900",
+     "level": 4,
+     "price": "0.3100"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "4251.8100",
+     "level": 0,
+     "price": "0.2200"
+    },
+    {
+     "qty": "50004.0000",
+     "level": 1,
+     "price": "0.2100"
+    },
+    {
+     "qty": "960.0000",
+     "level": 2,
+     "price": "0.1600"
+    },
+    {
+     "qty": "200.0000",
+     "level": 3,
+     "price": "0.0100"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
+  "sport": "NOT_IDENTIFIED",
+  "league": "NOT_IDENTIFIED",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.5600",
+  "yes_bid": "0.5500",
+  "event_id": "nfl-was-dal-2026-09-20",
+  "market_id": "atc-nfl-was-dal-2026-09-20-winner-2h-dal",
+  "yes_depth": {
+   "ask": "56663.1600",
+   "bid": "109512.1100",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "2.884",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-20T19:36:13.255189+00:00",
+  "outcome_leg": "no",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "atc-nfl-was-dal-2026-09-20-winner-2h-dal",
+  "book_source_ts": "2026-09-20T19:36:10.761346346Z",
+  "observation_id": "bsv_8cfd5e26a2c20ec650d374454e9e431088d2b6ae",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "2926",
+  "book_received_ts": "2026-09-20T19:36:13.644936+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "56347.0000",
+     "level": 0,
+     "price": "0.5600"
+    },
+    {
+     "qty": "65.0000",
+     "level": 1,
+     "price": "0.5700"
+    },
+    {
+     "qty": "0.9400",
+     "level": 2,
+     "price": "0.6000"
+    },
+    {
+     "qty": "0.2200",
+     "level": 3,
+     "price": "0.6400"
+    },
+    {
+     "qty": "250.0000",
+     "level": 4,
+     "price": "0.6500"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "78.1100",
+     "level": 0,
+     "price": "0.5500"
+    },
+    {
+     "qty": "52358.0000",
+     "level": 1,
+     "price": "0.5400"
+    },
+    {
+     "qty": "100.0000",
+     "level": 2,
+     "price": "0.5300"
+    },
+    {
+     "qty": "4375.0000",
+     "level": 3,
+     "price": "0.0200"
+    },
+    {
+     "qty": "52601.0000",
+     "level": 4,
+     "price": "0.0100"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
+  "sport": "esports",
+  "league": "cs2",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.5100",
+  "yes_bid": "0.5000",
+  "event_id": "cs2-brute-sparta-2026-09-21",
+  "market_id": "astatc-cs2-brute-sparta-2026-09-21-map2",
+  "yes_depth": {
+   "ask": "31288.9600",
+   "bid": "6661.9800",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "3.279",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T05:20:40.783831+00:00",
+  "outcome_leg": "no",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "astatc-cs2-brute-sparta-2026-09-21-map2",
+  "book_source_ts": "2026-09-21T05:20:40.429423427Z",
+  "observation_id": "bsv_b0a06169d1e4aa52ffe063bd2751643010bddfbb",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "9559",
+  "book_received_ts": "2026-09-21T05:20:43.708199+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "5095.9600",
+     "level": 0,
+     "price": "0.5100"
+    },
+    {
+     "qty": "875.0000",
+     "level": 1,
+     "price": "0.6400"
+    },
+    {
+     "qty": "151.0000",
+     "level": 2,
+     "price": "0.6500"
+    },
+    {
+     "qty": "55.0000",
+     "level": 3,
+     "price": "0.9800"
+    },
+    {
+     "qty": "25112.0000",
+     "level": 4,
+     "price": "0.9900"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "25.3500",
+     "level": 0,
+     "price": "0.5000"
+    },
+    {
+     "qty": "5489.6300",
+     "level": 1,
+     "price": "0.4400"
+    },
+    {
+     "qty": "217.0000",
+     "level": 2,
+     "price": "0.3900"
+    },
+    {
+     "qty": "925.0000",
+     "level": 3,
+     "price": "0.3100"
+    },
+    {
+     "qty": "5.0000",
+     "level": 4,
+     "price": "0.0200"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
+  "sport": "tennis",
+  "league": "atp",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.5400",
+  "yes_bid": "0.5200",
+  "event_id": "atp-juamar-sampie-2026-09-21",
+  "market_id": "aec-atp-juamar-sampie-2026-09-21",
+  "yes_depth": {
+   "ask": "102112.7000",
+   "bid": "135487.7000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "3.368",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T17:01:13.904653+00:00",
+  "outcome_leg": "juan martin",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "aec-atp-juamar-sampie-2026-09-21",
+  "book_source_ts": "2026-09-21T17:01:11.735961521Z",
+  "observation_id": "bsv_f783ef9d24c0addf03e3a1310ac25bfc960a4234",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "5326",
+  "book_received_ts": "2026-09-21T17:01:15.104416+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "25331.4500",
+     "level": 0,
+     "price": "0.5400"
+    },
+    {
+     "qty": "32613.9500",
+     "level": 1,
+     "price": "0.5500"
+    },
+    {
+     "qty": "29762.3000",
+     "level": 2,
+     "price": "0.5600"
+    },
+    {
+     "qty": "4996.0000",
+     "level": 3,
+     "price": "0.5700"
+    },
+    {
+     "qty": "9409.0000",
+     "level": 4,
+     "price": "0.5800"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "85471.9900",
+     "level": 0,
+     "price": "0.5200"
+    },
+    {
+     "qty": "28773.4500",
+     "level": 1,
+     "price": "0.5100"
+    },
+    {
+     "qty": "16238.2600",
+     "level": 2,
+     "price": "0.5000"
+    },
+    {
+     "qty": "4704.0000",
+     "level": 3,
+     "price": "0.4900"
+    },
+    {
+     "qty": "300.0000",
+     "level": 4,
+     "price": "0.4700"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
+  "sport": "hockey",
+  "league": "nhl",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.6000",
+  "yes_bid": "0.5900",
+  "event_id": "nhl-col-wpg-2026-09-21",
+  "market_id": "aec-nhl-col-wpg-2026-09-21",
+  "yes_depth": {
+   "ask": "21946.7900",
+   "bid": "7396.4000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "3.871",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T09:10:41.859487+00:00",
+  "outcome_leg": "avalanche",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "aec-nhl-col-wpg-2026-09-21",
+  "book_source_ts": "2026-09-21T09:10:38.103733218Z",
+  "observation_id": "bsv_c306fe9452c376ca32aaf03d29a712e8145e30fa",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "53358",
+  "book_received_ts": "2026-09-21T09:10:41.975188+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "361.4600",
+     "level": 0,
+     "price": "0.6000"
+    },
+    {
+     "qty": "19978.8100",
+     "level": 1,
+     "price": "0.6100"
+    },
+    {
+     "qty": "10.5200",
+     "level": 2,
+     "price": "0.6300"
+    },
+    {
+     "qty": "1571.0000",
+     "level": 3,
+     "price": "0.6500"
+    },
+    {
+     "qty": "25.0000",
+     "level": 4,
+     "price": "0.6600"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "386.4000",
+     "level": 0,
+     "price": "0.5900"
+    },
+    {
+     "qty": "10.0000",
+     "level": 1,
+     "price": "0.5800"
+    },
+    {
+     "qty": "25.0000",
+     "level": 2,
+     "price": "0.4600"
+    },
+    {
+     "qty": "2500.0000",
+     "level": 3,
+     "price": "0.4300"
+    },
+    {
+     "qty": "4475.0000",
+     "level": 4,
+     "price": "0.4100"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
+ },
+ {
+  "sport": "soccer",
+  "league": "par2",
+  "no_ask": "NOT_IDENTIFIED",
+  "no_bid": "NOT_IDENTIFIED",
+  "yes_ask": "0.3600",
+  "yes_bid": "0.2600",
+  "event_id": "par2-clu-tem-2026-09-21",
+  "market_id": "atc-par2-clu-tem-2026-09-21-tem",
+  "yes_depth": {
+   "ask": "125.0000",
+   "bid": "525.0000",
+   "levelsCaptured": 5,
+   "isNotQueueAhead": "DISPLAYED_DEPTH_AT_T0 is what the venue showed resting at a price: an observation. QUEUE_AHEAD_AT_T0 is how much would sit in front of an order that does not exist: a counterfactual. They coincide only under stated assumptions, and never beyond the snapshot instant"
+  },
+  "book_age_s": "3.878",
+  "live_status": "PREGAME",
+  "market_type": "side",
+  "observed_at": "2026-09-21T09:55:29.30905+00:00",
+  "outcome_leg": "no",
+  "venue_state": "MARKET_STATE_OPEN",
+  "instrument_id": "atc-par2-clu-tem-2026-09-21-tem",
+  "book_source_ts": "2026-09-21T09:55:28.640984509Z",
+  "observation_id": "bsv_5d3100467e7469f34be9c7e1b89a4765c3f6cfaf",
+  "identity_status": "VENUE_NATIVE_RESOLVED",
+  "time_to_event_s": "34470",
+  "book_received_ts": "2026-09-21T09:55:32.519054+00:00",
+  "multi_level_depth": {
+   "ask": [
+    {
+     "qty": "4.0000",
+     "level": 0,
+     "price": "0.3600"
+    },
+    {
+     "qty": "7.0000",
+     "level": 1,
+     "price": "0.3700"
+    },
+    {
+     "qty": "5.0000",
+     "level": 2,
+     "price": "0.5100"
+    },
+    {
+     "qty": "9.0000",
+     "level": 3,
+     "price": "0.8900"
+    },
+    {
+     "qty": "100.0000",
+     "level": 4,
+     "price": "0.9000"
+    }
+   ],
+   "bid": [
+    {
+     "qty": "6.0000",
+     "level": 0,
+     "price": "0.2600"
+    },
+    {
+     "qty": "11.0000",
+     "level": 1,
+     "price": "0.2500"
+    },
+    {
+     "qty": "205.0000",
+     "level": 2,
+     "price": "0.0200"
+    },
+    {
+     "qty": "303.0000",
+     "level": 3,
+     "price": "0.0100"
+    }
+   ],
+   "levels": 5
+  },
+  "book_readability_status": "READABLE"
  }
 ]
