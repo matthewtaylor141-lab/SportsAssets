@@ -117,9 +117,19 @@ def bench(monkeypatch):
     monkeypatch.setattr(le, "_whale_set", lambda _n: {"rn1"})
     monkeypatch.setattr(le, "_is_paused", _false)
     monkeypatch.setattr(le, "overspend_halt", _false)
+    # THE VENUE GATE IS ON THIS PATH NOW (2026-09-21). mirror_exit
+    # consults active_venue() before anything order-capable, so a bench
+    # that intends to exercise the sell path has to represent a system
+    # that is actually authorized to sell. `copy_probe_enabled` alone
+    # sufficed only while the gate did not exist -- which is precisely
+    # the hole R5 closed. These are fixture literals, not credentials.
     monkeypatch.setattr(le, "settings",
                         lambda: types.SimpleNamespace(
-                            copy_probe_enabled=True))
+                            copy_probe_enabled=True,
+                            live_trading_enabled=True,
+                            pmus_key_id="bench-key-id",
+                            pmus_secret_key="bench-secret",
+                            pm_private_key=None))
 
     # mirror_exit fetches its own pool. Without this the test dials a
     # real database and hangs, which is its own small lesson about
@@ -368,3 +378,84 @@ class TestTheGatesStillRefuse:
         pool = Pool(_row(qty=200))
         assert await _exit(pool, closed_frac=0.01) == "mx_below_floor"
         assert bench["close_calls"] == [] and bench["fok_calls"] == []
+
+
+class TestTheVenueGateRefuses:
+    """R5, 2026-09-21. mirror_exit reached the venue without ever asking
+    whether this system was authorized to trade at all.
+
+    Every other order path -- _execute_manual, _execute_manual_limit,
+    _execute_manual_sell, maybe_execute -- calls active_venue() first.
+    mirror_exit did not, so LIVE_TRADING_ENABLED did not gate the
+    whale-exit sell path. These tests exercise the gate through the real
+    function against the bench's fake venue; nothing here can reach a
+    real one.
+    """
+
+    def _cfg(monkeypatch, **over):
+        base = dict(copy_probe_enabled=True, live_trading_enabled=True,
+                    pmus_key_id="bench-key-id",
+                    pmus_secret_key="bench-secret", pm_private_key=None)
+        base.update(over)
+        monkeypatch.setattr(le, "settings",
+                            lambda: types.SimpleNamespace(**base))
+
+    _cfg = staticmethod(_cfg)
+
+    @pytest.mark.asyncio
+    async def test_master_switch_off_places_no_order(self, bench,
+                                                     monkeypatch):
+        """THE DEFECT. Everything else about this call is well-formed:
+        a real position, a venue holding shares, no pause, no halt."""
+        self._cfg(monkeypatch, live_trading_enabled=False)
+        pool = Pool(_row())
+        assert await _exit(pool) == "mx_not_authorized_no_active_venue"
+        assert bench["close_calls"] == [] and bench["fok_calls"] == []
+
+    @pytest.mark.asyncio
+    async def test_no_credentials_places_no_order(self, bench,
+                                                  monkeypatch):
+        """The switch alone is not a venue: with no keys there is
+        nothing armed, and the exit refuses rather than trying."""
+        self._cfg(monkeypatch, pmus_key_id=None, pmus_secret_key=None)
+        pool = Pool(_row())
+        assert await _exit(pool) == "mx_not_authorized_no_active_venue"
+        assert bench["close_calls"] == [] and bench["fok_calls"] == []
+
+    @pytest.mark.asyncio
+    async def test_credentials_without_the_switch_place_no_order(
+            self, bench, monkeypatch):
+        """Keys present is not authorization. active_venue() reads the
+        master switch FIRST, so a fully credentialled service that has
+        not been switched on still sells nothing."""
+        self._cfg(monkeypatch, live_trading_enabled=False,
+                  pmus_key_id="bench-key-id",
+                  pmus_secret_key="bench-secret")
+        pool = Pool(_row())
+        assert await _exit(pool) == "mx_not_authorized_no_active_venue"
+        assert bench["close_calls"] == [] and bench["fok_calls"] == []
+
+    @pytest.mark.asyncio
+    async def test_authorization_is_answered_before_operational_state(
+            self, bench, monkeypatch):
+        """A system not authorized to trade refuses on that ground,
+        without first consulting whether it happens to be paused. Both
+        conditions hold here; the authorization one is what comes back."""
+        self._cfg(monkeypatch, live_trading_enabled=False)
+
+        async def _true(_pool):
+            return True
+
+        monkeypatch.setattr(le, "_is_paused", _true)
+        pool = Pool(_row())
+        assert await _exit(pool) == "mx_not_authorized_no_active_venue"
+        assert bench["close_calls"] == [] and bench["fok_calls"] == []
+
+    @pytest.mark.asyncio
+    async def test_an_armed_venue_still_sells(self, bench):
+        """The control must refuse the unauthorized case WITHOUT
+        refusing the authorized one -- otherwise these tests would pass
+        against a function that never sells anything."""
+        pool = Pool(_row(qty=200))
+        assert await _exit(pool) == "mx_SOLD"
+        assert bench["close_calls"] or bench["fok_calls"]
