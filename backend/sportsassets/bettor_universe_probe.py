@@ -85,7 +85,16 @@ PROBE_BATCH = 240
 PROBE_CONCURRENCY = 8
 # Rounds run back to back at startup, to reach a decidable universe
 # before the loop begins rather than after it has reported nothing.
-PROBE_ROUNDS_AT_START = 4
+#
+# SEVEN, FROM THE MEASURED ADMIT RATE. Over the 30,590-body capture the
+# frozen rule admits 6.35%, so filling the 100-market cap needs about
+# 1,575 enriched markets: 1,680 at seven rounds of 240. Four rounds
+# (960) would have yielded about 61 and the cap would never bind -- a
+# smaller universe than the rule would have chosen, for no reason
+# anyone could see in the output. The loop stops early anyway as soon
+# as the rule reports a full universe, or as soon as the candidate set
+# has been swept once.
+PROBE_ROUNDS_AT_START = 7
 # A single read that will not answer in this long is abandoned so one
 # slow market cannot hold a round open.
 PROBE_TIMEOUT_S = 8.0

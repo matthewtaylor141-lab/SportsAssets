@@ -142,10 +142,18 @@ LEDGER_EVERY_S = 60.0
 # waits before returning, and the wait escalates. The supervisor's five
 # seconds are then added to a minute or more, not to zero.
 #
+# THE FIRST RUNG IS FIVE MINUTES, NOT ONE, BECAUSE A REFUSAL IS NOT
+# FREE. An EMPTY_UNIVERSE return has already spent its discovery: six
+# listing pages and up to 1,680 BBO reads, about 21 s of wall clock at
+# eight in flight. Holding 60 s after that is ~1,686 reads per 81 s --
+# 21 req/s, which is a hot loop wearing a backoff. Holding 300 s makes
+# the same round 5.2 req/s and the next one 1.8, and it is still
+# shorter than the 900 s a HEALTHY loop waits between refreshes.
+#
 # Reset to the first rung whenever a run actually starts, so a
 # transient venue outage does not leave the loop on the long rung for
 # the rest of the day.
-NOSTART_BACKOFF_S = (60.0, 120.0, 300.0, 900.0)
+NOSTART_BACKOFF_S = (300.0, 900.0, 1800.0, 3600.0)
 _nostart_rung = 0
 
 
@@ -989,9 +997,12 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
             # again would re-read markets already covered and inflate
             # every count derived from it.
             break
-        if len(by_slug) >= uni.MAX_MARKETS * 3:
-            # Enough enriched rows that the cap will bind. Reading more
-            # markets would only lengthen the tail we then discard.
+        # ELIGIBLE, NOT ENRICHED. The stopping condition is a FULL
+        # UNIVERSE, and only the rule can say when we have one. Counting
+        # enriched rows instead stopped after two rounds -- 480 rows,
+        # about 30 of them eligible at the measured 6.35% admit rate --
+        # and called a third of a universe done.
+        if uni.select(list(by_slug.values()))["selected"] >= uni.MAX_MARKETS:
             break
 
     rows = list(by_slug.values())

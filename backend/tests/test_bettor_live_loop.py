@@ -1154,11 +1154,22 @@ class TestTheNoStartBackoff:
                 await bl._backoff("EMPTY_UNIVERSE", sleep=spy)
 
         asyncio.run(drive())
-        assert spy.delays == [60.0, 120.0, 300.0, 900.0, 900.0, 900.0]
+        assert spy.delays == [300.0, 900.0, 1800.0, 3600.0, 3600.0,
+                              3600.0]
         assert spy.delays[-1] == max(bl.NOSTART_BACKOFF_S), "capped"
 
-    def test_the_first_hold_already_dwarfs_the_supervisors_five_seconds(self):
-        assert min(bl.NOSTART_BACKOFF_S) >= 60.0
+    def test_the_first_hold_covers_the_cost_of_the_refusal_itself(self):
+        """A refusal is not free: an EMPTY_UNIVERSE return has already
+        spent six listing pages and up to PROBE_BATCH * rounds BBO
+        reads. The hold has to be long enough that retrying is not a
+        hot loop wearing a backoff."""
+        from sportsassets import bettor_universe_probe as probe
+        worst_reads = 6 + probe.PROBE_BATCH * probe.PROBE_ROUNDS_AT_START
+        hold = min(bl.NOSTART_BACKOFF_S)
+        assert hold >= 300.0
+        assert worst_reads / hold < 6.0, (
+            "%d reads per %.0fs is %.1f req/s"
+            % (worst_reads, hold, worst_reads / hold))
 
     def test_a_run_that_started_clears_the_backoff(self, monkeypatch,
                                                    tmp_path):
@@ -1196,7 +1207,8 @@ class TestTheNoStartBackoff:
                                       control_pool=RunningControl(),
                                       sleep=spy))
             assert out["why"] == why
-            assert spy.delays == [60.0], "%s returned without holding" % why
+            assert spy.delays == [300.0], (
+                "%s returned without holding" % why)
 
     # -- helpers ------------------------------------------------------
 
@@ -1282,7 +1294,7 @@ class TestTheStopControlGovernsTheLoop:
         asyncio.run(bl.main(store=made["store"],
                             control_pool=FakeControlPool("false"),
                             sleep=spy))
-        assert spy.delays == [60.0], (
+        assert spy.delays == [300.0], (
             "a stopped loop must not re-poll every five seconds either")
 
     def test_a_running_control_lets_the_loop_start(self, monkeypatch,
