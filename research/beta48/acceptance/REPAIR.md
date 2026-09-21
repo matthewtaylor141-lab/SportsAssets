@@ -2,7 +2,8 @@
 
 | | |
 |---|---|
-| **prepared on** | `claude/bettor-observation-repair` @ **`f13f9474`** |
+| **prepared on** | `claude/bettor-observation-repair` |
+| **last code SHA** | **`f13f9474`** — every commit after it changes documents only |
 | **based on** | production `255a7d38a1b3d72ddc33625370d8c0af2023b5b5` |
 | **auto-deploys** | **NO** — verified, see §5 |
 | current production | `claude/session-njaewf` @ `255a7d38`, loop DEREGISTERED |
@@ -335,7 +336,7 @@ separately reversible:
 
 | | |
 |---|---|
-| **activation SHA** | `f13f9474c71289856a3e5a04bf0e3aa7305b5849` |
+| **activation SHA** | the branch tip. A document cannot hold its own hash: confirm with `git rev-parse origin/claude/bettor-observation-repair`, and check `git diff --stat f13f9474..HEAD` touches nothing under `backend/` or `scripts/` |
 | branch | `claude/bettor-observation-repair` |
 | destination when authorized | `claude/session-njaewf` |
 | force | **never** |
