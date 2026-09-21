@@ -58,7 +58,17 @@ INTERVAL_S = _rules.capped_env("WHALE_EXIT_INTERVAL_S", 120.0, floor=15.0)
 # A shrink smaller than this is noise — rounding in the venue's size
 # field, or a partial that is not worth a fee to follow.
 MIN_SHRINK = float(os.environ.get("WHALE_EXIT_MIN_SHRINK", "0.05"))
-ENABLED = os.environ.get("WHALE_EXIT_ENABLED", "1") != "0"
+# FAIL CLOSED. This defaulted to "1" -- absence meant ENABLED -- on a
+# worker registered in the running service, holding live venue
+# credentials, against a populated whale allowlist. Nothing had to be
+# turned on for it to sell; something had to be turned off, and the
+# thing that would have turned it off was an environment variable that
+# was not set.
+#
+# An order-capable route must never be armed by the absence of
+# configuration. Absence is now DISABLED, and arming it takes a
+# deliberate "1".
+ENABLED = os.environ.get("WHALE_EXIT_ENABLED", "0") == "1"
 # MOST EXITS PER CYCLE, PER WHALE.
 #
 # swisstony holds less than he bought on 62 of 75 positions. The first

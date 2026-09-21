@@ -864,6 +864,25 @@ async def mirror_exit(payload: dict) -> str:
     """
     if payload.get("side") != "SELL":
         return _exit_done("mx_not_a_sell")
+
+    # ── THE AUTHORITATIVE PRODUCTION EXECUTION GATE ──────────────────
+    #
+    # THIS WAS MISSING, AND ITS ABSENCE WAS THE HOLE. active_venue()
+    # is the master switch every other order path on this platform
+    # consults -- _execute_manual, _execute_manual_limit,
+    # _execute_manual_sell and maybe_execute all call it. mirror_exit
+    # did not, so LIVE_TRADING_ENABLED did not gate it, and the route
+    # could reach the wire on nothing more than: a default-on env flag,
+    # a populated allowlist, and credentials being present.
+    #
+    # It is checked FIRST, before the halt flags, because a halt is an
+    # operational pause and this is an authorization question. A system
+    # that is not authorized to trade must refuse before it asks
+    # whether it is currently paused.
+    venue = active_venue()
+    if not venue:
+        return _exit_done("mx_not_authorized_no_active_venue")
+
     if not settings().copy_probe_enabled or copy_halted():
         return _exit_done("mx_halted")
     username = (payload.get("whale_username") or "").lower()
