@@ -127,7 +127,12 @@ def read_book(client, market_slug: str, *, outcome_leg: str | None = None,
     from . import pmus
 
     received = now or _now_iso()
-    res = pmus.book_read(client, market_slug)
+    # SAME CLIENT RULE AS THE RESOLUTION READS. `pmus.book_read` reaches
+    # into `client.markets`, so a None client would return
+    # NO_BOOK_FEED_ON_CLIENT -- an unreadable book that looks like a
+    # venue problem and is actually a caller that meant "use ours".
+    res = pmus.book_read(
+        client if client is not None else pmus._get_client(), market_slug)
     row: dict = {
         "reader": READER_VERSION,
         "market_id": market_slug,
