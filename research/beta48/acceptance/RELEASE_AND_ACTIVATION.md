@@ -1,287 +1,244 @@
 # RELEASE AND ACTIVATION PACKAGE
 
-**SHA: `20bdd3426a050d1a4c31b1ce9488ed77c89793ae`**, branch
-`claude/session-njaewf`. Restrictions unchanged: `mirror_live=false`,
-no orders, no capital activation, production `3349219`, pilot
-unactivated.
+**Code SHA: `9454a305c1ad025dc1e5eaadc16f756f8112e9e2`**, branch
+`claude/session-njaewf`. Every executable line this package activates
+exists at that commit. This document is the sole change in the commit
+that adds it, so the branch tip differs from `9454a30` by documentation
+only:
+
+```
+git diff --stat 9454a30..HEAD
+→ research/beta48/acceptance/RELEASE_AND_ACTIVATION.md | (docs only)
+```
+
+Stated this way because a release note cannot contain its own SHA, and
+the previous version pretended otherwise: it was pinned to `20bdd342`
+while being delivered at `c87d1f4`, two commits ahead. Verify the pin by
+running the diff above rather than by trusting this line.
+
+Restrictions unchanged: `mirror_live=false`, no orders, no capital
+activation, production `3349219`, pilot unactivated.
 
 **NOTHING FROM THIS BRANCH IS RUNNING.** `sportsassets-workers` runs
-`python -m sportsassets.workers.all` from the default branch, and
-`bettor_live_loop` is not in its `LOOPS` list. The word "running" is
-used below only where something actually ran.
+`python -m sportsassets.workers.all` from production `3349219`.
 
 ---
 
-## 1. WHAT RAN, AND WHAT IT OBSERVED
+## 1. "ONE LINE AND MERGE" WAS WRONG, AND BY HOW MUCH
 
-| run | what it was | result |
+The activation review's central objection. Measured:
+
+```
+git diff --stat 3349219..HEAD -- backend/sportsassets/ render.yaml
+→ 22 files changed, 8,293 insertions, 8 deletions   (68 commits)
+```
+
+**A one-line registration in `all.py` does not make this a one-line
+release.** Merging to deploy the worker deploys everything below.
+
+### 1.1 Production behaviour that WOULD change
+
+| file | Δ | what it does in production |
 |---|---|---|
-| `scripts/bettor_live_harness.py` | the **real** stream handler, eligibility, normalizer, engine, shadow ledger and settlement ingestion, driven by 16 real captured books | 16 books → 16 decisions → **16 NO_TRADE**, 5 blockers by name, freshness median **1.0015 s**, residual 0, **0 orders** |
-| `research-sql` ×5 | read-only queries against the production read replica | depth shape, traded volume, spreads, clocks, maturity — §5 |
-| `bettor-capability-probe` ×2 | authenticated venue reads, proof-before-keys | 4 account reads `AuthenticationError`; public market read `ok` |
-| `pmx-preprod` (whoami) | institutional preproduction | failed at **"Stage the key"**, before any network call |
-| `fetch-docs` ×3 | venue documentation from the runner | subscription limit, level ordering, environment table |
+| **`pmus.py`** | +28 | **`submit_fok` and `close_position` now consult the execution gate and RAISE on denial.** Every order this system can place arrives at one of these. |
+| **`live_executor.py`** | +42/−8 | lane tags on copy / whale_exit / manual; **gates a second CLOB submission path** (`post_order` on its own `py_clob_client`) that `pmus`-level gating never covered |
+| **`workers/all.py`** | +27 | **`await _bind_execution_gate()` before any loop starts.** Until it binds, **every submission in the process is denied.** |
+| `workers/bettor_state.py` | +15 | capture pacing |
+| `api/app.py` | +17 | gate binding in the API process |
+| `execution_gate.py` | +571 | new module |
 
-**The socket has not been opened.** The harness replaces it with a
-file, so every record is `REPLAY_DECISION` and none is
-`PROSPECTIVE_SHADOW`. What the harness establishes is that the chain
-runs on real payloads; what it does not establish is that the socket
-connects, that subscriptions are accepted, what the venue's real update
-rate is, or whether a book message replaces or deltas.
+**The execution gate is a restriction, not a capability** — its failure
+mode is refusal. But a deploy that cannot read the kill switch **halts
+the mirror's order flow**, and that is a production consequence of
+merging this branch, not of adding the BETTOR worker.
 
-## 2. THE SINGLE REMAINING ACTION
+### 1.2 New modules, inert until called
 
-Everything else is finished. The one action left needs approval:
+`bettor_decision_engine` (866), `bettor_shadow_loop` (1279),
+`bettor_market_stream` (578), `bettor_observation_adapter` (493),
+`bettor_live_read` (519), `bettor_maker_economics` (426),
+`bettor_live_loop` (443), `bettor_fee_schedule` (382),
+`bettor_admission` (536), `bettor_capacity_harness` (438),
+`bettor_settlement_ingest` (211), `bettor_venue_contract` (186),
+`bettor_universe` (179), `bettor_prospective` (265),
+`venue_reconcile` (461), `api/reconcile_read` (339).
 
-> **Add `("bettor_live", bettor_live_loop.main)` to `LOOPS` in
-> `backend/sportsassets/workers/all.py` and merge to the default
-> branch.** Render redeploys `sportsassets-workers` on merge.
+**No production module imports any of them.** Verified by `grep` over
+`backend/sportsassets`. They deploy as dead weight until `all.py`
+registers one.
 
-### Exact diff
+### 1.3 Therefore: THREE releases, not one
+
+| # | contents | risk | approval |
+|---|---|---|---|
+| **R1** | the **execution gate**: `execution_gate.py`, `pmus.py`, `live_executor.py`, `api/app.py`, `all.py` binding | **touches the live order path** | its own, on its own evidence |
+| **R2** | the inert BETTOR modules + tests | none — nothing imports them | routine |
+| **R3** | **one line** registering `bettor_live_loop` in `LOOPS` | decision-only | the activation decision |
+
+**R3 is genuinely one line. R1 is not, and I previously described the
+whole thing as R3.** Splitting them is a recommendation, not something
+I have done: reordering 68 commits is itself a change and is the
+owner's call.
+
+## 2. THE ACTIVATION ACTION (R3)
 
 ```python
 # backend/sportsassets/workers/all.py
  from . import (analytics, bettor_state, chain_listener, copy_sweep,
 +               bettor_live_loop,
                 dispatcher, edge_marks, institutional_md, ...)
-
  LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
      ...
 +    ("bettor_live", bettor_live_loop.main),
  ]
 ```
 
-**No `render.yaml` change.** `sportsassets-workers` already carries
-`envVars: *backend_env`, which already holds `PMUS_KEY_ID` (36 chars)
-and `PMUS_SECRET_KEY` (88 chars) — verified by `render-ops env-keys`,
-which returns key names and lengths only. **No new credential, no new
-permission, no credential moved.**
+**No `render.yaml` change.**
+
+### Credentials on the EXACT target service
+
+`render-ops env-keys sportsassets-workers` — key names and lengths
+only, no value read, nothing moved:
+
+| key | length |
+|---|---|
+| `PMUS_KEY_ID` | **36** |
+| `PMUS_SECRET_KEY` | **88** |
+
+Present on the deployment target itself, not inferred from
+`sportsassets-api`. *(The service also carries the unprefixed `PMX_*`
+production-exchange credentials. This worker does not read them and
+must not: the preprod lane uses the `PMX_PREPROD_*` namespace precisely
+so the two can never be confused.)*
 
 ### Configuration
 
 | variable | default | effect |
 |---|---|---|
-| `BETTOR_LIVE_LOOP` | `on` | `off` stops the loop without a deploy |
-| `BETTOR_LIVE_MAX_CONTRACTS` | **`0`** | sizes a **simulated** execution only; zero means none |
-| `BETTOR_LIVE_STATE` | unset | JSONL path for decision records |
+| `BETTOR_LIVE_LOOP` | `on` | `off` stops the loop, no deploy needed |
+| **`BETTOR_LIVE_STATE_DIR`** | **`/var/tmp/bettor`** | journal + ledger. **`main()` refuses to run if it is unusable.** |
+| `BETTOR_LIVE_MAX_CONTRACTS` | **`0`** | sizes a **simulated** execution only |
+| `BETTOR_LIVE_DISCOVERY_PAGES` | `6` | 6 × 500 = 3,000 markets measured |
 | `BETTOR_LIVE_OPENING_CASH` | `0` | shadow ledger opening balance |
 | `BETTOR_FEE_DATE` | today | which dated schedule applies |
 
-### Pre-merge validation
+**`/var/tmp` on Render is ephemeral — it survives a restart, not a
+redeploy.** For evidence that must outlive a redeploy, point
+`BETTOR_LIVE_STATE_DIR` at a persistent disk (as `edge-shadow` already
+does) or accept that a redeploy starts a fresh journal. Recovery is
+correct either way: an absent journal recovers zero lines and decides
+everything afresh.
 
-1. `python3 -m pytest backend/tests/test_bettor_market_stream.py backend/tests/test_bettor_live_read.py backend/tests/test_bettor_shadow_loop.py backend/tests/test_bettor_decision_engine.py backend/tests/test_bettor_observation_adapter.py backend/tests/test_bettor_fee_schedule.py` — **241 passing at this SHA**
-
-   *On the full suite:* 10,163 pass, **387 fail, 99 skip** (22m44s).
-   Those 387 sit in **56 files, none of them these six**, and they
-   pre-date this work — the same suite failed in bulk before any of it.
-   I did not fix them and they are not this delivery's to fix; I am
-   reporting the number rather than quoting only the passing subset.
-2. `python3 scripts/bettor_live_harness.py` — exit 0, all assertions
-3. `python3 scripts/bettor_shadow_demo.py` — exit 0
-4. `python3 scripts/bettor_replay_real.py` — exit 0
-
-### Post-deploy validation, in order
-
-1. `render-ops logs sportsassets-workers 10` → `bettor_live_loop: N markets subscribed`
-2. Within 60 s: the first counters line — `stream.connected: true`,
-   `subscriptions.confirmed > 0`
-3. `by_action` is **expected to be `{"NO_TRADE": ...}`**. That is the
-   engine working. An execution count above zero with
-   `BETTOR_LIVE_MAX_CONTRACTS=0` is a **defect** and a rollback trigger.
-4. `freshness.median` — this is the **first measurement of the live
-   path's latency**. The capture feed's median source-to-receipt delay
-   is 549.6 s; the stream's is unmeasured and is the number that decides
-   whether a 10-second bound is reachable at all.
-
-### Rollback
-
-| severity | action | effect |
-|---|---|---|
-| immediate | `render-ops env-set BETTOR_LIVE_LOOP=off confirm=DO` | loop exits; Render redeploys |
-| full | revert the `all.py` commit | loop gone |
-
-It writes **only its own JSONL file**, holds no database handle, and
-touches no trading path, no accounting record and no venue order
-endpoint. Removing it leaves nothing behind.
-
-### Blast radius
-
-`grep` over `backend/sportsassets`: **no module imports
-`bettor_live_loop`, `bettor_market_stream` or `bettor_universe`** other
-than the new ones and their tests. Adding the loop changes one list in
-`all.py`; every other loop is untouched.
-
-## 3. WHY IT IS NOT ALREADY RUNNING — THE VERIFIED BLOCKER
-
-**Venue credentials exist in the runtime and not in CI.** One fact,
-two consequences.
-
-| where | `PMUS_KEY_ID` | `PMUS_SECRET_KEY` | `PMX_PREPROD_*` |
-|---|---|---|---|
-| `sportsassets-api` / `-workers` env | **36 chars** | **88 chars** | — |
-| GitHub Actions secret store | **empty** | **empty** | **empty** |
-
-- The capability probe printed `PMUS_KEY_ID:` and `PMUS_SECRET_KEY:`
-  **blank** in its own env block, so `pmus._get_client()` took its
-  documented public-only branch and all four account reads returned
-  `AuthenticationError`. One cause, four failures.
-- `pmx-preprod` failed at the **"Stage the key from the secret store"**
-  step, which exits with `SECRET_MISSING: PMX_PREPROD_PRIVATE_KEY_B64
-  is not set` before any network call.
-
-So there are exactly **two** ways to exercise the loop against live
-data, and **both are outside what I hold**:
-
-1. **Deploy it** to the runtime that already has the credentials — §2,
-   needs approval.
-2. **Put credentials in CI** — which would be *moving credentials*, and
-   the directive forbids it.
-
-I did not attempt either.
-
-## 4. PREPRODUCTION — ENTITLEMENT DETERMINED
-
-**It is a different API surface**, and the distinction the directive
-asked me to verify is real:
-
-| | our SDK (`polymarket-us` 0.1.2) | the preprod environment |
-|---|---|---|
-| host | `api.polymarket.us`, `gateway.polymarket.us` | `api.preprod.polymarketexchange.com` |
-| auth | Ed25519 `key_id` / `secret_key` headers | **Auth0 OAuth**, `pmx-preprod.us.auth0.com/oauth/token`, refreshed every 3 minutes |
-| transports | REST + WebSocket | REST + gRPC + FIX |
-
-The installed SDK ships **no preprod constant** — only
-`GATEWAY_BASE_URL` and `API_BASE_URL`, both production. It accepts base
-URLs as constructor arguments but names no preproduction one.
-
-**We hold the entitlement.** `.github/workflows/pmx-preprod.yml` is a
-complete institutional preprod lane with `whoami | health | refdata |
-bbo | book | positions | open-orders | report-orders | reconcile-order |
-order-stream | order-preview`, plus `order` and `cancel` behind
-`confirm=DO`. Its secrets are namespaced `PMX_PREPROD_*` precisely so
-the preprod lane can never pick up the production `PMX_*` slots.
-
-**THE ENTITLEMENT IS PROVEN, NOT INFERRED.** `pmx-preprod` **run 24
-succeeded on 2026-09-10** — the venue accepted our credentials and
-returned positions and the USD balance. Runs 25 (2026-09-19) and 26
-(today) both failed, and the workflow's own header explains why: the
-credentials **used to be `workflow_dispatch` inputs** and were moved
-into `PMX_PREPROD_*` secret slots for security, because runs 1–24 had
-printed the client id, participant id and key id into the logs. Run 25
-died on `base64: invalid input` — "the secret was set but was not
-decodable" — and run 26 dies earlier still, on `SECRET_MISSING`.
-
-**So the lane has been non-functional since the migration, and the
-cause is an unpopulated secret slot rather than anything about our
-access.** The missing thing is the secret, not the entitlement. The exact
-requirement: `PMX_PREPROD_CLIENT_ID`, `PMX_PREPROD_PARTICIPANT_ID`,
-`PMX_PREPROD_KEY_ID` and `PMX_PREPROD_PRIVATE_KEY_B64` present in the
-repository secret store. With those, the execution-lifecycle
-demonstrations the directive lists — submission, acknowledgment,
-partial fills, cancellation, cancellation races, expiry, disconnect
-recovery, restart, reconciliation — run through that existing lane,
-against dummy funds, and **that is not blocking live decision-only
-observation**, which needs only §2.
-
-**Preproduction results would demonstrate execution behavior, not
-production profitability.**
-
-## 5. CAPACITY — FROM MEASURED ACTIVITY
-
-### Definitions, stated once
-
-| term | meaning |
-|---|---|
-| **executed notional** | Σ price × contracts over every fill, **both sides of a round trip** |
-| **position notional** | entries only. A round trip is $X position, $2X executed. |
-| **working capital** | position notional ÷ turns per day |
-| **participation** | our share of the market's traded notional. The venue counts each trade once; **we can be at most one side of it.** |
-
-### The target, decomposed
+### Resource footprint
 
 | | |
 |---|---|
-| executed notional/day | $500,000 |
-| position notional/day | $250,000 |
-| contract executions/day | **1,000,000** (11.57/sec) |
-| fills/day at 5 contracts | **200,000** (2.31/sec) |
+| threads | **+1** (the socket), daemon, stopped in a `finally` |
+| memory | bounded: 2,000-record ring + 5,000-touch ring + ≤100 dedup keys + ≤100 cached books |
+| event loop | journal writes and `report()` run via `asyncio.to_thread` |
+| venue reads | 1 websocket; 1 discovery listing / 900 s; ≤25 settlement REST calls / 600 s |
+| existing workers | `all.py` supervises each loop independently and restarts on crash; `BOOT_STAGGER_S` shifts every subsequent loop's start by 0.75 s |
 
-### Against the measured market
+**The relevant risk is memory.** `sportsassets-workers` was OOM-killed
+thirteen times in one evening at 2 GiB, which is why every collection
+here is bounded and why that is tested rather than asserted.
 
-**Measured: $396,361 traded notional/day across all 396 observed
-markets** (1,106,312 shares, implied average price $0.3583).
+### Pre-merge validation
 
-> **$500,000/day requires 126.1% of every dollar traded in the
-> universe BETTOR observes.** Above 100% it is not a hard target; it is
-> larger than the whole measured market.
+1. `pytest` the seven affected files — **277 passing at this SHA**
+   *(full suite: 10,163 pass / 387 fail across 56 files, all
+   pre-existing, none of them these seven)*
+2. `python3 scripts/bettor_live_harness.py` — exit 0
+3. `python3 scripts/bettor_shadow_demo.py` — exit 0
+4. `python3 scripts/bettor_replay_real.py` — exit 0
 
-| participation | executed notional/day | % of target |
-|---|---|---|
-| 1% | $3,964 | 0.8% |
-| **5%** | **$19,818** | **4.0%** |
-| 10% | $39,636 | 7.9% |
-| 25% | $99,090 | 19.8% |
+### Post-deploy validation
 
-At a plausible 5%: **7,927 fills/day** (0.092/sec), **79 fills per
-market per day** across 100 markets — against a median observed market
-that trades **100 shares in a day, total**.
+1. `bettor_live_loop: recovered {...}` then `N markets subscribed of M considered`
+2. within 60 s: `stream.connected: true`, `subscriptions.confirmed > 0`
+3. `by_action` **expected `{"NO_TRADE": ...}`**
+4. `durability.records_written` rising, `persist_failures` **0**
+5. `freshness.median` — **the first measurement of the live path's
+   latency**; the capture feed's median source-to-receipt is 549.6 s
 
-### Capital cycles
+**Rollback triggers:** any execution with `MAX_CONTRACTS=0`;
+`persist_failures` > 0 and rising; worker RSS above its pre-deploy
+band; any sibling loop's heartbeat lagging.
 
-Working capital = $250,000 ÷ turns per day:
+### Rollback
 
-| holding period | turns/day | working capital |
-|---|---|---|
-| held to settlement | 1.0 | **$250,000** |
-| 4 hours | 6.0 | $41,667 |
-| 1 hour | 24.0 | $10,417 |
-| 15 minutes | 96.0 | $2,604 |
+| severity | action |
+|---|---|
+| immediate | `render-ops env-set BETTOR_LIVE_LOOP=off confirm=DO` — the loop exits its `while`, `finally` stops the stream and saves the ledger |
+| full | revert the `all.py` commit |
 
-**Every row is a scenario.** The repository contains **zero fills**, so
-no holding period has ever been measured. And RN1's recycling mechanism
-— merge/redeem — **is not available on PMUS**: `bettor_merge` returns
-`permitted=False` for both account classes. Without it a completed pair
-is held to settlement unless sold, which is the **top row**.
+## 3. WHY IT IS NOT ALREADY RUNNING
 
-### What this is not
+**Venue credentials exist in the runtime and not in CI.**
 
-- CPU throughput. The decision path measures 21,917 obs/sec and clears
-  the requirement by four orders of magnitude; it is irrelevant.
-- A projection. $396,361 is measured; the participation rows are
-  arithmetic on it; the capital rows are scenarios and say so.
-- The whole venue. 1,526 markets were observed by a research sampler
-  not built for coverage. **Expanding the universe is a specific,
-  measurable requirement** — and nothing here measures the venue.
-
-## 6. ACCOUNT RECONCILIATION — AND THE SEPARATION
-
-The directive asks for account identity, historical activity and
-resting-order reconciliation, and asks to keep **market settlement**
-separate from **account cash settlement**. They are separated in code:
-
-| | source | what it means | status |
+| | `PMUS_KEY_ID` | `PMUS_SECRET_KEY` | `PMX_PREPROD_*` |
 |---|---|---|---|
-| **market settlement** | `/v1/markets/{slug}/settlement` | what the contract paid | endpoint wired, units not assumed |
-| **account cash settlement** | `portfolio.activities` (`POSITION_RESOLUTION`), `portfolio.balances` | what **our account** received | reads built, **blocked on the credential** |
+| `sportsassets-workers` (target) | **36** | **88** | — |
+| `sportsassets-api` | 36 | 88 | — |
+| GitHub Actions | **empty** | **empty** | **empty** |
 
-A market settling at $1.00 says nothing about whether our account was
-credited, in what amount, net of which fees. Collapsing them is how a
-model's fee term goes unverified forever.
+Two ways to exercise the loop live, both outside what I hold:
+**deploy it** (§2, approval), or **move credentials into CI** (which
+the directive forbids). I attempted neither.
 
-`reconcile_read.capability_probe()`, `account_identity()`,
-`historical_activity()` and `resting_orders()` are built and order-free
-(AST-asserted in a step holding no credentials). They ran. They
-returned `AuthenticationError` for the reason in §3.
+## 4. WHAT RAN, AND WHAT IT OBSERVED
+
+| run | what it was | result |
+|---|---|---|
+| `bettor_live_harness.py` | the **real** stream handler, eligibility, normalizer, engine, shadow ledger, settlement ingestion and **the worker's own `build()` and `recover()`**, on 16 real captured books | 16 → **16 NO_TRADE**, 5 blockers by name, freshness median ≈1.0 s, **16 durable records, 0 persist failures**, recovery replayed 16 lines and re-decided **0**, residual 0, **0 orders** |
+| `pytest` (7 files) | 277 tests, **36 of them driving `main()` itself** | pass |
+| `research-sql` ×6 | read-only replica queries | depth, volume, spreads, clocks, maturity |
+| `bettor-capability-probe` ×2 | authenticated venue reads | 4 account reads `AuthenticationError`; public market read `ok` |
+| `pmx-preprod` (whoami) | institutional preprod | failed at "Stage the key" |
+| `render-ops env-keys` ×2 | key names and lengths only | §2 |
+
+**The socket has not been opened.** Every harness record is
+`REPLAY_DECISION`, never `PROSPECTIVE_SHADOW`. It does not establish
+that the socket connects, that subscriptions are accepted, the venue's
+real update rate, or whether a book message replaces or deltas.
+
+## 5. PREPRODUCTION
+
+Entitlement is **proven**: `pmx-preprod` **run 24 succeeded
+2026-09-10**, returning positions and the USD balance. Runs 25–26 fail
+at `SECRET_MISSING: PMX_PREPROD_PRIVATE_KEY_B64` — the credentials were
+migrated from dispatch inputs to secret slots that were never
+populated. **The missing thing is the secret, not the access**, and it
+does not block §2.
+
+## 6. CAPACITY
+
+Method, window, deduplication, units and population are documented in
+`CORRECTIONS_ACTIVATION.md` §5, including the caveat that
+`stats_shares_traded` is very likely cumulative, making **$396,361 an
+upper bound on one day's activity in the sampled universe rather than a
+measurement of one day** — and not a ceiling on future activity.
+
+| | round-trip model | settlement-only model |
+|---|---|---|
+| executed : position | 2 : 1 | **1 : 1** |
+| capital for $500k executed, 1 turn/day | $250,000 | **$500,000** |
+
+**Capital is no longer derived by halving.** Which model applies is
+`NOT_IDENTIFIED`, because `capital_recycling(INSTITUTIONAL)` reports
+`CAPITAL_RECYCLING_AVAILABLE = NOT_IDENTIFIED` — *not* `NO`.
 
 ## 7. ON THE CRITICAL PATH
 
-| # | item | blocked by | who can unblock |
+| # | item | blocked by | unblocked by |
 |---|---|---|---|
-| 1 | live decision-only observation | the §2 merge | owner approval |
-| 2 | account identity / activity / resting orders | PMUS secrets absent in CI *or* the §2 deploy | owner |
-| 3 | execution lifecycle in preprod | `PMX_PREPROD_*` secrets absent since the 2026-09-19 migration — **entitlement proven by run 24** | owner |
-| 4 | `p_fill`, markout, holding period | no resting orders have ever existed | funded pilot |
-| 5 | `holds_both_legs_independently`; complement identity | #2, plus **no leg-level venue identifier in the capture** | #2, then a capture change |
+| 1 | live decision-only observation | the R3 merge — **and R1's gate rides with it unless split** | owner |
+| 2 | account identity / activity / resting orders | PMUS secrets absent in CI, *or* #1 | owner |
+| 3 | execution lifecycle in preprod | `PMX_PREPROD_*` unpopulated since 2026-09-19 | owner |
+| 4 | `p_fill`, markout, holding period | no BETTOR order has ever rested | funded pilot |
+| 5 | `holds_both_legs_independently`; complement identity | #2, plus no leg-level venue identifier in the capture | #2, then a capture change |
+| 6 | **does completing a pair release capital** | `NOT_IDENTIFIED` on institutional | #2 / preprod |
 
 **#4 is the genuine circularity.** #1, #2 and #3 are each one owner
-action. #5 needs #2 and then a change to what we capture.
+action. #6 is newly separated from #1 — it had been wrongly reported as
+a settled `NO`.
