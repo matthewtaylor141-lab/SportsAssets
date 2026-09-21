@@ -122,9 +122,12 @@ _TICK_INSERT = """
         obs_unreadable_other, obs_written, obs_duplicate_bucket,
         fu_due, fu_attempted, fu_skipped_budget, fu_on_time, fu_late,
         fu_failed, status, obs_never_attempted, fu_selected,
-        fu_rotation_head, fu_per_horizon_cap)
+        fu_rotation_head, fu_per_horizon_cap,
+        obs_skipped_admission, backlog_tasks, admit_cap,
+        admission_saturated, admission_version)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
+            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28,$29,$30,
+            $31,$32,$33)
     ON CONFLICT DO NOTHING
 """
 
@@ -156,7 +159,12 @@ async def record_tick(row: dict, pool=None) -> None:
             # follow-up budget had no head, and that is a different
             # state from "60s led".
             row.get("FU_ROTATION_HEAD"),
-            row.get("FU_PER_HORIZON_CAP"))
+            row.get("FU_PER_HORIZON_CAP"),
+            int(row.get("OBS_SKIPPED_ADMISSION") or 0),
+            row.get("BACKLOG_TASKS"),
+            row.get("ADMIT_CAP"),
+            row.get("ADMISSION_SATURATED"),
+            row.get("ADMISSION_VERSION"))
     except Exception:                                          # noqa: BLE001
         pass
 

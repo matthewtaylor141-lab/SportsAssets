@@ -81,6 +81,12 @@ PACING_VERSION = "BETTOR_CAPTURE_PACING_V4_ALLOWANCE_RESTORED"
 # because WHICH horizon a read went to changed, not how many were sent.
 _FU_SERVICE_OPS = 0
 _TICK_SEQ = 0
+
+# Bumped when WHICH observations enter the sample changes. V4's
+# scheduler decided which follow-ups to serve; this decides how much
+# work is created in the first place, which is a property of the
+# sampling frame and not of the scheduler.
+ADMISSION_VERSION = "BETTOR_ADMISSION_V1_CAPACITY_AWARE"
 READ_PACING_BASE_S = 1.0
 READ_PACING_MAX_S = 8.0
 BACKOFF_GROWTH = 2.0
@@ -230,6 +236,9 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
              "unreadableOther": 0, "fuDue": 0, "fuAttempted": 0,
              "fuSkippedBudget": 0, "fuOnTime": 0, "fuLate": 0,
              "fuSelected": 0,
+             "obsSkippedAdmission": 0, "backlogTasks": 0,
+             "admitCap": None, "admissionSaturated": False,
+             "admissionVersion": ADMISSION_VERSION,
              # None, not 60: a tick with no follow-up budget had no
              # rotation head at all, and the two must not collapse.
              "fuRotationHead": None, "fuPerHorizonCap": None,
@@ -317,11 +326,87 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     stats["budget"] = budget
     stats["fuReserve"] = fu_reserve
     stats["totalBudget"] = total_budget
+    # ── CAPACITY-AWARE ADMISSION ─────────────────────────────────────
+    #
+    # THE DEFECT EVERY WINDOW SO FAR HAS MEASURED AND NONE HAS FIXED.
+    # Admitting an observation is not free: it creates one follow-up
+    # task PER HORIZON, four of them, each of which must be serviced
+    # inside its own recovery window or it expires unread. Measured in
+    # W3 (run 180, 60-minute flows):
+    #
+    #     intake                         1.43 observations/min
+    #     follow-up tasks made eligible  5.85 tasks/min  (intake x 4)
+    #     attempts completed             2.03 tasks/min
+    #     tasks expiring unread          4.02 tasks/min
+    #
+    # Sixty-five percent of the work this collector created for itself
+    # was thrown away. Scheduling repairs cannot fix that: rotation and
+    # ordering decide WHICH tasks are served, never HOW MANY. The
+    # collector was admitting work at roughly three times the rate it
+    # could service, and no amount of fairness between horizons makes
+    # an unservable task servable.
+    #
+    # THE RULE. Sustainable intake is the follow-up capacity divided by
+    # the number of horizons each observation obliges us to read. The
+    # reserved follow-up share IS that capacity, measured in the same
+    # unit, on the same tick.
+    #
+    # THE BACKLOG BRAKE. Capacity already committed to outstanding work
+    # is not available for new work. When the queue is deeper than one
+    # tick's reserve can clear, intake stops entirely for this tick and
+    # the whole budget goes to draining it. Admitting into a saturated
+    # queue does not collect more data; it converts reads that would
+    # have completed on time into reads that expire.
+    #
+    # THIS IS A SAMPLING CHANGE AND IT IS VERSIONED. Which markets
+    # enter the sample is what the frozen rule governs, so this carries
+    # its own ADMISSION_VERSION and the rows it produces are
+    # distinguishable from every row admitted before it.
+    horizons_per_obs = max(1, len(sc.HORIZONS_OBSERVABLE_S))
+    sustainable = fu_reserve // horizons_per_obs
+    backlog = 0
+    try:
+        for _h in sc.HORIZONS_OBSERVABLE_S:
+            backlog += await sstore.mids_outstanding(_h, pool=pool)
+    except Exception:                                          # noqa: BLE001
+        backlog = 0
+    saturated = backlog > max(1, fu_reserve)
+    admit_cap = 0 if saturated else sustainable
+    stats["admissionVersion"] = ADMISSION_VERSION
+    stats["backlogTasks"] = backlog
+    stats["admitCap"] = admit_cap
+    stats["admissionSaturated"] = saturated
+    # THE CAP IS APPLIED AS ITS OWN LIMIT, NOT BY SHRINKING `budget`.
+    # Lowering budget would make the sampling loop below report every
+    # declined market as `read_budget_exhausted` /
+    # `obs_skipped_budget`, which is the LOSS counter. Admission is not
+    # a loss -- a declined market stays in the rotation and comes round
+    # again -- and conflating the two would hide the throttle inside a
+    # figure I have been reporting as coverage failure since W1.
+    admitted_budget = min(budget, admit_cap)
+
     # SCHEDULED IS THE DENOMINATOR, recorded before any read. Coverage
     # computed against what was attempted can only ever be 100%.
+    #
+    # ADMISSION-CAPPED WORK IS NOT A COVERAGE FAILURE. A market the
+    # rotation offered and admission declined was never attempted and
+    # never lost -- it stays in the rotation and comes round again. It
+    # is counted apart from obs_skipped_budget, which IS a loss.
     stats["scheduled"] = len(sel["SELECTED"])
     abandoned = False
     for idx, subject in enumerate(sel["SELECTED"]):
+        # ADMISSION FIRST, AND COUNTED SEPARATELY. Declined work is
+        # deferred; exhausted budget is lost. Two counters, two causes.
+        if admitted_budget <= 0:
+            stats["status"] = ("admission_capped" if admit_cap < budget
+                               else "read_budget_exhausted")
+            remaining = len(sel["SELECTED"]) - idx
+            if admit_cap < budget:
+                stats["obsSkippedAdmission"] = remaining
+            else:
+                stats["obsSkippedBudget"] = remaining
+            break
+        admitted_budget -= 1
         if budget <= 0:
             stats["status"] = "read_budget_exhausted"
             stats["obsSkippedBudget"] = len(sel["SELECTED"]) - idx
@@ -517,6 +602,11 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
         "FU_DUE": stats["fuDue"],
         "FU_SELECTED": stats["fuSelected"],
         # None when the tick had no follow-up budget: no horizon led.
+        "OBS_SKIPPED_ADMISSION": stats.get("obsSkippedAdmission", 0),
+        "BACKLOG_TASKS": stats.get("backlogTasks"),
+        "ADMIT_CAP": stats.get("admitCap"),
+        "ADMISSION_SATURATED": stats.get("admissionSaturated"),
+        "ADMISSION_VERSION": stats.get("admissionVersion"),
         "FU_ROTATION_HEAD": stats.get("fuRotationHead"),
         "FU_PER_HORIZON_CAP": stats.get("fuPerHorizonCap"),
         "FU_ATTEMPTED": stats["fuAttempted"],
