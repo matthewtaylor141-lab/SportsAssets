@@ -452,12 +452,17 @@ def decide(book: Book, *, inventory: Inventory | None = None,
         })
         return record
 
+    # EVERY ACTION IS EVALUATED AND RECORDED, including the ones that are
+    # not feasible from this state. An action that silently never appears
+    # in the record cannot be distinguished by a reader from one that was
+    # considered and refused -- and "we never even looked at selling" is a
+    # different failure from "selling was worse".
     cands: list[Candidate] = [_eval_no_trade()]
     if not inv.flat:
         cands.append(_eval_hold(inv))
-        cands.append(_eval_pair_sell(book, inv, fee))
-        cands.append(_eval_directional(SELL_YES))
-        cands.append(_eval_directional(SELL_NO))
+    cands.append(_eval_pair_sell(book, inv, fee))
+    cands.append(_eval_directional(SELL_YES))
+    cands.append(_eval_directional(SELL_NO))
     cands.append(_eval_pair_buy(book, fee, max_contracts))
     cands.append(_eval_directional(TAKE_YES))
     cands.append(_eval_directional(TAKE_NO))
