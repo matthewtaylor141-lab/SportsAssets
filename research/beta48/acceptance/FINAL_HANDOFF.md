@@ -415,7 +415,7 @@ It is recorded here as an available option, not taken.
 
 ## 3. THE PACKAGE
 
-Branch `claude/session-njaewf`, final SHA **`4159c13`** (31 commits from
+Branch `claude/session-njaewf`, final SHA **`a2fdc8e`** (32 commits from
 production `3349219`).
 
 | | |
