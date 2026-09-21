@@ -72,9 +72,12 @@ LIVE_FRESHNESS_BOUND_S = 10.0
 # unverifiable rather than merely stale.
 MAX_CLOCK_SKEW_S = 120.0
 
-FEES = de.Fees(taker_per_contract=0.02, maker_per_contract=0.01,
-               verified=False, hypothetical=True,
-               source="HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS")
+# The PUBLISHED PMUS schedule for the date being decided. PUBLISHED,
+# not VERIFIED_APPLIED: the venue documents these terms and we have
+# never matched them against a settled statement for this account, so
+# the engine will compute with them and still refuse to select on them.
+FEE_DATE = "2026-09-21"
+FEES = de.Fees.published_pmus(FEE_DATE)
 
 
 def load_state(path):

@@ -37,13 +37,23 @@ from sportsassets import bettor_venue_contract as vc            # noqa: E402
 
 SAMPLE = "research/beta48/acceptance/replay_sample_rows.json"
 
-# ASSUMED, and labelled. There is no verified PMUS schedule, so this is
-# hypothetical and every result carrying it inherits that status.
-FEES = de.Fees(taker_per_contract=0.02, maker_per_contract=0.01,
-               verified=False, hypothetical=True,
-               source="HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS")
+# PUBLISHED, and labelled. The venue documents these terms; nothing
+# here has been matched against a settled statement, so the status is
+# PUBLISHED and not VERIFIED_APPLIED, and every result inherits that.
+#
+# SUPERSEDES the hypothetical flat schedule this script used to declare
+# (taker 0.02/contract, maker 0.01/contract AS A CHARGE). The maker side
+# is a REBATE and the fee is proportional to p(1-p), so the old numbers
+# were wrong in shape and in sign, not merely mis-sized.
+FEE_DATE = "2026-09-21"
+FEES = de.Fees.published_pmus(FEE_DATE)
 
 BOUNDS = (10.0, 30.0, 60.0, 300.0, 900.0)
+
+# Fee rounding is PER FILL, so a per-contract fee depends on the clip.
+# The grid is quoted at this size and the number does not generalize to
+# another one -- which is itself the point.
+MAKER_GRID_QTY = 10.0
 
 
 def rule(t=""):
@@ -185,12 +195,25 @@ def main() -> int:
                 if rec.bid is None or rec.ask is None:
                     continue
                 q = me.MakerQuote(
-                    side="BUY", entry_price=rec.bid, bid=rec.bid,
+                    side="BUY", qty=MAKER_GRID_QTY,
+                    entry_price=rec.bid, bid=rec.bid,
                     ask=rec.ask, exit_route=route,
                     conditional_reference_move=me.hypothetical(move),
                     exit_spread=me.hypothetical(rec.ask - rec.bid),
-                    fee_per_contract=me.hypothetical(
-                        FEES.maker_per_contract),
+                    # PUBLISHED, per fill, at BOTH legs' own prices --
+                    # and the exit price depends on the move, so the fee
+                    # is recomputed inside the grid rather than fixed.
+                    fee_per_contract=me.round_trip_fee(
+                        FEES.schedule, entry_price=rec.bid,
+                        exit_price=me.exit_price(
+                            me.MakerQuote(
+                                side="BUY", entry_price=rec.bid,
+                                bid=rec.bid, ask=rec.ask, exit_route=route,
+                                conditional_reference_move=me.hypothetical(
+                                    move),
+                                exit_spread=me.hypothetical(
+                                    rec.ask - rec.bid)))[0],
+                        exit_route=route, qty=MAKER_GRID_QTY),
                     carry_per_contract_per_hour=me.hypothetical(0.0),
                     duration_hours=me.hypothetical(0.0))
                 rt = me.round_trip(q)

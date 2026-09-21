@@ -75,6 +75,11 @@ NOT_IDENTIFIED = "NOT_IDENTIFIED"
 IDENTIFIED = "IDENTIFIED"
 HYPOTHETICAL = "HYPOTHETICAL"
 MEASURED = "MEASURED"
+# A term read off the venue's own published schedule. Stronger than
+# HYPOTHETICAL -- nobody invented it -- and weaker than MEASURED, which
+# here means measured on OUR fills. A result carrying a PUBLISHED term
+# is not hypothetical and is not verified either.
+PUBLISHED = "PUBLISHED"
 SHADOW = "SHADOW"
 
 # Exit routes. The price each one gets is different, and the difference
@@ -111,6 +116,58 @@ def hypothetical(v: float, note: str = "") -> Assumption:
 
 def unknown(note: str = "") -> Assumption:
     return Assumption(None, NOT_IDENTIFIED, note)
+
+
+def published(v: float, note: str = "") -> Assumption:
+    return Assumption(v, PUBLISHED, note)
+
+
+def round_trip_fee(schedule, *, entry_price, exit_price, exit_route,
+                   qty: float = 1.0) -> Assumption:
+    """The round trip's TOTAL fee per contract, under a dated schedule.
+
+    A ROUND TRIP HAS TWO FEES AT TWO PRICES, and until now this module
+    took one flat `fee_per_contract` for the whole thing. Under the
+    published schedule that is wrong in kind, not just in size: the fee
+    is proportional to p(1-p), so entry at 0.485 and exit at 0.465 are
+    charged different amounts, and the exit route decides which side of
+    the schedule applies.
+
+        EXIT_PASSIVE      maker in, maker out    -> rebate on BOTH legs
+        EXIT_AGGRESSIVE   maker in, taker out    -> rebate then charge
+        EXIT_SETTLEMENT   maker in, no exit fill -> rebate on entry only
+
+    Returned signed and per contract: positive is a net cost, negative
+    is a net credit. The entry leg is always a maker fill, because that
+    is what a MakerQuote is.
+
+    ROUNDING IS PER FILL AND THE QUANTITY MATTERS. The rebate is
+    computed on `qty` and divided back, so a 1-contract quote whose
+    rebate rounds to zero reports zero per contract rather than the
+    continuous rate. Multiplying a continuous rate by volume is how
+    small clips get credited with income they never receive.
+    """
+    if qty is None or not math.isfinite(qty) or qty <= 0:
+        return unknown("a fee needs a positive quantity; rounding is per fill")
+    for p in (entry_price, exit_price):
+        if exit_route != EXIT_SETTLEMENT or p is entry_price:
+            if p is None or not math.isfinite(p) or not 0 < p < 1:
+                return unknown("a published fee needs a price in (0,1)")
+
+    total = float(schedule.maker_rebate(qty, entry_price))      # negative
+    if exit_route == EXIT_AGGRESSIVE:
+        total += float(schedule.taker_fee(qty, exit_price))
+    elif exit_route == EXIT_PASSIVE:
+        total += float(schedule.maker_rebate(qty, exit_price))
+    elif exit_route != EXIT_SETTLEMENT:
+        return unknown("unknown exit route %r" % (exit_route,))
+
+    return published(
+        total / qty,
+        note=("%s, %s, entry %.4f exit %s, %g contracts, rounded per fill"
+              % (schedule.schedule_id, exit_route, entry_price,
+                 ("%.4f" % exit_price) if exit_route != EXIT_SETTLEMENT
+                 else "none", qty)))
 
 
 @dataclass(frozen=True)
@@ -254,9 +311,18 @@ def round_trip(q: MakerQuote) -> RoundTrip:
     sources = {q.conditional_reference_move.source, q.exit_spread.source,
                q.fee_per_contract.source, q.carry_per_contract_per_hour.source,
                q.duration_hours.source}
-    evidence = (MEASURED if sources == {MEASURED}
-                else (HYPOTHETICAL if HYPOTHETICAL in sources
-                      else NOT_IDENTIFIED))
+    # THE WEAKEST SOURCE WINS. A result is only as good as its worst
+    # input, and the ordering is not cosmetic: PUBLISHED sits strictly
+    # between HYPOTHETICAL (someone chose the number) and MEASURED
+    # (measured on OUR fills). Mixing a published fee into an otherwise
+    # hypothetical grid does not make the grid published.
+    evidence = NOT_IDENTIFIED
+    for level in (NOT_IDENTIFIED, HYPOTHETICAL, PUBLISHED, MEASURED):
+        if level in sources:
+            evidence = level
+            break
+    else:
+        evidence = MEASURED if sources == {MEASURED} else NOT_IDENTIFIED
     return RoundTrip(status=IDENTIFIED, per_contract=per,
                      total=per * q.qty, entry_price=entry, exit_price=xp,
                      terms=terms, missing=[], evidence=evidence,

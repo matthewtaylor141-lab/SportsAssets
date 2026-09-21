@@ -444,9 +444,17 @@ class ShadowLoop:
             rec["risk"] = (blocked or
                            "REDUCTION_CHECKS_PASSED_ENTRY_LIMITS_EXEMPT")
         else:
-            est_cash = (size * ((de._f(book.yes_ask) or 0)
-                                + (de._f(book.no_ask) or 0))
-                        + self.fees.fill_fee(size, maker=False) * 2)
+            # Each leg's fee at ITS OWN price. Under the published
+            # schedule the fee is proportional to p(1-p), so charging
+            # both legs at one price is wrong whenever the legs differ.
+            # An unreadable ask reserves the WORST fee available, which
+            # is the one at 0.50 where p(1-p) peaks -- a leg we cannot
+            # price is not a leg we may reserve cheaply for.
+            est_cash = size * ((de._f(book.yes_ask) or 0)
+                               + (de._f(book.no_ask) or 0))
+            for px in (de._f(book.yes_ask), de._f(book.no_ask)):
+                est_cash += self.fees.fill_fee(
+                    size, maker=False, price=px if px is not None else 0.5)
             blocked = self.limits.check(
                 pos=pos, add_contracts=2 * size, add_cash=est_cash,
                 deployed=self.deployed, open_markets=self.open_markets,
@@ -497,7 +505,8 @@ class ShadowLoop:
                     # FEES ARE APPLIED PER FILL. The old path moved only
                     # qty x price and left fees_paid at zero whatever
                     # schedule was supplied.
-                    fee = self.fees.fill_fee(r["filled"], maker=False)
+                    fee = self.fees.fill_fee(r["filled"], maker=False,
+                                             price=px)
                     cost = r["filled"] * px + fee
                     r["fee"] = round(fee, 6)
                     pos.buy(leg, r["filled"], px, fee)
@@ -516,7 +525,8 @@ class ShadowLoop:
                 r["leg"] = leg
                 legs.append(r)
                 if r["filled"] > 0:
-                    fee = self.fees.fill_fee(r["filled"], maker=False)
+                    fee = self.fees.fill_fee(r["filled"], maker=False,
+                                             price=px)
                     proceeds = r["filled"] * px - fee
                     realized = pos.sell(leg, r["filled"], px, fee)
                     r["fee"] = round(fee, 6)
@@ -629,13 +639,13 @@ class ShadowLoop:
 
         complete_net = None
         if pair_ok and other_ask is not None and other_depth >= qty:
-            fee = self.fees.fill_fee(qty, maker=False)
+            fee = self.fees.fill_fee(qty, maker=False, price=other_ask)
             complete_net = qty * (1.0 - other_ask) - fee
         exit_net = None
         if own_bid is not None and own_bid_depth > 0:
             sell_qty = min(qty, own_bid_depth)
             exit_net = sell_qty * own_bid - self.fees.fill_fee(
-                sell_qty, maker=False)
+                sell_qty, maker=False, price=own_bid)
 
         considered = {
             "complete_net_incremental": (round(complete_net, 6)
@@ -648,7 +658,7 @@ class ShadowLoop:
 
         if complete_net is not None and (exit_net is None
                                          or complete_net > exit_net):
-            fee = self.fees.fill_fee(qty, maker=False)
+            fee = self.fees.fill_fee(qty, maker=False, price=other_ask)
             cost = qty * other_ask + fee
             pos.buy(other, qty, other_ask, fee)
             self.ledger.fees_paid += fee
@@ -667,7 +677,7 @@ class ShadowLoop:
 
         if exit_net is not None:
             sell_qty = min(qty, own_bid_depth)
-            fee = self.fees.fill_fee(sell_qty, maker=False)
+            fee = self.fees.fill_fee(sell_qty, maker=False, price=own_bid)
             realized = pos.sell(side, sell_qty, own_bid, fee)
             proceeds = sell_qty * own_bid - fee
             self.ledger.fees_paid += fee
@@ -761,12 +771,25 @@ class ShadowLoop:
             rem = q["size"] - q["filled"]
             if rem <= 0:
                 continue
-            total += rem * q["price"] + self.fees.fill_fee(rem, maker=True)
+            total += rem * q["price"] + max(
+                0.0, self.fees.fill_fee(rem, maker=True, price=q["price"]))
         return total
 
     def quote_reservation(self, price: float, size: float) -> float:
-        """What one quote of this size reserves, fee included."""
-        return size * price + self.fees.fill_fee(size, maker=True)
+        """What one quote of this size reserves, fee included.
+
+        A REBATE DOES NOT REDUCE A RESERVATION. Under the published
+        schedule the maker fee is negative, and letting it net against
+        the reservation would let a quote be admitted against cash that
+        only exists if the rebate arrives -- reserving less than the
+        contracts themselves cost. `max(0, ...)` floors it: a charge is
+        reserved, a rebate is income that shows up after the fill and
+        reserves nothing. This is the same rule as
+        `rebate_verified_per_contract` defaulting to zero, applied to
+        cash rather than to EV.
+        """
+        return size * price + max(
+            0.0, self.fees.fill_fee(size, maker=True, price=price))
 
     def _admit_quote(self, market_id: str, price: float,
                      size: float) -> str | None:
@@ -849,7 +872,7 @@ class ShadowLoop:
         qty = min(qty, q["size"] - q["filled"])
         pos = self.position(q["market_id"])
         leg = "yes" if q["side"].lower() == "yes" else "no"
-        fee = self.fees.fill_fee(qty, maker=True)
+        fee = self.fees.fill_fee(qty, maker=True, price=q["price"])
         cost = qty * q["price"] + fee
         pos.buy(leg, qty, q["price"], fee)
         self.ledger.fees_paid += fee

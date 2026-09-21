@@ -397,7 +397,7 @@ class TestQuoteLifecycle:
         f = lp.fill_quote(q["quote_id"], qty=6, reason="test")
         assert lp.positions["m"].yes == 6
         assert lp.ledger.cash == pytest.approx(
-            before - (6 * 0.45 + VERIFIED.fill_fee(6, maker=True)))
+            before - (6 * 0.45 + VERIFIED.fill_fee(6, maker=True, price=0.45)))
         assert f["synthetic_fill"] is True
 
     def test_a_simulated_fill_is_synthetic_even_on_a_real_book(self):

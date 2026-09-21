@@ -20,12 +20,17 @@ import sys
 sys.path.insert(0, "backend")
 
 from sportsassets import bettor_decision_engine as de       # noqa: E402
+from sportsassets import bettor_fee_schedule as fs           # noqa: E402
 from sportsassets import bettor_maker_economics as me       # noqa: E402
 from sportsassets import bettor_shadow_loop as sl           # noqa: E402
 from sportsassets import bettor_venue_contract as vc        # noqa: E402
 
-FEES = de.Fees(taker_per_contract=0.02, maker_per_contract=0.01,
-               verified=True, source="DEMO_SCHEDULE_HYPOTHETICAL_VALUES")
+# The demo needs a schedule the engine will SELECT on, so this one
+# declares verified=True. It is a DEMO fixture and says so: no real
+# schedule in this repository is VERIFIED_APPLIED. The rates are the
+# published 2026-09-17 ones so the arithmetic below is the real shape.
+FEES = de.Fees(verified=True, schedule=fs.PMUS_2026_09_17,
+               source="DEMO_VERIFIED_FIXTURE_NOT_A_REAL_VERIFICATION")
 ASSUME = ("DECLARED: p_both_legs_fill assumed, to exercise the execution "
           "path the engine correctly refuses to select")
 FAILS = []
@@ -78,13 +83,19 @@ def main() -> int:
     for l in r["execution"]["legs"]:
         print("      %-4s %-12s qty %5.4g @ %.4f  fee %.2f"
               % (l["leg"], l["outcome"], l["filled"], l["price"], l["fee"]))
-    # 10 x 0.47 + 10 x 0.50 = 9.70 notional, fees 0.20 + 0.20 = 0.40
-    check("cash", lp.ledger.cash, 89.90)
-    check("fees_paid", lp.ledger.fees_paid, 0.40)
+    # 10 x 0.47 + 10 x 0.50 = 9.70 notional. Fees under the PUBLISHED
+    # schedule, computed here by hand so the check stays independent of
+    # the module under test:
+    #   YES  0.0695 x 10 x 0.47 x 0.53 = 0.1731  -> 0.17
+    #   NO   0.0695 x 10 x 0.50 x 0.50 = 0.1738  -> 0.17
+    # The two legs differ because p(1-p) differs. Under the superseded
+    # flat schedule both were 0.20 and the difference was invisible.
+    check("cash", lp.ledger.cash, 89.96)
+    check("fees_paid", lp.ledger.fees_paid, 0.34)
     check("inventory yes", lp.positions["m1"].yes, 10.0)
     check("inventory no", lp.positions["m1"].no, 10.0)
-    check("basis", lp.positions["m1"].basis, 10.10)
-    check("deployed", lp.deployed, 10.10)
+    check("basis", lp.positions["m1"].basis, 10.04)
+    check("deployed", lp.deployed, 10.04)
 
     head(2, "PARTIAL SALE THROUGH THE ENGINE  (depth-limited)")
     # ROUTED THROUGH lp.step(), not Position.sell(). The previous
@@ -102,9 +113,9 @@ def main() -> int:
                  l.get("fee", 0), l.get("realized", 0)))
     # 4 of 10 sold on each leg; 4/10 of each leg's basis leaves.
     check("yes remaining", p.yes, 6.0)
-    check("yes basis remaining", p.yes_basis, 4.90 * 0.6)
-    check("no basis remaining", p.no_basis, 5.20 * 0.6)
-    check("deployed (never negative)", lp.deployed, (4.90 + 5.20) * 0.6)
+    check("yes basis remaining", p.yes_basis, 4.87 * 0.6)
+    check("no basis remaining", p.no_basis, 5.17 * 0.6)
+    check("deployed (never negative)", lp.deployed, (4.87 + 5.17) * 0.6)
 
     head(3, "COMPLETE SALE THROUGH THE ENGINE  (zero remaining basis)")
     r = lp.step(bk("m1", yes_bid=.60, no_bid=.55, yes_bid_size=50,
@@ -121,9 +132,10 @@ def main() -> int:
     # INDEPENDENT TOTAL-FEE ASSERTION. The previous run reported 0.44
     # while the entry and the sales shown incurred more, because some
     # fees were added to a ledger.move() and never to fees_paid.
-    entry_fees = 0.20 + 0.20                 # 10 contracts x 0.02, both legs
-    partial_fees = 0.08 + 0.08               # 4 contracts x 0.02, both legs
-    final_fees = 0.12 + 0.12                 # 6 contracts x 0.02, both legs
+    # Every figure is theta x C x p x (1-p), banker's rounded per fill.
+    entry_fees = 0.17 + 0.17       # 10 @ 0.47 / 0.50
+    partial_fees = 0.07 + 0.07     #  4 @ 0.60 / 0.55
+    final_fees = 0.10 + 0.10       #  6 @ 0.60 / 0.55
     check("TOTAL fees_paid (independent)", lp.ledger.fees_paid,
           entry_fees + partial_fees + final_fees)
     check("position fees_paid agrees", p.fees_paid, lp.ledger.fees_paid)
@@ -176,7 +188,11 @@ def main() -> int:
     print("   FILL %s state=%s qty=%.4g fee=%.2f  evidence=%s"
           % (rp["new_quote_id"], f["state"], f["filled"], f["fee"],
              f["evidence_class"]))
-    check("cash after maker fill", lp3.ledger.cash, 100.0 - (6 * 0.455 + 0.06))
+    # A MAKER FILL COSTS LESS THAN ITS NOTIONAL. The rebate is
+    # -0.0125 x 6 x 0.455 x 0.545 = -0.0186 -> -0.02, RECEIVED. The
+    # superseded schedule added +0.06 as a charge; the sign is the
+    # largest single input error corrected here.
+    check("cash after maker fill", lp3.ledger.cash, 100.0 - (6 * 0.455 - 0.02))
     check("inventory yes", lp3.positions["m5"].yes, 6.0)
     c = lp3.cancel_quote(rp["new_quote_id"])
     print("   CANCEL %s, released %.4f" % (c["quote_id"], c["released_exposure"]))
@@ -225,6 +241,25 @@ def main() -> int:
         duration_hours=me.hypothetical(0.0)))
     print("      settlement route -> %s" % st.status)
     print("      missing: %s" % st.missing[0][:64])
+
+    print("\n      THE SAME QUOTE UNDER THE PUBLISHED SCHEDULE")
+    sch = fs.PMUS_2026_09_17
+    for qty in (1, 10, 100):
+        f = me.round_trip_fee(sch, entry_price=0.485, exit_price=0.485,
+                              exit_route=me.EXIT_AGGRESSIVE, qty=qty)
+        rtp = me.round_trip(me.MakerQuote(
+            side="BUY", qty=qty, entry_price=0.485, bid=0.485, ask=0.515,
+            exit_route=me.EXIT_AGGRESSIVE,
+            conditional_reference_move=me.hypothetical(0.0),
+            exit_spread=me.hypothetical(0.030), fee_per_contract=f,
+            carry_per_contract_per_hour=me.hypothetical(0.0),
+            duration_hours=me.hypothetical(0.0)))
+        print("      qty %3d  round-trip fee/contract %+8.5f  "
+              "net/contract %+8.5f  evidence %s"
+              % (qty, f.value, rtp.per_contract, rtp.evidence))
+    print("      The per-contract fee CHANGES WITH SIZE because each fill")
+    print("      rounds to a cent. A flat per-contract constant cannot")
+    print("      express that, and the 1-contract row is the pilot's.")
 
     head(9, "LEDGER RECONCILIATION (necessary, NOT sufficient)")
     for name, lp_ in (("scenario 1-3", lp), ("lifecycle", lp3),

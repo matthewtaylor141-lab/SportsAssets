@@ -129,7 +129,7 @@ class TestPairArithmeticIsForecastFree:
                            no_ask_size=100), max_contracts=100,
                       venue=kw["venue"])          # fees deliberately omitted
         c = cand(r, de.PAIR_BUY)
-        assert c["blocker"] == "FEE_SCHEDULE_UNVERIFIED"
+        assert c["blocker"] == "FEE_SCHEDULE_NOT_ESTABLISHED"
 
     def test_the_hypothetical_schedule_is_labelled(self):
         f = Fees.free_for_demonstration()
@@ -148,9 +148,39 @@ class TestPairSellFromInventory:
     def test_bids_over_par_sell_the_pair(self):
         r = de.decide(book(yes_bid=.55, no_bid=.48,
                            yes_bid_size=200, no_bid_size=200),
+                      fees=VERIFIED_FEES,
                       inventory=Inventory(yes_contracts=200, no_contracts=200))
         assert r["selected"] == de.PAIR_SELL
         assert cand(r, de.PAIR_SELL)["ev_net"] == pytest.approx(6.0)
+
+    def test_selling_without_an_established_schedule_is_not_identified(self):
+        """The buy path grew a fee gate after review; the sell path had
+        none, so all-zero unverified fees priced execution at zero and
+        returned IDENTIFIED. Bids over par would then have been SELECTED
+        on a schedule nobody supplied."""
+        r = de.decide(book(yes_bid=.55, no_bid=.48,
+                           yes_bid_size=200, no_bid_size=200),
+                      inventory=Inventory(yes_contracts=200, no_contracts=200))
+        c = cand(r, de.PAIR_SELL)
+        assert c["status"] == de.NOT_IDENTIFIED
+        assert c["blocker"] == "FEE_SCHEDULE_NOT_ESTABLISHED"
+        assert c["ev_net"] is None
+        assert r["selected"] == de.HOLD
+
+    def test_a_published_schedule_computes_but_does_not_select(self):
+        """PUBLISHED is a documented cost, not an observed one."""
+        pub = Fees.published_pmus("2026-09-21")
+        r = de.decide(book(yes_bid=.55, no_bid=.48,
+                           yes_bid_size=200, no_bid_size=200),
+                      fees=pub,
+                      inventory=Inventory(yes_contracts=200, no_contracts=200))
+        c = cand(r, de.PAIR_SELL)
+        assert c["blocker"] == "FEE_APPLICATION_NOT_VERIFIED"
+        assert c["status"] == de.NOT_IDENTIFIED
+        assert c["ev_net"] is None
+        # The number IS reported -- a documented cost is worth showing.
+        assert c["conditional_payoff"] is not None
+        assert r["selected"] == de.HOLD
 
     def test_bids_under_par_hold(self):
         r = de.decide(book(yes_bid=.45, no_bid=.48,
@@ -306,11 +336,12 @@ class TestEveryDecisionIsAuditable:
         is what exercises the threshold now."""
         inv = Inventory(yes_contracts=200, no_contracts=200)
         cheap = de.decide(book(yes_bid=.55, no_bid=.48, yes_bid_size=200,
-                               no_bid_size=200), inventory=inv)
+                               no_bid_size=200), inventory=inv,
+                          fees=VERIFIED_FEES)
         assert cheap["selected"] == de.PAIR_SELL
         strict = de.decide(book(yes_bid=.55, no_bid=.48, yes_bid_size=200,
                                 no_bid_size=200), inventory=inv,
-                           min_ev_to_act=100.0)
+                           fees=VERIFIED_FEES, min_ev_to_act=100.0)
         assert strict["selected"] == de.HOLD
         assert "threshold" in strict["reason"]
 
@@ -341,11 +372,39 @@ class TestEveryDecisionIsAuditable:
 class TestNoOrderPathExists:
 
     def test_the_module_holds_no_adapter_credentials_or_pool(self):
+        """AST scan of CALLS and IMPORTS, not a substring scan.
+
+        The substring version failed on `Fees.published_pmus`, a method
+        that reads a dated fee table and touches no venue. That is the
+        third time a self-check has flagged its own vocabulary: a
+        forbidden-name list that matches identifiers rather than call
+        sites measures spelling, not behaviour.
+        """
+        import ast
         import inspect
 
-        src = inspect.getsource(de)
-        for forbidden in ("submit_fok", "pmus", "_get_client", "get_pool",
-                          "authorize", "INSERT", "UPDATE "):
-            assert forbidden not in src, (
-                "%s appears; the decision engine computes and returns, it "
-                "does not execute" % forbidden)
+        tree = ast.parse(inspect.getsource(de))
+        called, imported = set(), set()
+        for n in ast.walk(tree):
+            if isinstance(n, ast.Call):
+                f = n.func
+                if isinstance(f, ast.Name):
+                    called.add(f.id)
+                elif isinstance(f, ast.Attribute):
+                    called.add(f.attr)
+            elif isinstance(n, ast.Import):
+                imported.update(a.name.split(".")[0] for a in n.names)
+            elif isinstance(n, ast.ImportFrom):
+                imported.add((n.module or "").split(".")[0])
+                imported.update(a.name for a in n.names)
+
+        for forbidden in ("submit_fok", "submit", "cancel", "_get_client",
+                          "get_pool", "execute", "executemany", "authorize"):
+            assert forbidden not in called, (
+                "%s() is CALLED; the decision engine computes and returns, "
+                "it does not execute" % forbidden)
+        for forbidden in ("polymarket_us", "psycopg", "asyncpg", "httpx",
+                          "requests", "aiohttp"):
+            assert forbidden not in imported, (
+                "%s is imported; the decision engine holds no adapter, "
+                "credentials or pool" % forbidden)

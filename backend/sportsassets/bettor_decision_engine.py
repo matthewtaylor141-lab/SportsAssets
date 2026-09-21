@@ -82,6 +82,7 @@ import math
 from dataclasses import dataclass, field, asdict
 
 from . import bettor_fair_value as fv
+from . import bettor_fee_schedule as fs
 from . import bettor_merge as merge
 from . import bettor_p_fill as pf
 from . import bettor_venue_contract as vc
@@ -141,6 +142,24 @@ class Fees:
     PMUS rounds fees to the nearest cent with banker's rounding PER
     FILL, so a rebate is not linear in size and a small fill can round
     the whole incentive away.
+
+    A FEE NEEDS A PRICE. The flat per-contract fields were not merely
+    mis-sized: the published term is proportional to p(1-p), so no flat
+    constant is right at more than one price. `fill_fee` and
+    `entry_cost` therefore REQUIRE a price, with no default. A caller
+    that cannot name the price it is trading at cannot be given a
+    number, and the old signature let every caller skip that.
+
+    Set `schedule` to a `bettor_fee_schedule.Schedule` to use the
+    published terms. The flat fields remain for the superseded
+    hypothetical scenarios, which are kept rather than deleted.
+
+    THREE STATUSES, NOT TWO. `NOT_ESTABLISHED` is an unknown cost and
+    blocks. `PUBLISHED` is a documented cost: it may be COMPUTED and
+    REPORTED, but it may not be SELECTED for execution, because the
+    venue documenting a schedule is not the same as us having seen it
+    applied to this account. `VERIFIED_APPLIED` is matched against a
+    settled statement, and nothing is.
     """
     taker_per_contract: float = 0.0
     maker_per_contract: float = 0.0
@@ -149,6 +168,7 @@ class Fees:
     verified: bool = False
     hypothetical: bool = False
     source: str = "UNVERIFIED"
+    schedule: object = None
 
     @classmethod
     def free_for_demonstration(cls) -> "Fees":
@@ -156,21 +176,66 @@ class Fees:
         return cls(verified=False, hypothetical=True,
                    source="HYPOTHETICAL_DEMONSTRATION_NOT_A_LIVE_SCHEDULE")
 
-    def fill_fee(self, contracts: float, *, maker: bool) -> float:
-        """Fee on ONE fill, rounded the way the venue rounds it.
+    @classmethod
+    def published_pmus(cls, on_date: str) -> "Fees":
+        """The published schedule in force on `on_date` (YYYY-MM-DD).
+
+        The date is required. Applying 0.0695 to a fill from August,
+        when 0.06 was in force, is exactly the error a dateless
+        schedule makes silently.
+        """
+        sch = fs.for_date(on_date)
+        return cls(verified=False, hypothetical=False,
+                   source=sch.schedule_id, schedule=sch)
+
+    @property
+    def status(self) -> str:
+        """NOT_ESTABLISHED / PUBLISHED / VERIFIED_APPLIED."""
+        if self.verified:
+            return fs.VERIFIED_APPLIED
+        if self.schedule is not None:
+            return self.schedule.status
+        return fs.NOT_ESTABLISHED
+
+    def fill_fee(self, contracts: float, *, maker: bool,
+                 price: float) -> float:
+        """Fee on ONE fill, signed: charge positive, rebate negative.
 
         PMUS rounds to the nearest cent with banker's rounding PER FILL,
         so a fee is not linear in size: a 1-contract fill can round its
         whole rebate away while a 10-contract fill does not. Rounding at
         the fill is therefore part of the schedule, not a display
         convention.
+
+        `price` is keyword-only and has no default. Under the published
+        schedule the fee is proportional to p(1-p); a price-free fee is
+        not a fee.
         """
+        if price is None or not math.isfinite(price) or not 0 < price < 1:
+            raise ValueError(
+                "a fee needs an executable price in (0,1), got %r. The "
+                "published term is proportional to p(1-p)" % (price,))
+        if self.schedule is not None:
+            gross = float(self.schedule.fill_fee(contracts, price,
+                                                 maker=maker))
+            return round(gross - contracts * self.rebate_verified_per_contract,
+                         2)
         per = self.maker_per_contract if maker else self.taker_per_contract
         gross = contracts * (per - self.rebate_verified_per_contract)
         # round() is banker's rounding in Python, which is what PMUS does.
         return round(gross, 2)
 
-    def entry_cost(self, contracts: float, *, maker: bool) -> float:
+    def entry_cost(self, contracts: float, *, maker: bool,
+                   price: float) -> float:
+        """Unrounded fee on `contracts` at `price`. Same sign rule."""
+        if price is None or not math.isfinite(price) or not 0 < price < 1:
+            raise ValueError(
+                "a fee needs an executable price in (0,1), got %r" % (price,))
+        if self.schedule is not None:
+            theta = (self.schedule.theta_maker if maker
+                     else self.schedule.theta_taker)
+            gross = float(self.schedule.exact(theta, contracts, price))
+            return gross - contracts * self.rebate_verified_per_contract
         per = self.maker_per_contract if maker else self.taker_per_contract
         return contracts * (per - self.rebate_verified_per_contract)
 
@@ -431,13 +496,14 @@ def _eval_pair_buy(book: Book, fees: Fees, max_contracts: float,
                          "not inherited by the institutional account"],
             uncertainty="unknown capability, which blocks rather than permits")
 
-    # 3. An unverified fee schedule is an unknown cost.
-    if not fees.verified:
+    # 3. A schedule that is NOT_ESTABLISHED is an unknown cost.
+    if fees.status == fs.NOT_ESTABLISHED:
         return Candidate(
             action=PAIR_BUY, status=NOT_IDENTIFIED,
-            blocker="FEE_SCHEDULE_UNVERIFIED",
-            why=("fees are %s; an unverified schedule is an unknown cost "
-                 "and must not be priced at zero" % fees.source),
+            blocker="FEE_SCHEDULE_NOT_ESTABLISHED",
+            why=("fees are %s; a schedule that is neither published nor "
+                 "verified is an unknown cost and must not be priced at "
+                 "zero" % fees.source),
             uncertainty="execution cost unknown, so net EV is unknown")
 
     ya, na = _f(book.yes_ask), _f(book.no_ask)
@@ -458,7 +524,13 @@ def _eval_pair_buy(book: Book, fees: Fees, max_contracts: float,
                  % (book.yes_ask_size, book.no_ask_size)),
             uncertainty="a quote without size is not an opportunity")
 
-    cash_now = -(ya + na) * size - fees.entry_cost(2 * size, maker=False)
+    # EACH LEG IS PRICED AT ITS OWN PRICE. `entry_cost(2 * size)` charged
+    # both legs at one price, which under a flat schedule was invisible
+    # and under p(1-p) is simply wrong: YES at 0.47 and NO at 0.50 do not
+    # cost the same to trade.
+    fee_now = (fees.entry_cost(size, maker=False, price=ya)
+               + fees.entry_cost(size, maker=False, price=na))
+    cash_now = -(ya + na) * size - fee_now
     cash_settle = (PAIR_SETTLEMENT_PAR * size
                    - fees.settlement_per_contract * size)
     conditional_payoff = cash_now + cash_settle
@@ -496,6 +568,9 @@ def _eval_pair_buy(book: Book, fees: Fees, max_contracts: float,
             "the venue settles YES+NO at exactly %.2f" % PAIR_SETTLEMENT_PAR,
             "verified rebate per contract = %.4f (unverified incentives are 0)"
             % fees.rebate_verified_per_contract,
+            "fee schedule %s is %s: the venue documents these terms, we "
+            "have not seen them applied to this account"
+            % (fees.source, fees.status),
         ],
         uncertainty=("a one-leg fill leaves a naked directional position on "
                      "a venue where directional action is blocked; unwinding "
@@ -504,7 +579,16 @@ def _eval_pair_buy(book: Book, fees: Fees, max_contracts: float,
 
 
 def _eval_pair_sell(book: Book, inv: Inventory, fees: Fees) -> Candidate:
-    """Sell a held pair back. Also forecast-free: it unwinds par."""
+    """Sell a held pair back. Also forecast-free: it unwinds par.
+
+    THIS PATH HAD NO FEE GATE. PAIR_BUY grew one after review found that
+    omitting fees produced a PAIR_BUY with data_quality "OK"; the same
+    defect sat on the sell side the whole time, where `Fees()` with
+    all-zero fields and verified=False priced execution at zero and
+    returned IDENTIFIED. Any book with bids summing above par would then
+    have been SELECTED. Fixing one side of a symmetric pair of paths and
+    not the other is its own recurring error.
+    """
     yb, nb = _f(book.yes_bid), _f(book.no_bid)
     paired = inv.paired_contracts
     if paired <= 0:
@@ -524,9 +608,41 @@ def _eval_pair_sell(book: Book, inv: Inventory, fees: Fees) -> Candidate:
             blocker="NO_EXECUTABLE_DEPTH",
             why="no depth at the bid on one or both legs")
 
-    cash_now = (yb + nb) * size - fees.entry_cost(2 * size, maker=False)
+    if fees.status == fs.NOT_ESTABLISHED:
+        return Candidate(
+            action=PAIR_SELL, status=NOT_IDENTIFIED,
+            blocker="FEE_SCHEDULE_NOT_ESTABLISHED", size_contracts=size,
+            why=("fees are %s; an unknown execution cost is not a zero one, "
+                 "and a sale priced at zero fees is the same defect the buy "
+                 "path was repaired for" % fees.source),
+            uncertainty="execution cost unknown, so net EV is unknown")
+
+    fee_now = (fees.entry_cost(size, maker=False, price=yb)
+               + fees.entry_cost(size, maker=False, price=nb))
+    cash_now = (yb + nb) * size - fee_now
     forgone = PAIR_SETTLEMENT_PAR * size - fees.settlement_per_contract * size
     ev = cash_now - forgone
+
+    if fees.status != fs.VERIFIED_APPLIED:
+        # COMPUTED AND REPORTED, NOT SELECTED. A published schedule is a
+        # documented cost, so the cash flow is worth showing; it is not
+        # a schedule we have seen applied to this account, so it is not
+        # a basis for putting an order into the market.
+        return Candidate(
+            action=PAIR_SELL, status=NOT_IDENTIFIED,
+            blocker="FEE_APPLICATION_NOT_VERIFIED",
+            conditional_payoff=ev, size_contracts=size,
+            cash_now=cash_now, cash_at_settlement=-forgone,
+            why=("CONDITIONAL net %+.4f under the %s schedule, which is "
+                 "PUBLISHED but never matched against a settled statement "
+                 "for this account" % (ev, fees.source)),
+            assumptions=["selling forgoes the par settlement this pair "
+                         "would pay",
+                         "the published schedule is applied as documented, "
+                         "which is unverified"],
+            uncertainty=("a published rate is not an observed charge; the "
+                         "difference is measurable only from a statement"))
+
     return Candidate(
         action=PAIR_SELL, status=IDENTIFIED, ev_net=ev, size_contracts=size,
         cash_now=cash_now, cash_at_settlement=-forgone,
@@ -637,7 +753,11 @@ def decide(book: Book, *, inventory: Inventory | None = None,
         "account_class": account_class,
         "complement_source": book.complement_source,
         "fee_schedule": {"verified": fee.verified, "source": fee.source,
-                         "hypothetical": fee.hypothetical},
+                         "hypothetical": fee.hypothetical,
+                         "status": fee.status,
+                         "effective_from": (fee.schedule.effective_from
+                                            if fee.schedule is not None
+                                            else None)},
     }
 
     # A book we cannot date or trade produces no action at all, and the
