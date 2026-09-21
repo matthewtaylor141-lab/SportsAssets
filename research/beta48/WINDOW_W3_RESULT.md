@@ -218,3 +218,58 @@ selection. No settlement term appears in any of these queries. Objects
 A, B, C and D stay separate; B, C and D remain NOT_IDENTIFIED.
 `mirror_live=false`, COMMAND undeployed, real-order activity NONE, real
 capital at risk 0.
+
+---
+
+# PART 2 — Matured cohort
+
+Re-read at **00:44:54Z**, after the last observation's 3600s recovery
+deadline (23:33:17Z + 3600 + 600 = **00:43:17Z**). Same query, same
+bounds, research-sql run 181. **Nothing is pending and nothing is
+not-yet-due at any horizon**; every criterion is now final.
+
+| horizon | not yet due | eligible | attempts | **on time** | late | pending | **finally missing** |
+|--------:|---:|---:|---:|---:|---:|---:|---:|
+| 60 | 0 | 49 | 16 | **0** | 16 | 0 | 33 |
+| 300 | 0 | 49 | 15 | **0** | 15 | 0 | 34 |
+| 900 | 0 | 49 | 14 | **0** | 14 | 0 | 35 |
+| 3600 | 0 | 49 | **23** | **0** | 23 | 0 | 26 |
+
+Every row sums to 49. Totals: **68 attempts, 0 on time, 128 tasks
+finally missing of 196** (49 × 4) — 65.3% lost, matching the measured
+expiry rate of ~69%.
+
+Timing placement, matured: **all 68 reads MISSED_BY_GT_90S**. Not one
+inside its band, at any horizon.
+
+### What moved between window close and maturity
+
+| horizon | attempts | pending | missing |
+|---|---|---|---|
+| 60 | 14 → **16** | 7 → 0 | 28 → **33** |
+| 300 | 11 → **15** | 10 → 0 | 28 → **34** |
+| 900 | 7 → **14** | 14 → 0 | 17 → **35** |
+| 3600 | 0 → **23** | 0 → 0 | 0 → **26** |
+
+The 31 pending tasks resolved overwhelmingly into **missing**, not into
+on-time reads. 3600s became evaluable and took 23 cohort attempts of
+its own — the most of any horizon, because it opens last and meets less
+competition once the earlier horizons' tasks have expired.
+
+### Criteria, final, unrevised
+
+| criterion | result |
+|---|---|
+| `COVERAGE_EVERY_HORIZON` | **PASS** — attempts > 0 at all four: 16, 15, 14, 23. 3600s passes on its **own** cohort, not on older observations. |
+| `ON_TIME_300S` ≥ 40% | **FAIL**, 0/49 = 0%. Final. |
+| `ON_TIME_900S` > 0% | **FAIL**, 0/49 = 0%. Final, and now legitimately final: 0 not-yet-due, 0 pending. |
+| `FAIL_IF` | **not triggered** |
+
+**W3 demonstrated broader service and did not demonstrate acceptable
+timing.** Service is fixed: the rotation cycles, every horizon is
+reached, no horizon starves. Timing is not: zero gate-admissible reads
+out of 68.
+
+Causal limits stand. Allocation and eligibility shipped together;
+attempts and timing are separate columns that diagnose behaviour but do
+not isolate either change's contribution.
