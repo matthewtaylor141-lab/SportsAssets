@@ -1,17 +1,17 @@
-# BETTOR RELEASE CANDIDATE — integrated engine, real-data results
-
-> **SUPERSEDED IN PART.** Review of `18b0dcf` found six defects, all mine.
-> See [`CORRECTIONS_18b0dcf.md`](CORRECTIONS_18b0dcf.md). In particular the
-> §6 capacity arithmetic below was **10× wrong** (order count labelled as
-> contract count), depth was **not** absent from the schema, the settlement
-> claim was unfounded, the evaluation **deviated from its own frozen
-> protocol**, and the "REFUTED" verdict is withdrawn to a scenario result.
-> The pilot proposal is now drafted: [`PILOT_PROPOSAL.md`](PILOT_PROPOSAL.md).
+# BETTOR RELEASE CANDIDATE — integrated engine, measured data
 
 Restrictions unchanged: `mirror_live=false`, **no real orders, no capital
-activation, nothing deployed**. Production remains `3349219`.
+activation, nothing deployed**. Production remains `3349219`. The pilot
+remains unactivated.
 
-**178 tests pass.** Three commands, all exit 0, all outputs committed.
+> **This revision replaces claims with measurements.** Six statements in the
+> previous version were unsupported or wrong; all six are corrected below and
+> itemised in
+> [`DATA_FINDINGS_2026_09_21.md`](DATA_FINDINGS_2026_09_21.md). The capacity
+> analysis in §6 is now bounded by **traded volume**, which had never been
+> queried.
+
+Three commands, all exit 0, all outputs committed.
 
 | # | command | artifact |
 |---|---|---|
@@ -26,6 +26,7 @@ activation, nothing deployed**. Production remains `3349219`.
 | component | file | status |
 |---|---|---|
 | Decision engine | `backend/sportsassets/bettor_decision_engine.py` | working |
+| **Published fee schedule** | `backend/sportsassets/bettor_fee_schedule.py` | **working — new** |
 | Venue/account contract | `backend/sportsassets/bettor_venue_contract.py` | working |
 | Maker economics | `backend/sportsassets/bettor_maker_economics.py` | working |
 | Observation adapter | `backend/sportsassets/bettor_observation_adapter.py` | working |
@@ -37,189 +38,241 @@ settlement → reconciled accounting`. `ShadowAdapter` is a different class from
 the production adapter, not the same one in a mode; the prospective runner
 imports neither it nor any venue client, asserted by AST scan.
 
-## 2. SYNTHETIC REGRESSION DEMONSTRATION — command 1
+## 2. THE FEE SCHEDULE — PUBLISHED, NOT HYPOTHETICAL, NOT VERIFIED
 
-Nine sections, each asserting **expected cash and expected inventory
-independently** of the ledger's own reconciliation — necessary because the
-ledger was self-consistent while fees were being dropped entirely.
+`fee = θ × contracts × price × (1 − price)`, banker's-rounded to the cent
+**per fill**. Two dated schedules, because the date is part of the schedule:
 
-Covers: non-zero-fee entry (89.90, fees 0.40); partial sale through the engine
-(basis removed proportionally, 4.90 → 2.94); complete sale (**zero remaining
-basis**); one-leg recovery across all four branches (COMPLETE / EXIT /
-UNRESOLVED-no-fresh-read / UNRESOLVED-no-action); quote lifecycle
-(rest → touch → reprice → fill → cancel); settlement; restart preserving
-balances, inventory, quotes and provenance; the maker counterexample; and
-ledger reconciliation with **residual 0**.
+| schedule | θ_taker | θ_maker | taker rounding |
+|---|---|---|---|
+| `PMUS_PUBLISHED_2026_07_01` | +0.06 | **−0.0125 (rebate)** | per fill, independent |
+| `PMUS_PUBLISHED_2026_09_17` | +0.0695 | **−0.0125 (rebate)** | cumulative per order |
+
+`for_date()` requires a date and refuses a fill before the first published
+schedule rather than pricing it at the nearest one. The two sources disagree
+on taker rounding; **both are implemented and the disagreement is recorded**,
+because only a settled statement decides which applied.
+
+**This was an unconnected module, not missing information.**
+`research/run85_trackb_fees.py` has carried the published schedule since
+2026-07-01 — sourced, dated, reproducing the venue documentation's worked
+examples. The engine never imported it and ran on hand-typed flat constants
+with the maker side entered **as a charge**. A test pins the 2026-07-01 terms
+against that module exactly, so the two copies cannot drift.
+
+**Status is `PUBLISHED`, not `VERIFIED_APPLIED`.** The engine's fee gate has
+three states: `NOT_ESTABLISHED` blocks as an unknown cost; `PUBLISHED` may be
+**computed and reported** but never **selected** for execution;
+`VERIFIED_APPLIED` needs a settled statement, and nothing has one.
+
+**The sign error was the largest single input error in the evaluation.** At
+p = 0.485 the venue **pays** 0.00312/contract where the engine subtracted
+0.01 — a swing of 0.0131/contract in the maker's favour. **A corrected input
+is not an edge**; see §5.
 
 ## 3. REAL-OBSERVATION REPLAY — command 2
 
-36 real rows from `bettor_state_observations`, under
-`('polymarket-us','institutional')` — `holds_both_legs_independently =
-UNKNOWN`. The demo fixture is not used.
+**16 real rows**, ages 0.307–3.878 s, every one carrying the five-level
+ladder, under `('polymarket-us','institutional')` —
+`holds_both_legs_independently = UNKNOWN`. The demo fixture is not used.
 
-**Normalization:** 15 accepted, 21 rejected. Ages 5.776s – 27.985s, median
-11.495s, bound 10s. **Every rejection is staleness alone** — the books are
-readable, open and two-sided, so age is the whole filter (asserted by test).
+**Normalization:** 16 accepted, 0 rejected.
 
-| bound | rows surviving |
-|---|---|
-| ≤ 10s | 15 of 36 |
-| ≤ 30s | 36 of 36 |
+**Depth is read from the ladder's top level, not from `yes_depth`.** Measured
+across 939 rows carrying both: `yes_depth.ask` equals the **five-level sum**
+on **939 of 939**, and the top level on 0 except where the two coincide. The
+median ratio is **15.29×** and the maximum **550,001×**. An order sized from
+the cumulative figure is not a large order at the quote — it is an order
+walking four levels up a book the venue never showed at the touch.
 
-Shown so the eligibility curve is visible, **not** to justify relaxing the
-bound.
+**Pairing:** 0 complement pairs. Venue-wide, 11 market_ids carry two
+`outcome_leg` labels — but all 11 have **one** `instrument_id` and **one**
+`condition_id`, `condition_id` is `NOT_IDENTIFIED` on all 1,538 rows, and
+`instrument_id` equals `market_id`. **There is no leg-level venue identifier
+in the capture**, so whether those labels are genuine complements is not
+checkable from our data. `no_ask`/`no_bid` are `NOT_IDENTIFIED` on 100% of
+rows: the sibling instrument is never read.
 
-**Pairing:** 0 genuine complement pairs in this sample. Venue-wide, **11
-contracts** have two distinct outcome legs observed — so pairs exist, just not
-among the freshest 36.
-
-**Decisions:** 15 of 15 → `NO_TRADE`. Blockers:
-`FV_BETTOR_INDEPENDENT_NOT_VALIDATED` ×60, `P_FILL_NOT_IDENTIFIED` ×30,
-`COMPLEMENT_ABSENT` ×15, `NO_PAIRED_INVENTORY` ×15.
+**Decisions:** 16 of 16 → `NO_TRADE`. Blockers:
+`FV_BETTOR_INDEPENDENT_NOT_VALIDATED` ×64, `P_FILL_NOT_IDENTIFIED` ×32,
+`NO_PAIRED_INVENTORY` ×16, `COMPLEMENT_ABSENT` ×16,
+`MERGE_NOT_OBSERVED_ON_INSTITUTIONAL` ×16.
 
 **Execution:** 0 orders. Ledger residual 0, fees 0, basis 0, positions 0.
-Every action is blocked or unidentified on this venue contract;
-**manufacturing a fill to produce a number is precisely what this run must
+**Manufacturing a fill to produce a number is precisely what this run must
 not do.**
 
-**Settlement:** `bettor_state_settlements` holds **0 rows venue-wide**. No
-outcome has matured for any observation. This is the "fresh outcomes have not
-matured" case, stated plainly.
+**Settlement:** `bettor_state_settlements` holds 0 rows, **0 fills**, 0
+settled. `record_settlement()` is **defined and never called** — a missing
+ingestion path, not evidence that nothing resolved. **552 of 1,538
+observations are of events that had already started** (`time_to_event_s`
+negative, `live_status` LIVE), so the previous version's "no outcome has
+matured for any observation" was unsupported. An event starting is not an
+event resolving, and the capture records no end time, so it is still not
+readable — but it was never established.
 
 ## 4. PROSPECTIVE RUNNER — command 3
 
-**Status: PREPARED AND SELF-TESTED, NOT RUNNING.**
+**Status: PREPARED AND SELF-TESTED, NOT RUNNING.** Self-test passes: decided
+16, duplicates refused 16, rejected 0; dedup, restart and the no-order path
+(AST scan of calls and imports) all verified.
 
-Self-test passes: decided 15, duplicates refused 36, rejected 21. Dedup and
-restart both verified, and the no-order-path check is an AST scan of calls and
-imports rather than a substring scan (which failed on its own forbidden-name
-list).
+**Freshness now uses three clocks and requires all three.** `book_received_ts`
+is populated on every captured row and was being treated as **optional**, so
+a row lacking it skipped the check and was treated as verified. A naive
+timestamp is **refused**, not assumed to be UTC. Decision time is measured
+**per observation**, not once per batch.
 
-Dedup is **not** an efficiency measure: re-deciding an observation after its
-market moved would silently convert a prospective record into a hindsight one.
+**A source-to-receipt delay is not clock skew.** Measured across 1,203 rows:
+**zero** have a source stamp in our receipt's future, so there is **no
+measured clock disagreement at all**. The old `abs(received − source) > 120 s`
+test would have flagged the majority of rows, because what it was measuring
+was the sampler's read cadence. Transport only runs forward; only a negative
+delay can show the clocks disagree. Separately, **we cannot decide on a book
+we have not received** — a causality check inside our own pipeline, which the
+self-test caught after the skew rewrite dropped it.
 
-**The one remaining action to make it live** — and it needs approval, so I have
-not taken it:
-
-> Deploy `scripts/bettor_prospective_runner.py` on `sportsassets-workers` as a
-> decision-only loop reading the live PMUS book, writing
-> `PROSPECTIVE_SHADOW` records. **Rollback:** stop the process; it holds no
-> state outside its own JSON file and touches no trading path.
-
-**It would currently produce `NO_TRADE` on every row**, for the reasons in §3.
-Running it establishes the record-keeping, not an edge.
+**The median source-to-receipt delay is 549.6 s — 9.2 minutes**, against a
+10-second decision bound. That is the binding constraint on a live feed and it
+is now measured.
 
 ## 5. STRATEGY EVIDENCE
 
-Frozen **before** any outcome was read:
-[`PREREGISTRATION_MAKER_V1.md`](PREREGISTRATION_MAKER_V1.md).
+v2 protocol frozen **before** any v2 evaluation:
+[`PREREGISTRATION_MAKER_V2.md`](PREREGISTRATION_MAKER_V2.md). v1 is preserved
+unchanged; nothing was retuned.
 
-Maker round-trip on the 15 real books, across the frozen grid, per contract:
+Maker round trip on the 16 real books, quoted at **10 contracts** (fees round
+per fill, so a per-contract figure does not carry to another clip size):
 
-| mid move | exit route | positive | negative | median |
+| mid move | exit route | positive | negative | median/contract |
 |---|---|---|---|---|
-| 0.000 | cross out | 0 | 15 | −0.010000 |
-| 0.000 | rest out | 12 | 3 | +0.000000 |
-| −0.005 | cross out | 0 | 15 | −0.015000 |
-| −0.005 | rest out | 7 | 8 | −0.005000 |
-| −0.010 | cross out | 0 | 15 | −0.020000 |
-| −0.020 | cross out | 0 | 15 | −0.030000 |
-| **−0.020** | **rest out** | **6** | **9** | **−0.020000** |
+| 0.000 | cross out | 0 | 16 | −0.013000 |
+| 0.000 | rest out | 16 | 0 | **+0.055000** |
+| −0.005 | cross out | 0 | 16 | −0.018000 |
+| −0.005 | rest out | 16 | 0 | +0.050000 |
+| −0.010 | rest out | 15 | 1 | +0.045000 |
+| **−0.020** | **rest out** | **9** | **7** | **+0.035000** |
+| −0.020 | cross out | 0 | 16 | −0.033000 |
+
+**The "rest out" row moved from negative to positive when the fee sign was
+corrected.** That is a fact about the model's sensitivity to one input, and
+it is the reason v2 is stricter than v1 rather than looser: an evaluation
+whose conclusion turns on one assumption was measuring the assumption.
+
+**The passive-exit row assumes a SECOND resting order fills.** It carries two
+unmeasured fill probabilities, not one — the entry's and the exit's,
+conditional on the entry having filled and the market having moved. Under
+rule 2 that makes it `UNRESOLVED` whatever its sign.
 
 ### Verdicts under the frozen rules
 
 | candidate | verdict |
 |---|---|
-| **M1** (passive quote, held/exited) | **REFUTED for the crossing route** — negative on 15/15 at every grid point, including zero adverse move, where the hypothetical maker fee alone makes it −0.010. **UNRESOLVED for the resting route** — fails rule 1 (positive at *every* grid point: only 6/15 at the conservative corner) and fails rule 2 (needs `p_fill` and `conditional_reference_move`, both NOT_IDENTIFIED). |
-| **M2** (maker first leg + completion) | **UNRESOLVED — BLOCKED ON CAPABILITY.** `holds_both_legs_independently` is UNKNOWN on the institutional account. Not evaluable until resolved. |
-| **I1** (completion-vs-exit policy) | **SUPPORTED AS A POLICY, NOT AN EDGE.** The rule selects the higher-incremental-cash action on every constructed case, and excludes sunk basis (asserted: bases of 0.10 and 0.90 give identical choices). This is a correctness property, not evidence of profitability. |
+| **M1** (passive quote, held/exited) | **UNRESOLVED.** Needs `conditional_reference_move`, entry `p_fill` and — on the passive route — exit `p_fill`, all `NOT_IDENTIFIED`. Rule 5 additionally requires `VERIFIED_APPLIED` fees; the schedule is `PUBLISHED`. |
+| **M2** (maker first leg + completion) | **UNRESOLVED — BLOCKED ON CAPABILITY.** `holds_both_legs_independently` is UNKNOWN, and the capture holds no leg-level identifier with which to establish a complement at all. |
+| **I1** (completion-vs-exit policy) | **SUPPORTED AS A POLICY, NOT AS AN EDGE.** It selects the higher-incremental-cash action on every constructed case and excludes sunk basis. A correctness property. |
 
-**No candidate is SUPPORTED as an edge.** Sample is 15 contracts against a
-required 200; the interval test was not reached. Acceptance rules were not
-relaxed.
+**No candidate is SUPPORTED as an edge.** The sample is 16 contracts against
+a required 200; the interval test was not reached. Acceptance rules were not
+relaxed — rule 5 was added.
 
 ### Data, assumptions, uncertainty
 
-- **Data:** 36 real observations, 15 decision-eligible, 0 settled.
-- **Assumed:** the entire fee schedule (`HYPOTHETICAL_NO_VERIFIED_SCHEDULE_EXISTS`),
-  every grid value, and **every fill** — BETTOR has never rested an order.
-- **Uncertainty:** three of the four terms M1 needs are NOT_IDENTIFIED, as
-  recorded in the pre-registration *before* these numbers existed.
+- **Observed:** 16 real books; 939 rows for depth shape; 1,203 for clocks;
+  1,538 for maturity and identity; 609 for traded volume.
+- **Published:** the fee schedule. Documented by the venue, never seen applied
+  to this account.
+- **Assumed:** every grid value, and that a resting exit fills at all.
+- **Synthetic:** every fill. **BETTOR has never rested an order.**
 
-## 6. CAPACITY ANALYSIS — $500,000/day
+## 6. CAPACITY — $500,000/DAY, BOUNDED BY MEASUREMENT
 
-### Technical throughput (software)
+### 6.1 The arithmetic
 
-Decision path **measured at 21,917 observations/second** single-threaded
-(7,200 normalize+decide cycles in 0.329 s). At 10 contracts × $0.50,
-sustaining $500k/day needs ~100,000 contracts/day ≈ **1.2 contracts/second**.
-**The software is not the constraint — it clears the requirement by about
-four orders of magnitude.**
+$500,000/day of executed notional at ~$0.50/contract = **1,000,000 contract
+executions/day ≈ 11.57/sec**; at 10 contracts/order, 100,000 orders/day ≈
+1.16/sec. *(The earlier version labelled the order count as the contract count
+and was 10× wrong. That correction stands.)*
 
-### Economically eligible turnover (observations)
+**Turnover definitions**, since the earlier version's were ambiguous:
+*executed notional* counts both sides of a round trip; *position notional*
+counts entries only; *working capital* = position notional ÷ turns per day,
+which needs a holding period.
 
-| | |
-|---|---|
-| Distinct markets observed/day | 810 (2026-09-21), 570 (2026-09-20) |
-| Decision-eligible at the 10s bound | **42%** of usable rows (15/36) |
-| Eligible opportunities with positive identified EV | **0** |
-| **Economically supportable turnover today** | **$0** |
+### 6.2 What is measured
 
-The shortfall is not a gap to be narrowed by scaling. **It is total**, because
-no action currently has an identified positive EV, and trading negative-EV
-opportunities to manufacture turnover is explicitly excluded.
+| requirement | measured | verdict |
+|---|---|---|
+| Decision throughput | 21,917 obs/sec single-threaded | clears by ~4 orders of magnitude |
+| **Traded notional available** | **$396,361/day across all 396 observed markets** (1,106,312 shares) | **the target needs ~63–126% of every dollar traded in the observed universe** |
+| Books meeting every pilot condition | **130 rows / 130 markets** of 1,526 observed | |
+| Eligible books fresh enough to act on | **18 of 449 within 10 s (4.0%)**; median eligible age 406.5 s | the feed is the constraint |
+| Executable size at the touch | p10 **2**, median **75**, p90 3,000 contracts | |
+| Spread (795 rows) | p10 0.0100, median 0.0300, **p90 0.9400** | top decile effectively untradeable |
+| **Measured holding period** | **none exists — 0 fills anywhere** | working capital `NOT_IDENTIFIED` |
+| Positive-EV action | **none** | |
 
-### What would have to change, quantified
+### 6.3 The conclusion
 
-To reach $500k/day at ~$0.50/contract — 100,000 contracts/day, ~1.2/sec —
-**all four** of the following are required:
+**The shortfall is not a gap to be narrowed by scaling.** To execute
+$500,000/day of notional BETTOR would have to be a majority of everything
+that trades in the markets it observes. That is a market-share statement, not
+a throughput one, and the software clearing its requirement by four orders of
+magnitude does not touch it.
 
-1. **A positive-EV action must exist.** None does. Requires either `p_fill`
-   measured (needs our own resting orders) or `holds_both_legs_independently`
-   resolved SUPPORTED with observed complements.
-2. **Depth data.** The capture schema has **no size column**, so no order can
-   be sized. 100,000 contracts/day across 810 markets is ~123 contracts per
-   market per day; whether that depth exists is **unmeasured**.
-3. **A decision-latency feed.** 58% of even the freshest rows exceed a 10s
-   bound. The research sampler reads at 60/300/900/3600s horizons — it was
-   never built for this.
-4. **Capital.** At ~$0.50/contract and same-day settlement, 100,000
-   contracts/day needs **~$50,000 of working capital per turn cycle**;
-   settlement timing is unmeasured, so the multiplier on that is unknown.
+**Economically supportable turnover today: $0** — no action has identified
+positive EV, and trading negative-EV opportunities to manufacture turnover is
+excluded.
 
-**Uncertainty:** items 2, 3 and 4 are unmeasured, not estimated. Item 1 is
-measured and currently negative.
+**"One hour and one day are scenarios, not bounds" — confirmed.** The
+repository contains **zero fills**, so no holding period has ever been
+measured and any capital figure for this strategy is a scenario.
+
+### 6.4 What these figures do not establish
+
+Our observed universe is **not** the venue: 1,526 markets seen by a research
+sampler not built for coverage. Expanding it is now a specific measurable
+requirement rather than an assumption. Traded volume is what the market did
+**without us**. Displayed depth is a loose upper bound on executable depth —
+BLOCK_4: 22,297 displayed shares against 180 traded in 16 minutes, zero
+touches.
 
 ## 7. REMAINING REQUIREMENTS FOR A BOUNDED LIVE PILOT
 
 | # | requirement | status |
 |---|---|---|
-| 1 | Verified fee schedule from a settled statement | **missing** — everything is hypothetical |
-| 2 | `holds_both_legs_independently` resolved for the institutional account | **UNKNOWN** — `reconcile_read.capability_probe()` is built and unrun |
-| 3 | Account identity verified | **blocked** — no identifier on the snapshot |
-| 4 | Depth in the capture schema | **missing** — no size column exists |
-| 5 | Decision-latency read path | **missing** — research sampler only |
-| 6 | `p_fill` measured | **impossible without a pilot** — requires our own resting orders |
-| 7 | Execution gate deployed | built, tested, **undeployed** |
-| 8 | A candidate SUPPORTED under frozen rules | **none** |
+| 1 | Published fee schedule wired | **DONE** |
+| 2 | Depth read as top-of-book | **DONE** |
+| 3 | Freshness: required receipt stamp, transport ≠ skew, per-observation decision time | **DONE** |
+| 4 | One combined exposure limit; pre-trade worst-case loss budget | **DONE** — enforced in the loop |
+| 5 | Two-phase cancel so a replacement never overlaps what it replaces | **DONE** |
+| 6 | Fee schedule `VERIFIED_APPLIED` from a settled statement | **missing** — needs a fill |
+| 7 | `holds_both_legs_independently` resolved | **UNKNOWN** — `capability_probe()` built, unrun |
+| 8 | Account identity verified | **blocked** — no identifier on the snapshot |
+| 9 | Decision-latency read path | **missing** — median feed delay 549.6 s |
+| 10 | `record_settlement()` wired | **missing** — defined, never called |
+| 11 | `p_fill` measured | **impossible without a pilot** |
+| 12 | Execution gate deployed | built, tested, **undeployed** |
+| 13 | A candidate SUPPORTED under frozen rules | **none** |
 
-**Items 1–5 and 7 are engineering and can be done without trading. Item 6 is
-genuinely circular** — measuring fill probability requires resting orders, and
-resting orders require a pilot. That circularity is the real gate on this
-mandate, and the smallest honest break is a **minimum-size, loss-capped maker
-pilot whose sole deliverable is a `p_fill` measurement**, not profit.
-
-I have not proposed its parameters here because it needs capital
-authorization, which is outside what I hold.
+**Item 11 is the genuine circularity** — measuring fill probability requires
+resting orders, and resting orders require a pilot. The smallest honest break
+is [`PILOT_PROPOSAL.md`](PILOT_PROPOSAL.md) v2, whose sole deliverable is a
+`p_fill` measurement.
 
 ## 8. WHAT IS AND IS NOT ESTABLISHED
 
 **Established:** the engine consumes real venue data, normalizes it under
-institutional semantics, evaluates every alternative with explicit economics,
-manages simulated execution and inventory, reconciles cash to residual 0, and
-refuses every action it cannot justify — on real data, not fixtures.
+institutional semantics with correctly-sized depth and three-clock freshness,
+prices every action on the venue's published fee schedule, evaluates every
+alternative with explicit economics, manages simulated execution and inventory
+under one combined exposure limit and a forward-looking loss budget,
+reconciles cash to residual 0, and refuses every action it cannot justify —
+on real data, not fixtures.
 
-**Not established:** any edge, any fill rate, any profitability, and any
-capacity above zero. Class C stays FALSIFIED within its tested scope; Class D
-stays LOCKED; directional stays blocked on a measurement whose interval
-crosses zero and which therefore refutes nothing either.
+**Not established:** any edge, any fill rate, any profitability, any holding
+period, and any capacity above zero. Class C stays FALSIFIED within its tested
+scope; Class D stays LOCKED; Track P stays preserved as a negative result and
+is not revisited — it was negative at zero fees, so no fee correction revives
+it.
