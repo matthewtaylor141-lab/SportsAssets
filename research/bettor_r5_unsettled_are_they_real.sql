@@ -1,79 +1,87 @@
--- ARE THE 52 UNSETTLED ROWS OPEN EXPOSURE, OR AN ACCOUNTING HOLE?
+-- WHAT ARE THE 52 ROWS IN status='filled'?
 --
--- The exposure read returned HISTORICAL_REAL_FILLS = 52 and
--- CURRENT_UNSETTLED_FILLED_ORDERS = 52. Every fill this system has ever
--- taken is still carried as unsettled, $16,180.53 across 47 markets,
--- all BUY, the oldest placed 2026-08-04 and the newest 2026-09-10.
+-- CORRECTION TO MY OWN FRAMING (2026-09-21). I wrote the first version
+-- of this file asking whether the 52 filled rows were "unsettled
+-- because nothing wrote settled_at" -- an accounting hole. Section 1
+-- answered a different question than I asked:
 --
--- THAT IS TWO VERY DIFFERENT CLAIMS WEARING ONE NUMBER:
+--     settled     5271 rows   5271 with settled_at   5271 with pnl
+--     cashed_out   457 rows    457 with settled_at    454 with pnl
+--     filled        52 rows      0 with settled_at     11 with pnl
 --
---   (a) the money is genuinely still on the table -- 47 sports markets
---       have not resolved in up to seven weeks, or
---   (b) the markets resolved and nothing ever wrote settled_at, so the
---       ledger reports exposure the account no longer has.
+-- SETTLEMENT MOVES THE STATUS. A position that settles leaves
+-- status='filled' and becomes 'settled' or 'cashed_out', carrying
+-- settled_at with it. So "status='filled' AND settled_at IS NULL" is
+-- not a finding, it is a tautology: no row in status='filled' can have
+-- settled_at, by construction. My filter added nothing and the 100%
+-- rate I thought was suspicious was arithmetic.
 --
--- A 100% unsettled rate across a seven-week span is not what an
--- account with a working settlement writer looks like, so (b) is the
--- hypothesis. But "it looks wrong" is not a measurement: this asks the
--- markets table whether the underlying markets have closed, and asks
--- whether pnl was ever booked on rows still carried open.
+-- The real reading is simpler and worse to leave unexamined:
+-- status='filled' IS the open-position state. 52 open positions,
+-- $16,180.53 of cost basis, is what this ledger currently claims.
+--
+-- WHAT IS STILL OPEN. Whether the VENUE agrees. Section 2 of the first
+-- version joined markets.slug to live_orders.us_market_slug and got
+-- NO MARKET ROW for all 52 -- but those are different key spaces, so
+-- that told us nothing about resolution and is not repeated here.
+-- condition_id is the key live_orders actually carries.
 --
 -- Read only.
-\echo == 1. DOES ANY FILLED ROW EVER GET settled_at? ==
-SELECT status,
-       count(*) AS rows,
-       count(*) FILTER (WHERE settled_at IS NOT NULL) AS with_settled_at,
-       count(*) FILTER (WHERE pnl IS NOT NULL) AS with_pnl
+\echo == 1. THE 52, BY SOURCE SLEEVE ==
+SELECT coalesce(whale_username, 'NONE') AS sleeve,
+       count(*) AS orders,
+       count(DISTINCT condition_id) AS conditions,
+       round(sum(filled_usd)::numeric, 2) AS cost_usd,
+       count(*) FILTER (WHERE pnl IS NOT NULL) AS with_pnl,
+       max(placed_at)::date AS last_placed
   FROM live_orders
- GROUP BY status
- ORDER BY rows DESC;
+ WHERE status = 'filled'
+ GROUP BY 1
+ ORDER BY cost_usd DESC;
 
 \echo
-\echo == 2. HAVE THE UNDERLYING MARKETS RESOLVED? ==
--- If the market is closed/resolved, the position is not open exposure
--- however the ledger has it.
-SELECT coalesce(m.closed::text, 'NO MARKET ROW') AS market_closed,
-       count(*) AS unsettled_orders,
-       round(sum(o.filled_usd)::numeric, 2) AS usd,
+\echo == 2. DO THE UNDERLYING MARKETS STILL EXIST AS OPEN? ==
+-- condition_id is the key live_orders carries, so this is the join
+-- that can actually answer it.
+SELECT CASE WHEN m.condition_id IS NULL THEN 'NO MARKET ROW'
+            WHEN m.closed THEN 'MARKET CLOSED'
+            ELSE 'MARKET OPEN' END AS market_state,
+       count(*) AS orders,
+       round(sum(o.filled_usd)::numeric, 2) AS cost_usd,
        min(o.placed_at)::date AS oldest,
        max(o.placed_at)::date AS newest
   FROM live_orders o
-  LEFT JOIN markets m ON m.slug = o.us_market_slug
- WHERE o.status = 'filled' AND o.settled_at IS NULL
+  LEFT JOIN markets m ON m.condition_id = o.condition_id
+ WHERE o.status = 'filled'
  GROUP BY 1
- ORDER BY usd DESC;
+ ORDER BY cost_usd DESC;
 
 \echo
-\echo == 3. AGE OF THE UNSETTLED BOOK ==
-SELECT width_bucket(extract(epoch FROM (now() - placed_at)) / 86400,
-                     0, 56, 8) AS week_bucket,
-       min(placed_at)::date AS from_date,
-       max(placed_at)::date AS to_date,
-       count(*) AS orders,
-       round(sum(filled_usd)::numeric, 2) AS usd
+\echo == 3. THE ELEVEN WITH pnl ALREADY BOOKED ==
+-- mirror_exit's partial branch writes a row back to status='filled'
+-- after booking pnl on the part it sold. These are the residuals.
+SELECT count(*) AS rows,
+       round(sum(filled_usd)::numeric, 2) AS cost_usd,
+       round(sum(pnl)::numeric, 2) AS pnl_booked,
+       min(placed_at)::date AS oldest,
+       max(placed_at)::date AS newest
   FROM live_orders
- WHERE status = 'filled' AND settled_at IS NULL
- GROUP BY 1
- ORDER BY 1;
+ WHERE status = 'filled' AND pnl IS NOT NULL;
 
 \echo
-\echo == 4. WHICH SLEEVE PLACED THEM ==
-SELECT coalesce(whale, 'NONE') AS whale,
-       count(*) AS orders,
-       count(DISTINCT us_market_slug) AS markets,
-       round(sum(filled_usd)::numeric, 2) AS usd,
-       max(placed_at)::date AS last_placed
-  FROM live_orders
- WHERE status = 'filled' AND settled_at IS NULL
- GROUP BY 1
- ORDER BY usd DESC;
-
-\echo
-\echo == 5. IS ANYTHING STILL HELD AT THE VENUE PER OUR OWN MIRROR BOOKS? ==
--- mirror_books is the reconciler's view of what is open. If it says
--- nothing is open while live_orders says 47 markets are, the two
--- ledgers disagree and that disagreement is the finding.
+\echo == 4. DOES THE RECONCILER AGREE ANYTHING IS OPEN? ==
+-- mirror_books is the P1 reconciler's own view. If it says nothing is
+-- open while live_orders carries 52, the two ledgers disagree and that
+-- disagreement is the finding.
 SELECT state, count(*) AS books, max(opened_at)::date AS last_opened
   FROM mirror_books
  GROUP BY state
  ORDER BY books DESC;
+
+\echo
+\echo == 5. HAS ANYTHING BEEN PLACED SINCE THE LAST FILL? ==
+SELECT status, count(*) AS orders, max(placed_at) AS last_placed
+  FROM live_orders
+ WHERE placed_at > timestamptz '2026-09-10 17:06:50.527288+00'
+ GROUP BY status
+ ORDER BY orders DESC;
