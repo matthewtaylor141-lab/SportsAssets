@@ -874,7 +874,14 @@ def test_e24_the_presets_print_the_hand_beside_manual_and_registered_and_parse()
         tree = pglast.parse_sql(sql)
         assert all(type(s.stmt).__name__ == "SelectStmt" for s in tree), "read-only"
     # the hourly gains nothing: its nine presets and the frozen read's text are untouched by the column
-    assert text.count("last_plan->'hand'") == 3          # the two presets and the comment over mirror-frozen
+    # 2, not 3, since 2026-09-21: render-ops.yml crossed GitHub's
+    # 512,000-byte ceiling and every dispatch returned startup_failure,
+    # so 67 comment blocks moved verbatim to RENDER_OPS_NOTES.md. One of
+    # them was the comment over mirror-frozen, which is where the third
+    # occurrence lived. Nothing was deleted and no preset changed; this
+    # now counts the two EXECUTABLE occurrences, which is the number
+    # that was worth asserting all along.
+    assert text.count("last_plan->'hand'") == 2          # the two presets
     # the help arm and the labels' order stand (no new label): `hourly` last
     labels = re.findall(r"^\s{16}([a-z0-9-]+|book=\*|paired-day=\*|paired-ratio=\*|tennis-witness=\*)\)", text, re.M)
     assert labels[-1] == "hourly"

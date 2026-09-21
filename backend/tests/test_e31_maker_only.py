@@ -105,9 +105,15 @@ RULES_UNTOUCHED = {
     "admission": "a10630d6d3a3a62c", "open_catchup": "6b9e8f2ffe1d3538",
     "select_flatten": "00e5b189ccb84bdb",
 }
+# submit_fok and close_position were RE-PINNED on 2026-09-21. They are
+# not untouched: each gained the fail-closed authorization check at the
+# venue boundary (execution_gate.authorize). The pin exists to catch an
+# edit nobody meant to make, and it did its job -- this edit was meant,
+# so the hash moves and the reason is recorded here rather than the
+# guard being loosened.
 PMUS_UNTOUCHED = {"_post_only_refusal": "7becc8060b5ec9de", "_post_only_cross": "41341b4b46075c53",
-                  "submit_fok": "7198b96c9a700ce9", "bbo_read": "5f8dd44f222a7c02",
-                  "_amount": "4ae6f1c4e71054d4", "close_position": "db12e4ed2d9f0554"}
+                  "submit_fok": "ead830681a5536e5", "bbo_read": "5f8dd44f222a7c02",
+                  "_amount": "4ae6f1c4e71054d4", "close_position": "a2032fad56ae9d71"}
 
 
 def _sha(fn):
