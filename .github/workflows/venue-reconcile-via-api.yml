@@ -121,10 +121,25 @@ jobs:
               for k, v in sorted(acc.items()):
                   if isinstance(v, list):
                       print("  %-25s list of %d" % (k, len(v)))
+              # AN EMPTY LIST IS FALSY, AND THAT COST A ROUND TRIP.
+              # This read `pm.get(key) or acc.get(key)`, so an EMPTY
+              # positions list fell through to acc.get(key) -> None ->
+              # "not a list" -> skipped silently. The first run printed
+              # no positions line at all and I could not tell whether
+              # the key was missing or the list was empty. Those are
+              # different findings: one is a parser gap, the other is
+              # the venue holding nothing while our ledger claims 52
+              # open positions worth $16,180.53.
               for key in ("positions", "external_positions",
                           "externals"):
-                  rows = pm.get(key) or acc.get(key)
+                  rows = pm.get(key)
+                  if rows is None:
+                      rows = acc.get(key)
                   if not isinstance(rows, list):
+                      print("  %s: KEY ABSENT" % key)
+                      continue
+                  if not rows:
+                      print("  %s: EMPTY LIST (present, zero rows)" % key)
                       continue
                   print()
                   print("  %s: %d" % (key, len(rows)))
@@ -154,6 +169,20 @@ jobs:
                       str(r.get("us_market_slug") or r.get("slug") or "?")[:40],
                       r.get("side"), r.get("size"), r.get("price")))
               print("  commitment (size x limit): %.2f" % total)
+
+          print()
+          if isinstance(acc, dict):
+              pm = acc.get("pm") or {}
+              print()
+              print("  DOES EMPTY MEAN EMPTY, OR MEAN THE READ FAILED?")
+              print("     configured : %s" % pm.get("configured"))
+              print("     error      : %s" % pm.get("error"))
+              print("     cash       : %s" % pm.get("cash"))
+              print("     open_value : %s" % pm.get("open_value"))
+              print("     account_val: %s" % pm.get("account_value"))
+              print("     -> configured true with no error and an empty")
+              print("        positions list means the venue HOLDS NOTHING.")
+              print("        Anything else and the read is inconclusive.")
 
           print()
           print("  SCOPE: this is CURRENT state. It does not match the 52")
