@@ -68,6 +68,7 @@ R_CROSSED = "BOOK_CROSSED_OR_LOCKED"
 R_NO_STATE = "NO_MARKET_STATE"
 R_NO_DEPTH = "NO_DEPTH_REPORTED"
 R_UNREADABLE = "COLLECTOR_MARKED_UNREADABLE"
+R_STALE = "BOOK_OLDER_THAN_DECISION_BOUND"
 
 
 @dataclass
@@ -134,14 +135,28 @@ def normalize(row: dict, *, venue: str = "polymarket-us",
     age = _num(g("book_age_s") or g("BOOK_AGE_S"))
     if age is None:
         reasons.append(R_NO_AGE)
+    elif age > de.MAX_BOOK_AGE_S:
+        # REAL BOOK AGES ARE HOURS. The captured sample runs from 61s to
+        # 25,912s, against a 10s decision bound. This is not a defect in
+        # the adapter -- it is the state of the capture, and an engine
+        # deciding on a seven-hour-old book would be deciding on history.
+        reasons.append(R_STALE)
 
-    state = g("venue_state") or g("VENUE_STATE")
-    if not state or state == SENTINEL:
+    # THE VENUE'S OWN VOCABULARY. Real rows carry MARKET_STATE_OPEN and
+    # MARKET_STATE_EXPIRED, not OPEN/CLOSED. Normalizing to the engine's
+    # vocabulary is this adapter's job; making the engine guess is not.
+    raw_state = g("venue_state") or g("VENUE_STATE")
+    state = None
+    if not raw_state or raw_state == SENTINEL:
         reasons.append(R_NO_STATE)
+    else:
+        state = str(raw_state).replace("MARKET_STATE_", "").upper()
+        if state not in ("OPEN", "ACTIVE"):
+            reasons.append("MARKET_STATE_%s" % state)
 
     readability = g("book_readability_status") or g("BOOK_READABILITY_STATUS")
-    if readability and readability not in ("READABLE", "OK", None):
-        reasons.append(R_UNREADABLE)
+    if readability and not str(readability).startswith(("READABLE", "OK")):
+        reasons.append("%s:%s" % (R_UNREADABLE, str(readability).split(":")[-1]))
 
     # THE LEG'S OWN BOOK. The yes_* columns are this leg's quotes; they
     # are not the YES side of a two-sided market.
@@ -252,7 +267,14 @@ def report(records: list) -> dict:
         for reason in r.reasons:
             counts[reason] = counts.get(reason, 0) + 1
     accepted = [r for r in records if r.status == ACCEPTED]
+    ages = sorted(r.age_s for r in records if r.age_s is not None)
     return {
+        "book_age_s": ({"min": ages[0], "median": ages[len(ages) // 2],
+                        "max": ages[-1],
+                        "decision_bound_s": de.MAX_BOOK_AGE_S,
+                        "within_bound": sum(1 for a in ages
+                                            if a <= de.MAX_BOOK_AGE_S)}
+                       if ages else None),
         "adapter": ADAPTER_VERSION,
         "rows": len(records),
         "accepted": len(accepted),

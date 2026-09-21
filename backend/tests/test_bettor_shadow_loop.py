@@ -13,7 +13,8 @@ from sportsassets import bettor_shadow_loop as sl
 from sportsassets import bettor_venue_contract as vc
 
 ASSUME = "DECLARED: p_both_legs_fill assumed, to exercise execution"
-VERIFIED = de.Fees(verified=True, source="TEST_VERIFIED_SCHEDULE")
+VERIFIED = de.Fees(taker_per_contract=0.02, maker_per_contract=0.01,
+                   verified=True, source="TEST_VERIFIED_SCHEDULE")
 
 
 @pytest.fixture(autouse=True)
@@ -28,10 +29,10 @@ def _demo_venue():
     vc.CAPABILITIES.pop(("demo-venue", "institutional"), None)
 
 
-def loop(**kw):
+def loop(cash=1000.0, **kw):
     kw.setdefault("fees", VERIFIED)
     kw.setdefault("venue", "demo-venue")
-    return sl.ShadowLoop(opening_cash=1000.0, **kw)
+    return sl.ShadowLoop(opening_cash=cash, **kw)
 
 
 def bk(mid="m", **kw):
@@ -115,8 +116,11 @@ class TestTheChain:
         # RECORDING IS NOT HANDLING. The loop now acts on the exposure,
         # so the assertion is that a recovery DECISION was taken and
         # named -- not that the naked leg was left sitting there.
-        assert r["execution"]["recovery"]["action"] in (
-            "COMPLETE", "EXIT", "HOLD_EXPOSED")
+        # No fresh recovery observation was supplied, so the policy
+        # refuses to decide on a book it knows is stale.
+        assert r["execution"]["recovery"]["action"] == "UNRESOLVED_EXPOSURE"
+        assert (r["execution"]["recovery"]["blocker"]
+                == "NO_FRESH_RECOVERY_OBSERVATION")
 
     def test_risk_refuses_before_execution_and_cash_is_untouched(self):
         lp = loop(limits=sl.RiskLimits(max_cash_per_market=2.0))
@@ -274,9 +278,57 @@ class TestOneLegRecoveryIsAutonomous:
     def test_it_completes_when_the_complement_is_executable(self):
         lp = loop()
         r = lp.step(bk("m"), max_contracts=10,
-                    assume_unidentified_terms=ASSUME, reject_legs=("no",))
-        assert r["execution"]["recovery"]["action"] == "COMPLETE"
+                    assume_unidentified_terms=ASSUME, reject_legs=("no",),
+                    recovery_book=bk("m"))
+        rec = r["execution"]["recovery"]
+        assert rec["action"] == "COMPLETE"
         assert lp.positions["m"].directional == 0
+        # The sunk basis is REPORTED and excluded from the comparison.
+        assert rec["considered"]["sunk_basis_excluded"] > 0
+        assert rec["considered"]["complete_net_incremental"] is not None
+
+    def test_sunk_basis_does_not_change_the_recovery_choice(self):
+        """An expensive entry used to make the engine LESS willing to
+        complete, which is backwards: the basis is identical under
+        every action available now."""
+        picks = []
+        for entry_ask in (0.10, 0.90):
+            lp = loop()
+            b = bk("m", yes_ask=entry_ask, no_ask=0.50)
+            r = lp.step(b, max_contracts=10,
+                        assume_unidentified_terms=ASSUME,
+                        reject_legs=("no",), recovery_book=bk("m"))
+            picks.append(r["execution"]["recovery"]["action"])
+        assert picks[0] == picks[1], picks
+
+    def test_completion_is_gated_on_the_account_capability(self):
+        """Where the venue NETS the complement, buying it CLOSES rather
+        than completes and the par model does not apply.
+
+        Driven directly, because on a venue whose capability is UNKNOWN
+        the ENTRY is blocked too -- so there is no way to reach recovery
+        through step() on that venue, which is itself correct.
+        """
+        lp = loop(venue="polymarket-us")          # capability UNKNOWN
+        pos = sl.Position("m", yes=10, yes_basis=4.9)
+        rec = lp._recover_one_leg(
+            bk("m"), pos, {"leg": "yes", "filled": 10.0},
+            sl.SYNTHETIC, fresh=True)
+        assert rec["action"] != "COMPLETE"
+        assert rec["considered"]["pair_capability"] == vc.UNKNOWN
+
+    def test_a_partial_exit_keeps_the_remainder_exposed(self):
+        lp = loop()
+        thin = bk("m", no_ask=None, no_ask_size=0, yes_bid=.46,
+                  yes_bid_size=3)
+        r = lp.step(bk("m"), max_contracts=10,
+                    assume_unidentified_terms=ASSUME, reject_legs=("no",),
+                    recovery_book=thin)
+        rec = r["execution"]["recovery"]
+        assert rec["action"] == "EXIT"
+        assert rec["resolved"] is False
+        assert rec["remaining_exposed"] == pytest.approx(7.0)
+        assert rec["next"]["action"] == "UNRESOLVED_EXPOSURE"
 
     def test_it_exits_when_the_complement_is_gone(self):
         lp = loop()
@@ -296,8 +348,18 @@ class TestOneLegRecoveryIsAutonomous:
                     assume_unidentified_terms=ASSUME, reject_legs=("no",),
                     recovery_book=stuck)
         rec = r["execution"]["recovery"]
-        assert rec["action"] == "HOLD_EXPOSED"
+        assert rec["action"] == "UNRESOLVED_EXPOSURE"
         assert rec["directional_contracts"] == 10
+
+    def test_a_stale_recovery_observation_is_refused(self):
+        lp = loop()
+        stale = bk("m", age_s=600.0)
+        r = lp.step(bk("m"), max_contracts=10,
+                    assume_unidentified_terms=ASSUME, reject_legs=("no",),
+                    recovery_book=stale)
+        rec = r["execution"]["recovery"]
+        assert rec["action"] == "UNRESOLVED_EXPOSURE"
+        assert rec["blocker"] == "RECOVERY_OBSERVATION_UNUSABLE"
 
 
 class TestQuoteLifecycle:
@@ -306,7 +368,8 @@ class TestQuoteLifecycle:
         lp = loop()
         q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
         assert q["state"] == "RESTING"
-        assert lp.quoted_exposure == pytest.approx(4.5)
+        # 10 x 0.45 notional plus the maker fee the fill would incur
+        assert lp.quoted_exposure == pytest.approx(4.5 + 0.10)
         lp.cancel_quote(q["quote_id"])
         assert lp.quoted_exposure == 0.0
 
@@ -333,7 +396,8 @@ class TestQuoteLifecycle:
         before = lp.ledger.cash
         f = lp.fill_quote(q["quote_id"], qty=6, reason="test")
         assert lp.positions["m"].yes == 6
-        assert lp.ledger.cash == pytest.approx(before - 6 * 0.45)
+        assert lp.ledger.cash == pytest.approx(
+            before - (6 * 0.45 + VERIFIED.fill_fee(6, maker=True)))
         assert f["synthetic_fill"] is True
 
     def test_a_simulated_fill_is_synthetic_even_on_a_real_book(self):
@@ -358,3 +422,84 @@ class TestQuoteLifecycle:
         back = sl.ShadowLoop.restore(lp.snapshot(), fees=VERIFIED,
                                      venue="demo-venue")
         assert back.quoted_exposure == pytest.approx(lp.quoted_exposure)
+
+
+class TestReservationsSurvivePartialFills:
+    """Reproduced by review: filling 6 of 10 dropped the reservation on
+    the remaining 4 to zero while that remainder was still working."""
+
+    def test_a_partial_fill_keeps_the_remainder_reserved(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        assert lp.quoted_exposure == pytest.approx(4.5 + 0.1)
+        lp.fill_quote(q["quote_id"], qty=6, reason="t")
+        assert lp.quotes[q["quote_id"]]["state"] == "PARTIAL"
+        assert lp.quoted_exposure == pytest.approx(1.8 + 0.04)
+
+    def test_successive_partial_fills_complete_the_quote(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        for qty in (3, 3, 4):
+            r = lp.fill_quote(q["quote_id"], qty=qty, reason="t")
+            assert "refused" not in r
+        assert lp.quotes[q["quote_id"]]["state"] == "FILLED"
+        assert lp.positions["m"].yes == pytest.approx(10.0)
+        assert lp.quoted_exposure == 0.0
+
+    def test_a_partial_quote_can_still_be_cancelled(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.fill_quote(q["quote_id"], qty=6, reason="t")
+        c = lp.cancel_quote(q["quote_id"])
+        assert c["state"] == sl.CANCELLED
+        assert lp.quoted_exposure == 0.0
+
+    def test_a_partial_quote_can_still_be_repriced(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.fill_quote(q["quote_id"], qty=6, reason="t")
+        rp = lp.reprice_quote(q["quote_id"], new_price=0.44)
+        assert rp["size"] == pytest.approx(4.0)
+
+    def test_filling_past_the_remainder_is_capped(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.fill_quote(q["quote_id"], qty=6, reason="t")
+        lp.fill_quote(q["quote_id"], qty=99, reason="t")
+        assert lp.positions["m"].yes == pytest.approx(10.0)
+
+
+class TestReplacementIsANewOrder:
+
+    def test_a_reprice_beyond_cash_is_refused(self):
+        """Reproduced: 10 shares 0.45 -> 0.99 with $5 cash was accepted
+        and reserved 9.90."""
+        lp = loop(cash=5.0)
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        rp = lp.reprice_quote(q["quote_id"], new_price=0.99)
+        assert rp.get("refused") is not None
+        assert lp.quoted_exposure == pytest.approx(4.6)
+        assert lp.quotes[q["quote_id"]]["state"] == "RESTING"
+
+    def test_an_invalid_replacement_price_is_refused(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        for bad in (0.0, 1.0, -0.5, float("inf")):
+            assert lp.reprice_quote(q["quote_id"],
+                                    new_price=bad).get("refused")
+
+    def test_concurrent_quotes_compete_for_the_same_cash(self):
+        lp = loop(cash=6.0)
+        a = lp.quote(bk("m1"), side="yes", price=0.45, size=10)
+        b = lp.quote(bk("m2"), side="yes", price=0.45, size=10)
+        assert a["state"] == "RESTING"
+        assert b["state"] == "REFUSED", "the second quote double-spent cash"
+
+    def test_reservations_survive_a_restart(self):
+        lp = loop()
+        q = lp.quote(bk("m"), side="yes", price=0.45, size=10)
+        lp.fill_quote(q["quote_id"], qty=6, reason="t")
+        back = sl.ShadowLoop.restore(lp.snapshot(), fees=VERIFIED,
+                                     venue="demo-venue")
+        assert back.quoted_exposure == pytest.approx(lp.quoted_exposure)
+        assert back.quotes[q["quote_id"]]["state"] == "PARTIAL"

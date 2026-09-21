@@ -86,45 +86,62 @@ def main() -> int:
     check("basis", lp.positions["m1"].basis, 10.10)
     check("deployed", lp.deployed, 10.10)
 
-    head(2, "PARTIAL SALE  (basis removed proportionally)")
+    head(2, "PARTIAL SALE THROUGH THE ENGINE  (depth-limited)")
+    # ROUTED THROUGH lp.step(), not Position.sell(). The previous
+    # version called the accounting helper and patched the ledger by
+    # hand, which demonstrated the helpers and not the decision and
+    # execution path that would actually run.
     p = lp.positions["m1"]
-    realized = p.sell("yes", 4, 0.60, FEES.fill_fee(4, maker=True))
-    lp.ledger.move("SELL_YES", 4 * 0.60 - 0.04, "partial sale", "m1")
-    lp.ledger.fees_paid += 0.04
-    lp.ledger.realized_pnl += realized
-    # yes basis was 10 x 0.47 + 0.20 = 4.90; 4/10 of it = 1.96
-    print("      sold 4 of 10 YES at 0.60; 4/10 of the 4.90 yes basis out")
+    r = lp.step(bk("m1", yes_bid=.60, no_bid=.55, yes_bid_size=4,
+                   no_bid_size=4), max_contracts=0)
+    print("      engine decided %s for %s contracts (bid depth 4)"
+          % (r["decision"], r["size_requested"]))
+    for l in r["execution"]["legs"]:
+        print("      %-4s %-14s qty %5.4g @ %.4f  fee %.2f  realized %+.4f"
+              % (l["leg"], l["outcome"], l["filled"], l["price"],
+                 l.get("fee", 0), l.get("realized", 0)))
+    # 4 of 10 sold on each leg; 4/10 of each leg's basis leaves.
     check("yes remaining", p.yes, 6.0)
-    check("yes basis remaining", p.yes_basis, 2.94)
-    check("realized on the sale", realized, 4 * 0.60 - 0.04 - 1.96)
-    check("deployed (never negative)", lp.deployed, 2.94 + 5.20)
+    check("yes basis remaining", p.yes_basis, 4.90 * 0.6)
+    check("no basis remaining", p.no_basis, 5.20 * 0.6)
+    check("deployed (never negative)", lp.deployed, (4.90 + 5.20) * 0.6)
 
-    head(3, "COMPLETE SALE  (a closed position has zero basis)")
-    r2 = p.sell("yes", 6, 0.60, FEES.fill_fee(6, maker=True))
-    r3 = p.sell("no", 10, 0.55, FEES.fill_fee(10, maker=True))
-    lp.ledger.move("SELL_YES", 6 * 0.60 - 0.06, "close yes", "m1")
-    lp.ledger.move("SELL_NO", 10 * 0.55 - 0.10, "close no", "m1")
-    lp.ledger.realized_pnl += r2 + r3
+    head(3, "COMPLETE SALE THROUGH THE ENGINE  (zero remaining basis)")
+    r = lp.step(bk("m1", yes_bid=.60, no_bid=.55, yes_bid_size=50,
+                   no_bid_size=50), max_contracts=0)
+    print("      engine decided %s for %s contracts"
+          % (r["decision"], r["size_requested"]))
     check("yes contracts", p.yes, 0.0)
     check("no contracts", p.no, 0.0)
     check("yes basis", p.yes_basis, 0.0)
     check("no basis", p.no_basis, 0.0)
     check("deployed", lp.deployed, 0.0)
     print("      realized P&L is booked separately and NEVER reduces basis:")
-    check("position realized_pnl", p.realized_pnl, realized + r2 + r3)
+    check("ledger realized_pnl", lp.ledger.realized_pnl, p.realized_pnl)
+    # INDEPENDENT TOTAL-FEE ASSERTION. The previous run reported 0.44
+    # while the entry and the sales shown incurred more, because some
+    # fees were added to a ledger.move() and never to fees_paid.
+    entry_fees = 0.20 + 0.20                 # 10 contracts x 0.02, both legs
+    partial_fees = 0.08 + 0.08               # 4 contracts x 0.02, both legs
+    final_fees = 0.12 + 0.12                 # 6 contracts x 0.02, both legs
+    check("TOTAL fees_paid (independent)", lp.ledger.fees_paid,
+          entry_fees + partial_fees + final_fees)
+    check("position fees_paid agrees", p.fees_paid, lp.ledger.fees_paid)
 
     head(4, "ONE-LEG FILL -> AUTONOMOUS RECOVERY")
     # The second leg is rejected because the price MOVED, so recovery
     # re-reads the market. The re-read book is what decides the branch.
     for title, mid_, reread, expect in (
-            ("complement still executable -> COMPLETE", "m2",
-             None, "COMPLETE"),
+            ("complement executable, fresh read -> COMPLETE", "m2",
+             bk("m2"), "COMPLETE"),
+            ("no fresh recovery read -> UNRESOLVED", "m2b",
+             None, "UNRESOLVED_EXPOSURE"),
             ("complement gone, bid present -> EXIT", "m3",
              bk("m3", no_ask=None, no_ask_size=0, yes_bid=.46,
                 yes_bid_size=50), "EXIT"),
-            ("complement gone, no bid -> HOLD_EXPOSED", "m4",
+            ("complement gone, no bid -> UNRESOLVED", "m4",
              bk("m4", no_ask=None, no_ask_size=0, yes_bid=None,
-                yes_bid_size=0), "HOLD_EXPOSED")):
+                yes_bid_size=0), "UNRESOLVED_EXPOSURE")):
         lp2 = loop()
         rr = lp2.step(bk(mid_), max_contracts=10,
                       assume_unidentified_terms=ASSUME,

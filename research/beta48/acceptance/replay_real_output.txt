@@ -1,0 +1,38 @@
+==========================================================================
+REAL-OBSERVATION REPLAY  |  16 captured rows from research/beta48/acceptance/replay_sample_rows.json
+==========================================================================
+
+VENUE CONTRACT IN FORCE (not the demo fixture):
+   holds_both_legs_independently      UNKNOWN
+   complement_quote_source            ABSENT
+   native_merge                       UNSUPPORTED
+   maker_orders                       UNKNOWN
+   verified_fee_schedule              False
+
+NORMALIZATION
+   rows 16 | accepted 0 | rejected 16
+   complement sources: {"OBSERVED": 0, "DERIVED": 0, "ABSENT": 16}
+   rejection reasons:
+      BOOK_OLDER_THAN_DECISION_BOUND                  16
+      PRICE_IS_NOT_IDENTIFIED_SENTINEL_BID             5
+      MARKET_STATE_EXPIRED                             2
+      COLLECTOR_MARKED_UNREADABLE:NO_BOOK_LEVELS_PUBLISHED     2
+      PRICE_IS_NOT_IDENTIFIED_SENTINEL_ASK             2
+
+PAIRING (same market_id + two distinct outcome legs)
+   genuine complement pairs formed: 0
+   contracts that could not be paired: 0
+
+DECISIONS (real engine, institutional capabilities, no fills)
+
+   decision counts: {}
+   blockers encountered:
+
+==========================================================================
+WHAT THIS ESTABLISHES, AND WHAT IT DOES NOT
+==========================================================================
+   Establishes: the engine consumes REAL captured observations,
+   normalizes them under institutional semantics, and reaches a
+   decision on every accepted row without fabricating anything.
+   Does NOT establish: any edge, any fill, any profitability.
+   No order was simulated and no performance number exists here.

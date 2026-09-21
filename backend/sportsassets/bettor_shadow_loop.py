@@ -803,12 +803,17 @@ class ShadowLoop:
         open_markets = len(
             {k for k, v in self.positions.items() if not v.flat}
             | quoted_markets)
+        # CASH IS CHECKED AGAINST EVERY LIVE RESERVATION, not just this
+        # market's. Two quotes on two different markets were each being
+        # measured against the full balance, so both were admitted
+        # against cash only one of them could actually spend.
         return self.limits.check(
             pos=held,
             add_contracts=size + market_quoted_contracts,
             add_cash=reserve + market_quoted,
             deployed=self.deployed + self.quoted_exposure,
-            open_markets=open_markets, cash=self.ledger.cash)
+            open_markets=open_markets,
+            cash=self.ledger.cash - self.quoted_exposure)
 
     def touch(self, quote_id: str) -> dict:
         """The market traded at our price. THAT IS NOT A FILL."""
