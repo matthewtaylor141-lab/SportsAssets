@@ -66,6 +66,11 @@ UNMATCHED = "UNMATCHED"      # the venue does not list this slug at all
 # is never counted as RESOLVED and never carries verified semantics.
 RESOLVED_DERIVED = "RESOLVED_DERIVED"
 
+# Settlement units. `settlementPrice` is a USD Amount and the type says
+# nothing about whether a settled binary reports 1, 1.0000 or 100. A
+# value outside [0,1] is reported as unverified, never divided by 100.
+UNITS_NOT_ESTABLISHED = "UNITS_NOT_ESTABLISHED"
+
 # MEASURED 2026-09-21, run 35641425742, on a real slug. The market
 # listing carries these 34 keys:
 #
@@ -298,33 +303,115 @@ def resolution_fields(client, market_slug: str) -> dict:
     return out
 
 
+def read_settlement(client, market_slug: str) -> dict:
+    """`GET /v1/markets/{slug}/settlement` -- the venue's own answer.
+
+    I did not check for this endpoint and inferred resolution from
+    `outcomePrices` on the market listing instead. It exists:
+    `client.markets.settlement(slug)`, returning `MarketSettlement =
+    {marketSlug, settlementPrice: Amount, settledAt: str}` where
+    `Amount = {value: str, currency: "USD"}`.
+
+    UNITS ARE NOT ASSUMED. `settlementPrice` is a USD Amount, and
+    whether a settled binary contract reports "1", "1.0000", "100" (if
+    cents) or something else is NOT established by the type. So the raw
+    string is carried through unparsed, `settlement_price_raw`, and a
+    numeric reading is offered only when it lands in [0, 1] -- with
+    `units_status` saying which. A value outside that range is reported
+    as UNITS_UNVERIFIED rather than divided by 100 on a hunch.
+
+    THE UNRESOLVED RESPONSE IS NOT ASSUMED EITHER. Whether an open
+    market 404s, 400s, or returns a zero price is unknown until a real
+    unresolved slug is read. A `NotFoundError` is reported as PENDING
+    -- the market exists and has no settlement -- and every other error
+    as UNREADABLE with its type, so the two never merge.
+    """
+    from . import pmus
+
+    out = {"reader": READER_VERSION, "slug": market_slug,
+           "status": UNREADABLE, "settlement_price_raw": None,
+           "settlement_price": None, "units_status": UNITS_NOT_ESTABLISHED,
+           "settled_at": None, "currency": None, "error": None,
+           "endpoint": "/v1/markets/{slug}/settlement"}
+    c = client if client is not None else pmus._get_client()
+    try:
+        resp = c.markets.settlement(market_slug) or {}
+    except Exception as exc:  # noqa: BLE001 -- named, never swallowed
+        name = type(exc).__name__
+        out["error"] = name
+        # A market with no settlement is PENDING. Any other failure is
+        # a failure, and collapsing the two is what made an empty table
+        # read as "nothing has matured".
+        out["status"] = PENDING if name == "NotFoundError" else UNREADABLE
+        return out
+
+    amt = resp.get("settlementPrice")
+    raw = amt.get("value") if isinstance(amt, dict) else amt
+    out["settlement_price_raw"] = str(raw) if raw is not None else None
+    out["currency"] = (amt.get("currency") if isinstance(amt, dict)
+                       else None)
+    out["settled_at"] = (str(resp["settledAt"])
+                         if resp.get("settledAt") is not None else None)
+
+    if raw is None:
+        out["error"] = "NO_SETTLEMENT_PRICE_IN_RESPONSE"
+        return out
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        out["error"] = "SETTLEMENT_PRICE_UNPARSABLE"
+        return out
+    if 0.0 <= val <= 1.0:
+        out["settlement_price"] = val
+        out["units_status"] = "DOLLARS_PER_CONTRACT_CONSISTENT"
+        out["status"] = RESOLVED
+    else:
+        # Could be cents, could be a different convention, could be a
+        # market that does not settle in [0,1]. Not divided by 100.
+        out["units_status"] = "UNITS_UNVERIFIED_OUT_OF_0_1"
+        out["error"] = "SETTLEMENT_PRICE_%s_OUTSIDE_0_1" % raw
+    return out
+
+
 def read_resolution(client, market_slug: str) -> dict:
     """Has this market resolved, and to what?
 
-    FOUR OUTCOMES, NOT TWO. `bettor_state_settlements` was empty and the
+    FIVE OUTCOMES, NOT TWO. `bettor_state_settlements` was empty and the
     acceptance package read that as "nothing has matured". It could
     equally have meant the read failed, or the slug is not listed, or
     nothing ever called the writer -- and it was in fact the last of
     those. So each is returned separately and by name:
 
-      RESOLVED    the venue reports an outcome
-      PENDING     listed and open, no outcome yet
-      UNREADABLE  the read failed, or the payload carries no field we
-                  recognise -- which is a fact about OUR field list,
-                  reported with the keys that WERE present
-      UNMATCHED   the venue does not list this slug
+      RESOLVED          the venue's settlement endpoint gives a price
+      RESOLVED_DERIVED  closed, outcome prices converged to 1 and 0 --
+                        an inference from a price, never counted as
+                        RESOLVED
+      PENDING           listed and open, or settlement not found yet
+      UNREADABLE        the read failed, or the payload made no sense
+      UNMATCHED         the venue does not list this slug
 
-    A `closed` market with no readable outcome is UNREADABLE, not
-    RESOLVED: closed says trading stopped, not who won, and inferring
-    the second from the first is the kind of substitution
-    `SETTLEMENT_SEMANTICS_STATUS` exists to prevent.
+    THE SETTLEMENT ENDPOINT IS TRIED FIRST, because it is the venue's
+    own answer rather than ours. Only when it does not resolve does this
+    fall back to the market listing.
     """
     from . import pmus
+
+    st = read_settlement(client, market_slug)
+    if st["status"] == RESOLVED:
+        return {"reader": READER_VERSION, "slug": market_slug,
+                "status": RESOLVED, "outcome": st["settlement_price_raw"],
+                "outcome_field": "settlementPrice",
+                "settlement_price": st["settlement_price"],
+                "units_status": st["units_status"],
+                "settled_at": st["settled_at"], "closed": None,
+                "error": None, "keys_seen": [],
+                "source": "/v1/markets/{slug}/settlement"}
 
     out = {"reader": READER_VERSION, "slug": market_slug,
            "status": UNREADABLE, "outcome": None, "settled_at": None,
            "outcome_field": None, "closed": None, "error": None,
-           "keys_seen": []}
+           "keys_seen": [], "settlement_probe": st["status"],
+           "settlement_error": st["error"]}
     try:
         resp = _markets(client, pmus).list({"slug": [market_slug]})
         markets = list((resp or {}).get("markets") or [])

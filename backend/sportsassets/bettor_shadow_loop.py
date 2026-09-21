@@ -514,6 +514,14 @@ class ShadowLoop:
                "reason": decision["reason"],
                "data_quality": decision["data_quality"],
                "size_requested": decision["size_contracts"],
+               # THE WHOLE DECISION RECORD, not a summary of it. The
+               # step record kept four fields and dropped `candidates`,
+               # so every blocker -- the reason each action was refused
+               # -- was lost the moment a decision passed through the
+               # loop. A caller wanting them had to call de.decide()
+               # itself, which is two decisions for one observation and
+               # two chances for them to disagree.
+               "engine": decision,
                "execution": None, "risk": None,
                "assumed": assumed,
                "inventory_before": {"yes": pos.yes, "no": pos.no},

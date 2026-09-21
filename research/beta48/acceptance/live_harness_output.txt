@@ -1,0 +1,136 @@
+
+============================================================================
+BETTOR LIVE HARNESS  |  16 real books through the real stream
+============================================================================
+   TRANSPORT  BETTOR_MARKET_STREAM_V1
+   LOOP       BETTOR_LIVE_LOOP_V1
+   FEES       PMUS_PUBLISHED_2026_09_17
+   SOCKET     REPLACED BY A FILE. No credentials in this
+              container, so nothing here establishes that the
+              socket connects or that subscriptions are taken.
+
+============================================================================
+1. UNIVERSE SELECTION -- liquidity and activity, not a sweep
+============================================================================
+   considered 16 | eligible 0 | selected 0
+   excluded by reason: {"ASK_ABOVE_MAX_PRICE": 7, "SPREAD_BELOW_MIN_TICKS": 7, "NO_TRADED_VOLUME_FIGURE": 2}
+   the activity test is the one the old capacity analysis
+   never applied: a market that does not trade cannot fill a
+   quote however wide its book looks.
+
+============================================================================
+2. SUBSCRIPTION LIFECYCLE -- requested, then confirmed by data
+============================================================================
+   queued 16 (cap 600, batch 100 -- the documented ceiling)
+      confirmed before any data                      0              expected 0              OK
+      confirmed after data                           16             expected 16             OK
+   There is no positive acknowledgment in this protocol:
+   MarketMessage carries no 'subscribed' reply, so the
+   arrival of data IS the confirmation.
+
+============================================================================
+3. DECISIONS -- driven by updates, three clocks per record
+============================================================================
+   books examined 16 | decided 16 | ineligible 0 | rejected 0
+   by action  : {"NO_TRADE": 16}
+   blockers   : {"COMPLEMENT_ABSENT": 16, "FV_BETTOR_INDEPENDENT_NOT_VALIDATED": 16, "MERGE_NOT_OBSERVED_ON_INSTITUTIONAL": 16, "NO_PAIRED_INVENTORY": 16, "P_FILL_NOT_IDENTIFIED": 16}
+   freshness  : n=16 min=1.0002 median=1.0019 max=1.0032 (bound 10.0s)
+
+   EXAMPLE RECORD -- every clock persisted
+      market_id        aec-modus-scotay-scorob-2026-09-22
+      source_ts        2026-09-21T19:12:42.069349+00:00
+      received_at      2026-09-21T19:12:43.069360+00:00
+      decided_at       2026-09-21T19:12:43.069588+00:00
+      source_age_s     1.0002
+      selected         NO_TRADE
+      blockers         ['COMPLEMENT_ABSENT', 'FV_BETTOR_INDEPENDENT_NOT_VALIDATED', 'MERGE_NOT_OBSERVED_ON_INSTITUTIONAL', 'NO_PAIRED_INVENTORY', 'P_FILL_NOT_IDENTIFIED']
+      every decision carries a source clock          True           expected True           OK
+      every decision carries a receipt clock         True           expected True           OK
+      refusals are records too                       True           expected True           OK
+
+============================================================================
+4. THE SAME VENUE TIMESTAMP IS DECIDED ONCE
+============================================================================
+      new records from re-deciding the same books    0              expected 0              OK
+   Not an optimisation: re-deciding one observation would
+   multiply it into several records and inflate every count.
+
+============================================================================
+5. A TRADE AT OUR PRICE IS A TOUCH, NEVER A FILL
+============================================================================
+   trades observed 3 | orders submitted 0
+   a trade at our quoted price is a TOUCH. We hold no order, so it establishes nothing about a fill of ours
+      orders submitted                               0              expected 0              OK
+
+============================================================================
+6. RECONCILED ACCOUNTING -- checked independently
+============================================================================
+   {"opening_cash": 1000.0, "movements": 0, "sum_of_movements": 0, "closing_cash": 1000.0, "residual_must_be_0": 0.0, "reconciled": true}
+      ledger reconciles                              True           expected True           OK
+      residual                                       0.0            expected 0.0            OK
+      fees paid                                      0.0            expected 0.0            OK
+      combined exposure                              0.0            expected 0.0            OK
+      worst-case loss                                0.0            expected 0.0            OK
+      open positions                                 0              expected 0              OK
+   Zero because every action was refused, which is the
+   engine working -- not an accounting that was never used.
+
+============================================================================
+7. A DISCONNECT INVALIDATES EVERY BOOK  (the defect corrected)
+============================================================================
+      connected        eligible=True   reason=ELIGIBLE
+      eligible while connected                       True           expected True           OK
+      dropped          eligible=False  reason=INVALIDATED_BY_DISCONNECT
+      ineligible on drop                             False          expected False          OK
+      reconnected      eligible=False  reason=INVALIDATED_BY_DISCONNECT
+      STILL ineligible after reconnect               False          expected False          OK
+      (the old transport served this book for up to 90s)
+      market spoke     eligible=True   reason=ELIGIBLE
+      eligible only after a fresh book               True           expected True           OK
+
+============================================================================
+8. STALE AND HALTED, EACH WITH ITS OWN REASON
+============================================================================
+      90s-old book     eligible=False  reason=STALE_AT_VENUE_CLOCK     age=90.0s
+      90s book refused at the 10s bound              STALE_AT_VENUE_CLOCK expected STALE_AT_VENUE_CLOCK OK
+      halted market    eligible=False  reason=MARKET_NOT_OPEN
+      halted refused                                 MARKET_NOT_OPEN expected MARKET_NOT_OPEN OK
+      The old cache kept neither the clock nor the state, so
+      a five-hour venue halt looked like a quiet market.
+
+============================================================================
+9. SETTLEMENT INGESTION -- the venue's own endpoint
+============================================================================
+   counts    : {"RESOLVED": 3, "RESOLVED_DERIVED": 0, "PENDING": 3, "UNREADABLE": 3, "UNMATCHED": 3, "INGESTED": 3, "WRITE_FAILED": 0}
+   reconciled: True   resolved_minus_ingested: 0
+      every resolution read was stored               True           expected True           OK
+      rows written                                   3              expected 3              OK
+   The endpoint is /v1/markets/{slug}/settlement, returning
+   {marketSlug, settlementPrice: Amount, settledAt}. UNITS
+   ARE NOT ASSUMED: a value outside [0,1] is reported as
+   UNITS_UNVERIFIED rather than divided by 100 on a hunch.
+
+============================================================================
+10. RESTART -- balances, inventory and quotes recovered
+============================================================================
+      cash after restart                             1000.0         expected 1000.0         OK
+      positions after restart                        16             expected 16             OK
+      reconciles after restart                       True           expected True           OK
+
+============================================================================
+WHAT THIS RUN IS
+============================================================================
+   REAL       the books, their clocks, their states, their
+              ladders; the fee schedule; every refusal.
+   REAL CODE  the stream handler, eligibility, normalizer,
+              engine, shadow ledger, settlement ingestion.
+   REPLACED   the socket. A file is not a feed, so every
+              record here is REPLAY_DECISION and none is
+              PROSPECTIVE_SHADOW.
+   UNPROVEN   that the socket connects, that subscriptions
+              are accepted, the venue's real update rate, and
+              whether a book message replaces or deltas.
+   ORDERS     0, and there is no code path that could place one.
+
+============================================================================
+ALL INDEPENDENT ASSERTIONS PASSED
