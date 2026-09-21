@@ -1,11 +1,19 @@
 # THE ISOLATED OBSERVATION RELEASE
 
-Branch **`claude/bettor-observation-release`**, based on production
-**`3349219`**. Decision-only. No orders, no capital, no credential
-moved, no accounting record touched, `mirror_live=false` unchanged.
+Branch **`claude/bettor-observation-release`**, based on **`3349219`**.
+Decision-only. No orders, no capital, no credential moved, no
+accounting record touched, `mirror_live=false` unchanged.
 
-The 68-commit branch `claude/session-njaewf` is untouched and is not
-merged by this. It remains the development branch.
+> **READ `ACTIVATION.md` §0 FIRST.** This document describes the
+> release as an isolated diff against `3349219`, and that is still
+> what it is — but `3349219` is **not** what production runs.
+> Measured 2026-09-21 through `render-ops action=deploys`:
+> `sportsassets-workers` is live on `0442d57`, the tip of
+> `claude/session-njaewf`, and every SportsAssets service tracks that
+> branch with `autoDeploy=yes`. The isolation here is real and still
+> the point; the **deployment** is a merge onto the live branch, whose
+> marginal diff is 24 files, and the prepared merge is
+> `claude/bettor-observation-activation` (`e293344`).
 
 ---
 
@@ -125,7 +133,7 @@ the build if they drift.
 | outbox | 20,000 records | overflow counted as `record_dropped_outbox_full` |
 | **recovery time** | **O(cursors), not O(journal)** | recovery reads the cursor table and one ledger row; **the journal is never replayed** |
 | write loss, flushes succeeding | one flush interval (2 s) | batched outbox |
-| write loss, **SIGTERM** | **one flush interval, measured** | see below |
+| write loss, **SIGTERM** | **whatever is uncommitted at that instant** | see below |
 | write loss, **database outage** | **grows until the outbox overflows, then records DROP** | counted, and the window is marked incomplete |
 
 ### The guarantee, stated accurately
@@ -151,12 +159,21 @@ a real server: replaying a 120-record batch leaves **120 rows, not
 `workers/all.py` installs no SIGTERM handler, and Python's default
 disposition terminates the process without running `finally` blocks
 (verified in this container — exit 143, the `finally` never ran). A
-Render restart or redeploy arrives as SIGTERM, so up to one flush
-interval is lost, and `oldest_uncommitted_age_s` in the last report
-before the restart is the size of it. The `finally` covers
-**cancellation** and the kill-switch exit, not SIGTERM. The one-line
-remedy — a SIGTERM handler in `all.py` — changes shutdown behaviour
-for all eighteen loops and is **not** in this release.
+Render restart or redeploy arrives as SIGTERM, so **whatever is
+uncommitted at that instant is lost.**
+
+**That is not "two seconds".** Two seconds is the healthy case, where
+the previous flush succeeded. The actual bound is
+`uncommitted_records` and `oldest_uncommitted_age_s` in the last
+report before the restart — under a database outage those grow until
+the outbox overflows, at which point records are DROPPED and the
+window is marked incomplete. Read the number; do not assume the
+interval.
+
+The `finally` covers **cancellation** and the kill-switch exit, not
+SIGTERM. The one-line remedy — a SIGTERM handler in `all.py` —
+changes shutdown behaviour for all 25 registered loops and is **not**
+in this release.
 
 **The schema is verified, not assumed.** `CREATE TABLE IF NOT EXISTS`
 is a no-op against a table that already exists with an older shape, so
@@ -211,8 +228,8 @@ BETTOR_LIVE_STATE_DISK=1
 
 * a Render service with a disk **cannot run more than one instance**,
   and its deploys **stop the old instance before starting the new
-  one**. That changes the deploy behaviour of **all eighteen loops in
-  this process**, not just the new one.
+  one**. That changes the deploy behaviour of **all 25 loops in this
+  process**, not just the new one.
 * a disk **cannot be shrunk**, the same permanent commitment the
   database's `diskSizeGB` already carries.
 * without `BETTOR_LIVE_STATE_DISK=1` the worker **refuses to start** on
@@ -333,7 +350,7 @@ delete the others.
 
 **Blocking I/O on the shared event loop.** `_record` opened the
 journal and `fsync`ed it *inline inside `decide_slug`*, which `main()`
-calls directly — on the event loop eighteen sibling worker loops share.
+calls directly — on the event loop 24 sibling worker loops share.
 The previous docstring claimed it ran in a thread. It did not. Records
 now go to a bounded outbox and are flushed in batches;
 `test_deciding_does_no_io_at_all` asserts the journal is still empty
@@ -492,7 +509,7 @@ One decision: **merge this branch and deploy `sportsassets-workers`.**
 
 | variable | default | effect |
 |---|---|---|
-| `BETTOR_LIVE_LOOP` | `on` | **`off` stops the loop with no deploy** |
+| `BETTOR_LIVE_LOOP` | `on` | `off` stops the loop — **but it is read from the process's own environment, so Render applies it by RESTARTING the service.** See ACTIVATION.md §4. |
 | `BETTOR_LIVE_STATE` | `postgres` | `file` needs `BETTOR_LIVE_STATE_DISK=1`; `memory` needs `BETTOR_LIVE_ALLOW_EPHEMERAL=1` |
 | `BETTOR_LIVE_MAX_CONTRACTS` | **`0`** | sizes a **simulated** execution only |
 | `BETTOR_LIVE_DISCOVERY_PAGES` | `6` | 6 × 500 = 3,000 markets measured; ≤100 subscribed |
@@ -529,7 +546,7 @@ bounded and every bound is tested.
 
 | severity | action |
 |---|---|
-| immediate | `BETTOR_LIVE_LOOP=off` — the loop exits its `while`, the `finally` stops the stream and flushes |
+| immediate | `BETTOR_LIVE_LOOP=off` — Render restarts the service; the NEW process reads the flag and returns. The old process is SIGTERMed and its `finally` does **not** run. |
 | full | revert the `all.py` commit |
 
 **Triggers:** any execution with `MAX_CONTRACTS=0`; `persist_failures`
