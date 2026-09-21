@@ -390,6 +390,29 @@ no server, which is the case in this repository's CI. That is why
 `bettor_durability_proof.py` exists: it runs the same code against a
 real server and kills a process between the write and the read.
 
+### Pre-existing failures this release does not cause
+
+Six test files assert that the newest file in `backend/migrations/` is
+`064_`. It has been `092_` for some time, so **all six already fail at
+`3349219`** — run there in a clean worktree to be sure:
+
+| file | at `3349219` | on this branch |
+|---|---|---|
+| `test_c10_nfl_spreads` | 1 failed, 31 passed | 1 failed, 31 passed |
+| `test_e12_flow_only` | 1 failed, 29 passed | 1 failed, 29 passed |
+| `test_e12b_witness` | 1 failed, 28 passed | 1 failed, 28 passed |
+| `test_e18_rest_life` | 1 failed, 20 passed | 1 failed, 20 passed |
+| `test_e5_frozen_exits` | 1 failed, 30 passed | 1 failed, 30 passed |
+| `test_fill_t2_record` | 1 failed, 16 passed | 1 failed, 16 passed |
+
+Adding `093` changes the value in the assertion message and nothing
+else. **They are not repaired here**: they belong to other lanes and
+re-pinning them is an unrelated change.
+
+The three test files that import `workers/all.py` — where the
+registration lives — pass: `test_workers_survive_a_dead_db`,
+`test_obs_safety`, `test_obs_config_independence`, **59 passed**.
+
 ## 11. THE ACTIVATION DECISION
 
 One decision: **merge this branch and deploy `sportsassets-workers`.**
