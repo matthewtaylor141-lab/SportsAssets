@@ -12,7 +12,7 @@ printed, extracted, transferred or added to GitHub.
 |---|---|---|
 | **Implementation** (gate, harness, release controls) | **PASS** | 275 focused tests; whole 228-file surface matches the `fc80f95` baseline |
 | **Production verification** (gate) | **NOT PROVEN — code-only** | the gate has never run in production; `3349219` predates it |
-| **Reconciliation** | **BLOCKED, partially routed** | venue identity settled; API path built; activities read still blocked |
+| **Reconciliation** | **BLOCKED, partially routed** | venue identity settled; API path works; venue positions list came back EMPTY, cause unresolved; activities read still blocked |
 | **Collector feasibility** | **INFEASIBLE at current budget; recommendation contingent** | measured 1.19–1.28× oversubscribed |
 | **Strategy readiness** | **NOT ASSESSED** | out of scope; no claim made |
 
@@ -147,12 +147,39 @@ What *is* venue-derived: `external_count`, computed from the venue
 portfolio's `open_positions` against our own order ledger. **Zero
 externals** — no venue position on a market we never ordered.
 
-**And zero externals is ambiguous**, which I am not going to paper
-over: either every venue position matches our ledger, or the venue
-holds no open positions at all. The second would mean $16,180.53 is
-entirely stale. A follow-up run printing the payload shape and every
-list length was dispatched (35620634497) and was still queued behind
-saturated runners at the time of writing. **Unresolved.**
+**Zero externals was ambiguous**, and resolving it exposed a bug in my
+own reader.
+
+The parser did `rows = pm.get(key) or acc.get(key)`. **An empty list is
+falsy**, so an empty `positions` list fell through to `acc.get(key)` →
+`None` → "not a list" → skipped without a word. The first run printed
+no positions line and I could not tell whether the key was missing or
+the list was empty.
+
+Reading the endpoint settles that much: `pm["positions"]` is assigned
+unconditionally, so the key exists. **The list was empty.** The venue
+returned no platform positions while `live_orders` carries 52 rows in
+`status='filled'` worth $16,180.53.
+
+**That is a large claim and it has a second reading I am not going to
+skip.** An empty list also results from `account_snapshot()` failing or
+the venue being unconfigured — in which case the read is inconclusive,
+not a zero. `pm.configured` and `pm.error` distinguish them:
+
+- `configured` true, no `error`, empty `positions` → **the venue holds
+  nothing**, and essentially the whole $16,180.53 is stale ledger state.
+- anything else → **inconclusive**, and a failed call must not be read
+  as a zero.
+
+The parser is fixed to print `EMPTY LIST (present, zero rows)` versus
+`KEY ABSENT` explicitly, and to print `configured`, `error`, `cash`,
+`open_value` and `account_value`. Two runs are dispatched
+(35620634497, 35621014265); **both have been queued behind saturated
+GitHub runners for roughly thirty minutes.** Blocked on runner
+availability, not on analysis.
+
+**STATUS: the venue's platform-positions list is empty. Whether that
+means "holds nothing" or "read failed" is UNRESOLVED.**
 
 **Scope:** these endpoints return *current* state. No trade-level
 activity, no settlement events, so this lane **cannot** match the 52
