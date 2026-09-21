@@ -392,6 +392,36 @@ CREATE TABLE IF NOT EXISTS bettor_live_ledger (
 OWN_TABLES = ("bettor_live_journal", "bettor_live_cursor",
               "bettor_live_ledger")
 
+# ── CREATE TABLE IF NOT EXISTS IS NOT CONCURRENCY-SAFE ───────────────
+#
+# MEASURED, not assumed: twelve sessions running the same
+# `CREATE TABLE IF NOT EXISTS` at once produced 2 successes and 10
+# failures -- DuplicateTableError, UniqueViolationError on
+# pg_type_typname_nsp_index, and DuplicateObjectError. `IF NOT EXISTS`
+# checks the catalog BEFORE taking the lock, so concurrent creators
+# race.
+#
+# This matters here because the two things that create this schema run
+# in the SAME DEPLOYMENT: `start.sh` runs the API's migration runner
+# (which applies 093) while the worker boots and calls `start()`.
+# Without serialization the worker's store would raise, `main()` would
+# report STORE_START_FAILED, and the observation run would simply not
+# happen on that deploy.
+#
+# So both sides take ONE advisory lock. The worker takes it here;
+# migration 093 takes it as its first statement, inside the
+# transaction the runner already wraps each migration in. Whoever is
+# second waits, finds the tables present, and proceeds.
+#
+# A lock is not enough on its own -- the other party may finish
+# between our catalog check and our lock -- so after ANY failure the
+# schema is VERIFIED and a complete schema is accepted however it got
+# there.
+SCHEMA_LOCK_KEY = 930_930_093        # fixed; also in migration 093
+SCHEMA_LOCK_TIMEOUT_MS = 10_000      # bounded wait for the lock itself
+SCHEMA_ATTEMPTS = 5                  # bounded retries
+SCHEMA_BACKOFF_S = (0.5, 1.0, 2.0, 4.0)   # bounded total ~ 17.5 s + locks
+
 CURSOR_FIELDS = ("first_seen_at", "last_seen_at", "last_source_ts",
                  "last_decided_at", "event_at", "settle_status",
                  "settle_attempts", "settle_failures", "settle_next_at",
@@ -737,34 +767,68 @@ class PgStore:
         return self._pool
 
     async def start(self) -> dict:
-        """Create the schema, then VERIFY it.
+        """Create the schema, then VERIFY it. SAFE UNDER CONCURRENCY.
 
         `CREATE TABLE IF NOT EXISTS` is a no-op against a table that
         already exists with an OLDER SHAPE -- it adds no column and
-        raises nothing, so a schema change would half-apply and the
-        first write would fail at runtime instead of at startup. The
-        verification below turns that into a refusal to start, which
-        `main()` reports as STORE_START_REFUSED.
+        raises nothing -- and it is not safe to run concurrently, which
+        is exactly what happens when the API's migration runner and
+        this worker boot in the same deployment. Both problems are
+        handled here: one advisory lock, bounded retries, and a
+        verification that accepts a complete schema however it arrived.
         """
         pool = await self._get_pool()
-        async with pool.acquire() as con:
-            # THE WORKERS NEVER RUN MIGRATIONS. Idempotent and
-            # additive: three CREATE TABLE IF NOT EXISTS and three
-            # indexes, touching no existing table.
-            await con.execute(DDL)
-            missing = await self._missing_columns(con)
-        if missing:
-            return {"ok": False, "backend": self.backend,
-                    "why": "SCHEMA_MISMATCH", "missing": missing,
-                    "remedy": ("these tables exist with an older shape. "
-                               "Apply migrations/093_bettor_live_"
-                               "observation.sql, or drop the three "
-                               "bettor_live_* tables if they hold "
-                               "nothing worth keeping")}
-        return {"ok": True, "backend": self.backend, "lane": LANE,
-                "schema_version": SCHEMA_VERSION,
-                "tables": list(OWN_TABLES),
-                "durable_across": list(self.durable_across)}
+        last_error = None
+        for attempt in range(SCHEMA_ATTEMPTS):
+            try:
+                async with pool.acquire() as con:
+                    async with con.transaction():
+                        # BOUNDED WAIT. Without this a lock held by a
+                        # stuck migration would hang the worker's boot
+                        # instead of failing it.
+                        await con.execute("SET LOCAL lock_timeout = '%dms'"
+                                          % SCHEMA_LOCK_TIMEOUT_MS)
+                        await con.execute(
+                            "SELECT pg_advisory_xact_lock($1)",
+                            SCHEMA_LOCK_KEY)
+                        await con.execute(DDL)
+            except Exception as exc:  # noqa: BLE001
+                last_error = type(exc).__name__
+                log.warning("bettor_live_store: schema attempt %d/%d "
+                            "failed (%s)", attempt + 1, SCHEMA_ATTEMPTS,
+                            last_error)
+            # VERIFY REGARDLESS. The other party may have created it
+            # between our check and our lock, and a complete schema is
+            # a complete schema however it got there.
+            try:
+                async with pool.acquire() as con:
+                    missing = await self._missing_columns(con)
+            except Exception as exc:  # noqa: BLE001
+                last_error = type(exc).__name__
+                missing = ["<verification failed: %s>" % last_error]
+            if not missing:
+                return {"ok": True, "backend": self.backend, "lane": LANE,
+                        "schema_version": SCHEMA_VERSION,
+                        "tables": list(OWN_TABLES),
+                        "schema_attempts": attempt + 1,
+                        "schema_last_error": last_error,
+                        "durable_across": list(self.durable_across)}
+            if attempt < len(SCHEMA_BACKOFF_S):
+                import asyncio as _a
+                await _a.sleep(SCHEMA_BACKOFF_S[attempt])
+        # THE EXPLICIT FAILURE PATH. `main()` turns this into
+        # STORE_START_REFUSED and does not start the loop -- a run
+        # whose records have nowhere to go is not a run.
+        return {"ok": False, "backend": self.backend,
+                "why": "SCHEMA_NOT_READY", "missing": missing,
+                "attempts": SCHEMA_ATTEMPTS, "last_error": last_error,
+                "remedy": ("either the tables exist with an older shape "
+                           "-- apply migrations/093_bettor_live_"
+                           "observation.sql, or drop the three "
+                           "bettor_live_* tables if they hold nothing "
+                           "worth keeping -- or the advisory lock %d is "
+                           "held by a stuck migration"
+                           % SCHEMA_LOCK_KEY)}
 
     async def _missing_columns(self, con) -> list:
         want = {

@@ -23,6 +23,18 @@
 -- settle_derived_outcome IS SEPARATE FROM settle_outcome. A market
 -- that is legitimately open is not a failing read, and an inference
 -- from converged prices is not the venue's own answer.
+--
+-- THE ADVISORY LOCK BELOW IS NOT DECORATION. `CREATE TABLE IF NOT
+-- EXISTS` checks the catalog before taking its lock, so concurrent
+-- creators race: measured, twelve sessions running this DDL at once
+-- gave 2 successes and 10 failures (DuplicateTableError,
+-- UniqueViolationError on pg_type_typname_nsp_index,
+-- DuplicateObjectError). The API's migration runner applies this file
+-- while the worker calls bettor_live_store.PgStore.start() in the SAME
+-- DEPLOYMENT, and both take THIS key. The runner already wraps each
+-- migration in a transaction, so the lock is released with it.
+
+SELECT pg_advisory_xact_lock(930930093);
 
 CREATE TABLE IF NOT EXISTS bettor_live_journal (
     id            BIGSERIAL   PRIMARY KEY,
