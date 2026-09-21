@@ -14,15 +14,20 @@ WHAT MEASUREMENT SAYS ABOUT THAT CLAIM. Of 1,538 captured observations,
 capture records no end time, so how many concluded is still not
 readable -- but "none has matured" was never supported.
 
-FIVE COUNTS, REPORTED SEPARATELY. The directive is explicit and the
+SIX COUNTS, REPORTED SEPARATELY. The directive is explicit and the
 reason is the mistake above: one number cannot distinguish these.
 
-  RESOLVED    the venue reports an outcome for this market
-  PENDING     listed and open; no outcome yet
-  UNREADABLE  the read failed, or the payload carries no field we
-              recognise as an outcome
-  UNMATCHED   the venue does not list this market at all
-  INGESTED    a settlement row was actually WRITTEN for it
+  RESOLVED          the venue REPORTS an outcome for this market
+  RESOLVED_DERIVED  closed, with outcome prices converged to 1 and 0.
+                    MEASURED 2026-09-21: the venue reports no winner on
+                    the market listing at all, so this is the only
+                    settlement signal available -- and it is an
+                    INFERENCE FROM A PRICE, never counted as RESOLVED
+  PENDING           listed and open; no outcome yet
+  UNREADABLE        the read failed, or the payload carries nothing we
+                    recognise as an outcome
+  UNMATCHED         the venue does not list this market at all
+  INGESTED          a settlement row was actually WRITTEN for it
 
 **INGESTED IS NOT RESOLVED.** A resolution we read but failed to write
 is a resolution we do not have, and reporting the read count as the
@@ -34,11 +39,13 @@ is passed through as a string, not reparsed into our own clock and not
 defaulted to now. A settlement stamped with the time we happened to
 read it is a settlement whose timing we have destroyed.
 
-SEMANTICS STAY UNVERIFIED. "Did this slug settle at 1 for the side we
-quoted" is a venue convention, not arithmetic.
-`SETTLEMENT_SEMANTICS_STATUS` carries that separately and this module
-never sets it to anything stronger than UNVERIFIED, because nothing has
-verified it.
+SEMANTICS STAY UNVERIFIED, AND A DERIVATION IS RECORDED AS ONE. "Did
+this slug settle at 1 for the side we quoted" is a venue convention, not
+arithmetic. `SETTLEMENT_SEMANTICS_STATUS` carries that separately and
+this module never sets it to anything stronger than UNVERIFIED. A
+derived outcome carries `SEMANTICS_DERIVED_FROM_CONVERGED_PRICES_
+UNVERIFIED`, so a downstream reader cannot mistake an inference from a
+price for a winner the venue reported.
 
 THIS MODULE WRITES ONE TABLE AND ONLY ONE. `bettor_state_settlements`,
 through the existing `record_settlement`. It touches no accounting
@@ -57,6 +64,13 @@ log = logging.getLogger(__name__)
 INGEST_VERSION = "BETTOR_SETTLEMENT_INGEST_V1"
 
 RESOLVED = live.RESOLVED
+# MEASURED 2026-09-21: the venue reports NO winner on the market
+# listing. The only settlement signal is `outcomePrices` converging to
+# 1 and 0 on a closed market, and reading a price as a winner is an
+# inference the venue did not make. It is counted separately, written
+# with a DERIVED semantics status, and never added to RESOLVED.
+RESOLVED_DERIVED = live.RESOLVED_DERIVED
+SEMANTICS_DERIVED = "SEMANTICS_DERIVED_FROM_CONVERGED_PRICES_UNVERIFIED"
 PENDING = live.PENDING
 UNREADABLE = live.UNREADABLE
 UNMATCHED = live.UNMATCHED
@@ -65,28 +79,34 @@ WRITE_FAILED = "WRITE_FAILED"
 
 
 def classify(resolution: dict) -> str:
-    """One venue read -> one of the four statuses. No inference."""
+    """One venue read -> one status. The inference is NAMED, not hidden."""
     status = resolution.get("status")
-    return status if status in (RESOLVED, PENDING, UNREADABLE,
-                                UNMATCHED) else UNREADABLE
+    return status if status in (RESOLVED, RESOLVED_DERIVED, PENDING,
+                                UNREADABLE, UNMATCHED) else UNREADABLE
 
 
 def build_row(observation_id: str, resolution: dict) -> dict:
     """The settlement row for one observation, or None if not resolved.
 
-    Only a RESOLVED read produces a row. PENDING, UNREADABLE and
-    UNMATCHED each write NOTHING -- writing a PENDING row would fill
+    Only a RESOLVED or RESOLVED_DERIVED read produces a row, and the
+    two are distinguished by their semantics status. PENDING,
+    UNREADABLE and UNMATCHED each write NOTHING -- writing a PENDING row would fill
     the table with records that look like outcomes, and writing an
     UNREADABLE one would record our failure as the market's state.
     """
-    if classify(resolution) != RESOLVED:
+    status = classify(resolution)
+    if status not in (RESOLVED, RESOLVED_DERIVED):
         return None
     return sc.settlement_record(
         observation_id,
         outcome=resolution.get("outcome"),
         # AS THE VENUE WROTE IT. Not reparsed, not defaulted to now.
         settled_at=resolution.get("settled_at"),
-        semantics_status=sc.SETTLEMENT_SEMANTICS_UNVERIFIED)
+        # A DERIVED outcome carries its derivation in the semantics
+        # column, so a downstream reader cannot mistake an inference
+        # from a price for a winner the venue reported.
+        semantics_status=(SEMANTICS_DERIVED if status == RESOLVED_DERIVED
+                          else sc.SETTLEMENT_SEMANTICS_UNVERIFIED))
 
 
 async def ingest(pairs, *, reader=None, writer=None, client=None) -> dict:
@@ -107,8 +127,8 @@ async def ingest(pairs, *, reader=None, writer=None, client=None) -> dict:
     read = reader or live.read_resolution
     write = writer or sstore.record_settlement
 
-    counts = {RESOLVED: 0, PENDING: 0, UNREADABLE: 0, UNMATCHED: 0,
-              INGESTED: 0, WRITE_FAILED: 0}
+    counts = {RESOLVED: 0, RESOLVED_DERIVED: 0, PENDING: 0, UNREADABLE: 0,
+              UNMATCHED: 0, INGESTED: 0, WRITE_FAILED: 0}
     detail: list = []
     reasons: dict = {}
 
@@ -152,8 +172,11 @@ async def ingest(pairs, *, reader=None, writer=None, client=None) -> dict:
         # were read and not stored, and the table understates what we
         # know. Reporting only one of them is the defect this whole
         # module exists because of.
-        "resolved_minus_ingested": counts[RESOLVED] - counts[INGESTED],
-        "reconciled": counts[RESOLVED] == counts[INGESTED],
+        "resolved_minus_ingested": (counts[RESOLVED]
+                                    + counts[RESOLVED_DERIVED]
+                                    - counts[INGESTED]),
+        "reconciled": (counts[RESOLVED] + counts[RESOLVED_DERIVED]
+                       == counts[INGESTED]),
     }
 
 
@@ -164,8 +187,13 @@ def describe() -> dict:
         "writes_accounting": False,
         "submits_orders": False,
         "deployed": False,
-        "statuses": [RESOLVED, PENDING, UNREADABLE, UNMATCHED, INGESTED,
-                     WRITE_FAILED],
+        "statuses": [RESOLVED, RESOLVED_DERIVED, PENDING, UNREADABLE,
+                     UNMATCHED, INGESTED, WRITE_FAILED],
+        "resolved_derived": (
+            "MEASURED 2026-09-21: the venue reports no winner on the "
+            "market listing. A closed market whose outcome prices "
+            "converged to 1 and 0 is an inference from a price, counted "
+            "separately and written with SEMANTICS_DERIVED"),
         "ingested_is_not_resolved": (
             "a resolution read and not written is a resolution we do "
             "not have; the two counts are reported separately and their "

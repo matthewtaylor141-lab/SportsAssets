@@ -142,15 +142,64 @@ class TestFourResolutionStatusesNotTwo:
     could equally have meant the read failed, the slug is not listed, or
     nothing ever called the writer -- and it was the last of those."""
 
-    def test_an_outcome_field_resolves(self):
+    def test_the_eight_guessed_outcome_fields_were_all_refuted(self):
+        """MEASURED 2026-09-21 on a real slug: the payload carries 34
+        keys and NOT ONE of the eight names I guessed is among them.
+        Returning the key names is what corrected it, in one read."""
+        assert lr.OUTCOME_FIELDS == ()
+        assert "resolvedOutcome" in lr.REFUTED_OUTCOME_FIELDS
+        assert len(lr.REFUTED_OUTCOME_FIELDS) == 8
+
+    def test_a_reported_outcome_field_would_still_resolve(self):
+        """OUTCOME_FIELDS is empty, not deleted: a payload that ever
+        grows a reported outcome must be recognised as one."""
+        lr.OUTCOME_FIELDS = ("resolvedOutcome",)
+        try:
+            c = FakeClient(listing=[{"slug": "s", "closed": True,
+                                     "resolvedOutcome": "yes",
+                                     "endDate": "2026-09-21T02:00:00Z"}])
+            r = lr.read_resolution(c, "s")
+            assert r["status"] == lr.RESOLVED
+            assert r["outcome"] == "yes"
+            assert r["outcome_field"] == "resolvedOutcome"
+            assert r["settled_at"] == "2026-09-21T02:00:00Z"
+        finally:
+            lr.OUTCOME_FIELDS = ()
+
+    def test_converged_prices_are_DERIVED_never_RESOLVED(self):
+        """The venue reports no winner. Reading a price of 1 as 'this
+        side won' is an inference the venue did not make, so it gets
+        its own status and never joins the reported count."""
         c = FakeClient(listing=[{"slug": "s", "closed": True,
-                                 "resolvedOutcome": "yes",
-                                 "resolvedAt": "2026-09-21T02:00:00Z"}])
+                                 "outcomes": ["Yes", "No"],
+                                 "outcomePrices": ["1", "0"],
+                                 "endDate": "2026-09-21T02:00:00Z"}])
         r = lr.read_resolution(c, "s")
-        assert r["status"] == lr.RESOLVED
-        assert r["outcome"] == "yes"
-        assert r["outcome_field"] == "resolvedOutcome"
-        assert r["settled_at"] == "2026-09-21T02:00:00Z"
+        assert r["status"] == lr.RESOLVED_DERIVED
+        assert r["status"] != lr.RESOLVED
+        assert r["outcome"] == "Yes"
+        assert "inference from a price" in r["derivation"]
+
+    def test_nearly_certain_is_not_settled(self):
+        """0.99 is a market that has not settled, not a settled one.
+        The tolerance is exact on purpose."""
+        c = FakeClient(listing=[{"slug": "s", "closed": True,
+                                 "outcomes": ["Yes", "No"],
+                                 "outcomePrices": ["0.99", "0.01"]}])
+        assert lr.read_resolution(c, "s")["status"] == lr.UNREADABLE
+
+    def test_the_venue_size_floor_and_tick_are_read_not_assumed(self):
+        """The pilot proposal assumed both. The venue reports both."""
+        c = FakeClient(listing=[{"slug": "s", "closed": False,
+                                 "minimumTradeQty": 5,
+                                 "orderPriceMinTickSize": "0.01",
+                                 "feeCoefficient": "0.06"}])
+        r = lr.read_resolution(c, "s")
+        assert r["minimum_trade_qty"] == "5"
+        assert r["tick_size"] == "0.01"
+        # A DIRECT CHECK ON WHICH SCHEDULE THE VENUE APPLIES: 0.06 is
+        # the 2026-07-01 theta, 0.0695 the 2026-09-17 one.
+        assert r["fee_coefficient"] == "0.06"
 
     def test_listed_and_open_is_pending(self):
         c = FakeClient(listing=[{"slug": "s", "closed": False}])
@@ -164,7 +213,7 @@ class TestFourResolutionStatusesNotTwo:
                                  "volume": 100}])
         r = lr.read_resolution(c, "s")
         assert r["status"] == lr.UNREADABLE
-        assert r["error"] == "CLOSED_BUT_NO_OUTCOME_FIELD"
+        assert r["error"] == "CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME"
         # The keys that WERE present -- names only, which is what
         # corrects OUTCOME_FIELDS with one read instead of a guess.
         assert r["keys_seen"] == ["closed", "slug", "volume"]
@@ -182,13 +231,12 @@ class TestFourResolutionStatusesNotTwo:
     def test_resolution_fields_returns_names_only(self):
         """Never a value. The same discipline capability_probe uses."""
         c = FakeClient(listing=[{"slug": "s", "closed": True,
-                                 "resolvedOutcome": "yes",
+                                 "outcomePrices": ["1", "0"],
                                  "bestBid": "0.99"}])
         f = lr.resolution_fields(c, "s")
-        assert f["keys"] == ["bestBid", "closed", "resolvedOutcome", "slug"]
-        assert f["outcome_field"] == "resolvedOutcome"
+        assert f["keys"] == ["bestBid", "closed", "outcomePrices", "slug"]
         blob = repr(f)
-        assert "0.99" not in blob and "yes" not in blob
+        assert "0.99" not in blob
 
 
 # ── ingestion ────────────────────────────────────────────────────────
@@ -221,10 +269,34 @@ class TestSettlementIngestion:
             "c": {"status": lr.UNREADABLE, "error": "X", "keys_seen": ["slug"]},
             "d": {"status": lr.UNMATCHED, "error": "NOT_LISTED"},
         })
-        assert out["counts"] == {si.RESOLVED: 1, si.PENDING: 1,
-                                 si.UNREADABLE: 1, si.UNMATCHED: 1,
-                                 si.INGESTED: 1, si.WRITE_FAILED: 0}
+        assert out["counts"] == {si.RESOLVED: 1, si.RESOLVED_DERIVED: 0,
+                                 si.PENDING: 1, si.UNREADABLE: 1,
+                                 si.UNMATCHED: 1, si.INGESTED: 1,
+                                 si.WRITE_FAILED: 0}
         assert len(written) == 1
+
+    def test_a_derived_outcome_is_written_with_its_derivation(self):
+        """Stored, because it is the only settlement signal the venue
+        gives -- and stored SAYING it is derived, so nothing downstream
+        mistakes an inference from a price for a reported winner."""
+        _, written = self.run({"a": {"status": si.RESOLVED_DERIVED,
+                                     "outcome": "Yes",
+                                     "settled_at": "2026-09-21T02:00:00Z"}})
+        assert len(written) == 1
+        assert written[0]["SETTLEMENT_SEMANTICS_STATUS"] == \
+            si.SEMANTICS_DERIVED
+        assert "DERIVED" in written[0]["SETTLEMENT_SEMANTICS_STATUS"]
+
+    def test_derived_and_reported_are_never_added_together(self):
+        out, _ = self.run({
+            "a": {"status": si.RESOLVED, "outcome": "yes"},
+            "b": {"status": si.RESOLVED_DERIVED, "outcome": "Yes"},
+        })
+        assert out["counts"][si.RESOLVED] == 1
+        assert out["counts"][si.RESOLVED_DERIVED] == 1
+        # Both are stored, so reconciliation covers both.
+        assert out["counts"][si.INGESTED] == 2
+        assert out["reconciled"] is True
 
     def test_only_a_resolved_read_writes_anything(self):
         """A PENDING row would look like an outcome; an UNREADABLE one

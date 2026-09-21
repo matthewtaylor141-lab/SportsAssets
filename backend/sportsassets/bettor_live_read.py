@@ -61,19 +61,66 @@ RESOLVED = "RESOLVED"        # the venue reports an outcome
 PENDING = "PENDING"          # the venue lists it, open, no outcome yet
 UNREADABLE = "UNREADABLE"    # the read failed, or the payload made no sense
 UNMATCHED = "UNMATCHED"      # the venue does not list this slug at all
+# A closed market whose outcome PRICES have converged to 1 and 0. That
+# is an inference from a price, not an outcome the venue reported, so it
+# is never counted as RESOLVED and never carries verified semantics.
+RESOLVED_DERIVED = "RESOLVED_DERIVED"
 
-# Field names the venue MIGHT use for a resolution. Tried in order.
+# MEASURED 2026-09-21, run 35641425742, on a real slug. The market
+# listing carries these 34 keys:
 #
-# This list is a HYPOTHESIS, not a specification. The SDK's market
-# object is not documented to carry a resolution field and our capture
-# has never held one, so the honest behaviour when none is present is
-# UNREADABLE plus the key names that WERE present -- which is how the
-# list gets corrected, by one read rather than by more guessing.
-OUTCOME_FIELDS = ("resolvedOutcome", "resolved_outcome", "winningOutcome",
-                  "winning_outcome", "settledOutcome", "settled_outcome",
-                  "result", "outcome")
+#   active archived assetPriceTerms category closed comboEnabled
+#   createdAt description endDate ep3Status ep3SyncedAt feeCoefficient
+#   gameStartTime hidden id line manualActivation marketSides marketType
+#   minimumTradeQty orderPriceMinTickSize outcomePrices outcomes question
+#   rulesDisclaimer rulesDisclaimerPopup slug sportsMarketType
+#   sportsMarketTypeV2 spreadTotalSuffix startDate status tags updatedAt
+#
+# NONE OF MY EIGHT GUESSES IS AMONG THEM. `resolvedOutcome`,
+# `winningOutcome`, `settledOutcome`, `result`, `outcome` and their
+# snake_case spellings are all absent. The hypothesis was wrong, which
+# is exactly what returning the key names was for.
+#
+# THE VENUE DOES NOT REPORT A WINNER ON THIS ENDPOINT. What it reports
+# is `outcomes` (the side labels, present on open markets too) and
+# `outcomePrices` (the current prices, likewise). Neither is a
+# resolution. At settlement the prices converge to 1 and 0, and reading
+# "1" as "this side won" is an INFERENCE FROM A PRICE, not a reported
+# outcome -- which is the substitution SETTLEMENT_SEMANTICS_STATUS
+# exists to prevent. So it gets its own status, RESOLVED_DERIVED, and
+# is never counted as RESOLVED.
+REFUTED_OUTCOME_FIELDS = ("resolvedOutcome", "resolved_outcome",
+                          "winningOutcome", "winning_outcome",
+                          "settledOutcome", "settled_outcome",
+                          "result", "outcome")
+# Kept empty rather than deleted: a payload that ever grows a reported
+# outcome field should be recognised, and the refuted list above is the
+# record of what was checked.
+OUTCOME_FIELDS: tuple = ()
+
+# The price vector, which is the only settlement signal available.
+OUTCOME_PRICE_FIELDS = ("outcomePrices", "outcome_prices")
+OUTCOME_LABEL_FIELDS = ("outcomes",)
+
+# How close to 1 / 0 the prices must sit before the market is treated as
+# having converged. Deliberately strict: a market at 0.99 has not
+# settled, it is nearly certain, and those are different.
+SETTLED_PRICE_TOLERANCE = 1e-9
+
+# Also measured and worth naming, because the pilot proposal assumed
+# both: `minimumTradeQty` and `orderPriceMinTickSize` are on the market,
+# so the size floor and tick size are READABLE rather than assumed. And
+# `feeCoefficient` is on the market, which is a direct check on WHICH
+# published schedule the venue is currently applying -- 0.06 is the
+# 2026-07-01 theta, 0.0695 the 2026-09-17 one.
+SIZE_FLOOR_FIELDS = ("minimumTradeQty", "minimum_trade_qty")
+TICK_SIZE_FIELDS = ("orderPriceMinTickSize", "order_price_min_tick_size")
+FEE_COEFFICIENT_FIELDS = ("feeCoefficient", "fee_coefficient")
+
+# `endDate` is the only one of these the payload actually carries.
 SETTLED_AT_FIELDS = ("resolvedAt", "resolved_at", "settledAt", "settled_at",
                      "closedAt", "closed_at", "endDate", "end_date")
+
 SOURCE_TS_FIELDS = ("transactTime", "transact_time", "timestamp", "ts",
                     "asOf", "as_of")
 
@@ -292,19 +339,70 @@ def read_resolution(client, market_slug: str) -> dict:
     m = markets[0]
     out["keys_seen"] = sorted(k for k in m if isinstance(k, str))
     out["closed"] = bool(m.get("closed"))
+    _, ts = _first(m, SETTLED_AT_FIELDS)
+    out["settled_at"] = str(ts) if ts is not None else None
+
+    # These three are read because the pilot proposal ASSUMED all three
+    # and the venue reports them. Values, not names: a tick size and a
+    # minimum quantity are public market parameters, not account data.
+    for key, names in (("minimum_trade_qty", SIZE_FLOOR_FIELDS),
+                       ("tick_size", TICK_SIZE_FIELDS),
+                       ("fee_coefficient", FEE_COEFFICIENT_FIELDS)):
+        f, v = _first(m, names)
+        out[key] = str(v) if v is not None else None
+
+    # 1. A REPORTED outcome, if the payload ever grows one. As of
+    #    2026-09-21 it does not; see REFUTED_OUTCOME_FIELDS.
     field, value = _first(m, OUTCOME_FIELDS)
     if field is not None:
-        out.update({"status": RESOLVED, "outcome": str(value),
-                    "outcome_field": field})
-        _, ts = _first(m, SETTLED_AT_FIELDS)
-        out["settled_at"] = str(ts) if ts is not None else None
-        return out
+        return dict(out, status=RESOLVED, outcome=str(value),
+                    outcome_field=field)
+
     if not out["closed"]:
-        out["status"] = PENDING
-        return out
-    # Closed with no readable outcome.
-    out["error"] = "CLOSED_BUT_NO_OUTCOME_FIELD"
+        return dict(out, status=PENDING)
+
+    # 2. A DERIVED outcome: closed, with prices converged to 1 and 0.
+    #    Reported separately and NEVER as RESOLVED, because reading a
+    #    price as a winner is an inference the venue did not make.
+    labels = _first(m, OUTCOME_LABEL_FIELDS)[1]
+    prices = _first(m, OUTCOME_PRICE_FIELDS)[1]
+    winner = _converged_winner(labels, prices)
+    if winner is not None:
+        return dict(out, status=RESOLVED_DERIVED, outcome=winner,
+                    outcome_field="outcomePrices",
+                    derivation=("closed market whose outcome prices "
+                                "converged to 1 and 0; the venue reported "
+                                "no winner and this is an inference from a "
+                                "price"))
+
+    out["error"] = "CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME"
     return out
+
+
+def _converged_winner(labels, prices):
+    """The label priced at exactly 1 when every other is exactly 0.
+
+    Strict on purpose. A market at 0.99 has not settled; it is nearly
+    certain, and those are different facts. Anything less than exact
+    convergence returns None and the market stays UNREADABLE.
+    """
+    if not isinstance(labels, (list, tuple)) or \
+            not isinstance(prices, (list, tuple)) or \
+            len(labels) != len(prices) or len(labels) < 2:
+        return None
+    vals = []
+    for p in prices:
+        try:
+            vals.append(float(p))
+        except (TypeError, ValueError):
+            return None
+    ones = [i for i, v in enumerate(vals)
+            if abs(v - 1.0) <= SETTLED_PRICE_TOLERANCE]
+    zeros = [i for i, v in enumerate(vals)
+             if abs(v) <= SETTLED_PRICE_TOLERANCE]
+    if len(ones) == 1 and len(zeros) == len(vals) - 1:
+        return str(labels[ones[0]])
+    return None
 
 
 def describe() -> dict:
@@ -319,10 +417,16 @@ def describe() -> dict:
         "deployment_requires": ("a separate authorization; writing this "
                                 "module activates nothing. See "
                                 "PILOT_PROPOSAL.md section 7"),
-        "outcome_fields_are_a_hypothesis": (
-            "the SDK is not documented to carry a resolution field and "
-            "our capture has never held one. A market with none comes "
-            "back UNREADABLE with the keys that WERE present, so one "
-            "read corrects the list"),
-        "statuses": [RESOLVED, PENDING, UNREADABLE, UNMATCHED],
+        "outcome_fields_were_a_hypothesis_and_it_was_wrong": (
+            "eight candidate names were guessed; a read on 2026-09-21 "
+            "found none of them on the payload. Returning the key names "
+            "is what corrected it, in one read"),
+        "statuses": [RESOLVED, RESOLVED_DERIVED, PENDING, UNREADABLE,
+                     UNMATCHED],
+        "outcome_fields_refuted_2026_09_21": list(REFUTED_OUTCOME_FIELDS),
+        "resolved_derived_is_not_resolved": (
+            "the venue reports no winner on this endpoint. A closed "
+            "market whose outcome prices converged to 1 and 0 is an "
+            "INFERENCE FROM A PRICE, counted separately and never with "
+            "verified semantics"),
     }

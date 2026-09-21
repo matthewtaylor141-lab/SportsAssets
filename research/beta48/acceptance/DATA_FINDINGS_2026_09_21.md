@@ -345,3 +345,60 @@ Until it runs, `bettor_settlement_ingest`'s `OUTCOME_FIELDS` remains a
 hypothesis, and the module says so — a payload matching none of them returns
 `UNREADABLE` **with the key names that were present**, which corrects the list
 with one read instead of more guessing.
+
+## 13. THE RESOLUTION FIELD — MY HYPOTHESIS WAS WRONG, AND ONE READ SHOWED IT
+
+Second probe run,
+[35641425742](https://github.com/matthewtaylor141-lab/SportsAssets/actions/runs/35641425742),
+on a real slug. The market listing is **public** and returned `ok: true`
+without credentials.
+
+**`outcome_field: null`.** Not one of the eight names I guessed
+(`resolvedOutcome`, `resolved_outcome`, `winningOutcome`, `winning_outcome`,
+`settledOutcome`, `settled_outcome`, `result`, `outcome`) is on the payload.
+The module was written to return the key names for exactly this case, and
+that is what corrected it — in one read, instead of more guessing.
+
+**The 34 keys the payload actually carries:**
+
+```
+active archived assetPriceTerms category closed comboEnabled createdAt
+description endDate ep3Status ep3SyncedAt feeCoefficient gameStartTime
+hidden id line manualActivation marketSides marketType minimumTradeQty
+orderPriceMinTickSize outcomePrices outcomes question rulesDisclaimer
+rulesDisclaimerPopup slug sportsMarketType sportsMarketTypeV2
+spreadTotalSuffix startDate status tags updatedAt
+```
+
+### 13.1 The venue does not report a winner on this endpoint
+
+`outcomes` is the side labels and `outcomePrices` the current prices — both
+present on open markets, neither a resolution. At settlement the prices
+converge to 1 and 0, and **reading a price of 1 as "this side won" is an
+inference the venue did not make.**
+
+So it gets its own status, `RESOLVED_DERIVED`, which is **never counted as
+`RESOLVED`**, is written with
+`SETTLEMENT_SEMANTICS_STATUS = SEMANTICS_DERIVED_FROM_CONVERGED_PRICES_UNVERIFIED`,
+and requires **exact** convergence: a market at 0.99 has not settled, it is
+nearly certain, and those are different facts.
+
+### 13.2 Three fields the pilot proposal assumed and the venue reports
+
+| field | why it matters |
+|---|---|
+| `minimumTradeQty` | the pilot's size floor is **readable**, not assumed |
+| `orderPriceMinTickSize` | the "spread ≥ 2 ticks" rule now has a venue-supplied tick |
+| **`feeCoefficient`** | **a direct check on which published schedule is in force** — 0.06 is the 2026-07-01 θ_taker, 0.0695 the 2026-09-17 one |
+
+`feeCoefficient` is the one that matters most: it can move the fee schedule
+from `PUBLISHED` toward verified application without a settled statement, and
+it costs one public read. It is not in this run's output because the probe
+returns key names only; reading its **value** is a public market parameter,
+not account data, and is the obvious next read.
+
+### 13.3 `endDate` is the only settled-at field present
+
+Of the eight `SETTLED_AT_FIELDS` candidates, only `endDate` exists. It is a
+scheduled end, not necessarily a resolution time, which is one more reason a
+derived outcome may not claim verified semantics.
