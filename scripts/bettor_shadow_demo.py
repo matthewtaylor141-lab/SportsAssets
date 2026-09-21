@@ -182,8 +182,20 @@ def main() -> int:
     print("   TOUCH -> %s (queue %s): %s"
           % (t["outcome"], t["queue_ahead"], t["why"][:46]))
     rp = lp3.reprice_quote(q["quote_id"], new_price=0.455)
-    print("   REPRICE %s -> %s at %.4f: %s"
-          % (rp["quote_id"], rp["new_quote_id"], rp["to"], rp["why"][:40]))
+    print("   REPRICE REQUESTED %s -> %.4f, replacement DEFERRED: %s"
+          % (rp["quote_id"], rp["to"], rp["why"][:44]))
+    print("   state=%s  still reserved %.4f  live orders now: %d"
+          % (rp["state"], rp["still_reserved"],
+             sum(1 for x in lp3.quotes.values()
+                 if x["state"] in sl.LIVE_QUOTE_STATES)))
+    cc = lp3.confirm_cancel(q["quote_id"])
+    nid = cc["replacement"]["new_quote_id"]
+    print("   CANCEL CONFIRMED, released %.4f; replacement %s rests at %.4f"
+          % (cc["released_exposure"], nid, cc["replacement"]["to"]))
+    check("live orders after replacement",
+          sum(1 for x in lp3.quotes.values()
+              if x["state"] in sl.LIVE_QUOTE_STATES), 1)
+    rp = {"new_quote_id": nid}
     f = lp3.fill_quote(rp["new_quote_id"], qty=6, reason="demonstrate fill")
     print("   FILL %s state=%s qty=%.4g fee=%.2f  evidence=%s"
           % (rp["new_quote_id"], f["state"], f["filled"], f["fee"],
@@ -195,8 +207,13 @@ def main() -> int:
     check("cash after maker fill", lp3.ledger.cash, 100.0 - (6 * 0.455 - 0.02))
     check("inventory yes", lp3.positions["m5"].yes, 6.0)
     c = lp3.cancel_quote(rp["new_quote_id"])
-    print("   CANCEL %s, released %.4f" % (c["quote_id"], c["released_exposure"]))
-    check("quoted exposure after cancel", lp3.quoted_exposure, 0.0)
+    print("   CANCEL REQUESTED %s: still live, still reserved %.4f"
+          % (c["quote_id"], c["still_reserved"]))
+    check("exposure while the cancel is in flight", lp3.quoted_exposure,
+          4 * 0.455)
+    c2 = lp3.confirm_cancel(rp["new_quote_id"])
+    print("   CANCEL CONFIRMED, released %.4f" % c2["released_exposure"])
+    check("quoted exposure after confirmation", lp3.quoted_exposure, 0.0)
 
     head(6, "SETTLEMENT")
     s1 = lp3.settle("m5", yes_wins=True)

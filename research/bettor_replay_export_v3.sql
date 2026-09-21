@@ -15,7 +15,11 @@
 -- READ ONLY.
 
 \echo == 8. THE EXPORT, as JSON, freshest first, WITH the ladder ==
-SELECT jsonb_pretty(jsonb_agg(r)) AS rows_json
+-- COMPACT, NOT PRETTY, AND ON ONE LINE. psql's aligned output pads
+-- every line to the widest column, so a pretty-printed 66 KB array
+-- rendered as 600 KB of log and was truncated before it could be
+-- retrieved. One line costs no padding.
+SELECT jsonb_agg(r)::text AS rows_json
   FROM (SELECT o.observation_id, o.market_id, o.event_id, o.instrument_id,
                o.outcome_leg, o.market_type, o.sport, o.league,
                o.observed_at, o.book_source_ts, o.book_received_ts,
@@ -31,4 +35,4 @@ SELECT jsonb_pretty(jsonb_agg(r)) AS rows_json
            AND o.yes_bid ~ '^[0-9.]+$' AND o.yes_ask ~ '^[0-9.]+$'
            AND o.multi_level_depth ? 'ask'
          ORDER BY o.book_age_s::numeric ASC
-         LIMIT 40) r;
+         LIMIT 16) r;

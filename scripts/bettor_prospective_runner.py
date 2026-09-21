@@ -191,6 +191,16 @@ def live_freshness(source_ts, received_at, decided_at):
                                      "latency; only a negative one shows "
                                      "the clocks disagree")}
 
+    # WE CANNOT DECIDE ON A BOOK WE HAVE NOT RECEIVED. This is not a
+    # clock-skew check and it is not a staleness check -- it is
+    # causality inside our own pipeline, and dropping it was a gap my
+    # own self-test caught: source 10:00, received 13:00, decided
+    # 10:00:03 gave age 3 s and passed, on a book that arrived three
+    # hours after the decision that used it. The abs() version caught
+    # this case for the wrong reason, which is why replacing it needed
+    # the right reason put back rather than removed.
+    if (d_ts - r_ts).total_seconds() < -CLOCK_DISAGREEMENT_TOLERANCE_S:
+        return dict(out, ok=False, reason="DECIDED_BEFORE_RECEIPT")
     if transport < -CLOCK_DISAGREEMENT_TOLERANCE_S:
         # The venue stamped this AFTER we received it. Transport cannot
         # do that, so the clocks genuinely disagree and every age
@@ -359,9 +369,34 @@ def self_test() -> int:
     ok = live_freshness("2026-09-21T10:00:00Z", "2026-09-21T10:00:01Z",
                         "2026-09-21T10:00:03Z")
     assert ok["ok"] is True, ok
-    skew = live_freshness("2026-09-21T10:00:00Z", "2026-09-21T13:00:00Z",
-                          "2026-09-21T10:00:03Z")
-    assert skew["reason"] == "CLOCK_SKEW_UNVERIFIABLE", skew
+    # A book received three hours AFTER the decision that used it. The
+    # age at decision is 3 s and passes every staleness test; what is
+    # wrong is causality in our own pipeline, not the venue's clock.
+    early = live_freshness("2026-09-21T10:00:00Z", "2026-09-21T13:00:00Z",
+                           "2026-09-21T10:00:03Z")
+    assert early["reason"] == "DECIDED_BEFORE_RECEIPT", early
+    # A source stamp in our receipt's FUTURE. Transport only runs
+    # forward, so this is the one case that shows the clocks disagree.
+    disagree = live_freshness("2026-09-21T10:00:10Z", "2026-09-21T10:00:00Z",
+                              "2026-09-21T10:00:12Z")
+    assert disagree["reason"] == "SOURCE_TIMESTAMP_AFTER_RECEIPT", disagree
+    # A NINE-MINUTE transport delay is the MEASURED median of this feed
+    # (549.6 s over 1,203 rows) and is NOT skew: 0 of 1,203 rows had a
+    # source stamp after receipt. It fails on AGE, which is its own
+    # reason and the one that is actually true.
+    slow = live_freshness("2026-09-21T10:00:00Z", "2026-09-21T10:09:10Z",
+                          "2026-09-21T10:09:11Z")
+    assert slow["reason"] == "STALE_AT_DECISION", slow
+    assert slow["source_to_receipt_s"] == 550.0
+    # A RECEIPT TIMESTAMP IS REQUIRED. It used to be optional, so a row
+    # without one skipped the check and was treated as verified.
+    assert live_freshness("2026-09-21T10:00:00Z", None,
+                          "2026-09-21T10:00:03Z")["reason"] == \
+        "NO_RECEIPT_TIMESTAMP"
+    # A NAIVE stamp is refused, not assumed to be UTC.
+    assert live_freshness("2026-09-21T10:00:00", "2026-09-21T10:00:01Z",
+                          "2026-09-21T10:00:03Z")["reason"] == \
+        "NO_VENUE_SOURCE_TIMESTAMP"
     assert live_freshness(None, None, "2026-09-21T10:00:00Z")["reason"] == \
         "NO_VENUE_SOURCE_TIMESTAMP"
     assert all(x["evidence_class"] == REPLAY for x in r1["new_records"]), (
