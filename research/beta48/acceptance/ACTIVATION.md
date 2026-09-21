@@ -565,3 +565,23 @@ endpoints, no orders, now stopped.
    while production selects nothing.
 3. Either demonstrate the environment kill switch actually taking
    effect on this service, or accept deregistration as the only stop.
+
+### The stop, verified
+
+| | |
+|---|---|
+| worker live on `7a9947b` | 22:49:41.29Z |
+| worker live on `c5ff8c3` | 22:50:42.96Z |
+| api live on `c5ff8c3` | 22:50:46.99Z |
+| last `bettor_live` log line of any kind | **22:51:08Z**, on the draining instance |
+| `logs arg="22:51:20/22:53:00 bettor_live"` | **zero lines returned** |
+
+The loop is gone from the running process, not merely quiet: the
+filter matches `starting loop: bettor_live` and `disabled by ...` as
+well as the discovery error, and it returned nothing across a
+100-second window in which a five-second cycle would have produced
+about twenty lines.
+
+`execution_gate.py` is present on the deployed tip and
+`_bind_execution_gate()` is still awaited before any loop starts.
+`live_trading_paused` and `mirror_live` were never touched.
