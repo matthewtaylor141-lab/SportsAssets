@@ -1,5 +1,13 @@
 # BETTOR RELEASE CANDIDATE — integrated engine, real-data results
 
+> **SUPERSEDED IN PART.** Review of `18b0dcf` found six defects, all mine.
+> See [`CORRECTIONS_18b0dcf.md`](CORRECTIONS_18b0dcf.md). In particular the
+> §6 capacity arithmetic below was **10× wrong** (order count labelled as
+> contract count), depth was **not** absent from the schema, the settlement
+> claim was unfounded, the evaluation **deviated from its own frozen
+> protocol**, and the "REFUTED" verdict is withdrawn to a scenario result.
+> The pilot proposal is now drafted: [`PILOT_PROPOSAL.md`](PILOT_PROPOSAL.md).
+
 Restrictions unchanged: `mirror_live=false`, **no real orders, no capital
 activation, nothing deployed**. Production remains `3349219`.
 

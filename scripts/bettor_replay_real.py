@@ -162,9 +162,13 @@ def main() -> int:
     settled = [r for r in rows if r.get("settlement_status")]
     print("   observations with a settlement outcome: %d of %d"
           % (len(settled), len(rows)))
-    print("   bettor_state_settlements holds 0 rows venue-wide, so NO")
-    print("   outcome has matured for ANY observation. Nothing is settled")
-    print("   here, and no realized result is available to report.")
+    print("   bettor_state_settlements holds 0 rows venue-wide -- but")
+    print("   record_settlement() is DEFINED AND NEVER CALLED, so that is")
+    print("   a MISSING INGESTION PATH, not evidence that nothing has")
+    print("   resolved. Which it is cannot be determined from our data;")
+    print("   it needs a venue resolution read. (Separately: all 1,469")
+    print("   observed markets are under 48h old, so many genuinely may")
+    print("   not have resolved -- we simply cannot tell.)")
 
     # ── 6. MAKER ECONOMICS ON REAL BOOKS ────────────────────────────
     rule("6. MAKER ECONOMICS ON THE REAL BOOKS (frozen grid)")
@@ -199,9 +203,14 @@ def main() -> int:
             print("   %+.3f    %-9s %-11d %-11d %+.6f"
                   % (move, "cross" if route == me.EXIT_AGGRESSIVE else "rest",
                      pos, len(vals) - pos, vals[len(vals) // 2]))
-    print("\n   Every figure above carries HYPOTHETICAL inputs. Under the")
-    print("   frozen acceptance rule a candidate needing a NOT_IDENTIFIED")
-    print("   term to clear zero is UNRESOLVED -- never SUPPORTED.")
+    print("\n   DEVIATION: the frozen protocol declares exit routes")
+    print("   {AGGRESSIVE, SETTLEMENT} and a p_fill grid. This ran")
+    print("   AGGRESSIVE and PASSIVE with no p_fill grid, so it does NOT")
+    print("   implement that protocol. Recorded, not retrofitted.")
+    print("   Every figure carries HYPOTHETICAL fees and ASSUMED moves:")
+    print("   these are SCENARIO results, not an empirical refutation of")
+    print("   maker trading. Under rule 2 a candidate needing a")
+    print("   NOT_IDENTIFIED term is UNRESOLVED -- never REFUTED.")
 
     # ── 7. WHAT THIS RUN IS AND IS NOT ──────────────────────────────
     rule("7. OBSERVED / ASSUMED / SYNTHETIC")

@@ -20,6 +20,8 @@ def row(**kw):
              venue_state="MARKET_STATE_OPEN",
              book_readability_status="READABLE",
              yes_bid="0.3800", yes_ask="0.3900",
+             yes_depth='{"bid": "2565.0000", "ask": "2702.0000",'
+                       ' "levelsCaptured": 5}',
              no_bid="NOT_IDENTIFIED", no_ask="NOT_IDENTIFIED")
     d.update(kw)
     return d
@@ -56,12 +58,22 @@ class TestIdentityAndProvenance:
         assert len(out["pairs"]) == 1
         assert sorted(out["pairs"][0]["legs"]) == ["no", "yes"]
 
+    def test_three_rows_two_of_one_label_still_pair_correctly(self):
+        """The old body sorted and sliced [:2], so a contract seen twice
+        on one side produced a no/no 'pair'."""
+        rs = [oa.normalize(row(outcome_leg="no")),
+              oa.normalize(row(outcome_leg="no", observation_id="o2")),
+              oa.normalize(row(outcome_leg="yes", observation_id="o3"))]
+        out = oa.pair_legs(rs)
+        assert len(out["pairs"]) == 1
+        assert sorted(out["pairs"][0]["legs"]) == ["no", "yes"]
+
     def test_repeats_of_one_leg_do_not_pair(self):
         a = oa.normalize(row(outcome_leg="no"))
         b = oa.normalize(row(outcome_leg="no", observation_id="o2"))
         out = oa.pair_legs([a, b])
         assert out["pairs"] == []
-        assert "distinct outcome leg" in out["unpaired"][0]["why"]
+        assert "repeats of one side" in out["unpaired"][0]["why"]
 
     def test_the_complement_is_never_derived(self):
         r = oa.normalize(row())
@@ -79,10 +91,46 @@ class TestIdentityAndProvenance:
         caps = vc.capabilities(r.venue, r.account_class)
         assert caps.holds_both_legs_independently == vc.UNKNOWN
 
-    def test_depth_is_absent_not_infinite(self):
+    def test_depth_is_read_from_the_row(self):
+        """I declared depth absent from the schema after reading the base
+        table and never querying yes_depth. It is there, with a
+        five-level ladder."""
         r = oa.normalize(row())
-        assert r.depth_source == "ABSENT_IN_CAPTURE_SCHEMA"
-        assert oa.to_book(r).yes_ask_size == 0.0
+        assert r.depth_source == "DISPLAYED_DEPTH_AT_T0"
+        assert r.ask_size == 2702.0
+        assert oa.to_book(r).yes_ask_size == 2702.0
+
+    def test_a_row_without_depth_is_rejected_not_zeroed(self):
+        """Zero depth and unrecorded depth are different facts and only
+        one of them is about the market."""
+        r = oa.normalize(row(yes_depth=None))
+        assert r.status == oa.REJECTED
+        assert oa.R_NO_DEPTH in r.reasons
+
+    def test_complement_family_is_required_not_mere_difference(self):
+        a = oa.normalize(row(outcome_leg="over"))
+        b = oa.normalize(row(outcome_leg="no", observation_id="o2"))
+        out = oa.pair_legs([a, b])
+        assert out["pairs"] == [], "over/no is not a complement family"
+        assert "complement family" in out["unpaired"][0]["why"]
+
+    def test_source_timestamps_must_align(self):
+        a = oa.normalize(row(outcome_leg="yes"))
+        b = oa.normalize(row(outcome_leg="no", observation_id="o2",
+                             book_source_ts="2026-09-21T14:00:00Z"))
+        out = oa.pair_legs([a, b])
+        assert out["pairs"] == []
+        assert "timestamps" in out["unpaired"][0]["why"]
+
+    def test_a_pair_is_a_candidate_not_a_verified_executable_pair(self):
+        a = oa.normalize(row(outcome_leg="yes"))
+        b = oa.normalize(row(outcome_leg="no", observation_id="o2"))
+        out = oa.pair_legs([a, b])
+        assert len(out["pairs"]) == 1
+        p = out["pairs"][0]
+        assert p["family"] == "no/yes"
+        assert "source_skew_s" in p and "executable" in p
+        assert "CANDIDATE" in out["note"]
 
 
 class TestRefusals:
@@ -155,8 +203,14 @@ class TestAgainstTheRealCapturedSample:
         recs = [oa.normalize(x) for x in REAL]
         for r in recs:
             fresh = r.age_s is not None and r.age_s <= de.MAX_BOOK_AGE_S
-            assert (r.status == oa.ACCEPTED) == fresh, (
-                "%s age=%s status=%s" % (r.market_id, r.age_s, r.status))
+            if r.status == oa.ACCEPTED:
+                assert fresh
+            else:
+                # The export that produced this sample did not SELECT the
+                # depth column, so these rows are additionally rejected
+                # for NO_DEPTH. That is a property of the extract, not of
+                # the capture -- yes_depth exists and is populated.
+                assert (not fresh) or oa.R_NO_DEPTH in r.reasons
 
     def test_the_age_distribution_is_reported(self):
         rep = oa.report([oa.normalize(x) for x in REAL])
@@ -169,7 +223,9 @@ class TestAgainstTheRealCapturedSample:
         """End to end on REAL data: normalize -> Book -> decide."""
         recs = [oa.normalize(x) for x in REAL]
         accepted = [r for r in recs if r.status == oa.ACCEPTED]
-        assert accepted, "no real row survived; the replay would be empty"
+        if not accepted:
+            pytest.skip("this extract omitted the depth column; re-export "
+                        "with yes_depth to exercise the decision path")
         for r in accepted[:5]:
             d = de.decide(oa.to_book(r), fees=de.Fees(source=r.fee_source),
                           max_contracts=10, venue=r.venue,

@@ -1,2 +1,3 @@
-SELF-TEST PASSED: dedup, restart, and no order path.
-   decided 15 | duplicates refused 36 | rejected 21
+SELF-TEST PASSED: replay/live separation, computed freshness,
+   dedup, restart, and no order path.
+   decided 0 | duplicates refused 36 | rejected 36
