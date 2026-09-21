@@ -128,11 +128,35 @@ answer. `GET /api/admin/open-orders` gives resting commitments.
 already used by `gate-lever.yml`. No venue credential moves; the API
 uses its own.
 
-**Scope, stated up front:** these endpoints return *current* state. This
-lane can deliver **current holdings** and **open-order commitments**. It
-carries no trade-level activity and no settlement events, so it
-**cannot** match the 52 historical fills row by row or establish settled
-proceeds.
+**IT WORKS — run 35619426313, HTTP 200 on both endpoints.** The first
+venue evidence in this effort:
+
+```
+pm.committed_usd      14500.0
+pm.trading_capital    35472.89
+pm.external_count     0
+```
+
+**One of these is not venue evidence, and I nearly used it as such.**
+`committed_usd` is `settings().committed_capital_pm_usd` — an
+owner-set configuration constant. Compared against the ledger's
+$16,180.53 it would have manufactured a $1,680.53 "discrepancy" out of
+a config value. It is now labelled at the point of printing.
+
+What *is* venue-derived: `external_count`, computed from the venue
+portfolio's `open_positions` against our own order ledger. **Zero
+externals** — no venue position on a market we never ordered.
+
+**And zero externals is ambiguous**, which I am not going to paper
+over: either every venue position matches our ledger, or the venue
+holds no open positions at all. The second would mean $16,180.53 is
+entirely stale. A follow-up run printing the payload shape and every
+list length was dispatched (35620634497) and was still queued behind
+saturated runners at the time of writing. **Unresolved.**
+
+**Scope:** these endpoints return *current* state. No trade-level
+activity, no settlement events, so this lane **cannot** match the 52
+historical fills row by row or establish settled proceeds.
 
 ### Remaining blocker, precisely
 
@@ -185,8 +209,18 @@ that ceiling is itself an arithmetic bound, not a measured maximum.
 
 The backlog stood at 11.8–17.0 with drain times 317–487 s, so work was
 available: the system was budget-limited rather than work-limited.
-That makes observed ≈ capacity **under the prevailing pacing**, and
-pacing is adaptive and responds to 429s.
+
+**Measured directly (run 35619569497): `pct_of_reserve_used = 94.4%`** —
+2.83 reads used against 3.00 available per tick. So observed throughput
+*is* essentially the capacity available **under the prevailing pacing**,
+and pacing is adaptive and set by the venue's 429s. The remaining
+headroom is not in the scheduler; it is in what the gateway will serve.
+
+The rate window is rolling. The later run gives V4 = 444 ticks,
+03:39:29Z–12:08:24Z, span 30,535 s, 395 obs_written, 1,196 fu_attempted
+→ created 3.104/min, served 2.350/min. The earlier figures (3.106 /
+2.435) came from a window shifted eight hours later; both are
+internally consistent and each is cited with its run.
 
 ### The 86.9% is an assumption-based upper bound, not a measured ceiling
 
@@ -202,15 +236,30 @@ It holds under five assumptions I neither stated nor tested:
 | A5 | within-tick processing costs nothing | **FALSE** — reads are serial and paced |
 
 The correct bound is `E[min(G, 2·tolerance)] / E[G]` over the actual
-gaps, not `2·tolerance / E[G]` over their mean. Gaps under 60 s are
-covered in full and contribute `G` rather than 60, so the true bound is
-**below** 86.9%. `bettor_timing_ceiling_assumptions.sql` computes both
-and prints the overstatement in percentage points; it was dispatched
-(run 35619569497) and was still queued behind saturated runners at the
-time of writing, so **the corrected figure is not yet in hand**.
+gaps, not `2·tolerance / E[G]` over their mean.
 
-**Label: 86.9% is an assumption-based upper bound and is overstated by
-an unmeasured amount.**
+**Measured (run 35619569497), and the correction is small:**
+
+| | value |
+|---|---|
+| bound from the gap distribution | **87.05%** |
+| bound from the mean alone | 87.50% |
+| **overstatement** | **0.45 pp** |
+
+Gaps are far more regular than min/max suggested: 629 gaps, mean
+68.57 s, **SD 5.62 s**, p10 64.41, p90 73.40, and only **5 of 629 below
+60 s**. So A2 is approximately true in practice and my arithmetic error
+was under half a percentage point.
+
+A5 is real but modest: 2.83 reads per tick at 2.027 s pacing is
+**5.75 s of serial pacing inside a tick**, about a tenth of the 60 s
+window.
+
+**Label: ~87% is an assumption-based upper bound on on-time service at
+this tick cadence, now computed from the gap distribution rather than
+its mean.** It is a property of this cadence, not a universal
+scheduling ceiling. The number was nearly right; presenting it as a
+measured limit was not.
 
 ### Both V1 failures preserved, separately
 
@@ -303,6 +352,10 @@ have not isolated it and do not claim it.
 - No claim rests on an unreconciled internal ledger: reconciliation is
   reported absent, and $16,180.53 is labelled a sum of acquisition costs
   throughout.
-- No assumption is presented as a measured limit: 86.9% is labelled an
-  assumption-based upper bound, known to be overstated, with the
-  corrected computation dispatched and not yet returned.
+- No assumption is presented as a measured limit: the timing bound is
+  now computed from the gap distribution (87.05%) rather than from its
+  mean (87.50%), and labelled a property of this tick cadence rather
+  than a universal ceiling.
+- No configuration constant is reported as venue evidence:
+  `committed_usd` is labelled as `settings().committed_capital_pm_usd`
+  at the point of printing, and is not compared with the ledger.
