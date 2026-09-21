@@ -1,0 +1,243 @@
+<?xml version="1.0" encoding="utf-8"?><testsuites name="pytest tests"><testsuite name="pytest" errors="0" failures="13" skipped="0" tests="26" time="0.337" timestamp="2026-09-21T16:30:05.909081+00:00" hostname="vm"><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_the_exact_reproduction_from_the_review" time="0.158"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize object at 0x7f0f7690f110&gt;
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75fe6bd0&gt;
+allowing_env = None
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x7f0f7691d550&gt;
+
+    def test_the_exact_reproduction_from_the_review(self, venue,
+                                                    allowing_env,
+                                                    monkeypatch):
+        """Recent allowed snapshot + TimeoutError on the read = DENY.
+    
+        This is the review's reproduction, run against the repaired
+        code. Before the fix it returned successfully.
+        """
+        loop, t = _loop_in_thread()
+        try:
+            pool = FakePool({"live_trading_paused": "false"})
+            gate.bind(loop, pool)
+    
+            # A real, successful, ALLOWED read lands in the cache.
+            ok = gate.authorize("submit", lane="manual")
+            assert ok.ok and not ok.paused
+            assert gate._last_known().ok, "the cache is primed and allowing"
+    
+            # Now the authoritative read stops working.
+            def _boom(coro, _loop):
+                coro.close()                 # no 'never awaited' warning
+                raise asyncio.TimeoutError("read unavailable")
+    
+            monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _boom)
+    
+&gt;           with pytest.raises(gate.Denied) as e:
+E           Failed: DID NOT RAISE Denied
+
+tests/test_execution_gate_fail_open.py:160: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_a_failed_read_immediately_after_an_allowed_read" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize object at 0x7f0f76910610&gt;
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f7691ced0&gt;
+allowing_env = None
+monkeypatch = &lt;_pytest.monkeypatch.MonkeyPatch object at 0x7f0f76912310&gt;
+
+    def test_a_failed_read_immediately_after_an_allowed_read(self, venue,
+                                                             allowing_env,
+                                                             monkeypatch):
+        """Zero seconds of staleness is still not permission.
+    
+        The old code's window was MAX_STALE_S. This asserts there is no
+        window at all: the allowed read is microseconds old and the
+        submission is still refused.
+        """
+        loop, t = _loop_in_thread()
+        try:
+            pool = FakePool({"live_trading_paused": "false"})
+            gate.bind(loop, pool)
+            first = gate.authorize("submit", lane="manual")
+            age = time.time() - first.read_at
+            assert age &lt; gate.MAX_STALE_S, "the cache is well inside the "\
+                                           "old staleness allowance"
+    
+            def _boom(coro, _loop):
+                coro.close()
+                raise RuntimeError("database gone")
+    
+            monkeypatch.setattr(asyncio, "run_coroutine_threadsafe", _boom)
+&gt;           with pytest.raises(gate.Denied):
+E           Failed: DID NOT RAISE Denied
+
+tests/test_execution_gate_fail_open.py:194: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_the_read_raising_inside_read_state_also_denies" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestFailedReadDoesNotAuthorize" name="test_describe_may_be_stale_and_says_so" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache" name="test_sync_authorize_on_the_loop_thread_denies" time="0.002"><failure message="AssertionError: assert 'ALLOWED' == 'denied'&#10;  &#10;  - denied&#10;  + ALLOWED">self = &lt;tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache object at 0x7f0f769118d0&gt;
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75c6b4d0&gt;
+allowing_env = None
+
+    def test_sync_authorize_on_the_loop_thread_denies(self, venue,
+                                                      allowing_env):
+        """The second fail-open: on the loop's own thread the old code
+        returned the cached snapshot outright."""
+        results = {}
+    
+        async def main():
+            pool = FakePool({"live_trading_paused": "false"})
+            gate.bind(asyncio.get_running_loop(), pool)
+            # Prime the cache with a real allowed read, from this loop.
+            await gate.authorize_async("submit", lane="manual")
+            assert gate._last_known().ok
+    
+            try:
+                _submit_through_gate(venue)         # SYNC, on the loop
+                results["outcome"] = "ALLOWED"
+            except gate.Denied as d:
+                results["outcome"] = "denied"
+                results["reason"] = d.reason
+                results["detail"] = d.detail
+    
+        asyncio.run(main())
+&gt;       assert results["outcome"] == "denied"
+E       AssertionError: assert 'ALLOWED' == 'denied'
+E         
+E         - denied
+E         + ALLOWED
+
+tests/test_execution_gate_fail_open.py:260: AssertionError</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache" name="test_authorize_async_is_the_supported_path_and_is_fresh" time="0.001" /><testcase classname="tests.test_execution_gate_fail_open.TestLoopThreadDoesNotAuthorizeFromCache" name="test_authorize_async_denies_when_the_read_fails" time="0.001" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[0-zero is a number, not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76913d50&gt;
+raw = '0', why = 'zero is a number, not false'
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75c4b810&gt;
+allowing_env = None
+
+    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+        loop, t = _loop_in_thread()
+        try:
+            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+&gt;           with pytest.raises(gate.Denied) as e:
+E           Failed: DID NOT RAISE Denied
+
+tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[1-one is a number, not true]" time="0.002"><failure message="AssertionError: one is a number, not true&#10;assert 'live_trading_paused' == 'authorization_unavailable'&#10;  &#10;  - authorization_unavailable&#10;  + live_trading_paused">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76913f90&gt;
+raw = '1', why = 'one is a number, not true'
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75c80610&gt;
+allowing_env = None
+
+    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+        loop, t = _loop_in_thread()
+        try:
+            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+            with pytest.raises(gate.Denied) as e:
+                _submit_through_gate(venue)
+&gt;           assert e.value.reason == "authorization_unavailable", why
+E           AssertionError: one is a number, not true
+E           assert 'live_trading_paused' == 'authorization_unavailable'
+E             
+E             - authorization_unavailable
+E             + live_trading_paused
+
+tests/test_execution_gate_fail_open.py:338: AssertionError</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[[]-an empty list is not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76912890&gt;
+raw = '[]', why = 'an empty list is not false'
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75cdb410&gt;
+allowing_env = None
+
+    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+        loop, t = _loop_in_thread()
+        try:
+            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+&gt;           with pytest.raises(gate.Denied) as e:
+E           Failed: DID NOT RAISE Denied
+
+tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[{}-an empty object is not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f769115d0&gt;
+raw = '{}', why = 'an empty object is not false'
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75c4a4d0&gt;
+allowing_env = None
+
+    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+        loop, t = _loop_in_thread()
+        try:
+            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+&gt;           with pytest.raises(gate.Denied) as e:
+E           Failed: DID NOT RAISE Denied
+
+tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[null-null is not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f769106d0&gt;
+raw = 'null', why = 'null is not false'
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75cadf10&gt;
+allowing_env = None
+
+    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+        loop, t = _loop_in_thread()
+        try:
+            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+&gt;           with pytest.raises(gate.Denied) as e:
+E           Failed: DID NOT RAISE Denied
+
+tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[&quot;&quot;-an empty string is not false]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f769180d0&gt;
+raw = '""', why = 'an empty string is not false'
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75311250&gt;
+allowing_env = None
+
+    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+        loop, t = _loop_in_thread()
+        try:
+            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+&gt;           with pytest.raises(gate.Denied) as e:
+E           Failed: DID NOT RAISE Denied
+
+tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[&quot;false&quot;-the WORD false, quoted, is a string]" time="0.002"><failure message="AssertionError: the WORD false, quoted, is a string&#10;assert 'live_trading_paused' == 'authorization_unavailable'&#10;  &#10;  - authorization_unavailable&#10;  + live_trading_paused">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f769182d0&gt;
+raw = '"false"', why = 'the WORD false, quoted, is a string'
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75ce3c90&gt;
+allowing_env = None
+
+    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+        loop, t = _loop_in_thread()
+        try:
+            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+            with pytest.raises(gate.Denied) as e:
+                _submit_through_gate(venue)
+&gt;           assert e.value.reason == "authorization_unavailable", why
+E           AssertionError: the WORD false, quoted, is a string
+E           assert 'live_trading_paused' == 'authorization_unavailable'
+E             
+E             - authorization_unavailable
+E             + live_trading_paused
+
+tests/test_execution_gate_fail_open.py:338: AssertionError</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[0.0-a float is not a boolean]" time="0.002"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76918410&gt;
+raw = '0.0', why = 'a float is not a boolean'
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75cd4110&gt;
+allowing_env = None
+
+    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+        loop, t = _loop_in_thread()
+        try:
+            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+&gt;           with pytest.raises(gate.Denied) as e:
+E           Failed: DID NOT RAISE Denied
+
+tests/test_execution_gate_fail_open.py:336: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_non_boolean_values_deny[[false]-a list containing false is not false]" time="0.002"><failure message="AssertionError: a list containing false is not false&#10;assert 'live_trading_paused' == 'authorization_unavailable'&#10;  &#10;  - authorization_unavailable&#10;  + live_trading_paused">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f76918550&gt;
+raw = '[false]', why = 'a list containing false is not false'
+venue = &lt;tests.test_execution_gate_fail_open.CountingVenue object at 0x7f0f75cfc210&gt;
+allowing_env = None
+
+    @pytest.mark.parametrize("raw,why", NOT_BOOLEANS)
+    def test_non_boolean_values_deny(self, raw, why, venue, allowing_env):
+        loop, t = _loop_in_thread()
+        try:
+            gate.bind(loop, FakePool({"live_trading_paused": raw}))
+            with pytest.raises(gate.Denied) as e:
+                _submit_through_gate(venue)
+&gt;           assert e.value.reason == "authorization_unavailable", why
+E           AssertionError: a list containing false is not false
+E           assert 'live_trading_paused' == 'authorization_unavailable'
+E             
+E             - authorization_unavailable
+E             + live_trading_paused
+
+tests/test_execution_gate_fail_open.py:338: AssertionError</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_malformed_values_deny[not json at all]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_malformed_values_deny[{]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_malformed_values_deny[tru]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_an_absent_row_denies" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_the_two_real_values_work[true-True]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_the_two_real_values_work[false-False]" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_a_real_python_bool_from_a_decoding_driver" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean" name="test_parse_switch_directly" time="0.001"><failure message="Failed: DID NOT RAISE Denied">self = &lt;tests.test_execution_gate_fail_open.TestKillSwitchMustBeABoolean object at 0x7f0f7691b210&gt;
+
+    def test_parse_switch_directly(self):
+        """The unit, so the reason is visible without a loop."""
+        assert gate._parse_switch("true") is True
+        assert gate._parse_switch("false") is False
+        assert gate._parse_switch(True) is True
+        for raw, _why in NOT_BOOLEANS:
+&gt;           with pytest.raises(gate.Denied) as e:
+E           Failed: DID NOT RAISE Denied
+
+tests/test_execution_gate_fail_open.py:407: Failed</failure></testcase><testcase classname="tests.test_execution_gate_fail_open.TestCancellationStaysOpen" name="test_cancel_is_not_gated_even_when_everything_denies" time="0.002" /><testcase classname="tests.test_execution_gate_fail_open.TestCancellationStaysOpen" name="test_submit_and_close_are_gated" time="0.004" /></testsuite></testsuites>

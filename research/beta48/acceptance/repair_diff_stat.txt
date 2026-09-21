@@ -1,0 +1,10 @@
+ backend/sportsassets/api/reconcile_read.py       | 339 ++++++++++++++++++
+ backend/sportsassets/bettor_admission.py         | 238 ++++++++++++-
+ backend/sportsassets/execution_gate.py           | 242 ++++++++++---
+ backend/tests/conftest.py                        |   2 +-
+ backend/tests/test_admission_fractional.py       | 308 ++++++++++++++++
+ backend/tests/test_execution_gate_fail_open.py   | 436 +++++++++++++++++++++++
+ backend/tests/test_execution_gate_integration.py |  54 ++-
+ backend/tests/test_reconcile_read.py             | 335 +++++++++++++++++
+ research/bettor_cohort_accounting.sql            | 264 ++++++++++++++
+ 9 files changed, 2136 insertions(+), 82 deletions(-)

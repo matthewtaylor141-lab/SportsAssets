@@ -461,3 +461,30 @@ job carries `timeout-minutes: 10`, and 18 stuck runs were cancelled.
 **A cosmetic psql defect**, recorded so it does not recur: `\echo` treats an
 apostrophe as an unterminated quoted string. `VENUE'S` in a heading printed an
 error mid-file. Results were unaffected; later files avoid apostrophes.
+
+---
+
+# SUPERSEDED IN PART — see REPAIR_195ee01.md
+
+An independent review of 195ee01 reproduced four concrete defects, all of
+them mine. The following statements above are **withdrawn or corrected** by
+[`REPAIR_195ee01.md`](REPAIR_195ee01.md):
+
+* **The execution-gate implementation PASS is withdrawn.** Two fail-open
+  paths let a cached ALLOW authorize a submission after a failed read, and
+  `_parse_switch` read `"0"`, `"[]"`, `"{}"` and `"null"` as *not paused*.
+* **"21.9% of created work never serviced" is withdrawn.** It was a
+  difference of two rates over one window, not a completion rate. Cohort
+  accounting puts it at **49.5% of obligations never read** and on-time at
+  **10.6–16.0%** — worse than reported, not better.
+* **"at ≤6 reads per tick refusals stay ≤3%" is withdrawn.** My own
+  seven-day table gives 6 reads 7.00%, and the buckets are confounded with
+  adaptive pacing, so they support no causal claim.
+* **"0.667 observations/minute" is corrected to 0.567**, and the code that
+  was supposed to implement it admitted **double** capacity.
+* **Two of the three reconciliation blockers are retracted.** Paginated
+  history and venue resting orders both already exist in the SDK; I called
+  the wrong endpoints. Only account identity remains a genuine blocker.
+* **$16,180.53 and $8,911.89 are unverified recorded amounts**, and
+  $15,036.19 is recorded value on rows lacking a recorded closure — not a
+  verified cash discrepancy.

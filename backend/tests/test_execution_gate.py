@@ -346,9 +346,16 @@ def test_an_undeclared_lane_gets_the_strictest_treatment(venue):
 
 
 def test_global_only_lanes_is_an_allowlist_not_a_blocklist():
+    """The control checks moved from authorize() into _decide() when the
+    fail-open repair split the read from the decision, so BOTH entry
+    points share one copy of this rule. Inspect the decision itself, and
+    assert both doors reach it -- a blocklist creeping into only one of
+    them is exactly what this test exists to catch."""
     import inspect
-    src = inspect.getsource(gate.authorize)
-    assert "lane not in GLOBAL_ONLY_LANES" in src
+
+    assert "lane not in GLOBAL_ONLY_LANES" in inspect.getsource(gate._decide)
+    for entry in (gate.authorize, gate.authorize_async):
+        assert "_decide(" in inspect.getsource(entry), entry.__name__
 
 
 # ── 6. cancellation stays available ──────────────────────────────────
