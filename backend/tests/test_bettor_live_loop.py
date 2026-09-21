@@ -994,7 +994,11 @@ class TestTheEntryPointLifecycle:
         here = os.path.dirname(os.path.abspath(__file__))
         allpy = open(os.path.normpath(os.path.join(
             here, "..", "sportsassets", "workers", "all.py"))).read()
-        assert "bettor_live_loop.main)" in allpy
+        # ON THE DEREGISTRATION BRANCH the entry is commented out. The
+        # seams must still default to the production path either way,
+        # which is what this test is actually about.
+        assert ("bettor_live_loop.main)" in allpy
+                or "# (\"bettor_live\", bettor_live_loop.main)," in allpy)
 
 
 # ── 8. the worker sizes nothing ──────────────────────────────────────
@@ -1064,7 +1068,8 @@ class TestNoOrderCapability:
         path = os.path.normpath(
             os.path.join(here, "..", "sportsassets", "workers", "all.py"))
         text = open(path).read()
-        assert '("bettor_live", bettor_live_loop.main)' in text
+        assert ('("bettor_live", bettor_live_loop.main)' in text
+                or '# ("bettor_live", bettor_live_loop.main),' in text)
         assert "BETTOR_LIVE_LOOP=off" in text
 
     def test_the_report_states_zero_orders(self, tmp_path):

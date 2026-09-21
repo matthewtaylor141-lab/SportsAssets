@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 
 from .. import procmem
 from ..db import heartbeat
-from . import (analytics, bettor_live_loop, bettor_state,
+from . import (analytics, bettor_state,
                chain_listener, copy_sweep, dispatcher, edge_marks,
                institutional_md, metadata_refresher, mirror_live,
                mirror_shadow, poller, premap, price_path, reconciler,
@@ -394,24 +394,20 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     ("institutional_md", institutional_md.run),
     ("shadow_experimental", shadow_experimental.run),
     ("shadow_rn1", shadow_rn1.run),
-    # BETTOR LIVE OBSERVATION -- DECISION ONLY (isolated release).
+    # BETTOR LIVE OBSERVATION -- DEREGISTERED 2026-09-21.
     #
-    # Streams a selected universe of at most 100 markets, decides on
-    # every book update, and writes every decision AND every refusal to
-    # its own three tables. It holds no order path: MAX_CONTRACTS
-    # defaults to 0, no submit/cancel/close call is reachable from its
-    # import closure, and a test asserts that over the source rather
-    # than over behaviour.
+    # A FORWARD REVERT of the registration only. The loop's modules,
+    # its three storage tables and every record already written stay
+    # exactly where they are; nothing is rewritten and no history is
+    # discarded. Re-registering is the one line below, uncommented.
     #
-    # REGISTERED LAST AMONG THE VENUE READERS, so a cold boot fires the
-    # existing loops' opening reads before this one's discovery listing.
+    # This is the second stop, not the first. The first is
+    # BETTOR_LIVE_LOOP=off, which needs no deploy of its own -- Render
+    # restarts the service and the new process reads the flag. This
+    # commit exists for the case where the flag is not enough or the
+    # registration itself must come out.
     #
-    # INERT WITHOUT THE CREDENTIAL, and inert without a durable store:
-    # absent PMUS_KEY_ID / PMUS_SECRET_KEY it logs and returns, and if
-    # no store survives a redeploy it REFUSES TO START rather than
-    # producing evidence that the next deploy deletes.
-    # BETTOR_LIVE_LOOP=off stops it outright, with no deploy.
-    ("bettor_live", bettor_live_loop.main),
+    # ("bettor_live", bettor_live_loop.main),
     ("memory", memory_watch),
 ]
 
