@@ -434,3 +434,134 @@ demonstration and not a feature.
 | 8 | the `hourly` heartbeat query | pre-existing division by zero, unrelated |
 
 **#4 is the only genuine circularity.**
+
+---
+
+## 12. WHAT HAPPENED WHEN IT WENT LIVE — 2026-09-21
+
+**Outcome: STOPPED / ROLLED BACK.** The activation deployed exactly as
+planned. The observation loop then failed to select a universe, wrote
+nothing, and has been deregistered.
+
+### The push and the deploy
+
+| | |
+|---|---|
+| destination before | `0442d576` |
+| pushed | `e8b82a3e350aa1df563500bbcdfc031a73f5d022`, plain fast-forward, 0 behind / 18 ahead, **no force** |
+| pushed at | 22:31:39Z |
+| worker live on `e8b82a3` | 22:32:53.94Z |
+| api live on `e8b82a3` | 22:33:02.80Z |
+| api health | `GET /healthz 200 OK` at 22:41:16Z and 22:41:21Z |
+
+### The defect: the universe is empty by construction
+
+Every five seconds, from 22:32:53Z:
+
+```
+bettor_live_loop: listing hit the 6-page bound; the universe is drawn from a PREFIX
+bettor_live_loop: discovery returned 0 eligible markets of 3000 considered;
+                  not starting. Excluded: {"ONE_SIDED_BOOK": 3000}
+loop bettor_live exited cleanly; restarting in 5s
+```
+
+`_discover` reads `client.markets.list(...)`, which returns
+`GetMarketsResponse -> list[MarketDetail]`. `MarketDetail` is
+`id, slug, title, outcome, description, active, closed, liquidity,
+volume, eventSlug, team`. **No `bestBid`, no `bestAsk`, no
+`sharesTraded`, no `state`.** `assess()` requires a bid, an ask and a
+shares figure, so every row falls to `R_ONE_SIDED` — 3000 of 3000.
+
+The venue carries bid and ask on a **different endpoint**:
+`markets.bbo(slug) -> MarketBBO {bestBid, bestAsk, bidDepth, askDepth,
+lastTradePx, sharesTraded, openInterest}`, **one market at a time**.
+
+Reproduced locally against a `MarketDetail`-shaped row:
+`reason ONE_SIDED_BOOK, bid None, ask None, included False`.
+
+**Why the harness missed it.** `startup_rows_250.json` holds *captured
+observations* — `yes_bid`, `yes_ask`, `stats_shares_traded`,
+`venue_state` — spellings `assess()` also accepts. The harness proved
+the selection rule against a payload shape production never delivers.
+
+### Schema initialization DID succeed
+
+`main()` calls `store.start()` **before** `_discover`, and returns
+`STORE_START_REFUSED` on failure. The `EMPTY_UNIVERSE` log is only
+reachable past a `PgStore.start()` that returned `ok` — and the
+default backend is Postgres. So the advisory-locked DDL ran against
+production Postgres and the three tables exist.
+
+**Nothing was observed and nothing was written.** `main()` returns
+before `build()`, so no record was ever constructed.
+
+### The first stop did not work
+
+| time | action | result |
+|---|---|---|
+| 22:38:58Z | `env-set BETTOR_LIVE_LOOP=off` | HTTP 200, 3 chars stored |
+| — | Render raised **no deploy** for the env change | still cycling at 22:43:10Z |
+| 22:43:40.13Z | `action=restart confirm=DO` | **`server_restarted`** in the event log |
+| 22:47:29Z | loop still logging the **discovery error** | **not** `disabled by BETTOR_LIVE_LOOP=off` |
+
+The restart demonstrably happened and the restarted process still did
+not read the new value. **§4's claim that an environment change is a
+working kill switch on this service is withdrawn.** It is not a
+demonstrated control and must not be relied on as the first stop until
+someone shows it working.
+
+A second defect the same reading exposed: `run_forever` in
+`workers/all.py` is `while True`, so a clean return restarts the loop
+after `RESTART_DELAY_SECONDS`. **Even a working kill switch would
+leave a five-second start/disable/restart cycle**, not a quiet stop.
+Deregistration is the only genuinely quiet state.
+
+### The second stop, applied
+
+`ca68bc5` is **not** a descendant of `e8b82a3` (1 ahead, 5 behind), so
+pushing it would not have been a fast-forward and this activation is
+never to be forced. It was applied **onto the current tip** instead:
+
+| | |
+|---|---|
+| commit | `7a9947b65bc91e57b1dae7d23f7c05994356c488` |
+| pushed at | 22:48:50Z, `e8b82a3..7a9947b`, fast-forward, **no force** |
+| change | one `LOOPS` line commented out, one import dropped, two registration tests widened |
+| tests | `test_bettor_live_loop.py` **61 passed** |
+| untouched | `execution_gate.py` present, `_bind_execution_gate` still awaited before any loop; `live_trading_paused=true`; `mirror_live=false`; migration 093 and the three tables stay |
+
+### What the canary established
+
+| # | check | result |
+|---|---|---|
+| 1 | live socket, fresh books | **FAIL** — zero decisions; the loop never subscribed |
+| 2 | committed to Postgres | **NOT ESTABLISHED** — tables created, no rows to commit |
+| 3 | outcome checks ran | **NOT ESTABLISHED** — no contracts to check |
+| 4 | no execution in our journal | trivially true; nothing ran |
+| 5 | siblings unaffected | the other loops ran throughout; API served 200s |
+| 6 | restart retained records | **NOT ESTABLISHED** — no records to retain |
+
+The scripted 20-minute canary was **not run**: with zero fresh
+decisions it exits 3 by construction, and running it would have
+produced a number, not a finding.
+
+### The load this cost
+
+~73 discovery cycles between 22:32:53Z and the deregistration, each
+six listing pages — roughly 440 listing requests at about 1.2/s, plus
+one advisory-locked DDL transaction per cycle. Bounded, public
+endpoints, no orders, now stopped.
+
+### What has to change before this is re-registered
+
+1. `_discover` must obtain a bid, an ask and a shares figure. The
+   listing cannot supply them; `markets.bbo(slug)` can, per market.
+   3000 candidates is 3000 calls, so a pre-filter is needed — but
+   `MarketDetail.volume` is not `sharesTraded`, and substituting it
+   would silently change the frozen selection rule. **That is a
+   decision, not an implementation detail.**
+2. The startup harness must be driven by the **listing payload
+   shape**, not by captured observations, or it will keep passing
+   while production selects nothing.
+3. Either demonstrate the environment kill switch actually taking
+   effect on this service, or accept deregistration as the only stop.
