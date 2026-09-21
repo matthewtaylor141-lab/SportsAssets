@@ -1254,7 +1254,15 @@ jobs:
               # (LIVE_COPY_HALT: 'on'/'1'/'true'/'yes'/'halt'/'stop' halt) must
               # be readable without a screenshot; everything else stays masked.
               ID=$(svc_id "$SERVICE"); [ -z "$ID" ] && { echo "no service named $SERVICE"; exit 1; }
-              FLAGS=" LIVE_COPY_HALT LIVE_TRADING_ENABLED AI_TRADER_ENABLED COPY_PROBE_ENABLED LIVE_PREMAP LIVE_ALLOW_SHORT LIVE_VERIFIED_WHALES LIVE_PREMAP_WHALES WHALE_EXIT_MAX_SIBLINGS RETENTION API_INGESTION_FALLBACK LIVE_COPY_CONCURRENCY "
+              # WHALE_EXIT_ENABLED, UNDERDOG_ENABLED and SA_COPY_EXIT
+              # added 2026-09-21 (R5). Each one decides whether an
+              # order-capable worker runs at all, which is exactly the
+              # kind of fact this list exists to make readable without a
+              # screenshot. None of them is a credential: they are
+              # on/off flags, and being unable to read them is how
+              # WHALE_EXIT_ENABLED's absence went unnoticed while it
+              # armed a sell route by default.
+              FLAGS=" LIVE_COPY_HALT LIVE_TRADING_ENABLED AI_TRADER_ENABLED COPY_PROBE_ENABLED LIVE_PREMAP LIVE_ALLOW_SHORT LIVE_VERIFIED_WHALES LIVE_PREMAP_WHALES WHALE_EXIT_MAX_SIBLINGS RETENTION API_INGESTION_FALLBACK LIVE_COPY_CONCURRENCY WHALE_EXIT_ENABLED UNDERDOG_ENABLED SA_COPY_EXIT "
               get "/services/$ID/env-vars?limit=100" > /tmp/env.json
               for k in ${ARG//,/ }; do
                 case "$FLAGS" in
