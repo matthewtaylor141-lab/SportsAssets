@@ -13,7 +13,7 @@ accounting record touched, `mirror_live=false` unchanged.
 > branch with `autoDeploy=yes`. The isolation here is real and still
 > the point; the **deployment** is a merge onto the live branch, whose
 > marginal diff is 24 files, and the prepared merge is
-> `claude/bettor-observation-activation` (`e293344`).
+> `claude/bettor-observation-activation`.
 
 ---
 
