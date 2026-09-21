@@ -46,17 +46,26 @@ def test_the_follow_up_share_is_reserved_before_either_pass_runs():
     assert r["fuReserve"] + r["budget"] == r["totalBudget"]
 
 
-def test_total_reads_per_tick_are_unchanged_so_pacing_is_preserved():
-    """A reservation, not an increase. The venue sees the same rate."""
+def test_the_split_never_spends_more_than_the_tick_allows():
+    """A reservation, not an increase.
+
+    This used to recompute max(2, ...) locally and assert
+    `sampling + fu <= total + 1` -- a formula that is no longer
+    deployed, and a slack term of +1 that permitted exactly the
+    over-spend the floor was hiding. Both are gone: the floor is the
+    restored one and the bound is exact."""
     for pacing in (1.0, 1.352, 2.848, 3.849, 5.132, 8.0):
-        total = max(2, int(w.MAX_READS_PER_TICK * min(
+        total = max(1, int(w.MAX_READS_PER_TICK * min(
             1.0, w.READ_PACING_BASE_S / pacing)))
-        fu = max(1, total // 2)
-        sampling = max(1, total - fu)
-        # The split never exceeds what the unsplit budget would have
-        # spent, which is what keeps gateway pacing identical.
-        assert sampling + fu <= total + 1, pacing
-        assert fu >= 1 and sampling >= 1, pacing
+        for seq in (0, 1):
+            if total <= 1:
+                fu = 1 if (seq % 2) else 0
+                sampling = total - fu
+            else:
+                fu = max(1, total // 2)
+                sampling = max(1, total - fu)
+            assert sampling + fu <= total, (pacing, seq)
+            assert fu >= 0 and sampling >= 0, pacing
 
 
 def test_a_starved_sampling_pass_can_no_longer_zero_the_follow_ups():
@@ -316,9 +325,10 @@ def test_the_shared_budget_still_bounds_the_pass_not_just_the_cap():
 
 
 def test_the_version_marks_the_allocation_change_for_attribution():
-    """Coverage measured under V2 and V3 must not be pooled: which
-    horizon a read went to changed between them."""
-    assert w.PACING_VERSION == "BETTOR_CAPTURE_PACING_V3_ROTATED_FOLLOWUPS"
+    """Coverage must not be pooled across pacing versions: V2 -> V3
+    changed WHICH horizon a read went to, and V3 -> V4 changed HOW MANY
+    requests go out at backoff. Both break comparability."""
+    assert w.PACING_VERSION == "BETTOR_CAPTURE_PACING_V4_ALLOWANCE_RESTORED"
     r = asyncio.run(w.tick(_Pool()))
     assert r["pacingVersion"] == w.PACING_VERSION
 

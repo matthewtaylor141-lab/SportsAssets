@@ -66,8 +66,13 @@ BACKOFF_S = 120.0
 # Bumped whenever the pacing behaviour changes, so a coverage figure
 # can be attributed to the regime that produced it rather than pooled
 # across regimes that behaved differently.
-PACING_VERSION = "BETTOR_CAPTURE_PACING_V3_ROTATED_FOLLOWUPS"
-# V2 -> V3 changes the FOLLOW-UP ALLOCATION only: the horizon order now
+PACING_VERSION = "BETTOR_CAPTURE_PACING_V4_ALLOWANCE_RESTORED"
+# V3 -> V4 restores the ORIGINAL REQUEST ALLOWANCE (floor 1, not 2)
+# and orders the due queue ON-TIME FIRST. V4 issues FEWER requests than
+# V3 at backoff, never more: at pacing >= 5.063 it sends one read per
+# tick where V3 sent two. Coverage must not be pooled across V3 and V4.
+#
+# V2 -> V3 changed the FOLLOW-UP ALLOCATION only: the horizon order now
 # rotates on service opportunities and each horizon is capped at its
 # share of the tick's follow-up budget. The gateway pacing arithmetic
 # -- base, max, growth, recovery and the per-tick read ceiling -- is

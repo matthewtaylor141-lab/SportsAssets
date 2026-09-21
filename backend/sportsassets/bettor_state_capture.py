@@ -588,6 +588,79 @@ HORIZON_DUE_WINDOW_S = 600
 HORIZON_EARLY_ELIGIBILITY_S = 30
 ELIGIBILITY_VERSION = "BETTOR_ELIGIBILITY_V3_EARLY_30"
 
+# ── THE INTAKE PROBLEM, DEFINED PROSPECTIVELY AND NOT YET TAKEN ─────
+#
+# W3 measured, in per-minute flows over 60 minutes (run 180):
+#
+#     intake                         1.43 observations/min
+#     follow-up tasks made eligible  5.85 tasks/min   (= intake x 4)
+#     attempts completed             2.03 tasks/min
+#     tasks expiring unread          4.02 tasks/min
+#
+# ADMITTED OBSERVATIONS GENERATE MORE FOLLOW-UP WORK THAN CAPACITY
+# COMPLETES, by about 2.9x, and roughly 65% of follow-up work expires
+# unread. That is a rate, and NO ORDERING RULE CHANGES A RATE. The
+# on-time-first repair moves which tasks get served; it cannot move how
+# many.
+#
+# OFFLINE REPLAY, CALIBRATED TO THOSE RATES (a simulation; it observes
+# no venue). On-time throughput is capacity-bound at ~1.2 reads/min and
+# does NOT rise as intake falls. What changes is the FRACTION of
+# admitted work that gets a usable outcome:
+#
+#     intake     obs/min   on-time coverage   expiring/min
+#     current      1.41          22%              3.70
+#     x0.60        0.85          41%              1.20
+#     x0.40        0.57          54%              0.07
+#     x0.30        0.42          74%              0.00
+#
+# So the trade is: FEWER MARKETS OBSERVED, a far higher share of them
+# with gate-admissible outcomes. Same on-time throughput either way.
+# The only thing extra intake buys is expired tasks.
+#
+# THE SAMPLING CHANGE IS THEREFORE DEFINED HERE AND DELIBERATELY NOT
+# APPLIED. It alters the frame -- which markets enter the sample at all
+# -- so it needs its own UNIVERSE_VERSION, its own frozen rotation
+# recomputed so the period stays non-commensurate with 24h, and a
+# declaration before row one. Bundling it with a scheduling repair
+# would make neither attributable, and changing a frozen sampling rule
+# quietly is the one thing this contract exists to prevent.
+INTAKE_REDUCTION_PROPOSED_NOT_APPLIED = {
+    "status": "DEFINED_PROSPECTIVELY_NOT_APPLIED",
+    "problem": (
+        "intake creates 5.85 eligible follow-up tasks/min against 2.03 "
+        "completed; 4.02/min expire unread. Measured, run 180"),
+    "whyOrderingCannotFixIt": (
+        "ordering decides WHICH tasks are served, not HOW MANY. The "
+        "shortfall is a rate"),
+    "proposedTarget": (
+        "intake such that intake x len(HORIZONS_OBSERVABLE_S) <= "
+        "sustained completion rate. At 2.03 completions/min and four "
+        "horizons that is <= 0.51 observations/min, against 1.43 now"),
+    "quantifiedCost": (
+        "roughly a 60-65% reduction in markets entering the sample. "
+        "On-time THROUGHPUT does not improve -- it is capacity-bound "
+        "near 1.2 reads/min either way -- so the entire gain is in the "
+        "SHARE of admitted observations that end with a gate-admissible "
+        "outcome, replayed at 22% now against ~74% at 0.42 obs/min"),
+    "alternativeNotPreferred": (
+        "dropping horizons instead of intake. Four horizons at 0.51 "
+        "obs/min and two horizons at 1.02 obs/min cost the same "
+        "capacity. That trades breadth of TIME structure for breadth "
+        "of MARKETS and is a scientific choice, not an operational "
+        "one. It is not taken here either"),
+    "requiresBeforeItCanBeApplied": (
+        "a new UNIVERSE_VERSION; ROTATION_SLICES recomputed so the "
+        "full-rotation period stays prime and non-commensurate with "
+        "24h; the rule frozen and declared BEFORE the first row it "
+        "governs; and V4's own measurement finished first so the two "
+        "changes stay attributable"),
+    "simulationIsNotMeasurement": (
+        "the intake table above comes from bettor_schedule_sim "
+        "calibrated to measured rates. It exercises the allocation "
+        "rule and observes no venue"),
+}
+
 # ── AND THE MEASUREMENT THAT JUSTIFIES IT, NOT AN ARGUMENT ──────────
 #
 # research/bettor_ontime_opportunity.sql, run 176 on ecb0928, against
