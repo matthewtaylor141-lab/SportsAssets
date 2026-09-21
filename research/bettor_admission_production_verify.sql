@@ -47,19 +47,21 @@ SELECT count(*) AS ticks,
 -- ON_TIME is the only class admissible to the horizon gate. Rows with
 -- a NULL timing_class are still in flight and are excluded from BOTH
 -- numerator and denominator, so nothing pending can flatter the rate.
-SELECT CASE WHEN read_at >= timestamptz '2026-09-21 12:07:34+00'
-            THEN 'AFTER  (capacity-aware)'
-            ELSE 'BEFORE (V4)' END AS era,
-       timing_class,
-       count(*) AS reads,
-       round(100.0 * count(*) / nullif(sum(count(*)) OVER (
-           PARTITION BY (read_at >= timestamptz '2026-09-21 12:07:34+00')
-       ), 0), 1) AS pct
-  FROM bettor_state_mids
- WHERE read_at > now() - interval '6 hours'
-   AND timing_class IS NOT NULL
- GROUP BY 1, 2
- ORDER BY 1 DESC, reads DESC;
+SELECT era, timing_class, reads,
+       round(100.0 * reads / nullif(sum(reads) OVER (PARTITION BY era), 0),
+             1) AS pct
+  FROM (
+    SELECT CASE WHEN read_at >= timestamptz '2026-09-21 12:07:34+00'
+                THEN 'AFTER  (capacity-aware)'
+                ELSE 'BEFORE (V4)' END AS era,
+           timing_class,
+           count(*) AS reads
+      FROM bettor_state_mids
+     WHERE read_at > now() - interval '6 hours'
+       AND timing_class IS NOT NULL
+     GROUP BY 1, 2
+  ) t
+ ORDER BY era DESC, reads DESC;
 
 \echo
 \echo == 4. PER-HORIZON SERVICE SINCE THE DEPLOY ==
