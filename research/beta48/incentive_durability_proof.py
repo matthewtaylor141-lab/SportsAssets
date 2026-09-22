@@ -47,6 +47,8 @@ ARM = {
     "max_incentive_retry": 2,
     "incentive_manifest_reserved": 0, "incentive_recheck_reserved": 0,
     "incentive_retry_reserved": 0,
+    "max_socket_connect": 20, "max_socket_subscribe": 40,
+    "socket_connect_reserved": 0, "socket_subscribe_reserved": 0,
     "slugs": [],
 }
 

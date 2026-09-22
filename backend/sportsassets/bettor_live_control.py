@@ -290,9 +290,39 @@ R_INC_MANIFEST = "incentive_manifest"
 R_INC_RECHECK = "incentive_recheck"
 R_INC_RETRY = "incentive_retry"
 
+# ── THE SOCKET KINDS ─────────────────────────────────────────────────
+#
+# WHY THESE ARE HERE AND NOT COUNTED IN THE LOOP. The run first bounded
+# the socket by counting epochs the POLLING LOOP had crossed. That is
+# accounting after the fact, and it fails the requirement for the same
+# reason an in-memory request counter did: the attempt has already been
+# made by the time anything counts it, a crash loses the count, and two
+# workers each keep their own. A bound that is applied after the
+# dispatch is not a bound on the dispatch.
+#
+# These are reserved AT THE BOUNDARY, inside the socket thread, before
+# `ws.connect()` and before each subscribe message leaves. A refusal
+# means the attempt is NOT MADE.
+#
+# R_SOCK_CONNECT covers EVERY connection attempt -- the initial one, a
+# retry after a failure, and a reconnect after a drop. They are the
+# same event to the venue and they are the same unit here; an attempt
+# that fails has still been made, and its unit is spent.
+#
+# R_SOCK_SUBSCRIBE is per MESSAGE, not per batch and not per epoch. One
+# batch of slugs sends TWO messages -- `subscribe_market_data` and
+# `subscribe_trades` -- so a batch costs two units.
+R_SOCK_CONNECT = "socket_connect"
+R_SOCK_SUBSCRIBE = "socket_subscribe"
+
 INCENTIVE_MAX_MANIFEST = 4
 INCENTIVE_MAX_RECHECK = 2
 INCENTIVE_MAX_RETRY = 2
+
+# One initial connection plus nineteen reconnects; each epoch
+# resubscribes one batch of <=100 slugs as two messages.
+SOCKET_MAX_CONNECT = 20
+SOCKET_MAX_SUBSCRIBE = 40
 INCENTIVE_TOTAL = (INCENTIVE_MAX_MANIFEST + INCENTIVE_MAX_RECHECK
                    + INCENTIVE_MAX_RETRY)
 
@@ -301,19 +331,25 @@ _COUNTER = {R_DISTINCT: "distinct_reserved",
             R_LISTING: "listing_attempts_reserved",
             R_INC_MANIFEST: "incentive_manifest_reserved",
             R_INC_RECHECK: "incentive_recheck_reserved",
-            R_INC_RETRY: "incentive_retry_reserved"}
+            R_INC_RETRY: "incentive_retry_reserved",
+            R_SOCK_CONNECT: "socket_connect_reserved",
+            R_SOCK_SUBSCRIBE: "socket_subscribe_reserved"}
 _CAP = {R_DISTINCT: "max_distinct",
         R_ATTEMPT: "max_bbo_attempts",
         R_LISTING: "max_listing_attempts",
         R_INC_MANIFEST: "max_incentive_manifest",
         R_INC_RECHECK: "max_incentive_recheck",
-        R_INC_RETRY: "max_incentive_retry"}
+        R_INC_RETRY: "max_incentive_retry",
+        R_SOCK_CONNECT: "max_socket_connect",
+        R_SOCK_SUBSCRIBE: "max_socket_subscribe"}
 _DEFAULT_CAP = {R_DISTINCT: PROBE_MAX_DISTINCT,
                 R_ATTEMPT: PROBE_MAX_BBO_ATTEMPTS,
                 R_LISTING: PROBE_MAX_LISTING_ATTEMPTS,
                 R_INC_MANIFEST: INCENTIVE_MAX_MANIFEST,
                 R_INC_RECHECK: INCENTIVE_MAX_RECHECK,
-                R_INC_RETRY: INCENTIVE_MAX_RETRY}
+                R_INC_RETRY: INCENTIVE_MAX_RETRY,
+                R_SOCK_CONNECT: SOCKET_MAX_CONNECT,
+                R_SOCK_SUBSCRIBE: SOCKET_MAX_SUBSCRIBE}
 
 B_OPEN = "OPEN"
 B_EXHAUSTED = "BUDGET_EXHAUSTED"

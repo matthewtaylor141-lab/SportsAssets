@@ -138,41 +138,125 @@ def corpus_supplies_depth(eps) -> dict:
 
 
 def period_exposure(eps) -> dict:
-    """How much of a daily period C4's quotes are actually resting for.
+    """SCORING EXPOSURE, from RESTING QUANTITY over time.
 
-    This IS computable without depth, and it is the multiplier the
-    required-share calculation needs: a pool is earned over a period,
-    and an episode that rests two hours can earn at most two hours of
-    it.
+    THE CORRECTION THIS MAKES. The first version multiplied a pool by
+    an episode's wall-clock fraction of a day, as though the full clip
+    rested on both sides for the whole episode. It does not:
+
+      A FILL REMOVES RESTING SIZE.   Contracts that trade are no longer
+          in the book and no longer score. A partial fill of 52 of 100
+          leaves 48 resting, not 100 -- and partials are the NORMAL
+          case in this corpus.
+      A CANCELLATION REMOVES IT ENTIRELY. C3 cancels the opposite leg
+          on the first fill; from `cancel_requested_at_obs` onward that
+          side rests nothing at all.
+      TWO SIDES ARE TWO EXPOSURES.  The pool is normalised per side,
+          so a one-sided quote earns on one side only.
+
+    So exposure is integrated as SIZE-WEIGHTED TIME and then expressed
+    as a fraction of a full-clip day. `qty_fraction` is the share of
+    the clip still resting; an episode that fills half its bid and
+    cancels its offer contributes far less than its wall clock says.
+
+    WHAT IS STILL APPROXIMATE, AND IT IS SAID RATHER THAN HIDDEN: the
+    corpus records fill SIZES but not fill TIMESTAMPS, so a fill is
+    attributed to the episode's cancel instant where one exists and to
+    the episode midpoint otherwise. That places the reduction in time
+    approximately; it does not change its magnitude.
     """
     period_s = 86400.0
     total_frac, market_days = 0.0, set()
+    detail = {"episodes": 0, "with_partial": 0, "with_cancel": 0,
+              "full_clip_side_seconds": 0.0, "resting_side_seconds": 0.0}
     for e in eps:
         t0, t1 = _t(e.get("t0")), _t(e.get("t_end"))
         if t0 is None or t1 is None or t1 <= t0:
             continue
-        total_frac += min(1.0, (t1 - t0) / period_s)
+        detail["episodes"] += 1
         market_days.add((e.get("slug"), (e.get("t0") or "")[:10]))
+        span = t1 - t0
+        clip = float(e.get("size") or CLIP)
+        sides = [s for s in ("quote_bid", "quote_offer") if e.get(s)]
+        n_sides = len(sides) or 1
+        detail["full_clip_side_seconds"] += span * n_sides
+
+        filled = sum(abs(float(x)) for x in (e.get("fill_sizes") or ()))
+        entry_filled = min(filled, clip) if filled else 0.0
+        if entry_filled and entry_filled < clip - 1e-9:
+            detail["with_partial"] += 1
+
+        # When the resting size was reduced. A cancel instant is
+        # recorded as an OBSERVATION INDEX, so it is converted through
+        # the episode's own observation count.
+        obs = max(1, int(e.get("observations") or 1))
+        ci = e.get("cancel_requested_at_obs")
+        cut = (t0 + span * min(1.0, float(ci) / obs)) if ci is not None \
+            else (t0 + span * 0.5 if entry_filled else t1)
+        if ci is not None:
+            detail["with_cancel"] += 1
+
+        for side in sides:
+            # Before the cut the side rests the whole clip; after it,
+            # the clip less what filled -- and nothing at all once the
+            # policy cancelled it.
+            before = (cut - t0)
+            after = (t1 - cut)
+            rest_after = 0.0 if ci is not None else max(
+                0.0, clip - entry_filled) / clip
+            detail["resting_side_seconds"] += before * 1.0 + after * rest_after
+    frac = detail["resting_side_seconds"] / (2.0 * period_s)
+    total_frac = frac
     return {"summed_period_fractions": round(total_frac, 4),
             "market_days": len(market_days),
             "mean_fraction_per_market_day":
                 round(total_frac / len(market_days), 4)
-                if market_days else None}
+                if market_days else None,
+            "basis": "SIZE-WEIGHTED resting time across BOTH sides, "
+                     "reduced by partial fills and by cancellations; "
+                     "expressed as full-clip two-sided days",
+            "naive_wall_clock_side_days":
+                round(detail["full_clip_side_seconds"] / (2.0 * period_s), 4),
+            "detail": detail,
+            "approximation": "fill TIMESTAMPS are absent from the corpus; "
+                             "a reduction is placed at the cancel instant "
+                             "where one exists and at the episode midpoint "
+                             "otherwise"}
 
 
 def required_share(loss_usd, prog, exposure) -> dict:
-    """The share of the pool C4 must win to stop losing money.
+    """The share a TRANSFERRED programme would have to pay on THIS corpus.
 
-    Computable WITHOUT depth, because it inverts the formula rather
-    than evaluating it: reward = pool x share x period-fraction, so
-    share = loss / (pool x summed period-fractions).
+    NOT A MEASURED QUALIFICATION HURDLE, and the label travels with the
+    number. Three things make it a scenario:
+
+      1. THE PROGRAMME IS TRANSFERRED. These terms run on culture,
+         crypto and eFootball markets; this corpus is 12 markets
+         captured for another purpose. No programme has ever been
+         observed on these books.
+      2. THE LOSS IS A SIMULATED REPLAY LOSS, not an account result.
+      3. REWARDS AND LOSSES MUST BE COMPARED ON THE SAME MARKETS UNDER
+         THE SAME POLICY. Here they are not: the loss is C4 on this
+         corpus and the pool is a programme on other markets. A real
+         qualification requires both sides measured together.
+
+    It inverts the formula rather than evaluating it, so it needs no
+    depth: reward = pool x share x resting-exposure.
     """
     denom = prog.reward_pool * exposure["summed_period_fractions"]
     if denom <= 0:
         return {"required_share": None, "why": "NO_RESTING_TIME"}
     share = loss_usd / denom
-    return {"pool_per_day": prog.reward_pool,
-            "summed_period_fractions": exposure["summed_period_fractions"],
+    return {"label": "TRANSFERRED SCENARIO -- not a measured hurdle",
+            "same_market_same_policy": False,
+            "why_not_measured": "the programme terms come from other "
+                                "markets, the loss is a simulated replay "
+                                "on this corpus, and a qualification "
+                                "requires both measured together",
+            "pool_per_day": prog.reward_pool,
+            "resting_exposure_full_clip_days":
+                exposure["summed_period_fractions"],
+            "exposure_basis": exposure["basis"],
             "pool_dollars_addressable": round(denom, 4),
             "loss_to_cover_usd": round(loss_usd, 4),
             "required_share": round(share, 6),
@@ -335,6 +419,25 @@ def _incentive_block(eps, s):
     loss = -s["net_usd"]
     block = {"computable": depth["depth_available"],
              "why_not": None if depth["depth_available"] else NOT_COMPUTABLE,
+             # THE DISTINCTION THAT MATTERS: what is missing is missing
+             # from the REDUCED EPISODE OUTPUT, which is a summary the
+             # replay emits. Whether the UNDERLYING captured ladder
+             # carried depth is a separate question about the capture,
+             # and this module has not established it either way. The
+             # honest statement is about the input this calculation
+             # actually reads.
+             "scope_of_the_absence": {
+                 "missing_from": "the reduced episode output "
+                                 "(entry_book), which is what this "
+                                 "calculation reads",
+                 "not_established": "whether the underlying captured "
+                                    "ladder corpus carried depth -- that "
+                                    "is a question about the capture, and "
+                                    "recovering it would mean re-deriving "
+                                    "episodes from the raw frames",
+                 "consequence": "the reward is not computable HERE; this "
+                                "is not a claim that the depth was never "
+                                "captured"},
              "corpus_depth_check": depth,
              "period_exposure": exposure,
              "programmes": {}}

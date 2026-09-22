@@ -242,22 +242,45 @@ async def run(*, stream_factory=None, control_pool=None,
         cls = health.on_book(slug, rec)
         journal.ladder(cls, rec.get("book") or {})
 
+    # ── THE SOCKET ALLOWANCE BRIDGE ──────────────────────────────────
+    #
+    # The stream runs its own event loop on its own thread, so it
+    # cannot await a coroutine on ours. This hands the reservation
+    # across and BLOCKS the socket thread on the answer -- which is
+    # correct: the attempt must not be made until the unit is durably
+    # committed, and a connect or a subscribe is rare enough that one
+    # database round trip costs nothing a connection was not already
+    # costing.
+    #
+    # UNCERTAIN MEANS NO. A timeout or an error answers False, so the
+    # attempt is not made; losing an allowance unit is the safe
+    # direction and a spent-but-unused unit shows in the row.
+    main_loop = asyncio.get_running_loop()
+
+    def _socket_reserve(kind: str) -> bool:
+        try:
+            fut = asyncio.run_coroutine_threadsafe(
+                ledger.spend(kind, why="socket"), main_loop)
+            return bool(fut.result(timeout=ctl.CONTROL_READ_TIMEOUT_S)["ok"])
+        except Exception as exc:            # noqa: BLE001 -- named
+            log.error("bettor_incentive_observe: socket reservation (%s) "
+                      "did not answer (%s); refusing the attempt",
+                      kind, type(exc).__name__)
+            return False
+
     stream = factory(key_id, secret, on_book=_on_book)
+    if hasattr(stream, "set_socket_allowance"):
+        stream.set_socket_allowance(_socket_reserve)
     health = feed_mod.FeedHealth(stream)
     holder["health"] = health
     # The heartbeat, where the transport offers one. Its ABSENCE is
     # recorded rather than assumed away -- see `FeedHealth.liveness`.
     if hasattr(stream, "set_heartbeat_listener"):
         stream.set_heartbeat_listener(health.on_heartbeat)
-    # PER RUN, NOT PER BOOT: seeded with what earlier boots of this run
-    # already spent, so a crash loop cannot buy a fresh twenty.
-    bounds = bud.ReconnectBounds(
-        prior_reconnects=int(run_row.get("reconnects") or 0),
-        prior_resubscribes=int(run_row.get("resubscribes") or 0))
 
+    # `subscribe()` only QUEUES the slugs; the messages that leave the
+    # socket are reserved inside the stream, one unit each.
     stream.subscribe(slugs)
-    health.note_resubscribe(_batches(len(slugs)))
-    bounds.note_resubscribe(_batches(len(slugs)))
     stream.start()
 
     t_start = _now()
@@ -285,11 +308,23 @@ async def run(*, stream_factory=None, control_pool=None,
             if run_for_s is not None and now - t_start >= run_for_s:
                 end_why = END_DEADLINE
                 break
-            # (c) THE SOCKET BOUNDS, counted apart.
-            b = bounds.check(int(getattr(stream, "reconnects", 0) or 0))
-            if not b["ok"]:
+            # (c) THE SOCKET ALLOWANCE, ENFORCED AT THE BOUNDARY.
+            #
+            # Nothing is counted here. The stream reserves each connect
+            # and each subscribe message BEFORE making it, and a
+            # refusal sets its stop flag. This only NOTICES that and
+            # ends the run; the bound was already applied where the
+            # attempt would have been.
+            refused = getattr(stream, "stopped_by_allowance", None)
+            if refused:
                 end_why = END_SOCKET
-                journal.gap(event="SOCKET_BOUND", why=b["why"], detail=b)
+                journal.gap(event="SOCKET_ALLOWANCE_REFUSED", why=refused,
+                            detail={"connect_attempts": getattr(
+                                        stream, "socket_connect_attempts", 0),
+                                    "subscribe_messages": getattr(
+                                        stream, "subscribe_messages_sent", 0),
+                                    "refusals": getattr(
+                                        stream, "refusals", [])})
                 break
             # (d) THE CONTROL, at the same cadence as everywhere else.
             if now - last_control >= ctl.CONTROL_EVERY_S:
@@ -323,24 +358,30 @@ async def run(*, stream_factory=None, control_pool=None,
                 #
                 # Every epoch resubscribes every slug, so the honest
                 # count is one batch set PER EPOCH CROSSED.
+                # REPORTING ONLY. The bound lives at the boundary; what
+                # is recorded here is what the stream ACTUALLY did,
+                # read from its own counters rather than inferred from
+                # how many epochs a poll happened to skip.
                 crossed = max(1, epoch - last_epoch)
-                batches = _batches(len(slugs)) * crossed
                 journal.epoch(epoch=epoch, event="EPOCH_OPENED",
                               previous=last_epoch, epochs_crossed=crossed,
                               reconnects=getattr(stream, "reconnects", None),
-                              resubscribed=len(slugs),
-                              resubscribe_batches=batches)
-                health.note_resubscribe(batches)
-                bounds.note_resubscribe(batches)
+                              connect_attempts=getattr(
+                                  stream, "socket_connect_attempts", None),
+                              subscribe_messages=getattr(
+                                  stream, "subscribe_messages_sent", None),
+                              resubscribed=len(slugs))
+                health.note_resubscribe(crossed)
                 last_epoch = epoch
                 # CARRY THE RUN TOTALS FORWARD. An epoch transition IS
                 # a reconnect, so this write is as rare as the event it
                 # records.
-                t_now = bounds.totals(
-                    int(getattr(stream, "reconnects", 0) or 0))
-                await st.note_socket(control_pool, run_row,
-                                     reconnects=t_now["reconnects"],
-                                     resubscribes=t_now["resubscribes"])
+                await st.note_socket(
+                    control_pool, run_row,
+                    reconnects=int(getattr(stream,
+                                           "socket_connect_attempts", 0)),
+                    resubscribes=int(getattr(stream,
+                                             "subscribe_messages_sent", 0)))
 
             # (f) LIVENESS TRANSITIONS become GAP records. A gap is an
             #     interval we did not observe -- not a quiet book, and
@@ -415,7 +456,18 @@ async def run(*, stream_factory=None, control_pool=None,
         # PER-MARKET COVERAGE, computed from what was actually
         # observed. It is a RESEARCH verdict and is labelled as one.
         coverage = _coverage(slugs, health, window, t_start, _now())
-        final_bounds = bounds.check(int(getattr(stream, "reconnects", 0) or 0))
+        final_bounds = {
+            "scope": "PER RUN -- enforced in the allowance row at the "
+                     "connect/subscribe boundary, not counted in this loop",
+            "connect_attempts_this_boot": getattr(
+                stream, "socket_connect_attempts", 0),
+            "subscribe_messages_this_boot": getattr(
+                stream, "subscribe_messages_sent", 0),
+            "reconnects_reported_by_stream": getattr(
+                stream, "reconnects", None),
+            "refusals": getattr(stream, "refusals", []),
+            "stopped_by_allowance": getattr(
+                stream, "stopped_by_allowance", None)}
         spent_after = await ledger.read()
         journal.run_close(
             end_why=end_why, stop_seen_at=stop_seen_at,
@@ -424,9 +476,10 @@ async def run(*, stream_factory=None, control_pool=None,
             budget=ledger.report(), allowance_at_close=spent_after,
             bounds=final_bounds)
         jreport = await journal.close()
-        await st.note_socket(control_pool, run_row,
-                             reconnects=final_bounds["reconnects"],
-                             resubscribes=final_bounds["resubscribes"])
+        await st.note_socket(
+            control_pool, run_row,
+            reconnects=final_bounds["connect_attempts_this_boot"],
+            resubscribes=final_bounds["subscribe_messages_this_boot"])
         if end_why in (END_WINDOW, END_DEADLINE, END_SOCKET):
             await st.close_run(control_pool, run_row, end_why)
 

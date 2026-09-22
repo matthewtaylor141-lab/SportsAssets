@@ -21,16 +21,34 @@ take.**
 | **branch** | `claude/incentive-observation-release` — tracked by no service |
 | **marginal diff** | ~2.6k insertions, **3 deletions** (the closing brace of three dict literals in `bettor_live_control`; every existing mapping, cap and default survives, and `reserve()`, `read_control()`, `read_budget()` and `disarm()` are untouched) |
 
-**Reconnect-budget defect — closed.** Resubscriptions were counted once
-per *detected* epoch change. The loop polls every 0.5 s while the stream
-reconnects on its own thread, so a flapping socket advances the epoch
-several times between polls and the poll that notices recorded **one**
-resubscription for all of them. The resubscription ceiling — the bound
-that exists specifically to catch a subscribe storm — was the one that
-did not bind. Now counted **per epoch crossed**.
-`test_resubscriptions_are_counted_per_epoch_crossed_not_per_detection`
-pins it. `reconnects` was never affected; it is read from the stream's
-own counter.
+**Socket allowance — now reserved BEFORE dispatch, at the boundary.**
+Counting crossed epochs afterwards did not satisfy the requirement, and
+the correction was right: an attempt already made cannot be bounded by
+counting it. The gate moved into `MarketStream` itself, and every
+attempt goes through the **same** `bettor_live_control.reserve()` the
+HTTP allowance uses — one locked row, control and deadline checked in
+the same transaction, committed before the caller may act.
+
+| event | unit | note |
+|---|---|---|
+| initial connection | `socket_connect` | reserved before `ws.connect()` |
+| **failed** connection attempt | `socket_connect` | the venue saw it; the allowance does too |
+| reconnect | `socket_connect` | same event, same unit |
+| `subscribe_market_data` | `socket_subscribe` | |
+| `subscribe_trades` | `socket_subscribe` | **a batch is two messages, so two units** |
+
+Caps live in the armed row (`max_socket_connect` 20,
+`max_socket_subscribe` 40) and are **separate from the eight HTTP
+requests** — mixing them would let a reconnect storm eat the manifest
+allowance. A refusal means the attempt is **not made**: the reader
+records it and stops. An uncertain reservation answers no.
+
+A real deadlock was found while proving this. The bridge hands the
+reservation to the main loop and blocks the socket thread on it, which
+is safe only while `start()` returns immediately. The rehearsal's first
+fake reserved inline and hung every reservation.
+`test_start_must_not_block_or_the_reservation_bridge_deadlocks` now
+asserts `MarketStream.start()` spawns a thread and never joins it.
 
 **Regression — settled by direct comparison, not by assertion.**
 
@@ -47,9 +65,50 @@ leaves it closed. Reproduced on the production SHA with
 `test_bettor_live_store.py` in place of ours. Pre-existing; left alone.
 **Zero regressions, +64 passing tests.**
 
-Also verified: rehearsal **11/11** through `main()` with no arguments;
-durability proof **16/16** against real PostgreSQL; release suite
-**67 passed** with a DSN.
+**Focused verification** (no broad suites rerun):
+
+| | |
+|---|---|
+| `test_bettor_socket_allowance.py` | **14 passed** — order, refusal, failed attempts, both messages, durable ceiling, crash, overlap, stop |
+| socket + release + stream + live_loop | **288 passed** |
+| durability proof, real PostgreSQL | **16 / 16** |
+| rehearsal through `main()`, no arguments | **11 / 11**, now driving the real reservation bridge |
+
+### How the bounded manifest capture reaches the worker
+
+**It rides in the deploy.** The worker reads
+`BETTOR_INCENTIVE_MANIFEST` as a **path** and loads a file; it has no
+capture path of its own and cannot fetch one. So the capture happens
+**before** the deploy, here, and the file is **committed**:
+
+```
+python research/beta48/capture_incentive_manifest.py --et-date YYYY-MM-DD
+  -> <=6 public unauthenticated requests, bounded and refused past it
+  -> writes research/beta48/acceptance/incentive_manifest.json
+  -> prints a FREEZE PREVIEW: markets / programmes / events, and whether
+     the run would return INSUFFICIENT COVERAGE
+```
+
+Committing it makes the allowlist **reviewable before it is armed** —
+the exact markets, the exact terms and the response digest are in the
+diff rather than discovered at runtime.
+
+**This costs the run's allowance nothing.** The eight-request row budget
+covers the *run*; this capture happens before the run exists and
+enforces its own bound in-process. The run's `manifest` sub-cap
+therefore goes unused, and only the recheck and retry units remain in
+play — conservative, and the manifest records it.
+
+### What the approval covers — exactly three things
+
+| # | approval | consequence |
+|---|---|---|
+| **1** | **three-service deployment** of the candidate SHA to `claude/session-njaewf` | `sportsassets-api`, `sportsassets-workers` and `edge-shadow` restart. Behaviour identical to `ba87076`: mode unconfigured, control false |
+| **2** | **configuration** of five variables on `sportsassets-workers` | one further deploy of that service; the mode becomes armed-capable. Still nothing observes |
+| **3** | **one observation run** — one ET date, one arm, one `obs-run` | the socket opens, the journal fills, and the run ends at the date boundary or on `obs-stop` |
+
+**Not covered, and not requested:** any order, any change to a trading
+control, any credential movement, any second run.
 
 ### The deployment action — ONE action, requiring authorization
 
@@ -78,13 +137,14 @@ durability proof **16/16** against real PostgreSQL; release suite
 
 # 3  CONFIGURATION -- on sportsassets-workers only, set together so ONE
 #    deploy carries them (an env-set redeploys; only a deploy reloads env)
-     BETTOR_INCENTIVE_MANIFEST         = <path to the captured manifest>
+     BETTOR_INCENTIVE_MANIFEST         = research/beta48/acceptance/incentive_manifest.json
      BETTOR_INCENTIVE_ET_DATE          = YYYY-MM-DD
      BETTOR_INCENTIVE_WATCH_MAX        = 12
-     BETTOR_INCENTIVE_MAX_RECONNECTS   = 20
-     BETTOR_INCENTIVE_MAX_RESUBSCRIBES = 40
+#    (the socket ceilings are in the ARMED ROW, not the environment --
+#     max_socket_connect 20, max_socket_subscribe 40)
 
-# 4  ARM -- 4/2/2 incentive caps, 26h deadline, general caps ZEROED
+# 4  ARM -- 4/2/2 HTTP caps, 20/40 socket caps, 26h deadline,
+#          general acquisition caps ZEROED
    render-ops:  action=sql  arg=obs-arm-incentive  confirm=DO
    render-ops:  action=sql  service=sportsassets-db  arg=obs-incentive
 
@@ -219,16 +279,41 @@ there is no walk, no denominator and no share.
 > would have been a false negative dressed as a measurement. The module
 > now checks for depth and refuses.
 
+**What is missing, and from where.** The absence is in the **reduced
+episode output** — `entry_book`, the summary the replay emits and the
+only thing this calculation reads. Whether the **underlying captured
+ladder corpus** carried depth is a separate question about the capture,
+and this module has **not** established it either way; recovering it
+would mean re-deriving episodes from the raw frames. The honest claim is
+"not computable here", not "the depth was never captured".
+
 What **is** computable inverts the formula and needs no depth:
 
-| programme | addressable pool $ | **required share to break even** |
-|---|---|---|
-| culture ($50/day) | 539.14 | **6.52%** |
-| crypto ($30/day) | 323.48 | **10.87%** |
-| eFootball ($100/day) | 1,078.27 | **3.26%** |
+**These are TRANSFERRED SCENARIOS, not measured qualification hurdles.**
+Three separate reasons, carried in the output beside every figure:
+the programme terms come from *other* markets; the loss is a *simulated
+replay*; and a qualification requires rewards and trading losses
+measured on the **same markets under the same policy**, which these are
+not.
 
-*(C4 at qfrac 1.00: 10.78 summed period-fractions over 17 market-days,
-mean 0.63 of a day each.)*
+| programme | addressable pool $ | required share *(transferred scenario)* |
+|---|---|---|
+| culture ($50/day) | 244.31 | **3.94%** |
+| crypto ($30/day) | 146.58 | **6.56%** |
+| eFootball ($100/day) | 488.61 | **1.97%** |
+
+**Scoring exposure is now resting quantity over time**, not wall clock.
+The first version multiplied the pool by an episode's fraction of a day
+as though the full clip rested on both sides throughout. It does not: a
+fill removes resting size (partials are the normal case here), a
+cancellation removes it entirely (C3/C4 cancel the opposite leg on the
+first fill), and two sides are two exposures. Integrating size-weighted
+resting time gives **4.89** full-clip two-sided days against a naive
+wall-clock **10.78** — the correction more than halves the addressable
+pool. Fill *timestamps* are absent from the corpus, so a reduction is
+placed at the cancel instant where one exists and at the episode
+midpoint otherwise; that places it approximately and does not change its
+magnitude.
 
 And a **labelled scenario** sweep over competing depth at our price,
 with a 100-contract clip against Target Size 500:
@@ -342,7 +427,8 @@ Each tied to an acceptance requirement and a concrete resolution.
 | **B5** | account identity unverified | actual-results attribution | D2 | **open, yours** |
 | **B6** | no size model | B(3) | not on this release's path; record only | **accepted limitation** |
 | **B7** | corpus consumed | C — out-of-sample claims | fresh capture; the §A run is the first | **open, unblocked by B1** |
-| ~~B8~~ | ~~reconnect-budget defect~~ | ~~A~~ | counted per epoch crossed | **CLOSED** |
+| **B10** | rewards and losses not measured on the same markets/policy | C — any qualification | the §A run collects depth on programme markets; the replay must then be run on **those** markets | **open, unblocked by B1** |
+| ~~B8~~ | ~~socket attempts not reserved before dispatch~~ | ~~A~~ | reserved at the connect/subscribe boundary through `reserve()`; 14 focused tests | **CLOSED** |
 | ~~B9~~ | ~~regression unverified~~ | ~~A~~ | baseline vs candidate, identical failure set | **CLOSED** |
 
 ---

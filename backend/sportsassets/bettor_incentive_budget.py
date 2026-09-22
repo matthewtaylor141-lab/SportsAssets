@@ -82,12 +82,31 @@ R_SUBCAP = "REFUSED_SUBCAP"
 R_FORBIDDEN = "REFUSED_FORBIDDEN_KIND"
 R_UNKNOWN = "REFUSED_UNKNOWN_KIND"
 
+# ── THE SOCKET KINDS, DELIBERATELY OUTSIDE THE EIGHT ─────────────────
+#
+# A connect and a subscribe are not HTTP requests and must not inflate
+# the eight-request HTTP ceiling: mixing them would let a reconnect
+# storm consume the manifest allowance, and would make "eight public
+# requests" describe a run that made three. They are reserved through
+# the SAME durable mechanism, at the connect/subscribe boundary, under
+# their OWN caps in the same row.
+K_SOCK_CONNECT = "socket_connect"
+K_SOCK_SUBSCRIBE = "socket_subscribe"
+
+SOCKET_CAPS = {K_SOCK_CONNECT: 20, K_SOCK_SUBSCRIBE: 40}
+
 # OUR KIND NAMES -> THE RESERVATION KINDS THE CONTROL MODULE KNOWS.
 # Two vocabularies, mapped in one place, so the allowance row's keys
 # and this module's names can never drift apart silently.
 CTL_KIND = {K_MANIFEST: "incentive_manifest",
             K_RECHECK: "incentive_recheck",
-            K_RETRY: "incentive_retry"}
+            K_RETRY: "incentive_retry",
+            K_SOCK_CONNECT: "socket_connect",
+            K_SOCK_SUBSCRIBE: "socket_subscribe"}
+
+# Every kind this ledger will reserve, HTTP and socket together. The
+# two families keep separate totals in `report()`.
+ALL_CAPS = dict(SUBCAPS, **SOCKET_CAPS)
 
 # NO ENVIRONMENT VARIABLE SETS THE CAP ANY MORE. It used to, and that
 # was the wrong home for it: an allowance held in the process is
@@ -138,7 +157,7 @@ class DurableLedger:
     def __init__(self, pool, *, probe_id: str | None) -> None:
         self.pool = pool
         self.probe_id = probe_id
-        self.observed: dict[str, int] = {k: 0 for k in SUBCAPS}
+        self.observed: dict[str, int] = {k: 0 for k in ALL_CAPS}
         self.refused: list[dict] = []
         self.log: list[dict] = []
         self._lock = threading.Lock()
@@ -200,13 +219,20 @@ class DurableLedger:
         v = _json.loads(raw) if isinstance(raw, (str, bytes)) else raw
         if not isinstance(v, dict):
             return dict(out, detail="allowance value is not an object")
-        res = {k: int(v.get(ctl._COUNTER[CTL_KIND[k]], 0) or 0)
-               for k in SUBCAPS}
-        caps = {k: int(v.get(ctl._CAP[CTL_KIND[k]], SUBCAPS[k]) or 0)
-                for k in SUBCAPS}
+        def _pull(names):
+            r = {k: int(v.get(ctl._COUNTER[CTL_KIND[k]], 0) or 0)
+                 for k in names}
+            c = {k: int(v.get(ctl._CAP[CTL_KIND[k]], names[k]) or 0)
+                 for k in names}
+            return r, c
+        res, caps = _pull(SUBCAPS)
+        sres, scaps = _pull(SOCKET_CAPS)
         return {"row_readable": True, "reserved": res, "caps": caps,
+                # THE HTTP TOTAL, and only the HTTP total. Socket units
+                # are reported beside it, never inside it.
                 "total_reserved": sum(res.values()),
                 "total_cap": sum(caps.values()),
+                "socket_reserved": sres, "socket_caps": scaps,
                 "probe_id": v.get("probe_id"),
                 "deadline_at": v.get("deadline_at")}
 
@@ -217,11 +243,18 @@ class DurableLedger:
                 "enforcement": "bettor_live_control.reserve -- one row "
                                "lock per request, committed BEFORE "
                                "dispatch",
-                "declared_total": TOTAL_CAP,
-                "subcaps": dict(SUBCAPS),
+                "http_declared_total": TOTAL_CAP,
+                "http_subcaps": dict(SUBCAPS),
                 "subcaps_sum_to_total": sum(SUBCAPS.values()) == TOTAL_CAP,
+                "socket_caps": dict(SOCKET_CAPS),
+                "socket_is_not_http": "a connect and a subscribe are not "
+                                      "HTTP requests and do not count "
+                                      "against the eight",
                 "grants_observed_this_boot": dict(self.observed),
-                "observed_total_this_boot": sum(self.observed.values()),
+                "http_observed_this_boot": sum(
+                    v for k, v in self.observed.items() if k in SUBCAPS),
+                "socket_observed_this_boot": sum(
+                    v for k, v in self.observed.items() if k in SOCKET_CAPS),
                 "authoritative_count": "the allowance row, not this object",
                 "refusals": len(self.refused),
                 "refused_by_verdict": _tally(self.refused, "verdict"),
@@ -328,6 +361,11 @@ def describe() -> dict:
         "budget": BUDGET_VERSION,
         "total_cap": TOTAL_CAP,
         "subcaps": dict(SUBCAPS),
+        "socket_caps": dict(SOCKET_CAPS),
+        "socket_unit": "ONE CONNECTION ATTEMPT (initial, failed or "
+                       "reconnect) or ONE SUBSCRIBE MESSAGE (a batch is "
+                       "TWO messages), reserved at the boundary before "
+                       "the attempt is made",
         "unit": "ONE OUTBOUND HTTP REQUEST, including every pagination "
                 "page and every retry",
         "subcaps_sum_to_total": sum(SUBCAPS.values()) == TOTAL_CAP,

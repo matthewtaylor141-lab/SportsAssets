@@ -169,6 +169,22 @@ class MarketStream:
         # the venue and the SDK, so `heartbeat_registered` records
         # whether the handler was even accepted, and `heartbeats`
         # records whether any actually came. Neither is assumed.
+        # ── THE SOCKET ALLOWANCE GATE ────────────────────────────────
+        #
+        # A SYNCHRONOUS callable, because this is consulted from the
+        # SOCKET THREAD, which runs its own event loop. The worker
+        # supplies a bridge that hands the coroutine to the main loop
+        # and blocks on the answer. Reserving takes one round trip and
+        # happens only at a connect or a subscribe, so blocking here
+        # costs nothing a connection was not already costing.
+        #
+        # None means NO GATE, which is what every other caller of this
+        # module gets and what it got before this existed.
+        self._reserve = None
+        self.socket_connect_attempts = 0
+        self.subscribe_messages_sent = 0
+        self.refusals = []
+        self.stopped_by_allowance = None
         self._heartbeat_cb = None
         self.heartbeats = 0
         self.last_heartbeat_at: float | None = None
@@ -653,6 +669,45 @@ class MarketStream:
             except Exception as exc:  # noqa: BLE001 -- never stop the feed
                 log.debug("book listener failed: %s", exc)
 
+    def set_socket_allowance(self, reserve) -> None:
+        """Install the gate. `reserve(kind) -> bool`, SYNCHRONOUS.
+
+        Additive: a caller that does not install one is ungated, so
+        nothing outside the incentive run changes behaviour.
+        """
+        self._reserve = reserve
+
+    def _may(self, kind: str) -> bool:
+        """Reserve one socket attempt, or refuse it. CALLED BEFORE.
+
+        A refusal is recorded and stops the reader: an allowance that
+        is spent is not a reason to keep trying, and a socket thread
+        that quietly looped past a refusal would be the defect this
+        gate exists to remove.
+        """
+        if self._reserve is None:
+            return True
+        try:
+            ok = bool(self._reserve(kind))
+        except Exception as exc:  # noqa: BLE001 -- uncertain means NO
+            ok = False
+            with self._lock:
+                self.refusals.append({"at": _now_iso(), "kind": kind,
+                                      "why": type(exc).__name__})
+            log.error("bettor market stream: %s reservation raised (%s); "
+                      "treating it as REFUSED and not attempting",
+                      kind, type(exc).__name__)
+            return False
+        if not ok:
+            with self._lock:
+                self.refusals.append({"at": _now_iso(), "kind": kind,
+                                      "why": "REFUSED_BY_ALLOWANCE"})
+                self.stopped_by_allowance = kind
+            log.warning("bettor market stream: %s refused by the "
+                        "allowance; NOT attempting, and stopping", kind)
+            self._stop = True
+        return ok
+
     def set_heartbeat_listener(self, cb) -> None:
         """Additive. A caller that does not ask stays exactly as before."""
         with self._lock:
@@ -739,6 +794,15 @@ class MarketStream:
         while not self._stop:
             open_flag = {"v": False}
             ws = None
+            # RESERVED BEFORE THE ATTEMPT, NOT AFTER IT. This covers the
+            # initial connection, a retry after a failure and a
+            # reconnect after a drop -- they are one event to the venue
+            # and one unit here. An attempt that then FAILS has still
+            # been made, and its unit stays spent.
+            if not self._may("socket_connect"):
+                break
+            with self._lock:
+                self.socket_connect_attempts += 1
             try:
                 ws = MarketsWebSocket(key_id=self._key_id,
                                       secret_key=self._secret_key)
@@ -783,8 +847,15 @@ class MarketStream:
                     seq += 1
                     for kind, rid in (("book", "bk-%d" % seq),
                                       ("trade", "tr-%d" % seq)):
+                        # ONE UNIT PER MESSAGE. A batch is TWO messages
+                        # -- market data and trades -- so a batch costs
+                        # two, and counting batches would undercount by
+                        # half.
+                        if not self._may("socket_subscribe"):
+                            break
                         with self._lock:
                             self._req_slugs[rid] = list(batch)
+                            self.subscribe_messages_sent += 1
                             if kind == "book":
                                 for s in batch:
                                     self._subs[s]["request_id"] = rid
@@ -792,6 +863,8 @@ class MarketStream:
                             await ws.subscribe_market_data(rid, batch)
                         else:
                             await ws.subscribe_trades(rid, batch)
+                    if self._stop:
+                        break
             except Exception as exc:  # noqa: BLE001 -- reconnect
                 log.warning("bettor market stream disconnected: %s", exc)
                 with self._lock:

@@ -42,6 +42,7 @@ import json
 import os
 import shutil
 import sys
+import threading
 import tempfile
 import time
 from datetime import datetime, timedelta, timezone
@@ -103,6 +104,44 @@ class FakeStream:
         self._t0 = None
         self._emitted = 0
         self._bumped = False
+        # The gated surface. The rehearsal drives the REAL reservation
+        # bridge through these, so the allowance is exercised even
+        # though no socket exists.
+        self._reserve = None
+        self.socket_connect_attempts = 0
+        self.subscribe_messages_sent = 0
+        self.refusals: list = []
+        self.stopped_by_allowance = None
+
+    def set_socket_allowance(self, reserve):
+        self._reserve = reserve
+
+    def _may(self, kind):
+        """Reserve FROM A SEPARATE THREAD, as the real reader does.
+
+        The bridge hands the coroutine to the main loop and BLOCKS on
+        the answer. Calling it inline from the loop's own thread
+        deadlocks -- the loop cannot run the coroutine while it is
+        blocked waiting for it. The real `MarketStream` never has this
+        problem because `_may` runs on the socket thread; the fake has
+        to reproduce that or it is testing a different shape.
+        """
+        if self._reserve is None:
+            return True
+        box = {}
+
+        def _go():
+            box["ok"] = bool(self._reserve(kind))
+
+        t = threading.Thread(target=_go, daemon=True)
+        t.start()
+        t.join(timeout=15.0)
+        ok = bool(box.get("ok"))
+        if not ok:
+            self.refusals.append({"kind": kind,
+                                  "why": "REFUSED_BY_ALLOWANCE"})
+            self.stopped_by_allowance = kind
+        return ok
 
     # the API the runner uses
     def set_heartbeat_listener(self, cb):
@@ -113,10 +152,31 @@ class FakeStream:
         self.slugs = list(slugs)
 
     def start(self):
-        self.connected = True
-        self.epoch = 1
-        self._t0 = time.time()
-        self._emit_all()
+        """Spawn a thread and RETURN, exactly as the real `start()` does.
+
+        `MarketStream.start()` starts `_run` on its own thread and
+        returns immediately, which is what keeps the main loop free to
+        service the reservation the socket thread is blocked on. A fake
+        that reserved inline blocked the loop inside `start()`, so the
+        bridge could never answer and every reservation timed out. That
+        was the fake's shape, not the worker's -- but it would have been
+        a REAL deadlock had `start()` ever blocked, so the property is
+        now pinned by a test.
+        """
+        def _connect():
+            if not self._may("socket_connect"):
+                return
+            self.socket_connect_attempts += 1
+            for _ in range(2):          # market data AND trades
+                if not self._may("socket_subscribe"):
+                    return
+                self.subscribe_messages_sent += 1
+            self.connected = True
+            self.epoch = 1
+            self._t0 = time.time()
+            self._emit_all()
+
+        threading.Thread(target=_connect, daemon=True).start()
 
     def stop(self):
         self.connected = False
@@ -143,13 +203,27 @@ class FakeStream:
     def tick(self):
         if not self.connected:
             return
+        if self._t0 is None:
+            return
         if not self._bumped and time.time() - self._t0 > 3.0:
             # ONE SIMULATED RECONNECT: the epoch advances, every book
             # from the old epoch is void, and every slug is resubscribed.
             self._bumped = True
-            self.epoch += 1
-            self.reconnects += 1
-            self._emit_all()
+
+            def _recon():
+                # A RECONNECT IS A CONNECT AND TWO MORE SUBSCRIBES.
+                if not self._may("socket_connect"):
+                    return
+                self.socket_connect_attempts += 1
+                for _ in range(2):
+                    if not self._may("socket_subscribe"):
+                        return
+                    self.subscribe_messages_sent += 1
+                self.epoch += 1
+                self.reconnects += 1
+                self._emit_all()
+
+            threading.Thread(target=_recon, daemon=True).start()
             return
         if self._emitted < 40:
             self._emit_one(self.slugs[self._emitted % len(self.slugs)])
@@ -259,7 +333,10 @@ ARM_ROW = {
     "max_incentive_manifest": 4, "max_incentive_recheck": 2,
     "max_incentive_retry": 2,
     "incentive_manifest_reserved": 0, "incentive_recheck_reserved": 0,
-    "incentive_retry_reserved": 0, "slugs": [],
+    "incentive_retry_reserved": 0,
+    "max_socket_connect": 20, "max_socket_subscribe": 40,
+    "socket_connect_reserved": 0, "socket_subscribe_reserved": 0,
+    "slugs": [],
 }
 
 
@@ -418,7 +495,11 @@ async def main() -> int:
     ])
 
     # ── S6 a real collection, stopped by the DATABASE ────────────────
+    # A FRESH ARM. S5 already spent socket units against the previous
+    # row, and a scenario that inherits another scenario's counters is
+    # measuring the wrong thing.
     await _clear_run()
+    await _arm()
     _configure(manifest_path=m12, et_date=today)
     LIVE.clear()
 
@@ -487,6 +568,16 @@ async def main() -> int:
                 (await _allowance() or {}).get("max_distinct") == 0),
                ("the run row carries the SOCKET totals",
                 (row or {}).get("reconnects") is not None),
+               ("every connect and subscribe was reserved BEFORE it",
+                (await _allowance() or {}).get("socket_connect_reserved", 0)
+                >= 1
+                and (await _allowance() or {}).get(
+                    "socket_subscribe_reserved", 0) >= 2),
+               ("a batch cost TWO subscribe units, not one",
+                (await _allowance() or {}).get(
+                    "socket_subscribe_reserved", 0)
+                == 2 * (await _allowance() or {}).get(
+                    "socket_connect_reserved", 0)),
                ("no orders", out.get("orders_submitted") == 0),
            ])
     spend_after_s6 = (out.get("allowance_at_close") or {}).get(
@@ -523,12 +614,14 @@ async def main() -> int:
         ("boot 1's evidence is still in the journal", len(boots) == 2),
         ("a BOOT_GAP marks the interval nobody observed",
          any(r["kind"] == jrnl.R_GAP for r in gap_rows)),
-        ("socket bounds are scoped PER RUN",
-         (out2.get("socket_bounds") or {}).get("scope", "").startswith(
-             "PER RUN")),
-        ("the run total includes boot 1's reconnects",
-         (out2.get("socket_bounds") or {}).get("prior_boots", {}).get(
-             "reconnects", -1) >= 1),
+        ("socket attempts are enforced at the boundary, not counted",
+         "boundary" in (out2.get("socket_bounds") or {}).get("scope", "")),
+        ("boot 2's connects and subscribes were reserved durably",
+         (out2.get("socket_bounds") or {}).get(
+             "connect_attempts_this_boot", 0) >= 1),
+        ("the row's socket counters advanced across BOTH boots",
+         ((await _allowance()) or {}).get("socket_connect_reserved", 0)
+         >= 2),
     ])
 
     # ── S8 the allowance row is the ceiling ──────────────────────────

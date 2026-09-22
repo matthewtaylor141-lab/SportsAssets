@@ -1,6 +1,6 @@
 {
   "rehearsal": "BETTOR_INCENTIVE_REHEARSAL_V1",
-  "at": "2026-09-22T19:58:55.017743+00:00",
+  "at": "2026-09-22T20:28:51.513784+00:00",
   "entry_point": "bettor_live_loop.main()  [no arguments]",
   "transport": "SIMULATED -- FakeStream; no socket, no venue byte, no credential",
   "credentials": "invented placeholders, never dispatched",
@@ -223,6 +223,14 @@
           "pass": true
         },
         {
+          "check": "every connect and subscribe was reserved BEFORE it",
+          "pass": true
+        },
+        {
+          "check": "a batch cost TWO subscribe units, not one",
+          "pass": true
+        },
+        {
           "check": "no orders",
           "pass": true
         }
@@ -268,15 +276,19 @@
           "pass": true
         },
         {
-          "check": "socket bounds are scoped PER RUN",
+          "check": "socket attempts are enforced at the boundary, not counted",
           "pass": true
         },
         {
-          "check": "the run total includes boot 1's reconnects",
+          "check": "boot 2's connects and subscribes were reserved durably",
+          "pass": true
+        },
+        {
+          "check": "the row's socket counters advanced across BOTH boots",
           "pass": true
         }
       ],
-      "why": "STOPPED_BY_CONTROL",
+      "why": "SOCKET_BOUND_REACHED",
       "started": true
     },
     {
