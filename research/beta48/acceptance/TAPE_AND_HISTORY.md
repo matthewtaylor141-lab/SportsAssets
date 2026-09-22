@@ -121,6 +121,15 @@ a further place to investigate, not yet a complete execution sequence.
 
 ## 3. Corrected policy comparison
 
+> **SUPERSEDED by `EXECUTION_CALIBRATION.md` section 5.** The
+> tape column below was produced by a fill model that treated an
+> EMPTY print list -- the tape saying nothing traded -- as "no
+> tape" and fell back to the snapshot proxy. Every quiet interval
+> was therefore still being filled by inferred volume. The
+> conclusion (C2 negative at every queue assumption) survives the
+> fix; the numbers do not.
+
+
 The snapshot proxy's **total volume was accurate** (ratio 1.00 vs the
 tape on eight of twelve markets). The defect was **price attribution**:
 all of an interval's volume was priced at `lastTradePx`, one price,
