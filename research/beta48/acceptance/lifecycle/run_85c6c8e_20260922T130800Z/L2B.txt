@@ -1,0 +1,37 @@
+2026-09-22 13:16:37,763 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: boot f208a55be15f4f80, store {"ok": true, "backend": "postgres", "lane": "polymarket-us/institutional/decision-only", "schema_version": 1, "tables": ["bettor_live_journal", "bettor_live_cursor", "bettor_live_ledger"], "schema_attempts": 1, "schema_last_error": null, "durable_across": ["restart", "service_restart", "redeploy"]}, recovered {"backend": "postgres", "cursors_recovered": 8, "ledger_restored": true, "journal_rows": 160, "store_load_seconds": 0.0038, "settlements_completed_at_recovery": 0, "settlements_outstanding_at_recovery": 8, "cash": 0.0, "recover_seconds": 0.004}
+2026-09-22 13:16:37,763 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: probe 5abab58b reserved {"listing": 1, "distinct": 8, "bbo_attempt": 8, "refused": 0}
+2026-09-22 13:16:37,763 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: WATCHING 8 markets (8 strategy-admitted, 0 observation-only); refusals observed {}; sampling {"seed": "BETTOR_SAMPLE_V1", "order_version": "BLAKE2B_KEYED_SLUG_ORDER_V1", "population": 8, "sampled": 8, "coverage_of_listing": 1.0, "population_families": 8, "sampled_families": 8, "sampled_family_counts": {"event:ev-bsp-050-5bc8b6": 1, "event:ev-bsp-044-5bc8b6": 1, "event:ev-bsp-039-5bc8b6": 1, "event:ev-bsp-019-5bc8b6": 1, "event:ev-bsp-009-5bc8b6": 1, "event:ev-bsp-030-5bc8b6": 1, "event:ev-bsp-040-5bc8b6": 1, "event:ev-bsp-038-5bc8b6": 1}, "largest_sampled_family_share": 0.125, "establishes": "coverage within the bounded listing", "does_not_establish": "representativeness of the venue, of any market family, or of any period other than the one observed"}
+2026-09-22 13:16:37,763 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: request telemetry {"pacer": "process", "configured_max_rps": 100000.0, "requests_started": 9, "last_request_started_at_iso": "2026-09-22T13:16:37.758699+00:00", "observed_span_s": 0.153, "observed_mean_rps": 58.9621, "densest_1s_starts": 9, "densest_10s_starts": 9, "max_concurrent_inflight": 1, "paced_wait_s": 0.0, "penalties": 0, "penalties_s": 0.0, "starts_ring_capacity": 4096, "starts_ring_full": false, "scope": "THIS PROCESS ONLY -- not the credential, not the egress address, not the venue"}
+2026-09-22 13:16:37,764 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: 8 markets subscribed; 8 eligible of 8 ENRICHED; covered 8 of 8 candidates in 8 reads over 1 pages (BETTOR_UNIVERSE_PROBE_V2); fees PMUS_PUBLISHED_2026_09_17 (PUBLISHED)
+2026-09-22 13:16:37,764 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: effective config {"loop": "BETTOR_LIVE_LOOP_V3", "probe": "BETTOR_UNIVERSE_PROBE_V2", "max_rps": 100000.0, "concurrency": 4, "above_demonstrated_envelope": true, "probe_batch": 120, "rounds_at_start": 2, "frame_capture_n": 0, "max_contracts": "0", "kill_env": "(unset -> on)", "control_every_s": 1.0, "suspend_above_s": 120.0, "discovery_pages": "6", "listing_max_retries": 2, "listing_timeout_s": 20.0, "listing_reservation_unit": "ONE_PER_OUTBOUND_REQUEST", "listing_max_outbound_requests": 18, "listing_paced": true, "listing_stop_after_consecutive_429": 2, "observe_max": 8, "observe_is_not_trading_admission": true, "sample_seed": "BETTOR_SAMPLE_V1", "sample_order_version": "BLAKE2B_KEYED_SLUG_ORDER_V1", "probe_max_retries": 3, "probe_timeout_s": 8.0, "budget_key": "bettor_live_probe_state", "budget_max_distinct_default": 40, "budget_max_bbo_attempts_default": 160, "budget_max_listing_attempts_default": 18, "budget_deadline_s_default": 1800.0, "budget_authority": "the ingestion_state row, not this line", "allowance_reserved_before_dispatch": true, "allowance_refund_paths": 0}
+2026-09-22 13:16:49,866 WARNING sportsassets.workers.bettor_live_loop: bettor_live_loop: stopping on the control (STOPPED_BY_CONTROL: bare boolean false)
+2026-09-22 13:16:49,892 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: SHUTDOWN NOT VERIFIED (INCOMPLETE_THREAD_EXITED_WITHOUT_CLOSE); the socket close was not observed to complete
+2026-09-22 13:16:49,892 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: stopped (STOPPED_BY_CONTROL); transport {"shutdown": "INCOMPLETE_THREAD_EXITED_WITHOUT_CLOSE", "closed": false, "thread_started": true, "thread_alive": false, "socket_close_returned": false, "socket_close_error": null, "socket_closes": 0, "stop_requested_at": 1790083009.8665812, "stop_requested_at_iso": "2026-09-22T13:16:49.866582+00:00", "socket_closed_at_iso": null, "thread_exited_at_iso": null, "last_frame_at_iso": "2026-09-22T13:16:49.785551+00:00", "close_latency_s": null, "thread_exit_latency_s": null, "waited_s": 20.0, "epoch": 1, "updates": 56, "connected_at_stop": true, "connected_since": "2026-09-22T13:16:37.764610+00:00", "epoch_at_stop": 1, "reconnects_at_stop": 0, "updates_at_stop": 56, "active_close_exercised": false, "active_close_note": null}; 56 records written, 0 persist failures
+image  : /app/sportsassets/__init__.py
+entry  : bettor_live_loop.main() with NO ARGUMENTS
+db     : bettor_lifecycle
+FIXTURE_BBO      RECORDED_VERBATIM  1 markets (of 30590 HTTP 200 bodies in the corpus)
+FIXTURE_BOOK     RECORDED_VERBATIM  1 markets, paired by (slug, segment)
+FIXTURE_LISTING  CONSTRUCTED  no capture of the collection endpoint exists
+FIXTURE_WS       ABSENT  no recorded PMUS WebSocket frame exists; none invented
+
+==============================================================================
+L2/L10 (process 2)  A NEW PROCESS RESUMES THE SAME PROBE
+==============================================================================
+   before any work: probe_id=5abab58b deadline=2026-09-22T13:45:56+00:00 counters=[1, 8, 8]
+   [PASS] the probe IDENTITY survived the restart                        got '5abab58b-465b-4df8-84e7-6ab89b6fc98f'
+   [PASS] the ABSOLUTE DEADLINE survived unchanged                       got '2026-09-22T13:45:56+00:00'
+   [PASS] the counters survived unchanged                                got [1, 8, 8]
+   [PASS] committed evidence survived the restart                        got 160
+   [PASS] outstanding outcome obligations survived                       got 8
+   recovered_at_start: {"backend": "postgres", "cursors_recovered": 8, "ledger_restored": true, "journal_rows": 160, "store_load_seconds": 0.0038, "settlements_completed_at_recovery": 0, "settlements_outstanding_at_recovery": 8, "cash": 0.0, "recover_seconds": 0.004}
+   [PASS] the loop RECOVERED the committed journal                       got 160
+   [PASS] and RECOVERED the outstanding cursors                          got 8
+   [PASS] the deadline is STILL the original one                         got '2026-09-22T13:45:56+00:00'
+   [PASS] the identity is STILL the original one                         got '5abab58b-465b-4df8-84e7-6ab89b6fc98f'
+   [PASS] and the restart did not replenish the allowance                got True
+
+==============================================================================
+PHASE L2B RESULT
+==============================================================================
+all 10 checks passed (SIMULATED TRANSPORT -- not a live venue connection)

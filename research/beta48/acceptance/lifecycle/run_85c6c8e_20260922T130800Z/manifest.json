@@ -1,0 +1,26 @@
+{
+  "run_id": "20260922T130800Z",
+  "sha": "85c6c8e4246c6977873a9d9d891b94dcf859a04b",
+  "working_tree_modified_paths": 0,
+  "image": "bettor-lifecycle:85c6c8e",
+  "image_id": "sha256:91dd2d61497d7710ee1715edee583f1c744437b986a3afbadc8359abac0f65ad",
+  "dsn_database": "bettor_lifecycle",
+  "checks_passed": 125,
+  "checks_failed": 0,
+  "phases_failed": "",
+  "phases": {
+    "L1": {"pass": 6, "fail": 0},
+    "L11": {"pass": 12, "fail": 0},
+    "L2A": {"pass": 4, "fail": 0},
+    "L2B": {"pass": 10, "fail": 0},
+    "L3": {"pass": 9, "fail": 0},
+    "L3B": {"pass": 7, "fail": 0},
+    "L4": {"pass": 11, "fail": 0},
+    "L5": {"pass": 13, "fail": 0},
+    "L6": {"pass": 22, "fail": 0},
+    "L7": {"pass": 17, "fail": 0},
+    "L8": {"pass": 8, "fail": 0},
+    "L9": {"pass": 6, "fail": 0}
+  },
+  "transport": "SIMULATED -- not a live venue connection"
+}

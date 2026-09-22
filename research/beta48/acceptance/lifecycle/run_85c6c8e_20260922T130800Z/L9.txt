@@ -1,0 +1,26 @@
+2026-09-22 13:15:12,179 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not observing (DEADLINE_PASSED: deadline 2026-09-22T13:15:11+00:00 passed); effective config {"loop": "BETTOR_LIVE_LOOP_V3", "probe": "BETTOR_UNIVERSE_PROBE_V2", "max_rps": 100000.0, "concurrency": 4, "above_demonstrated_envelope": true, "probe_batch": 120, "rounds_at_start": 2, "frame_capture_n": 0, "max_contracts": "0", "kill_env": "(unset -> on)", "control_every_s": 1.0, "suspend_above_s": 120.0, "discovery_pages": "6", "listing_max_retries": 2, "listing_timeout_s": 20.0, "listing_reservation_unit": "ONE_PER_OUTBOUND_REQUEST", "listing_max_outbound_requests": 18, "listing_paced": true, "listing_stop_after_consecutive_429": 2, "observe_max": 8, "observe_is_not_trading_admission": true, "sample_seed": "BETTOR_SAMPLE_V1", "sample_order_version": "BLAKE2B_KEYED_SLUG_ORDER_V1", "probe_max_retries": 3, "probe_timeout_s": 8.0, "budget_key": "bettor_live_probe_state", "budget_max_distinct_default": 40, "budget_max_bbo_attempts_default": 160, "budget_max_listing_attempts_default": 18, "budget_deadline_s_default": 1800.0, "budget_authority": "the ingestion_state row, not this line", "allowance_reserved_before_dispatch": true, "allowance_refund_paths": 0}
+2026-09-22 13:15:12,180 ERROR sportsassets.bettor_live_control: bettor_live_control: could not disarm (RaiseError); the loop stops anyway and the next process will read whatever is there
+2026-09-22 13:15:12,181 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (DEADLINE_PASSED); holding 30s (control poll) before the supervisor's own restart delay
+image  : /app/sportsassets/__init__.py
+entry  : bettor_live_loop.main() with NO ARGUMENTS
+db     : bettor_lifecycle
+FIXTURE_BBO      RECORDED_VERBATIM  1 markets (of 30590 HTTP 200 bodies in the corpus)
+FIXTURE_BOOK     RECORDED_VERBATIM  1 markets, paired by (slug, segment)
+FIXTURE_LISTING  CONSTRUCTED  no capture of the collection endpoint exists
+FIXTURE_WS       ABSENT  no recorded PMUS WebSocket frame exists; none invented
+
+==============================================================================
+L9  DEADLINE ENFORCEMENT SURVIVES A FAILURE TO WRITE THE DISARMED STATE
+==============================================================================
+   disarm blocked: why=DEADLINE_PASSED control still true; reservation RESERVATION_DEADLINE_PASSED
+   [PASS] local acquisition still stopped                                got False
+   [PASS] and named the deadline                                         got 'DEADLINE_PASSED'
+   [PASS] no venue request was issued                                    got (0, 0)
+   [PASS] the control was genuinely NOT written                          got 'true'
+   [PASS] every transport is closed                                      got True
+   [PASS] and the DATABASE DEADLINE goes on refusing regardless          got (False, 'RESERVATION_DEADLINE_PASSED')
+
+==============================================================================
+PHASE L9 RESULT
+==============================================================================
+all 6 checks passed (SIMULATED TRANSPORT -- not a live venue connection)
