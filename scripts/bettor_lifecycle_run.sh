@@ -103,20 +103,41 @@ echo "checks passed: $TOTAL    checks failed: $BAD"
   printf '  "checks_failed": %s,\n' "$BAD"
   printf '  "phases_failed": "%s",\n' "${FAILED[*]}"
   printf '  "phases": {\n'
-  SEP=""
+  # TWO BUGS LIVED HERE AND BOTH PRODUCED INVALID JSON:
+  #   * `grep -c` exits 1 when the count is ZERO, so `|| echo 0`
+  #     fired IN ADDITION to grep's own "0" and the field became
+  #     "0\n0". The fallback was not a fallback; it was a second value.
+  #   * the separator was carried in a variable and printed through
+  #     `%s`, which does NOT interpret `\n` -- only printf's FORMAT
+  #     string does -- so the entries ran together.
+  # Fixed, and validated below rather than trusted.
+  FIRST=1
   for f in "$OUT"/L*.txt; do
     [ -e "$f" ] || continue
     n="$(basename "$f" .txt)"
-    p=$(grep -c '^\s*\[PASS\]' "$f" 2>/dev/null || echo 0)
-    b=$(grep -c '^\s*\[FAIL\]' "$f" 2>/dev/null || echo 0)
-    printf '%s    "%s": {"pass": %s, "fail": %s}' "$SEP" "$n" "$p" "$b"
-    SEP=",\n"
+    p=$(grep -c '^[[:space:]]*\[PASS\]' "$f" 2>/dev/null)
+    b=$(grep -c '^[[:space:]]*\[FAIL\]' "$f" 2>/dev/null)
+    [ "$FIRST" -eq 1 ] || printf ',\n'
+    FIRST=0
+    printf '    "%s": {"pass": %s, "fail": %s}' "$n" "${p:-0}" "${b:-0}"
   done
   printf '\n  },\n'
   printf '  "transport": "SIMULATED -- not a live venue connection"\n'
   printf '}\n'
 } > "$OUT/manifest.json"
-echo "manifest: $OUT/manifest.json"
+
+# THE MANIFEST IS PARSED BEFORE IT IS BELIEVED. A manifest whose whole
+# purpose is to be machine-readable, and which was never once parsed,
+# shipped malformed on its first run.
+if python3 -c "import json,sys; json.load(open(sys.argv[1]))" \
+     "$OUT/manifest.json" 2>/dev/null; then
+  echo "manifest: $OUT/manifest.json  (valid JSON)"
+else
+  echo "MANIFEST IS NOT VALID JSON -- $OUT/manifest.json"
+  python3 -c "import json,sys; json.load(open(sys.argv[1]))" \
+    "$OUT/manifest.json" || true
+  exit 3
+fi
 
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "PHASES FAILED: ${FAILED[*]}"
