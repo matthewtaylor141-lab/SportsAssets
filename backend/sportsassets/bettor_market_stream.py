@@ -181,6 +181,19 @@ class MarketStream:
         self.errors: list = []
         self.connected_since: str | None = None
         self.first_connected_at: str | None = None
+        # ── SHUTDOWN, MEASURED ───────────────────────────────────────
+        #
+        # "The stream closed within 90 seconds" was previously argued
+        # from the ABSENCE of new journal rows, which a quiet market
+        # produces just as well. These are positive facts: when the
+        # last frame arrived, when a stop was asked for, and when the
+        # socket was actually closed.
+        self.last_frame_at: float | None = None
+        self.last_frame_at_iso: str | None = None
+        self.stop_requested_at: float | None = None
+        self.stop_requested_at_iso: str | None = None
+        self.closed_at: float | None = None
+        self.closed_at_iso: str | None = None
         self._stop = False
         self._thread = None
         if autostart:
@@ -195,8 +208,42 @@ class MarketStream:
                                         name="bettor-market-stream")
         self._thread.start()
 
-    def stop(self) -> None:
+    def stop(self, *, wait_s: float = 0.0) -> dict:
+        """Ask the socket thread to close, and OPTIONALLY WAIT FOR IT.
+
+        The old signature set a flag and returned, so a caller could
+        only infer closure from silence. `wait_s` joins the thread, and
+        the returned record says whether it closed and how long that
+        took -- the difference between "no rows arrived" and "the
+        socket is shut".
+        """
+        with self._lock:
+            if self.stop_requested_at is None:
+                self.stop_requested_at = time.time()
+                self.stop_requested_at_iso = _now_iso()
+            asked = self.stop_requested_at
         self._stop = True
+        t = self._thread
+        if wait_s and t is not None and t.is_alive():
+            t.join(timeout=max(0.0, float(wait_s)))
+        alive = bool(t is not None and t.is_alive())
+        with self._lock:
+            if not alive and self.closed_at is None:
+                # The thread is gone; if it exited without stamping
+                # (an abrupt death), stamp it now rather than leave the
+                # receipt silent about it.
+                self.closed_at = time.time()
+                self.closed_at_iso = _now_iso()
+            closed_at = self.closed_at
+        return {"stop_requested_at": asked,
+                "stop_requested_at_iso": self.stop_requested_at_iso,
+                "closed": not alive,
+                "thread_alive": alive,
+                "closed_at": closed_at,
+                "closed_at_iso": self.closed_at_iso,
+                "close_latency_s": (None if closed_at is None
+                                    else round(closed_at - asked, 3)),
+                "waited_s": float(wait_s)}
 
     def subscribe(self, slugs) -> dict:
         """Queue slugs. They are REQUESTED, not subscribed, until data."""
@@ -438,6 +485,17 @@ class MarketStream:
                     "errors": list(self.errors[-10:]),
                     "connected_since": self.connected_since,
                     "first_connected_at": self.first_connected_at,
+                    # POSITIVE SHUTDOWN FACTS, not inferred from silence.
+                    "last_frame_at_iso": self.last_frame_at_iso,
+                    "stop_requested_at_iso": self.stop_requested_at_iso,
+                    "closed_at_iso": self.closed_at_iso,
+                    "close_latency_s": (
+                        None if (self.closed_at is None
+                                 or self.stop_requested_at is None)
+                        else round(self.closed_at
+                                   - self.stop_requested_at, 3)),
+                    "thread_alive": bool(self._thread is not None
+                                         and self._thread.is_alive()),
                     "subscriptions": self._subscription_report_locked()}
 
     # ── socket thread ────────────────────────────────────────────────
@@ -466,6 +524,8 @@ class MarketStream:
         with self._lock:
             self._books[slug] = rec
             self.updates += 1
+            self.last_frame_at = now
+            self.last_frame_at_iso = rec["received_at_iso"]
             sub = self._subs.get(slug)
             if sub is not None and sub["state"] != CONFIRMED:
                 # 5. DATA IS THE ONLY CONFIRMATION THIS PROTOCOL OFFERS.
@@ -528,6 +588,15 @@ class MarketStream:
             with self._lock:
                 self.connected = False
                 self.errors.append({"at": _now_iso(), "fatal": str(exc)})
+        finally:
+            # WHEN THE SOCKET THREAD ACTUALLY ENDED. Stamped from the
+            # thread itself, so it is an observation of closure rather
+            # than an inference from silence.
+            with self._lock:
+                self.connected = False
+                if self.closed_at is None:
+                    self.closed_at = time.time()
+                    self.closed_at_iso = _now_iso()
 
     async def _main(self) -> None:
         from polymarket_us.websocket.markets import MarketsWebSocket

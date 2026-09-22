@@ -629,6 +629,43 @@ async def disarm(pool, why: str) -> dict:
     return {"disarmed": True, "why": why}
 
 
+RECEIPT_KEY = "bettor_live_stop_receipt"
+
+
+async def write_stop_receipt(pool, receipt: dict) -> dict:
+    """Leave a DURABLE, READABLE record of how this run ended.
+
+    WHY THIS EXISTS. "The stream closed within 90 seconds" was
+    previously argued from the ABSENCE of new journal rows -- which is
+    exactly what a quiet market also produces. The claim needed a
+    positive observation, made by the process that did the closing,
+    surviving the process's own exit.
+
+    It carries WHEN the last venue request was issued, WHEN the last
+    frame arrived, WHEN the stop was asked for and WHEN the socket was
+    actually shut, so stop latency is a subtraction rather than an
+    inference. It is written under one key that each run overwrites;
+    the probe record in the repository is what preserves history.
+
+    NEVER FATAL. A receipt that cannot be written must not change how
+    the loop shuts down -- the shutdown is the thing that matters and
+    it has already happened by the time this is called.
+    """
+    try:
+        p = await _resolve(pool)
+        await p.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, "
+            "$2::jsonb) ON CONFLICT (key) DO UPDATE SET "
+            "value = EXCLUDED.value", RECEIPT_KEY,
+            json.dumps(receipt, default=str))
+    except Exception as exc:                               # noqa: BLE001
+        log.warning("bettor_live_control: stop receipt not written (%s); "
+                    "the shutdown itself is unaffected",
+                    type(exc).__name__)
+        return {"written": False, "error": type(exc).__name__}
+    return {"written": True, "key": RECEIPT_KEY}
+
+
 def describe_allowance() -> dict:
     """What the allowance is and what it buys. For the refusal log."""
     return {

@@ -71,9 +71,11 @@ function and holds no position state.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import logging
 import os
 import time
+from collections import deque
 
 log = logging.getLogger(__name__)
 
@@ -176,6 +178,59 @@ LISTING_MAX_RETRIES = 2
 LISTING_RETRY_BACKOFF_S = (2.0, 8.0)
 LISTING_TIMEOUT_S = 20.0
 
+# ONE RESERVED UNIT PER PAGE, NOT PER INVOCATION.
+#
+# THE DEFECT, measured on the 2026-09-22 probe: `_list_candidates`
+# reserved ONE listing unit and then ran a `while pages < max_pages`
+# loop issuing up to SIX `markets.list` calls under it, with no pacing
+# between them. The probe recorded `listing_attempts_reserved: 1` while
+# the venue received six requests -- an undercount of up to 6x, and a
+# six-request burst at the start of a run that was reported as running
+# at 0.25 req/s.
+#
+# VERIFIED AT THE SDK, not assumed (`polymarket_us` 2026-09-22):
+#   * `Markets.list` is `self._client.get("/v1/markets", query=...)` --
+#     a thin wrapper. NO internal pagination.
+#   * `PolymarketUS.__init__` builds `httpx.Client(timeout=timeout)`
+#     with no `transport=` and no `retries=`; httpx defaults to
+#     `retries=0`. NO internal retry.
+#   * `follow_redirects` appears nowhere in the package, so httpx's
+#     default of False applies: a 3xx is not followed, it is raised as
+#     `APIStatusError`. NO hidden redirect request.
+# Therefore ONE WRAPPER CALL IS EXACTLY ONE OUTBOUND HTTP REQUEST, and
+# reserving per call is reserving per request. If a future SDK version
+# adds retry or pagination this equality breaks, so it is asserted by
+# `test_bettor_universe_probe.py::test_sdk_has_no_hidden_requests`.
+LISTING_PAGE_IS_ONE_REQUEST = True
+
+# How many consecutive throttled pages end the listing. "Honor server
+# backoff and stop on repeated throttling" -- a limiter that says no
+# twice in a row is not asking to be asked a third time.
+LISTING_MAX_CONSECUTIVE_429 = 2
+
+# ── REPRODUCIBLE SAMPLING ACROSS THE BOUNDED LISTING ────────────────
+#
+# The candidate list is sorted by slug, and the enrichment window walks
+# it from an offset -- so the 2026-09-22 probe's 40 markets were the 40
+# ALPHABETICALLY FIRST slugs, which delivered one market family
+# (`aachc-mlb-bavg-*-leader-*`) and told us nothing about the rest.
+#
+# A seeded permutation spreads the window across the whole bounded
+# listing instead. The seed is recorded, so the sample is reproducible
+# and was fixed BEFORE any of its economic results were seen.
+#
+# WHAT THIS DOES NOT ESTABLISH. It improves coverage WITHIN the
+# bounded listing. The listing is itself a prefix of the venue
+# (`LISTING_MAX_PAGES` pages at `BETTOR_LIVE_DISCOVERY_PAGE_SIZE`), so
+# nothing here supports a claim about the venue as a whole.
+SAMPLE_SEED_ENV = "BETTOR_PROBE_SAMPLE_SEED"
+DEFAULT_SAMPLE_SEED = "BETTOR_SAMPLE_V1"
+SAMPLE_ORDER_VERSION = "BLAKE2B_KEYED_SLUG_ORDER_V1"
+
+# How many request starts the pacer remembers, for the densest-window
+# telemetry. Bounded like everything else; the flag says when it wrapped.
+STARTS_RING = 4096
+
 # How often, in completed reads, the round asks whether it should stop.
 # The caller's callback does its own time-based caching, so this is a
 # bound on RESPONSIVENESS, not a query rate.
@@ -239,14 +294,40 @@ class Pacer:
     ROUND and not of each task.
     """
 
-    def __init__(self, max_rps: float, *, sleep=None):
-        self.min_interval = 1.0 / max(0.001, max_rps)
+    def __init__(self, max_rps: float, *, sleep=None, name: str = "probe"):
+        self.name = name
+        self.max_rps = max(0.001, max_rps)
+        self.min_interval = 1.0 / self.max_rps
         self._lock = asyncio.Lock()
         self._next_at = 0.0
         self._sleep = sleep or asyncio.sleep
         self.waited_s = 0.0
         self.grants = 0
 
+        # ── MEASURED REQUEST TELEMETRY ───────────────────────────────
+        #
+        # The 2026-09-22 probe reported "0.25 req/s" because that is
+        # what the pacer was CONFIGURED to. That is a setting, not an
+        # observation, and it was not even true of the whole process:
+        # the six listing pages were issued through no pacer at all.
+        # The rate at which a 429 arrived was therefore never measured.
+        #
+        # These are measurements. `starts` is the monotonic clock at
+        # every request START (the thing a limiter counts), so the
+        # densest one- and ten-second windows can be read off it; and
+        # `inflight` is how many were open at once, which is the
+        # separate quantity a concurrency ceiling bounds.
+        self._starts: deque = deque(maxlen=STARTS_RING)
+        self.inflight = 0
+        self.max_inflight = 0
+        self.first_start_at: float | None = None
+        self.last_start_at: float | None = None
+        self.penalties_s = 0.0
+        self.penalties = 0
+
+    # `acquire` STARTS a request; `release` ends it. The pair is what
+    # makes `inflight` meaningful -- a caller that forgets `release`
+    # inflates it, so every dispatch site uses `started()` below.
     async def acquire(self) -> None:
         async with self._lock:
             now = time.monotonic()
@@ -261,11 +342,73 @@ class Pacer:
                 now = time.monotonic()
             self._next_at = max(now, self._next_at) + self.min_interval
             self.grants += 1
+            self._starts.append(now)
+            if self.first_start_at is None:
+                self.first_start_at = now
+            self.last_start_at = now
+            self.inflight += 1
+            self.max_inflight = max(self.max_inflight, self.inflight)
+
+    def release(self) -> None:
+        self.inflight = max(0, self.inflight - 1)
+
+    def starts_within(self, seconds: float,
+                      *, now: float | None = None) -> int:
+        """How many requests THIS PROCESS started in the last
+        `seconds`. Read at the moment a 429 arrives, this is the
+        closest thing we have to the rate the venue saw."""
+        now = time.monotonic() if now is None else now
+        cut = now - seconds
+        return sum(1 for t in self._starts if t >= cut)
+
+    def densest_window(self, seconds: float) -> int:
+        """The largest number of starts in any `seconds`-wide window,
+        over the starts still in the ring."""
+        ts = list(self._starts)
+        best, j = 0, 0
+        for i, t in enumerate(ts):
+            while ts[j] < t - seconds:
+                j += 1
+            best = max(best, i - j + 1)
+        return best
+
+    def telemetry(self) -> dict:
+        """What was MEASURED, kept apart from what was configured.
+
+        `observed_mean_rps` is this process's own starts over its own
+        elapsed time. It is a LOWER BOUND on the rate the venue saw:
+        other workers, other processes and anything else sharing the
+        credential or the egress address are invisible from here, and
+        that is exactly why a 429 cannot be attributed to this number.
+        """
+        span = None
+        if self.first_start_at is not None and self.last_start_at is not None:
+            span = self.last_start_at - self.first_start_at
+        return {
+            "pacer": self.name,
+            "configured_max_rps": self.max_rps,
+            "requests_started": self.grants,
+            "observed_span_s": None if span is None else round(span, 3),
+            "observed_mean_rps": (
+                None if not span else round(self.grants / span, 4)),
+            "densest_1s_starts": self.densest_window(1.0),
+            "densest_10s_starts": self.densest_window(10.0),
+            "max_concurrent_inflight": self.max_inflight,
+            "paced_wait_s": round(self.waited_s, 2),
+            "penalties": self.penalties,
+            "penalties_s": round(self.penalties_s, 2),
+            "starts_ring_capacity": STARTS_RING,
+            "starts_ring_full": len(self._starts) >= STARTS_RING,
+            "scope": "THIS PROCESS ONLY -- not the credential, not the "
+                     "egress address, not the venue",
+        }
 
     def penalise(self, seconds: float) -> None:
         """Push every pending start back. Used on a 429, so ONE rate
         limit slows the whole round rather than only the task that
         happened to be told about it."""
+        self.penalties += 1
+        self.penalties_s += max(0.0, float(seconds))
         self._next_at = max(self._next_at, time.monotonic() + seconds)
 
 
@@ -306,6 +449,106 @@ def candidates_from_listing(rows) -> list:
                     "title": r.get("title")})
     out.sort(key=lambda c: c["slug"])
     return out
+
+
+def sample_seed() -> str:
+    raw = os.environ.get(SAMPLE_SEED_ENV)
+    return raw.strip() if raw and raw.strip() else DEFAULT_SAMPLE_SEED
+
+
+def family_of(cand: dict) -> str:
+    """A COARSE NAMING HEURISTIC, not the venue's taxonomy.
+
+    The venue publishes no family field. `eventSlug` is the closest
+    thing it does publish, so it is preferred where present; otherwise
+    the first three dash-separated tokens of the slug are used, which
+    is what separated `aachc-mlb-bavg-...` from everything else in the
+    2026-09-22 listing.
+
+    This is reported so a reader can see whether a sample was drawn
+    from one corner of the listing or spread across it. It is NOT a
+    claim that these groups are the venue's own categories, and no
+    selection decision is made from it.
+    """
+    ev = cand.get("event_slug")
+    if ev:
+        return "event:%s" % ev
+    slug = str(cand.get("slug") or "")
+    parts = [p for p in slug.split("-") if p]
+    if not parts:
+        return "slug:"
+    return "slug:%s" % "-".join(parts[:3])
+
+
+def _order_key(seed: str, slug: str) -> bytes:
+    """A keyed hash, not `random.shuffle`.
+
+    `random` is reproducible only for one PRNG implementation; a keyed
+    digest of the slug is reproducible anywhere, which is what lets a
+    reviewer regenerate this sample from the seed and the listing alone.
+    """
+    return hashlib.blake2b(slug.encode("utf-8"), digest_size=16,
+                           key=seed.encode("utf-8")[:64]).digest()
+
+
+def order_candidates(candidates, *, seed: str | None = None) -> dict:
+    """The candidate list PERMUTED DETERMINISTICALLY by `seed`.
+
+    Returns the permuted list plus the sampling record: the seed, the
+    population it was drawn over, and the family distribution of the
+    population. What the probe actually reaches is a PREFIX of the
+    permuted list, so `sample_report` below describes that prefix
+    against this population.
+    """
+    seed = seed or sample_seed()
+    cands = [c for c in (candidates or []) if c.get("slug")]
+    ordered = sorted(cands, key=lambda c: (_order_key(seed, c["slug"]),
+                                           c["slug"]))
+    fam: dict = {}
+    for c in cands:
+        f = family_of(c)
+        fam[f] = fam.get(f, 0) + 1
+    return {
+        "ordered": ordered,
+        "seed": seed,
+        "order_version": SAMPLE_ORDER_VERSION,
+        "population": len(cands),
+        "population_families": len(fam),
+        "population_family_counts": fam,
+        "scope": "WITHIN THE BOUNDED LISTING ONLY. The listing is a "
+                 "prefix of the venue; this permutation does not make "
+                 "it a sample of the venue.",
+    }
+
+
+def sample_report(ordering: dict, slugs) -> dict:
+    """What the probe actually reached, against the population it was
+    drawn from. Coverage, family spread, and the fact that neither is
+    a representativeness claim."""
+    pop_fam = dict(ordering.get("population_family_counts") or {})
+    by_slug = {c["slug"]: c for c in ordering.get("ordered") or []}
+    got = [s for s in (slugs or []) if s in by_slug]
+    fam: dict = {}
+    for s in got:
+        f = family_of(by_slug[s])
+        fam[f] = fam.get(f, 0) + 1
+    pop = int(ordering.get("population") or 0)
+    return {
+        "seed": ordering.get("seed"),
+        "order_version": ordering.get("order_version"),
+        "population": pop,
+        "sampled": len(got),
+        "coverage_of_listing": (round(len(got) / pop, 6) if pop else None),
+        "population_families": len(pop_fam),
+        "sampled_families": len(fam),
+        "sampled_family_counts": fam,
+        "largest_sampled_family_share": (
+            round(max(fam.values()) / len(got), 4) if got else None),
+        "establishes": "coverage within the bounded listing",
+        "does_not_establish": (
+            "representativeness of the venue, of any market family, or "
+            "of any period other than the one observed"),
+    }
 
 
 def _market_data(resp):
@@ -400,6 +643,47 @@ def _retry_after_s(exc) -> float | None:
     return secs
 
 
+_RL_EVENTS_MAX = 64
+
+
+def _note_429(acct: dict, pacer, slug, retry_after_s, *, where: str) -> None:
+    """One HTTP 429, with what THIS PROCESS was doing at that instant.
+
+    WHY THIS IS NOT AN ATTRIBUTION. The venue counts requests per
+    credential, per address, per endpoint, or by some combination it
+    has not published. This process can see only its own starts, so
+    `observed_*` below is a LOWER BOUND on what the limiter counted.
+    Other workers on the same service, anything else holding the same
+    credential, a shared egress address, and an endpoint-specific
+    ceiling are all invisible from here and all remain live
+    explanations. These numbers narrow the question; they do not
+    answer it.
+    """
+    ev = acct.setdefault("rate_limit_events", [])
+    if len(ev) >= _RL_EVENTS_MAX:
+        acct["rate_limit_events_dropped"] = \
+            acct.get("rate_limit_events_dropped", 0) + 1
+        return
+    now = time.monotonic()
+    first = getattr(pacer, "first_start_at", None)
+    ev.append({
+        "where": where,
+        "slug": slug,
+        "at_s_into_pacing": (None if first is None
+                             else round(now - first, 3)),
+        "retry_after_s": retry_after_s,
+        "observed_starts_last_1s": pacer.starts_within(1.0, now=now),
+        "observed_starts_last_10s": pacer.starts_within(10.0, now=now),
+        "observed_starts_last_60s": pacer.starts_within(60.0, now=now),
+        "observed_inflight": getattr(pacer, "inflight", None),
+        "configured_max_rps": getattr(pacer, "max_rps", None),
+        "attribution": "NOT ESTABLISHED -- this process's own starts "
+                       "only; shared credential, shared egress address "
+                       "and endpoint-specific limits are not visible "
+                       "from here",
+    })
+
+
 def _read_one_sync(client, slug: str) -> dict:
     """One BBO call. Never raises; names what happened.
 
@@ -435,7 +719,7 @@ async def probe(client, candidates, *, offset: int = 0,
                 timeout_s: float = PROBE_TIMEOUT_S,
                 remaining: int | None = None,
                 max_distinct: int | None = None,
-                reserve=None,
+                reserve=None, pacer=None,
                 should_stop=None, sleep=None) -> dict:
     """Enrich one deterministic, RATE-LIMITED slice of the candidates.
 
@@ -512,8 +796,18 @@ async def probe(client, candidates, *, offset: int = 0,
         window.append(c)
 
     sem = asyncio.Semaphore(max(1, concurrency))
-    pacer = Pacer(max_rps, sleep=_sleep)
+    # THE PACER IS SHARED WHEN THE CALLER SHARES IT. `_discover` passes
+    # ONE pacer through the listing and every enrichment round, so the
+    # process has a single outbound rate rather than one per call site.
+    # The listing used to have none at all.
+    pacer = pacer if pacer is not None else Pacer(max_rps, sleep=_sleep,
+                                                  name="enrichment")
     acct = {"attempts": 0, "retries": 0, "rate_limited": 0,
+            # WHEN each 429 arrived and WHAT THIS PROCESS WAS DOING at
+            # that moment. Recorded because "we were paced at 0.25
+            # req/s" is a setting; these are observations, and they are
+            # still only observations OF THIS PROCESS.
+            "rate_limit_events": [],
             # DISPATCHED, not offered. `window` is what we would have
             # liked to read; this counts the markets a reservation
             # actually paid for, which is the number the ceiling is
@@ -636,10 +930,18 @@ async def probe(client, candidates, *, offset: int = 0,
                 except Exception as exc:                   # noqa: BLE001
                     r = {"slug": c["slug"], "status": P_READ_FAILED,
                          "detail": type(exc).__name__}
+                finally:
+                    pacer.release()
                 if r["status"] != P_RATE_LIMITED:
                     await _check_stop()
                     return r
                 acct["rate_limited"] += 1
+                # WHAT THIS PROCESS WAS DOING WHEN THE VENUE SAID NO.
+                # Measured at the moment of the refusal, so the claim
+                # "we were throttled at rate X" can be checked rather
+                # than read off the configuration.
+                _note_429(acct, pacer, c["slug"], r.get("retry_after_s"),
+                          where="enrichment")
                 asked = r.get("retry_after_s")
                 if asked is not None and asked > PROBE_SUSPEND_ABOVE_S:
                     # THE SERVER ASKED FOR LONGER THAN THIS ROUND
@@ -689,6 +991,8 @@ async def probe(client, candidates, *, offset: int = 0,
                                      outcome_leg=leg.get(r["slug"])))
     acct["enriched"] = len(rows)
     acct["paced_wait_s"] = round(pacer.waited_s, 2)
+    # MEASURED, beside the configured pace rather than instead of it.
+    acct["request_telemetry"] = pacer.telemetry()
 
     return {
         "rows": rows,
@@ -730,6 +1034,24 @@ def merge_coverage(a: dict, b: dict) -> dict:
            "by_status": st}
     for k in _SUMMED:
         out[k] = round(a.get(k, 0) + b.get(k, 0), 2)
+    # NEITHER OF THESE IS A COUNT, so neither is summed.
+    #
+    # `rate_limit_events` is a list of observations and is
+    # CONCATENATED, bounded. `request_telemetry` comes from a pacer
+    # that `_discover` SHARES across every round, so the later reading
+    # is already cumulative and the earlier one is a prefix of it --
+    # summing them would double-count. A caller that does not share a
+    # pacer gets the last round's telemetry only, and the
+    # `requests_started` figure beside it says so.
+    ev = list(a.get("rate_limit_events") or []) + \
+        list(b.get("rate_limit_events") or [])
+    if ev:
+        out["rate_limit_events"] = ev[:_RL_EVENTS_MAX]
+        if len(ev) > _RL_EVENTS_MAX:
+            out["rate_limit_events_dropped"] = len(ev) - _RL_EVENTS_MAX
+    tel = b.get("request_telemetry") or a.get("request_telemetry")
+    if tel:
+        out["request_telemetry"] = tel
     return out
 
 
@@ -775,7 +1097,59 @@ def describe() -> dict:
                            "max_retries": LISTING_MAX_RETRIES,
                            "backoff_s": list(LISTING_RETRY_BACKOFF_S),
                            "timeout_s": LISTING_TIMEOUT_S,
-                           "counted": "separately from enrichment"},
+                           "counted": "separately from enrichment",
+                           # ONE UNIT PER OUTBOUND REQUEST, not per
+                           # invocation. The previous build reserved
+                           # one for up to six.
+                           "reservation_unit": "ONE_PER_OUTBOUND_REQUEST",
+                           "max_outbound_requests":
+                               LISTING_MAX_PAGES * (LISTING_MAX_RETRIES + 1),
+                           "paced": True,
+                           "stop_after_consecutive_429":
+                               LISTING_MAX_CONSECUTIVE_429},
+        "sdk_request_accounting": {
+            "one_wrapper_call_is_one_http_request": LISTING_PAGE_IS_ONE_REQUEST,
+            "verified_against": "the installed polymarket_us package",
+            "checks": ["Markets.list has no loop and no pagination",
+                       "httpx.Client built with no transport= and no "
+                       "retries= (httpx default retries=0)",
+                       "follow_redirects appears nowhere (httpx default "
+                       "False; a 3xx raises rather than re-requesting)",
+                       "_request contains no sleep; a 429 raises "
+                       "immediately"],
+            "if_this_changes": ("the listing budget silently "
+                                "undercounts again; asserted by "
+                                "TestTheSDKAddsNoHiddenRequests"),
+        },
+        "sampling": {
+            "order_version": SAMPLE_ORDER_VERSION,
+            "seed_env": SAMPLE_SEED_ENV,
+            "seed": sample_seed(),
+            "method": ("keyed BLAKE2b digest of the slug -- "
+                       "reproducible from the seed and the listing "
+                       "alone, unlike random.shuffle"),
+            "establishes": "coverage WITHIN the bounded listing",
+            "does_not_establish": ("representativeness of the venue; "
+                                   "the listing is a page-bounded "
+                                   "prefix and a permutation of a "
+                                   "prefix is still a prefix"),
+            "family_of": ("a COARSE NAMING HEURISTIC (eventSlug, else "
+                          "the first three dash-separated tokens) -- "
+                          "not the venue's taxonomy, and no selection "
+                          "decision is made from it"),
+        },
+        "request_telemetry": {
+            "measured": ["requests_started", "observed_mean_rps",
+                         "densest_1s_starts", "densest_10s_starts",
+                         "max_concurrent_inflight", "penalties_s"],
+            "per_429": ["observed_starts_last_1s/_10s/_60s",
+                        "observed_inflight", "retry_after_s"],
+            "scope": ("THIS PROCESS ONLY. Other workers, anything else "
+                      "holding the same credential, a shared egress "
+                      "address and endpoint-specific ceilings are "
+                      "invisible from here"),
+            "attribution_of_a_429": "NOT_ESTABLISHED",
+        },
         "listing_supplies": ["slug", "outcome", "active", "closed",
                              "archived", "eventSlug", "title"],
         "listing_does_not_supply": ["bestBid", "bestAsk", "sharesTraded",
@@ -790,7 +1164,10 @@ def describe() -> dict:
         "websocket_status": ("SDK-DECLARED ONLY -- no captured PMUS "
                              "frame in this repo to check it against"),
         "cost": "one call per market; bounded by PROBE_BATCH per round",
-        "rotation": "deterministic over candidates sorted by slug",
+        "rotation": ("deterministic over candidates in the SEEDED "
+                     "order (%s), not the slug sort -- which delivered "
+                     "one market family on 2026-09-22"
+                     % SAMPLE_ORDER_VERSION),
         "coverage_is_not_eligibility": True,
         "probe_failure_reasons": [P_READ_FAILED, P_NO_PAYLOAD, P_TIMEOUT,
                                   P_NOT_PROBED],

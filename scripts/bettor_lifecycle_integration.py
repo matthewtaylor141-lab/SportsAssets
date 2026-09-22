@@ -427,8 +427,14 @@ async def L3_reservation_precedes_dispatch(pool):
     print("   row   : listing=%s distinct=%s attempts=%s"
           % (b["listing_attempts_reserved"], b["distinct_reserved"],
              b["bbo_attempts_reserved"]))
-    check("a listing reservation exists for every listing request",
-          b["listing_attempts_reserved"] >= m.list_calls, True)
+    # EQUALITY, NOT `>=`. This check was written as `>=` while
+    # `_list_candidates` reserved ONE unit around a loop that issued up
+    # to SIX requests -- so it passed on a build that undercounted
+    # outbound listing requests by 6x, and the defect had to be found
+    # by reading the source instead. One reserved unit per outbound
+    # request is the repair, and equality is what states it.
+    check("one listing reservation per outbound listing request",
+          b["listing_attempts_reserved"], m.list_calls)
     check("listing requests were actually issued", m.list_calls >= 1, True)
     check("one distinct slot per distinct market read",
           b["distinct_reserved"], m.distinct)

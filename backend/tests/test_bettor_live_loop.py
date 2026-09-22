@@ -33,6 +33,7 @@ from sportsassets import bettor_market_stream as ms
 from sportsassets import bettor_settlement_ingest as si
 from sportsassets import bettor_live_control as ctl_mod
 from sportsassets import bettor_universe_probe as probe_mod
+from sportsassets import bettor_universe as uni_mod
 from sportsassets.workers import bettor_live_loop as bl
 
 
@@ -962,7 +963,15 @@ class TestTheEntryPointLifecycle:
         def fake_build(*a, **kw):
             loop, stream = real_build(*a, **kw)
             stream.start = lambda: made.setdefault("started", True)
-            stream.stop = lambda: made.setdefault("stopped", True)
+            # THE DOUBLE CARRIES THE PRODUCTION SIGNATURE. `stop()`
+            # now takes `wait_s` and RETURNS the closure record; a
+            # double that took neither would have hidden the change
+            # and passed while production raised TypeError.
+            stream.stop = lambda *, wait_s=0.0: (
+                made.setdefault("stopped", True),
+                made.setdefault("stop_wait_s", wait_s),
+                {"closed": True, "thread_alive": False,
+                 "close_latency_s": 0.0, "waited_s": wait_s})[-1]
             made["loop"], made["stream"] = loop, stream
             return loop, stream
 
@@ -993,16 +1002,29 @@ class TestTheEntryPointLifecycle:
         assert out["started"] is False and out["why"] == "DISCOVERY_FAILED"
         assert "started" not in made
 
-    def test_an_empty_universe_is_reported_not_bypassed(self, monkeypatch,
-                                                        tmp_path):
-        """The rule is not relaxed to find something to watch."""
+    def test_nothing_observable_is_reported_not_bypassed(self, monkeypatch,
+                                                         tmp_path):
+        """The rule is not relaxed to find something to watch.
+
+        THE REFUSAL MOVED, AND NARROWED. It used to fire whenever the
+        ECONOMIC rule admitted nothing, which made the transport
+        untestable for as long as the strategy kept saying no. It now
+        fires only when there is nothing VALID AND OPEN to watch at
+        all -- a strictly weaker precondition. The strategy's verdict
+        is still reported verbatim and is still not relaxed; see
+        `TestObservationIsNotTradingAdmission` for the case where the
+        rule refuses everything and the run proceeds anyway.
+        """
         made = self._patch(monkeypatch, tmp_path,
                            discovery={"ok": True, "slugs": [],
                                       "considered": 400, "pages_read": 6,
+                                      "observation": {"slugs": [],
+                                                      "eligible_for_"
+                                                      "observation": 0},
                                       "excluded_by_reason":
                                           {"TRADED_VOLUME_BELOW_MIN": 400}})
         out = self.run_main(made)
-        assert out["why"] == "EMPTY_UNIVERSE"
+        assert out["why"] == "NOTHING_OBSERVABLE"
         assert out["considered"] == 400
         assert out["excluded_by_reason"]["TRADED_VOLUME_BELOW_MIN"] == 400
         assert out["pages_read"] == 6
@@ -1315,9 +1337,9 @@ class TestTheNoStartBackoff:
         for why, kw in (
             ("DISCOVERY_FAILED", {"discovery": {"ok": False,
                                                 "error": "TimeoutError"}}),
-            ("EMPTY_UNIVERSE", {"discovery": {"ok": True, "slugs": [],
-                                              "considered": 900,
-                                              "coverage": {}}}),
+            ("NOTHING_OBSERVABLE", {"discovery": {"ok": True, "slugs": [],
+                                                  "considered": 900,
+                                                  "coverage": {}}}),
             ("NO_CREDENTIALS", {"discovery": {"ok": True, "slugs": ["m1"]},
                                 "creds": (None, None)}),
         ):
@@ -2019,3 +2041,535 @@ class TestTheStoppedWorkerPollsInsteadOfSleepingThroughTheProbe:
                                   store=filestore(tmp_path), sleep=spy))
         assert out["why"] == ctl_mod.W_STOPPED
         assert spy.delays == [bl.IDLE_POLL_S]
+
+
+# ── the two repairs of 2026-09-22 (turn D) ───────────────────────────
+
+def _bbo(slug, *, bid="0.4500", ask="0.4800", vol="900",
+         state="MARKET_STATE_OPEN"):
+    """One enriched row in the spelling `bettor_universe.assess` reads."""
+    row = {"slug": slug, "market_id": slug, "venue_state": state,
+           "sharesTraded": vol, "outcome_leg": "yes",
+           "enriched_from": "markets.bbo"}
+    if bid is not None:
+        row["bestBid"] = {"value": bid, "currency": "USD"}
+    if ask is not None:
+        row["bestAsk"] = {"value": ask, "currency": "USD"}
+    return row
+
+
+class TestObservationIsNotTradingAdmission:
+    """THE CIRCULAR DEPENDENCY.
+
+    Probe 3c413436 subscribed only to markets the frozen rule ADMITTED.
+    The rule admitted none, so nothing was subscribed, so no WebSocket
+    frame was ever received, so the transport stayed unverified -- and
+    would have stayed unverified for as long as the strategy kept
+    saying no. The two outcomes are now independent.
+
+    Every test here asserts an EXTERNAL CONSEQUENCE: what got
+    subscribed, what got journalled, what the rule still says.
+    """
+
+    def test_a_universe_the_rule_refuses_entirely_is_still_watched(self):
+        # Every one of these is REFUSED by the frozen rule: one tick of
+        # spread is below MIN_SPREAD_TICKS = 2.
+        rows = [_bbo("m%d" % i, bid="0.4500", ask="0.4600")
+                for i in range(6)]
+        cands = [{"slug": r["slug"]} for r in rows]
+        sel = uni_mod.select(rows)
+        assert sel["slugs"] == [], "fixture no longer exercises a refusal"
+
+        obs = bl.observation_subset(rows, cands, limit=4,
+                                    admitted=sel["slugs"])
+        assert len(obs["slugs"]) == 4, "nothing was watched"
+        assert obs["observed_despite_refusal"] == 4
+        assert obs["refusal_reasons_observed"] == {
+            uni_mod.R_SPREAD: 4}
+
+    def test_the_frozen_rule_is_applied_unchanged(self):
+        """Watching a market does not admit it. The thresholds are the
+        same objects the rule publishes."""
+        rows = [_bbo("m1", bid="0.4500", ask="0.4600")]
+        obs = bl.observation_subset(rows, [{"slug": "m1"}], limit=4,
+                                    admitted=[])
+        d = obs["detail"][0]
+        assert d["strategy_admitted"] is False
+        assert d["universe_rule_reason"] == uni_mod.R_SPREAD
+        assert obs["not_trading_admission"] is True
+        # UNCHANGED, asserted against the rule itself rather than a
+        # copy of its numbers.
+        assert uni_mod.MIN_SPREAD_TICKS == 2
+        assert uni_mod.MAX_PRICE == 0.50
+        assert uni_mod.MIN_SHARES_TRADED == 100.0
+
+    def test_admitted_markets_do_not_consume_the_observation_limit(self):
+        good = _bbo("good", bid="0.4000", ask="0.4500")   # 5 ticks, admitted
+        bad = [_bbo("b%d" % i, bid="0.4500", ask="0.4600") for i in range(5)]
+        rows = [good] + bad
+        cands = [{"slug": r["slug"]} for r in rows]
+        sel = uni_mod.select(rows)
+        assert sel["slugs"] == ["good"]
+        obs = bl.observation_subset(rows, cands, limit=3,
+                                    admitted=sel["slugs"])
+        assert "good" in obs["slugs"]
+        assert len(obs["observation_only_slugs"]) == 3
+        assert "good" not in obs["observation_only_slugs"]
+
+    def test_closed_and_unparsable_markets_are_never_watched(self):
+        """Valid and OPEN. A market the venue does not call open cannot
+        produce a meaningful frame -- that is a transport fact, and it
+        is the ONLY non-economic filter applied."""
+        rows = [_bbo("closed", state="MARKET_STATE_CLOSED"),
+                _bbo("crossed", bid="0.6000", ask="0.5000"),
+                _bbo("thin", bid="0.4500", ask="0.4600")]
+        obs = bl.observation_subset(rows, [{"slug": r["slug"]}
+                                           for r in rows],
+                                    limit=9, admitted=[])
+        assert obs["slugs"] == ["thin"]
+
+    def test_one_sided_books_are_watched_but_ranked_last(self):
+        rows = [_bbo("one_sided", ask=None),
+                _bbo("two_sided", bid="0.4500", ask="0.4600")]
+        obs = bl.observation_subset(rows, [{"slug": "one_sided"},
+                                           {"slug": "two_sided"}],
+                                    limit=9, admitted=[])
+        assert obs["slugs"] == ["two_sided", "one_sided"]
+
+    def test_the_subset_is_deterministic_and_order_is_the_seeded_one(self):
+        """DETERMINISTIC, AND CHOSEN BEFORE THE ECONOMICS ARE SEEN. The
+        candidate order decides, and the candidate order is the seeded
+        permutation fixed at listing time -- not the arrival order of
+        the enriched rows and not anything about their prices."""
+        rows = [_bbo("z", bid="0.4500", ask="0.4600"),
+                _bbo("a", bid="0.4500", ask="0.4600"),
+                _bbo("m", bid="0.4500", ask="0.4600")]
+        cands = [{"slug": "m"}, {"slug": "z"}, {"slug": "a"}]
+        first = bl.observation_subset(rows, cands, limit=2, admitted=[])
+        again = bl.observation_subset(list(reversed(rows)), cands,
+                                      limit=2, admitted=[])
+        assert first["slugs"] == again["slugs"] == ["m", "z"]
+
+    def test_every_record_carries_why_the_market_is_watched(self, tmp_path):
+        """DURABLE, PER RECORD. Not a startup log line a restart
+        overwrites."""
+        loop, stream = wired(tmp_path, slugs=("m1",), admission={
+            "m1": {"observation_basis": "OBSERVATION_ONLY",
+                   "universe_rule_reason": uni_mod.R_SPREAD,
+                   "universe": uni_mod.UNIVERSE_VERSION}})
+        stream._on_market_data(md("m1", source_ts=fresh(-1)))
+        loop.drain()
+        asyncio.run(loop.flush())
+        lines = journal_lines(tmp_path)
+        assert lines, "no record was written"
+        assert all(x["observation_basis"] == "OBSERVATION_ONLY"
+                   for x in lines)
+        assert all(x["universe_rule_reason"] == uni_mod.R_SPREAD
+                   for x in lines)
+        assert loop.report()["watching"]["refusals_observed"] == \
+            {uni_mod.R_SPREAD: len(lines)}
+
+    def test_watching_never_produces_an_order(self, tmp_path):
+        loop, stream = wired(tmp_path, slugs=("m1",), admission={
+            "m1": {"observation_basis": "OBSERVATION_ONLY",
+                   "universe_rule_reason": uni_mod.R_SPREAD}})
+        stream._on_market_data(md("m1", source_ts=fresh(-1)))
+        loop.drain()
+        rep = loop.report()
+        assert rep["orders_submitted"] == 0
+        assert rep["watching"]["observation_is_not_trading_admission"]
+        # THE STRUCTURAL GUARANTEE, not the configured one: the worker
+        # holds no order path at all.
+        src = inspect.getsource(bl)
+        assert "orders." not in src and "place_order" not in src
+
+
+class TestTheListingBudgetCountsOutboundRequests:
+    """ONE RESERVED UNIT PER OUTBOUND REQUEST.
+
+    THE DEFECT, measured on probe 3c413436: the reservation was taken
+    once around a loop that issued up to six `markets.list` calls, so
+    `listing_attempts_reserved: 1` was written while the venue received
+    six requests -- and those six went through no pacer, so a run
+    reported as 0.25 req/s opened with a six-request burst.
+    """
+
+    class _Client:
+        """A venue whose LISTING is counted, page by page."""
+
+        def __init__(self, pages, *, fail_on=(), status=None):
+            self.pages = pages
+            self.fail_on = set(fail_on)
+            self.status = status
+            self.retry_after = None
+            self.calls: list = []
+            self.markets = self
+
+        def list(self, params):
+            self.calls.append(dict(params))
+            n = len(self.calls)
+            if n in self.fail_on:
+                raise _HTTPish(self.status or 500, self.retry_after)
+            off = int(params.get("offset", 0))
+            size = int(params.get("limit", 500))
+            idx = off // size
+            rows = self.pages[idx] if idx < len(self.pages) else []
+            return {"markets": rows}
+
+    @staticmethod
+    def _rows(n, *, base=0):
+        return [{"slug": "s%05d" % (base + i), "active": True,
+                 "closed": False, "outcome": "yes"} for i in range(n)]
+
+    def _run(self, client, **kw):
+        seen = {"n": 0}
+
+        async def reserve(kind, slug):
+            assert kind == "listing"
+            seen["n"] += 1
+            return {"ok": True, "why": "RESERVED", "new": True}
+
+        spy = SleepSpy()
+        out = asyncio.run(bl._list_candidates(client=client,
+                                              reserve=reserve, sleep=spy,
+                                              **kw))
+        return out, seen["n"], spy
+
+    def test_every_page_costs_a_reserved_unit(self, monkeypatch):
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGES", "6")
+        pages = [self._rows(10, base=i * 10) for i in range(4)] + \
+                [self._rows(3, base=40)]
+        out, reserved, _ = self._run(self._Client(pages))
+        assert len(out["candidates"]) == 43
+        assert len(pages[0]) == 10
+        # FIVE PAGES READ, FIVE RESERVATIONS, FIVE OUTBOUND REQUESTS.
+        # The old build reserved ONE and issued five.
+        assert reserved == 5
+        assert out["listing_attempts"] == 5
+        assert out["listing_pages_requested"] == 5
+        assert len(out["request_telemetry"]) and \
+            out["request_telemetry"]["requests_started"] == 5
+
+    def test_an_unfunded_page_is_never_issued(self, monkeypatch):
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        client = self._Client([self._rows(10, base=i * 10)
+                               for i in range(6)])
+        n = {"i": 0}
+
+        async def reserve(kind, slug):
+            n["i"] += 1
+            if n["i"] > 3:
+                return {"ok": False, "why": "RESERVATION_EXHAUSTED"}
+            return {"ok": True, "why": "RESERVED", "new": True}
+
+        out = asyncio.run(bl._list_candidates(client=client,
+                                              reserve=reserve,
+                                              sleep=SleepSpy()))
+        # THE REQUEST COUNT IS THE THING. Three funded, three issued.
+        assert len(client.calls) == 3
+        assert out["ok"] is True and out["pages_read"] == 3
+        assert out["listing_incomplete"]
+
+    def test_a_retry_costs_its_own_unit(self, monkeypatch):
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        client = self._Client([self._rows(3)], fail_on=(1,))
+        out, reserved, spy = self._run(client)
+        assert len(client.calls) == 2 and reserved == 2
+        assert out["listing_attempts"] == 2
+        assert spy.delays == [2.0], "the retry did not back off"
+
+    def test_page_one_failing_is_a_failed_listing(self, monkeypatch):
+        client = self._Client([self._rows(3)], fail_on=(1, 2, 3))
+        out, reserved, _ = self._run(client)
+        assert out["ok"] is False
+        assert reserved == 3 and len(client.calls) == 3
+
+    def test_a_later_page_failing_keeps_the_rows_already_paid_for(
+            self, monkeypatch):
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        client = self._Client([self._rows(10, base=0),
+                               self._rows(10, base=10)],
+                              fail_on=(2, 3, 4))
+        out, _, _ = self._run(client)
+        assert out["ok"] is True
+        assert len(out["candidates"]) == 10
+        assert out["pages_read"] == 1
+        assert out["listing_incomplete"]
+
+    def test_the_listing_is_paced(self, monkeypatch):
+        """Six unpaced requests at the start of a run is why '0.25
+        req/s' was never a description of the process."""
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        monkeypatch.setenv(probe_mod.RPS_ENV, "0.5")
+        client = self._Client([self._rows(10, base=0),
+                               self._rows(10, base=10),
+                               self._rows(3, base=20)])
+        out, _, spy = self._run(client)
+        assert out["pages_read"] == 3
+        # THE PACER SLEPT BETWEEN PAGES: one wait per gap, each at
+        # least the configured interval. (The exact figures grow under
+        # a spy sleep, which does not advance the clock it measures
+        # against -- the property under test is that the listing is
+        # paced at all, which it previously was not.)
+        assert len(spy.delays) == 2
+        assert all(d > 1.9 for d in spy.delays)
+        # The densest-window figures are NOT asserted here: a spy
+        # sleep does not advance the clock they are measured against,
+        # so all three starts land in the same millisecond and the
+        # window reads 3. That is a property of the double, not of the
+        # code, and asserting it either way would be asserting the
+        # double. What IS asserted is the request count.
+        assert out["request_telemetry"]["requests_started"] == 3
+
+    def test_repeated_throttling_stops_the_listing(self, monkeypatch):
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        client = self._Client([self._rows(10, base=0),
+                               self._rows(10, base=10)],
+                              fail_on=(2, 3, 4, 5, 6), status=429)
+        out, reserved, _ = self._run(client)
+        assert out["ok"] is True and out["pages_read"] == 1
+        assert out["rate_limited"] >= 2
+        assert "throttled" in (out["listing_incomplete"] or "")
+        # IT STOPPED rather than walking the remaining pages to collect
+        # identical refusals.
+        assert len(client.calls) == 3
+
+    def test_a_429_records_what_this_process_was_doing(self, monkeypatch):
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        client = self._Client([self._rows(3)], fail_on=(1, 2, 3),
+                              status=429)
+        out, _, _ = self._run(client)
+        ev = out["rate_limit_events"]
+        # TWO, not three: the second consecutive refusal STOPS the
+        # listing rather than spending the third retry on the same
+        # answer. Both are recorded.
+        assert len(ev) == probe_mod.LISTING_MAX_CONSECUTIVE_429 == 2
+        assert len(client.calls) == 2
+        assert all(e["where"] == "listing" for e in ev)
+        assert all(e["observed_starts_last_10s"] >= 1 for e in ev)
+        # AND IT REFUSES TO ATTRIBUTE THE CAUSE.
+        assert all("NOT ESTABLISHED" in e["attribution"] for e in ev)
+
+    def test_retry_after_is_honoured_verbatim(self, monkeypatch):
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        client = self._Client([self._rows(3)], fail_on=(1,), status=429)
+        client.retry_after = "47"
+        out, _, spy = self._run(client)
+        assert 47.0 in spy.delays, "the server's own backoff was ignored"
+
+    def test_a_retry_after_above_the_threshold_abandons_the_listing(
+            self, monkeypatch):
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        client = self._Client([self._rows(10, base=0),
+                               self._rows(3, base=10)],
+                              fail_on=(2,), status=429)
+        client.retry_after = str(int(probe_mod.PROBE_SUSPEND_ABOVE_S) + 60)
+        out, _, spy = self._run(client)
+        assert out["suspended_for_s"] == \
+            probe_mod.PROBE_SUSPEND_ABOVE_S + 60
+        assert len(client.calls) == 2, "it retried sooner than asked"
+        assert probe_mod.PROBE_SUSPEND_ABOVE_S + 60 not in spy.delays
+
+    def test_a_listing_suspension_reaches_the_callers_backoff(
+            self, monkeypatch, tmp_path):
+        """The venue asked for a delay. A discovery failure that
+        dropped it would let the loop come back sooner than the server
+        said -- the one thing a limiter tells us not to do."""
+        monkeypatch.setenv("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "10")
+        asked = probe_mod.PROBE_SUSPEND_ABOVE_S + 300
+
+        class _C(TestTheListingBudgetCountsOutboundRequests._Client):
+            pass
+
+        client = _C([[{"slug": "s1", "active": True, "closed": False}]],
+                    fail_on=(1, 2, 3), status=429)
+        client.retry_after = str(int(asked))
+
+        async def reserve(kind, slug):
+            return {"ok": True, "why": "RESERVED", "new": True}
+
+        out = asyncio.run(bl._discover(client=client, reserve=reserve,
+                                       sleep=SleepSpy()))
+        assert out["ok"] is False
+        assert out["suspended_for_s"] == asked
+
+        spy = SleepSpy()
+        asyncio.run(bl._backoff("DISCOVERY_FAILED", sleep=spy,
+                                at_least=out["suspended_for_s"]))
+        assert spy.delays == [asked]
+
+
+class _HTTPish(Exception):
+    """An SDK error in the shape `probe_mod._status_of` reads."""
+
+    def __init__(self, status, retry_after=None):
+        super().__init__("HTTP %d" % status)
+        self.status_code = status
+        self.response = _Resp(status, retry_after)
+
+
+class _Resp:
+    def __init__(self, status, retry_after):
+        self.status_code = status
+        self.headers = ({} if retry_after is None
+                        else {"retry-after": str(retry_after)})
+
+
+class TestTheSampleIsReproducible:
+    """The 40 markets of probe 3c413436 were the 40 ALPHABETICALLY
+    FIRST slugs, and came back as one market family. A seeded
+    permutation spreads the sample across the bounded listing -- and
+    establishes nothing about the venue beyond it."""
+
+    def _cands(self, n=500):
+        return probe_mod.candidates_from_listing(
+            [{"slug": "fam%d-league-bavg-mkt%04d" % (i % 7, i),
+              "active": True,
+              "closed": False, "outcome": "yes"} for i in range(n)])
+
+    def test_the_same_seed_gives_the_same_order(self):
+        c = self._cands()
+        a = probe_mod.order_candidates(c, seed="S1")["ordered"]
+        b = probe_mod.order_candidates(list(reversed(c)), seed="S1")
+        assert [x["slug"] for x in a] == [x["slug"] for x in b["ordered"]]
+
+    def test_a_different_seed_gives_a_different_order(self):
+        c = self._cands()
+        a = probe_mod.order_candidates(c, seed="S1")["ordered"]
+        b = probe_mod.order_candidates(c, seed="S2")["ordered"]
+        assert [x["slug"] for x in a] != [x["slug"] for x in b]
+
+    def test_it_is_a_permutation_and_loses_nothing(self):
+        c = self._cands()
+        o = probe_mod.order_candidates(c, seed="S1")
+        assert sorted(x["slug"] for x in o["ordered"]) == \
+            sorted(x["slug"] for x in c)
+        assert o["population"] == len(c)
+
+    def test_a_prefix_spreads_across_families_where_the_sort_did_not(self):
+        c = self._cands()
+        alphabetical = {probe_mod.family_of(x) for x in c[:40]}
+        o = probe_mod.order_candidates(c, seed="S1")
+        seeded = {probe_mod.family_of(x) for x in o["ordered"][:40]}
+        assert len(alphabetical) == 1, "fixture no longer shows the defect"
+        assert len(seeded) > 1
+
+    def test_the_report_records_the_seed_and_refuses_the_claim(self):
+        c = self._cands()
+        o = probe_mod.order_candidates(c, seed="S1")
+        rep = probe_mod.sample_report(o, [x["slug"] for x in
+                                          o["ordered"][:40]])
+        assert rep["seed"] == "S1"
+        assert rep["sampled"] == 40 and rep["population"] == 500
+        assert rep["coverage_of_listing"] == 0.08
+        assert "representativeness" in rep["does_not_establish"]
+        assert rep["establishes"] == "coverage within the bounded listing"
+
+
+class TestTheSDKAddsNoHiddenRequests:
+    """THE BUDGET MUST COVER OUTBOUND REQUESTS, NOT WRAPPER CALLS.
+
+    One `markets.list` call is asserted here to be exactly one outbound
+    HTTP request. If a future SDK adds pagination, retry or redirect
+    following, that equality breaks and the listing budget silently
+    undercounts again -- so it is checked against the INSTALLED
+    package rather than remembered from a reading of it.
+    """
+
+    def _sdk(self):
+        return pytest.importorskip("polymarket_us")
+
+    def test_markets_list_has_no_internal_pagination(self):
+        sdk = self._sdk()
+        src = inspect.getsource(sdk.resources.Markets.list)
+        assert "while" not in src and "for " not in src
+        assert src.count("self._client.get") == 1
+
+    def test_the_http_client_adds_no_retry_transport(self):
+        sdk = self._sdk()
+        src = inspect.getsource(sdk.client.PolymarketUS.__init__)
+        assert "httpx.Client(" in src
+        # httpx defaults to retries=0 and follow_redirects=False; what
+        # matters is that the SDK does not override either.
+        assert "retries" not in src and "transport" not in src
+
+    def test_the_client_follows_no_redirects(self):
+        sdk = self._sdk()
+        src = inspect.getsource(sdk.client)
+        assert "follow_redirects" not in src
+
+    def test_a_429_is_raised_not_retried(self):
+        sdk = self._sdk()
+        src = inspect.getsource(sdk.client.PolymarketUS._request)
+        assert "sleep" not in src
+        assert "_handle_error_response" in src
+
+
+class TestTheShutdownIsMeasuredNotInferred:
+    """"The stream closed within 90 seconds" was argued from the
+    ABSENCE of new journal rows. A quiet market produces exactly the
+    same absence. These are positive observations, made by the process
+    that did the closing and surviving its exit."""
+
+    def test_stop_returns_a_closure_record(self):
+        s = ms.MarketStream("k", "s", autostart=False)
+        rec = s.stop(wait_s=0.0)
+        assert rec["closed"] is True and rec["thread_alive"] is False
+        assert rec["stop_requested_at_iso"]
+        assert rec["close_latency_s"] is not None
+
+    def test_a_frame_stamps_when_it_arrived(self):
+        s = ms.MarketStream("k", "s", autostart=False)
+        s.epoch += 1
+        s.connected = True
+        assert s.stats()["last_frame_at_iso"] is None
+        s._on_market_data(md("m1", source_ts=fresh(-1)))
+        assert s.stats()["last_frame_at_iso"] is not None
+
+    def test_the_stop_latency_is_a_subtraction_not_an_inference(self):
+        s = ms.MarketStream("k", "s", autostart=False)
+        s.stop(wait_s=0.0)
+        st = s.stats()
+        assert st["stop_requested_at_iso"] and st["closed_at_iso"]
+        assert 0.0 <= st["close_latency_s"] < 5.0
+
+    def test_main_writes_a_durable_stop_receipt(self, monkeypatch,
+                                                tmp_path):
+        made = TestTheEntryPointLifecycle()._patch(
+            monkeypatch, tmp_path,
+            discovery={"ok": True, "slugs": ["m1"], "considered": 1,
+                       "detail": [{"slug": "m1", "outcome_leg": "yes"}],
+                       "observation": {
+                           "slugs": ["m1"],
+                           "detail": [{"slug": "m1",
+                                       "strategy_admitted": True,
+                                       "universe_rule_reason": None,
+                                       "outcome_leg": "yes"}]},
+                       "coverage": {"candidates": 1, "probed": 1}})
+        pool = RunningControl()
+        bl._reset_backoff()
+        out = asyncio.run(bl.main(store=made["store"], control_pool=pool,
+                                  run_for_s=0.05, sleep=SleepSpy()))
+        # THE EXTERNAL CONSEQUENCE: a row in ingestion_state, written
+        # by the process that shut the socket.
+        written = [a for sql, a in pool.writes
+                   if a and a[0] == ctl_mod.RECEIPT_KEY]
+        assert written, "no stop receipt reached the database"
+        body = json.loads(written[-1][1])
+        assert body["boot_id"] == out["report"]["boot_id"]
+        assert body["orders_submitted"] == 0
+        assert body["transport"]["closed"] is True
+        assert body["transport"]["waited_s"] == bl.STREAM_CLOSE_WAIT_S
+        assert "acquisition" in body and "reserved" in body["acquisition"]
+
+    def test_an_unwritable_receipt_does_not_change_the_shutdown(self):
+        """The shutdown has already happened by the time this is
+        called. A receipt that cannot be written is a warning, not a
+        failure mode."""
+        class _Dead:
+            async def execute(self, *a):
+                raise RuntimeError("no database")
+
+        r = asyncio.run(ctl_mod.write_stop_receipt(_Dead(), {"a": 1}))
+        assert r["written"] is False and r["error"] == "RuntimeError"

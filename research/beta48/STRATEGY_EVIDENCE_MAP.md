@@ -149,7 +149,7 @@ Four objects, kept apart (never substitute one for another):
 
 | | estimand | status |
 |---|---|---|
-| **A** | `E[SETTLEMENT − QUOTE \| STATE]` | measurable prospectively, without P_FILL |
+| **A** | `E[SETTLEMENT − QUOTE \| STATE]` | **NOT YET MEASURED.** Measurable prospectively without P_FILL, but only given all three of: matched authoritative settlements, adequate coverage, and a valid clustered evaluation. Observation supplies the QUOTE and STATE sides and **none** of those three |
 | **B** | `P(FILL \| STATE, QUOTE)` | **NOT_IDENTIFIED** |
 | **C** | `E[SETTLEMENT − QUOTE \| FILLED, STATE]` | **NOT_IDENTIFIED** |
 | **D** | maker EV = f(B, C, fees, rebates, inventory) | **NOT_IDENTIFIED** |

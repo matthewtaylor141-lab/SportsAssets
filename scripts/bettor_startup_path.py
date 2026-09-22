@@ -302,9 +302,11 @@ class ReplayStream(ms.MarketStream):
         self._thread = threading.Thread(target=self._run, daemon=True)
         self._thread.start()
 
-    def stop(self):
+    def stop(self, *, wait_s=0.0):
         self._stop.set()
         self.connected = False
+        return {"closed": True, "thread_alive": False,
+                "close_latency_s": 0.0, "waited_s": wait_s}
 
     def _run(self):
         for slug in list(self._subs):

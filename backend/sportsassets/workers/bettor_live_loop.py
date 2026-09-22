@@ -135,6 +135,34 @@ RECORD_RING = 2000
 TOUCH_RING = 5000
 
 DISCOVERY_EVERY_S = 900.0
+
+# HOW MANY MARKETS ARE WATCHED WHEN THE STRATEGY ADMITS NONE.
+#
+# Small and bounded on purpose. This is a transport experiment, not a
+# collection programme: enough subscriptions to show that the socket
+# connects, that frames arrive, that their timestamps and payloads
+# parse, and that a stop closes them -- and few enough that an
+# observation run cannot quietly become continuous collection.
+#
+# Zero disables the decoupling entirely and restores the old behaviour
+# of watching only what the rule admits.
+OBSERVE_MAX = 8
+OBSERVE_MAX_ENV = "BETTOR_LIVE_OBSERVE_MAX"
+# A CEILING ON THE OVERRIDE, so "watch a few for transport evidence"
+# cannot be turned into a collection programme by one environment
+# variable. The distinct-market reservation bounds what is ACQUIRED;
+# this bounds what is SUBSCRIBED.
+OBSERVE_MAX_CEIL = 40
+
+# HOW LONG THE SHUTDOWN WAITS FOR THE SOCKET THREAD TO ACTUALLY CLOSE.
+#
+# The inner send loop checks `_stop` at most every 0.25 s and then
+# awaits `ws.close()`, so this is generous by two orders of magnitude.
+# It is bounded because a socket that will not close must not hold the
+# supervisor's shutdown open -- the receipt then records
+# `closed: false`, which is a finding, not a hang.
+STREAM_CLOSE_WAIT_S = 20.0
+
 SETTLEMENT_EVERY_S = 600.0
 SETTLEMENT_BATCH = 25
 LEDGER_EVERY_S = 60.0
@@ -263,11 +291,32 @@ def effective_config() -> dict:
         "control_every_s": ctl.CONTROL_EVERY_S,
         "suspend_above_s": probe_mod.PROBE_SUSPEND_ABOVE_S,
         "discovery_pages": os.environ.get(
-            "BETTOR_LIVE_DISCOVERY_PAGES", "6"),
+            "BETTOR_LIVE_DISCOVERY_PAGES",
+            str(probe_mod.LISTING_MAX_PAGES)),
         # THE LISTING'S OWN BOUNDS, counted apart from enrichment so a
         # listing retry storm cannot eat the enrichment allowance.
         "listing_max_retries": probe_mod.LISTING_MAX_RETRIES,
         "listing_timeout_s": probe_mod.LISTING_TIMEOUT_S,
+        # ONE RESERVED UNIT PER OUTBOUND LISTING REQUEST. Stated here
+        # because the previous build reserved one unit for up to six
+        # requests, and an operator reading this line is entitled to
+        # know which build they are looking at.
+        "listing_reservation_unit": "ONE_PER_OUTBOUND_REQUEST",
+        "listing_max_outbound_requests": (
+            int(os.environ.get("BETTOR_LIVE_DISCOVERY_PAGES",
+                               probe_mod.LISTING_MAX_PAGES))
+            * (probe_mod.LISTING_MAX_RETRIES + 1)),
+        "listing_paced": True,
+        "listing_stop_after_consecutive_429":
+            probe_mod.LISTING_MAX_CONSECUTIVE_429,
+        # THE OBSERVATION SUBSET -- watched regardless of the frozen
+        # rule's verdict, so the transport can be verified when the
+        # strategy admits nothing. Not a trading permission.
+        "observe_max": _int_env(OBSERVE_MAX_ENV, OBSERVE_MAX,
+                                OBSERVE_MAX_CEIL),
+        "observe_is_not_trading_admission": True,
+        "sample_seed": probe_mod.sample_seed(),
+        "sample_order_version": probe_mod.SAMPLE_ORDER_VERSION,
         "probe_max_retries": probe_mod.PROBE_MAX_RETRIES,
         "probe_timeout_s": probe_mod.PROBE_TIMEOUT_S,
         # THE LIFETIME BUDGET, reported here as the CODE'S DEFAULTS and
@@ -312,7 +361,7 @@ class LiveLoop:
 
     def __init__(self, stream, *, store=None, fees=None,
                  opening_cash: float = 0.0, max_contracts: float = 0.0,
-                 leg_of=None, boot_id: str | None = None):
+                 leg_of=None, boot_id: str | None = None, admission=None):
         # ONE IDENTITY PER PROCESS BOOT, stamped on every record and on
         # the ledger. Without it "the worker restarted and kept its
         # records" cannot be checked: a stream epoch increments on a
@@ -326,6 +375,13 @@ class LiveLoop:
             or _now().strftime("%Y-%m-%d"))
         self.max_contracts = max_contracts
         self.leg_of = dict(leg_of or {})
+        # WHY THIS MARKET IS BEING WATCHED, stamped on every record it
+        # produces. A market watched for transport evidence that the
+        # frozen rule refused must be distinguishable in the journal
+        # from one the rule admitted, FOREVER and per record -- not by
+        # cross-referencing a startup log line that a later restart
+        # overwrites. Absent means the old behaviour: admitted.
+        self.admission = dict(admission or {})
 
         self.shadow = sl.ShadowLoop(opening_cash=opening_cash,
                                     fees=self.fees,
@@ -484,6 +540,22 @@ class LiveLoop:
                 "stats_shares_traded": at.get("stats_shares_traded"),
                 "fee_schedule": self.fees.source,
                 "fee_status": self.fees.status}
+
+        # WHY THIS MARKET IS WATCHED, ON THE RECORD ITSELF.
+        #
+        # OBSERVATION_ONLY means the frozen rule REFUSED this market
+        # and it is being watched anyway, for transport and price
+        # evidence. `universe_rule_reason` carries that refusal
+        # verbatim. Neither field relaxes anything: the rule is applied
+        # unchanged, the refusal is durable, and an observation
+        # subscription is not trading admission.
+        adm = self.admission.get(slug)
+        if adm:
+            base.update(adm)
+            self.bump("watched:%s" % adm.get("observation_basis"))
+            if adm.get("universe_rule_reason"):
+                self.bump("watched_refused:%s"
+                          % adm["universe_rule_reason"])
 
         if not at["eligible"]:
             self.bump("ineligible")
@@ -917,6 +989,27 @@ class LiveLoop:
                        if hasattr(self.stream, "frame_capture_report")
                        else None),
             "discovery": self.discovery,
+            # TWO INDEPENDENT OUTCOMES, REPORTED APART.
+            #
+            # `transport` is about the socket: did it connect, did
+            # frames arrive, did they parse, did a stop close it. It is
+            # answerable whether the strategy admits zero markets or
+            # many, which is the whole point of the observation subset.
+            #
+            # `strategy` is the frozen rule's verdict, unchanged. A run
+            # in which every watched market was refused is a COMPLETE
+            # run with a NEGATIVE strategy result, not a failed one.
+            "watching": {
+                "watched": len(self.admission) or None,
+                "by_basis": {k[8:]: v for k, v in self.counters.items()
+                             if k.startswith("watched:")},
+                "refusals_observed": {
+                    k[16:]: v for k, v in self.counters.items()
+                    if k.startswith("watched_refused:")},
+                "rule": uni.UNIVERSE_VERSION,
+                "rule_applied": "UNCHANGED",
+                "observation_is_not_trading_admission": True,
+            },
             "control": self.control,
             "counters": dict(self.counters),
             "decisions_in_ring": len(self.records),
@@ -966,7 +1059,7 @@ def _elapsed(a, b):
 
 def build(key_id: str, secret_key: str, *, slugs, leg_of=None, store=None,
           opening_cash: float = 0.0, stream_factory=None,
-          boot_id: str | None = None):
+          boot_id: str | None = None, admission=None):
     """Wire a stream to a loop. Subscribes; does not start the socket.
 
     `on_trade` IS NOT INSTALLED as a stream callback. It used to be,
@@ -977,7 +1070,7 @@ def build(key_id: str, secret_key: str, *, slugs, leg_of=None, store=None,
     exact function with a replaying transport. Production passes None
     and gets `ms.MarketStream`.
     """
-    loop = LiveLoop(None, store=store, leg_of=leg_of,
+    loop = LiveLoop(None, store=store, leg_of=leg_of, admission=admission,
                     opening_cash=opening_cash, boot_id=boot_id)
     if store is not None and getattr(store, "boot_id", None) is None:
         store.boot_id = loop.boot_id
@@ -1022,76 +1115,194 @@ def describe() -> dict:
 
 # ── the worker entry point ───────────────────────────────────────────
 
-async def _list_candidates(client=None, *, reserve=None, sleep=None) -> dict:
+async def _list_candidates(client=None, *, reserve=None, sleep=None,
+                           pacer=None) -> dict:
     """The venue's listing, PAGINATED, reduced to CANDIDATES.
 
     Identity only. The listing cannot answer a single question the
     selection rule asks, so nothing here judges a market -- see
     `bettor_universe_probe.candidates_from_listing`.
+
+    ONE RESERVED UNIT AND ONE PACED SLOT PER PAGE.
+
+    THE DEFECT THIS REPLACES, measured on probe 3c413436
+    (2026-09-22). The reservation was taken ONCE, around a
+    `while pages < max_pages` loop that issued up to SIX
+    `markets.list` calls back to back. Two consequences, both
+    recorded in the probe's own numbers:
+
+      * The budget undercounted outbound listing requests by up to
+        6x. `listing_attempts_reserved: 1` was written while the
+        venue received six requests.
+      * Those six requests went through NO PACER AT ALL, so the run
+        opened with a six-request burst and was nevertheless reported
+        as running at 0.25 req/s. The rate the venue actually saw at
+        the start of that probe was never 0.25 req/s, and the 429
+        analysis was built on a figure that was a setting rather than
+        an observation.
+
+    THE SDK ADDS NOTHING TO THE COUNT -- verified, not assumed; see
+    `probe_mod.LISTING_PAGE_IS_ONE_REQUEST` for the three checks
+    (no pagination, no retry transport, no redirect following). One
+    `markets.list` call is one outbound HTTP GET, so one reservation
+    per call is one reservation per request.
     """
     from .. import pmus
 
-    max_pages = int(os.environ.get("BETTOR_LIVE_DISCOVERY_PAGES", "6"))
+    max_pages = int(os.environ.get("BETTOR_LIVE_DISCOVERY_PAGES",
+                                   str(probe_mod.LISTING_MAX_PAGES)))
     page_size = int(os.environ.get("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", "500"))
+    _sleep = sleep or asyncio.sleep
+    pace = probe_mod.configured_pace()
+    pacer = pacer if pacer is not None else probe_mod.Pacer(
+        pace["max_rps"], sleep=_sleep, name="listing")
 
-    def _list():
+    def _one_page(offset: int):
+        """EXACTLY ONE outbound request. No loop lives in here any more."""
         client_ = client or pmus._get_client()
-        rows, offset, pages, truncated = [], 0, 0, False
-        while pages < max_pages:
-            resp = client_.markets.list({"active": True, "closed": False,
-                                         "limit": page_size,
-                                         "offset": offset})
-            got = list((resp or {}).get("markets") or [])
-            rows.extend(got)
-            pages += 1
-            if len(got) < page_size:
-                break
-            offset += page_size
-        else:
-            truncated = True
-        return rows, pages, truncated
+        resp = client_.markets.list({"active": True, "closed": False,
+                                     "limit": page_size, "offset": offset})
+        return list((resp or {}).get("markets") or [])
 
-    # BOUNDED SEPARATELY FROM ENRICHMENT. Its own attempt count, its
-    # own backoff, its own timeout, counted apart -- a listing retry
-    # storm must not be able to eat the enrichment allowance.
-    attempts = 0
-    last = None
-    for attempt in range(probe_mod.LISTING_MAX_RETRIES + 1):
-        # A LISTING ATTEMPT IS RESERVED BEFORE IT IS ISSUED. The listing
-        # had no durable accounting at all before this: bounded per
-        # invocation in memory, so every restart replenished the whole
-        # allowance. Each attempt now costs one reserved unit, retries
-        # included, and the units do not come back.
-        if reserve is not None:
-            got = await reserve("listing", None)
-            if not (got or {}).get("ok"):
-                why = (got or {}).get("why") or "RESERVATION_REFUSED"
-                log.error("bettor_live_loop: listing attempt %d not "
-                          "funded (%s); not issuing the request",
-                          attempts + 1, why)
-                return {"ok": False, "error": why,
-                        "listing_attempts": attempts,
-                        "why": "listing allowance refused: %s" % why}
-        attempts += 1
-        try:
-            rows, pages, truncated = await asyncio.wait_for(
-                asyncio.to_thread(_list),
-                timeout=probe_mod.LISTING_TIMEOUT_S)
-            last = None
+    rows: list = []
+    attempts = 0          # RESERVED UNITS SPENT == OUTBOUND REQUESTS
+    pages = 0             # pages successfully read
+    truncated = False
+    consecutive_429 = 0
+    rate_limited = 0
+    acct: dict = {"rate_limit_events": []}
+    suspended_for = 0.0
+    fatal = None          # set only when page 1 never arrives
+    stopped_why = None
+
+    for page in range(max_pages):
+        offset = page * page_size
+        got = None
+        last = None
+        for attempt in range(probe_mod.LISTING_MAX_RETRIES + 1):
+            # RESERVED BEFORE THE REQUEST, AND BEFORE THE PACER -- a
+            # request that cannot be paid for never even waits its
+            # turn. Retries cost their own unit; the units do not come
+            # back.
+            if reserve is not None:
+                r = await reserve("listing", None)
+                if not (r or {}).get("ok"):
+                    why = (r or {}).get("why") or "RESERVATION_REFUSED"
+                    log.error("bettor_live_loop: listing page %d attempt "
+                              "%d not funded (%s); not issuing the "
+                              "request", page + 1, attempt + 1, why)
+                    stopped_why = "listing allowance refused: %s" % why
+                    if page == 0 and not rows:
+                        fatal = why
+                    break
+            attempts += 1
+            throttled, asked = False, None
+            await pacer.acquire()
+            try:
+                got = await asyncio.wait_for(
+                    asyncio.to_thread(_one_page, offset),
+                    timeout=probe_mod.LISTING_TIMEOUT_S)
+                last = None
+                break
+            except asyncio.TimeoutError:
+                last = "TimeoutError(%.0fs)" % probe_mod.LISTING_TIMEOUT_S
+            except Exception as exc:  # noqa: BLE001 -- named, never swallowed
+                last = type(exc).__name__
+                throttled = probe_mod._status_of(exc) == 429
+                asked = probe_mod._retry_after_s(exc) if throttled else None
+            finally:
+                # PAIRED WITH `acquire`, ALWAYS. An unreleased slot
+                # makes `max_concurrent_inflight` a fiction, and that
+                # figure is one of the few things this probe exists to
+                # measure.
+                pacer.release()
+            if throttled:
+                rate_limited += 1
+                consecutive_429 += 1
+                probe_mod._note_429(acct, pacer, "LISTING p%d" % (page + 1),
+                                    asked, where="listing")
+                if asked is not None and \
+                        asked > probe_mod.PROBE_SUSPEND_ABOVE_S:
+                    # THE SERVER ASKED FOR LONGER THAN THIS DISCOVERY
+                    # SHOULD LIVE. Never shortened.
+                    log.error("bettor_live_loop: listing HTTP 429 with "
+                              "Retry-After %.0fs, above the %.0fs "
+                              "threshold; ABANDONING the listing",
+                              asked, probe_mod.PROBE_SUSPEND_ABOVE_S)
+                    suspended_for = max(suspended_for, asked)
+                    stopped_why = "listing suspended by Retry-After %.0fs" \
+                                  % asked
+                    break
+                if consecutive_429 >= probe_mod.LISTING_MAX_CONSECUTIVE_429:
+                    # STOP ON REPEATED THROTTLING, IMMEDIATELY -- not
+                    # after spending the rest of this page's retries.
+                    # A limiter that has refused this many times
+                    # running is not asking to be asked again, and each
+                    # further attempt is another reserved unit spent to
+                    # collect the same answer.
+                    log.error("bettor_live_loop: %d consecutive throttled "
+                              "listing requests; STOPPING the listing",
+                              consecutive_429)
+                    break
+                hold = asked
+                if hold is None:
+                    hold = probe_mod.LISTING_RETRY_BACKOFF_S[
+                        min(attempt,
+                            len(probe_mod.LISTING_RETRY_BACKOFF_S) - 1)]
+                # HONOUR THE SERVER'S BACKOFF, VERBATIM, and slow every
+                # later page with it rather than only this attempt -- a
+                # 429 is about the process's rate, not about this page.
+                pacer.penalise(hold)
+                log.warning("bettor_live_loop: listing page %d HTTP 429; "
+                            "holding %.0fs (Retry-After %s)", page + 1,
+                            hold, "absent" if asked is None
+                            else "%.0fs" % asked)
+                await _sleep(hold)
+                continue
+            if attempt < probe_mod.LISTING_MAX_RETRIES:
+                hold = probe_mod.LISTING_RETRY_BACKOFF_S[
+                    min(attempt, len(probe_mod.LISTING_RETRY_BACKOFF_S) - 1)]
+                log.warning("bettor_live_loop: listing page %d attempt %d "
+                            "failed (%s); retrying in %.0fs",
+                            page + 1, attempt + 1, last, hold)
+                await _sleep(hold)
+
+        if got is None:
+            # THIS PAGE NEVER ARRIVED. Page 1 failing is a failed
+            # listing; a later page failing is a SHORTER listing, and
+            # the rows already paid for are kept rather than discarded.
+            if consecutive_429 >= probe_mod.LISTING_MAX_CONSECUTIVE_429:
+                # STOP ON REPEATED THROTTLING. A limiter that refuses
+                # this many times running is not asking to be asked
+                # again, and walking the remaining pages would spend
+                # reserved units to collect identical refusals.
+                stopped_why = stopped_why or (
+                    "stopped after %d consecutive throttled listing "
+                    "requests" % consecutive_429)
+            if page == 0 and not rows:
+                fatal = fatal or last or "LISTING_PAGE_1_FAILED"
+                break
+            stopped_why = stopped_why or ("listing stopped after page %d "
+                                          "(%s)" % (pages, last))
             break
-        except asyncio.TimeoutError:
-            last = "TimeoutError(%.0fs)" % probe_mod.LISTING_TIMEOUT_S
-        except Exception as exc:  # noqa: BLE001 -- named, never swallowed
-            last = type(exc).__name__
-        if attempt < probe_mod.LISTING_MAX_RETRIES:
-            hold = probe_mod.LISTING_RETRY_BACKOFF_S[
-                min(attempt, len(probe_mod.LISTING_RETRY_BACKOFF_S) - 1)]
-            log.warning("bettor_live_loop: listing attempt %d failed "
-                        "(%s); retrying in %.0fs", attempts, last, hold)
-            await (sleep or asyncio.sleep)(hold)
-    if last is not None:
-        return {"ok": False, "error": last, "listing_attempts": attempts,
-                "why": "market listing failed after %d attempts"
+        consecutive_429 = 0
+        rows.extend(got)
+        pages += 1
+        if len(got) < page_size:
+            break
+    else:
+        truncated = True
+
+    telemetry = pacer.telemetry()
+    if fatal is not None:
+        return {"ok": False, "error": fatal,
+                "listing_attempts": attempts,
+                "listing_pages_requested": attempts,
+                "rate_limited": rate_limited,
+                "rate_limit_events": acct["rate_limit_events"],
+                "request_telemetry": telemetry,
+                "suspended_for_s": suspended_for or None,
+                "why": "market listing failed after %d reserved requests"
                        % attempts}
 
     cands = probe_mod.candidates_from_listing(rows)
@@ -1099,17 +1310,123 @@ async def _list_candidates(client=None, *, reserve=None, sleep=None) -> dict:
         log.warning("bettor_live_loop: listing hit the %d-page bound; "
                     "the candidate set is a PREFIX of the venue",
                     max_pages)
+    if stopped_why:
+        log.warning("bettor_live_loop: listing incomplete -- %s; %d rows "
+                    "over %d pages are kept", stopped_why, len(rows), pages)
     return {"ok": True, "candidates": cands, "pages_read": pages,
+            # ONE UNIT PER OUTBOUND REQUEST. `listing_attempts` and
+            # `listing_pages_requested` are now the same number BY
+            # CONSTRUCTION, and a divergence between them and the
+            # budget row's `listing_attempts_reserved` is a defect.
             "listing_attempts": attempts,
+            "listing_pages_requested": attempts,
+            "rate_limited": rate_limited,
+            "rate_limit_events": acct["rate_limit_events"],
+            "request_telemetry": telemetry,
+            "suspended_for_s": suspended_for or None,
+            "listing_incomplete": stopped_why,
             "rows_listed": len(rows), "page_size": page_size,
             "listing_truncated_at_page_bound": truncated}
+
+
+def observation_subset(rows, candidates, *, limit: int,
+                       admitted=None) -> dict:
+    """A small, bounded, DETERMINISTIC set of markets to WATCH --
+    chosen without reference to whether the strategy would trade them.
+
+    THE CIRCULAR DEPENDENCY THIS REMOVES. Probe 3c413436 subscribed
+    only to markets the frozen rule ADMITTED. The rule admitted none,
+    so nothing was subscribed, so no WebSocket frame was ever received,
+    so the transport remained unverified -- and it would have remained
+    unverified for exactly as long as the strategy kept saying no. The
+    two questions are independent and are now answered independently.
+
+    AN OBSERVATION SUBSCRIPTION IS NOT TRADING ADMISSION. The frozen
+    rule is applied UNCHANGED to every one of these markets and its
+    verdict is recorded on every observation (`observation_basis`,
+    `universe_rule_reason` on each journalled record). A market watched
+    here that the rule refused stays refused; watching it produces
+    evidence about the transport and about prices, and produces no
+    trading permission of any kind. The worker holds no order path at
+    all -- it imports no order function -- and runs with
+    MAX_CONTRACTS=0 besides.
+
+    DETERMINISTIC, AND CHOSEN BEFORE ANY ECONOMIC RESULT IS SEEN. The
+    order is the seeded candidate permutation fixed at listing time.
+    Nothing here re-reads, re-searches or re-draws until something
+    passes: it is one pass over what was already enriched, and the only
+    non-economic preference applied is that a two-sided book is
+    preferred to a one-sided one, because a book with both sides
+    produces more transport evidence per frame.
+
+    ADMITTED MARKETS ARE NOT COUNTED AGAINST THE LIMIT. If the rule
+    admits markets they are watched as well; this subset exists so that
+    the run has something to watch WHEN IT DOES NOT.
+    """
+    admitted = set(admitted or ())
+    order = {c["slug"]: i for i, c in enumerate(candidates or [])}
+    seen, pool = set(), []
+    for row in rows or []:
+        slug = row.get("slug")
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        a = uni.assess(row)
+        # VALID AND OPEN, and nothing else. A market the venue does not
+        # call open, or whose book will not parse, cannot produce a
+        # meaningful frame -- that is a transport fact, not an economic
+        # one. Every economic exclusion (spread, price, volume,
+        # one-sided) is left in the pool deliberately.
+        if a["reason"] in (uni.R_NOT_OPEN, uni.R_UNPARSABLE):
+            continue
+        pool.append({
+            "slug": slug,
+            "two_sided": a["reason"] != uni.R_ONE_SIDED,
+            "order_index": order.get(slug, 10 ** 9),
+            "strategy_admitted": bool(a["included"]),
+            "universe_rule_reason": a["reason"],
+            "universe": a["universe"],
+            "outcome_leg": a.get("outcome_leg"),
+            "spread_ticks": a.get("spread_ticks"),
+            "shares_traded": a.get("shares_traded"),
+        })
+    pool.sort(key=lambda p: (0 if p["two_sided"] else 1,
+                             p["order_index"], p["slug"]))
+    chosen, extra = [], []
+    for p in pool:
+        if p["slug"] in admitted:
+            continue
+        if len(extra) >= max(0, int(limit)):
+            break
+        extra.append(p)
+    chosen = [p for p in pool if p["slug"] in admitted] + extra
+    refused = [p for p in extra if not p["strategy_admitted"]]
+    reasons: dict = {}
+    for p in refused:
+        r = p["universe_rule_reason"] or "UNKNOWN"
+        reasons[r] = reasons.get(r, 0) + 1
+    return {
+        "limit": int(limit),
+        "eligible_for_observation": len(pool),
+        "observation_only_slugs": [p["slug"] for p in extra],
+        "strategy_admitted_slugs": sorted(admitted),
+        "slugs": [p["slug"] for p in chosen],
+        "detail": chosen,
+        "observed_despite_refusal": len(refused),
+        "refusal_reasons_observed": reasons,
+        "rule": uni.UNIVERSE_VERSION,
+        "rule_applied": "UNCHANGED -- the refusal is recorded, not waived",
+        "selection": ("seeded candidate order, two-sided first; fixed "
+                      "before any economic result was examined"),
+        "not_trading_admission": True,
+    }
 
 
 async def _discover(client=None, *, candidates=None, offset: int = 0,
                     rounds: int = probe_mod.PROBE_ROUNDS_AT_START,
                     batch: int | None = None, should_stop=None,
                     max_distinct: int | None = None, reserve=None,
-                    sleep=None) -> dict:
+                    sleep=None, observe_max: int | None = None) -> dict:
     """Listing -> ENRICHMENT -> the frozen selection rule.
 
     THE RULE RUNS ONLY AFTER ENRICHMENT. It used to run on listing
@@ -1139,19 +1456,56 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
         from .. import pmus
         client = pmus._get_client()
 
+    # ONE PACER FOR THE WHOLE DISCOVERY -- the listing and every
+    # enrichment round. Before this the listing had no pacer and the
+    # rounds each built their own, so "the process's request rate" was
+    # not a quantity that existed anywhere.
+    pace = probe_mod.configured_pace()
+    pacer = probe_mod.Pacer(pace["max_rps"], sleep=sleep, name="discovery")
+
+    ordering = None
     if candidates is None:
         listed = await _list_candidates(client=client, reserve=reserve,
-                                        sleep=sleep)
+                                        sleep=sleep, pacer=pacer)
         if not listed.get("ok"):
             return {"ok": False, "error": listed.get("error"),
-                    "why": listed.get("why")}
+                    "why": listed.get("why"),
+                    # A LISTING SUSPENSION MUST REACH THE CALLER'S
+                    # BACKOFF. The venue asked for a delay; a discovery
+                    # failure that dropped it would let `main()` come
+                    # back sooner than the server said, which is the
+                    # one thing a limiter tells us not to do.
+                    "suspended_for_s": listed.get("suspended_for_s"),
+                    "request_telemetry": listed.get("request_telemetry"),
+                    "rate_limit_events": listed.get("rate_limit_events")}
         candidates = listed["candidates"]
-        meta = {k: listed[k] for k in
+        meta = {k: listed.get(k) for k in
                 ("pages_read", "rows_listed", "page_size",
-                 "listing_attempts",
+                 "listing_attempts", "listing_pages_requested",
+                 "listing_incomplete", "rate_limited",
                  "listing_truncated_at_page_bound")}
+        meta["listing_rate_limit_events"] = listed.get("rate_limit_events")
+        listing_suspended = float(listed.get("suspended_for_s") or 0.0)
+        # SPREAD THE SAMPLE ACROSS THE LISTING, REPRODUCIBLY.
+        #
+        # `candidates_from_listing` sorts by slug and the enrichment
+        # window walks that order from an offset, so probe 3c413436's
+        # 40 markets were the 40 alphabetically first slugs and came
+        # back as one market family. The permutation below is keyed by
+        # a RECORDED SEED, fixed before any economic result was seen,
+        # so the sample is reproducible from the seed and the listing.
+        #
+        # It improves coverage WITHIN the bounded listing and nothing
+        # more: the listing is itself a page-bounded prefix of the
+        # venue.
+        ordering = probe_mod.order_candidates(candidates)
+        candidates = ordering["ordered"]
+        meta["sampling"] = {k: ordering[k] for k in
+                            ("seed", "order_version", "population",
+                             "population_families", "scope")}
     else:
         meta = {}
+        listing_suspended = 0.0
 
     if not candidates:
         return dict(meta, ok=True, candidates=0, slugs=[], detail=[],
@@ -1193,7 +1547,7 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
                                   batch=batch, should_stop=should_stop,
                                   remaining=len(candidates) - swept,
                                   max_distinct=left, reserve=reserve,
-                                  sleep=sleep)
+                                  pacer=pacer, sleep=sleep)
         for row in r["rows"]:
             by_slug[row["slug"]] = row
         coverage = probe_mod.merge_coverage(coverage, r["coverage"])
@@ -1233,15 +1587,30 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
     # actually looked at.
     coverage = dict(coverage, distinct_enriched=len(rows))
     sel = uni.select(rows)
+    obs = observation_subset(
+        rows, candidates,
+        limit=(_int_env(OBSERVE_MAX_ENV, OBSERVE_MAX, OBSERVE_MAX_CEIL)
+               if observe_max is None else observe_max),
+        admitted=sel["slugs"])
     sel.update(meta)
     sel.update({"ok": True, "candidates": len(candidates),
                 "enriched_rows": len(rows), "coverage": coverage,
                 "next_offset": nxt, "swept": swept,
                 "stopped_by_control": stopped,
                 "budget_max_distinct": max_distinct,
-                "suspended_for_s": suspended_for or None,
+                # THE LONGEST DELAY THE VENUE ASKED FOR, from either
+                # stage. Taking only the enrichment figure would let a
+                # listing suspension be retried sooner than the server
+                # said.
+                "suspended_for_s": (max(suspended_for, listing_suspended)
+                                    or None),
                 "pace": probe_mod.configured_pace(),
+                "request_telemetry": pacer.telemetry(),
+                "observation": obs,
                 "enrichment": probe_mod.PROBE_VERSION})
+    if ordering is not None:
+        sel["sample_report"] = probe_mod.sample_report(
+            ordering, [r["slug"] for r in rows])
     return sel
 
 
@@ -1478,12 +1847,34 @@ async def main(*, client=None, stream_factory=None, store=None,
     if not first.get("ok"):
         log.error("bettor_live_loop: %s (%s); not starting",
                   first.get("why"), first.get("error"))
-        await _backoff("DISCOVERY_FAILED", sleep=sleep)
+        # NEVER SOONER THAN THE SERVER ASKED. A discovery that failed
+        # because the venue suspended us carries its Retry-After here.
+        await _backoff("DISCOVERY_FAILED", sleep=sleep,
+                       at_least=first.get("suspended_for_s") or 0.0)
         return {"started": False, "why": "DISCOVERY_FAILED",
                 "detail": first}
-    if not first.get("slugs"):
-        # AN EMPTY UNIVERSE IS REPORTED, NOT BYPASSED. The rule is not
-        # relaxed to find something to watch.
+    # ── WHAT IS WATCHED vs WHAT THE STRATEGY ADMITS ─────────────────
+    #
+    # Two independent outcomes. `first["slugs"]` is the frozen rule's
+    # verdict, unchanged. `watch` is the rule's verdict PLUS a small
+    # bounded deterministic subset of valid, open markets chosen so the
+    # transport can be verified even when the rule admits nothing --
+    # which is exactly what happened on probe 3c413436.
+    obs = first.get("observation") or {}
+    watch = list(obs.get("slugs") or first.get("slugs") or [])
+    admission = {d["slug"]: {
+        "observation_basis": ("STRATEGY_ADMITTED" if d["strategy_admitted"]
+                              else "OBSERVATION_ONLY"),
+        "universe_rule_reason": d.get("universe_rule_reason"),
+        "universe": d.get("universe"),
+    } for d in (obs.get("detail") or [])}
+
+    if not watch:
+        # NOTHING VALID AND OPEN WAS FOUND -- a strictly weaker
+        # statement than the old EMPTY_UNIVERSE, which fired whenever
+        # the ECONOMIC rule said no. The rule is still not relaxed; the
+        # difference is that its refusal no longer decides whether the
+        # transport gets tested.
         #
         # COVERAGE IS REPORTED BESIDE THE VERDICT, because "of 3,000
         # candidates we read 960 and none qualified" and "we read none
@@ -1491,19 +1882,22 @@ async def main(*, client=None, stream_factory=None, store=None,
         # message could not tell them apart -- it counted 3,000
         # unenriched listing rows as 3,000 one-sided books.
         cov = first.get("coverage") or {}
-        log.error("bettor_live_loop: no eligible markets; not starting. "
-                  "COVERAGE candidates=%s probed=%s enriched=%s %s | "
-                  "RULE considered=%s excluded=%s",
+        log.error("bettor_live_loop: nothing valid and open to watch; not "
+                  "starting. COVERAGE candidates=%s probed=%s enriched=%s "
+                  "%s | RULE considered=%s excluded=%s | OBSERVABLE %s",
                   cov.get("candidates"), cov.get("probed"),
                   cov.get("enriched"), json.dumps(cov.get("by_status", {})),
                   first.get("considered", 0),
-                  json.dumps(first.get("excluded_by_reason", {})))
+                  json.dumps(first.get("excluded_by_reason", {})),
+                  obs.get("eligible_for_observation"))
         await _backoff("EMPTY_UNIVERSE", sleep=sleep,
                        at_least=first.get("suspended_for_s") or 0.0)
-        return {"started": False, "why": "EMPTY_UNIVERSE",
+        return {"started": False, "why": "NOTHING_OBSERVABLE",
                 "considered": first.get("considered", 0),
                 "excluded_by_reason": first.get("excluded_by_reason", {}),
-                "coverage": cov,
+                "coverage": cov, "observation": obs,
+                "request_telemetry": first.get("request_telemetry"),
+                "sample_report": first.get("sample_report"),
                 "candidates": first.get("candidates"),
                 "pages_read": first.get("pages_read")}
 
@@ -1514,6 +1908,10 @@ async def main(*, client=None, stream_factory=None, store=None,
     # running the startup path end to end rather than by reading it.
     legs = {d["slug"]: d.get("outcome_leg")
             for d in (first.get("detail") or [])}
+    # The observation subset carries its own legs -- those markets are
+    # not in `detail`, which is the rule's chosen list.
+    for d in (obs.get("detail") or []):
+        legs.setdefault(d["slug"], d.get("outcome_leg"))
     if first.get("selected_without_outcome_leg"):
         log.warning("bettor_live_loop: %d of %d selected markets carry no "
                     "outcome leg; their observations will be refused as "
@@ -1521,9 +1919,10 @@ async def main(*, client=None, stream_factory=None, store=None,
                     first["selected_without_outcome_leg"],
                     len(first["slugs"]))
     loop, stream = build(
-        key_id, secret, slugs=first["slugs"],
-        leg_of={s: legs.get(s) for s in first["slugs"]},
+        key_id, secret, slugs=watch,
+        leg_of={s: legs.get(s) for s in watch},
         store=store, stream_factory=stream_factory, boot_id=boot_id,
+        admission=admission,
         opening_cash=float(os.environ.get("BETTOR_LIVE_OPENING_CASH", "0")))
     loop.max_contracts = float(
         os.environ.get("BETTOR_LIVE_MAX_CONTRACTS", "0"))
@@ -1548,10 +1947,21 @@ async def main(*, client=None, stream_factory=None, store=None,
              str(probe_id)[:8], json.dumps(reserved_tally))
 
     cov0 = first.get("coverage") or {}
+    # TWO INDEPENDENT OUTCOMES, LOGGED APART. The first number is what
+    # is WATCHED; the second is what the frozen rule ADMITTED. They are
+    # different questions and a run is useful when either one answers.
+    log.info("bettor_live_loop: WATCHING %d markets (%d strategy-admitted, "
+             "%d observation-only); refusals observed %s; sampling %s",
+             len(watch), len(first.get("slugs") or []),
+             len(obs.get("observation_only_slugs") or []),
+             json.dumps(obs.get("refusal_reasons_observed") or {}),
+             json.dumps(first.get("sample_report") or {}, default=str))
+    log.info("bettor_live_loop: request telemetry %s",
+             json.dumps(first.get("request_telemetry") or {}, default=str))
     log.info("bettor_live_loop: %d markets subscribed; %d eligible of %d "
              "ENRICHED; covered %s of %s candidates in %s reads over %s "
              "pages (%s); fees %s (%s)",
-             len(first["slugs"]), first.get("eligible", 0),
+             len(watch), first.get("eligible", 0),
              first.get("considered", 0), cov0.get("distinct_enriched"),
              cov0.get("candidates"), cov0.get("probed"),
              first.get("pages_read"), first.get("enrichment"),
@@ -1573,6 +1983,7 @@ async def main(*, client=None, stream_factory=None, store=None,
     stop_reason = None
     last_prune = t_start
     cycle = 0
+    receipt = None
     try:
         while enabled():
             loop.drain()
@@ -1620,15 +2031,33 @@ async def main(*, client=None, stream_factory=None, store=None,
                                       reserve=_reserve,
                                       should_stop=_stop_now)
                 probe_offset = nxt.get("next_offset", probe_offset)
-                if nxt.get("ok") and nxt.get("slugs"):
+                # THE REFRESH WATCHES WHAT THE START WATCHED: admitted
+                # markets plus the bounded observation subset. A
+                # refresh that narrowed to the rule's verdict alone
+                # would silently re-create the circular dependency
+                # fifteen minutes into every run.
+                nobs = nxt.get("observation") or {}
+                nwatch = list(nobs.get("slugs") or nxt.get("slugs") or [])
+                if nxt.get("ok") and nwatch:
                     loop.event_at.update(_event_times(nxt))
-                    keep = set(nxt["slugs"])
+                    keep = set(nwatch)
                     dropped = stream.prune(keep)
-                    added = stream.subscribe(nxt["slugs"])
+                    added = stream.subscribe(nwatch)
+                    for d in (nobs.get("detail") or []):
+                        loop.admission[d["slug"]] = {
+                            "observation_basis": (
+                                "STRATEGY_ADMITTED" if d["strategy_admitted"]
+                                else "OBSERVATION_ONLY"),
+                            "universe_rule_reason":
+                                d.get("universe_rule_reason"),
+                            "universe": d.get("universe")}
+                        loop.leg_of.setdefault(d["slug"],
+                                               d.get("outcome_leg"))
                     loop.bump("discovery_refresh")
                     log.info("bettor_live_loop: discovery refresh "
-                             "+%d -%d (now %d)", added["queued"], dropped,
-                             len(keep))
+                             "+%d -%d (now %d watched, %d admitted)",
+                             added["queued"], dropped, len(keep),
+                             len(nxt.get("slugs") or []))
                 else:
                     # A refresh that fails leaves the EXISTING universe
                     # in place. Dropping it would turn a transient venue
@@ -1694,10 +2123,46 @@ async def main(*, client=None, stream_factory=None, store=None,
         # would otherwise leave the socket thread running forever and
         # the last batch of records unwritten.
         loop.stopped_at = _now().isoformat()
-        stream.stop()
+        # WAIT FOR THE SOCKET, AND MEASURE IT.
+        #
+        # `stop()` used to set a flag and return, so "the stream closed
+        # within 90 seconds" could only ever be argued from the absence
+        # of new rows -- which a quiet market produces just as well.
+        # The thread is now joined with a bounded wait and the closure
+        # is timed by the process that did it.
+        shut = stream.stop(wait_s=STREAM_CLOSE_WAIT_S)
         await _final_flush(loop)
-        log.info("bettor_live_loop: stopped; stream stop requested, "
+        rep = loop.report()
+        receipt = {
+            "probe_id": str(probe_id) if probe_id else None,
+            "boot_id": loop.boot_id,
+            "loop": LOOP_VERSION,
+            "stopped_by": stop_reason,
+            "started_at": loop.started_at,
+            "stopped_at": loop.stopped_at,
+            "runtime_s": rep.get("runtime_s"),
+            # ACQUISITION: what was spent, and when the last outbound
+            # request was started. `requests_started` stops rising the
+            # moment acquisition ceases, so the pair is the cessation
+            # evidence.
+            "acquisition": {
+                "reserved": dict(reserved_tally),
+                "telemetry": (loop.discovery or {}).get(
+                    "request_telemetry"),
+            },
+            # TRANSPORT: the positive shutdown facts.
+            "transport": shut,
+            "stream": rep.get("stream"),
+            "frames": rep.get("frames"),
+            "watching": rep.get("watching"),
+            "records_written": loop.records_written,
+            "durability": rep.get("durability"),
+            "orders_submitted": 0,
+        }
+        await ctl.write_stop_receipt(control_pool, receipt)
+        log.info("bettor_live_loop: stopped (%s); transport %s; "
                  "%d records written, %d persist failures",
+                 stop_reason, json.dumps(shut, default=str),
                  loop.records_written, loop.persist_failures)
     return {"started": True, "stopped_by": stop_reason,
-            "report": loop.report()}
+            "report": loop.report(), "stop_receipt": receipt}

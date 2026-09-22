@@ -206,6 +206,28 @@ jobs:
                 # resets when the supervisor restarts the loop. obs-arm opens
                 # it; the loop decrements it and DISARMS the control at expiry.
                 obs-budget) SQL="SELECT coalesce((SELECT jsonb_pretty(value) FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'ROW ABSENT -- a probe without a declared budget does not run') AS bettor_live_probe_state;"; TO=30000 ;;
+                # [R15] READ-ONLY. How the last run ENDED, written by the
+                # process that closed the socket. Stop latency was previously
+                # argued from the ABSENCE of new journal rows, which a quiet
+                # market produces just as well; this carries the positive
+                # facts -- last frame, stop requested, socket closed -- so the
+                # latency is a subtraction rather than an inference.
+                obs-stop-receipt) SQL="SELECT coalesce((SELECT jsonb_pretty(value) FROM ingestion_state WHERE key = 'bettor_live_stop_receipt'), 'ROW ABSENT -- no run has ended under this build') AS bettor_live_stop_receipt;"; TO=30000 ;;
+                # [R15] READ-ONLY LIVENESS, for deciding WHEN to issue
+                # obs-stop. "Waking later and refusing does not substitute for
+                # measuring stop latency during active work" -- so the stop is
+                # issued on an observed condition rather than on a guess about
+                # timing. `journal_age_s` small means frames are arriving now;
+                # the budget counters rising between two reads means
+                # acquisition is running now.
+                #
+                # NOTE ON COLUMNS, read from the deployed DDL rather than
+                # assumed: bettor_live_journal.decided_at is TEXT (the
+                # worker's own ISO stamp) and cannot be subtracted from now();
+                # written_at is the TIMESTAMPTZ the database set, and is the
+                # right clock for "is it writing right now". The JSONB column
+                # is `record`, not `payload`.
+                obs-live) SQL="SELECT 'journal_rows' AS what, count(*)::text AS v FROM bettor_live_journal UNION ALL SELECT 'journal_newest_written_at', coalesce(max(written_at)::text,'none') FROM bettor_live_journal UNION ALL SELECT 'journal_age_s', coalesce(round(extract(epoch FROM now() - max(written_at))::numeric, 1)::text, 'none') FROM bettor_live_journal UNION ALL SELECT 'journal_rows_last_60s', count(*)::text FROM bettor_live_journal WHERE written_at > now() - interval '60 seconds' UNION ALL SELECT 'observation_only_rows', count(*)::text FROM bettor_live_journal WHERE record->>'observation_basis' = 'OBSERVATION_ONLY' UNION ALL SELECT 'strategy_admitted_rows', count(*)::text FROM bettor_live_journal WHERE record->>'observation_basis' = 'STRATEGY_ADMITTED' UNION ALL SELECT 'distinct_markets_seen', count(DISTINCT market_id)::text FROM bettor_live_journal UNION ALL SELECT 'bbo_attempts_reserved', coalesce((SELECT value->>'bbo_attempts_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'listing_attempts_reserved', coalesce((SELECT value->>'listing_attempts_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'distinct_reserved', coalesce((SELECT value->>'distinct_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'observation_control', coalesce((SELECT value::text FROM ingestion_state WHERE key = 'bettor_live_observation'), 'ROW ABSENT -- NOT OBSERVING');"; TO=30000 ;;
                 # [R14] READ-ONLY schema metadata. On 2026-09-22 a reservation
                 # UPDATE named ingestion_state.updated_at, a column that does
                 # not exist, and every local fixture had CREATEd the table

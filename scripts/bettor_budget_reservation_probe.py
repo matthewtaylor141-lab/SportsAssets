@@ -220,7 +220,9 @@ async def run_one(pool, markets, tmp, *, crash=None):
     def build(*a, **kw):
         loop, stream = real_build(*a, **kw)
         stream.start = lambda: None
-        stream.stop = lambda: None
+        stream.stop = lambda *, wait_s=0.0: {"closed": True,
+                                             "thread_alive": False,
+                                             "waited_s": wait_s}
 
         async def rec():
             if crash == "after_dispatch":
@@ -782,9 +784,14 @@ class FakeStream:
         self.open = True
         self.started += 1
 
-    def stop(self):
+    def stop(self, *, wait_s=0.0):
+        # PRODUCTION SIGNATURE. `MarketStream.stop` takes `wait_s`
+        # and returns the closure record; a double that did not
+        # would pass here and raise TypeError in the worker.
         self.open = False
         self.stopped += 1
+        return {"closed": True, "thread_alive": False,
+                "close_latency_s": 0.0, "waited_s": wait_s}
 
     def drain_trades(self):
         return []

@@ -387,9 +387,35 @@ WORKING_CAPITAL_FOR_500K_PER_DAY = NOT_IDENTIFIED
 ```
 
 Two of three components have never been observed and the third needs a
-venue fact we have not read back. A scenario on **component 1 alone**,
-with 2 and 3 set to zero, is a **lower bound** and not an estimate: at a
-two-hour inventory hold it is **≥ $41,667**.
+venue fact we have not read back.
+
+**The $41,667 figure is a SCENARIO, not an unconditional lower bound.**
+I called it a lower bound twice, and that was wrong both times. It is
+the value of component 1 alone — components 2 and 3 set to zero — under
+**two stated conditions**:
+
+1. an assumed **two-hour inventory holding period**, which has never
+   been observed because BETTOR has never had a fill; and
+2. a **turnover convention** in which $500,000/day of turnover is
+   financed by capital recycling at that holding period
+   (`$500,000 × 2h / 24h = $41,667`).
+
+Change either condition and the number changes with it: a four-hour
+hold doubles it, a twenty-minute hold cuts it to a sixth. It is
+therefore a **lower bound only WITHIN those two conditions**, and
+unconditionally it is neither a bound nor an estimate — it is one point
+on a curve whose x-axis (holding time) is unmeasured.
+
+```
+WORKING_CAPITAL_FOR_500K_PER_DAY        = NOT_IDENTIFIED
+CAPITAL | 2h hold, components 2,3 = 0   = $41,667   (a SCENARIO)
+```
+
+The honest form of the claim is: *if* the holding period were two
+hours, *and* resting orders locked no collateral, *and* capital
+returned instantly, *then* the requirement would be $41,667 — and since
+two of those three are known to be false or unmeasured, the real figure
+is higher by an unknown amount.
 
 This is a statement about **measured opportunity**, not a proof of
 impossibility. A venue with more volume, a larger addressable census, or
@@ -437,9 +463,31 @@ run and the distinction decided how to read its result.
   wide books really are across market families.
 - **Latency** — venue response times, socket frame cadence, and the
   staleness of the book a decision would be made on.
-- **Unconditional price movement** — `E[SETTLEMENT − QUOTE | STATE]`,
-  which states later move adversely, and the clean state frame that
-  would *size* any eventual pilot.
+- **Unconditional price movement** — the raw material for
+  `E[SETTLEMENT − QUOTE | STATE]`: which states later move adversely,
+  and the clean state frame that would *size* any eventual pilot.
+
+  **OBSERVATION ALONE DOES NOT ESTABLISH THIS ESTIMAND.** Watching
+  quotes produces the QUOTE side and the STATE side; it produces
+  neither the SETTLEMENT side nor a valid estimate. Three further
+  things are required and none of them is a by-product of streaming:
+
+  1. **Matched authoritative outcomes.** Each observed state must be
+     joined to the venue's own settlement for that market. The
+     settlement ingest exists, but a join is not a measurement until
+     the match rate and the unmatched residue are both reported.
+  2. **Adequate coverage.** Enough distinct markets, across enough
+     families and enough time, that the estimate is not a description
+     of one evening's one market family. A bounded probe of a few
+     markets cannot deliver this however many frames it receives.
+  3. **A valid statistical evaluation.** Repeated observations of the
+     same market are not independent draws; a held-out split, a
+     clustered interval and a pre-declared horizon are what turn a
+     sample mean into a claim. The Class C work already shows how far
+     apart "788 observations" and "8 markets" can be.
+
+  A probe therefore moves this estimand from *unstartable* to
+  *started*. It does not settle it.
 
 **It CANNOT settle, ever, by itself:**
 
