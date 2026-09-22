@@ -144,23 +144,50 @@ async def run(*, stream_factory=None, control_pool=None,
              frozen["distinct_programs"], frozen["distinct_events"],
              frozen["independence_note"])
 
-    # ── 3. THE DURABLE RUN ROW, SO A RESTART RESUMES ─────────────────
+    # ── 3. THE ALLOWANCE ROW: WHERE THE REQUEST CEILING ACTUALLY LIVES
+    #
+    # Read before the run row, because an unarmed or expired allowance
+    # means this process may not issue a single request and there is
+    # nothing to resume into. The ceiling itself is never held here --
+    # `DurableLedger` takes each unit from this row under a lock.
+    # NOT `read_budget`: that gates on the general distinct allowance,
+    # which this run's arm deliberately zeroes as a rollback guard.
+    allowance = await ctl.read_incentive_allowance(control_pool)
+    if not allowance.get("open"):
+        log.info("bettor_incentive_observe: not observing (%s: %s); "
+                 "effective config %s", allowance["state"],
+                 allowance.get("detail"), json.dumps(effective_config()))
+        return _not_started(allowance["state"], budget=allowance,
+                            config=effective_config())
+    probe_id = allowance.get("probe_id")
+    if not allowance.get("general_caps_zeroed"):
+        # NOT FATAL, BUT SAID OUT LOUD. The run is safe either way; what
+        # is not safe is a later rollback that removes the mode while
+        # the control is still true, because the general loop would
+        # then begin discovery. `obs-arm-incentive` zeroes them.
+        log.warning("bettor_incentive_observe: the allowance row leaves the "
+                    "general acquisition caps NON-ZERO; a rollback that "
+                    "removes the mode while the control is true could start "
+                    "general discovery. Arm with obs-arm-incentive.")
+
+    # ── 3b. THE DURABLE RUN ROW: identity and the SOCKET totals ──────
     opened = await st.open_or_resume(
         control_pool, et_date=et_date,
         manifest_id=manifest.get("manifest_id") or "NONE",
-        subcaps=bud.SUBCAPS, boot_id=boot_id)
+        boot_id=boot_id)
     if not opened.get("ok"):
         log.error("bettor_incentive_observe: run row %s (%s); not starting",
                   opened["why"], opened.get("detail"))
         return _not_started(opened["why"], detail=opened.get("detail"))
     run_row = opened["run"]
-    ledger = bud.RequestLedger()
-    seeded = ledger.seed(opened["seed"])
+    ledger = bud.DurableLedger(control_pool, probe_id=probe_id)
+    spent_before = await ledger.read()
     if opened["resumed"]:
-        log.info("bettor_incentive_observe: RESUMED run %s (boot %d); "
-                 "%d of %d requests already spent",
+        log.info("bettor_incentive_observe: RESUMED run %s (boot %d); the "
+                 "allowance row already holds %s of %s requests",
                  run_row["run_id"], run_row.get("boots", 0),
-                 seeded["used"], ledger.total)
+                 spent_before.get("total_reserved"),
+                 spent_before.get("total_cap"))
 
     # ── 4. CREDENTIALS, NAMED ────────────────────────────────────────
     from ..config import settings
@@ -175,10 +202,16 @@ async def run(*, stream_factory=None, control_pool=None,
                   "environment; not starting")
         return _not_started("NO_CREDENTIALS")
 
-    # ── 5. THE JOURNAL ───────────────────────────────────────────────
-    jdir = jrnl_mod.directory_for(run_row["run_id"])
-    journal = jrnl_mod.Journal(jdir, run_id=run_row["run_id"])
-    jopen = journal.open()
+    # ── 5. THE JOURNAL, IN POSTGRES ──────────────────────────────────
+    #
+    # `open()` also writes the BOOT GAP: on a resumed run it reads the
+    # last record of the previous boot and records `[then, now)` as
+    # UNOBSERVED. Without it the outage would show only as an absence
+    # of rows, and on a change-driven feed an absence of rows is
+    # exactly what an unchanged book looks like.
+    journal = jrnl_mod.PgJournal(control_pool, run_id=run_row["run_id"],
+                                 boot_id=boot_id)
+    jopen = await journal.open()
     if not jopen.get("ok"):
         log.error("bettor_incentive_observe: %s (%s); not starting -- a run "
                   "whose evidence cannot be written produces nothing",
@@ -186,11 +219,12 @@ async def run(*, stream_factory=None, control_pool=None,
         return _not_started(jopen["why"], detail=jopen.get("detail"))
 
     journal.run_open(
-        observe=OBSERVE_VERSION, boot_id=boot_id, resumed=opened["resumed"],
+        observe=OBSERVE_VERSION, resumed=opened["resumed"],
         et_date=et_date, window=window, allowlist=frozen,
         manifest_id=manifest.get("manifest_id"),
         response_digest=manifest.get("response_digest"),
         config=effective_config(), budget=ledger.report(),
+        allowance_at_boot=spent_before, probe_id=probe_id,
         orders="NONE -- this module imports no order path")
     journal.program_version(phase="ARM",
                             programs=frozen["programs_by_slug"],
@@ -215,7 +249,11 @@ async def run(*, stream_factory=None, control_pool=None,
     # recorded rather than assumed away -- see `FeedHealth.liveness`.
     if hasattr(stream, "set_heartbeat_listener"):
         stream.set_heartbeat_listener(health.on_heartbeat)
-    bounds = bud.ReconnectBounds()
+    # PER RUN, NOT PER BOOT: seeded with what earlier boots of this run
+    # already spent, so a crash loop cannot buy a fresh twenty.
+    bounds = bud.ReconnectBounds(
+        prior_reconnects=int(run_row.get("reconnects") or 0),
+        prior_resubscribes=int(run_row.get("resubscribes") or 0))
 
     stream.subscribe(slugs)
     health.note_resubscribe(_batches(len(slugs)))
@@ -228,6 +266,7 @@ async def run(*, stream_factory=None, control_pool=None,
     last_epoch = getattr(stream, "epoch", 0)
     last_alive = True
     gap_open_at = None
+    gap_open_why = None
     recheck_done = False
     stop_seen_at = None
     journal.epoch(epoch=last_epoch, event="RUN_STARTED",
@@ -275,6 +314,14 @@ async def run(*, stream_factory=None, control_pool=None,
                 health.note_resubscribe(_batches(len(slugs)))
                 bounds.note_resubscribe(_batches(len(slugs)))
                 last_epoch = epoch
+                # CARRY THE RUN TOTALS FORWARD. An epoch transition IS
+                # a reconnect, so this write is as rare as the event it
+                # records.
+                t_now = bounds.totals(
+                    int(getattr(stream, "reconnects", 0) or 0))
+                await st.note_socket(control_pool, run_row,
+                                     reconnects=t_now["reconnects"],
+                                     resubscribes=t_now["resubscribes"])
 
             # (f) LIVENESS TRANSITIONS become GAP records. A gap is an
             #     interval we did not observe -- not a quiet book, and
@@ -282,13 +329,23 @@ async def run(*, stream_factory=None, control_pool=None,
             live = health.liveness(now)
             if live["alive"] != last_alive:
                 if live["alive"]:
-                    journal.gap(event="GAP_CLOSED", why=live["why"],
-                                opened_at=gap_open_at,
+                    # `from`/`to` ON THE CLOSING RECORD, because that is
+                    # the only one that knows both ends -- and it is
+                    # what `journal.covers()` reads to decide whether an
+                    # instant was observed. A GAP_OPENED without them
+                    # marks nothing; the interval would look like a
+                    # quiet book to a reconstruction, which is the whole
+                    # error this release exists to avoid.
+                    #
+                    # The reason recorded is why the gap EXISTED, not
+                    # "ALIVE", which is merely how it ended.
+                    journal.gap(event="GAP_CLOSED", why=gap_open_why,
+                                **{"from": gap_open_at, "to": now},
                                 duration_s=(round(now - gap_open_at, 4)
                                             if gap_open_at else None))
-                    gap_open_at = None
+                    gap_open_at, gap_open_why = None, None
                 else:
-                    gap_open_at = now
+                    gap_open_at, gap_open_why = now, live["why"]
                     journal.gap(event="GAP_OPENED", why=live["why"],
                                 detail=live)
                 last_alive = live["alive"]
@@ -301,7 +358,8 @@ async def run(*, stream_factory=None, control_pool=None,
                     and now - window["start_epoch"]
                     >= RECHECK_AT * window["span_s"]):
                 recheck_done = True
-                r = ledger.spend(bud.K_RECHECK, why="mid-run programme terms")
+                r = await ledger.spend(bud.K_RECHECK,
+                                       why="mid-run programme terms")
                 journal.program_version(
                     phase="RECHECK", programs={},
                     attempted=r["ok"], verdict=r.get("verdict"),
@@ -309,11 +367,12 @@ async def run(*, stream_factory=None, control_pool=None,
                     note=("the recheck READ is performed by the arm-time "
                           "capture path; this record reserves and reports "
                           "its budget unit"))
-                await st.persist_spend(control_pool, run_row, ledger.spent)
-                if ledger.remaining() <= 0:
-                    log.info("bettor_incentive_observe: HTTP budget spent; "
-                             "the socket keeps delivering")
+                if not r["ok"]:
+                    log.info("bettor_incentive_observe: recheck not funded "
+                             "(%s); the socket keeps delivering",
+                             r.get("verdict"))
 
+            await journal.flush()
             await _sleep(POLL_S)
     except asyncio.CancelledError:
         end_why = END_CONTROL
@@ -324,19 +383,31 @@ async def run(*, stream_factory=None, control_pool=None,
         journal.gap(event="RUN_ERROR", why=END_ERROR,
                     detail=type(exc).__name__)
     finally:
+        # A GAP THAT WAS STILL OPEN WHEN THE RUN ENDED IS STILL A GAP.
+        # Leaving it unclosed would let a reconstruction treat the
+        # final unobserved stretch as coverage.
+        if gap_open_at is not None:
+            journal.gap(event="GAP_CLOSED", why=gap_open_why or "RUN_ENDED",
+                        **{"from": gap_open_at, "to": _now()},
+                        duration_s=round(_now() - gap_open_at, 4),
+                        closed_by="RUN_END")
         closed = _close_stream(stream)
         feed_report = health.report()
         # PER-MARKET COVERAGE, computed from what was actually
         # observed. It is a RESEARCH verdict and is labelled as one.
         coverage = _coverage(slugs, health, window, t_start, _now())
+        final_bounds = bounds.check(int(getattr(stream, "reconnects", 0) or 0))
+        spent_after = await ledger.read()
         journal.run_close(
             end_why=end_why, stop_seen_at=stop_seen_at,
             ran_s=round(_now() - t_start, 3),
             stream=closed, feed=feed_report, coverage=coverage,
-            budget=ledger.report(),
-            bounds=bounds.check(int(getattr(stream, "reconnects", 0) or 0)))
-        jreport = journal.close()
-        await st.persist_spend(control_pool, run_row, ledger.spent)
+            budget=ledger.report(), allowance_at_close=spent_after,
+            bounds=final_bounds)
+        jreport = await journal.close()
+        await st.note_socket(control_pool, run_row,
+                             reconnects=final_bounds["reconnects"],
+                             resubscribes=final_bounds["resubscribes"])
         if end_why in (END_WINDOW, END_DEADLINE, END_SOCKET):
             await st.close_run(control_pool, run_row, end_why)
 
@@ -351,6 +422,10 @@ async def run(*, stream_factory=None, control_pool=None,
                        "dropped_by_watch_cap", "watch_max", "no_fallback")},
         "feed": feed_report, "coverage": coverage,
         "budget": ledger.report(),
+        # THE ROW'S OWN COUNT, BEFORE AND AFTER. These differing across
+        # a restart is the evidence that the ceiling survived it.
+        "allowance_at_boot": spent_before, "allowance_at_close": spent_after,
+        "socket_bounds": final_bounds,
         "journal": jreport, "stream": closed,
         "orders_submitted": 0,
         "order_path": "NONE -- this module imports no order function",
@@ -359,7 +434,8 @@ async def run(*, stream_factory=None, control_pool=None,
              end_why, out["ran_s"], json.dumps(
                  {"frames": feed_report["frames"],
                   "epochs": feed_report["epoch_count"],
-                  "http": ledger.report()["used"]}, default=str))
+                  "http_row": spent_after.get("total_reserved"),
+                  "rows": jreport.get("rows_written")}, default=str))
     return out
 
 
@@ -428,13 +504,13 @@ def effective_config() -> dict:
         "manifest_path": os.environ.get(man.MANIFEST_ENV) or None,
         "et_date": os.environ.get(man.ET_DATE_ENV) or None,
         "watch_max": os.environ.get(man.WATCH_MAX_ENV) or man.WATCH_MAX,
-        "http_cap": os.environ.get(bud.TOTAL_ENV) or bud.TOTAL_CAP,
+        "http_cap": "%d, held in the armed allowance row (%s), not in "
+                    "this process" % (bud.TOTAL_CAP, ctl.BUDGET_KEY),
         "max_reconnects": os.environ.get(bud.RECONNECT_ENV)
         or bud.MAX_RECONNECTS,
         "max_resubscribes": os.environ.get(bud.RESUBSCRIBE_ENV)
         or bud.MAX_RESUBSCRIBES,
-        "journal_dir": os.environ.get(jrnl_mod.DIR_ENV) or None,
-        "journal_disk_declared": os.environ.get(jrnl_mod.DISK_ENV) or None,
+        "journal": "postgres table %s" % jrnl_mod.TABLE,
         "kill_switch": os.environ.get(KILL_ENV) or None,
         "control_key": ctl.CONTROL_KEY,
         "control_every_s": ctl.CONTROL_EVERY_S,

@@ -1,19 +1,25 @@
 """The run row: what survives the restart the supervisor guarantees.
 
 `workers/all.py:run_forever` is a `while True`. A process that returns
-is started again five seconds later, so ANY cap held only in memory is
-re-granted on every cycle -- an eight-request budget becomes eight
-requests PER BOOT, which is not a budget at all. The same lesson is
-already written into `bettor_live_control`'s allowance, for the same
-reason, and this is that lesson applied to the public incentive reads.
+is started again five seconds later, so ANY bound held only in memory
+is re-granted on every cycle.
 
-So the request ledger is seeded FROM THE DATABASE at boot and written
-BACK after every spend. A restart mid-run resumes the same run with
-the same counters; it does not begin a fresh one. Two things identify
-a run and both must match for it to be resumed: the ET DATE and the
-MANIFEST ID. A different date is a different experiment; a different
-manifest is a different allowlist, and resuming one run's counters into
-another run's allowlist would be an accounting fiction.
+THE HTTP ALLOWANCE IS NOT HERE, AND THAT IS THE POINT. An earlier
+version kept it here as a counter seeded at boot and written back
+after each spend, which is not a ceiling: two overlapping workers seed
+from the same number and both spend it, and a crash between two writes
+loses the record of a request that was already sent. That allowance
+now lives in `bettor_live_control`'s row and is taken by `reserve()`
+under a row lock BEFORE each dispatch. Nothing in this module counts
+requests.
+
+WHAT DOES LIVE HERE is the run's IDENTITY and the socket totals. Two
+things identify a run and both must match for it to be resumed: the ET
+DATE and the MANIFEST ID. A different date is a different experiment;
+a different manifest is a different allowlist. And the reconnect and
+resubscription totals are carried across boots, because a bound that
+resets when the supervisor restarts a crashed worker describes a run
+that made ten times as many.
 
 THIS MODULE NEVER WRITES THE OBSERVATION CONTROL. Arming is a human
 action through `render-ops sql obs-run`, exactly as before. Nothing
@@ -96,66 +102,62 @@ async def _write(pool, value: dict) -> bool:
 
 
 async def open_or_resume(pool, *, et_date: str, manifest_id: str,
-                         subcaps: dict, boot_id: str) -> dict:
+                         boot_id: str) -> dict:
     """Continue this run if the row already describes it; else start one.
 
-    Returns `{"run": row, "resumed": bool, "seed": {kind: spent}}`. The
-    seed is what the in-process ledger starts from, so a restart cannot
-    re-grant a spent allowance.
+    Returns `{"run": row, "resumed": bool}`. The socket totals on the
+    row are what `ReconnectBounds` is seeded from, so the reconnect and
+    resubscription ceilings are PER RUN rather than per boot.
     """
     cur = await read_run(pool)
     row = cur.get("run") or {}
     same = (row.get("et_date") == et_date
             and row.get("manifest_id") == manifest_id)
     if cur["why"] == S_UNREADABLE:
-        # FAIL CLOSED. If we cannot read what was spent we must not
-        # assume nothing was.
+        # FAIL CLOSED. A run row we cannot read is not a run we may
+        # start: the socket totals it holds are a bound, and an
+        # unreadable bound is not an absent one.
         return {"ok": False, "why": S_UNREADABLE, "detail": cur.get("detail"),
-                "resumed": False, "seed": {k: v for k, v in subcaps.items()}}
+                "resumed": False}
     if same and row.get("closed"):
         return {"ok": False, "why": S_CLOSED, "run": row, "resumed": False,
                 "detail": "this run is closed (%s); arming a new one needs "
                           "a new ET date or a new manifest"
-                          % row.get("close_reason"),
-                "seed": {k: v for k, v in subcaps.items()}}
+                          % row.get("close_reason")}
     if same:
         row = dict(row)
         row["boots"] = int(row.get("boots") or 0) + 1
         row["last_boot_at"] = time.time()
         row["last_boot_id"] = boot_id
         await _write(pool, row)
-        return {"ok": True, "why": S_OPEN, "run": row, "resumed": True,
-                "seed": dict(row.get("http_spent") or {})}
+        return {"ok": True, "why": S_OPEN, "run": row, "resumed": True}
 
     fresh = {
         "state": STATE_VERSION,
         "run_id": "%s:%s" % (et_date, manifest_id),
         "et_date": et_date, "manifest_id": manifest_id,
-        "http_spent": {k: 0 for k in subcaps},
-        "subcaps": dict(subcaps),
+        # SOCKET TOTALS FOR THE WHOLE RUN, not for one process.
+        "reconnects": 0, "resubscribes": 0,
         "opened_at": time.time(), "boots": 1, "last_boot_at": time.time(),
         "last_boot_id": boot_id, "closed": False, "close_reason": None,
     }
     await _write(pool, fresh)
-    return {"ok": True, "why": S_OPEN, "run": fresh, "resumed": False,
-            "seed": dict(fresh["http_spent"])}
+    return {"ok": True, "why": S_OPEN, "run": fresh, "resumed": False}
 
 
-async def persist_spend(pool, run: dict, spent: dict) -> bool:
-    """Write the ledger back. Called AFTER each granted request.
+async def note_socket(pool, run: dict, *, reconnects: int,
+                      resubscribes: int) -> bool:
+    """Carry the run's socket totals forward.
 
-    Writing after rather than before is deliberate and is the safe
-    direction here: a crash between dispatch and write loses at most
-    the record of one request that WAS made, and the next boot reads a
-    count one low. Writing first would risk the opposite -- a count
-    recorded for a request that never went out -- and of the two, an
-    over-count is the one that silently shrinks the allowance while an
-    under-count is visible in the journal, which records every
-    dispatch.
+    Written at every epoch transition and at close -- low frequency by
+    construction, because an epoch transition IS a reconnect. Absolute
+    run totals are stored, not deltas, so a lost write costs at most
+    one boot's contribution rather than corrupting the running sum.
     """
     row = dict(run)
-    row["http_spent"] = dict(spent)
-    row["last_spend_at"] = time.time()
+    row["reconnects"] = max(0, int(reconnects))
+    row["resubscribes"] = max(0, int(resubscribes))
+    row["last_socket_at"] = time.time()
     return await _write(pool, row)
 
 
@@ -176,6 +178,10 @@ def describe() -> dict:
     return {
         "state": STATE_VERSION, "table": "ingestion_state", "key": RUN_KEY,
         "identifies_a_run_by": ["et_date", "manifest_id"],
+        "holds": ["run identity", "boot count",
+                  "reconnect and resubscribe totals FOR THE RUN"],
+        "does_not_hold": "the HTTP allowance -- that is reserved under a "
+                         "row lock by bettor_live_control.reserve()",
         "survives_restart": True,
         # Named through the control module rather than spelled out, so a
         # test can assert the literal appears in NO write path here.

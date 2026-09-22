@@ -267,15 +267,53 @@ R_DISTINCT = "distinct"
 R_ATTEMPT = "bbo_attempt"
 R_LISTING = "listing"
 
+# ── THE INCENTIVE OBSERVATION KINDS ──────────────────────────────────
+#
+# ADDED HERE RATHER THAN REBUILT ELSEWHERE. The incentive run first
+# carried its own in-process counter seeded from Postgres at boot, and
+# that is not a ceiling: two overlapping workers both seed from the
+# same number and both spend it, and a crash between two writes loses
+# the record of requests that were actually sent. This mechanism
+# already solves all of it -- one row lock, the control and the
+# deadline checked inside the same transaction, the counter incremented
+# before the caller may dispatch, and a timeout treated as SPENT.
+#
+# THE THREE SUB-CAPS SUM TO THE DECLARED TOTAL: 4 + 2 + 2 = 8. That is
+# deliberate, and it is what makes per-kind enforcement TOTAL
+# enforcement -- there is no combination of grants that reaches nine
+# without some kind exceeding its own cap. `reserve()` is therefore
+# left exactly as it is, with no cross-kind bookkeeping added to a
+# function the general loop also depends on.
+# `test_the_incentive_subcaps_sum_to_the_declared_total` fails loudly
+# if anyone changes one of these numbers without the other.
+R_INC_MANIFEST = "incentive_manifest"
+R_INC_RECHECK = "incentive_recheck"
+R_INC_RETRY = "incentive_retry"
+
+INCENTIVE_MAX_MANIFEST = 4
+INCENTIVE_MAX_RECHECK = 2
+INCENTIVE_MAX_RETRY = 2
+INCENTIVE_TOTAL = (INCENTIVE_MAX_MANIFEST + INCENTIVE_MAX_RECHECK
+                   + INCENTIVE_MAX_RETRY)
+
 _COUNTER = {R_DISTINCT: "distinct_reserved",
             R_ATTEMPT: "bbo_attempts_reserved",
-            R_LISTING: "listing_attempts_reserved"}
+            R_LISTING: "listing_attempts_reserved",
+            R_INC_MANIFEST: "incentive_manifest_reserved",
+            R_INC_RECHECK: "incentive_recheck_reserved",
+            R_INC_RETRY: "incentive_retry_reserved"}
 _CAP = {R_DISTINCT: "max_distinct",
         R_ATTEMPT: "max_bbo_attempts",
-        R_LISTING: "max_listing_attempts"}
+        R_LISTING: "max_listing_attempts",
+        R_INC_MANIFEST: "max_incentive_manifest",
+        R_INC_RECHECK: "max_incentive_recheck",
+        R_INC_RETRY: "max_incentive_retry"}
 _DEFAULT_CAP = {R_DISTINCT: PROBE_MAX_DISTINCT,
                 R_ATTEMPT: PROBE_MAX_BBO_ATTEMPTS,
-                R_LISTING: PROBE_MAX_LISTING_ATTEMPTS}
+                R_LISTING: PROBE_MAX_LISTING_ATTEMPTS,
+                R_INC_MANIFEST: INCENTIVE_MAX_MANIFEST,
+                R_INC_RECHECK: INCENTIVE_MAX_RECHECK,
+                R_INC_RETRY: INCENTIVE_MAX_RETRY}
 
 B_OPEN = "OPEN"
 B_EXHAUSTED = "BUDGET_EXHAUSTED"
@@ -342,6 +380,102 @@ async def _resolve(pool):
         return pool
     from .db import get_pool
     return await get_pool()
+
+
+async def read_incentive_allowance(pool=None, *,
+                                   now: float | None = None) -> dict:
+    """The INCENTIVE allowance. A different question from `read_budget`.
+
+    WHY THIS IS NOT `read_budget`. That function gates `open` on the
+    DISTINCT-market allowance, because that is what decides whether the
+    general loop may begin acquiring. The incentive arm deliberately
+    sets `max_distinct` to ZERO -- that is the guard which stops a
+    mistaken rollback from starting general discovery -- and
+    `0 >= 0` reads as BUDGET_EXHAUSTED. Asking `read_budget` whether
+    the incentive run may proceed therefore always answers no, and the
+    incentive runner would block itself with its own safety guard.
+
+    FOUND BY THE REHEARSAL, NOT BY READING. The durability proof called
+    `reserve()` directly and passed; the end-to-end run through
+    `main()` did not start at all. Two checks of the same row for two
+    different purposes need two functions.
+
+    So this asks only what the incentive run depends on: a probe
+    identity, a deadline that has not passed, and at least one
+    incentive unit left. It FAILS CLOSED exactly as `read_budget` does.
+    """
+    now = time.time() if now is None else now
+    kinds = (R_INC_MANIFEST, R_INC_RECHECK, R_INC_RETRY)
+    out = {"key": BUDGET_KEY, "state": B_UNREADABLE, "open": False,
+           "probe_id": None, "reserved": {}, "caps": {},
+           "total_reserved": None, "total_cap": None,
+           "deadline_at": None, "seconds_left": 0.0, "detail": None,
+           # REPORTED so a reader can see the guard is in place without
+           # having to read the row separately.
+           "general_caps_zeroed": None}
+
+    async def _fetch():
+        p = await _resolve(pool)
+        return await p.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1", BUDGET_KEY)
+
+    try:
+        row = await asyncio.wait_for(_fetch(), timeout=CONTROL_READ_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        out["detail"] = "read did not answer in %.0fs" % CONTROL_READ_TIMEOUT_S
+        return out
+    except Exception as exc:                               # noqa: BLE001
+        out["detail"] = "read failed: %s" % type(exc).__name__
+        return out
+
+    if row is None:
+        out["detail"] = ("no %s row; an unarmed allowance is not permission"
+                         % BUDGET_KEY)
+        return out
+    val = _as_obj(row)
+    if val is None:
+        out["detail"] = "allowance value is not a JSON object"
+        return out
+    try:
+        res = {k: int(val.get(_COUNTER[k], 0) or 0) for k in kinds}
+        caps = {k: int(val.get(_CAP[k], _DEFAULT_CAP[k])) for k in kinds}
+        general = tuple(int(val.get(c, 0) or 0) for c in
+                        ("max_distinct", "max_bbo_attempts",
+                         "max_listing_attempts"))
+    except (TypeError, ValueError):
+        out["detail"] = "an incentive counter or cap is not an integer"
+        return out
+    deadline = _parse_iso(val.get("deadline_at"))
+    out.update(probe_id=val.get("probe_id"), reserved=res, caps=caps,
+               total_reserved=sum(res.values()), total_cap=sum(caps.values()),
+               deadline_at=val.get("deadline_at"),
+               general_caps_zeroed=(general == (0, 0, 0)))
+    if not val.get("probe_id"):
+        out["detail"] = ("no probe_id; reservations cannot be tied to a "
+                         "probe identity")
+        return out
+    if deadline is None:
+        out["detail"] = "deadline_at is absent or unparsable"
+        return out
+    out["seconds_left"] = round(deadline - now, 1)
+    if now >= deadline:
+        out.update(state=B_EXPIRED,
+                   detail="deadline %s passed" % val.get("deadline_at"))
+        return out
+    if out["total_reserved"] >= out["total_cap"]:
+        out.update(state=B_EXHAUSTED,
+                   detail="%d of %d incentive requests already reserved"
+                          % (out["total_reserved"], out["total_cap"]))
+        return out
+    out.update(state=B_OPEN, open=True,
+               detail="probe %s: %d of %d incentive requests reserved, "
+                      "%.0fs left; general acquisition caps %s"
+                      % (str(val.get("probe_id"))[:8], out["total_reserved"],
+                         out["total_cap"], deadline - now,
+                         "ZEROED" if out["general_caps_zeroed"]
+                         else "NOT zeroed -- a rollback could start "
+                              "discovery"))
+    return out
 
 
 async def reserve(pool, kind: str, *, slug: str | None = None,

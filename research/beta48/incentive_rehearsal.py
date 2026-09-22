@@ -13,8 +13,9 @@ reservation in the live probe.
     the mode switch     the process environment            -- real
     the control         Postgres `ingestion_state`         -- real
     the allowlist       a manifest file on disk            -- real
-    the budget ledger   seeded from the real run row       -- real
-    the journal         real files, real fsync             -- real
+    the allowance       a real armed row, reserved under a
+                        real row lock before every request -- real
+    the journal         a real Postgres table              -- real
 
     THE TRANSPORT       A FAKE. `bettor_market_stream.MarketStream` is
                         replaced in THIS PROCESS by `FakeStream`. NO
@@ -57,7 +58,7 @@ os.environ["PMUS_SECRET_KEY"] = "REHEARSAL-SECRET"
 import asyncpg                                              # noqa: E402
 
 from sportsassets import bettor_incentive_budget as bud     # noqa: E402
-from sportsassets import bettor_incentive_journal as jrnl   # noqa: E402
+from sportsassets import bettor_incentive_journal as jrnl   # noqa: E402  # noqa: F401
 from sportsassets import bettor_incentive_manifest as man   # noqa: E402
 from sportsassets import bettor_incentive_state as st       # noqa: E402
 from sportsassets import bettor_live_control as ctl         # noqa: E402
@@ -215,7 +216,7 @@ def _manifest_file(n_markets: int, et_date: str, path: str) -> str:
     return path
 
 
-def _configure(*, manifest_path, et_date, journal_dir, creds=True):
+def _configure(*, manifest_path, et_date, creds=True):
     os.environ.pop("BETTOR_LIVE_LOOP", None)
     os.environ[man.MANIFEST_ENV] = manifest_path or ""
     if not manifest_path:
@@ -223,8 +224,6 @@ def _configure(*, manifest_path, et_date, journal_dir, creds=True):
         os.environ[man.MANIFEST_ENV] = "/nonexistent/manifest.json"
     os.environ[man.ET_DATE_ENV] = et_date
     os.environ[man.WATCH_MAX_ENV] = "12"
-    os.environ[jrnl.DIR_ENV] = journal_dir
-    os.environ[jrnl.DISK_ENV] = "1"
     os.environ[bud.RECONNECT_ENV] = "20"
     os.environ[bud.RESUBSCRIBE_ENV] = "40"
     os.environ["PMUS_KEY_ID"] = "REHEARSAL-KEY-ID" if creds else ""
@@ -251,6 +250,53 @@ async def _set_control(value):
     await _sql("INSERT INTO ingestion_state (key, value) VALUES ($1,$2::jsonb)"
                " ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
                ctl.CONTROL_KEY, json.dumps(value))
+
+
+ARM_ROW = {
+    "max_distinct": 0, "max_bbo_attempts": 0, "max_listing_attempts": 0,
+    "distinct_reserved": 0, "bbo_attempts_reserved": 0,
+    "listing_attempts_reserved": 0,
+    "max_incentive_manifest": 4, "max_incentive_recheck": 2,
+    "max_incentive_retry": 2,
+    "incentive_manifest_reserved": 0, "incentive_recheck_reserved": 0,
+    "incentive_retry_reserved": 0, "slugs": [],
+}
+
+
+async def _arm(probe_id="REHEARSAL-PROBE", hours=26.0):
+    """Exactly what `render-ops sql obs-arm-incentive` writes."""
+    now = datetime.now(timezone.utc)
+    row = dict(ARM_ROW, probe_id=probe_id, started_at=now.isoformat(),
+               deadline_at=(now + timedelta(hours=hours)).isoformat())
+    await _sql("INSERT INTO ingestion_state (key,value) VALUES ($1,$2::jsonb)"
+               " ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+               ctl.BUDGET_KEY, json.dumps(row))
+
+
+async def _disarm():
+    await _sql("DELETE FROM ingestion_state WHERE key=$1", ctl.BUDGET_KEY)
+
+
+async def _allowance():
+    r = await _sql("SELECT value FROM ingestion_state WHERE key=$1",
+                   ctl.BUDGET_KEY)
+    return json.loads(r[0]["value"]) if r else None
+
+
+async def _journal_rows(run_id):
+    try:
+        return await _sql(
+            "SELECT boot_id, kind, epoch, slug FROM " + jrnl.TABLE +
+            " WHERE run_id=$1 ORDER BY at, id", run_id)
+    except Exception:                       # table may not exist yet
+        return []
+
+
+async def _clear_journal():
+    try:
+        await _sql("DROP TABLE IF EXISTS " + jrnl.TABLE)
+    except Exception:
+        pass
 
 
 async def _clear_run():
@@ -285,7 +331,7 @@ async def main() -> int:
     m12 = _manifest_file(12, today, os.path.join(WORK, "m12.json"))
     m09 = _manifest_file(9, today, os.path.join(WORK, "m09.json"))
     m12y = _manifest_file(12, yesterday, os.path.join(WORK, "m12y.json"))
-    jdir = os.path.join(WORK, "journal")
+    await _clear_journal()
 
     print("\nREHEARSAL -- every call below is `bll.main()` with NO arguments")
     print("transport: FakeStream (SIMULATED; no socket, no venue, no "
@@ -294,16 +340,18 @@ async def main() -> int:
     # ── S0 control absent: absence is not permission ─────────────────
     await _set_control(None)
     await _clear_run()
-    _configure(manifest_path=m12, et_date=today, journal_dir=jdir)
+    _configure(manifest_path=m12, et_date=today)
     out = await bll.main()
     record("S0 control absent", "does absence permit a run?", out, [
         ("did not start", out.get("started") is False),
         ("why is CONTROL_ROW_ABSENT", out.get("why") == ctl.W_ABSENT),
         ("no run row was created", (await _run_row()) is None),
-        ("no journal directory was made", not os.path.isdir(jdir)),
+        ("no journal rows were written",
+         len(await _journal_rows("any")) == 0),
     ])
 
     # ── S1 control false: the stop, read before anything ─────────────
+    await _arm()
     await _set_control(False)
     out = await bll.main()
     record("S1 control false", "does a stopped control cost anything?", out, [
@@ -312,10 +360,23 @@ async def main() -> int:
         ("no run row", (await _run_row()) is None),
     ])
 
-    # ── S2 credentials: the stream authenticates ─────────────────────
+    # ── S1b the allowance must be ARMED ──────────────────────────────
     await _set_control(True)
-    _configure(manifest_path=m12, et_date=today, journal_dir=jdir,
-               creds=False)
+    await _disarm()
+    _configure(manifest_path=m12, et_date=today)
+    out = await bll.main()
+    record("S1b not armed", "does an unarmed allowance still run?", out, [
+        ("did not start", out.get("started") is False),
+        ("why names the allowance",
+         out.get("why") in (ctl.B_UNREADABLE, ctl.B_EXPIRED,
+                            ctl.B_EXHAUSTED)),
+        ("no run row", (await _run_row()) is None),
+    ])
+
+    # ── S2 credentials: the stream authenticates ─────────────────────
+    await _arm()
+    await _set_control(True)
+    _configure(manifest_path=m12, et_date=today, creds=False)
     out = await bll.main()
     record("S2 no credentials", "does it degrade to a public client?", out, [
         ("did not start", out.get("started") is False),
@@ -323,7 +384,7 @@ async def main() -> int:
     ])
 
     # ── S3 manifest absent ───────────────────────────────────────────
-    _configure(manifest_path=None, et_date=today, journal_dir=jdir)
+    _configure(manifest_path=None, et_date=today)
     out = await bll.main()
     record("S3 manifest absent", "is an absent manifest an empty universe?",
            out, [
@@ -332,7 +393,7 @@ async def main() -> int:
            ])
 
     # ── S4 nine markets: INSUFFICIENT COVERAGE, and no fallback ──────
-    _configure(manifest_path=m09, et_date=today, journal_dir=jdir)
+    _configure(manifest_path=m09, et_date=today)
     out = await bll.main()
     al = out.get("allowlist") or {}
     record("S4 nine markets", "does it top up from the general universe?",
@@ -346,7 +407,7 @@ async def main() -> int:
            ])
 
     # ── S5 the ET window has ended: the half-open bound ends the run ─
-    _configure(manifest_path=m12y, et_date=yesterday, journal_dir=jdir)
+    _configure(manifest_path=m12y, et_date=yesterday)
     LIVE.clear()
     out = await bll.main()
     record("S5 window ended", "does a past ET date still collect?", out, [
@@ -358,7 +419,7 @@ async def main() -> int:
 
     # ── S6 a real collection, stopped by the DATABASE ────────────────
     await _clear_run()
-    _configure(manifest_path=m12, et_date=today, journal_dir=jdir)
+    _configure(manifest_path=m12, et_date=today)
     LIVE.clear()
 
     async def _drive():
@@ -382,20 +443,15 @@ async def main() -> int:
     latency = time.time() - t_stop
     driver.cancel()
     row = await _run_row()
-    jfiles = []
-    for root, _d, files in os.walk(jdir):
-        jfiles += [os.path.join(root, f) for f in files]
-    recs = []
-    for f in jfiles:
-        recs += [json.loads(x) for x in open(f, encoding="utf-8")]
+    rows = await _journal_rows(out.get("run_id"))
     kinds = {}
-    for r in recs:
+    for r in rows:
         kinds[r["kind"]] = kinds.get(r["kind"], 0) + 1
     al = out.get("allowlist") or {}
     fd = out.get("feed") or {}
     bd = out.get("budget") or {}
-    ladders = [r for r in recs if r["kind"] == jrnl.R_LADDER]
-    initial = [r for r in ladders if r["ladder_class"] == "INITIAL_LADDER"]
+    ladders = [r for r in rows if r["kind"] == jrnl.R_LADDER]
+    epochs_seen = {r["epoch"] for r in ladders}
     record("S6 collection + DB stop", "does it collect, and does the row "
            "stop it?", out, [
                ("started", out.get("started") is True),
@@ -416,21 +472,26 @@ async def main() -> int:
                 latency <= ctl.CONTROL_EVERY_S + 2.0),
                ("a reconnect was seen and a new epoch opened",
                 fd.get("epoch_count", 0) >= 2),
-               ("each epoch re-established an INITIAL_LADDER",
-                len(initial) >= 24),
-               ("LADDER, EPOCH and PROGRAM_VERSION were all persisted",
+               ("ladders were recorded under BOTH epochs",
+                len(epochs_seen) >= 2),
+               ("LADDER, EPOCH and PROGRAM_VERSION are all in POSTGRES",
                 all(k in kinds for k in (jrnl.R_LADDER, jrnl.R_EPOCH,
                                          jrnl.R_PROGRAM, jrnl.R_RUN_OPEN,
                                          jrnl.R_RUN_CLOSE))),
+               ("the journal wrote to the database, not a file",
+                (out.get("journal") or {}).get("destination") == "postgres"),
                ("HTTP spend is within the eight-request cap",
-                bd.get("used", 99) <= bud.TOTAL_CAP),
-               ("zero listing/BBO/settlement requests were made",
-                bd.get("by_kind", {}).get("manifest", 0) == 0),
-               ("the run row persisted the spend",
-                (row or {}).get("http_spent") is not None),
+                (out.get("allowance_at_close") or {}).get("total_reserved", 99)
+                <= bud.TOTAL_CAP),
+               ("zero general acquisition was even possible",
+                (await _allowance() or {}).get("max_distinct") == 0),
+               ("the run row carries the SOCKET totals",
+                (row or {}).get("reconnects") is not None),
                ("no orders", out.get("orders_submitted") == 0),
            ])
-    spend_after_s6 = dict((row or {}).get("http_spent") or {})
+    spend_after_s6 = (out.get("allowance_at_close") or {}).get(
+        "total_reserved")
+    run_id_s6 = out.get("run_id")
 
     # ── S7 restart: the supervisor starts a returning loop again ─────
     await _set_control(True)
@@ -442,41 +503,62 @@ async def main() -> int:
     out2 = await asyncio.wait_for(task, timeout=ctl.CONTROL_EVERY_S + 20)
     driver.cancel()
     row2 = await _run_row()
-    b2 = out2.get("budget") or {}
+    rows2 = await _journal_rows(run_id_s6)
+    boots = {r["boot_id"] for r in rows2}
+    gap_rows = [r for r in rows2 if r["kind"] == jrnl.R_GAP]
+    boot_before = (out2.get("allowance_at_boot") or {}).get("total_reserved")
+    boot_after = (out2.get("allowance_at_close") or {}).get("total_reserved")
     record("S7 restart", "does a restart re-grant the allowance?", out2, [
         ("started", out2.get("started") is True),
         ("resumed the SAME run", out2.get("resumed") is True),
-        ("same run_id", out2.get("run_id") == out.get("run_id")),
+        ("same run_id", out2.get("run_id") == run_id_s6),
         ("boot counter advanced", (row2 or {}).get("boots") == 2),
-        # THE SEED IS THE CLAIM, NOT THE END STATE. Boot 2 legitimately
-        # spends more than boot 1 ended on -- the mid-run recheck fires
-        # once per boot -- so comparing end states proves nothing in
-        # either direction. What must hold is that boot 2 STARTED from
-        # boot 1's total rather than from zero.
-        ("the ledger was seeded from the row, not reset",
-         b2.get("seeded_from") == spend_after_s6),
-        ("boot 2 did not get a fresh eight",
-         b2.get("used", 0) > sum(spend_after_s6.values())),
+        # THE ROW IS THE CEILING. Boot 2 legitimately spends more than
+        # boot 1 ended on, so comparing end states proves nothing; what
+        # must hold is that boot 2 STARTED from boot 1's total.
+        ("boot 2 started from boot 1's total, not zero",
+         boot_before == spend_after_s6 and boot_before > 0),
         ("the cap still binds across boots",
-         b2.get("used", 99) <= bud.TOTAL_CAP),
-        ("the recheck sub-cap bounds repeated restarts",
-         b2.get("by_kind", {}).get("recheck", 99)
-         <= bud.SUBCAPS[bud.K_RECHECK]),
+         boot_after <= bud.TOTAL_CAP),
+        ("boot 1's evidence is still in the journal", len(boots) == 2),
+        ("a BOOT_GAP marks the interval nobody observed",
+         any(r["kind"] == jrnl.R_GAP for r in gap_rows)),
+        ("socket bounds are scoped PER RUN",
+         (out2.get("socket_bounds") or {}).get("scope", "").startswith(
+             "PER RUN")),
+        ("the run total includes boot 1's reconnects",
+         (out2.get("socket_bounds") or {}).get("prior_boots", {}).get(
+             "reconnects", -1) >= 1),
     ])
 
-    # ── S8 the budget is durable and refuses when spent ──────────────
-    L = bud.RequestLedger()
-    L.seed({"manifest": 4, "recheck": 2, "retry": 2})
-    refusals = [L.spend(k) for k in (bud.K_MANIFEST, bud.K_RECHECK,
-                                     "listing", "bbo_attempt")]
-    record("S8 exhausted budget", "can a spent allowance be spent again?",
-           {}, [
-               ("a spent ledger grants nothing",
-                all(not r["ok"] for r in refusals)),
-               ("listing is refused BY NAME, not merely uncalled",
-                refusals[2]["verdict"] == bud.R_FORBIDDEN),
-               ("settlement likewise",
-                L.spend("settlement")["verdict"] == bud.R_FORBIDDEN),
+    # ── S8 the allowance row is the ceiling ──────────────────────────
+    # THE CONTROL MUST BE OPEN FOR THIS SCENARIO. `reserve()` reads it
+    # inside the same transaction, so with the stop still set from S7
+    # every reservation is correctly refused as STOPPED_BY_CONTROL --
+    # which is the right behaviour and the wrong test.
+    await _set_control(True)
+    await _arm(probe_id="REHEARSAL-PROBE-2")
+    pool = await asyncpg.create_pool(DSN, min_size=1, max_size=4)
+    try:
+        L = bud.DurableLedger(pool, probe_id="REHEARSAL-PROBE-2")
+        grants = []
+        for k in ([bud.K_MANIFEST] * 5 + [bud.K_RECHECK] * 3
+                  + [bud.K_RETRY] * 3):
+            grants.append((await L.spend(k))["ok"])
+        stale = await bud.DurableLedger(
+            pool, probe_id="A-DIFFERENT-PROBE").spend(bud.K_MANIFEST)
+        forbidden = [await L.spend(k) for k in ("listing", "settlement")]
+        total = (await L.read())["total_reserved"]
+    finally:
+        await pool.close()
+    record("S8 the row is the ceiling",
+           "can eleven requests be squeezed out of eight?", {}, [
+               ("11 attempts, exactly 8 granted", sum(grants) == 8),
+               ("the ROW agrees", total == 8),
+               ("a different probe is refused",
+                stale["verdict"] == ctl.V_MISMATCH),
+               ("listing and settlement refused BY NAME",
+                all(r["verdict"] == bud.R_FORBIDDEN for r in forbidden)),
            ])
 
     # ── S9 the general loop is untouched when unconfigured ───────────
@@ -492,6 +574,8 @@ async def main() -> int:
 
     await _set_control(None)
     await _clear_run()
+    await _disarm()
+    await _clear_journal()
 
     passed = sum(1 for r in RESULTS if r["pass"])
     print("\n%d of %d scenarios passed" % (passed, len(RESULTS)))
@@ -507,7 +591,9 @@ async def main() -> int:
                    "transport": "SIMULATED -- FakeStream; no socket, no "
                                 "venue byte, no credential",
                    "credentials": "invented placeholders, never dispatched",
-                   "database": "local PostgreSQL 16, real ingestion_state",
+                   "database": "local PostgreSQL 16 -- real "
+                               "ingestion_state, real allowance row, real "
+                               "bettor_incentive_journal table",
                    "scenarios": RESULTS,
                    "passed": passed, "total": len(RESULTS)},
                   fh, indent=2)

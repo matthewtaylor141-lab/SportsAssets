@@ -1,10 +1,10 @@
 {
   "rehearsal": "BETTOR_INCENTIVE_REHEARSAL_V1",
-  "at": "2026-09-22T19:19:22.201683+00:00",
+  "at": "2026-09-22T19:48:43.822381+00:00",
   "entry_point": "bettor_live_loop.main()  [no arguments]",
   "transport": "SIMULATED -- FakeStream; no socket, no venue byte, no credential",
   "credentials": "invented placeholders, never dispatched",
-  "database": "local PostgreSQL 16, real ingestion_state",
+  "database": "local PostgreSQL 16 -- real ingestion_state, real allowance row, real bettor_incentive_journal table",
   "scenarios": [
     {
       "scenario": "S0 control absent",
@@ -24,7 +24,7 @@
           "pass": true
         },
         {
-          "check": "no journal directory was made",
+          "check": "no journal rows were written",
           "pass": true
         }
       ],
@@ -50,6 +50,27 @@
         }
       ],
       "why": "STOPPED_BY_CONTROL",
+      "started": false
+    },
+    {
+      "scenario": "S1b not armed",
+      "question": "does an unarmed allowance still run?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "did not start",
+          "pass": true
+        },
+        {
+          "check": "why names the allowance",
+          "pass": true
+        },
+        {
+          "check": "no run row",
+          "pass": true
+        }
+      ],
+      "why": "BUDGET_UNREADABLE",
       "started": false
     },
     {
@@ -178,11 +199,15 @@
           "pass": true
         },
         {
-          "check": "each epoch re-established an INITIAL_LADDER",
+          "check": "ladders were recorded under BOTH epochs",
           "pass": true
         },
         {
-          "check": "LADDER, EPOCH and PROGRAM_VERSION were all persisted",
+          "check": "LADDER, EPOCH and PROGRAM_VERSION are all in POSTGRES",
+          "pass": true
+        },
+        {
+          "check": "the journal wrote to the database, not a file",
           "pass": true
         },
         {
@@ -190,11 +215,11 @@
           "pass": true
         },
         {
-          "check": "zero listing/BBO/settlement requests were made",
+          "check": "zero general acquisition was even possible",
           "pass": true
         },
         {
-          "check": "the run row persisted the spend",
+          "check": "the run row carries the SOCKET totals",
           "pass": true
         },
         {
@@ -227,11 +252,7 @@
           "pass": true
         },
         {
-          "check": "the ledger was seeded from the row, not reset",
-          "pass": true
-        },
-        {
-          "check": "boot 2 did not get a fresh eight",
+          "check": "boot 2 started from boot 1's total, not zero",
           "pass": true
         },
         {
@@ -239,7 +260,19 @@
           "pass": true
         },
         {
-          "check": "the recheck sub-cap bounds repeated restarts",
+          "check": "boot 1's evidence is still in the journal",
+          "pass": true
+        },
+        {
+          "check": "a BOOT_GAP marks the interval nobody observed",
+          "pass": true
+        },
+        {
+          "check": "socket bounds are scoped PER RUN",
+          "pass": true
+        },
+        {
+          "check": "the run total includes boot 1's reconnects",
           "pass": true
         }
       ],
@@ -247,20 +280,24 @@
       "started": true
     },
     {
-      "scenario": "S8 exhausted budget",
-      "question": "can a spent allowance be spent again?",
+      "scenario": "S8 the row is the ceiling",
+      "question": "can eleven requests be squeezed out of eight?",
       "pass": true,
       "checks": [
         {
-          "check": "a spent ledger grants nothing",
+          "check": "11 attempts, exactly 8 granted",
           "pass": true
         },
         {
-          "check": "listing is refused BY NAME, not merely uncalled",
+          "check": "the ROW agrees",
           "pass": true
         },
         {
-          "check": "settlement likewise",
+          "check": "a different probe is refused",
+          "pass": true
+        },
+        {
+          "check": "listing and settlement refused BY NAME",
           "pass": true
         }
       ],
@@ -285,6 +322,6 @@
       "started": null
     }
   ],
-  "passed": 10,
-  "total": 10
+  "passed": 11,
+  "total": 11
 }

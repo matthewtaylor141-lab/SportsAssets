@@ -131,8 +131,8 @@ def et_window(et_date: str) -> dict:
 
 # ── capture ──────────────────────────────────────────────────────────
 
-def capture(get, ledger: bud.RequestLedger, *, et_date: str,
-            page_size: int = 100, max_pages: int = 4) -> dict:
+async def capture(get, ledger, *, et_date: str,
+                  page_size: int = 100, max_pages: int = 4) -> dict:
     """Read `/v1/incentives` through the ledger and write down what came.
 
     `get(url, params) -> (status, body)` is injected so this is
@@ -141,8 +141,13 @@ def capture(get, ledger: bud.RequestLedger, *, et_date: str,
     EVERY PAGE COSTS A UNIT, AND SO DOES EVERY RETRY. The first attempt
     on a page is charged to `manifest`; a retry is charged to `retry`,
     so "how many pages did we read" and "what did failure cost" stay
-    separate numbers. A refused reservation ends the capture -- it
-    never dispatches anyway.
+    separate numbers.
+
+    THE RESERVATION IS DURABLE AND COMES FIRST. `ledger.spend()` awaits
+    `bettor_live_control.reserve()`, which commits the increment under
+    a row lock BEFORE this function may dispatch. A refusal ends the
+    capture without a request; a crash after the reservation loses the
+    unit, which is the safe direction.
 
     UNAUTHENTICATED. This endpoint takes no credentials, and none are
     passed. `/v1/incentives/earnings` -- which IS authenticated -- is
@@ -159,9 +164,10 @@ def capture(get, ledger: bud.RequestLedger, *, et_date: str,
             params["page_token"] = token
         body, err = None, None
         for attempt in range(2):            # first attempt, then one retry
-            r = ledger.spend(bud.K_MANIFEST if attempt == 0 else bud.K_RETRY,
-                             why="incentives page %d attempt %d"
-                                 % (pages + 1, attempt + 1))
+            r = await ledger.spend(
+                bud.K_MANIFEST if attempt == 0 else bud.K_RETRY,
+                why="incentives page %d attempt %d"
+                    % (pages + 1, attempt + 1))
             if not r["ok"]:
                 err = "%s: %s" % (r["verdict"], r.get("detail"))
                 break

@@ -24,7 +24,14 @@ from sportsassets import bettor_incentive_feed as feed_mod
 from sportsassets import bettor_incentive_journal as jrnl_mod
 from sportsassets import bettor_incentive_manifest as man
 from sportsassets import bettor_market_stream as ms
+from sportsassets import bettor_live_control as ctl
 from sportsassets.workers import bettor_incentive_observe as obs
+
+# The repo's convention for tests that need a real server. Skipping is
+# honest; a fake pool would prove nothing about a row lock.
+PG_DSN = os.environ.get("BETTOR_TEST_PG_DSN")
+needs_pg = pytest.mark.skipif(not PG_DSN,
+                              reason="BETTOR_TEST_PG_DSN names no server")
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 PKG = os.path.join(HERE, "..", "sportsassets")
@@ -207,62 +214,75 @@ def test_the_dst_dates_are_23_and_25_hours_not_24():
 
 
 # ═══ 2. THE EIGHT-REQUEST BUDGET ═════════════════════════════════════
+#
+# THE CEILING IS A POSTGRES ROW, NOT AN OBJECT. The crash and
+# overlapping-worker evidence needs a real server and lives in
+# `research/beta48/incentive_durability_proof.py`, which runs every
+# scenario against one. What is asserted here is what can be asserted
+# without one: the arithmetic that makes the sub-caps a total, the
+# refusals that happen before any reservation, and the per-run scope of
+# the socket bounds.
 
-def test_eight_is_the_total_across_every_kind():
-    L = bud.RequestLedger()
-    got = [L.spend(k)["ok"] for k in
-           [bud.K_MANIFEST] * 4 + [bud.K_RECHECK] * 2 + [bud.K_RETRY] * 2]
-    assert got == [True] * 8
-    assert L.used() == 8 and L.remaining() == 0
-    assert L.spend(bud.K_RETRY)["verdict"] == bud.R_TOTAL
+def test_the_subcaps_sum_to_the_declared_total():
+    """This is what makes per-kind enforcement TOTAL enforcement.
+
+    `reserve()` checks one kind's cap per call and knows nothing about
+    a total. That is safe only while 4 + 2 + 2 == 8: there is then no
+    combination of grants reaching nine without some kind exceeding its
+    own cap. Change one number and this fails, which is the point.
+    """
+    assert sum(bud.SUBCAPS.values()) == bud.TOTAL_CAP == 8
+    assert ctl.INCENTIVE_TOTAL == bud.TOTAL_CAP
+    assert (ctl.INCENTIVE_MAX_MANIFEST, ctl.INCENTIVE_MAX_RECHECK,
+            ctl.INCENTIVE_MAX_RETRY) == (4, 2, 2)
 
 
-def test_each_subcap_binds_before_the_total_does():
-    L = bud.RequestLedger()
-    for _ in range(4):
-        assert L.spend(bud.K_MANIFEST)["ok"]
-    r = L.spend(bud.K_MANIFEST)
-    assert r["ok"] is False and r["verdict"] == bud.R_SUBCAP
-    assert L.used() == 4                    # the total still has room
+def test_every_incentive_kind_has_a_counter_and_a_cap_in_the_row():
+    for k, ctl_kind in bud.CTL_KIND.items():
+        assert ctl_kind in ctl._COUNTER, k
+        assert ctl_kind in ctl._CAP, k
+        assert ctl_kind in ctl._DEFAULT_CAP, k
 
 
-def test_listing_bbo_and_settlement_are_refused_by_name():
+def test_the_ledger_holds_no_counter_of_its_own():
+    """A count in the process is re-granted on every restart."""
+    L = bud.DurableLedger(None, probe_id="p")
+    assert not hasattr(L, "seed")
+    assert not hasattr(L, "total")
+    assert L.report()["authoritative_count"] == \
+        "the allowance row, not this object"
+    assert "reserve" in L.report()["enforcement"]
+
+
+@pytest.mark.asyncio
+async def test_listing_bbo_and_settlement_are_refused_before_any_reservation():
     """The general loop's acquisition spends ~1,686 requests.
 
-    Not calling those paths is not enough -- they are refused at the
-    reservation, so a code path that reached one fails loudly.
+    These are refused BY NAME and BEFORE the database is touched, so a
+    code path that reached one fails loudly rather than quietly
+    spending the venue's patience. `pool=None` proves no reservation
+    was attempted: a reservation would have tried to resolve a pool.
     """
-    L = bud.RequestLedger()
+    L = bud.DurableLedger(None, probe_id="p")
     for kind in ("listing", "bbo_attempt", "distinct", "settlement"):
-        r = L.spend(kind)
+        r = await L.spend(kind)
         assert r["ok"] is False and r["verdict"] == bud.R_FORBIDDEN, kind
-    assert L.used() == 0
 
 
-def test_the_environment_can_lower_the_cap_and_never_raise_it(monkeypatch):
-    monkeypatch.setenv(bud.TOTAL_ENV, "99")
-    assert bud.RequestLedger().total == 8
-    monkeypatch.setenv(bud.TOTAL_ENV, "3")
-    assert bud.RequestLedger().total == 3
+@pytest.mark.asyncio
+async def test_an_unknown_kind_is_refused_rather_than_guessed():
+    r = await bud.DurableLedger(None, probe_id="p").spend("whatever")
+    assert r["ok"] is False and r["verdict"] == bud.R_UNKNOWN
 
 
-def test_a_restart_resumes_the_spend_rather_than_regranting_it():
-    """The supervisor restarts a returning loop forever."""
-    first = bud.RequestLedger()
-    for _ in range(3):
-        first.spend(bud.K_MANIFEST)
-    second = bud.RequestLedger()
-    second.seed(first.spent)
-    assert second.used() == 3 and second.remaining() == 5
+def test_no_environment_variable_sets_the_request_cap():
+    """It used to, and that was the wrong home for it."""
+    assert not hasattr(bud, "TOTAL_ENV")
+    src = _code_only("bettor_incentive_budget.py")
+    assert "BETTOR_INCENTIVE_HTTP_CAP" not in src
 
 
-def test_an_unreadable_prior_spend_seeds_the_ledger_full_not_empty():
-    L = bud.RequestLedger()
-    L.seed({"manifest": "?", "recheck": None, "retry": "x"})
-    assert L.remaining() == 0               # fails closed
-
-
-def test_reconnects_and_resubscribes_are_bounded_separately():
+def test_reconnects_and_resubscribes_are_bounded_separately_and_per_run():
     b = bud.ReconnectBounds(max_reconnects=2, max_resubscribes=5)
     assert b.check(2)["ok"] is True
     assert b.check(3)["why"] == bud.RC_RECONNECTS
@@ -271,7 +291,57 @@ def test_reconnects_and_resubscribes_are_bounded_separately():
     assert b2.check(0)["why"] == bud.RC_RESUBSCRIBES
 
 
-def test_capture_charges_every_page_and_charges_a_retry_to_retry():
+def test_a_crash_loop_cannot_buy_a_fresh_reconnect_allowance():
+    """Per boot would not be a bound: the supervisor restarts forever."""
+    b = bud.ReconnectBounds(max_reconnects=20, max_resubscribes=40,
+                            prior_reconnects=20, prior_resubscribes=0)
+    v = b.check(1)
+    assert v["ok"] is False and v["why"] == bud.RC_RECONNECTS
+    assert v["scope"].startswith("PER RUN")
+    assert v["prior_boots"]["reconnects"] == 20
+    assert v["this_boot"]["reconnects"] == 1
+
+
+# ── capture, with a ledger that records the ORDER of events ──────────
+
+class _SpyLedger:
+    """Grants up to the sub-caps and records reserve/dispatch order."""
+
+    def __init__(self, caps=None):
+        self.caps = dict(caps or bud.SUBCAPS)
+        self.spent = {k: 0 for k in self.caps}
+        self.events: list = []
+
+    async def spend(self, kind, *, why=""):
+        if kind in bud.FORBIDDEN:
+            return {"ok": False, "verdict": bud.R_FORBIDDEN}
+        if self.spent.get(kind, 0) >= self.caps.get(kind, 0):
+            self.events.append(("refused", kind))
+            return {"ok": False, "verdict": bud.R_SUBCAP, "detail": "cap"}
+        self.spent[kind] += 1
+        self.events.append(("reserved", kind))
+        return {"ok": True, "verdict": bud.GRANTED, "durable": True}
+
+    def report(self):
+        return {"by_kind": dict(self.spent)}
+
+
+@pytest.mark.asyncio
+async def test_capture_reserves_before_it_dispatches():
+    L = _SpyLedger()
+
+    def get(_url, _params):
+        L.events.append(("dispatched", None))
+        return 200, {"programs": [], "nextPageToken": None}
+
+    await man.capture(get, L, et_date="2026-09-23")
+    # EVERY dispatch is preceded by a reservation, with none in flight.
+    assert L.events[0][0] == "reserved"
+    assert L.events[1][0] == "dispatched"
+
+
+@pytest.mark.asyncio
+async def test_capture_charges_every_page_and_charges_a_retry_to_retry():
     calls = {"n": 0}
 
     def get(_url, params):
@@ -282,28 +352,30 @@ def test_capture_charges_every_page_and_charges_a_retry_to_retry():
             return 200, {"programs": [], "nextPageToken": "t2"}
         return 200, {"programs": [], "nextPageToken": None}
 
-    L = bud.RequestLedger()
-    out = man.capture(get, L, et_date="2026-09-23")
+    L = _SpyLedger()
+    out = await man.capture(get, L, et_date="2026-09-23")
     assert out["pages_read"] == 2
     assert L.spent[bud.K_MANIFEST] == 2     # one per page
     assert L.spent[bud.K_RETRY] == 1        # the failure, charged apart
-    assert L.used() == 3
+    assert sum(L.spent.values()) == 3
 
 
-def test_capture_stops_when_the_budget_refuses_rather_than_dispatching():
+@pytest.mark.asyncio
+async def test_capture_stops_at_a_refusal_rather_than_dispatching():
     sent = {"n": 0}
 
     def get(_url, _params):
         sent["n"] += 1
         return 200, {"programs": [], "nextPageToken": "more"}
 
-    L = bud.RequestLedger()
-    man.capture(get, L, et_date="2026-09-23", max_pages=10)
-    assert sent["n"] <= 4                   # the manifest sub-cap
-    assert L.used() <= bud.TOTAL_CAP
+    L = _SpyLedger()
+    await man.capture(get, L, et_date="2026-09-23", max_pages=10)
+    assert sent["n"] <= bud.SUBCAPS[bud.K_MANIFEST]
+    assert sum(L.spent.values()) <= bud.TOTAL_CAP
 
 
-def test_terms_arrive_with_discovery_so_no_per_market_call_is_budgeted():
+@pytest.mark.asyncio
+async def test_terms_arrive_with_discovery_so_no_per_market_call_is_budgeted():
     """The four-request arm phase only works because of this."""
     body = {"programs": [{
         "marketSlug": "m00", "eventStartTime": "2026-12-27T04:59:00.000Z",
@@ -313,17 +385,18 @@ def test_terms_arrive_with_discovery_so_no_per_market_call_is_budgeted():
                          "discountFactor": 0.25, "targetSize": 500,
                          "start": "s", "end": "e", "status": "active"}]}],
         "nextPageToken": None}
-    L = bud.RequestLedger()
-    out = man.capture(lambda u, p: (200, body), L, et_date="2026-09-23")
+    L = _SpyLedger()
+    out = await man.capture(lambda u, p: (200, body), L, et_date="2026-09-23")
     p = out["programs"][0]
-    assert L.used() == 1                    # ONE request
+    assert sum(L.spent.values()) == 1       # ONE request
     assert (p["reward_pool"], p["discount_factor"], p["target_size"]) \
         == (50.0, 0.25, 500.0)
 
 
-def test_capture_is_unauthenticated_and_says_so():
-    out = man.capture(lambda u, p: (200, {"programs": []}), bud.RequestLedger(),
-                      et_date="2026-09-23")
+@pytest.mark.asyncio
+async def test_capture_is_unauthenticated_and_says_so():
+    out = await man.capture(lambda u, p: (200, {"programs": []}),
+                            _SpyLedger(), et_date="2026-09-23")
     assert out["authenticated"] is False
     assert "earnings" not in out["source"]
 
@@ -469,65 +542,116 @@ def test_book_semantics_stay_labelled_as_assumed():
 
 
 # ═══ 4. WHAT IS PERSISTED, AND WHAT A GAP MEANS ══════════════════════
+#
+# The destination is Postgres and there is no other one, so the
+# persistence tests need a server. `incentive_durability_proof.py`
+# runs the same properties end to end against one.
 
-def test_the_first_frame_of_an_epoch_is_an_initial_ladder(tmp_path):
-    s = ms.MarketStream("k", "s")
-    s.connected, s.epoch = True, 7
-    h = feed_mod.FeedHealth(s)
-    j = jrnl_mod.Journal(str(tmp_path), run_id="r1", disk_declared=True)
-    assert j.open()["ok"]
-    for i in range(3):
-        s._on_market_data({"marketData": {
-            "marketSlug": "m00", "state": "MARKET_STATE_OPEN",
-            "transactTime": "2026-09-23T12:00:0%d.123456Z" % i,
-            "bids": [{"px": "0.50", "qty": "400"}],
-            "offers": [{"px": "0.52", "qty": "300"}], "stats": {}}})
-        c = h.on_book("m00", s._books["m00"])
-        j.ladder(c, s._books["m00"]["book"])
-    j.close()
-    rows = [json.loads(x) for x in open(j.path, encoding="utf-8")]
-    ladders = [r for r in rows if r["kind"] == jrnl_mod.R_LADDER]
-    assert [r["ladder_class"] for r in ladders] == [
-        feed_mod.INITIAL_LADDER, feed_mod.UPDATE, feed_mod.UPDATE]
-    assert [r["ladder_seq"] for r in ladders] == [1, 2, 3]
-    # FULL LADDER, BOTH SIDES, AND THE VENUE CLOCK AT SOURCE PRECISION.
-    assert ladders[0]["bids"] and ladders[0]["offers"]
-    assert ladders[0]["source_ts"].endswith(".123456Z")
-    assert all(r["epoch"] == 7 for r in ladders)
+def test_the_ephemeral_file_backend_is_gone_not_demoted():
+    """/var/tmp passes every fsync and loses everything on a deploy."""
+    assert not hasattr(jrnl_mod, "Journal")
+    assert not hasattr(jrnl_mod, "directory_for")
+    assert not hasattr(jrnl_mod, "DIR_ENV")
+    assert "REMOVED" in jrnl_mod.describe()["ephemeral_file_backend"]
+    assert jrnl_mod.describe()["destination"].startswith("postgres")
 
 
-def test_epochs_gaps_and_programme_versions_are_all_recorded(tmp_path):
-    j = jrnl_mod.Journal(str(tmp_path), run_id="r2", disk_declared=True)
-    j.open()
-    j.run_open(et_date="2026-09-23")
-    j.program_version(phase="ARM", programs={"m00": _program("m00")})
-    j.epoch(epoch=1, event="EPOCH_OPENED")
-    j.gap(event="GAP_OPENED", why=feed_mod.G_DISCONNECTED)
-    j.gap(event="GAP_CLOSED", why="ALIVE", duration_s=12.5)
-    j.program_version(phase="RECHECK", programs={})
-    j.run_close(end_why=obs.END_WINDOW)
-    j.close()
-    kinds = [json.loads(x)["kind"] for x in open(j.path, encoding="utf-8")]
-    for k in (jrnl_mod.R_RUN_OPEN, jrnl_mod.R_PROGRAM, jrnl_mod.R_EPOCH,
-              jrnl_mod.R_GAP, jrnl_mod.R_RUN_CLOSE):
-        assert k in kinds, k
-    assert kinds.count(jrnl_mod.R_PROGRAM) == 2   # ARM and RECHECK
+def test_the_reconstruction_key_is_the_pair_not_the_bare_epoch():
+    """MarketStream.epoch restarts at 1 in every process."""
+    d = jrnl_mod.describe()
+    assert d["reconstruction_key"] == "(boot_id, epoch) -- never epoch alone"
+    assert "NEVER carry a ladder across a boot boundary" in \
+        jrnl_mod.RECONSTRUCTION_RULE
 
 
-def test_the_reconstruction_rule_travels_with_the_data(tmp_path):
-    j = jrnl_mod.Journal(str(tmp_path), run_id="r3", disk_declared=True)
-    j.open()
-    j.run_open()
-    j.close()
-    first = json.loads(open(j.path, encoding="utf-8").readline())
-    assert "same EPOCH" in first["reconstruction_rule"]
-    assert "Never carry a ladder across an epoch boundary" in \
-        first["reconstruction_rule"]
+def _rec(boot, at, kind, epoch=None, slug=None, **payload):
+    return {"boot_id": boot, "at": at, "kind": kind, "epoch": epoch,
+            "slug": slug, "payload": payload}
 
 
-def test_an_ephemeral_journal_directory_is_declared_not_assumed(tmp_path):
-    j = jrnl_mod.Journal(str(tmp_path), run_id="r4", disk_declared=False)
-    assert j.open()["durable_across_redeploy"] is False
+def test_two_boots_with_the_same_epoch_number_are_two_segments():
+    recs = [_rec("b1", 100.0, jrnl_mod.R_LADDER, 1, "m"),
+            _rec("b1", 150.0, jrnl_mod.R_EPOCH, 1),
+            _rec("b2", 200.0, jrnl_mod.R_GAP, None,
+                 event=jrnl_mod.BOOT_GAP, why=jrnl_mod.PROCESS_REPLACED,
+                 **{"from": 150.0, "to": 200.0}),
+            _rec("b2", 201.0, jrnl_mod.R_LADDER, 1, "m")]
+    segs = jrnl_mod.segments(recs)
+    assert len(segs) == 2
+    assert {s["boot_id"] for s in segs} == {"b1", "b2"}
+    assert {s["epoch"] for s in segs} == {1}      # the SAME bare epoch
+
+
+def test_an_instant_between_two_boots_is_unobserved():
+    recs = [_rec("b1", 100.0, jrnl_mod.R_LADDER, 1, "m"),
+            _rec("b1", 150.0, jrnl_mod.R_EPOCH, 1),
+            _rec("b2", 200.0, jrnl_mod.R_GAP, None,
+                 event=jrnl_mod.BOOT_GAP, why=jrnl_mod.PROCESS_REPLACED,
+                 **{"from": 150.0, "to": 200.0}),
+            _rec("b2", 201.0, jrnl_mod.R_LADDER, 1, "m")]
+    v = jrnl_mod.covers(recs, 175.0)
+    assert v["observed"] is False
+    assert v["why"] == jrnl_mod.PROCESS_REPLACED
+
+
+def test_a_quiet_stretch_inside_an_epoch_is_still_observed():
+    """The same error as the sampling side, in the reconstruction.
+
+    A segment that ended at its LAST LADDER would mark every quiet
+    stretch before a disconnect as unobserved -- and quiet stretches
+    are what a qualifying-uptime measurement is made of.
+    """
+    recs = [_rec("b1", 100.0, jrnl_mod.R_LADDER, 1, "m"),
+            _rec("b1", 150.0, jrnl_mod.R_EPOCH, 1)]
+    v = jrnl_mod.covers(recs, 140.0)          # 40s after the last ladder
+    assert v["observed"] is True
+    assert v["segment"]["boot_id"] == "b1"
+    assert "NOT the last ladder" in v["segment"]["end_basis"]
+
+
+def test_an_instant_before_any_ladder_is_unobserved():
+    recs = [_rec("b1", 100.0, jrnl_mod.R_LADDER, 1, "m")]
+    assert jrnl_mod.covers(recs, 50.0)["observed"] is False
+
+
+@needs_pg
+def test_the_journal_survives_process_replacement_and_records_the_gap():
+    """Two boots of one run against a real server."""
+    import asyncpg
+
+    async def go():
+        pool = await asyncpg.create_pool(PG_DSN, min_size=1, max_size=3)
+        run_id = "unit:%s" % os.getpid()
+        try:
+            j1 = jrnl_mod.PgJournal(pool, run_id=run_id, boot_id="b1")
+            assert (await j1.open())["ok"]
+            j1.run_open(et_date="2026-09-23")
+            j1.ladder({"slug": "m", "epoch": 1,
+                       "ladder_class": "INITIAL_LADDER", "ladder_seq": 1,
+                       "received_at": time.time(), "source_ts": "t",
+                       "venue_state": "MARKET_STATE_OPEN",
+                       "replacement": "x"},
+                      {"bids": [{"px": "0.5", "qty": "1"}], "offers": []})
+            await j1.flush(force=True)
+            await asyncio.sleep(0.4)
+
+            j2 = jrnl_mod.PgJournal(pool, run_id=run_id, boot_id="b2")
+            o2 = await j2.open()
+            await j2.flush(force=True)
+            recs = await jrnl_mod.read_run(pool, run_id)
+            await pool.execute("DELETE FROM " + jrnl_mod.TABLE +
+                               " WHERE run_id=$1", run_id)
+            return o2, recs
+        finally:
+            await pool.close()
+
+    o2, recs = asyncio.new_event_loop().run_until_complete(go())
+    assert (o2.get("boot_gap") or {}).get("why") == jrnl_mod.PROCESS_REPLACED
+    assert {r["boot_id"] for r in recs} == {"b1", "b2"}
+    boot_gaps = [r for r in recs if r["kind"] == jrnl_mod.R_GAP
+                 and r["payload"].get("event") == jrnl_mod.BOOT_GAP]
+    assert len(boot_gaps) == 1
+    assert boot_gaps[0]["payload"]["duration_s"] >= 0.3
 
 
 def test_a_gap_is_never_extrapolated_into_a_full_day():
@@ -607,14 +731,19 @@ def test_nothing_in_the_release_writes_the_observation_control_true():
         assert "'true'::jsonb" not in code, name
         assert "bettor_live_observation" not in code, name
         assert "disarm" not in code, name
+    # The run row no longer holds the HTTP allowance at all.
+    assert "http_spent" not in _code_only("bettor_incentive_state.py")
     state = _code_only("bettor_incentive_state.py")
-    # The one module here that touches `ingestion_state` issues exactly
-    # two statements, and both are keyed by its OWN row.
+    # READING the table is ordinary -- the budget module reads the
+    # allowance row to report the authoritative count. WRITING it is
+    # not: exactly one module inserts, exactly once, into its OWN key.
     assert state.count("INSERT INTO ingestion_state") == 1
     assert state.count("FROM ingestion_state") == 1
     assert "RUN_KEY" in state
     for other in set(RELEASE_MODULES) - {"bettor_incentive_state.py"}:
-        assert "ingestion_state" not in _code_only(other), other
+        code = _code_only(other)
+        assert "INSERT INTO ingestion_state" not in code, other
+        assert "UPDATE ingestion_state" not in code, other
 
 
 def test_a_closed_control_starts_nothing_at_all(monkeypatch):
@@ -653,3 +782,196 @@ def test_effective_config_is_readable_with_nothing_configured():
     c = obs.effective_config()
     assert c["control_key"] == "bettor_live_observation"
     assert c["max_contracts"].startswith("N/A")
+
+
+# ═══ 6. THE THREE PRE-DEPLOYMENT PROPERTIES ══════════════════════════
+#
+# Full end-to-end evidence lives in
+# `research/beta48/incentive_durability_proof.py`, which runs all
+# sixteen against a real server. These are the three that must not be
+# allowed to regress silently in CI.
+
+_ARM = {"max_distinct": 0, "max_bbo_attempts": 0, "max_listing_attempts": 0,
+        "distinct_reserved": 0, "bbo_attempts_reserved": 0,
+        "listing_attempts_reserved": 0,
+        "max_incentive_manifest": 4, "max_incentive_recheck": 2,
+        "max_incentive_retry": 2, "incentive_manifest_reserved": 0,
+        "incentive_recheck_reserved": 0, "incentive_retry_reserved": 0,
+        "slugs": []}
+
+
+async def _arm_row(pool, probe="t-probe", control=True, general=0):
+    now = datetime.now(timezone.utc)
+    row = dict(_ARM, probe_id=probe, started_at=now.isoformat(),
+               deadline_at=(now + timedelta(hours=2)).isoformat(),
+               max_distinct=general, max_bbo_attempts=general,
+               max_listing_attempts=general)
+    await pool.execute(
+        "CREATE TABLE IF NOT EXISTS ingestion_state "
+        "(key text PRIMARY KEY, value jsonb NOT NULL)")
+    for k, v in ((ctl.BUDGET_KEY, row), (ctl.CONTROL_KEY, bool(control))):
+        await pool.execute(
+            "INSERT INTO ingestion_state (key,value) VALUES ($1,$2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value=EXCLUDED.value",
+            k, json.dumps(v))
+
+
+@needs_pg
+def test_two_overlapping_workers_share_one_eight_request_ceiling():
+    """The failure an in-process counter cannot prevent.
+
+    Two ledgers on SEPARATE POOLS -- separate connections, as two
+    processes would have -- each try the whole allowance concurrently.
+    """
+    import asyncpg
+
+    async def go():
+        admin = await asyncpg.create_pool(PG_DSN, min_size=1, max_size=2)
+        a = await asyncpg.create_pool(PG_DSN, min_size=2, max_size=3)
+        b = await asyncpg.create_pool(PG_DSN, min_size=2, max_size=3)
+        try:
+            await _arm_row(admin)
+            kinds = ([bud.K_MANIFEST] * 4 + [bud.K_RECHECK] * 2
+                     + [bud.K_RETRY] * 2)
+
+            async def burst(pool):
+                L = bud.DurableLedger(pool, probe_id="t-probe")
+                return [await L.spend(k) for k in kinds]
+
+            ga, gb = await asyncio.gather(burst(a), burst(b))
+            total = (await bud.DurableLedger(
+                admin, probe_id="t-probe").read())["total_reserved"]
+            await admin.execute("DELETE FROM ingestion_state")
+            return ga, gb, total
+        finally:
+            for p in (admin, a, b):
+                await p.close()
+
+    ga, gb, total = asyncio.new_event_loop().run_until_complete(go())
+    assert len(ga + gb) == 16                      # 16 attempted
+    assert sum(1 for r in ga + gb if r["ok"]) == 8  # 8 granted, in total
+    assert total == 8                               # and the row says so
+
+
+@needs_pg
+def test_a_reservation_is_committed_before_the_caller_may_dispatch():
+    import asyncpg
+
+    async def go():
+        pool = await asyncpg.create_pool(PG_DSN, min_size=1, max_size=3)
+        try:
+            await _arm_row(pool)
+            L = bud.DurableLedger(pool, probe_id="t-probe")
+            r = await L.spend(bud.K_MANIFEST)
+            # Read on a DIFFERENT ledger object: only a committed
+            # increment is visible here, and this happens before any
+            # dispatch would.
+            seen = (await bud.DurableLedger(
+                pool, probe_id="t-probe").read())["total_reserved"]
+            await pool.execute("DELETE FROM ingestion_state")
+            return r, seen
+        finally:
+            await pool.close()
+
+    r, seen = asyncio.new_event_loop().run_until_complete(go())
+    assert r["ok"] is True and r["durable"] is True
+    assert seen == 1
+
+
+@needs_pg
+def test_removing_the_mode_cannot_start_general_discovery():
+    """Configuration removal is not a stop -- so the arm makes it safe.
+
+    `obs-arm-incentive` zeroes the general acquisition caps. If the
+    manifest variable were removed while the control was still true,
+    `main()` would return to the general loop, read BUDGET_EXHAUSTED
+    before constructing a client, and issue nothing.
+    """
+    import asyncpg
+
+    async def go():
+        pool = await asyncpg.create_pool(PG_DSN, min_size=1, max_size=2)
+        try:
+            await _arm_row(pool, control=True, general=0)
+            gen = await ctl.read_budget(pool)
+            inc = await ctl.read_incentive_allowance(pool)
+            listing = await ctl.reserve(pool, ctl.R_LISTING,
+                                        probe_id="t-probe")
+            bbo = await ctl.reserve(pool, ctl.R_ATTEMPT, probe_id="t-probe")
+            ctrl = await ctl.read_control(pool)
+            await pool.execute("DELETE FROM ingestion_state")
+            return gen, inc, listing, bbo, ctrl
+        finally:
+            await pool.close()
+
+    gen, inc, listing, bbo, ctrl = \
+        asyncio.new_event_loop().run_until_complete(go())
+    # The control is STILL TRUE -- removing configuration did not stop it.
+    assert ctrl["run"] is True
+    # ...but the general loop can acquire nothing.
+    assert gen["state"] == ctl.B_EXHAUSTED and gen["open"] is False
+    assert not ctl.granted(listing) and not ctl.granted(bbo)
+    # ...while the incentive allowance reads OPEN, which is why the two
+    # questions needed two functions.
+    assert inc["state"] == ctl.B_OPEN and inc["open"] is True
+    assert inc["general_caps_zeroed"] is True
+
+
+@needs_pg
+def test_a_stop_refuses_the_next_request_inside_the_same_transaction():
+    import asyncpg
+
+    async def go():
+        pool = await asyncpg.create_pool(PG_DSN, min_size=1, max_size=2)
+        try:
+            await _arm_row(pool, control=False)
+            L = bud.DurableLedger(pool, probe_id="t-probe")
+            r = await L.spend(bud.K_MANIFEST)
+            g = await ctl.reserve(pool, ctl.R_LISTING, probe_id="t-probe")
+            await pool.execute("DELETE FROM ingestion_state")
+            return r, g
+        finally:
+            await pool.close()
+
+    r, g = asyncio.new_event_loop().run_until_complete(go())
+    assert r["ok"] is False and r["verdict"] == ctl.V_STOPPED
+    assert not ctl.granted(g) and g["why"] == ctl.V_STOPPED
+
+
+def test_the_incentive_allowance_is_read_by_its_own_function():
+    """`read_budget` gates on max_distinct, which this arm zeroes.
+
+    Asking it whether the incentive run may proceed always answers no.
+    The rehearsal found this; the direct-reserve proof did not, because
+    it never went through the worker's gate.
+    """
+    src = _code_only("workers/bettor_incentive_observe.py")
+    assert "read_incentive_allowance" in src
+    assert "read_budget" not in src
+
+
+def test_an_in_run_liveness_gap_is_visible_to_a_reconstruction():
+    """A GAP_OPENED without `from`/`to` marks nothing.
+
+    `covers()` reads those two fields. The closing record is the only
+    one that knows both ends, so it carries them -- and it records why
+    the gap EXISTED, not "ALIVE", which is merely how it ended.
+    """
+    recs = [_rec("b1", 100.0, jrnl_mod.R_LADDER, 1, "m"),
+            _rec("b1", 110.0, jrnl_mod.R_GAP, None,
+                 event="GAP_OPENED", why=feed_mod.G_DISCONNECTED),
+            _rec("b1", 140.0, jrnl_mod.R_GAP, None,
+                 event="GAP_CLOSED", why=feed_mod.G_DISCONNECTED,
+                 duration_s=30.0, **{"from": 110.0, "to": 140.0}),
+            _rec("b1", 141.0, jrnl_mod.R_LADDER, 1, "m")]
+    v = jrnl_mod.covers(recs, 125.0)
+    assert v["observed"] is False
+    assert v["why"] == feed_mod.G_DISCONNECTED
+    # ...and either side of it is still observed.
+    assert jrnl_mod.covers(recs, 105.0)["observed"] is True
+    assert jrnl_mod.covers(recs, 141.0)["observed"] is True
+
+
+def test_the_worker_closes_an_open_gap_when_the_run_ends():
+    src = _code_only("workers/bettor_incentive_observe.py")
+    assert "closed_by" in src and "RUN_END" in src

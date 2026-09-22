@@ -1,0 +1,348 @@
+{
+  "proof": "BETTOR_INCENTIVE_DURABILITY_V1",
+  "database": "real PostgreSQL 16, real ingestion_state, real bettor_incentive_journal",
+  "properties": [
+    {
+      "property": "P1a reserve-then-dispatch",
+      "question": "is the unit durable before the request goes out?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "the reservation was granted",
+          "pass": true
+        },
+        {
+          "check": "the ROW already shows 1 before dispatch",
+          "pass": true
+        },
+        {
+          "check": "the grant says it is durable",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P1b crash before dispatch",
+      "question": "can the lost in-flight unit be spent twice?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "the unit was already committed when the process died",
+          "pass": true
+        },
+        {
+          "check": "the new boot got only the 3 that remained",
+          "pass": true
+        },
+        {
+          "check": "the manifest sub-cap is exactly spent",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P1c crash after dispatch",
+      "question": "does the row still know the request was made?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "the request was dispatched",
+          "pass": true
+        },
+        {
+          "check": "the row counts it after the crash",
+          "pass": true
+        },
+        {
+          "check": "a fresh boot reads the row, not zero",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P1d two overlapping workers",
+      "question": "do two workers each get eight?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "16 requests were attempted",
+          "pass": true
+        },
+        {
+          "check": "exactly 8 were granted IN TOTAL",
+          "pass": true
+        },
+        {
+          "check": "the row agrees",
+          "pass": true
+        },
+        {
+          "check": "both workers got some -- they really did race",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P1e re-arm invalidates stale",
+      "question": "can a process that outlived its probe spend?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "refused",
+          "pass": true
+        },
+        {
+          "check": "named RESERVATION_PROBE_MISMATCH",
+          "pass": true
+        },
+        {
+          "check": "nothing was spent",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P1f stop refuses mid-run",
+      "question": "does a stop wait for the next poll?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "refused immediately",
+          "pass": true
+        },
+        {
+          "check": "named RESERVATION_STOPPED_BY_CONTROL",
+          "pass": true
+        },
+        {
+          "check": "nothing was spent",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P1g subcaps sum to the total",
+      "question": "can eight be exceeded without exceeding a sub-cap?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "4 + 2 + 2 == 8",
+          "pass": true
+        },
+        {
+          "check": "the control module agrees",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P1h socket bounds scope",
+      "question": "are reconnect limits per boot or per run?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "declared PER RUN",
+          "pass": true
+        },
+        {
+          "check": "a fresh boot cannot buy another twenty",
+          "pass": true
+        },
+        {
+          "check": "prior boots are carried in the verdict",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P2a destination",
+      "question": "where does the evidence actually live?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "the journal opened against Postgres",
+          "pass": true
+        },
+        {
+          "check": "it declares itself durable across a redeploy",
+          "pass": true
+        },
+        {
+          "check": "no ephemeral file backend exists at all",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P2b survives process replacement",
+      "question": "do boot 1's records survive into boot 2?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "records from both boots are present",
+          "pass": true
+        },
+        {
+          "check": "boot 1's three ladders are still there",
+          "pass": true
+        },
+        {
+          "check": "boot 2 wrote its own",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P2c the gap is not mistaken for coverage",
+      "question": "does the outage look like a quiet book?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "a BOOT_GAP was recorded",
+          "pass": true
+        },
+        {
+          "check": "it is attributed to PROCESS_REPLACED",
+          "pass": true
+        },
+        {
+          "check": "it spans the real outage",
+          "pass": true
+        },
+        {
+          "check": "an instant inside it is UNOBSERVED",
+          "pass": true
+        },
+        {
+          "check": "and says why",
+          "pass": true
+        },
+        {
+          "check": "open() reported the gap rather than hiding it",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P2d run identity across boots",
+      "question": "is (boot_id, epoch) the reconstruction key?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "both boots used epoch 1",
+          "pass": true
+        },
+        {
+          "check": "but they are TWO segments, not one",
+          "pass": true
+        },
+        {
+          "check": "keyed on boot_id",
+          "pass": true
+        },
+        {
+          "check": "the rule says so in the data",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P2e coverage is not blanket",
+      "question": "is a quiet stretch inside an epoch still observed?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "the quiet instant IS observed",
+          "pass": true
+        },
+        {
+          "check": "attributed to boot-one",
+          "pass": true
+        },
+        {
+          "check": "it lies after boot 1's last LADDER",
+          "pass": true
+        },
+        {
+          "check": "the segment says why it extends that far",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P3a config removal alone",
+      "question": "if the mode is removed while the control is true?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "the control IS still true -- removal is not a stop",
+          "pass": true
+        },
+        {
+          "check": "but the allowance reads BUDGET_EXHAUSTED",
+          "pass": true
+        },
+        {
+          "check": "so the general loop never constructs a client",
+          "pass": true
+        },
+        {
+          "check": "a listing reservation is refused",
+          "pass": true
+        },
+        {
+          "check": "a BBO reservation is refused",
+          "pass": true
+        },
+        {
+          "check": "zero venue requests are possible",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P3b stop first, then verify",
+      "question": "does obs-stop actually stop BOTH paths?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "the control reads stopped",
+          "pass": true
+        },
+        {
+          "check": "the incentive path is refused",
+          "pass": true
+        },
+        {
+          "check": "the general path is refused too",
+          "pass": true
+        },
+        {
+          "check": "verification is a read, needing no deploy",
+          "pass": true
+        }
+      ]
+    },
+    {
+      "property": "P3c the guard is load-bearing",
+      "question": "would a normally-armed row have allowed discovery?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "with general caps armed the budget is OPEN",
+          "pass": true
+        },
+        {
+          "check": "and a listing reservation IS granted",
+          "pass": true
+        },
+        {
+          "check": "which is exactly what obs-arm-incentive prevents",
+          "pass": true
+        }
+      ]
+    }
+  ],
+  "passed": 16,
+  "total": 16
+}

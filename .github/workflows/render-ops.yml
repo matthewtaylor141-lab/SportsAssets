@@ -19,7 +19,7 @@ on:
           - restart       # confirm=DO
           - deploy        # confirm=DO: deploy the latest commit of the service's branch
           - metrics       # a service's memory (MB) and CPU per instance over the last N minutes (arg, default 120)
-          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | pause-on (DO) | pause-off (DO) | pause-state | mirror-preflight | mirror-rearm (DO) | mirror-register (DO) | mirror-frozen
+          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | pause-on (DO) | pause-off (DO) | pause-state | mirror-preflight | mirror-rearm (DO) | mirror-register (DO) | mirror-frozen | obs-arm-incentive (DO) | obs-incentive | obs-incentive-journal
           - env-keys      # the service's env var KEYS (never values)
           - env-get       # arg = comma-separated OPERATOR FLAGS (LIVE_COPY_HALT, ...); values of flags only
           - env-set       # confirm=DO: arg = KEY=VALUE (value masked in the log; Render redeploys)
@@ -264,6 +264,35 @@ jobs:
                 # which migrations describe it.
                 obs-schema) SQL="SELECT ordinal_position AS pos, column_name, data_type, is_nullable, coalesce(column_default,'-') AS dflt FROM information_schema.columns WHERE table_schema='public' AND table_name='ingestion_state' ORDER BY ordinal_position; SELECT count(*) AS applied, min(version) AS first, max(version) AS last FROM schema_migrations;"; TO=30000 ;;
                 obs-arm)   need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('bettor_live_probe_state', jsonb_build_object('probe_id', gen_random_uuid()::text, 'started_at', to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'), 'deadline_at', to_char((now() + interval '30 minutes') AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'), 'max_distinct', 40, 'max_bbo_attempts', 160, 'max_listing_attempts', 18, 'distinct_reserved', 0, 'bbo_attempts_reserved', 0, 'listing_attempts_reserved', 0, 'slugs', '[]'::jsonb)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value; SELECT jsonb_pretty(value) FROM ingestion_state WHERE key = 'bettor_live_probe_state';"; TO=30000 ;;
+                # [R77] INCENTIVE OBSERVATION ARM. Two differences from
+                # obs-arm, and both matter.
+                #
+                # 1. It declares the EIGHT-REQUEST allowance as three
+                #    sub-caps summing to eight, so the numbers approved
+                #    are the numbers `reserve()` enforces.
+                # 2. IT ZEROES THE GENERAL ACQUISITION CAPS. This is the
+                #    structural half of the rollback guard. Removing
+                #    BETTOR_INCENTIVE_MANIFEST returns main() to the
+                #    general loop, and if the observation control were
+                #    still true that loop would begin DISCOVERY -- six
+                #    listing pages and up to 1,680 BBO reads. With
+                #    max_distinct = 0 the budget reads BUDGET_EXHAUSTED
+                #    before a client is ever constructed, so the general
+                #    loop polls at one database read and issues NOTHING.
+                #    Configuration removal is still not a stop; this is
+                #    what makes a mistaken one harmless.
+                #
+                # The deadline is 26 hours: long enough for a 25-hour ET
+                # date plus arming slack, and still a deadline.
+                obs-arm-incentive) need_confirm; SQL="INSERT INTO ingestion_state (key, value) VALUES ('bettor_live_probe_state', jsonb_build_object('probe_id', gen_random_uuid()::text, 'started_at', to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'), 'deadline_at', to_char((now() + interval '26 hours') AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'), 'max_distinct', 0, 'max_bbo_attempts', 0, 'max_listing_attempts', 0, 'distinct_reserved', 0, 'bbo_attempts_reserved', 0, 'listing_attempts_reserved', 0, 'max_incentive_manifest', 4, 'max_incentive_recheck', 2, 'max_incentive_retry', 2, 'incentive_manifest_reserved', 0, 'incentive_recheck_reserved', 0, 'incentive_retry_reserved', 0, 'slugs', '[]'::jsonb)) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value; SELECT jsonb_pretty(value) FROM ingestion_state WHERE key = 'bettor_live_probe_state';"; TO=30000 ;;
+                # [R78] The incentive allowance, read-only: what the row
+                # says was RESERVED, which is the authoritative count.
+                obs-incentive) SQL="SELECT coalesce((SELECT value::text FROM ingestion_state WHERE key = 'bettor_live_observation'), 'ROW ABSENT -- NOT OBSERVING') AS control, (SELECT (value->>'incentive_manifest_reserved')::int FROM ingestion_state WHERE key = 'bettor_live_probe_state') AS manifest_used, (SELECT (value->>'incentive_recheck_reserved')::int FROM ingestion_state WHERE key = 'bettor_live_probe_state') AS recheck_used, (SELECT (value->>'incentive_retry_reserved')::int FROM ingestion_state WHERE key = 'bettor_live_probe_state') AS retry_used, (SELECT (COALESCE((value->>'incentive_manifest_reserved')::int,0) + COALESCE((value->>'incentive_recheck_reserved')::int,0) + COALESCE((value->>'incentive_retry_reserved')::int,0)) FROM ingestion_state WHERE key = 'bettor_live_probe_state') AS http_total_used, (SELECT (value->>'max_distinct')::int FROM ingestion_state WHERE key = 'bettor_live_probe_state') AS general_max_distinct, (SELECT value->>'deadline_at' FROM ingestion_state WHERE key = 'bettor_live_probe_state') AS deadline_at, (SELECT value->>'boots' FROM ingestion_state WHERE key = 'bettor_incentive_run') AS boots, (SELECT value->>'reconnects' FROM ingestion_state WHERE key = 'bettor_incentive_run') AS run_reconnects, (SELECT value->>'resubscribes' FROM ingestion_state WHERE key = 'bettor_incentive_run') AS run_resubscribes; SELECT CASE WHEN to_regclass('public.bettor_incentive_journal') IS NULL THEN 'no journal table yet -- no run has started' ELSE 'journal table present' END AS journal;"; TO=30000 ;;
+                # [R79] The journal itself. SEPARATE from obs-incentive
+                # because the table does not exist until the first run
+                # creates it, and a status read that errors before the
+                # run has started looks like a failure when it is not.
+                obs-incentive-journal) SQL="SELECT kind, count(*) AS rows, min(to_timestamp(at))::timestamptz(0) AS first, max(to_timestamp(at))::timestamptz(0) AS last, count(DISTINCT boot_id) AS boots, count(DISTINCT run_id) AS runs FROM bettor_incentive_journal GROUP BY kind ORDER BY kind; SELECT boot_id, count(*) AS rows, min(to_timestamp(at))::timestamptz(0) AS first, max(to_timestamp(at))::timestamptz(0) AS last FROM bettor_incentive_journal GROUP BY boot_id ORDER BY 3; SELECT payload->>'why' AS gap_why, payload->>'from' AS gap_from, payload->>'to' AS gap_to, payload->>'duration_s' AS duration_s FROM bettor_incentive_journal WHERE kind = 'GAP' AND payload ? 'from' ORDER BY at DESC LIMIT 20;"; TO=30000 ;;
                 # [R09] see .github/workflows/RENDER_OPS_NOTES.md
                 mirror-preflight) SQL="SELECT what, value FROM (SELECT key AS what, left(value::text, 240) AS value FROM ingestion_state WHERE key IN ('mirror_live','mirror_live_whales','mirror_live_demoted','mirror_loss_stop','mapping_quarantine','premap_live','side_echo_last','live_trading_paused','copy_overspend_halt','live_verified_whales','live_clip_overrides','workers_boot','roster_auto_last') UNION ALL SELECT 'zz mirror_books live/24h', (SELECT count(*) FILTER (WHERE state <> 'closed') || '/' || count(*) FILTER (WHERE opened_at > now() - interval '24 hours') FROM mirror_books) UNION ALL SELECT 'zz mirror_orders by state', (SELECT COALESCE(string_agg(state || '=' || n, ' ' ORDER BY state), 'none') FROM (SELECT state, count(*) AS n FROM mirror_orders GROUP BY state) s) UNION ALL SELECT 'zz kalshi_claims rn1 24h', (SELECT count(*) FROM kalshi_claims WHERE lower(whale) = 'rn1' AND claimed_at > now() - interval '24 hours')::text UNION ALL SELECT 'zz live_orders 24h by status', (SELECT COALESCE(string_agg(status || '=' || n, ' ' ORDER BY status), 'none') FROM (SELECT status, count(*) AS n FROM live_orders WHERE placed_at > now() - interval '24 hours' GROUP BY status) s) UNION ALL SELECT 'zz live_orders last placed', (SELECT COALESCE(max(placed_at)::text, 'none') FROM live_orders)) t ORDER BY what;"; TO=30000 ;;
                 # [R10] see .github/workflows/RENDER_OPS_NOTES.md
