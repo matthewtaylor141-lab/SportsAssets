@@ -13,8 +13,16 @@ on:
         required: true
         type: string
 
+# CONCURRENCY IS PER-URL, NOT GLOBAL.
+#
+# A single `group: fetch-docs` meant that dispatching eight
+# files in quick succession CANCELLED four of them: with
+# cancel-in-progress false GitHub keeps one running and one
+# pending, and each new arrival evicts the previous pending
+# run. Four cancelled runs is not four retrieved files, and a
+# cancelled run must never be mistaken for an empty one.
 concurrency:
-  group: fetch-docs
+  group: fetch-docs-${{ inputs.url }}
   cancel-in-progress: false
 
 jobs:
