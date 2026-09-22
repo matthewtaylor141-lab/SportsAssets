@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 
 from .. import procmem
 from ..db import heartbeat
-from . import (analytics, bettor_live_loop, bettor_state,
+from . import (analytics, bettor_state,
                chain_listener, copy_sweep, dispatcher, edge_marks,
                institutional_md, metadata_refresher, mirror_live,
                mirror_shadow, poller, premap, price_path, reconciler,
@@ -423,7 +423,6 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # the authoritative stop because it is the PROMPT one.
     #
     # Deregistering is this one line, commented out.
-    ("bettor_live", bettor_live_loop.main),
     ("memory", memory_watch),
 ]
 
