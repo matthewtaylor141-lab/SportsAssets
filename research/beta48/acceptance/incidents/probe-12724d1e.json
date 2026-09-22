@@ -1,0 +1,84 @@
+{
+  "artifact": "BETTOR_PROBE_INCIDENT_RECORD",
+  "why_this_exists": [
+    "The allowance lives in ONE row, ingestion_state.bettor_live_probe_state,",
+    "and `obs-arm` replaces it wholesale with ON CONFLICT DO UPDATE. Replacing",
+    "a row is not preserving its history: the moment the replacement probe is",
+    "armed, every trace of this one is gone from the database. This file is",
+    "the copy, written BEFORE that happened."
+  ],
+  "probe_id": "12724d1e-fd2d-41b7-a62f-00c267e43880",
+  "outcome": "NEVER RAN. Refused its own first reservation and spent nothing.",
+  "row_verbatim": {
+    "slugs": [],
+    "probe_id": "12724d1e-fd2d-41b7-a62f-00c267e43880",
+    "started_at": "2026-09-22T07:38:21+00:00",
+    "deadline_at": "2026-09-22T08:08:21+00:00",
+    "max_distinct": 40,
+    "max_bbo_attempts": 160,
+    "distinct_reserved": 0,
+    "max_listing_attempts": 18,
+    "bbo_attempts_reserved": 0,
+    "listing_attempts_reserved": 0
+  },
+  "row_read_at": "2026-09-22T08:02:03Z",
+  "row_read_via": "render-ops sql obs-budget, run 35702610501",
+  "row_unchanged_since": {
+    "first_read": "2026-09-22T07:40:30Z",
+    "note": "identical at 07:40:30Z and 08:02:03Z; nothing was ever spent"
+  },
+  "not_captured": [
+    "ingestion_state.updated_at -- the obs-budget operator statement",
+    "returns value only, and no read-only case exposes the column."
+  ],
+  "code_sha_deployed_at_the_time": "67652e9974f8573637f3488b8aaa72a3f900b7a7",
+  "timeline_utc": [
+    ["07:38:21.000", "obs-arm wrote this row; deadline 1800 s out"],
+    ["07:38:59.000", "obs-run set bettor_live_observation to true"],
+    ["07:39:00.856", "supervisor: loop bettor_live exited cleanly; restarting in 5s"],
+    ["07:39:05.856", "supervisor: starting loop: bettor_live"],
+    ["07:39:05.938", "ERROR listing attempt 1 not funded (NO_CONTROL_POOL); not issuing the request"],
+    ["07:39:05.938", "ERROR listing allowance refused: NO_CONTROL_POOL; not starting"],
+    ["07:39:05.938", "INFO  not starting (DISCOVERY_FAILED); holding 900s"],
+    ["07:40:02.000", "obs-stop set bettor_live_observation to false"],
+    ["07:40:30.000", "row read: all three counters 0, slugs empty"],
+    ["08:02:03.000", "row read again before preservation: byte-identical"]
+  ],
+  "defect": {
+    "summary": "The reserver refused every request because it was handed no pool.",
+    "detail": [
+      "workers/all.py registers the loop as bettor_live_loop.main and the",
+      "supervisor calls it WITH NO ARGUMENTS, so control_pool is None.",
+      "read_control, read_budget and reserve all resolve None through",
+      "_resolve() -> get_pool(), which is why the control read true and the",
+      "allowance read open. The _reserve closure did not: it treated None as",
+      "'there is no pool' and refused everything."
+    ],
+    "second_defect_found_after": [
+      "disarm took a pool directly and main() guarded both call sites with",
+      "control_pool is not None -- always false in production -- so the",
+      "deadline's automatic shutdown would have written nothing at all."
+    ],
+    "third_defect_found_after": [
+      "_read_one_sync reads getattr(client, 'markets'), and main() with no",
+      "arguments passed client=None into probe(). _list_candidates resolved",
+      "its own client so the LISTING worked and hid it; every BBO read would",
+      "have returned 'client.markets.bbo is absent', spending the whole",
+      "allowance on reads that never left the process."
+    ],
+    "fixed_in": "fd39a0a91704699176ba108e60a816acc0fe9054"
+  },
+  "it_failed_closed": {
+    "venue_requests": 0,
+    "distinct_markets": 0,
+    "bbo_attempts": 0,
+    "listing_attempts": 0,
+    "orders": 0,
+    "observation_rows_written": 0,
+    "note": "The ceilings were never at risk. The probe simply could not run."
+  },
+  "do_not": [
+    "Do not reset, replenish or extend this allowance.",
+    "A replacement probe takes a NEW probe_id after this one is closed."
+  ]
+}
