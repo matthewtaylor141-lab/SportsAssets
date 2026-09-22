@@ -315,8 +315,22 @@ def _run_worker_and_journal():
     # so a runner that wants the worker to start has to supply one that
     # says run -- exactly as production will, out of `ingestion_state`.
     class _RunControl:
-        async def fetchval(self, _sql, *_a):
+        """Control and budget, both open. The loop fails closed on
+        either, so a runner has to supply both."""
+
+        async def fetchval(self, _sql, *a):
+            from sportsassets import bettor_live_control as _c
+            if a and a[0] == _c.BUDGET_KEY:
+                from datetime import datetime, timedelta, timezone
+                now = datetime.now(timezone.utc)
+                return json.dumps({
+                    "started_at": now.isoformat(),
+                    "deadline_at": (now + timedelta(hours=1)).isoformat(),
+                    "max_distinct": 10_000, "distinct_consumed": 0})
             return "true"
+
+        async def execute(self, *_a):
+            return "OK"
 
     out = asyncio.run(bl.main(client=_Client(rows),
                               stream_factory=RepeatStream, store=store,

@@ -89,24 +89,51 @@ FAILS: list = []
 
 
 class RunPool:
-    """The database stop control, saying observation may run.
+    """The stop control AND the probe budget, both saying go.
 
     The loop reads `ingestion_state` before it does anything else and
-    FAILS CLOSED, so a runner that wants to reach discovery has to
-    supply a control that says yes -- exactly as production will.
+    FAILS CLOSED on both: a control that does not say `true`, or a
+    budget that is absent, exhausted or past its deadline, and it does
+    not acquire. A runner that wants to reach discovery has to supply
+    both -- exactly as production will.
     """
 
-    async def fetchval(self, _sql, *_a):
+    def __init__(self, max_distinct=10_000, seconds_left=3600.0):
+        self.max_distinct, self.seconds_left = max_distinct, seconds_left
+        self.consumed = 0
+
+    async def fetchval(self, _sql, *a):
+        from sportsassets import bettor_live_control as _ctl
+        if a and a[0] == _ctl.BUDGET_KEY:
+            now = datetime.now(timezone.utc)
+            return json.dumps({
+                "started_at": now.isoformat(),
+                "deadline_at": (now + timedelta(
+                    seconds=self.seconds_left)).isoformat(),
+                "max_distinct": self.max_distinct,
+                "distinct_consumed": self.consumed})
         return "true"
 
+    async def execute(self, sql, *a):
+        if "distinct_consumed" in sql:
+            self.consumed += a[1]
+        return "OK"
 
-class StopPool:
+
+class StopPool(RunPool):
+    """A closed control over an otherwise healthy budget, so the
+    refusal under test is the CONTROL's and not the budget's."""
+
     def __init__(self, value=None, raises=None):
+        super().__init__()
         self.value, self.raises = value, raises
 
-    async def fetchval(self, _sql, *_a):
+    async def fetchval(self, sql, *a):
+        from sportsassets import bettor_live_control as _ctl
         if self.raises is not None:
             raise self.raises
+        if a and a[0] == _ctl.BUDGET_KEY:
+            return await super().fetchval(sql, *a)
         return self.value
 
 

@@ -166,6 +166,16 @@ PROBE_MAX_RETRIES = 3
 PROBE_RETRY_BACKOFF_S = (5.0, 15.0, 45.0)
 PROBE_SUSPEND_ABOVE_S = 120.0
 
+# THE LISTING IS BOUNDED SEPARATELY FROM ENRICHMENT, because they are
+# different requests against different paths with different costs. A
+# listing page returns up to 500 rows; a BBO read returns one market.
+# Folding them into one budget would let a listing retry storm eat an
+# enrichment allowance, or the reverse.
+LISTING_MAX_PAGES = 6
+LISTING_MAX_RETRIES = 2
+LISTING_RETRY_BACKOFF_S = (2.0, 8.0)
+LISTING_TIMEOUT_S = 20.0
+
 # How often, in completed reads, the round asks whether it should stop.
 # The caller's callback does its own time-based caching, so this is a
 # bound on RESPONSIVENESS, not a query rate.
@@ -417,8 +427,15 @@ async def probe(client, candidates, *, offset: int = 0,
                 max_rps: float | None = None,
                 timeout_s: float = PROBE_TIMEOUT_S,
                 remaining: int | None = None,
+                max_distinct: int | None = None,
                 should_stop=None, sleep=None) -> dict:
     """Enrich one deterministic, RATE-LIMITED slice of the candidates.
+
+    `max_distinct` clamps the window to the probe's LIFETIME budget --
+    distinct markets this probe may ever enrich, across restarts. A
+    cap held in memory is not a cap: `workers/all.py` restarts a
+    returning loop forever, so an in-process "40 markets" buys 40 more
+    on every cycle.
 
     `remaining` clamps the window to the part of the candidate set this
     sweep has not read yet. WITHOUT IT THE LAST ROUND WRAPS: 400
@@ -455,8 +472,13 @@ async def probe(client, candidates, *, offset: int = 0,
                 "coverage": dict(empty_acct, candidates=0),
                 "accounting": empty_acct, "pace": pace}
 
-    # THE WINDOW NEVER WRAPS PAST WHAT THIS SWEEP STILL OWES.
+    # THE WINDOW NEVER WRAPS PAST WHAT THIS SWEEP STILL OWES, and never
+    # past the probe's LIFETIME budget. `remaining` is the sweep;
+    # `max_distinct` is the whole probe, restarts included, and is the
+    # smaller of the two whenever a probe is bounded.
     room = n if remaining is None else max(0, min(n, int(remaining)))
+    if max_distinct is not None:
+        room = min(room, max(0, int(max_distinct)))
     width = min(batch, room)
     start = offset % n
     window, seen = [], set()
@@ -648,6 +670,11 @@ def describe() -> dict:
         },
         "stop_during_acquisition": ("checked every %d completed reads"
                                     % PROBE_STOP_CHECK_EVERY),
+        "listing_bounds": {"max_pages": LISTING_MAX_PAGES,
+                           "max_retries": LISTING_MAX_RETRIES,
+                           "backoff_s": list(LISTING_RETRY_BACKOFF_S),
+                           "timeout_s": LISTING_TIMEOUT_S,
+                           "counted": "separately from enrichment"},
         "listing_supplies": ["slug", "outcome", "active", "closed",
                              "archived", "eventSlug", "title"],
         "listing_does_not_supply": ["bestBid", "bestAsk", "sharesTraded",

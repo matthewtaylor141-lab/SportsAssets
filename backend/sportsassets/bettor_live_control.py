@@ -177,3 +177,171 @@ def describe() -> dict:
                         "2026-09-21T22:43:40.131647Z); the restarted "
                         "process still did not read it"),
     }
+
+
+# ── THE PROBE BUDGET ─────────────────────────────────────────────────
+#
+# A BUDGET THAT RESETS ON RESTART IS NOT A BUDGET. `workers/all.py`
+# restarts a returning loop forever, so a "40 candidates" cap held in
+# memory buys 40 more every time the process cycles -- and on
+# 2026-09-21 the loop cycled about 73 times in sixteen minutes. The
+# same argument applies to a deadline measured from "now".
+#
+# So both live in one `ingestion_state` row beside the control:
+#
+#   started_at        when the probe first ran, ever
+#   deadline_at       absolute. A restart resumes TOWARD it, never
+#                     away from it.
+#   distinct_consumed how many distinct markets have been enriched
+#                     across the WHOLE probe, restarts included.
+#
+# The loop reads this before acquiring anything and refuses to exceed
+# either bound. At expiry it DISARMS -- writes the observation control
+# to false -- so the shutdown survives the restart that follows.
+BUDGET_KEY = "bettor_live_probe_state"
+
+# Defaults. Overridable per probe by whoever opens the budget, so the
+# numbers in an approval are the numbers in the row.
+PROBE_MAX_DISTINCT = 40
+PROBE_DEADLINE_S = 1800.0
+
+B_OPEN = "OPEN"
+B_EXHAUSTED = "BUDGET_EXHAUSTED"
+B_EXPIRED = "DEADLINE_PASSED"
+B_UNREADABLE = "BUDGET_UNREADABLE"
+
+
+def _iso(ts: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat()
+
+
+def _parse_iso(raw) -> float | None:
+    from datetime import datetime
+    if not raw:
+        return None
+    try:
+        return datetime.fromisoformat(str(raw).replace("Z", "+00:00")) \
+            .timestamp()
+    except (TypeError, ValueError):
+        return None
+
+
+async def read_budget(pool=None, *, now: float | None = None) -> dict:
+    """The probe's lifetime budget. FAILS CLOSED like the control.
+
+    An unreadable or malformed budget is `B_UNREADABLE` with
+    `remaining = 0`: we cannot show we are still inside it, so we are
+    not.
+    """
+    now = time.time() if now is None else now
+    out = {"key": BUDGET_KEY, "state": B_UNREADABLE, "open": False,
+           "remaining": 0, "consumed": None, "max_distinct": None,
+           "started_at": None, "deadline_at": None,
+           "seconds_left": 0.0, "detail": None}
+
+    async def _fetch():
+        p = pool
+        if p is None:
+            from .db import get_pool
+            p = await get_pool()
+        return await p.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1", BUDGET_KEY)
+
+    try:
+        row = await asyncio.wait_for(_fetch(),
+                                     timeout=CONTROL_READ_TIMEOUT_S)
+    except asyncio.TimeoutError:
+        out["detail"] = "budget read did not answer in %.0fs" % \
+            CONTROL_READ_TIMEOUT_S
+        return out
+    except Exception as exc:                               # noqa: BLE001
+        out["detail"] = "budget read failed: %s" % type(exc).__name__
+        return out
+
+    if row is None:
+        out.update(state=B_UNREADABLE,
+                   detail="no %s row; a probe without a declared "
+                          "budget does not run" % BUDGET_KEY)
+        return out
+
+    val = row
+    if isinstance(val, (bytes, bytearray)):
+        val = val.decode("utf-8", "replace")
+    if isinstance(val, str):
+        try:
+            val = json.loads(val)
+        except (TypeError, ValueError):
+            out["detail"] = "budget value is not JSON"
+            return out
+    if not isinstance(val, dict):
+        out["detail"] = "budget value is not an object"
+        return out
+
+    try:
+        cap = int(val.get("max_distinct"))
+        used = int(val.get("distinct_consumed", 0))
+    except (TypeError, ValueError):
+        out["detail"] = "max_distinct/distinct_consumed are not integers"
+        return out
+    deadline = _parse_iso(val.get("deadline_at"))
+    if deadline is None:
+        out["detail"] = "deadline_at is absent or unparsable"
+        return out
+
+    out.update(consumed=used, max_distinct=cap,
+               started_at=val.get("started_at"),
+               deadline_at=val.get("deadline_at"),
+               seconds_left=round(deadline - now, 1),
+               remaining=max(0, cap - used))
+    if now >= deadline:
+        out.update(state=B_EXPIRED, open=False, remaining=0,
+                   detail="deadline %s passed" % val.get("deadline_at"))
+    elif used >= cap:
+        out.update(state=B_EXHAUSTED, open=False, remaining=0,
+                   detail="%d of %d distinct markets already enriched"
+                          % (used, cap))
+    else:
+        out.update(state=B_OPEN, open=True,
+                   detail="%d of %d used, %.0fs left"
+                          % (used, cap, deadline - now))
+    return out
+
+
+async def consume_budget(pool, n: int) -> None:
+    """Add `n` distinct markets to the lifetime total.
+
+    Written BEFORE the rows are used, so a crash between the read and
+    the write costs budget rather than granting it.
+    """
+    if n <= 0:
+        return
+    await pool.execute(
+        "UPDATE ingestion_state SET value = jsonb_set(value, "
+        "'{distinct_consumed}', to_jsonb("
+        "COALESCE((value->>'distinct_consumed')::int, 0) + $2)) "
+        "WHERE key = $1", BUDGET_KEY, int(n))
+
+
+async def disarm(pool, why: str) -> dict:
+    """Write the observation control to FALSE. Never to true.
+
+    This is how a deadline survives the restart that follows it: the
+    loop stops itself, and the row it leaves behind stops the next
+    process too. Arming is always a human action through
+    `render-ops sql obs-run`; nothing in this codebase writes `true`.
+    """
+    try:
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, "
+            "'false'::jsonb) ON CONFLICT (key) DO UPDATE SET "
+            "value = 'false'::jsonb", CONTROL_KEY)
+    except Exception as exc:                               # noqa: BLE001
+        log.error("bettor_live_control: could not disarm (%s); the "
+                  "loop stops anyway and the next process will read "
+                  "whatever is there", type(exc).__name__)
+        return {"disarmed": False, "why": why,
+                "error": type(exc).__name__}
+    log.warning("bettor_live_control: DISARMED -- %s set to false (%s)",
+                CONTROL_KEY, why)
+    return {"disarmed": True, "why": why}

@@ -946,7 +946,7 @@ def describe() -> dict:
 
 # ── the worker entry point ───────────────────────────────────────────
 
-async def _list_candidates(client=None) -> dict:
+async def _list_candidates(client=None, *, sleep=None) -> dict:
     """The venue's listing, PAGINATED, reduced to CANDIDATES.
 
     Identity only. The listing cannot answer a single question the
@@ -975,11 +975,33 @@ async def _list_candidates(client=None) -> dict:
             truncated = True
         return rows, pages, truncated
 
-    try:
-        rows, pages, truncated = await asyncio.to_thread(_list)
-    except Exception as exc:  # noqa: BLE001 -- named, never swallowed
-        return {"ok": False, "error": type(exc).__name__,
-                "why": "market listing failed"}
+    # BOUNDED SEPARATELY FROM ENRICHMENT. Its own attempt count, its
+    # own backoff, its own timeout, counted apart -- a listing retry
+    # storm must not be able to eat the enrichment allowance.
+    attempts = 0
+    last = None
+    for attempt in range(probe_mod.LISTING_MAX_RETRIES + 1):
+        attempts += 1
+        try:
+            rows, pages, truncated = await asyncio.wait_for(
+                asyncio.to_thread(_list),
+                timeout=probe_mod.LISTING_TIMEOUT_S)
+            last = None
+            break
+        except asyncio.TimeoutError:
+            last = "TimeoutError(%.0fs)" % probe_mod.LISTING_TIMEOUT_S
+        except Exception as exc:  # noqa: BLE001 -- named, never swallowed
+            last = type(exc).__name__
+        if attempt < probe_mod.LISTING_MAX_RETRIES:
+            hold = probe_mod.LISTING_RETRY_BACKOFF_S[
+                min(attempt, len(probe_mod.LISTING_RETRY_BACKOFF_S) - 1)]
+            log.warning("bettor_live_loop: listing attempt %d failed "
+                        "(%s); retrying in %.0fs", attempts, last, hold)
+            await (sleep or asyncio.sleep)(hold)
+    if last is not None:
+        return {"ok": False, "error": last, "listing_attempts": attempts,
+                "why": "market listing failed after %d attempts"
+                       % attempts}
 
     cands = probe_mod.candidates_from_listing(rows)
     if truncated:
@@ -987,13 +1009,15 @@ async def _list_candidates(client=None) -> dict:
                     "the candidate set is a PREFIX of the venue",
                     max_pages)
     return {"ok": True, "candidates": cands, "pages_read": pages,
+            "listing_attempts": attempts,
             "rows_listed": len(rows), "page_size": page_size,
             "listing_truncated_at_page_bound": truncated}
 
 
 async def _discover(client=None, *, candidates=None, offset: int = 0,
                     rounds: int = probe_mod.PROBE_ROUNDS_AT_START,
-                    batch: int | None = None, should_stop=None) -> dict:
+                    batch: int | None = None, should_stop=None,
+                    max_distinct: int | None = None, sleep=None) -> dict:
     """Listing -> ENRICHMENT -> the frozen selection rule.
 
     THE RULE RUNS ONLY AFTER ENRICHMENT. It used to run on listing
@@ -1009,13 +1033,14 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
     which is the rule's verdict on what we did read.
     """
     if candidates is None:
-        listed = await _list_candidates(client=client)
+        listed = await _list_candidates(client=client, sleep=sleep)
         if not listed.get("ok"):
             return {"ok": False, "error": listed.get("error"),
                     "why": listed.get("why")}
         candidates = listed["candidates"]
         meta = {k: listed[k] for k in
                 ("pages_read", "rows_listed", "page_size",
+                 "listing_attempts",
                  "listing_truncated_at_page_bound")}
     else:
         meta = {}
@@ -1039,9 +1064,14 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
     stopped = False
     suspended_for = 0.0
     for _ in range(max(1, rounds)):
+        left = None if max_distinct is None else \
+            max_distinct - len(by_slug)
+        if left is not None and left <= 0:
+            break
         r = await probe_mod.probe(client, candidates, offset=nxt,
                                   batch=batch, should_stop=should_stop,
-                                  remaining=len(candidates) - swept)
+                                  remaining=len(candidates) - swept,
+                                  max_distinct=left, sleep=sleep)
         for row in r["rows"]:
             by_slug[row["slug"]] = row
         coverage = probe_mod.merge_coverage(coverage, r["coverage"])
@@ -1086,6 +1116,7 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
                 "enriched_rows": len(rows), "coverage": coverage,
                 "next_offset": nxt, "swept": swept,
                 "stopped_by_control": stopped,
+                "budget_max_distinct": max_distinct,
                 "suspended_for_s": suspended_for or None,
                 "pace": probe_mod.configured_pace(),
                 "enrichment": probe_mod.PROBE_VERSION})
@@ -1216,6 +1247,29 @@ async def main(*, client=None, stream_factory=None, store=None,
             _ctl_cache["at"] = now
         return ctl.is_closed(_ctl_cache["state"])
 
+    # THE LIFETIME BUDGET, read after the control and before anything
+    # is acquired. It fails closed the same way: a budget we cannot
+    # read, that has no row, that is exhausted or whose deadline has
+    # passed, is not permission to acquire. Held in the database, not
+    # in memory, because the supervisor restarts a returning loop
+    # forever and an in-process cap would be re-granted on every cycle.
+    budget = await ctl.read_budget(control_pool)
+    if not budget.get("open"):
+        log.info("bettor_live_loop: not observing (%s: %s); "
+                 "effective config %s", budget["state"],
+                 budget.get("detail"), json.dumps(effective_config()))
+        if budget["state"] in (ctl.B_EXPIRED, ctl.B_EXHAUSTED) \
+                and control_pool is not None:
+            # AUTOMATIC SHUTDOWN, AND IT HAS TO OUTLIVE THE RESTART.
+            # Returning is not enough: the supervisor starts us again
+            # in five seconds. Writing the control to false stops the
+            # next process too. Only ever false -- arming is a human
+            # action.
+            await ctl.disarm(control_pool, budget["state"])
+        await _backoff(budget["state"], sleep=sleep)
+        return {"started": False, "why": budget["state"],
+                "budget": budget, "config": effective_config()}
+
     cfg = settings()
     key_id = getattr(cfg, "pmus_key_id", None)
     secret = getattr(cfg, "pmus_secret_key", None)
@@ -1253,7 +1307,9 @@ async def main(*, client=None, stream_factory=None, store=None,
         return {"started": False, "why": "STORE_START_REFUSED",
                 "detail": started}
 
-    first = await _discover(client=client, should_stop=_stop_now)
+    first = await _discover(client=client, should_stop=_stop_now,
+                            max_distinct=budget["remaining"],
+                            sleep=sleep)
     if not first.get("ok"):
         log.error("bettor_live_loop: %s (%s); not starting",
                   first.get("why"), first.get("error"))
@@ -1315,6 +1371,21 @@ async def main(*, client=None, stream_factory=None, store=None,
     log.info("bettor_live_loop: boot %s, store %s, recovered %s",
              loop.boot_id, json.dumps(started, default=str),
              json.dumps(rec, default=str))
+    # CHARGED BEFORE USE. A crash between reading the budget and
+    # writing the consumption should cost allowance, never grant it.
+    consumed = (first.get("coverage") or {}).get("distinct_enriched") or 0
+    if consumed and control_pool is not None:
+        try:
+            await ctl.consume_budget(control_pool, consumed)
+        except Exception as exc:                           # noqa: BLE001
+            log.error("bettor_live_loop: could not record %d consumed "
+                      "candidates (%s); stopping rather than acquiring "
+                      "against a budget that cannot be decremented",
+                      consumed, type(exc).__name__)
+            await _backoff("BUDGET_NOT_RECORDABLE", sleep=sleep)
+            return {"started": False, "why": "BUDGET_NOT_RECORDABLE",
+                    "detail": type(exc).__name__}
+
     cov0 = first.get("coverage") or {}
     log.info("bettor_live_loop: %d markets subscribed; %d eligible of %d "
              "ENRICHED; covered %s of %s candidates in %s reads over %s "
@@ -1359,6 +1430,19 @@ async def main(*, client=None, stream_factory=None, store=None,
             # stops it too; see `bettor_live_control`.
             if now - last_control >= ctl.CONTROL_EVERY_S:
                 last_control = now
+                # THE DEADLINE IS CHECKED ON THE SAME TICK AS THE
+                # CONTROL, and it DISARMS rather than merely returning:
+                # the supervisor would otherwise start a fresh process
+                # five seconds later and the probe would run on.
+                b = await ctl.read_budget(control_pool)
+                if not b.get("open"):
+                    log.warning("bettor_live_loop: stopping on the "
+                                "probe budget (%s: %s)", b["state"],
+                                b.get("detail"))
+                    if control_pool is not None:
+                        await ctl.disarm(control_pool, b["state"])
+                    stop_reason = b["state"]
+                    break
                 live = await ctl.read_control(control_pool)
                 loop.control = live
                 if ctl.is_closed(live):

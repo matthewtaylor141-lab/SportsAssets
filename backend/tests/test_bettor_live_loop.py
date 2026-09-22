@@ -30,6 +30,7 @@ import pytest
 from sportsassets import bettor_live_store as store_mod
 from sportsassets import bettor_market_stream as ms
 from sportsassets import bettor_settlement_ingest as si
+from sportsassets import bettor_live_control as ctl_mod
 from sportsassets import bettor_universe_probe as probe_mod
 from sportsassets.workers import bettor_live_loop as bl
 
@@ -44,26 +45,58 @@ def unpaced(monkeypatch):
     monkeypatch.setenv(probe_mod.CONC_ENV, "8")
 
 
-class FakeControlPool:
-    """`pool.fetchval` over one stored value, or a raise.
+def open_budget(*, max_distinct=40, seconds_left=1800.0, consumed=0):
+    """A probe budget row with room and time left."""
+    from datetime import datetime, timedelta, timezone
+    now = datetime.now(timezone.utc)
+    return json.dumps({
+        "started_at": now.isoformat(),
+        "deadline_at": (now + timedelta(seconds=seconds_left)).isoformat(),
+        "max_distinct": max_distinct, "distinct_consumed": consumed})
 
-    Small enough to stand in for asyncpg wherever `main()` and
-    `read_control` only ever ask the one question they ask.
+
+class FakeControlPool:
+    """`pool.fetchval` KEYED BY ingestion_state key, or a raise.
+
+    Keyed, because `main()` now asks two different questions of the
+    same table -- may we observe, and is there budget left -- and a
+    double that answers both with one value cannot tell them apart.
+    `execute` is recorded so a test can assert what was WRITTEN, which
+    is how automatic shutdown is checked.
     """
 
-    def __init__(self, value=None, *, raises=None):
-        self.value, self.raises, self.calls = value, raises, 0
+    def __init__(self, value=None, *, raises=None, budget=None):
+        self.value = value
+        self.budget = open_budget() if budget is None else budget
+        self.raises = raises
+        self.calls = 0
+        self.writes: list = []
 
     async def fetchval(self, _sql, *args):
         self.calls += 1
         if self.raises is not None:
             raise self.raises
+        key = args[0] if args else None
+        if key == ctl_mod.BUDGET_KEY:
+            return self.budget
         return self.value
 
+    async def execute(self, sql, *args):
+        self.writes.append((sql, args))
+        if "distinct_consumed" in sql:
+            import json as _j
+            b = _j.loads(self.budget) if isinstance(self.budget, str) \
+                else dict(self.budget or {})
+            b["distinct_consumed"] = b.get("distinct_consumed", 0) + args[1]
+            self.budget = _j.dumps(b)
+        elif args and args[0] == ctl_mod.CONTROL_KEY:
+            self.value = "false"
+        return "OK"
 
-def RunningControl():
-    """A control that says, in so many words, that observation may run."""
-    return FakeControlPool("true")
+
+def RunningControl(**kw):
+    """A control that says observation may run, with an open budget."""
+    return FakeControlPool("true", **kw)
 
 
 class SleepSpy:
@@ -1361,7 +1394,10 @@ class TestTheStopControlGovernsTheLoop:
             return await asyncio.wait_for(task, timeout=5)
 
         out = asyncio.run(drive())
-        assert out["stopped_by"] == "CONTROL_UNREADABLE"
+        # A database that has gone away fails BOTH reads. Whichever is
+        # asked first, the loop stops -- that is the whole property.
+        assert out["stopped_by"] in ("CONTROL_UNREADABLE",
+                                     "BUDGET_UNREADABLE")
         assert made.get("stopped") is True
 
     def test_the_report_names_the_control_it_is_running_on(
@@ -1373,3 +1409,143 @@ class TestTheStopControlGovernsTheLoop:
         ctl_state = out["report"]["control"]
         assert ctl_state["why"] == "RUNNING"
         assert ctl_state["key"] == "bettor_live_observation"
+
+
+# ── 11. the probe budget and its deadline ────────────────────────────
+
+class TestTheProbeBudgetSurvivesRestarts:
+    """A BUDGET HELD IN MEMORY IS NOT A BUDGET. `workers/all.py`
+    restarts a returning loop forever -- about 73 times in sixteen
+    minutes on 2026-09-21 -- so an in-process '40 markets' buys 40 more
+    on every cycle. Both the cap and the deadline live in the database
+    and are absolute."""
+
+    def _spying(self, monkeypatch, tmp_path, candidates=6):
+        made = TestTheEntryPointLifecycle()._patch(
+            monkeypatch, tmp_path,
+            discovery={"ok": True, "slugs": ["m1"], "considered": 1,
+                       "detail": [{"slug": "m1", "outcome_leg": "yes"}],
+                       "coverage": {"candidates": candidates,
+                                    "distinct_enriched": 3}})
+        return made
+
+    def test_an_absent_budget_row_refuses(self, monkeypatch, tmp_path):
+        """A probe without a declared budget does not run."""
+        made = self._spying(monkeypatch, tmp_path)
+        pool = RunningControl(budget=None)
+        pool.budget = None
+        out = asyncio.run(bl.main(store=made["store"], control_pool=pool,
+                                  sleep=SleepSpy()))
+        assert out["started"] is False
+        assert out["why"] == ctl_mod.B_UNREADABLE
+        assert "started" not in made
+
+    @pytest.mark.parametrize("budget,why", [
+        (open_budget(max_distinct=40, consumed=40), ctl_mod.B_EXHAUSTED),
+        (open_budget(seconds_left=-1), ctl_mod.B_EXPIRED),
+        ("not json", ctl_mod.B_UNREADABLE),
+        (json.dumps({"max_distinct": 40}), ctl_mod.B_UNREADABLE),
+    ])
+    def test_it_fails_closed_on_every_bad_budget(self, monkeypatch,
+                                                 tmp_path, budget, why):
+        made = self._spying(monkeypatch, tmp_path)
+        out = asyncio.run(bl.main(store=made["store"],
+                                  control_pool=RunningControl(budget=budget),
+                                  sleep=SleepSpy()))
+        assert out["started"] is False and out["why"] == why
+        assert "started" not in made, "nothing was acquired"
+
+    def test_expiry_DISARMS_so_the_restart_does_not_resume(
+            self, monkeypatch, tmp_path):
+        """Returning is not enough: the supervisor starts a fresh
+        process five seconds later. The control is written to false so
+        the NEXT process stops too."""
+        made = self._spying(monkeypatch, tmp_path)
+        pool = RunningControl(budget=open_budget(seconds_left=-1))
+        out = asyncio.run(bl.main(store=made["store"], control_pool=pool,
+                                  sleep=SleepSpy()))
+        assert out["why"] == ctl_mod.B_EXPIRED
+        assert pool.value == "false", "the control was not disarmed"
+        assert any(ctl_mod.CONTROL_KEY in str(a) for _s, a in pool.writes)
+
+    def test_exhaustion_disarms_too(self, monkeypatch, tmp_path):
+        made = self._spying(monkeypatch, tmp_path)
+        pool = RunningControl(budget=open_budget(max_distinct=40,
+                                                 consumed=40))
+        asyncio.run(bl.main(store=made["store"], control_pool=pool,
+                            sleep=SleepSpy()))
+        assert pool.value == "false"
+
+    def test_nothing_in_the_codebase_ever_writes_true(self):
+        """Arming is a human action. `disarm` is the only writer of the
+        control and it writes one literal."""
+        import inspect
+        src = inspect.getsource(ctl_mod.disarm)
+        assert "'false'::jsonb" in src
+        assert "'true'" not in src and '"true"' not in src
+
+    def test_consumption_is_recorded_before_the_universe_is_used(
+            self, monkeypatch, tmp_path):
+        made = self._spying(monkeypatch, tmp_path)
+        pool = RunningControl()
+        asyncio.run(bl.main(store=made["store"], run_for_s=0.0,
+                            control_pool=pool, sleep=SleepSpy()))
+        assert json.loads(pool.budget)["distinct_consumed"] == 3
+        assert any("distinct_consumed" in s for s, _a in pool.writes)
+
+    def test_consumption_accumulates_across_runs(self, monkeypatch,
+                                                 tmp_path):
+        """The point of holding it in the database: a restart resumes
+        against what has already been spent."""
+        made = self._spying(monkeypatch, tmp_path)
+        pool = RunningControl()
+        for _ in range(3):
+            asyncio.run(bl.main(store=made["store"], run_for_s=0.0,
+                                control_pool=pool, sleep=SleepSpy()))
+        assert json.loads(pool.budget)["distinct_consumed"] == 9
+
+    def test_the_remaining_budget_caps_what_discovery_may_read(
+            self, monkeypatch, tmp_path):
+        seen = {}
+        made = TestTheEntryPointLifecycle()._patch(
+            monkeypatch, tmp_path,
+            discovery={"ok": True, "slugs": ["m1"], "considered": 1,
+                       "detail": [{"slug": "m1", "outcome_leg": "yes"}],
+                       "coverage": {}})
+
+        async def capture(client=None, **kw):
+            seen.update(kw)
+            return {"ok": True, "slugs": ["m1"], "considered": 1,
+                    "detail": [{"slug": "m1", "outcome_leg": "yes"}],
+                    "coverage": {}}
+
+        monkeypatch.setattr(bl, "_discover", capture)
+        asyncio.run(bl.main(store=made["store"], run_for_s=0.0,
+                            control_pool=RunningControl(
+                                budget=open_budget(max_distinct=40,
+                                                   consumed=37)),
+                            sleep=SleepSpy()))
+        assert seen["max_distinct"] == 3, (
+            "discovery was handed the LIFETIME remainder, not a batch")
+
+    def test_the_deadline_stops_a_running_loop_and_disarms(
+            self, monkeypatch, tmp_path):
+        monkeypatch.setattr(bl.ctl, "CONTROL_EVERY_S", 0.0)
+        made = self._spying(monkeypatch, tmp_path)
+        pool = RunningControl()
+
+        async def drive():
+            task = asyncio.create_task(bl.main(
+                store=made["store"], control_pool=pool, sleep=SleepSpy()))
+            for _ in range(200):
+                await asyncio.sleep(0.01)
+                if made.get("started"):
+                    break
+            assert made.get("started") is True
+            pool.budget = open_budget(seconds_left=-1)   # deadline passes
+            return await asyncio.wait_for(task, timeout=5)
+
+        out = asyncio.run(drive())
+        assert out["stopped_by"] == ctl_mod.B_EXPIRED
+        assert made.get("stopped") is True, "the stream was stopped"
+        assert pool.value == "false", "and the next process is stopped too"
