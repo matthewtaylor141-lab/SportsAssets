@@ -1,3 +1,24 @@
+> **SUPERSEDED BY `DECISION_PACKAGE.md` WHEREVER THEY DISAGREE.**
+>
+> The replay this document rests on read `bidDepth`/`askDepth` as
+> contract quantities. They are **level counts** (integers in [0,67];
+> `bidDepth: 1` on a market with 61,918 shares traded). The queue model
+> therefore subtracted single digits where the real queue is tens of
+> thousands, and **every fill rate here is an upper bound** -- q =
+> 0.0753, P(any fill) = 0.4274 and the -0.0291/contract headline are
+> all withdrawn.
+>
+> Rebuilt on the 30,588 `/book` ladders already in the capture, the
+> conclusion changes: queue position is the binding unknown, and one
+> candidate (2+-tick books, at the touch, hard-flattened) is
+> **positive and queue-robust at +0.0020/contract**, though still not
+> established.
+>
+> Also withdrawn from this document: "a CI spanning zero establishes
+> negative expected profit" and "an upper bound below the half-spread
+> settles it". Neither follows, and the half-spread is not the
+> acceptance threshold.
+
 # BETTOR — the consolidated economic package
 
 **The investment decision: do not deploy capital on the two-sided
