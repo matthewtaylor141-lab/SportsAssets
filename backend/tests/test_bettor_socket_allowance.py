@@ -389,3 +389,32 @@ def test_start_must_not_block_or_the_reservation_bridge_deadlocks():
              if isinstance(c, ast.Call)}
     assert "start" in calls              # thread.start()
     assert "join" not in calls           # and never waits for it
+
+
+def test_the_manifest_path_survives_dockerignore_and_the_copy():
+    """THE DEFECT A REPOSITORY-FILE CHECK CANNOT SEE.
+
+    Two rules had to agree and neither did:
+
+      .dockerignore  `research/beta48/*` removed `acceptance/` from the
+                     BUILD CONTEXT, so the Dockerfile could not have
+                     copied it even with a COPY line present.
+      Dockerfile     `COPY research/beta48/*.json` is TOP-LEVEL ONLY
+                     and never descended into `acceptance/`.
+
+    The declared runtime path therefore did not exist in the image, and
+    the worker would have refused to start with MANIFEST_ABSENT on the
+    first boot after deployment -- while the file sat happily in the
+    repository. This asserts both halves; the image build and an
+    in-container load through `man.load()` are the real proof and are
+    recorded in the handoff.
+    """
+    root = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..")
+    di = open(os.path.join(root, ".dockerignore"), encoding="utf-8").read()
+    df = open(os.path.join(root, "backend", "Dockerfile"),
+              encoding="utf-8").read()
+    rel = "research/beta48/acceptance/incentive_manifest.json"
+    assert "!%s" % rel in di, ".dockerignore does not re-admit the manifest"
+    assert rel in df, "the Dockerfile does not COPY the manifest"
+    # And the narrow form: acceptance/ as a whole must stay excluded.
+    assert "research/beta48/acceptance/*" in di

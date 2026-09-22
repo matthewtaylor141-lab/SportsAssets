@@ -40,4 +40,18 @@ research/beta48/*
 # The frozen whale priors sit beside shadow/, not inside it, and carry
 # the completion-hazard table the pair engine reads.
 !research/beta48/*.json
+
+# THE CAPTURED INCENTIVE MANIFEST. Narrow on purpose: `acceptance/` is
+# 4.9 MB of patches, suite XML and result JSON that the runtime has no
+# use for, and the rule above excluded the whole directory.
+#
+# THIS IS THE OTHER HALF OF THE MANIFEST DELIVERY DEFECT, and it is why
+# adding the COPY alone was not enough. The Dockerfile can only copy
+# what the CONTEXT contains; `research/beta48/*` removed `acceptance/`
+# from the context, so the COPY failed at build time with "not found"
+# even though the file was committed and present in the working tree.
+# A repository-file check passes here. A build does not.
+!research/beta48/acceptance
+research/beta48/acceptance/*
+!research/beta48/acceptance/incentive_manifest.json
 research/beta48/shadow/**/__pycache__
