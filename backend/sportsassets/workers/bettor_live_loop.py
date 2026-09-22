@@ -1846,7 +1846,13 @@ async def main(*, client=None, stream_factory=None, store=None,
         log.info("bettor_live_loop: not observing (%s: %s); "
                  "effective config %s", budget["state"],
                  budget.get("detail"), json.dumps(effective_config()))
-        if budget["state"] in (ctl.B_EXPIRED, ctl.B_EXHAUSTED):
+        # A SPENT ALLOWANCE IS NO LONGER A SHUTDOWN. A fresh process
+        # with an exhausted budget has no candidates and so nothing to
+        # watch -- it still returns here -- but it must not DISARM,
+        # because the authorization runs to the DEADLINE and a crash at
+        # minute three would otherwise end a thirty-minute window. The
+        # deadline (B_EXPIRED) disarms; exhaustion polls and waits.
+        if budget["state"] == ctl.B_EXPIRED:
             # AUTOMATIC SHUTDOWN, AND IT HAS TO OUTLIVE THE RESTART.
             # Returning is not enough: the supervisor starts us again
             # in five seconds. Writing the control to false stops the
@@ -2096,6 +2102,27 @@ async def main(*, client=None, stream_factory=None, store=None,
     last_prune = t_start
     cycle = 0
     receipt = None
+    # ── ACQUISITION LIFETIME IS NOT OBSERVATION LIFETIME ──────────────
+    #
+    # Probe 2 exposed this: enrichment consumed all 40 distinct-market
+    # slots BEFORE the stream opened, and the first budget check after
+    # subscription then stopped the whole loop. An 1,800-second
+    # authorization produced THIRTY SECONDS of streaming and 14 frames
+    # of 25, with roughly 1,187 seconds of the window still unused.
+    #
+    # Exhausting the HTTP allowance means DO NOT ACQUIRE. It does not
+    # mean drop subscriptions that were already authorized and paid
+    # for. This flag separates the two: once set, no further discovery
+    # is attempted and no request is dispatched, while the already-open
+    # socket keeps delivering frames until the DEADLINE or a stop.
+    #
+    # EVERY CAP IS PRESERVED. This adds no request, raises no limit and
+    # extends no deadline; it only stops the allowance from ending the
+    # observation early.
+    acquisition_closed = False
+    acquisition_closed_at = None
+    acquisition_closed_at_t = None
+    acquisition_closed_why = None
     try:
         while enabled():
             loop.drain()
@@ -2120,13 +2147,34 @@ async def main(*, client=None, stream_factory=None, store=None,
                 # five seconds later and the probe would run on.
                 b = await ctl.read_budget(control_pool)
                 if not b.get("open"):
-                    log.warning("bettor_live_loop: stopping on the "
-                                "probe budget (%s: %s)", b["state"],
-                                b.get("detail"))
-                    await ctl.disarm(control_pool, b["state"])
-                    stop_reason = b["state"]
-                    control_detected_at = _now().isoformat()
-                    break
+                    # THE ONE CASE THAT DOES NOT END THE OBSERVATION.
+                    # A spent HTTP allowance forbids further requests.
+                    # It says nothing about the socket, which is already
+                    # open and costs no allowance to keep. The deadline
+                    # and the control still end this loop; an
+                    # unreadable budget still fails closed.
+                    if b["state"] == ctl.B_EXHAUSTED:
+                        if not acquisition_closed:
+                            acquisition_closed = True
+                            acquisition_closed_at = _now().isoformat()
+                            acquisition_closed_at_t = time.time()
+                            acquisition_closed_why = b.get("detail")
+                            log.warning(
+                                "bettor_live_loop: ACQUISITION CLOSED "
+                                "(%s: %s); the %d already-authorized "
+                                "subscriptions continue until the "
+                                "deadline or a stop. No further request "
+                                "will be dispatched.",
+                                b["state"], b.get("detail"),
+                                len(loop.admission or ()))
+                    else:
+                        log.warning("bettor_live_loop: stopping on the "
+                                    "probe budget (%s: %s)", b["state"],
+                                    b.get("detail"))
+                        await ctl.disarm(control_pool, b["state"])
+                        stop_reason = b["state"]
+                        control_detected_at = _now().isoformat()
+                        break
                 live = await ctl.read_control(control_pool)
                 loop.control = live
                 if ctl.is_closed(live):
@@ -2137,7 +2185,11 @@ async def main(*, client=None, stream_factory=None, store=None,
                     control_detected_at = _now().isoformat()
                     break
 
-            if now - last_discovery >= DISCOVERY_EVERY_S:
+            # NO DISCOVERY ONCE ACQUISITION IS CLOSED. This is the half
+            # of the repair that keeps the caps honest: the socket
+            # lives on, but nothing reaches the venue over HTTP again.
+            if not acquisition_closed and \
+                    now - last_discovery >= DISCOVERY_EVERY_S:
                 last_discovery = now
                 nxt = await _discover(client=client,
                                       candidates=candidates,
@@ -2179,7 +2231,12 @@ async def main(*, client=None, stream_factory=None, store=None,
                     # error into an empty engine.
                     loop.bump("discovery_refresh_failed")
 
-            if now - last_settlement >= SETTLEMENT_EVERY_S:
+            # SETTLEMENT READS ARE ALSO OUTBOUND HTTP, so they stop with
+            # everything else when acquisition closes. Gating only
+            # discovery would leave a second request path open and turn
+            # a lifetime repair into a quiet allowance increase.
+            if not acquisition_closed and \
+                    now - last_settlement >= SETTLEMENT_EVERY_S:
                 last_settlement = now
                 try:
                     out = await loop.ingest_settlements(client=client)
@@ -2277,6 +2334,17 @@ async def main(*, client=None, stream_factory=None, store=None,
             # control poll interval and belongs to the operator's
             # record, not to this one.
             "stopped_by": stop_reason,
+            # ACQUISITION AND OBSERVATION END SEPARATELY, and the
+            # receipt says so. A reader can now tell "the allowance ran
+            # out at 14:16:53 and the socket carried on until the
+            # deadline" from "the run ended at 14:16:53", which probe 2
+            # could not distinguish because they were the same event.
+            "acquisition_closed": bool(acquisition_closed),
+            "acquisition_closed_at": acquisition_closed_at,
+            "acquisition_closed_why": acquisition_closed_why,
+            "observed_after_acquisition_closed_s": (
+                None if acquisition_closed_at_t is None
+                else round(time.time() - acquisition_closed_at_t, 3)),
             "control_detected_at": control_detected_at,
             "control_poll_interval_s": ctl.CONTROL_EVERY_S,
             "stop_requested_at": shut.get("stop_requested_at_iso"),

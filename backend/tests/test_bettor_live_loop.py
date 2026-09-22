@@ -1579,13 +1579,112 @@ class TestTheProbeBudgetSurvivesRestarts:
         assert pool.value == "false", "the control was not disarmed"
         assert any(ctl_mod.CONTROL_KEY in str(a) for _s, a in pool.writes)
 
-    def test_exhaustion_disarms_too(self, monkeypatch, tmp_path):
+    def test_exhaustion_no_longer_disarms_the_whole_authorization(
+            self, monkeypatch, tmp_path):
+        """THE REPAIR. Exhausting the HTTP allowance is not the end of
+        the observation window.
+
+        This test previously asserted `pool.value == "false"` -- that a
+        spent allowance disarmed the probe. Probe 2 showed what that
+        costs: enrichment consumed all 40 distinct slots BEFORE the
+        stream opened, the next budget check stopped the loop, and an
+        1,800-second authorization produced 30 seconds of streaming and
+        14 frames of 25, leaving roughly 1,187 seconds unused.
+
+        A fresh process with a spent allowance still cannot acquire, so
+        it still does not start -- but it must NOT write the control to
+        false, because the authorization runs to the DEADLINE and a
+        crash at minute three would otherwise end a thirty-minute
+        window. The deadline disarms; exhaustion waits.
+        """
         made = self._spying(monkeypatch, tmp_path)
         pool = RunningControl(budget=open_budget(max_distinct=40,
                                                  consumed=40))
-        asyncio.run(bl.main(store=made["store"], control_pool=pool,
-                            sleep=SleepSpy()))
-        assert pool.value == "false"
+        out = asyncio.run(bl.main(store=made["store"], control_pool=pool,
+                                  sleep=SleepSpy()))
+        assert out["started"] is False
+        assert out["why"] == ctl_mod.B_EXHAUSTED
+        assert pool.value == "true", \
+            "a spent allowance must not disarm a live authorization"
+        assert not any(ctl_mod.CONTROL_KEY in str(a)
+                       for _s, a in pool.writes), \
+            "nothing may be written to the control on exhaustion"
+        assert "started" not in made, "and nothing was acquired"
+
+    def test_a_spent_allowance_closes_ACQUISITION_not_the_OBSERVATION(
+            self, monkeypatch, tmp_path):
+        """The in-flight half of the repair, and the important half.
+
+        A running loop whose allowance runs out mid-stream must:
+          * keep the socket it already paid for,
+          * stop dispatching HTTP entirely -- discovery AND settlement,
+          * not disarm,
+          * and say so in the receipt, separately from `stopped_by`.
+
+        This is the case probe 2 could not distinguish, because
+        acquisition ending and the run ending were the same event.
+        """
+        made = self._spying(monkeypatch, tmp_path)
+
+        class ExhaustsMidRun(FakeControlPool):
+            """Open for the first budget read, spent for every one
+            after -- which is exactly what a probe that finishes
+            enrichment looks like."""
+
+            def __init__(self):
+                super().__init__("true", budget=open_budget())
+                self.budget_reads = 0
+
+            async def fetchval(self, sql, *args):
+                key = args[0] if args else None
+                if key == ctl_mod.BUDGET_KEY:
+                    self.budget_reads += 1
+                    if self.budget_reads > 1:
+                        self.budget = open_budget(max_distinct=40,
+                                                  consumed=40)
+                return await super().fetchval(sql, *args)
+
+        pool = ExhaustsMidRun()
+        discoveries = []
+        real = bl._discover
+
+        async def counting_discover(client=None, **kw):
+            discoveries.append(kw)
+            return {"ok": True, "slugs": ["m1"], "considered": 1,
+                    "detail": [{"slug": "m1", "outcome_leg": "yes"}],
+                    "coverage": {"candidates": 6, "distinct_enriched": 3}}
+
+        monkeypatch.setattr(bl, "_discover", counting_discover)
+        monkeypatch.setattr(bl, "CONTROL_EVERY_S", 0.0, raising=False)
+        monkeypatch.setattr(ctl_mod, "CONTROL_EVERY_S", 0.0)
+        monkeypatch.setattr(bl, "DISCOVERY_EVERY_S", 0.0)
+        monkeypatch.setattr(bl, "SETTLEMENT_EVERY_S", 0.0)
+
+        settlements = []
+
+        out = asyncio.run(bl.main(store=made["store"], control_pool=pool,
+                                  run_for_s=0.25, sleep=SleepSpy()))
+        del real, settlements
+
+        assert out["started"] is True, "the run must not refuse to start"
+        # THE OBSERVATION SURVIVED the exhaustion.
+        assert out["stopped_by"] != ctl_mod.B_EXHAUSTED, (
+            "a spent allowance ended the observation; that is the defect "
+            "this repair exists to remove")
+        # THE ALLOWANCE DID NOT GROW. Exactly one discovery -- the
+        # startup one -- and none after acquisition closed.
+        assert len(discoveries) == 1, (
+            "discovery ran %d times after the allowance was spent"
+            % (len(discoveries) - 1))
+        # AND THE AUTHORIZATION IS STILL LIVE.
+        assert pool.value == "true"
+
+        r = out.get("stop_receipt") or {}
+        assert r.get("acquisition_closed") is True
+        assert r.get("acquisition_closed_at"), \
+            "the receipt must timestamp acquisition closing"
+        assert r.get("observed_after_acquisition_closed_s") is not None, \
+            "the receipt must report how long observation outlived it"
 
     def test_nothing_in_the_codebase_ever_writes_true(self):
         """Arming is a human action. `disarm` is the only writer of the
