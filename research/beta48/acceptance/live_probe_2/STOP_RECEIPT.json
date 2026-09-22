@@ -1,0 +1,80 @@
+{
+  "_source": "ingestion_state.bettor_live_stop_receipt, read via render-ops sql obs-stop-verdict, GitHub Actions run 35739916192 at 2026-09-22T14:23:05Z",
+  "_note": "Scalar fields only, each extracted verbatim by jsonb path. The full record additionally carries acquisition.telemetry.rate_limit_events (a per-refusal array) and acquisition.telemetry internals; those are summarised in RESULT.md section 3.",
+  "_running_sha": "ba870764f847e31b2704c5315ba53f7907b5c687",
+
+  "probe_id": "f72d7bac-71e9-46f4-b717-df786554e5c6",
+  "boot_id": "3ddd79c916e54190",
+  "pid": 1,
+  "host": "srv-d9gcv6urnols73ce6erg-5bb4489676-6sq6s",
+  "loop": "BETTOR_LIVE_LOOP_V3",
+  "receipt_written_at": "2026-09-22T14:16:53.297479+00:00",
+
+  "stopped_by": "BUDGET_EXHAUSTED",
+  "control_detected_at": "2026-09-22T14:16:53.152026+00:00",
+  "stop_requested_at": "2026-09-22T14:16:53.152048+00:00",
+  "socket_closed_at": "2026-09-22T14:16:53.283909+00:00",
+  "thread_exited_at": "2026-09-22T14:16:53.285212+00:00",
+  "last_request_started_at": "2026-09-22T14:16:22.894723+00:00",
+  "last_frame_at": "2026-09-22T14:16:32.106167+00:00",
+  "started_at": "2026-09-22T14:16:23.063763+00:00",
+  "stopped_at": "2026-09-22T14:16:53.152034+00:00",
+  "runtime_s": 30.088,
+
+  "shutdown_verified": true,
+  "connected_at_stop": true,
+  "active_close_exercised": true,
+  "active_close_note": null,
+
+  "transport": {
+    "shutdown": "CLOSED",
+    "closed": true,
+    "thread_started": true,
+    "thread_alive": false,
+    "socket_close_returned": true,
+    "socket_close_error": null,
+    "socket_closes": 1,
+    "close_latency_s": 0.132,
+    "connected_since": "2026-09-22T14:16:23.297120+00:00",
+    "epoch_at_stop": 1,
+    "reconnects_at_stop": 0,
+    "updates_at_stop": 14
+  },
+
+  "acquisition": {
+    "reserved": {"listing": 6, "refused": 0, "distinct": 40, "bbo_attempt": 52},
+    "reserved_total": 58,
+    "requests_started": 58,
+    "reconciles": true,
+    "observed_mean_rps": 0.1003,
+    "configured_max_rps": 0.1,
+    "max_concurrent_inflight": 1,
+    "last_request_started_at_iso": "2026-09-22T14:16:22.894723+00:00"
+  },
+
+  "frames": {"captured": 14, "wanted": 25, "received": 14, "distinct_slugs": 8},
+  "stream": {"updates": 14, "connected": false, "reconnects": 1},
+  "watching": {
+    "rule": "BETTOR_UNIVERSE_V1",
+    "rule_applied": "UNCHANGED",
+    "watched": 8,
+    "by_basis": {"OBSERVATION_ONLY": 14},
+    "refusals_observed": {"SPREAD_BELOW_MIN_TICKS": 14},
+    "observation_is_not_trading_admission": true
+  },
+  "records_written": 14,
+  "orders_submitted": 0,
+
+  "_acceptance": {
+    "total_subscription_cap_8": "HELD -- 8 subscribed, union of 0 strategy-admitted and 8 observation-only",
+    "distinct_40": "AT CAP -- 40 of 40",
+    "bbo_attempts_160": "WITHIN -- 52",
+    "listing_attempts_18": "WITHIN -- 6, and 6 dispatched pages reconcile to 6 reservations",
+    "rate_0_10_shared": "HELD -- 0.1003 observed mean, one in flight",
+    "deadline_1800s": "WITHIN -- ended at ~613s, never extended",
+    "zero_orders": "HELD -- 0",
+    "active_close_on_live_connection": "EXERCISED -- connected_at_stop true, close returned in 0.132s",
+    "acquisition_cessation": "NOT EXERCISED THIS RUN -- last request started 30.26s before the stop",
+    "operator_issued_obs_stop": "NOT EXERCISED THIS RUN -- the worker's own budget check fired first; not re-armed"
+  }
+}
