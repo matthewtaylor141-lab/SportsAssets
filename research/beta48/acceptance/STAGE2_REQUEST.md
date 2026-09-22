@@ -266,3 +266,87 @@ back.
 **Requested: approval for 2A and 2B as one package, at `88d429ed`.**
 Awaiting that, nothing is deployed, the environment stop stands, and `obs-run`
 is not set.
+
+---
+
+# STAGE 2A OUTCOME — 2026-09-22
+
+**PASSED on all three required items. `obs-run` NOT set; the budget was never
+armed** — see `STAGE2_BUDGET_GAP.md` for why 2B was stopped before arming.
+
+## Pre-deployment
+
+| Check | Result |
+|---|---|
+| Destination SHA | `691fa598` (unchanged since Stage 1) |
+| Ancestry | `691fa598` **is** an ancestor of `88d429ed`; 0 behind / 6 ahead |
+| `obs-state` | **`false`** at `01:23:40Z` (run 35675582029) |
+| Push | `691fa59..88d429e` — **fast-forward, not forced** |
+
+Environment applied **before** the deployment that loads it, five values at
+`01:21:00Z`–`01:23:19Z`, all HTTP-acknowledged:
+`BETTOR_PROBE_MAX_RPS=0.25`, `BETTOR_PROBE_CONCURRENCY=1`,
+`BETTOR_FRAME_CAPTURE_N=25`, `BETTOR_LIVE_MAX_CONTRACTS=0`,
+`BETTOR_LIVE_DISCOVERY_PAGES=6`, then `BETTOR_LIVE_LOOP=on` last.
+
+## Both services on the approved SHA
+
+| Service | SHA | Live at |
+|---|---|---|
+| sportsassets-workers | `88d429e` | `2026-09-22T01:24:52.140Z` |
+| sportsassets-api | `88d429e` | `2026-09-22T01:24:56.332Z` |
+
+## 1. The database control was read as false — FIRST PRODUCTION PROOF
+
+```
+01:25:10.176Z  INFO __main__: starting loop: bettor_live
+01:25:10.181Z  INFO bettor_live_loop: not observing
+               (STOPPED_BY_CONTROL: bare boolean false); effective config {...}
+01:25:10.181Z  INFO bettor_live_loop: not starting (STOPPED_BY_CONTROL);
+               holding 300s before the supervisor's own restart delay
+```
+
+`STOPPED_BY_CONTROL: bare boolean false` — **not** `disabled by
+BETTOR_LIVE_LOOP=off`. The environment stop was cleared and the loop was held
+by the DATABASE ROW. That is the gap the Stage 1 acceptance identified, now
+closed on production.
+
+Second refusal at `01:30:15.185Z` — **305.004 s** after the first, exactly the
+declared 300 s hold plus the supervisor's 5 s delay.
+
+## 2. No observation-related venue requests
+
+Control read and refusal are **5 ms** apart, before any client is constructed.
+Observation tables at `01:26:27Z`: `journal 0 / cursor 0 / ledger 0`, newest
+`NULL` — unchanged against the 23:40:25Z baseline. Zero listing pages, zero
+BBO reads, zero sockets.
+
+## 3. The effective configuration matches — all eight verified
+
+Render truncates log lines at ~400 characters, so the delivered line is cut at
+`"kill_env":`. Values past that point were verified by **exact-substring log
+filter** — a filter that matches proves the literal text is in the emitted
+line:
+
+| Filter matched | Verifies |
+|---|---|
+| visible in line | `max_rps 0.25`, `concurrency 1`, `frame_capture_n 25`, `max_contracts "0"`, `above_demonstrated_envelope false`, `probe_batch 120`, `rounds_at_start 2` |
+| `budget_max_distinct_default": 40` | **40 distinct** |
+| `budget_deadline_s_default": 1800.0, "budget_authority"` | **1800 s deadline**, and the no-false-claim marker |
+| `"suspend_above_s": 120.0, "discovery_pages": "6", "listing_max_retries": 2, "listing_timeout_s": 20.0, "probe_max_retries": 3` | **Retry-After suspension**, listing bounds, probe retries |
+
+Nothing missing, nothing incorrect, nothing unverifiable.
+
+## State at the end of 2A
+
+| | |
+|---|---|
+| `obs-state` | **`false`** |
+| `obs-budget` | **ROW ABSENT** — "a probe without a declared budget does not run" |
+| `live_trading_paused` | **`true`** — unchanged |
+| Observation tables | 0 / 0 / 0 |
+| Orders | 0 |
+
+Both guards are independent and both closed: with no `bettor_live_probe_state`
+row, `read_budget` returns `BUDGET_UNREADABLE` and the loop refuses **even if
+`obs-run` were set**.
