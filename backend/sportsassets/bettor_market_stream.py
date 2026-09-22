@@ -156,6 +156,25 @@ class MarketStream:
         # have bound the user's callback in place of the handler.
         self._book_cb = on_book
         self._trade_cb = on_trade
+        # THE ONE SIGNAL THAT RESOLVES SILENCE ON A CHANGE-DRIVEN FEED.
+        #
+        # `MarketMessage` is declared as
+        # `MarketData | MarketDataLite | Trade | Heartbeat |
+        # WebSocketErrorMessage`, and until now nothing listened for
+        # the fourth member. Without it, ten quiet markets and a dead
+        # socket are indistinguishable from the application side, and a
+        # research sample cannot tell "the book did not change" from
+        # "we stopped hearing anything". Registering the listener does
+        # not make heartbeats arrive -- whether they do is a fact about
+        # the venue and the SDK, so `heartbeat_registered` records
+        # whether the handler was even accepted, and `heartbeats`
+        # records whether any actually came. Neither is assumed.
+        self._heartbeat_cb = None
+        self.heartbeats = 0
+        self.last_heartbeat_at: float | None = None
+        self.last_heartbeat_at_iso: str | None = None
+        self.heartbeat_registered: bool | None = None
+        self.heartbeat_register_error: str | None = None
 
         # Stage-1 frame capture, under its own lock so recording a
         # frame never contends with a reader holding `_lock`.
@@ -634,6 +653,24 @@ class MarketStream:
             except Exception as exc:  # noqa: BLE001 -- never stop the feed
                 log.debug("book listener failed: %s", exc)
 
+    def set_heartbeat_listener(self, cb) -> None:
+        """Additive. A caller that does not ask stays exactly as before."""
+        with self._lock:
+            self._heartbeat_cb = cb
+
+    def _on_heartbeat(self, message=None) -> None:
+        now = time.time()
+        with self._lock:
+            self.heartbeats += 1
+            self.last_heartbeat_at = now
+            self.last_heartbeat_at_iso = _now_iso()
+            cb = self._heartbeat_cb
+        if cb:
+            try:
+                cb(message)
+            except Exception as exc:  # noqa: BLE001 -- never stop the feed
+                log.debug("heartbeat listener failed: %s", exc)
+
     def _on_trade(self, message: dict) -> None:
         t = (message or {}).get("trade") or {}
         slug = t.get("marketSlug")
@@ -708,6 +745,17 @@ class MarketStream:
                 ws.on("market_data", self._on_market_data)
                 ws.on("trade", self._on_trade)
                 ws.on("error", self._on_error)
+                # GUARDED, BECAUSE THE EVENT NAME IS NOT VERIFIED. The
+                # union declares Heartbeat; whether this SDK surfaces
+                # it under this name is not established, and a run must
+                # not die because a listener was refused. Both outcomes
+                # are recorded so the report can say which it was.
+                try:
+                    ws.on("heartbeat", self._on_heartbeat)
+                    self.heartbeat_registered = True
+                except Exception as exc:  # noqa: BLE001
+                    self.heartbeat_registered = False
+                    self.heartbeat_register_error = type(exc).__name__
                 ws.on("close", lambda *a: open_flag.update(v=False))
                 await ws.connect()
                 open_flag["v"] = True
@@ -870,6 +918,15 @@ def describe() -> dict:
         "sub_batch": SUB_BATCH,
         "max_subscriptions": MAX_SUBSCRIPTIONS,
         "submits_orders": False,
+        # WHETHER THE LISTENER WAS ACCEPTED AND WHETHER ANYTHING CAME
+        # ARE DIFFERENT FACTS, and a change-driven feed needs both: a
+        # registered handler that never fires leaves connection silence
+        # ambiguous, which is a reportable state rather than a failure.
+        "heartbeat": {"listener": "registered under the name 'heartbeat', "
+                                  "guarded; the SDK's event name is not "
+                                  "verified",
+                      "declared_in": "MarketMessage union",
+                      "arrival_verified": False},
         "separate_from": ("edge/venues/pmus_stream.py, which is a "
                           "protected research path and is not modified"),
         "corrections": {

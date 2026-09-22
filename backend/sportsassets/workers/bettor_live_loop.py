@@ -127,6 +127,23 @@ LOOP_VERSION = "BETTOR_LIVE_LOOP_V3"
 PROSPECTIVE = "PROSPECTIVE_SHADOW"
 KILL_ENV = "BETTOR_LIVE_LOOP"
 
+# WHICH EXPERIMENT THIS PROCESS IS RUNNING.
+#
+# Set to the path of a captured incentive manifest, `main()` delegates
+# to the incentive observation runner and NONE of the code below it
+# executes. Unset -- the default, and what every currently deployed
+# service holds -- it runs the general loop unchanged, so deploying
+# this release alters no behaviour until it is configured.
+#
+# The name is the MANIFEST PATH rather than a boolean on purpose: a
+# mode that cannot be turned on without also saying which markets it
+# will watch cannot be turned on by accident.
+_INCENTIVE_ENV = "BETTOR_INCENTIVE_MANIFEST"
+
+
+def _incentive_mode() -> bool:
+    return bool(str(os.environ.get(_INCENTIVE_ENV, "")).strip())
+
 MAX_SOURCE_AGE_S = 10.0
 MAX_RECEIPT_AGE_S = 5.0
 POLL_S = 0.2
@@ -1782,6 +1799,34 @@ async def main(*, client=None, stream_factory=None, store=None,
     if sleep is None and run_for_s is not None:
         async def sleep(_delay):        # noqa: F811 -- deliberate shadow
             return
+
+    # ── INCENTIVE OBSERVATION MODE ───────────────────────────────────
+    #
+    # ONE ENTRY POINT, TWO EXPERIMENTS. `workers/all.py` registers this
+    # loop as `bettor_live_loop.main` and calls it with no arguments,
+    # so the mode cannot be selected by a caller -- it is selected by
+    # the SERVICE'S OWN ENVIRONMENT, which is the same place the kill
+    # switch and the store backend already come from.
+    #
+    # THE DELEGATION IS FIRST AND TOTAL. It stands above the kill
+    # switch only because the incentive runner reads that switch
+    # itself, with the same semantics; everything below this point --
+    # listing, BBO enrichment, the decision engine, shadow execution,
+    # settlement polling -- is code the incentive run must NOT reach.
+    # A listing refresh alone would spend six requests against an
+    # eight-request allowance. Delegating rather than branching inside
+    # the body is what makes that structural instead of careful.
+    #
+    # UNSET IS OFF. Absent configuration runs the general loop exactly
+    # as it ran before this release, which is what makes the deployment
+    # inert until it is configured.
+    if _incentive_mode():
+        from . import bettor_incentive_observe as inc_obs
+        log.info("bettor_live_loop: delegating to %s (%s is set)",
+                 inc_obs.OBSERVE_VERSION, _INCENTIVE_ENV)
+        return await inc_obs.run(stream_factory=stream_factory,
+                                 control_pool=control_pool,
+                                 run_for_s=run_for_s, sleep=sleep)
 
     if not enabled():
         log.info("bettor_live_loop: disabled by %s=off", KILL_ENV)

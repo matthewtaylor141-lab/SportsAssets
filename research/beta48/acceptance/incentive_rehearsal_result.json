@@ -1,0 +1,290 @@
+{
+  "rehearsal": "BETTOR_INCENTIVE_REHEARSAL_V1",
+  "at": "2026-09-22T19:19:22.201683+00:00",
+  "entry_point": "bettor_live_loop.main()  [no arguments]",
+  "transport": "SIMULATED -- FakeStream; no socket, no venue byte, no credential",
+  "credentials": "invented placeholders, never dispatched",
+  "database": "local PostgreSQL 16, real ingestion_state",
+  "scenarios": [
+    {
+      "scenario": "S0 control absent",
+      "question": "does absence permit a run?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "did not start",
+          "pass": true
+        },
+        {
+          "check": "why is CONTROL_ROW_ABSENT",
+          "pass": true
+        },
+        {
+          "check": "no run row was created",
+          "pass": true
+        },
+        {
+          "check": "no journal directory was made",
+          "pass": true
+        }
+      ],
+      "why": "CONTROL_ROW_ABSENT",
+      "started": false
+    },
+    {
+      "scenario": "S1 control false",
+      "question": "does a stopped control cost anything?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "did not start",
+          "pass": true
+        },
+        {
+          "check": "why is STOPPED_BY_CONTROL",
+          "pass": true
+        },
+        {
+          "check": "no run row",
+          "pass": true
+        }
+      ],
+      "why": "STOPPED_BY_CONTROL",
+      "started": false
+    },
+    {
+      "scenario": "S2 no credentials",
+      "question": "does it degrade to a public client?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "did not start",
+          "pass": true
+        },
+        {
+          "check": "why is NO_CREDENTIALS",
+          "pass": true
+        }
+      ],
+      "why": "NO_CREDENTIALS",
+      "started": false
+    },
+    {
+      "scenario": "S3 manifest absent",
+      "question": "is an absent manifest an empty universe?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "did not start",
+          "pass": true
+        },
+        {
+          "check": "why is MANIFEST_ABSENT",
+          "pass": true
+        }
+      ],
+      "why": "MANIFEST_ABSENT",
+      "started": false
+    },
+    {
+      "scenario": "S4 nine markets",
+      "question": "does it top up from the general universe?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "did not start",
+          "pass": true
+        },
+        {
+          "check": "why is INSUFFICIENT_COVERAGE",
+          "pass": true
+        },
+        {
+          "check": "reports 9 markets against a gate of 10",
+          "pass": true
+        },
+        {
+          "check": "watched nothing at all",
+          "pass": true
+        }
+      ],
+      "why": "INSUFFICIENT_COVERAGE",
+      "started": false
+    },
+    {
+      "scenario": "S5 window ended",
+      "question": "does a past ET date still collect?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "started",
+          "pass": true
+        },
+        {
+          "check": "ended on ET_DATE_ENDED",
+          "pass": true
+        },
+        {
+          "check": "ran for under a second",
+          "pass": true
+        },
+        {
+          "check": "the socket was closed",
+          "pass": true
+        }
+      ],
+      "why": "ET_DATE_ENDED",
+      "started": true
+    },
+    {
+      "scenario": "S6 collection + DB stop",
+      "question": "does it collect, and does the row stop it?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "started",
+          "pass": true
+        },
+        {
+          "check": "watched exactly the 12 allowlisted markets",
+          "pass": true
+        },
+        {
+          "check": "ONE subscribe call, one batch, 12 slugs",
+          "pass": true
+        },
+        {
+          "check": "12 <= SUB_BATCH (100)",
+          "pass": true
+        },
+        {
+          "check": "reports 12 markets / 1 programme / 1 event",
+          "pass": true
+        },
+        {
+          "check": "independence is stated, not implied",
+          "pass": true
+        },
+        {
+          "check": "ended on STOPPED_BY_CONTROL",
+          "pass": true
+        },
+        {
+          "check": "stop landed within CONTROL_EVERY_S + poll",
+          "pass": true
+        },
+        {
+          "check": "a reconnect was seen and a new epoch opened",
+          "pass": true
+        },
+        {
+          "check": "each epoch re-established an INITIAL_LADDER",
+          "pass": true
+        },
+        {
+          "check": "LADDER, EPOCH and PROGRAM_VERSION were all persisted",
+          "pass": true
+        },
+        {
+          "check": "HTTP spend is within the eight-request cap",
+          "pass": true
+        },
+        {
+          "check": "zero listing/BBO/settlement requests were made",
+          "pass": true
+        },
+        {
+          "check": "the run row persisted the spend",
+          "pass": true
+        },
+        {
+          "check": "no orders",
+          "pass": true
+        }
+      ],
+      "why": "STOPPED_BY_CONTROL",
+      "started": true
+    },
+    {
+      "scenario": "S7 restart",
+      "question": "does a restart re-grant the allowance?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "started",
+          "pass": true
+        },
+        {
+          "check": "resumed the SAME run",
+          "pass": true
+        },
+        {
+          "check": "same run_id",
+          "pass": true
+        },
+        {
+          "check": "boot counter advanced",
+          "pass": true
+        },
+        {
+          "check": "the ledger was seeded from the row, not reset",
+          "pass": true
+        },
+        {
+          "check": "boot 2 did not get a fresh eight",
+          "pass": true
+        },
+        {
+          "check": "the cap still binds across boots",
+          "pass": true
+        },
+        {
+          "check": "the recheck sub-cap bounds repeated restarts",
+          "pass": true
+        }
+      ],
+      "why": "STOPPED_BY_CONTROL",
+      "started": true
+    },
+    {
+      "scenario": "S8 exhausted budget",
+      "question": "can a spent allowance be spent again?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "a spent ledger grants nothing",
+          "pass": true
+        },
+        {
+          "check": "listing is refused BY NAME, not merely uncalled",
+          "pass": true
+        },
+        {
+          "check": "settlement likewise",
+          "pass": true
+        }
+      ],
+      "why": null,
+      "started": null
+    },
+    {
+      "scenario": "S9 mode off",
+      "question": "is the deployment inert until configured?",
+      "pass": true,
+      "checks": [
+        {
+          "check": "unset manifest leaves incentive mode off",
+          "pass": true
+        },
+        {
+          "check": "a blank value is also off",
+          "pass": true
+        }
+      ],
+      "why": null,
+      "started": null
+    }
+  ],
+  "passed": 10,
+  "total": 10
+}
