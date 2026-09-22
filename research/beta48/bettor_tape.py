@@ -356,21 +356,30 @@ def load_books(capture_dir: str = CAPTURE):
     return dict(by_slug)
 
 
-def attach_ladders(by_slug, books=None, max_skew_s: float = 5.0):
-    """Join each BBO row to the ladder captured closest in time.
+def attach_ladders(by_slug, books=None, max_age_s: float = 60.0):
+    """CAUSAL join: every row gets the most recent ladder AT OR BEFORE
+    its own timestamp. Never a future one.
 
-    The two endpoints were polled back to back -- 30,590 BBO against
-    30,588 book responses -- so the join is near one-to-one. A row
-    whose nearest ladder is further away than `max_skew_s` gets
-    `ladder: None` and is reported, never silently filled in.
+    THE DEFECT THIS REPLACES. The first version picked the ladder
+    NEAREST in time, which is a lookahead: the book polled 2.5 s AFTER
+    a row was routinely chosen to establish the queue our order would
+    have faced 2.5 s EARLIER. For a queue at ENTRY that is exactly the
+    information an entry decision cannot have. The median skew of 2.5 s
+    made it look harmless; it is not harmless in kind, only in size.
+
+    `max_age_s` bounds staleness in the one direction that is now
+    allowed. A row with no ladder at or before it -- which every market
+    has at the very start of the capture -- gets `ladder: None` and is
+    counted, never filled in from the future.
     """
     books = load_books() if books is None else books
     stats = {"rows": 0, "joined": 0, "no_ladder": 0,
-             "max_skew_s": max_skew_s, "skews": []}
+             "no_prior_ladder": 0, "too_stale": 0,
+             "max_age_s": max_age_s, "ages": []}
     for slug, rows in by_slug.items():
         bl = books.get(slug) or []
         ts = [b["t"] for b in bl]
-        j = 0
+        j = -1
         for r in rows:
             stats["rows"] += 1
             t = r["t"]
@@ -378,28 +387,33 @@ def attach_ladders(by_slug, books=None, max_skew_s: float = 5.0):
                 r["ladder"] = None
                 stats["no_ladder"] += 1
                 continue
+            # advance to the LAST book whose timestamp is <= t
             while j + 1 < len(ts) and ts[j + 1] is not None \
-                    and abs(ts[j + 1] - t) <= abs(ts[j] - t):
+                    and ts[j + 1] <= t:
                 j += 1
-            k = j
-            # the pointer only moves forward; check the neighbour behind
-            if k > 0 and ts[k - 1] is not None and \
-                    abs(ts[k - 1] - t) < abs(ts[k] - t):
-                k -= 1
-            skew = abs((ts[k] or 0) - t)
-            if skew > max_skew_s:
+            if j < 0:
                 r["ladder"] = None
                 stats["no_ladder"] += 1
+                stats["no_prior_ladder"] += 1
                 continue
-            r["ladder"] = {"bids": bl[k]["bids"], "offers": bl[k]["offers"],
-                           "t_iso": bl[k]["t_iso"], "skew_s": round(skew, 3)}
+            age = t - (ts[j] or 0)
+            if age > max_age_s:
+                r["ladder"] = None
+                stats["no_ladder"] += 1
+                stats["too_stale"] += 1
+                continue
+            r["ladder"] = {"bids": bl[j]["bids"], "offers": bl[j]["offers"],
+                           "t_iso": bl[j]["t_iso"], "age_s": round(age, 3),
+                           "causal": True}
             stats["joined"] += 1
-            stats["skews"].append(skew)
-    sk = stats.pop("skews")
-    stats["median_skew_s"] = (round(sorted(sk)[len(sk) // 2], 3) if sk
-                              else None)
-    stats["p90_skew_s"] = (round(sorted(sk)[int(0.9 * len(sk))], 3)
-                           if sk else None)
+            stats["ages"].append(age)
+    sk = stats.pop("ages")
+    stats["median_age_s"] = (round(sorted(sk)[len(sk) // 2], 3) if sk
+                             else None)
+    stats["p90_age_s"] = (round(sorted(sk)[int(0.9 * len(sk))], 3)
+                          if sk else None)
+    stats["max_age_observed_s"] = round(max(sk), 3) if sk else None
+    stats["future_ladders_used"] = 0     # structurally impossible now
     return by_slug, stats
 
 

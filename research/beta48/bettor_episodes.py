@@ -161,13 +161,24 @@ class Policy:
     # ahead. Swept rather than asserted.
     queue_ahead_fraction: float = 1.0
 
-    # PRINT ATTRIBUTION.
-    #   LADDER_BOUNDED  volume that could have reached us is bounded by
-    #                   the quantity that actually DISAPPEARED at our
-    #                   price or better between the two ladders
-    #   ALL_AT_LAST     the old, optimistic rule: the whole interval's
-    #                   volume at the single last-trade price
-    print_attribution: str = "LADDER_BOUNDED"
+    # EXECUTION SCENARIO -- how the queue AHEAD of us is consumed.
+    #
+    # Snapshot depletion is NOT executed volume. A level can shrink
+    # because orders cancelled or repriced, and it can stay flat while
+    # executions happened underneath replenishment. So depletion is not
+    # a bound on fills in either direction, and the honest treatment is
+    # a small set of LABELLED scenarios rather than one rule:
+    #
+    #   TRADE_ONLY        only printed volume advances our queue.
+    #                     Cancellations never help us. Pessimistic.
+    #   TRADE_OR_DEPLETION  the queue advances by whichever is larger.
+    #                     Treats cancels and repricing as if they
+    #                     cleared the queue. Optimistic.
+    #   TRADE_PLUS_HALF   trades, plus half of any excess depletion.
+    #
+    # IN EVERY SCENARIO, ONLY TRADED VOLUME CAN FILL US. A cancellation
+    # ahead of us moves us up the queue; it cannot buy our contracts.
+    execution_scenario: str = "TRADE_ONLY"
 
     # RECOVERY -- what to do with unmatched inventory
     #   MAKER_THEN_TAKER  rest an exit, then cross out
@@ -276,10 +287,39 @@ class Episode:
         self.cancel_effective_from = None
         self.race_fills = 0
 
+        # ── PERSISTENT PER-ORDER QUEUE ────────────────────────────
+        #
+        # Set ONCE, from the causal ladder at entry, and thereafter only
+        # decremented. Recomputing it from each snapshot -- which the
+        # previous version did -- silently re-queued us behind every new
+        # order that arrived at our price, which is the opposite of
+        # price-time priority.
+        #
+        # Only the SAME-PRICE component persists. Quantity at a STRICTLY
+        # BETTER price is price priority, not queue position, so it is
+        # re-read every interval: a new order that betters our price
+        # really does execute ahead of us.
+        self.q_ahead_same_price = {"YES": None, "NO": None}
+        self.q_ahead_at_entry = {"YES": None, "NO": None}
+        self.queue_advance = {"YES": 0.0, "NO": 0.0}
         self.ladder_bounded_intervals = 0
         self.unbounded_intervals = 0
         self.no_ladder_intervals = 0
         self.unliquidated = 0.0
+        lad0 = row.get("ladder")
+        for leg, side, our in (("YES", "BID", self.pb),
+                               ("NO", "OFFER", self.po)):
+            if lad0:
+                at_ours = sum(q for px, q in
+                              (lad0["bids"] if side == "BID"
+                               else lad0["offers"])
+                              if abs(px - our) < 1e-9)
+                v = self.policy.queue_ahead_fraction * at_ours
+            else:
+                v = None
+            self.q_ahead_same_price[leg] = v
+            self.q_ahead_at_entry[leg] = v
+
         self.status = None
         self.end_i = None
         self.end_t = None
@@ -337,13 +377,26 @@ class Episode:
                 (ev.THETA_MAKER if maker else ev.THETA_TAKER)
                 * n * px * (1.0 - px), 8)})
 
-    def _sell(self, leg, px, n, i, row, maker, tag):
-        """Sell an owned leg (reduces the position, brings cash in)."""
+    def _sell(self, leg, px, n, i, row, maker, tag, levels=None):
+        """Sell an owned leg (reduces the position, brings cash in).
+
+        `levels` is the (price, qty) list this ONE aggressive order
+        actually swept. The published rule caps an order's total taker
+        commission at the banker's rounding of its CUMULATIVE exact
+        fee, so the cap must be applied per ORDER, across that order's
+        own fills -- never across unrelated orders. When no ladder walk
+        is available the order is treated as a single fill, which is
+        what it is.
+        """
         if n <= 0:
             return
         te = row.get("t")
-        f = (_maker_fee(px, n, self.rebates_on, te) if maker
-             else _taker_fee(px, n, te))
+        if maker:
+            f = _maker_fee(px, n, self.rebates_on, te)
+        elif levels:
+            f = ev.taker_fee_for_order(levels, at_epoch=te)
+        else:
+            f = _taker_fee(px, n, te)
         if maker:
             self.rebates_paid += f
         else:
@@ -361,73 +414,137 @@ class Episode:
                 (ev.THETA_MAKER if maker else ev.THETA_TAKER)
                 * n * px * (1.0 - px), 8)})
 
-    # ── the fill model, on REAL LADDER QUANTITIES ─────────────────────
-    def _available(self, side, prev, row, dvol, print_px):
-        """Contracts of this interval's flow that could reach OUR order.
+    def _taker_exit(self, leg, n, i, row, tag):
+        """Cross out through the ACTUAL ladder, as one aggressive order.
 
-        REBUILT. The first version used `bidDepth`/`askDepth` as the
-        queue ahead of us. Those fields are LEVEL COUNTS -- integers in
-        [0, 67] across all 30,590 bodies -- not quantities, so it
-        subtracted single digits where the real queue is tens of
-        thousands and every fill rate it produced was an upper bound.
+        Two things this does that a touch-priced exit cannot:
 
-        Three bounds now apply, and a fill needs all three:
-
-          1. DIRECTION. The print must cross our price.
-          2. LADDER CONSUMPTION. The flow that could have reached us is
-             capped by the quantity that actually DISAPPEARED at our
-             price or better between the two captured ladders. This is
-             what replaces "attribute the whole interval's volume to
-             the single last-trade price": unobserved multi-price
-             volume can no longer all be claimed as ours.
-          3. QUEUE. Everything resting STRICTLY better than us is
-             always ahead. A fraction of the quantity at our OWN price
-             is ahead too -- the fraction is a swept parameter, because
-             per-order queue position is not published by the venue and
-             is therefore NOT MEASURED.
+        * IT CAN FAIL. A 100-contract exit into a book holding 40
+          contracts fills 40 and leaves 60 UNLIQUIDATED, which then
+          rides to settlement. "Hard-flatten" is a request, not a
+          guarantee, and this is where that shows up.
+        * The levels it sweeps are ONE order, so the published
+          cumulative-rounding cap applies across them and nothing else.
         """
-        if dvol <= 0 or print_px is None:
-            return 0.0
+        lad = row.get("ladder")
+        book_side = "BID" if leg == "YES" else "OFFER"
+        if lad is None:
+            self.unliquidated += n
+            self.notes.append("no ladder at exit; %g %s UNLIQUIDATED"
+                              % (n, leg))
+            return
+        levels = lad["bids"] if book_side == "BID" else lad["offers"]
+        need, swept, cash = float(n), [], 0.0
+        for px, q in levels:
+            if need <= 1e-9:
+                break
+            take = min(need, q)
+            # our YES sale happens at the bid price; our NO sale is the
+            # mirror, at 1 - the ask we hit
+            eff = px if leg == "YES" else 1.0 - px
+            swept.append((eff, take))
+            cash += eff * take
+            need -= take
+        filled = float(n) - need
+        if filled <= 1e-9:
+            self.unliquidated += n
+            self.notes.append("empty book at exit; %g %s UNLIQUIDATED"
+                              % (n, leg))
+            return
+        if need > 1e-9:
+            self.unliquidated += need
+            self.notes.append("ladder exhausted; %g %s UNLIQUIDATED"
+                              % (need, leg))
+        f = ev.taker_fee_for_order(swept, at_epoch=row.get("t"))
+        self.taker_fees_paid += f
+        self.cash += cash + f
+        if leg == "YES":
+            self.yes -= filled
+        else:
+            self.no -= filled
+        self.fills.append({
+            "leg": leg, "px": round(cash / filled, 6), "n": -filled,
+            "maker": False, "tag": tag, "i": i, "t": row["t_iso"],
+            "fee_cash": round(f, 6),
+            "fee_per_contract": round(f / filled, 8),
+            "cash_out": -cash, "levels_swept": len(swept),
+            "raw_fee_before_rounding": round(
+                sum(ev.THETA_TAKER * q * p * (1.0 - p) for p, q in swept),
+                8)})
+
+    # ── the fill model: PERSISTENT QUEUE, LABELLED SCENARIOS ──────────
+    def _available(self, side, prev, row, dvol, print_px):
+        """Contracts of this interval's PRINTED volume that reach us.
+
+        THE TWO DEFECTS THIS REPLACES, both real:
+
+        1. The queue was recomputed from every snapshot, so any new
+           order arriving at our price re-queued us behind it. Under
+           price-time priority it should have queued BEHIND us. The
+           same-price queue now persists from entry and only shrinks.
+
+        2. Ladder depletion was used as a bound on fills. It is not
+           one: a level shrinks on cancellation and repricing too, and
+           it can stay flat while executions happen underneath
+           replenishment. Depletion now feeds only the QUEUE ADVANCE,
+           under a labelled scenario, and never fills us by itself.
+
+        ONLY TRADED VOLUME FILLS. A cancellation ahead of us moves us
+        up the queue; it cannot buy our contracts.
+        """
         our = self.pb if side == "YES" else self.po
         book_side = "BID" if side == "YES" else "OFFER"
-        if side == "YES":
-            if print_px > our + 1e-9:
-                return 0.0
-        else:
-            if print_px < our - 1e-9:
-                return 0.0
-
-        lad_a = prev.get("ladder")
-        lad_b = row.get("ladder")
-        if self.policy.print_attribution == "LADDER_BOUNDED" and lad_a:
-            before = tape.qty_at_or_better(lad_a, book_side, our) or 0.0
-            after = (tape.qty_at_or_better(lad_b, book_side, our)
-                     if lad_b else before)
-            consumed = max(0.0, before - (after or 0.0))
-            reachable = min(dvol, consumed)
-            self.ladder_bounded_intervals += 1
-        else:
-            reachable = dvol
-            self.unbounded_intervals += 1
-
-        if lad_a:
-            levels = (lad_a["bids"] if book_side == "BID"
-                      else lad_a["offers"])
-            if book_side == "BID":
-                strictly_better = sum(q for px, q in levels
-                                      if px > our + 1e-9)
-            else:
-                strictly_better = sum(q for px, q in levels
-                                      if px < our - 1e-9)
-            at_ours = sum(q for px, q in levels if abs(px - our) < 1e-9)
-            ahead = strictly_better + \
-                self.policy.queue_ahead_fraction * at_ours
-        else:
-            # NO LADDER FOR THIS ROW. Refusing the fill is the
-            # conservative choice and it is counted, not hidden.
+        lad_a, lad_b = prev.get("ladder"), row.get("ladder")
+        if lad_a is None:
             self.no_ladder_intervals += 1
             return 0.0
-        return max(0.0, reachable - ahead)
+        if self.q_ahead_same_price[side] is None:
+            self.no_ladder_intervals += 1
+            return 0.0
+
+        levels_a = lad_a["bids"] if book_side == "BID" else lad_a["offers"]
+        if book_side == "BID":
+            strictly_better = sum(q for px, q in levels_a
+                                  if px > our + 1e-9)
+        else:
+            strictly_better = sum(q for px, q in levels_a
+                                  if px < our - 1e-9)
+
+        # does the print cross our quote at all?
+        crosses = False
+        if print_px is not None and dvol > 0:
+            crosses = (print_px <= our + 1e-9) if side == "YES" \
+                else (print_px >= our - 1e-9)
+        traded = dvol if crosses else 0.0
+
+        # depletion at our price or better, between the two CAUSAL
+        # ladders. Used for queue advance only.
+        before = tape.qty_at_or_better(lad_a, book_side, our) or 0.0
+        after = (tape.qty_at_or_better(lad_b, book_side, our)
+                 if lad_b else before)
+        depletion = max(0.0, before - (after or 0.0))
+
+        sc = self.policy.execution_scenario
+        if sc == "TRADE_ONLY":
+            advance = traded
+        elif sc == "TRADE_OR_DEPLETION":
+            advance = max(traded, depletion)
+        elif sc == "TRADE_PLUS_HALF":
+            advance = traded + 0.5 * max(0.0, depletion - traded)
+        else:
+            raise ValueError("unknown execution_scenario %r" % (sc,))
+
+        # WHAT REACHES US. Price priority is re-read; queue position
+        # persists. Only `traded` can fill.
+        ahead_now = strictly_better + self.q_ahead_same_price[side]
+        filled = max(0.0, traded - ahead_now)
+
+        # the queue then advances, by the scenario's measure
+        self.q_ahead_same_price[side] = max(
+            0.0, self.q_ahead_same_price[side] - advance)
+        self.queue_advance[side] += advance
+        self.ladder_bounded_intervals += 1
+        return filled
 
     # ── the run ───────────────────────────────────────────────────────
     def run(self, rows, settlement):
@@ -456,11 +573,11 @@ class Episode:
                     matched = min(self.yes, self.no)
                     ey, en = self.yes - matched, self.no - matched
                     if ey > 0:
-                        self._sell("YES", prev["bid"], ey, i - 1, prev,
-                                   False, "FLATTEN_PRE_EXPIRY")
+                        self._taker_exit("YES", ey, i - 1, prev,
+                                         "FLATTEN_PRE_EXPIRY")
                     if en > 0:
-                        self._sell("NO", 1.0 - prev["ask"], en, i - 1,
-                                   prev, False, "FLATTEN_PRE_EXPIRY")
+                        self._taker_exit("NO", en, i - 1, prev,
+                                         "FLATTEN_PRE_EXPIRY")
                     if matched > 0:
                         self._finish_paired(prev, i - 1, settlement,
                                             FLAT_EXITED_TAKER)
@@ -561,11 +678,11 @@ class Episode:
             rec = self.policy.recovery
             if rec == "TAKER_NOW":
                 if excess_yes > 0:
-                    self._sell("YES", row["bid"], excess_yes, i, row,
-                               False, "EXIT_TAKER")
+                    self._taker_exit("YES", excess_yes, i, row,
+                                     "EXIT_TAKER")
                 if excess_no > 0:
-                    self._sell("NO", 1.0 - row["ask"], excess_no, i, row,
-                               False, "EXIT_TAKER")
+                    self._taker_exit("NO", excess_no, i, row,
+                                     "EXIT_TAKER")
                 if matched > 0:
                     self._finish_paired(row, i, settlement,
                                         FLAT_EXITED_TAKER)
@@ -652,11 +769,9 @@ class Episode:
                 matched = min(self.yes, self.no)
                 ey, en = self.yes - matched, self.no - matched
                 if ey > 0:
-                    self._sell("YES", row["bid"], ey, i, row, False,
-                               "EXIT_TAKER")
+                    self._taker_exit("YES", ey, i, row, "EXIT_TAKER")
                 if en > 0:
-                    self._sell("NO", 1.0 - row["ask"], en, i, row, False,
-                               "EXIT_TAKER")
+                    self._taker_exit("NO", en, i, row, "EXIT_TAKER")
                 if matched > 0:
                     self._finish_paired(row, i, settlement,
                                         FLAT_EXITED_TAKER)

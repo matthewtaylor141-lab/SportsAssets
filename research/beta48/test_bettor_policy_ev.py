@@ -205,6 +205,28 @@ class TestTheModuleDescribesItsOwnLimits:
             assert abs(m.fee(p, n, maker=False) - taker) < 0.011
             assert abs(m.fee(p, n, maker=True) - maker) < 0.011
 
+    def test_the_regime_boundary_is_0000_eastern_not_0359_utc(self):
+        """00:00 ET on 2026-09-17 is 04:00:00Z in EDT (UTC-4).
+
+        Both this engine and forward/fees_v2.py had 03:59Z -- one
+        minute early -- so a fill inside that minute was charged the
+        new coefficient before it applied. Tested AT the boundary and
+        one second before it.
+        """
+        b = m.REGIME_CUTOVER_EPOCH
+        assert b == 1789617600.0
+        import datetime as _dt
+        assert _dt.datetime.fromtimestamp(
+            b, _dt.timezone.utc).isoformat() == "2026-09-17T04:00:00+00:00"
+        # strictly before -> old regime, right up to the last second
+        assert m.theta_taker_at(b - 1.0) == m.THETA_TAKER_JUL2026
+        assert m.theta_taker_at(b - 0.001) == m.THETA_TAKER_JUL2026
+        # AT the boundary -> new regime
+        assert m.theta_taker_at(b) == m.THETA_TAKER_SEP2026
+        assert m.theta_taker_at(b + 0.001) == m.THETA_TAKER_SEP2026
+        # and the minute that used to be mis-charged is now the OLD one
+        assert m.theta_taker_at(b - 60.0) == m.THETA_TAKER_JUL2026
+
     def test_the_taker_regime_is_selected_by_the_fills_timestamp(self):
         """The capture straddles the cutover, so one constant is wrong
         for one side of it whichever value it takes."""

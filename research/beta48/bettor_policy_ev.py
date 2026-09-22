@@ -61,7 +61,14 @@ from dataclasses import dataclass, field
 # it takes. `fee()` selects by timestamp.
 THETA_TAKER_JUL2026 = 0.06
 THETA_TAKER_SEP2026 = 0.0695
-REGIME_CUTOVER_EPOCH = 1789617540.0        # 2026-09-17T03:59:00+00:00
+# THE BOUNDARY IS 00:00 EASTERN ON 2026-09-17, which in EDT (UTC-4) is
+# 04:00:00Z -- NOT 03:59Z. Both this file and forward/fees_v2.py had
+# 03:59, one minute early, so any fill in that minute was charged the
+# new coefficient a minute before it applied. One minute of one day is
+# a small error and it is still a wrong boundary.
+REGIME_CUTOVER_EPOCH = 1789617600.0        # 2026-09-17T04:00:00+00:00
+REGIME_CUTOVER_ISO = "2026-09-17T04:00:00+00:00"
+REGIME_CUTOVER_LOCAL = "2026-09-17 00:00 America/New_York (EDT, UTC-4)"
 THETA_TAKER = THETA_TAKER_SEP2026          # the current regime
 THETA_MAKER = -0.0125                      # unchanged across both
 FEE_EFFECTIVE_FROM = "2026-09-17"
@@ -72,6 +79,7 @@ def theta_taker_at(at_epoch=None) -> float:
     """The taker coefficient in force at `at_epoch` (None = current)."""
     if at_epoch is None:
         return THETA_TAKER_SEP2026
+    # AT the boundary is the NEW regime; strictly before it is the old.
     return (THETA_TAKER_SEP2026 if at_epoch >= REGIME_CUTOVER_EPOCH
             else THETA_TAKER_JUL2026)
 
