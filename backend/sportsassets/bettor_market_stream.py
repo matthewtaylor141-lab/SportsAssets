@@ -259,6 +259,16 @@ class MarketStream:
                 self.stop_requested_at = time.time()
                 self.stop_requested_at_iso = _now_iso()
             asked = self.stop_requested_at
+            # READ BEFORE THE FLAG IS SET. Once `_stop` is true the
+            # thread tears the connection down, so a read taken after
+            # it would describe the shutdown rather than the state the
+            # shutdown found. This is the only moment at which "was
+            # there a live connection to close" can be answered.
+            connected_at_stop = self.connected
+            connected_since = self.connected_since
+            epoch_at_stop = self.epoch
+            reconnects_at_stop = self.reconnects
+            updates_at_stop = self.updates
         self._stop = True
         t = self._thread
         if wait_s and t is not None and t.is_alive():
@@ -302,6 +312,27 @@ class MarketStream:
                 "waited_s": float(wait_s),
                 "epoch": self.epoch,
                 "updates": self.updates,
+
+                # ── WAS THERE A LIVE CONNECTION TO CLOSE? ──────────
+                #
+                # `ws.close()` returns cleanly on a socket that had
+                # already dropped -- the reconnect loop holds the `ws`
+                # object across a disconnect -- so a CLOSED verdict is
+                # NOT by itself evidence that an open connection was
+                # shut. These say what the stop actually found.
+                "connected_at_stop": connected_at_stop,
+                "connected_since": connected_since,
+                "epoch_at_stop": epoch_at_stop,
+                "reconnects_at_stop": reconnects_at_stop,
+                "updates_at_stop": updates_at_stop,
+                # THE ONLY FIELD THAT LICENSES AN ACTIVE-CLOSE CLAIM.
+                "active_close_exercised": bool(
+                    connected_at_stop and verdict == self.SHUT_CLOSED),
+                "active_close_note": (
+                    None if connected_at_stop
+                    else "NOT EXERCISED -- the connection was already "
+                         "down when the stop was issued; any close "
+                         "recorded here closed nothing live"),
             }
         return out
 

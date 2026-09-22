@@ -16,8 +16,19 @@ REPO="$(cd "$(dirname "$0")/.." && pwd)"
 DSN="${1:-postgresql://root:imgcheck@127.0.0.1:5432/bettor_lifecycle}"
 DB="$(printf '%s' "$DSN" | sed 's#.*/##')"
 IMG="bettor-lifecycle:$(cd "$REPO" && git rev-parse --short HEAD)"
-OUT="${BETTOR_LIFECYCLE_OUT:-$REPO/research/beta48/acceptance/lifecycle}"
+# ONE DIRECTORY PER RUN. Sharing a flat directory meant an interrupted
+# run left the previous run's phase files sitting beside the new ones
+# with nothing to tell them apart -- see the manifest written at the
+# end, which is what makes a run's results identifiable as a set.
+SHA="$(cd "$REPO" && git rev-parse HEAD)"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+DIRTY="$(cd "$REPO" && git status --porcelain | wc -l)"
+BASE="${BETTOR_LIFECYCLE_OUT:-$REPO/research/beta48/acceptance/lifecycle}"
+OUT="$BASE/run_${SHA:0:7}_${RUN_ID}"
 mkdir -p "$OUT"
+echo "run  $RUN_ID"
+echo "sha  $SHA  (working tree: $DIRTY modified paths)"
+echo "out  $OUT"
 
 say() { printf '\n\033[1m== %s ==\033[0m\n' "$*"; }
 run() { docker run --rm --network=host -w /app \
@@ -76,6 +87,37 @@ say "RESULT"
 TOTAL=$(grep -ho '^\s*\[PASS\]' "$OUT"/L*.txt 2>/dev/null | wc -l)
 BAD=$(grep -ho '^\s*\[FAIL\]' "$OUT"/L*.txt 2>/dev/null | wc -l)
 echo "checks passed: $TOTAL    checks failed: $BAD"
+
+# THE MANIFEST IS WRITTEN LAST, ON PURPOSE. Its presence is what marks
+# a run as complete; a directory without one was interrupted, and no
+# reader has to infer that from timestamps.
+{
+  printf '{\n'
+  printf '  "run_id": "%s",\n' "$RUN_ID"
+  printf '  "sha": "%s",\n' "$SHA"
+  printf '  "working_tree_modified_paths": %s,\n' "$DIRTY"
+  printf '  "image": "%s",\n' "$IMG"
+  printf '  "image_id": "%s",\n' "$IMAGE_ID"
+  printf '  "dsn_database": "%s",\n' "$DB"
+  printf '  "checks_passed": %s,\n' "$TOTAL"
+  printf '  "checks_failed": %s,\n' "$BAD"
+  printf '  "phases_failed": "%s",\n' "${FAILED[*]}"
+  printf '  "phases": {\n'
+  SEP=""
+  for f in "$OUT"/L*.txt; do
+    [ -e "$f" ] || continue
+    n="$(basename "$f" .txt)"
+    p=$(grep -c '^\s*\[PASS\]' "$f" 2>/dev/null || echo 0)
+    b=$(grep -c '^\s*\[FAIL\]' "$f" 2>/dev/null || echo 0)
+    printf '%s    "%s": {"pass": %s, "fail": %s}' "$SEP" "$n" "$p" "$b"
+    SEP=",\n"
+  done
+  printf '\n  },\n'
+  printf '  "transport": "SIMULATED -- not a live venue connection"\n'
+  printf '}\n'
+} > "$OUT/manifest.json"
+echo "manifest: $OUT/manifest.json"
+
 if [ ${#FAILED[@]} -ne 0 ]; then
   echo "PHASES FAILED: ${FAILED[*]}"
   exit 1

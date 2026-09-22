@@ -2634,6 +2634,94 @@ class TestTheShutdownIsMeasuredNotInferred:
         s._on_market_data(md("m1", source_ts=fresh(-1)))
         assert s.stats()["last_frame_at_iso"] is not None
 
+    def test_a_close_after_a_prior_disconnect_is_NOT_an_active_close(self):
+        """THE CORRECTION.
+
+        `ws.close()` returns cleanly on a socket that had ALREADY
+        dropped -- the reconnect loop holds the `ws` object across a
+        disconnect -- so a CLOSED verdict can follow a disconnect that
+        happened minutes earlier. An unchanged epoch does not rule it
+        out either: the epoch advances on a successful RECONNECT, so a
+        socket that dropped and never came back leaves the epoch
+        exactly where it was.
+        """
+        s = ms.MarketStream("k", "s", autostart=False)
+        s._thread = type("Dead", (), {"is_alive": lambda self: False})()
+        s.connected = False                  # already down
+        s.epoch = 1                          # and the epoch never moved
+        s.stop_requested_at = time.time() - 1.0
+        s.stop_requested_at_iso = "t0"
+        s.socket_closed_at = time.time()
+        s.socket_closed_at_iso = "t1"
+        s.socket_close_ok = True
+        rec = s.stop(wait_s=0.0)
+        # The close itself is recorded honestly...
+        assert rec["shutdown"] == ms.MarketStream.SHUT_CLOSED
+        assert rec["closed"] is True
+        # ...and licenses NO active-close claim.
+        assert rec["connected_at_stop"] is False
+        assert rec["active_close_exercised"] is False
+        assert "NOT EXERCISED" in rec["active_close_note"]
+
+    def test_an_active_close_requires_a_live_connection(self):
+        s = ms.MarketStream("k", "s", autostart=False)
+        s._thread = type("Dead", (), {"is_alive": lambda self: False})()
+        s.connected = True
+        s.connected_since = "2026-09-22T12:00:00+00:00"
+        s.epoch = 3
+        s.reconnects = 2
+        s.stop_requested_at = time.time() - 1.0
+        s.stop_requested_at_iso = "t0"
+        s.socket_closed_at = time.time()
+        s.socket_closed_at_iso = "t1"
+        s.socket_close_ok = True
+        rec = s.stop(wait_s=0.0)
+        assert rec["active_close_exercised"] is True
+        assert rec["active_close_note"] is None
+        assert rec["connected_at_stop"] is True
+        assert rec["epoch_at_stop"] == 3
+        assert rec["reconnects_at_stop"] == 2
+        assert rec["connected_since"] == "2026-09-22T12:00:00+00:00"
+
+    def test_connection_state_is_read_BEFORE_the_stop_flag_is_set(self):
+        """Once `_stop` is true the thread tears the connection down, so
+        a read taken after it would describe the shutdown rather than
+        the state the shutdown found."""
+        s = ms.MarketStream("k", "s", autostart=False)
+        s.connected = True
+        seen = {}
+
+        real = ms.MarketStream.__dict__["stop"]
+
+        class Spy(ms.MarketStream):
+            pass
+
+        # Flip `connected` to False the instant `_stop` is written, the
+        # way the socket thread would.
+        class _Flag:
+            def __set__(self, obj, value):
+                obj.__dict__["_stop"] = value
+                if value:
+                    obj.__dict__["connected"] = False
+
+            def __get__(self, obj, owner=None):
+                return obj.__dict__.get("_stop", False)
+
+        Spy._stop = _Flag()
+        s.__class__ = Spy
+        rec = real(s, wait_s=0.0)
+        seen["connected_at_stop"] = rec["connected_at_stop"]
+        # If the read happened after the flag, this would be False.
+        assert seen["connected_at_stop"] is True
+        assert s.connected is False, "the flag did not take effect"
+
+    def test_a_never_started_stream_exercises_no_active_close(self):
+        s = ms.MarketStream("k", "s", autostart=False)
+        rec = s.stop(wait_s=0.0)
+        assert rec["shutdown"] == ms.MarketStream.SHUT_NEVER_STARTED
+        assert rec["active_close_exercised"] is False
+        assert "NOT EXERCISED" in rec["active_close_note"]
+
     def test_stats_keeps_socket_close_and_thread_exit_apart(self):
         s = ms.MarketStream("k", "s", autostart=False)
         s.stop(wait_s=0.0)

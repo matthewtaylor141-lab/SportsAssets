@@ -2298,6 +2298,15 @@ async def main(*, client=None, stream_factory=None, store=None,
             # not a slow success.
             "transport": shut,
             "shutdown_verified": bool(shut.get("closed")),
+            # WAS THERE A LIVE CONNECTION TO CLOSE? A clean close() can
+            # follow a disconnect that happened minutes earlier -- the
+            # reconnect loop holds the ws object across a drop -- so a
+            # CLOSED verdict alone licenses no active-close claim. This
+            # is the field that does.
+            "connected_at_stop": shut.get("connected_at_stop"),
+            "active_close_exercised": bool(
+                shut.get("active_close_exercised")),
+            "active_close_note": shut.get("active_close_note"),
 
             # ── ACQUISITION ─────────────────────────────────────────
             #
@@ -2322,6 +2331,11 @@ async def main(*, client=None, stream_factory=None, store=None,
             log.error("bettor_live_loop: SHUTDOWN NOT VERIFIED (%s); "
                       "the socket close was not observed to complete",
                       shut.get("shutdown"))
+        elif not shut.get("active_close_exercised"):
+            log.warning("bettor_live_loop: the socket closed, but the "
+                        "connection was ALREADY DOWN when the stop was "
+                        "issued -- the active-close test is NOT "
+                        "EXERCISED by this run")
         log.info("bettor_live_loop: stopped (%s); transport %s; "
                  "%d records written, %d persist failures",
                  stop_reason, json.dumps(shut, default=str),
