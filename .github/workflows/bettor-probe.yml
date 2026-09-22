@@ -1,0 +1,306 @@
+# ONE BOUNDED OBSERVATION PROBE, AS ONE OPERATION.
+#
+# Everything the probe needs -- preflight, archive, arm, run, watch,
+# stop, verify shutdown, preserve the result -- happens in this single
+# dispatch. It replaces a sequence of separate render-ops calls, each of
+# which was a chance to arm twice, to skip the readback, or to leave the
+# control ON after a failure.
+#
+# WHAT IT CANNOT DO, BY CONSTRUCTION
+#   * it never re-arms: obs-arm runs exactly once, and only after the
+#     preflight has passed and the previous probe has been archived;
+#   * it never replenishes or extends: the allowance row is written once
+#     and only ever read afterwards;
+#   * it never enables trading: it asserts live_trading_paused is true
+#     before arming and again at the end, and writes no trading key;
+#   * it always stops: obs-stop runs in an `if: always()` step, so a
+#     cancelled or failed run still disarms the control.
+#
+# The limits below are the approved ones and are written into the
+# allowance row, which is the only authority the worker reads.
+name: bettor-probe
+
+on:
+  workflow_dispatch:
+    inputs:
+      expect_sha:
+        description: 'The exact commit the workers service must be running'
+        required: true
+        type: string
+      confirm:
+        description: 'Type ARM to allow this to arm and run a probe'
+        required: true
+        default: ''
+        type: string
+      evidence_rows:
+        description: 'Stop once this many fresh journal rows exist (default 200)'
+        required: false
+        default: '200'
+        type: string
+      max_watch_minutes:
+        description: 'Give up watching after this long (default 32, cap 35)'
+        required: false
+        default: '32'
+        type: string
+      render_key:
+        description: 'Render API key (only if the RENDER_API_KEY secret is unset)'
+        required: false
+        default: ''
+
+concurrency:
+  # ONE PROBE AT A TIME, EVER. A second dispatch waits; it does not run
+  # beside the first and arm over its allowance.
+  group: bettor-probe
+  cancel-in-progress: false
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Run one bounded observation probe
+        id: probe
+        shell: bash
+        env:
+          EXPECT_SHA: ${{ inputs.expect_sha }}
+          CONFIRM: ${{ inputs.confirm }}
+          EVIDENCE_ROWS: ${{ inputs.evidence_rows }}
+          MAX_WATCH: ${{ inputs.max_watch_minutes }}
+          KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          set -uo pipefail
+          KEY_INPUT="$(jq -r '.inputs.render_key // empty' "$GITHUB_EVENT_PATH")"
+          [ -n "$KEY_INPUT" ] && echo "::add-mask::$KEY_INPUT"
+          KEY="$KEY_SECRET"; [ -z "$KEY" ] && KEY="$KEY_INPUT"
+          [ -z "$KEY" ] && { echo "no Render key"; exit 1; }
+          echo "::add-mask::$KEY"
+          API=https://api.render.com/v1
+          OUT="$GITHUB_WORKSPACE/probe-artifacts"; mkdir -p "$OUT"
+
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" \
+                       -H "Accept: application/json" "$API$1"; }
+          fail() { echo "PREFLIGHT FAILED: $*"; echo "verdict=PREFLIGHT_FAILED" >> "$GITHUB_OUTPUT"; exit 1; }
+
+          [ "$CONFIRM" = "ARM" ] || fail "confirm must be ARM (got '$CONFIRM')"
+          case "$EXPECT_SHA" in
+            ????????????????????????????????????????) : ;;
+            *) fail "expect_sha must be a full 40-character commit" ;;
+          esac
+          W=$(( MAX_WATCH )); [ "$W" -gt 35 ] && W=35; [ "$W" -lt 1 ] && W=1
+
+          command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; \
+            sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+
+          PG=$(get "/postgres?name=sportsassets-db&limit=20" \
+               | jq -r '.[]? | select(.postgres.name=="sportsassets-db") | .postgres.id' | head -1)
+          [ -n "$PG" ] || fail "no database named sportsassets-db"
+          get "/postgres/$PG/connection-info" > /tmp/ci.json
+          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
+          PW=$(jq -r '.password // empty' /tmp/ci.json)
+          [ -n "$PW" ] && echo "::add-mask::$PW"
+          [ -n "$EXT" ] && echo "::add-mask::$EXT" || fail "no connection string"
+          q() { PGOPTIONS='-c statement_timeout=30000' timeout 90 psql "$EXT" -X -A -t \
+                  -v ON_ERROR_STOP=1 -c "$1" 2>&1 | grep -v -F "$PW"; }
+
+          echo "=============================================================="
+          echo "1. PREFLIGHT -- nothing is armed until every line below passes"
+          echo "=============================================================="
+
+          for S in sportsassets-workers sportsassets-api; do
+            ID=$(get "/services?name=$S&limit=20" | jq -r --arg n "$S" \
+                 '.[]? | select(.service.name==$n) | .service.id' | head -1)
+            [ -n "$ID" ] || fail "no service named $S"
+            LIVE=$(get "/services/$ID/deploys?limit=20" \
+                   | jq -r '[.[]?.deploy | select(.status=="live")][0].commit.id // empty')
+            echo "  $S running $LIVE"
+            [ "$LIVE" = "$EXPECT_SHA" ] || fail "$S is on $LIVE, expected $EXPECT_SHA"
+            [ "$S" = "sportsassets-workers" ] && WORKERS_ID="$ID"
+          done
+
+          # The operator flags that BOUND this probe, read from the service
+          # itself. These are non-secret operational knobs, not credentials.
+          get "/services/$WORKERS_ID/env-vars?limit=200" > /tmp/env.json
+          ev() { jq -r --arg k "$1" '.[]? | .envVar | select(.key==$k) | .value' /tmp/env.json | head -1; }
+          for PAIR in "BETTOR_LIVE_MAX_CONTRACTS=0" "BETTOR_PROBE_MAX_RPS=0.25" \
+                      "BETTOR_PROBE_CONCURRENCY=1" "BETTOR_FRAME_CAPTURE_N=25"; do
+            K="${PAIR%%=*}"; WANT="${PAIR#*=}"; GOT="$(ev "$K")"
+            echo "  $K = ${GOT:-<unset>}  (want $WANT)"
+            [ "$GOT" = "$WANT" ] || fail "$K is '${GOT:-unset}', expected $WANT"
+          done
+          # credential AVAILABILITY only -- never the value, never a hash
+          for K in PMUS_KEY_ID PMUS_SECRET_KEY; do
+            n=$(ev "$K" | wc -c)
+            [ "$n" -gt 1 ] || fail "$K is not set on the workers service"
+            echo "  $K present (value never read, printed or logged)"
+          done
+
+          OBS=$(q "SELECT coalesce((SELECT value::text FROM ingestion_state WHERE key='bettor_live_observation'),'absent')")
+          PAUSE=$(q "SELECT coalesce((SELECT value::text FROM ingestion_state WHERE key='live_trading_paused'),'absent')")
+          echo "  obs-state=$OBS  live_trading_paused=$PAUSE"
+          [ "$OBS" = "false" ] || [ "$OBS" = "absent" ] || fail "observation is not stopped (obs-state=$OBS)"
+          [ "$PAUSE" = "true" ] || fail "live_trading_paused is '$PAUSE', refusing to run"
+
+          echo "=============================================================="
+          echo "2. ARCHIVE THE PREVIOUS PROBE -- obs-arm REPLACES the row"
+          echo "=============================================================="
+          PREV=$(q "SELECT coalesce((SELECT value::text FROM ingestion_state WHERE key='bettor_live_probe_state'),'null')")
+          PREV_ID=$(printf '%s' "$PREV" | jq -r '.probe_id // "none"' 2>/dev/null || echo none)
+          printf '%s\n' "$PREV" > "$OUT/previous_probe_row.json"
+          echo "  archived previous probe: $PREV_ID"
+          echo "  -> probe-artifacts/previous_probe_row.json (uploaded below)"
+          [ -s "$OUT/previous_probe_row.json" ] || fail "the archive is empty; refusing to overwrite the row"
+
+          echo "=============================================================="
+          echo "3. ARM ONCE, AND READ THE ROW BACK BEFORE ANYTHING RUNS"
+          echo "=============================================================="
+          q "INSERT INTO ingestion_state (key, value) VALUES ('bettor_live_probe_state',
+               jsonb_build_object(
+                 'probe_id', gen_random_uuid()::text,
+                 'started_at',  to_char(now() AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'),
+                 'deadline_at', to_char((now() + interval '1800 seconds') AT TIME ZONE 'UTC','YYYY-MM-DD\"T\"HH24:MI:SS+00:00'),
+                 'max_distinct', 40, 'max_bbo_attempts', 160, 'max_listing_attempts', 18,
+                 'distinct_reserved', 0, 'bbo_attempts_reserved', 0, 'listing_attempts_reserved', 0,
+                 'slugs', '[]'::jsonb))
+             ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value" > /dev/null || fail "arm failed"
+          ROW=$(q "SELECT value::text FROM ingestion_state WHERE key='bettor_live_probe_state'")
+          printf '%s\n' "$ROW" | jq . | tee "$OUT/armed_row.json"
+          PID=$(printf '%s' "$ROW" | jq -r .probe_id)
+          [ "$PID" != "$PREV_ID" ] || fail "the new identity equals the old one"
+          for F in distinct_reserved bbo_attempts_reserved listing_attempts_reserved; do
+            V=$(printf '%s' "$ROW" | jq -r ".$F")
+            [ "$V" = "0" ] || fail "$F read back as $V, not 0"
+          done
+          for F in "max_distinct=40" "max_bbo_attempts=160" "max_listing_attempts=18"; do
+            K="${F%%=*}"; WANT="${F#*=}"
+            V=$(printf '%s' "$ROW" | jq -r ".$K")
+            [ "$V" = "$WANT" ] || fail "$K read back as $V, not $WANT"
+          done
+          DEADLINE=$(printf '%s' "$ROW" | jq -r .deadline_at)
+          echo "  identity $PID  deadline $DEADLINE  counters 0/0/0  caps 40/160/18"
+
+          echo "=============================================================="
+          echo "4. RUN, AND WATCH THE COUNTERS THE WORKER ACTUALLY MOVES"
+          echo "=============================================================="
+          J0=$(q "SELECT count(*) FROM bettor_live_journal")
+          echo "  journal rows before: $J0"
+          q "INSERT INTO ingestion_state (key, value) VALUES ('bettor_live_observation','true'::jsonb)
+             ON CONFLICT (key) DO UPDATE SET value='true'::jsonb" > /dev/null || fail "obs-run failed"
+          echo "  obs-run at $(date -u +%FT%TZ)"
+          echo "armed=1" >> "$GITHUB_OUTPUT"
+
+          WANT_ROWS=$(( EVIDENCE_ROWS ))
+          DEADLINE_EPOCH=$(date -u -d "$DEADLINE" +%s 2>/dev/null || echo 0)
+          STOP_WHY="watch_expired"
+          END=$(( $(date -u +%s) + W * 60 ))
+          while :; do
+            NOW=$(date -u +%s)
+            [ "$NOW" -ge "$END" ] && { STOP_WHY="watch_expired"; break; }
+            if [ "$DEADLINE_EPOCH" -gt 0 ] && [ "$NOW" -ge "$DEADLINE_EPOCH" ]; then
+              STOP_WHY="probe_deadline"; break
+            fi
+            B=$(q "SELECT coalesce((SELECT value::text FROM ingestion_state WHERE key='bettor_live_probe_state'),'null')")
+            J=$(q "SELECT count(*) FROM bettor_live_journal")
+            C=$(q "SELECT coalesce((SELECT value::text FROM ingestion_state WHERE key='bettor_live_observation'),'absent')")
+            D=$(printf '%s' "$B" | jq -r '.distinct_reserved // "?"')
+            A=$(printf '%s' "$B" | jq -r '.bbo_attempts_reserved // "?"')
+            L=$(printf '%s' "$B" | jq -r '.listing_attempts_reserved // "?"')
+            echo "  $(date -u +%H:%M:%S)  listing=$L distinct=$D attempts=$A  journal=$J  control=$C"
+            [ "$C" = "false" ] && { STOP_WHY="worker_disarmed_itself"; break; }
+            [ "$(( J - J0 ))" -ge "$WANT_ROWS" ] && { STOP_WHY="useful_evidence"; break; }
+            sleep 30
+          done
+          echo "  watch ended: $STOP_WHY"
+          echo "stop_why=$STOP_WHY" >> "$GITHUB_OUTPUT"
+
+          echo "=============================================================="
+          echo "5. STOP, AND VERIFY THE SHUTDOWN RATHER THAN ASSUME IT"
+          echo "=============================================================="
+          B_AT_STOP=$(q "SELECT value::text FROM ingestion_state WHERE key='bettor_live_probe_state'")
+          J_AT_STOP=$(q "SELECT count(*) FROM bettor_live_journal")
+          T_STOP=$(date -u +%s)
+          q "INSERT INTO ingestion_state (key, value) VALUES ('bettor_live_observation','false'::jsonb)
+             ON CONFLICT (key) DO UPDATE SET value='false'::jsonb" > /dev/null
+          echo "  obs-stop at $(date -u +%FT%TZ)"
+          # ACQUISITION MUST STOP WITHIN 58 s: the worker re-reads the control
+          # every 30 s, and the supervisor adds at most a 5 s restart delay.
+          sleep 58
+          B_58=$(q "SELECT value::text FROM ingestion_state WHERE key='bettor_live_probe_state'")
+          sleep 32                              # 90 s total for the transport
+          B_90=$(q "SELECT value::text FROM ingestion_state WHERE key='bettor_live_probe_state'")
+          J_90=$(q "SELECT count(*) FROM bettor_live_journal")
+          d58=$(printf '%s' "$B_58" | jq -r .bbo_attempts_reserved)
+          d90=$(printf '%s' "$B_90" | jq -r .bbo_attempts_reserved)
+          echo "  attempts at stop / +58s / +90s: $(printf '%s' "$B_AT_STOP" | jq -r .bbo_attempts_reserved) / $d58 / $d90"
+          SHUTDOWN=OK
+          [ "$d58" = "$d90" ] || SHUTDOWN="STILL_ACQUIRING_AFTER_90s"
+          echo "  shutdown: $SHUTDOWN"
+
+          echo "=============================================================="
+          echo "6. THE RESULT"
+          echo "=============================================================="
+          FINAL=$(q "SELECT value::text FROM ingestion_state WHERE key='bettor_live_probe_state'")
+          OBS_END=$(q "SELECT coalesce((SELECT value::text FROM ingestion_state WHERE key='bettor_live_observation'),'absent')")
+          PAUSE_END=$(q "SELECT coalesce((SELECT value::text FROM ingestion_state WHERE key='live_trading_paused'),'absent')")
+          ROWS=$(q "SELECT 'journal='||count(*) FROM bettor_live_journal")
+          FRESH=$(( J_90 - J0 ))
+          printf '%s\n' "$FINAL" | jq . > "$OUT/final_row.json"
+          q "SELECT json_agg(t)::text FROM (SELECT status, record->>'evidence_class' AS evidence_class,
+                 record->>'venue_state' AS venue_state, count(*) AS n
+               FROM bettor_live_journal GROUP BY 1,2,3 ORDER BY n DESC LIMIT 40) t" \
+             > "$OUT/decision_breakdown.json"
+          q "SELECT json_agg(t)::text FROM (SELECT record->'stream' AS stream,
+                 record->'frames' AS frames FROM bettor_live_journal
+               ORDER BY id DESC LIMIT 1) t" > "$OUT/last_stream_report.json" || true
+          {
+            echo "probe_id=$PID"
+            echo "deadline=$DEADLINE"
+            echo "stop_why=$STOP_WHY"
+            echo "shutdown=$SHUTDOWN"
+            echo "fresh_journal_rows=$FRESH"
+            echo "obs_state_at_end=$OBS_END"
+            echo "live_trading_paused_at_end=$PAUSE_END"
+            echo "final_row=$FINAL"
+          } | tee "$OUT/summary.txt"
+          [ "$OBS_END" = "false" ] || { echo "REFUSING TO REPORT SUCCESS: the control is '$OBS_END'"; exit 1; }
+          [ "$PAUSE_END" = "true" ] || { echo "TRADING PAUSE CHANGED DURING THE RUN"; exit 1; }
+          [ "$SHUTDOWN" = "OK" ] || exit 1
+          echo "verdict=COMPLETE" >> "$GITHUB_OUTPUT"
+
+      - name: Always stop observation, whatever happened above
+        if: always()
+        shell: bash
+        env:
+          KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          set -uo pipefail
+          KEY_INPUT="$(jq -r '.inputs.render_key // empty' "$GITHUB_EVENT_PATH")"
+          KEY="$KEY_SECRET"; [ -z "$KEY" ] && KEY="$KEY_INPUT"
+          [ -z "$KEY" ] && { echo "no key; cannot confirm the stop"; exit 1; }
+          echo "::add-mask::$KEY"
+          API=https://api.render.com/v1
+          PG=$(curl -sS -H "Authorization: Bearer $KEY" -H "Accept: application/json" \
+               "$API/postgres?name=sportsassets-db&limit=20" \
+               | jq -r '.[]? | select(.postgres.name=="sportsassets-db") | .postgres.id' | head -1)
+          curl -sS -H "Authorization: Bearer $KEY" -H "Accept: application/json" \
+               "$API/postgres/$PG/connection-info" > /tmp/ci.json
+          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
+          PW=$(jq -r '.password // empty' /tmp/ci.json)
+          [ -n "$PW" ] && echo "::add-mask::$PW"; [ -n "$EXT" ] && echo "::add-mask::$EXT"
+          command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; \
+            sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+          psql "$EXT" -X -A -t -v ON_ERROR_STOP=1 -c \
+            "INSERT INTO ingestion_state (key, value) VALUES ('bettor_live_observation','false'::jsonb)
+             ON CONFLICT (key) DO UPDATE SET value='false'::jsonb;
+             SELECT 'obs-state now '||value::text FROM ingestion_state
+             WHERE key='bettor_live_observation';" 2>&1 | grep -v -F "$PW"
+
+      - name: Preserve the result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: bettor-probe-${{ github.run_id }}
+          path: probe-artifacts/
+          if-no-files-found: warn
+          retention-days: 90

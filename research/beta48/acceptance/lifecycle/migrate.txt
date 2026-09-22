@@ -1,0 +1,104 @@
+/app/sportsassets/workers/premap.py:118: SyntaxWarning: invalid escape sequence '\d'
+  Only \d+\.5 was matched before, so a whole-number line ('-3', 'O/U
+2026-09-22 09:26:55,405 INFO sportsassets.scripts.migrate: applying 001_init.sql
+2026-09-22 09:26:55,455 INFO sportsassets.scripts.migrate: applying 002_api_positions.sql
+2026-09-22 09:26:55,461 INFO sportsassets.scripts.migrate: applying 003_backfill_source.sql
+2026-09-22 09:26:55,464 INFO sportsassets.scripts.migrate: applying 004_engine_fills.sql
+2026-09-22 09:26:55,470 INFO sportsassets.scripts.migrate: applying 005_copy_probes.sql
+2026-09-22 09:26:55,476 INFO sportsassets.scripts.migrate: applying 006_ai_trades.sql
+2026-09-22 09:26:55,483 INFO sportsassets.scripts.migrate: applying 007_live_orders.sql
+2026-09-22 09:26:55,491 INFO sportsassets.scripts.migrate: applying 008_live_orders_venue.sql
+2026-09-22 09:26:55,493 INFO sportsassets.scripts.migrate: applying 009_trades_detected_idx.sql
+2026-09-22 09:26:55,496 INFO sportsassets.scripts.migrate: applying 010_outbox_kinds.sql
+2026-09-22 09:26:55,497 INFO sportsassets.scripts.migrate: applying 011_one_copy_per_asset.sql
+2026-09-22 09:26:55,500 INFO sportsassets.scripts.migrate: applying 012_seed_copy_portfolio_whales.sql
+2026-09-22 09:26:55,502 INFO sportsassets.scripts.migrate: applying 013_kalshi_claims.sql
+2026-09-22 09:26:55,506 INFO sportsassets.scripts.migrate: applying 014_manual_trade_desk.sql
+2026-09-22 09:26:55,509 INFO sportsassets.scripts.migrate: applying 015_manual_kalshi_queue.sql
+2026-09-22 09:26:55,514 INFO sportsassets.scripts.migrate: applying 016_underdog_sleeve.sql
+2026-09-22 09:26:55,518 INFO sportsassets.scripts.migrate: applying 017_kud_queue.sql
+2026-09-22 09:26:55,525 INFO sportsassets.scripts.migrate: applying 018_kud_queue_start.sql
+2026-09-22 09:26:55,528 INFO sportsassets.scripts.migrate: applying 019_pin_whale_0x2c33.sql
+2026-09-22 09:26:55,530 INFO sportsassets.scripts.migrate: applying 020_venue_truth_days.sql
+2026-09-22 09:26:55,536 INFO sportsassets.scripts.migrate: applying 021_seed_dossier_promotions.sql
+2026-09-22 09:26:55,538 INFO sportsassets.scripts.migrate: applying 022_seed_crypto_whales.sql
+2026-09-22 09:26:55,540 INFO sportsassets.scripts.migrate: applying 023_manual_inflight_unique.sql
+2026-09-22 09:26:55,543 INFO sportsassets.scripts.migrate: applying 024_hotpath_indexes_jarvis_notes.sql
+2026-09-22 09:26:55,551 INFO sportsassets.scripts.migrate: applying 025_meridian_journal.sql
+2026-09-22 09:26:55,557 INFO sportsassets.scripts.migrate: applying 026_meridian_exchange.sql
+2026-09-22 09:26:55,563 INFO sportsassets.scripts.migrate: applying 027_desk_sell.sql
+2026-09-22 09:26:55,565 INFO sportsassets.scripts.migrate: applying 028_exiting_status.sql
+2026-09-22 09:26:55,568 INFO sportsassets.scripts.migrate: applying 029_trades_merge_replay_idx.sql
+2026-09-22 09:26:55,571 INFO sportsassets.scripts.migrate: applying 030_trades_asset_idx.sql
+2026-09-22 09:26:55,574 INFO sportsassets.scripts.migrate: applying 031_us_premap_signed.sql
+2026-09-22 09:26:55,597 INFO sportsassets.scripts.migrate: applying 031_us_premap_signed.sql
+2026-09-22 09:26:55,600 INFO sportsassets.scripts.migrate: applying 032_copy_exit_applied.sql
+2026-09-22 09:26:55,603 INFO sportsassets.scripts.migrate: applying 033_trades_source_s1.sql
+2026-09-22 09:26:55,606 INFO sportsassets.scripts.migrate: applying 034_trades_venue_seen.sql
+2026-09-22 09:26:55,608 INFO sportsassets.scripts.migrate: applying 035_trades_s1_checked.sql
+2026-09-22 09:26:55,611 INFO sportsassets.scripts.migrate: applying 036_manual_resting.sql
+2026-09-22 09:26:55,613 INFO sportsassets.scripts.migrate: applying 037_live_orders_notify.sql
+2026-09-22 09:26:55,616 INFO sportsassets.scripts.migrate: applying 038_trades_s1_suspect.sql
+2026-09-22 09:26:55,619 INFO sportsassets.scripts.migrate: applying 039_trades_noslug_idx.sql
+2026-09-22 09:26:55,622 INFO sportsassets.scripts.migrate: applying 040_live_orders_orig_shares.sql
+2026-09-22 09:26:55,624 INFO sportsassets.scripts.migrate: applying 041_live_orders_lane.sql
+2026-09-22 09:26:55,627 INFO sportsassets.scripts.migrate: applying 042_price_path.sql
+2026-09-22 09:26:55,631 INFO sportsassets.scripts.migrate: applying 043_roster_decisions.sql
+2026-09-22 09:26:55,637 INFO sportsassets.scripts.migrate: applying 044_trade_marks.sql
+2026-09-22 09:26:55,645 INFO sportsassets.scripts.migrate: applying 045_add_legs.sql
+2026-09-22 09:26:55,651 INFO sportsassets.scripts.migrate: applying 046_mirror_shadow.sql
+2026-09-22 09:26:55,658 INFO sportsassets.scripts.migrate: applying 047_mirror_live.sql
+2026-09-22 09:26:55,679 INFO sportsassets.scripts.migrate: applying 049_mirror_fidelity.sql
+2026-09-22 09:26:55,683 INFO sportsassets.scripts.migrate: applying 050_mirror_shorts.sql
+2026-09-22 09:26:55,686 INFO sportsassets.scripts.migrate: applying 052_copy_exit_legs.sql
+2026-09-22 09:26:55,697 INFO sportsassets.scripts.migrate: applying 053_copy_probes_probe_at_idx.sql
+2026-09-22 09:26:55,700 INFO sportsassets.scripts.migrate: applying 054_mirror_candidate_refusals.sql
+2026-09-22 09:26:55,709 INFO sportsassets.scripts.migrate: applying 055_us_premap_team.sql
+2026-09-22 09:26:55,712 INFO sportsassets.scripts.migrate: applying 056_mirror_registered_positions.sql
+2026-09-22 09:26:55,720 INFO sportsassets.scripts.migrate: applying 057_mirror_books_flow.sql
+2026-09-22 09:26:55,723 INFO sportsassets.scripts.migrate: applying 058_mirror_books_flow_clock.sql
+2026-09-22 09:26:55,726 INFO sportsassets.scripts.migrate: applying 059_mirror_orders_send_record.sql
+2026-09-22 09:26:55,729 INFO sportsassets.scripts.migrate: applying 060_mirror_fill_answers.sql
+2026-09-22 09:26:55,738 INFO sportsassets.scripts.migrate: applying 061_fill_answers_cause_orders_fast.sql
+2026-09-22 09:26:55,741 INFO sportsassets.scripts.migrate: applying 062_rn1_observability.sql
+2026-09-22 09:26:55,767 INFO sportsassets.scripts.migrate: applying 063_rn1_observability_v2.sql
+2026-09-22 09:26:55,790 INFO sportsassets.scripts.migrate: applying 064_run833_stream_channels.sql
+2026-09-22 09:26:55,796 INFO sportsassets.scripts.migrate: applying 065_calibration_lifecycles.sql
+2026-09-22 09:26:55,809 INFO sportsassets.scripts.migrate: applying 066_calibration_send_attempts.sql
+2026-09-22 09:26:55,818 INFO sportsassets.scripts.migrate: applying 067_calibration_environment_tag.sql
+2026-09-22 09:26:55,825 INFO sportsassets.scripts.migrate: applying 068_shadow_trading.sql
+2026-09-22 09:26:55,852 INFO sportsassets.scripts.migrate: applying 069_shadow_lanes.sql
+2026-09-22 09:26:55,866 INFO sportsassets.scripts.migrate: applying 070_rn1_prospective_observation.sql
+2026-09-22 09:26:55,887 INFO sportsassets.scripts.migrate: applying 071_bettor_opportunities.sql
+2026-09-22 09:26:55,896 INFO sportsassets.scripts.migrate: applying 072_recovered_is_not_prospective.sql
+2026-09-22 09:26:55,921 INFO sportsassets.scripts.migrate: applying 073_bettor_decision_pipeline.sql
+2026-09-22 09:26:55,933 INFO sportsassets.scripts.migrate: applying 074_bettor_shadow_accounting.sql
+2026-09-22 09:26:55,945 INFO sportsassets.scripts.migrate: applying 075_bettor_experimental.sql
+2026-09-22 09:26:55,968 INFO sportsassets.scripts.migrate: applying 076_bettor_l2_bridge.sql
+2026-09-22 09:26:55,980 INFO sportsassets.scripts.migrate: applying 077_bettor_experimental_seals.sql
+2026-09-22 09:26:55,987 INFO sportsassets.scripts.migrate: applying 078_bettor_experimental_markout_lag.sql
+2026-09-22 09:26:55,991 INFO sportsassets.scripts.migrate: applying 079_bettor_experimental_why.sql
+2026-09-22 09:26:55,995 INFO sportsassets.scripts.migrate: applying 080_bettor_experimental_observations.sql
+2026-09-22 09:26:56,003 INFO sportsassets.scripts.migrate: applying 081_direct_institutional_worker.sql
+2026-09-22 09:26:56,010 INFO sportsassets.scripts.migrate: applying 082_bettor_identity_bindings.sql
+2026-09-22 09:26:56,017 INFO sportsassets.scripts.migrate: applying 083_contract_family.sql
+2026-09-22 09:26:56,021 INFO sportsassets.scripts.migrate: applying 084_markout_direct_regime.sql
+2026-09-22 09:26:56,024 INFO sportsassets.scripts.migrate: applying 085_position_lifecycle_events.sql
+2026-09-22 09:26:56,036 INFO sportsassets.scripts.migrate: applying 086_reentry_refusal_status.sql
+2026-09-22 09:26:56,040 INFO sportsassets.scripts.migrate: applying 087_version_blocked_status.sql
+2026-09-22 09:26:56,044 INFO sportsassets.scripts.migrate: applying 088_bettor_unselected_state.sql
+2026-09-22 09:26:56,071 INFO sportsassets.scripts.migrate: applying 089_bettor_capture_telemetry.sql
+2026-09-22 09:26:56,084 INFO sportsassets.scripts.migrate: applying 090_fu_selected.sql
+2026-09-22 09:26:56,088 INFO sportsassets.scripts.migrate: applying 091_fu_rotation_head.sql
+2026-09-22 09:26:56,092 INFO sportsassets.scripts.migrate: applying 092_admission_control.sql
+2026-09-22 09:26:56,096 INFO sportsassets.scripts.migrate: applying 093_bettor_live_observation.sql
+2026-09-22 09:26:56,114 INFO sportsassets.scripts.migrate: migrations complete
+SUPPLIED us_premap via sportsassets.workers.premap._ensure_table; resuming the runner
+MIGRATE_COMPLETE after 2 pass(es)
+APPLIED_COUNT=91
+APPLIED_FIRST=001_init.sql
+APPLIED_LAST=093_bettor_live_observation.sql
+INGESTION_STATE_COLUMNS:
+  1 | key | text | nullable=NO | -
+  2 | value | jsonb | nullable=NO | -
+RUNTIME_SUPPLIED_TABLES: [('us_premap', 'sportsassets.workers.premap._ensure_table')]

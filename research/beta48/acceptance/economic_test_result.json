@@ -1,0 +1,47 @@
+{
+  "development": {
+    "n": 100,
+    "median_basis": 1.01,
+    "min_basis": 1.005,
+    "below_par": 0,
+    "profitable_after_fees": 0,
+    "median_ev_per_contract": -0.0354,
+    "verdict": "FALSIFIED"
+  },
+  "holdout": {
+    "n": 788,
+    "median_basis": 1.005,
+    "min_basis": 1.005,
+    "below_par": 0,
+    "profitable_after_fees": 0,
+    "median_ev_per_contract": -0.032499999999999855,
+    "verdict": "FALSIFIED"
+  },
+  "maker": {
+    "median_spread": 0.0050000000000000044,
+    "half_spread": 0.0025000000000000022,
+    "median_mid": 0.3575,
+    "rebate_per_share_100lot": 0.0029,
+    "rebate_per_share_1lot": -0.0,
+    "stress_case_deficit": -0.009,
+    "rebate_covers_pct_of_stress_deficit": 32.22222222222222,
+    "distinct_markets": 8,
+    "half_cent_tick_share": 0.6256345177664975,
+    "verdict": "NOT_IDENTIFIED",
+    "binding_unknown": "E[settlement - quote | FILLED, state]"
+  },
+  "capacity": {
+    "target_per_day": 500000.0,
+    "median_mid": 0.3575,
+    "shares_per_day_required": 1398601.3986013986,
+    "market_volume_shares_per_hour": 675.0,
+    "markets_required_at_100pct_capture": 86.333419666753,
+    "markets_required_at_1000_share_display": 2011.3096779763448,
+    "addressable_census": 2204,
+    "hours_to_front_of_queue": 33.03259259259259,
+    "working_capital_at_2h_turn": 41666.666666666664,
+    "working_capital_at_measured_queue_time": 688179.012345679,
+    "verdict": "NOT_SUPPORTED_BY_MEASURED_OPPORTUNITY"
+  },
+  "note": "PART 1 is decided. PARTS 2 and 3 report what is measured and what is missing; neither invents an input."
+}
