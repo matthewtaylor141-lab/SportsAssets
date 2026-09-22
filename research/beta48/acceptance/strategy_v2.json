@@ -217,7 +217,7 @@
       "size_rules": {
         "FIXED": 470
       },
-      "pairs_released": 2,
+      "pairs_released": 0,
       "episodes_with_unliquidated": 0
     },
     {
@@ -313,7 +313,7 @@
       "size_rules": {
         "EDGE_SCALED": 470
       },
-      "pairs_released": 2,
+      "pairs_released": 0,
       "episodes_with_unliquidated": 0
     },
     {

@@ -147,6 +147,30 @@ class Inventory:
         return abs(self.yes - self.no)
 
 
+def is_open(state) -> bool:
+    """TWO VOCABULARIES MEET HERE, so the translation is in one place.
+
+    The venue and the market stream say `MARKET_STATE_OPEN`.
+    `bettor_decision_engine` and `bettor_observation_adapter` normalise
+    that to `OPEN`/`ACTIVE` before the engine sees it. This module is
+    called from BOTH sides -- the replay feeds it tape rows in the
+    venue's spelling, the runtime adapter feeds it engine books in the
+    normalised one -- so a rule that recognised only one of them would
+    silently stand aside on every book from the other. That is exactly
+    how a live engine ends up quoting nothing and reporting no defect.
+
+    `None` means the source did not carry a state, which is the state
+    of the captured corpus; the engine refuses an unstated state on its
+    own terms and this module does not second-guess it.
+    """
+    if state is None:
+        return True
+    s = str(state).upper()
+    if s.startswith("MARKET_STATE_"):
+        s = s[len("MARKET_STATE_"):]
+    return s in ("OPEN", "ACTIVE")
+
+
 def _d(decision, why, rule, inputs, alternatives=(), **kw):
     """Every decision carries its own reason and provenance."""
     return {"decision": decision, "why": why, "rule": rule,
@@ -178,7 +202,7 @@ def admit(policy: Policy, book: Book) -> dict:
                       mid if mid is not None else float("nan"),
                       policy.min_mid, policy.max_mid),
                   "entry_band", ["bid", "ask"], [D_QUOTE_BOTH])
-    if book.state not in (None, "MARKET_STATE_OPEN"):
+    if not is_open(book.state):
         return _d(D_STAND_ASIDE, "market state %r is not open" % book.state,
                   "entry", ["state"], [D_QUOTE_BOTH])
     return _d(D_QUOTE_BOTH,

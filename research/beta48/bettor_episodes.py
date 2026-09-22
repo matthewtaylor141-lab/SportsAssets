@@ -353,6 +353,11 @@ class Episode:
         self.rebates_on = rebates_on
         self.queue_model = queue_model
         self.policy = policy or BASE_POLICY
+        # THE SHARED POLICY OBJECT, built once. Every decision below
+        # goes through `sportsassets.bettor_policy`; nothing in this
+        # file decides anything the runtime would decide differently,
+        # because neither of them holds its own copy of the rule.
+        self._sp = _as_shared(self.policy)
 
         book = ev.Book(slug=slug, bid=row["bid"], ask=row["ask"], tick=tick)
         qb = ev.incremental_ev("QUOTE_BID", book, ev.Inventory(),
@@ -443,6 +448,20 @@ class Episode:
         self.residual_basis = None
         self.settlement = None
         self.notes = []
+
+    # ── the shared policy's view of this episode ──────────────────────
+    def _inv_of(self, elapsed_s, unmatched_since=None):
+        """This episode's state in the SHARED policy's terms.
+
+        The runtime builds the same object from its own position
+        keeping. Both then call the same functions, which is the point:
+        an adapter per caller, one rule for everybody.
+        """
+        return shared.Inventory(
+            yes=self.yes, no=self.no,
+            open_yes=self.open_yes, open_no=self.open_no,
+            clip=self.size, elapsed_s=float(elapsed_s or 0.0),
+            unmatched_since_s=unmatched_since)
 
     # ── collateral ────────────────────────────────────────────────────
     def collateral_now(self):
@@ -772,14 +791,16 @@ class Episode:
                 # recovery. The cancel still takes effect only from the
                 # NEXT observation -- the race is charged against us
                 # here exactly as it is at the horizon.
-                if (self.policy.cancel_other_on_fill
-                        and self.cancel_requested_at is None
+                if (self.cancel_requested_at is None
                         and (self.yes > 0) != (self.no > 0)):
-                    self.cancel_requested_at = i
-                    self.cancel_effective_from = i + 1
-                    self.notes.append("cancelled the resting leg on the "
-                                      "first fill (policy)")
-                    continue
+                    d = shared.on_fill(self._sp, self._inv_of(age))
+                    if d["decision"] == shared.D_CANCEL_OTHER:
+                        self.cancel_requested_at = i
+                        self.cancel_effective_from = i + 1
+                        self.notes.append("cancelled the resting leg on "
+                                          "the first fill -- %s"
+                                          % d["why"])
+                        continue
 
             # ── both legs done: a matched pair, settles at 1 ──────────
             if (self.open_yes <= 1e-9 and self.open_no <= 1e-9
@@ -789,16 +810,15 @@ class Episode:
                 return self
 
             # ── the quoting horizon: request the cancel ───────────────
-            if (age >= self.policy.quote_horizon_s
-                    and self.cancel_requested_at is None
+            expired = shared.horizon_expired(self._sp, self._inv_of(age))
+            if (expired and self.cancel_requested_at is None
                     and (self.open_yes > 0 or self.open_no > 0)):
                 self.cancel_requested_at = i
                 # RACE: effective only from the NEXT observation, so a
                 # print in this interval still fills us.
                 self.cancel_effective_from = i + 1
                 continue
-            if age >= self.policy.quote_horizon_s \
-                    and self.cancel_requested_at is None:
+            if expired and self.cancel_requested_at is None:
                 self.cancel_requested_at = i
                 self.cancel_effective_from = i
 
@@ -812,8 +832,10 @@ class Episode:
             if excess_yes <= 1e-9 and excess_no <= 1e-9:
                 if matched <= 0:
                     self._finish_never_filled(row, i)
-                elif self.policy is not None and \
-                        getattr(self.policy, "release_matched", False):
+                    return self
+                d = shared.release_action(self._sp, self._inv_of(age),
+                                          _book_of(row, self.tick))
+                if d["decision"] == shared.D_RELEASE:
                     # SELL THE PAIR BACK rather than hold it. Both legs
                     # cross the book as takers, so the cost is the
                     # spread plus two taker fees and the capital is
@@ -831,8 +853,18 @@ class Episode:
             # Four of them, because the case studies do not all do the
             # same thing with unmatched inventory and rejecting one is
             # not rejecting the others.
-            rec = self.policy.recovery
-            if rec == "TAKER_NOW":
+            #
+            # ONE CALL DECIDES ALL FOUR. `recovery_action` is the same
+            # function the runtime calls; what differs between them is
+            # only how the Inventory was assembled.
+            _since = (recovery_started_t - self.t0_epoch
+                      if (recovery_started_t is not None
+                          and self.t0_epoch is not None) else None)
+            rd = shared.recovery_action(
+                self._sp, self._inv_of(age, unmatched_since=_since),
+                _book_of(row, self.tick))
+            dec = rd["decision"]
+            if dec == shared.D_EXIT_TAKER and recovery_started is None:
                 if excess_yes > 0:
                     self._taker_exit("YES", excess_yes, i, row,
                                      "EXIT_TAKER")
@@ -845,7 +877,7 @@ class Episode:
                 else:
                     self._finish_flat(row, i, FLAT_EXITED_TAKER)
                 return self
-            if rec == "COMPLETE_PAIR":
+            if dec == shared.D_COMPLETE_PAIR:
                 # MECHANISM 3 IN ITS TIME-DEPENDENT FORM. Buy the
                 # COMPLEMENT as a taker so the position becomes a
                 # matched pair that settles at 1, instead of selling
@@ -861,7 +893,7 @@ class Episode:
                 self.notes.append("completed the pair as a taker rather "
                                   "than exiting the leg")
                 return self
-            if rec == "HOLD":
+            if dec == shared.D_HOLD:
                 # Ride it to settlement. The episode ends when the
                 # market expires or the capture does -- the loop's own
                 # expiry and horizon handlers take it from here.
@@ -917,10 +949,10 @@ class Episode:
                         return self
                     continue
 
-            rec_age = ((row["t"] - recovery_started_t)
-                       if (row["t"] is not None
-                           and recovery_started_t is not None) else 0.0)
-            if rec_age >= self.policy.recovery_wait_s:
+            # THE WAIT EXPIRED -- decided by the same shared call above,
+            # which read `unmatched_since_s` and compared it to
+            # `recovery_wait_s`. No second copy of that comparison.
+            if dec == shared.D_EXIT_TAKER:
                 # cross out as a taker
                 matched = min(self.yes, self.no)
                 ey, en = self.yes - matched, self.no - matched
