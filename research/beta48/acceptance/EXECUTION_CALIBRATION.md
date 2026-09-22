@@ -106,6 +106,13 @@ independent draws.
 
 **Held-out error −200.3 fills (−5.19 pp); binomial s.e. 29.4; z = −6.82.**
 
+> **QUALIFIED in `SEVEN_BOOK_RECONCILIATION.md` §4.** This treats 3,861
+> orders as independent draws. Clustered on the market: design effect
+> **2.27**, z falls to **−4.87**. The direction survives; the certainty
+> does not. The error is a diagnosable SHAPE error concentrated in one
+> market-size band, not a universal limit on fill predictability.
+
+
 **The model does not transfer forward two days.** A fill rate fitted on
 our own orders fails out-of-sample against our own orders. So the
 aggregate 26% is not transferable to a different policy — it is not even
@@ -186,6 +193,14 @@ execution history is available beyond what we happen to have stored.
 ---
 
 ## 4. Incentive terms — retrieved, and they change the question
+
+> **CORRECTED in `SEVEN_BOOK_RECONCILIATION.md` §3.** The claim below
+> that the $1 minimum makes the M-scale "ineligible by construction"
+> does not follow: the floor applies to share x pool, not to order
+> size. C4's shortfall is **$1.46 a day**, and the 165-855% annualised
+> figure was the same fact over a small base, stated so as to sound
+> structural.
+
 
 Retrieved from `docs.polymarket.us/incentives/liquidity` (public docs, no
 allowance spent). The programme is **not a rate on capital**:
@@ -354,6 +369,12 @@ question.
 ---
 
 ## 8. Open, and flagged rather than acted on
+
+> **RESOLVED in `SEVEN_BOOK_RECONCILIATION.md` §1.** All seven books
+> carry ZERO current venue exposure. The $9,280.69 was a sum of
+> historical high-water marks, and our own ledger_net was already 0 on
+> four of the seven.
+
 
 **7 mirror books never reached `closed`** — 6 `closing` and 1 `frozen`,
 $9,280.69 of peak exposure, opened 2026-09-08..10, untouched for 12 days.
