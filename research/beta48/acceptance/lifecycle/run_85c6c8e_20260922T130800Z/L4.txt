@@ -1,0 +1,37 @@
+2026-09-22 13:10:22,856 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: nothing valid and open to watch; not starting. COVERAGE candidates=35 probed=35 enriched=0 {"PROBE_READ_FAILED": 35} | RULE considered=0 excluded={} | OBSERVABLE 0
+2026-09-22 13:10:22,856 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (EMPTY_UNIVERSE); holding 300s (acquisition backoff) before the supervisor's own restart delay
+2026-09-22 13:11:07,696 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: nothing valid and open to watch; not starting. COVERAGE candidates=35 probed=10 enriched=0 {"PROBE_READ_FAILED": 10} | RULE considered=0 excluded={} | OBSERVABLE 0
+2026-09-22 13:11:07,696 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (EMPTY_UNIVERSE); holding 300s (acquisition backoff) before the supervisor's own restart delay
+2026-09-22 13:11:52,735 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: nothing valid and open to watch; not starting. COVERAGE candidates=None probed=None enriched=None {} | RULE considered=0 excluded={} | OBSERVABLE None
+2026-09-22 13:11:52,735 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (EMPTY_UNIVERSE); holding 300s (acquisition backoff) before the supervisor's own restart delay
+image  : /app/sportsassets/__init__.py
+entry  : bettor_live_loop.main() with NO ARGUMENTS
+db     : bettor_lifecycle
+FIXTURE_BBO      RECORDED_VERBATIM  1 markets (of 30590 HTTP 200 bodies in the corpus)
+FIXTURE_BOOK     RECORDED_VERBATIM  1 markets, paired by (slug, segment)
+FIXTURE_LISTING  CONSTRUCTED  no capture of the collection endpoint exists
+FIXTURE_WS       ABSENT  no recorded PMUS WebSocket frame exists; none invented
+
+==============================================================================
+L4  FAILURES, RETRIES, EMPTY SELECTION AND CRASHES CANNOT REPLENISH AN ALLOWANCE
+==============================================================================
+   (a) all reads fail   : venue 35 BBO, row ((1, 35, 35),)
+   [PASS] failed reads consumed their attempts                           got 35
+   [PASS] failed reads consumed their distinct slots                     got 35
+   (b) second lifetime  : row (2, 35, 45) (was (1, 35, 35))
+   [PASS] no counter moved backwards                                     got True
+   [PASS] the allowance was not reset to zero                            got True
+   (c) empty universe   : venue 1 listing, row ((1, 0, 0),)
+   [PASS] an empty universe still consumed its listing attempt           got True
+   [PASS] and reserved no BBO attempt it did not make                    got 0
+   [PASS] the crash propagated to the supervisor, as designed            got 'CRASHED'
+   [PASS] crash 2: no counter moved backwards                            got True
+   [PASS] crash 3: no counter moved backwards                            got True
+   (d) after 3 crashes  : row (3, 35, 55)
+   [PASS] crashes spent the allowance rather than resetting it           got True
+   [PASS] and never exceeded the ceiling                                 got True
+
+==============================================================================
+PHASE L4 RESULT
+==============================================================================
+all 11 checks passed (SIMULATED TRANSPORT -- not a live venue connection)

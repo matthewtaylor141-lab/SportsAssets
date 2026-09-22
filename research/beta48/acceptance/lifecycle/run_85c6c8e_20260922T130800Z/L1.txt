@@ -1,2 +1,25 @@
 2026-09-22 13:08:04,191 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: disabled by BETTOR_LIVE_LOOP=off
 2026-09-22 13:08:04,191 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (KILL_SWITCH); holding 30s (control poll) before the supervisor's own restart delay
+image  : /app/sportsassets/__init__.py
+entry  : bettor_live_loop.main() with NO ARGUMENTS
+db     : bettor_lifecycle
+FIXTURE_BBO      RECORDED_VERBATIM  1 markets (of 30590 HTTP 200 bodies in the corpus)
+FIXTURE_BOOK     RECORDED_VERBATIM  1 markets, paired by (slug, segment)
+FIXTURE_LISTING  CONSTRUCTED  no capture of the collection endpoint exists
+FIXTURE_WS       ABSENT  no recorded PMUS WebSocket frame exists; none invented
+
+==============================================================================
+L1  A DISABLED WORKER MAKES NO OBSERVATION VENUE REQUEST
+==============================================================================
+   result: started=False why=KILL_SWITCH
+   [PASS] the kill switch refused the run                                got 'KILL_SWITCH'
+   [PASS] it is a CONTROL reason, so it polls and never escalates        got True
+   [PASS] ZERO listing requests were issued                              got 0
+   [PASS] ZERO BBO requests were issued                                  got 0
+   [PASS] ZERO stream connections were opened                            got 0
+   [PASS] and the OPEN allowance was not touched                         got (0, 0, 0)
+
+==============================================================================
+PHASE L1 RESULT
+==============================================================================
+all 6 checks passed (SIMULATED TRANSPORT -- not a live venue connection)
