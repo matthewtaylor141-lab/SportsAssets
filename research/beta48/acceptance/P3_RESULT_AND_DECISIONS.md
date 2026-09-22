@@ -72,18 +72,18 @@ at that same level.
 | program | C = 0 | C = 400 | C = 2,000 | C = 10,000 |
 |---|---:|---:|---:|---:|
 | culture daily_event | $50.00 | **$10.00** | $2.38 | $0.50 ✗ |
-
-> **These use `100/(100+C)`, which is a special case.** The full
-> calculation is implemented in `bettor_incentive_score.py`; at
-> C = 200 the true answer is **$0.00**, because the side never
-> reaches Target Size at all.
-
 | crypto 1h up/down | $30.00 | $6.00 | $1.43 | $0.30 ✗ |
 | eFootball day_of | $35.00 | $7.00 | $1.67 | $0.35 ✗ |
 | eFootball live | $100.00 | **$20.00** | $4.76 | $0.99 ✗ |
 
 ✗ = under the $1.00 floor. **Exclusion case, separately:** if ≥ Target
 Size rests at strictly better prices, reward is $0.00 in every column.
+
+> **These use `100/(100+C)`, which is a special case.** The full
+> calculation is implemented in `bettor_incentive_score.py`; at
+> C = 200 the true answer is **$0.00**, because the side never
+> reaches Target Size at all.
+
 
 ### 1.5 The payout unit is (market, date) — another correction
 
