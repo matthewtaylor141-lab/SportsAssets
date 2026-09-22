@@ -71,6 +71,23 @@ A disposable PostgreSQL is built **inside the image** by
 `sportsassets.scripts.migrate` — the repository's real runner — and its
 `ingestion_state` matches production column for column.
 
+### Image identity, stated precisely
+
+```
+image id (final build)  sha256:5e3b4cfbe27c615ab2871af5a5792c6b8c6f8aeda5a811ae3880115d5bbd97af
+RootFS layers           sha256:8680c8f321832365558f928c44d9037194207a70e4c362c1883a9466a32d4bae
+                        sha256:d047c781a6d4b0d477f7b1ed05775e2a6d3d7f7d18a6351783042cc3087887bf
+```
+
+**A docker image ID is not reproducible across builds** — the image
+config embeds a creation timestamp, so rebuilding identical content
+yields a different ID. Two builds of this branch at different commits
+produced different IDs (`f1a7ec4e…` and `5e3b4cfb…`) and **identical
+RootFS layer digests**, which is the claim that actually matters: the
+shipped filesystem did not change. The invariant to check before
+deploying is therefore `git diff cf77a0f <tip> -- backend/` being empty
+and `backend/Dockerfile` being unmodified, not an image ID match.
+
 ### The four fixtures, kept apart
 
 | fixture | provenance |

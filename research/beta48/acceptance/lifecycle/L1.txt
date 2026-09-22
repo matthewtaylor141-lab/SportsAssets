@@ -1,5 +1,5 @@
-2026-09-22 09:26:57,228 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: disabled by BETTOR_LIVE_LOOP=off
-2026-09-22 09:26:57,228 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (KILL_SWITCH); holding 30s (control poll) before the supervisor's own restart delay
+2026-09-22 09:49:26,619 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: disabled by BETTOR_LIVE_LOOP=off
+2026-09-22 09:49:26,619 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (KILL_SWITCH); holding 30s (control poll) before the supervisor's own restart delay
 image  : /app/sportsassets/__init__.py
 entry  : bettor_live_loop.main() with NO ARGUMENTS
 db     : bettor_lifecycle

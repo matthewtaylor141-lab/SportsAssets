@@ -50,6 +50,7 @@ force.
 | entry point | `bettor_live_loop.main()` **with no arguments** |
 | replaced | the venue network boundary only — `pmus._get_client`, and `MarketStream._run` |
 | result | **115 checks, 0 failures**, across eleven lifecycle properties |
+| image RootFS layers | `8680c8f3…`, `d047c781…` — identical across builds at different commits |
 
 Reproduce: `scripts/bettor_lifecycle_run.sh`. Each phase is a separate
 `docker run`, so the restart phases cross a real process boundary.

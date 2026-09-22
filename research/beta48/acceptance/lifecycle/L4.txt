@@ -1,9 +1,9 @@
-2026-09-22 09:28:14,712 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: no eligible markets; not starting. COVERAGE candidates=35 probed=35 enriched=0 {"PROBE_READ_FAILED": 35} | RULE considered=0 excluded={}
-2026-09-22 09:28:14,712 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (EMPTY_UNIVERSE); holding 300s (acquisition backoff) before the supervisor's own restart delay
-2026-09-22 09:28:59,583 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: no eligible markets; not starting. COVERAGE candidates=35 probed=10 enriched=0 {"PROBE_READ_FAILED": 10} | RULE considered=0 excluded={}
-2026-09-22 09:28:59,583 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (EMPTY_UNIVERSE); holding 300s (acquisition backoff) before the supervisor's own restart delay
-2026-09-22 09:29:44,578 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: no eligible markets; not starting. COVERAGE candidates=None probed=None enriched=None {} | RULE considered=0 excluded={}
-2026-09-22 09:29:44,578 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (EMPTY_UNIVERSE); holding 300s (acquisition backoff) before the supervisor's own restart delay
+2026-09-22 09:50:43,972 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: no eligible markets; not starting. COVERAGE candidates=35 probed=35 enriched=0 {"PROBE_READ_FAILED": 35} | RULE considered=0 excluded={}
+2026-09-22 09:50:43,972 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (EMPTY_UNIVERSE); holding 300s (acquisition backoff) before the supervisor's own restart delay
+2026-09-22 09:51:28,844 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: no eligible markets; not starting. COVERAGE candidates=35 probed=10 enriched=0 {"PROBE_READ_FAILED": 10} | RULE considered=0 excluded={}
+2026-09-22 09:51:28,844 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (EMPTY_UNIVERSE); holding 300s (acquisition backoff) before the supervisor's own restart delay
+2026-09-22 09:52:13,870 ERROR sportsassets.workers.bettor_live_loop: bettor_live_loop: no eligible markets; not starting. COVERAGE candidates=None probed=None enriched=None {} | RULE considered=0 excluded={}
+2026-09-22 09:52:13,870 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (EMPTY_UNIVERSE); holding 300s (acquisition backoff) before the supervisor's own restart delay
 image  : /app/sportsassets/__init__.py
 entry  : bettor_live_loop.main() with NO ARGUMENTS
 db     : bettor_lifecycle
