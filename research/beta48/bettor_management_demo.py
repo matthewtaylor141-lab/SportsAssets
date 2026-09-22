@@ -505,6 +505,36 @@ def _caph(e):
     return e.get("collateral_incl_resting", 0.0) * (b - a) / 3600.0
 
 
+def _runtime_path():
+    """THE SAME DECISION, TAKEN THE WAY THE LIVE ENGINE WOULD TAKE IT.
+
+    Everything above this walks the REPLAY. That is the right surface
+    for economics -- it has outcomes -- but it is not the surface that
+    would run in production, and a demonstration that only ever shows
+    the replay cannot show management what the live system would
+    actually do with a book.
+
+    So this puts one live-shaped book through
+    `sportsassets.bettor_policy_runtime`, which is what the worker
+    calls. The policy proposes; `bettor_decision_engine` disposes. The
+    interesting part is that they DISAGREE, and the record says so
+    instead of quietly reporting the winner.
+    """
+    sys.path.insert(0, os.path.join(HERE, "..", "..", "backend"))
+    from sportsassets import bettor_decision_engine as de
+    from sportsassets import bettor_policy as bp
+    from sportsassets import bettor_policy_runtime as rt
+
+    book = de.Book(market_id="live-shaped-example",
+                   yes_bid=0.40, yes_ask=0.44,
+                   yes_bid_size=500.0, yes_ask_size=500.0,
+                   age_s=1.0, venue_state="OPEN")
+    pol = bp.Policy(name="C3", min_spread_ticks=2, placement=bp.AT_TOUCH,
+                    cancel_other_on_fill=True, max_unmatched_mult=0.5,
+                    recovery=bp.R_COMPLETE_PAIR)
+    return rt.evaluate(book, policy=pol, base_size=100.0, clip=100.0)
+
+
 def main():
     if not prints_mod.tape_dir():
         print("NO TAPE -- refusing to demonstrate tape-backed execution "
@@ -519,6 +549,7 @@ def main():
     print("policy C3 (inventory-aware), queue fraction 0.25, tape-backed")
     print("NO ORDER WAS SENT. Every fill below is a REPLAY fill.")
     print("=" * 78)
+    runtime = _runtime_path()
     for d in ds:
         print()
         print("-" * 78)
@@ -588,6 +619,32 @@ def main():
     ]
     print()
     print("=" * 78)
+    print("THE SAME ENGINE ON THE LIVE PATH -- what the worker would do")
+    print("=" * 78)
+    p = runtime["proposal"]
+    print("  book            bid 0.40 / ask 0.44, 500 up, 1.0s old, OPEN")
+    print("  STRATEGY says   %s" % p["action"])
+    print("    prices        bid %s / offer %s   size %s"
+          % (p.get("quote_bid"), p.get("quote_offer"), p.get("size")))
+    print("    because       %s" % _wrap(p["why"], 18))
+    print("    rule          %s (%s)" % (p["rule"], p["provenance"]))
+    print("  ENGINE says     %s" % runtime["engine_verdict"])
+    print("    because       %s" % _wrap(runtime["engine_detail"] or "-", 18))
+    print("  WHAT HAPPENS    %s, size %s"
+          % (runtime["effective_action"],
+             runtime["effective_size_contracts"]))
+    print("    because       %s" % _wrap(runtime["effective_reason"], 18))
+    print()
+    print("  READ THIS CAREFULLY. The strategy wants to quote and the")
+    print("  engine will not let it, because MAKE_YES/MAKE_NO have no")
+    print("  identified EV -- P_FILL is not identified, and NOT_IDENTIFIED")
+    print("  is not zero. The live system today therefore produces")
+    print("  NO_TRADE at size 0 on a perfectly good book. That is the")
+    print("  system working as designed, not a fault, and it is what")
+    print("  fill-conditioned evidence would change.")
+
+    print()
+    print("=" * 78)
     print("WHAT THE ENGINE STILL CANNOT DO")
     print("=" * 78)
     for name, why in remaining:
@@ -613,6 +670,7 @@ def main():
                    "status_counts": dict(collections.Counter(
                        e["status"] for e in eps)),
                    "decisions": ds,
+                   "runtime_path": runtime,
                    "unsupported_decisions": unsupported,
                    "still_absent": [{"capability": n, "status": w}
                                     for n, w in remaining]},

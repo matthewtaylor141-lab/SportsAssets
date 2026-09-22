@@ -406,6 +406,306 @@
       "evidence": "bettor_incentive_score, pinned against the venue's own worked example (1000 at four levels, DF 0.30 -> 70.6% / 1.9%)"
     }
   ],
+  "runtime_path": {
+    "adapter": "BETTOR_POLICY_RUNTIME_V1",
+    "market_id": "live-shaped-example",
+    "proposal": {
+      "adapter": "BETTOR_POLICY_RUNTIME_V1",
+      "policy": "BETTOR_POLICY_V1",
+      "policy_name": "C3",
+      "stage": "FLAT",
+      "inventory": {
+        "yes": 0.0,
+        "no": 0.0,
+        "matched": 0.0,
+        "unmatched": 0.0,
+        "open_yes": 0.0,
+        "open_no": 0.0
+      },
+      "steps": [
+        {
+          "asked": "admit",
+          "decision": "QUOTE_BOTH_SIDES",
+          "why": "spread 4 ticks clears the minimum and the book is two-sided, so a paired fill is worth the spread less fees",
+          "rule": "entry",
+          "provenance": "DERIVED_FROM_CASE_STUDY",
+          "inputs_read": [
+            "bid",
+            "ask",
+            "state"
+          ],
+          "alternatives": [
+            "STAND_ASIDE"
+          ]
+        },
+        {
+          "asked": "quote_prices",
+          "bid": 0.4,
+          "offer": 0.44,
+          "why": "join the touch. Queue position is NOT OBSERVABLE, so paying a tick to improve buys something unmeasurable; joining is the only placement whose cost is known",
+          "rule": "placement",
+          "inputs_read": [
+            "bid",
+            "ask",
+            "tick"
+          ],
+          "provenance": "DERIVED_FROM_CASE_STUDY"
+        },
+        {
+          "asked": "quote_size",
+          "size": 100.0,
+          "mult": 1.0,
+          "rule": "FIXED",
+          "why": "fixed clip",
+          "inputs_read": [],
+          "provenance": "HYPOTHESIS_INTRODUCED_BY_THIS_PROGRAMME"
+        }
+      ],
+      "action": "QUOTE_BOTH_SIDES",
+      "why": "spread 4 ticks clears the minimum and the book is two-sided, so a paired fill is worth the spread less fees",
+      "rule": "entry",
+      "provenance": "DERIVED_FROM_CASE_STUDY",
+      "alternatives": [
+        "STAND_ASIDE"
+      ],
+      "quote_bid": 0.4,
+      "quote_offer": 0.44,
+      "placement_why": "join the touch. Queue position is NOT OBSERVABLE, so paying a tick to improve buys something unmeasurable; joining is the only placement whose cost is known",
+      "size": 100.0,
+      "size_mult": 1.0,
+      "size_rule": "FIXED",
+      "size_why": "fixed clip"
+    },
+    "engine_verdict": "PROPOSED_BUT_NOT_SCORED",
+    "engine_detail": "MAKE_YES NOT_IDENTIFIED -- P_FILL_NOT_IDENTIFIED; MAKE_NO NOT_IDENTIFIED -- P_FILL_NOT_IDENTIFIED",
+    "engine_candidates_for_proposal": [
+      {
+        "action": "MAKE_YES",
+        "status": "NOT_IDENTIFIED",
+        "ev_net": null,
+        "size_contracts": 0.0,
+        "cash_now": null,
+        "cash_at_settlement": null,
+        "conditional_payoff": null,
+        "leg_risk_cost": null,
+        "why": "maker EV is a conditional expectation and its condition is unmeasured; bettor_p_fill reports NOT_IDENTIFIED",
+        "blocker": "P_FILL_NOT_IDENTIFIED",
+        "assumptions": [
+          "NOT_IDENTIFIED is not zero: an unscored action cannot win a ranking by default"
+        ],
+        "uncertainty": "the prize is bounded by the spread, which is measured; the probability of collecting it is not"
+      },
+      {
+        "action": "MAKE_NO",
+        "status": "NOT_IDENTIFIED",
+        "ev_net": null,
+        "size_contracts": 0.0,
+        "cash_now": null,
+        "cash_at_settlement": null,
+        "conditional_payoff": null,
+        "leg_risk_cost": null,
+        "why": "maker EV is a conditional expectation and its condition is unmeasured; bettor_p_fill reports NOT_IDENTIFIED",
+        "blocker": "P_FILL_NOT_IDENTIFIED",
+        "assumptions": [
+          "NOT_IDENTIFIED is not zero: an unscored action cannot win a ranking by default"
+        ],
+        "uncertainty": "the prize is bounded by the spread, which is measured; the probability of collecting it is not"
+      }
+    ],
+    "effective_action": "NO_TRADE",
+    "effective_size_contracts": 0.0,
+    "effective_reason": "no action has an identified EV. Blockers: COMPLEMENT_ABSENT, FV_BETTOR_INDEPENDENT_NOT_VALIDATED, MERGE_NOT_OBSERVED_ON_INSTITUTIONAL, NO_PAIRED_INVENTORY, P_FILL_NOT_IDENTIFIED",
+    "data_quality": "OK",
+    "executable": false,
+    "executable_why": "this module has no order path and max_contracts is 0.0; execution sits behind the separate execution gate with mirror_live=false",
+    "engine": {
+      "engine": "BETTOR_DECISION_ENGINE_V1",
+      "market_id": "live-shaped-example",
+      "baseline": "NO_TRADE",
+      "book_age_s": 1.0,
+      "inventory": {
+        "yes": 0.0,
+        "no": 0.0,
+        "paired": 0.0
+      },
+      "venue": "polymarket-us",
+      "account_class": "institutional",
+      "complement_source": "ABSENT",
+      "fee_schedule": {
+        "verified": false,
+        "source": "OMITTED_BY_CALLER",
+        "hypothetical": false,
+        "status": "NOT_ESTABLISHED",
+        "effective_from": null
+      },
+      "selected": "NO_TRADE",
+      "size_contracts": 0.0,
+      "reason": "no action has an identified EV. Blockers: COMPLEMENT_ABSENT, FV_BETTOR_INDEPENDENT_NOT_VALIDATED, MERGE_NOT_OBSERVED_ON_INSTITUTIONAL, NO_PAIRED_INVENTORY, P_FILL_NOT_IDENTIFIED",
+      "data_quality": "OK",
+      "candidates": [
+        {
+          "action": "NO_TRADE",
+          "status": "IDENTIFIED",
+          "ev_net": 0.0,
+          "size_contracts": 0.0,
+          "cash_now": 0.0,
+          "cash_at_settlement": 0.0,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "the baseline from flat: no cash moves",
+          "blocker": null,
+          "assumptions": [],
+          "uncertainty": "none; this is a definition, not an estimate"
+        },
+        {
+          "action": "PAIR_SELL",
+          "status": "UNSUPPORTED",
+          "ev_net": null,
+          "size_contracts": 0.0,
+          "cash_now": null,
+          "cash_at_settlement": null,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "there is no paired inventory to sell",
+          "blocker": "NO_PAIRED_INVENTORY",
+          "assumptions": [],
+          "uncertainty": ""
+        },
+        {
+          "action": "SELL_YES",
+          "status": "BLOCKED",
+          "ev_net": null,
+          "size_contracts": 0.0,
+          "cash_now": null,
+          "cash_at_settlement": null,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "a directional action is a bet that the venue price is wrong. P_BETTOR_INDEPENDENT_V3 measured the blend as WORSE than the market by 0.00926 log loss on held-out events, so the engine would be overriding its own evidence",
+          "blocker": "FV_BETTOR_INDEPENDENT_NOT_VALIDATED",
+          "assumptions": [
+            "the venue midpoint is a price, never a BETTOR belief"
+          ],
+          "uncertainty": "NOT_DETECTED_AT_THIS_SAMPLE_SIZE is not a refutation; this may unblock with more data and must not be read as proof that no alpha exists"
+        },
+        {
+          "action": "SELL_NO",
+          "status": "BLOCKED",
+          "ev_net": null,
+          "size_contracts": 0.0,
+          "cash_now": null,
+          "cash_at_settlement": null,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "a directional action is a bet that the venue price is wrong. P_BETTOR_INDEPENDENT_V3 measured the blend as WORSE than the market by 0.00926 log loss on held-out events, so the engine would be overriding its own evidence",
+          "blocker": "FV_BETTOR_INDEPENDENT_NOT_VALIDATED",
+          "assumptions": [
+            "the venue midpoint is a price, never a BETTOR belief"
+          ],
+          "uncertainty": "NOT_DETECTED_AT_THIS_SAMPLE_SIZE is not a refutation; this may unblock with more data and must not be read as proof that no alpha exists"
+        },
+        {
+          "action": "PAIR_BUY",
+          "status": "NOT_IDENTIFIED",
+          "ev_net": null,
+          "size_contracts": 0.0,
+          "cash_now": null,
+          "cash_at_settlement": null,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "no independently observed complement book; the sibling instrument was not read this cycle",
+          "blocker": "COMPLEMENT_ABSENT",
+          "assumptions": [],
+          "uncertainty": "the complement price is unknown, not absent"
+        },
+        {
+          "action": "TAKE_YES",
+          "status": "BLOCKED",
+          "ev_net": null,
+          "size_contracts": 0.0,
+          "cash_now": null,
+          "cash_at_settlement": null,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "a directional action is a bet that the venue price is wrong. P_BETTOR_INDEPENDENT_V3 measured the blend as WORSE than the market by 0.00926 log loss on held-out events, so the engine would be overriding its own evidence",
+          "blocker": "FV_BETTOR_INDEPENDENT_NOT_VALIDATED",
+          "assumptions": [
+            "the venue midpoint is a price, never a BETTOR belief"
+          ],
+          "uncertainty": "NOT_DETECTED_AT_THIS_SAMPLE_SIZE is not a refutation; this may unblock with more data and must not be read as proof that no alpha exists"
+        },
+        {
+          "action": "TAKE_NO",
+          "status": "BLOCKED",
+          "ev_net": null,
+          "size_contracts": 0.0,
+          "cash_now": null,
+          "cash_at_settlement": null,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "a directional action is a bet that the venue price is wrong. P_BETTOR_INDEPENDENT_V3 measured the blend as WORSE than the market by 0.00926 log loss on held-out events, so the engine would be overriding its own evidence",
+          "blocker": "FV_BETTOR_INDEPENDENT_NOT_VALIDATED",
+          "assumptions": [
+            "the venue midpoint is a price, never a BETTOR belief"
+          ],
+          "uncertainty": "NOT_DETECTED_AT_THIS_SAMPLE_SIZE is not a refutation; this may unblock with more data and must not be read as proof that no alpha exists"
+        },
+        {
+          "action": "MAKE_YES",
+          "status": "NOT_IDENTIFIED",
+          "ev_net": null,
+          "size_contracts": 0.0,
+          "cash_now": null,
+          "cash_at_settlement": null,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "maker EV is a conditional expectation and its condition is unmeasured; bettor_p_fill reports NOT_IDENTIFIED",
+          "blocker": "P_FILL_NOT_IDENTIFIED",
+          "assumptions": [
+            "NOT_IDENTIFIED is not zero: an unscored action cannot win a ranking by default"
+          ],
+          "uncertainty": "the prize is bounded by the spread, which is measured; the probability of collecting it is not"
+        },
+        {
+          "action": "MAKE_NO",
+          "status": "NOT_IDENTIFIED",
+          "ev_net": null,
+          "size_contracts": 0.0,
+          "cash_now": null,
+          "cash_at_settlement": null,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "maker EV is a conditional expectation and its condition is unmeasured; bettor_p_fill reports NOT_IDENTIFIED",
+          "blocker": "P_FILL_NOT_IDENTIFIED",
+          "assumptions": [
+            "NOT_IDENTIFIED is not zero: an unscored action cannot win a ranking by default"
+          ],
+          "uncertainty": "the prize is bounded by the spread, which is measured; the probability of collecting it is not"
+        },
+        {
+          "action": "MERGE",
+          "status": "UNSUPPORTED",
+          "ev_net": null,
+          "size_contracts": 0.0,
+          "cash_now": null,
+          "cash_at_settlement": null,
+          "conditional_payoff": null,
+          "leg_risk_cost": null,
+          "why": "no merge mechanism has been observed, which is not the same as the venue lacking one. MERGE stays blocked",
+          "blocker": "MERGE_NOT_OBSERVED_ON_INSTITUTIONAL",
+          "assumptions": [
+            "a mechanism available to a reference account is not thereby available to the institutional account"
+          ],
+          "uncertainty": "absence of observation, not observation of absence"
+        }
+      ],
+      "assumptions": [
+        "an action with no identified EV does not become attractive by being unmeasured"
+      ],
+      "uncertainty": "the unscored actions may or may not be positive; that is exactly why they were not selected",
+      "fair_value_basis": "FV_VENUE_IMPLIED",
+      "directional_permitted": false
+    }
+  },
   "unsupported_decisions": [],
   "still_absent": [
     {
