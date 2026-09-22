@@ -101,10 +101,20 @@ Receipt census over the venue's **actual** responses:
 | `expected_cost` (**ours**, computed) | 3,790 | 3,790 |
 | **`venue_cost`** | 3,790 | **0** |
 
-**`venue_cost` is null in every row where the key exists.** Our fee
-model has *not* been validated against a venue-reported fee, because the
-venue never reported one in this history. A fee field existing in a
-response schema is not a fee field carrying a value.
+> **WRONG, AND CORRECTED in `EXECUTION_CALIBRATION.md` section 3b.**
+> `venue_cost` is null because it is `cashOrderQty` from the SHORT
+> PREVIEW guard, which our own code maps to None at zero -- and a
+> preview cost is not a fee. The venue DOES report fees, on every
+> EXECUTION. Our fee engine is now validated against 3,285 real
+> executions: maker theta -0.012495 against a published -0.0125,
+> taker +0.059971 against +0.06, exact to the cent on all 345 maker
+> fills. Maker rebates are real and credited.
+
+What *is* empty is the **preview**: `commissionsBasisPoints` and
+`makerCommissionsBasisPoints` are `"0"` on all 7,733 previews. A fee
+field existing in a response schema is not a fee field carrying a
+value — but that is a statement about the preview, not about the
+venue.
 
 ### Settlement ≠ buying power — reported separately, as instructed
 
