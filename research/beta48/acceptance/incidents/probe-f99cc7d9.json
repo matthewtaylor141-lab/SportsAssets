@@ -1,0 +1,127 @@
+{
+  "artifact": "BETTOR_PROBE_INCIDENT_RECORD",
+  "why_this_exists": [
+    "The allowance lives in ONE row, ingestion_state.bettor_live_probe_state,",
+    "and `obs-arm` replaces it wholesale with ON CONFLICT DO UPDATE. Replacing",
+    "a row is not preserving its history: the moment a replacement probe is",
+    "armed, every trace of this one is gone from the database. This file is",
+    "the copy, written BEFORE that happens.",
+    "This is the SECOND such record. The first is probe-12724d1e.json."
+  ],
+  "probe_id": "f99cc7d9-535d-41ee-9780-7b2d6f67035a",
+  "outcome": "NEVER RAN. Failed on its own first reservation and spent nothing.",
+  "row_verbatim": {
+    "slugs": [],
+    "probe_id": "f99cc7d9-535d-41ee-9780-7b2d6f67035a",
+    "started_at": "2026-09-22T08:05:40+00:00",
+    "deadline_at": "2026-09-22T08:35:40+00:00",
+    "max_distinct": 40,
+    "max_bbo_attempts": 160,
+    "distinct_reserved": 0,
+    "max_listing_attempts": 18,
+    "bbo_attempts_reserved": 0,
+    "listing_attempts_reserved": 0
+  },
+  "row_read_at": "2026-09-22T08:13:05Z",
+  "row_read_via": "render-ops sql obs-budget, run 35703600085, job 106667133017",
+  "counters_are_zero": {
+    "distinct_reserved": 0,
+    "bbo_attempts_reserved": 0,
+    "listing_attempts_reserved": 0,
+    "slugs": "empty array",
+    "note": "Nothing was ever reserved, so nothing was ever spent."
+  },
+  "code_sha_deployed_at_the_time": "fd39a0a91704699176ba108e60a816acc0fe9054",
+  "timeline_utc": [
+    ["08:05:40.000", "obs-arm wrote this row; deadline 1800 s out (08:35:40Z)"],
+    ["08:06:0x.000", "obs-run set bettor_live_observation to true"],
+    ["08:06:36.604", "ERROR asyncpg.exceptions.UndefinedColumnError: column \"updated_at\" of relation \"ingestion_state\" does not exist"],
+    ["08:06:36.604", "the listing reservation raised; nothing was dispatched"],
+    ["08:07:42.000", "obs-stop set bettor_live_observation to false"],
+    ["08:11:13.000", "observation tables read: 0 / 0 / 0"],
+    ["08:13:05.000", "row read for this artifact: all three counters 0, slugs empty"]
+  ],
+  "defect": {
+    "summary": "The reservation UPDATE named a column the table does not have.",
+    "detail": [
+      "ctl.reserve() wrote `SET value = jsonb_set(...), updated_at = now()`.",
+      "ingestion_state, created by backend/migrations/001_init.sql, has exactly",
+      "two columns: key TEXT PRIMARY KEY and value JSONB NOT NULL. There is no",
+      "updated_at. Postgres rejected the statement inside the reservation",
+      "transaction, so the reservation raised rather than returning a verdict,",
+      "and the loop treated an uncertain reservation as a refusal -- correctly.",
+      "No venue request was issued."
+    ],
+    "why_every_local_proof_passed": [
+      "Every proof script and every test double CREATED ingestion_state itself,",
+      "and every one of them created it WITH the invented updated_at column.",
+      "The fixtures were written from the code's assumption rather than from",
+      "the migration, so the fixtures agreed with the bug. The bug could only",
+      "surface against a table built by the real migration -- which is to say,",
+      "against production."
+    ],
+    "why_the_mistake_was_plausible": [
+      "001_init.sql does declare updated_at on three OTHER tables (lines 39,",
+      "100, 145). ingestion_state is the narrow exception, and nothing in the",
+      "code said so."
+    ],
+    "no_schema_change_is_required": [
+      "The repair is to stop writing a column that does not exist. Production",
+      "schema is correct as it stands; the code was wrong about it."
+    ],
+    "fixed_in": "4b2c7bdd"
+  },
+  "the_cause_we_need_to_eliminate": {
+    "statement": "Our code and fixtures did not match the production interfaces.",
+    "not": [
+      "This was not 'an environment issue'. Calling it one obscures the cause.",
+      "Nothing about the production environment was unusual, misconfigured or",
+      "unavailable. Production behaved exactly as its schema and its call",
+      "signatures specify. What was wrong was on our side: the code assumed",
+      "interfaces production does not have, and the fixtures were built from",
+      "the same assumptions, so they could never contradict it."
+    ],
+    "three_instances_of_the_same_cause": [
+      {
+        "interface": "the supervisor's call signature",
+        "production": "workers/all.py calls bettor_live_loop.main() with NO arguments",
+        "our_code_assumed": "a control_pool would be passed in",
+        "our_fixtures_supplied": "a pool, in every test",
+        "cost": "probe 12724d1e (NO_CONTROL_POOL)"
+      },
+      {
+        "interface": "the venue client argument",
+        "production": "main() with no arguments passes client=None into probe()",
+        "our_code_assumed": "a client object with .markets.bbo",
+        "our_fixtures_supplied": "a client, in every test",
+        "cost": "would have spent all 40 distinct slots on reads that never left the process; caught by the supervisor-path phase before it ran"
+      },
+      {
+        "interface": "the ingestion_state table",
+        "production": "columns (key, value) -- and only those",
+        "our_code_assumed": "an updated_at column as well",
+        "our_fixtures_supplied": "a CREATE TABLE they wrote themselves, with updated_at",
+        "cost": "probe f99cc7d9 (UndefinedColumnError)"
+      }
+    ],
+    "the_rule_that_follows": [
+      "A proof is worth nothing if it supplies the seam it is meant to test.",
+      "Fixtures must be derived from the production artifact -- the migration,",
+      "the real entry point, the real image -- not authored alongside the code",
+      "that consumes them."
+    ]
+  },
+  "it_failed_closed": {
+    "venue_requests": 0,
+    "distinct_markets": 0,
+    "bbo_attempts": 0,
+    "listing_attempts": 0,
+    "orders": 0,
+    "observation_rows_written": 0,
+    "note": "The ceilings were never at risk. The probe simply could not run."
+  },
+  "do_not": [
+    "Do not reset, replenish or extend this allowance.",
+    "A replacement probe takes a NEW probe_id after this one is closed."
+  ]
+}
