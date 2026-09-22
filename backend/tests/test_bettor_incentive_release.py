@@ -615,7 +615,7 @@ def test_an_instant_before_any_ladder_is_unobserved():
 
 
 @needs_pg
-def test_the_journal_survives_process_replacement_and_records_the_gap():
+async def test_the_journal_survives_process_replacement_and_records_the_gap():
     """Two boots of one run against a real server."""
     import asyncpg
 
@@ -645,7 +645,7 @@ def test_the_journal_survives_process_replacement_and_records_the_gap():
         finally:
             await pool.close()
 
-    o2, recs = asyncio.new_event_loop().run_until_complete(go())
+    o2, recs = await go()
     assert (o2.get("boot_gap") or {}).get("why") == jrnl_mod.PROCESS_REPLACED
     assert {r["boot_id"] for r in recs} == {"b1", "b2"}
     boot_gaps = [r for r in recs if r["kind"] == jrnl_mod.R_GAP
@@ -746,7 +746,7 @@ def test_nothing_in_the_release_writes_the_observation_control_true():
         assert "UPDATE ingestion_state" not in code, other
 
 
-def test_a_closed_control_starts_nothing_at_all(monkeypatch):
+async def test_a_closed_control_starts_nothing_at_all(monkeypatch):
     """Read FIRST: before the manifest, before credentials, before a
     socket. A stopped run must cost nothing."""
     from sportsassets import bettor_live_control as ctl
@@ -761,17 +761,15 @@ def test_a_closed_control_starts_nothing_at_all(monkeypatch):
 
     monkeypatch.setattr(obs.ctl, "read_control", _closed)
     monkeypatch.setattr(obs.man, "load", _load)
-    out = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-        obs.run(control_pool=object()))
+    out = await obs.run(control_pool=object())
     assert out["started"] is False
     assert out["why"] == ctl.W_STOPPED
     assert touched["manifest"] is False
 
 
-def test_the_kill_switch_still_answers_first(monkeypatch):
+async def test_the_kill_switch_still_answers_first(monkeypatch):
     monkeypatch.setenv(obs.KILL_ENV, "off")
-    out = asyncio.get_event_loop_policy().new_event_loop().run_until_complete(
-        obs.run())
+    out = await obs.run()
     assert out == {"started": False, "why": "KILL_SWITCH",
                    "observe": obs.OBSERVE_VERSION}
 
@@ -817,7 +815,7 @@ async def _arm_row(pool, probe="t-probe", control=True, general=0):
 
 
 @needs_pg
-def test_two_overlapping_workers_share_one_eight_request_ceiling():
+async def test_two_overlapping_workers_share_one_eight_request_ceiling():
     """The failure an in-process counter cannot prevent.
 
     Two ledgers on SEPARATE POOLS -- separate connections, as two
@@ -847,14 +845,14 @@ def test_two_overlapping_workers_share_one_eight_request_ceiling():
             for p in (admin, a, b):
                 await p.close()
 
-    ga, gb, total = asyncio.new_event_loop().run_until_complete(go())
+    ga, gb, total = await go()
     assert len(ga + gb) == 16                      # 16 attempted
     assert sum(1 for r in ga + gb if r["ok"]) == 8  # 8 granted, in total
     assert total == 8                               # and the row says so
 
 
 @needs_pg
-def test_a_reservation_is_committed_before_the_caller_may_dispatch():
+async def test_a_reservation_is_committed_before_the_caller_may_dispatch():
     import asyncpg
 
     async def go():
@@ -873,13 +871,13 @@ def test_a_reservation_is_committed_before_the_caller_may_dispatch():
         finally:
             await pool.close()
 
-    r, seen = asyncio.new_event_loop().run_until_complete(go())
+    r, seen = await go()
     assert r["ok"] is True and r["durable"] is True
     assert seen == 1
 
 
 @needs_pg
-def test_removing_the_mode_cannot_start_general_discovery():
+async def test_removing_the_mode_cannot_start_general_discovery():
     """Configuration removal is not a stop -- so the arm makes it safe.
 
     `obs-arm-incentive` zeroes the general acquisition caps. If the
@@ -904,8 +902,7 @@ def test_removing_the_mode_cannot_start_general_discovery():
         finally:
             await pool.close()
 
-    gen, inc, listing, bbo, ctrl = \
-        asyncio.new_event_loop().run_until_complete(go())
+    gen, inc, listing, bbo, ctrl = await go()
     # The control is STILL TRUE -- removing configuration did not stop it.
     assert ctrl["run"] is True
     # ...but the general loop can acquire nothing.
@@ -918,7 +915,7 @@ def test_removing_the_mode_cannot_start_general_discovery():
 
 
 @needs_pg
-def test_a_stop_refuses_the_next_request_inside_the_same_transaction():
+async def test_a_stop_refuses_the_next_request_inside_the_same_transaction():
     import asyncpg
 
     async def go():
@@ -933,7 +930,7 @@ def test_a_stop_refuses_the_next_request_inside_the_same_transaction():
         finally:
             await pool.close()
 
-    r, g = asyncio.new_event_loop().run_until_complete(go())
+    r, g = await go()
     assert r["ok"] is False and r["verdict"] == ctl.V_STOPPED
     assert not ctl.granted(g) and g["why"] == ctl.V_STOPPED
 
@@ -975,3 +972,24 @@ def test_an_in_run_liveness_gap_is_visible_to_a_reconstruction():
 def test_the_worker_closes_an_open_gap_when_the_run_ends():
     src = _code_only("workers/bettor_incentive_observe.py")
     assert "closed_by" in src and "RUN_END" in src
+
+
+def test_no_test_here_builds_its_own_event_loop():
+    """THE DEFECT THIS PINS, which I introduced and which cost 33
+    failures in a file that passes 37/37 on its own.
+
+    This repo runs pytest-asyncio in `asyncio_mode = "auto"`, so an
+    `async def` test is awaited on the session's loop. Calling
+    `asyncio.new_event_loop().run_until_complete(...)` inside a SYNC
+    test builds a second loop, never closes it, and leaves the async
+    machinery in a state where LATER tests' coroutines are collected
+    without ever being awaited -- so the damage lands in other files
+    and looks like their bug.
+
+    Running this file alone hid it completely. It only appeared when
+    the selection widened enough to put another async suite after it.
+    """
+    src = open(os.path.join(HERE, "test_bettor_incentive_release.py"),
+               encoding="utf-8").read()
+    assert "new_event_loop" not in src
+    assert "run_until_complete" not in src
