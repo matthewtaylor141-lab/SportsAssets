@@ -131,3 +131,45 @@ machinery works against real depth and give a concrete share figure for
 that day. It cannot establish that the figure is typical, and no number
 of additional days on the *same* programme and event would make those
 markets independent of each other.
+
+---
+
+## The analysis path exists already
+
+`bettor_incentive_opportunity.py` closes the gap between the frozen
+manifest and a reward figure, so the observation is analysable on
+arrival rather than followed by another round of tooling.
+
+It builds a `Program` per frozen market **from the captured terms**
+(pool $50, DF 0.25, target 500 — read from the manifest, not from a
+constant), walks ladder snapshots, and reports qualifying uptime, mean
+score share, gross reward, how often our level fell outside the walk,
+and how often the side qualified **only because we were there**.
+
+Exercised end to end on real ladders from the captured tape — labelled a
+**scenario**, because those markets carry no programme and their actual
+reward is zero:
+
+| ladder source | clip | offset | uptime | mean share | gross |
+|---|---|---|---|---|---|
+| boxing-canalv-chrmbi | 100 | 0 | 0.908 | 0.0574 | $2.87 |
+| boxing-canalv-chrmbi | 500 | 0 | 1.000 | 0.5634 | $28.17 |
+| cfb-coast-del | 100 | 0 | 1.000 | 0.0711 | $3.55 |
+| cfb-coast-del | 100 | **1** | 1.000 | **0.0004** | $0.02 |
+| cfb-kentst-ohiost | 100 | 0 | 1.000 | 0.0006 | $0.03 |
+
+**What the scenario already shows, and it bears on the decision:** the
+reward is *dominated by competing depth*, not by our clip. The same
+100-contract quote earns a 0.0711 share on one book and 0.0006 on
+another — a hundredfold spread. And one tick back is not a small
+discount: on a book that already meets Target Size at the touch the walk
+stops there and a quote behind it scores **exactly zero**, not `DF × our
+size`.
+
+That is precisely the quantity the observation run would measure on
+markets that actually carry a pool, and it is why a transferred
+share figure was never going to be worth much.
+
+*Self-test pins the arithmetic at the reported precision — exact share
+values, the zero-score-outside-the-walk case, and the created-eligibility
+counter — against the terms in the captured manifest.*

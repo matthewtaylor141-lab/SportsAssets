@@ -4,11 +4,19 @@
 
 | | |
 |---|---|
-| **Release SHA** | **`0228b1027f6c2e60f9a6d5451c45de209ad08c3d`** |
+| **Release SHA (image identity verified)** | **`0228b1027f6c2e60f9a6d5451c45de209ad08c3d`** |
 | branch | `claude/incentive-observation-release` — **no service tracks it** |
 | production now | `ba87076` on `claude/session-njaewf`, live since 2026-09-22T13:58:16Z |
 | manifest | captured 2026-09-22T21:43:59Z, Actions run **35788331780**, from commit `30c7ae1`, committed in `5cfd211` |
-| image | built from this SHA and verified from inside the container |
+| image | built from `0228b10` and verified from inside the container |
+
+> **Deploy the branch head.** `0228b10` is the last commit that changes
+> anything the image contains; everything after it is documentation,
+> which `.dockerignore` keeps out of the build context. Verified rather
+> than asserted — images built from `0228b10` and from a later
+> documentation commit have **identical shipped filesystems**: 747 files,
+> every md5 equal, empty diff. Only build metadata differs. The
+> verification below therefore holds for the head.
 
 ---
 
