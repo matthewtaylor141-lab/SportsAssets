@@ -1,0 +1,66 @@
+image check: python 3.12.14
+package    : /app/sportsassets/__init__.py
+entry point: bettor_live_loop.main() with NO ARGUMENTS
+database   : bettor_image_check
+recorded   : 30590 verbatim BBO bodies in the corpus, 35 usable, 35 served
+patched    : pmus._get_client and ms.MarketStream. NOTHING about the pool, settings or reservation path.
+
+========================================================================
+S1. listing reservation -> BBO reservation -> selection -> persisted decision
+========================================================================
+   result : started=None why=TEST_TIMEOUT
+   venue  : 1 listing request(s), 35 BBO request(s) over 35 distinct market(s)
+   row    : listing=1 distinct=35 attempts=35 probe_id=3cc35e83
+   journal: 0 -> 644 rows
+   selected: 28 market(s) subscribed on the stream
+   replayed: 644 recorded frame(s) pushed through _on_market_data
+   [PASS] a listing attempt was RESERVED before the request          got True
+   [PASS] and the listing request actually went out                  got True
+   [PASS] the listing reservation covers every listing request       got True
+   [PASS] a distinct-market slot was RESERVED per market read        got True
+   [PASS] a BBO attempt was RESERVED per BBO request                 got True
+   [PASS] no ceiling was exceeded: distinct <= 40                    got True
+   [PASS] no ceiling was exceeded: attempts <= 160                   got True
+   [PASS] no ceiling was exceeded: listing <= 18                     got True
+   [PASS] the row carries the armed identity                         got True
+   [PASS] the recorded bodies produced a non-empty selection         got True
+   [PASS] a stream was opened and subscribed                         got True
+   [PASS] recorded frames reached the production _on_market_data     got True
+   [PASS] a DECISION WAS PERSISTED to bettor_live_journal            got True
+   [PASS] and every stream the run opened was closed                 got True
+   journal rows by (status, evidence_class):
+     DECIDED      REPLAY_DECISION      644
+   [PASS] every persisted decision is labelled REPLAY_DECISION, never PROSPECTIVE_SHADOW got {'REPLAY_DECISION'}
+   [PASS] at least one decision passed the freshness gates           got True
+   [PASS] MAX_CONTRACTS=0 held: no order was submitted               got True
+
+========================================================================
+S2. obs-stop -- the control refuses, no venue request is made
+========================================================================
+   result : started=False why=STOPPED_BY_CONTROL
+   venue  : listing 1 -> 1, BBO 35 -> 35
+   [PASS] the stopped loop did not start                             got False
+   [PASS] it issued NO listing request                               got 1
+   [PASS] it issued NO BBO request                                   got 35
+   [PASS] and it reserved NOTHING                                    got (1, 35, 35)
+   [PASS] the refusal is a CONTROL reason, so it polls rather than escalating got True
+
+========================================================================
+S3. deadline -- an expired allowance refuses, and no request is made
+========================================================================
+   result : started=False why=DEADLINE_PASSED in 30.03s
+   venue  : listing 1 -> 1, BBO 35 -> 35
+   control after the expiry: false
+   [PASS] the expired probe did not start                            got False
+   [PASS] it issued NO listing request past the deadline             got 1
+   [PASS] it issued NO BBO request past the deadline                 got 35
+   [PASS] counters did not move                                      got (0, 0)
+   direct reservation after the deadline: {'kind': 'listing', 'slug': None, 'probe_id': '9b1f4538-d004-4dd5-870d-c1d1fb1bbe0c', 'why': 'RESERVATION_STOPPED_BY_CONTROL', 'reserved': None, 'cap': None, 'remaining': 0, 'detail': 'control says STOPPED_BY_CONTROL (bare boolean false)', 'uncertain': False}
+   [PASS] the DATABASE itself refuses a post-deadline reservation    got False
+   with the control back ON and the deadline still past: RESERVATION_DEADLINE_PASSED
+   [PASS] the DEADLINE gate refuses on its own, control notwithstanding got (False, 'RESERVATION_DEADLINE_PASSED')
+
+========================================================================
+RESULT
+========================================================================
+every check passed, inside the deployment image, against a database built by the repository's own migration runner.

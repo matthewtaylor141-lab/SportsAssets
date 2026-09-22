@@ -1,0 +1,9 @@
+SUPPLIED us_premap via sportsassets.workers.premap._ensure_table; resuming the runner
+MIGRATE_COMPLETE after 2 pass(es)
+APPLIED_COUNT=91
+APPLIED_FIRST=001_init.sql
+APPLIED_LAST=093_bettor_live_observation.sql
+INGESTION_STATE_COLUMNS:
+  1 | key | text | nullable=NO | -
+  2 | value | jsonb | nullable=NO | -
+RUNTIME_SUPPLIED_TABLES: [('us_premap', 'sportsassets.workers.premap._ensure_table')]
