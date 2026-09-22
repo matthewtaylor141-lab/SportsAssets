@@ -1,3 +1,21 @@
+> **SUPERSEDED IN PART by `ECONOMIC_PACKAGE.md`.** Three things in this
+> document did not survive whole-episode accounting:
+>
+> * **§4 Classes A and B "UNRESOLVED"** — the two-sided maker policy is
+>   now **REJECTED on development evidence**: −0.0291/contract over 943
+>   episodes, with the double-fill rate measured at 0.0753 against a
+>   0.163 break-even.
+> * **§5's 33.9% toxic-flow scenario** — withdrawn as an acceptance
+>   criterion. Net cash is evaluated directly instead.
+> * **§7's pilot shape and §6's capital figures** — the stopping rule
+>   was invalid and the capital claim ("releases immediately") is
+>   withdrawn; the PMUS API surface carries `openOrders`,
+>   `unsettledFunds` and `qtyAvailable` as distinct encumbrance lines.
+>
+> Its headline answer — **no policy is supported for a bounded pilot** —
+> is unchanged, and is now supported by measurement rather than by a
+> named missing quantity.
+
 # BETTOR — the economic verdict on our own engine
 
 **Does our evidence support a profitable BETTOR policy today?**

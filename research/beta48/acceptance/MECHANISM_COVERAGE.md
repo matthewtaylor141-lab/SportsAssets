@@ -1,3 +1,20 @@
+> **SUPERSEDED IN PART by `ECONOMIC_PACKAGE.md`.** Four conclusions in
+> this document were wrong and are corrected there. Kept in place
+> because the errors are instructive and because deleting the record of
+> a withdrawn claim is not a correction.
+>
+> | row | this document said | corrected to |
+> |---|---|---|
+> | 5 | "UNRESOLVED — the strongest survivor", +0.0086/contract, positive 1,551 of 1,551 | **REJECTED on development evidence.** Run as whole episodes with inventory carried: **−0.0291/contract**, 95% CI [−0.140, +0.082] on 11 event clusters. q measured at **0.0753** against the 0.163 break-even |
+> | 1 | "the headline returns are mostly this row, not the pair channel" | **WITHDRAWN.** That inferred a profit share from a capital share. Actual attribution: profit is **65.2% pair / 34.8% settlement** |
+> | 7 | rejected because the pair channel "changes sign 3–3" | **rejected for a better reason.** A 3–3 count is weak evidence. The signal has already moved a median **+0.0100** against us when we see it (89.5% of 214,609 fills), and **0 of 214,609** are in a PMUS slug namespace |
+> | 3 | "REJECTED on these books" | **narrowed.** A static one-book calculation rejects only the static version. The time-dependent version was then run over 8 horizon/size settings and is negative at all 8 |
+>
+> The pilot proposal at the end of this document is **replaced**: its
+> stopping rule was invalid, its 500-episode cap was ~105× too coarse
+> to detect the edge it targeted, and its $250 cap was defined against
+> the wrong quantity. See `ECONOMIC_PACKAGE.md` §8–§9.
+
 # Mechanism coverage — every case-study mechanism against our engine
 
 One row per mechanism the team's research actually proposes. For each:
