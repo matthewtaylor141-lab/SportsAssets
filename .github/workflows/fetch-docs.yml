@@ -37,6 +37,20 @@ jobs:
           python3 - <<'PY'
           import html, re
           s = open('/tmp/page.html', encoding='utf-8', errors='ignore').read()
+          # SCRIPT SOURCES AND IN-SCRIPT URLS, captured BEFORE the
+          # scripts are stripped. A JS-rendered index -- the Time &
+          # Sales file list is one -- keeps its real data URLs inside a
+          # bundle or an inline fetch(), and stripping scripts first
+          # threw exactly those away. Still read-only, still one page.
+          scripts = re.findall(r'<script[^>]+src="([^"]+)"', s)
+          inline = re.findall(
+              r'(?is)<script(?![^>]*\ssrc=)[^>]*>(.*?)</script>', s)
+          urlish = re.compile(
+              r'["\'`]([^"\'`\s<>]*(?:\.json|\.csv|/api/|/reports?/)'
+              r'[^"\'`\s<>]*)["\'`]')
+          inline_urls = []
+          for blk in inline:
+              inline_urls += urlish.findall(blk)
           s = re.sub(r'(?is)<(script|style|noscript)[^>]*>.*?</\1>', ' ', s)
           links = re.findall(r'href="([^"]+)"', s)
           s = re.sub(r'(?i)<br\s*/?>|</p>|</div>|</li>|</h[1-6]>|</tr>|</pre>', '\n', s)
@@ -46,6 +60,12 @@ jobs:
           s = re.sub(r'\n\s*\n+', '\n', s)
           print("== TEXT ==")
           print(s[:60000])
+          print("== SCRIPTS ==")
+          for l in sorted(set(scripts))[:100]:
+              print(l)
+          print("== IN-SCRIPT URLS ==")
+          for l in sorted(set(inline_urls))[:200]:
+              print(l)
           print("== LINKS ==")
           for l in sorted(set(links))[:400]:
               print(l)
