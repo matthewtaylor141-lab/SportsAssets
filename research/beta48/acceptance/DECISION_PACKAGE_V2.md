@@ -417,8 +417,9 @@ metric that matters. Both are read-only.
 
 ## 9. Reproducing
 
-**SHA: `<filled in by the commit that adds this file>`** — see the git
-log entry "Fee regime corrected, C2 re-run".
+**SHA: `fc5106837aa5a1b9bf46b79994d792d69d513265`**
+(branch `claude/bettor-none-pool-fix`; production remains `ba87076`,
+untouched).
 
 ```bash
 python -m pytest research/beta48/test_bettor_policy_ev.py -q   # 28 tests
