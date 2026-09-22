@@ -1,0 +1,12 @@
+{
+  "kind": "FULL_SUITE_FAILURE_SET_COMPARISON",
+  "candidate_sha": "1aa2ce9834106041e0eee667c9349fd7022884ad",
+  "baseline_sha": "e8f616a37f4c23b6a59a6f2e2ff845ce3283f9eb",
+  "candidate": {"failed": 446, "passed": 10555, "skipped": 134, "xfailed": 3, "seconds": 1548.11},
+  "baseline":  {"failed": 446, "passed": 10511, "skipped": 134, "xfailed": 3, "seconds": 1546.84},
+  "only_at_candidate_REGRESSIONS": 0,
+  "only_at_baseline_FIXED": 0,
+  "sets_identical": true,
+  "passed_delta_explained_by": "44 new tests in backend/tests/test_bettor_live_loop.py",
+  "method": "two fresh runs, -p no:cacheprovider, full FAILED id lists diffed; no cached lastfailed used"
+}
