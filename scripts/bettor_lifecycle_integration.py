@@ -1199,6 +1199,231 @@ async def L2B_restart(pool, expect):
                b2["bbo_attempts_reserved"]])), True)
 
 
+# ══ L12: THE STOP RECEIPT, THROUGH THE REAL SHUTDOWN PATH ═══════════════
+#
+# THE GAP THIS CLOSES. Every other phase here drives `main()`, but none
+# of them ever read `ingestion_state.bettor_live_stop_receipt`. The
+# receipt -- and with it the active-close gate that decides whether a
+# shutdown may be reported as having closed a live connection -- was
+# covered by unit tests only. A unit test exercises `stop()`; it does
+# not exercise `main()`'s finally block, `ctl.write_stop_receipt`, the
+# jsonb round trip, or the identities the row is supposed to carry.
+#
+# TRANSPORT IS SIMULATED, EXPLICITLY. `ReplayStream` speaks to no
+# venue. The four streams below stamp the SAME fields the real
+# `_main` finally block stamps (`socket_closed_at`, `socket_close_ok`,
+# `thread_exited_at`) so the SHUTDOWN BOOKKEEPING is exercised end to
+# end -- the receipt, the gate and the persistence. It establishes
+# nothing whatever about a real socket.
+
+class _StampingStream(ReplayStream):
+    """A replay transport that keeps the real closure bookkeeping.
+
+    `ReplayStream._run` returns without stamping anything, which is
+    honest for a replay -- there is no socket -- but it means the
+    CLOSED path is never reached. These subclasses stamp exactly what
+    `MarketStream._main`'s finally does, and nothing else.
+    """
+
+    close_ok = True
+    close_error = None
+    drop_before_stop = False     # go disconnected while still running
+    hang_s = 0.0                 # ignore _stop for this long
+
+    def _run(self):
+        import datetime as _dt
+        self.epoch += 1
+        self.connected = True
+        self.connected_since = ms._now_iso()
+        self.first_connected_at = self.connected_since
+        dropped_at = time.monotonic() + 1.0
+        try:
+            while not self._stop:
+                if type(self).drop_before_stop and \
+                        time.monotonic() > dropped_at:
+                    # THE CONNECTION DIES WHILE THE LOOP RUNS ON. This
+                    # is the case a clean close() cannot distinguish.
+                    with self._lock:
+                        self.connected = False
+                with self._lock:
+                    want = list(self._subs)
+                for slug in want:
+                    md = ReplayStream.frames.get(slug)
+                    if md is None:
+                        continue
+                    md = dict(md)
+                    md["transactTime"] = _dt.datetime.now(
+                        _dt.timezone.utc).strftime(
+                            "%Y-%m-%dT%H:%M:%S.%f000Z")
+                    self._on_market_data({"marketData": md})
+                for _ in range(5):
+                    if self._stop:
+                        break
+                    time.sleep(0.1)
+            if type(self).hang_s:
+                # A THREAD THAT WILL NOT LEAVE. The join must time out
+                # and the receipt must say so.
+                time.sleep(type(self).hang_s)
+        finally:
+            with self._lock:
+                self.connected = False
+                # The same three stamps the production finally writes.
+                self.socket_closed_at = time.time()
+                self.socket_closed_at_iso = ms._now_iso()
+                self.socket_close_ok = type(self).close_ok
+                self.socket_close_error = type(self).close_error
+                self.socket_closes += 1
+                if self.thread_exited_at is None:
+                    self.thread_exited_at = time.time()
+                    self.thread_exited_at_iso = ms._now_iso()
+
+
+async def receipt(pool):
+    v = await pool.fetchval("SELECT value FROM ingestion_state WHERE key=$1",
+                            ctl.RECEIPT_KEY)
+    return json.loads(v) if isinstance(v, str) else v
+
+
+async def _run_to_receipt(pool, cls, *, wait_for_connect=True,
+                          settle_s=30.0):
+    """Arm, run `main()` for real, stop it, return the PERSISTED row."""
+    await wipe_observation(pool)
+    await pool.execute("DELETE FROM ingestion_state WHERE key=$1",
+                       ctl.RECEIPT_KEY)
+    fx = Fixtures(n=6)
+    m = RecordedMarkets(fx)
+    cls.made = ReplayStream.made
+    ms.MarketStream = cls
+    bl.ms.MarketStream = cls
+    ReplayStream.made.clear()
+    ReplayStream.frames = fx.book
+    pmus._get_client = lambda: Client(m)
+    pid = await arm(pool)
+    bl._reset_backoff()
+    task = asyncio.create_task(bl.main())
+    if wait_for_connect:
+        for _ in range(300):
+            if any(f.connected for f in ReplayStream.made):
+                break
+            await asyncio.sleep(0.1)
+    else:
+        await asyncio.sleep(3.0)
+    await stop_now(pool)
+    try:
+        await asyncio.wait_for(task, timeout=settle_s)
+    except (asyncio.TimeoutError, BaseException):
+        task.cancel()
+        try:
+            await task
+        except BaseException:
+            pass
+    await asyncio.sleep(0.5)
+    return pid, await receipt(pool)
+
+
+async def L12_stop_receipt(pool):
+    rule("L12  THE STOP RECEIPT IS WRITTEN, AND ONLY A LIVE CONNECTION "
+         "MAY BE CALLED AN ACTIVE CLOSE")
+    print("   TRANSPORT: SIMULATED. ReplayStream speaks to no venue; it "
+          "stamps\n   the same closure fields the production finally "
+          "block stamps, so the\n   RECEIPT AND THE GATE are exercised "
+          "-- not a real socket.\n")
+
+    # ── 1. A LIVE CONNECTION, CLOSED CLEANLY ─────────────────────────
+    class Clean(_StampingStream):
+        close_ok, close_error, drop_before_stop, hang_s = True, None, False, 0.0
+
+    pid, r = await _run_to_receipt(pool, Clean)
+    check("a receipt row was persisted", bool(r), True)
+    if not r:
+        return
+    t = r.get("transport") or {}
+    check("the receipt carries the ARMED probe id", r.get("probe_id"), pid)
+    check("   ... and a boot id", bool(r.get("boot_id")), True)
+    check("   ... matching the durability record",
+          r.get("boot_id"), (r.get("durability") or {}).get("boot_id"))
+    check("   ... and this process's pid", isinstance(r.get("pid"), int),
+          True)
+    check("   ... and its host", bool(r.get("host")), True)
+    check("connection state was captured BEFORE the stop",
+          t.get("connected_at_stop"), True)
+    check("   ... with the connection's own identity",
+          bool(t.get("connected_since")) and t.get("epoch_at_stop", 0) >= 1,
+          True)
+    check("the shutdown verdict is CLOSED", t.get("shutdown"), "CLOSED")
+    check("   ... and it is reported as verified",
+          r.get("shutdown_verified"), True)
+    check("AN ACTIVE CLOSE IS CLAIMED, because one was exercised",
+          r.get("active_close_exercised"), True)
+    check("   ... so no NOT-EXERCISED note is carried",
+          r.get("active_close_note"), None)
+    check("the close latency is a subtraction, not a guess",
+          isinstance(t.get("close_latency_s"), (int, float)), True)
+    check("the control detection time is recorded",
+          bool(r.get("control_detected_at")), True)
+    check("the last outbound request time is recorded",
+          bool(r.get("last_request_started_at")), True)
+    check("no order was submitted", r.get("orders_submitted"), 0)
+
+    # ── 2. THE CONNECTION WAS ALREADY DOWN ───────────────────────────
+    #
+    # close() still returns cleanly -- the ws object survives a drop --
+    # so the verdict is CLOSED and the ACTIVE-CLOSE CLAIM MUST NOT BE.
+    class Dropped(_StampingStream):
+        close_ok, close_error, drop_before_stop, hang_s = True, None, True, 0.0
+
+    _, r2 = await _run_to_receipt(pool, Dropped)
+    t2 = (r2 or {}).get("transport") or {}
+    check("a dropped connection still closes cleanly",
+          t2.get("shutdown"), "CLOSED")
+    check("   ... but connected_at_stop is FALSE",
+          t2.get("connected_at_stop"), False)
+    check("   ... and NO active close may be claimed",
+          (r2 or {}).get("active_close_exercised"), False)
+    check("   ... the receipt says NOT EXERCISED",
+          "NOT EXERCISED" in ((r2 or {}).get("active_close_note") or ""),
+          True)
+
+    # ── 3. close() RAISED ────────────────────────────────────────────
+    class Raised(_StampingStream):
+        close_ok, close_error = False, "ConnectionResetError"
+        drop_before_stop, hang_s = False, 0.0
+
+    _, r3 = await _run_to_receipt(pool, Raised)
+    t3 = (r3 or {}).get("transport") or {}
+    check("a close that raised is INCOMPLETE",
+          t3.get("shutdown"), "INCOMPLETE_CLOSE_RAISED")
+    check("   ... not verified", (r3 or {}).get("shutdown_verified"), False)
+    check("   ... the error is named",
+          t3.get("socket_close_error"), "ConnectionResetError")
+    check("   ... and no active close is claimed",
+          (r3 or {}).get("active_close_exercised"), False)
+
+    # ── 4. THE JOIN TIMED OUT ────────────────────────────────────────
+    class Hangs(_StampingStream):
+        close_ok, close_error = True, None
+        drop_before_stop = False
+        hang_s = bl.STREAM_CLOSE_WAIT_S + 10.0
+
+    _, r4 = await _run_to_receipt(
+        pool, Hangs, settle_s=bl.STREAM_CLOSE_WAIT_S + 40.0)
+    t4 = (r4 or {}).get("transport") or {}
+    check("a join that timed out is INCOMPLETE",
+          t4.get("shutdown"), "INCOMPLETE_JOIN_TIMEOUT")
+    check("   ... the thread is reported still alive",
+          t4.get("thread_alive"), True)
+    check("   ... not verified", (r4 or {}).get("shutdown_verified"), False)
+    check("   ... and no active close is claimed",
+          (r4 or {}).get("active_close_exercised"), False)
+
+    ms.MarketStream = ReplayStream
+    bl.ms.MarketStream = ReplayStream
+    print("\n   ESTABLISHED: the receipt is written through main()'s real "
+          "shutdown\n   path, carries the armed identities, and gates the "
+          "active-close claim\n   on connection state read before the stop."
+          "\n   NOT ESTABLISHED: anything about a real WebSocket.")
+
+
 PHASES = {
     "L1": L1_disabled_startup,
     "L3": L3_reservation_precedes_dispatch,
@@ -1209,6 +1434,7 @@ PHASES = {
     "L8": L8_stop_and_deadline,
     "L9": L9_deadline_survives_disarm_failure,
     "L11": L11_bounded,
+    "L12": L12_stop_receipt,
 }
 
 
