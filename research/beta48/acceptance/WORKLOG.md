@@ -189,3 +189,24 @@ pre-existing.
 NOT ESTABLISHED: attribution of all 445. That needs a full baseline run,
 which is broad testing and was not authorized. What is established is
 that the sampled failures are not caused by this work.
+
+### Image verification, and a misleading refusal found by it
+Built from 0228b10 and verified INSIDE the container: manifest loads
+through the real startup path (441 programs, et_date 2026-09-22,
+authenticated False), freeze OK at 12 markets / 1 programme / 1 event,
+and the runtime adapter produces QUOTE_BOTH_SIDES -> engine
+PROPOSED_BUT_NOT_SCORED -> NO_TRADE 0.0, executable False.
+
+A DEFECT FOUND BY BEING MISLED BY IT. load() returns a WRAPPER
+{ok, why, path, manifest}; passing that wrapper to freeze() returned
+MANIFEST_HAS_NO_QUALIFYING_PROGRAMS. Fail-closed, and for entirely the
+wrong reason -- it reads as "the venue had no programmes today". I spent
+a build and three checks hunting a delivery defect that did not exist;
+the file in the image was byte-identical to the host (277,118 bytes,
+same md5). freeze() now refuses a document with no `programs` key BY
+NAME and says which value to pass. Pinned by a test.
+
+### Approval request V4 written, release SHA 0228b10
+Scope: three services, one variable, one observation day. Preflight
+allowance EXHAUSTED (6/6). Socket allowances separate. Rollback is
+stop-and-verify first.
