@@ -67,12 +67,29 @@ ENDS     at the first of:
 WHAT IS MODELLED AND WHAT IS ASSUMED -- the assumptions, named
 ────────────────────────────────────────────────────────────────────
 
-A1  PRINTS. `sharesTraded` is cumulative; its increase between two
-    observations is the volume printed in that interval. `lastTradePx`
-    gives ONE price for that interval -- the last one. If several
-    prints happened at different prices the interval's whole volume is
-    attributed to that single price. This cuts both ways and cannot be
-    corrected from a BBO feed.
+A1  PRINTS -- NO LONGER AN ASSUMPTION WHERE THE TAPE COVERS US.
+    This previously read: `sharesTraded` is cumulative, its increase
+    between two observations is that interval's volume, `lastTradePx`
+    gives ONE price for it, and "this cuts both ways and cannot be
+    corrected from a BBO feed." The last clause was wrong. The venue
+    publishes daily Time & Sales, all eight days of the capture window
+    were retrieved complete, and `bettor_prints.py` now supplies the
+    ACTUAL prints -- time, price and quantity -- for each interval.
+
+    Measured against that tape the snapshot TOTAL was accurate (ratio
+    1.00 on eight of twelve markets) and the PRICE ATTRIBUTION was not:
+    one interval carries up to 120 distinct prices. So the defect was
+    never the volume, it was pricing all of it at one price.
+
+    WHAT THE TAPE STILL DOES NOT SETTLE. It has four columns and
+    carries no side, no aggressor flag and no counterparty. A print
+    establishes that trading reached a price. It does not establish who
+    initiated it, so it is used only to test whether trading reached
+    our quote, never to claim we know who lifted whom.
+
+    When the tape is absent the snapshot path still runs, and every
+    result records `tape_intervals` and `snapshot_intervals` so the two
+    can never be silently mixed.
 
 A2  QUEUE. Quoting strictly inside the spread puts us alone at our
     price, so we are at the front. Quoting at the touch puts us behind
@@ -102,6 +119,7 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 import bettor_policy_ev as ev                                   # noqa: E402
+import bettor_prints as prints_mod                              # noqa: E402
 import bettor_tape as tape                                      # noqa: E402
 
 # ── the policy's parameters, frozen here so they are visible ──────────
@@ -233,8 +251,9 @@ class Episode:
     """One quoting lifecycle in one market. Nothing is dropped."""
 
     def __init__(self, slug, event, i0, row, size, tick, rebates_on,
-                 queue_model, policy=None):
+                 queue_model, policy=None, prints=None):
         self.slug, self.event = slug, event
+        self.prints = prints
         self.i0, self.t0 = i0, row["t_iso"]
         self.t0_epoch = row.get("t")
         self.size = float(size)
@@ -305,6 +324,11 @@ class Episode:
         self.ladder_bounded_intervals = 0
         self.unbounded_intervals = 0
         self.no_ladder_intervals = 0
+        # HOW EACH INTERVAL WAS PRICED, counted so a result can
+        # never silently mix the venue's tape with the snapshot
+        # proxy it replaces.
+        self.tape_intervals = 0
+        self.snapshot_intervals = 0
         self.unliquidated = 0.0
         lad0 = row.get("ladder")
         for leg, side, our in (("YES", "BID", self.pb),
@@ -473,7 +497,7 @@ class Episode:
                 8)})
 
     # ── the fill model: PERSISTENT QUEUE, LABELLED SCENARIOS ──────────
-    def _available(self, side, prev, row, dvol, print_px):
+    def _available(self, side, prev, row, dvol, print_px, tprints=None):
         """Contracts of this interval's PRINTED volume that reach us.
 
         THE TWO DEFECTS THIS REPLACES, both real:
@@ -510,12 +534,31 @@ class Episode:
             strictly_better = sum(q for px, q in levels_a
                                   if px < our - 1e-9)
 
-        # does the print cross our quote at all?
-        crosses = False
-        if print_px is not None and dvol > 0:
-            crosses = (print_px <= our + 1e-9) if side == "YES" \
-                else (print_px >= our - 1e-9)
-        traded = dvol if crosses else 0.0
+        # WHAT REACHED OUR PRICE.
+        #
+        # With the venue's tape we test EVERY print in the interval
+        # against our own quote and sum only the ones that reach it. A
+        # single interval carries up to 120 distinct prices, so the old
+        # test -- one snapshot delta priced at `last_trade_px`, the most
+        # recent print -- decided the whole interval on whichever side
+        # of our quote one arbitrary print happened to land.
+        #
+        # The tape has no side and no aggressor flag, so a print is used
+        # only to establish that trading REACHED a price. It is never
+        # read as evidence about who initiated it.
+        if tprints:
+            if side == "YES":
+                traded = sum(q for _, px, q in tprints if px <= our + 1e-9)
+            else:
+                traded = sum(q for _, px, q in tprints if px >= our - 1e-9)
+            self.tape_intervals += 1
+        else:
+            crosses = False
+            if print_px is not None and dvol > 0:
+                crosses = (print_px <= our + 1e-9) if side == "YES" \
+                    else (print_px >= our - 1e-9)
+            traded = dvol if crosses else 0.0
+            self.snapshot_intervals += 1
 
         # depletion at our price or better, between the two CAUSAL
         # ladders. Used for queue advance only.
@@ -594,6 +637,11 @@ class Episode:
                     and prev["shares_traded"] is not None):
                 dvol = max(0.0, row["shares_traded"] - prev["shares_traded"])
             print_px = row["last_trade_px"]
+            # THE REAL PRINTS IN (t_prev, t_now]. Empty tuple means the
+            # tape says NOTHING traded in this interval -- which is the
+            # common case: most intervals contain no print at all.
+            tprints = (self.prints.between(prev.get("t"), row.get("t"))
+                       if self.prints is not None else None)
 
             age = (row["t"] - self.t0_epoch) if (
                 row["t"] is not None and self.t0_epoch is not None) else 0.0
@@ -602,14 +650,16 @@ class Episode:
 
             # ── entry fills (the two resting legs) ────────────────────
             if not cancelled and (self.open_yes > 0 or self.open_no > 0):
-                got = self._available("YES", prev, row, dvol, print_px)
+                got = self._available("YES", prev, row, dvol, print_px,
+                                      tprints)
                 take = min(self.open_yes, got)
                 if take > 0:
                     self._fill("YES", self.pb, take, i, row, True, "ENTRY")
                     self.open_yes -= take
                     if self.cancel_requested_at is not None:
                         self.race_fills += 1
-                got = self._available("NO", prev, row, dvol, print_px)
+                got = self._available("NO", prev, row, dvol, print_px,
+                                      tprints)
                 take = min(self.open_no, got)
                 if take > 0:
                     self._fill("NO", 1.0 - self.po, take, i, row, True,
@@ -864,6 +914,12 @@ class Episode:
             "status": self.status,
             "queue_model": self.queue_model,
             "rebates": "PUBLISHED" if self.rebates_on else "EXCLUDED",
+
+            # HOW EACH INTERVAL WAS PRICED. Carried on every episode so
+            # a tape-backed result and a snapshot-proxy result can never
+            # be added together without the mixture being visible.
+            "tape_intervals": self.tape_intervals,
+            "snapshot_intervals": self.snapshot_intervals,
             "size": self.size,
             "quote_bid": self.pb, "quote_offer": self.po,
             "entry_book": self.entry_book,
@@ -909,7 +965,7 @@ class Episode:
 
 
 def run_market(slug, rows, size, rebates_on, queue_model,
-               max_episodes=None, policy=None):
+               max_episodes=None, policy=None, prints=None):
     """Non-overlapping episodes across one market's whole tape."""
     pol = policy or BASE_POLICY
     settlement, _ = tape.settlement_label(rows)
@@ -929,7 +985,7 @@ def run_market(slug, rows, size, rebates_on, queue_model,
             i += 1
             continue
         ep = Episode(slug, event, i, r, size, tick, rebates_on,
-                     queue_model, policy=pol)
+                     queue_model, policy=pol, prints=prints)
         ep.run(rows, settlement)
         out.append(ep.result())
         i = max(ep.end_i or i, i) + COOLDOWN + 1
@@ -943,17 +999,22 @@ _TAPE_CACHE = {}
 
 def run_all(size=100.0, rebates_on=True,
             queue_model="QUEUE_FRONT_IF_INSIDE", max_episodes=None,
-            policy=None):
+            policy=None, use_tape=True):
     if "t" not in _TAPE_CACHE:
         by, _f = tape.load_tape()
         by, stats = tape.attach_ladders(by)
         _TAPE_CACHE["t"] = by
         _TAPE_CACHE["ladder_stats"] = stats
     by_slug = _TAPE_CACHE["t"]
+    if "prints" not in _TAPE_CACHE:
+        _TAPE_CACHE["prints"] = prints_mod.load_prints()
+    all_prints = _TAPE_CACHE["prints"] if use_tape else {}
     eps = []
     for slug, rows in sorted(by_slug.items()):
+        idx = (prints_mod.index_for(all_prints, slug)
+               if all_prints else None)
         eps.extend(run_market(slug, rows, size, rebates_on, queue_model,
-                              max_episodes, policy=policy))
+                              max_episodes, policy=policy, prints=idx))
     return eps
 
 

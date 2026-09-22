@@ -1,0 +1,206 @@
+{
+  "candidates": [
+    "C0",
+    "C2"
+  ],
+  "qfracs": [
+    0.0,
+    0.25,
+    0.5,
+    1.0
+  ],
+  "rows": [
+    {
+      "candidate": "C0",
+      "qfrac": 0.0,
+      "snapshot": {
+        "any_fill": 405,
+        "both_legs": 160,
+        "contracts": 55272.23,
+        "episodes": 734,
+        "net_usd": -134.5575,
+        "per_contract": -0.002434,
+        "snapshot_intervals": 36072,
+        "tape_intervals": 0
+      },
+      "tape": {
+        "any_fill": 495,
+        "both_legs": 327,
+        "contracts": 75494.93,
+        "episodes": 817,
+        "net_usd": -50.3824,
+        "per_contract": -0.000667,
+        "snapshot_intervals": 33144,
+        "tape_intervals": 3050
+      }
+    },
+    {
+      "candidate": "C0",
+      "qfrac": 0.25,
+      "snapshot": {
+        "any_fill": 165,
+        "both_legs": 26,
+        "contracts": 16461.56,
+        "episodes": 791,
+        "net_usd": -199.5631,
+        "per_contract": -0.012123,
+        "snapshot_intervals": 39762,
+        "tape_intervals": 0
+      },
+      "tape": {
+        "any_fill": 181,
+        "both_legs": 47,
+        "contracts": 20700.07,
+        "episodes": 792,
+        "net_usd": -168.8169,
+        "per_contract": -0.008155,
+        "snapshot_intervals": 36160,
+        "tape_intervals": 3444
+      }
+    },
+    {
+      "candidate": "C0",
+      "qfrac": 0.5,
+      "snapshot": {
+        "any_fill": 153,
+        "both_legs": 22,
+        "contracts": 15383.99,
+        "episodes": 792,
+        "net_usd": -198.6249,
+        "per_contract": -0.012911,
+        "snapshot_intervals": 39992,
+        "tape_intervals": 0
+      },
+      "tape": {
+        "any_fill": 166,
+        "both_legs": 43,
+        "contracts": 18269.38,
+        "episodes": 796,
+        "net_usd": -240.6881,
+        "per_contract": -0.013174,
+        "snapshot_intervals": 36376,
+        "tape_intervals": 3494
+      }
+    },
+    {
+      "candidate": "C0",
+      "qfrac": 1.0,
+      "snapshot": {
+        "any_fill": 147,
+        "both_legs": 24,
+        "contracts": 14669.19,
+        "episodes": 795,
+        "net_usd": -159.1731,
+        "per_contract": -0.010851,
+        "snapshot_intervals": 40150,
+        "tape_intervals": 0
+      },
+      "tape": {
+        "any_fill": 156,
+        "both_legs": 42,
+        "contracts": 16722.56,
+        "episodes": 796,
+        "net_usd": -181.5874,
+        "per_contract": -0.010859,
+        "snapshot_intervals": 36534,
+        "tape_intervals": 3528
+      }
+    },
+    {
+      "candidate": "C2",
+      "qfrac": 0.0,
+      "snapshot": {
+        "any_fill": 110,
+        "both_legs": 16,
+        "contracts": 9481.41,
+        "episodes": 343,
+        "net_usd": -126.7201,
+        "per_contract": -0.013365,
+        "snapshot_intervals": 17712,
+        "tape_intervals": 0
+      },
+      "tape": {
+        "any_fill": 121,
+        "both_legs": 36,
+        "contracts": 11971.16,
+        "episodes": 347,
+        "net_usd": -78.4752,
+        "per_contract": -0.006555,
+        "snapshot_intervals": 17096,
+        "tape_intervals": 530
+      }
+    },
+    {
+      "candidate": "C2",
+      "qfrac": 0.25,
+      "snapshot": {
+        "any_fill": 40,
+        "both_legs": 2,
+        "contracts": 3527.95,
+        "episodes": 374,
+        "net_usd": -120.3833,
+        "per_contract": -0.034123,
+        "snapshot_intervals": 19114,
+        "tape_intervals": 0
+      },
+      "tape": {
+        "any_fill": 48,
+        "both_legs": 9,
+        "contracts": 5004.76,
+        "episodes": 378,
+        "net_usd": -78.1702,
+        "per_contract": -0.015619,
+        "snapshot_intervals": 18500,
+        "tape_intervals": 564
+      }
+    },
+    {
+      "candidate": "C2",
+      "qfrac": 0.5,
+      "snapshot": {
+        "any_fill": 32,
+        "both_legs": 2,
+        "contracts": 2916.15,
+        "episodes": 381,
+        "net_usd": -113.8449,
+        "per_contract": -0.039039,
+        "snapshot_intervals": 19362,
+        "tape_intervals": 0
+      },
+      "tape": {
+        "any_fill": 36,
+        "both_legs": 4,
+        "contracts": 3688.75,
+        "episodes": 379,
+        "net_usd": -83.3623,
+        "per_contract": -0.022599,
+        "snapshot_intervals": 18736,
+        "tape_intervals": 584
+      }
+    },
+    {
+      "candidate": "C2",
+      "qfrac": 1.0,
+      "snapshot": {
+        "any_fill": 22,
+        "both_legs": 2,
+        "contracts": 2431.05,
+        "episodes": 386,
+        "net_usd": -110.2132,
+        "per_contract": -0.045336,
+        "snapshot_intervals": 19680,
+        "tape_intervals": 0
+      },
+      "tape": {
+        "any_fill": 28,
+        "both_legs": 4,
+        "contracts": 2927.26,
+        "episodes": 384,
+        "net_usd": -100.8195,
+        "per_contract": -0.034442,
+        "snapshot_intervals": 18982,
+        "tape_intervals": 588
+      }
+    }
+  ]
+}
