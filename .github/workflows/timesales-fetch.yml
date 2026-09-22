@@ -1,0 +1,233 @@
+name: timesales-fetch
+
+# READ-ONLY PUBLIC DATA RETRIEVAL.
+#
+# Streams Polymarket US daily Time & Sales CSVs on the runner, filters
+# each to the symbols we care about, and publishes ONLY the filtered
+# rows plus a completeness report as a workflow artifact.
+#
+# WHY IT RUNS HERE AND NOT IN THE SESSION CONTAINER. One day is ~223 MB
+# and the capture window is 8 days, so a naive download is ~1.8 GB. The
+# runner has the disk and the bandwidth; the session container does not.
+# That is a retrieval-design fact, not a reason to skip the data. Each
+# file is streamed through a filter and DELETED before the next one, so
+# peak disk is one file, not the whole window.
+#
+# NO CREDENTIALS. These are public reports published by the exchange at
+# https://www.polymarketexchange.com/files/time-and-sales/ . The
+# manifest URL and the per-file URL pattern were read out of the site's
+# own loader (assets/js/time-and-sales.js), not guessed:
+#
+#   const manifestUrl = '/files/time-and-sales/manifest.json';
+#   `/files/time-and-sales/${file.filename}?v=${file.eTag}`
+#
+# SOURCE IDENTITY IS PRESERVED. Every output row carries the source
+# filename and the manifest eTag it came from, and the run records each
+# file's declared size, declared eTag, observed bytes and observed
+# SHA-256 so a later reader can tell whether the file it is looking at
+# is the file that was published.
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "comma-separated Symbol values to keep (empty = keep the per-symbol totals only, no rows)"
+        required: false
+        default: ""
+      dates:
+        description: "comma-separated YYYYMMDD to fetch (empty = every file in the manifest)"
+        required: false
+        default: ""
+      max_files:
+        description: "hard cap on files downloaded this run"
+        required: false
+        default: "8"
+      max_bytes:
+        description: "hard cap on total bytes downloaded this run"
+        required: false
+        default: "2500000000"
+
+concurrency:
+  group: timesales-fetch
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Stream, filter and reconcile
+        env:
+          SYMBOLS: ${{ inputs.symbols }}
+          DATES: ${{ inputs.dates }}
+          MAX_FILES: ${{ inputs.max_files }}
+          MAX_BYTES: ${{ inputs.max_bytes }}
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python3 - <<'PY'
+          import csv, gzip, hashlib, io, json, os, sys, time, urllib.request
+
+          class Counting(io.RawIOBase):
+              """Hash and count the RAW bytes while they stream past.
+
+              The file is never held: it is read in chunks, hashed,
+              counted and handed straight to the CSV reader. Peak
+              memory is one chunk; peak disk is zero for the source.
+              """
+
+              def __init__(self, fh):
+                  self._fh = fh
+                  self.sha = hashlib.sha256()
+                  self.n = 0
+
+              def readable(self):
+                  return True
+
+              def readinto(self, b):
+                  chunk = self._fh.read(len(b))
+                  if not chunk:
+                      return 0
+                  self.sha.update(chunk)
+                  self.n += len(chunk)
+                  b[:len(chunk)] = chunk
+                  return len(chunk)
+
+          BASE = "https://www.polymarketexchange.com"
+          MANIFEST = BASE + "/files/time-and-sales/manifest.json"
+          UA = "sportsassets-timesales-reader"
+
+          symbols = {s.strip() for s in os.environ.get("SYMBOLS", "").split(",")
+                     if s.strip()}
+          dates = {d.strip() for d in os.environ.get("DATES", "").split(",")
+                   if d.strip()}
+          max_files = int(os.environ.get("MAX_FILES") or 8)
+          max_bytes = int(os.environ.get("MAX_BYTES") or 2_500_000_000)
+
+          def get(url, timeout=120):
+              req = urllib.request.Request(url, headers={"User-Agent": UA})
+              return urllib.request.urlopen(req, timeout=timeout)
+
+          print("== manifest %s ==" % MANIFEST)
+          man = json.load(get(MANIFEST))
+          files = man.get("files") or []
+          print("manifest entries: %d" % len(files))
+
+          def day_of(fn):
+              return fn[:8] if len(fn) >= 8 and fn[:8].isdigit() else None
+
+          wanted = [f for f in files
+                    if (not dates) or (day_of(f.get("filename", "")) in dates)]
+          wanted.sort(key=lambda f: f.get("filename", ""))
+          if len(wanted) > max_files:
+              print("CAPPED: %d matched, %d allowed this run"
+                    % (len(wanted), max_files))
+              wanted = wanted[:max_files]
+
+          declared = sum(int(f.get("size") or 0) for f in wanted)
+          print("files to fetch: %d   declared bytes: %d" % (len(wanted),
+                                                             declared))
+          if declared > max_bytes:
+              print("REFUSED: declared %d bytes exceeds max_bytes %d"
+                    % (declared, max_bytes))
+              sys.exit(2)
+
+          report = {"manifest_url": MANIFEST,
+                    "manifest_entries": len(files),
+                    "requested_dates": sorted(dates) or "ALL",
+                    "symbols_filter": sorted(symbols) or "NONE (totals only)",
+                    "max_files": max_files, "max_bytes": max_bytes,
+                    "files": []}
+          total_bytes = 0
+          kept_path = "out/timesales_filtered.csv.gz"
+          kept = gzip.open(kept_path, "wt", newline="")
+          w = csv.writer(kept)
+          w.writerow(["source_file", "source_etag", "transaction_time",
+                      "symbol", "last_price", "last_quantity"])
+          kept_rows = 0
+
+          for f in wanted:
+              fn = f["filename"]
+              etag = f.get("eTag") or ""
+              url = BASE + "/files/time-and-sales/" + fn
+              if etag:
+                  url += "?v=" + etag
+              print("== %s (declared %s bytes, etag %s) =="
+                    % (fn, f.get("size"), etag))
+              t0 = time.time()
+              rows = 0
+              per_symbol = {}
+              hdr = None
+              # stream: decode incrementally, never hold the file
+              raw = Counting(get(url, timeout=600))
+              buf = io.TextIOWrapper(io.BufferedReader(raw, 1 << 20),
+                                     encoding="utf-8", errors="replace",
+                                     newline="")
+              rdr = csv.reader(buf)
+              for i, row in enumerate(rdr):
+                  if i == 0:
+                      hdr = row
+                      continue
+                  rows += 1
+                  if len(row) < 4:
+                      continue
+                  tt, sym, px, qty = row[0], row[1], row[2], row[3]
+                  try:
+                      q = float(qty)
+                  except ValueError:
+                      q = 0.0
+                  a = per_symbol.setdefault(sym, [0, 0.0])
+                  a[0] += 1
+                  a[1] += q
+                  if symbols and sym in symbols:
+                      w.writerow([fn, etag, tt, sym, px, qty])
+                      kept_rows += 1
+              obs = raw.n
+              total_bytes += obs
+              dt = time.time() - t0
+              ent = {"filename": fn, "etag_declared": etag,
+                     "size_declared": f.get("size"),
+                     "lastModified": f.get("lastModified"),
+                     "header": hdr,
+                     "rows_total": rows,
+                     "distinct_symbols": len(per_symbol),
+                     "seconds": round(dt, 1),
+                     "bytes_observed": obs,
+                     "size_matches_manifest": (
+                         obs == int(f.get("size") or -1)),
+                     "sha256_of_bytes": raw.sha.hexdigest()}
+              if symbols:
+                  ent["per_requested_symbol"] = {
+                      s: {"prints": per_symbol.get(s, [0, 0.0])[0],
+                          "quantity": round(per_symbol.get(s, [0, 0.0])[1], 4)}
+                      for s in sorted(symbols)}
+              ent["top_symbols_by_quantity"] = sorted(
+                  ({"symbol": k, "prints": v[0], "quantity": round(v[1], 4)}
+                   for k, v in per_symbol.items()),
+                  key=lambda r: -r["quantity"])[:15]
+              report["files"].append(ent)
+              print(json.dumps({k: ent[k] for k in
+                                ("filename", "rows_total", "distinct_symbols",
+                                 "seconds")}))
+              if total_bytes > max_bytes:
+                  print("STOPPING: byte cap reached")
+                  break
+
+          kept.close()
+          report["kept_rows"] = kept_rows
+          report["decoded_bytes_total"] = total_bytes
+          with open("out/timesales_report.json", "w") as fh:
+              json.dump(report, fh, indent=2, sort_keys=True)
+          print("== SUMMARY ==")
+          print(json.dumps({"files": len(report["files"]),
+                            "kept_rows": kept_rows,
+                            "decoded_bytes": total_bytes}, indent=2))
+          PY
+        shell: bash
+
+      - name: Upload
+        uses: actions/upload-artifact@v4
+        with:
+          name: timesales
+          path: out/
+          retention-days: 7
