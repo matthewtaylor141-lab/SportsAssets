@@ -66,14 +66,65 @@ These are derived, not chosen. The derivation is below each one.
 
 | parameter | recommended | binds because |
 |---|---|---|
-| **clip** | **5 contracts per side** | banker's rounding |
-| **price band** | **mid ∈ [0.20, 0.80]** | banker's rounding |
+| **clip** | **5 contracts per side** | see the correction below — it does NOT guarantee a rebate |
+| **price band** | **mid ∈ [0.20, 0.80]** | bounds the limit price, hence the ceiling |
 | **market set** | **6 markets, selected by measured depth** — see below | fills must be reachable |
-| **max concurrent two-sided quotes** | **6** (12 resting orders) | committed collateral |
-| **hard contract cap** | **300 filled contracts**, both sides, whole experiment | the $250 cap |
-| **worst-case cash at risk** | **$240** | 300 × max price 0.80 |
-| **pre-trade cap** | **worst_case_remaining_loss ≤ $250**, unchanged | already defined in ECONOMIC_PACKAGE §8 |
+| **max concurrent two-sided quotes** | **6** (12 resting orders) | committed collateral + the pending race |
+| **hard contract cap** | **200 filled contracts**, both sides, whole experiment | the $250 cap |
+| **worst-case cash at risk** | **$210.22** | see the corrected arithmetic below |
+| **pre-trade cap** | **worst_case_remaining_loss ≤ $250**, unchanged | ECONOMIC_PACKAGE §8 |
 | **wall clock** | one fixed 6-hour window, no extension, no replacement | — |
+
+### CORRECTION 1 — order size does not buy a rebate; FILL PIECES do
+
+My earlier reasoning here was wrong and the error mattered. The fee is
+banker-rounded to the cent **per fill**, not per order, and an order
+fills in however many pieces the book gives it. The same 5-contract
+order at p = 0.50:
+
+| fill granularity | rebate per piece | **total** |
+|---|---|---|
+| one piece of 5 | $0.015625 → 2¢ | **$0.02** |
+| two pieces of 2.5 | $0.007812 → 1¢ | **$0.02** |
+| **five pieces of 1** | $0.003125 → **0¢** | **$0.00** |
+
+Same order, same price, same size — and the rebate is either two cents
+or **nothing**, decided entirely by how the counterparty flow arrives.
+The threshold is on the **piece**: `k ≥ 0.4 / p(1−p)`, so ≥ 1.6
+contracts per piece at p = 0.50 and ≥ 2.5 at p = 0.20.
+
+**We do not control piece size.** So the maker rebate is not a
+dependable component of the economics at this scale — it is a lottery
+on fill granularity, and at a 1-contract granularity it is exactly
+zero. This *strengthens* the measured finding rather than softening it:
+the taker side rounds up reliably at these sizes while the maker side
+can round away to nothing.
+
+**Consequence for the experiment:** fill-piece-size distribution becomes
+a *primary* output, not a detail. It determines whether a maker rebate
+exists at all, and nothing we already hold measures it.
+
+### CORRECTION 2 — the ceiling must include fees, the pending race, and accumulated losses
+
+My $240 figure counted only premium at the band edge. The $250 cap in
+ECONOMIC_PACKAGE §8 is `realised losses + inventory exposure + the
+pending-order race`, so the ceiling has to carry all three:
+
+```
+worst = N × P_max  +  N × taker_fee_at_P_max  +  pending_race
+      = N × 0.80   +  N × $0.01112            +  (12 orders × 5 × 0.80 = $48)
+```
+
+| N | worst case | |
+|---|---|---|
+| 300 | **$291.34** | **exceeds $250 — my earlier figure was wrong** |
+| 240 | $242.67 | inside, no headroom |
+| **200** | **$210.22** | **inside with headroom — recommended** |
+| 150 | $169.67 | inside |
+
+**200 contracts**, not 300. At clip 5 that is 40 fills rather than 60,
+so the window or the concurrency has to carry more of the sample — which
+is the honest trade, not a reason to raise the cap.
 
 ### Why clip 5, and why a price band at all
 
@@ -117,9 +168,21 @@ So the selection rule, fixed now:
 
 That ratio is exactly what the 2026-09-23 observation run measures. The
 two experiments connect: the observation picks the experiment's markets.
-If no market clears a reachability floor, **the honest outcome is to say
-so and not run** — not to quote into books where the answer is known in
-advance.
+
+### CORRECTION 3 — zero fills is a result, not a failure
+
+I wrote earlier that an experiment returning P_FILL ≈ 0 "has measured
+nothing". That was wrong. **Zero fills at a recorded clip, price,
+queue position and depth is a measurement**: it bounds P_FILL from above
+for those conditions, and "a 5-contract order at the touch behind 500
+resting contracts did not fill in six hours" is exactly the kind of fact
+the strategy needs and does not have.
+
+What matters is that the *conditions* are recorded precisely enough for
+the zero to mean something — which is what the per-order record above is
+for. The reachability rule is there to spend the budget where the answer
+is most informative, **not** because a low fill rate would be a wasted
+run.
 
 ### Why 300 contracts
 
