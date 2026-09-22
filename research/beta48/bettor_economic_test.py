@@ -156,7 +156,16 @@ def part1_taker_pair(rows, label):
             below_par += 1
         if v.ev > 0:
             below_par_after_fees += 1
+    per_market = {}
+    for r in rows:
+        per_market.setdefault(r["slug"], []).append(r)
+    n_mkt = len(per_market)
     print("  observations                       %8d" % len(rows))
+    print("  DISTINCT MARKETS                   %8d   <- the real n" % n_mkt)
+    print("  observations per market  min/med/max  %d / %d / %d"
+          % (min(len(v) for v in per_market.values()),
+             pct([len(v) for v in per_market.values()], 0.5),
+             max(len(v) for v in per_market.values())))
     print("  median basis  ask + (1 - bid)      %8.4f" % pct(bases, 0.5))
     print("  minimum basis observed             %8.4f" % min(bases))
     print("  pairs BELOW PAR before fees        %8d" % below_par)
@@ -165,12 +174,35 @@ def part1_taker_pair(rows, label):
     print("  best EV per contract observed      %+8.4f" % max(evs))
     verdict = "FALSIFIED" if below_par_after_fees == 0 else "NOT_FALSIFIED"
     print("  VERDICT                            %s" % verdict)
-    print("  ask + (1 - bid) = 1 + spread is an identity, so the pair costs")
-    print("  par plus the spread BEFORE the taker fee is charged on both")
-    print("  legs. No fill model and no fair value enters this line, which")
-    print("  is why this class -- and only this class -- can be settled on")
-    print("  recorded data.")
-    return {"n": len(rows), "median_basis": pct(bases, 0.5),
+
+    print("\n  THE TWO CLAIMS HERE ARE NOT THE SAME KIND, AND WERE RUN")
+    print("  TOGETHER IN AN EARLIER VERSION OF THIS FILE:")
+    print()
+    print("  (a) AN ARITHMETIC IDENTITY, about THE SAME BOOK.")
+    print("      ask + (1 - bid) = 1 + spread. This holds for every")
+    print("      two-sided book with a non-negative spread, by algebra.")
+    print("      It needs no data, no fill model and no fair value, and no")
+    print("      sample size makes it more or less true. Buying both sides")
+    print("      OF ONE MARKET AT THE TOUCH cannot cost less than par.")
+    print()
+    print("  (b) AN EMPIRICAL CLAIM, about THIS SAMPLE.")
+    print("      The distribution of that spread, and therefore how far")
+    print("      from par the pair actually costs, is measured on")
+    print("      %d observations across %d DISTINCT MARKETS, repeatedly"
+          % (len(rows), n_mkt))
+    print("      sampled. %d markets is the sample size, not %d."
+          % (n_mkt, len(rows)))
+    print()
+    print("  (a) DOES NOT GENERALISE TO OTHER PAIR STRUCTURES. It says")
+    print("      nothing about: the same outcome across two venues; two")
+    print("      different markets on one event; a maker leg paired with a")
+    print("      taker completion; or any structure whose legs are not the")
+    print("      two sides of one book. Those are separate hypotheses with")
+    print("      separate evidence requirements, and (a) is not evidence")
+    print("      about any of them.")
+    return {"n": len(rows), "distinct_markets": n_mkt,
+            "identity_scope": "same-book two-sided touch only",
+            "median_basis": pct(bases, 0.5),
             "min_basis": min(bases), "below_par": below_par,
             "profitable_after_fees": below_par_after_fees,
             "median_ev_per_contract": pct(evs, 0.5), "verdict": verdict}
@@ -291,7 +323,20 @@ def part3_capacity(rows, maker):
     print("      shares the queue at its price with everyone else resting")
     print("      there, so its share of the flow is its share of the queue.")
 
-    print("\n  THE QUEUE-SHARE MODEL, which is the honest version")
+    print("\n  EVERYTHING BELOW THIS LINE IS A MODEL ESTIMATE, NOT A")
+    print("  MEASUREMENT. Measured inputs are above. What follows applies")
+    print("  a proportional-queue-share assumption -- that our share of")
+    print("  the flow equals our share of the displayed size at our price")
+    print("  -- which is NOT measured on this venue and is known to be")
+    print("  wrong in at least two directions: it ignores time priority")
+    print("  (we join the BACK of the queue, so early fills go to older")
+    print("  orders) and it ignores cancellation (queue ahead of us can")
+    print("  evaporate without trading). It is used because it is simple")
+    print("  and its errors are named, not because it is calibrated.")
+    print("  MODEL_QUEUE_SHARE = ASSUMED_PROPORTIONAL_NOT_MEASURED")
+    print("  MODEL_QUEUE_WAIT  = ASSUMED_FIFO_AT_MEASURED_VOLUME")
+
+    print("\n  THE QUEUE-SHARE MODEL [ESTIMATE], which is the honest version")
     QUEUE = 22297.0
     CENSUS = 2204.0
     rows_out = []
@@ -347,20 +392,55 @@ def part3_capacity(rows, maker):
     print("    Depth to support a $2,500 clip is NOT_IDENTIFIED: the board's")
     print("    quote fields carry a price and no size.")
 
-    print("\n  WORKING CAPITAL, FROM THE MEASURED HOLDING TIME")
-    print("    An earlier capacity note assumed a two-hour holding time and")
-    print("    concluded capital was not the constraint. That assumption is")
-    print("    not supported here: the measured time to reach the front of")
-    print("    the queue is %.1f HOURS, and a position cannot turn faster"
-          % q_hours)
-    print("    than it can be entered.")
+    print("\n  WORKING CAPITAL -- THREE COMPONENTS, NOT ONE")
+    print("    An earlier version of this section derived capital from")
+    print("    QUEUE WAIT alone, as though a maker's capital were tied up")
+    print("    for as long as it takes to reach the front of the queue.")
+    print("    That is wrong twice over: queue wait is a MODEL ESTIMATE,")
+    print("    and waiting in a queue is not the only thing that commits")
+    print("    capital. The components are:")
+    print()
+    print("    1. INVENTORY HOLDING  -- capital in FILLED positions, from")
+    print("       fill to exit or settlement.")
+    print("         driver: INVENTORY_HOLDING_TIME")
+    print("         status: NOT_IDENTIFIED. No BETTOR fill has ever")
+    print("                 occurred, so no holding time has been")
+    print("                 observed. It is NOT the queue wait: the queue")
+    print("                 wait ends where the holding period BEGINS.")
+    print()
+    print("    2. OUTSTANDING-ORDER COLLATERAL -- capital committed by")
+    print("       RESTING orders that have not filled. On a fully")
+    print("       collateralised binary venue a resting buy of n at p")
+    print("       plausibly locks p*n while it rests, so a maker quoting")
+    print("       widely commits capital WITHOUT HOLDING ANY INVENTORY.")
+    print("         status: NOT_IDENTIFIED. Whether PMUS locks collateral")
+    print("                 on resting orders, and at what haircut, is not")
+    print("                 documented in anything we have read back from")
+    print("                 the venue. This term could dominate the other")
+    print("                 two for a wide quoting strategy and it is")
+    print("                 entirely unmeasured.")
+    print()
+    print("    3. RELEASE MECHANICS -- how fast capital comes back on")
+    print("       cancel, on partial fill, and on settlement.")
+    print("         status: NOT_IDENTIFIED. Same-day vs next-day release")
+    print("                 changes required capital by the settlement")
+    print("                 cycle, independently of any trading decision.")
+    print()
+    print("    CONSEQUENCE: WORKING_CAPITAL_FOR_500K_PER_DAY =")
+    print("    NOT_IDENTIFIED. Two of its three components have never")
+    print("    been observed, and the third needs a venue fact we have")
+    print("    not read back. The figures below are a SCENARIO on")
+    print("    component 1 alone, with 2 and 3 set to zero -- which is a")
+    print("    LOWER BOUND, not an estimate.")
     for hold_h in (2.0, q_hours):
         cap = TARGET * hold_h / 24.0
-        print("      holding %5.1f h -> turns %5.2f x/day -> capital %9.0f"
+        print("      inventory held %5.1f h -> %5.2f turns/day -> >= %9.0f"
               % (hold_h, 24.0 / hold_h, cap))
-    print("    At the measured queue time the working capital is %.1fx the"
-          % (q_hours / 2.0))
-    print("    figure the two-hour assumption gives.")
+    print("    The %.1f h line uses the MODELLED queue wait as a proxy for"
+          % q_hours)
+    print("    holding time. That proxy is not justified -- it is shown to")
+    print("    make the range visible, not because entry time and holding")
+    print("    time are the same quantity.")
 
     print("\n  VERDICT ON $500,000/DAY")
     print("    NOT SUPPORTED BY MEASURED OPPORTUNITY on this venue today.")
@@ -381,6 +461,25 @@ def part3_capacity(rows, maker):
     print("    of impossibility: a venue with more volume, a larger")
     print("    addressable census, or a queue we are early in would change")
     print("    every line of it.")
+
+    print("\n  WHAT THE OBSERVATION PROBE CAN AND CANNOT SETTLE")
+    print("    CAN, once it runs long enough on a qualifying universe:")
+    print("      * LIQUIDITY -- displayed size, depth, how often a touch")
+    print("        moves, how wide books really are across families;")
+    print("      * LATENCY -- venue response times, socket frame cadence,")
+    print("        staleness of the book we would decide on;")
+    print("      * UNCONDITIONAL PRICE MOVEMENT -- E[settlement - quote |")
+    print("        STATE], which states later move adversely, and the")
+    print("        clean state frame that would SIZE a pilot.")
+    print("    CANNOT, ever, by itself:")
+    print("      * FILL-CONDITIONED MAKER EV. The probe never rests an")
+    print("        order, so it never observes a fill, so it cannot")
+    print("        measure E[settlement - quote | FILLED, STATE] or")
+    print("        P(FILL | STATE, QUOTE). Removing state-selection bias")
+    print("        leaves FILL-selection bias exactly where it was.")
+    print("    Only BETTOR's own admitted fills identify the maker EV, and")
+    print("    that needs an order path and capital -- neither authorised,")
+    print("    and neither justified until the state frame exists.")
     return {"target_per_day": TARGET, "median_mid": mid,
             "shares_per_day_required": shares,
             "market_volume_shares_per_hour": vol_per_hour,
@@ -389,9 +488,18 @@ def part3_capacity(rows, maker):
                 need_markets_ideal / (1000.0 / (22297.0 + 1000.0)),
             "addressable_census": 2204,
             "hours_to_front_of_queue": q_hours,
-            "working_capital_at_2h_turn": TARGET * 2.0 / 24.0,
-            "working_capital_at_measured_queue_time":
-                TARGET * q_hours / 24.0,
+            "working_capital": "NOT_IDENTIFIED",
+            "working_capital_components": {
+                "inventory_holding": "NOT_IDENTIFIED -- no BETTOR fill has ever occurred",
+                "outstanding_order_collateral": "NOT_IDENTIFIED -- venue collateral rules not read back",
+                "release_mechanics": "NOT_IDENTIFIED -- cancel/partial/settlement release latency unknown"},
+            "working_capital_lower_bound_inventory_only_2h": TARGET * 2.0 / 24.0,
+            "queue_share_status": "MODEL_ESTIMATE_ASSUMED_PROPORTIONAL_NOT_MEASURED",
+            "queue_wait_status": "MODEL_ESTIMATE_ASSUMED_FIFO_AT_MEASURED_VOLUME",
+            "probe_can_settle": ["liquidity", "latency",
+                                 "unconditional_price_movement"],
+            "probe_cannot_settle": ["fill_conditioned_maker_ev",
+                                    "p_fill"],
             "verdict": "NOT_SUPPORTED_BY_MEASURED_OPPORTUNITY"}
 
 

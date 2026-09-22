@@ -1,6 +1,8 @@
 {
   "development": {
     "n": 100,
+    "distinct_markets": 100,
+    "identity_scope": "same-book two-sided touch only",
     "median_basis": 1.01,
     "min_basis": 1.005,
     "below_par": 0,
@@ -10,6 +12,8 @@
   },
   "holdout": {
     "n": 788,
+    "distinct_markets": 8,
+    "identity_scope": "same-book two-sided touch only",
     "median_basis": 1.005,
     "min_basis": 1.005,
     "below_par": 0,
@@ -39,8 +43,24 @@
     "markets_required_at_1000_share_display": 2011.3096779763448,
     "addressable_census": 2204,
     "hours_to_front_of_queue": 33.03259259259259,
-    "working_capital_at_2h_turn": 41666.666666666664,
-    "working_capital_at_measured_queue_time": 688179.012345679,
+    "working_capital": "NOT_IDENTIFIED",
+    "working_capital_components": {
+      "inventory_holding": "NOT_IDENTIFIED -- no BETTOR fill has ever occurred",
+      "outstanding_order_collateral": "NOT_IDENTIFIED -- venue collateral rules not read back",
+      "release_mechanics": "NOT_IDENTIFIED -- cancel/partial/settlement release latency unknown"
+    },
+    "working_capital_lower_bound_inventory_only_2h": 41666.666666666664,
+    "queue_share_status": "MODEL_ESTIMATE_ASSUMED_PROPORTIONAL_NOT_MEASURED",
+    "queue_wait_status": "MODEL_ESTIMATE_ASSUMED_FIFO_AT_MEASURED_VOLUME",
+    "probe_can_settle": [
+      "liquidity",
+      "latency",
+      "unconditional_price_movement"
+    ],
+    "probe_cannot_settle": [
+      "fill_conditioned_maker_ev",
+      "p_fill"
+    ],
     "verdict": "NOT_SUPPORTED_BY_MEASURED_OPPORTUNITY"
   },
   "note": "PART 1 is decided. PARTS 2 and 3 report what is measured and what is missing; neither invents an input."

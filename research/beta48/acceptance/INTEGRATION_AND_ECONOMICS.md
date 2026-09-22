@@ -269,19 +269,41 @@ markets**, pulled from the raw capture segments. The curated 400-pair
 file is development data — the integration harness uses it — and is
 reported separately.
 
-### Class C, taker complementary pair — FALSIFIED
+### Class C, taker complementary pair — two claims, kept apart
+
+An earlier version of this section ran them together. They are not the
+same kind of statement and they do not have the same strength.
+
+**(a) An arithmetic identity, about the same book.**
+`ask + (1 − bid) = 1 + spread` holds for every two-sided book with a
+non-negative spread, by algebra. No data, no fill model, no fair value,
+and no sample size makes it more or less true. **Buying both sides of
+one market at the touch cannot cost less than par**, and the PMUS taker
+fee is charged on both legs on top of that. This part is settled.
+
+**It does not generalise to other pair structures.** It says nothing
+about the same outcome across two venues, two different markets on one
+event, a maker leg with a taker completion, or any structure whose legs
+are not the two sides of one book. Those are separate hypotheses.
+
+**(b) An empirical claim, about this sample — and the sample is small.**
 
 | | development | **holdout** |
 |---|---|---|
-| observations | 100 | **788** |
-| median basis `ask + (1 − bid)` | 1.0100 | **1.0050** |
-| minimum basis | 1.0050 | **1.0050** |
+| observations | 100 | 788 |
+| **distinct markets** | — | **8** ← the real n |
+| observations per market (min/med/max) | — | **2 / 21 / 383** |
+| median basis | 1.0100 | 1.0050 |
+| minimum basis | 1.0050 | 1.0050 |
 | below par before fees | 0 | **0** |
 | profitable after PMUS fees | 0 | **0** |
-| median EV / contract | −0.0354 | **−0.0325** |
+| median EV / contract | −0.0354 | −0.0325 |
 
-`ask + (1 − bid) = 1 + spread` is an identity. No fill model, no fair
-value. **Decided, and negative.**
+**Eight markets, repeatedly sampled, one of them contributing 383 of the
+788 rows.** The spread *distribution* — how far from par the pair
+actually costs — rests on n = 8, not n = 788. The verdict `FALSIFIED`
+is carried by (a), which needs no sample at all; (b) is consistent with
+it and is not independent corroboration.
 
 ### Classes A and B, passive maker — NOT_IDENTIFIED
 
@@ -317,7 +339,20 @@ $500k/day at the holdout's median mid is **1,398,601 shares/day**, or
 | market-wide volume (THROUGHPUT_V2, 6 markets, 7.18 market-hours) | **25 shares/hour** |
 | addressable census | **2,204 markets** |
 
-A maker's share of flow is its share of the queue:
+**Everything from here to the end of this section is a MODEL
+ESTIMATE, not a measurement.** It assumes our share of the flow equals
+our share of the displayed size at our price. That is not measured on
+this venue and is wrong in at least two known directions: it ignores
+**time priority** (we join the back of the queue, so early fills go to
+older orders) and it ignores **cancellation** (the queue ahead can
+evaporate without trading).
+
+```
+MODEL_QUEUE_SHARE = ASSUMED_PROPORTIONAL_NOT_MEASURED
+MODEL_QUEUE_WAIT  = ASSUMED_FIFO_AT_MEASURED_VOLUME
+```
+
+A maker's *modelled* share of flow is its share of the queue:
 
 | our display | share of flow | markets needed | vs 2,204 census |
 |---|---|---|---|
@@ -332,16 +367,29 @@ And the queue does not clear: **22,297 shares displayed ahead**, **33.0
 hours** to the front at the optimistic volume, and **zero touches in 16
 minutes** the one time it was watched.
 
-**Working capital, corrected.** An earlier note assumed a two-hour hold
-and concluded capital was not the constraint. At the **measured 33-hour
-queue time** a position cannot turn faster than it can be entered:
+**Working capital — three components, and it is NOT_IDENTIFIED.**
 
-| holding | turns/day | working capital |
+An earlier note derived capital from a two-hour holding assumption. I
+then replaced that with the *queue wait*, which was wrong in a second
+way: queue wait is a model estimate, and waiting in a queue is not the
+only thing that commits capital. Queue wait ends exactly where the
+holding period begins — they are different quantities and neither
+substitutes for the other.
+
+| component | driver | status |
 |---|---|---|
-| 2.0 h (assumed) | 12.00 | $41,667 |
-| **33.0 h (measured)** | **0.73** | **$688,179** |
+| **1. Inventory holding** | time from fill to exit or settlement | **NOT_IDENTIFIED** — no BETTOR fill has ever occurred, so no holding time has been observed |
+| **2. Outstanding-order collateral** | capital locked by *resting* orders that have not filled | **NOT_IDENTIFIED** — whether PMUS locks collateral on a resting order, and at what haircut, is not documented in anything we have read back from the venue. For a widely-quoting maker this term could dominate the other two, and it is entirely unmeasured |
+| **3. Release mechanics** | how fast capital returns on cancel, partial fill and settlement | **NOT_IDENTIFIED** — same-day vs next-day release changes required capital by the settlement cycle, independently of any trading decision |
 
-**16.5× the figure the assumption gives.**
+```
+WORKING_CAPITAL_FOR_500K_PER_DAY = NOT_IDENTIFIED
+```
+
+Two of three components have never been observed and the third needs a
+venue fact we have not read back. A scenario on **component 1 alone**,
+with 2 and 3 set to zero, is a **lower bound** and not an estimate: at a
+two-hour inventory hold it is **≥ $41,667**.
 
 This is a statement about **measured opportunity**, not a proof of
 impossibility. A venue with more volume, a larger addressable census, or
@@ -378,14 +426,41 @@ shows every crossed pair in the holdout loses.
 Weakening a criterion to produce one would be the failure mode this
 programme exists to avoid.
 
+### What the observation probe can and cannot settle
+
+Stated before the next one is proposed, because the first probe has now
+run and the distinction decided how to read its result.
+
+**It CAN settle, given a qualifying universe and enough time:**
+
+- **Liquidity** — displayed size, depth, how often a touch moves, how
+  wide books really are across market families.
+- **Latency** — venue response times, socket frame cadence, and the
+  staleness of the book a decision would be made on.
+- **Unconditional price movement** — `E[SETTLEMENT − QUOTE | STATE]`,
+  which states later move adversely, and the clean state frame that
+  would *size* any eventual pilot.
+
+**It CANNOT settle, ever, by itself:**
+
+- **Fill-conditioned maker EV.** The probe never rests an order, so it
+  never observes a fill, so it cannot measure
+  `E[SETTLEMENT − QUOTE | FILLED, STATE]` or `P(FILL | STATE, QUOTE)`.
+  Removing state-selection bias leaves **fill-selection bias exactly
+  where it was**.
+
+Only BETTOR's own admitted fills identify the maker EV. That needs an
+order path and capital — neither authorised, and neither justified until
+the state frame exists.
+
 What is proposed instead, in order:
 
-1. **The bounded observation probe** (already prepared, awaiting
-   authorisation). It is decision-only with zero order capability. It
-   delivers the first PMUS WebSocket evidence of any kind — MIF-1 — plus
-   the real listing envelope (MIF-2) and the clean state frame that
-   identifies object **A**. It does **not** identify maker EV, and it is
-   not a step toward capital on its own.
+1. **A second bounded observation probe**, with the sampling fix the
+   first one's result calls for (see below). It is decision-only with
+   zero order capability. It would deliver the first PMUS WebSocket
+   evidence of any kind — MIF-1 — plus the real listing envelope
+   (MIF-2) and the state frame that identifies object **A**. It does
+   **not** identify maker EV, and it is not a step toward capital.
 2. **Add `ferrarichampions2026` to the extraction workflow matrix** —
    one line, closes MIF-3, and makes the four-account comparison
    possible for the first time.
@@ -400,3 +475,78 @@ that the collector will do what it says, stop when told, and not spend
 what it was not given. Venue connectivity, profitability and
 institutional readiness are three separate questions, and this run
 answers none of them.
+
+---
+
+# PART C — WHAT THE LIVE PROBE CHANGED
+
+Probe `3c413436-68ba-4e50-b106-5d349b372567`, 2026-09-22, on `e8f616a`.
+Verdict **INCOMPLETE**. Full evidence:
+`research/beta48/acceptance/live_probe_3c413436/`.
+
+## C1. A documented claim is overturned
+
+The record said the rate limit was **NOT ESTABLISHED** — 65,980
+responses, zero 429s, no `RateLimit-*` header, observed 0.030–0.285
+req/s — with the caveat that the evidence was unauthenticated while the
+worker is authenticated.
+
+**That caveat was the whole story.** At **0.227 req/s**, inside the old
+envelope, the authenticated worker took **seven HTTP 429s in 134
+seconds** across six markets, with server-directed holds of 7–10 s.
+
+```
+PMUS_AUTHENTICATED_BBO_RATE_LIMIT = EXISTS_VALUE_NOT_IDENTIFIED
+```
+
+The approved pacing of 0.25 req/s was derived from the unauthenticated
+corpus and **is too fast**. The limit's value, window and scope
+(per-credential? per-IP? per-endpoint?) remain unmeasured — seven
+observations in one window on one market family is not a
+characterisation.
+
+**This does not change the economic verdict.** That turns on
+fill-conditioned adverse selection, not on polling. It does change the
+denominator of any freshness or coverage claim a collector makes.
+
+## C2. The selection rule, measured live
+
+```
+candidates=3000 probed=40 enriched=40
+excluded: ONE_SIDED_BOOK 28, SPREAD_BELOW_MIN_TICKS 12, admitted 0
+```
+
+Every probed market returned a usable BBO — the 429s cost time, not
+data. The two binding exclusions are a **one-sided book** (70%) and a
+spread **under two ticks** (30%). Neither is "the market is empty": a
+one-sided book has one side quoted, and a sub-two-tick spread is too
+*tight* for the rule.
+
+That second bucket connects to the tick finding. At the half-cent grid
+that 493 of 788 holdout observations sit on, `MIN_SPREAD_TICKS = 2`
+demands a **full cent** of spread, so a market quoted 0.600/0.605 is
+refused for being one tick wide.
+
+**Scope:** 40 markets, one moment, and the listing prefix delivered a
+single family (`aachc-mlb-bavg-*-leader-*` — long-dated many-outcome
+futures, close to the worst case for two-sided quoting). This is not a
+measurement of the venue; it is a measurement of the head of one
+listing.
+
+## C3. The sampling fix the result calls for
+
+The probe spent its entire 40-market allowance on one unrepresentative
+slice because that is what the listing prefix handed it. A second probe
+should **sample across the listing** rather than take its head, or
+filter candidates by family **before** spending distinct slots.
+
+Both change *what is probed*, not *what is admitted*, so neither touches
+the frozen selection rule. That distinction is the point.
+
+## C4. What did not move
+
+The maker classes are still `NOT_IDENTIFIED`, for exactly the reason
+stated in Part B: the probe rests no order, observes no fill, and so
+cannot reach `E[SETTLEMENT − QUOTE | FILLED, STATE]`. No WebSocket
+opened, so MIF-1 is still open. No decision was persisted, so the state
+frame is still empty. Nothing in this run moves the capital decision.
