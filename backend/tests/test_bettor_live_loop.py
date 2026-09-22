@@ -48,6 +48,10 @@ def unpaced(monkeypatch):
 
 PROBE_ID = "11111111-2222-3333-4444-555555555555"
 
+# `workers/all.py:RESTART_DELAY_SECONDS` -- the supervisor's own
+# pause between loop restarts. A hold must be meaningfully longer.
+RESTART_DELAY_FLOOR = 5.0
+
 
 def open_budget(*, max_distinct=40, seconds_left=1800.0, consumed=0,
                 max_attempts=160, attempts=0, max_listing=18, listing=0,
@@ -1385,16 +1389,28 @@ class TestTheStopControlGovernsTheLoop:
         assert out["started"] is False and out["why"] == why
         assert calls["discover"] == 0 and calls["store_start"] == 0
 
-    def test_a_closed_control_also_serves_the_backoff(self, monkeypatch,
-                                                      tmp_path):
+    def test_a_closed_control_polls_on_a_bounded_interval(
+            self, monkeypatch, tmp_path):
+        """A STOPPED LOOP IS HELD FROM BOTH SIDES.
+
+        It must not re-poll every five seconds -- that was the original
+        point of this test -- and it must not disappear for an hour
+        either, which is what the shared escalating backoff did on
+        2026-09-22 when it slept past the deadline of the probe it had
+        just been armed for.
+        """
         bl._reset_backoff()
         made, _ = self._spying(monkeypatch, tmp_path)
         spy = SleepSpy()
         asyncio.run(bl.main(store=made["store"],
                             control_pool=FakeControlPool("false"),
                             sleep=spy))
-        assert spy.delays == [300.0], (
-            "a stopped loop must not re-poll every five seconds either")
+        assert spy.delays == [bl.IDLE_POLL_S]
+        held = spy.delays[0]
+        assert held > RESTART_DELAY_FLOOR, \
+            "a stopped loop must not re-poll every five seconds"
+        assert held < ctl_mod.PROBE_DEADLINE_S, \
+            "a stopped loop must not sleep past the probe it is armed for"
 
     def test_a_running_control_lets_the_loop_start(self, monkeypatch,
                                                   tmp_path):
@@ -1887,3 +1903,101 @@ class TestTheProductionSeamHasNoInjectedPool:
             assert (await ctl_mod.disarm(None, "T"))["disarmed"] is True
 
         asyncio.run(drive())
+
+
+class TestTheStoppedWorkerPollsInsteadOfSleepingThroughTheProbe:
+    """THE DEFECT THIS CLASS PINS, measured 2026-09-22.
+
+    A deliberately stopped worker shared the ESCALATING acquisition
+    backoff. Hours of idling had climbed the rung to 3600 s, so when an
+    allowance was armed at 07:38:21Z with a 1800 s deadline, the next
+    wake was not due until ~08:34 -- after the deadline it was meant to
+    run inside. The probe could only be started by restarting the
+    service, and a stop you have to restart to undo is not a control.
+
+    A refusal that never touched the venue now polls on a short fixed
+    interval; one that did still backs off.
+    """
+
+    def setup_method(self):
+        bl._reset_backoff()
+
+    def _hold(self, why, n=1):
+        spy = SleepSpy()
+
+        async def drive():
+            for _ in range(n):
+                await bl._backoff(why, sleep=spy)
+
+        asyncio.run(drive())
+        return spy.delays
+
+    def test_a_stopped_worker_polls_and_never_escalates(self):
+        """Ten cycles of being switched off is ten short polls."""
+        delays = self._hold(ctl_mod.W_STOPPED, n=10)
+        assert delays == [bl.IDLE_POLL_S] * 10, delays
+
+    def test_the_poll_is_short_enough_to_run_inside_a_probe(self):
+        """The arithmetic the incident turned on: a stopped worker must
+        notice `obs-run` well inside the 1800 s a probe is given."""
+        assert bl.IDLE_POLL_S + 5 < ctl_mod.PROBE_DEADLINE_S / 10, (
+            "a stopped worker must pick up an arming many times over "
+            "within one probe's deadline")
+
+    @pytest.mark.parametrize("why", [
+        "KILL_SWITCH", "STOPPED_BY_CONTROL", "CONTROL_ROW_ABSENT",
+        "CONTROL_MALFORMED", "CONTROL_UNREADABLE",
+        "DEADLINE_PASSED", "BUDGET_EXHAUSTED", "BUDGET_UNREADABLE",
+    ])
+    def test_every_zero_cost_refusal_polls(self, why):
+        """Each of these is decided before a client is constructed, so
+        each costs one database read and no venue request."""
+        assert bl.is_control_reason(why), why
+        assert self._hold(why) == [bl.IDLE_POLL_S]
+
+    @pytest.mark.parametrize("why", [
+        "DISCOVERY_FAILED", "EMPTY_UNIVERSE", "NO_CREDENTIALS",
+        "STORE_START_FAILED", "STORE_START_REFUSED", "NO_DURABLE_STORE",
+    ])
+    def test_acquisition_errors_still_back_off(self, why):
+        assert not bl.is_control_reason(why), why
+        assert self._hold(why) == [bl.NOSTART_BACKOFF_S[0]]
+
+    def test_the_acquisition_ladder_is_unchanged(self):
+        assert self._hold("DISCOVERY_FAILED", n=5) == [
+            300.0, 900.0, 1800.0, 3600.0, 3600.0]
+
+    def test_a_stop_does_not_advance_the_acquisition_rung(self):
+        """The two are separate. Being switched off between two venue
+        failures must not push the venue ladder along."""
+        assert self._hold("DISCOVERY_FAILED") == [300.0]
+        assert self._hold(ctl_mod.W_STOPPED, n=20) == [bl.IDLE_POLL_S] * 20
+        assert self._hold("DISCOVERY_FAILED") == [900.0], \
+            "the stop moved the acquisition ladder"
+
+    def test_a_stop_does_not_reset_it_either(self):
+        self._hold("DISCOVERY_FAILED", n=3)          # 300, 900, 1800
+        self._hold(ctl_mod.W_STOPPED, n=3)
+        assert self._hold("DISCOVERY_FAILED") == [3600.0], \
+            "the stop reset the acquisition ladder"
+
+    def test_a_venue_retry_after_still_wins_over_both(self):
+        spy = SleepSpy()
+        asyncio.run(bl._backoff("EMPTY_UNIVERSE", sleep=spy,
+                                at_least=4000.0))
+        assert spy.delays == [4000.0]
+
+    def test_polling_costs_no_venue_request(self, monkeypatch, tmp_path):
+        """The point of the short interval: it is cheap. A stopped
+        `main()` must construct no client at all."""
+        import sportsassets.pmus as pmus
+
+        def boom():
+            raise AssertionError("a stopped loop built a venue client")
+
+        monkeypatch.setattr(pmus, "_get_client", boom, raising=False)
+        spy = SleepSpy()
+        out = asyncio.run(bl.main(control_pool=FakeControlPool("false"),
+                                  store=filestore(tmp_path), sleep=spy))
+        assert out["why"] == ctl_mod.W_STOPPED
+        assert spy.delays == [bl.IDLE_POLL_S]

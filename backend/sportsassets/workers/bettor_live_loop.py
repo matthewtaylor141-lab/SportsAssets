@@ -161,8 +161,40 @@ LEDGER_EVERY_S = 60.0
 # Reset to the first rung whenever a run actually starts, so a
 # transient venue outage does not leave the loop on the long rung for
 # the rest of the day.
+# ── TWO HOLDS, FOR TWO DIFFERENT THINGS ──────────────────────────────
+#
+# A DELIBERATELY STOPPED WORKER IS NOT AN ERRING ONE. Both used to share
+# one escalating schedule, and on 2026-09-22 that cost a probe: the loop
+# had been idle for hours, so the rung had climbed to 3600 s, and when
+# an allowance was armed at 07:38:21Z with a 1800 s deadline the next
+# wake was not due until ~08:34 -- AFTER the deadline it was meant to
+# run inside. The probe could only be started by restarting the service,
+# which is not a control.
+#
+# So a refusal that never touched the venue POLLS instead. It costs one
+# database read, it never escalates, and it is short enough that an
+# operator's `obs-run` is picked up without a deploy or a restart.
+IDLE_POLL_S = 30.0
+
+# And a refusal that DID reach the venue still backs off, escalating, so
+# a failing acquisition cannot hammer it. The 21 September incident is
+# the reason this rung starts at five minutes rather than five seconds.
 NOSTART_BACKOFF_S = (300.0, 900.0, 1800.0, 3600.0)
 _nostart_rung = 0
+
+# The reasons that are a STOP, not a failure. Every one of them is
+# decided before a client is constructed, so each costs exactly one
+# database read and no venue request.
+_CONTROL_REASONS = frozenset({
+    "KILL_SWITCH",
+    ctl.W_STOPPED, ctl.W_ABSENT, ctl.W_MALFORMED, ctl.W_UNREADABLE,
+    ctl.B_EXPIRED, ctl.B_EXHAUSTED, ctl.B_UNREADABLE,
+})
+
+
+def is_control_reason(why: str) -> bool:
+    """One place decides which hold a reason gets."""
+    return why in _CONTROL_REASONS
 
 
 def _reset_backoff() -> None:
@@ -173,6 +205,11 @@ def _reset_backoff() -> None:
 async def _backoff(why: str, *, sleep=None, at_least: float = 0.0) -> float:
     """Hold a non-starting `main()` before it returns to the supervisor.
 
+    A CONTROL REASON POLLS; anything else BACKS OFF. A control reason
+    also leaves the acquisition rung untouched in both directions: being
+    switched off is not progress against a failing venue, and it is not
+    a failure to be punished for either.
+
     `at_least` is a floor the caller can raise -- used to carry a
     venue's own `Retry-After` through, so a suspension is never
     shortened by our schedule being the smaller number.
@@ -181,15 +218,21 @@ async def _backoff(why: str, *, sleep=None, at_least: float = 0.0) -> float:
     spending it.
     """
     global _nostart_rung
-    delay = NOSTART_BACKOFF_S[min(_nostart_rung, len(NOSTART_BACKOFF_S) - 1)]
-    _nostart_rung = min(_nostart_rung + 1, len(NOSTART_BACKOFF_S) - 1)
+    if is_control_reason(why):
+        delay, kind = IDLE_POLL_S, "control poll"
+    else:
+        delay = NOSTART_BACKOFF_S[
+            min(_nostart_rung, len(NOSTART_BACKOFF_S) - 1)]
+        _nostart_rung = min(_nostart_rung + 1, len(NOSTART_BACKOFF_S) - 1)
+        kind = "acquisition backoff"
     if at_least and at_least > delay:
         log.warning("bettor_live_loop: the venue asked for %.0fs; our "
                     "schedule would have returned in %.0fs, so the "
                     "venue's number wins", at_least, delay)
-        delay = at_least
-    log.info("bettor_live_loop: not starting (%s); holding %.0fs before "
-             "the supervisor's own restart delay", why, delay)
+        delay, kind = at_least, "venue Retry-After"
+    log.info("bettor_live_loop: not starting (%s); holding %.0fs (%s) "
+             "before the supervisor's own restart delay",
+             why, delay, kind)
     await (sleep or asyncio.sleep)(delay)
     return delay
 
@@ -1081,6 +1124,21 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
     actually read and is reported apart from `excluded_by_reason`,
     which is the rule's verdict on what we did read.
     """
+    # THE VENUE CLIENT IS RESOLVED ONCE, HERE.
+    #
+    # `main()` is called by the supervisor WITH NO ARGUMENTS, so
+    # `client` is None, and `probe._read_one_sync` reads
+    # `getattr(client, "markets", None)` -- which on None yields
+    # "client.markets.bbo is absent" for every market. `_list_candidates`
+    # resolved its own client and so the LISTING worked, which is what
+    # made this invisible: discovery would have spent the entire
+    # allowance, 40 distinct slots and their attempts, on reads that
+    # never left the process. Found by running the no-argument path
+    # against a real database rather than an injected one.
+    if client is None:
+        from .. import pmus
+        client = pmus._get_client()
+
     if candidates is None:
         listed = await _list_candidates(client=client, reserve=reserve,
                                         sleep=sleep)

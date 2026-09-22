@@ -16,6 +16,14 @@ unguarded crash point.
   E  lost acknowledgements               -- uncertain is not permission
   F  crashes before and after dispatch   -- waste, never replenish
 
+  I  the supervisor path                -- main() with NO ARGUMENTS,
+                                           a real pool resolved by
+                                           get_pool(), venue patched
+  J  the deadline                       -- closes a LIVE socket
+  K  the deadline, disarm write failing -- closes it anyway, and the
+                                           database still refuses
+  L  obs-stop                           -- closes a LIVE socket
+
 The combined ceilings asserted throughout: 40 distinct markets, 160 BBO
 attempts, 18 listing attempts.
 
@@ -28,8 +36,10 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import json
 import os
 import sys
+import time
 import tempfile
 import uuid
 
@@ -83,11 +93,13 @@ class CountingMarkets:
     apart from ATTEMPTS -- the two numbers the ceilings are written in.
     """
 
-    def __init__(self, *, fail_all=False, tradable=True):
+    def __init__(self, *, fail_all=False, tradable=True,
+                 n_markets=CANDIDATES):
         self.list_calls = 0
         self.bbo_calls: list[str] = []
         self.fail_all = fail_all
         self.tradable = tradable
+        self.n_markets = n_markets
 
     def list(self, params):
         self.list_calls += 1
@@ -99,7 +111,7 @@ class CountingMarkets:
              "description": "", "active": True, "closed": False,
              "liquidity": 1000.0, "volume": 5000.0,
              "eventSlug": "e%03d" % i, "team": "T"}
-            for i in range(CANDIDATES)]}
+            for i in range(self.n_markets)]}
 
     def bbo(self, slug):
         self.bbo_calls.append(slug)
@@ -216,6 +228,218 @@ async def run_one(pool, markets, tmp, *, crash=None):
                              sleep=_nap)
     finally:
         cfgmod.settings, bl.build = old_settings, old_build
+
+
+async def supervisor_phases(pool, dsn):
+    """I-L: the no-argument path, against a real database."""
+    import sportsassets.pmus as pmus
+    from sportsassets import bettor_market_stream as ms
+    import sportsassets.bettor_live_store as store_mod
+
+    ms_real = ms.MarketStream
+    ctl_real_every = ctl.CONTROL_EVERY_S
+    ctl.CONTROL_EVERY_S = 1.0
+    ms.MarketStream = FakeStream
+    bl.ms.MarketStream = FakeStream
+    # The 0.25 req/s pace is asserted in its own phase and in
+    # test_bettor_universe_probe; spending 160 s of it per phase here
+    # would prove nothing these phases are about.
+    os.environ["BETTOR_PROBE_MAX_RPS"] = "100000"
+    os.environ["BETTOR_PROBE_CONCURRENCY"] = "4"
+
+    m = CountingMarkets()
+    pmus._get_client = lambda: venue(m)
+
+    try:
+        # ── I ────────────────────────────────────────────────────────
+        rule("I. THE SUPERVISOR PATH -- main() with NO ARGUMENTS")
+        print("   database: resolved by get_pool() -> settings()."
+              "database_url")
+        print("   patched : the VENUE only -- pmus._get_client and")
+        print("             ms.MarketStream. No pool wiring is touched.\n")
+        FakeStream.made.clear()
+        pid = await arm(pool, minutes=30)
+        bl._reset_backoff()
+        out = await supervisor_run(90)
+        b = await row(pool)
+        print("   result: started=%s why=%s"
+              % (out.get("started"), out.get("why")))
+        print("   venue : %d listing, %d BBO over %d distinct"
+              % (m.list_calls, len(m.bbo_calls), m.distinct))
+        print("   row   : listing %s, distinct %s, attempts %s"
+              % (b["listing_attempts_reserved"], b["distinct_reserved"],
+                 b["bbo_attempts_reserved"]))
+        check("the no-argument path reserved a listing attempt",
+              b["listing_attempts_reserved"] >= 1, True)
+        check("and the listing request actually went out",
+              m.list_calls >= 1, True)
+        check("no reservation was refused for want of a pool",
+              "NO_CONTROL_POOL" in json.dumps(out, default=str), False)
+        check("the row accounts for every distinct market requested",
+              b["distinct_reserved"], m.distinct)
+        check("and for every BBO attempt",
+              b["bbo_attempts_reserved"], len(m.bbo_calls))
+        le("distinct markets", m.distinct, MAX_DISTINCT)
+        le("BBO attempts", len(m.bbo_calls), MAX_ATTEMPTS)
+        le("listing attempts", m.list_calls, MAX_LISTING)
+        opened = [f for f in FakeStream.made if f.started]
+        check("a stream was opened on the no-argument path",
+              len(opened) >= 1, True)
+        check("and it was closed on the way out",
+              all(not f.open for f in FakeStream.made), True)
+
+        # ── J ────────────────────────────────────────────────────────
+        rule("J. THE DEADLINE CLOSES AN ACTIVE STREAM")
+        FakeStream.made.clear()
+        m2 = CountingMarkets()
+        pmus._get_client = lambda: venue(m2)
+        pid = await arm(pool, minutes=30)
+        bl._reset_backoff()
+        task = asyncio.create_task(bl.main())
+        for _ in range(200):                  # wait for a live socket
+            await asyncio.sleep(0.05)
+            if any(f.open for f in FakeStream.made):
+                break
+        live = [f for f in FakeStream.made if f.open]
+        check("the stream is OPEN before the deadline is moved",
+              len(live) >= 1, True)
+        before_attempts = len(m2.bbo_calls)
+        await pool.execute(
+            "UPDATE ingestion_state SET value = jsonb_set(value,"
+            " '{deadline_at}', to_jsonb(to_char("
+            " (now() - interval '1 second') AT TIME ZONE 'UTC',"
+            " 'YYYY-MM-DD\"T\"HH24:MI:SS+00:00'))) WHERE key=$1",
+            ctl.BUDGET_KEY)
+        try:
+            out = await asyncio.wait_for(task, timeout=30)
+        except asyncio.TimeoutError:
+            task.cancel()
+            out = {"why": "DID_NOT_STOP"}
+        check("the loop stopped on the deadline", out.get("stopped_by"),
+              ctl.B_EXPIRED)
+        check("the active stream was CLOSED",
+              all(not f.open for f in FakeStream.made), True)
+        check("every opened stream was stopped",
+              all(f.stopped >= 1 for f in FakeStream.made if f.started),
+              True)
+        ctlrow = await ctl.read_control(pool)
+        check("and it disarmed itself", ctl.is_closed(ctlrow), True)
+        v = await ctl.reserve(pool, ctl.R_ATTEMPT, slug="x",
+                              probe_id=pid)
+        check("the database refuses further reservations",
+              ctl.granted(v), False)
+
+        # ── K ────────────────────────────────────────────────────────
+        rule("K. THE DEADLINE STILL CLOSES IT WHEN THE DISARM WRITE"
+             " FAILS")
+        print("   A trigger makes every write to the control row raise,")
+        print("   so `disarm` genuinely fails rather than being stubbed.")
+        print("   Local acquisition must still stop, the stream must")
+        print("   still close, and the DATABASE deadline must go on")
+        print("   refusing reservations regardless.\n")
+        FakeStream.made.clear()
+        m3 = CountingMarkets()
+        pmus._get_client = lambda: venue(m3)
+        pid = await arm(pool, minutes=30)
+        await pool.execute(
+            "CREATE OR REPLACE FUNCTION _block_disarm() RETURNS trigger"
+            " AS $$ BEGIN RAISE EXCEPTION 'disarm blocked by test';"
+            " END $$ LANGUAGE plpgsql")
+        await pool.execute("DROP TRIGGER IF EXISTS _t_block_disarm ON"
+                           " ingestion_state")
+        await pool.execute(
+            "CREATE TRIGGER _t_block_disarm BEFORE INSERT OR UPDATE ON"
+            " ingestion_state FOR EACH ROW WHEN (NEW.key ="
+            " 'bettor_live_observation') EXECUTE FUNCTION"
+            " _block_disarm()")
+        try:
+            d = await ctl.disarm(pool, "PRECHECK")
+            check("the disarm write really does fail now",
+                  d["disarmed"], False)
+            bl._reset_backoff()
+            task = asyncio.create_task(bl.main())
+            for _ in range(200):
+                await asyncio.sleep(0.05)
+                if any(f.open for f in FakeStream.made):
+                    break
+            check("the stream is OPEN before the deadline is moved",
+                  any(f.open for f in FakeStream.made), True)
+            await pool.execute(
+                "UPDATE ingestion_state SET value = jsonb_set(value,"
+                " '{deadline_at}', to_jsonb(to_char("
+                " (now() - interval '1 second') AT TIME ZONE 'UTC',"
+                " 'YYYY-MM-DD\"T\"HH24:MI:SS+00:00'))) WHERE key=$1",
+                ctl.BUDGET_KEY)
+            try:
+                out = await asyncio.wait_for(task, timeout=30)
+            except asyncio.TimeoutError:
+                task.cancel()
+                out = {"why": "DID_NOT_STOP"}
+            after = len(m3.bbo_calls)
+            check("local acquisition stopped anyway",
+                  out.get("stopped_by"), ctl.B_EXPIRED)
+            check("the active stream was CLOSED anyway",
+                  all(not f.open for f in FakeStream.made), True)
+            ctlrow = await ctl.read_control(pool)
+            check("the control was NOT written (the disarm failed)",
+                  ctlrow["run"], True)
+            v = await ctl.reserve(pool, ctl.R_ATTEMPT, slug="x",
+                                  probe_id=pid)
+            check("but the DATABASE DEADLINE still refuses",
+                  v["why"], ctl.V_EXPIRED)
+            await asyncio.sleep(1.2)
+            check("and no further BBO request was issued",
+                  len(m3.bbo_calls), after)
+        finally:
+            await pool.execute("DROP TRIGGER IF EXISTS _t_block_disarm"
+                               " ON ingestion_state")
+
+        # ── L ────────────────────────────────────────────────────────
+        rule("L. obs-stop CLOSES AN ACTIVE STREAM")
+        FakeStream.made.clear()
+        # A SMALL UNIVERSE ON PURPOSE. With 400 candidates the 40-slot
+        # allowance is exhausted during acquisition and the loop stops
+        # on BUDGET_EXHAUSTED before a stop can be demonstrated. This
+        # phase is about the stop closing a LIVE socket, so it leaves
+        # allowance unspent.
+        m4 = CountingMarkets(n_markets=5)
+        pmus._get_client = lambda: venue(m4)
+        pid = await arm(pool, minutes=30)
+        bl._reset_backoff()
+        task = asyncio.create_task(bl.main())
+        for _ in range(200):
+            await asyncio.sleep(0.05)
+            if any(f.open for f in FakeStream.made):
+                break
+        check("the stream is OPEN before the stop",
+              any(f.open for f in FakeStream.made), True)
+        t0 = time.monotonic()
+        await pool.execute(
+            "UPDATE ingestion_state SET value='false'::jsonb WHERE"
+            " key=$1", ctl.CONTROL_KEY)
+        try:
+            out = await asyncio.wait_for(task, timeout=30)
+        except asyncio.TimeoutError:
+            task.cancel()
+            out = {"why": "DID_NOT_STOP"}
+        closed_after = time.monotonic() - t0
+        after = len(m4.bbo_calls)
+        print("   stream closed %.2fs after obs-stop" % closed_after)
+        check("the loop stopped on the control",
+              out.get("stopped_by"), ctl.W_STOPPED)
+        check("the active stream was CLOSED",
+              all(not f.open for f in FakeStream.made), True)
+        await asyncio.sleep(1.2)
+        check("no further BBO request was issued",
+              len(m4.bbo_calls), after)
+        v = await ctl.reserve(pool, ctl.R_ATTEMPT, slug="x",
+                              probe_id=pid)
+        check("and a stopped control refuses reservations",
+              v["why"], ctl.V_STOPPED)
+    finally:
+        ms.MarketStream = ms_real
+        bl.ms.MarketStream = ms_real
+        ctl.CONTROL_EVERY_S = ctl_real_every
 
 
 async def main_async(dsn):
@@ -408,15 +632,15 @@ async def main_async(dsn):
     check("and it says so", b["state"], ctl.B_EXHAUSTED)
 
     print("\n   a REFUSAL BEFORE DISPATCH reserves nothing:")
-    print("   `main()` is entered with an armed allowance and refused")
-    print("   at the earliest gate it has -- no credentials -- which is")
-    print("   upstream of every reservation. Nothing may be taken.")
-    await arm(pool)
+    print("   The allowance is armed with NOTHING LEFT, so `main()` is")
+    print("   refused on the budget -- upstream of every reservation.")
+    print("   A refusal must cost the venue nothing and the row nothing.")
+    await arm(pool, max_distinct=0)
     before = await row(pool)
     m = CountingMarkets()
     out = await bl.main(
         client=Client(m),
-        store=st.FileStore(tempfile.mkdtemp(prefix="reservation-nocred-"),
+        store=st.FileStore(tempfile.mkdtemp(prefix="reservation-refuse-"),
                            durable_across_redeploy=True),
         control_pool=pool, run_for_s=0.0, sleep=_nap)
     after = await row(pool)
@@ -458,6 +682,8 @@ async def main_async(dsn):
     v = await ctl.reserve(pool, ctl.R_ATTEMPT, slug="x", probe_id=pid)
     check("an unarmed probe reserves nothing", v["why"], ctl.V_ABSENT)
 
+    await supervisor_phases(pool, dsn)
+
     await pool.execute(
         "DELETE FROM ingestion_state WHERE key = ANY($1::text[])",
         [ctl.CONTROL_KEY, ctl.BUDGET_KEY])
@@ -465,16 +691,115 @@ async def main_async(dsn):
 
     rule("VERDICT")
     if FAILS == 0:
-        print("   ALL CEILINGS HELD.")
+        print("   ALL CEILINGS HELD, AND THE SUPERVISOR PATH WORKS.")
         print("   40 distinct markets, 160 BBO attempts, 18 listing")
         print("   attempts -- under concurrency, empty results, request")
         print("   failures, lost acknowledgements and crashes on both")
         print("   sides of dispatch. Reservation precedes every request")
         print("   and no counter was ever decremented.")
+        print()
+        print("   And main() WITH NO ARGUMENTS -- the way the supervisor")
+        print("   calls it -- reserved, reached the transport, opened a")
+        print("   stream and closed it, against a real PostgreSQL pool")
+        print("   resolved through settings().database_url. The deadline")
+        print("   closed a live socket EVEN WITH THE DISARM WRITE")
+        print("   FAILING, and the database went on refusing anyway.")
         return 0
     print("   %d MISMATCHES. The ceilings do NOT hold. Do not arm."
           % FAILS)
     return 1
+
+
+# ═════════════════════════════════════════════════════════════════════
+# THE SUPERVISOR PATH
+#
+# Everything above injects a pool. `workers/all.py` does not: it calls
+# `bettor_live_loop.main` WITH NO ARGUMENTS, and on 2026-09-22 a defect
+# living exactly in that gap refused every reservation on production
+# while every local proof passed.
+#
+# So these phases call `main()` with no arguments and let the PRODUCTION
+# PATH resolve the database: `get_pool()` -> `settings().database_url`,
+# from the environment, to a real PostgreSQL server. The database wiring
+# is NOT patched. What is patched is the VENUE TRANSPORT -- the HTTP
+# client `pmus._get_client()` returns and the websocket class
+# `ms.MarketStream` -- because there is no venue here to talk to.
+#
+# `ctl.CONTROL_EVERY_S` is shortened so a phase finishes in seconds
+# rather than half an hour. It is a timing constant, not a seam.
+# ═════════════════════════════════════════════════════════════════════
+
+class FakeStream:
+    """An ACTIVE socket, in the shape the loop actually uses it.
+
+    `open` is what the deadline and the stop have to close. Nothing here
+    invents book data: the point of these phases is the lifecycle, not
+    the payloads (those are covered by bettor_startup_path.py).
+    """
+
+    made: list = []
+
+    def __init__(self, key_id, secret_key, on_book=None):
+        self.on_book = on_book
+        self.slugs: list = []
+        self.open = False
+        self.started = 0
+        self.stopped = 0
+        FakeStream.made.append(self)
+
+    def subscribe(self, slugs):
+        new = [s for s in slugs if s not in self.slugs]
+        self.slugs.extend(new)
+        return len(new)
+
+    def prune(self, keep):
+        before = len(self.slugs)
+        self.slugs = [s for s in self.slugs if s in set(keep)]
+        return before - len(self.slugs)
+
+    def start(self):
+        self.open = True
+        self.started += 1
+
+    def stop(self):
+        self.open = False
+        self.stopped += 1
+
+    def drain_trades(self):
+        return []
+
+    def stats(self):
+        return {"open": self.open, "subscribed": len(self.slugs)}
+
+    def frame_capture_report(self):
+        return {"frames_captured": 0, "frames_received": 0,
+                "decoding": "NOT_ESTABLISHED",
+                "book_semantics": "NOT_ESTABLISHED"}
+
+    def book_at(self, slug, decided_at=None, **kw):
+        return None
+
+
+def venue(markets):
+    """The HTTP transport `pmus._get_client()` hands back."""
+    class C:
+        def __init__(self):
+            self.markets = markets
+    return C()
+
+
+async def supervisor_run(timeout_s):
+    """`main()` exactly as the supervisor invokes it: no arguments."""
+    task = asyncio.create_task(bl.main())
+    try:
+        return await asyncio.wait_for(task, timeout=timeout_s)
+    except asyncio.TimeoutError:
+        task.cancel()
+        try:
+            await task
+        except (asyncio.CancelledError, Exception):
+            pass
+        return {"started": None, "why": "TEST_TIMEOUT"}
 
 
 if __name__ == "__main__":
@@ -485,4 +810,17 @@ if __name__ == "__main__":
         print("NO DSN. Pass --dsn or set BETTOR_TEST_PG_DSN. These "
               "phases cannot be faked and are not simulated.")
         raise SystemExit(2)
+
+    # THE PRODUCTION PATH, POINTED AT A TEST SERVER. `get_pool()` reads
+    # `settings().database_url`, so this is the ordinary configuration
+    # the worker uses -- not a patch of the pool wiring, which is the
+    # thing these phases exist to exercise. `settings()` is lru_cached,
+    # so the environment is set before its first call.
+    os.environ["DATABASE_URL"] = a.dsn
+    os.environ.setdefault("PMUS_KEY_ID", "probe-key-id")
+    os.environ.setdefault("PMUS_SECRET_KEY", "probe-secret")
+    os.environ.setdefault("BETTOR_LIVE_STORE", "postgres")
+    from sportsassets.config import settings as _settings
+    _settings.cache_clear()
+
     raise SystemExit(asyncio.run(main_async(a.dsn)))
