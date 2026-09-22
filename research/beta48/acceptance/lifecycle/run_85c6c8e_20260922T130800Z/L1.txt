@@ -1,0 +1,2 @@
+2026-09-22 13:08:04,191 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: disabled by BETTOR_LIVE_LOOP=off
+2026-09-22 13:08:04,191 INFO sportsassets.workers.bettor_live_loop: bettor_live_loop: not starting (KILL_SWITCH); holding 30s (control poll) before the supervisor's own restart delay
