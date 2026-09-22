@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 
 from .. import procmem
 from ..db import heartbeat
-from . import (analytics, bettor_state,
+from . import (analytics, bettor_live_loop, bettor_state,
                chain_listener, copy_sweep, dispatcher, edge_marks,
                institutional_md, metadata_refresher, mirror_live,
                mirror_shadow, poller, premap, price_path, reconciler,
@@ -394,20 +394,33 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     ("institutional_md", institutional_md.run),
     ("shadow_experimental", shadow_experimental.run),
     ("shadow_rn1", shadow_rn1.run),
-    # BETTOR LIVE OBSERVATION -- DEREGISTERED 2026-09-21.
+    # BETTOR LIVE OBSERVATION -- DECISION ONLY.
     #
-    # A FORWARD REVERT of the registration only. The loop's modules,
-    # its three storage tables and every record already written stay
-    # exactly where they are; nothing is rewritten and no history is
-    # discarded. Re-registering is the one line below, uncommented.
+    # REGISTERED AND STOPPED. Registration does not start observation.
+    # `main()` reads `bettor_live_observation` from `ingestion_state`
+    # before it does anything else and FAILS CLOSED four ways -- false,
+    # absent, malformed, unreadable -- so with the row at `false`, or
+    # with no row at all, this loop wakes, reads one column, logs why
+    # it is not observing and returns. No listing page, no BBO read, no
+    # schema initialization, no socket.
     #
-    # This is the second stop, not the first. The first is
-    # BETTOR_LIVE_LOOP=off, which needs no deploy of its own -- Render
-    # restarts the service and the new process reads the flag. This
-    # commit exists for the case where the flag is not enough or the
-    # registration itself must come out.
+    # Starting it is therefore a DATABASE WRITE, not a deploy:
+    # `render-ops sql obs-run confirm=DO`. Stopping it is `obs-stop`,
+    # and a running loop notices within CONTROL_EVERY_S.
     #
-    # ("bettor_live", bettor_live_loop.main),
+    # It holds no order path. MAX_CONTRACTS defaults to 0, no
+    # submit/cancel/close call is reachable from its import closure,
+    # and a test asserts that over the SOURCE rather than over
+    # behaviour.
+    #
+    # The environment variable BETTOR_LIVE_LOOP=off is kept as a cheap
+    # pre-check and is NOT a demonstrated control on this service: it
+    # was set and acknowledged on 2026-09-21, the service was
+    # demonstrably restarted (`server_restarted` 22:43:40.131647Z), and
+    # the restarted process still ran discovery.
+    #
+    # Deregistering is this one line, commented out.
+    ("bettor_live", bettor_live_loop.main),
     ("memory", memory_watch),
 ]
 
