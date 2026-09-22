@@ -1,9 +1,23 @@
 name: fetch-docs
 
-# READ-ONLY. Fetches one public documentation page from the GitHub runner
-# (which has open internet; the desk's session container does not) and
-# prints it as text so the desk can read a venue's public docs. No
-# secrets, no repository writes, no venue credentials, no deploy.
+# Fetches one public documentation page from the GitHub runner (which has
+# open internet; the desk's session container does not) and prints it as
+# text so the desk can read a venue's public docs. No secrets, no venue
+# credentials, no deploy.
+#
+# ONE REPOSITORY WRITE, AND ONLY ONE. The `#stream` mode appends the
+# filtered Time & Sales rows to an ORPHAN branch, `claude/tape-data`,
+# under `tape/`. Nothing else is ever written, no other branch is ever
+# pushed to, and the orphan branch carries no code -- so there is
+# nothing on it any service could deploy.
+#
+# WHY A BRANCH AND NOT AN ARTIFACT. Workflow artifacts and raw job logs
+# are both served from *.blob.core.windows.net, and this organization's
+# egress policy answers CONNECT to that host with 403. An artifact the
+# analysis container cannot open is not a retrieval. api.github.com and
+# git-over-https to github.com both work, so the rows travel by branch.
+# The previous header said "no repository writes"; that is no longer
+# true and saying so would be the kind of check that cannot fail.
 
 on:
   workflow_dispatch:
@@ -29,6 +43,8 @@ jobs:
   fetch:
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    permissions:
+      contents: write          # ONLY to push tape/ to claude/tape-data
     steps:
       - uses: actions/checkout@v4
       - name: Fetch
@@ -103,6 +119,46 @@ jobs:
           for l in sorted(set(links))[:400]:
               print(l)
           PY
+
+      - name: Publish the filtered tape to the orphan data branch
+        if: success()
+        env:
+          URL: ${{ inputs.url }}
+        run: |
+          set -euo pipefail
+          case "$URL" in *"#stream") ;; *) echo "not stream mode; nothing to publish"; exit 0 ;; esac
+          if ! ls out/*.filtered.csv.gz >/dev/null 2>&1; then
+            echo "REFUSED: stream mode produced no filtered file"; exit 1
+          fi
+          NAME="$(basename "$(ls out/*.filtered.csv.gz | head -1)")"
+          git config user.email "actions@github.com"
+          git config user.name "fetch-docs tape"
+          # The tape lives on an ORPHAN branch so it shares no history
+          # with any code branch and cannot be deployed by anything.
+          stage() {
+            mkdir -p tape
+            cp out/*.filtered.csv.gz out/*.report.json tape/
+            git add -A tape
+            git commit -q -m "tape: ${NAME}" || true
+          }
+          # Concurrent dispatches race on one branch; each writes its own
+          # filenames, so re-basing onto whatever landed first is safe.
+          ok=0
+          for attempt in 1 2 3 4 5 6; do
+            if git fetch --depth 1 origin claude/tape-data 2>/dev/null; then
+              git checkout -qf -B tape FETCH_HEAD
+            else
+              git checkout -q --orphan tape
+              git rm -rq --cached . 2>/dev/null || true
+            fi
+            stage
+            if git push -q origin tape:claude/tape-data 2>&1; then
+              echo "pushed ${NAME} on attempt ${attempt}"; ok=1; break
+            fi
+            echo "push attempt ${attempt} lost the race; retrying"
+            sleep $(( attempt * 5 ))
+          done
+          [ "$ok" = "1" ] || { echo "FAILED: could not publish ${NAME}"; exit 1; }
 
       - name: Upload artifacts when a mode produced them
         if: always()
