@@ -100,20 +100,27 @@ def _t(s):
 #     {"bid": 0.72, "ask": 0.73, "spread": 0.01, "spread_ticks": 1,
 #      "mid": 0.725, "bid_at_touch": true, "offer_at_touch": true}
 #
-# -- PRICES ONLY. There are no sizes at any level, on either side.
+# -- PRICES ONLY, and the conclusion drawn from that was WRONG.
 #
-# The reward formula's denominator is the DISCOUNTED SIZE walked from
-# the best price out to Target Size. With no sizes there is no walk, no
-# denominator, and no share. So the reward is NOT COMPUTABLE from this
-# corpus. It does not compute to zero; zero would be a finding, and
-# this is an absence of input.
+# WHAT THIS MODULE USED TO SAY, and why it was a mistake worth naming:
+# "there are no sizes at any level, on either side ... the reward is
+# NOT COMPUTABLE FROM THIS CORPUS." That was a fact about the dict
+# above -- one summary field on the episode record -- and it was
+# reported as a fact about the CAPTURE. It is not. All 30,590 tape rows
+# carry touch depth AND a full ladder, median 5 bid levels, median join
+# age 2.5s, `no_ladder: 0`. The sizes were there the whole time.
 #
-# The first version of this module read the book with a parser that
-# returned None on every episode and then reported a gross reward of
-# $0.0000 across the board. That number was an artifact of the reader,
-# and reporting it as a result would have been a false negative dressed
-# as a measurement. It is named here so it cannot come back.
+# `entry_book` now carries `bid_depth`, `ask_depth` and a bounded
+# `ladder`, so the walk the reward formula needs can be performed.
+#
+# WHAT IS ACTUALLY ABSENT is narrower and is a different kind of
+# absence: a PROGRAMME. None of the five sports markets in this corpus
+# was observed in any incentive programme, so their reward is ZERO --
+# a finding, not a missing input -- and every share figure quoted for
+# them is a transferred scenario from the culture / crypto / eFootball
+# programmes, which cover different instruments entirely.
 NOT_COMPUTABLE = "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS"
+NOT_APPLICABLE = "NO_INCENTIVE_PROGRAMME_OBSERVED_ON_THESE_MARKETS"
 
 # The competing sizes the sensitivity is run at. These are SCENARIO
 # PARAMETERS, not observations -- the whole point is that the corpus
@@ -122,19 +129,32 @@ COMPETING_DEPTHS = (0.0, 100.0, 250.0, 400.0, 500.0, 1000.0, 2500.0)
 
 
 def corpus_supplies_depth(eps) -> dict:
-    """Does any episode carry a size anywhere in its book? Checked."""
-    keys, with_size = set(), 0
+    """Does any episode carry a size anywhere in its book? Checked.
+
+    The key list is reported whatever the answer, because the previous
+    version of this check looked for names the record did not use and
+    concluded the capture had no depth. A check that reports what it
+    DID find cannot make that mistake silently twice.
+    """
+    keys, with_touch, with_ladder, levels = set(), 0, 0, []
     for e in eps:
         b = e.get("entry_book")
-        if isinstance(b, dict):
-            keys |= set(b)
-            if any(k in b for k in ("bid_size", "ask_size", "bids", "asks",
-                                    "bid_levels", "ask_levels",
-                                    "multi_level_depth")):
-                with_size += 1
-    return {"episodes": len(eps), "episodes_with_any_size": with_size,
+        if not isinstance(b, dict):
+            continue
+        keys |= set(b)
+        if b.get("bid_depth") is not None or b.get("ask_depth") is not None:
+            with_touch += 1
+        lad = b.get("ladder")
+        if isinstance(lad, dict) and (lad.get("bids") or lad.get("offers")):
+            with_ladder += 1
+            levels.append(len(lad.get("bids") or ()))
+    return {"episodes": len(eps),
+            "episodes_with_touch_depth": with_touch,
+            "episodes_with_ladder": with_ladder,
+            "median_bid_levels": (sorted(levels)[len(levels) // 2]
+                                  if levels else None),
             "entry_book_keys": sorted(keys),
-            "depth_available": with_size > 0}
+            "depth_available": with_ladder > 0}
 
 
 def period_exposure(eps) -> dict:
@@ -419,34 +439,45 @@ def _incentive_block(eps, s):
     loss = -s["net_usd"]
     block = {"computable": depth["depth_available"],
              "why_not": None if depth["depth_available"] else NOT_COMPUTABLE,
-             # THE DISTINCTION THAT MATTERS: what is missing is missing
-             # from the REDUCED EPISODE OUTPUT, which is a summary the
-             # replay emits. Whether the UNDERLYING captured ladder
-             # carried depth is a separate question about the capture,
-             # and this module has not established it either way. The
-             # honest statement is about the input this calculation
-             # actually reads.
+             # THE QUESTION THIS BLOCK USED TO GET WRONG, settled.
+             # It reported the reward as NOT COMPUTABLE FROM THIS
+             # CORPUS on the strength of one summary field, and that
+             # was a statement about the field rather than about the
+             # capture. The ladder is in every tape row and now travels
+             # with the episode, so the walk can be performed.
+             #
+             # What remains absent is a PROGRAMME, which is a different
+             # kind of absence and produces a different answer: a
+             # reward of ZERO, which is a finding.
              "scope_of_the_absence": {
-                 "missing_from": "the reduced episode output "
-                                 "(entry_book), which is what this "
-                                 "calculation reads",
-                 "not_established": "whether the underlying captured "
-                                    "ladder corpus carried depth -- that "
-                                    "is a question about the capture, and "
-                                    "recovering it would mean re-deriving "
-                                    "episodes from the raw frames",
-                 "consequence": "the reward is not computable HERE; this "
-                                "is not a claim that the depth was never "
-                                "captured"},
+                 "depth": "PRESENT. entry_book now carries bid_depth, "
+                          "ask_depth and a bounded ladder; the earlier "
+                          "'no sizes in this corpus' claim was about "
+                          "the summary field, not the capture",
+                 "programme": NOT_APPLICABLE,
+                 "consequence": "the reward for these five sports "
+                                "markets is ZERO because no programme "
+                                "covered them -- not unknown. Every "
+                                "share figure quoted for them is "
+                                "TRANSFERRED from the culture / crypto "
+                                "/ eFootball programmes, which cover "
+                                "different instruments."},
              "corpus_depth_check": depth,
              "period_exposure": exposure,
              "programmes": {}}
     if not depth["depth_available"]:
         block["detail"] = (
-            "entry_book carries %s -- prices only, no sizes. The reward's "
-            "denominator is the discounted size walked to Target Size, so "
-            "no share can be formed. This is an ABSENCE OF INPUT, not a "
-            "reward of zero." % ", ".join(depth["entry_book_keys"]))
+            "entry_book carries %s. No ladder reached this calculation, "
+            "so no share can be formed. Re-run the replay: the ladder is "
+            "in the tape and is emitted onto the episode record."
+            % ", ".join(depth["entry_book_keys"]))
+    else:
+        block["detail"] = (
+            "depth IS available -- %d of %d episodes carry a ladder, "
+            "median %s bid levels. The reward is nevertheless ZERO for "
+            "these markets, because %s."
+            % (depth["episodes_with_ladder"], depth["episodes"],
+               depth["median_bid_levels"], NOT_APPLICABLE))
 
     for pname, prog in PROGRAMMES.items():
         req = required_share(loss, prog, exposure)

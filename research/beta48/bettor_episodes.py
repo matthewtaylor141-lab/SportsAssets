@@ -151,6 +151,30 @@ def _book_of(row, tick, flow_per_s=None, vol_per_sqrt_s=None):
                        vol_per_sqrt_s=vol_per_sqrt_s)
 
 
+LADDER_LEVELS = 10
+
+
+def _ladder_of(row):
+    """The book's own levels at the entry instant, bounded and dated.
+
+    Bounded because an episode record carrying 63 levels x 420 episodes
+    is a different artifact from a decision summary. Dated because the
+    ladder is joined from a nearby snapshot rather than being the same
+    message as the BBO -- `age_s` travels so a reader can see how near.
+    """
+    lad = row.get("ladder") or {}
+    if not lad:
+        return None
+    return {"bids": [list(x) for x in (lad.get("bids") or ()
+                                       )[:LADDER_LEVELS]],
+            "offers": [list(x) for x in (lad.get("offers") or ()
+                                         )[:LADDER_LEVELS]],
+            "age_s": lad.get("age_s"), "causal": lad.get("causal"),
+            "levels_kept": LADDER_LEVELS,
+            "bid_levels_total": len(lad.get("bids") or ()),
+            "offer_levels_total": len(lad.get("offers") or ())}
+
+
 def trailing_vol(rows, i, window_s):
     """Realised mid volatility per root second, ending at row i.
 
@@ -490,7 +514,21 @@ class Episode:
                                (row["ask"] - row["bid"]) / tick)),
                            "mid": round(0.5 * (row["bid"] + row["ask"]), 6),
                            "bid_at_touch": self.pb == row["bid"],
-                           "offer_at_touch": self.po == row["ask"]}
+                           "offer_at_touch": self.po == row["ask"],
+                           # THE SIZES, WHICH WERE ALWAYS THERE. This
+                           # summary carried prices only, and a report
+                           # that read it concluded "the reward is not
+                           # computable from this corpus -- no sizes at
+                           # any level". That was a fact about THIS
+                           # DICT, not about the capture: all 30,590
+                           # tape rows carry touch depth AND a full
+                           # ladder (median 5 bid levels, median join
+                           # age 2.5s). The ladder is what the
+                           # incentive score walks, so it travels with
+                           # the episode now.
+                           "bid_depth": row.get("bid_depth"),
+                           "ask_depth": row.get("ask_depth"),
+                           "ladder": _ladder_of(row)}
 
         # position, in LONG legs -- one YES + one NO pays exactly 1
         self.yes = 0.0

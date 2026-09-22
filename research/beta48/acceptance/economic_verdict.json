@@ -118,26 +118,31 @@
       "episodes": 44,
       "any_fill": 16,
       "incentive": {
-        "computable": false,
-        "why_not": "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS",
+        "computable": true,
+        "why_not": null,
         "scope_of_the_absence": {
-          "missing_from": "the reduced episode output (entry_book), which is what this calculation reads",
-          "not_established": "whether the underlying captured ladder corpus carried depth -- that is a question about the capture, and recovering it would mean re-deriving episodes from the raw frames",
-          "consequence": "the reward is not computable HERE; this is not a claim that the depth was never captured"
+          "depth": "PRESENT. entry_book now carries bid_depth, ask_depth and a bounded ladder; the earlier 'no sizes in this corpus' claim was about the summary field, not the capture",
+          "programme": "NO_INCENTIVE_PROGRAMME_OBSERVED_ON_THESE_MARKETS",
+          "consequence": "the reward for these five sports markets is ZERO because no programme covered them -- not unknown. Every share figure quoted for them is TRANSFERRED from the culture / crypto / eFootball programmes, which cover different instruments."
         },
         "corpus_depth_check": {
           "episodes": 44,
-          "episodes_with_any_size": 0,
+          "episodes_with_touch_depth": 44,
+          "episodes_with_ladder": 44,
+          "median_bid_levels": 4,
           "entry_book_keys": [
             "ask",
+            "ask_depth",
             "bid",
             "bid_at_touch",
+            "bid_depth",
+            "ladder",
             "mid",
             "offer_at_touch",
             "spread",
             "spread_ticks"
           ],
-          "depth_available": false
+          "depth_available": true
         },
         "period_exposure": {
           "summed_period_fractions": 2.861,
@@ -408,7 +413,7 @@
             ]
           }
         },
-        "detail": "entry_book carries ask, bid, bid_at_touch, mid, offer_at_touch, spread, spread_ticks -- prices only, no sizes. The reward's denominator is the discounted size walked to Target Size, so no share can be formed. This is an ABSENCE OF INPUT, not a reward of zero."
+        "detail": "depth IS available -- 44 of 44 episodes carry a ladder, median 4 bid levels. The reward is nevertheless ZERO for these markets, because NO_INCENTIVE_PROGRAMME_OBSERVED_ON_THESE_MARKETS."
       }
     },
     {
@@ -433,26 +438,31 @@
       "episodes": 52,
       "any_fill": 5,
       "incentive": {
-        "computable": false,
-        "why_not": "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS",
+        "computable": true,
+        "why_not": null,
         "scope_of_the_absence": {
-          "missing_from": "the reduced episode output (entry_book), which is what this calculation reads",
-          "not_established": "whether the underlying captured ladder corpus carried depth -- that is a question about the capture, and recovering it would mean re-deriving episodes from the raw frames",
-          "consequence": "the reward is not computable HERE; this is not a claim that the depth was never captured"
+          "depth": "PRESENT. entry_book now carries bid_depth, ask_depth and a bounded ladder; the earlier 'no sizes in this corpus' claim was about the summary field, not the capture",
+          "programme": "NO_INCENTIVE_PROGRAMME_OBSERVED_ON_THESE_MARKETS",
+          "consequence": "the reward for these five sports markets is ZERO because no programme covered them -- not unknown. Every share figure quoted for them is TRANSFERRED from the culture / crypto / eFootball programmes, which cover different instruments."
         },
         "corpus_depth_check": {
           "episodes": 52,
-          "episodes_with_any_size": 0,
+          "episodes_with_touch_depth": 52,
+          "episodes_with_ladder": 52,
+          "median_bid_levels": 2,
           "entry_book_keys": [
             "ask",
+            "ask_depth",
             "bid",
             "bid_at_touch",
+            "bid_depth",
+            "ladder",
             "mid",
             "offer_at_touch",
             "spread",
             "spread_ticks"
           ],
-          "depth_available": false
+          "depth_available": true
         },
         "period_exposure": {
           "summed_period_fractions": 4.8861,
@@ -723,7 +733,7 @@
             ]
           }
         },
-        "detail": "entry_book carries ask, bid, bid_at_touch, mid, offer_at_touch, spread, spread_ticks -- prices only, no sizes. The reward's denominator is the discounted size walked to Target Size, so no share can be formed. This is an ABSENCE OF INPUT, not a reward of zero."
+        "detail": "depth IS available -- 52 of 52 episodes carry a ladder, median 2 bid levels. The reward is nevertheless ZERO for these markets, because NO_INCENTIVE_PROGRAMME_OBSERVED_ON_THESE_MARKETS."
       }
     },
     {
@@ -748,26 +758,31 @@
       "episodes": 53,
       "any_fill": 5,
       "incentive": {
-        "computable": false,
-        "why_not": "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS",
+        "computable": true,
+        "why_not": null,
         "scope_of_the_absence": {
-          "missing_from": "the reduced episode output (entry_book), which is what this calculation reads",
-          "not_established": "whether the underlying captured ladder corpus carried depth -- that is a question about the capture, and recovering it would mean re-deriving episodes from the raw frames",
-          "consequence": "the reward is not computable HERE; this is not a claim that the depth was never captured"
+          "depth": "PRESENT. entry_book now carries bid_depth, ask_depth and a bounded ladder; the earlier 'no sizes in this corpus' claim was about the summary field, not the capture",
+          "programme": "NO_INCENTIVE_PROGRAMME_OBSERVED_ON_THESE_MARKETS",
+          "consequence": "the reward for these five sports markets is ZERO because no programme covered them -- not unknown. Every share figure quoted for them is TRANSFERRED from the culture / crypto / eFootball programmes, which cover different instruments."
         },
         "corpus_depth_check": {
           "episodes": 53,
-          "episodes_with_any_size": 0,
+          "episodes_with_touch_depth": 53,
+          "episodes_with_ladder": 53,
+          "median_bid_levels": 2,
           "entry_book_keys": [
             "ask",
+            "ask_depth",
             "bid",
             "bid_at_touch",
+            "bid_depth",
+            "ladder",
             "mid",
             "offer_at_touch",
             "spread",
             "spread_ticks"
           ],
-          "depth_available": false
+          "depth_available": true
         },
         "period_exposure": {
           "summed_period_fractions": 5.1487,
@@ -1038,7 +1053,7 @@
             ]
           }
         },
-        "detail": "entry_book carries ask, bid, bid_at_touch, mid, offer_at_touch, spread, spread_ticks -- prices only, no sizes. The reward's denominator is the discounted size walked to Target Size, so no share can be formed. This is an ABSENCE OF INPUT, not a reward of zero."
+        "detail": "depth IS available -- 53 of 53 episodes carry a ladder, median 2 bid levels. The reward is nevertheless ZERO for these markets, because NO_INCENTIVE_PROGRAMME_OBSERVED_ON_THESE_MARKETS."
       }
     },
     {
@@ -1063,26 +1078,31 @@
       "episodes": 79,
       "any_fill": 3,
       "incentive": {
-        "computable": false,
-        "why_not": "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS",
+        "computable": true,
+        "why_not": null,
         "scope_of_the_absence": {
-          "missing_from": "the reduced episode output (entry_book), which is what this calculation reads",
-          "not_established": "whether the underlying captured ladder corpus carried depth -- that is a question about the capture, and recovering it would mean re-deriving episodes from the raw frames",
-          "consequence": "the reward is not computable HERE; this is not a claim that the depth was never captured"
+          "depth": "PRESENT. entry_book now carries bid_depth, ask_depth and a bounded ladder; the earlier 'no sizes in this corpus' claim was about the summary field, not the capture",
+          "programme": "NO_INCENTIVE_PROGRAMME_OBSERVED_ON_THESE_MARKETS",
+          "consequence": "the reward for these five sports markets is ZERO because no programme covered them -- not unknown. Every share figure quoted for them is TRANSFERRED from the culture / crypto / eFootball programmes, which cover different instruments."
         },
         "corpus_depth_check": {
           "episodes": 79,
-          "episodes_with_any_size": 0,
+          "episodes_with_touch_depth": 79,
+          "episodes_with_ladder": 79,
+          "median_bid_levels": 5,
           "entry_book_keys": [
             "ask",
+            "ask_depth",
             "bid",
             "bid_at_touch",
+            "bid_depth",
+            "ladder",
             "mid",
             "offer_at_touch",
             "spread",
             "spread_ticks"
           ],
-          "depth_available": false
+          "depth_available": true
         },
         "period_exposure": {
           "summed_period_fractions": 7.8495,
@@ -1353,7 +1373,7 @@
             ]
           }
         },
-        "detail": "entry_book carries ask, bid, bid_at_touch, mid, offer_at_touch, spread, spread_ticks -- prices only, no sizes. The reward's denominator is the discounted size walked to Target Size, so no share can be formed. This is an ABSENCE OF INPUT, not a reward of zero."
+        "detail": "depth IS available -- 79 of 79 episodes carry a ladder, median 5 bid levels. The reward is nevertheless ZERO for these markets, because NO_INCENTIVE_PROGRAMME_OBSERVED_ON_THESE_MARKETS."
       }
     }
   ]

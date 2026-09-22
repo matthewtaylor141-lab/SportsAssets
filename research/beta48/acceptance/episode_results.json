@@ -227,350 +227,350 @@
   ],
   "policy": {
     "EXCLUDED|QUEUE_BEHIND_ALWAYS": {
-      "any_fill_rate": 0.3824,
-      "double_fill_rate_q": 0.0721,
-      "episodes": 957,
+      "any_fill_rate": 0.1835,
+      "double_fill_rate_q": 0.0225,
+      "episodes": 801,
       "events": 11,
       "markets": 11,
       "per_contract": {
         "ci": [
-          -0.141749,
-          0.080782
+          -0.0026,
+          0.000335
         ],
         "cluster_means": [
-          -0.405,
-          -0.205,
-          -0.006527,
-          -0.004713,
-          -0.002933,
-          -0.000549,
-          -4e-06,
-          0.001817,
-          0.002587,
-          0.005,
-          0.28
+          -0.006334,
+          -0.003307,
+          -0.003179,
+          -0.00036,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.000721
         ],
-        "cluster_se": 0.04994,
+        "cluster_se": 0.000659,
         "clusters": 11,
-        "naive_se": 0.001027,
-        "point": -0.030484,
-        "se_inflation_vs_naive": 48.64
+        "naive_se": 0.000788,
+        "point": -0.001133,
+        "se_inflation_vs_naive": 0.84
       },
       "per_episode": {
         "ci": [
-          -14.17494,
-          8.078179
+          -0.259978,
+          0.033461
         ],
         "cluster_means": [
-          -40.5,
-          -20.5,
-          -0.652676,
-          -0.4713,
-          -0.293255,
-          -0.054879,
-          -0.000443,
-          0.181716,
-          0.258654,
-          0.5,
-          28.0
+          -0.633435,
+          -0.330694,
+          -0.317859,
+          -0.035968,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.072112
         ],
-        "cluster_se": 4.993967,
+        "cluster_se": 0.065853,
         "clusters": 11,
-        "naive_se": 0.102666,
-        "point": -3.04838,
-        "se_inflation_vs_naive": 48.64
+        "naive_se": 0.078809,
+        "point": -0.113259,
+        "se_inflation_vs_naive": 0.84
       },
-      "positive_episodes": 127,
+      "positive_episodes": 24,
       "rebates_received_total": 0.0,
       "statuses": {
-        "CARRIED_OPEN_AT_HORIZON": 2,
-        "CARRIED_SETTLED": 6,
-        "FLAT_EXITED_MAKER": 42,
-        "FLAT_EXITED_TAKER": 249,
-        "FLAT_PAIRED": 69,
-        "NEVER_FILLED": 589
+        "CARRIED_OPEN_AT_HORIZON": 1,
+        "CARRIED_SETTLED": 4,
+        "FLAT_EXITED_MAKER": 21,
+        "FLAT_EXITED_TAKER": 103,
+        "FLAT_PAIRED": 18,
+        "NEVER_FILLED": 654
       },
-      "sum_total": -265.4015,
-      "taker_fees_total": -92.43,
-      "unmatched_at_end": 6
+      "sum_total": -195.5392,
+      "taker_fees_total": -39.02,
+      "unmatched_at_end": 5
     },
     "EXCLUDED|QUEUE_FRONT_IF_INSIDE": {
-      "any_fill_rate": 0.4274,
-      "double_fill_rate_q": 0.0753,
-      "episodes": 943,
+      "any_fill_rate": 0.1835,
+      "double_fill_rate_q": 0.0225,
+      "episodes": 801,
       "events": 11,
       "markets": 11,
       "per_contract": {
         "ci": [
-          -0.141795,
-          0.080726
+          -0.002584,
+          0.000337
         ],
         "cluster_means": [
-          -0.405,
-          -0.205,
-          -0.007031,
-          -0.004797,
-          -0.002894,
-          -0.000549,
-          -1.4e-05,
-          0.001817,
-          0.002587,
-          0.005,
-          0.28
+          -0.006328,
+          -0.003266,
+          -0.003128,
+          -0.00036,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.000721
         ],
-        "cluster_se": 0.049937,
+        "cluster_se": 0.000655,
         "clusters": 11,
-        "naive_se": 0.001042,
-        "point": -0.030535,
-        "se_inflation_vs_naive": 47.93
+        "naive_se": 0.000788,
+        "point": -0.001124,
+        "se_inflation_vs_naive": 0.83
       },
       "per_episode": {
         "ci": [
-          -14.179478,
-          8.072559
+          -0.258392,
+          0.033657
         ],
         "cluster_means": [
-          -40.5,
-          -20.5,
-          -0.70311,
-          -0.479696,
-          -0.289361,
-          -0.054879,
-          -0.001375,
-          0.181716,
-          0.258654,
-          0.5,
-          28.0
+          -0.632755,
+          -0.326606,
+          -0.312823,
+          -0.035968,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.072112
         ],
-        "cluster_se": 4.993725,
+        "cluster_se": 0.065541,
         "clusters": 11,
-        "naive_se": 0.104197,
-        "point": -3.053459,
-        "se_inflation_vs_naive": 47.93
+        "naive_se": 0.0788,
+        "point": -0.112367,
+        "se_inflation_vs_naive": 0.83
       },
-      "positive_episodes": 133,
+      "positive_episodes": 25,
       "rebates_received_total": 0.0,
       "statuses": {
-        "CARRIED_OPEN_AT_HORIZON": 2,
-        "CARRIED_SETTLED": 6,
-        "FLAT_EXITED_MAKER": 46,
-        "FLAT_EXITED_TAKER": 280,
-        "FLAT_PAIRED": 71,
-        "NEVER_FILLED": 538
+        "CARRIED_OPEN_AT_HORIZON": 1,
+        "CARRIED_SETTLED": 4,
+        "FLAT_EXITED_MAKER": 24,
+        "FLAT_EXITED_TAKER": 100,
+        "FLAT_PAIRED": 18,
+        "NEVER_FILLED": 654
       },
-      "sum_total": -269.3262,
-      "taker_fees_total": -94.44,
-      "unmatched_at_end": 6
+      "sum_total": -193.9834,
+      "taker_fees_total": -37.88,
+      "unmatched_at_end": 5
     },
     "PUBLISHED|QUEUE_BEHIND_ALWAYS": {
-      "any_fill_rate": 0.3824,
-      "double_fill_rate_q": 0.0721,
-      "episodes": 957,
+      "any_fill_rate": 0.1835,
+      "double_fill_rate_q": 0.0225,
+      "episodes": 801,
       "events": 11,
       "markets": 11,
       "per_contract": {
         "ci": [
-          -0.140131,
-          0.082077
+          -0.002353,
+          0.000354
         ],
         "cluster_means": [
-          -0.402,
-          -0.203,
-          -0.00633,
-          -0.003245,
-          -0.002476,
-          -0.000438,
-          -4e-06,
-          0.001946,
-          0.002751,
-          0.011,
-          0.2825
+          -0.006027,
+          -0.002961,
+          -0.002411,
+          -0.00036,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          3e-06,
+          0.000758
         ],
-        "cluster_se": 0.049867,
+        "cluster_se": 0.000608,
         "clusters": 11,
-        "naive_se": 0.001019,
-        "point": -0.029027,
-        "se_inflation_vs_naive": 48.93
+        "naive_se": 0.000779,
+        "point": -0.001,
+        "se_inflation_vs_naive": 0.78
       },
       "per_episode": {
         "ci": [
-          -14.013083,
-          8.20771
+          -0.235347,
+          0.035391
         ],
         "cluster_means": [
-          -40.2,
-          -20.3,
-          -0.632998,
-          -0.3245,
-          -0.247588,
-          -0.04375,
-          -0.000443,
-          0.194625,
-          0.275106,
-          1.1,
-          28.25
+          -0.602671,
+          -0.296064,
+          -0.241087,
+          -0.035968,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.000268,
+          0.075765
         ],
-        "cluster_se": 4.986713,
+        "cluster_se": 0.060758,
         "clusters": 11,
-        "naive_se": 0.101926,
-        "point": -2.902686,
-        "se_inflation_vs_naive": 48.93
+        "naive_se": 0.077893,
+        "point": -0.099978,
+        "se_inflation_vs_naive": 0.78
       },
-      "positive_episodes": 138,
-      "rebates_received_total": 43.42,
+      "positive_episodes": 45,
+      "rebates_received_total": 22.39,
       "statuses": {
-        "CARRIED_OPEN_AT_HORIZON": 2,
-        "CARRIED_SETTLED": 6,
-        "FLAT_EXITED_MAKER": 42,
-        "FLAT_EXITED_TAKER": 249,
-        "FLAT_PAIRED": 69,
-        "NEVER_FILLED": 589
+        "CARRIED_OPEN_AT_HORIZON": 1,
+        "CARRIED_SETTLED": 4,
+        "FLAT_EXITED_MAKER": 21,
+        "FLAT_EXITED_TAKER": 103,
+        "FLAT_PAIRED": 18,
+        "NEVER_FILLED": 654
       },
-      "sum_total": -221.9815,
-      "taker_fees_total": -92.43,
-      "unmatched_at_end": 6
+      "sum_total": -173.1492,
+      "taker_fees_total": -39.02,
+      "unmatched_at_end": 5
     },
     "PUBLISHED|QUEUE_FRONT_IF_INSIDE": {
-      "any_fill_rate": 0.4274,
-      "double_fill_rate_q": 0.0753,
-      "episodes": 943,
+      "any_fill_rate": 0.1835,
+      "double_fill_rate_q": 0.0225,
+      "episodes": 801,
       "events": 11,
       "markets": 11,
       "per_contract": {
         "ci": [
-          -0.140163,
-          0.082038
+          -0.002337,
+          0.000357
         ],
         "cluster_means": [
-          -0.402,
-          -0.203,
-          -0.006768,
-          -0.003326,
-          -0.002343,
-          -0.000438,
-          -1.4e-05,
-          0.001946,
-          0.002751,
-          0.011,
-          0.2825
+          -0.006019,
+          -0.002915,
+          -0.002354,
+          -0.00036,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          3e-06,
+          0.000758
         ],
-        "cluster_se": 0.049866,
+        "cluster_se": 0.000605,
         "clusters": 11,
-        "naive_se": 0.001035,
-        "point": -0.029063,
-        "se_inflation_vs_naive": 48.19
+        "naive_se": 0.000779,
+        "point": -0.00099,
+        "se_inflation_vs_naive": 0.78
       },
       "per_episode": {
         "ci": [
-          -14.016328,
-          8.20376
+          -0.23367,
+          0.035703
         ],
         "cluster_means": [
-          -40.2,
-          -20.3,
-          -0.676832,
-          -0.332611,
-          -0.234287,
-          -0.04375,
-          -0.001375,
-          0.194625,
-          0.275106,
-          1.1,
-          28.25
+          -0.601921,
+          -0.291544,
+          -0.235418,
+          -0.035968,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.000268,
+          0.075765
         ],
-        "cluster_se": 4.986555,
+        "cluster_se": 0.060452,
         "clusters": 11,
-        "naive_se": 0.103474,
-        "point": -2.906284,
-        "se_inflation_vs_naive": 48.19
+        "naive_se": 0.07789,
+        "point": -0.098984,
+        "se_inflation_vs_naive": 0.78
       },
-      "positive_episodes": 149,
-      "rebates_received_total": 46.13,
+      "positive_episodes": 45,
+      "rebates_received_total": 22.57,
       "statuses": {
-        "CARRIED_OPEN_AT_HORIZON": 2,
-        "CARRIED_SETTLED": 6,
-        "FLAT_EXITED_MAKER": 46,
-        "FLAT_EXITED_TAKER": 280,
-        "FLAT_PAIRED": 71,
-        "NEVER_FILLED": 538
+        "CARRIED_OPEN_AT_HORIZON": 1,
+        "CARRIED_SETTLED": 4,
+        "FLAT_EXITED_MAKER": 24,
+        "FLAT_EXITED_TAKER": 100,
+        "FLAT_PAIRED": 18,
+        "NEVER_FILLED": 654
       },
-      "sum_total": -223.1962,
-      "taker_fees_total": -94.44,
-      "unmatched_at_end": 6
+      "sum_total": -171.4134,
+      "taker_fees_total": -37.88,
+      "unmatched_at_end": 5
     }
   },
   "realised_fills": {
-    "fills": 958,
+    "fills": 376,
     "max": 100.0,
-    "mean_fill": 59.306,
-    "median_fill": 63.01500000001397,
-    "min": 0.060000000000002274,
-    "partial_fills_below_order_size": 581,
+    "mean_fill": 39.043,
+    "median_fill": 23.064999999999998,
+    "min": 1.1102230246251565e-16,
+    "partial_fills_below_order_size": 310,
     "size_buckets": {
-      "1": 21,
-      "10-99": 419,
-      "2": 24,
-      "3-4": 27,
-      "5-9": 90,
-      ">=100": 377
+      "1": 19,
+      "10-99": 199,
+      "2": 18,
+      "3-4": 22,
+      "5-9": 53,
+      ">=100": 65
     }
   },
   "sensitivity": {
     "horizon=10 size=100": {
-      "episodes": 1570,
-      "per_contract_point": -0.001522,
-      "positive": 148,
-      "q_double_fill": 0.0248,
-      "sum_total": -238.9277
+      "episodes": 801,
+      "per_contract_point": -0.00214,
+      "positive": 45,
+      "q_double_fill": 0.0225,
+      "sum_total": -171.4134
     },
     "horizon=10 size=4": {
-      "episodes": 1595,
-      "per_contract_point": -0.002311,
-      "positive": 173,
-      "q_double_fill": 0.0426,
-      "sum_total": -14.745
+      "episodes": 824,
+      "per_contract_point": -0.003829,
+      "positive": 70,
+      "q_double_fill": 0.0583,
+      "sum_total": -12.6192
     },
     "horizon=20 size=100": {
-      "episodes": 943,
-      "per_contract_point": -0.002367,
-      "positive": 149,
-      "q_double_fill": 0.0753,
-      "sum_total": -223.1962
+      "episodes": 801,
+      "per_contract_point": -0.00214,
+      "positive": 45,
+      "q_double_fill": 0.0225,
+      "sum_total": -171.4134
     },
     "horizon=20 size=4": {
-      "episodes": 970,
-      "per_contract_point": -0.00314,
-      "positive": 176,
-      "q_double_fill": 0.1165,
-      "sum_total": -12.1822
+      "episodes": 824,
+      "per_contract_point": -0.003829,
+      "positive": 70,
+      "q_double_fill": 0.0583,
+      "sum_total": -12.6192
     },
     "horizon=40 size=100": {
-      "episodes": 562,
-      "per_contract_point": -0.001717,
-      "positive": 147,
-      "q_double_fill": 0.1744,
-      "sum_total": -96.4957
+      "episodes": 801,
+      "per_contract_point": -0.00214,
+      "positive": 45,
+      "q_double_fill": 0.0225,
+      "sum_total": -171.4134
     },
     "horizon=40 size=4": {
-      "episodes": 602,
-      "per_contract_point": -0.004132,
-      "positive": 200,
-      "q_double_fill": 0.2558,
-      "sum_total": -9.9491
+      "episodes": 824,
+      "per_contract_point": -0.003829,
+      "positive": 70,
+      "q_double_fill": 0.0583,
+      "sum_total": -12.6192
     },
     "horizon=5 size=100": {
-      "episodes": 2527,
-      "per_contract_point": -0.000774,
-      "positive": 115,
-      "q_double_fill": 0.0055,
-      "sum_total": -195.6068
+      "episodes": 801,
+      "per_contract_point": -0.00214,
+      "positive": 45,
+      "q_double_fill": 0.0225,
+      "sum_total": -171.4134
     },
     "horizon=5 size=4": {
-      "episodes": 2549,
-      "per_contract_point": -0.001139,
-      "positive": 136,
-      "q_double_fill": 0.0114,
-      "sum_total": -11.6095
+      "episodes": 824,
+      "per_contract_point": -0.003829,
+      "positive": 70,
+      "q_double_fill": 0.0583,
+      "sum_total": -12.6192
     }
   },
   "settlement": {
