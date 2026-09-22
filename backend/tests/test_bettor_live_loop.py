@@ -1549,3 +1549,97 @@ class TestTheProbeBudgetSurvivesRestarts:
         assert out["stopped_by"] == ctl_mod.B_EXPIRED
         assert made.get("stopped") is True, "the stream was stopped"
         assert pool.value == "false", "and the next process is stopped too"
+
+
+class TestTheIdleDeploymentEvidencesTheApprovedLimits:
+    """THE CHECK THIS STAGE RESTS ON.
+
+    Stage 2 is authorized against eight specific limits, and the first
+    deployment's whole job is to prove -- from a loop that refused to
+    observe -- that the running process actually holds them. That proof
+    is a log line carrying `effective_config()`, so the line has to be
+    complete: a limit the line omits is a limit the deployment cannot
+    evidence, and the September 21 incident is exactly what happens
+    when a configuration is believed rather than read back.
+
+    These tests fail if a future edit drops one of the eight, or
+    changes a default out from under the approved figure.
+    """
+
+    APPROVED = {
+        "max_rps": 0.25,
+        "concurrency": 1,
+        "budget_max_distinct_default": 40,
+        "budget_deadline_s_default": 1800.0,
+        "frame_capture_n": 25,
+        "max_contracts": "0",
+        "suspend_above_s": 120.0,
+        "listing_max_retries": 2,
+    }
+
+    def _clean(self, monkeypatch):
+        """The approved environment, and nothing inherited."""
+        for name in (probe_mod.RPS_ENV, probe_mod.CONC_ENV,
+                     probe_mod.BATCH_ENV, "BETTOR_LIVE_MAX_CONTRACTS",
+                     "BETTOR_LIVE_DISCOVERY_PAGES", bl.KILL_ENV):
+            monkeypatch.delenv(name, raising=False)
+        monkeypatch.setenv(ms.FRAMES_ENV, "25")
+
+    def test_it_reports_every_approved_limit(self, monkeypatch):
+        self._clean(monkeypatch)
+        cfg = bl.effective_config()
+        missing = [k for k in self.APPROVED if k not in cfg]
+        assert not missing, f"effective_config omits {missing}"
+
+    def test_the_reported_values_are_the_approved_values(self, monkeypatch):
+        self._clean(monkeypatch)
+        cfg = bl.effective_config()
+        wrong = {k: (cfg[k], v) for k, v in self.APPROVED.items()
+                 if cfg[k] != v}
+        assert not wrong, f"reported != approved (got, approved): {wrong}"
+
+    def test_the_line_is_json_serialisable(self, monkeypatch):
+        """It is logged with json.dumps. A value that cannot serialise
+        turns the evidence line into a traceback."""
+        self._clean(monkeypatch)
+        json.dumps(bl.effective_config())
+
+    def test_it_does_not_claim_to_have_read_the_budget_row(self,
+                                                          monkeypatch):
+        """A refusal at the control returns BEFORE the budget is read.
+        The line must name the row as authoritative rather than imply
+        these defaults are what was armed."""
+        self._clean(monkeypatch)
+        cfg = bl.effective_config()
+        assert cfg["budget_key"] == ctl_mod.BUDGET_KEY
+        assert "row" in cfg["budget_authority"]
+        assert all(k.endswith("_default") for k in cfg
+                   if k.startswith("budget_") and k not in
+                   ("budget_key", "budget_authority")), \
+            "a budget figure not marked _default reads as one that was read"
+
+    def test_an_override_above_the_envelope_is_flagged(self, monkeypatch):
+        """Raising the pace past the demonstrated envelope must show up
+        in the same line, so an override cannot be quiet."""
+        self._clean(monkeypatch)
+        assert bl.effective_config()["above_demonstrated_envelope"] is False
+        monkeypatch.setenv(probe_mod.RPS_ENV, "5")
+        flagged = bl.effective_config()
+        assert flagged["max_rps"] == 5.0
+        assert flagged["above_demonstrated_envelope"] is True
+
+    def test_the_refusal_actually_carries_the_line(self, monkeypatch,
+                                                  tmp_path, caplog):
+        """Not that the function exists -- that a stopped `main()` logs
+        it. The deployment has nothing else to show."""
+        self._clean(monkeypatch)
+        with caplog.at_level("INFO"):
+            out = asyncio.run(bl.main(control_pool=FakeControlPool("false"),
+                                      sleep=SleepSpy()))
+        assert out["started"] is False
+        assert out["config"]["max_rps"] == 0.25
+        said = "\n".join(r.getMessage() for r in caplog.records)
+        assert "not observing" in said
+        assert "effective config" in said
+        assert '"max_rps": 0.25' in said
+        assert '"budget_max_distinct_default": 40' in said

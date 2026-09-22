@@ -221,6 +221,23 @@ def effective_config() -> dict:
         "suspend_above_s": probe_mod.PROBE_SUSPEND_ABOVE_S,
         "discovery_pages": os.environ.get(
             "BETTOR_LIVE_DISCOVERY_PAGES", "6"),
+        # THE LISTING'S OWN BOUNDS, counted apart from enrichment so a
+        # listing retry storm cannot eat the enrichment allowance.
+        "listing_max_retries": probe_mod.LISTING_MAX_RETRIES,
+        "listing_timeout_s": probe_mod.LISTING_TIMEOUT_S,
+        "probe_max_retries": probe_mod.PROBE_MAX_RETRIES,
+        "probe_timeout_s": probe_mod.PROBE_TIMEOUT_S,
+        # THE LIFETIME BUDGET, reported here as the CODE'S DEFAULTS and
+        # named as such. The authoritative numbers live in the
+        # `bettor_live_probe_state` row and are whatever `obs-arm`
+        # wrote; a refusal at the control returns before the budget is
+        # ever read, so this line cannot claim to have read the row.
+        # It says what this build would arm to, which is the thing a
+        # reader wants from an idle process.
+        "budget_key": ctl.BUDGET_KEY,
+        "budget_max_distinct_default": ctl.PROBE_MAX_DISTINCT,
+        "budget_deadline_s_default": ctl.PROBE_DEADLINE_S,
+        "budget_authority": "the ingestion_state row, not this line",
     }
 
 
