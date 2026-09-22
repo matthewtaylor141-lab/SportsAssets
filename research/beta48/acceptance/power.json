@@ -1,0 +1,175 @@
+{
+  "AS_RUN": {
+    "designs": {
+      "Bonferroni": {
+        "alpha": 0.0029411764705882353,
+        "events_in_hand": 11,
+        "mde_at_events_in_hand": 0.190258,
+        "rows": [
+          {
+            "edge_per_contract": 0.0005,
+            "events_required_80pct_power": 1592717
+          },
+          {
+            "edge_per_contract": 0.001,
+            "events_required_80pct_power": 398180
+          },
+          {
+            "edge_per_contract": 0.0025,
+            "events_required_80pct_power": 63709
+          },
+          {
+            "edge_per_contract": 0.005,
+            "events_required_80pct_power": 15928
+          },
+          {
+            "edge_per_contract": 0.01,
+            "events_required_80pct_power": 3982
+          },
+          {
+            "edge_per_contract": 0.02,
+            "events_required_80pct_power": 996
+          }
+        ],
+        "sigma_event": 0.165385,
+        "z": 2.9738
+      },
+      "uncorrected": {
+        "alpha": 0.05,
+        "events_in_hand": 11,
+        "mde_at_events_in_hand": 0.139702,
+        "rows": [
+          {
+            "edge_per_contract": 0.0005,
+            "events_required_80pct_power": 858727
+          },
+          {
+            "edge_per_contract": 0.001,
+            "events_required_80pct_power": 214682
+          },
+          {
+            "edge_per_contract": 0.0025,
+            "events_required_80pct_power": 34350
+          },
+          {
+            "edge_per_contract": 0.005,
+            "events_required_80pct_power": 8588
+          },
+          {
+            "edge_per_contract": 0.01,
+            "events_required_80pct_power": 2147
+          },
+          {
+            "edge_per_contract": 0.02,
+            "events_required_80pct_power": 537
+          }
+        ],
+        "sigma_event": 0.165385,
+        "z": 1.96
+      }
+    },
+    "event_means": [
+      -0.402,
+      -0.203,
+      -0.006768,
+      -0.003326,
+      -0.002343,
+      -0.000438,
+      -1.4e-05,
+      0.001946,
+      0.002751,
+      0.011,
+      0.2825
+    ],
+    "events": 11,
+    "sigma_event": 0.165385
+  },
+  "HARD_FLATTEN": {
+    "designs": {
+      "Bonferroni": {
+        "alpha": 0.0029411764705882353,
+        "events_in_hand": 11,
+        "mde_at_events_in_hand": 0.004985,
+        "rows": [
+          {
+            "edge_per_contract": 0.0005,
+            "events_required_80pct_power": 1094
+          },
+          {
+            "edge_per_contract": 0.001,
+            "events_required_80pct_power": 274
+          },
+          {
+            "edge_per_contract": 0.0025,
+            "events_required_80pct_power": 44
+          },
+          {
+            "edge_per_contract": 0.005,
+            "events_required_80pct_power": 11
+          },
+          {
+            "edge_per_contract": 0.01,
+            "events_required_80pct_power": 3
+          },
+          {
+            "edge_per_contract": 0.02,
+            "events_required_80pct_power": 1
+          }
+        ],
+        "sigma_event": 0.004333,
+        "z": 2.9738
+      },
+      "uncorrected": {
+        "alpha": 0.05,
+        "events_in_hand": 11,
+        "mde_at_events_in_hand": 0.00366,
+        "rows": [
+          {
+            "edge_per_contract": 0.0005,
+            "events_required_80pct_power": 590
+          },
+          {
+            "edge_per_contract": 0.001,
+            "events_required_80pct_power": 148
+          },
+          {
+            "edge_per_contract": 0.0025,
+            "events_required_80pct_power": 24
+          },
+          {
+            "edge_per_contract": 0.005,
+            "events_required_80pct_power": 6
+          },
+          {
+            "edge_per_contract": 0.01,
+            "events_required_80pct_power": 2
+          },
+          {
+            "edge_per_contract": 0.02,
+            "events_required_80pct_power": 1
+          }
+        ],
+        "sigma_event": 0.004333,
+        "z": 1.96
+      }
+    },
+    "event_means": [
+      -0.006768,
+      -0.002287,
+      -0.001404,
+      -0.0009,
+      -0.0009,
+      -0.0009,
+      -0.000452,
+      -2e-05,
+      0.001983,
+      0.002751,
+      0.011
+    ],
+    "events": 11,
+    "sigma_event": 0.004333
+  },
+  "bonferroni_alpha": 0.002941,
+  "episodes": 943,
+  "variants_tried": 17
+}
