@@ -196,15 +196,26 @@ NEVER_FILLED = "NEVER_FILLED"
 QUEUE_MODELS = ("QUEUE_FRONT_IF_INSIDE", "QUEUE_BEHIND_ALWAYS")
 
 
-def _maker_fee(px, n, rebates_on):
-    """Signed cash from the maker schedule on ONE fill of n contracts."""
+def _maker_fee(px, n, rebates_on, at_epoch=None):
+    """Signed cash from the maker schedule on ONE fill of n contracts.
+
+    The maker coefficient is -0.0125 in BOTH published regimes, so
+    `at_epoch` changes nothing here. It is threaded anyway so the two
+    fee paths look the same and a future maker change cannot be missed.
+    """
     if not rebates_on:
         return 0.0
-    return ev.fee(px, n, maker=True)          # positive: we receive
+    return ev.fee(px, n, maker=True, at_epoch=at_epoch)
 
 
-def _taker_fee(px, n):
-    return ev.fee(px, n, maker=False)         # negative: we pay
+def _taker_fee(px, n, at_epoch=None):
+    """THE REGIME IS SELECTED BY THE FILL'S OWN TIMESTAMP.
+
+    theta_taker moved 0.06 -> 0.0695 at 2026-09-17T03:59Z and this
+    capture runs 09-13 to 09-20, so a single constant is wrong for one
+    side of the corpus whichever value it takes.
+    """
+    return ev.fee(px, n, maker=False, at_epoch=at_epoch)
 
 
 class Episode:
@@ -305,7 +316,9 @@ class Episode:
         """Record ONE fill. The fee is computed on THIS fill's size."""
         if n <= 0:
             return
-        f = _maker_fee(px, n, self.rebates_on) if maker else _taker_fee(px, n)
+        te = row.get("t")
+        f = (_maker_fee(px, n, self.rebates_on, te) if maker
+             else _taker_fee(px, n, te))
         if maker:
             self.rebates_paid += f
         else:
@@ -328,7 +341,9 @@ class Episode:
         """Sell an owned leg (reduces the position, brings cash in)."""
         if n <= 0:
             return
-        f = _maker_fee(px, n, self.rebates_on) if maker else _taker_fee(px, n)
+        te = row.get("t")
+        f = (_maker_fee(px, n, self.rebates_on, te) if maker
+             else _taker_fee(px, n, te))
         if maker:
             self.rebates_paid += f
         else:
@@ -706,14 +721,14 @@ class Episode:
         v = matched * 1.0
         basis = ["matched pair %g -> 1.0 each" % matched] if matched else []
         if row["bid"] is not None and ey > 0:
-            v += row["bid"] * ey + _taker_fee(row["bid"], ey)
+            v += row["bid"] * ey + _taker_fee(row["bid"], ey, row.get("t"))
             basis.append("excess YES %g marked at the BID %.4f net of the "
                          "taker fee" % (ey, row["bid"]))
         elif ey > 0:
             basis.append("excess YES %g UNMARKED -- no bid" % ey)
         if row["ask"] is not None and en > 0:
             px = 1.0 - row["ask"]
-            v += px * en + _taker_fee(px, en)
+            v += px * en + _taker_fee(px, en, row.get("t"))
             basis.append("excess NO %g marked at 1-ASK %.4f net of the taker "
                          "fee" % (en, px))
         elif en > 0:

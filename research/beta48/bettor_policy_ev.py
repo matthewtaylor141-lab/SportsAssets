@@ -39,10 +39,41 @@ import json
 import math
 from dataclasses import dataclass, field
 
-# ── the verified PMUS schedule ─────────────────────────────────────────
-THETA_TAKER = 0.06
-THETA_MAKER = -0.0125
-FEE_EFFECTIVE_FROM = "2026-07-01"
+# ── the PMUS schedule: TWO REGIMES, and our capture straddles them ────
+#
+# VERIFIED 2026-09-22 against https://docs.polymarket.us/fees, whose five
+# worked examples all use 0.0695:
+#
+#   Buy 1,000 @ 0.10  taker 0.0695 x 1000 x 0.10 x 0.90 = -$6.26
+#   Buy 1,000 @ 0.50  taker 0.0695 x 1000 x 0.50 x 0.50 = -$17.38
+#   maker on the same fills: 0.0125 x ... = +$1.12 / +$3.12
+#
+# THIS FILE HAD 0.06 -- the JUL2026 coefficient -- as a single constant.
+# Every taker fee it computed after the cutover was 13.7% too small, and
+# the policies that exit inventory as takers are exactly the ones that
+# error favours. `forward/fees_v2.py` already carried the SEP2026
+# coefficient with THETA_TAKER_SEP2026_VERIFIED = False; the docs page
+# is that verification.
+#
+# THE CUTOVER MATTERS HERE SPECIFICALLY. The capture runs
+# 2026-09-13 -> 2026-09-20 and the cutover is 2026-09-17T03:59Z, so a
+# single constant is wrong for one side of the corpus whichever value
+# it takes. `fee()` selects by timestamp.
+THETA_TAKER_JUL2026 = 0.06
+THETA_TAKER_SEP2026 = 0.0695
+REGIME_CUTOVER_EPOCH = 1789617540.0        # 2026-09-17T03:59:00+00:00
+THETA_TAKER = THETA_TAKER_SEP2026          # the current regime
+THETA_MAKER = -0.0125                      # unchanged across both
+FEE_EFFECTIVE_FROM = "2026-09-17"
+FEE_SOURCE = "https://docs.polymarket.us/fees fetched 2026-09-22"
+
+
+def theta_taker_at(at_epoch=None) -> float:
+    """The taker coefficient in force at `at_epoch` (None = current)."""
+    if at_epoch is None:
+        return THETA_TAKER_SEP2026
+    return (THETA_TAKER_SEP2026 if at_epoch >= REGIME_CUTOVER_EPOCH
+            else THETA_TAKER_JUL2026)
 
 # THE TICK IS PER MARKET, AND IT IS NOT ALWAYS A CENT. The venue carries
 # `market.orderPriceMinTickSize` on the listing (verified 20/20 in the
@@ -74,11 +105,43 @@ def banker_cents(x: float) -> float:
     return r / 100.0
 
 
-def fee(p: float, contracts: float, *, maker: bool) -> float:
-    """Signed cash effect of the fee on ONE fill. Negative = we pay."""
-    theta = THETA_MAKER if maker else THETA_TAKER
+def fee(p: float, contracts: float, *, maker: bool,
+        at_epoch: float | None = None) -> float:
+    """Signed cash effect of the fee on ONE fill. Negative = we pay.
+
+    `at_epoch` selects the taker regime. The maker coefficient is the
+    same in both.
+    """
+    theta = THETA_MAKER if maker else theta_taker_at(at_epoch)
     raw = theta * contracts * p * (1.0 - p)
     return -banker_cents(raw)
+
+
+def taker_fee_for_order(fills, *, at_epoch: float | None = None) -> float:
+    """Total taker charge for ONE aggressive order that swept several
+    resting orders. Negative = we pay.
+
+    THE PUBLISHED RULE, verbatim from the fee page:
+
+      "When an aggressive order fills against multiple resting orders,
+       each fill is charged its banker's-rounded fee, adjusted so that
+       the total commission collected across the order's fills never
+       exceeds the banker's rounding of the cumulative exact fee. The
+       adjustment can only reduce a fill's charge, never increase it.
+       Maker rebates are computed per fill, independently."
+
+    So a multi-level sweep is CAPPED at the rounding of the cumulative
+    exact fee -- per-fill rounding alone over-charges. This is the only
+    place that cap is applied; maker rebates stay per-fill and are not
+    routed through here.
+
+    `fills` is an iterable of (price, contracts).
+    """
+    theta = theta_taker_at(at_epoch)
+    per_fill = sum(banker_cents(theta * n * p * (1.0 - p))
+                   for p, n in fills)
+    exact = sum(theta * n * p * (1.0 - p) for p, n in fills)
+    return -min(per_fill, banker_cents(exact))
 
 
 # ── state ──────────────────────────────────────────────────────────────
