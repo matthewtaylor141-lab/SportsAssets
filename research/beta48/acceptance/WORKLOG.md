@@ -265,3 +265,43 @@ F2  THE DAILY SCORING BOUNDARY IS NOT ESTABLISHED BY THE MANIFEST.
     window can be applied in analysis; it does mean the collection
     window must COVER whichever period is real, and an ET window does
     not cover a UTC one.
+
+### LIVE ACCEPTANCE OF THE DEPLOYMENT — complete, observation stopped
+  sportsassets-api      d630d3d  LIVE  2026-09-22T22:22:19Z
+  sportsassets-workers  d630d3d  LIVE  2026-09-22T22:22:16Z
+  edge-shadow           suspended=suspended -- takes no deploy (pre-existing)
+
+Observation state read from Postgres (render-ops sql obs-incentive,
+run 35792283294):
+
+  control               false        NOT OBSERVING
+  http_total_used       0            run allowance untouched
+  sock_connects/subs    null / null  untouched
+  general_max_distinct  40           general loop cap NOT zeroed
+  deadline_at           2026-09-22T14:35:09Z  stale, already past
+  journal table         absent -- no run has started
+
+So the release is running and observation is stopped through
+deployment, which is what was required before arming.
+
+### ARM NOT EXECUTED. The decision is one-shot and would have been wasted.
+The authorization is "one arm, one obs-run, no automatic extension or
+replacement run". Spending that single arm on the 23.6% that remains of
+the frozen ET date would consume the authorization and leave no way to
+collect a complete window. Arming now is therefore strictly worse than
+not arming, independently of the instruction to deliver a COMPLETE
+ET-date window -- which it also fails.
+
+### Scheduled collector — preserved, with one residual doubt named
+The deployed d630d3d carries `if: github.event.inputs.manifest_et_date
+== ''` on the capture job. On a scheduled run there is no `inputs`
+object, so the left side is null; GitHub casts both sides to a number
+when the types differ, null and '' both become 0, and the comparison is
+true. Documented behaviour, and the collector keeps running.
+
+I would still rather not have the 2-hourly collector resting on a
+coercion rule. 67d7a93 on the release branch replaces both job
+conditions with explicit `github.event_name` tests and was deliberately
+NOT deployed, because the approval names d630d3d and a superset is
+still not what was approved. Next scheduled run (00:00Z) is the
+verification either way.
