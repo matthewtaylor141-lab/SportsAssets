@@ -95,7 +95,7 @@
         "base_clip": 100.0,
         "spread_ticks": 2,
         "policy_minimum_ticks": 2,
-        "rule_applied": "FIXED",
+        "rule_applied": "FIXED x1.00 -- fixed clip",
         "book_depth": "NOT USED -- the corpus carries none, and a rule that needed it could not be validated here"
       },
       "alternatives_considered": [
@@ -119,7 +119,7 @@
         "measured_effect": "IT IS AN ALLOCATION RULE, NOT A PROFITABILITY LEVER. Edge and capital both scale with the clip, so per-capital-hour is invariant to a uniform change. Measured on this corpus it cut HELD capital-hours at every queue fraction (-66 to -348) and improved per-capital-hour at three of four, but net P&L moved BOTH WAYS (+14.20 to -18.08). Four clustered observations; that is not an improvement anyone should bank.",
         "uncertainty": "the sign of the net effect"
       },
-      "action": "EDGE-SCALED CLIP: 100 contracts (FIXED)",
+      "action": "EDGE-SCALED CLIP: 100 contracts (FIXED x1.00 -- fixed clip)",
       "reason": "a wider spread pays more for the same capital and the same queue risk, so it earns more size. Only decision-time inputs are used: the book's own spread, never a realised fill rate and never a later price.",
       "case_study_mechanism": "Edge-proportional allocation.",
       "evidence": "implemented in bettor_episodes.decision_time_size; measured in acceptance/strategy_v2.json against the same baseline"
@@ -161,7 +161,7 @@
       "action": "CANCEL THE RESTING LEG; hold 52.34 unmatched",
       "reason": "the inventory cap is half a clip. Letting the second side rest while a leg is unmatched is how a market maker becomes a directional trader by accident.",
       "case_study_mechanism": "Inventory control -- the case-study mechanism that separates market making from position taking.",
-      "evidence": "note recorded on the episode: cancelled the resting leg on the first fill (policy)"
+      "evidence": "note recorded on the episode: cancelled the resting leg on the first fill -- a leg filled and the other side is still working. Letting it rest while a leg is unmatched is how a market maker becomes a directional trader by accident"
     },
     {
       "stage": "5  COMPLETION -- how does the unmatched leg get closed?",
@@ -417,8 +417,12 @@
       "status": "STILL UNOBSERVABLE. The replay sweeps a queue-ahead fraction instead of knowing one, and EVERY fill figure in this demonstration inherits that sweep."
     },
     {
-      "capability": "RESTING DEPTH AT THE TOUCH",
-      "status": "NOT IN THIS CORPUS. It is the denominator of the incentive reward and the input a depth-aware size rule would need. The observation release exists to measure it."
+      "capability": "INCENTIVE REWARD ON THIS CORPUS",
+      "status": "NOT APPLICABLE, which is different from not computable. The ladder depth the reward formula needs IS in every row of this corpus. What is absent is a PROGRAMME: none of these five sports markets was observed in any incentive programme, so their reward is zero and any share figure quoted for them is a transferred scenario, not a measurement."
+    },
+    {
+      "capability": "TIME TO RESOLUTION",
+      "status": "NOT IN THIS CORPUS AT ALL. The tape carries no close time and no event start time -- only a state transition that arrives after the fact. It is the natural input for refusing to quote into a resolving event, which is where the entire evaluation loss came from, and the observation release captures it from the incentives API."
     },
     {
       "capability": "FILL-CONDITIONED PROFITABILITY",

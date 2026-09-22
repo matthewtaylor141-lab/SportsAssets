@@ -1,0 +1,58 @@
+{
+  "note": "APPEND ONLY. Every look at the evaluation split, in order. More than one entry for more than one variant means the split was reused and its result must be read as such.",
+  "touches": [
+    {
+      "protocol": "BETTOR_EVALUATION_V1",
+      "variant": "R10 R9 + maker-then-taker recovery",
+      "cut": "2026-09-17T00:00:00+00:00",
+      "result": [
+        {
+          "qfrac": 0.0,
+          "net_usd": -74.2883,
+          "per_capital_hour": -0.006605
+        },
+        {
+          "qfrac": 0.25,
+          "net_usd": -72.3673,
+          "per_capital_hour": -0.00603
+        },
+        {
+          "qfrac": 0.5,
+          "net_usd": -80.8113,
+          "per_capital_hour": -0.00652
+        },
+        {
+          "qfrac": 1.0,
+          "net_usd": -100.0089,
+          "per_capital_hour": -0.008021
+        }
+      ]
+    },
+    {
+      "protocol": "BETTOR_EVALUATION_V1",
+      "kind": "DIAGNOSTIC READ -- NOT a performance estimate",
+      "variant": "R12/R13 volatility gate, mechanism check only",
+      "what_was_read": "two named episodes from the evaluation split (aec-cfb-uwg-etnst-2026-09-19 @17:58:07, aec-cfb-coast-del-2026-09-19 @18:21:42) -- the two that produced -79.82 of R10's -74.29 total",
+      "question": "does the volatility gate refuse them, and is the answer sensitive to the threshold?",
+      "result": {
+        "aec-cfb-uwg-etnst-2026-09-19": {
+          "vol_per_sqrt_s": 0.002315,
+          "spread": 0.015,
+          "expected_move_2400s": 0.1134,
+          "cover": 0.132,
+          "decision_at_1.0": "STAND_ASIDE",
+          "decision_at_2.0": "STAND_ASIDE"
+        },
+        "aec-cfb-coast-del-2026-09-19": {
+          "vol_per_sqrt_s": 0.002372,
+          "spread": 0.01,
+          "expected_move_2400s": 0.1162,
+          "cover": 0.086,
+          "decision_at_1.0": "STAND_ASIDE",
+          "decision_at_2.0": "STAND_ASIDE"
+        }
+      },
+      "reading": "the gate refuses both by a wide margin -- the expected move is 7x to 12x the spread -- so the refusal is not threshold-sensitive anywhere in the range tried and no threshold was tuned to produce it. This establishes the MECHANISM only. It does NOT establish that the policy is profitable: the evaluation split is spent and R14 has not been and must not be run against it."
+    }
+  ]
+}

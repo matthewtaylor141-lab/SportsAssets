@@ -82,6 +82,12 @@ class Policy:
     min_flow_cover: float = 0.0
     flow_window_s: float = 1800.0
 
+    # THE VOLATILITY GATE. Zero leaves it off. Where the flow gate asks
+    # whether a quote will be REACHED, this asks whether being reached
+    # is worth anything. See RULES["volatility"].
+    min_vol_cover: float = 0.0
+    vol_window_s: float = 1800.0
+
     # QUOTE PLACEMENT
     placement: str = ENGINE
 
@@ -123,6 +129,10 @@ class Book:
     # ENDS AT THIS INSTANT. Never forward-looking: it is the flow that
     # has already happened, which is what a live engine would have.
     flow_per_s: float | None = None
+    # TRAILING realised volatility of the mid, expressed per root
+    # second, measured over a window ENDING at this instant. Like
+    # `flow_per_s` it is strictly backward-looking.
+    vol_per_sqrt_s: float | None = None
 
     @property
     def spread_ticks(self) -> int | None:
@@ -232,6 +242,50 @@ def flow_cover(policy: Policy, book: Book, *, clip: float,
                                               need)}
 
 
+def vol_cover(policy: Policy, book: Book, *,
+              horizon_s: float | None = None) -> dict:
+    """How many times does the spread cover the move we expect to eat?
+
+    THE ECONOMICS OF A PASSIVE QUOTE, in one ratio. Resting on both
+    sides earns the spread when both legs fill at rest. What it loses
+    is the price move between the two fills -- we are hit on the side
+    the market is leaving and left holding the side it is going to. So
+
+        cover = spread / (expected absolute move over the horizon)
+
+    and a cover below 1 says the move we expect to be adversely
+    selected by is larger than the spread we are quoting to capture.
+    Fill rate does not enter it: this is a statement about the value of
+    the fills, not their number, which is exactly what the flow gate
+    got wrong.
+
+    THE SCALING ASSUMPTION IS A RANDOM WALK and is stated because it is
+    an assumption: a trailing move measured over W seconds is scaled to
+    the horizon H by sqrt(H/W), which is what `vol_per_sqrt_s` already
+    carries. A price that trends rather than diffuses moves further
+    than this, so the ratio is optimistic in a trending market -- which
+    is the market this gate exists to refuse.
+    """
+    horizon = policy.quote_horizon_s if horizon_s is None else horizon_s
+    if book.vol_per_sqrt_s is None:
+        return {"cover": None, "known": False,
+                "why": "no trailing volatility was supplied, so the "
+                       "adverse-selection cost cannot be evaluated from "
+                       "this book"}
+    if book.bid is None or book.ask is None:
+        return {"cover": None, "known": False, "why": "one-sided book"}
+    move = book.vol_per_sqrt_s * (horizon ** 0.5)
+    spread = book.ask - book.bid
+    if move <= 0:
+        return {"cover": float("inf"), "known": True, "move": 0.0,
+                "spread": spread, "horizon_s": horizon,
+                "why": "the mid did not move over the trailing window"}
+    return {"cover": spread / move, "known": True, "move": move,
+            "spread": spread, "horizon_s": horizon,
+            "why": "spread %.4f against an expected %.4f move over %.0fs"
+                   % (spread, move, horizon)}
+
+
 def admit(policy: Policy, book: Book, *, clip: float | None = None) -> dict:
     """Is this book worth quoting at all?"""
     if book.bid is None or book.ask is None:
@@ -280,6 +334,19 @@ def admit(policy: Policy, book: Book, *, clip: float | None = None) -> dict:
                       % (fc["cover"], policy.min_flow_cover, fc["why"]),
                       "flow", ["flow_per_s", "depth_bid", "depth_ask"],
                       [D_QUOTE_BOTH], flow_cover=round(fc["cover"], 4))
+    if policy.min_vol_cover > 0:
+        vc = vol_cover(policy, book)
+        if not vc["known"]:
+            return _d(D_STAND_ASIDE, vc["why"], "volatility",
+                      ["vol_per_sqrt_s", "bid", "ask"], [D_QUOTE_BOTH])
+        if vc["cover"] < policy.min_vol_cover:
+            return _d(D_STAND_ASIDE,
+                      "volatility cover %.2f is below the %.2f minimum -- "
+                      "%s. Quoting into a move larger than the spread is "
+                      "selling an option for less than it is worth"
+                      % (vc["cover"], policy.min_vol_cover, vc["why"]),
+                      "volatility", ["vol_per_sqrt_s", "bid", "ask"],
+                      [D_QUOTE_BOTH], vol_cover=round(vc["cover"], 4))
     return _d(D_QUOTE_BOTH,
               "spread %d ticks clears the minimum and the book is "
               "two-sided, so a paired fill is worth the spread less fees"
@@ -488,6 +555,28 @@ RULES = {
                     "split; its effect is reported in "
                     "acceptance/evaluation.json. A hypothesis aimed at "
                     "the measured constraint is still a hypothesis.",
+    },
+    "volatility": {
+        "provenance": HYPOTHESIS,
+        "case_study": "adverse selection -- the reason a market maker "
+                      "widens or stops quoting, present in every market "
+                      "making study but not previously implemented here",
+        "inputs": ["vol_per_sqrt_s", "bid", "ask"],
+        "rationale": "a passive two-sided quote earns the spread and "
+                     "loses the price move between its two fills. When "
+                     "the expected move over the quoting horizon exceeds "
+                     "the spread, being filled is worth less than not "
+                     "being filled, whatever the fill rate.",
+        "evidence": "DIRECTLY FROM THE EVALUATION FAILURE. On the "
+                    "evaluation split the selected policy lost 74.29 "
+                    "over 197 episodes, of which TWO episodes -- both "
+                    "opened during live college football play on "
+                    "2026-09-19 -- accounted for -79.82. The other 195 "
+                    "netted +5.53. The loss was the adverse move, not "
+                    "the fee and not the fill rate. NOT YET EVALUATED: "
+                    "the evaluation split has been spent, so this rule "
+                    "is a prespecified candidate for fresh data, not a "
+                    "validated improvement.",
     },
     "placement": {
         "provenance": DERIVED,

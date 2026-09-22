@@ -199,6 +199,53 @@ REGISTER = [
      "case-study recovery option, not a threshold move"),
 ]
 
+# ── BRANCH 3: ADVERSE SELECTION. DEVELOPED AFTER THE EVALUATION ──────
+#
+# THESE ROWS ARE DEVELOPMENT ONLY AND MUST NOT BE READ AS RESULTS. The
+# evaluation split has been spent -- once, by R10, as the protocol
+# requires -- so nothing below has been evaluated out of sample and
+# nothing below may be reported as validated.
+#
+# WHY THEY EXIST. R10's evaluation failure was not ambiguous and it was
+# not the fee: 197 episodes, net -74.29, of which TWO episodes opened
+# during live college football play on 2026-09-19 accounted for -79.82.
+# The other 195 netted +5.53. One held 100 YES contracts into a
+# settlement of 0.00.
+#
+#   DEV  loss was taker fees          position +7.36, taker -11.31
+#   EVAL loss was the position itself position -63.91, taker -21.81
+#
+# The two protections R10 removed to save taker fees -- cancelling the
+# second side on a fill, and flattening before expiry -- are what had
+# been preventing exactly that. Their taker cost is an INSURANCE
+# PREMIUM, and R10's improvement on DEV was the premium refunded in a
+# period that happened to contain no claim.
+#
+# WHAT WOULD ACTUALLY FIX IT is a rule that declines to quote into a
+# large expected move, since that move is the loss. Time-to-resolution
+# would be the natural input and IT IS NOT IN THE CORPUS: the tape
+# carries no close or event-start time, only a state transition that
+# arrives after the fact. Trailing realised volatility IS in the
+# corpus, is strictly backward-looking, and prices the same thing.
+REGISTER += [
+    ("R12 vol gate, cover >= 1",
+     dict(BASE, min_vol_cover=1.0),
+     "DEV ONLY. The spread must at least cover the move expected over "
+     "the quoting horizon, or being filled is worth less than not "
+     "being filled"),
+
+    ("R13 vol gate, cover >= 2",
+     dict(BASE, min_vol_cover=2.0),
+     "DEV ONLY. The same rule with headroom for the random-walk "
+     "scaling, which understates a trending market"),
+
+    ("R14 vol gate + taker avoidance",
+     dict(BASE, min_vol_cover=1.0, cancel_other_on_fill=False,
+          hard_flatten=False, recovery="MAKER_THEN_TAKER"),
+     "DEV ONLY. R10's fee saving is only safe if the adverse move is "
+     "refused at entry; this is the pair of them together"),
+]
+
 # NO SWEEP OF `recovery_wait_s` APPEARS ABOVE, DELIBERATELY. It is the
 # knob that trades taker fees against carry risk, and the mechanism is
 # already identified, so sweeping it would be adjusting a threshold
@@ -426,6 +473,29 @@ def main(dev_only=False):
         print("\n--dev-only: the evaluation split was NOT read, and no "
               "touch was recorded.")
         return 0
+
+    # THE SPLIT IS SPENT AFTER ONE TOUCH, and the guard is structural
+    # rather than a note in a document. Re-running this file -- to add
+    # a variant, to regenerate an artifact, by habit -- would otherwise
+    # quietly turn a held-out set into a development set.
+    prior = []
+    if os.path.exists(TOUCHES):
+        with open(TOUCHES) as fh:
+            prior = json.load(fh).get("touches", [])
+    if prior:
+        print("\nREFUSING A SECOND TOUCH. The evaluation split has "
+              "already been read %d time(s):" % len(prior))
+        for t in prior:
+            print("    %s" % t["variant"])
+            for r in t["result"]:
+                print("       qfrac %.2f  net %9.2f  per_cap_hr %s"
+                      % (r["qfrac"], r["net_usd"], r["per_capital_hour"]))
+        print("\nThat result stands. A new candidate needs NEW DATA, "
+              "not another look at this split -- which is what the "
+              "observation release exists to collect.")
+        print("To deliberately override, delete %s, and understand that "
+              "doing so ends the out-of-sample claim." % TOUCHES)
+        return 3
 
     # ── THE SINGLE EVAL TOUCH ────────────────────────────────────────
     print("\n" + "=" * 92)

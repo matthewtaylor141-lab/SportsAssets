@@ -27,8 +27,13 @@ demonstration:
       against this venue, so capital stays committed until the event
       resolves. This is the single largest constraint on capital reuse
       and it is a venue capability question, not a policy choice.
-  ADAPTIVE SIZE                       every quote is one fixed clip.
-      The engine has no size model; `size` is a constant.
+  ADAPTIVE SIZE                       IMPLEMENTED SINCE, and NOT
+      VALIDATED. `bettor_policy.quote_size` scales the clip by the
+      spread in ticks, from decision-time inputs only. Measured effect:
+      it cut held capital-hours at every queue fraction and moved net
+      BOTH ways (+14.20 to -18.08) over four clustered observations.
+      An implemented rule with no demonstrated benefit is reported as
+      exactly that.
   QUEUE POSITION                      not observable. The replay sweeps
       a queue-ahead fraction instead of knowing one, and every fill
       figure inherits that sweep.
@@ -555,10 +560,28 @@ def main():
          "STILL UNOBSERVABLE. The replay sweeps a queue-ahead fraction "
          "instead of knowing one, and EVERY fill figure in this "
          "demonstration inherits that sweep."),
-        ("RESTING DEPTH AT THE TOUCH",
-         "NOT IN THIS CORPUS. It is the denominator of the incentive "
-         "reward and the input a depth-aware size rule would need. The "
-         "observation release exists to measure it."),
+        # CORRECTED. This entry used to read "RESTING DEPTH AT THE
+        # TOUCH -- NOT IN THIS CORPUS", and that was simply wrong: all
+        # 30,590 tape rows carry touch depth AND a full ladder (median
+        # 5 bid levels, median join age 2.5s). The mistaken claim came
+        # from the EPISODE RECORD's `entry_book`, which carries prices
+        # only -- a property of one summary field, not of the capture.
+        # The real gap is narrower and is stated as it actually is.
+        ("INCENTIVE REWARD ON THIS CORPUS",
+         "NOT APPLICABLE, which is different from not computable. The "
+         "ladder depth the reward formula needs IS in every row of "
+         "this corpus. What is absent is a PROGRAMME: none of these "
+         "five sports markets was observed in any incentive "
+         "programme, so their reward is zero and any share figure "
+         "quoted for them is a transferred scenario, not a "
+         "measurement."),
+        ("TIME TO RESOLUTION",
+         "NOT IN THIS CORPUS AT ALL. The tape carries no close time "
+         "and no event start time -- only a state transition that "
+         "arrives after the fact. It is the natural input for refusing "
+         "to quote into a resolving event, which is where the entire "
+         "evaluation loss came from, and the observation release "
+         "captures it from the incentives API."),
         ("FILL-CONDITIONED PROFITABILITY",
          "NOT ESTABLISHABLE BY OBSERVATION. It needs our own orders in "
          "the book. No amount of watching substitutes for it."),

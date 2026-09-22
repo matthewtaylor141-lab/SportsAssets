@@ -251,6 +251,97 @@ def test_both_state_vocabularies_admit_and_neither_is_guessed_at():
         assert bp.admit(pol, b)["decision"] == bp.D_STAND_ASIDE, state
 
 
+# ── the two entry gates fail closed ──────────────────────────────────
+
+def test_an_armed_gate_refuses_when_its_own_input_is_missing():
+    """A gate that passes on a missing input is not a gate.
+
+    Both of these read a quantity the captured corpus does not always
+    carry, and BOTH are armed by a policy field rather than by the
+    presence of data -- so the failure mode is a quote placed past an
+    unevaluated gate, silently.
+    """
+    b = bp.Book(bid=0.40, ask=0.44, tick=0.01, state=ENGINE_OPEN)
+    assert b.flow_per_s is None and b.vol_per_sqrt_s is None
+    flow = bp.Policy(min_flow_cover=1.0)
+    vol = bp.Policy(min_vol_cover=1.0)
+    assert bp.admit(flow, b, clip=100.0)["decision"] == bp.D_STAND_ASIDE
+    assert bp.admit(vol, b, clip=100.0)["decision"] == bp.D_STAND_ASIDE
+    # And the flow gate refuses even a KNOWN flow when no clip was
+    # given, because the cover cannot be computed without one.
+    b2 = bp.Book(bid=0.40, ask=0.44, tick=0.01, state=ENGINE_OPEN,
+                 flow_per_s=100.0, depth_bid=10.0, depth_ask=10.0)
+    assert bp.admit(flow, b2)["decision"] == bp.D_STAND_ASIDE
+    assert bp.admit(flow, b2, clip=100.0)["decision"] == bp.D_QUOTE_BOTH
+
+
+def test_a_disarmed_gate_does_not_bind_at_all():
+    """Every result predating these gates used policies with them off."""
+    b = bp.Book(bid=0.40, ask=0.44, tick=0.01, state=ENGINE_OPEN)
+    off = bp.Policy(min_flow_cover=0.0, min_vol_cover=0.0)
+    assert bp.admit(off, b)["decision"] == bp.D_QUOTE_BOTH
+
+
+def test_the_volatility_gate_prices_the_move_against_the_spread():
+    """Cover is spread over expected move, and a big move refuses."""
+    pol = bp.Policy(min_vol_cover=1.0, quote_horizon_s=2400.0)
+    # The measured shape of the two episodes that produced the whole
+    # evaluation loss: a penny spread against a move of order 0.11.
+    loud = bp.Book(bid=0.33, ask=0.34, tick=0.01, state=ENGINE_OPEN,
+                   vol_per_sqrt_s=0.00237)
+    vc = bp.vol_cover(pol, loud)
+    assert vc["known"] and vc["cover"] < 0.2
+    assert bp.admit(pol, loud, clip=100.0)["decision"] == bp.D_STAND_ASIDE
+    # A quiet book with the same spread is admitted.
+    quiet = bp.Book(bid=0.33, ask=0.34, tick=0.01, state=ENGINE_OPEN,
+                    vol_per_sqrt_s=0.00005)
+    assert bp.vol_cover(pol, quiet)["cover"] > 1.0
+    assert bp.admit(pol, quiet, clip=100.0)["decision"] == bp.D_QUOTE_BOTH
+
+
+def test_the_flow_gate_reads_depth_ahead_and_our_own_clip():
+    pol = bp.Policy(min_flow_cover=1.0, quote_horizon_s=2400.0)
+    # 1 share/s over 2400s = 2400 to clear 400 ahead + 100 clip.
+    b = bp.Book(bid=0.40, ask=0.44, tick=0.01, state=ENGINE_OPEN,
+                depth_bid=400.0, depth_ask=100.0, flow_per_s=1.0)
+    fc = bp.flow_cover(pol, b, clip=100.0)
+    assert fc["depth_ahead"] == 400.0          # the WORSE side
+    assert fc["need"] == 500.0
+    assert abs(fc["cover"] - 4.8) < 1e-9
+    # A bigger clip needs more flow to cover it.
+    assert bp.flow_cover(pol, b, clip=2000.0)["cover"] < fc["cover"]
+
+
+def test_the_new_gates_are_labelled_hypotheses_not_case_study_rules():
+    for rule in ("flow", "volatility"):
+        assert bp.RULES[rule]["provenance"] == bp.HYPOTHESIS
+        assert bp.RULES[rule]["evidence"]
+    assert "flow" in bp.describe()["hypotheses"]
+    assert "volatility" in bp.describe()["hypotheses"]
+
+
+def test_no_gate_can_read_an_outcome_because_the_book_carries_none():
+    """The structural version, not a grep for suspicious words.
+
+    A rule can only read what its argument holds. `Book` is the whole
+    of what any entry rule sees, so enumerating its fields IS the
+    guarantee: there is no settlement, no later price and no realised
+    fill in there to read.
+    """
+    import dataclasses as dc
+    fields = {f.name for f in dc.fields(bp.Book)}
+    assert fields == {"bid", "ask", "tick", "state", "depth_bid",
+                      "depth_ask", "flow_per_s", "vol_per_sqrt_s"}
+    # And the gates are pure: same book in, same answer out, with no
+    # state carried between calls.
+    pol = bp.Policy(min_flow_cover=1.0, min_vol_cover=1.0)
+    b = bp.Book(bid=0.40, ask=0.44, tick=0.01, state=ENGINE_OPEN,
+                depth_bid=10.0, depth_ask=10.0, flow_per_s=2.0,
+                vol_per_sqrt_s=0.0001)
+    assert bp.flow_cover(pol, b, clip=1.0) == bp.flow_cover(pol, b, clip=1.0)
+    assert bp.vol_cover(pol, b) == bp.vol_cover(pol, b)
+
+
 def test_the_complement_instrument_is_not_invented_from_this_book():
     """no_bid/no_ask belong to a DIFFERENT instrument. Not folded in."""
     b = rt.book_from_engine(_book(no_bid=0.50, no_ask=0.70))

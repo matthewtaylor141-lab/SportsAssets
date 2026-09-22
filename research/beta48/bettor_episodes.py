@@ -141,13 +141,60 @@ if _BACKEND not in sys.path:
 from sportsassets import bettor_policy as shared            # noqa: E402
 
 
-def _book_of(row, tick, flow_per_s=None):
+def _book_of(row, tick, flow_per_s=None, vol_per_sqrt_s=None):
     """A replay row -> the shared policy's decision-time Book."""
     return shared.Book(bid=row.get("bid"), ask=row.get("ask"),
                        tick=tick or 0.01, state=row.get("state"),
                        depth_bid=row.get("bid_depth"),
                        depth_ask=row.get("ask_depth"),
-                       flow_per_s=flow_per_s)
+                       flow_per_s=flow_per_s,
+                       vol_per_sqrt_s=vol_per_sqrt_s)
+
+
+def trailing_vol(rows, i, window_s):
+    """Realised mid volatility per root second, ending at row i.
+
+    STRICTLY BACKWARD-LOOKING, for the same reason `trailing_flow` is:
+    a live engine has the past and nothing else at the moment it
+    quotes. Measured as the root-mean-square of the mid's increments
+    inside the window, divided by the root of the mean increment --
+    which is the per-root-second figure `vol_cover` scales to the
+    horizon.
+
+    Returns None when the window cannot be filled or too few usable
+    mids are present, and None is a REFUSAL upstream, never a pass.
+    """
+    t_now = rows[i].get("t")
+    if t_now is None:
+        return None
+    j = i
+    while j > 0 and (t_now - (rows[j].get("t") or t_now)) < window_s:
+        j -= 1
+    if (t_now - (rows[j].get("t") or t_now)) < 0.5 * window_s:
+        return None
+    mids, ts = [], []
+    for k in range(j, i + 1):
+        b, a, t = rows[k].get("bid"), rows[k].get("ask"), rows[k].get("t")
+        if b is None or a is None or t is None:
+            continue
+        mids.append(0.5 * (b + a))
+        ts.append(t)
+    if len(mids) < 3:
+        return None
+    ss, dt_total = 0.0, 0.0
+    n = 0
+    for k in range(1, len(mids)):
+        dt = ts[k] - ts[k - 1]
+        if dt <= 0:
+            continue
+        ss += (mids[k] - mids[k - 1]) ** 2
+        dt_total += dt
+        n += 1
+    if n == 0 or dt_total <= 0:
+        return None
+    # sum of squared increments / total elapsed time is the variance
+    # per second; its root is the per-root-second volatility.
+    return (ss / dt_total) ** 0.5
 
 
 def trailing_flow(rows, i, window_s):
@@ -244,6 +291,13 @@ class Policy:
     # existed -- so a comparison against those is still like for like.
     min_flow_cover: float = 0.0
     flow_window_s: float = 1800.0
+
+    # THE VOLATILITY GATE. Where the flow gate asks whether a quote
+    # will be REACHED, this asks whether being reached is worth
+    # anything: a passive quote earns the spread and loses the move
+    # between its two fills. Zero leaves it off.
+    min_vol_cover: float = 0.0
+    vol_window_s: float = 1800.0
 
     # QUOTE PLACEMENT
     #   ENGINE     whatever incremental_ev returns (improve by one tick
@@ -386,12 +440,13 @@ class Episode:
 
     def __init__(self, slug, event, i0, row, size, tick, rebates_on,
                  queue_model, policy=None, prints=None,
-                 entry_flow_per_s=None):
+                 entry_flow_per_s=None, entry_vol_per_sqrt_s=None):
         self.slug, self.event = slug, event
         self.prints = prints
         # RECORDED WHETHER OR NOT THE GATE IS ARMED, so the gate's
         # effect can be measured against episodes it did not filter.
         self.entry_flow_per_s = entry_flow_per_s
+        self.entry_vol_per_sqrt_s = entry_vol_per_sqrt_s
         self.i0, self.t0 = i0, row["t_iso"]
         self.t0_epoch = row.get("t")
         # THE CLIP IS DECIDED HERE, from this book, at this instant.
@@ -1200,6 +1255,7 @@ class Episode:
             "base_size": self.base_size,
             "size_rule": self.size_why,
             "entry_flow_per_s": self.entry_flow_per_s,
+            "entry_vol_per_sqrt_s": self.entry_vol_per_sqrt_s,
             "quote_bid": self.pb, "quote_offer": self.po,
             "entry_book": self.entry_book,
 
@@ -1264,13 +1320,15 @@ def run_market(slug, rows, size, rebates_on, queue_model,
         # no flow gate). `admit` decides now.
         flow = (trailing_flow(rows, i, sp.flow_window_s)
                 if sp.min_flow_cover > 0 else None)
-        adm = shared.admit(sp, _book_of(r, tick, flow), clip=size)
+        vol = (trailing_vol(rows, i, sp.vol_window_s)
+               if sp.min_vol_cover > 0 else None)
+        adm = shared.admit(sp, _book_of(r, tick, flow, vol), clip=size)
         if adm["decision"] != shared.D_QUOTE_BOTH:
             i += 1
             continue
         ep = Episode(slug, event, i, r, size, tick, rebates_on,
                      queue_model, policy=pol, prints=prints,
-                     entry_flow_per_s=flow)
+                     entry_flow_per_s=flow, entry_vol_per_sqrt_s=vol)
         ep.run(rows, settlement)
         out.append(ep.result())
         i = max(ep.end_i or i, i) + COOLDOWN + 1
