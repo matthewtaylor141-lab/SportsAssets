@@ -1,6 +1,6 @@
 {
   "rehearsal": "BETTOR_INCENTIVE_REHEARSAL_V1",
-  "at": "2026-09-22T20:28:51.513784+00:00",
+  "at": "2026-09-22T20:33:56.776680+00:00",
   "entry_point": "bettor_live_loop.main()  [no arguments]",
   "transport": "SIMULATED -- FakeStream; no socket, no venue byte, no credential",
   "credentials": "invented placeholders, never dispatched",
