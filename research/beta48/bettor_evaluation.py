@@ -496,10 +496,25 @@ def main(dev_only=False):
         print("\nREFUSING A SECOND TOUCH. The evaluation split has "
               "already been read %d time(s):" % len(prior))
         for t in prior:
-            print("    %s" % t["variant"])
-            for r in t["result"]:
-                print("       qfrac %.2f  net %9.2f  per_cap_hr %s"
-                      % (r["qfrac"], r["net_usd"], r["per_capital_hour"]))
+            print("    %s%s" % (t["variant"],
+                                "   [%s]" % t["kind"] if t.get("kind")
+                                else ""))
+            # A touch's `result` is a list of scenario rows for a full
+            # evaluation and a keyed dict for a diagnostic read. Both
+            # are printed; assuming one shape is how a guard ends up
+            # raising instead of refusing, which reads as broken rather
+            # than as working.
+            res = t.get("result")
+            if isinstance(res, list):
+                for r in res:
+                    print("       qfrac %.2f  net %9.2f  per_cap_hr %s"
+                          % (r["qfrac"], r["net_usd"],
+                             r["per_capital_hour"]))
+            elif isinstance(res, dict):
+                for k, v in res.items():
+                    print("       %s: %s" % (k, v))
+            else:
+                print("       %s" % (res,))
         print("\nThat result stands. A new candidate needs NEW DATA, "
               "not another look at this split -- which is what the "
               "observation release exists to collect.")
