@@ -4,6 +4,13 @@
 strategy evaluation. The probe is complete when the transport question
 is answered, **whether the frozen rule admits zero markets or many**.
 
+**NOTHING HERE IS DEPLOYED.** `b876724` is the **candidate runtime
+code**: it has been built into an image and exercised, and it is a
+proposal. **Production runs `e8f616a`** and continues to, on both
+services, until an activation is separately approved. Where this
+document says "the candidate", it means code that is not running
+anywhere.
+
 No trading. No relaxed economic thresholds. No capital activation. The
 worker holds no order path — `grep` for `orders.`, `place_order` or
 `create_order` in `backend/sportsassets/workers/bettor_live_loop.py`
@@ -291,6 +298,34 @@ of them means the connection shut:
 **UNMEASURED is None, never zero.** A non-`CLOSED` verdict is logged at
 ERROR and `shutdown_verified: false` goes on the receipt.
 
+**A `CLOSED` VERDICT DOES NOT BY ITSELF MEAN AN OPEN CONNECTION WAS
+CLOSED.** `ws.close()` returns cleanly on a socket that had already
+dropped — the reconnect loop holds the `ws` object across a
+disconnect — so a clean close can follow a disconnect that happened
+minutes earlier. An unchanged stream epoch does not rule this out
+either: the epoch advances on a successful *re*connect, so a socket
+that dropped and never came back leaves the epoch exactly where it
+was.
+
+The connection state is therefore read **at the moment of the stop**,
+before the stop flag is set (once it is set the thread tears the
+connection down, so a later read would describe the shutdown rather
+than the state it found):
+
+```
+connected_at_stop        was there a live connection to close
+connected_since          when that connection was established
+epoch_at_stop            which connection it was
+reconnects_at_stop       how many drops preceded it
+active_close_exercised   connected_at_stop AND verdict == CLOSED
+```
+
+`active_close_exercised` is **the only field that licenses an
+active-close claim**. If the connection was already down, the run
+reports the active-close test as **NOT EXERCISED** — carrying the
+reason in `active_close_note` — regardless of what the close verdict
+says. That is a complete result with a named gap, not a pass.
+
 The worker writes `ingestion_state.bettor_live_stop_receipt`:
 
 ```
@@ -442,9 +477,17 @@ t≈460+   poll obs-live every 20 s
          >>> journal_rows_last_60s > 0  ->  ISSUE obs-stop <<<
 T+58 s   obs-budget: counters unchanged (if acquisition was live)
 T+90 s   obs-live:   journal no longer growing
-then     obs-stop-receipt: shutdown == CLOSED, close_latency_s
+then     obs-stop-receipt:
+           connected_at_stop        was anything live to close
+           active_close_exercised   the only active-close claim
+           shutdown / close_latency_s
 t≈1800   deadline disarms if nothing else has
 ```
+
+**Reporting rule for the close test.** If `connected_at_stop` is
+false, the active-close test is reported **NOT EXERCISED** — the
+connection was already down and whatever closed, closed nothing live.
+A `CLOSED` verdict in that case is recorded but carries no claim.
 
 If no journal row ever appears, the stop is issued at T+900 s
 regardless and the run is reported as **transport NOT VERIFIED**, with
@@ -462,7 +505,9 @@ request instead of one unit per six.
 
 ```
 branch (untracked, no auto-deploy)   claude/bettor-none-pool-fix
-SHA to deploy                        <FROZEN AT PUSH -- §7>
+CANDIDATE RUNTIME SHA                b876724   (backend/ frozen here)
+documentation/tooling tip            e69ad01   (backend/ identical)
+CURRENTLY RUNNING, both services     e8f616a   (unchanged)
 base                                 e8f616a  (current production, all services)
 ```
 
@@ -643,7 +688,8 @@ EOF
 
 Only when the release itself is implicated, not merely this loop.
 
-The deployable surface is **four modules**, all modifications — no
+The candidate runtime surface is **four modules**, all
+modifications — no
 file is added, renamed or deleted under `backend/`:
 
 ```
