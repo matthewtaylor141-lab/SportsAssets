@@ -178,6 +178,65 @@ def main():
             "event_means": [round(v, 6) for v in sorted(vals)],
             "designs": block}
 
+    # ── the refinement that matters most ──────────────────────────────
+    #
+    # FOUR OF THE ELEVEN CLUSTERS HOLD ONE EPISODE EACH. The four NFL
+    # markets were sampled 135 times over a week, almost all of it
+    # after expiry, so each yields a single episode whose per-contract
+    # result is a settlement coin-flip: +0.28, -0.40, +0.01, -0.20.
+    # Those four points are what make sigma 0.1654. An interval built
+    # on them is dominated by four numbers that carry no information
+    # about a quoting policy's steady-state economics.
+    #
+    # Restricting to clusters with at least MIN_EPISODES episodes keeps
+    # 939 of 943 episodes and drops the four singletons. This is a
+    # pre-stated rule about COVERAGE, not about outcomes -- it selects
+    # on how often a market was sampled, which is a property of our own
+    # capture cadence, not of the result.
+    MIN_EPISODES = 10
+    by = collections.defaultdict(list)
+    for e in eps:
+        by[e["event"]].append(e)
+    dense = {k: v for k, v in by.items() if len(v) >= MIN_EPISODES}
+    thin = {k: len(v) for k, v in by.items() if len(v) < MIN_EPISODES}
+    d_means = {k: st.fmean([e["total_if_residual_realises"] / size
+                            for e in v]) for k, v in dense.items()}
+    d_vals = list(d_means.values())
+    d_sigma = st.stdev(d_vals) if len(d_vals) > 1 else float("nan")
+    d_k = len(d_vals)
+    d_point = st.fmean(d_vals)
+    d_se = d_sigma / math.sqrt(d_k)
+    tcrit = {6: 2.447, 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228}.get(
+        d_k - 1, 1.96)
+    print()
+    print("-" * 74)
+    print("DENSELY SAMPLED CLUSTERS ONLY (>= %d episodes)" % MIN_EPISODES)
+    print("  clusters kept %d, episodes kept %d of %d" % (
+        d_k, sum(len(v) for v in dense.values()), len(eps)))
+    print("  singleton clusters dropped: %s" % thin)
+    print("  per contract  %+0.6f   95%% CI [%+0.6f, %+0.6f]" % (
+        d_point, d_point - tcrit * d_se, d_point + tcrit * d_se))
+    print("  sigma across events  %0.6f  (against %0.6f with the "
+          "singletons in)" % (d_sigma, res["AS_RUN"]["sigma_event"]))
+    dd = {}
+    for alpha, aname in ((0.05, "uncorrected"),
+                         (0.05 / VARIANTS_TRIED, "Bonferroni")):
+        z = z_two_sided(alpha)
+        n = math.ceil(((z + Z80) * d_sigma / 0.0025) ** 2)
+        dd[aname] = n
+        print("    events to detect +0.0025/contract at 80%% (%s): %d"
+              % (aname, n))
+    res["DENSE_CLUSTERS"] = {
+        "min_episodes_per_cluster": MIN_EPISODES,
+        "clusters": d_k,
+        "episodes_kept": sum(len(v) for v in dense.values()),
+        "singletons_dropped": thin,
+        "point_per_contract": round(d_point, 6),
+        "ci": [round(d_point - tcrit * d_se, 6),
+               round(d_point + tcrit * d_se, 6)],
+        "sigma_event": round(d_sigma, 6),
+        "events_to_detect_half_spread": dd}
+
     print()
     print("=" * 74)
     print("WHAT THIS MEANS FOR A 500-EPISODE CAP")

@@ -26,7 +26,8 @@ Run as whole episodes:
 
 | | |
 |---|---|
-| **per contract, cluster-aware** | **−0.0291**, 95% CI [−0.1402, +0.0820] |
+| **per contract — best estimate** (7 densely-sampled event clusters, 939 of 943 episodes) | **−0.00117**, 95% CI **[−0.00420, +0.00186]** |
+| per contract — all 11 clusters | −0.0291, 95% CI [−0.1402, +0.0820] |
 | episodes | 943, over 11 markets / 11 events |
 | total | **−223.20** on 100-contract quotes |
 | positive | 149 of 943 |
@@ -34,6 +35,17 @@ Run as whole episodes:
 
 The favourable branch happens **7.5%** of the time. It was being
 priced as though it happened always.
+
+**Which of the two intervals to read.** Four of the eleven clusters
+hold **one episode each** — the four NFL markets were sampled 135 times
+over a week, nearly all of it after expiry, so each yields a single
+episode whose result is a settlement coin-flip (+0.28, −0.40, +0.01,
+−0.20 per contract). Those four points are what make the all-cluster σ
+0.1654; they carry no information about a quoting policy's steady-state
+economics. Restricting to clusters with ≥10 episodes keeps **939 of 943
+episodes** and is a rule about **our own capture cadence**, not about
+outcomes. That restricted estimate — **−0.00117, CI [−0.0042, +0.0019]** —
+is the one to read. Both are reported; neither is positive.
 
 ---
 
@@ -499,14 +511,24 @@ run.
 
 | policy shape | σ across events | events to detect **+0.0025/contract** at 80%, Bonferroni |
 |---|---:|---:|
-| **AS RUN** (inventory may carry to expiry) | **0.1654** | **63,709** |
-| **HARD FLATTEN** (never carry to expiry) | **0.004333** | **44** |
+| **AS RUN**, all 11 clusters | 0.1654 | 63,709 |
+| **AS RUN**, 7 densely-sampled clusters | **0.003274** | **25** |
+| **HARD FLATTEN** (never carry to expiry) | 0.004333 | 44 |
 
-**This is the most actionable finding in the package. The settlement
-tail, not the edge, is what makes the experiment impossible.** Carrying
-inventory through expiry admits ±0.40-per-contract outcomes into a
-distribution whose signal is 0.0025. Removing the carry shrinks σ by a
-factor of **38** and the required coverage by a factor of **1,448**.
+**This is the most actionable finding in the package: the experiment is
+affordable, and it was the settlement tail — not the edge — that made
+it look impossible.** Carrying inventory through expiry admits
+±0.40-per-contract outcomes into a distribution whose signal is 0.0025.
+On the four singleton clusters that is *all* there is, and σ inflates
+fifty-fold.
+
+**Required coverage is 25–44 events, not 63,709.** Both routes get
+there: drop the thinly-sampled markets (25) or forbid the carry (44).
+A design that does both is the one to pre-register.
+
+The number that *is* impossible is the old one: **500 episodes ≈ 5.8
+events**, a Bonferroni MDE of +0.2613/contract, **105× the edge it was
+meant to detect.**
 
 ### What 500 episodes was actually worth
 
@@ -554,9 +576,17 @@ probe report.
 |---|---|
 | **$500,000/day** | **NOT SUPPORTED.** Unchanged, and now for a stronger reason than measured opportunity: no policy in the engine has a positive point estimate on development data |
 | **supported scale today** | **zero** |
-| **strongest remaining policy** | HARD-FLATTEN two-sided maker — not because it is profitable, but because it is the only candidate whose **measurement is affordable** (44 events instead of 63,709) |
-| **its development point estimate** | **negative**, on 8 of 11 event clusters |
+| **strongest remaining policy** | HARD-FLATTEN two-sided maker on densely-traded markets — not because it is profitable, but because it is the only candidate whose **measurement is affordable**: 25–44 events |
+| **its development point estimate** | **−0.00117/contract**, 95% CI [−0.0042, +0.0019]. Negative, spanning zero, on 4 of 7 dense clusters negative |
 | **recommended action** | run M1–M3 (single orders, a few dollars). **Do not fund M4 on this evidence.** Reconsider M4 only if M1–M3 show the collateral and release mechanics are materially better than the API surface suggests |
+
+**A note on how close this is.** The point estimate is −0.0012 per
+contract and the half-spread being hunted is +0.0025. The interval's
+upper bound, +0.0019, is below that half-spread. So the development
+data does not merely fail to show the edge — it puts a ceiling under
+where the edge could be, and that ceiling is beneath the target. That
+is a more informative negative than "unresolved," and it is why the
+recommendation is to spend dollars on M1–M3 rather than capital on M4.
 
 **This is a negative result, reported as one.** The primary mandate — a
 BETTOR-native autonomous EV and decision engine with a defensible path

@@ -84,6 +84,27 @@
     "events": 11,
     "sigma_event": 0.165385
   },
+  "DENSE_CLUSTERS": {
+    "ci": [
+      -0.004198,
+      0.001858
+    ],
+    "clusters": 7,
+    "episodes_kept": 939,
+    "events_to_detect_half_spread": {
+      "Bonferroni": 25,
+      "uncorrected": 14
+    },
+    "min_episodes_per_cluster": 10,
+    "point_per_contract": -0.00117,
+    "sigma_event": 0.003274,
+    "singletons_dropped": {
+      "aec-nfl-atl-pit-2026-09-13": 1,
+      "aec-nfl-bal-ind-2026-09-13": 1,
+      "aec-nfl-chi-car-2026-09-13": 1,
+      "aec-nfl-cle-jax-2026-09-13": 1
+    }
+  },
   "HARD_FLATTEN": {
     "designs": {
       "Bonferroni": {
