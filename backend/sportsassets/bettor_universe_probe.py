@@ -192,6 +192,13 @@ P_RATE_LIMITED = "PROBE_RATE_LIMITED"
 P_SUSPENDED = "PROBE_SUSPENDED_BY_RETRY_AFTER"
 P_NOT_PROBED = "NOT_PROBED_YET"
 P_STOPPED = "PROBE_STOPPED_BY_CONTROL"
+# REFUSED BEFORE DISPATCH. These are the only statuses that cost the
+# venue NOTHING -- they are recorded when the allowance would not cover
+# the request, so the request was never sent. They are coverage facts
+# like the rest: they say we did not look, never that a market is
+# unsuitable.
+P_NO_DISTINCT = "PROBE_NO_DISTINCT_ALLOWANCE"
+P_NO_ATTEMPT = "PROBE_NO_ATTEMPT_ALLOWANCE"
 
 
 def _env_float(name, default):
@@ -428,14 +435,26 @@ async def probe(client, candidates, *, offset: int = 0,
                 timeout_s: float = PROBE_TIMEOUT_S,
                 remaining: int | None = None,
                 max_distinct: int | None = None,
+                reserve=None,
                 should_stop=None, sleep=None) -> dict:
     """Enrich one deterministic, RATE-LIMITED slice of the candidates.
 
-    `max_distinct` clamps the window to the probe's LIFETIME budget --
-    distinct markets this probe may ever enrich, across restarts. A
-    cap held in memory is not a cap: `workers/all.py` restarts a
-    returning loop forever, so an in-process "40 markets" buys 40 more
-    on every cycle.
+    `reserve(kind, slug)` IS THE CEILING. It is awaited before every
+    request and must answer `{"ok": bool, "why": str, "new": bool}`.
+    Nothing is dispatched without a grant, and `reserve=None` refuses
+    everything -- an unreserved probe is the defect this exists to
+    prevent, so absence is not a free pass.
+
+    That replaces counting after the fact, which failed three ways
+    (measured 2026-09-22): the charge sat below an early return so 40
+    reads recorded nothing; a crash between dispatch and charge left the
+    row untouched and reusable; and the cap counted SUCCESSES, so 30
+    failed reads bought a further round -- 70 distinct markets against a
+    ceiling of 40 in a single lifetime.
+
+    `max_distinct` is now only a WINDOW HINT -- how many candidates it
+    is worth putting in front of the reserver. It is not the bound. The
+    bound is the durable row, and it is enforced one request at a time.
 
     `remaining` clamps the window to the part of the candidate set this
     sweep has not read yet. WITHOUT IT THE LAST ROUND WRAPS: 400
@@ -452,7 +471,8 @@ async def probe(client, candidates, *, offset: int = 0,
     Returns the enriched rows, the next cursor, and an accounting that
     keeps ATTEMPTS, RETRIES, DISTINCT MARKETS and SUCCESSFUL
     ENRICHMENTS apart -- four numbers that an earlier version collapsed
-    into one and could not then reconcile.
+    into one and could not then reconcile. `distinct_markets` now counts
+    markets a reservation PAID FOR, not markets offered to the window.
     """
     pace = configured_pace()
     max_rps = pace["max_rps"] if max_rps is None else max_rps
@@ -465,7 +485,9 @@ async def probe(client, candidates, *, offset: int = 0,
     cands = list(candidates or [])
     n = len(cands)
     empty_acct = {"attempts": 0, "retries": 0, "rate_limited": 0,
-                  "distinct_markets": 0, "enriched": 0, "by_status": {}}
+                  "distinct_markets": 0, "enriched": 0,
+                  "refused_distinct": 0, "refused_attempt": 0,
+                  "by_status": {}}
     if n == 0:
         return {"rows": [], "next_offset": 0, "probed": 0,
                 "slugs_probed": [], "stopped": False,
@@ -492,11 +514,58 @@ async def probe(client, candidates, *, offset: int = 0,
     sem = asyncio.Semaphore(max(1, concurrency))
     pacer = Pacer(max_rps, sleep=_sleep)
     acct = {"attempts": 0, "retries": 0, "rate_limited": 0,
-            "distinct_markets": len(window), "enriched": 0,
+            # DISPATCHED, not offered. `window` is what we would have
+            # liked to read; this counts the markets a reservation
+            # actually paid for, which is the number the ceiling is
+            # written in.
+            "distinct_markets": 0, "enriched": 0,
+            "refused_distinct": 0, "refused_attempt": 0,
             "by_status": {}}
     stopped = {"flag": False}
     suspended = {"until": 0.0}
     done = {"n": 0}
+
+    # ── RESERVATION, OR NO REQUEST ───────────────────────────────────
+    #
+    # `reserve` is injected. Passing None means NOTHING MAY BE
+    # DISPATCHED: an unreserved probe is the bug this repair exists to
+    # remove, so the default is refusal rather than a free pass. The
+    # loop hands in a closure bound to the probe identity; the unit
+    # tests hand in doubles.
+    _EXHAUSTS = ("RESERVATION_EXHAUSTED",)
+
+    async def _reserve(kind, slug):
+        if reserve is None:
+            return {"ok": False, "why": "NO_RESERVER",
+                    "exhausted_probe": True}
+        try:
+            r = await reserve(kind, slug)
+        except Exception as exc:                           # noqa: BLE001
+            # AN UNANSWERABLE RESERVATION IS A REFUSAL. Same rule as
+            # the control: we cannot show the request is funded.
+            log.warning("bettor_universe_probe: reservation for %s "
+                        "raised (%s); not dispatching",
+                        slug, type(exc).__name__)
+            return {"ok": False, "why": "RESERVATION_RAISED_%s"
+                                        % type(exc).__name__,
+                    "exhausted_probe": False}
+        ok = bool(r) and bool(r.get("ok"))
+        why = (r or {}).get("why")
+        return {"ok": ok, "why": why, "new": bool((r or {}).get("new")),
+                "exhausted_probe": why in _EXHAUSTS}
+
+    async def _reserve_distinct(slug):
+        r = await _reserve("distinct", slug)
+        if r["ok"] and r["new"]:
+            # Counted here, once, and only when a slot was actually
+            # taken -- an idempotent re-grant is not a second market.
+            acct["distinct_markets"] += 1
+        return r
+
+    reserve_distinct = _reserve_distinct
+
+    async def reserve_attempt(slug):
+        return await _reserve("bbo_attempt", slug)
 
     async def _check_stop() -> bool:
         if should_stop is None or stopped["flag"]:
@@ -519,9 +588,40 @@ async def probe(client, candidates, *, offset: int = 0,
         if stopped["flag"]:
             return {"slug": c["slug"], "status": P_STOPPED}
         async with sem:
+            # THE DISTINCT SLOT, BEFORE THIS MARKET'S FIRST REQUEST.
+            # Idempotent in the slug, so the retries below share the one
+            # slot. Refused means the ceiling is reached and this market
+            # is never asked about at all.
+            got = await reserve_distinct(c["slug"])
+            if not got["ok"]:
+                acct["refused_distinct"] += 1
+                if got.get("exhausted_probe"):
+                    # The allowance is gone for good, not just for this
+                    # market. Stop the round rather than walking the
+                    # rest of the window to collect identical refusals.
+                    stopped["flag"] = True
+                return {"slug": c["slug"], "status": P_NO_DISTINCT,
+                        "detail": got.get("why")}
             for attempt in range(PROBE_MAX_RETRIES + 1):
                 if stopped["flag"]:
                     return {"slug": c["slug"], "status": P_STOPPED}
+                # AN ATTEMPT SLOT FOR EVERY ATTEMPT, RETRIES INCLUDED.
+                # Reserved before the pacer, so a request that cannot be
+                # paid for never even waits its turn.
+                a = await reserve_attempt(c["slug"])
+                if not a["ok"]:
+                    acct["refused_attempt"] += 1
+                    if a.get("exhausted_probe"):
+                        stopped["flag"] = True
+                    if attempt:
+                        # Already read once; keep the earlier verdict
+                        # rather than downgrading it to "not probed".
+                        return {"slug": c["slug"],
+                                "status": P_RATE_LIMITED,
+                                "detail": "retry unfunded: %s"
+                                          % a.get("why")}
+                    return {"slug": c["slug"], "status": P_NO_ATTEMPT,
+                            "detail": a.get("why")}
                 await pacer.acquire()
                 acct["attempts"] += 1
                 if attempt:
@@ -610,7 +710,8 @@ async def probe(client, candidates, *, offset: int = 0,
 
 
 _SUMMED = ("probed", "enriched", "attempts", "retries", "rate_limited",
-           "distinct_markets", "paced_wait_s")
+           "distinct_markets", "paced_wait_s",
+           "refused_distinct", "refused_attempt")
 
 
 def merge_coverage(a: dict, b: dict) -> dict:

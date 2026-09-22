@@ -51,6 +51,62 @@ def unpaced(monkeypatch):
     monkeypatch.setenv(probe.RPS_ENV, "100000")
     monkeypatch.setenv(probe.CONC_ENV, "8")
 
+
+class Reserver:
+    """A durable allowance, in memory, with the real semantics.
+
+    Counts what was RESERVED, refuses when a cap is reached, and is
+    idempotent per slug for distinct slots so a market's retries share
+    one slot. `log` records the order so a test can assert that the
+    reservation came BEFORE the request.
+    """
+
+    def __init__(self, *, distinct=10_000, attempts=10_000,
+                 listing=10_000, fail_after=None, raise_after=None):
+        self.caps = {"distinct": distinct, "bbo_attempt": attempts,
+                     "listing": listing}
+        self.used = {"distinct": 0, "bbo_attempt": 0, "listing": 0}
+        self.slugs: set = set()
+        self.log: list = []
+        self.fail_after = fail_after      # n grants, then refuse
+        self.raise_after = raise_after    # n grants, then raise
+        self.grants = 0
+
+    async def __call__(self, kind, slug):
+        self.log.append(("reserve", kind, slug))
+        if self.raise_after is not None and self.grants >= self.raise_after:
+            raise ConnectionError("reservation connection lost")
+        if self.fail_after is not None and self.grants >= self.fail_after:
+            return {"ok": False, "why": "RESERVATION_UNREADABLE",
+                    "new": False}
+        if kind == "distinct" and slug in self.slugs:
+            return {"ok": True, "why": "ALREADY_RESERVED", "new": False}
+        if self.used[kind] >= self.caps[kind]:
+            return {"ok": False, "why": "RESERVATION_EXHAUSTED",
+                    "new": False}
+        self.used[kind] += 1
+        self.grants += 1
+        if kind == "distinct":
+            self.slugs.add(slug)
+        return {"ok": True, "why": "RESERVED", "new": True}
+
+
+@pytest.fixture(autouse=True)
+def _default_allowance(monkeypatch):
+    """`probe(reserve=None)` REFUSES EVERYTHING, which is the point of
+    the repair. Most tests here are about pacing, 429 handling or
+    stopping, so they get an effectively unlimited allowance unless they
+    pass their own. The ceiling itself is asserted in
+    TestNothingIsDispatchedWithoutAReservation and against real
+    PostgreSQL in scripts/bettor_budget_reservation_probe.py."""
+    real = probe.probe
+
+    async def with_allowance(*a, **kw):
+        kw.setdefault("reserve", Reserver())
+        return await real(*a, **kw)
+
+    monkeypatch.setattr(probe, "probe", with_allowance)
+
 # ── verbatim bodies ──────────────────────────────────────────────────
 # Each is the `marketData` object of a real HTTP 200 /bbo response.
 
@@ -782,3 +838,113 @@ class TestTheAcquisitionCountsReconcile:
                                       max_rps=1000.0, remaining=3))
         assert out["probed"] == 3
         assert len(c.markets.calls) == 3
+
+
+class TestNothingIsDispatchedWithoutAReservation:
+    """THE DEFECT THIS CLASS PINS, measured 2026-09-22 against real
+    PostgreSQL before the repair:
+
+      * the charge sat below `main()`'s EMPTY_UNIVERSE return, so 40
+        distinct markets were read and the row recorded nothing;
+      * a crash between dispatch and charge (four lifetimes, 160 BBO
+        attempts) left the row at 0 and still open;
+      * the cap counted SUCCESSES, so 30 failed reads bought another
+        round -- 70 distinct markets against a ceiling of 40, in ONE
+        lifetime with no crash;
+      * the listing had no durable accounting at all.
+
+    The order is now inverted: reserve, then dispatch, never refund.
+    """
+
+    def _run(self, n, reserver, **kw):
+        payloads = _many(n)
+        c = client_for(payloads)
+        out = asyncio.run(probe.probe(c, cands(payloads),
+                                      reserve=reserver, **kw))
+        return c, out
+
+    def test_no_reserver_dispatches_nothing_at_all(self):
+        """`reserve=None` is not a free pass. An unreserved probe is the
+        bug this repair removes, so absence refuses."""
+        payloads = _many(5)
+        c = client_for(payloads)
+        out = asyncio.run(probe.probe(c, cands(payloads), reserve=None))
+        assert c.markets.calls == [], "it read the venue unfunded"
+        assert out["coverage"]["distinct_markets"] == 0
+        assert out["coverage"]["enriched"] == 0
+        # The first refusal is terminal, so the round stops rather than
+        # walking the window collecting identical refusals.
+        assert probe.P_NO_DISTINCT in out["coverage"]["by_status"]
+        assert set(out["coverage"]["by_status"]) <= \
+            {probe.P_NO_DISTINCT, probe.P_STOPPED}
+        assert out["stopped"] is True
+
+    def test_the_reservation_precedes_the_request(self):
+        """Order, not just totals: the distinct slot is taken, then the
+        attempt slot, and only then is the market read."""
+        r = Reserver()
+        c, _ = self._run(1, r)
+        slug = c.markets.calls[0]
+        assert r.log.index(("reserve", "distinct", slug)) < \
+            r.log.index(("reserve", "bbo_attempt", slug))
+        assert c.markets.calls == [slug]
+
+    def test_the_distinct_cap_bounds_markets_actually_read(self):
+        r = Reserver(distinct=6)
+        c, out = self._run(20, r)
+        assert len(set(c.markets.calls)) == 6, c.markets.calls
+        assert out["coverage"]["distinct_markets"] == 6
+        assert r.used["distinct"] == 6
+
+    def test_the_attempt_cap_bounds_reads_including_retries(self):
+        r = Reserver(distinct=20, attempts=5)
+        c, out = self._run(20, r)
+        assert len(c.markets.calls) == 5, c.markets.calls
+        assert out["coverage"]["attempts"] == 5
+
+    def test_a_failed_read_still_consumes_and_is_never_refunded(self):
+        """THE THIRD DEFECT, which let failures buy more markets."""
+        payloads = _many(10)
+        c = client_for(payloads, raises=RuntimeError("venue down"))
+        r = Reserver(distinct=4)
+        out = asyncio.run(probe.probe(c, cands(payloads), reserve=r))
+        assert r.used["distinct"] == 4, "failures must still consume"
+        assert out["coverage"]["enriched"] == 0
+        assert out["coverage"]["distinct_markets"] == 4
+        assert len(set(c.markets.calls)) == 4
+
+    def test_retries_share_one_distinct_slot_but_cost_attempts_each(self):
+        """Idempotence in the slug is what keeps three retries of one
+        market from consuming three markets of allowance."""
+        r = Reserver()
+
+        async def drive():
+            for _ in range(3):
+                await r("distinct", "m1")
+            for _ in range(3):
+                await r("bbo_attempt", "m1")
+
+        asyncio.run(drive())
+        assert r.used["distinct"] == 1
+        assert r.used["bbo_attempt"] == 3
+
+    def test_an_unanswerable_reservation_refuses_rather_than_dispatches(
+            self):
+        """UNCERTAIN IS NOT PERMISSION. A reservation that raises may
+        have committed; the request is not sent either way."""
+        r = Reserver(raise_after=4)
+        c, out = self._run(10, r)
+        assert len(set(c.markets.calls)) <= 3, c.markets.calls
+        assert out["coverage"]["refused_distinct"] >= 1
+
+    def test_a_refused_reservation_is_coverage_not_a_rule_verdict(self):
+        """An unfunded market is recorded as NOT LOOKED AT. It must
+        never be mistaken for the rule rejecting the market."""
+        r = Reserver(distinct=2)
+        _, out = self._run(6, r)
+        assert probe.P_NO_DISTINCT in out["coverage"]["by_status"]
+        assert out["coverage"]["distinct_markets"] == 2
+        for status in (probe.P_NO_DISTINCT, probe.P_NO_ATTEMPT):
+            assert status.startswith("PROBE_")
+            assert "ALLOWANCE" in status, \
+                "the name must say it is about funding, not the market"

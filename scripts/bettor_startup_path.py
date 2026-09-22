@@ -98,26 +98,71 @@ class RunPool:
     both -- exactly as production will.
     """
 
-    def __init__(self, max_distinct=10_000, seconds_left=3600.0):
+    PROBE_ID = "99999999-8888-7777-6666-555555555555"
+
+    def __init__(self, max_distinct=10_000, seconds_left=3600.0,
+                 max_attempts=10_000, max_listing=10_000):
         self.max_distinct, self.seconds_left = max_distinct, seconds_left
-        self.consumed = 0
+        self.max_attempts, self.max_listing = max_attempts, max_listing
+        # RESERVED, not consumed. The allowance is taken before each
+        # request now, so these only ever go up.
+        self.row = {
+            "probe_id": self.PROBE_ID,
+            "max_distinct": max_distinct,
+            "max_bbo_attempts": max_attempts,
+            "max_listing_attempts": max_listing,
+            "distinct_reserved": 0,
+            "bbo_attempts_reserved": 0,
+            "listing_attempts_reserved": 0,
+            "slugs": []}
+
+    def _budget(self):
+        now = datetime.now(timezone.utc)
+        out = dict(self.row)
+        out["started_at"] = now.isoformat()
+        out["deadline_at"] = (now + timedelta(
+            seconds=self.seconds_left)).isoformat()
+        return json.dumps(out)
 
     async def fetchval(self, _sql, *a):
         from sportsassets import bettor_live_control as _ctl
         if a and a[0] == _ctl.BUDGET_KEY:
-            now = datetime.now(timezone.utc)
-            return json.dumps({
-                "started_at": now.isoformat(),
-                "deadline_at": (now + timedelta(
-                    seconds=self.seconds_left)).isoformat(),
-                "max_distinct": self.max_distinct,
-                "distinct_consumed": self.consumed})
+            return self._budget()
         return "true"
 
     async def execute(self, sql, *a):
-        if "distinct_consumed" in sql:
-            self.consumed += a[1]
+        from sportsassets import bettor_live_control as _ctl
+        if a and a[0] == _ctl.BUDGET_KEY and "jsonb_set" in sql:
+            self.row[a[1]] = a[2]
+            if len(a) > 3:
+                self.row.setdefault("slugs", []).append(a[3])
         return "OK"
+
+    # `ctl.reserve` needs a connection and a transaction, because a
+    # single statement cannot hold a cap under concurrency. Real
+    # serialisation is proved against real PostgreSQL in
+    # scripts/bettor_budget_reservation_probe.py.
+    def acquire(self):
+        pool = self
+
+        class _Held:
+            async def __aenter__(self):
+                return pool
+
+            async def __aexit__(self, *a):
+                return False
+
+        return _Held()
+
+    def transaction(self):
+        class _Txn:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *a):
+                return False
+
+        return _Txn()
 
 
 class StopPool(RunPool):

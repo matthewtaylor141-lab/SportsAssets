@@ -236,8 +236,16 @@ def effective_config() -> dict:
         # reader wants from an idle process.
         "budget_key": ctl.BUDGET_KEY,
         "budget_max_distinct_default": ctl.PROBE_MAX_DISTINCT,
+        "budget_max_bbo_attempts_default": ctl.PROBE_MAX_BBO_ATTEMPTS,
+        "budget_max_listing_attempts_default":
+            ctl.PROBE_MAX_LISTING_ATTEMPTS,
         "budget_deadline_s_default": ctl.PROBE_DEADLINE_S,
         "budget_authority": "the ingestion_state row, not this line",
+        # THE PROPERTY THE CEILINGS ACTUALLY REST ON, stated in the
+        # refusal log so it can be read off a stopped process rather
+        # than taken on trust.
+        "allowance_reserved_before_dispatch": True,
+        "allowance_refund_paths": 0,
     }
 
 
@@ -971,7 +979,7 @@ def describe() -> dict:
 
 # ── the worker entry point ───────────────────────────────────────────
 
-async def _list_candidates(client=None, *, sleep=None) -> dict:
+async def _list_candidates(client=None, *, reserve=None, sleep=None) -> dict:
     """The venue's listing, PAGINATED, reduced to CANDIDATES.
 
     Identity only. The listing cannot answer a single question the
@@ -1006,6 +1014,21 @@ async def _list_candidates(client=None, *, sleep=None) -> dict:
     attempts = 0
     last = None
     for attempt in range(probe_mod.LISTING_MAX_RETRIES + 1):
+        # A LISTING ATTEMPT IS RESERVED BEFORE IT IS ISSUED. The listing
+        # had no durable accounting at all before this: bounded per
+        # invocation in memory, so every restart replenished the whole
+        # allowance. Each attempt now costs one reserved unit, retries
+        # included, and the units do not come back.
+        if reserve is not None:
+            got = await reserve("listing", None)
+            if not (got or {}).get("ok"):
+                why = (got or {}).get("why") or "RESERVATION_REFUSED"
+                log.error("bettor_live_loop: listing attempt %d not "
+                          "funded (%s); not issuing the request",
+                          attempts + 1, why)
+                return {"ok": False, "error": why,
+                        "listing_attempts": attempts,
+                        "why": "listing allowance refused: %s" % why}
         attempts += 1
         try:
             rows, pages, truncated = await asyncio.wait_for(
@@ -1042,7 +1065,8 @@ async def _list_candidates(client=None, *, sleep=None) -> dict:
 async def _discover(client=None, *, candidates=None, offset: int = 0,
                     rounds: int = probe_mod.PROBE_ROUNDS_AT_START,
                     batch: int | None = None, should_stop=None,
-                    max_distinct: int | None = None, sleep=None) -> dict:
+                    max_distinct: int | None = None, reserve=None,
+                    sleep=None) -> dict:
     """Listing -> ENRICHMENT -> the frozen selection rule.
 
     THE RULE RUNS ONLY AFTER ENRICHMENT. It used to run on listing
@@ -1058,7 +1082,8 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
     which is the rule's verdict on what we did read.
     """
     if candidates is None:
-        listed = await _list_candidates(client=client, sleep=sleep)
+        listed = await _list_candidates(client=client, reserve=reserve,
+                                        sleep=sleep)
         if not listed.get("ok"):
             return {"ok": False, "error": listed.get("error"),
                     "why": listed.get("why")}
@@ -1089,14 +1114,28 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
     stopped = False
     suspended_for = 0.0
     for _ in range(max(1, rounds)):
-        left = None if max_distinct is None else \
-            max_distinct - len(by_slug)
+        # THE WINDOW HINT COUNTS RESERVATIONS, NOT SUCCESSES.
+        #
+        # It used to be `max_distinct - len(by_slug)`, and `by_slug`
+        # holds only markets that PARSED. Thirty failed reads therefore
+        # left thirty slots apparently unspent and bought another round
+        # of fresh markets: 70 distinct markets against a ceiling of 40,
+        # in one lifetime, with no crash involved (measured
+        # 2026-09-22). Failures consume their request allowance, so the
+        # figure to subtract is what was RESERVED.
+        #
+        # This is only a hint either way. The bound is the durable
+        # reservation, taken one request at a time, and it holds even if
+        # this arithmetic is wrong.
+        paid = int((coverage or {}).get("distinct_markets", 0) or 0)
+        left = None if max_distinct is None else max_distinct - paid
         if left is not None and left <= 0:
             break
         r = await probe_mod.probe(client, candidates, offset=nxt,
                                   batch=batch, should_stop=should_stop,
                                   remaining=len(candidates) - swept,
-                                  max_distinct=left, sleep=sleep)
+                                  max_distinct=left, reserve=reserve,
+                                  sleep=sleep)
         for row in r["rows"]:
             by_slug[row["slug"]] = row
         coverage = probe_mod.merge_coverage(coverage, r["coverage"])
@@ -1295,6 +1334,38 @@ async def main(*, client=None, stream_factory=None, store=None,
         return {"started": False, "why": budget["state"],
                 "budget": budget, "config": effective_config()}
 
+    # ── THE RESERVER ─────────────────────────────────────────────────
+    #
+    # One closure, bound to THIS probe's identity, handed to everything
+    # that can issue a request. Every listing attempt, every distinct
+    # market and every BBO attempt goes through it BEFORE dispatch, and
+    # it is the only thing standing between this process and the venue.
+    #
+    # The identity matters: if the row is re-armed while this process is
+    # mid-round, the probe_id changes and every further reservation
+    # answers RESERVATION_PROBE_MISMATCH, so a stale process cannot
+    # spend the new probe's allowance.
+    probe_id = budget.get("probe_id")
+    reserved_tally = {"listing": 0, "distinct": 0, "bbo_attempt": 0,
+                      "refused": 0}
+
+    async def _reserve(kind: str, slug):
+        if control_pool is None:
+            return {"ok": False, "why": "NO_CONTROL_POOL"}
+        r = await ctl.reserve(control_pool, kind, slug=slug,
+                              probe_id=probe_id)
+        ok = ctl.granted(r)
+        if ok:
+            reserved_tally[kind] = reserved_tally.get(kind, 0) + 1
+        else:
+            reserved_tally["refused"] += 1
+            log.warning("bettor_live_loop: %s reservation refused for "
+                        "%s (%s: %s)", kind, slug or "-", r.get("why"),
+                        r.get("detail"))
+        return {"ok": ok, "why": r.get("why"),
+                "new": r.get("why") == ctl.V_GRANTED,
+                "reserved": r.get("reserved"), "cap": r.get("cap")}
+
     cfg = settings()
     key_id = getattr(cfg, "pmus_key_id", None)
     secret = getattr(cfg, "pmus_secret_key", None)
@@ -1334,7 +1405,7 @@ async def main(*, client=None, stream_factory=None, store=None,
 
     first = await _discover(client=client, should_stop=_stop_now,
                             max_distinct=budget["remaining"],
-                            sleep=sleep)
+                            reserve=_reserve, sleep=sleep)
     if not first.get("ok"):
         log.error("bettor_live_loop: %s (%s); not starting",
                   first.get("why"), first.get("error"))
@@ -1396,20 +1467,16 @@ async def main(*, client=None, stream_factory=None, store=None,
     log.info("bettor_live_loop: boot %s, store %s, recovered %s",
              loop.boot_id, json.dumps(started, default=str),
              json.dumps(rec, default=str))
-    # CHARGED BEFORE USE. A crash between reading the budget and
-    # writing the consumption should cost allowance, never grant it.
-    consumed = (first.get("coverage") or {}).get("distinct_enriched") or 0
-    if consumed and control_pool is not None:
-        try:
-            await ctl.consume_budget(control_pool, consumed)
-        except Exception as exc:                           # noqa: BLE001
-            log.error("bettor_live_loop: could not record %d consumed "
-                      "candidates (%s); stopping rather than acquiring "
-                      "against a budget that cannot be decremented",
-                      consumed, type(exc).__name__)
-            await _backoff("BUDGET_NOT_RECORDABLE", sleep=sleep)
-            return {"started": False, "why": "BUDGET_NOT_RECORDABLE",
-                    "detail": type(exc).__name__}
+    # NOTHING IS CHARGED HERE, BECAUSE EVERYTHING WAS RESERVED FIRST.
+    #
+    # This is where the old `consume_budget` call stood, and standing
+    # here was the defect: the requests had already been sent, the
+    # EMPTY_UNIVERSE return above skipped the call entirely, and a crash
+    # anywhere between the two left the row untouched and the whole
+    # allowance available to the next process. The allowance is now
+    # taken one unit at a time, before each request, by `_reserve`.
+    log.info("bettor_live_loop: probe %s reserved %s",
+             str(probe_id)[:8], json.dumps(reserved_tally))
 
     cov0 = first.get("coverage") or {}
     log.info("bettor_live_loop: %d markets subscribed; %d eligible of %d "
@@ -1482,6 +1549,7 @@ async def main(*, client=None, stream_factory=None, store=None,
                 nxt = await _discover(client=client,
                                       candidates=candidates,
                                       offset=probe_offset, rounds=1,
+                                      reserve=_reserve,
                                       should_stop=_stop_now)
                 probe_offset = nxt.get("next_offset", probe_offset)
                 if nxt.get("ok") and nxt.get("slugs"):

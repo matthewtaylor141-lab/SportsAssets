@@ -186,36 +186,106 @@ def describe() -> dict:
     }
 
 
-# ── THE PROBE BUDGET ─────────────────────────────────────────────────
+# ── THE PROBE ALLOWANCE, RESERVED BEFORE EVERY REQUEST ───────────────
 #
-# A BUDGET THAT RESETS ON RESTART IS NOT A BUDGET. `workers/all.py`
-# restarts a returning loop forever, so a "40 candidates" cap held in
-# memory buys 40 more every time the process cycles -- and on
-# 2026-09-21 the loop cycled about 73 times in sixteen minutes. The
-# same argument applies to a deadline measured from "now".
+# A BUDGET THAT RESETS ON RESTART IS NOT A BUDGET, and a budget charged
+# AFTER the request is not a budget either. The first version got the
+# first half right and the second half wrong, and the second half is
+# where it failed. Measured on 2026-09-22 against real PostgreSQL:
 #
-# So both live in one `ingestion_state` row beside the control:
+#   * the charge sat downstream of the EMPTY_UNIVERSE early return, so
+#     40 distinct markets were read and the row recorded nothing;
+#   * a crash between dispatch and charge (four lifetimes, 160 BBO
+#     attempts) left the row at consumed=0 and still open;
+#   * the cap counted SUCCESSES, so 30 failed reads bought another
+#     round -- 70 distinct markets against a ceiling of 40, in one
+#     lifetime, with no crash at all;
+#   * the listing had no durable accounting whatsoever.
 #
-#   started_at        when the probe first ran, ever
-#   deadline_at       absolute. A restart resumes TOWARD it, never
-#                     away from it.
-#   distinct_consumed how many distinct markets have been enriched
-#                     across the WHOLE probe, restarts included.
+# The order is therefore inverted. NOTHING IS DISPATCHED THAT WAS NOT
+# RESERVED FIRST, and a reservation is never refunded:
 #
-# The loop reads this before acquiring anything and refuses to exceed
-# either bound. At expiry it DISARMS -- writes the observation control
-# to false -- so the shutdown survives the restart that follows.
+#   * a listing attempt is reserved before each listing request;
+#   * a distinct-market slot is reserved before a market's FIRST BBO
+#     request, keyed by slug so a retry does not buy a second slot;
+#   * a BBO-attempt slot is reserved before EVERY attempt, retries
+#     included;
+#   * the control and the absolute deadline are checked inside the same
+#     transaction as the reservation, so neither can go stale between
+#     the check and the dispatch it authorises.
+#
+# FAILED RESPONSES, REJECTED CANDIDATES AND EMPTY UNIVERSES STILL
+# CONSUME. The allowance buys REQUESTS, not results. There is no refund
+# path in this module, and a test asserts no counter is ever decremented.
+#
+# A CRASH AFTER RESERVING WASTES ALLOWANCE. That is deliberate and is
+# the safe direction: the alternative -- confirming consumption after
+# the response -- is exactly the bug above. Wasting is bounded by the
+# caps; replenishing is not.
+#
+# WHY AN EXPLICIT TRANSACTION AND `FOR UPDATE`. A single statement is
+# atomic but NOT sufficient. A data-modifying CTE evaluates its
+# decision against the statement's snapshot; under READ COMMITTED two
+# concurrent reservations both see `reserved = 39 < cap = 40`, the
+# second blocks on the row lock, and on waking re-checks only its WHERE
+# clause -- not the already-materialised decision -- and commits
+# anyway. That over-grants. Locking the row first and deciding inside
+# the transaction serialises reservations properly, which is what
+# `test_concurrent_reservations_never_exceed_the_cap` and the real
+# PostgreSQL reproduction both exercise.
 BUDGET_KEY = "bettor_live_probe_state"
 
-# Defaults. Overridable per probe by whoever opens the budget, so the
-# numbers in an approval are the numbers in the row.
+# Defaults. Whoever arms the probe writes the real numbers into the row,
+# so the figures in an approval are the figures being enforced.
 PROBE_MAX_DISTINCT = 40
+PROBE_MAX_BBO_ATTEMPTS = 160
+PROBE_MAX_LISTING_ATTEMPTS = 18
 PROBE_DEADLINE_S = 1800.0
+
+# The three counters, and the cap each is checked against. The names are
+# the JSON keys, passed to SQL as data rather than interpolated.
+R_DISTINCT = "distinct"
+R_ATTEMPT = "bbo_attempt"
+R_LISTING = "listing"
+
+_COUNTER = {R_DISTINCT: "distinct_reserved",
+            R_ATTEMPT: "bbo_attempts_reserved",
+            R_LISTING: "listing_attempts_reserved"}
+_CAP = {R_DISTINCT: "max_distinct",
+        R_ATTEMPT: "max_bbo_attempts",
+        R_LISTING: "max_listing_attempts"}
+_DEFAULT_CAP = {R_DISTINCT: PROBE_MAX_DISTINCT,
+                R_ATTEMPT: PROBE_MAX_BBO_ATTEMPTS,
+                R_LISTING: PROBE_MAX_LISTING_ATTEMPTS}
 
 B_OPEN = "OPEN"
 B_EXHAUSTED = "BUDGET_EXHAUSTED"
 B_EXPIRED = "DEADLINE_PASSED"
 B_UNREADABLE = "BUDGET_UNREADABLE"
+
+# A reservation either grants or it does not, and only the first two of
+# these are a grant. Everything else means DO NOT DISPATCH.
+V_GRANTED = "RESERVED"
+V_ALREADY = "ALREADY_RESERVED"          # this probe already holds it
+V_EXHAUSTED = "RESERVATION_EXHAUSTED"
+V_EXPIRED = "RESERVATION_DEADLINE_PASSED"
+V_STOPPED = "RESERVATION_STOPPED_BY_CONTROL"
+V_ABSENT = "RESERVATION_NO_BUDGET_ROW"
+V_MISMATCH = "RESERVATION_PROBE_MISMATCH"
+V_UNREADABLE = "RESERVATION_UNREADABLE"
+
+_GRANTS = (V_GRANTED, V_ALREADY)
+
+
+def granted(res: dict) -> bool:
+    """One place decides what counts as permission to dispatch.
+
+    UNCERTAINTY IS NOT PERMISSION. A reservation whose write may or may
+    not have landed -- a timeout, a dropped connection, a lost
+    acknowledgement -- answers `V_UNREADABLE` and this returns False.
+    The allowance may have been spent; the request is still not sent.
+    """
+    return bool(res) and res.get("why") in _GRANTS
 
 
 def _iso(ts: float) -> str:
@@ -234,24 +304,209 @@ def _parse_iso(raw) -> float | None:
         return None
 
 
-async def read_budget(pool=None, *, now: float | None = None) -> dict:
-    """The probe's lifetime budget. FAILS CLOSED like the control.
+def _as_obj(row):
+    """The row's value as a dict, or None. asyncpg hands back jsonb as
+    str; a test double may hand back a dict already."""
+    val = row
+    if isinstance(val, (bytes, bytearray)):
+        val = val.decode("utf-8", "replace")
+    if isinstance(val, str):
+        try:
+            val = json.loads(val)
+        except (TypeError, ValueError):
+            return None
+    return val if isinstance(val, dict) else None
 
-    An unreadable or malformed budget is `B_UNREADABLE` with
-    `remaining = 0`: we cannot show we are still inside it, so we are
-    not.
+
+async def _resolve(pool):
+    if pool is not None:
+        return pool
+    from .db import get_pool
+    return await get_pool()
+
+
+async def reserve(pool, kind: str, *, slug: str | None = None,
+                  probe_id: str | None = None,
+                  timeout_s: float = CONTROL_READ_TIMEOUT_S) -> dict:
+    """Reserve ONE unit of allowance, durably, BEFORE its request.
+
+    Returns a verdict dict; `granted()` decides whether the caller may
+    dispatch. Nothing here ever decrements a counter.
+
+    `kind` is `R_LISTING`, `R_DISTINCT` or `R_ATTEMPT`. For `R_DISTINCT`
+    the `slug` is required and the reservation is IDEMPOTENT in it: a
+    market this probe already holds a slot for answers `V_ALREADY`,
+    which is a grant that consumes nothing, so the three retries of one
+    market cost one distinct slot and three attempt slots.
+
+    `probe_id` ties the reservation to one probe identity. A row armed
+    for a different probe answers `V_MISMATCH` -- so a re-arm cannot
+    inherit a previous probe's in-flight reservations, and a process
+    that outlived its probe cannot spend the next one's allowance.
+
+    THE CONTROL AND THE DEADLINE ARE CHECKED IN HERE, in the same
+    transaction that takes the lock. Checking them in the caller would
+    leave a window in which a stop or an expiry lands between the check
+    and the request it authorised.
+    """
+    out = {"kind": kind, "slug": slug, "probe_id": probe_id,
+           "why": V_UNREADABLE, "reserved": None, "cap": None,
+           "remaining": 0, "detail": None, "uncertain": True}
+    if kind not in _COUNTER:
+        out.update(why=V_UNREADABLE, detail="unknown kind %r" % kind,
+                   uncertain=False)
+        return out
+    if kind == R_DISTINCT and not slug:
+        out.update(why=V_UNREADABLE, uncertain=False,
+                   detail="a distinct-market slot needs its slug")
+        return out
+
+    counter, capkey = _COUNTER[kind], _CAP[kind]
+
+    async def _txn():
+        p = await _resolve(pool)
+        async with p.acquire() as con:
+            async with con.transaction():
+                # THE LOCK COMES FIRST. Everything after it -- the
+                # control, the deadline, the counter -- is read under it,
+                # so two reservations cannot both pass the same check.
+                raw = await con.fetchval(
+                    "SELECT value FROM ingestion_state WHERE key=$1 "
+                    "FOR UPDATE", BUDGET_KEY)
+                if raw is None:
+                    return dict(out, why=V_ABSENT, uncertain=False,
+                                detail="no %s row; nothing is reserved "
+                                       "against an unarmed probe"
+                                       % BUDGET_KEY)
+                bud = _as_obj(raw)
+                if bud is None:
+                    return dict(out, why=V_UNREADABLE, uncertain=False,
+                                detail="budget value is not an object")
+
+                pid = bud.get("probe_id")
+                if probe_id is not None and str(pid or "") != str(probe_id):
+                    return dict(out, why=V_MISMATCH, uncertain=False,
+                                detail="row is probe %r, caller is %r"
+                                       % (pid, probe_id))
+
+                ctl_raw = await con.fetchval(
+                    "SELECT value FROM ingestion_state WHERE key=$1",
+                    CONTROL_KEY)
+                if ctl_raw is None:
+                    return dict(out, why=V_STOPPED, uncertain=False,
+                                probe_id=pid,
+                                detail="control row absent; absence is "
+                                       "not permission")
+                run, cwhy, cdetail = _parse(ctl_raw)
+                if not run:
+                    return dict(out, why=V_STOPPED, uncertain=False,
+                                probe_id=pid,
+                                detail="control says %s (%s)"
+                                       % (cwhy, cdetail))
+
+                deadline = _parse_iso(bud.get("deadline_at"))
+                if deadline is None:
+                    return dict(out, why=V_UNREADABLE, uncertain=False,
+                                probe_id=pid,
+                                detail="deadline_at absent or unparsable")
+                if time.time() >= deadline:
+                    return dict(out, why=V_EXPIRED, uncertain=False,
+                                probe_id=pid,
+                                detail="deadline %s passed"
+                                       % bud.get("deadline_at"))
+
+                try:
+                    cap = int(bud.get(capkey, _DEFAULT_CAP[kind]))
+                    used = int(bud.get(counter, 0) or 0)
+                except (TypeError, ValueError):
+                    return dict(out, why=V_UNREADABLE, uncertain=False,
+                                probe_id=pid,
+                                detail="%s/%s are not integers"
+                                       % (counter, capkey))
+
+                if kind == R_DISTINCT:
+                    held = bud.get("slugs") or []
+                    if not isinstance(held, list):
+                        return dict(out, why=V_UNREADABLE, uncertain=False,
+                                    probe_id=pid,
+                                    detail="slugs is not a list")
+                    if slug in held:
+                        # ALREADY OURS. A grant that consumes nothing --
+                        # this is what keeps a retry from buying a
+                        # second distinct slot.
+                        return dict(out, why=V_ALREADY, uncertain=False,
+                                    probe_id=pid, reserved=used, cap=cap,
+                                    remaining=max(0, cap - used),
+                                    detail="probe already holds %s" % slug)
+
+                if used >= cap:
+                    return dict(out, why=V_EXHAUSTED, uncertain=False,
+                                probe_id=pid, reserved=used, cap=cap,
+                                remaining=0,
+                                detail="%d of %d %s already reserved"
+                                       % (used, cap, kind))
+
+                # THE WRITE. Under the lock, so `used + 1` cannot race.
+                if kind == R_DISTINCT:
+                    await con.execute(
+                        "UPDATE ingestion_state SET value = jsonb_set("
+                        "  jsonb_set(value, ARRAY[$2::text],"
+                        "            to_jsonb($3::int)),"
+                        "  '{slugs}',"
+                        "  COALESCE(value->'slugs','[]'::jsonb)"
+                        "  || to_jsonb($4::text)),"
+                        " updated_at = now() WHERE key=$1",
+                        BUDGET_KEY, counter, used + 1, slug)
+                else:
+                    await con.execute(
+                        "UPDATE ingestion_state SET value = jsonb_set("
+                        "  value, ARRAY[$2::text], to_jsonb($3::int)),"
+                        " updated_at = now() WHERE key=$1",
+                        BUDGET_KEY, counter, used + 1)
+                return dict(out, why=V_GRANTED, uncertain=False,
+                            probe_id=pid, reserved=used + 1, cap=cap,
+                            remaining=max(0, cap - (used + 1)),
+                            detail="%d of %d %s reserved"
+                                   % (used + 1, cap, kind))
+
+    try:
+        return await asyncio.wait_for(_txn(), timeout=timeout_s)
+    except asyncio.TimeoutError:
+        # UNCERTAIN, AND UNCERTAIN MEANS NO. The transaction may have
+        # committed. We do not dispatch, and we do not try to give the
+        # unit back -- wasting allowance is the safe direction.
+        out.update(detail="reservation did not answer in %.0fs; it may "
+                          "have committed, so the unit is treated as "
+                          "SPENT and nothing is dispatched" % timeout_s)
+        return out
+    except Exception as exc:                               # noqa: BLE001
+        out.update(detail="reservation failed: %s; treated as SPENT and "
+                          "nothing is dispatched" % type(exc).__name__)
+        return out
+
+
+async def read_budget(pool=None, *, now: float | None = None) -> dict:
+    """The probe's allowance, as the row has it. FAILS CLOSED.
+
+    Reports all three counters so a refusal log says which bound was
+    hit. `open` tracks the DISTINCT allowance and the deadline, because
+    those are what decide whether a probe may begin; the other two caps
+    are enforced by `reserve()` at the point of each request, which is
+    the only place enforcement belongs.
     """
     now = time.time() if now is None else now
     out = {"key": BUDGET_KEY, "state": B_UNREADABLE, "open": False,
-           "remaining": 0, "consumed": None, "max_distinct": None,
+           "probe_id": None, "remaining": 0,
+           "distinct_reserved": None, "max_distinct": None,
+           "bbo_attempts_reserved": None, "max_bbo_attempts": None,
+           "listing_attempts_reserved": None,
+           "max_listing_attempts": None,
+           "slugs_held": None,
            "started_at": None, "deadline_at": None,
            "seconds_left": 0.0, "detail": None}
 
     async def _fetch():
-        p = pool
-        if p is None:
-            from .db import get_pool
-            p = await get_pool()
+        p = await _resolve(pool)
         return await p.fetchval(
             "SELECT value FROM ingestion_state WHERE key=$1", BUDGET_KEY)
 
@@ -267,67 +522,61 @@ async def read_budget(pool=None, *, now: float | None = None) -> dict:
         return out
 
     if row is None:
-        out.update(state=B_UNREADABLE,
-                   detail="no %s row; a probe without a declared "
-                          "budget does not run" % BUDGET_KEY)
+        out["detail"] = ("no %s row; a probe without a declared "
+                         "allowance does not run" % BUDGET_KEY)
         return out
-
-    val = row
-    if isinstance(val, (bytes, bytearray)):
-        val = val.decode("utf-8", "replace")
-    if isinstance(val, str):
-        try:
-            val = json.loads(val)
-        except (TypeError, ValueError):
-            out["detail"] = "budget value is not JSON"
-            return out
-    if not isinstance(val, dict):
-        out["detail"] = "budget value is not an object"
+    val = _as_obj(row)
+    if val is None:
+        out["detail"] = "budget value is not a JSON object"
         return out
 
     try:
-        cap = int(val.get("max_distinct"))
-        used = int(val.get("distinct_consumed", 0))
+        cap = int(val.get("max_distinct", PROBE_MAX_DISTINCT))
+        used = int(val.get("distinct_reserved", 0) or 0)
+        acap = int(val.get("max_bbo_attempts", PROBE_MAX_BBO_ATTEMPTS))
+        aused = int(val.get("bbo_attempts_reserved", 0) or 0)
+        lcap = int(val.get("max_listing_attempts",
+                           PROBE_MAX_LISTING_ATTEMPTS))
+        lused = int(val.get("listing_attempts_reserved", 0) or 0)
     except (TypeError, ValueError):
-        out["detail"] = "max_distinct/distinct_consumed are not integers"
+        out["detail"] = "a counter or cap is not an integer"
         return out
     deadline = _parse_iso(val.get("deadline_at"))
     if deadline is None:
         out["detail"] = "deadline_at is absent or unparsable"
         return out
+    held = val.get("slugs")
 
-    out.update(consumed=used, max_distinct=cap,
+    out.update(probe_id=val.get("probe_id"),
+               distinct_reserved=used, max_distinct=cap,
+               bbo_attempts_reserved=aused, max_bbo_attempts=acap,
+               listing_attempts_reserved=lused,
+               max_listing_attempts=lcap,
+               slugs_held=len(held) if isinstance(held, list) else None,
                started_at=val.get("started_at"),
                deadline_at=val.get("deadline_at"),
                seconds_left=round(deadline - now, 1),
                remaining=max(0, cap - used))
+
+    if not val.get("probe_id"):
+        out.update(state=B_UNREADABLE, open=False, remaining=0,
+                   detail="no probe_id; reservations cannot be tied to "
+                          "a probe identity")
+        return out
     if now >= deadline:
         out.update(state=B_EXPIRED, open=False, remaining=0,
                    detail="deadline %s passed" % val.get("deadline_at"))
     elif used >= cap:
         out.update(state=B_EXHAUSTED, open=False, remaining=0,
-                   detail="%d of %d distinct markets already enriched"
+                   detail="%d of %d distinct-market slots reserved"
                           % (used, cap))
     else:
         out.update(state=B_OPEN, open=True,
-                   detail="%d of %d used, %.0fs left"
-                          % (used, cap, deadline - now))
+                   detail="probe %s: distinct %d/%d, attempts %d/%d, "
+                          "listing %d/%d, %.0fs left"
+                          % (str(val.get("probe_id"))[:8], used, cap,
+                             aused, acap, lused, lcap, deadline - now))
     return out
-
-
-async def consume_budget(pool, n: int) -> None:
-    """Add `n` distinct markets to the lifetime total.
-
-    Written BEFORE the rows are used, so a crash between the read and
-    the write costs budget rather than granting it.
-    """
-    if n <= 0:
-        return
-    await pool.execute(
-        "UPDATE ingestion_state SET value = jsonb_set(value, "
-        "'{distinct_consumed}', to_jsonb("
-        "COALESCE((value->>'distinct_consumed')::int, 0) + $2)) "
-        "WHERE key = $1", BUDGET_KEY, int(n))
 
 
 async def disarm(pool, why: str) -> dict:
@@ -352,3 +601,24 @@ async def disarm(pool, why: str) -> dict:
     log.warning("bettor_live_control: DISARMED -- %s set to false (%s)",
                 CONTROL_KEY, why)
     return {"disarmed": True, "why": why}
+
+
+def describe_allowance() -> dict:
+    """What the allowance is and what it buys. For the refusal log."""
+    return {
+        "key": BUDGET_KEY,
+        "reserved_before_dispatch": True,
+        "refund_paths": 0,
+        "caps": {"distinct_markets": PROBE_MAX_DISTINCT,
+                 "bbo_attempts_incl_retries": PROBE_MAX_BBO_ATTEMPTS,
+                 "listing_attempts": PROBE_MAX_LISTING_ATTEMPTS},
+        "deadline_s": PROBE_DEADLINE_S,
+        "deadline_is": "absolute; a restart resumes toward it",
+        "buys": "REQUESTS, not results -- failures, rejected candidates "
+                "and empty universes all consume",
+        "identity": "probe_id; a row armed for another probe refuses",
+        "serialised_by": "SELECT ... FOR UPDATE inside the reservation "
+                         "transaction",
+        "uncertain_is": "refused -- the unit is treated as spent and "
+                        "nothing is dispatched",
+    }

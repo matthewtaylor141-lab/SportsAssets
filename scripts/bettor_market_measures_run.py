@@ -315,22 +315,65 @@ def _run_worker_and_journal():
     # so a runner that wants the worker to start has to supply one that
     # says run -- exactly as production will, out of `ingestion_state`.
     class _RunControl:
-        """Control and budget, both open. The loop fails closed on
-        either, so a runner has to supply both."""
+        """Control and allowance, both open. The loop fails closed on
+        either, so a runner has to supply both -- and the allowance is
+        now RESERVED before each request, so this also has to offer the
+        transaction surface `ctl.reserve` takes."""
+
+        PROBE_ID = "77777777-6666-5555-4444-333333333333"
+
+        def __init__(self):
+            self.row = {
+                "probe_id": self.PROBE_ID,
+                "max_distinct": 10_000,
+                "max_bbo_attempts": 100_000,
+                "max_listing_attempts": 10_000,
+                "distinct_reserved": 0,
+                "bbo_attempts_reserved": 0,
+                "listing_attempts_reserved": 0,
+                "slugs": []}
 
         async def fetchval(self, _sql, *a):
             from sportsassets import bettor_live_control as _c
             if a and a[0] == _c.BUDGET_KEY:
                 from datetime import datetime, timedelta, timezone
                 now = datetime.now(timezone.utc)
-                return json.dumps({
-                    "started_at": now.isoformat(),
-                    "deadline_at": (now + timedelta(hours=1)).isoformat(),
-                    "max_distinct": 10_000, "distinct_consumed": 0})
+                out = dict(self.row)
+                out["started_at"] = now.isoformat()
+                out["deadline_at"] = (now + timedelta(
+                    hours=1)).isoformat()
+                return json.dumps(out)
             return "true"
 
-        async def execute(self, *_a):
+        async def execute(self, sql, *a):
+            from sportsassets import bettor_live_control as _c
+            if a and a[0] == _c.BUDGET_KEY and "jsonb_set" in sql:
+                self.row[a[1]] = a[2]
+                if len(a) > 3:
+                    self.row.setdefault("slugs", []).append(a[3])
             return "OK"
+
+        def acquire(self):
+            pool = self
+
+            class _Held:
+                async def __aenter__(self):
+                    return pool
+
+                async def __aexit__(self, *a):
+                    return False
+
+            return _Held()
+
+        def transaction(self):
+            class _Txn:
+                async def __aenter__(self):
+                    return None
+
+                async def __aexit__(self, *a):
+                    return False
+
+            return _Txn()
 
     out = asyncio.run(bl.main(client=_Client(rows),
                               stream_factory=RepeatStream, store=store,

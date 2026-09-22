@@ -20,6 +20,7 @@ Each class names the defect it pins.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import json
 import os
 import threading
@@ -45,14 +46,33 @@ def unpaced(monkeypatch):
     monkeypatch.setenv(probe_mod.CONC_ENV, "8")
 
 
-def open_budget(*, max_distinct=40, seconds_left=1800.0, consumed=0):
-    """A probe budget row with room and time left."""
+PROBE_ID = "11111111-2222-3333-4444-555555555555"
+
+
+def open_budget(*, max_distinct=40, seconds_left=1800.0, consumed=0,
+                max_attempts=160, attempts=0, max_listing=18, listing=0,
+                probe_id=PROBE_ID, slugs=None):
+    """An armed allowance with room and time left.
+
+    The shape is the one `obs-arm` writes: a probe identity, three caps,
+    three RESERVED counters and the set of distinct slugs already paid
+    for. `consumed` names the distinct counter for the tests that
+    predate the rename.
+    """
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
-    return json.dumps({
+    row = {
+        "probe_id": probe_id,
         "started_at": now.isoformat(),
         "deadline_at": (now + timedelta(seconds=seconds_left)).isoformat(),
-        "max_distinct": max_distinct, "distinct_consumed": consumed})
+        "max_distinct": max_distinct,
+        "max_bbo_attempts": max_attempts,
+        "max_listing_attempts": max_listing,
+        "distinct_reserved": consumed,
+        "bbo_attempts_reserved": attempts,
+        "listing_attempts_reserved": listing,
+        "slugs": list(slugs or [])}
+    return json.dumps(row)
 
 
 class FakeControlPool:
@@ -83,15 +103,50 @@ class FakeControlPool:
 
     async def execute(self, sql, *args):
         self.writes.append((sql, args))
-        if "distinct_consumed" in sql:
+        if args and args[0] == ctl_mod.BUDGET_KEY and "jsonb_set" in sql:
+            # The reservation's UPDATE, applied to the double's row so a
+            # sequence of reservations behaves like the real one:
+            # ($1 key, $2 counter name, $3 new value, [$4 slug]).
             import json as _j
             b = _j.loads(self.budget) if isinstance(self.budget, str) \
                 else dict(self.budget or {})
-            b["distinct_consumed"] = b.get("distinct_consumed", 0) + args[1]
+            b[args[1]] = args[2]
+            if len(args) > 3:
+                b.setdefault("slugs", []).append(args[3])
             self.budget = _j.dumps(b)
         elif args and args[0] == ctl_mod.CONTROL_KEY:
             self.value = "false"
         return "OK"
+
+    # ── the transaction surface `ctl.reserve` needs ──────────────────
+    #
+    # `reserve()` takes a connection and a transaction because a single
+    # statement cannot hold the cap under concurrency. The double
+    # therefore has to offer the same shape; it is the SAME object, so
+    # `FOR UPDATE` is a no-op here and real serialisation is proved
+    # against real PostgreSQL instead
+    # (scripts/bettor_budget_reservation_probe.py).
+    def acquire(self):
+        pool = self
+
+        class _Held:
+            async def __aenter__(self):
+                return pool
+
+            async def __aexit__(self, *a):
+                return False
+
+        return _Held()
+
+    def transaction(self):
+        class _Txn:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *a):
+                return False
+
+        return _Txn()
 
 
 def RunningControl(**kw):
@@ -1484,25 +1539,77 @@ class TestTheProbeBudgetSurvivesRestarts:
         assert "'false'::jsonb" in src
         assert "'true'" not in src and '"true"' not in src
 
-    def test_consumption_is_recorded_before_the_universe_is_used(
+    def test_nothing_is_charged_after_the_fact_any_more(
             self, monkeypatch, tmp_path):
+        """THE DEFECT THESE TWO TESTS USED TO ENCODE.
+
+        They asserted that `main()` wrote `distinct_consumed` after
+        discovery returned. That write WAS the bug: it sat below the
+        EMPTY_UNIVERSE early return, so the ordinary path spent the
+        allowance and recorded nothing, and a crash between dispatch and
+        write left the row reusable. Post-hoc charging is now gone
+        entirely and this test fails if it comes back.
+        """
         made = self._spying(monkeypatch, tmp_path)
         pool = RunningControl()
         asyncio.run(bl.main(store=made["store"], run_for_s=0.0,
                             control_pool=pool, sleep=SleepSpy()))
-        assert json.loads(pool.budget)["distinct_consumed"] == 3
-        assert any("distinct_consumed" in s for s, _a in pool.writes)
+        assert not hasattr(ctl_mod, "consume_budget"), \
+            "post-hoc charging must not exist"
+        row = json.loads(pool.budget)
+        assert "distinct_consumed" not in row
+        for sql, _a in pool.writes:
+            assert "distinct_consumed" not in sql
 
-    def test_consumption_accumulates_across_runs(self, monkeypatch,
-                                                 tmp_path):
-        """The point of holding it in the database: a restart resumes
-        against what has already been spent."""
-        made = self._spying(monkeypatch, tmp_path)
-        pool = RunningControl()
-        for _ in range(3):
-            asyncio.run(bl.main(store=made["store"], run_for_s=0.0,
-                                control_pool=pool, sleep=SleepSpy()))
-        assert json.loads(pool.budget)["distinct_consumed"] == 9
+    def test_no_counter_is_ever_decremented(self):
+        """NO REFUND PATH. Failures, rejected candidates and empty
+        universes all keep what they spent, so a counter only ever goes
+        up. Asserted over a real reservation sequence AND over the
+        source, because a refund added later would pass the first check
+        by simply never being exercised."""
+        pool = FakeControlPool("true", budget=open_budget())
+        seen: dict = {}
+
+        async def drive():
+            for i in range(4):
+                await ctl_mod.reserve(pool, ctl_mod.R_DISTINCT,
+                                      slug="m%d" % i, probe_id=PROBE_ID)
+                await ctl_mod.reserve(pool, ctl_mod.R_ATTEMPT,
+                                      slug="m%d" % i, probe_id=PROBE_ID)
+            await ctl_mod.reserve(pool, ctl_mod.R_LISTING,
+                                  probe_id=PROBE_ID)
+
+        asyncio.run(drive())
+        for sql, args in pool.writes:
+            if args and args[0] == ctl_mod.BUDGET_KEY \
+                    and "jsonb_set" in sql:
+                name, val = args[1], args[2]
+                assert val > seen.get(name, -1), \
+                    f"{name} went from {seen.get(name)} to {val}"
+                seen[name] = val
+        assert seen == {"distinct_reserved": 4,
+                        "bbo_attempts_reserved": 4,
+                        "listing_attempts_reserved": 1}, seen
+
+        # And over the source, because a refund added later would pass
+        # the check above simply by never being exercised. Code tokens
+        # only -- the module's prose says "never refunded" and that is
+        # the opposite of a defect.
+        import ast
+        tree = ast.parse(inspect.getsource(ctl_mod))
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if isinstance(body, list) and body \
+                    and isinstance(body[0], ast.Expr) \
+                    and isinstance(getattr(body[0], "value", None),
+                                   ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                body.pop(0)
+        code = ast.unparse(tree)
+        for banned in ("- 1)", "- $2", "def refund", "def unreserve",
+                       "distinct_reserved') - ", "used - 1"):
+            assert banned not in code, \
+                f"{banned!r} in the control module looks like a refund"
 
     def test_the_remaining_budget_caps_what_discovery_may_read(
             self, monkeypatch, tmp_path):

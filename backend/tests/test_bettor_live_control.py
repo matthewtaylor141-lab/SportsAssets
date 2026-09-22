@@ -161,8 +161,12 @@ class TestItIsAnObservationControlAndNothingElse:
         assert src.count("'false'::jsonb") >= 1
         assert "'true'::jsonb" not in src, (
             "nothing in this module may arm observation")
-        # and the budget write is an increment, not a replacement
-        assert "distinct_consumed" in src and "+ $2" in src
+        # and the allowance write is a RESERVATION, taken under a row
+        # lock before the request it pays for
+        assert "FOR UPDATE" in src, "reservations must take the lock"
+        assert "distinct_reserved" in src
+        assert not hasattr(ctl, "consume_budget"), \
+            "post-hoc charging must not come back"
 
     def test_it_imports_no_order_path(self):
         src = inspect.getsource(ctl)
@@ -235,16 +239,66 @@ class BudgetPool(Pool):
 
     async def execute(self, sql, *args):
         self.writes.append((sql, args))
+        if args and args[0] == ctl.BUDGET_KEY and "jsonb_set" in sql:
+            b = json.loads(self.budget) if isinstance(self.budget, str) \
+                else dict(self.budget or {})
+            b[args[1]] = args[2]
+            if len(args) > 3:
+                b.setdefault("slugs", []).append(args[3])
+            self.budget = json.dumps(b)
         return "OK"
 
+    # `reserve()` needs a connection and a transaction, because a single
+    # statement cannot hold a cap under concurrency. Real serialisation
+    # is proved against real PostgreSQL in
+    # scripts/bettor_budget_reservation_probe.py.
+    def acquire(self):
+        pool = self
 
-def budget_row(*, max_distinct=40, consumed=0, seconds_left=1800.0):
+        class _Held:
+            async def __aenter__(self):
+                return pool
+
+            async def __aexit__(self, *a):
+                return False
+
+        return _Held()
+
+    def transaction(self):
+        class _Txn:
+            async def __aenter__(self):
+                return None
+
+            async def __aexit__(self, *a):
+                return False
+
+        return _Txn()
+
+
+PROBE_ID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+
+
+def budget_row(*, max_distinct=40, consumed=0, seconds_left=1800.0,
+               max_attempts=160, attempts=0, max_listing=18, listing=0,
+               probe_id=PROBE_ID, slugs=None):
+    """The shape `obs-arm` writes: an identity, three caps, three
+    RESERVED counters and the distinct slugs already paid for."""
     from datetime import datetime, timedelta, timezone
     now = datetime.now(timezone.utc)
-    return json.dumps({
+    row = {
+        "probe_id": probe_id,
         "started_at": now.isoformat(),
         "deadline_at": (now + timedelta(seconds=seconds_left)).isoformat(),
-        "max_distinct": max_distinct, "distinct_consumed": consumed})
+        "max_distinct": max_distinct,
+        "max_bbo_attempts": max_attempts,
+        "max_listing_attempts": max_listing,
+        "distinct_reserved": consumed,
+        "bbo_attempts_reserved": attempts,
+        "listing_attempts_reserved": listing,
+        "slugs": list(slugs or [])}
+    if probe_id is None:
+        row.pop("probe_id")
+    return json.dumps(row)
 
 
 
@@ -260,7 +314,11 @@ class TestTheBudgetFailsClosedToo:
     def test_an_open_budget_reports_what_is_left(self):
         b = self._read(BudgetPool(budget=budget_row(consumed=12)))
         assert b["state"] == ctl.B_OPEN and b["open"] is True
-        assert b["remaining"] == 28 and b["consumed"] == 12
+        assert b["remaining"] == 28
+        assert b["distinct_reserved"] == 12
+        assert b["max_bbo_attempts"] == 160
+        assert b["max_listing_attempts"] == 18
+        assert b["probe_id"] == PROBE_ID
         assert 1700 < b["seconds_left"] <= 1800
 
     def test_an_absent_row_is_not_permission(self):
@@ -304,20 +362,22 @@ class TestTheBudgetFailsClosedToo:
         assert b["state"] == ctl.B_UNREADABLE
         assert "ConnectionError" in b["detail"]
 
-    def test_consume_is_a_relative_increment(self):
-        """Read-modify-write in the process would lose a concurrent
-        decrement; the increment happens in SQL."""
-        p = BudgetPool(budget=budget_row())
-        asyncio.run(ctl.consume_budget(p, 7))
-        sql, args = p.writes[0]
-        assert "distinct_consumed" in sql and "+ $2" in sql
-        assert args[1] == 7
-        assert "SELECT" not in sql.upper().split("WHERE")[0]
+    def test_an_unarmed_probe_has_no_identity_and_does_not_run(self):
+        """A row without a probe_id cannot tie reservations to a probe,
+        so it is not an allowance."""
+        b = self._read(BudgetPool(budget=budget_row(probe_id=None)))
+        assert b["state"] == ctl.B_UNREADABLE and b["open"] is False
+        assert "probe_id" in b["detail"]
 
-    def test_consuming_nothing_writes_nothing(self):
-        p = BudgetPool(budget=budget_row())
-        asyncio.run(ctl.consume_budget(p, 0))
-        assert p.writes == []
+    def test_the_three_counters_are_reported_apart(self):
+        b = self._read(BudgetPool(budget=budget_row(
+            consumed=7, attempts=31, listing=4)))
+        assert b["distinct_reserved"] == 7
+        assert b["bbo_attempts_reserved"] == 31
+        assert b["listing_attempts_reserved"] == 4
+        assert "distinct 7/40" in b["detail"]
+        assert "attempts 31/160" in b["detail"]
+        assert "listing 4/18" in b["detail"]
 
     def test_disarm_writes_false_and_only_false(self):
         p = BudgetPool()
