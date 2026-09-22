@@ -1,0 +1,138 @@
+{
+  "bytes_read": 377904398,
+  "calendar_dates_present": {
+    "2026-09-19": 1805349,
+    "2026-09-20": 2509374
+  },
+  "declared_content_length": "377904398",
+  "distinct_symbols_in_file": 484118,
+  "file": "20260920-time-and-sales.csv",
+  "first_transaction_time": "2026-09-19T17:00:00.022865171-04:00",
+  "header": [
+    "Transaction Time",
+    "Symbol",
+    "Last Price",
+    "Last Quantity"
+  ],
+  "joined_any": [
+    "aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi",
+    "aec-cfb-uwg-etnst-2026-09-19"
+  ],
+  "last_transaction_time": "2026-09-20T16:59:59.999089329-04:00",
+  "our_markets": {
+    "aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi": {
+      "prints": 68,
+      "quantity": 3901.62
+    },
+    "aec-cfb-coast-del-2026-09-19": {
+      "prints": 0,
+      "quantity": 0.0
+    },
+    "aec-cfb-kentst-ohiost-2026-09-19": {
+      "prints": 0,
+      "quantity": 0.0
+    },
+    "aec-cfb-portst-ore-2026-09-18": {
+      "prints": 0,
+      "quantity": 0.0
+    },
+    "aec-cfb-uwg-etnst-2026-09-19": {
+      "prints": 15,
+      "quantity": 662.35
+    },
+    "aec-nfl-atl-pit-2026-09-13": {
+      "prints": 0,
+      "quantity": 0.0
+    },
+    "aec-nfl-bal-ind-2026-09-13": {
+      "prints": 0,
+      "quantity": 0.0
+    },
+    "aec-nfl-chi-car-2026-09-13": {
+      "prints": 0,
+      "quantity": 0.0
+    },
+    "aec-nfl-cle-jax-2026-09-13": {
+      "prints": 0,
+      "quantity": 0.0
+    },
+    "asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5": {
+      "prints": 0,
+      "quantity": 0.0
+    },
+    "atc-lmx-ame-tij-2026-09-05-tij": {
+      "prints": 0,
+      "quantity": 0.0
+    },
+    "atc-lmx-pue-tol-2026-09-04-draw": {
+      "prints": 0,
+      "quantity": 0.0
+    }
+  },
+  "price_decimal_widths": {
+    "2": 2296461,
+    "3": 2017815,
+    "4": 447
+  },
+  "rows_kept_for_our_markets": 83,
+  "rows_malformed": 0,
+  "rows_total": 4314723,
+  "sha256_of_bytes_read": "c82c0fd542d24d820864f02756a6eaceb8bb83daa736f78936e06911fd8d984c",
+  "top_symbols": [
+    {
+      "prints": 107122,
+      "quantity": 13091714.1,
+      "symbol": "aec-cfb-lsu-miss-2026-09-19"
+    },
+    {
+      "prints": 49951,
+      "quantity": 7619649.48,
+      "symbol": "aec-nfl-phi-ten-2026-09-20"
+    },
+    {
+      "prints": 53774,
+      "quantity": 6848313.93,
+      "symbol": "aec-nfl-gb-nyj-2026-09-20"
+    },
+    {
+      "prints": 48419,
+      "quantity": 6172568.41,
+      "symbol": "aec-nfl-min-chi-2026-09-20"
+    },
+    {
+      "prints": 64360,
+      "quantity": 5817390.52,
+      "symbol": "aec-ufc-josvan-alepan-2026-09-19"
+    },
+    {
+      "prints": 38629,
+      "quantity": 5428459.68,
+      "symbol": "aec-cfb-flst-ala-2026-09-19"
+    },
+    {
+      "prints": 24851,
+      "quantity": 4125250.38,
+      "symbol": "aec-nfl-cin-hou-2026-09-20"
+    },
+    {
+      "prints": 22761,
+      "quantity": 3887674.78,
+      "symbol": "aec-nfl-no-bal-2026-09-20"
+    },
+    {
+      "prints": 19462,
+      "quantity": 3799058.83,
+      "symbol": "aec-nfl-pit-ne-2026-09-20"
+    },
+    {
+      "prints": 23744,
+      "quantity": 3791971.66,
+      "symbol": "aec-cfb-smu-lou-2026-09-19"
+    }
+  ],
+  "truncated_at_cap": false,
+  "url": "https://www.polymarketexchange.com/files/time-and-sales/20260920-time-and-sales.csv",
+  "utc_offsets_present": {
+    "-04:00": 4314723
+  }
+}
