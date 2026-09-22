@@ -20,20 +20,45 @@ concurrency:
 jobs:
   fetch:
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 30
     steps:
+      - uses: actions/checkout@v4
       - name: Fetch
         env:
           URL: ${{ inputs.url }}
         run: |
           set -euo pipefail
-          case "$URL" in
+          # A URL FRAGMENT SELECTS A MODE, and it is never sent to the
+          # server. This job's ONE input is `url`, and its input schema
+          # is fixed by the copy of this file on the default branch --
+          # so a new input cannot be added without touching production.
+          # A fragment rides along inside the existing input.
+          #
+          #   ...-schema.json#op=/v1/order/preview   extract that
+          #                                          operation and every
+          #                                          schema it $refs
+          #   ...20260913-time-and-sales.csv#stream  stream, filter to
+          #                                          our markets, emit an
+          #                                          artifact
+          URL_NOFRAG="${URL%%#*}"
+          FRAG=""
+          case "$URL" in *"#"*) FRAG="${URL#*#}" ;; esac
+          export FRAG URL_NOFRAG
+          case "$URL_NOFRAG" in
             https://*) ;;
-            *) echo "refused: https only (got '$URL')"; exit 1 ;;
+            *) echo "refused: https only (got '$URL_NOFRAG')"; exit 1 ;;
           esac
-          echo "== fetch $URL at $(date -u +%FT%TZ) =="
-          curl -sSL --max-time 60 -A "sportsassets-docs-reader" "$URL" -o /tmp/page.html
+          echo "== fetch $URL_NOFRAG at $(date -u +%FT%TZ) == frag='$FRAG'"
+          mkdir -p out
+          if [ "$FRAG" = "stream" ]; then
+            python3 "$GITHUB_WORKSPACE/.github/scripts/timesales_stream.py"
+            exit 0
+          fi
+          curl -sSL --max-time 300 -A "sportsassets-docs-reader" "$URL_NOFRAG" -o /tmp/page.html
           echo "== bytes: $(wc -c < /tmp/page.html) =="
+          if [ -n "$FRAG" ]; then
+            python3 "$GITHUB_WORKSPACE/.github/scripts/schema_extract.py" || true
+          fi
           python3 - <<'PY'
           import html, re
           s = open('/tmp/page.html', encoding='utf-8', errors='ignore').read()
@@ -70,3 +95,12 @@ jobs:
           for l in sorted(set(links))[:400]:
               print(l)
           PY
+
+      - name: Upload artifacts when a mode produced them
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fetch-docs-out
+          path: out/
+          if-no-files-found: ignore
+          retention-days: 7
