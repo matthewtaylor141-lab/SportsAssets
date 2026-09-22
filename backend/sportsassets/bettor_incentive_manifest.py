@@ -310,6 +310,24 @@ def freeze(manifest: dict, *, et_date: str | None = None,
     holds no qualifying programme at all; it holds some but fewer than
     the gate. None of them is answered by watching something else.
     """
+    # REFUSE A DOCUMENT THAT IS NOT A MANIFEST, by name.
+    #
+    # `load()` returns a WRAPPER -- {"ok", "why", "path", "manifest"} --
+    # and passing that wrapper here used to sail through: it has no
+    # `programs`, so the walk found nothing and the answer came back
+    # MANIFEST_HAS_NO_QUALIFYING_PROGRAMS. Fail-closed, and for
+    # completely the wrong reason. I lost time chasing a delivery
+    # defect that did not exist because of it, with a byte-identical
+    # file sitting in the image. A refusal that names the wrong cause
+    # is worse than an exception.
+    if not isinstance(manifest, dict) or "programs" not in manifest:
+        got = sorted(manifest)[:6] if isinstance(manifest, dict) else type(
+            manifest).__name__
+        return {"ok": False, "why": M_MALFORMED,
+                "detail": "this is not a manifest document -- it carries no "
+                          "`programs` key (got %r). If it came from load(), "
+                          "pass its ['manifest'] value, not the wrapper."
+                          % (got,)}
     want_date = et_date or manifest.get("et_date")
     if want_date and manifest.get("et_date") and \
             manifest["et_date"] != want_date:
