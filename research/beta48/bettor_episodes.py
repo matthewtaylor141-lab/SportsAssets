@@ -546,7 +546,14 @@ class Episode:
         # The tape has no side and no aggressor flag, so a print is used
         # only to establish that trading REACHED a price. It is never
         # read as evidence about who initiated it.
-        if tprints:
+        # `tprints is None` means NO TAPE. An EMPTY TUPLE means the tape
+        # covers this interval and says NOTHING TRADED -- which is the
+        # common case, and the opposite of "no information". Testing
+        # truthiness conflated the two and sent every quiet interval
+        # back to the snapshot proxy, where a sharesTraded delta could
+        # still fill us. That is precisely the defect the tape was
+        # retrieved to remove.
+        if tprints is not None:
             if side == "YES":
                 traded = sum(q for _, px, q in tprints if px <= our + 1e-9)
             else:

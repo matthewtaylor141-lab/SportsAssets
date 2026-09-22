@@ -1,0 +1,42 @@
+{
+  "binomial_se": 29.36,
+  "held_out": [
+    {
+      "band": "a_lt30s",
+      "observed": 202,
+      "orders": 929,
+      "predicted": 153.1
+    },
+    {
+      "band": "b_30_120s",
+      "observed": 493,
+      "orders": 1520,
+      "predicted": 653.7
+    },
+    {
+      "band": "c_2_10min",
+      "observed": 355,
+      "orders": 890,
+      "predicted": 441.6
+    },
+    {
+      "band": "d_gt10min",
+      "observed": 49,
+      "orders": 522,
+      "predicted": 50.9
+    }
+  ],
+  "held_out_observed": 1099.0,
+  "held_out_orders": 3861.0,
+  "held_out_predicted": 1299.3,
+  "test_days": [
+    "2026-09-09",
+    "2026-09-10"
+  ],
+  "train_days": [
+    "2026-09-06",
+    "2026-09-07",
+    "2026-09-08"
+  ],
+  "z": -6.822
+}
