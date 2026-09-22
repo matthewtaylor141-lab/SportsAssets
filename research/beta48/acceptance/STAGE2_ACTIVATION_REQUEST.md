@@ -75,14 +75,25 @@ matching the disposable database column for column.
 
 **No production schema alteration is needed or requested.**
 
-### Regression
+### Regression — the full suite, both sides
 
-446 suite failures on this branch, **zero in any `bettor_live` file**.
-The identical 446 ids at `fd39a0a9` and on this branch give
-**byte-identical failure sets — 179 and 179**. The gap is test-order
-pollution in the full run, not a code difference. **No regression.** The
-179 pre-existing failures are in mirror/pmus/calibration/pnl modules and
-are out of scope here.
+| | deployed `fd39a0a9` | branch `e3535e9` |
+|---|---|---|
+| failed | **446** | **446** |
+| passed | 10,507 | **10,511** |
+| skipped / xfailed | 134 / 3 | 134 / 3 |
+
+The failing **ids** are compared, not just the counts:
+
+```
+comm -23 branch prod   ->  0 regressions
+comm -13 branch prod   ->  0 newly fixed
+```
+
+**Zero difference in either direction.** The branch passes four more
+tests, which are exactly the four it adds. Zero of the 446 is in any
+`bettor_live` file; they are pre-existing failures in
+mirror/pmus/calibration/pnl modules and are out of scope for this run.
 
 ### What this does NOT establish
 

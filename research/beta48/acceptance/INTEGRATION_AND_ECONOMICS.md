@@ -181,17 +181,33 @@ assumed.
   are what the counters group by. Misleading telemetry, no behavioural
   risk.
 
-## A4. Regression check
+## A4. Regression check — the full suite, run on both sides
 
-The backend suite shows **446 failures on this branch**. **Zero of them
-is in any `bettor_live` file.** Running the identical 446 ids at the
-deployed SHA `fd39a0a9` and on this branch gives **byte-identical
-failure sets — 179 and 179, `comm -23` empty.** The 446-vs-179 gap is
-test-order pollution in the full-suite run, not a code difference.
+| | deployed `fd39a0a9` | branch `e3535e9` |
+|---|---|---|
+| failed | **446** | **446** |
+| passed | 10,507 | **10,511** |
+| skipped / xfailed | 134 / 3 | 134 / 3 |
+| wall clock | 26m18s | 25m31s |
 
-**This branch introduces no regression.** The 179 pre-existing failures
-are in mirror/pmus/calibration/pnl modules and are out of scope for this
-run; they are named here rather than left for someone to rediscover.
+The failing **test ids** were compared, not the counts alone:
+
+```
+comm -23 branch prod   ->  0   (regressions)
+comm -13 branch prod   ->  0   (newly fixed)
+```
+
+**Zero difference in either direction.** The branch passes four more
+tests, which are exactly the four it adds. Zero of the 446 is in any
+`bettor_live` file.
+
+An earlier read of this same evidence ran only the 446 ids in isolation
+and got 179 failures on both sides; that was a weaker check — running a
+subset changes the order and the module-level state other tests leave
+behind. The full-suite comparison above supersedes it and says the same
+thing more strongly. The 179 pre-existing failures named there are a
+subset of these 446, all in mirror/pmus/calibration/pnl modules, and are
+out of scope for this run.
 
 ## A5. The probe, as one operation
 
