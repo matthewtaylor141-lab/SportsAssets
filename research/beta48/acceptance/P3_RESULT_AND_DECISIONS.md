@@ -72,6 +72,12 @@ at that same level.
 | program | C = 0 | C = 400 | C = 2,000 | C = 10,000 |
 |---|---:|---:|---:|---:|
 | culture daily_event | $50.00 | **$10.00** | $2.38 | $0.50 ✗ |
+
+> **These use `100/(100+C)`, which is a special case.** The full
+> calculation is implemented in `bettor_incentive_score.py`; at
+> C = 200 the true answer is **$0.00**, because the side never
+> reaches Target Size at all.
+
 | crypto 1h up/down | $30.00 | $6.00 | $1.43 | $0.30 ✗ |
 | eFootball day_of | $35.00 | $7.00 | $1.67 | $0.35 ✗ |
 | eFootball live | $100.00 | **$20.00** | $4.76 | $0.99 ✗ |
@@ -80,6 +86,15 @@ at that same level.
 Size rests at strictly better prices, reward is $0.00 in every column.
 
 ### 1.5 The payout unit is (market, date) — another correction
+
+> **OVERSTATED; corrected in `PACKAGE_B_INCENTIVE_MEASUREMENT.md` §2.**
+> The documentation says only *"Rewards under $1.00 are not paid
+> out."* A response GROUPED by (market, date) describes how a
+> reporting endpoint groups rows; it does not establish that the
+> floor is applied to that grouping, nor that $35 and $100 become one
+> economically interchangeable pool. Three candidate aggregations are
+> now carried, and the decision rule uses the STRICTEST.
+
 
 `GetIncentivesEarnedResponse.UserReward = {reward, programType,
 marketSlug, date, status}`, and the endpoint states each entry *"sums
@@ -92,6 +107,14 @@ market-day are **one $135 pool against one floor**, not two independent
 tests. My per-period framing used the wrong unit and was too pessimistic.
 
 ### 1.6 Against the measured hurdle
+
+> **WITHDRAWN; see `PACKAGE_B_INCENTIVE_MEASUREMENT.md` §3.** The
+> $1.47/day came from C4 on NINE SPORTS MARKETS under a different
+> policy. Culture markets are a different population. Subtracting one
+> from the other establishes nothing. Rewards are reported instead as
+> a CEILING on the trading loss they could absorb, and the trading
+> loss for these markets at this size is measured by the same run.
+
 
 C4's replay trading result was **−$10.23 over 6.96 days = −$1.47/day**,
 already net of $6.48 of validated maker rebates, on ~$302.53 mean
