@@ -23,7 +23,7 @@ from collections.abc import Awaitable, Callable
 
 from .. import procmem
 from ..db import heartbeat
-from . import (analytics, bettor_live_loop, bettor_state,
+from . import (analytics, bettor_state,
                chain_listener, copy_sweep, dispatcher, edge_marks,
                institutional_md, metadata_refresher, mirror_live,
                mirror_shadow, poller, premap, price_path, reconciler,
@@ -422,8 +422,17 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # environment on this service; a deploy does. The database row is
     # the authoritative stop because it is the PROMPT one.
     #
-    # Deregistering is this one line, commented out.
-    ("bettor_live", bettor_live_loop.main),
+    # DEREGISTERED 2026-09-22. The rollback for the reservation
+    # repair at 67652e99, and deliberately the bluntest one
+    # available: the supervisor cannot start what it is not handed.
+    #
+    # Reach for this only when the database control is not enough --
+    # when `obs-stop` cannot be written, or a running process is not
+    # honouring it. For every ordinary stop, `render-ops sql
+    # obs-stop confirm=DO` is faster and needs no deploy.
+    #
+    # Re-registering is this one line and its import, restored.
+    # ("bettor_live", bettor_live_loop.main),
     ("memory", memory_watch),
 ]
 
