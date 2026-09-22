@@ -88,9 +88,11 @@ on:
       # REF. So the route is to extend an already-dispatchable
       # workflow on the release branch, which is what this is.
       #
-      # THIS FILE IS MODIFIED ONLY ON `claude/incentive-observation-
-      # release`. The default branch copy is untouched, so the 2-hourly
-      # schedule keeps running the original collector unchanged.
+      # THIS ADDITION NOW REACHES THE DEFAULT BRANCH, as part of the
+      # authorized release. The 2-hourly schedule is unaffected: the
+      # `capture` job's condition names the event, so a scheduled run
+      # always takes the original collector path, and the `manifest`
+      # job cannot be reached from a schedule at all.
       #
       # Setting this input runs the manifest capture INSTEAD OF the
       # forward capture -- see the `if:` on both jobs. It never runs
@@ -138,7 +140,19 @@ jobs:
   capture:
     # SKIPPED when a manifest date is supplied. The two jobs are
     # mutually exclusive so one dispatch never does both.
-    if: github.event.inputs.manifest_et_date == ''
+    #
+    # THE event_name TEST IS NOT REDUNDANT, and leaving it out would be
+    # the most expensive kind of subtle. On a SCHEDULED run there is no
+    # `inputs` object at all, so `github.event.inputs.manifest_et_date`
+    # is null; GitHub casts both sides to a number when the types
+    # differ, null and '' both become 0, and the comparison happens to
+    # come out true. The 2-hourly collector would therefore keep
+    # running -- by coincidence of a coercion rule, with the whole
+    # scheduled collector resting on it. Naming the event makes the
+    # scheduled path unconditional instead of lucky.
+    if: >-
+      github.event_name != 'workflow_dispatch'
+      || github.event.inputs.manifest_et_date == ''
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -277,7 +291,11 @@ jobs:
   # name -- so what ran is identifiable after the fact even if the
   # branch moves.
   manifest:
-    if: github.event.inputs.manifest_et_date != ''
+    # Dispatch only, and only with a date. A scheduled run can never
+    # reach this job.
+    if: >-
+      github.event_name == 'workflow_dispatch'
+      && github.event.inputs.manifest_et_date != ''
     runs-on: ubuntu-latest
     timeout-minutes: 20
 
