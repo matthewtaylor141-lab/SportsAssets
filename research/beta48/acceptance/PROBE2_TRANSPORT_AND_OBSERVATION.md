@@ -52,6 +52,7 @@ spread or liquidity**.
 |---|---|
 | `NOT_OPEN` | the venue does not call it open; it cannot produce a meaningful frame. A **transport** fact |
 | `PRICE_UNPARSABLE` | the book will not parse; same |
+| a price field present but unreadable | a body we could not read. Reported separately as `excluded_malformed_body`, because `assess` files it under `ONE_SIDED_BOOK` |
 
 | **kept** in observation despite refusal | the rule's verdict is **recorded, not waived** |
 |---|---|
@@ -83,10 +84,28 @@ carries:
 so a refusal is readable from the journal forever, not from a startup
 log line the next restart overwrites.
 
-**Bound.** `OBSERVE_MAX = 8`, override ceiling `40`. Strategy-admitted
-markets are watched **in addition** and do not consume the limit. This
-is a transport experiment; the ceiling exists so it cannot become a
-collection programme through one environment variable.
+**Bound — a TOTAL subscription cap.** `WATCH_MAX = 8` bounds the
+**union** of strategy-admitted and observation-only markets, not the
+observation-only additions alone.
+
+An earlier draft let admitted markets be watched *in addition* to the
+eight. That made the declared limit describe neither number: one
+admitted plus eight observed is nine subscriptions under an "eight
+market" authorization. The union is now capped, admitted markets take
+priority within it in the rule's own volume-ranked order, and any
+truncation of the rule's choices is reported by name in
+`strategy_admitted_dropped_by_cap` — a run that watched fewer markets
+than the rule chose is a different run and must not be silent about it.
+
+**A malformed body is never subscribed.** `assess()` reports
+`ONE_SIDED_BOOK` both for a side that is *absent* (a real market state,
+worth observing) and for a side that is *present and unreadable*
+(`{"value": "not-a-number"}`). Those are the same reason string and
+different kinds of fact. `assess` is frozen and is not changed;
+`observation_subset` asks the narrower question separately via
+`_prices_parse()` and excludes bodies it could not read, listing them
+in `excluded_malformed_body`. Subscribing on an unreadable body would
+mean subscribing on nothing.
 
 ---
 
@@ -247,29 +266,85 @@ evidence that would let a rate be reasoned about at all.
 **absence** of new journal rows. A quiet market produces exactly the
 same absence.
 
-`MarketStream.stop(wait_s=…)` now joins the socket thread and returns a
-closure record; the thread stamps `closed_at` from inside itself. On
-shutdown the worker writes `ingestion_state.bettor_live_stop_receipt`:
+**A thread exiting is not proof that a socket closed.** A thread can
+end with its close having raised, or having never run, or having never
+connected at all. Three events are now stamped separately and only one
+of them means the connection shut:
+
+| stamp | meaning |
+|---|---|
+| `socket_closed_at` | `ws.close()` **returned**. The only closure evidence |
+| `thread_exited_at` | the socket thread ended. Not closure |
+| `stop_requested_at` | when the worker asked the socket to close |
+
+`stop(wait_s=)` joins the thread and returns one verdict:
+
+| verdict | `closed` | when |
+|---|---|---|
+| `CLOSED` | true | thread gone **and** `close()` returned cleanly |
+| `INCOMPLETE_JOIN_TIMEOUT` | false | the wait expired, thread still running — **a failure, not a slow success** |
+| `INCOMPLETE_CLOSE_RAISED` | false | `close()` raised; the error is named |
+| `INCOMPLETE_THREAD_EXITED_WITHOUT_CLOSE` | false | thread ended, `close()` never returned |
+| `NEVER_STARTED` | false | no thread, so no connection to close |
+
+`close_latency_s` is `None` when there is nothing to subtract.
+**UNMEASURED is None, never zero.** A non-`CLOSED` verdict is logged at
+ERROR and `shutdown_verified: false` goes on the receipt.
+
+The worker writes `ingestion_state.bettor_live_stop_receipt`:
 
 ```
-stopped_by, started_at, stopped_at, runtime_s
-acquisition.reserved            what was spent
-acquisition.telemetry           requests_started, densest windows, inflight
-transport.stop_requested_at_iso
-transport.closed_at_iso
-transport.close_latency_s       a SUBTRACTION, not an inference
-transport.closed / thread_alive
-stream, frames, watching, durability
-orders_submitted: 0
+IDENTITY      probe_id, boot_id, pid, host, receipt_written_at
+THE FOUR TIMES
+  control_detected_at      when THIS PROCESS read the stop
+  stop_requested_at        when it asked the socket to close
+  socket_closed_at         when ws.close() RETURNED
+  last_request_started_at  the last outbound HTTP request it STARTED
+  (+ last_frame_at, thread_exited_at)
+VERDICT       transport.shutdown, shutdown_verified, close_latency_s
+ACQUISITION   reserved counters, process-pacer telemetry, 429 events
+              stream, frames, watching, durability, orders_submitted: 0
 ```
+
+The operator's own issue time is not visible from inside the process,
+so the gap between it and `control_detected_at` is the control-poll
+interval (`CONTROL_EVERY_S = 30 s`) and belongs to the operator's
+record, not to this one. Reporting one as the other would flatter the
+measurement by up to 30 seconds.
 
 Read with `render-ops sql obs-stop-receipt` (read-only). A receipt that
 cannot be written is a warning, never a change to how the loop shuts
 down — the shutdown has already happened by then.
 
----
+### 4b. The request budget is GLOBAL, and here is the worst case
 
-## 5. Issuing the stop **while acquisition and streaming are both live**
+Listing, enrichment, every refresh and every retry share **one durable
+counter set** (the `bettor_live_probe_state` row) and **one pacer**
+(built once in `main()` and passed to every discovery).
+
+An earlier build created a pacer per `_discover` call, so each refresh
+got a fresh pacer whose `_next_at` started at zero and its first
+request ignored the rate entirely. That is fixed; the configured rate
+now describes the **process**.
+
+**Worst case under the authorized budget, at 0.10 req/s:**
+
+| counter | cap | seconds of pacing |
+|---|---|---|
+| `max_listing_attempts` | 18 | 180 |
+| `max_bbo_attempts` | 160 | 1,600 |
+| **total outbound requests** | **178** | **1,780** |
+
+The absolute deadline is **1,800 s**, so the request budget and the
+deadline bind at very nearly the same point — neither can be exceeded
+by the other running long. Both are durable and survive a restart:
+the counters do not reset and the deadline is an absolute timestamp.
+
+**Expected case:** ~6 listing + 40 BBO = **46 requests ≈ 460 s**, after
+which the distinct-market allowance (40) is exhausted and any later
+refresh is refused at the reservation before a request is issued.
+
+## 5. Stopping while the stream is live
 
 > *"Waking later and refusing does not substitute for measuring stop
 > latency during active work."*
@@ -277,62 +352,70 @@ down — the shutdown has already happened by then.
 On the last run, obs-stop was issued while the worker sat in an
 `EMPTY_UNIVERSE` backoff. It refused, correctly, and measured nothing.
 
-**The window is engineered, and the trigger is observed.**
+### 5a. The trigger is the SOCKET, not the HTTP counters
 
-With `BETTOR_PROBE_BATCH = 12` the initial discovery acquires
-2 × 12 = 24 markets and then **starts the stream**, leaving allowance
-unspent. `DISCOVERY_EVERY_S = 900` then runs a refresh **900 s after
-the stream started**, and `main()` holds no candidate cache — it
-re-lists — so that refresh issues **6 listing requests and 12 BBO
-reads**: a window in which acquisition and streaming are **both
-active**, lasting `18 / 0.10 = 180 s`.
+An earlier draft required `bbo_attempts_reserved` to be **rising** at
+the moment of the stop, and manufactured a discovery refresh (by
+shrinking `BETTOR_PROBE_BATCH`) to make such a window exist. Both were
+wrong:
+
+* it spends requests for no reason other than to create a convenient
+  test window, and
+* it makes the stop test **impossible** in the ordinary case where the
+  acquisition allowance is already exhausted — which is exactly what a
+  40-market budget does within the first eight minutes.
+
+The transport question does not need an HTTP request in flight. The
+trigger is:
+
+```
+issue obs-stop when the socket is confirmed open AND fresh evidence
+has arrived:
+
+  journal_rows_last_60s  > 0        durable observations, this minute
+  journal_age_s          < 60       the newest row is fresh
+```
+
+A committed journal row means a frame arrived, parsed, and was
+decided — so the socket is open and delivering. That is the condition,
+read from the database, from the worker's own durable output.
+
+`BETTOR_PROBE_BATCH` is left at its default. No request is issued to
+manufacture a window.
+
+### 5b. Acquisition cessation is measured SEPARATELY, and only if it applies
+
+Whether an HTTP request happens to be active at stop time is an
+accident of timing, not a precondition. It is reported either way:
+
+| at stop time | what is measured |
+|---|---|
+| `last_request_started_at` within ~120 s | acquisition was live; assert the budget counters are unchanged at T+58 s |
+| otherwise | acquisition had already ceased; recorded as **NOT EXERCISED THIS RUN**, not as a pass |
+
+The receipt carries `last_request_started_at` from the **process
+pacer**, so the claim rests on the worker's own record of its last
+outbound request rather than on a counter read from outside.
+
+### 5c. The sequence
 
 ```
 t≈0      arm, run
-t≈0-60   listing: 6 paced requests, 6 reserved units
-t≈60-300 enrichment: 24 paced BBO reads
-t≈300    stream.start()  -- frames begin
-t≈300+   journal rows accumulate, refusals included
-t≈1200   DISCOVERY REFRESH: 6 listing + 12 BBO, all paced
-         >>> ACQUISITION AND STREAMING BOTH ACTIVE, ~180 s <<<
-t≈1200+  obs-stop, on the observed condition below
+t≈0-60   listing: up to 6 paced requests, one reserved unit each
+t≈60-460 enrichment: 40 paced BBO reads (the distinct allowance)
+t≈460    stream.start()  -- frames begin
+t≈460+   poll obs-live every 20 s
+         >>> journal_rows_last_60s > 0  ->  ISSUE obs-stop <<<
+T+58 s   obs-budget: counters unchanged (if acquisition was live)
+T+90 s   obs-live:   journal no longer growing
+then     obs-stop-receipt: shutdown == CLOSED, close_latency_s
 t≈1800   deadline disarms if nothing else has
 ```
 
-Listing units: 6 at startup + 6 at the refresh = **12 of the
-18 authorized**. Distinct markets: 24 + 12 = **36 of 40**.
-
-**The trigger — polled every 20 s with `render-ops sql obs-live`
-(read-only):**
-
-```
-issue obs-stop when BOTH hold on the same read:
-  bbo_attempts_reserved  has INCREASED since the previous read   (acquisition live)
-  journal_rows_last_60s  > 0                                     (streaming live)
-```
-
-Both come from the database, so the decision rests on the worker's own
-durable output rather than on a guess about timing. `obs-live` also
-reports `journal_age_s`, `observation_only_rows`,
-`strategy_admitted_rows` and `distinct_markets_seen`.
-
-**Then verify, in this order:**
-
-1. `obs-budget` at T+58 s — `bbo_attempts_reserved`,
-   `listing_attempts_reserved` and `distinct_reserved` **unchanged**
-   from the value at T. Acquisition has ceased.
-2. `obs-live` at T+90 s — `journal_rows_last_60s` no longer rising.
-3. `obs-stop-receipt` — `transport.closed == true` and
-   `close_latency_s`. **This is the closure evidence**; 1 and 2 are
-   corroboration.
-
-If the refresh window is missed, the fallback is the weaker but still
-valid test: issue obs-stop while **streaming alone** is active
-(`journal_rows_last_60s > 0`), and report the acquisition-cessation
-check as not exercised. Do **not** wait for a second window; do not
-re-arm.
-
----
+If no journal row ever appears, the stop is issued at T+900 s
+regardless and the run is reported as **transport NOT VERIFIED**, with
+the refusal histogram as the finding. That is a complete result, not a
+failure to complete.
 
 ## 6. The exact activation request
 
@@ -369,6 +452,7 @@ Step 9 must show, from the worker's own log line:
 listing_reservation_unit         ONE_PER_OUTBOUND_REQUEST
 listing_paced                    true
 listing_max_outbound_requests    18
+watch_max                        8
 observe_max                      8
 observe_is_not_trading_admission true
 sample_seed                      PROBE2-2026-09-22
@@ -382,13 +466,17 @@ max_contracts                    0
 ```
 BETTOR_PROBE_MAX_RPS        = 0.10
 BETTOR_PROBE_CONCURRENCY    = 1
-BETTOR_PROBE_BATCH          = 12
-BETTOR_LIVE_OBSERVE_MAX     = 8
+BETTOR_LIVE_WATCH_MAX       = 8      TOTAL subscriptions (the union)
+BETTOR_LIVE_OBSERVE_MAX     = 8      observation-only additions
 BETTOR_PROBE_SAMPLE_SEED    = PROBE2-2026-09-22
 BETTOR_LIVE_MAX_CONTRACTS   = 0
 BETTOR_LIVE_DISCOVERY_PAGES = 6
 BETTOR_LIVE_DISCOVERY_PAGE_SIZE = 500
 BETTOR_FRAME_CAPTURE_N      = 25
+
+BETTOR_PROBE_BATCH is LEFT AT ITS DEFAULT. An earlier draft shrank it
+to manufacture a discovery-refresh window for the stop test; that
+spends requests for no reason but the test, and §5a removes the need.
 ```
 
 ### Budget — `obs-arm`, once

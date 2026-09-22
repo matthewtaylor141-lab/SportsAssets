@@ -216,10 +216,24 @@ jobs:
                 # [R15] READ-ONLY LIVENESS, for deciding WHEN to issue
                 # obs-stop. "Waking later and refusing does not substitute for
                 # measuring stop latency during active work" -- so the stop is
-                # issued on an observed condition rather than on a guess about
-                # timing. `journal_age_s` small means frames are arriving now;
-                # the budget counters rising between two reads means
-                # acquisition is running now.
+                # issued on an OBSERVED condition rather than on a guess about
+                # timing.
+                #
+                # THE TRIGGER IS THE SOCKET, NOT THE HTTP COUNTERS:
+                #   journal_rows_last_60s > 0  and  journal_age_s < 60
+                # A committed journal row means a frame arrived, parsed and
+                # was decided, so the socket is open and delivering. Requiring
+                # the budget counters to be RISING as well would make the stop
+                # test impossible once the acquisition allowance is spent --
+                # which it is, within the first few minutes of a 40-market
+                # probe -- and would tempt an operator into spending requests
+                # purely to manufacture a window.
+                #
+                # The counters are still reported, for the SEPARATE question
+                # of whether acquisition happened to be active at stop time.
+                # If it was, assert them unchanged at T+58 s; if it was not,
+                # record acquisition cessation as NOT EXERCISED THIS RUN
+                # rather than as a pass.
                 #
                 # NOTE ON COLUMNS, read from the deployed DDL rather than
                 # assumed: bettor_live_journal.decided_at is TEXT (the

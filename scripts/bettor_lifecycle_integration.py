@@ -144,17 +144,49 @@ class RecordedMarkets:
         self.empty_listing = empty_listing
         self.listing_fails = listing_fails
         self.list_calls = 0
+        # EVERY DISPATCH, WITH ITS ARGUMENTS. `list_calls` alone cannot
+        # distinguish "one page" from "six pages" and that is precisely
+        # how the reservation check came to pass on a broken build; see
+        # `list` below.
+        self.list_dispatch: list = []
         self.bbo_calls = []
         self.book_calls = []
 
     def list(self, params):
+        """ONE INVOCATION == ONE OUTBOUND REQUEST, and it PAGINATES.
+
+        THE DEFECT IN THIS DOUBLE, found 2026-09-22 after a reviewer
+        asked how `listing_attempts_reserved >= list_calls` could ever
+        have passed on a build that issued six requests per
+        reservation. It could not have -- unless `list_calls` was
+        counting a different boundary, and it was:
+
+            if ... params.get("offset", 0) > 0: return {"markets": []}
+            return {"markets": self.fx.listing_envelope()}
+
+        The envelope is 40 rows and the page size is 500, so the
+        worker's pagination loop got a short page on its FIRST call and
+        stopped. `list_calls` was 1, the reservation was 1, and
+        `1 >= 1` passed. THE CHECK NEVER EXERCISED PAGINATION AT ALL,
+        so tightening it to `==` would have changed nothing.
+
+        This version slices the envelope by `offset`/`limit` like the
+        venue does, so a small page size produces real multi-page
+        traffic and the reconciliation in L3B has something to count.
+        """
         self.list_calls += 1
+        off = int(params.get("offset", 0) or 0)
+        lim = int(params.get("limit", 500) or 500)
+        self.list_dispatch.append({"n": self.list_calls, "offset": off,
+                                   "limit": lim,
+                                   "at": time.time()})
         if self.listing_fails > 0:
             self.listing_fails -= 1
             raise RuntimeError("listing transport failed")
-        if self.empty_listing or params.get("offset", 0) > 0:
+        if self.empty_listing:
             return {"markets": []}
-        return {"markets": self.fx.listing_envelope()}
+        rows = self.fx.listing_envelope()
+        return {"markets": rows[off:off + lim]}
 
     def bbo(self, slug):
         self.bbo_calls.append(slug)
@@ -259,6 +291,17 @@ async def arm(pool, *, minutes=30, distinct=40, attempts=160, listing=18):
                        distinct, attempts, listing)
     await run_on(pool)
     return pid
+
+
+async def journal_rows(pool, slugs):
+    """The COMMITTED records for these markets, from the database."""
+    if not slugs:
+        return []
+    rows = await pool.fetch(
+        "SELECT record FROM bettor_live_journal WHERE market_id = ANY($1)",
+        list(slugs))
+    return [json.loads(r["record"]) if isinstance(r["record"], str)
+            else r["record"] for r in rows]
 
 
 async def run_on(pool):
@@ -447,6 +490,66 @@ async def L3_reservation_precedes_dispatch(pool):
     check("ceiling: attempts <= 160", b["bbo_attempts_reserved"] <= 160, True)
     check("ceiling: listing <= 18",
           b["listing_attempts_reserved"] <= 18, True)
+
+
+async def L3B_listing_dispatch_reconciles(pool):
+    """EVERY OUTBOUND LISTING REQUEST, RECONCILED AGAINST ITS RESERVATION.
+
+    WHY THIS PHASE EXISTS. L3 asserted
+    `listing_attempts_reserved >= m.list_calls` and passed on a build
+    where `_list_candidates` took ONE reservation and issued up to SIX
+    `markets.list` calls. That was only possible because the check was
+    counting the wrong boundary: the fixture's listing is 40 rows, the
+    page size defaults to 500, so the worker's pagination loop got a
+    short page on its FIRST call and stopped. `list_calls` was 1, the
+    reservation was 1, and `1 >= 1` passed. Tightening `>=` to `==`
+    would have changed nothing -- PAGINATION WAS NEVER EXERCISED.
+
+    This phase forces it. The page size is set small enough that the
+    same 40 markets span several pages, one attempt is made to fail so
+    a RETRY is exercised too, and the reconciliation is made against
+    the RECORDED DISPATCH LIST -- every invocation with its offset --
+    rather than against a bare counter.
+    """
+    rule("L3B  LISTING PAGINATION AND RETRIES ARE RESERVED PER REQUEST")
+    await wipe_observation(pool)
+    fx = Fixtures(n=40)
+    # 40 markets at 8 per page = 5 pages, inside the 6-page bound.
+    os.environ["BETTOR_LIVE_DISCOVERY_PAGE_SIZE"] = "8"
+    os.environ["BETTOR_LIVE_DISCOVERY_PAGES"] = "6"
+    # The FIRST request fails, so a retry is issued and must be paid
+    # for like any other request.
+    m = RecordedMarkets(fx, listing_fails=1)
+    install(fx, m)
+    pid = await arm(pool)
+    bl._reset_backoff()
+    await supervisor_run(60)
+    await stop_now(pool)
+    await settle()
+    b = await budget(pool)
+
+    offsets = [d["offset"] for d in m.list_dispatch]
+    print("   dispatched : %d requests at offsets %s"
+          % (len(m.list_dispatch), offsets))
+    print("   reserved   : %s listing units"
+          % b["listing_attempts_reserved"])
+
+    check("pagination was actually exercised", len(m.list_dispatch) > 1, True)
+    check("a retry was actually exercised",
+          offsets.count(0) >= 2, True)
+    check("the pages walked distinct offsets",
+          sorted(set(offsets)) == sorted({0, 8, 16, 24, 32}), True)
+    # THE RECONCILIATION. One reserved unit per outbound request,
+    # counted at the dispatch boundary, retries and pages included.
+    check("reserved == outbound listing requests dispatched",
+          b["listing_attempts_reserved"], len(m.list_dispatch))
+    check("   ... and the bare counter agrees with the dispatch list",
+          m.list_calls, len(m.list_dispatch))
+    check("the listing ceiling still holds",
+          b["listing_attempts_reserved"] <= 18, True)
+    check("the identity on the row is the armed one", b["probe_id"], pid)
+    os.environ.pop("BETTOR_LIVE_DISCOVERY_PAGE_SIZE", None)
+    os.environ.pop("BETTOR_LIVE_DISCOVERY_PAGES", None)
 
 
 async def L4_no_replenishment(pool):
@@ -675,7 +778,45 @@ async def L6_malformed_refusals(pool):
     check("   ... named PRICE_UNPARSABLE (no slug to blame the book)",
           empty.get("reason"), uni.R_UNPARSABLE)
 
-    check("no mangled market reached the stream", subs & set(victims), set())
+    # ── WHAT MAY AND MAY NOT BE SUBSCRIBED ───────────────────────────
+    #
+    # This was ONE check -- "no mangled market reached the stream" --
+    # and it now fails, because the observation subset deliberately
+    # watches markets the rule REFUSED so the transport can be verified
+    # when the strategy admits nothing. Keeping it as written would be
+    # asserting the circular dependency the repair exists to remove.
+    #
+    # It is restated as TWO checks along the line the whole repair
+    # rests on, and the safety half is not weakened:
+    #
+    #   a body we could not READ            -> never subscribed
+    #   a body that reads and is merely
+    #   unattractive to the strategy        -> MAY be subscribed, and
+    #                                          carries its refusal on
+    #                                          every record
+    never = {victims[1],        # state says CLOSED -- not open
+             victims[2]}        # bestAsk present and unreadable
+    check("a closed or unreadable market is NEVER subscribed",
+          subs & never, set())
+    economic = {victims[0],     # genuinely one-sided (bestBid absent)
+                victims[3],     # no volume figure
+                victims[4],     # volume below the minimum
+                victims[5]}     # ask above the maximum price
+    watched = subs & economic
+    print("   economically refused markets watched: %d of %d"
+          % (len(watched), len(economic)))
+    # EVERY ONE OF THEM CARRIES ITS REFUSAL, durably, on every record
+    # it produced -- that is what makes watching it evidence rather
+    # than a relaxation.
+    rows_ = await journal_rows(pool, watched) if watched else []
+    if watched:
+        check("every watched refusal is journalled as OBSERVATION_ONLY",
+              all(r.get("observation_basis") == "OBSERVATION_ONLY"
+                  for r in rows_), True)
+        check("   ... and names the rule's reason",
+              all(r.get("universe_rule_reason") for r in rows_), True)
+        check("   ... under the frozen rule version",
+              {r.get("universe") for r in rows_}, {uni.UNIVERSE_VERSION})
     check("a malformed body never raised out of the probe",
           len(m.bbo_calls) >= len(victims), True)
 
@@ -1061,6 +1202,7 @@ async def L2B_restart(pool, expect):
 PHASES = {
     "L1": L1_disabled_startup,
     "L3": L3_reservation_precedes_dispatch,
+    "L3B": L3B_listing_dispatch_reconciles,
     "L4": L4_no_replenishment,
     "L5": L5_full_path,
     "L6": L6_malformed_refusals,

@@ -104,6 +104,7 @@ import asyncio
 import json
 import logging
 import os
+import socket
 import threading
 import time
 import uuid
@@ -153,6 +154,18 @@ OBSERVE_MAX_ENV = "BETTOR_LIVE_OBSERVE_MAX"
 # variable. The distinct-market reservation bounds what is ACQUIRED;
 # this bounds what is SUBSCRIBED.
 OBSERVE_MAX_CEIL = 40
+
+# THE TOTAL SUBSCRIPTION CAP -- the UNION of strategy-admitted and
+# observation-only markets.
+#
+# `OBSERVE_MAX` alone bounds only the observation-only ADDITIONS. If
+# the rule admitted thirty markets, "watch eight extra" subscribes
+# thirty-eight and the declared bound describes neither number. For
+# this probe the declared limit is a TOTAL, so the union is what is
+# capped and any truncation of the rule's own choices is reported by
+# name in `strategy_admitted_dropped_by_cap`.
+WATCH_MAX = 8
+WATCH_MAX_ENV = "BETTOR_LIVE_WATCH_MAX"
 
 # HOW LONG THE SHUTDOWN WAITS FOR THE SOCKET THREAD TO ACTUALLY CLOSE.
 #
@@ -1329,8 +1342,37 @@ async def _list_candidates(client=None, *, reserve=None, sleep=None,
             "listing_truncated_at_page_bound": truncated}
 
 
+def _prices_parse(row: dict) -> bool:
+    """Do the row's PRICE FIELDS, where present, actually parse?
+
+    `assess()` cannot answer this. It runs `_f()` over both sides and
+    reports `ONE_SIDED_BOOK` when either comes back None -- which
+    conflates a genuinely one-sided book (the field is ABSENT, a real
+    market state worth observing) with a MALFORMED body (the field is
+    present and unreadable, e.g. `{"value": "not-a-number"}`). The two
+    are the same reason string and different kinds of fact.
+
+    `assess` is frozen and is not changed to tell them apart. This asks
+    the narrower question the OBSERVATION filter needs: a body whose
+    prices do not parse is a transport failure, and a transport failure
+    is never subscribed. A body that parses and is merely unattractive
+    is a strategy verdict, and strategy verdicts do not decide what is
+    watched.
+    """
+    for key in ("bestBid", "best_bid", "yes_bid",
+                "bestAsk", "best_ask", "yes_ask"):
+        if key not in row:
+            continue
+        raw = row.get(key)
+        if raw is None:
+            continue                     # explicitly absent: one-sided
+        if uni._f(raw) is None:
+            return False                 # present and unreadable
+    return True
+
+
 def observation_subset(rows, candidates, *, limit: int,
-                       admitted=None) -> dict:
+                       admitted=None, watch_max: int | None = None) -> dict:
     """A small, bounded, DETERMINISTIC set of markets to WATCH --
     chosen without reference to whether the strategy would trade them.
 
@@ -1363,9 +1405,17 @@ def observation_subset(rows, candidates, *, limit: int,
     admits markets they are watched as well; this subset exists so that
     the run has something to watch WHEN IT DOES NOT.
     """
-    admitted = set(admitted or ())
+    admitted_in = [s for s in (admitted or ()) if s]
+    admitted = set(admitted_in)
+    # THE TOTAL SUBSCRIPTION CAP. `limit` bounds the OBSERVATION-ONLY
+    # additions; `watch_max` bounds the UNION that is actually
+    # subscribed. Without the second, "watch 8 extra" plus "the rule
+    # admitted 30" subscribes 38, and the declared bound would describe
+    # neither number. Default: the union may not exceed `limit` either.
+    total_cap = int(limit if watch_max is None else watch_max)
+    total_cap = max(0, total_cap)
     order = {c["slug"]: i for i, c in enumerate(candidates or [])}
-    seen, pool = set(), []
+    seen, pool, malformed = set(), [], []
     for row in rows or []:
         slug = row.get("slug")
         if not slug or slug in seen:
@@ -1376,8 +1426,16 @@ def observation_subset(rows, candidates, *, limit: int,
         # call open, or whose book will not parse, cannot produce a
         # meaningful frame -- that is a transport fact, not an economic
         # one. Every economic exclusion (spread, price, volume,
-        # one-sided) is left in the pool deliberately.
+        # genuinely one-sided) is left in the pool deliberately.
         if a["reason"] in (uni.R_NOT_OPEN, uni.R_UNPARSABLE):
+            continue
+        # A MALFORMED BODY IS NOT AN ECONOMIC VERDICT. `assess` reports
+        # `ONE_SIDED_BOOK` both for an absent side and for a side that
+        # is present and unreadable; only the first is a market state.
+        # Subscribing to the second would mean subscribing on the
+        # strength of a body we could not read.
+        if not _prices_parse(row):
+            malformed.append(slug)
             continue
         pool.append({
             "slug": slug,
@@ -1392,14 +1450,32 @@ def observation_subset(rows, candidates, *, limit: int,
         })
     pool.sort(key=lambda p: (0 if p["two_sided"] else 1,
                              p["order_index"], p["slug"]))
-    chosen, extra = [], []
+    by_slug = {p["slug"]: p for p in pool}
+
+    # ADMITTED MARKETS COME FIRST, in the rule's own ranked order --
+    # `select` ranks them by traded volume, and that ranking is the
+    # strategy's, not ours. They are truncated at the cap like
+    # everything else, and the truncation is REPORTED rather than
+    # silent, because a run that watched fewer markets than the rule
+    # chose is a different run.
+    admitted_present = [s for s in admitted_in if s in by_slug]
+    keep_admitted = [by_slug[s] for s in admitted_present[:total_cap]]
+    dropped_admitted = admitted_present[total_cap:]
+    # An admitted market absent from the pool would mean the rule
+    # included something this function then excluded -- impossible as
+    # the two are written, so it is reported rather than assumed away.
+    admitted_not_pooled = [s for s in admitted_in if s not in by_slug]
+
+    room = max(0, total_cap - len(keep_admitted))
+    extra = []
     for p in pool:
         if p["slug"] in admitted:
             continue
-        if len(extra) >= max(0, int(limit)):
+        if len(extra) >= min(room, max(0, int(limit))):
             break
         extra.append(p)
-    chosen = [p for p in pool if p["slug"] in admitted] + extra
+
+    chosen = keep_admitted + extra
     refused = [p for p in extra if not p["strategy_admitted"]]
     reasons: dict = {}
     for p in refused:
@@ -1407,17 +1483,28 @@ def observation_subset(rows, candidates, *, limit: int,
         reasons[r] = reasons.get(r, 0) + 1
     return {
         "limit": int(limit),
+        "watch_max": total_cap,
         "eligible_for_observation": len(pool),
+        "excluded_malformed_body": malformed,
         "observation_only_slugs": [p["slug"] for p in extra],
         "strategy_admitted_slugs": sorted(admitted),
+        "strategy_admitted_watched": [p["slug"] for p in keep_admitted],
+        # NAMED, NOT SILENT. Non-empty means the cap bound the
+        # strategy's own choices and the run is smaller than the rule
+        # asked for.
+        "strategy_admitted_dropped_by_cap": dropped_admitted,
+        "strategy_admitted_not_observable": admitted_not_pooled,
         "slugs": [p["slug"] for p in chosen],
         "detail": chosen,
+        "total_subscribed": len(chosen),
         "observed_despite_refusal": len(refused),
         "refusal_reasons_observed": reasons,
         "rule": uni.UNIVERSE_VERSION,
         "rule_applied": "UNCHANGED -- the refusal is recorded, not waived",
         "selection": ("seeded candidate order, two-sided first; fixed "
                       "before any economic result was examined"),
+        "cap_semantics": ("watch_max bounds the UNION of admitted and "
+                          "observation-only subscriptions"),
         "not_trading_admission": True,
     }
 
@@ -1426,7 +1513,8 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
                     rounds: int = probe_mod.PROBE_ROUNDS_AT_START,
                     batch: int | None = None, should_stop=None,
                     max_distinct: int | None = None, reserve=None,
-                    sleep=None, observe_max: int | None = None) -> dict:
+                    sleep=None, pacer=None,
+                    observe_max: int | None = None) -> dict:
     """Listing -> ENRICHMENT -> the frozen selection rule.
 
     THE RULE RUNS ONLY AFTER ENRICHMENT. It used to run on listing
@@ -1456,12 +1544,20 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
         from .. import pmus
         client = pmus._get_client()
 
-    # ONE PACER FOR THE WHOLE DISCOVERY -- the listing and every
-    # enrichment round. Before this the listing had no pacer and the
-    # rounds each built their own, so "the process's request rate" was
-    # not a quantity that existed anywhere.
-    pace = probe_mod.configured_pace()
-    pacer = probe_mod.Pacer(pace["max_rps"], sleep=sleep, name="discovery")
+    # ONE PACER FOR THE WHOLE PROCESS -- the listing, every enrichment
+    # round, and every later discovery refresh.
+    #
+    # Before this the listing had no pacer at all and each round built
+    # its own, so "the process's outbound request rate" was not a
+    # quantity that existed anywhere. Building one per `_discover` call
+    # was still wrong: a refresh got a fresh pacer whose `_next_at`
+    # started at zero, so the first request of every refresh ignored
+    # the rate entirely. The caller passes the process's pacer in; the
+    # fallback here exists only for direct callers in tests.
+    if pacer is None:
+        pace = probe_mod.configured_pace()
+        pacer = probe_mod.Pacer(pace["max_rps"], sleep=sleep,
+                                name="discovery")
 
     ordering = None
     if candidates is None:
@@ -1591,6 +1687,7 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
         rows, candidates,
         limit=(_int_env(OBSERVE_MAX_ENV, OBSERVE_MAX, OBSERVE_MAX_CEIL)
                if observe_max is None else observe_max),
+        watch_max=_int_env(WATCH_MAX_ENV, WATCH_MAX, OBSERVE_MAX_CEIL),
         admitted=sel["slugs"])
     sel.update(meta)
     sel.update({"ok": True, "candidates": len(candidates),
@@ -1841,9 +1938,19 @@ async def main(*, client=None, stream_factory=None, store=None,
         return {"started": False, "why": "STORE_START_REFUSED",
                 "detail": started}
 
+    # THE PROCESS'S ONE OUTBOUND RATE. Built here, before the first
+    # request, and handed to every discovery for the life of the
+    # process -- listing, enrichment rounds and every later refresh
+    # share it, so the configured rate describes the PROCESS and not
+    # one call site. The durable reservation counters are already
+    # global for the same reason.
+    _pace = probe_mod.configured_pace()
+    process_pacer = probe_mod.Pacer(_pace["max_rps"], sleep=sleep,
+                                    name="process")
     first = await _discover(client=client, should_stop=_stop_now,
                             max_distinct=budget["remaining"],
-                            reserve=_reserve, sleep=sleep)
+                            reserve=_reserve, sleep=sleep,
+                            pacer=process_pacer)
     if not first.get("ok"):
         log.error("bettor_live_loop: %s (%s); not starting",
                   first.get("why"), first.get("error"))
@@ -1981,6 +2088,11 @@ async def main(*, client=None, stream_factory=None, store=None,
     last_control = t_start
     loop.control = control
     stop_reason = None
+    # WHEN THIS PROCESS SAW THE STOP, as distinct from when an operator
+    # issued it. The gap between the two is the control-poll interval
+    # and is not this loop's latency; reporting one as the other would
+    # flatter the measurement by up to CONTROL_EVERY_S.
+    control_detected_at = None
     last_prune = t_start
     cycle = 0
     receipt = None
@@ -2013,6 +2125,7 @@ async def main(*, client=None, stream_factory=None, store=None,
                                 b.get("detail"))
                     await ctl.disarm(control_pool, b["state"])
                     stop_reason = b["state"]
+                    control_detected_at = _now().isoformat()
                     break
                 live = await ctl.read_control(control_pool)
                 loop.control = live
@@ -2021,6 +2134,7 @@ async def main(*, client=None, stream_factory=None, store=None,
                                 "control (%s: %s)", live["why"],
                                 live.get("detail"))
                     stop_reason = live["why"]
+                    control_detected_at = _now().isoformat()
                     break
 
             if now - last_discovery >= DISCOVERY_EVERY_S:
@@ -2028,7 +2142,8 @@ async def main(*, client=None, stream_factory=None, store=None,
                 nxt = await _discover(client=client,
                                       candidates=candidates,
                                       offset=probe_offset, rounds=1,
-                                      reserve=_reserve,
+                                      reserve=_reserve, sleep=sleep,
+                                      pacer=process_pacer,
                                       should_stop=_stop_now)
                 probe_offset = nxt.get("next_offset", probe_offset)
                 # THE REFRESH WATCHES WHAT THE START WATCHED: admitted
@@ -2133,25 +2248,68 @@ async def main(*, client=None, stream_factory=None, store=None,
         shut = stream.stop(wait_s=STREAM_CLOSE_WAIT_S)
         await _final_flush(loop)
         rep = loop.report()
+        tel = process_pacer.telemetry()
         receipt = {
+            # ── IDENTITY ────────────────────────────────────────────
+            #
+            # WHOSE shutdown this was. A receipt under one key is
+            # overwritten by the next run, so without these a reader
+            # cannot tell whether the row in front of them belongs to
+            # the probe they armed or to a supervisor restart that
+            # happened afterwards.
             "probe_id": str(probe_id) if probe_id else None,
             "boot_id": loop.boot_id,
+            "pid": os.getpid(),
+            "host": socket.gethostname(),
             "loop": LOOP_VERSION,
+            "receipt_written_at": _now().isoformat(),
+
+            # ── THE FOUR TIMES, KEPT APART ──────────────────────────
+            #
+            # control_detected_at  when THIS PROCESS read the stop
+            # stop_requested_at    when it asked the socket to close
+            # socket_closed_at     when ws.close() RETURNED
+            # last_request_at      the last outbound HTTP request it
+            #                      STARTED
+            #
+            # The operator's own issue time is not visible from here,
+            # so the gap between it and control_detected_at is the
+            # control poll interval and belongs to the operator's
+            # record, not to this one.
             "stopped_by": stop_reason,
+            "control_detected_at": control_detected_at,
+            "control_poll_interval_s": ctl.CONTROL_EVERY_S,
+            "stop_requested_at": shut.get("stop_requested_at_iso"),
+            "socket_closed_at": shut.get("socket_closed_at_iso"),
+            "thread_exited_at": shut.get("thread_exited_at_iso"),
+            "last_request_started_at": tel.get(
+                "last_request_started_at_iso"),
+            "last_frame_at": shut.get("last_frame_at_iso"),
             "started_at": loop.started_at,
             "stopped_at": loop.stopped_at,
             "runtime_s": rep.get("runtime_s"),
-            # ACQUISITION: what was spent, and when the last outbound
-            # request was started. `requests_started` stops rising the
-            # moment acquisition ceases, so the pair is the cessation
-            # evidence.
+
+            # ── THE VERDICT ─────────────────────────────────────────
+            #
+            # `shutdown` is CLOSED only when the socket thread ended
+            # AND ws.close() returned without raising. A join that
+            # timed out reports INCOMPLETE_JOIN_TIMEOUT and
+            # `closed: false` -- an unverified shutdown is a failure,
+            # not a slow success.
+            "transport": shut,
+            "shutdown_verified": bool(shut.get("closed")),
+
+            # ── ACQUISITION ─────────────────────────────────────────
+            #
+            # From the PROCESS pacer, which every listing page, every
+            # enrichment read and every refresh shares, so
+            # `requests_started` is the process's whole outbound count.
             "acquisition": {
                 "reserved": dict(reserved_tally),
-                "telemetry": (loop.discovery or {}).get(
-                    "request_telemetry"),
+                "telemetry": tel,
+                "rate_limit_events": (loop.discovery or {}).get(
+                    "coverage", {}).get("rate_limit_events"),
             },
-            # TRANSPORT: the positive shutdown facts.
-            "transport": shut,
             "stream": rep.get("stream"),
             "frames": rep.get("frames"),
             "watching": rep.get("watching"),
@@ -2160,6 +2318,10 @@ async def main(*, client=None, stream_factory=None, store=None,
             "orders_submitted": 0,
         }
         await ctl.write_stop_receipt(control_pool, receipt)
+        if not shut.get("closed"):
+            log.error("bettor_live_loop: SHUTDOWN NOT VERIFIED (%s); "
+                      "the socket close was not observed to complete",
+                      shut.get("shutdown"))
         log.info("bettor_live_loop: stopped (%s); transport %s; "
                  "%d records written, %d persist failures",
                  stop_reason, json.dumps(shut, default=str),

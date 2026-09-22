@@ -256,6 +256,11 @@ P_NO_DISTINCT = "PROBE_NO_DISTINCT_ALLOWANCE"
 P_NO_ATTEMPT = "PROBE_NO_ATTEMPT_ALLOWANCE"
 
 
+def _utc_iso(epoch: float) -> str:
+    from datetime import datetime, timezone
+    return datetime.fromtimestamp(epoch, timezone.utc).isoformat()
+
+
 def _env_float(name, default):
     raw = os.environ.get(name)
     if raw is None or not str(raw).strip():
@@ -322,6 +327,12 @@ class Pacer:
         self.max_inflight = 0
         self.first_start_at: float | None = None
         self.last_start_at: float | None = None
+        # WALL CLOCK, beside the monotonic one. The monotonic stamps
+        # are for measuring intervals; the receipt needs a time an
+        # operator can compare against when they issued the stop, and
+        # a monotonic reading is meaningless outside this process.
+        self.last_start_wall: float | None = None
+        self.last_start_iso: str | None = None
         self.penalties_s = 0.0
         self.penalties = 0
 
@@ -346,6 +357,8 @@ class Pacer:
             if self.first_start_at is None:
                 self.first_start_at = now
             self.last_start_at = now
+            self.last_start_wall = time.time()
+            self.last_start_iso = _utc_iso(self.last_start_wall)
             self.inflight += 1
             self.max_inflight = max(self.max_inflight, self.inflight)
 
@@ -388,6 +401,10 @@ class Pacer:
             "pacer": self.name,
             "configured_max_rps": self.max_rps,
             "requests_started": self.grants,
+            # THE LAST OUTBOUND REQUEST THIS PROCESS STARTED, in wall
+            # clock, so "did acquisition stop when we said stop" is a
+            # comparison an operator can actually make.
+            "last_request_started_at_iso": self.last_start_iso,
             "observed_span_s": None if span is None else round(span, 3),
             "observed_mean_rps": (
                 None if not span else round(self.grants / span, 4)),

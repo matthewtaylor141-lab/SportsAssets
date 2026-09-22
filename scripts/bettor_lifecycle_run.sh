@@ -49,7 +49,7 @@ grep -E "APPLIED_COUNT|APPLIED_FIRST|APPLIED_LAST|RUNTIME_SUPPLIED|^  [0-9] \|" 
 
 say "3. the lifecycle"
 FAILED=()
-for P in L1 L3 L4 L5 L6 L7 L8 L9 L11; do
+for P in L1 L3 L3B L4 L5 L6 L7 L8 L9 L11; do
   printf '\n--- phase %s ---\n' "$P"
   run python lc.py --phase "$P" > "$OUT/$P.txt" 2>&1
   rc=$?

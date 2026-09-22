@@ -2103,18 +2103,62 @@ class TestObservationIsNotTradingAdmission:
         assert uni_mod.MAX_PRICE == 0.50
         assert uni_mod.MIN_SHARES_TRADED == 100.0
 
-    def test_admitted_markets_do_not_consume_the_observation_limit(self):
+    def test_the_union_of_admitted_and_observed_respects_the_total_cap(self):
+        """THE DECLARED LIMIT IS A TOTAL.
+
+        This test used to assert that admitted markets did NOT consume
+        the observation limit -- so one admitted plus a limit of three
+        subscribed four, and the declared bound described neither
+        number. `watch_max` now bounds the union.
+        """
         good = _bbo("good", bid="0.4000", ask="0.4500")   # 5 ticks, admitted
         bad = [_bbo("b%d" % i, bid="0.4500", ask="0.4600") for i in range(5)]
         rows = [good] + bad
         cands = [{"slug": r["slug"]} for r in rows]
         sel = uni_mod.select(rows)
         assert sel["slugs"] == ["good"]
-        obs = bl.observation_subset(rows, cands, limit=3,
+        obs = bl.observation_subset(rows, cands, limit=8, watch_max=3,
                                     admitted=sel["slugs"])
+        assert obs["total_subscribed"] == 3
+        assert len(obs["slugs"]) == 3
         assert "good" in obs["slugs"]
-        assert len(obs["observation_only_slugs"]) == 3
-        assert "good" not in obs["observation_only_slugs"]
+        assert len(obs["observation_only_slugs"]) == 2
+        assert obs["watch_max"] == 3
+
+    def test_the_cap_truncates_the_rules_own_choices_and_says_so(self):
+        """A run that watched fewer markets than the rule chose is a
+        DIFFERENT RUN, and the truncation is named rather than silent."""
+        rows = [_bbo("a%d" % i, bid="0.4000", ask="0.4500")
+                for i in range(6)]
+        cands = [{"slug": r["slug"]} for r in rows]
+        sel = uni_mod.select(rows)
+        assert len(sel["slugs"]) == 6
+        obs = bl.observation_subset(rows, cands, limit=8, watch_max=2,
+                                    admitted=sel["slugs"])
+        assert obs["total_subscribed"] == 2
+        assert len(obs["strategy_admitted_dropped_by_cap"]) == 4
+        assert obs["observation_only_slugs"] == []
+
+    def test_the_default_total_cap_is_the_observation_limit(self):
+        rows = [_bbo("a%d" % i, bid="0.4500", ask="0.4600")
+                for i in range(9)]
+        cands = [{"slug": r["slug"]} for r in rows]
+        obs = bl.observation_subset(rows, cands, limit=4, admitted=[])
+        assert obs["watch_max"] == 4 and obs["total_subscribed"] == 4
+
+    def test_a_malformed_body_is_never_subscribed(self):
+        """`assess` reports ONE_SIDED_BOOK both for an absent side and
+        for one that is present and unreadable. Only the first is a
+        market state; the second is a body we could not read, and
+        subscribing on it would mean subscribing on nothing."""
+        good = _bbo("real_one_sided", ask=None)
+        junk = _bbo("junk", ask="not-a-number")
+        rows = [good, junk]
+        obs = bl.observation_subset(rows, [{"slug": "real_one_sided"},
+                                           {"slug": "junk"}],
+                                    limit=8, admitted=[])
+        assert obs["slugs"] == ["real_one_sided"]
+        assert obs["excluded_malformed_body"] == ["junk"]
 
     def test_closed_and_unparsable_markets_are_never_watched(self):
         """Valid and OPEN. A market the venue does not call open cannot
@@ -2512,12 +2556,75 @@ class TestTheShutdownIsMeasuredNotInferred:
     same absence. These are positive observations, made by the process
     that did the closing and surviving its exit."""
 
-    def test_stop_returns_a_closure_record(self):
+    def test_a_stream_that_never_ran_does_not_report_a_close(self):
+        """A THREAD THAT NEVER EXISTED IS NOT A CLOSED SOCKET.
+
+        This test previously asserted `closed is True` here, which is
+        the whole error: there was no connection, so there was nothing
+        to close, and `close_latency_s` was a number measuring nothing.
+        """
         s = ms.MarketStream("k", "s", autostart=False)
         rec = s.stop(wait_s=0.0)
-        assert rec["closed"] is True and rec["thread_alive"] is False
+        assert rec["shutdown"] == ms.MarketStream.SHUT_NEVER_STARTED
+        assert rec["closed"] is False
+        assert rec["thread_started"] is False
+        assert rec["socket_close_returned"] is False
+        # UNMEASURED is None, never zero.
+        assert rec["close_latency_s"] is None
         assert rec["stop_requested_at_iso"]
-        assert rec["close_latency_s"] is not None
+
+    def test_a_join_that_times_out_reports_failure(self):
+        """An unverified shutdown is a FAILURE, not a slow success."""
+        import threading as _th
+        s = ms.MarketStream("k", "s", autostart=False)
+        hold = _th.Event()
+        t = _th.Thread(target=hold.wait, daemon=True)
+        t.start()
+        s._thread = t
+        try:
+            rec = s.stop(wait_s=0.05)
+            assert rec["shutdown"] == ms.MarketStream.SHUT_JOIN_TIMEOUT
+            assert rec["closed"] is False and rec["thread_alive"] is True
+            assert rec["socket_closed_at_iso"] is None
+        finally:
+            hold.set()
+            t.join(timeout=2)
+
+    def test_a_thread_that_exited_without_closing_is_not_CLOSED(self):
+        """A thread can end without its socket having shut -- an
+        exception on the way out, a close() that raised, a run that
+        never connected. Thread exit is not proof."""
+        s = ms.MarketStream("k", "s", autostart=False)
+        s._thread = type("Dead", (), {"is_alive": lambda self: False})()
+        s.thread_exited_at, s.thread_exited_at_iso = time.time(), "t"
+        rec = s.stop(wait_s=0.0)
+        assert rec["shutdown"] == ms.MarketStream.SHUT_NO_CLOSE
+        assert rec["closed"] is False
+
+    def test_a_close_that_raised_is_reported_as_incomplete(self):
+        s = ms.MarketStream("k", "s", autostart=False)
+        s._thread = type("Dead", (), {"is_alive": lambda self: False})()
+        s.socket_closed_at = time.time()
+        s.socket_closed_at_iso = "t"
+        s.socket_close_ok = False
+        s.socket_close_error = "ConnectionResetError"
+        rec = s.stop(wait_s=0.0)
+        assert rec["shutdown"] == ms.MarketStream.SHUT_CLOSE_FAILED
+        assert rec["closed"] is False
+        assert rec["socket_close_error"] == "ConnectionResetError"
+
+    def test_only_a_returned_close_counts_as_CLOSED(self):
+        s = ms.MarketStream("k", "s", autostart=False)
+        s._thread = type("Dead", (), {"is_alive": lambda self: False})()
+        s.stop_requested_at = time.time() - 1.5
+        s.stop_requested_at_iso = "t0"
+        s.socket_closed_at = time.time()
+        s.socket_closed_at_iso = "t1"
+        s.socket_close_ok = True
+        rec = s.stop(wait_s=0.0)
+        assert rec["shutdown"] == ms.MarketStream.SHUT_CLOSED
+        assert rec["closed"] is True
+        assert 1.0 < rec["close_latency_s"] < 3.0
 
     def test_a_frame_stamps_when_it_arrived(self):
         s = ms.MarketStream("k", "s", autostart=False)
@@ -2527,12 +2634,15 @@ class TestTheShutdownIsMeasuredNotInferred:
         s._on_market_data(md("m1", source_ts=fresh(-1)))
         assert s.stats()["last_frame_at_iso"] is not None
 
-    def test_the_stop_latency_is_a_subtraction_not_an_inference(self):
+    def test_stats_keeps_socket_close_and_thread_exit_apart(self):
         s = ms.MarketStream("k", "s", autostart=False)
         s.stop(wait_s=0.0)
         st = s.stats()
-        assert st["stop_requested_at_iso"] and st["closed_at_iso"]
-        assert 0.0 <= st["close_latency_s"] < 5.0
+        assert st["stop_requested_at_iso"]
+        # NOTHING CLOSED, so nothing is claimed.
+        assert st["socket_closed_at_iso"] is None
+        assert st["close_latency_s"] is None
+        assert "thread_exited_at_iso" in st
 
     def test_main_writes_a_durable_stop_receipt(self, monkeypatch,
                                                 tmp_path):

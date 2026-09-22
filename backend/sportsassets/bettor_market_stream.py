@@ -192,8 +192,22 @@ class MarketStream:
         self.last_frame_at_iso: str | None = None
         self.stop_requested_at: float | None = None
         self.stop_requested_at_iso: str | None = None
-        self.closed_at: float | None = None
-        self.closed_at_iso: str | None = None
+        # THREE DIFFERENT EVENTS, KEPT APART.
+        #
+        # `socket_closed_at` is stamped when `ws.close()` RETURNS. That
+        # is the only one of these that says the connection was shut.
+        # `thread_exited_at` is stamped when the socket thread ends --
+        # a thread can exit without its socket having closed cleanly
+        # (an exception on the way out, a close that raised, a run that
+        # never connected at all), so thread exit is NOT proof of
+        # closure and is never reported as such.
+        self.socket_closed_at: float | None = None
+        self.socket_closed_at_iso: str | None = None
+        self.socket_close_ok: bool | None = None
+        self.socket_close_error: str | None = None
+        self.socket_closes = 0
+        self.thread_exited_at: float | None = None
+        self.thread_exited_at_iso: str | None = None
         self._stop = False
         self._thread = None
         if autostart:
@@ -208,14 +222,37 @@ class MarketStream:
                                         name="bettor-market-stream")
         self._thread.start()
 
-    def stop(self, *, wait_s: float = 0.0) -> dict:
-        """Ask the socket thread to close, and OPTIONALLY WAIT FOR IT.
+    # Shutdown verdicts. Only the first one means the connection shut.
+    SHUT_CLOSED = "CLOSED"
+    SHUT_NEVER_STARTED = "NEVER_STARTED"
+    SHUT_JOIN_TIMEOUT = "INCOMPLETE_JOIN_TIMEOUT"
+    SHUT_CLOSE_FAILED = "INCOMPLETE_CLOSE_RAISED"
+    SHUT_NO_CLOSE = "INCOMPLETE_THREAD_EXITED_WITHOUT_CLOSE"
 
-        The old signature set a flag and returned, so a caller could
-        only infer closure from silence. `wait_s` joins the thread, and
-        the returned record says whether it closed and how long that
-        took -- the difference between "no rows arrived" and "the
-        socket is shut".
+    def stop(self, *, wait_s: float = 0.0) -> dict:
+        """Ask the socket thread to close, wait for it, and SAY WHAT
+        ACTUALLY HAPPENED.
+
+        A THREAD EXITING IS NOT PROOF OF A COMPLETED SOCKET CLOSE, and
+        this no longer treats it as one. `closed` is True only when the
+        thread has gone AND `ws.close()` returned without raising. Each
+        other outcome gets its own verdict:
+
+          NEVER_STARTED    the socket thread was never started, so
+                           there was no connection to close
+          INCOMPLETE_JOIN_TIMEOUT
+                           the wait expired with the thread still
+                           running -- shutdown is UNVERIFIED, and this
+                           is a failure, not a slow success
+          INCOMPLETE_CLOSE_RAISED
+                           close() raised; the connection's state is
+                           unknown and the error is named
+          INCOMPLETE_THREAD_EXITED_WITHOUT_CLOSE
+                           the thread ended without close() ever
+                           returning
+
+        An earlier version stamped a closure time whenever the thread
+        was not alive, which turned every one of these into CLOSED.
         """
         with self._lock:
             if self.stop_requested_at is None:
@@ -228,22 +265,45 @@ class MarketStream:
             t.join(timeout=max(0.0, float(wait_s)))
         alive = bool(t is not None and t.is_alive())
         with self._lock:
-            if not alive and self.closed_at is None:
-                # The thread is gone; if it exited without stamping
-                # (an abrupt death), stamp it now rather than leave the
-                # receipt silent about it.
-                self.closed_at = time.time()
-                self.closed_at_iso = _now_iso()
-            closed_at = self.closed_at
-        return {"stop_requested_at": asked,
-                "stop_requested_at_iso": self.stop_requested_at_iso,
-                "closed": not alive,
+            closed_at = self.socket_closed_at
+            close_ok = self.socket_close_ok
+            err = self.socket_close_error
+            exited = self.thread_exited_at
+            if t is None:
+                verdict = self.SHUT_NEVER_STARTED
+            elif alive:
+                verdict = self.SHUT_JOIN_TIMEOUT
+            elif close_ok is False:
+                verdict = self.SHUT_CLOSE_FAILED
+            elif closed_at is None:
+                verdict = self.SHUT_NO_CLOSE
+            else:
+                verdict = self.SHUT_CLOSED
+            out = {
+                "shutdown": verdict,
+                # TRUE ONLY FOR SHUT_CLOSED.
+                "closed": verdict == self.SHUT_CLOSED,
+                "thread_started": t is not None,
                 "thread_alive": alive,
-                "closed_at": closed_at,
-                "closed_at_iso": self.closed_at_iso,
+                "socket_close_returned": bool(close_ok),
+                "socket_close_error": err,
+                "socket_closes": self.socket_closes,
+                "stop_requested_at": asked,
+                "stop_requested_at_iso": self.stop_requested_at_iso,
+                "socket_closed_at_iso": self.socket_closed_at_iso,
+                "thread_exited_at_iso": self.thread_exited_at_iso,
+                "last_frame_at_iso": self.last_frame_at_iso,
+                # THE SUBTRACTION, and only where there is something to
+                # subtract. None means UNMEASURED, never zero.
                 "close_latency_s": (None if closed_at is None
                                     else round(closed_at - asked, 3)),
-                "waited_s": float(wait_s)}
+                "thread_exit_latency_s": (None if exited is None
+                                          else round(exited - asked, 3)),
+                "waited_s": float(wait_s),
+                "epoch": self.epoch,
+                "updates": self.updates,
+            }
+        return out
 
     def subscribe(self, slugs) -> dict:
         """Queue slugs. They are REQUESTED, not subscribed, until data."""
@@ -485,14 +545,19 @@ class MarketStream:
                     "errors": list(self.errors[-10:]),
                     "connected_since": self.connected_since,
                     "first_connected_at": self.first_connected_at,
-                    # POSITIVE SHUTDOWN FACTS, not inferred from silence.
+                    # POSITIVE SHUTDOWN FACTS, not inferred from
+                    # silence, and kept apart: only `socket_closed_at`
+                    # means the connection shut.
                     "last_frame_at_iso": self.last_frame_at_iso,
                     "stop_requested_at_iso": self.stop_requested_at_iso,
-                    "closed_at_iso": self.closed_at_iso,
+                    "socket_closed_at_iso": self.socket_closed_at_iso,
+                    "socket_close_returned": self.socket_close_ok,
+                    "socket_close_error": self.socket_close_error,
+                    "thread_exited_at_iso": self.thread_exited_at_iso,
                     "close_latency_s": (
-                        None if (self.closed_at is None
+                        None if (self.socket_closed_at is None
                                  or self.stop_requested_at is None)
-                        else round(self.closed_at
+                        else round(self.socket_closed_at
                                    - self.stop_requested_at, 3)),
                     "thread_alive": bool(self._thread is not None
                                          and self._thread.is_alive()),
@@ -589,14 +654,15 @@ class MarketStream:
                 self.connected = False
                 self.errors.append({"at": _now_iso(), "fatal": str(exc)})
         finally:
-            # WHEN THE SOCKET THREAD ACTUALLY ENDED. Stamped from the
-            # thread itself, so it is an observation of closure rather
-            # than an inference from silence.
+            # WHEN THE SOCKET THREAD ENDED. Stamped from the thread
+            # itself. This is NOT a claim that the connection closed --
+            # see `socket_closed_at`, which is the only stamp that
+            # means that.
             with self._lock:
                 self.connected = False
-                if self.closed_at is None:
-                    self.closed_at = time.time()
-                    self.closed_at_iso = _now_iso()
+                if self.thread_exited_at is None:
+                    self.thread_exited_at = time.time()
+                    self.thread_exited_at_iso = _now_iso()
 
     async def _main(self) -> None:
         from polymarket_us.websocket.markets import MarketsWebSocket
@@ -653,10 +719,22 @@ class MarketStream:
                     self.errors.append({"at": _now_iso(), "error": str(exc)})
             finally:
                 if ws is not None:
+                    # THE ONE EVENT THAT MEANS THE CONNECTION IS SHUT,
+                    # stamped when `close()` RETURNS and recorded with
+                    # its outcome. A close that raised is a close that
+                    # did not happen, and the receipt says so rather
+                    # than inheriting the thread's exit as proof.
                     try:
                         await ws.close()
-                    except Exception:  # noqa: BLE001
-                        pass
+                        ok, err = True, None
+                    except Exception as exc:  # noqa: BLE001
+                        ok, err = False, type(exc).__name__
+                    with self._lock:
+                        self.socket_closed_at = time.time()
+                        self.socket_closed_at_iso = _now_iso()
+                        self.socket_close_ok = ok
+                        self.socket_close_error = err
+                        self.socket_closes += 1
             with self._lock:
                 self.connected = False
                 self.connected_since = None
