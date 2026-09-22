@@ -79,36 +79,47 @@ log = logging.getLogger(__name__)
 
 PROBE_VERSION = "BETTOR_UNIVERSE_PROBE_V2"
 
-# ── THE RATE LIMIT ───────────────────────────────────────────────────
+# ── THE RATE LIMIT: NOT ESTABLISHED ──────────────────────────────────
 #
-# WHAT THE VENUE PUBLISHES: NOTHING. Across all 65,980 captured
-# responses there is not one `X-RateLimit-*`, `RateLimit-*`,
-# `Retry-After` or `X-Throttle` header -- the response header set is
-# `date, content-type, cache-control, server, age` and nothing else --
-# and there is not one HTTP 429. 61,178 answered 200; the other 4,800
-# are a single segment that is 100% 403 with a Cloudflare `server`
-# header and an HTML body, which is a WAF block of the whole host, not
-# an endpoint throttle (a throttle would not take `/book` down with
-# `/bbo` for four hours and then stop).
+# THE LIMIT FOR THIS ENDPOINT AND THIS CREDENTIAL CONTEXT IS NOT
+# ESTABLISHED. That is the whole statement, and the weaker readings of
+# it are wrong:
 #
-# SO THE APPLICABLE LIMIT IS UNKNOWN. Absence of a published limit is
-# not absence of a limit, and eight concurrent requests is not a rate
-# limit -- it is a concurrency ceiling with no bound on the rate behind
-# it.
+#   * "The venue publishes no limit." NOT SHOWN. What is shown is that
+#     no rate-limit header appeared in the 65,980 responses WE
+#     CAPTURED -- `date, content-type, cache-control, server, age` and
+#     nothing else. A published limit can live in documentation, in a
+#     contract, or in headers sent only once a threshold is neared. Our
+#     sample cannot see any of those.
+#   * "There is no 429, so there is no limit." NOT SHOWN. Zero observed
+#     429s over a sample that never exceeded one request per second is
+#     what you would see EITHER from no limit OR from a limit we never
+#     came close to. The observation does not separate them.
+#   * The 4,800 non-200s are one segment that is 100% 403 with a
+#     Cloudflare `server` header and an HTML body -- consistent with a
+#     WAF block of the whole host, since it took `/book` down together
+#     with `/bbo`. Also not a throttle measurement.
 #
-# WHAT IS DEMONSTRATED: the entire 30,590-read evidence base was
+# SO: UNKNOWN LIMIT, and the only defensible default is the request
+# pattern that has actually been survived.
+#
+# WHAT HAS BEEN SURVIVED: the entire 30,590-read evidence base was
 # collected STRICTLY SERIALLY. Across every segment the densest
-# one-second window holds exactly ONE request, and the sustained rate
-# is 0.030 to 0.285 req/s (median 0.145) over eight days. That envelope
-# -- one in flight, under 0.285 req/s -- is the only request pattern
-# this endpoint has ever been observed to tolerate, so it is the
-# default, and the code does not quietly exceed what the evidence
-# covers.
+# one-second window holds exactly ONE request, at 0.030-0.285 req/s
+# sustained (median 0.145) over eight days, with 61,178 successful
+# reads. That is an EXISTENCE PROOF for one pattern, not a boundary:
+# it says this was tolerated, never that anything faster would be.
 #
-# CREDENTIALS. Those reads were taken by an unauthenticated collector
-# against the public gateway. The worker holds PMUS credentials and its
-# limits may differ in either direction. UNVERIFIED either way, and the
-# first live stage is what settles it.
+# Eight concurrent requests was not a rate limit at all -- a
+# concurrency ceiling bounds how many are in flight and says nothing
+# about how often a new one may start, which is what a limiter counts.
+#
+# CREDENTIAL CONTEXT. Those reads were taken by an UNAUTHENTICATED
+# collector against the public gateway. The worker holds PMUS
+# credentials. Authenticated limits are commonly different -- higher,
+# lower, or separately metered -- and none of that is established
+# here either. The first live stage is what begins to settle it, for
+# one endpoint, at one pace.
 PROBE_MAX_RPS = 0.25
 PROBE_CONCURRENCY = 1
 
@@ -140,13 +151,20 @@ PROBE_ROUNDS_AT_START = 2
 # 181 ms; the slowest single read was 14.3 s.
 PROBE_TIMEOUT_S = 8.0
 
-# 429 HANDLING. Never observed, and implemented anyway: a limit nobody
-# has hit is still a limit. `Retry-After` is honoured when present and
-# capped, because a server-supplied delay is a better number than ours
-# right up until it is an hour.
+# 429 HANDLING. Not observed in the captures we hold, and implemented
+# anyway.
+#
+# `Retry-After` IS NEVER SHORTENED. An earlier version capped it at
+# 120 s, which meant that a server asking for an hour would be retried
+# in two minutes -- ignoring the one explicit instruction a limiter
+# ever gives us, in the direction that makes things worse. The cap is
+# now a SUSPENSION THRESHOLD: a delay at or under it is waited out, and
+# a delay above it ABANDONS THE ROUND. The venue is telling us to go
+# away for longer than this round should exist, so the round ends and
+# the loop's own bounded backoff decides when to come back.
 PROBE_MAX_RETRIES = 3
 PROBE_RETRY_BACKOFF_S = (5.0, 15.0, 45.0)
-PROBE_RETRY_AFTER_CAP_S = 120.0
+PROBE_SUSPEND_ABOVE_S = 120.0
 
 # How often, in completed reads, the round asks whether it should stop.
 # The caller's callback does its own time-based caching, so this is a
@@ -161,6 +179,7 @@ P_READ_FAILED = "PROBE_READ_FAILED"
 P_NO_PAYLOAD = "PROBE_NO_MARKET_DATA"
 P_TIMEOUT = "PROBE_TIMED_OUT"
 P_RATE_LIMITED = "PROBE_RATE_LIMITED"
+P_SUSPENDED = "PROBE_SUSPENDED_BY_RETRY_AFTER"
 P_NOT_PROBED = "NOT_PROBED_YET"
 P_STOPPED = "PROBE_STOPPED_BY_CONTROL"
 
@@ -334,7 +353,11 @@ def _status_of(exc) -> int | None:
 
 
 def _retry_after_s(exc) -> float | None:
-    """`Retry-After` off the response, in seconds, capped.
+    """`Retry-After` off the response, in seconds, VERBATIM.
+
+    Never shortened. The caller decides whether to wait it out or to
+    suspend; this function's job is to report what the server asked
+    for, not to negotiate it down.
 
     Only the delta-seconds form is read. An HTTP-date is valid too and
     is NOT parsed here: getting it wrong means either hammering a
@@ -357,7 +380,7 @@ def _retry_after_s(exc) -> float | None:
         return None
     if secs < 0:
         return None
-    return min(secs, PROBE_RETRY_AFTER_CAP_S)
+    return secs
 
 
 def _read_one_sync(client, slug: str) -> dict:
@@ -450,6 +473,7 @@ async def probe(client, candidates, *, offset: int = 0,
             "distinct_markets": len(window), "enriched": 0,
             "by_status": {}}
     stopped = {"flag": False}
+    suspended = {"until": 0.0}
     done = {"n": 0}
 
     async def _check_stop() -> bool:
@@ -494,10 +518,28 @@ async def probe(client, candidates, *, offset: int = 0,
                     await _check_stop()
                     return r
                 acct["rate_limited"] += 1
+                asked = r.get("retry_after_s")
+                if asked is not None and asked > PROBE_SUSPEND_ABOVE_S:
+                    # THE SERVER ASKED FOR LONGER THAN THIS ROUND
+                    # SHOULD LIVE. Retrying sooner would ignore the one
+                    # explicit instruction a limiter ever gives us, in
+                    # the direction that makes things worse. Abandon
+                    # the round; the loop's own backoff decides when to
+                    # come back, and it is never sooner than this.
+                    suspended["until"] = max(suspended["until"], asked)
+                    stopped["flag"] = True
+                    log.error("bettor_universe_probe: HTTP 429 on %s "
+                              "with Retry-After %.0fs, above the %.0fs "
+                              "suspension threshold; ABANDONING the "
+                              "round rather than retrying sooner",
+                              c["slug"], asked, PROBE_SUSPEND_ABOVE_S)
+                    return {"slug": c["slug"], "status": P_SUSPENDED,
+                            "detail": "Retry-After %.0fs" % asked,
+                            "retry_after_s": asked}
                 if attempt >= PROBE_MAX_RETRIES:
                     await _check_stop()
                     return r
-                hold = r.get("retry_after_s")
+                hold = asked
                 if hold is None:
                     hold = PROBE_RETRY_BACKOFF_S[
                         min(attempt, len(PROBE_RETRY_BACKOFF_S) - 1)]
@@ -532,6 +574,10 @@ async def probe(client, candidates, *, offset: int = 0,
         "probed": len(window),
         "slugs_probed": [c["slug"] for c in window],
         "stopped": stopped["flag"],
+        # A SUSPENSION IS NOT AN ORDINARY STOP. It carries the delay
+        # the SERVER asked for, so the caller can refuse to come back
+        # sooner than that.
+        "suspended_for_s": suspended["until"] or None,
         "accounting": acct,
         # COVERAGE, not eligibility. Nothing here says a market is
         # unsuitable; it says how much of the candidate set we have
@@ -569,24 +615,33 @@ def describe() -> dict:
     return {
         "probe": PROBE_VERSION,
         "rate_limit": {
-            "published_by_venue": ("NONE -- no RateLimit/Retry-After "
-                                   "header in any of 65,980 captured "
-                                   "responses, and no HTTP 429"),
-            "applicable_limit": "UNKNOWN",
-            "demonstrated_envelope": ("1 request in flight, 0.030-0.285 "
-                                      "req/s sustained, over 61,178 "
-                                      "successful reads across 8 days"),
+            "applicable_limit": "NOT_ESTABLISHED",
+            "published_by_venue": "NOT_ESTABLISHED",
+            "what_the_capture_shows": (
+                "no rate-limit header in the 65,980 responses WE "
+                "captured, and no 429. Neither establishes that no "
+                "limit is published: our sample never exceeded 1 "
+                "req/s, so zero 429s is what a limit we never "
+                "approached would also look like"),
+            "survived_pattern": ("1 request in flight, 0.030-0.285 "
+                                 "req/s sustained, 61,178 successful "
+                                 "reads across 8 days -- an existence "
+                                 "proof for one pattern, NOT a "
+                                 "boundary"),
             "enforced_max_rps": pace["max_rps"],
             "enforced_concurrency": pace["concurrency"],
             "above_demonstrated_envelope":
                 pace["above_demonstrated_envelope"],
-            "credentials_caveat": ("the evidence was collected "
+            "credential_context": ("the evidence was collected "
                                    "UNAUTHENTICATED against the public "
-                                   "gateway; the worker's authenticated "
-                                   "limits are UNVERIFIED"),
-            "on_429": "honour Retry-After (capped %.0fs) else %s, "
+                                   "gateway; the worker is "
+                                   "authenticated, and authenticated "
+                                   "limits are NOT ESTABLISHED in "
+                                   "either direction"),
+            "on_429": "honour Retry-After VERBATIM up to %.0fs and "
+                      "SUSPEND the round above it; else %s, "
                       "%d retries, then give up on that market"
-                      % (PROBE_RETRY_AFTER_CAP_S,
+                      % (PROBE_SUSPEND_ABOVE_S,
                          "/".join("%.0f" % s
                                   for s in PROBE_RETRY_BACKOFF_S),
                          PROBE_MAX_RETRIES),

@@ -427,12 +427,15 @@ class TestTheRateLimitIsEnforced:
     """THE POINT: eight concurrent requests is not a rate limit. It is
     a concurrency ceiling with no bound on the rate behind it.
 
-    What the venue publishes is NOTHING -- no RateLimit or Retry-After
-    header in any of 65,980 captured responses, and no HTTP 429. What
-    is DEMONSTRATED is that all 61,178 successful reads were taken
-    strictly serially: the densest one-second window in the whole
-    archive holds exactly one request, at 0.030-0.285 req/s sustained.
-    That envelope is the default."""
+    The applicable limit is NOT ESTABLISHED. No rate-limit header
+    appeared in the 65,980 responses we captured and no 429 was seen,
+    and NEITHER establishes that no limit is published -- the sample
+    never exceeded one request per second, so zero 429s is what a
+    limit we never approached would also look like. What IS shown is
+    that 61,178 successful reads were taken strictly serially, the
+    densest one-second window holding exactly one request at
+    0.030-0.285 req/s. That is an existence proof for one pattern, and
+    it is the default because it is the only pattern survived."""
 
     @pytest.fixture(autouse=True)
     def repaced(self, monkeypatch):
@@ -495,11 +498,20 @@ class TestTheRateLimitIsEnforced:
         assert out["pace"]["demonstrated_concurrency"] == 1
         assert "61,178" in out["pace"]["envelope_evidence"]
 
-    def test_describe_states_that_the_limit_is_unknown(self):
+    def test_describe_says_the_limit_is_not_established(self):
+        """THE CORRECTION. Missing headers and zero observed 429s do
+        not establish that no published limit exists: our sample never
+        exceeded one request per second, so zero 429s is exactly what
+        a limit we never approached would also look like."""
         rl = probe.describe()["rate_limit"]
-        assert rl["applicable_limit"] == "UNKNOWN"
-        assert "NONE" in rl["published_by_venue"]
-        assert "UNVERIFIED" in rl["credentials_caveat"]
+        assert rl["applicable_limit"] == "NOT_ESTABLISHED"
+        assert rl["published_by_venue"] == "NOT_ESTABLISHED"
+        assert "NOT ESTABLISHED" in rl["credential_context"]
+        assert "existence" in rl["survived_pattern"], (
+            "the survived pattern is a proof of one case, not a bound")
+        # and the weaker reading is not asserted anywhere
+        assert "no limit" not in rl["what_the_capture_shows"].lower() \
+            or "would also look like" in rl["what_the_capture_shows"]
 
 
 # ── 7. HTTP 429 ──────────────────────────────────────────────────────
@@ -558,14 +570,43 @@ class TestRateLimitResponses:
                                 max_rps=1000.0, sleep=_spy(slept)))
         assert _holds(slept) == [7], "the server's number beats ours"
 
-    def test_retry_after_is_capped(self):
+    def test_a_long_retry_after_suspends_and_is_never_shortened(self):
+        """THE CORRECTION. Capping at 120 s meant a server asking for
+        an hour would be retried in two minutes -- ignoring the one
+        explicit instruction a limiter ever gives us, in the direction
+        that makes things worse. Above the threshold the round is
+        ABANDONED, and the delay the server asked for is carried out
+        so the caller cannot come back sooner."""
         c = self._client(fail_times=1, retry_after=99999)
         slept = []
-        asyncio.run(probe.probe(c, cands([OPEN_WIDE]), batch=1,
-                                max_rps=1000.0, sleep=_spy(slept)))
-        assert _holds(slept) == [round(probe.PROBE_RETRY_AFTER_CAP_S)], (
-            "a server-supplied delay is better than ours right up until "
-            "it is an hour")
+        out = asyncio.run(probe.probe(c, cands([OPEN_WIDE]), batch=1,
+                                      max_rps=1000.0, sleep=_spy(slept)))
+        assert _holds(slept) == [], "it must not wait it out inside a round"
+        assert out["suspended_for_s"] == 99999.0, "carried, not shortened"
+        assert out["stopped"] is True
+        a = out["accounting"]
+        assert a["by_status"][probe.P_SUSPENDED] == 1
+        assert a["attempts"] == 1, "no retry at all above the threshold"
+        assert a["enriched"] == 0
+
+    def test_a_retry_after_at_the_threshold_is_still_waited_out(self):
+        c = self._client(fail_times=1, retry_after=probe.PROBE_SUSPEND_ABOVE_S)
+        slept = []
+        out = asyncio.run(probe.probe(c, cands([OPEN_WIDE]), batch=1,
+                                      max_rps=1000.0, sleep=_spy(slept)))
+        assert _holds(slept) == [round(probe.PROBE_SUSPEND_ABOVE_S)]
+        assert out["suspended_for_s"] is None
+        assert out["accounting"]["enriched"] == 1
+
+    def test_the_suspension_delay_is_never_negotiated_down(self):
+        """`_retry_after_s` reports what the server asked for. Deciding
+        what to do about it is the caller's job, and shortening it is
+        nobody's."""
+        class E(Exception):
+            status_code = 429
+            response = type("R", (), {"headers": {"retry-after": "3600"}})()
+
+        assert probe._retry_after_s(E()) == 3600.0
 
     def test_retries_are_bounded_and_the_market_is_named_not_blamed(self):
         c = self._client(fail_times=99)

@@ -162,8 +162,12 @@ def _reset_backoff() -> None:
     _nostart_rung = 0
 
 
-async def _backoff(why: str, *, sleep=None) -> float:
+async def _backoff(why: str, *, sleep=None, at_least: float = 0.0) -> float:
     """Hold a non-starting `main()` before it returns to the supervisor.
+
+    `at_least` is a floor the caller can raise -- used to carry a
+    venue's own `Retry-After` through, so a suspension is never
+    shortened by our schedule being the smaller number.
 
     `sleep` is injectable so the tests can assert the SCHEDULE without
     spending it.
@@ -171,10 +175,52 @@ async def _backoff(why: str, *, sleep=None) -> float:
     global _nostart_rung
     delay = NOSTART_BACKOFF_S[min(_nostart_rung, len(NOSTART_BACKOFF_S) - 1)]
     _nostart_rung = min(_nostart_rung + 1, len(NOSTART_BACKOFF_S) - 1)
+    if at_least and at_least > delay:
+        log.warning("bettor_live_loop: the venue asked for %.0fs; our "
+                    "schedule would have returned in %.0fs, so the "
+                    "venue's number wins", at_least, delay)
+        delay = at_least
     log.info("bettor_live_loop: not starting (%s); holding %.0fs before "
              "the supervisor's own restart delay", why, delay)
     await (sleep or asyncio.sleep)(delay)
     return delay
+
+
+def effective_config() -> dict:
+    """What THIS PROCESS will actually use, read from its own
+    environment at the moment of asking.
+
+    Not what a service dashboard says, not what a deploy intended --
+    what the interpreter holding this loop can see. The difference is
+    the whole lesson of 2026-09-21.
+    """
+    pace = probe_mod.configured_pace()
+    return {
+        "loop": LOOP_VERSION,
+        "probe": probe_mod.PROBE_VERSION,
+        "max_rps": pace["max_rps"],
+        "concurrency": pace["concurrency"],
+        "above_demonstrated_envelope":
+            pace["above_demonstrated_envelope"],
+        "probe_batch": int(probe_mod._env_float(
+            probe_mod.BATCH_ENV, probe_mod.PROBE_BATCH)),
+        "rounds_at_start": probe_mod.PROBE_ROUNDS_AT_START,
+        "frame_capture_n": _int_env(ms.FRAMES_ENV, ms.FRAMES_DEFAULT,
+                                    ms.FRAMES_MAX),
+        "max_contracts": os.environ.get("BETTOR_LIVE_MAX_CONTRACTS", "0"),
+        "kill_env": os.environ.get(KILL_ENV, "(unset -> on)"),
+        "control_every_s": ctl.CONTROL_EVERY_S,
+        "suspend_above_s": probe_mod.PROBE_SUSPEND_ABOVE_S,
+        "discovery_pages": os.environ.get(
+            "BETTOR_LIVE_DISCOVERY_PAGES", "6"),
+    }
+
+
+def _int_env(name, default, ceiling):
+    try:
+        return max(0, min(int(os.environ.get(name, default) or 0), ceiling))
+    except (TypeError, ValueError):
+        return default
 
 
 def enabled() -> bool:
@@ -991,6 +1037,7 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
     by_slug: dict = {}
     coverage, nxt, swept = {}, offset, 0
     stopped = False
+    suspended_for = 0.0
     for _ in range(max(1, rounds)):
         r = await probe_mod.probe(client, candidates, offset=nxt,
                                   batch=batch, should_stop=should_stop,
@@ -1000,6 +1047,14 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
         coverage = probe_mod.merge_coverage(coverage, r["coverage"])
         nxt = r["next_offset"]
         swept += r["probed"]
+        if r.get("suspended_for_s"):
+            # THE VENUE ASKED FOR LONGER THAN A ROUND. Carried out so
+            # the caller's backoff cannot come back sooner than the
+            # server asked; retrying earlier than an explicit
+            # Retry-After is the one thing a limiter tells us not to do.
+            suspended_for = max(suspended_for, r["suspended_for_s"])
+            stopped = True
+            break
         if r.get("stopped"):
             # THE CONTROL SAID STOP MID-ACQUISITION. Whatever was read
             # is kept -- it cost the venue the same either way -- but no
@@ -1031,6 +1086,7 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
                 "enriched_rows": len(rows), "coverage": coverage,
                 "next_offset": nxt, "swept": swept,
                 "stopped_by_control": stopped,
+                "suspended_for_s": suspended_for or None,
                 "pace": probe_mod.configured_pace(),
                 "enrichment": probe_mod.PROBE_VERSION})
     return sel
@@ -1121,11 +1177,25 @@ async def main(*, client=None, stream_factory=None, store=None,
     # is not what holds this loop off.
     control = await ctl.read_control(control_pool)
     if ctl.is_closed(control):
-        log.info("bettor_live_loop: not observing (%s: %s)",
-                 control["why"], control.get("detail"))
+        # THE EFFECTIVE CONFIGURATION IS LOGGED EVEN WHEN STOPPED, and
+        # that is deliberate. Setting an environment variable does not
+        # prove the RUNNING PROCESS received it: on 2026-09-21
+        # BETTOR_LIVE_LOOP=off was stored, acknowledged, and survived a
+        # demonstrated restart without ever reaching the process that
+        # was supposed to read it.
+        #
+        # So the process states its own budget, out of its own
+        # `os.environ`, on every pass. Reading it costs nothing -- no
+        # venue request, no database query, no socket -- so a stopped
+        # loop can be used to VERIFY a configuration BEFORE anything is
+        # enabled, which is the only order that catches the failure
+        # above.
+        log.info("bettor_live_loop: not observing (%s: %s); "
+                 "effective config %s", control["why"],
+                 control.get("detail"), json.dumps(effective_config()))
         await _backoff(control["why"], sleep=sleep)
         return {"started": False, "why": control["why"],
-                "control": control}
+                "control": control, "config": effective_config()}
 
     # THE STOP, ASKED DURING ACQUISITION AND NOT ONLY BEFORE IT. At the
     # demonstrated pace a full startup round is minutes of wall clock,
@@ -1207,7 +1277,8 @@ async def main(*, client=None, stream_factory=None, store=None,
                   cov.get("enriched"), json.dumps(cov.get("by_status", {})),
                   first.get("considered", 0),
                   json.dumps(first.get("excluded_by_reason", {})))
-        await _backoff("EMPTY_UNIVERSE", sleep=sleep)
+        await _backoff("EMPTY_UNIVERSE", sleep=sleep,
+                       at_least=first.get("suspended_for_s") or 0.0)
         return {"started": False, "why": "EMPTY_UNIVERSE",
                 "considered": first.get("considered", 0),
                 "excluded_by_reason": first.get("excluded_by_reason", {}),
@@ -1257,8 +1328,8 @@ async def main(*, client=None, stream_factory=None, store=None,
     # A RUN THAT STARTED CLEARS THE BACKOFF. Otherwise one bad morning
     # leaves every later restart on the fifteen-minute rung.
     _reset_backoff()
-    log.info("bettor_live_loop: enrichment pace %s", json.dumps(
-        first.get("pace"), default=str))
+    log.info("bettor_live_loop: effective config %s",
+             json.dumps(effective_config(), default=str))
 
     stream.start()
     t_start = time.time()
