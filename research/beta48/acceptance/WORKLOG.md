@@ -210,3 +210,58 @@ NAME and says which value to pass. Pinned by a test.
 Scope: three services, one variable, one observation day. Preflight
 allowance EXHAUSTED (6/6). Socket allowances separate. Rollback is
 stop-and-verify first.
+
+### DEPLOYMENT EXECUTED — d630d3d
+claude/session-njaewf advanced ba87076 -> d630d3d (fast-forward, 27
+commits, ba87076 an ancestor). Deployed exactly the approved SHA, not
+the release-branch head: a later workflow-only safety commit (67d7a93)
+exists on the release branch and was NOT deployed, because the approval
+names d630d3d and a superset is still not what was approved.
+
+  sportsassets-api      d630d3d LIVE 2026-09-22T22:22:19Z
+  sportsassets-workers  d630d3d build started 22:21:26Z
+  edge-shadow           SUSPENDED -- pre-existing, takes no deploy
+
+### ARMING IS BLOCKED. TWO FINDINGS, BOTH FROM CHECKING RATHER THAN ASSUMING.
+
+F1  THE FROZEN ET DATE IS NO LONGER A COMPLETE WINDOW.
+    Manifest et_date = 2026-09-22. ET window
+    [2026-09-22T04:00Z, 2026-09-23T04:00Z). At 22:20Z:
+
+        elapsed  18.33 h        remaining  5.67 h
+        maximum achievable coverage: 23.6%
+
+    The worker takes et_date from the manifest (or ET_DATE_ENV), not
+    from "today", so armed now it would run to END_WINDOW at 04:00Z and
+    record 23.6% honestly. That is a partial day. The instruction was
+    one COMPLETE ET-date window and not to report partial as complete,
+    so this is the check's fail path, not a surprise.
+
+    Changing the date is not a workaround: freeze() enforces
+    M_DATE_MISMATCH against the manifest's own et_date, and a manifest
+    for 2026-09-23 needs capture requests the allowance (6/6) forbids.
+    Fail-closed in both directions, which is correct.
+
+F2  THE DAILY SCORING BOUNDARY IS NOT ESTABLISHED BY THE MANIFEST.
+    Every one of the 138 rows for culture_low_20260921 carries
+    start = 2026-09-22T00:00:00Z, end = null, created_at =
+    2026-09-21T20:18:01Z, period = daily_event.
+
+    Our window is ET midnight = 04:00Z. The captured start is 00:00Z --
+    four hours earlier. The ET assumption traces to a doc note recorded
+    in EXECUTION_CALIBRATION.md and PACKAGE_A.md ("Daily
+    (midnight-to-midnight ET)"), not to any venue field we hold.
+
+    Two readings and the manifest cannot separate them: `start` is the
+    period boundary and the daily period is UTC-day based; or `start`
+    is the programme ACTIVATION instant (consistent with created_at
+    being the previous evening) and the ET note still governs. `end` is
+    null, so the period length is not published either.
+
+    CONSEQUENCE, bounded: if the boundary is UTC and we collect an ET
+    window, reward attribution is wrong by up to 4 hours at each end --
+    on a $50 daily pool that is a third of the period. It does not
+    invalidate COLLECTION, because every ladder is timestamped and the
+    window can be applied in analysis; it does mean the collection
+    window must COVER whichever period is real, and an ET window does
+    not cover a UTC one.
