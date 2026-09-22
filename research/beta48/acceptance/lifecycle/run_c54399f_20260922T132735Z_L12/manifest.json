@@ -1,0 +1,14 @@
+{
+  "run_id": "20260922T132803Z",
+  "sha": "c54399fcafd3fa406108b7e91ef1d235f306ea3e",
+  "kind": "FOCUSED_PHASE_RERUN",
+  "phases_run": ["L12"],
+  "reuses": "run_85c6c8e_20260922T130800Z (125 passed, 0 failed)",
+  "reuse_is_valid_because": "git diff 85c6c8e c54399f -- backend/ is EMPTY; only the harness gained L12",
+  "image": "bettor-lifecycle:85c6c8e",
+  "image_id": "sha256:91dd2d61497d7710ee1715edee583f1c744437b986a3afbadc8359abac0f65ad",
+  "checks_passed": 28,
+  "checks_failed": 0,
+  "exit_code": 0,
+  "transport": "SIMULATED -- not a live venue connection"
+}
