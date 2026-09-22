@@ -273,3 +273,97 @@ stays idle.
 
 `obs-run` is a **separate** authorization. No funded pilot, no real
 orders, no trading-control change.
+
+---
+
+# STAGE 1 — WHAT HAPPENED, 2026-09-22
+
+**Result: ACCEPTED, with one qualification that changes Stage 2's
+prerequisites.**
+
+## The push
+
+| time (UTC) | |
+|---|---|
+| 00:29:26 | destination `255a7d38`, ancestor of the approved SHA — 0 behind, 6 ahead |
+| 00:29:38 | `obs-state` re-read: **`false`** |
+| 00:30:09 | `git push origin 691fa598…:refs/heads/claude/session-njaewf` → `255a7d3..691fa59`, **no force** |
+
+The **approved SHA** was pushed, not the repair branch's tip
+(`7e086376`), which carries documentation the approval did not cover.
+
+## Acceptance
+
+| # | check | evidence | |
+|---|---|---|---|
+| 1 | worker running SHA | `691fa59` **live 00:31:04.755Z** | PASS |
+| 2 | API running SHA | `691fa59` **live 00:31:09.222Z** | PASS |
+| 3 | API health | `GET /healthz 200 OK` ×4, 00:34:18–00:34:28Z | PASS |
+| 4 | worker disabled | `bettor_live_loop: disabled by BETTOR_LIVE_LOOP=off` at 00:31:22.805Z | PASS |
+| 5 | zero observation venue requests | all three log lines stamped **00:31:22.805**, i.e. the loop returned within the same millisecond it started, before any client is constructed; and §6 below | PASS |
+| 6 | observation tables unchanged | journal **0**, cursor **0**, ledger **0** at 00:34:08Z — identical to the 2026-09-21T23:40:25Z baseline | PASS |
+| 7 | bounded disabled retry cadence | hold declared 300 s; **measured 300.001 s** (00:31:22.806 → 00:36:22.806), then the supervisor's 5 s | PASS |
+
+Four `bettor_live` log lines exist in the whole 00:31:00–00:42:00
+window. On 2026-09-21 the same window would have held roughly 130.
+
+## THE QUALIFICATION
+
+**The loop is disabled by the environment pre-check, not by the
+database control.** `enabled()` is evaluated before `read_control`, so
+`BETTOR_LIVE_LOOP=off` — set 2026-09-21T22:38:58Z and never cleared —
+short-circuits the path this release was built around. **The database
+control's behaviour on production is therefore still unverified.**
+
+### And that corrects a claim I made
+
+I reported that the environment variable "is not a demonstrated
+control on this service." **That was too strong.** The precise finding
+is narrower:
+
+* an env change applied through the API was **not** picked up by a
+  `server_restarted` API call (22:43:40Z, still running discovery at
+  22:47:29Z);
+* the same env change **was** picked up by a **new deploy** —
+  demonstrated here at 00:31:22Z, where the new process read `off` and
+  returned.
+
+So: *restart does not reload the environment on this service; a deploy
+does.* The database control is still the better mechanism — it needs
+neither — but the env var is not inert, and saying so was wrong.
+
+### Stage 2 prerequisite, arising from this
+
+`BETTOR_LIVE_LOOP=off` must be cleared **before** `obs-run` can do
+anything, and clearing it requires a deploy. Until then `obs-run`
+would write a row that nothing reads. The order is:
+
+1. clear `BETTOR_LIVE_LOOP` and deploy → the loop reaches the database
+   control and stops there instead, logging `STOPPED_BY_CONTROL` plus
+   its `effective_config`;
+2. verify that log line and the budget it prints — **this is how the
+   configuration is proven to have reached the process**;
+3. only then `obs-run`.
+
+Step 2 is the check that the September 21 incident says cannot be
+skipped, and a stopped loop can perform it because it costs no venue
+request, no query and no socket.
+
+## Not done, as instructed
+
+`obs-run` was **not** set. `obs-state` remains `false`. No observation,
+no funded pilot, no trading activation, no credential movement. The
+execution gate, `live_trading_paused`, `mirror_live` and
+`MAX_CONTRACTS` were not touched.
+
+## Rollback, still available and now correctly based
+
+| # | stop | deploy? |
+|---|---|---|
+| 1 | `obs-stop` / delete the row | no |
+| 2 | `BETTOR_LIVE_LOOP=off` | already in force |
+| 3 | `claude/bettor-observation-deregister-691fa598` @ `76676a58` | yes, **fast-forward: 0 behind, 1 ahead of the deployed tip** |
+
+`ca68bc5f` is retired as a rollback: it was branched from a tip
+production had already moved past, and pushing it would have required
+a force.
