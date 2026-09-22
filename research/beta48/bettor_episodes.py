@@ -128,6 +128,31 @@ RECOVERY_WAIT = 10      # observations a maker exit rests before crossing
 COOLDOWN = 1            # observations between episodes in one market
 
 
+def decision_time_size(policy, base_size, row):
+    """The clip for THIS book, from decision-time inputs only.
+
+    Returns (size, why). `why` travels onto the episode so a reader can
+    see which rule produced the number rather than inferring it.
+    """
+    if policy is None or policy.size_rule == "FIXED":
+        return float(base_size), "FIXED"
+    bid, ask = row.get("bid"), row.get("ask")
+    if bid is None or ask is None:
+        return float(base_size), "FIXED -- one-sided book"
+    tick = row.get("tick") or 0.01
+    ticks = max(1, int(round((ask - bid) / tick)))
+    floor_ticks = max(1, int(getattr(policy, "min_spread_ticks", 1)))
+    if policy.size_rule == "EDGE_SCALED":
+        # Linear in the edge ABOVE the minimum this policy will quote.
+        # A book exactly at the floor gets the base clip; a book paying
+        # twice the floor gets twice the size, bounded both ways.
+        mult = ticks / float(floor_ticks)
+        mult = max(policy.size_min_mult, min(policy.size_max_mult, mult))
+        return float(base_size) * mult, "EDGE_SCALED x%.2f (%d ticks)" % (
+            mult, ticks)
+    return float(base_size), "FIXED -- unknown rule %r" % policy.size_rule
+
+
 @dataclasses.dataclass(frozen=True)
 class Policy:
     """EVERY DECISION THE REPLAY MAKES, in one frozen object.
@@ -206,6 +231,46 @@ class Policy:
     #   HOLD              keep it to settlement
     recovery: str = "MAKER_THEN_TAKER"
 
+    # ── DECISION-TIME SIZING ─────────────────────────────────────────
+    #
+    # `size` was a run-wide constant, which the management
+    # demonstration reported as NOT SUPPORTED. It now has a rule, and
+    # the rule uses ONLY what is knowable when the quote is placed.
+    #
+    #   FIXED        the constant. Kept as the comparison baseline.
+    #   EDGE_SCALED  scale the clip by the edge the book is offering,
+    #                measured in ticks of spread over the minimum this
+    #                policy will quote. A 4-tick book pays twice what a
+    #                2-tick book pays for the same capital and the same
+    #                queue risk, so it earns more size.
+    #
+    # WHAT IT DELIBERATELY DOES NOT USE: depth (the corpus has none),
+    # realised fill rates (an outcome), and anything about what the
+    # price later did. A rule that needed those could not be run by a
+    # live engine at the moment it quotes.
+    #
+    # AND SIZING DOES NOT CHANGE THE RATE. Edge and capital both scale
+    # with size, so per-capital-hour is invariant to a uniform clip.
+    # What sizing changes is WHICH BOOKS get the capital -- it is an
+    # allocation rule, not a profitability lever, and it is evaluated
+    # as one.
+    size_rule: str = "FIXED"
+    size_min_mult: float = 0.5      # floor, as a multiple of the clip
+    size_max_mult: float = 2.0      # ceiling, as a multiple of the clip
+
+    # ── CAPITAL RELEASE ──────────────────────────────────────────────
+    #
+    # A matched YES/NO pair is worth exactly 1 at settlement and is
+    # NOT cash until then, because no merge/netting call has been
+    # demonstrated at this venue. The feasible alternative is to sell
+    # BOTH legs back into the market and take the spread as the cost of
+    # getting the capital back now.
+    #
+    # True does that. The comparison it enables is the one that
+    # matters: is releasing capital at a cost of the spread better than
+    # holding it to settlement for free?
+    release_matched: bool = False
+
     # SETTLEMENT
     #   False  inventory may ride through expiry
     #   True   cross out at the last OPEN observation before expiry
@@ -256,7 +321,9 @@ class Episode:
         self.prints = prints
         self.i0, self.t0 = i0, row["t_iso"]
         self.t0_epoch = row.get("t")
-        self.size = float(size)
+        # THE CLIP IS DECIDED HERE, from this book, at this instant.
+        self.size, self.size_why = decision_time_size(policy, size, row)
+        self.base_size = float(size)
         self.tick = tick
         self.rebates_on = rebates_on
         self.queue_model = queue_model
@@ -720,6 +787,13 @@ class Episode:
             if excess_yes <= 1e-9 and excess_no <= 1e-9:
                 if matched <= 0:
                     self._finish_never_filled(row, i)
+                elif self.policy is not None and \
+                        getattr(self.policy, "release_matched", False):
+                    # SELL THE PAIR BACK rather than hold it. Both legs
+                    # cross the book as takers, so the cost is the
+                    # spread plus two taker fees and the capital is
+                    # free immediately instead of at settlement.
+                    self._release_pair(matched, i, row)
                 else:
                     self._finish_paired(row, i, settlement)
                 return self
@@ -840,6 +914,35 @@ class Episode:
     def _stamp(self, row, i, status):
         self.status, self.end_i, self.end_t = status, i, row["t_iso"]
 
+    def _release_pair(self, matched, i, row):
+        """Unwind a matched pair into cash NOW, at the cost of the spread.
+
+        THE ALTERNATIVE TO A CAPABILITY WE DO NOT HAVE. A merge call
+        would return the pair's full 1.00 with no market cost. Nothing
+        like it has been demonstrated at this venue, so this is the
+        feasible substitute: sell the YES at the bid and the NO at
+        (1 - ask), both as takers, through the real ladder.
+
+        IT CAN FAIL PARTIALLY, and that is reported rather than
+        smoothed: `_taker_exit` sweeps the actual ladder, so a thin
+        book leaves part of the pair UNLIQUIDATED and riding to
+        settlement after all.
+        """
+        before_yes, before_no = self.yes, self.no
+        self._taker_exit("YES", matched, i, row, "RELEASE_PAIR")
+        self._taker_exit("NO", matched, i, row, "RELEASE_PAIR")
+        sold_yes = before_yes - self.yes
+        sold_no = before_no - self.no
+        left = min(self.yes, self.no)
+        self.notes.append(
+            "RELEASED the matched pair into cash: sold %.4f YES and %.4f "
+            "NO as takers; %.4f pair(s) could not be sold and ride to "
+            "settlement" % (sold_yes, sold_no, left))
+        if left > 1e-9:
+            self._finish_paired(row, i, None, FLAT_PAIRED)
+        else:
+            self._finish_flat(row, i, FLAT_EXITED_TAKER)
+
     def _finish_paired(self, row, i, settlement, status=FLAT_PAIRED):
         """A matched pair remains. It pays EXACTLY 1 per pair."""
         self._stamp(row, i, status)
@@ -928,6 +1031,8 @@ class Episode:
             "tape_intervals": self.tape_intervals,
             "snapshot_intervals": self.snapshot_intervals,
             "size": self.size,
+            "base_size": self.base_size,
+            "size_rule": self.size_why,
             "quote_bid": self.pb, "quote_offer": self.po,
             "entry_book": self.entry_book,
 

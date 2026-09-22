@@ -90,29 +90,39 @@
     {
       "stage": "3  SIZE -- how many contracts?",
       "label": "REPLAY -- tape-priced, NOT an execution",
-      "supported": false,
+      "supported": true,
       "inputs_at_decision_time": {
-        "clip": 100.0,
-        "book_depth": "NOT OBSERVABLE -- the sizing input is missing"
+        "base_clip": 100.0,
+        "spread_ticks": 2,
+        "policy_minimum_ticks": 2,
+        "rule_applied": "FIXED",
+        "book_depth": "NOT USED -- the corpus carries none, and a rule that needed it could not be validated here"
       },
       "alternatives_considered": [
         {
-          "action": "fixed clip",
+          "action": "FIXED clip",
+          "why_not": "spends the same capital on a 2-tick book as on a 4-tick book"
+        },
+        {
+          "action": "EDGE_SCALED -- scale by spread above the policy minimum",
           "chosen": true
         },
         {
           "action": "size to a fraction of resting depth",
-          "why_not": "the corpus carries no depth, so this cannot be computed, let alone validated"
+          "why_not": "not computable on this corpus, so not validatable"
         }
       ],
       "economics": {
+        "clip_chosen": 100.0,
+        "bounds": "x0.50 .. x2.00 of the base clip",
         "capital_per_side_usd": 71.0,
-        "uncertainty": "none in the input -- it is a constant"
+        "measured_effect": "IT IS AN ALLOCATION RULE, NOT A PROFITABILITY LEVER. Edge and capital both scale with the clip, so per-capital-hour is invariant to a uniform change. Measured on this corpus it cut HELD capital-hours at every queue fraction (-66 to -348) and improved per-capital-hour at three of four, but net P&L moved BOTH WAYS (+14.20 to -18.08). Four clustered observations; that is not an improvement anyone should bank.",
+        "uncertainty": "the sign of the net effect"
       },
-      "action": "FIXED 100-CONTRACT CLIP",
-      "reason": "there is no size model. This is stated as a LIMITATION rather than presented as a decision: the engine does not size to depth, imbalance or volatility.",
-      "case_study_mechanism": "n/a -- no case study supports a sizing rule we have validated.",
-      "evidence": "size is a constant in every run"
+      "action": "EDGE-SCALED CLIP: 100 contracts (FIXED)",
+      "reason": "a wider spread pays more for the same capital and the same queue risk, so it earns more size. Only decision-time inputs are used: the book's own spread, never a realised fill rate and never a later price.",
+      "case_study_mechanism": "Edge-proportional allocation.",
+      "evidence": "implemented in bettor_episodes.decision_time_size; measured in acceptance/strategy_v2.json against the same baseline"
     },
     {
       "stage": "4  PARTIAL FILL -- one leg filled, and only partly",
@@ -194,7 +204,7 @@
     {
       "stage": "6  NETTING TO CASH -- can the pair be turned into cash now?",
       "label": "REPLAY -- tape-priced, NOT an execution",
-      "supported": false,
+      "supported": true,
       "inputs_at_decision_time": {
         "matched_pairs": 52.3425,
         "certain_value_usd": 52.3425,
@@ -204,11 +214,17 @@
         {
           "action": "merge/net the pair into cash at the venue",
           "supported": false,
-          "why": "no merge or netting call has been demonstrated against this venue, and none appears in the contract we have exercised. The engine therefore CANNOT release this capital before settlement."
+          "why": "no merge or netting call has been demonstrated against this venue, and none appears in the contract we have exercised. This remains UNAVAILABLE."
+        },
+        {
+          "action": "SELL BOTH LEGS BACK -- the feasible alternative, now implemented",
+          "implemented": true,
+          "why": "pays the spread plus two taker fees to convert a certain settlement claim into cash now. Implemented as Policy(release_matched=True) and MEASURED: it fired twice in 470 episodes, cost $1.75, and freed 26 of 3,696 held capital-hours."
         },
         {
           "action": "hold to settlement",
-          "chosen": true
+          "chosen": true,
+          "why": "on this corpus the release is not worth its cost"
         }
       ],
       "economics": {
@@ -216,10 +232,10 @@
         "locked_until": "event settlement",
         "consequence": "capital-hours accrue at the full committed amount for the whole holding period, and this is the dominant term in every per-capital-hour figure in the economic verdict."
       },
-      "action": "HOLD TO SETTLEMENT -- because nothing else is available",
-      "reason": "this is a VENUE CAPABILITY LIMIT, not a policy preference. It is reported here rather than implied away.",
-      "case_study_mechanism": "Capital recycling -- the case-study mechanism this engine CANNOT currently perform.",
-      "evidence": "residual_basis on every paired episode: 'certain, but not cash until settlement'"
+      "action": "HOLD TO SETTLEMENT -- on measurement, not for want of an option",
+      "reason": "the merge call is still unavailable, but the feasible alternative is now implemented and was measured: selling the pair back costs more than the capital it frees on this corpus. THE BINDING CAPITAL COST IS NOT HELD INVENTORY. It is collateral resting behind quotes that never fill -- 27,955 capital-hours against at most 3,696 held. Releasing pairs attacks the small term.",
+      "case_study_mechanism": "Capital recycling -- alternative implemented, measured, and found not to be the constraint.",
+      "evidence": "Policy(release_matched=True); acceptance/strategy_v2.json"
     },
     {
       "stage": "7  EXIT -- taking a loss rather than carrying a leg",
@@ -296,7 +312,7 @@
     {
       "stage": "9  CAPITAL REUSE -- how often can the same dollar work?",
       "label": "REPLAY -- tape-priced, NOT an execution",
-      "supported": false,
+      "supported": true,
       "inputs_at_decision_time": {
         "capital_hours": 27694.6,
         "episodes": 420,
@@ -311,6 +327,11 @@
           "action": "recycle on netting",
           "supported": false,
           "why": "see decision 6 -- not available at this venue"
+        },
+        {
+          "action": "recycle by selling pairs back",
+          "implemented": true,
+          "why": "measured: 2 firings, $1.75 cost, 26 capital-hours freed. Not the constraint."
         }
       ],
       "economics": {
@@ -318,9 +339,9 @@
         "consequence": "supportable turnover is bounded by settlement cadence, not by the engine's speed"
       },
       "action": "RECYCLE ONLY ON SETTLEMENT",
-      "reason": "with no netting call, capital velocity is set by how fast events resolve. This is the binding constraint on scale, and it is a venue property.",
+      "reason": "with no netting call, HELD capital waits for the event. But the measurement moved the diagnosis: 88% of committed capital-hours are RESTING behind unfilled quotes, not held in inventory. The binding constraint on scale is the fill rate, not the netting call.",
       "case_study_mechanism": "Capital velocity.",
-      "evidence": "capital-hours measured per candidate in economic_verdict.json"
+      "evidence": "capital-hours measured per candidate in economic_verdict.json and strategy_v2.json"
     },
     {
       "stage": "10 INCENTIVE ELIGIBILITY -- does resting here earn a reward?",
@@ -385,9 +406,23 @@
       "evidence": "bettor_incentive_score, pinned against the venue's own worked example (1000 at four levels, DF 0.30 -> 70.6% / 1.9%)"
     }
   ],
-  "unsupported": [
-    "3  SIZE -- how many contracts?",
-    "6  NETTING TO CASH -- can the pair be turned into cash now?",
-    "9  CAPITAL REUSE -- how often can the same dollar work?"
+  "unsupported_decisions": [],
+  "still_absent": [
+    {
+      "capability": "MERGE / NETTING TO CASH",
+      "status": "STILL ABSENT. No merge call has been demonstrated at this venue. The feasible alternative -- selling both legs back -- is implemented and measured, and it is not a substitute: it pays the spread for capital the merge would return whole."
+    },
+    {
+      "capability": "QUEUE POSITION",
+      "status": "STILL UNOBSERVABLE. The replay sweeps a queue-ahead fraction instead of knowing one, and EVERY fill figure in this demonstration inherits that sweep."
+    },
+    {
+      "capability": "RESTING DEPTH AT THE TOUCH",
+      "status": "NOT IN THIS CORPUS. It is the denominator of the incentive reward and the input a depth-aware size rule would need. The observation release exists to measure it."
+    },
+    {
+      "capability": "FILL-CONDITIONED PROFITABILITY",
+      "status": "NOT ESTABLISHABLE BY OBSERVATION. It needs our own orders in the book. No amount of watching substitutes for it."
+    }
   ]
 }

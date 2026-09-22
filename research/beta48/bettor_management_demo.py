@@ -167,21 +167,44 @@ def walk(eps):
     # ── 3. SIZE ──────────────────────────────────────────────────────
     ds.append(decision(
         "3  SIZE -- how many contracts?",
-        {"clip": ex["size"],
-         "book_depth": "NOT OBSERVABLE -- the sizing input is missing"},
-        [{"action": "fixed clip", "chosen": True},
+        {"base_clip": ex.get("base_size", ex["size"]),
+         "spread_ticks": b.get("spread_ticks"),
+         "policy_minimum_ticks": POLICY.min_spread_ticks,
+         "rule_applied": ex.get("size_rule"),
+         "book_depth": "NOT USED -- the corpus carries none, and a rule "
+                       "that needed it could not be validated here"},
+        [{"action": "FIXED clip", "why_not": "spends the same capital on "
+                                             "a 2-tick book as on a "
+                                             "4-tick book"},
+         {"action": "EDGE_SCALED -- scale by spread above the policy "
+                    "minimum", "chosen": True},
          {"action": "size to a fraction of resting depth",
-          "why_not": "the corpus carries no depth, so this cannot be "
-                     "computed, let alone validated"}],
-        {"capital_per_side_usd": round(ex["size"] * ex["quote_bid"], 2),
-         "uncertainty": "none in the input -- it is a constant"},
-        "FIXED %d-CONTRACT CLIP" % int(ex["size"]),
-        "there is no size model. This is stated as a LIMITATION rather "
-        "than presented as a decision: the engine does not size to "
-        "depth, imbalance or volatility.",
-        "n/a -- no case study supports a sizing rule we have validated.",
-        "size is a constant in every run",
-        REPLAY, supported=False))
+          "why_not": "not computable on this corpus, so not validatable"}],
+        {"clip_chosen": ex["size"],
+         "bounds": "x%.2f .. x%.2f of the base clip"
+                   % (POLICY.size_min_mult, POLICY.size_max_mult),
+         "capital_per_side_usd": round(ex["size"] * ex["quote_bid"], 2),
+         "measured_effect": "IT IS AN ALLOCATION RULE, NOT A "
+                            "PROFITABILITY LEVER. Edge and capital both "
+                            "scale with the clip, so per-capital-hour is "
+                            "invariant to a uniform change. Measured on "
+                            "this corpus it cut HELD capital-hours at "
+                            "every queue fraction (-66 to -348) and "
+                            "improved per-capital-hour at three of four, "
+                            "but net P&L moved BOTH WAYS (+14.20 to "
+                            "-18.08). Four clustered observations; that "
+                            "is not an improvement anyone should bank.",
+         "uncertainty": "the sign of the net effect"},
+        "EDGE-SCALED CLIP: %g contracts (%s)"
+        % (ex["size"], ex.get("size_rule")),
+        "a wider spread pays more for the same capital and the same "
+        "queue risk, so it earns more size. Only decision-time inputs "
+        "are used: the book's own spread, never a realised fill rate "
+        "and never a later price.",
+        "Edge-proportional allocation.",
+        "implemented in bettor_episodes.decision_time_size; measured in "
+        "acceptance/strategy_v2.json against the same baseline",
+        REPLAY))
 
     # ── 4. PARTIAL FILL ──────────────────────────────────────────────
     if partial:
@@ -262,9 +285,17 @@ def walk(eps):
           "supported": False,
           "why": "no merge or netting call has been demonstrated against "
                  "this venue, and none appears in the contract we have "
-                 "exercised. The engine therefore CANNOT release this "
-                 "capital before settlement."},
-         {"action": "hold to settlement", "chosen": True}],
+                 "exercised. This remains UNAVAILABLE."},
+         {"action": "SELL BOTH LEGS BACK -- the feasible alternative, "
+                    "now implemented",
+          "implemented": True,
+          "why": "pays the spread plus two taker fees to convert a "
+                 "certain settlement claim into cash now. Implemented as "
+                 "Policy(release_matched=True) and MEASURED: it fired "
+                 "twice in 470 episodes, cost $1.75, and freed 26 of "
+                 "3,696 held capital-hours."},
+         {"action": "hold to settlement", "chosen": True,
+          "why": "on this corpus the release is not worth its cost"}],
         {"capital_locked_usd": paired[0]["collateral_filled_only"]
             if paired else None,
          "locked_until": "event settlement",
@@ -272,14 +303,18 @@ def walk(eps):
                         "amount for the whole holding period, and this is "
                         "the dominant term in every per-capital-hour "
                         "figure in the economic verdict."},
-        "HOLD TO SETTLEMENT -- because nothing else is available",
-        "this is a VENUE CAPABILITY LIMIT, not a policy preference. It is "
-        "reported here rather than implied away.",
-        "Capital recycling -- the case-study mechanism this engine "
-        "CANNOT currently perform.",
-        "residual_basis on every paired episode: "
-        "'certain, but not cash until settlement'",
-        REPLAY, supported=False))
+        "HOLD TO SETTLEMENT -- on measurement, not for want of an option",
+        "the merge call is still unavailable, but the feasible "
+        "alternative is now implemented and was measured: selling the "
+        "pair back costs more than the capital it frees on this corpus. "
+        "THE BINDING CAPITAL COST IS NOT HELD INVENTORY. It is "
+        "collateral resting behind quotes that never fill -- 27,955 "
+        "capital-hours against at most 3,696 held. Releasing pairs "
+        "attacks the small term.",
+        "Capital recycling -- alternative implemented, measured, and "
+        "found not to be the constraint.",
+        "Policy(release_matched=True); acceptance/strategy_v2.json",
+        REPLAY))
 
     # ── 7. EXIT / LOSS-TAKING ────────────────────────────────────────
     #
@@ -360,18 +395,24 @@ def walk(eps):
          "mean_hours_per_episode": round(cap / max(1, len(eps)), 2)},
         [{"action": "recycle on settlement", "chosen": True},
          {"action": "recycle on netting", "supported": False,
-          "why": "see decision 6 -- not available at this venue"}],
+          "why": "see decision 6 -- not available at this venue"},
+         {"action": "recycle by selling pairs back", "implemented": True,
+          "why": "measured: 2 firings, $1.75 cost, 26 capital-hours "
+                 "freed. Not the constraint."}],
         {"turnover_limit": "a dollar committed to an episode cannot be "
                            "committed to another until that event settles",
          "consequence": "supportable turnover is bounded by settlement "
                         "cadence, not by the engine's speed"},
         "RECYCLE ONLY ON SETTLEMENT",
-        "with no netting call, capital velocity is set by how fast events "
-        "resolve. This is the binding constraint on scale, and it is a "
-        "venue property.",
+        "with no netting call, HELD capital waits for the event. But the "
+        "measurement moved the diagnosis: 88% of committed capital-hours "
+        "are RESTING behind unfilled quotes, not held in inventory. The "
+        "binding constraint on scale is the fill rate, not the netting "
+        "call.",
         "Capital velocity.",
-        "capital-hours measured per candidate in economic_verdict.json",
-        REPLAY, supported=False))
+        "capital-hours measured per candidate in economic_verdict.json "
+        "and strategy_v2.json",
+        REPLAY))
 
     # ── 10. INCENTIVE ELIGIBILITY -- labelled scenario ───────────────
     prog = inc.Program("(scenario)", "culture_low_20260921", "daily_event",
@@ -498,16 +539,45 @@ def main():
         print("  MECHANISM %s" % _wrap(d["case_study_mechanism"], 10))
         print("  EVIDENCE %s" % _wrap(d["evidence"], 9))
 
+    # WHAT REMAINS ABSENT, kept as a STANDING LIST rather than derived
+    # from which decisions happen to be flagged. Implementing an
+    # alternative to a missing capability does not make the capability
+    # present, and a list that emptied itself when the alternatives
+    # landed would say exactly the wrong thing.
     unsupported = [d["stage"] for d in ds if not d["supported"]]
+    remaining = [
+        ("MERGE / NETTING TO CASH",
+         "STILL ABSENT. No merge call has been demonstrated at this "
+         "venue. The feasible alternative -- selling both legs back -- "
+         "is implemented and measured, and it is not a substitute: it "
+         "pays the spread for capital the merge would return whole."),
+        ("QUEUE POSITION",
+         "STILL UNOBSERVABLE. The replay sweeps a queue-ahead fraction "
+         "instead of knowing one, and EVERY fill figure in this "
+         "demonstration inherits that sweep."),
+        ("RESTING DEPTH AT THE TOUCH",
+         "NOT IN THIS CORPUS. It is the denominator of the incentive "
+         "reward and the input a depth-aware size rule would need. The "
+         "observation release exists to measure it."),
+        ("FILL-CONDITIONED PROFITABILITY",
+         "NOT ESTABLISHABLE BY OBSERVATION. It needs our own orders in "
+         "the book. No amount of watching substitutes for it."),
+    ]
     print()
     print("=" * 78)
-    print("CAPABILITIES THE ENGINE DOES NOT HAVE")
+    print("WHAT THE ENGINE STILL CANNOT DO")
     print("=" * 78)
-    for u in unsupported:
-        print("  - %s" % u)
+    for name, why in remaining:
+        print("  %-32s %s" % (name, _wrap(why, 35)))
+    if unsupported:
+        print()
+        print("  decisions flagged unsupported this run:")
+        for u in unsupported:
+            print("    - %s" % u)
     print()
-    print("These are stated so the demonstration cannot be read as")
-    print("evidence of a complete capability.")
+    print("Stated so the demonstration cannot be read as evidence of a")
+    print("complete capability. Implementing an alternative to a missing")
+    print("capability does not make the capability present.")
 
     with open(OUT, "w") as fh:
         json.dump({"demo": "BETTOR_MANAGEMENT_DEMO_V1",
@@ -520,7 +590,10 @@ def main():
                    "status_counts": dict(collections.Counter(
                        e["status"] for e in eps)),
                    "decisions": ds,
-                   "unsupported": unsupported}, fh, indent=2, default=str)
+                   "unsupported_decisions": unsupported,
+                   "still_absent": [{"capability": n, "status": w}
+                                    for n, w in remaining]},
+                  fh, indent=2, default=str)
     print("\nwritten: %s" % OUT)
     return 0
 
