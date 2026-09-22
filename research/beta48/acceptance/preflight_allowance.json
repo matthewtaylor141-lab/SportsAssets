@@ -1,0 +1,28 @@
+{
+  "_note": "THE DURABLE PREFLIGHT ALLOWANCE. Committed on purpose: an in-process counter is reset by the next process, and the whole point of an allowance is that it is not. capture_incentive_manifest.py seeds from this file and writes back to it, so a re-dispatch of the capture workflow resumes from what was already spent instead of starting again at zero.",
+  "_scope": "PRE-DEPLOY, out of band. This is NOT the observation run's eight-request row budget, which is held in Postgres by bettor_live_control.reserve() and is untouched by anything here.",
+  "cap": 6,
+  "spent": 2,
+  "remaining": 4,
+  "attempts": [
+    {
+      "at": "2026-09-22T20:40:26Z",
+      "where": "session container, direct",
+      "kind": "manifest",
+      "n_total": 1,
+      "why": "incentives page 1 attempt 1",
+      "outcome": "URLError -- the egress proxy refused CONNECT to gateway.polymarket.us with 403 (policy denial). The request never reached the venue.",
+      "counted": true
+    },
+    {
+      "at": "2026-09-22T20:40:26Z",
+      "where": "session container, direct",
+      "kind": "retry",
+      "n_total": 2,
+      "why": "incentives page 1 attempt 2",
+      "outcome": "URLError -- same proxy refusal.",
+      "counted": true
+    }
+  ],
+  "_why_blocked_attempts_still_count": "A CONNECT the proxy refused consumed none of the venue's rate budget, so on a narrow reading these two were free. They are counted anyway. The allowance exists to bound how many times we reach for this endpoint, not only how many times we succeed, and an accounting rule that forgives every failure is one that never binds. Recording them as spent is the conservative reading and it is the one in force."
+}

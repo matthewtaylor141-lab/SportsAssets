@@ -77,6 +77,34 @@ on:
           - LEXICOGRAPHIC_WITHIN_FROZEN_STRATA
           - SALTED_HASH_WITHIN_FROZEN_STRATA
 
+      # ── BRANCH-LOCAL ADDITION, authorized 2026-09-22 ───────────────
+      #
+      # WHY IT IS IN THIS FILE AND NOT A NEW ONE. `workflow_dispatch`
+      # resolves the workflow by ID against the DEFAULT branch, so a
+      # workflow that exists only on a feature branch cannot be
+      # dispatched at all -- that is the 404 the earlier attempt hit.
+      # A workflow that IS on the default branch can be dispatched at
+      # any ref, and GitHub then runs the file AS IT EXISTS AT THAT
+      # REF. So the route is to extend an already-dispatchable
+      # workflow on the release branch, which is what this is.
+      #
+      # THIS FILE IS MODIFIED ONLY ON `claude/incentive-observation-
+      # release`. The default branch copy is untouched, so the 2-hourly
+      # schedule keeps running the original collector unchanged.
+      #
+      # Setting this input runs the manifest capture INSTEAD OF the
+      # forward capture -- see the `if:` on both jobs. It never runs
+      # both, so a manifest dispatch cannot start a 120-minute
+      # collection by accident.
+      manifest_et_date:
+        description: >-
+          ET date (YYYY-MM-DD) for the bounded incentive-programme
+          manifest capture. Set this and the forward capture is SKIPPED
+          and the manifest capture runs instead. Leave blank for the
+          ordinary forward capture.
+        required: false
+        default: ""
+
 permissions:
   contents: write
 
@@ -108,6 +136,9 @@ concurrency:
 
 jobs:
   capture:
+    # SKIPPED when a manifest date is supplied. The two jobs are
+    # mutually exclusive so one dispatch never does both.
+    if: github.event.inputs.manifest_et_date == ''
     runs-on: ubuntu-latest
     timeout-minutes: 120
 
@@ -224,3 +255,112 @@ jobs:
             echo "push failed, retrying in ${i}s"; sleep "$i"
           done
           echo "BETA48_FORWARD_BRANCH $BR"
+
+  # ── BRANCH-LOCAL: THE BOUNDED INCENTIVE MANIFEST CAPTURE ──────────
+  #
+  # Runs INSTEAD OF the forward capture when `manifest_et_date` is set.
+  #
+  # WHAT IT PRESERVES, deliberately and each for a reason:
+  #   - the workflow-level concurrency group `pmus-public-read-global`,
+  #     so this can never read the venue while another BETTOR collector
+  #     is reading it;
+  #   - GET only, gateway.polymarket.us only, and NO CREDENTIAL. No
+  #     `secrets.` reference appears in this job. `/v1/incentives` is
+  #     unauthenticated; `/v1/incentives/earnings`, which is not, is
+  #     never contacted;
+  #   - the preflight allowance, which is DURABLE. The ledger is a
+  #     committed file, seeded from what earlier attempts already
+  #     spent, so a re-dispatch resumes instead of resetting. Two of
+  #     six are already gone.
+  #
+  # IT CHECKS OUT THE DISPATCHED COMMIT -- `github.sha`, not a branch
+  # name -- so what ran is identifiable after the fact even if the
+  # branch moves.
+  manifest:
+    if: github.event.inputs.manifest_et_date != ''
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Refuse to touch the auto-deploy branch
+        run: |
+          set -e
+          # A capture that can commit to the branch the services track
+          # is a deployment mechanism wearing a research hat.
+          if [ "${{ github.ref_name }}" = "claude/session-njaewf" ]; then
+            echo "REFUSED: dispatched at the auto-deploy branch."
+            echo "Dispatch this at the untracked release branch instead."
+            exit 1
+          fi
+          echo "ref_name = ${{ github.ref_name }}   sha = ${{ github.sha }}"
+
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      # THE GATE, kept from the forward capture: no venue contact until
+      # the capability boundary is proved offline.
+      - name: Prove the capability boundary offline
+        run: |
+          set -e
+          python -m pip install --quiet "httpx==0.27.2" "pytest==8.3.3"
+          python -m pytest research/beta48/forward/test_fwd_collect.py -q
+
+      - name: Show the allowance before spending any of it
+        run: python -c "import json;d=json.load(open('research/beta48/acceptance/preflight_allowance.json'));print('cap',d['cap'],'spent',d['spent'],'remaining',d['remaining'])"
+
+      - name: Capture the programme manifest
+        id: cap
+        run: |
+          set +e
+          python research/beta48/capture_incentive_manifest.py \
+            --et-date "${{ github.event.inputs.manifest_et_date }}" \
+            --where "github-actions run ${{ github.run_id }}"
+          echo "rc=$?" >> "$GITHUB_OUTPUT"
+
+      - name: Show the allowance after
+        if: always()
+        run: python -c "import json;d=json.load(open('research/beta48/acceptance/preflight_allowance.json'));print('cap',d['cap'],'spent',d['spent'],'remaining',d['remaining']);print('attempts',len(d['attempts']))"
+
+      # COMMITTED WHATEVER THE CAPTURE RETURNED. A refused or empty
+      # capture is evidence too, and the spent allowance must reach the
+      # repository even when nothing usable came back -- otherwise a
+      # failure is a way to spend requests without recording them.
+      - name: Commit the manifest and the allowance
+        if: always()
+        run: |
+          set -e
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add research/beta48/acceptance/incentive_manifest.json \
+                  research/beta48/acceptance/preflight_allowance.json
+          if git diff --cached --quiet; then
+            echo "nothing changed"; exit 0
+          fi
+          git commit -qm "Capture the incentive programme manifest (run ${{ github.run_id }}) [skip render]"
+          for i in 1 2 4 8 16; do
+            git push origin HEAD:refs/heads/${{ github.ref_name }} && break
+            echo "push failed, retrying in ${i}s"; sleep "$i"
+          done
+          git log --oneline -1
+
+      - name: Report the capture verdict
+        if: always()
+        run: |
+          python - <<'PY'
+          import json
+          m = json.load(open('research/beta48/acceptance/incentive_manifest.json'))
+          fp = m.get('freeze_preview') or {}
+          print('programs      ', len(m.get('programs') or []))
+          print('pages_read    ', m.get('pages_read'))
+          print('errors        ', json.dumps(m.get('errors'))[:300])
+          print('freeze ok     ', fp.get('ok'), '--', fp.get('why'))
+          print('markets       ', fp.get('markets'))
+          print('programmes    ', fp.get('distinct_programs'))
+          print('events        ', fp.get('distinct_events'))
+          PY
