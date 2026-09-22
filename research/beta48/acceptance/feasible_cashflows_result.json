@@ -1,0 +1,22 @@
+{
+  "two_sided_pair_both_fill_median": 0.0086,
+  "two_sided_pair_one_leg_median": -0.005,
+  "breakeven_double_fill_rate_median": 0.163,
+  "observations": 1551,
+  "distinct_markets": 11,
+  "median_capture_vs_mid_per_contract": 0.0025,
+  "median_rebate_per_contract": 0.0013,
+  "gross_per_contract_if_mid_is_fair": 0.0038,
+  "observations_capturing_nothing": 144,
+  "share_capturing_nothing": 0.0928,
+  "round_trip_median_net_per_fill": -0.55,
+  "complete_pair_median_ev_per_fill": -0.7,
+  "hold_to_settlement": "NOT IDENTIFIED -- engine refuses without a fair value",
+  "tick_source": "INFERRED from the price grid; orderPriceMinTickSize absent from captured bodies",
+  "data_status": "DEVELOPMENT",
+  "corrections": [
+    "p_fill decomposition holds only in the engine's simplified model; quote price, size and waiting time move p_fill and the conditional return together",
+    "33.9% was a scenario, not an empirical threshold; a pilot measures NET CASH, not a mixture proportion",
+    "the tick imposes no half-spread haircut; a one-tick book captures the FULL half-spread and it is OUR two-tick quoting rule that captures zero"
+  ]
+}

@@ -430,12 +430,12 @@ def part3_capacity(rows, maker):
     print("    NOT_IDENTIFIED. Two of its three components have never")
     print("    been observed, and the third needs a venue fact we have")
     print("    not read back. The figures below are a SCENARIO on")
-    print("    component 1 alone, with 2 and 3 set to zero -- which is a")
-    print("    SCENARIO under a stated holding assumption and a stated
-    turnover convention -- a bound ONLY WITHIN those two
-    conditions, and unconditionally neither a bound nor an
-    estimate. Change the holding period and the number moves
-    with it.")
+    print("    component 1 alone, with 2 and 3 set to zero. It is a")
+    print("    SCENARIO under a stated holding assumption and a stated")
+    print("    turnover convention -- a bound ONLY WITHIN those two")
+    print("    conditions, and unconditionally neither a bound nor an")
+    print("    estimate. Change the holding period and the number")
+    print("    moves with it.")
     for hold_h in (2.0, q_hours):
         cap = TARGET * hold_h / 24.0
         print("      inventory held %5.1f h -> %5.2f turns/day -> >= %9.0f"
