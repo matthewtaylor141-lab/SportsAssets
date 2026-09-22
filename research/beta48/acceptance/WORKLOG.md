@@ -138,3 +138,54 @@ modification the standing restrictions forbid.
 Two unblocking routes, in APPROVAL_REQUEST_V3.md. Recommended: allow
 gateway.polymarket.us in the environment network policy (smallest, no
 repository effect, no service restart).
+
+### MANIFEST CAPTURED — the route worked, and the earlier blocker report was wrong
+Run 35788331780, dispatched at commit 30c7ae1, conclusion SUCCESS in 35s.
+441 programme rows over 4 pages, zero errors, unauthenticated. Freeze OK:
+12 markets, 1 programme (culture_low_20260921), 1 event start time.
+Manifest commit 5cfd211.
+
+WHAT I GOT WRONG. I reported "every venue-reaching workflow runs a fixed
+set of script names, so a new file at my SHA would never execute" as an
+external blocker. The relevant fact is different: workflow_dispatch
+resolves the workflow by ID against the DEFAULT branch, but RUNS THE FILE
+AS IT EXISTS AT THE DISPATCHED REF. So extending an already-dispatchable
+workflow on the release branch was available the whole time.
+
+ALLOWANCE: cap 6, was 2 spent, the run spent the remaining 4 (one per
+page). Now 6/6, remaining 0. Durable in preflight_allowance.json, so a
+re-dispatch is refused rather than restarted.
+
+### EVALUATION PROVENANCE — independent-holdout claim WITHDRAWN
+acceptance/policy_final.json sweeps C0/C2/C3/C4 x 4 queue fractions over
+the WHOLE tape, including 17-20 September, and the C3 baseline in the
+register was selected using it. A protocol committed on 2026-09-22 does
+not make earlier-inspected dates untouched.
+
+So: chronological DEVELOPMENT split, every figure a DEVELOPMENT
+DIAGNOSTIC, no out-of-sample claim. "Confident negative" withdrawn --
+five clusters do not settle the mechanism in either direction, and a
+"confident positive" would have been wrong the same way.
+
+WHAT SURVIVES INDEPENDENTLY: the fee decomposition. Th_taker/|Th_maker|
+= 4.8 / 5.6 is arithmetic on the published schedule, and the per-episode
+cash split is an accounting identity over observed fills.
+
+### eventStartTime IS NOT A RESOLUTION TIMESTAMP — claim withdrawn
+The captured value is 2026-12-27T04:59Z, three months past the
+observation window, on year-end album markets. It is the programme's
+event reference and its meaning is not constant across categories. The
+previous handoff's claim that the observation release supplies the
+missing time-to-resolution input is withdrawn. See OBSERVATION_SCOPE.md.
+
+### Full-suite result, and what was actually established
+445 failed / 10674 passed / 143 skipped in 24 minutes. Sampled the
+reported failures (test_render_ops_take_band, test_shadow_v2,
+test_workers_boot_stagger, test_s4_review_pins) in isolation: 6 failed /
+127 passed. Ran the SAME selection on ba87076, the production SHA, with
+none of this work present: IDENTICAL 6 failed / 127 passed. Those are
+pre-existing.
+
+NOT ESTABLISHED: attribution of all 445. That needs a full baseline run,
+which is broad testing and was not authorized. What is established is
+that the sampled failures are not caused by this work.

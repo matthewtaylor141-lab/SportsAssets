@@ -116,8 +116,10 @@ class Book:
     """The decision-time book. Prices only -- depth is optional.
 
     `depth_*` are None when the source does not carry them, and every
-    rule below must work without them. The captured corpus has no
-    depth; the observation release will.
+    rule below must work without them -- the episode SUMMARY did not
+    carry depth for a long time, which is how a report came to claim
+    the capture had none. It always did: every tape row holds touch
+    depth and a full ladder, and they now travel with the episode.
     """
     bid: float | None
     ask: float | None
@@ -550,11 +552,13 @@ RULES = {
                      "them asks whether a book trades enough for the "
                      "quote to be reached. This one does, from "
                      "decision-time information only.",
-        "evidence": "DIAGNOSTIC, not yet a validated improvement. Derived "
-                    "from the fill-rate breakdown of the development "
-                    "split; its effect is reported in "
-                    "acceptance/evaluation.json. A hypothesis aimed at "
-                    "the measured constraint is still a hypothesis.",
+        "evidence": "TESTED AND FAILED, kept as a negative result. The "
+                    "gate worked as designed and the design was wrong: "
+                    "fill rate rose 39% -> 78% while the per-contract "
+                    "loss got WORSE, -0.0032 -> -0.0045 -> -0.0048. "
+                    "Never-filled episodes net exactly 0.00, so the "
+                    "fill rate was never the lever. Not retuned. See "
+                    "acceptance/evaluation.json R4-R6.",
     },
     "volatility": {
         "provenance": HYPOTHESIS,
@@ -567,16 +571,19 @@ RULES = {
                      "the expected move over the quoting horizon exceeds "
                      "the spread, being filled is worth less than not "
                      "being filled, whatever the fill rate.",
-        "evidence": "DIRECTLY FROM THE EVALUATION FAILURE. On the "
-                    "evaluation split the selected policy lost 74.29 "
-                    "over 197 episodes, of which TWO episodes -- both "
-                    "opened during live college football play on "
-                    "2026-09-19 -- accounted for -79.82. The other 195 "
-                    "netted +5.53. The loss was the adverse move, not "
-                    "the fee and not the fill rate. NOT YET EVALUATED: "
-                    "the evaluation split has been spent, so this rule "
-                    "is a prespecified candidate for fresh data, not a "
-                    "validated improvement.",
+        "evidence": "FROM THE LATER-PERIOD DIAGNOSTIC. The selected "
+                    "policy lost 74.29 over 197 episodes there, of "
+                    "which TWO -- both opened during live college "
+                    "football play on 2026-09-19 -- accounted for "
+                    "-79.82, while the other 195 netted +5.53. The loss "
+                    "was the adverse move, not the fee and not the fill "
+                    "rate. NOT VALIDATED, and it cannot be validated on "
+                    "this corpus: those dates were already inspected in "
+                    "earlier policy work, so they are a development "
+                    "diagnostic rather than a holdout, and the earlier "
+                    "period contains none of the volatility this rule "
+                    "targets. A prespecified candidate awaiting data "
+                    "that actually contains the condition.",
     },
     "placement": {
         "provenance": DERIVED,
@@ -645,8 +652,13 @@ RULES = {
                      "spread.",
         "evidence": "measured: fired twice in 470 episodes, cost $1.75, "
                     "freed 26 of 3,696 held capital-hours. NOT the "
-                    "binding constraint -- 88% of committed capital-hours "
-                    "rest behind quotes that never fill.",
+                    "binding constraint. (The reason given here used to "
+                    "be '88% of capital-hours rest behind quotes that "
+                    "never fill'; that diagnosis was DISPROVED -- "
+                    "never-filled episodes net exactly 0.00 and the "
+                    "whole P&L comes from episodes that fill. Release "
+                    "is still not the lever, for the smaller reason "
+                    "that it fired twice.)",
     },
 }
 

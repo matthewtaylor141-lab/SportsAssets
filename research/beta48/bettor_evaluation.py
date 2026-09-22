@@ -1,11 +1,42 @@
-"""THE PRESPECIFIED EVALUATION. Written before the answer was known.
+"""A CHRONOLOGICAL DEVELOPMENT SPLIT. NOT an independent holdout.
 
-WHY THIS FILE EXISTS. Every economic number reported so far came from
-running a policy over the WHOLE corpus and reading the total. With
-four candidates, four queue fractions and several variants, that is
-sixteen-plus looks at one sample -- and the best of sixteen looks at
-one sample is not an estimate of anything. This file fixes the
-protocol first and then runs it.
+READ THIS BEFORE ANY NUMBER BELOW.
+
+WHAT THIS FILE IS FOR. Every economic number reported before it came
+from running a policy over the WHOLE corpus and reading the total.
+With four candidates and four queue fractions that is sixteen-plus
+looks at one sample, and the best of sixteen looks at one sample is
+not an estimate of anything. Splitting the corpus by time and holding
+the later part back is a real improvement on that, and it is what this
+file does.
+
+WHAT IT IS NOT, AND THE CLAIM THAT IS WITHDRAWN. An earlier version of
+this docstring called the later part an evaluation split touched once,
+and reported its result as out-of-sample evidence. THAT WAS WRONG. The
+September corpus -- all of it, including 17-20 September -- had
+already been inspected and used in earlier policy work:
+`acceptance/policy_final.json` holds a C0/C2/C3/C4 sweep across four
+queue fractions over the whole tape, and the C3 baseline carried into
+the register below was SELECTED using it.
+
+Committing a protocol in 2026-09-22 does not make dates that were
+examined beforehand untouched. Freshness is a property of the DATA's
+history, not of the document's. So:
+
+  * the split is a CHRONOLOGICAL DEVELOPMENT SPLIT;
+  * the later-period figures are DEVELOPMENT DIAGNOSTICS;
+  * no result here is out-of-sample evidence, and none is reported as
+    such;
+  * the intervals below quantify sampling variation given the split.
+    They are NOT a valid frequentist statement about a policy selected
+    on data that includes the period being scored, and with five
+    clusters they could not be decisive even if it were.
+
+WHAT STILL STANDS, because it does not depend on the split at all: the
+FEE DECOMPOSITION. Th_taker / |Th_maker| is 4.8 (JUL2026) and 5.6
+(SEP2026) -- arithmetic on the published schedule, not an inference
+from this sample -- and the per-episode cash decomposition is an
+accounting identity over observed fills.
 
 ────────────────────────────────────────────────────────────────────
 THE PROTOCOL, IN FULL, FIXED BEFORE ANY RESULT BELOW WAS COMPUTED.
@@ -40,10 +71,16 @@ THE PROTOCOL, IN FULL, FIXED BEFORE ANY RESULT BELOW WAS COMPUTED.
     REGISTER below -- including the ones that failed, which is the
     point of a register.
 
-4.  EVAL IS TOUCHED ONCE, by ONE variant, chosen on DEV. Each touch is
-    appended to `acceptance/eval_touches.json`, so a second touch is
-    visible in the artifact rather than invisible in the history. The
-    register makes selection VISIBLE; it does not make it free.
+4.  THE LATER PERIOD IS READ ONCE, by ONE variant, chosen on the
+    earlier one. Each read is appended to
+    `acceptance/eval_touches.json`, so a second read is visible in the
+    artifact rather than invisible in the history. The register makes
+    selection VISIBLE; it does not make it free.
+
+    THIS DISCIPLINE IS WORTH KEEPING AND IT DOES NOT BUY WHAT A
+    HOLDOUT BUYS. Reading the later period once limits how much THIS
+    protocol overfits it. It cannot undo the reading that already
+    happened before the protocol existed.
 
 5.  DEPENDENCE IS HANDLED BY CLUSTERING ON THE EVENT. The corpus holds
     420 episodes over FIVE events. Episodes within an event share a
@@ -51,18 +88,26 @@ THE PROTOCOL, IN FULL, FIXED BEFORE ANY RESULT BELOW WAS COMPUTED.
     independent observations -- they are five. Every interval below is
     a bootstrap over EVENTS, resampled whole.
 
-6.  THE ACCEPTANCE THRESHOLD, stated before the result: net P&L after
-    fees positive on EVAL, with an event-clustered 90% interval that
-    excludes zero. Anything short of that is reported as a failure to
-    qualify, with the reason.
+6.  THE THRESHOLD, stated before the result: net P&L after fees
+    positive on the later period with an event-clustered 90% interval
+    excluding zero. Failing it is reported as a failure to qualify.
+    PASSING IT WOULD NOT HAVE QUALIFIED THE STRATEGY EITHER, for the
+    provenance reason above -- it is a screen, not a proof.
 
-WHAT THE PROTOCOL CANNOT FIX, and it is the dominant fact: FIVE
-CLUSTERS. A bootstrap over five events cannot produce a narrow
-interval no matter what the point estimate does, so a positive result
-here would be suggestive and could not be significant. That is a
-property of the capture, not of the policy, and the honest response is
-to say so rather than to report an unclustered interval that looks
-tighter.
+TWO THINGS THE PROTOCOL CANNOT FIX.
+
+FIVE CLUSTERS. A bootstrap over five events cannot produce a narrow
+interval whatever the point estimate does. A positive result here
+could only ever have been suggestive.
+
+AND THE SAME ARITHMETIC CUTS BOTH WAYS. Five clusters do not license
+a confident NEGATIVE conclusion about the underlying economic
+mechanism either. What a large negative point estimate on this corpus
+supports is that THIS policy, on THESE five events, lost money and
+where it went. It does not establish that two-sided passive quoting on
+this venue cannot work. An earlier version of this file called the
+result a "confident negative"; that overstated it in the same way a
+"confident positive" would have, and it is withdrawn.
 
 Run:  python research/beta48/bettor_evaluation.py
 """
@@ -405,16 +450,19 @@ def main(dev_only=False):
         return 1
 
     print("=" * 92)
-    print("PRESPECIFIED EVALUATION -- %s" % PROTOCOL_VERSION)
-    print("cut %s   |   DEV before, EVAL on or after, by episode t0"
+    print("CHRONOLOGICAL DEVELOPMENT SPLIT -- %s" % PROTOCOL_VERSION)
+    print("cut %s   |   earlier before, later on or after, by episode t0"
           % CUT_ISO)
+    print("NOT AN INDEPENDENT HOLDOUT: these dates were already "
+          "inspected in earlier\npolicy work. Every figure below is a "
+          "DEVELOPMENT DIAGNOSTIC.")
     print("SIMULATED replay. Not account performance, not executed "
           "fills.")
     print("=" * 92)
 
     # ── DEVELOPMENT. EVAL is not read in this loop. ──────────────────
     dev_rows = []
-    print("\nDEVELOPMENT SPLIT ONLY -- %d variants in the register\n"
+    print("\nEARLIER PERIOD ONLY -- %d variants in the register\n"
           % len(REGISTER))
     print("%-32s %5s %4s %4s %9s %9s %8s %9s" % (
         "variant", "qfrac", "eps", "fill", "net$", "position", "rebates",
@@ -524,7 +572,7 @@ def main(dev_only=False):
 
     # ── THE SINGLE EVAL TOUCH ────────────────────────────────────────
     print("\n" + "=" * 92)
-    print("EVALUATION SPLIT -- ONE variant, ONE touch")
+    print("LATER PERIOD -- ONE variant, ONE read.  DEVELOPMENT\nDIAGNOSTIC, not out-of-sample evidence: these dates were already\ninspected in earlier policy work (see acceptance/policy_final.json)")
     print("=" * 92)
     eval_rows = []
     for q in QFRACS:
@@ -561,14 +609,18 @@ def main(dev_only=False):
     print("VERDICT")
     print("=" * 92)
     if qualifies:
-        print("  QUALIFIES on the stated threshold: net positive on EVAL "
-              "in every queue scenario with a clustered interval that "
-              "excludes zero.")
+        print("  PASSES THE SCREEN: net positive in every queue scenario "
+              "with a clustered interval excluding zero. That is a "
+              "SCREEN, not a qualification -- these dates were "
+              "already inspected before this protocol existed.")
     else:
         neg = [r for r in eval_rows if r["net_usd"] <= 0]
         wide = [r for r in eval_rows
                 if not r["bootstrap"].get("excludes_zero")]
-        print("  DOES NOT QUALIFY.")
+        print("  DOES NOT PASS THE SCREEN.")
+        print("  Read as a DEVELOPMENT DIAGNOSTIC. Five event clusters "
+              "do not support a\n  confident conclusion about the "
+              "underlying mechanism in EITHER direction.")
         if neg:
             print("    net P&L is not positive at qfrac %s"
                   % ", ".join("%.2f" % r["qfrac"] for r in neg))
@@ -583,6 +635,23 @@ def main(dev_only=False):
     with open(OUT, "w") as fh:
         json.dump({"protocol": PROTOCOL_VERSION,
                    "cut": CUT_ISO,
+                   "provenance": {
+                       "independent_holdout": False,
+                       "why": "the September corpus, including the "
+                              "later period, was already inspected "
+                              "and used in earlier policy work "
+                              "(acceptance/policy_final.json sweeps "
+                              "C0/C2/C3/C4 x 4 queue fractions over "
+                              "the whole tape). A protocol committed "
+                              "afterwards does not make those dates "
+                              "untouched.",
+                       "status_of_every_figure_here": "DEVELOPMENT "
+                              "DIAGNOSTIC -- not out-of-sample "
+                              "evidence",
+                       "what_survives_independently": "the fee "
+                              "decomposition: Th_taker/|Th_maker| = "
+                              "4.8 (JUL2026) / 5.6 (SEP2026) is "
+                              "arithmetic on the published schedule"},
                    "execution": "tape-backed replay; SIMULATED, not "
                                 "account performance",
                    "register": [{"variant": n, "policy": k, "why": w}
@@ -593,7 +662,9 @@ def main(dev_only=False):
                    "selection_rule": "best worst-case net across the four "
                                      "queue scenarios, on DEV only",
                    "eval": eval_rows,
-                   "qualifies": qualifies}, fh, indent=2, default=str)
+                   "passes_screen": qualifies,
+                   "qualifies": False,
+                   "qualifies_why": "no result on this corpus qualifies a strategy: the dates were already inspected, and five event clusters cannot settle the mechanism in either direction"}, fh, indent=2, default=str)
     print("\nwritten: %s" % OUT)
     return 0
 

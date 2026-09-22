@@ -1,21 +1,41 @@
 # BETTOR — economic verdict on a prespecified evaluation
 
-`BETTOR_EVALUATION_V1` · protocol frozen in commit `851cb23`, before the
-evaluation split had ever been read · artifacts `evaluation.json`,
-`eval_touches.json`
+`BETTOR_EVALUATION_V1` · protocol frozen in commit `851cb23` · artifacts
+`evaluation.json`, `eval_touches.json`
+
+> **Status: DEVELOPMENT DIAGNOSTIC.** The independent-holdout claim this
+> document originally made is withdrawn — see *Provenance* below. Nothing
+> here qualifies or disqualifies a strategy.
 
 **All figures below are SIMULATED replay on captured tape. None of them
 are account results and no order was placed.**
 
 ---
 
-## The verdict
+## Provenance first, because it limits everything below
 
-**No candidate qualifies.** The threshold was fixed before the result
-existed: net P&L after fees positive on the evaluation split, with an
+**This is NOT an independent holdout, and the earlier claim that it was
+is withdrawn.** The September corpus — all of it, including 17–20
+September — had already been inspected and used in earlier policy work:
+`acceptance/policy_final.json` holds a C0/C2/C3/C4 sweep across four
+queue fractions over the whole tape, and the C3 baseline carried into
+this register was selected using it.
+
+Committing a protocol on 2026-09-22 does not make dates examined before
+it untouched. Freshness is a property of the data's history, not of the
+document's. So every figure below is a **development diagnostic**.
+
+Reading the later period once still limits how much *this* protocol
+overfits it, which is worth keeping. It cannot undo the reading that
+already happened.
+
+## The screen, and what it does and does not settle
+
+**No candidate passes the screen.** The threshold was fixed before the
+result existed: net P&L after fees positive on the later period, with an
 event-clustered 90% interval excluding zero.
 
-The selected policy (`R10`) returned, on data it had never been fitted to:
+The selected policy (`R10`) returned:
 
 | queue scenario | episodes | fill | net | per capital-hour | 90% clustered interval |
 |---|---|---|---|---|---|
@@ -24,20 +44,31 @@ The selected policy (`R10`) returned, on data it had never been fitted to:
 | 0.50 | 209 | 11% | **−80.81** | −0.006520 | [−152.30, −5.35] |
 | 1.00 | 210 | 9% | **−100.01** | −0.008021 | [−206.89, −7.59] |
 
-Every interval excludes zero **on the negative side**. This is not an
-inconclusive result. It is a confident negative.
+Every interval excludes zero on the negative side. **That is not a
+confident negative about the mechanism, and calling it one was an
+overstatement that is withdrawn.** Five event clusters cannot settle the
+question in either direction; a "confident positive" on the same sample
+would have been wrong in the same way.
 
-Development had shown −3.29 worst case and +2.65 at the most favourable
-queue assumption. The out-of-sample figure is roughly twenty-five times
-worse. That gap is itself the finding: the development numbers were
-selection artifacts across 48 looks at one sample, and the protocol
-existed to expose exactly that.
+What these numbers support is narrow and still useful: **this policy, on
+these five events, lost money, and the decomposition shows where it
+went.** They do not establish that two-sided passive quoting on this
+venue cannot work.
+
+The earlier period had shown −3.29 worst case and +2.65 at the most
+favourable queue assumption. The later figure is roughly twenty-five
+times worse across 48 looks at one sample — consistent with the earlier
+numbers being selection artifacts, which is what the split was built to
+expose.
 
 ---
 
 ## What actually consumes the money — two costs, in tension
 
 ### 1. Completing a maker fill with a taker order costs about five times what resting earned
+
+*This one does not depend on the split at all — it is arithmetic on the
+published fee schedule plus an accounting identity over observed fills.*
 
 Decomposing the baseline's filled development episodes (81 episodes,
 4,459 contracts, queue fraction 0.00):
@@ -73,17 +104,18 @@ roughly five times what resting earned it, per contract, by construction.
 > **It cannot explain the result.** EVAL's taker fees were −21.81 against a
 > position loss of −63.91. A 16% higher taker rate accounts for roughly
 > $3 of a $74 loss, and none of the $63.91.
+
 Variants R7–R11 stop paying the taker, and every one of them improves net:
 worst-case net goes from −14.29 (baseline) to −3.29 (R10).
 
-### 2. Those taker fees were an insurance premium, and the evaluation period contained the claim
+### 2. Those taker fees were an insurance premium, and the later period contained the claim
 
-On the evaluation split the loss is **not** the fee:
+On the later period the loss is **not** the fee:
 
 | | position | rebates | taker fees | net |
 |---|---|---|---|---|
-| DEV (qfrac 0.00) | +7.36 | +6.60 | −11.31 | **+2.65** |
-| EVAL (qfrac 0.00) | −63.91 | +11.43 | −21.81 | **−74.29** |
+| earlier (qfrac 0.00) | +7.36 | +6.60 | −11.31 | **+2.65** |
+| later (qfrac 0.00) | −63.91 | +11.43 | −21.81 | **−74.29** |
 
 Two episodes account for the entire loss:
 

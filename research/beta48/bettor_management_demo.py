@@ -521,6 +521,7 @@ def _runtime_path():
     instead of quietly reporting the winner.
     """
     sys.path.insert(0, os.path.join(HERE, "..", "..", "backend"))
+    global bp
     from sportsassets import bettor_decision_engine as de
     from sportsassets import bettor_policy as bp
     from sportsassets import bettor_policy_runtime as rt
@@ -635,13 +636,29 @@ def main():
              runtime["effective_size_contracts"]))
     print("    because       %s" % _wrap(runtime["effective_reason"], 18))
     print()
-    print("  READ THIS CAREFULLY. The strategy wants to quote and the")
-    print("  engine will not let it, because MAKE_YES/MAKE_NO have no")
-    print("  identified EV -- P_FILL is not identified, and NOT_IDENTIFIED")
-    print("  is not zero. The live system today therefore produces")
-    print("  NO_TRADE at size 0 on a perfectly good book. That is the")
-    print("  system working as designed, not a fault, and it is what")
-    print("  fill-conditioned evidence would change.")
+    print("  WHICH RULES PRODUCED THAT, AND ON WHAT AUTHORITY")
+    d = bp.describe()
+    print("    case-study derived : %s" % ", ".join(d["derived"]))
+    print("    hypotheses (ours)  : %s" % ", ".join(d["hypotheses"]))
+    print("    the decision above was produced by rule %r, which is %s"
+          % (p["rule"], p["provenance"]))
+    for r in d["hypotheses"]:
+        print("      %-12s %s" % (r, _wrap(bp.RULES[r]["evidence"], 21)))
+    print()
+    print("  P_FILL IS AN UNRESOLVED EXECUTION-MODEL REQUIREMENT.")
+    print("  The strategy wants to quote; the engine will not score it,")
+    print("  because MAKE_YES/MAKE_NO have no identified EV without a")
+    print("  fill model, and NOT_IDENTIFIED is not zero. So the live")
+    print("  system produces NO_TRADE at size 0 on a good book.")
+    print()
+    print("  That is NOT a completed autonomous strategy with a")
+    print("  conservative setting. It is a strategy with a REQUIRED")
+    print("  INPUT MISSING. P_FILL cannot be supplied by observation:")
+    print("  a public feed shows the book, never our order in it. It")
+    print("  needs a bounded execution experiment -- real resting")
+    print("  orders, real fills -- which is not authorized and is not")
+    print("  requested here. Until then the engine's refusal is the")
+    print("  correct output and the strategy is INCOMPLETE.")
 
     print()
     print("=" * 78)
