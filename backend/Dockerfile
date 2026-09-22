@@ -42,6 +42,29 @@ COPY research/beta48/shadow ./research/beta48/shadow
 # restrictions would not follow them.
 COPY research/beta48/*.json ./research/beta48/
 
+# THE CAPTURED INCENTIVE MANIFEST, AND ONLY IT.
+#
+# THE DEFECT THIS FIXES. The line above globs `research/beta48/*.json`,
+# which is TOP-LEVEL ONLY -- it does not descend into `acceptance/`.
+# The activation sequence declared
+# `BETTOR_INCENTIVE_MANIFEST=research/beta48/acceptance/incentive_manifest.json`,
+# and against WORKDIR /app that path simply does not exist in the
+# image. The worker would have refused to start with MANIFEST_ABSENT on
+# the first boot after deployment. A repository-file check could never
+# have caught it, because the file IS in the repository.
+#
+# COPIED NARROWLY, not by copying `acceptance/` whole: that directory
+# is 4.9 MB of patches, suite XML and result JSON that the runtime has
+# no use for, and shipping it would put evidence artifacts inside a
+# production image.
+#
+# AND THE BUILD FAILS IF IT IS ABSENT. `COPY` of a missing literal path
+# is a build error, so "the manifest is not in the image" becomes a
+# failed build rather than a worker that starts and refuses. That is
+# the direction this release wants the failure to point.
+COPY research/beta48/acceptance/incentive_manifest.json \
+     ./research/beta48/acceptance/
+
 # The bridge resolves this FIRST, before any parent-directory guess.
 # Source-tree parent arithmetic has no reason to hold inside an image
 # whose layout a Dockerfile chose.

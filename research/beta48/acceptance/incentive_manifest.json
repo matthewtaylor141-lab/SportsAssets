@@ -1,0 +1,101 @@
+{
+  "authenticated": false,
+  "capture": {
+    "mode": "PRE-DEPLOY, committed to the repository",
+    "note": "this capture spends NONE of the run's eight-request row budget; the run's manifest sub-cap therefore goes unused",
+    "request_report": {
+      "cap": 6,
+      "log": [
+        {
+          "kind": "manifest",
+          "n_total": 1,
+          "ok": true,
+          "verdict": "GRANTED",
+          "why": "incentives page 1 attempt 1"
+        },
+        {
+          "kind": "retry",
+          "n_total": 2,
+          "ok": true,
+          "verdict": "GRANTED",
+          "why": "incentives page 1 attempt 2"
+        }
+      ],
+      "scope": "PRE-DEPLOY, out of band -- NOT the run's row",
+      "spent": {
+        "manifest": 1,
+        "retry": 1
+      },
+      "used": 2
+    },
+    "run_allowance_spent": 0
+  },
+  "captured_at": "2026-09-22T20:40:26.572268+00:00",
+  "errors": [
+    {
+      "error": "URLError",
+      "page": 1
+    }
+  ],
+  "et_date": "2026-09-23",
+  "freeze_preview": {
+    "distinct_events": null,
+    "distinct_programs": null,
+    "dropped_by_watch_cap": null,
+    "independence_note": null,
+    "markets": 0,
+    "ok": false,
+    "slugs": null,
+    "why": "MANIFEST_HAS_NO_QUALIFYING_PROGRAMS"
+  },
+  "manifest": "BETTOR_INCENTIVE_MANIFEST_V1",
+  "manifest_id": "4f53cda18c2baa0c",
+  "pages_read": 0,
+  "programs": [],
+  "programs_raw_count": 0,
+  "request_report": {
+    "cap": 6,
+    "log": [
+      {
+        "kind": "manifest",
+        "n_total": 1,
+        "ok": true,
+        "verdict": "GRANTED",
+        "why": "incentives page 1 attempt 1"
+      },
+      {
+        "kind": "retry",
+        "n_total": 2,
+        "ok": true,
+        "verdict": "GRANTED",
+        "why": "incentives page 1 attempt 2"
+      }
+    ],
+    "scope": "PRE-DEPLOY, out of band -- NOT the run's row",
+    "spent": {
+      "manifest": 1,
+      "retry": 1
+    },
+    "used": 2
+  },
+  "response_digest": "sha256:4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945",
+  "source": "https://gateway.polymarket.us/v1/incentives",
+  "source_params": {
+    "instrument_states": "INSTRUMENT_STATE_OPEN",
+    "page_size": 100,
+    "program_type": "liquidityProgram",
+    "statuses": "active"
+  },
+  "window": {
+    "end_epoch": 1790222400.0,
+    "end_iso": "2026-09-24T00:00:00-04:00",
+    "et_date": "2026-09-23",
+    "half_open": "[start, end) -- the next midnight belongs to the next date",
+    "hours": 24.0,
+    "scoring_instants": 86400,
+    "span_s": 86400.0,
+    "start_epoch": 1790136000.0,
+    "start_iso": "2026-09-23T00:00:00-04:00",
+    "tz": "America/New_York"
+  }
+}
