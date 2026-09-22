@@ -1322,8 +1322,7 @@ async def main(*, client=None, stream_factory=None, store=None,
         log.info("bettor_live_loop: not observing (%s: %s); "
                  "effective config %s", budget["state"],
                  budget.get("detail"), json.dumps(effective_config()))
-        if budget["state"] in (ctl.B_EXPIRED, ctl.B_EXHAUSTED) \
-                and control_pool is not None:
+        if budget["state"] in (ctl.B_EXPIRED, ctl.B_EXHAUSTED):
             # AUTOMATIC SHUTDOWN, AND IT HAS TO OUTLIVE THE RESTART.
             # Returning is not enough: the supervisor starts us again
             # in five seconds. Writing the control to false stops the
@@ -1350,8 +1349,20 @@ async def main(*, client=None, stream_factory=None, store=None,
                       "refused": 0}
 
     async def _reserve(kind: str, slug):
-        if control_pool is None:
-            return {"ok": False, "why": "NO_CONTROL_POOL"}
+        # `control_pool` IS None IN PRODUCTION. The supervisor registers
+        # this loop as `bettor_live_loop.main` and calls it with no
+        # arguments; only tests and scripts inject a pool. `ctl.reserve`
+        # resolves None through `_resolve` -> `get_pool()`, exactly as
+        # `read_control` and `read_budget` already do, so None is passed
+        # THROUGH rather than treated as "no pool".
+        #
+        # An earlier version short-circuited on None and refused every
+        # reservation. It failed closed -- no venue request was made --
+        # but the probe could not run at all: on 2026-09-22T07:39:05.938Z
+        # the live worker read the control as `true`, read an open
+        # allowance, and then refused its first listing reservation with
+        # NO_CONTROL_POOL. Every local proof had injected a pool, so the
+        # seam production actually uses was never exercised.
         r = await ctl.reserve(control_pool, kind, slug=slug,
                               probe_id=probe_id)
         ok = ctl.granted(r)
@@ -1531,8 +1542,7 @@ async def main(*, client=None, stream_factory=None, store=None,
                     log.warning("bettor_live_loop: stopping on the "
                                 "probe budget (%s: %s)", b["state"],
                                 b.get("detail"))
-                    if control_pool is not None:
-                        await ctl.disarm(control_pool, b["state"])
+                    await ctl.disarm(control_pool, b["state"])
                     stop_reason = b["state"]
                     break
                 live = await ctl.read_control(control_pool)

@@ -1750,3 +1750,140 @@ class TestTheIdleDeploymentEvidencesTheApprovedLimits:
         assert "effective config" in said
         assert '"max_rps": 0.25' in said
         assert '"budget_max_distinct_default": 40' in said
+
+
+class TestTheProductionSeamHasNoInjectedPool:
+    """THE DEFECT THIS CLASS PINS, found on production 2026-09-22.
+
+    `workers/all.py` registers this loop as `bettor_live_loop.main` and
+    the supervisor calls it WITH NO ARGUMENTS, so `control_pool` is
+    None. `read_control`, `read_budget` and `reserve` all resolve None
+    through `_resolve()` -> `get_pool()`; an earlier `_reserve` closure
+    did not, and refused every reservation with NO_CONTROL_POOL.
+
+    Measured at 2026-09-22T07:39:05.938Z: the live worker read the
+    control as `true`, read an open allowance, then refused its first
+    listing reservation and never issued a request. It failed CLOSED --
+    zero venue requests, all three counters still 0 -- but the probe
+    could not run.
+
+    Every proof before it injected a pool, so the seam production
+    actually uses was never exercised. These tests use that seam.
+    """
+
+    def _patched_pool(self, monkeypatch, pool):
+        """Make `get_pool()` answer, exactly as it does in production."""
+        import sportsassets.db as dbmod
+
+        async def get_pool():
+            return pool
+
+        monkeypatch.setattr(dbmod, "get_pool", get_pool, raising=False)
+
+    def _venue(self):
+        """A client that counts, so the test can see that a request was
+        actually issued rather than merely permitted."""
+        class Markets:
+            def __init__(self):
+                self.list_calls, self.bbo_calls = 0, []
+
+            def list(self, params):
+                self.list_calls += 1
+                if params.get("offset", 0) > 0:
+                    return {"markets": []}
+                return {"markets": [
+                    {"id": "i%d" % i, "slug": "s%03d" % i,
+                     "title": "M", "outcome": "yes", "active": True,
+                     "closed": False, "liquidity": 1.0, "volume": 1.0,
+                     "eventSlug": "e"} for i in range(3)]}
+
+            def bbo(self, slug):
+                self.bbo_calls.append(slug)
+                return {"marketData": {
+                    "marketSlug": slug, "state": "MARKET_STATE_OPEN",
+                    "bestBid": {"value": "0.2150", "currency": "USD"},
+                    "bestAsk": {"value": "0.3850", "currency": "USD"},
+                    "askDepth": 16, "bidDepth": 10,
+                    "sharesTraded": "138.77"}}
+
+            def settlement(self, slug):
+                return {"marketData": {}}
+
+        class Client:
+            def __init__(self):
+                self.markets = Markets()
+
+        return Client()
+
+    def test_main_with_no_pool_still_reserves_and_dispatches(
+            self, monkeypatch, tmp_path):
+        """The whole defect, in one assertion: called the way the
+        supervisor calls it -- no `control_pool` -- the loop must still
+        take allowance and reach the venue."""
+        pool = FakeControlPool("true", budget=open_budget())
+        self._patched_pool(monkeypatch, pool)
+        monkeypatch.setenv(probe_mod.RPS_ENV, "100000")
+
+        class Cfg:
+            pmus_key_id, pmus_secret_key = "k", "s"
+
+        import sportsassets.config as cfgmod
+        monkeypatch.setattr(cfgmod, "settings", lambda: Cfg(),
+                            raising=False)
+        client = self._venue()
+        asyncio.run(bl.main(client=client, store=filestore(tmp_path),
+                            run_for_s=0.0, sleep=SleepSpy()))
+        row = json.loads(pool.budget)
+        assert row["listing_attempts_reserved"] >= 1, \
+            "no listing attempt was reserved through the production seam"
+        assert client.markets.list_calls >= 1, "the listing never went out"
+        assert row["distinct_reserved"] == len(set(client.markets.bbo_calls))
+
+    def test_no_reservation_answers_NO_CONTROL_POOL(self):
+        """The specific refusal that fired on production at
+        07:39:05.938Z must not be reachable at all any more.
+
+        Over CODE only -- the comment above the fix names the refusal
+        deliberately, and recording why it existed is the opposite of
+        reintroducing it."""
+        import ast
+        tree = ast.parse(inspect.getsource(bl))
+        for node in ast.walk(tree):
+            body = getattr(node, "body", None)
+            if isinstance(body, list) and body \
+                    and isinstance(body[0], ast.Expr) \
+                    and isinstance(getattr(body[0], "value", None),
+                                   ast.Constant) \
+                    and isinstance(body[0].value.value, str):
+                body.pop(0)
+        assert "NO_CONTROL_POOL" not in ast.unparse(tree)
+
+    def test_disarm_reaches_the_database_without_an_injected_pool(
+            self, monkeypatch):
+        """THE SECOND, QUIETER HALF. `disarm` took a pool directly and
+        `main()` guarded it with `control_pool is not None`, so on
+        production the deadline's automatic shutdown would have written
+        nothing at all -- on the one deployment it exists for."""
+        pool = FakeControlPool("true", budget=open_budget())
+        self._patched_pool(monkeypatch, pool)
+        out = asyncio.run(ctl_mod.disarm(None, ctl_mod.B_EXPIRED))
+        assert out["disarmed"] is True
+        assert pool.value == "false", "the control was not written"
+        assert "control_pool is not None" not in inspect.getsource(bl), \
+            "a None pool must never mean 'skip the safety write'"
+
+    def test_every_control_entry_point_accepts_none(self, monkeypatch):
+        """One rule, applied everywhere: None means RESOLVE THE PROCESS
+        POOL, never 'there is no pool'."""
+        pool = FakeControlPool("true", budget=open_budget())
+        self._patched_pool(monkeypatch, pool)
+
+        async def drive():
+            assert (await ctl_mod.read_control(None))["run"] is True
+            assert (await ctl_mod.read_budget(None))["open"] is True
+            r = await ctl_mod.reserve(None, ctl_mod.R_LISTING,
+                                      probe_id=PROBE_ID)
+            assert ctl_mod.granted(r), r
+            assert (await ctl_mod.disarm(None, "T"))["disarmed"] is True
+
+        asyncio.run(drive())

@@ -588,7 +588,14 @@ async def disarm(pool, why: str) -> dict:
     `render-ops sql obs-run`; nothing in this codebase writes `true`.
     """
     try:
-        await pool.execute(
+        # RESOLVES None, like `read_control`, `read_budget` and
+        # `reserve`. In production nothing injects a pool -- the
+        # supervisor calls `main()` with no arguments -- and a disarm
+        # that quietly did nothing there would mean the deadline's
+        # automatic shutdown never fired on the one deployment it
+        # exists for.
+        p = await _resolve(pool)
+        await p.execute(
             "INSERT INTO ingestion_state (key, value) VALUES ($1, "
             "'false'::jsonb) ON CONFLICT (key) DO UPDATE SET "
             "value = 'false'::jsonb", CONTROL_KEY)
