@@ -57,7 +57,7 @@ jobs:
           curl -sSL --max-time 300 -A "sportsassets-docs-reader" "$URL_NOFRAG" -o /tmp/page.html
           echo "== bytes: $(wc -c < /tmp/page.html) =="
           if [ -n "$FRAG" ]; then
-            python3 "$GITHUB_WORKSPACE/.github/scripts/schema_extract.py" || true
+            python3 "$GITHUB_WORKSPACE/.github/scripts/schema_extract.py"
           fi
           python3 - <<'PY'
           import html, re

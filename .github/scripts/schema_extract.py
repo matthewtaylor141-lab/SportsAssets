@@ -13,8 +13,12 @@ if not m:
     sys.exit(0)
 want = m.group(1)
 
-doc = json.load(open("/tmp/page.html", encoding="utf-8", errors="replace"))
+blob = open("/tmp/page.html", encoding="utf-8", errors="replace").read()
+print("== body %d chars, starts %r ==" % (len(blob), blob[:60]))
+doc = json.loads(blob)
+print("== top-level keys: %s ==" % sorted(doc))
 paths = doc.get("paths") or {}
+print("== %d paths ==" % len(paths))
 hits = {p: v for p, v in paths.items() if want in p}
 if not hits:
     print("NO PATH MATCHED %r. available paths:" % want)
