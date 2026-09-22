@@ -29,8 +29,17 @@ SO THE INPUTS ARE NOW THE ENDPOINTS' OWN SHAPES:
                    from the capture archive. Wrapped, as the real
                    responses are; the SDK's flat `MarketBBO` is not
                    what the venue sends.
-    the socket     the paired VERBATIM `/book` bodies, which already
-                   ARE the websocket payload shape.
+    the socket     the paired VERBATIM `/book` bodies, fed through the
+                   real stream handler.
+
+WHAT THE REPLAY DOES NOT ESTABLISH. Those `/book` bodies are HTTP
+responses. They share a DECLARED shape with `_MarketDataPayload`, and
+sharing a declared shape is not evidence about the wire: this run does
+not show that real frames decode the same way, that `transactTime`
+arrives on the socket and parses, or whether `bids`/`offers` REPLACE
+the book or amend it. No captured PMUS frame exists in this repo. The
+replacement reading stays ASSUMED_FULL_REPLACEMENT, and the first live
+stage records actual frames (BETTOR_FRAME_CAPTURE_N) to settle it.
 
 WHAT THIS RUNS. `bettor_live_loop.main()`, the same function
 `workers/all.py` calls, with three seams:
@@ -318,8 +327,11 @@ def main() -> int:
     print("   ENRICHED   markets.bbo(slug)['marketData'], %d VERBATIM "
           "HTTP 200 bodies\n              from %s"
           % (len(rows), doc["_source"]))
-    print("   BOOKS      the paired VERBATIM /book bodies, replayed as "
-          "the websocket\n              shape they already are")
+    print("   BOOKS      the paired VERBATIM /book bodies, through the "
+          "real stream\n              handler. They are HTTP responses: "
+          "this run says NOTHING\n              about frame decoding, "
+          "socket timestamps or replacement\n              semantics. "
+          "No PMUS frame has ever been captured.")
     print("   CORPUS     %s" % json.dumps(doc["_corpus_totals"]))
     print("   SEAMS      an injected client, transport and control pool."
           "\n              Production passes none of them.")
@@ -341,13 +353,24 @@ def main() -> int:
     check("rows listed across pages", disc["rows_listed"], 400)
     check("a short final page ended pagination",
           disc["listing_truncated_at_page_bound"], False)
-    check("every candidate was ENRICHED before the rule saw it",
-          disc["coverage"]["distinct_enriched"], 400)
-    check("BBO reads issued", len(client.markets.bbo_calls), 480)
-    check("markets considered", disc["considered"], 400)
-    check("markets SELECTED by the frozen rule", disc["selected"], 34)
+    cov = disc["coverage"]
+    print("   coverage     : %s" % json.dumps(cov))
+    print("   pace         : %s" % json.dumps(disc.get("pace")))
+    check("markets ENRICHED before the rule saw them",
+          cov["distinct_enriched"], 240)
+    check("BBO reads issued -- one per market, none twice",
+          len(client.markets.bbo_calls), 240)
+    check("no market was read twice",
+          len(set(client.markets.bbo_calls)), 240)
+    check("attempts == distinct + retries",
+          cov["attempts"], cov["distinct_markets"] + cov["retries"])
+    check("markets considered == markets enriched",
+          disc["considered"], 240)
+    check("COVERAGE IS PARTIAL AND SAYS SO",
+          cov["distinct_enriched"] < cov["candidates"], True)
+    check("markets SELECTED by the frozen rule", disc["selected"], 22)
     check("every exclusion is counted",
-          sum(disc["excluded_by_reason"].values()), 400 - 34)
+          sum(disc["excluded_by_reason"].values()), 240 - 22)
     check("the rule is the frozen one", disc["universe"],
           uni.UNIVERSE_VERSION)
 
@@ -359,19 +382,19 @@ def main() -> int:
         {k: rep[k] for k in ("connected", "books", "epoch")
          if k in rep}))
     print("   subscriptions: %s" % json.dumps(rep.get("subscriptions")))
-    check("markets subscribed", len(stream._subs), 34)
+    check("markets subscribed", len(stream._subs), 22)
     check("subscribed set == selected set",
           sorted(stream._subs) == sorted(disc["slugs"]), True)
     subs = rep.get("subscriptions") or {}
     check("subscriptions confirmed by arriving data", subs.get("confirmed"),
-          34)
+          22)
     check("subscriptions that failed", subs.get("failed"), 0)
     print("   There is no positive acknowledgment in this protocol: "
           "MarketMessage\n   carries no 'subscribed' reply, so the "
           "arrival of data IS the\n   confirmation.")
     print("   The ceiling is %d per subscription, documented by the "
-          "venue;\n   34 is what the rule chose, not what the cap "
-          "allowed." % uni.MAX_MARKETS)
+          "venue;\n   22 is what the rule ACCEPTED FROM WHAT WE READ "
+          "-- not what the cap\n   allowed, and not a forecast." % uni.MAX_MARKETS)
 
     # ── 3 ────────────────────────────────────────────────────────────
     rule("3. AN EMPTY UNIVERSE IS REPORTED, NEVER BYPASSED")
@@ -390,13 +413,13 @@ def main() -> int:
     print("   excluded     : %s" % json.dumps(o2.get("excluded_by_reason")))
     check("it refuses to start", o2["started"], False)
     check("and names why", o2["why"], "EMPTY_UNIVERSE")
-    check("every candidate was still ENRICHED",
-          o2["coverage"]["distinct_enriched"], 400)
+    check("every market read was still ENRICHED",
+          o2["coverage"]["distinct_enriched"], 240)
     check("volume is the binding reason",
           o2["excluded_by_reason"].get("TRADED_VOLUME_BELOW_MIN"),
-          34 + 3)
+          22 + 2)
     check("NOT ONE_SIDED_BOOK -- nothing was missing",
-          o2["excluded_by_reason"].get("ONE_SIDED_BOOK"), 12)
+          o2["excluded_by_reason"].get("ONE_SIDED_BOOK"), 3)
     print("   MIN_SHARES_TRADED is still %.0f. Nothing was relaxed to "
           "find\n   something to watch -- and COVERAGE is reported "
           "beside the verdict, so\n   'we did not look' can never be "
@@ -490,9 +513,13 @@ def main() -> int:
     print("   REAL CODE  bettor_live_loop.main(), start to finally.")
     print("   REPLACED   the socket and the listing HTTP call. Nothing "
           "between\n              them.")
-    print("   UNPROVEN   that the socket connects, that the venue "
-          "accepts a\n              subscription, and the venue's real "
-          "update rate. Those\n              need the wire.")
+    print("   UNPROVEN   that the socket connects; that the venue "
+          "accepts a\n              subscription; the venue's real "
+          "update rate; THE FRAME FORMAT;\n              whether "
+          "transactTime arrives and parses on the wire; and\n"
+          "              whether books REPLACE or amend. Those need "
+          "the wire, and\n              stage 1 captures frames to "
+          "settle them.")
     print("   ORDERS     0.")
 
     rule()

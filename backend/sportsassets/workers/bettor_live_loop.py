@@ -788,6 +788,12 @@ class LiveLoop:
             "started_at": self.started_at, "stopped_at": self.stopped_at,
             "runtime_s": _elapsed(self.started_at, self.stopped_at),
             "stream": self.stream.stats() if self.stream else None,
+            # WHAT THE WIRE ACTUALLY SENT. Empty unless stage-1 frame
+            # capture is on; NOT_ESTABLISHED until it has run, because
+            # replaying HTTP bodies says nothing about the socket.
+            "frames": (self.stream.frame_capture_report()
+                       if hasattr(self.stream, "frame_capture_report")
+                       else None),
             "discovery": self.discovery,
             "control": self.control,
             "counters": dict(self.counters),
@@ -941,7 +947,7 @@ async def _list_candidates(client=None) -> dict:
 
 async def _discover(client=None, *, candidates=None, offset: int = 0,
                     rounds: int = probe_mod.PROBE_ROUNDS_AT_START,
-                    batch: int = probe_mod.PROBE_BATCH) -> dict:
+                    batch: int | None = None, should_stop=None) -> dict:
     """Listing -> ENRICHMENT -> the frozen selection rule.
 
     THE RULE RUNS ONLY AFTER ENRICHMENT. It used to run on listing
@@ -984,14 +990,22 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
     # book.
     by_slug: dict = {}
     coverage, nxt, swept = {}, offset, 0
+    stopped = False
     for _ in range(max(1, rounds)):
         r = await probe_mod.probe(client, candidates, offset=nxt,
-                                  batch=batch)
+                                  batch=batch, should_stop=should_stop,
+                                  remaining=len(candidates) - swept)
         for row in r["rows"]:
             by_slug[row["slug"]] = row
         coverage = probe_mod.merge_coverage(coverage, r["coverage"])
         nxt = r["next_offset"]
         swept += r["probed"]
+        if r.get("stopped"):
+            # THE CONTROL SAID STOP MID-ACQUISITION. Whatever was read
+            # is kept -- it cost the venue the same either way -- but no
+            # further round is started.
+            stopped = True
+            break
         if swept >= len(candidates):
             # A FULL SWEEP IS THE END OF THE ROUND BUDGET. Going round
             # again would re-read markets already covered and inflate
@@ -1015,7 +1029,9 @@ async def _discover(client=None, *, candidates=None, offset: int = 0,
     sel.update(meta)
     sel.update({"ok": True, "candidates": len(candidates),
                 "enriched_rows": len(rows), "coverage": coverage,
-                "next_offset": nxt,
+                "next_offset": nxt, "swept": swept,
+                "stopped_by_control": stopped,
+                "pace": probe_mod.configured_pace(),
                 "enrichment": probe_mod.PROBE_VERSION})
     return sel
 
@@ -1111,6 +1127,25 @@ async def main(*, client=None, stream_factory=None, store=None,
         return {"started": False, "why": control["why"],
                 "control": control}
 
+    # THE STOP, ASKED DURING ACQUISITION AND NOT ONLY BEFORE IT. At the
+    # demonstrated pace a full startup round is minutes of wall clock,
+    # so a stop that only took effect between rounds would wait out
+    # every outstanding read. This closure is handed to the probe and
+    # awaited between reads; it re-reads the database at most every
+    # CONTROL_EVERY_S and otherwise answers from the last verdict, so
+    # the cost is one query per interval however many reads happen.
+    #
+    # WORST-CASE STOP LATENCY DURING ACQUISITION:
+    #   CONTROL_EVERY_S + PROBE_STOP_CHECK_EVERY / max_rps + timeout
+    _ctl_cache = {"state": control, "at": time.time()}
+
+    async def _stop_now() -> bool:
+        now = time.time()
+        if now - _ctl_cache["at"] >= ctl.CONTROL_EVERY_S:
+            _ctl_cache["state"] = await ctl.read_control(control_pool)
+            _ctl_cache["at"] = now
+        return ctl.is_closed(_ctl_cache["state"])
+
     cfg = settings()
     key_id = getattr(cfg, "pmus_key_id", None)
     secret = getattr(cfg, "pmus_secret_key", None)
@@ -1148,7 +1183,7 @@ async def main(*, client=None, stream_factory=None, store=None,
         return {"started": False, "why": "STORE_START_REFUSED",
                 "detail": started}
 
-    first = await _discover(client=client)
+    first = await _discover(client=client, should_stop=_stop_now)
     if not first.get("ok"):
         log.error("bettor_live_loop: %s (%s); not starting",
                   first.get("why"), first.get("error"))
@@ -1222,6 +1257,8 @@ async def main(*, client=None, stream_factory=None, store=None,
     # A RUN THAT STARTED CLEARS THE BACKOFF. Otherwise one bad morning
     # leaves every later restart on the fifteen-minute rung.
     _reset_backoff()
+    log.info("bettor_live_loop: enrichment pace %s", json.dumps(
+        first.get("pace"), default=str))
 
     stream.start()
     t_start = time.time()
@@ -1262,8 +1299,10 @@ async def main(*, client=None, stream_factory=None, store=None,
 
             if now - last_discovery >= DISCOVERY_EVERY_S:
                 last_discovery = now
-                nxt = await _discover(client=client, candidates=candidates,
-                                      offset=probe_offset, rounds=1)
+                nxt = await _discover(client=client,
+                                      candidates=candidates,
+                                      offset=probe_offset, rounds=1,
+                                      should_stop=_stop_now)
                 probe_offset = nxt.get("next_offset", probe_offset)
                 if nxt.get("ok") and nxt.get("slugs"):
                     loop.event_at.update(_event_times(nxt))
@@ -1321,7 +1360,8 @@ async def main(*, client=None, stream_factory=None, store=None,
                                 d["uncommitted_records"],
                                 d["flush_failures"], d["last_flush_error"])
                 log.info("bettor_live_loop: %s", json.dumps(
-                    {"stream": rep["stream"], "by_action": rep["by_action"],
+                    {"stream": rep["stream"], "frames": rep["frames"],
+                     "by_action": rep["by_action"],
                      "ineligible": rep["ineligible_by_reason"],
                      "freshness": rep["freshness"],
                      "durability": d,

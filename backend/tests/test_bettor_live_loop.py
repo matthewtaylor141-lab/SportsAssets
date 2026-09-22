@@ -30,7 +30,18 @@ import pytest
 from sportsassets import bettor_live_store as store_mod
 from sportsassets import bettor_market_stream as ms
 from sportsassets import bettor_settlement_ingest as si
+from sportsassets import bettor_universe_probe as probe_mod
 from sportsassets.workers import bettor_live_loop as bl
+
+
+@pytest.fixture(autouse=True)
+def unpaced(monkeypatch):
+    """The enrichment pace is 0.25 req/s by default, which is the point
+    of it. These tests are about what `main()` DECIDES, so they run
+    unpaced; the pace itself is asserted in
+    test_bettor_universe_probe.TestTheRateLimitIsEnforced."""
+    monkeypatch.setenv(probe_mod.RPS_ENV, "100000")
+    monkeypatch.setenv(probe_mod.CONC_ENV, "8")
 
 
 class FakeControlPool:

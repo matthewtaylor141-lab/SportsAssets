@@ -30,10 +30,26 @@ pass the frozen selection rule unchanged.
 from __future__ import annotations
 
 import asyncio
+import time
 import json
+
+import pytest
 
 from sportsassets import bettor_universe as uni
 from sportsassets import bettor_universe_probe as probe
+
+
+@pytest.fixture(autouse=True)
+def unpaced(monkeypatch):
+    """Most tests are about WHAT the probe reads, not how slowly.
+
+    The default pace is 0.25 req/s, so a 6-market round is 24 seconds
+    of real sleeping. Every test here runs unpaced EXCEPT the ones in
+    TestTheRateLimitIsEnforced, which clear this and assert the real
+    numbers.
+    """
+    monkeypatch.setenv(probe.RPS_ENV, "100000")
+    monkeypatch.setenv(probe.CONC_ENV, "8")
 
 # ── verbatim bodies ──────────────────────────────────────────────────
 # Each is the `marketData` object of a real HTTP 200 /bbo response.
@@ -100,6 +116,37 @@ class FakeClient:
 
 def client_for(payloads, **kw):
     return FakeClient(by_slug={p["marketSlug"]: p for p in payloads}, **kw)
+
+
+def _spy(sink):
+    """Records every sleep the round takes -- the 429 holds AND the
+    pacer's own spacing, which is why `_holds` filters."""
+    async def _sleep(seconds):
+        sink.append(seconds)
+    return _sleep
+
+
+def _holds(slept):
+    """The 429 holds, as the PACER served them. The hold is imposed by
+    `Pacer.penalise` and paid at the next `acquire`, so it arrives as a
+    pacer wait; ordinary spacing at the test's max_rps is
+    sub-millisecond, so anything of a second or more is a penalty.
+    Rounded because the wait is measured against a real clock."""
+    return [round(s) for s in slept if s >= 1.0]
+
+
+def _many(n):
+    """n distinct markets, every body still verbatim."""
+    out = []
+    for i in range(n):
+        md = dict(ALL[i % len(ALL)])
+        md["marketSlug"] = "many-%03d" % i
+        out.append(md)
+    return out
+
+
+def client_for_many(payloads):
+    return client_for(payloads)
 
 
 def cands(payloads):
@@ -372,3 +419,325 @@ class TestTheFrozenRuleIsNotChanged:
         for forbidden in ("submit_fok", "close_position", "place_order",
                           "cancel_order"):
             assert forbidden not in src
+
+
+# ── 6. the rate limit ────────────────────────────────────────────────
+
+class TestTheRateLimitIsEnforced:
+    """THE POINT: eight concurrent requests is not a rate limit. It is
+    a concurrency ceiling with no bound on the rate behind it.
+
+    What the venue publishes is NOTHING -- no RateLimit or Retry-After
+    header in any of 65,980 captured responses, and no HTTP 429. What
+    is DEMONSTRATED is that all 61,178 successful reads were taken
+    strictly serially: the densest one-second window in the whole
+    archive holds exactly one request, at 0.030-0.285 req/s sustained.
+    That envelope is the default."""
+
+    @pytest.fixture(autouse=True)
+    def repaced(self, monkeypatch):
+        monkeypatch.delenv(probe.RPS_ENV, raising=False)
+        monkeypatch.delenv(probe.CONC_ENV, raising=False)
+
+    def test_the_default_is_the_demonstrated_envelope(self):
+        p = probe.configured_pace()
+        assert p["max_rps"] <= 0.285, "above anything ever observed"
+        assert p["concurrency"] == 1, "the capture never had two in flight"
+        assert p["above_demonstrated_envelope"] is False
+
+    def test_an_override_above_the_envelope_is_flagged(self, monkeypatch):
+        monkeypatch.setenv(probe.RPS_ENV, "5")
+        assert probe.configured_pace()["above_demonstrated_envelope"] is True
+        monkeypatch.setenv(probe.RPS_ENV, "0.2")
+        monkeypatch.setenv(probe.CONC_ENV, "8")
+        assert probe.configured_pace()["above_demonstrated_envelope"] is True
+
+    def test_a_nonsense_override_falls_back_to_the_default(self,
+                                                           monkeypatch):
+        monkeypatch.setenv(probe.RPS_ENV, "fast please")
+        assert probe.configured_pace()["max_rps"] == probe.PROBE_MAX_RPS
+
+    def test_the_pacer_spaces_request_starts(self):
+        async def go():
+            pacer = probe.Pacer(20.0)          # 50 ms apart
+            t0 = time.monotonic()
+            for _ in range(5):
+                await pacer.acquire()
+            return time.monotonic() - t0, pacer.grants
+
+        elapsed, grants = asyncio.run(go())
+        assert grants == 5
+        # four intervals of 50 ms, allowing scheduler slack
+        assert elapsed >= 0.18, "%.3fs is faster than the ceiling" % elapsed
+
+    def test_the_rate_is_of_the_round_not_of_each_task(self):
+        """A per-task limiter multiplies by concurrency and is not a
+        limit at all."""
+        async def go():
+            pacer = probe.Pacer(20.0)
+            t0 = time.monotonic()
+            await asyncio.gather(*[pacer.acquire() for _ in range(5)])
+            return time.monotonic() - t0
+
+        assert asyncio.run(go()) >= 0.18
+
+    def test_a_real_round_obeys_the_ceiling(self):
+        c = client_for(ALL)
+        t0 = time.monotonic()
+        out = asyncio.run(probe.probe(c, cands(ALL), batch=4, max_rps=25.0))
+        elapsed = time.monotonic() - t0
+        assert out["accounting"]["attempts"] == 4
+        assert elapsed >= 0.12, "4 reads at 25 req/s cannot take %.3fs" % elapsed
+
+    def test_the_pace_is_reported_with_the_result(self):
+        out = asyncio.run(probe.probe(client_for(ALL), cands(ALL), batch=1,
+                                      max_rps=1000.0))
+        assert out["pace"]["demonstrated_concurrency"] == 1
+        assert "61,178" in out["pace"]["envelope_evidence"]
+
+    def test_describe_states_that_the_limit_is_unknown(self):
+        rl = probe.describe()["rate_limit"]
+        assert rl["applicable_limit"] == "UNKNOWN"
+        assert "NONE" in rl["published_by_venue"]
+        assert "UNVERIFIED" in rl["credentials_caveat"]
+
+
+# ── 7. HTTP 429 ──────────────────────────────────────────────────────
+
+class Rate429(Exception):
+    """An SDK RateLimitError, as it really arrives: an exception
+    carrying `status_code` and the response it came from."""
+
+    def __init__(self, retry_after=None):
+        super().__init__("429")
+        self.status_code = 429
+        self.response = type("R", (), {
+            "status_code": 429,
+            "headers": {} if retry_after is None
+            else {"retry-after": str(retry_after)}})()
+
+
+class Limited(FakeMarkets):
+    def __init__(self, fail_times, retry_after=None, **kw):
+        super().__init__(**kw)
+        self.fail_times, self.retry_after = fail_times, retry_after
+        self.seen = {}
+
+    def bbo(self, slug):
+        self.calls.append(slug)
+        self.seen[slug] = self.seen.get(slug, 0) + 1
+        if self.seen[slug] <= self.fail_times:
+            raise Rate429(self.retry_after)
+        return wrapped(OPEN_WIDE)
+
+
+class TestRateLimitResponses:
+    """Never observed in 65,980 responses, and handled anyway: a limit
+    nobody has hit is still a limit."""
+
+    def _client(self, **kw):
+        c = FakeClient(by_slug={})
+        c.markets = Limited(by_slug={}, **kw)
+        return c
+
+    def test_a_429_is_retried_and_then_succeeds(self):
+        c = self._client(fail_times=1)
+        slept = []
+        out = asyncio.run(probe.probe(
+            c, cands([OPEN_WIDE]), batch=1, max_rps=1000.0,
+            sleep=_spy(slept)))
+        a = out["accounting"]
+        assert a["attempts"] == 2 and a["retries"] == 1
+        assert a["rate_limited"] == 1 and a["enriched"] == 1
+        assert _holds(slept) == [round(probe.PROBE_RETRY_BACKOFF_S[0])]
+
+    def test_retry_after_is_honoured_over_our_schedule(self):
+        c = self._client(fail_times=1, retry_after=7)
+        slept = []
+        asyncio.run(probe.probe(c, cands([OPEN_WIDE]), batch=1,
+                                max_rps=1000.0, sleep=_spy(slept)))
+        assert _holds(slept) == [7], "the server's number beats ours"
+
+    def test_retry_after_is_capped(self):
+        c = self._client(fail_times=1, retry_after=99999)
+        slept = []
+        asyncio.run(probe.probe(c, cands([OPEN_WIDE]), batch=1,
+                                max_rps=1000.0, sleep=_spy(slept)))
+        assert _holds(slept) == [round(probe.PROBE_RETRY_AFTER_CAP_S)], (
+            "a server-supplied delay is better than ours right up until "
+            "it is an hour")
+
+    def test_retries_are_bounded_and_the_market_is_named_not_blamed(self):
+        c = self._client(fail_times=99)
+
+        out = asyncio.run(probe.probe(c, cands([OPEN_WIDE]), batch=1,
+                                      max_rps=1000.0, sleep=_spy([])))
+        a = out["accounting"]
+        assert a["attempts"] == probe.PROBE_MAX_RETRIES + 1
+        assert a["retries"] == probe.PROBE_MAX_RETRIES
+        assert a["enriched"] == 0
+        assert a["by_status"][probe.P_RATE_LIMITED] == 1
+        # a rate limit is a COVERAGE fact, never a verdict on the book
+        assert uni.R_ONE_SIDED not in a["by_status"]
+
+    def test_a_429_slows_the_whole_round_not_one_task(self):
+        pacer = probe.Pacer(1000.0)
+        before = pacer._next_at
+        pacer.penalise(30.0)
+        assert pacer._next_at > before + 25
+
+    def test_a_non_429_status_is_not_treated_as_a_rate_limit(self):
+        class Boom(Exception):
+            status_code = 500
+
+        c = FakeClient(by_slug={})
+        c.markets = FakeMarkets(by_slug={}, raises=Boom())
+        out = asyncio.run(probe.probe(c, cands([OPEN_WIDE]), batch=1,
+                                      max_rps=1000.0))
+        a = out["accounting"]
+        assert a["by_status"][probe.P_READ_FAILED] == 1
+        assert a["retries"] == 0, "only a 429 is retried"
+
+
+# ── 8. stopping during acquisition ───────────────────────────────────
+
+class TestStoppingDuringAcquisition:
+    """A stop that only lands between rounds waits out every
+    outstanding read. At the demonstrated pace that is minutes."""
+
+    def test_a_stop_abandons_the_rest_of_the_batch(self):
+        """60 markets, stopped at the first check. Without this the
+        round runs to the end of its batch -- minutes, at the
+        demonstrated pace."""
+        many = _many(60)
+        c = client_for_many(many)
+        calls = {"n": 0}
+
+        async def should_stop():
+            calls["n"] += 1
+            return True                      # stop at the first check
+
+        out = asyncio.run(probe.probe(c, cands(many), batch=60,
+                                      max_rps=1000.0, concurrency=1,
+                                      should_stop=should_stop))
+        assert out["stopped"] is True
+        a = out["accounting"]
+        assert a["attempts"] <= probe.PROBE_STOP_CHECK_EVERY + 1, (
+            "read %d of 60 after the stop" % a["attempts"])
+        assert a["by_status"].get(probe.P_STOPPED, 0) >= 50
+        assert a["enriched"] == a["by_status"].get(probe.P_OK, 0), (
+            "what was read before the stop is still kept")
+
+    def test_the_check_is_throttled_so_it_is_not_a_query_per_read(self):
+        """PROBE_STOP_CHECK_EVERY reads per call. The caller's callback
+        also caches, so the database sees far fewer than this."""
+        many = _many(20)
+        c = client_for_many(many)
+        checks = {"n": 0}
+
+        async def should_stop():
+            checks["n"] += 1
+            return False
+
+        asyncio.run(probe.probe(c, cands(many), batch=20, max_rps=1000.0,
+                                should_stop=should_stop, concurrency=1))
+        assert checks["n"] == 20 // probe.PROBE_STOP_CHECK_EVERY == 4
+
+    def test_an_unanswerable_stop_check_stops(self):
+        """Same rule as the control itself: we cannot show we are still
+        permitted, so we are not."""
+        c = client_for(ALL)
+
+        async def should_stop():
+            raise ConnectionError("db went away")
+
+        many = _many(20)
+        out = asyncio.run(probe.probe(client_for_many(many), cands(many),
+                                      batch=20, max_rps=1000.0,
+                                      should_stop=should_stop,
+                                      concurrency=1))
+        assert out["stopped"] is True
+
+    def test_no_callback_means_no_checks_and_no_crash(self):
+        out = asyncio.run(probe.probe(client_for(ALL), cands(ALL),
+                                      batch=2, max_rps=1000.0))
+        assert out["stopped"] is False
+
+
+# ── 9. the counts reconcile ──────────────────────────────────────────
+
+class TestTheAcquisitionCountsReconcile:
+    """THE DEFECT: the report said 400 candidates enriched -- and 480
+    reads. De-duplicating by slug fixed the COUNTS and left the WASTE:
+    two rounds of 240 over 400 candidates had the second round cross
+    the end of the list and re-read the first 80 markets. The venue
+    still received 480 requests. Those 80 were the overlap."""
+
+    def test_the_old_overlap_is_reproduced_without_the_clamp(self):
+        many = _many(400)
+        c = client_for_many(many)
+        cs = cands(many)
+        swept, off = 0, 0
+        for _ in range(2):
+            out = asyncio.run(probe.probe(c, cs, offset=off, batch=240,
+                                          max_rps=1000.0))
+            off = out["next_offset"]
+            swept += out["probed"]
+        assert swept == 480, "the shape of the old report"
+        assert len(c.markets.calls) == 480
+        assert len(set(c.markets.calls)) == 400, (
+            "400 distinct markets, 480 requests: the extra 80 are the "
+            "second round wrapping past the end")
+
+    def test_the_clamp_removes_exactly_those_eighty(self):
+        many = _many(400)
+        c = client_for_many(many)
+        cs = cands(many)
+        swept, off = 0, 0
+        for _ in range(2):
+            out = asyncio.run(probe.probe(c, cs, offset=off, batch=240,
+                                          max_rps=1000.0,
+                                          remaining=400 - swept))
+            off = out["next_offset"]
+            swept += out["probed"]
+        assert swept == 400
+        assert len(c.markets.calls) == 400, "no market is read twice"
+        assert len(set(c.markets.calls)) == 400
+
+    def test_the_four_numbers_are_reported_separately(self):
+        """ATTEMPTS, RETRIES, DISTINCT MARKETS and ENRICHED are four
+        different things and an earlier version had one number."""
+        c = FakeClient(by_slug={})
+        c.markets = Limited(by_slug={}, fail_times=1)
+        out = asyncio.run(probe.probe(c, cands(_many(3)), batch=3,
+                                      max_rps=1000.0, sleep=_spy([])))
+        a = out["accounting"]
+        assert a["distinct_markets"] == 3, "markets asked about"
+        assert a["attempts"] == 6, "HTTP requests issued, retries included"
+        assert a["retries"] == 3, "of those, retries"
+        assert a["rate_limited"] == 3, "of those, refused with 429"
+        assert a["enriched"] == 3, "rows the rule can judge"
+        # attempts = distinct + retries, always
+        assert a["attempts"] == a["distinct_markets"] + a["retries"]
+
+    def test_merge_sums_counts_and_carries_the_set_size(self):
+        many = _many(10)
+        c = client_for_many(many)
+        cs = cands(many)
+        cov = {}
+        for off in (0, 5):
+            out = asyncio.run(probe.probe(c, cs, offset=off, batch=5,
+                                          max_rps=1000.0, remaining=5))
+            cov = probe.merge_coverage(cov, out["coverage"])
+        assert cov["candidates"] == 10, "the set size, not a running total"
+        assert cov["probed"] == 10 and cov["distinct_markets"] == 10
+        assert cov["attempts"] == 10 and cov["retries"] == 0
+        assert cov["enriched"] == 10
+
+    def test_a_batch_wider_than_the_remainder_is_clamped(self):
+        many = _many(10)
+        c = client_for_many(many)
+        out = asyncio.run(probe.probe(c, cands(many), offset=7, batch=99,
+                                      max_rps=1000.0, remaining=3))
+        assert out["probed"] == 3
+        assert len(c.markets.calls) == 3

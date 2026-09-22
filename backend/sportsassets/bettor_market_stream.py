@@ -106,6 +106,18 @@ FAILED = "FAILED_BY_ERROR"
 
 BOOK_REPLACEMENT = "ASSUMED_FULL_REPLACEMENT"
 
+# The keys `_MarketDataPayload` DECLARES. Recorded so a captured frame
+# can be compared against the declaration instead of being assumed to
+# match it -- the whole point of the stage-1 capture.
+DECLARED_KEYS = ("marketSlug", "bids", "offers", "state", "stats",
+                 "transactTime")
+
+# Stage-1 frame capture. Zero means off, which is the default: this is
+# for the first live run, not for every run forever.
+FRAMES_ENV = "BETTOR_FRAME_CAPTURE_N"
+FRAMES_DEFAULT = 0
+FRAMES_MAX = 200
+
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -144,6 +156,19 @@ class MarketStream:
         # have bound the user's callback in place of the handler.
         self._book_cb = on_book
         self._trade_cb = on_trade
+
+        # Stage-1 frame capture, under its own lock so recording a
+        # frame never contends with a reader holding `_lock`.
+        import os as _os
+        try:
+            want = int(_os.environ.get(FRAMES_ENV, FRAMES_DEFAULT) or 0)
+        except (TypeError, ValueError):
+            want = FRAMES_DEFAULT
+        self._frames_wanted = max(0, min(want, FRAMES_MAX))
+        self._frame_lock = threading.Lock()
+        self._frames: list = []
+        self._frames_seen = 0
+        self._frame_prev: dict = {}
 
         self.connected = False
         # THE EPOCH IS THE INVALIDATION MECHANISM. It increments on every
@@ -305,6 +330,105 @@ class MarketStream:
             out, self._trades = self._trades, []
         return out
 
+    # ── stage-1 frame capture ────────────────────────────────────────
+    #
+    # THE REPLAY DOES NOT ESTABLISH THE WIRE FORMAT. The startup path
+    # replays VERBATIM HTTP `/book` bodies, and an HTTP body that
+    # happens to share a declared shape with a websocket payload is not
+    # evidence about the websocket: it does not show that frames decode
+    # the same way, that `transactTime` arrives and parses, or whether
+    # `bids`/`offers` REPLACE the book or amend it. This repo holds no
+    # captured PMUS frame at all.
+    #
+    # So the first live stage records the real thing. Bounded, off
+    # unless asked for, and it records what a reviewer needs to settle
+    # the three open questions -- decoding, timestamps, book semantics
+    # -- rather than a firehose.
+
+    def _capture_frame(self, slug: str, md: dict) -> None:
+        if self._frames_wanted <= 0:
+            return
+        with self._frame_lock:
+            if self._frames_seen >= self._frames_wanted:
+                return
+            self._frames_seen += 1
+            bids = md.get("bids") or []
+            offers = md.get("offers") or []
+            prev = self._frame_prev.get(slug)
+            self._frame_prev[slug] = (len(bids), len(offers))
+            self._frames.append({
+                "n": self._frames_seen,
+                "slug": slug,
+                "received_at": _now_iso(),
+                # DECODING: what keys really arrived, so a declared
+                # shape can be compared with a delivered one.
+                "keys": sorted(md.keys()),
+                "unexpected_keys": sorted(set(md) - set(DECLARED_KEYS)),
+                "missing_declared_keys": sorted(set(DECLARED_KEYS) - set(md)),
+                # TIMESTAMPS: present, and parsable?
+                "transact_time": md.get("transactTime"),
+                "transact_time_parses": _parse_ts(
+                    md.get("transactTime")) is not None,
+                "state": md.get("state"),
+                "has_asks_key": "asks" in md,
+                # BOOK SEMANTICS: the counts, frame over frame. A book
+                # that REPLACES holds a plausible ladder every time; a
+                # delta feed shows one or two levels after the first.
+                # REPORTED, NOT CONCLUDED.
+                "bid_levels": len(bids), "ask_levels": len(offers),
+                "prev_levels_for_slug": prev,
+                "level_keys": sorted((bids or offers or [{}])[0].keys())
+                if (bids or offers) else [],
+                "stats_keys": sorted((md.get("stats") or {}).keys()),
+            })
+
+    def captured_frames(self) -> list:
+        with self._frame_lock:
+            return list(self._frames)
+
+    def frame_capture_report(self) -> dict:
+        """What the captured frames settle, and what they do not."""
+        frames = self.captured_frames()
+        if not frames:
+            return {"captured": 0,
+                    "wanted": self._frames_wanted,
+                    "decoding": "NOT_ESTABLISHED",
+                    "timestamps": "NOT_ESTABLISHED",
+                    "book_semantics": "NOT_ESTABLISHED",
+                    "replacement": BOOK_REPLACEMENT}
+        unexpected = sorted({k for f in frames for k in f["unexpected_keys"]})
+        missing = sorted({k for f in frames for k in
+                          f["missing_declared_keys"]})
+        ts_ok = sum(1 for f in frames if f["transact_time_parses"])
+        # A SECOND FRAME FOR THE SAME SLUG is what makes the
+        # replacement question answerable at all.
+        repeats = [f for f in frames if f["prev_levels_for_slug"]]
+        thinned = [f for f in repeats
+                   if f["bid_levels"] + f["ask_levels"]
+                   < sum(f["prev_levels_for_slug"]) / 2]
+        return {
+            "captured": len(frames),
+            "wanted": self._frames_wanted,
+            "distinct_slugs": len({f["slug"] for f in frames}),
+            "decoding": "OK" if not (unexpected or missing) else "DIVERGED",
+            "unexpected_keys": unexpected,
+            "missing_declared_keys": missing,
+            "any_asks_key": any(f["has_asks_key"] for f in frames),
+            "timestamps": ("OK" if ts_ok == len(frames)
+                           else "%d of %d parsed" % (ts_ok, len(frames))),
+            "repeat_frames": len(repeats),
+            "repeat_frames_thinner_than_half": len(thinned),
+            "book_semantics": (
+                "NOT_ESTABLISHED -- no slug seen twice" if not repeats
+                else "CONSISTENT_WITH_REPLACEMENT" if not thinned
+                else "DELTA_SUSPECTED -- %d repeat frames lost half "
+                     "their depth" % len(thinned)),
+            "replacement": BOOK_REPLACEMENT,
+            "caveat": ("counts over a bounded sample are EVIDENCE, not "
+                       "proof; %s stands until a reviewer says "
+                       "otherwise" % BOOK_REPLACEMENT),
+        }
+
     def stats(self) -> dict:
         with self._lock:
             return {"stream": STREAM_VERSION, "connected": self.connected,
@@ -324,6 +448,7 @@ class MarketStream:
         if not slug:
             return
         now = time.time()
+        self._capture_frame(slug, md)
         rec = {
             # 2. BOTH CLOCKS AND THE STATE, which the old cache dropped.
             "source_ts": md.get("transactTime"),

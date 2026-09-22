@@ -416,3 +416,145 @@ class TestUniverseSelection:
 
     def test_the_cap_is_one_subscription_by_the_documented_limit(self):
         assert uni.MAX_MARKETS <= ms.SUB_BATCH
+
+
+# ── stage-1 frame capture ────────────────────────────────────────────
+
+class TestStageOneFrameCapture:
+    """THE SCOPE CORRECTION. The startup path replays VERBATIM HTTP
+    `/book` bodies. An HTTP body that happens to share a DECLARED shape
+    with a websocket payload is not evidence about the websocket: it
+    does not show that frames decode the same way, that `transactTime`
+    arrives and parses, or whether `bids`/`offers` replace the book or
+    amend it. This repo holds no captured PMUS frame at all, so the
+    first live stage records real ones."""
+
+    def _stream(self, monkeypatch, n=10):
+        monkeypatch.setenv(ms.FRAMES_ENV, str(n))
+        return ms.MarketStream("k", "s")
+
+    def test_capture_is_off_by_default(self, monkeypatch):
+        monkeypatch.delenv(ms.FRAMES_ENV, raising=False)
+        s = ms.MarketStream("k", "s")
+        s._on_market_data(frame("m1"))
+        assert s.captured_frames() == []
+        r = s.frame_capture_report()
+        assert r["captured"] == 0
+        for k in ("decoding", "timestamps", "book_semantics"):
+            assert r[k] == "NOT_ESTABLISHED", (
+                "%s must not read as settled before a frame arrives" % k)
+
+    def test_it_records_what_the_wire_sent(self, monkeypatch):
+        s = self._stream(monkeypatch)
+        s._on_market_data(frame("m1"))
+        f = s.captured_frames()[0]
+        assert f["slug"] == "m1"
+        assert "transactTime" in f["keys"] and f["transact_time_parses"]
+        assert f["has_asks_key"] is False, (
+            "the payload has no `asks` key and the record says so")
+        assert f["bid_levels"] == 2 and f["ask_levels"] == 2
+        assert f["level_keys"] == ["px", "qty"]
+
+    def test_the_capture_is_bounded(self, monkeypatch):
+        s = self._stream(monkeypatch, n=3)
+        for i in range(20):
+            s._on_market_data(frame("m%d" % i))
+        assert len(s.captured_frames()) == 3
+        assert s.frame_capture_report()["captured"] == 3
+
+    def test_a_ceiling_bounds_even_a_silly_request(self, monkeypatch):
+        monkeypatch.setenv(ms.FRAMES_ENV, "999999")
+        assert ms.MarketStream("k", "s")._frames_wanted == ms.FRAMES_MAX
+
+    def test_an_unparsable_setting_leaves_capture_off(self, monkeypatch):
+        monkeypatch.setenv(ms.FRAMES_ENV, "lots")
+        assert ms.MarketStream("k", "s")._frames_wanted == 0
+
+    def test_a_diverging_payload_is_named_not_absorbed(self, monkeypatch):
+        s = self._stream(monkeypatch)
+        odd = frame("m1")
+        odd["marketData"]["asks"] = []            # the key that is not sent
+        odd["marketData"].pop("stats")            # a declared key missing
+        s._on_market_data(odd)
+        r = s.frame_capture_report()
+        assert r["decoding"] == "DIVERGED"
+        assert "asks" in r["unexpected_keys"]
+        assert "stats" in r["missing_declared_keys"]
+        assert r["any_asks_key"] is True
+
+    def test_book_semantics_stay_unestablished_without_a_repeat(
+            self, monkeypatch):
+        s = self._stream(monkeypatch)
+        s._on_market_data(frame("m1"))
+        s._on_market_data(frame("m2"))
+        r = s.frame_capture_report()
+        assert r["book_semantics"].startswith("NOT_ESTABLISHED")
+        assert r["repeat_frames"] == 0
+
+    def test_a_repeat_at_full_depth_is_consistent_with_replacement(
+            self, monkeypatch):
+        s = self._stream(monkeypatch)
+        s._on_market_data(frame("m1"))
+        s._on_market_data(frame("m1"))
+        r = s.frame_capture_report()
+        assert r["repeat_frames"] == 1
+        assert r["book_semantics"] == "CONSISTENT_WITH_REPLACEMENT"
+        assert r["replacement"] == ms.BOOK_REPLACEMENT, (
+            "evidence does not promote the assumption on its own")
+        assert "EVIDENCE, not" in r["caveat"]
+
+    def test_a_thin_repeat_raises_the_delta_suspicion(self, monkeypatch):
+        s = self._stream(monkeypatch)
+        s._on_market_data(frame("m1"))
+        thin = frame("m1")
+        thin["marketData"]["bids"] = thin["marketData"]["bids"][:1]
+        thin["marketData"]["offers"] = []
+        s._on_market_data(thin)
+        r = s.frame_capture_report()
+        assert r["book_semantics"].startswith("DELTA_SUSPECTED")
+        assert r["repeat_frames_thinner_than_half"] == 1
+
+    def test_timestamps_are_reported_when_one_will_not_parse(self,
+                                                             monkeypatch):
+        s = self._stream(monkeypatch)
+        s._on_market_data(frame("m1"))
+        bad = frame("m2")
+        bad["marketData"]["transactTime"] = "not a time"
+        s._on_market_data(bad)
+        assert s.frame_capture_report()["timestamps"] == "1 of 2 parsed"
+
+    def test_capture_never_changes_what_is_decided(self, monkeypatch):
+        """The recorder is a bystander: same book, same eligibility."""
+        monkeypatch.delenv(ms.FRAMES_ENV, raising=False)
+        off = ms.MarketStream("k", "s")
+        on = self._stream(monkeypatch)
+        for s in (off, on):
+            s.epoch += 1
+            s.connected = True
+            s.subscribe(["m1"])
+            s._on_market_data(frame("m1", source_ts=_fresh()))
+        a = off.book_at("m1", max_source_age_s=10, max_receipt_age_s=5)
+        b = on.book_at("m1", max_source_age_s=10, max_receipt_age_s=5)
+        assert a["eligible"] == b["eligible"] is True
+        assert a["book"] == b["book"]
+
+
+def _fresh():
+    from datetime import datetime, timedelta, timezone
+    return (datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat()
+
+
+def frame(slug="m1", *, source_ts="2026-09-21T12:00:00.000000Z",
+          state="MARKET_STATE_OPEN"):
+    """A `MarketData` message in the shape the SDK DECLARES.
+
+    Declared, not captured -- which is exactly why the live stage has
+    to record the real thing.
+    """
+    return {"marketData": {
+        "marketSlug": slug, "transactTime": source_ts, "state": state,
+        "bids": [{"px": {"value": "0.4500"}, "qty": "40"},
+                 {"px": {"value": "0.4400"}, "qty": "900"}],
+        "offers": [{"px": {"value": "0.4700"}, "qty": "12"},
+                   {"px": {"value": "0.4800"}, "qty": "3000"}],
+        "stats": {"sharesTraded": "612.5"}}}
