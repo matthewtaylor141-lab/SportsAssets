@@ -1,0 +1,2339 @@
+{
+  "any_lower_bound_above_zero": [],
+  "best_by_point_estimate": "COMBO_touch_flatten_wide",
+  "dense_min_episodes": 10,
+  "ranked": [
+    "COMBO_touch_flatten_wide",
+    "ENTRY_spread_ge_3t",
+    "ENTRY_spread_ge_2t",
+    "COMBO_touch_flatten_cancel",
+    "COMBO_touch_flatten",
+    "SETTLE_hard_flatten",
+    "COMBO_complete_flatten",
+    "PLACE_one_tick_behind",
+    "TIME_horizon_5",
+    "TIME_recovery_30",
+    "TIME_horizon_40",
+    "TIME_recovery_2",
+    "PLACE_at_touch",
+    "BASE",
+    "REC_taker_now",
+    "REC_complete_pair",
+    "ENTRY_mid_0.05_0.95",
+    "ENTRY_mid_0.20_0.80",
+    "INV_cancel_other_on_fill",
+    "REC_hold_to_settlement"
+  ],
+  "size": 100.0,
+  "variants": [
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -13.292,
+            "n": 5,
+            "sum": -66.46
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -1.12692,
+            "n": 46,
+            "sum": -51.8383
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.53732,
+            "n": 280,
+            "sum": -150.4507
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.65873,
+            "n": 71,
+            "sum": 46.77
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 540,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 46.13,
+        "taker_fees_paid": -94.44
+      },
+      "episodes": 943,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "BASE",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.4274,
+        "P_both__GIVEN_any_fill": 0.2928,
+        "P_both__of_all_episodes": 0.1251,
+        "all_episodes": 943,
+        "episodes_both_legs_filled": 118,
+        "episodes_one_sided": 285,
+        "episodes_with_any_entry_fill": 403,
+        "reconciliation": {
+          "entry_fills_gt_0": 403,
+          "episodes": 943,
+          "never_filled_status": 540,
+          "reconciles": true,
+          "status_plus_anyfill": 943
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.140163,
+          0.082038
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.006768,
+          -0.003326,
+          -0.002343,
+          -0.000438,
+          -1.4e-05,
+          0.001946,
+          0.002751,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.049866,
+        "clusters": 11,
+        "naive_se": 0.001035,
+        "point": -0.029063,
+        "se_inflation_vs_naive": 48.19
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.004198,
+          0.001858
+        ],
+        "cluster_means": [
+          -0.006768,
+          -0.003326,
+          -0.002343,
+          -0.000438,
+          -1.4e-05,
+          0.001946,
+          0.002751
+        ],
+        "cluster_se": 0.001238,
+        "clusters": 7,
+        "naive_se": 0.000872,
+        "point": -0.00117,
+        "se_inflation_vs_naive": 1.42
+      },
+      "sum_total_dollars": -223.2
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -0.51,
+            "n": 1,
+            "sum": -0.51
+          },
+          "CARRIED_SETTLED": {
+            "mean": -13.192,
+            "n": 5,
+            "sum": -65.96
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -1.35533,
+            "n": 40,
+            "sum": -54.2134
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.49698,
+            "n": 251,
+            "sum": -124.7417
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.71072,
+            "n": 69,
+            "sum": 49.04
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 591,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 43.98,
+        "taker_fees_paid": -94.84
+      },
+      "episodes": 957,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "AT_TOUCH",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "PLACE_at_touch",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.3824,
+        "P_both__GIVEN_any_fill": 0.2978,
+        "P_both__of_all_episodes": 0.1139,
+        "all_episodes": 957,
+        "episodes_both_legs_filled": 109,
+        "episodes_one_sided": 257,
+        "episodes_with_any_entry_fill": 366,
+        "reconciliation": {
+          "entry_fills_gt_0": 366,
+          "episodes": 957,
+          "never_filled_status": 591,
+          "reconciles": true,
+          "status_plus_anyfill": 957
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.140037,
+          0.082198
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.00651,
+          -0.003198,
+          -0.001165,
+          -0.000438,
+          0.0,
+          0.001946,
+          0.002751,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.049873,
+        "clusters": 11,
+        "naive_se": 0.001013,
+        "point": -0.028919,
+        "se_inflation_vs_naive": 49.23
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.003852,
+          0.001962
+        ],
+        "cluster_means": [
+          -0.00651,
+          -0.003198,
+          -0.001165,
+          -0.000438,
+          0.0,
+          0.001946,
+          0.002751
+        ],
+        "cluster_se": 0.001188,
+        "clusters": 7,
+        "naive_se": 0.000852,
+        "point": -0.000945,
+        "se_inflation_vs_naive": 1.4
+      },
+      "sum_total_dollars": -196.39
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": 0.0571,
+            "n": 1,
+            "sum": 0.0571
+          },
+          "CARRIED_SETTLED": {
+            "mean": -12.592,
+            "n": 5,
+            "sum": -62.96
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -5.88625,
+            "n": 4,
+            "sum": -23.545
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -2.3764,
+            "n": 34,
+            "sum": -80.7976
+          },
+          "FLAT_PAIRED": {
+            "mean": 2.24286,
+            "n": 7,
+            "sum": 15.7
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 991,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 11.31,
+        "taker_fees_paid": -20.64
+      },
+      "episodes": 1042,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "DEEPER_1",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "PLACE_one_tick_behind",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.0489,
+        "P_both__GIVEN_any_fill": 0.1765,
+        "P_both__of_all_episodes": 0.0086,
+        "all_episodes": 1042,
+        "episodes_both_legs_filled": 9,
+        "episodes_one_sided": 42,
+        "episodes_with_any_entry_fill": 51,
+        "reconciliation": {
+          "entry_fills_gt_0": 51,
+          "episodes": 1042,
+          "never_filled_status": 991,
+          "reconciles": true,
+          "status_plus_anyfill": 1042
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.136604,
+          0.081389
+        ],
+        "cluster_means": [
+          -0.387,
+          -0.198,
+          -0.003503,
+          -0.002427,
+          -0.000216,
+          -3.6e-05,
+          0.0,
+          0.0,
+          0.0,
+          0.0,
+          0.2875
+        ],
+        "cluster_se": 0.048921,
+        "clusters": 11,
+        "naive_se": 0.000806,
+        "point": -0.027607,
+        "se_inflation_vs_naive": 60.73
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.002231,
+          0.000465
+        ],
+        "cluster_means": [
+          -0.003503,
+          -0.002427,
+          -0.000216,
+          -3.6e-05,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "cluster_se": 0.000551,
+        "clusters": 7,
+        "naive_se": 0.000634,
+        "point": -0.000883,
+        "se_inflation_vs_naive": 0.87
+      },
+      "sum_total_dollars": -151.55
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -37.71,
+            "n": 1,
+            "sum": -37.71
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -8.30794,
+            "n": 10,
+            "sum": -83.0794
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.55531,
+            "n": 103,
+            "sum": -57.197
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.38125,
+            "n": 8,
+            "sum": 3.05
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 313,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 15.83,
+        "taker_fees_paid": -39.3
+      },
+      "episodes": 436,
+      "events": 5,
+      "markets": 5,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 2,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "ENTRY_spread_ge_2t",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.2821,
+        "P_both__GIVEN_any_fill": 0.1382,
+        "P_both__of_all_episodes": 0.039,
+        "all_episodes": 436,
+        "episodes_both_legs_filled": 17,
+        "episodes_one_sided": 106,
+        "episodes_with_any_entry_fill": 123,
+        "reconciliation": {
+          "entry_fills_gt_0": 123,
+          "episodes": 436,
+          "never_filled_status": 313,
+          "reconciles": true,
+          "status_plus_anyfill": 436
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.013094,
+          0.002761
+        ],
+        "cluster_means": [
+          -0.014946,
+          -0.008089,
+          -0.002782,
+          -1.5e-05,
+          0.0
+        ],
+        "cluster_se": 0.002856,
+        "clusters": 5,
+        "naive_se": 0.001682,
+        "point": -0.005166,
+        "se_inflation_vs_naive": 1.7
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.01692,
+          0.004004
+        ],
+        "cluster_means": [
+          -0.014946,
+          -0.008089,
+          -0.002782,
+          -1.5e-05
+        ],
+        "cluster_se": 0.003288,
+        "clusters": 4,
+        "naive_se": 0.001689,
+        "point": -0.006458,
+        "se_inflation_vs_naive": 1.95
+      },
+      "sum_total_dollars": -176.15
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_SETTLED": {
+            "mean": -7.41,
+            "n": 1,
+            "sum": -7.41
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -20.85213,
+            "n": 3,
+            "sum": -62.5564
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.44789,
+            "n": 31,
+            "sum": -13.8845
+          },
+          "FLAT_PAIRED": {
+            "mean": 1.275,
+            "n": 4,
+            "sum": 5.1
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 176,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 5.59,
+        "taker_fees_paid": -10.96
+      },
+      "episodes": 215,
+      "events": 4,
+      "markets": 4,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 3,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "ENTRY_spread_ge_3t",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.1814,
+        "P_both__GIVEN_any_fill": 0.2051,
+        "P_both__of_all_episodes": 0.0372,
+        "all_episodes": 215,
+        "episodes_both_legs_filled": 8,
+        "episodes_one_sided": 31,
+        "episodes_with_any_entry_fill": 39,
+        "reconciliation": {
+          "entry_fills_gt_0": 39,
+          "episodes": 215,
+          "never_filled_status": 176,
+          "reconciles": true,
+          "status_plus_anyfill": 215
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.011229,
+          0.001789
+        ],
+        "cluster_means": [
+          -0.009576,
+          -0.006133,
+          -0.003162,
+          -8e-06
+        ],
+        "cluster_se": 0.002045,
+        "clusters": 4,
+        "naive_se": 0.002775,
+        "point": -0.00472,
+        "se_inflation_vs_naive": 0.74
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.016361,
+          0.007864
+        ],
+        "cluster_means": [
+          -0.009576,
+          -0.003162,
+          -8e-06
+        ],
+        "cluster_se": 0.002815,
+        "clusters": 3,
+        "naive_se": 0.002809,
+        "point": -0.004249,
+        "se_inflation_vs_naive": 1.0
+      },
+      "sum_total_dollars": -78.75
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -13.95424,
+            "n": 5,
+            "sum": -69.7712
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -3.06969,
+            "n": 21,
+            "sum": -64.4635
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.79405,
+            "n": 191,
+            "sum": -151.6643
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.98591,
+            "n": 22,
+            "sum": 21.69
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 493,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 43.69,
+        "taker_fees_paid": -90.1
+      },
+      "episodes": 733,
+      "events": 9,
+      "markets": 9,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 0.95,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.05,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "ENTRY_mid_0.05_0.95",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.3274,
+        "P_both__GIVEN_any_fill": 0.2167,
+        "P_both__of_all_episodes": 0.0709,
+        "all_episodes": 733,
+        "episodes_both_legs_filled": 52,
+        "episodes_one_sided": 188,
+        "episodes_with_any_entry_fill": 240,
+        "reconciliation": {
+          "entry_fills_gt_0": 240,
+          "episodes": 733,
+          "never_filled_status": 493,
+          "reconciles": true,
+          "status_plus_anyfill": 733
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.177567,
+          0.105434
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.006984,
+          -0.003326,
+          -0.002343,
+          -0.000438,
+          -8e-06,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.061362,
+        "clusters": 9,
+        "naive_se": 0.001328,
+        "point": -0.036066,
+        "se_inflation_vs_naive": 46.22
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.006087,
+          0.000848
+        ],
+        "cluster_means": [
+          -0.006984,
+          -0.003326,
+          -0.002343,
+          -0.000438,
+          -8e-06
+        ],
+        "cluster_se": 0.001249,
+        "clusters": 5,
+        "naive_se": 0.00112,
+        "point": -0.00262,
+        "se_inflation_vs_naive": 1.12
+      },
+      "sum_total_dollars": -265.43
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -15.564,
+            "n": 5,
+            "sum": -77.82
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -2.94772,
+            "n": 18,
+            "sum": -53.059
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.56416,
+            "n": 158,
+            "sum": -89.1378
+          },
+          "FLAT_PAIRED": {
+            "mean": 1.07143,
+            "n": 21,
+            "sum": 22.5
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 393,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 41.0,
+        "taker_fees_paid": -80.38
+      },
+      "episodes": 596,
+      "events": 9,
+      "markets": 9,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 0.8,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.2,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "ENTRY_mid_0.20_0.80",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.3406,
+        "P_both__GIVEN_any_fill": 0.2365,
+        "P_both__of_all_episodes": 0.0805,
+        "all_episodes": 596,
+        "episodes_both_legs_filled": 48,
+        "episodes_one_sided": 155,
+        "episodes_with_any_entry_fill": 203,
+        "reconciliation": {
+          "entry_fills_gt_0": 203,
+          "episodes": 596,
+          "never_filled_status": 393,
+          "reconciles": true,
+          "status_plus_anyfill": 596
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.177769,
+          0.10517
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.009082,
+          -0.003326,
+          -0.002343,
+          -0.000438,
+          -8e-06,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.061348,
+        "clusters": 9,
+        "naive_se": 0.00135,
+        "point": -0.0363,
+        "se_inflation_vs_naive": 45.43
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.00756,
+          0.001481
+        ],
+        "cluster_means": [
+          -0.009082,
+          -0.003326,
+          -0.002343,
+          -0.000438,
+          -8e-06
+        ],
+        "cluster_se": 0.001629,
+        "clusters": 5,
+        "naive_se": 0.001023,
+        "point": -0.003039,
+        "se_inflation_vs_naive": 1.59
+      },
+      "sum_total_dollars": -198.73
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -7.348,
+            "n": 5,
+            "sum": -36.74
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -0.07968,
+            "n": 119,
+            "sum": -9.4815
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.55035,
+            "n": 407,
+            "sum": -223.9921
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.16,
+            "n": 4,
+            "sum": 0.64
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 592,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 48.61,
+        "taker_fees_paid": -124.67
+      },
+      "episodes": 1128,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": true,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "INV_cancel_other_on_fill",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.4752,
+        "P_both__GIVEN_any_fill": 0.0075,
+        "P_both__of_all_episodes": 0.0035,
+        "all_episodes": 1128,
+        "episodes_both_legs_filled": 4,
+        "episodes_one_sided": 532,
+        "episodes_with_any_entry_fill": 536,
+        "reconciliation": {
+          "entry_fills_gt_0": 536,
+          "episodes": 1128,
+          "never_filled_status": 592,
+          "reconciles": true,
+          "status_plus_anyfill": 1128
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.142233,
+          0.033055
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.005372,
+          -0.004034,
+          -0.002501,
+          -1.4e-05,
+          0.0,
+          0.000765,
+          0.001633,
+          0.003045,
+          0.011
+        ],
+        "cluster_se": 0.039338,
+        "clusters": 11,
+        "naive_se": 0.000727,
+        "point": -0.054589,
+        "se_inflation_vs_naive": 54.1
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.003799,
+          0.001948
+        ],
+        "cluster_means": [
+          -0.005372,
+          -0.004034,
+          -0.002501,
+          -1.4e-05,
+          0.000765,
+          0.001633,
+          0.003045
+        ],
+        "cluster_se": 0.001174,
+        "clusters": 7,
+        "naive_se": 0.000611,
+        "point": -0.000925,
+        "se_inflation_vs_naive": 1.92
+      },
+      "sum_total_dollars": -270.79
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -6.15837,
+            "n": 6,
+            "sum": -36.9502
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -0.27852,
+            "n": 92,
+            "sum": -25.6242
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.42451,
+            "n": 327,
+            "sum": -138.8153
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.5,
+            "n": 14,
+            "sum": 7.0
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 2087,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 40.54,
+        "taker_fees_paid": -96.21
+      },
+      "episodes": 2527,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 5,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "TIME_horizon_5",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.1741,
+        "P_both__GIVEN_any_fill": 0.0591,
+        "P_both__of_all_episodes": 0.0103,
+        "all_episodes": 2527,
+        "episodes_both_legs_filled": 26,
+        "episodes_one_sided": 414,
+        "episodes_with_any_entry_fill": 440,
+        "reconciliation": {
+          "entry_fills_gt_0": 440,
+          "episodes": 2527,
+          "never_filled_status": 2087,
+          "reconciles": true,
+          "status_plus_anyfill": 2527
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.113167,
+          0.056477
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.001887,
+          -0.001704,
+          -0.000626,
+          -2.4e-05,
+          0.0,
+          0.000443,
+          0.001055,
+          0.001095,
+          0.011,
+          0.08085
+        ],
+        "cluster_se": 0.038071,
+        "clusters": 11,
+        "naive_se": 0.000296,
+        "point": -0.028345,
+        "se_inflation_vs_naive": 128.8
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.001367,
+          0.000896
+        ],
+        "cluster_means": [
+          -0.001887,
+          -0.001704,
+          -0.000626,
+          -2.4e-05,
+          0.000443,
+          0.001055,
+          0.001095
+        ],
+        "cluster_se": 0.000462,
+        "clusters": 7,
+        "naive_se": 0.000241,
+        "point": -0.000235,
+        "se_inflation_vs_naive": 1.92
+      },
+      "sum_total_dollars": -195.61
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -8.13,
+            "n": 5,
+            "sum": -40.65
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -0.72942,
+            "n": 31,
+            "sum": -22.612
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.48288,
+            "n": 200,
+            "sum": -96.5765
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.65878,
+            "n": 98,
+            "sum": 64.56
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 227,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 43.36,
+        "taker_fees_paid": -83.36
+      },
+      "episodes": 562,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 40,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "TIME_horizon_40",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.5961,
+        "P_both__GIVEN_any_fill": 0.4328,
+        "P_both__of_all_episodes": 0.258,
+        "all_episodes": 562,
+        "episodes_both_legs_filled": 145,
+        "episodes_one_sided": 190,
+        "episodes_with_any_entry_fill": 335,
+        "reconciliation": {
+          "entry_fills_gt_0": 335,
+          "episodes": 562,
+          "never_filled_status": 227,
+          "reconciles": true,
+          "status_plus_anyfill": 562
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.139789,
+          0.082518
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.003916,
+          -0.003846,
+          -0.002234,
+          -0.000819,
+          -0.000126,
+          0.003258,
+          0.00419,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.049889,
+        "clusters": 11,
+        "naive_se": 0.001121,
+        "point": -0.028636,
+        "se_inflation_vs_naive": 44.5
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.003478,
+          0.002479
+        ],
+        "cluster_means": [
+          -0.003916,
+          -0.003846,
+          -0.002234,
+          -0.000819,
+          -0.000126,
+          0.003258,
+          0.00419
+        ],
+        "cluster_se": 0.001217,
+        "clusters": 7,
+        "naive_se": 0.000608,
+        "point": -0.000499,
+        "se_inflation_vs_naive": 2.0
+      },
+      "sum_total_dollars": -96.5
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_SETTLED": {
+            "mean": -2.406,
+            "n": 5,
+            "sum": -12.03
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -3.64607,
+            "n": 17,
+            "sum": -61.9832
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.62169,
+            "n": 357,
+            "sum": -221.9432
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.64631,
+            "n": 84,
+            "sum": 54.29
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 584,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 48.53,
+        "taker_fees_paid": -124.47
+      },
+      "episodes": 1047,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 2
+      },
+      "policy": "TIME_recovery_2",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.4422,
+        "P_both__GIVEN_any_fill": 0.3002,
+        "P_both__of_all_episodes": 0.1328,
+        "all_episodes": 1047,
+        "episodes_both_legs_filled": 139,
+        "episodes_one_sided": 324,
+        "episodes_with_any_entry_fill": 463,
+        "reconciliation": {
+          "entry_fills_gt_0": 463,
+          "episodes": 1047,
+          "never_filled_status": 584,
+          "reconciles": true,
+          "status_plus_anyfill": 1047
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.14003,
+          0.082214
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.006669,
+          -0.003764,
+          -0.002456,
+          -1.4e-05,
+          0.001209,
+          0.002201,
+          0.003003,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.049875,
+        "clusters": 11,
+        "naive_se": 0.000923,
+        "point": -0.028908,
+        "se_inflation_vs_naive": 54.06
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.004175,
+          0.002321
+        ],
+        "cluster_means": [
+          -0.006669,
+          -0.003764,
+          -0.002456,
+          -1.4e-05,
+          0.001209,
+          0.002201,
+          0.003003
+        ],
+        "cluster_se": 0.001327,
+        "clusters": 7,
+        "naive_se": 0.000774,
+        "point": -0.000927,
+        "se_inflation_vs_naive": 1.71
+      },
+      "sum_total_dollars": -241.67
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -13.47714,
+            "n": 7,
+            "sum": -94.34
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -0.31271,
+            "n": 95,
+            "sum": -29.7071
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.43919,
+            "n": 165,
+            "sum": -72.467
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.71468,
+            "n": 47,
+            "sum": 33.59
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 474,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 41.83,
+        "taker_fees_paid": -58.31
+      },
+      "episodes": 789,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 30
+      },
+      "policy": "TIME_recovery_30",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.3992,
+        "P_both__GIVEN_any_fill": 0.2603,
+        "P_both__of_all_episodes": 0.1039,
+        "all_episodes": 789,
+        "episodes_both_legs_filled": 82,
+        "episodes_one_sided": 233,
+        "episodes_with_any_entry_fill": 315,
+        "reconciliation": {
+          "entry_fills_gt_0": 315,
+          "episodes": 789,
+          "never_filled_status": 474,
+          "reconciles": true,
+          "status_plus_anyfill": 789
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.139712,
+          0.082638
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.00759,
+          -0.002982,
+          -0.002221,
+          -9e-06,
+          0.00281,
+          0.00356,
+          0.004023,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.049899,
+        "clusters": 11,
+        "naive_se": 0.001278,
+        "point": -0.028537,
+        "se_inflation_vs_naive": 39.04
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.004256,
+          0.003568
+        ],
+        "cluster_means": [
+          -0.00759,
+          -0.002982,
+          -0.002221,
+          -9e-06,
+          0.00281,
+          0.00356,
+          0.004023
+        ],
+        "cluster_se": 0.001599,
+        "clusters": 7,
+        "naive_se": 0.001092,
+        "point": -0.000344,
+        "se_inflation_vs_naive": 1.46
+      },
+      "sum_total_dollars": -164.14
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -9.018,
+            "n": 5,
+            "sum": -45.09
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.77815,
+            "n": 396,
+            "sum": -308.146
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.6511,
+            "n": 91,
+            "sum": 59.25
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 587,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 51.71,
+        "taker_fees_paid": -139.15
+      },
+      "episodes": 1080,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "TAKER_NOW",
+        "recovery_wait": 10
+      },
+      "policy": "REC_taker_now",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.4565,
+        "P_both__GIVEN_any_fill": 0.3083,
+        "P_both__of_all_episodes": 0.1407,
+        "all_episodes": 1080,
+        "episodes_both_legs_filled": 152,
+        "episodes_one_sided": 341,
+        "episodes_with_any_entry_fill": 493,
+        "reconciliation": {
+          "entry_fills_gt_0": 493,
+          "episodes": 1080,
+          "never_filled_status": 587,
+          "reconciles": true,
+          "status_plus_anyfill": 1080
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.140401,
+          0.081732
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.00742,
+          -0.003598,
+          -0.002957,
+          -0.000375,
+          -1.4e-05,
+          0.001054,
+          0.00213,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.04985,
+        "clusters": 11,
+        "naive_se": 0.000896,
+        "point": -0.029335,
+        "se_inflation_vs_naive": 55.64
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.004634,
+          0.001439
+        ],
+        "cluster_means": [
+          -0.00742,
+          -0.003598,
+          -0.002957,
+          -0.000375,
+          -1.4e-05,
+          0.001054,
+          0.00213
+        ],
+        "cluster_se": 0.001241,
+        "clusters": 7,
+        "naive_se": 0.000752,
+        "point": -0.001597,
+        "se_inflation_vs_naive": 1.65
+      },
+      "sum_total_dollars": -295.2
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -9.018,
+            "n": 5,
+            "sum": -45.09
+          },
+          "FLAT_PAIRED": {
+            "mean": -0.51108,
+            "n": 487,
+            "sum": -248.896
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 587,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 51.71,
+        "taker_fees_paid": -139.15
+      },
+      "episodes": 1080,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "COMPLETE_PAIR",
+        "recovery_wait": 10
+      },
+      "policy": "REC_complete_pair",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.4565,
+        "P_both__GIVEN_any_fill": 0.3083,
+        "P_both__of_all_episodes": 0.1407,
+        "all_episodes": 1080,
+        "episodes_both_legs_filled": 152,
+        "episodes_one_sided": 341,
+        "episodes_with_any_entry_fill": 493,
+        "reconciliation": {
+          "entry_fills_gt_0": 493,
+          "episodes": 1080,
+          "never_filled_status": 587,
+          "reconciles": true,
+          "status_plus_anyfill": 1080
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.140401,
+          0.081732
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.00742,
+          -0.003598,
+          -0.002957,
+          -0.000375,
+          -1.4e-05,
+          0.001054,
+          0.00213,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.04985,
+        "clusters": 11,
+        "naive_se": 0.000896,
+        "point": -0.029335,
+        "se_inflation_vs_naive": 55.64
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.004634,
+          0.001439
+        ],
+        "cluster_means": [
+          -0.00742,
+          -0.003598,
+          -0.002957,
+          -0.000375,
+          -1.4e-05,
+          0.001054,
+          0.00213
+        ],
+        "cluster_se": 0.001241,
+        "clusters": 7,
+        "naive_se": 0.000752,
+        "point": -0.001597,
+        "se_inflation_vs_naive": 1.65
+      },
+      "sum_total_dollars": -295.2
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.77255,
+            "n": 2,
+            "sum": -3.5451
+          },
+          "CARRIED_SETTLED": {
+            "mean": -7.26473,
+            "n": 8,
+            "sum": -58.1178
+          },
+          "FLAT_PAIRED": {
+            "mean": 1.04,
+            "n": 3,
+            "sum": 3.12
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 36,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 2.47,
+        "taker_fees_paid": 0.0
+      },
+      "episodes": 49,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": false,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "HOLD",
+        "recovery_wait": 10
+      },
+      "policy": "REC_hold_to_settlement",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.2653,
+        "P_both__GIVEN_any_fill": 0.2308,
+        "P_both__of_all_episodes": 0.0612,
+        "all_episodes": 49,
+        "episodes_both_legs_filled": 3,
+        "episodes_one_sided": 10,
+        "episodes_with_any_entry_fill": 13,
+        "reconciliation": {
+          "entry_fills_gt_0": 13,
+          "episodes": 49,
+          "never_filled_status": 36,
+          "reconciles": true,
+          "status_plus_anyfill": 49
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.188361,
+          0.073022
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.3621,
+          -0.203,
+          -0.0049,
+          -0.003996,
+          0.002331,
+          0.0051,
+          0.007757,
+          0.011,
+          0.032942,
+          0.2825
+        ],
+        "cluster_se": 0.058658,
+        "clusters": 11,
+        "naive_se": 0.013129,
+        "point": -0.05767,
+        "se_inflation_vs_naive": 4.47
+      },
+      "sensitivity_dense_clusters": null,
+      "sum_total_dollars": -58.54
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -0.49,
+            "n": 1,
+            "sum": -0.49
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -1.12692,
+            "n": 46,
+            "sum": -51.8383
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.66815,
+            "n": 286,
+            "sum": -191.0907
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.65873,
+            "n": 71,
+            "sum": 46.77
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 538,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 46.13,
+        "taker_fees_paid": -98.11
+      },
+      "episodes": 943,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": true,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "SETTLE_hard_flatten",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.4274,
+        "P_both__GIVEN_any_fill": 0.2928,
+        "P_both__of_all_episodes": 0.1251,
+        "all_episodes": 943,
+        "episodes_both_legs_filled": 118,
+        "episodes_one_sided": 285,
+        "episodes_with_any_entry_fill": 403,
+        "reconciliation": {
+          "entry_fills_gt_0": 403,
+          "episodes": 943,
+          "never_filled_status": 538,
+          "reconciles": false,
+          "status_plus_anyfill": 941
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.021241,
+          0.004054
+        ],
+        "cluster_means": [
+          -0.0559,
+          -0.0301,
+          -0.0115,
+          -0.006768,
+          -0.003164,
+          -0.002343,
+          -0.000438,
+          -1.4e-05,
+          0.001946,
+          0.002751,
+          0.011
+        ],
+        "cluster_se": 0.005677,
+        "clusters": 11,
+        "naive_se": 0.000859,
+        "point": -0.008594,
+        "se_inflation_vs_naive": 6.61
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.004159,
+          0.001865
+        ],
+        "cluster_means": [
+          -0.006768,
+          -0.003164,
+          -0.002343,
+          -0.000438,
+          -1.4e-05,
+          0.001946,
+          0.002751
+        ],
+        "cluster_se": 0.001231,
+        "clusters": 7,
+        "naive_se": 0.00086,
+        "point": -0.001147,
+        "se_inflation_vs_naive": 1.43
+      },
+      "sum_total_dollars": -197.87
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -0.51,
+            "n": 1,
+            "sum": -0.51
+          },
+          "CARRIED_SETTLED": {
+            "mean": -0.49,
+            "n": 1,
+            "sum": -0.49
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -1.35533,
+            "n": 40,
+            "sum": -54.2134
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.64156,
+            "n": 257,
+            "sum": -164.8817
+          },
+          "FLAT_PAIRED": {
+            "mean": 0.71072,
+            "n": 69,
+            "sum": 49.04
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 589,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 43.98,
+        "taker_fees_paid": -98.51
+      },
+      "episodes": 957,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": true,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "AT_TOUCH",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "COMBO_touch_flatten",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.3824,
+        "P_both__GIVEN_any_fill": 0.2978,
+        "P_both__of_all_episodes": 0.1139,
+        "all_episodes": 957,
+        "episodes_both_legs_filled": 109,
+        "episodes_one_sided": 257,
+        "episodes_with_any_entry_fill": 366,
+        "reconciliation": {
+          "entry_fills_gt_0": 366,
+          "episodes": 957,
+          "never_filled_status": 589,
+          "reconciles": false,
+          "status_plus_anyfill": 955
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.021131,
+          0.00423
+        ],
+        "cluster_means": [
+          -0.0559,
+          -0.0301,
+          -0.0115,
+          -0.00651,
+          -0.003036,
+          -0.001165,
+          -0.000438,
+          0.0,
+          0.001946,
+          0.002751,
+          0.011
+        ],
+        "cluster_se": 0.005691,
+        "clusters": 11,
+        "naive_se": 0.000839,
+        "point": -0.00845,
+        "se_inflation_vs_naive": 6.78
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.003811,
+          0.001968
+        ],
+        "cluster_means": [
+          -0.00651,
+          -0.003036,
+          -0.001165,
+          -0.000438,
+          0.0,
+          0.001946,
+          0.002751
+        ],
+        "cluster_se": 0.001181,
+        "clusters": 7,
+        "naive_se": 0.00084,
+        "point": -0.000922,
+        "se_inflation_vs_naive": 1.41
+      },
+      "sum_total_dollars": -171.06
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "FLAT_EXITED_MAKER": {
+            "mean": -8.32255,
+            "n": 10,
+            "sum": -83.2255
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.74015,
+            "n": 66,
+            "sum": -48.8502
+          },
+          "FLAT_PAIRED": {
+            "mean": 1.71333,
+            "n": 3,
+            "sum": 5.14
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 370,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 12.99,
+        "taker_fees_paid": -31.14
+      },
+      "episodes": 449,
+      "events": 5,
+      "markets": 5,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": true,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 2,
+        "placement": "AT_TOUCH",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "COMBO_touch_flatten_wide",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.1737,
+        "P_both__GIVEN_any_fill": 0.1154,
+        "P_both__of_all_episodes": 0.02,
+        "all_episodes": 449,
+        "episodes_both_legs_filled": 9,
+        "episodes_one_sided": 69,
+        "episodes_with_any_entry_fill": 78,
+        "reconciliation": {
+          "entry_fills_gt_0": 78,
+          "episodes": 449,
+          "never_filled_status": 370,
+          "reconciles": false,
+          "status_plus_anyfill": 448
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.010737,
+          0.002811
+        ],
+        "cluster_means": [
+          -0.011858,
+          -0.007539,
+          -0.000419,
+          0.0,
+          0.0
+        ],
+        "cluster_se": 0.00244,
+        "clusters": 5,
+        "naive_se": 0.001625,
+        "point": -0.003963,
+        "se_inflation_vs_naive": 1.5
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.014115,
+          0.004207
+        ],
+        "cluster_means": [
+          -0.011858,
+          -0.007539,
+          -0.000419,
+          0.0
+        ],
+        "cluster_se": 0.002879,
+        "clusters": 4,
+        "naive_se": 0.001632,
+        "point": -0.004954,
+        "se_inflation_vs_naive": 1.76
+      },
+      "sum_total_dollars": -126.94
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -0.51,
+            "n": 1,
+            "sum": -0.51
+          },
+          "CARRIED_SETTLED": {
+            "mean": 1.53,
+            "n": 2,
+            "sum": 3.06
+          },
+          "FLAT_EXITED_MAKER": {
+            "mean": -0.0907,
+            "n": 116,
+            "sum": -10.5211
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -0.50679,
+            "n": 380,
+            "sum": -192.5799
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 625,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 46.11,
+        "taker_fees_paid": -121.15
+      },
+      "episodes": 1124,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": true,
+        "hard_flatten": true,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "AT_TOUCH",
+        "quote_horizon": 20,
+        "recovery": "MAKER_THEN_TAKER",
+        "recovery_wait": 10
+      },
+      "policy": "COMBO_touch_flatten_cancel",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.4422,
+        "P_both__GIVEN_any_fill": 0.0,
+        "P_both__of_all_episodes": 0.0,
+        "all_episodes": 1124,
+        "episodes_both_legs_filled": 0,
+        "episodes_one_sided": 497,
+        "episodes_with_any_entry_fill": 497,
+        "reconciliation": {
+          "entry_fills_gt_0": 497,
+          "episodes": 1124,
+          "never_filled_status": 625,
+          "reconciles": false,
+          "status_plus_anyfill": 1122
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.017606,
+          0.00584
+        ],
+        "cluster_means": [
+          -0.0559,
+          -0.0115,
+          -0.005342,
+          -0.00387,
+          -0.001106,
+          -0.000393,
+          0.0,
+          0.0,
+          0.000765,
+          0.001633,
+          0.011
+        ],
+        "cluster_se": 0.005262,
+        "clusters": 11,
+        "naive_se": 0.000568,
+        "point": -0.005883,
+        "se_inflation_vs_naive": 9.27
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.003523,
+          0.001148
+        ],
+        "cluster_means": [
+          -0.005342,
+          -0.00387,
+          -0.001106,
+          -0.000393,
+          0.0,
+          0.000765,
+          0.001633
+        ],
+        "cluster_se": 0.000955,
+        "clusters": 7,
+        "naive_se": 0.000567,
+        "point": -0.001188,
+        "se_inflation_vs_naive": 1.68
+      },
+      "sum_total_dollars": -200.55
+    },
+    {
+      "decomposition": {
+        "_unused": [
+          0.0,
+          0.0,
+          0.0,
+          0.0
+        ],
+        "by_end_state": {
+          "CARRIED_OPEN_AT_HORIZON": {
+            "mean": -1.2171,
+            "n": 1,
+            "sum": -1.2171
+          },
+          "CARRIED_SETTLED": {
+            "mean": -6.42,
+            "n": 2,
+            "sum": -12.84
+          },
+          "FLAT_EXITED_TAKER": {
+            "mean": -1.625,
+            "n": 6,
+            "sum": -9.75
+          },
+          "FLAT_PAIRED": {
+            "mean": -0.51108,
+            "n": 487,
+            "sum": -248.896
+          },
+          "NEVER_FILLED": {
+            "mean": 0.0,
+            "n": 584,
+            "sum": 0.0
+          }
+        },
+        "rebates_received": 51.71,
+        "taker_fees_paid": -142.65
+      },
+      "episodes": 1080,
+      "events": 11,
+      "markets": 11,
+      "params": {
+        "cancel_other_on_fill": false,
+        "hard_flatten": true,
+        "max_mid": 1.0,
+        "max_unmatched_mult": 1.0,
+        "min_mid": 0.0,
+        "min_spread_ticks": 1,
+        "placement": "ENGINE",
+        "quote_horizon": 20,
+        "recovery": "COMPLETE_PAIR",
+        "recovery_wait": 10
+      },
+      "policy": "COMBO_complete_flatten",
+      "populations": {
+        "P_any_fill__of_all_episodes": 0.4565,
+        "P_both__GIVEN_any_fill": 0.3083,
+        "P_both__of_all_episodes": 0.1407,
+        "all_episodes": 1080,
+        "episodes_both_legs_filled": 152,
+        "episodes_one_sided": 341,
+        "episodes_with_any_entry_fill": 493,
+        "reconciliation": {
+          "entry_fills_gt_0": 493,
+          "episodes": 1080,
+          "never_filled_status": 584,
+          "reconciles": false,
+          "status_plus_anyfill": 1077
+        }
+      },
+      "primary_all_clusters": {
+        "ci": [
+          -0.021446,
+          0.003686
+        ],
+        "cluster_means": [
+          -0.0559,
+          -0.0301,
+          -0.0115,
+          -0.00742,
+          -0.003598,
+          -0.002957,
+          -0.000375,
+          -1.4e-05,
+          0.001054,
+          0.00213,
+          0.011
+        ],
+        "cluster_se": 0.00564,
+        "clusters": 11,
+        "naive_se": 0.000752,
+        "point": -0.00888,
+        "se_inflation_vs_naive": 7.5
+      },
+      "sensitivity_dense_clusters": {
+        "ci": [
+          -0.004634,
+          0.001439
+        ],
+        "cluster_means": [
+          -0.00742,
+          -0.003598,
+          -0.002957,
+          -0.000375,
+          -1.4e-05,
+          0.001054,
+          0.00213
+        ],
+        "cluster_se": 0.001241,
+        "clusters": 7,
+        "naive_se": 0.000752,
+        "point": -0.001597,
+        "se_inflation_vs_naive": 1.65
+      },
+      "sum_total_dollars": -272.7
+    }
+  ]
+}

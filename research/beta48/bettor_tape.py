@@ -12,7 +12,8 @@ assumed:
 
     local_request_wall_utc   our clock at request start
     bestBid / bestAsk        the touch
-    bidDepth / askDepth      shares at the touch
+    bidDepth / askDepth      NUMBER OF PRICE LEVELS -- NOT a
+                             quantity. See the ladder section.
     sharesTraded             CUMULATIVE volume -- its DELTA is a print
     lastTradePx              the price of the most recent print
     state                    OPEN | HALTED | EXPIRED
@@ -274,3 +275,167 @@ if __name__ == "__main__":
         print(hdr % (slug[:50], m["event"][-24:], m["observations"],
                      m["two_sided"], m["print_intervals"],
                      m["shares_printed"], m["settlement"]))
+
+
+# ═════════════════════════════════════════════════════════════════════
+# LADDERS -- because bidDepth/askDepth are LEVEL COUNTS, not quantities
+# ═════════════════════════════════════════════════════════════════════
+#
+# THE DEFECT THIS EXISTS TO REPAIR. The first version of the episode
+# replay read `bidDepth`/`askDepth` as "contracts resting at the touch"
+# and used them as the queue ahead of our order. They are not
+# quantities. Across all 30,590 BBO bodies both fields are INTEGERS in
+# [0, 67] with only ~60 distinct values, and `aec-cfb-portst-ore` shows
+# `bidDepth: 1` on a market with 61,918 shares traded. They are the
+# NUMBER OF PRICE LEVELS on that side.
+#
+# Using them as a queue subtracted one to sixty-seven SHARES where the
+# real queue is thousands, so both "queue models" in the first sweep
+# were effectively front-of-queue and every fill rate it reported is an
+# upper bound.
+#
+# The fix is in the capture already: 30,588 `/v1/markets/{slug}/book`
+# responses carry the full ladder with real per-level `qty`. The same
+# market shows ONE bid level of 72,217.52 contracts -- which is both
+# the true queue and the confirmation that `bidDepth: 1` is a count.
+#
+# WHAT A LADDER STILL DOES NOT GIVE US: our own position WITHIN a
+# price level. Resting at a level that already holds 72,217 contracts
+# puts us behind all of them only if we arrive last, and the venue
+# publishes no per-order queue. `queue_ahead_fraction` therefore stays
+# a POLICY PARAMETER swept across its range rather than a single
+# number pretending to be measured.
+
+def load_books(capture_dir: str = CAPTURE):
+    """Full order-book ladders, time-ordered per market."""
+    by_slug = collections.defaultdict(list)
+    for path in sorted(glob.glob(os.path.join(capture_dir, "*",
+                                              "request_log.jsonl.gz"))):
+        try:
+            fh = gzip.open(path, "rt")
+        except OSError:
+            continue
+        with fh as f:
+            for line in f:
+                try:
+                    r = json.loads(line)
+                except ValueError:
+                    continue
+                if r.get("http_status") != 200:
+                    continue
+                if not (r.get("path") or "").endswith("/book"):
+                    continue
+                body = r.get("body")
+                if isinstance(body, str):
+                    try:
+                        body = json.loads(body)
+                    except ValueError:
+                        continue
+                md = (body or {}).get("marketData") or {}
+                slug = md.get("marketSlug")
+                if not slug:
+                    continue
+
+                def _lvls(key):
+                    out = []
+                    for lv in (md.get(key) or []):
+                        px, qty = _amt(lv.get("px")), _amt(lv.get("qty"))
+                        if px is not None and qty is not None and qty > 0:
+                            out.append((px, qty))
+                    return out
+
+                bids = sorted(_lvls("bids"), key=lambda x: -x[0])
+                offers = sorted(_lvls("offers"), key=lambda x: x[0])
+                by_slug[slug].append({
+                    "t": _ts(r.get("local_request_wall_utc")),
+                    "t_iso": r.get("local_request_wall_utc"),
+                    "bids": bids, "offers": offers})
+    for slug in by_slug:
+        by_slug[slug].sort(key=lambda r: (r["t"] if r["t"] is not None
+                                          else 0))
+    return dict(by_slug)
+
+
+def attach_ladders(by_slug, books=None, max_skew_s: float = 5.0):
+    """Join each BBO row to the ladder captured closest in time.
+
+    The two endpoints were polled back to back -- 30,590 BBO against
+    30,588 book responses -- so the join is near one-to-one. A row
+    whose nearest ladder is further away than `max_skew_s` gets
+    `ladder: None` and is reported, never silently filled in.
+    """
+    books = load_books() if books is None else books
+    stats = {"rows": 0, "joined": 0, "no_ladder": 0,
+             "max_skew_s": max_skew_s, "skews": []}
+    for slug, rows in by_slug.items():
+        bl = books.get(slug) or []
+        ts = [b["t"] for b in bl]
+        j = 0
+        for r in rows:
+            stats["rows"] += 1
+            t = r["t"]
+            if not bl or t is None:
+                r["ladder"] = None
+                stats["no_ladder"] += 1
+                continue
+            while j + 1 < len(ts) and ts[j + 1] is not None \
+                    and abs(ts[j + 1] - t) <= abs(ts[j] - t):
+                j += 1
+            k = j
+            # the pointer only moves forward; check the neighbour behind
+            if k > 0 and ts[k - 1] is not None and \
+                    abs(ts[k - 1] - t) < abs(ts[k] - t):
+                k -= 1
+            skew = abs((ts[k] or 0) - t)
+            if skew > max_skew_s:
+                r["ladder"] = None
+                stats["no_ladder"] += 1
+                continue
+            r["ladder"] = {"bids": bl[k]["bids"], "offers": bl[k]["offers"],
+                           "t_iso": bl[k]["t_iso"], "skew_s": round(skew, 3)}
+            stats["joined"] += 1
+            stats["skews"].append(skew)
+    sk = stats.pop("skews")
+    stats["median_skew_s"] = (round(sorted(sk)[len(sk) // 2], 3) if sk
+                              else None)
+    stats["p90_skew_s"] = (round(sorted(sk)[int(0.9 * len(sk))], 3)
+                           if sk else None)
+    return by_slug, stats
+
+
+def qty_at_or_better(ladder, side, price):
+    """Contracts resting at `price` or better on `side`.
+
+    This is the real queue quantity the level-count fields could never
+    supply. "Better" means a higher bid or a lower offer -- orders that
+    would execute before ours at the same incoming print.
+    """
+    if not ladder:
+        return None
+    if side == "BID":
+        return sum(q for px, q in ladder["bids"] if px >= price - 1e-9)
+    return sum(q for px, q in ladder["offers"] if px <= price + 1e-9)
+
+
+def walk_for_size(ladder, side, size):
+    """Volume-weighted price to EXECUTE `size` against the ladder.
+
+    Liquidating at the touch assumes the touch is infinitely deep. It
+    is not: `aec-cfb-portst-ore` shows a single bid level, so a
+    100-contract sell either fills there or does not fill at all.
+    Returns (vwap, filled, levels_used) -- `filled < size` means the
+    book could not absorb it and the remainder is UNLIQUIDATED.
+    """
+    if not ladder:
+        return None, 0.0, 0
+    levels = ladder["bids"] if side == "BID" else ladder["offers"]
+    need, cost, used = float(size), 0.0, 0
+    for px, q in levels:
+        if need <= 1e-9:
+            break
+        take = min(need, q)
+        cost += take * px
+        need -= take
+        used += 1
+    filled = float(size) - need
+    return ((cost / filled) if filled > 1e-9 else None), filled, used

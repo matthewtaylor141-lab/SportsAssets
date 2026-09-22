@@ -94,6 +94,7 @@ Run:  python research/beta48/bettor_episodes.py
 """
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import sys
@@ -107,6 +108,82 @@ import bettor_tape as tape                                      # noqa: E402
 QUOTE_HORIZON = 20      # observations the pair of quotes rests for
 RECOVERY_WAIT = 10      # observations a maker exit rests before crossing
 COOLDOWN = 1            # observations between episodes in one market
+
+
+@dataclasses.dataclass(frozen=True)
+class Policy:
+    """EVERY DECISION THE REPLAY MAKES, in one frozen object.
+
+    The first version of this file hard-coded one policy and then the
+    result was reported as though it were a fact about two-sided market
+    making. It is not: it is a fact about ONE entry rule, ONE quote
+    placement, ONE inventory rule, ONE recovery path and ONE settlement
+    treatment. Every one of those is a decision that could have been
+    made differently, and several are decisions the case studies make
+    differently.
+
+    Each field below is therefore a knob, every combination that was
+    run is recorded in the sweep, and the unsuccessful ones stay in the
+    record rather than being quietly dropped.
+    """
+    name: str = "BASE"
+
+    # ENTRY
+    min_spread_ticks: int = 1        # do not quote a book tighter than this
+    max_mid: float = 1.0             # do not quote above this mid
+    min_mid: float = 0.0
+
+    # QUOTE PLACEMENT
+    #   ENGINE     whatever incremental_ev returns (improve by one tick
+    #              where there is room, else at the touch)
+    #   AT_TOUCH   always join the touch, never improve
+    #   DEEPER_1   one tick BEHIND the touch -- worse fill odds, better
+    #              conditional price
+    placement: str = "ENGINE"
+
+    # INVENTORY
+    #   when one leg fills, does the other stay up?
+    cancel_other_on_fill: bool = False
+    #   stop quoting at all once |unmatched| reaches this multiple of size
+    max_unmatched_mult: float = 1.0
+
+    # TIME -- IN SECONDS. Observation counts were a proxy for time that
+    # silently changed meaning between markets: the boxing market was
+    # polled every ~112 s and the NFL markets every ~4,500 s, so
+    # "20 observations" was 37 minutes in one and 25 hours in another.
+    quote_horizon_s: float = 2400.0      # 40 minutes
+    recovery_wait_s: float = 1200.0      # 20 minutes
+
+    # QUEUE. Our position WITHIN a price level is not observable: the
+    # venue publishes aggregate ladder quantity, not per-order queues.
+    # This is the fraction of the quantity at our own price assumed to
+    # be ahead of us. Everything strictly better than us is ALWAYS
+    # ahead. Swept rather than asserted.
+    queue_ahead_fraction: float = 1.0
+
+    # PRINT ATTRIBUTION.
+    #   LADDER_BOUNDED  volume that could have reached us is bounded by
+    #                   the quantity that actually DISAPPEARED at our
+    #                   price or better between the two ladders
+    #   ALL_AT_LAST     the old, optimistic rule: the whole interval's
+    #                   volume at the single last-trade price
+    print_attribution: str = "LADDER_BOUNDED"
+
+    # RECOVERY -- what to do with unmatched inventory
+    #   MAKER_THEN_TAKER  rest an exit, then cross out
+    #   TAKER_NOW         cross out immediately
+    #   COMPLETE_PAIR     buy the complement as a taker (mechanism 3,
+    #                     in its time-dependent form)
+    #   HOLD              keep it to settlement
+    recovery: str = "MAKER_THEN_TAKER"
+
+    # SETTLEMENT
+    #   False  inventory may ride through expiry
+    #   True   cross out at the last OPEN observation before expiry
+    hard_flatten: bool = False
+
+
+BASE_POLICY = Policy()
 
 # Episode end states
 FLAT_PAIRED = "FLAT_PAIRED"
@@ -134,13 +211,15 @@ class Episode:
     """One quoting lifecycle in one market. Nothing is dropped."""
 
     def __init__(self, slug, event, i0, row, size, tick, rebates_on,
-                 queue_model):
+                 queue_model, policy=None):
         self.slug, self.event = slug, event
         self.i0, self.t0 = i0, row["t_iso"]
+        self.t0_epoch = row.get("t")
         self.size = float(size)
         self.tick = tick
         self.rebates_on = rebates_on
         self.queue_model = queue_model
+        self.policy = policy or BASE_POLICY
 
         book = ev.Book(slug=slug, bid=row["bid"], ask=row["ask"], tick=tick)
         qb = ev.incremental_ev("QUOTE_BID", book, ev.Inventory(),
@@ -149,8 +228,21 @@ class Episode:
         qo = ev.incremental_ev("QUOTE_OFFER", book, ev.Inventory(),
                                contracts=self.size, as_fill=0.0, p_fill=1.0,
                                rebate_eligible=rebates_on)
-        self.pb = qb.terms["quote_price"]          # our YES bid
-        self.po = qo.terms["quote_price"]          # our YES offer
+        # PLACEMENT IS A POLICY DECISION, not the engine's. The engine
+        # prices whatever we quote; where to quote is ours to choose,
+        # and the base rule ("improve by one tick where there is room")
+        # is the one that lands a 2-tick book EXACTLY ON THE MID and
+        # captures nothing. The alternatives exist so that defect can
+        # be measured instead of argued about.
+        pl = self.policy.placement
+        if pl == "AT_TOUCH":
+            self.pb, self.po = row["bid"], row["ask"]
+        elif pl == "DEEPER_1":
+            self.pb = round(row["bid"] - tick, 6)
+            self.po = round(row["ask"] + tick, 6)
+        else:
+            self.pb = qb.terms["quote_price"]      # our YES bid
+            self.po = qo.terms["quote_price"]      # our YES offer
         self.entry_book = {"bid": row["bid"], "ask": row["ask"],
                            "spread": round(row["ask"] - row["bid"], 6),
                            "spread_ticks": int(round(
@@ -173,6 +265,10 @@ class Episode:
         self.cancel_effective_from = None
         self.race_fills = 0
 
+        self.ladder_bounded_intervals = 0
+        self.unbounded_intervals = 0
+        self.no_ladder_intervals = 0
+        self.unliquidated = 0.0
         self.status = None
         self.end_i = None
         self.end_t = None
@@ -250,40 +346,80 @@ class Episode:
                 (ev.THETA_MAKER if maker else ev.THETA_TAKER)
                 * n * px * (1.0 - px), 8)})
 
-    # ── the fill model ────────────────────────────────────────────────
+    # ── the fill model, on REAL LADDER QUANTITIES ─────────────────────
     def _available(self, side, prev, row, dvol, print_px):
-        """Shares of `dvol` that could reach OUR order on `side`.
+        """Contracts of this interval's flow that could reach OUR order.
 
-        side "YES": our bid at self.pb -- fills when someone sells at or
-        below it, i.e. print_px <= pb.
-        side "NO": our YES offer at self.po -- fills when someone buys
-        at or above it, i.e. print_px >= po.
+        REBUILT. The first version used `bidDepth`/`askDepth` as the
+        queue ahead of us. Those fields are LEVEL COUNTS -- integers in
+        [0, 67] across all 30,590 bodies -- not quantities, so it
+        subtracted single digits where the real queue is tens of
+        thousands and every fill rate it produced was an upper bound.
+
+        Three bounds now apply, and a fill needs all three:
+
+          1. DIRECTION. The print must cross our price.
+          2. LADDER CONSUMPTION. The flow that could have reached us is
+             capped by the quantity that actually DISAPPEARED at our
+             price or better between the two captured ladders. This is
+             what replaces "attribute the whole interval's volume to
+             the single last-trade price": unobserved multi-price
+             volume can no longer all be claimed as ours.
+          3. QUEUE. Everything resting STRICTLY better than us is
+             always ahead. A fraction of the quantity at our OWN price
+             is ahead too -- the fraction is a swept parameter, because
+             per-order queue position is not published by the venue and
+             is therefore NOT MEASURED.
         """
         if dvol <= 0 or print_px is None:
             return 0.0
+        our = self.pb if side == "YES" else self.po
+        book_side = "BID" if side == "YES" else "OFFER"
         if side == "YES":
-            if print_px > self.pb + 1e-9:
+            if print_px > our + 1e-9:
                 return 0.0
-            inside = (prev["bid"] is not None
-                      and self.pb > prev["bid"] + 1e-9)
-            depth = prev["bid_depth"] or 0
         else:
-            if print_px < self.po - 1e-9:
+            if print_px < our - 1e-9:
                 return 0.0
-            inside = (prev["ask"] is not None
-                      and self.po < prev["ask"] - 1e-9)
-            depth = prev["ask_depth"] or 0
-        if self.queue_model == "QUEUE_FRONT_IF_INSIDE" and inside:
-            ahead = 0.0
+
+        lad_a = prev.get("ladder")
+        lad_b = row.get("ladder")
+        if self.policy.print_attribution == "LADDER_BOUNDED" and lad_a:
+            before = tape.qty_at_or_better(lad_a, book_side, our) or 0.0
+            after = (tape.qty_at_or_better(lad_b, book_side, our)
+                     if lad_b else before)
+            consumed = max(0.0, before - (after or 0.0))
+            reachable = min(dvol, consumed)
+            self.ladder_bounded_intervals += 1
         else:
-            ahead = float(depth)
-        return max(0.0, dvol - ahead)
+            reachable = dvol
+            self.unbounded_intervals += 1
+
+        if lad_a:
+            levels = (lad_a["bids"] if book_side == "BID"
+                      else lad_a["offers"])
+            if book_side == "BID":
+                strictly_better = sum(q for px, q in levels
+                                      if px > our + 1e-9)
+            else:
+                strictly_better = sum(q for px, q in levels
+                                      if px < our - 1e-9)
+            at_ours = sum(q for px, q in levels if abs(px - our) < 1e-9)
+            ahead = strictly_better + \
+                self.policy.queue_ahead_fraction * at_ours
+        else:
+            # NO LADDER FOR THIS ROW. Refusing the fill is the
+            # conservative choice and it is counted, not hidden.
+            self.no_ladder_intervals += 1
+            return 0.0
+        return max(0.0, reachable - ahead)
 
     # ── the run ───────────────────────────────────────────────────────
     def run(self, rows, settlement):
         n = len(rows)
         i = self.i0
         recovery_started = None
+        recovery_started_t = None
         exit_quote = None            # (leg, price) of a resting maker exit
 
         while True:
@@ -295,6 +431,29 @@ class Episode:
 
             # ── expiry / settlement ───────────────────────────────────
             if row["state"] == tape.EXPIRED:
+                # HARD FLATTEN crosses out on the LAST OPEN observation
+                # rather than riding through expiry. It pays a taker fee
+                # every time in exchange for removing the +-0.40 tail
+                # that dominates the variance.
+                if self.policy.hard_flatten and prev["state"] == tape.OPEN \
+                        and prev["bid"] is not None \
+                        and prev["ask"] is not None:
+                    matched = min(self.yes, self.no)
+                    ey, en = self.yes - matched, self.no - matched
+                    if ey > 0:
+                        self._sell("YES", prev["bid"], ey, i - 1, prev,
+                                   False, "FLATTEN_PRE_EXPIRY")
+                    if en > 0:
+                        self._sell("NO", 1.0 - prev["ask"], en, i - 1,
+                                   prev, False, "FLATTEN_PRE_EXPIRY")
+                    if matched > 0:
+                        self._finish_paired(prev, i - 1, settlement,
+                                            FLAT_EXITED_TAKER)
+                    else:
+                        self._finish_flat(prev, i - 1, FLAT_EXITED_TAKER)
+                    self.notes.append("hard-flattened on the last open "
+                                      "observation before expiry")
+                    return self
                 self._finish_expired(row, i, settlement)
                 return self
 
@@ -304,7 +463,8 @@ class Episode:
                 dvol = max(0.0, row["shares_traded"] - prev["shares_traded"])
             print_px = row["last_trade_px"]
 
-            age = i - self.i0
+            age = (row["t"] - self.t0_epoch) if (
+                row["t"] is not None and self.t0_epoch is not None) else 0.0
             cancelled = (self.cancel_effective_from is not None
                          and i >= self.cancel_effective_from)
 
@@ -325,6 +485,20 @@ class Episode:
                     self.open_no -= take
                     if self.cancel_requested_at is not None:
                         self.race_fills += 1
+                # INVENTORY RULE. A one-sided fill is the state that
+                # costs money, so one alternative is to stop trying for
+                # the pair the moment a leg prints and go straight to
+                # recovery. The cancel still takes effect only from the
+                # NEXT observation -- the race is charged against us
+                # here exactly as it is at the horizon.
+                if (self.policy.cancel_other_on_fill
+                        and self.cancel_requested_at is None
+                        and (self.yes > 0) != (self.no > 0)):
+                    self.cancel_requested_at = i
+                    self.cancel_effective_from = i + 1
+                    self.notes.append("cancelled the resting leg on the "
+                                      "first fill (policy)")
+                    continue
 
             # ── both legs done: a matched pair, settles at 1 ──────────
             if (self.open_yes <= 1e-9 and self.open_no <= 1e-9
@@ -334,14 +508,16 @@ class Episode:
                 return self
 
             # ── the quoting horizon: request the cancel ───────────────
-            if (age >= QUOTE_HORIZON and self.cancel_requested_at is None
+            if (age >= self.policy.quote_horizon_s
+                    and self.cancel_requested_at is None
                     and (self.open_yes > 0 or self.open_no > 0)):
                 self.cancel_requested_at = i
                 # RACE: effective only from the NEXT observation, so a
                 # print in this interval still fills us.
                 self.cancel_effective_from = i + 1
                 continue
-            if age >= QUOTE_HORIZON and self.cancel_requested_at is None:
+            if age >= self.policy.quote_horizon_s \
+                    and self.cancel_requested_at is None:
                 self.cancel_requested_at = i
                 self.cancel_effective_from = i
 
@@ -362,8 +538,50 @@ class Episode:
             if row["bid"] is None or row["ask"] is None:
                 continue
 
+            # ── THE RECOVERY PATH IS A POLICY CHOICE ──────────────────
+            #
+            # Four of them, because the case studies do not all do the
+            # same thing with unmatched inventory and rejecting one is
+            # not rejecting the others.
+            rec = self.policy.recovery
+            if rec == "TAKER_NOW":
+                if excess_yes > 0:
+                    self._sell("YES", row["bid"], excess_yes, i, row,
+                               False, "EXIT_TAKER")
+                if excess_no > 0:
+                    self._sell("NO", 1.0 - row["ask"], excess_no, i, row,
+                               False, "EXIT_TAKER")
+                if matched > 0:
+                    self._finish_paired(row, i, settlement,
+                                        FLAT_EXITED_TAKER)
+                else:
+                    self._finish_flat(row, i, FLAT_EXITED_TAKER)
+                return self
+            if rec == "COMPLETE_PAIR":
+                # MECHANISM 3 IN ITS TIME-DEPENDENT FORM. Buy the
+                # COMPLEMENT as a taker so the position becomes a
+                # matched pair that settles at 1, instead of selling
+                # the leg we hold. The engine prices it; the cash is
+                # the complement's price plus a taker fee.
+                if excess_yes > 0:
+                    self._fill("NO", 1.0 - row["bid"], excess_yes, i, row,
+                               False, "COMPLETE_PAIR")
+                if excess_no > 0:
+                    self._fill("YES", row["ask"], excess_no, i, row,
+                               False, "COMPLETE_PAIR")
+                self._finish_paired(row, i, settlement, FLAT_PAIRED)
+                self.notes.append("completed the pair as a taker rather "
+                                  "than exiting the leg")
+                return self
+            if rec == "HOLD":
+                # Ride it to settlement. The episode ends when the
+                # market expires or the capture does -- the loop's own
+                # expiry and horizon handlers take it from here.
+                continue
+
             if recovery_started is None:
                 recovery_started = i
+                recovery_started_t = row["t"]
                 book = ev.Book(slug=self.slug, bid=row["bid"],
                                ask=row["ask"], tick=self.tick)
                 if excess_yes > 0:
@@ -411,7 +629,10 @@ class Episode:
                         return self
                     continue
 
-            if i - recovery_started >= RECOVERY_WAIT:
+            rec_age = ((row["t"] - recovery_started_t)
+                       if (row["t"] is not None
+                           and recovery_started_t is not None) else 0.0)
+            if rec_age >= self.policy.recovery_wait_s:
                 # cross out as a taker
                 matched = min(self.yes, self.no)
                 ey, en = self.yes - matched, self.no - matched
@@ -452,6 +673,14 @@ class Episode:
         self.residual_basis = "FLAT -- neither leg filled"
 
     def _finish_expired(self, row, i, settlement):
+        if not self.fills:
+            # NOTHING EVER FILLED. The market merely expired underneath
+            # a quote that never traded. Labelling it CARRIED_SETTLED
+            # put two episodes in the carried population that had no
+            # position to carry, and broke the reconciliation
+            # never_filled + any_fill == all_episodes.
+            self._finish_never_filled(row, i)
+            return
         self._stamp(row, i, CARRIED_SETTLED)
         self.settlement = settlement
         if settlement == tape.SETTLEMENT_NOT_OBSERVED or settlement is None:
@@ -468,6 +697,9 @@ class Episode:
                                "no*%0.4f" % (s, s, 1.0 - s))
 
     def _finish_open(self, row, i):
+        if not self.fills:
+            self._finish_never_filled(row, i)
+            return
         self._stamp(row, i, CARRIED_OPEN)
         matched = min(self.yes, self.no)
         ey, en = self.yes - matched, self.no - matched
@@ -524,6 +756,14 @@ class Episode:
 
             "fills": len(self.fills),
             "entry_fills": sum(1 for f in self.fills if f["tag"] == "ENTRY"),
+            # WHICH LEGS ACTUALLY FILLED AS MAKER ENTRIES. The end state
+            # is not a safe proxy for this: the COMPLETE_PAIR recovery
+            # turns a one-sided fill into FLAT_PAIRED by BUYING the
+            # complement as a taker, which would read as a 98.8%
+            # double-fill rate if the label were trusted.
+            "entry_legs_filled": sorted({
+                f["leg"] for f in self.fills
+                if f["tag"] == "ENTRY" and f["n"] > 0}),
             "fill_sizes": [f["n"] for f in self.fills],
             "rebates_received": round(self.rebates_paid, 6),
             "taker_fees_paid": round(self.taker_fees_paid, 6),
@@ -539,19 +779,27 @@ class Episode:
 
 
 def run_market(slug, rows, size, rebates_on, queue_model,
-               max_episodes=None):
+               max_episodes=None, policy=None):
     """Non-overlapping episodes across one market's whole tape."""
+    pol = policy or BASE_POLICY
     settlement, _ = tape.settlement_label(rows)
     tick = tape.market_tick(rows)
     event = tape.event_of(slug)
     out, i, n = [], 0, len(rows)
     while i < n:
         r = rows[i]
+        # THE ENTRY FILTER IS PART OF THE POLICY, so a variant that
+        # only quotes wide books or only quotes a price band is a
+        # different policy and is recorded as one.
         if (r["state"] != tape.OPEN or r["bid"] is None or r["ask"] is None
-                or (r["ask"] - r["bid"]) < tick - 1e-9):
+                or (r["ask"] - r["bid"])
+                < pol.min_spread_ticks * tick - 1e-9
+                or not (pol.min_mid <= 0.5 * (r["bid"] + r["ask"])
+                        <= pol.max_mid)):
             i += 1
             continue
-        ep = Episode(slug, event, i, r, size, tick, rebates_on, queue_model)
+        ep = Episode(slug, event, i, r, size, tick, rebates_on,
+                     queue_model, policy=pol)
         ep.run(rows, settlement)
         out.append(ep.result())
         i = max(ep.end_i or i, i) + COOLDOWN + 1
@@ -560,13 +808,22 @@ def run_market(slug, rows, size, rebates_on, queue_model,
     return out
 
 
+_TAPE_CACHE = {}
+
+
 def run_all(size=100.0, rebates_on=True,
-            queue_model="QUEUE_FRONT_IF_INSIDE", max_episodes=None):
-    by_slug, _ = tape.load_tape()
+            queue_model="QUEUE_FRONT_IF_INSIDE", max_episodes=None,
+            policy=None):
+    if "t" not in _TAPE_CACHE:
+        by, _f = tape.load_tape()
+        by, stats = tape.attach_ladders(by)
+        _TAPE_CACHE["t"] = by
+        _TAPE_CACHE["ladder_stats"] = stats
+    by_slug = _TAPE_CACHE["t"]
     eps = []
     for slug, rows in sorted(by_slug.items()):
         eps.extend(run_market(slug, rows, size, rebates_on, queue_model,
-                              max_episodes))
+                              max_episodes, policy=policy))
     return eps
 
 
