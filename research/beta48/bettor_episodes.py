@@ -128,29 +128,54 @@ RECOVERY_WAIT = 10      # observations a maker exit rests before crossing
 COOLDOWN = 1            # observations between episodes in one market
 
 
+# ── THE SHARED POLICY ────────────────────────────────────────────────
+#
+# Imported, not copied. `backend/sportsassets/bettor_policy.py` is the
+# ONE definition of every decision this replay makes, and the live loop
+# imports the same module. A backtest of a policy the runtime does not
+# run is a description of a program nobody executes.
+_BACKEND = os.path.join(os.path.dirname(os.path.abspath(__file__)),
+                        "..", "..", "backend")
+if _BACKEND not in sys.path:
+    sys.path.insert(0, _BACKEND)
+from sportsassets import bettor_policy as shared            # noqa: E402
+
+
+def _book_of(row, tick):
+    """A replay row -> the shared policy's decision-time Book."""
+    return shared.Book(bid=row.get("bid"), ask=row.get("ask"),
+                       tick=tick or 0.01, state=row.get("state"))
+
+
 def decision_time_size(policy, base_size, row):
     """The clip for THIS book, from decision-time inputs only.
 
     Returns (size, why). `why` travels onto the episode so a reader can
     see which rule produced the number rather than inferring it.
     """
-    if policy is None or policy.size_rule == "FIXED":
+    if policy is None:
         return float(base_size), "FIXED"
-    bid, ask = row.get("bid"), row.get("ask")
-    if bid is None or ask is None:
-        return float(base_size), "FIXED -- one-sided book"
-    tick = row.get("tick") or 0.01
-    ticks = max(1, int(round((ask - bid) / tick)))
-    floor_ticks = max(1, int(getattr(policy, "min_spread_ticks", 1)))
-    if policy.size_rule == "EDGE_SCALED":
-        # Linear in the edge ABOVE the minimum this policy will quote.
-        # A book exactly at the floor gets the base clip; a book paying
-        # twice the floor gets twice the size, bounded both ways.
-        mult = ticks / float(floor_ticks)
-        mult = max(policy.size_min_mult, min(policy.size_max_mult, mult))
-        return float(base_size) * mult, "EDGE_SCALED x%.2f (%d ticks)" % (
-            mult, ticks)
-    return float(base_size), "FIXED -- unknown rule %r" % policy.size_rule
+    # THE SHARED IMPLEMENTATION DECIDES. This function is a thin
+    # adapter from a replay row to the policy's Book, and nothing else.
+    r = shared.quote_size(_as_shared(policy), _book_of(row, row.get("tick")),
+                          base_size)
+    return r["size"], "%s x%.2f -- %s" % (r["rule"], r["mult"], r["why"])
+
+
+def _as_shared(policy):
+    """The replay's Policy -> the shared Policy. Field for field.
+
+    They carry the same names deliberately, so this cannot silently
+    drop a knob: a field added to one and not the other raises here
+    rather than quietly changing behaviour in only one consumer.
+    """
+    if isinstance(policy, shared.Policy):
+        return policy
+    kw = {}
+    for f in dataclasses.fields(shared.Policy):
+        if hasattr(policy, f.name):
+            kw[f.name] = getattr(policy, f.name)
+    return shared.Policy(**kw)
 
 
 @dataclasses.dataclass(frozen=True)
@@ -923,21 +948,82 @@ class Episode:
         feasible substitute: sell the YES at the bid and the NO at
         (1 - ask), both as takers, through the real ladder.
 
-        IT CAN FAIL PARTIALLY, and that is reported rather than
-        smoothed: `_taker_exit` sweeps the actual ladder, so a thin
-        book leaves part of the pair UNLIQUIDATED and riding to
-        settlement after all.
+        UNEQUAL LIQUIDATION IS THE DEFECT THIS NOW HANDLES.
+        `_taker_exit` sweeps the ACTUAL ladder and can fill only part
+        of what it is asked for. The first version sold YES then NO and
+        accepted whatever came back -- so a deep YES side and a thin NO
+        side turned a RISKLESS MATCHED PAIR into a NAKED DIRECTIONAL
+        POSITION, created by the very operation whose purpose was to
+        remove risk. Worse, it did it silently: `min(yes, no)` still
+        reported a tidy pair count and the naked excess simply rode to
+        settlement.
+
+        The repair is to size the second leg to what the FIRST one
+        actually achieved, and then to re-pair anything left over:
+
+          1. sell the smaller side first is not enough -- we cannot
+             know which side is thinner until we try. So sell YES,
+             measure, then ask the NO side for EXACTLY what the YES
+             side gave us.
+          2. if the NO side then gives less, we are long YES-short by
+             the difference; that residue is put BACK into a matched
+             pair by buying the complement, which is the same
+             mechanism `COMPLETE_PAIR` uses and is known to work.
+          3. whatever remains is reported as a pair that could not be
+             released, never as flat.
+
+        The invariant this maintains: THE RELEASE NEVER INCREASES
+        DIRECTIONAL EXPOSURE. `test_release_never_creates_naked_risk`
+        asserts it over a sweep of asymmetric ladders.
         """
         before_yes, before_no = self.yes, self.no
+        net_before = self.yes - self.no
+
+        # 1. Sell the YES leg and MEASURE what actually came back.
         self._taker_exit("YES", matched, i, row, "RELEASE_PAIR")
-        self._taker_exit("NO", matched, i, row, "RELEASE_PAIR")
         sold_yes = before_yes - self.yes
-        sold_no = before_no - self.no
+
+        # 2. Ask the NO side for exactly that much -- never more. Asking
+        #    for `matched` when the YES side only managed half is what
+        #    created the naked leg.
+        if sold_yes > 1e-9:
+            before_no2 = self.no
+            self._taker_exit("NO", sold_yes, i, row, "RELEASE_PAIR")
+            sold_no = before_no2 - self.no
+        else:
+            sold_no = 0.0
+
+        # 3. Re-pair the residue. If the two legs came back unequal we
+        #    are directionally exposed by the difference; buying the
+        #    complement puts it back into a pair rather than leaving it
+        #    naked.
+        gap = round(sold_yes - sold_no, 9)
+        repaired = 0.0
+        if abs(gap) > 1e-9 and row.get("bid") is not None \
+                and row.get("ask") is not None:
+            if gap > 0:
+                # sold more YES than NO -> short YES relative to NO ->
+                # we hold excess NO. Buy YES back to re-pair it.
+                self._fill("YES", row["ask"], gap, i, row, False,
+                           "RELEASE_REPAIR")
+            else:
+                self._fill("NO", 1.0 - row["bid"], -gap, i, row, False,
+                           "RELEASE_REPAIR")
+            repaired = abs(gap)
+
+        net_after = self.yes - self.no
         left = min(self.yes, self.no)
         self.notes.append(
-            "RELEASED the matched pair into cash: sold %.4f YES and %.4f "
-            "NO as takers; %.4f pair(s) could not be sold and ride to "
-            "settlement" % (sold_yes, sold_no, left))
+            "RELEASE: sold %.4f YES and %.4f NO as takers; re-paired "
+            "%.4f of unequal liquidation; %.4f pair(s) could not be "
+            "released and ride to settlement. Net directional %.4f -> "
+            "%.4f." % (sold_yes, sold_no, repaired, left,
+                       net_before, net_after))
+        if abs(net_after) > abs(net_before) + 1e-6:
+            # THE INVARIANT, CHECKED AT RUNTIME AND NOT ONLY IN A TEST.
+            self.notes.append(
+                "RELEASE_INCREASED_DIRECTIONAL_EXPOSURE -- this is a "
+                "defect, recorded rather than smoothed over")
         if left > 1e-9:
             self._finish_paired(row, i, None, FLAT_PAIRED)
         else:
