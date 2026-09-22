@@ -76,6 +76,12 @@ class Policy:
     max_mid: float = 1.0
     min_mid: float = 0.0
 
+    # THE FLOW GATE. Zero leaves it off, which is every policy
+    # evaluated before it existed. See RULES["flow"] for why it exists
+    # and what it is aimed at.
+    min_flow_cover: float = 0.0
+    flow_window_s: float = 1800.0
+
     # QUOTE PLACEMENT
     placement: str = ENGINE
 
@@ -113,6 +119,10 @@ class Book:
     state: str | None = None
     depth_bid: float | None = None
     depth_ask: float | None = None
+    # TRAILING traded shares per second, measured over a window that
+    # ENDS AT THIS INSTANT. Never forward-looking: it is the flow that
+    # has already happened, which is what a live engine would have.
+    flow_per_s: float | None = None
 
     @property
     def spread_ticks(self) -> int | None:
@@ -181,7 +191,48 @@ def _d(decision, why, rule, inputs, alternatives=(), **kw):
 
 # ═══ THE DECISIONS ═══════════════════════════════════════════════════
 
-def admit(policy: Policy, book: Book) -> dict:
+def flow_cover(policy: Policy, book: Book, *, clip: float,
+               horizon_s: float | None = None) -> dict:
+    """How many times over can the trailing flow reach our quote?
+
+    THE QUANTITY THE WHOLE STRATEGY TURNS ON. To be filled on a side we
+    must first see the depth already resting at that price traded
+    through, and then our own clip. Over the quoting horizon the volume
+    that could do that is the trailing flow rate times the horizon. So
+
+        cover = flow_per_s * horizon / (depth_ahead + clip)
+
+    and a cover below 1 says, from decision-time information alone,
+    that this quote is not expected to be reached at all.
+
+    TWO ASSUMPTIONS, BOTH CONSERVATIVE IN THE SAME DIRECTION AND BOTH
+    STATED. `flow_per_s` is TOTAL traded volume, not the half that
+    would lift our particular side, so the cover is optimistic by
+    roughly a factor of two; and `depth_ahead` takes the WORSE of the
+    two sides, because a pair needs both. The first overstates cover
+    and the second understates it, and neither is tuned -- a threshold
+    picked to make the arithmetic come out is a threshold fitted to the
+    answer.
+    """
+    horizon = policy.quote_horizon_s if horizon_s is None else horizon_s
+    if book.flow_per_s is None:
+        return {"cover": None, "known": False,
+                "why": "no trailing flow was supplied, so the fill "
+                       "constraint cannot be evaluated from this book"}
+    depth = max(book.depth_bid or 0.0, book.depth_ask or 0.0)
+    need = depth + max(0.0, float(clip))
+    if need <= 0:
+        return {"cover": None, "known": False,
+                "why": "nothing to clear and no clip: undefined"}
+    return {"cover": book.flow_per_s * horizon / need, "known": True,
+            "flow_per_s": book.flow_per_s, "depth_ahead": depth,
+            "need": need, "horizon_s": horizon,
+            "why": "%.1f shares of trailing flow per second over %.0fs "
+                   "against %.0f to clear" % (book.flow_per_s, horizon,
+                                              need)}
+
+
+def admit(policy: Policy, book: Book, *, clip: float | None = None) -> dict:
     """Is this book worth quoting at all?"""
     if book.bid is None or book.ask is None:
         return _d(D_STAND_ASIDE, "one-sided book: a single-sided quote is "
@@ -205,6 +256,30 @@ def admit(policy: Policy, book: Book) -> dict:
     if not is_open(book.state):
         return _d(D_STAND_ASIDE, "market state %r is not open" % book.state,
                   "entry", ["state"], [D_QUOTE_BOTH])
+    if policy.min_flow_cover > 0:
+        # FAIL CLOSED. A gate that passes when its input is missing is
+        # not a gate, and this one is missing on every historical row
+        # that predates the ladder join.
+        if clip is None:
+            return _d(D_STAND_ASIDE,
+                      "the flow gate is armed but no clip was supplied, so "
+                      "the cover cannot be computed; refusing rather than "
+                      "quoting past an unevaluated gate",
+                      "flow", ["flow_per_s", "depth_bid", "depth_ask"],
+                      [D_QUOTE_BOTH])
+        fc = flow_cover(policy, book, clip=clip)
+        if not fc["known"]:
+            return _d(D_STAND_ASIDE, fc["why"], "flow",
+                      ["flow_per_s", "depth_bid", "depth_ask"],
+                      [D_QUOTE_BOTH])
+        if fc["cover"] < policy.min_flow_cover:
+            return _d(D_STAND_ASIDE,
+                      "flow cover %.2f is below the %.2f minimum -- %s. A "
+                      "quote that is not expected to be reached commits "
+                      "capital and earns nothing"
+                      % (fc["cover"], policy.min_flow_cover, fc["why"]),
+                      "flow", ["flow_per_s", "depth_bid", "depth_ask"],
+                      [D_QUOTE_BOTH], flow_cover=round(fc["cover"], 4))
     return _d(D_QUOTE_BOTH,
               "spread %d ticks clears the minimum and the book is "
               "two-sided, so a paired fill is worth the spread less fees"
@@ -395,6 +470,24 @@ RULES = {
         "evidence": "introduced for C4 to shape a liquidity-provision "
                     "quote. NOT derived from a case study, and it has "
                     "never been shown to improve a measured result.",
+    },
+    "flow": {
+        "provenance": HYPOTHESIS,
+        "case_study": None,
+        "inputs": ["flow_per_s", "depth_bid", "depth_ask", "clip"],
+        "rationale": "the measured constraint is the FILL RATE, not the "
+                     "netting call: 88% of committed capital-hours rest "
+                     "behind quotes that never fill, and 358 of 420 "
+                     "episodes never fill at all. Spread, price band and "
+                     "sizing all allocate capital among books; none of "
+                     "them asks whether a book trades enough for the "
+                     "quote to be reached. This one does, from "
+                     "decision-time information only.",
+        "evidence": "DIAGNOSTIC, not yet a validated improvement. Derived "
+                    "from the fill-rate breakdown of the development "
+                    "split; its effect is reported in "
+                    "acceptance/evaluation.json. A hypothesis aimed at "
+                    "the measured constraint is still a hypothesis.",
     },
     "placement": {
         "provenance": DERIVED,

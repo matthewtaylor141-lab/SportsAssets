@@ -141,10 +141,46 @@ if _BACKEND not in sys.path:
 from sportsassets import bettor_policy as shared            # noqa: E402
 
 
-def _book_of(row, tick):
+def _book_of(row, tick, flow_per_s=None):
     """A replay row -> the shared policy's decision-time Book."""
     return shared.Book(bid=row.get("bid"), ask=row.get("ask"),
-                       tick=tick or 0.01, state=row.get("state"))
+                       tick=tick or 0.01, state=row.get("state"),
+                       depth_bid=row.get("bid_depth"),
+                       depth_ask=row.get("ask_depth"),
+                       flow_per_s=flow_per_s)
+
+
+def trailing_flow(rows, i, window_s):
+    """Traded shares per second over the window ENDING at row i.
+
+    STRICTLY BACKWARD-LOOKING, which is the whole point: this is the
+    only form of the quantity a live engine could have at the moment it
+    decides. `shares_traded` is a CUMULATIVE counter, so the flow is a
+    difference -- and a difference that comes out negative means the
+    counter restarted, which is not flow and is reported as unknown
+    rather than as zero.
+
+    Returns None when the window cannot be filled, and None is a
+    REFUSAL upstream, never a pass.
+    """
+    t_now = rows[i].get("t")
+    c_now = rows[i].get("shares_traded")
+    if t_now is None or c_now is None:
+        return None
+    j = i
+    while j > 0 and (t_now - (rows[j].get("t") or t_now)) < window_s:
+        j -= 1
+    t_then, c_then = rows[j].get("t"), rows[j].get("shares_traded")
+    if t_then is None or c_then is None:
+        return None
+    span = t_now - t_then
+    # A window we could not actually fill is not a measurement of it.
+    if span < 0.5 * window_s:
+        return None
+    d = c_now - c_then
+    if d < 0:
+        return None
+    return d / span
 
 
 def decision_time_size(policy, base_size, row):
@@ -200,6 +236,14 @@ class Policy:
     min_spread_ticks: int = 1        # do not quote a book tighter than this
     max_mid: float = 1.0             # do not quote above this mid
     min_mid: float = 0.0
+
+    # THE FLOW GATE. Aimed at the measured constraint rather than at
+    # the spread: 358 of 420 episodes never fill, and 88% of committed
+    # capital-hours rest behind a quote that is never reached. Zero
+    # leaves the gate off, which is every policy evaluated before it
+    # existed -- so a comparison against those is still like for like.
+    min_flow_cover: float = 0.0
+    flow_window_s: float = 1800.0
 
     # QUOTE PLACEMENT
     #   ENGINE     whatever incremental_ev returns (improve by one tick
@@ -341,9 +385,13 @@ class Episode:
     """One quoting lifecycle in one market. Nothing is dropped."""
 
     def __init__(self, slug, event, i0, row, size, tick, rebates_on,
-                 queue_model, policy=None, prints=None):
+                 queue_model, policy=None, prints=None,
+                 entry_flow_per_s=None):
         self.slug, self.event = slug, event
         self.prints = prints
+        # RECORDED WHETHER OR NOT THE GATE IS ARMED, so the gate's
+        # effect can be measured against episodes it did not filter.
+        self.entry_flow_per_s = entry_flow_per_s
         self.i0, self.t0 = i0, row["t_iso"]
         self.t0_epoch = row.get("t")
         # THE CLIP IS DECIDED HERE, from this book, at this instant.
@@ -1151,6 +1199,7 @@ class Episode:
             "size": self.size,
             "base_size": self.base_size,
             "size_rule": self.size_why,
+            "entry_flow_per_s": self.entry_flow_per_s,
             "quote_bid": self.pb, "quote_offer": self.po,
             "entry_book": self.entry_book,
 
@@ -1198,6 +1247,7 @@ def run_market(slug, rows, size, rebates_on, queue_model,
                max_episodes=None, policy=None, prints=None):
     """Non-overlapping episodes across one market's whole tape."""
     pol = policy or BASE_POLICY
+    sp = _as_shared(pol)
     settlement, _ = tape.settlement_label(rows)
     tick = tape.market_tick(rows)
     event = tape.event_of(slug)
@@ -1207,15 +1257,20 @@ def run_market(slug, rows, size, rebates_on, queue_model,
         # THE ENTRY FILTER IS PART OF THE POLICY, so a variant that
         # only quotes wide books or only quotes a price band is a
         # different policy and is recorded as one.
-        if (r["state"] != tape.OPEN or r["bid"] is None or r["ask"] is None
-                or (r["ask"] - r["bid"])
-                < pol.min_spread_ticks * tick - 1e-9
-                or not (pol.min_mid <= 0.5 * (r["bid"] + r["ask"])
-                        <= pol.max_mid)):
+        #
+        # THIS USED TO BE AN INLINE COPY of the shared rule -- the exact
+        # drift the shared module exists to prevent, and the copy had
+        # already fallen behind (it had no market-state vocabulary and
+        # no flow gate). `admit` decides now.
+        flow = (trailing_flow(rows, i, sp.flow_window_s)
+                if sp.min_flow_cover > 0 else None)
+        adm = shared.admit(sp, _book_of(r, tick, flow), clip=size)
+        if adm["decision"] != shared.D_QUOTE_BOTH:
             i += 1
             continue
         ep = Episode(slug, event, i, r, size, tick, rebates_on,
-                     queue_model, policy=pol, prints=prints)
+                     queue_model, policy=pol, prints=prints,
+                     entry_flow_per_s=flow)
         ep.run(rows, settlement)
         out.append(ep.result())
         i = max(ep.end_i or i, i) + COOLDOWN + 1
