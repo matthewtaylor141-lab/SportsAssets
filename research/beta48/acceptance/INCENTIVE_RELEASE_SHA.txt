@@ -1,6 +1,6 @@
 INCENTIVE OBSERVATION RELEASE -- REVIEWED
 
-candidate SHA : 5877093   (supersedes 2b0fa0f)
+candidate SHA : 3a64635   (supersedes 5877093, 2b0fa0f)
 base          : ba87076   (production on sportsassets-workers,
                            live since 2026-09-22T13:58:16.368074Z)
 branch        : claude/incentive-observation-release  (no service tracks it)
@@ -25,3 +25,14 @@ review repairs
 
 state : NOT merged, NOT deployed, NOT armed. No orders.
         Trading controls unchanged. No order path in this release.
+
+DELIVERY (3a64635)
+  A release + deployment action : acceptance/DELIVERY.md
+  B management demonstration    : bettor_management_demo.py
+                                  acceptance/management_demo.json
+  C economic verdict            : bettor_economic_verdict.py
+                                  acceptance/economic_verdict.json
+  regression : ba87076 = 2 failed/982 passed
+               3a64635 = 2 failed/1046 passed  (identical failure set)
+  verdict    : NO CANDIDATE QUALIFIES. C4 is UNDETERMINED, turning on
+               one unmeasured input (competing depth at the touch).
