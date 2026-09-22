@@ -112,3 +112,29 @@ resolution and >=20 independent events (~a month at the current rate).
 The observation release is the instrument, and the incentives API it
 reads carries `eventStartTime` — the time-to-resolution input the
 captured corpus lacks entirely.
+
+### Correction found after the verdict was written
+The DEV/EVAL cut (2026-09-17T00:00Z) sits FOUR HOURS before the PMUS
+taker regime change (0.0600 -> 0.0695 at 2026-09-17T04:00Z). Both dates
+come from the calendar and neither was picked with reference to the
+other, but DEV therefore runs almost entirely under the old rate and
+EVAL under the new one. The replay applies the regime BY FILL TIMESTAMP
+so every number is arithmetically right; the DEV-to-EVAL COMPARISON is
+what carries the confound. It cannot explain the result: EVAL's taker
+fees were -21.81 against a position loss of -63.91, and 16% of 21.81 is
+about $3 of a $74 loss. Recorded in the protocol docstring and in
+ECONOMIC_VERDICT_V2.md rather than left for a reader to find.
+
+### Manifest capture — re-verified this session, still gated
+gateway.polymarket.us: 403 CONNECT from this container, confirmed again.
+NEW finding: `beta48-forward-capture.yml` and
+`beta48-substantive-capture.yml` ARE on the default branch and DO reach
+the venue, so Actions runners have egress. But each runs a FIXED set of
+script names; `beta48-substantive-capture` checks out an arbitrary
+`code_sha` yet still invokes substantive_select.py / capture_manifest.py
+/ substantive_capture.py by name, so a new file at my SHA would never
+run, and repurposing a frozen capture script is the unrelated
+modification the standing restrictions forbid.
+Two unblocking routes, in APPROVAL_REQUEST_V3.md. Recommended: allow
+gateway.polymarket.us in the environment network policy (smallest, no
+repository effect, no service restart).

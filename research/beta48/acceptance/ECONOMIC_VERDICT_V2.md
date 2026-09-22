@@ -54,11 +54,25 @@ Taker fees are 3.9× the rebates earned. That ratio is **not a property of
 this sample** — it is the published schedule:
 
 ```
-Θ_taker / |Θ_maker|  =  0.06 / 0.0125  =  4.8
+Θ_taker / |Θ_maker|  =  0.0600 / 0.0125  =  4.8    (JUL2026 regime)
+                     =  0.0695 / 0.0125  =  5.6    (SEP2026 regime)
 ```
 
 Any policy that completes every maker fill by crossing the book pays back
 roughly five times what resting earned it, per contract, by construction.
+
+> **A confound in the split, stated because it is real.** PMUS raised
+> Θ_taker from 0.0600 to 0.0695 at **2026-09-17T04:00Z**, four hours after
+> the DEV/EVAL cut. Both dates come from the calendar and neither was
+> chosen with reference to the other, but the consequence is that DEV runs
+> almost entirely under the old rate and EVAL almost entirely under the
+> new one. The replay applies the regime by fill timestamp
+> (`bettor_policy_ev.theta_taker_at`), so the arithmetic is right; the
+> comparison is what carries the confound.
+>
+> **It cannot explain the result.** EVAL's taker fees were −21.81 against a
+> position loss of −63.91. A 16% higher taker rate accounts for roughly
+> $3 of a $74 loss, and none of the $63.91.
 Variants R7–R11 stop paying the taker, and every one of them improves net:
 worst-case net goes from −14.29 (baseline) to −3.29 (R10).
 

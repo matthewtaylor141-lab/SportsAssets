@@ -20,6 +20,16 @@ THE PROTOCOL, IN FULL, FIXED BEFORE ANY RESULT BELOW WAS COMPUTED.
     Chosen from ROW COUNTS and dates alone. No policy was run to pick
     it, and it does not move.
 
+    A CONFOUND THIS CREATES, recorded rather than discovered later:
+    PMUS raised Th_taker from 0.0600 to 0.0695 at 2026-09-17T04:00Z,
+    four hours after the cut. Both dates come from the calendar and
+    neither was chosen with reference to the other, but DEV therefore
+    runs almost entirely under the old rate and EVAL under the new one.
+    The replay applies the regime by FILL TIMESTAMP, so every number is
+    arithmetically right; it is the DEV-to-EVAL COMPARISON that carries
+    the confound, and any reading of it has to allow for a taker rate
+    16% higher on the evaluation side.
+
 2.  AN EPISODE BELONGS TO THE SIDE ITS DECISION WAS MADE ON -- its
     `t0`, the instant the quote went up. An episode that begins in DEV
     and ends in EVAL is a DEV episode, because that is the information
