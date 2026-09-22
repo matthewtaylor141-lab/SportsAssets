@@ -1,38 +1,40 @@
-INCENTIVE OBSERVATION RELEASE -- REVIEWED
+INCENTIVE OBSERVATION RELEASE -- SOCKET ALLOWANCE REPAIRED
 
-candidate SHA : 3a64635   (supersedes 5877093, 2b0fa0f)
+candidate SHA : f8cbafc   (supersedes 3a64635, 5877093, 2b0fa0f)
 base          : ba87076   (production on sportsassets-workers,
                            live since 2026-09-22T13:58:16.368074Z)
 branch        : claude/incentive-observation-release  (no service tracks it)
 
-marginal diff vs ba87076 : 2620 insertions, 3 deletions
-  the 3 deletions are the closing brace of three dict literals in
-  bettor_live_control; every existing mapping, cap and default
-  survives, and reserve()/read_control()/read_budget()/disarm() are
-  untouched.
+BLOCKER CLOSED
+  socket attempts are reserved BEFORE dispatch, at the
+  connect/subscribe boundary, through bettor_live_control.reserve().
+  initial connect, FAILED connect, reconnect -> socket_connect
+  subscribe_market_data + subscribe_trades   -> socket_subscribe x2
+  caps in the armed row (20 / 40), SEPARATE from the 8 HTTP requests.
+  refusal means the attempt is not made; uncertain means no.
 
-review repairs
-  1 request ceiling  durably reserved before dispatch via
-                     bettor_live_control.reserve(); survives crashes
-                     and overlapping workers. 16/16 against real PG.
-    reconnect scope  PER RUN, across boots (was per boot)
-  2 evidence        Postgres table bettor_incentive_journal; the
-                     ephemeral file backend is removed, not demoted.
-                     BOOT_GAP recorded on every resumed boot.
-  3 rollback        stop first, verify by read, then remove config.
-                     obs-arm-incentive zeroes the general acquisition
-                     caps so a mistaken removal issues nothing.
+FOCUSED VERIFICATION
+  test_bettor_socket_allowance.py            14 passed
+  socket + release + stream + live_loop     288 passed
+  durability proof (real PostgreSQL)         16 / 16
+  rehearsal through main(), no arguments     11 / 11
+
+MANIFEST DELIVERY
+  capture_incentive_manifest.py, PRE-DEPLOY, <=6 public requests,
+  file committed and deployed with the code. Spends none of the run
+  allowance.
+
+APPROVAL COVERS EXACTLY THREE THINGS
+  1 three-service deployment of this SHA to claude/session-njaewf
+  2 configuration of five variables on sportsassets-workers
+  3 one observation run (one ET date)
+  NOT covered: any order, any trading-control change, any credential
+  movement, any second run.
+
+ECONOMIC STATUS
+  NO CANDIDATE QUALIFIES. C4 is UNDETERMINED.
+  Required-share figures are TRANSFERRED SCENARIOS, not measured
+  hurdles: rewards and losses are not yet measured on the same
+  markets under the same policy (blocker B10).
 
 state : NOT merged, NOT deployed, NOT armed. No orders.
-        Trading controls unchanged. No order path in this release.
-
-DELIVERY (3a64635)
-  A release + deployment action : acceptance/DELIVERY.md
-  B management demonstration    : bettor_management_demo.py
-                                  acceptance/management_demo.json
-  C economic verdict            : bettor_economic_verdict.py
-                                  acceptance/economic_verdict.json
-  regression : ba87076 = 2 failed/982 passed
-               3a64635 = 2 failed/1046 passed  (identical failure set)
-  verdict    : NO CANDIDATE QUALIFIES. C4 is UNDETERMINED, turning on
-               one unmeasured input (competing depth at the touch).
