@@ -1,0 +1,31 @@
+PACKAGE A — pinned deploy SHA
+=============================
+
+content SHA (everything Package A describes, review this):
+  7da20c5109be95b56ca00576d28ca697545b46d1
+
+branch: claude/bettor-none-pool-fix   (no Render service tracks it)
+
+Contains:
+  backend/sportsassets/api/app.py          Part 1 routes, +40 lines
+  backend/sportsassets/workers/bettor_live_loop.py
+                                           lifetime repair, 5874d21,
+                                           verified an ancestor
+  research/beta48/acceptance/PACKAGE_A.md  the package itself
+  research/beta48/acceptance/FROZEN_SELECTION_RULE.md
+                                           frozen 2026-09-22T18:05Z
+
+Tests passing at this SHA:
+  backend/tests/test_reconcile_read.py
+  backend/tests/test_bettor_live_loop.py
+  research/beta48/test_bettor_policy_ev.py
+  research/beta48/test_venue_seven_books_read_only.py
+  -> 218 + 4 passed
+
+NOT deployed. NOT armed. No order can be sized
+(BETTOR_LIVE_MAX_CONTRACTS = 0). M4 unexecuted.
+
+This file is committed AFTER the content SHA above, so this file's own
+commit is not that SHA -- deliberately, because a file cannot contain
+its own hash. Review 7da20c5; deploy 7da20c5 or the commit adding this
+pin, which changes no code.
