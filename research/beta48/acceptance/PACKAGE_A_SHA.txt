@@ -1,31 +1,40 @@
-PACKAGE A — pinned deploy SHA
-=============================
+PACKAGE A (complete) — pinned deploy SHA
+========================================
 
-content SHA (everything Package A describes, review this):
-  7da20c5109be95b56ca00576d28ca697545b46d1
+content SHA — review and deploy THIS:
+  71918fc59c954109f3f7108d3d4a7228fadb692e
 
 branch: claude/bettor-none-pool-fix   (no Render service tracks it)
 
-Contains:
-  backend/sportsassets/api/app.py          Part 1 routes, +40 lines
+Code in this SHA
+  backend/sportsassets/api/app.py            +63, 0 modified, 0 removed
+      GET /api/desk/venue-identity           identity gate, 0 parameters
+      GET /api/desk/venue-resting-orders     venue resting orders
+      GET /api/desk/venue-activity           TRADE + POSITION_RESOLUTION
+  backend/sportsassets/config.py             +10, additive and inert
+      pmus_account_ref: str = ""             owner-set OUT OF BAND
   backend/sportsassets/workers/bettor_live_loop.py
-                                           lifetime repair, 5874d21,
-                                           verified an ancestor
-  research/beta48/acceptance/PACKAGE_A.md  the package itself
-  research/beta48/acceptance/FROZEN_SELECTION_RULE.md
-                                           frozen 2026-09-22T18:05Z
+      lifetime repair 5874d21, verified an ancestor of this SHA
 
-Tests passing at this SHA:
+Tests passing at this SHA
+  backend/tests/test_venue_identity_route.py        8
   backend/tests/test_reconcile_read.py
   backend/tests/test_bettor_live_loop.py
   research/beta48/test_bettor_policy_ev.py
   research/beta48/test_venue_seven_books_read_only.py
-  -> 218 + 4 passed
+  -> 197 + 4 passed, no broad re-run
 
-NOT deployed. NOT armed. No order can be sized
-(BETTOR_LIVE_MAX_CONTRACTS = 0). M4 unexecuted.
+Deploy effect
+  merging to claude/session-njaewf redeploys sportsassets-api AND
+  sportsassets-workers (both track it, autoDeploy=yes). Routes are
+  additive; no existing route's behaviour changes; no worker path
+  changes; no migration; no secret added.
 
-This file is committed AFTER the content SHA above, so this file's own
-commit is not that SHA -- deliberately, because a file cannot contain
-its own hash. Review 7da20c5; deploy 7da20c5 or the commit adding this
-pin, which changes no code.
+State
+  NOT deployed. NOT armed. BETTOR_LIVE_MAX_CONTRACTS = 0, so no order
+  can be sized. M4 and M5 unexecuted. Trading controls unchanged.
+
+Note on this file
+  A file cannot contain its own hash, so this pin is committed after
+  the content SHA and changes no code. Verify with:
+      git diff --stat 71918fc HEAD -- backend/     (expect empty)
