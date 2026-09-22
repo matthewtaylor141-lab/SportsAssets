@@ -148,6 +148,16 @@ Rollback = revert + redeploy; nothing to unwind.
 
 ## 2.1 Why C0, stated plainly — and what this run is NOT
 
+> **SUPERSEDED by `P3_RESULT_AND_DECISIONS.md` §3.** The 72-hour,
+> five-cluster C0 run is a NO-GO: it aimed at an event-level
+> return test its own arithmetic said five clusters could not
+> resolve, on a baseline nobody would fund. Replaced by a
+> 24-hour measurement of competing resting size at the touch in
+> incentive-eligible markets, which needs no orders and has an
+> explicit stop rule. The reasoning below on why there is NO
+> intended investment policy still stands.
+
+
 > *"Do not silently substitute a baseline for the intended investment
 > policy."*
 
@@ -410,6 +420,18 @@ approval in this package**, and M4 likewise remains unexecuted.
 ---
 
 # P3 — INCENTIVE TERMS
+
+> **P3 IS DONE. Results and the resulting decisions are in
+> `P3_RESULT_AND_DECISIONS.md`.** Four of six public reads used.
+> Three claims below are corrected there: a same-level competitor
+> does NOT exclude us (only Target Size met at strictly BETTER
+> prices does); the payout unit is **(market, date)**, not
+> (market, period); and the live parameters are retrieved, so the
+> scenario grid is replaced by measured pools and target sizes.
+> **The 72-hour C0 run in P2 is superseded** by a 24-hour
+> incentive-share measurement aimed at the one quantity that now
+> decides the economics.
+
 
 ## 3.1 Retrieved — and they correct me twice
 
