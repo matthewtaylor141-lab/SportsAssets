@@ -36,6 +36,23 @@ from sportsassets import bettor_universe_probe as probe_mod
 from sportsassets.workers import bettor_live_loop as bl
 
 
+def _reject_phantom_columns(sql: str) -> None:
+    """A double that accepts a column production does not have is not a
+    double, it is a second schema. On 2026-09-22 the reservation wrote
+    `updated_at = now()`, which `ingestion_state` has never had, and
+    every local proof passed because every local proof had invented the
+    column. These doubles now raise the way PostgreSQL would."""
+    import re as _re
+    for assign in _re.findall(r"([a-zA-Z_]+)\s*=\s*",
+                              sql.split("WHERE")[0]):
+        if assign.lower() in ("key", "value", "now", "jsonb_set",
+                              "to_jsonb", "coalesce"):
+            continue
+        raise RuntimeError(
+            "UndefinedColumnError: ingestion_state has no column %r "
+            "(see backend/migrations/001_init.sql)" % assign)
+
+
 @pytest.fixture(autouse=True)
 def unpaced(monkeypatch):
     """The enrichment pace is 0.25 req/s by default, which is the point
@@ -107,6 +124,7 @@ class FakeControlPool:
 
     async def execute(self, sql, *args):
         self.writes.append((sql, args))
+        _reject_phantom_columns(sql)
         if args and args[0] == ctl_mod.BUDGET_KEY and "jsonb_set" in sql:
             # The reservation's UPDATE, applied to the double's row so a
             # sequence of reservations behaves like the real one:

@@ -235,6 +235,25 @@ def describe() -> dict:
 # PostgreSQL reproduction both exercise.
 BUDGET_KEY = "bettor_live_probe_state"
 
+# THE TABLE HAS TWO COLUMNS. `backend/migrations/001_init.sql`:
+#
+#   CREATE TABLE IF NOT EXISTS ingestion_state (
+#       key    TEXT PRIMARY KEY,
+#       value  JSONB NOT NULL
+#   );
+#
+# An earlier reservation also wrote `updated_at = now()`, a column that
+# does not exist. On production every reservation raised
+# UndefinedColumnError and the probe of 2026-09-22T08:06:36.604Z could
+# not issue a single request. It failed closed -- nothing dispatched,
+# nothing recorded -- but it could not run either.
+#
+# It was invisible locally because the proof scripts CREATED the table
+# themselves and invented the column. They now build it from the
+# migration, and `test_the_sql_touches_only_real_columns` reads the
+# migration and fails on any other column name.
+INGESTION_STATE_COLUMNS = ("key", "value")
+
 # Defaults. Whoever arms the probe writes the real numbers into the row,
 # so the figures in an approval are the figures being enforced.
 PROBE_MAX_DISTINCT = 40
@@ -454,14 +473,14 @@ async def reserve(pool, kind: str, *, slug: str | None = None,
                         "            to_jsonb($3::int)),"
                         "  '{slugs}',"
                         "  COALESCE(value->'slugs','[]'::jsonb)"
-                        "  || to_jsonb($4::text)),"
-                        " updated_at = now() WHERE key=$1",
+                        "  || to_jsonb($4::text))"
+                        " WHERE key=$1",
                         BUDGET_KEY, counter, used + 1, slug)
                 else:
                     await con.execute(
                         "UPDATE ingestion_state SET value = jsonb_set("
-                        "  value, ARRAY[$2::text], to_jsonb($3::int)),"
-                        " updated_at = now() WHERE key=$1",
+                        "  value, ARRAY[$2::text], to_jsonb($3::int))"
+                        " WHERE key=$1",
                         BUDGET_KEY, counter, used + 1)
                 return dict(out, why=V_GRANTED, uncertain=False,
                             probe_id=pid, reserved=used + 1, cap=cap,

@@ -20,10 +20,28 @@ from __future__ import annotations
 import asyncio
 import inspect
 import json
+import pathlib
+import re
 
 import pytest
 
 from sportsassets import bettor_live_control as ctl
+
+
+def _reject_phantom_columns(sql: str) -> None:
+    """A double that accepts a column production does not have is not a
+    double, it is a second schema. On 2026-09-22 the reservation wrote
+    `updated_at = now()`, which `ingestion_state` has never had, and
+    every local proof passed because every local proof had invented the
+    column. These doubles now raise the way PostgreSQL would."""
+    for assign in re.findall(r"([a-zA-Z_]+)\s*=\s*", sql.split("WHERE")[0]):
+        if assign.lower() in ("key", "value"):
+            continue
+        if assign.lower() in ("now", "jsonb_set", "to_jsonb", "coalesce"):
+            continue
+        raise RuntimeError(
+            "UndefinedColumnError: ingestion_state has no column %r "
+            "(see backend/migrations/001_init.sql)" % assign)
 
 
 class Pool:
@@ -239,6 +257,7 @@ class BudgetPool(Pool):
 
     async def execute(self, sql, *args):
         self.writes.append((sql, args))
+        _reject_phantom_columns(sql)
         if args and args[0] == ctl.BUDGET_KEY and "jsonb_set" in sql:
             b = json.loads(self.budget) if isinstance(self.budget, str) \
                 else dict(self.budget or {})
@@ -396,3 +415,68 @@ class TestTheBudgetFailsClosedToo:
         out = asyncio.run(ctl.disarm(Bad(), ctl.B_EXPIRED))
         assert out["disarmed"] is False
         assert out["error"] == "ConnectionError"
+
+
+class TestTheSqlTouchesOnlyColumnsThatExist:
+    """THE DEFECT THIS CLASS PINS, found on production 2026-09-22.
+
+    The reservation UPDATE also set `updated_at = now()`. There is no
+    such column: `backend/migrations/001_init.sql` declares
+    `ingestion_state (key TEXT PRIMARY KEY, value JSONB NOT NULL)` and
+    nothing else. Every reservation raised UndefinedColumnError, so the
+    probe armed at 08:05:40Z could not issue one request
+    (08:06:36.604Z, RESERVATION_UNREADABLE).
+
+    It was invisible because every proof script CREATED the table
+    itself and invented the column -- the same shape as the injected
+    pool and the injected venue client: the test environment differed
+    from production exactly at the seam under test. This test reads the
+    migration rather than trusting a hand-written CREATE TABLE.
+    """
+
+    MIGRATION = (pathlib.Path(__file__).resolve().parents[1]
+                 / "migrations" / "001_init.sql")
+
+    def _declared_columns(self):
+        sql = self.MIGRATION.read_text()
+        m = re.search(
+            r"CREATE TABLE IF NOT EXISTS ingestion_state\s*\((.*?)\);",
+            sql, re.S)
+        assert m, "ingestion_state is not declared in the migration"
+        cols = []
+        for line in m.group(1).splitlines():
+            line = line.split("--")[0].strip().rstrip(",")
+            if line:
+                cols.append(line.split()[0].lower())
+        return set(cols)
+
+    def test_the_migration_declares_exactly_key_and_value(self):
+        assert self._declared_columns() == {"key", "value"}
+
+    def test_the_module_agrees_with_the_migration(self):
+        assert set(ctl.INGESTION_STATE_COLUMNS) == self._declared_columns()
+
+    def test_no_sql_in_this_module_names_another_column(self):
+        """Every bare identifier that appears immediately before `=` in
+        a SET clause, or in an INSERT column list, must be declared."""
+        declared = self._declared_columns()
+        src = inspect.getsource(ctl)
+        for stmt in re.findall(r"SET\s+(.*?)\s+WHERE", src, re.S):
+            for assign in re.findall(r"([a-z_]+)\s*=\s*", stmt):
+                if assign in ("key", "value"):
+                    continue
+                assert assign in declared, (
+                    "SQL assigns to %r, which the migration does not "
+                    "declare: %r" % (assign, stmt[:120]))
+        for cols in re.findall(r"INSERT INTO ingestion_state\s*\(([^)]*)\)",
+                               src):
+            for c in cols.split(","):
+                c = c.strip().lower()
+                if c:
+                    assert c in declared, \
+                        "INSERT names undeclared column %r" % c
+
+    def test_updated_at_is_gone_from_the_sql(self):
+        """The specific column that broke production."""
+        code = _code_only(ctl)
+        assert "updated_at" not in code

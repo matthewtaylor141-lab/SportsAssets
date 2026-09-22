@@ -60,6 +60,22 @@ CANDIDATES = 400
 FAILS = 0
 
 
+def ingestion_state_ddl() -> str:
+    """The `ingestion_state` CREATE TABLE, lifted verbatim from the
+    migration the deployment actually runs."""
+    import pathlib
+    import re
+    mig = (pathlib.Path(__file__).resolve().parents[1] / "backend"
+           / "migrations" / "001_init.sql").read_text()
+    m = re.search(
+        r"CREATE TABLE IF NOT EXISTS ingestion_state\s*\(.*?\);",
+        mig, re.S)
+    if not m:
+        raise SystemExit("ingestion_state is not declared in the "
+                         "migration; refusing to invent a schema")
+    return m.group(0)
+
+
 def rule(t):
     print("\n" + "=" * 76 + "\n" + t + "\n" + "=" * 76)
 
@@ -171,14 +187,13 @@ async def arm(pool, *, minutes=30, max_distinct=MAX_DISTINCT,
         "  'bbo_attempts_reserved', 0,"
         "  'listing_attempts_reserved', 0,"
         "  'slugs', '[]'::jsonb)) "
-        "ON CONFLICT (key) DO UPDATE SET value = excluded.value, "
-        "updated_at = now()",
+        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
         ctl.BUDGET_KEY, pid, str(minutes), max_distinct, max_attempts,
         max_listing)
     await pool.execute(
         "INSERT INTO ingestion_state (key, value) VALUES ($1, "
         "'true'::jsonb) ON CONFLICT (key) DO UPDATE SET "
-        "value = 'true'::jsonb, updated_at = now()", ctl.CONTROL_KEY)
+        "value = 'true'::jsonb", ctl.CONTROL_KEY)
     return pid
 
 
@@ -444,10 +459,16 @@ async def supervisor_phases(pool, dsn):
 
 async def main_async(dsn):
     pool = await asyncpg.create_pool(dsn, min_size=2, max_size=12)
-    await pool.execute(
-        "CREATE TABLE IF NOT EXISTS ingestion_state ("
-        " key text PRIMARY KEY, value jsonb NOT NULL,"
-        " updated_at timestamptz NOT NULL DEFAULT now())")
+    # THE TABLE COMES FROM THE MIGRATION, NOT FROM THIS SCRIPT.
+    #
+    # It used to be hand-written here, WITH AN updated_at COLUMN THAT
+    # PRODUCTION DOES NOT HAVE. Every phase passed against a schema no
+    # deployment has, and on 2026-09-22T08:06:36.604Z the live worker
+    # raised UndefinedColumnError on its first reservation. A proof
+    # whose fixture is not the deployed shape proves nothing about the
+    # deployment, so the statement is now read from
+    # backend/migrations/001_init.sql.
+    await pool.execute(ingestion_state_ddl())
     tmp = tempfile.mkdtemp(prefix="reservation-")
     os.environ["BETTOR_PROBE_MAX_RPS"] = "100000"   # pace is not the subject
     os.environ["BETTOR_PROBE_CONCURRENCY"] = "8"
