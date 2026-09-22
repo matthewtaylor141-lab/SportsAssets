@@ -1,0 +1,9 @@
+INCENTIVE OBSERVATION RELEASE
+candidate SHA : 2b0fa0f
+base          : ba87076  (production, live on sportsassets-workers
+                          since 2026-09-22T13:58:16.368074Z)
+branch        : claude/incentive-observation-release  (no service tracks it)
+marginal diff : 2122 insertions, 0 deletions, 0 modified; 102 lines in
+                2 pre-existing files, all additive
+control       : bettor_live_observation = false @ 2026-09-22T19:21:58Z
+state         : NOT merged, NOT deployed, NOT armed. No orders.
