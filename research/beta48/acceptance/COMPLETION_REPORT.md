@@ -310,7 +310,7 @@ question that decides whether any version of this is worth funding.
 
 ## 8. Reproducing
 
-**SHA: `<pinned by the commit adding this file>`**, branch
+**SHA: `4bfb39f21e1840212486c1cc7e56635f7216ff2f`**, branch
 `claude/bettor-none-pool-fix`. Production remains `ba87076`.
 
 ```bash
