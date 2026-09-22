@@ -1,9 +1,27 @@
-INCENTIVE OBSERVATION RELEASE
-candidate SHA : 2b0fa0f
-base          : ba87076  (production, live on sportsassets-workers
-                          since 2026-09-22T13:58:16.368074Z)
+INCENTIVE OBSERVATION RELEASE -- REVIEWED
+
+candidate SHA : 5877093   (supersedes 2b0fa0f)
+base          : ba87076   (production on sportsassets-workers,
+                           live since 2026-09-22T13:58:16.368074Z)
 branch        : claude/incentive-observation-release  (no service tracks it)
-marginal diff : 2122 insertions, 0 deletions, 0 modified; 102 lines in
-                2 pre-existing files, all additive
-control       : bettor_live_observation = false @ 2026-09-22T19:21:58Z
-state         : NOT merged, NOT deployed, NOT armed. No orders.
+
+marginal diff vs ba87076 : 2620 insertions, 3 deletions
+  the 3 deletions are the closing brace of three dict literals in
+  bettor_live_control; every existing mapping, cap and default
+  survives, and reserve()/read_control()/read_budget()/disarm() are
+  untouched.
+
+review repairs
+  1 request ceiling  durably reserved before dispatch via
+                     bettor_live_control.reserve(); survives crashes
+                     and overlapping workers. 16/16 against real PG.
+    reconnect scope  PER RUN, across boots (was per boot)
+  2 evidence        Postgres table bettor_incentive_journal; the
+                     ephemeral file backend is removed, not demoted.
+                     BOOT_GAP recorded on every resumed boot.
+  3 rollback        stop first, verify by read, then remove config.
+                     obs-arm-incentive zeroes the general acquisition
+                     caps so a mistaken removal issues nothing.
+
+state : NOT merged, NOT deployed, NOT armed. No orders.
+        Trading controls unchanged. No order path in this release.
