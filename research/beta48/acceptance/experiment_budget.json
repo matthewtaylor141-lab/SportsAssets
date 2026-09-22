@@ -1,0 +1,54 @@
+{
+  "experiments": [
+    {
+      "gross_order_exposure": 1.76,
+      "loss_derivation": "the position goes to zero: 1.7600 paid, less the 0.0100 maker rebate if it filled",
+      "maker_rebate_if_filled": 0.01,
+      "maximum_loss": 1.75,
+      "name": "M1 collateral",
+      "order": "BUY_LONG LIMIT 4 @ 0.44 GTC",
+      "peak_committed_capital": 1.76,
+      "residual_if_cleanup_fails": "4 contracts long",
+      "worst_case_position_value": 0.0
+    },
+    {
+      "gross_order_exposure": 1.96,
+      "loss_derivation": "a fill inside the cancel window IS the measurement; worst case it is worth zero: 1.9600 paid less the 0.0100 rebate",
+      "maker_rebate_if_filled": 0.01,
+      "maximum_loss": 1.95,
+      "name": "M2 cancel race",
+      "order": "BUY_LONG LIMIT 4 @ 0.49 GTC, cancel immediately",
+      "peak_committed_capital": 1.96,
+      "residual_if_cleanup_fails": "4 contracts long",
+      "worst_case_position_value": 0.0
+    },
+    {
+      "gross_order_exposure": 4.08,
+      "loss_derivation": "both fill: pay 4.0800, receive 4.00 at settlement, pay 0.1400 in taker fees -> -0.2200. ONE LEG ONLY: pay 2.0400 for a single leg that can settle at zero, plus 0.0700 fee -> -2.1100. The worst path is the second, not the first.",
+      "maximum_loss": 2.11,
+      "name": "M3 netting and release",
+      "order": "BUY_LONG 4 @ 0.51 (taker) THEN BUY_SHORT 4 @ 0.51 (taker)",
+      "outcome_both_legs_fill": -0.22,
+      "outcome_one_leg_only": -2.11,
+      "peak_committed_capital": 4.08,
+      "residual_if_cleanup_fails": "a matched pair, which pays exactly 4.00",
+      "taker_fees": -0.14
+    }
+  ],
+  "gross_order_exposure_total": 7.8,
+  "maximum_combined_loss": 5.81,
+  "peak_committed_capital_if_concurrent": 7.8,
+  "peak_committed_capital_sequential": 4.08,
+  "reference_book": {
+    "ask": 0.51,
+    "bid": 0.49,
+    "contracts": 4,
+    "tick": 0.01
+  },
+  "supersedes": {
+    "reported_exposure": 16.0,
+    "reported_loss_a": 12.2,
+    "reported_loss_b": 12.24,
+    "why_wrong": "collateral ceilings reported as maximum loss; and $4.00 + $0.14 is $4.14, not $4.24, so the second total did not follow from its own stated correction"
+  }
+}

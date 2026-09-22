@@ -307,12 +307,31 @@ async def run(*, stream_factory=None, control_pool=None,
             #     every slug is resubscribed, so both are recorded.
             epoch = int(getattr(stream, "epoch", 0) or 0)
             if epoch != last_epoch:
+                # COUNT BY THE EPOCH DELTA, NOT BY THE DETECTION.
+                #
+                # THE DEFECT THIS REPAIRS. This used to add ONE
+                # resubscription per detected change. The loop polls
+                # every POLL_S = 0.5s and the stream reconnects on its
+                # own thread, so a flapping socket can advance the
+                # epoch several times between two polls -- and the poll
+                # that finally notices would record a single
+                # resubscription for all of them. The resubscription
+                # ceiling is the bound that exists SPECIFICALLY to
+                # catch a subscribe storm, and it was the one that
+                # failed to bind. `reconnects` was never affected: it
+                # is read from the stream's own counter.
+                #
+                # Every epoch resubscribes every slug, so the honest
+                # count is one batch set PER EPOCH CROSSED.
+                crossed = max(1, epoch - last_epoch)
+                batches = _batches(len(slugs)) * crossed
                 journal.epoch(epoch=epoch, event="EPOCH_OPENED",
-                              previous=last_epoch,
+                              previous=last_epoch, epochs_crossed=crossed,
                               reconnects=getattr(stream, "reconnects", None),
-                              resubscribed=len(slugs))
-                health.note_resubscribe(_batches(len(slugs)))
-                bounds.note_resubscribe(_batches(len(slugs)))
+                              resubscribed=len(slugs),
+                              resubscribe_batches=batches)
+                health.note_resubscribe(batches)
+                bounds.note_resubscribe(batches)
                 last_epoch = epoch
                 # CARRY THE RUN TOTALS FORWARD. An epoch transition IS
                 # a reconnect, so this write is as rare as the event it

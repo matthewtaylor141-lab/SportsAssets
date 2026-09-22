@@ -1,0 +1,552 @@
+"""The decision engine, walked end to end for management.
+
+WHAT THIS IS. One run over the captured corpus that stops at every
+decision the engine makes and prints, for each one:
+
+    INPUTS      what was knowable AT THE DECISION INSTANT -- never an
+                outcome, never a later price.
+    ALTERNATIVES the other actions available at that instant.
+    ECONOMICS   expected cash, fees, uncertainty and the capital the
+                action commits.
+    ACTION      what was chosen, and why.
+    EVIDENCE    the case-study mechanism it implements and the record
+                that supports it.
+
+WHAT IT IS NOT. No order was sent. Every fill below is a REPLAY fill,
+priced against the venue's own time-and-sales tape, and is labelled
+REPLAY at the point of use. The account's real executions appear only
+in the ACTUAL section, and the two are never added.
+
+THREE CAPABILITIES ARE NOT SUPPORTED, and saying so is part of the
+demonstration:
+
+  NETTING TO CASH BEFORE SETTLEMENT   a matched YES/NO pair is worth
+      exactly $1 at settlement, and the engine records that as
+      `MATCHED_PAIR_PAYS_1 -- certain, but not cash until settlement`.
+      It is NOT cash now. No merge/netting call has been demonstrated
+      against this venue, so capital stays committed until the event
+      resolves. This is the single largest constraint on capital reuse
+      and it is a venue capability question, not a policy choice.
+  ADAPTIVE SIZE                       every quote is one fixed clip.
+      The engine has no size model; `size` is a constant.
+  QUEUE POSITION                      not observable. The replay sweeps
+      a queue-ahead fraction instead of knowing one, and every fill
+      figure inherits that sweep.
+
+Run:  python research/beta48/bettor_management_demo.py
+"""
+from __future__ import annotations
+
+import collections
+import datetime as dt
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+import bettor_episodes as epi                                # noqa: E402
+import bettor_incentive_score as inc                         # noqa: E402
+import bettor_prints as prints_mod                           # noqa: E402
+
+OUT = os.path.join(HERE, "acceptance", "management_demo.json")
+
+REPLAY = "REPLAY -- tape-priced, NOT an execution"
+SCENARIO = "SCENARIO -- constructed to exercise a path the corpus does "\
+           "not contain"
+ACTUAL = "ACTUAL -- from the venue's own records"
+
+# The policy the walk is taken under. C3 is the declared
+# inventory-aware candidate; it exercises the most decision points.
+POLICY = epi.Policy(
+    name="C3", min_spread_ticks=2, placement="AT_TOUCH", hard_flatten=True,
+    cancel_other_on_fill=True, max_unmatched_mult=0.5,
+    recovery="COMPLETE_PAIR", queue_ahead_fraction=0.25)
+
+# Published fee schedule, verified against 3,285 real executions.
+THETA_TAKER = 0.0695            # SEP2026 regime
+THETA_MAKER = -0.0125
+
+
+def fee(theta, contracts, price):
+    """fee = theta x C x p x (1-p), banker's rounded to the cent."""
+    exact = theta * contracts * price * (1.0 - price)
+    cents = round(exact * 100.0)        # banker's rounding, as the venue
+    return cents / 100.0
+
+
+def decision(stage, inputs, alternatives, economics, action, reason,
+             mechanism, evidence, label, supported=True):
+    return {"stage": stage, "label": label, "supported": supported,
+            "inputs_at_decision_time": inputs,
+            "alternatives_considered": alternatives,
+            "economics": economics, "action": action, "reason": reason,
+            "case_study_mechanism": mechanism, "evidence": evidence}
+
+
+# ═══ the walk ════════════════════════════════════════════════════════
+
+def walk(eps):
+    ds = []
+    filled = [e for e in eps if e.get("entry_legs_filled")]
+    paired = [e for e in eps if e["status"] == "FLAT_PAIRED"]
+    exited = [e for e in eps if e["status"] == "FLAT_EXITED_TAKER"]
+    never = [e for e in eps if e["status"] == "NEVER_FILLED"]
+    partial = [e for e in filled
+               if any(abs(s) < e["size"] - 1e-9 for s in e["fill_sizes"])]
+
+    # ── 1. ENTRY ─────────────────────────────────────────────────────
+    ex = paired[0] if paired else filled[0]
+    b = ex["entry_book"]
+    ds.append(decision(
+        "1  ENTRY -- is this market worth quoting at all?",
+        {"slug": ex["slug"], "at": ex["t0"],
+         "best_bid": b.get("bid"), "best_ask": b.get("ask"),
+         "spread_ticks": b.get("spread_ticks"), "mid": b.get("mid"),
+         "depth_at_touch": "NOT OBSERVABLE in this corpus -- prices only",
+         "known_at_this_instant": "the book and the clock. Nothing about "
+                                  "what the price later did."},
+        [{"action": "quote both sides", "admitted": True},
+         {"action": "quote one side only",
+          "admitted": False, "why": "the policy is two-sided; a one-sided "
+                                    "quote is a directional bet, which is "
+                                    "a different mandate"},
+         {"action": "stand aside",
+          "admitted": False, "why": "spread %s ticks >= the 2-tick minimum"
+                                    % b.get("spread_ticks")}],
+        {"expected_gross_if_both_legs_fill_usd":
+             round((b.get("ask", 0) - b.get("bid", 0)) * ex["size"], 4),
+         "maker_rebate_both_legs_usd":
+             round(abs(fee(THETA_MAKER, ex["size"], b.get("bid", 0.5)))
+                   + abs(fee(THETA_MAKER, ex["size"], b.get("ask", 0.5))), 4),
+         "capital_committed_usd": ex["collateral_incl_resting"],
+         "uncertainty": "whether EITHER leg fills. Across the corpus "
+                        "%d of %d episodes never filled at all (%.0f%%)."
+                        % (len(never), len(eps), 100.0 * len(never) / len(eps))},
+        "QUOTE BOTH SIDES at %s / %s, %d contracts"
+        % (ex["quote_bid"], ex["quote_offer"], int(ex["size"])),
+        "the spread clears the minimum and the book is two-sided, so a "
+        "paired fill is worth the spread less fees. The engine does not "
+        "forecast direction; it is paid for the spread.",
+        "Two-sided market making -- the mechanism the maker case studies "
+        "describe: earn the spread and the maker rebate, avoid carrying "
+        "direction.",
+        "entry rule frozen in Policy(min_spread_ticks=2); "
+        "%d episodes admitted from the corpus" % len(eps),
+        REPLAY))
+
+    # ── 2. QUOTE PLACEMENT ───────────────────────────────────────────
+    ds.append(decision(
+        "2  QUOTE PLACEMENT -- where in the book?",
+        {"best_bid": b.get("bid"), "best_ask": b.get("ask"),
+         "our_bid": ex["quote_bid"], "our_offer": ex["quote_offer"],
+         "queue_position": "NOT OBSERVABLE -- see the unsupported list"},
+        [{"action": "AT_TOUCH (join the best price)", "chosen": True},
+         {"action": "improve by one tick",
+          "why_not": "costs a tick of edge on every fill to buy queue "
+                     "priority that cannot be measured"},
+         {"action": "DEEPER_1 (one tick behind)",
+          "why_not": "better price conditional on filling, worse odds of "
+                     "filling; the corpus already shows fills are scarce"}],
+        {"edge_per_paired_fill_usd":
+             round((ex["quote_offer"] - ex["quote_bid"]) * ex["size"], 4),
+         "queue_uncertainty": "swept, not known: qfrac 0.00/0.25/0.50/1.00. "
+                              "Every fill count in this demonstration is "
+                              "reported at qfrac 0.25.",
+         "capital_committed_usd": ex["collateral_incl_resting"]},
+        "JOIN THE TOUCH on both sides",
+        "the engine cannot observe queue position, so paying a tick for "
+        "priority buys something unmeasurable. Joining is the only "
+        "placement whose cost is known.",
+        "Passive liquidity provision at the touch.",
+        "placement=AT_TOUCH, frozen; queue effect swept across four "
+        "fractions rather than assumed",
+        REPLAY))
+
+    # ── 3. SIZE ──────────────────────────────────────────────────────
+    ds.append(decision(
+        "3  SIZE -- how many contracts?",
+        {"clip": ex["size"],
+         "book_depth": "NOT OBSERVABLE -- the sizing input is missing"},
+        [{"action": "fixed clip", "chosen": True},
+         {"action": "size to a fraction of resting depth",
+          "why_not": "the corpus carries no depth, so this cannot be "
+                     "computed, let alone validated"}],
+        {"capital_per_side_usd": round(ex["size"] * ex["quote_bid"], 2),
+         "uncertainty": "none in the input -- it is a constant"},
+        "FIXED %d-CONTRACT CLIP" % int(ex["size"]),
+        "there is no size model. This is stated as a LIMITATION rather "
+        "than presented as a decision: the engine does not size to "
+        "depth, imbalance or volatility.",
+        "n/a -- no case study supports a sizing rule we have validated.",
+        "size is a constant in every run",
+        REPLAY, supported=False))
+
+    # ── 4. PARTIAL FILL ──────────────────────────────────────────────
+    if partial:
+        pe = partial[0]
+        got = abs(pe["fill_sizes"][0])
+        ds.append(decision(
+            "4  PARTIAL FILL -- one leg filled, and only partly",
+            {"slug": pe["slug"], "clip": pe["size"],
+             "filled": round(got, 4),
+             "leg": pe["entry_legs_filled"],
+             "unmatched_contracts": round(got, 4),
+             "known_at_this_instant": "the size that traded against us. "
+                                      "Not whether more will follow."},
+            [{"action": "leave the other side resting",
+              "why_not": "it could also fill, doubling exposure before the "
+                         "first leg is matched"},
+             {"action": "cancel the other side", "chosen": True},
+             {"action": "immediately take the other side to flatten",
+              "why_not": "pays the taker fee at once for an exposure that "
+                         "may still be matched passively"}],
+            {"unmatched_exposure_usd": round(got * pe["quote_bid"], 2),
+             "maker_rebate_earned_usd": pe["rebates_received"],
+             "capital_committed_usd": pe["collateral_incl_resting"],
+             "uncertainty": "%d of %d filled episodes were partial -- a "
+                            "partial is the NORMAL case, not the exception"
+                            % (len(partial), len(filled))},
+            "CANCEL THE RESTING LEG; hold %.2f unmatched" % got,
+            "the inventory cap is half a clip. Letting the second side "
+            "rest while a leg is unmatched is how a market maker becomes "
+            "a directional trader by accident.",
+            "Inventory control -- the case-study mechanism that separates "
+            "market making from position taking.",
+            "note recorded on the episode: %s"
+            % (pe["notes"][0] if pe.get("notes") else "cancel-on-fill"),
+            REPLAY))
+
+    # ── 5. INVENTORY / COMPLETION ────────────────────────────────────
+    if paired:
+        ce = paired[0]
+        ds.append(decision(
+            "5  COMPLETION -- how does the unmatched leg get closed?",
+            {"unmatched": round(abs(ce["fill_sizes"][0]), 4),
+             "elapsed_s": _secs(ce),
+             "recovery_rule": "COMPLETE_PAIR"},
+            [{"action": "wait for a passive match",
+              "why_not": "ties capital up for an unbounded time at an "
+                         "unknown probability"},
+             {"action": "complete the pair as a taker", "chosen": True},
+             {"action": "exit the leg as a taker",
+              "why_not": "realises the loss and abandons the $1 pair value"}],
+            {"taker_fee_paid_usd": ce["taker_fees_paid"],
+             "maker_rebate_received_usd": ce["rebates_received"],
+             "realised_cash_usd": ce["realised_cash"],
+             "residual_value_usd": ce["residual_value"],
+             "residual_basis": ce["residual_basis"],
+             "net_if_residual_realises_usd": ce["total_if_residual_realises"],
+             "capital_committed_usd": ce["collateral_incl_resting"],
+             "uncertainty": "NONE on the pair's value -- a matched pair "
+                            "pays exactly $1. The uncertainty is WHEN."},
+            "COMPLETE THE PAIR as a taker",
+            "a matched pair is worth exactly $1 at settlement, which is "
+            "certain. Paying the taker fee converts an uncertain "
+            "directional position into a certain one.",
+            "Pair completion / netting -- the case-study mechanism for "
+            "turning a half-filled quote into a riskless holding.",
+            "%d of %d filled episodes reached FLAT_PAIRED"
+            % (len(paired), len(filled)),
+            REPLAY))
+
+    # ── 6. NETTING TO CASH -- NOT SUPPORTED ──────────────────────────
+    ds.append(decision(
+        "6  NETTING TO CASH -- can the pair be turned into cash now?",
+        {"matched_pairs": round(paired[0]["residual_contracts"]
+                                ["matched_pairs"], 4) if paired else None,
+         "certain_value_usd": paired[0]["residual_value"] if paired else None,
+         "basis": paired[0]["residual_basis"] if paired else None},
+        [{"action": "merge/net the pair into cash at the venue",
+          "supported": False,
+          "why": "no merge or netting call has been demonstrated against "
+                 "this venue, and none appears in the contract we have "
+                 "exercised. The engine therefore CANNOT release this "
+                 "capital before settlement."},
+         {"action": "hold to settlement", "chosen": True}],
+        {"capital_locked_usd": paired[0]["collateral_filled_only"]
+            if paired else None,
+         "locked_until": "event settlement",
+         "consequence": "capital-hours accrue at the full committed "
+                        "amount for the whole holding period, and this is "
+                        "the dominant term in every per-capital-hour "
+                        "figure in the economic verdict."},
+        "HOLD TO SETTLEMENT -- because nothing else is available",
+        "this is a VENUE CAPABILITY LIMIT, not a policy preference. It is "
+        "reported here rather than implied away.",
+        "Capital recycling -- the case-study mechanism this engine "
+        "CANNOT currently perform.",
+        "residual_basis on every paired episode: "
+        "'certain, but not cash until settlement'",
+        REPLAY, supported=False))
+
+    # ── 7. EXIT / LOSS-TAKING ────────────────────────────────────────
+    #
+    # THE CORPUS TRIGGERS THIS PATH BUT NEVER MATERIALLY. Both
+    # FLAT_EXITED_TAKER episodes realised exactly $0.00: the recovery
+    # window expired before any size had traded, so the "exit" closed
+    # nothing. Presenting one of them as a demonstration of loss-taking
+    # would be showing a loss-taking rule by showing no loss. The
+    # observed case is reported for what it is, and the economics are
+    # then exercised in a LABELLED SCENARIO.
+    obs_exit = (max(exited, key=lambda e: abs(e.get("realised_cash", 0.0)))
+                if exited else None)
+    ds.append(decision(
+        "7  EXIT -- taking a loss rather than carrying a leg",
+        {"observed_taker_exits": len(exited),
+         "largest_observed_realised_cash_usd":
+             obs_exit.get("realised_cash") if obs_exit else None,
+         "observed_verdict": "the path FIRES but closes nothing -- the "
+                             "recovery window expired before size traded. "
+                             "The corpus does not contain a material "
+                             "loss-taking event.",
+         "recovery_wait_s": POLICY.recovery_wait_s},
+        [{"action": "keep waiting for a passive match",
+          "why_not": "the recovery window expired; waiting longer is an "
+                     "unbounded commitment of capital at an unknown "
+                     "probability"},
+         {"action": "exit the leg as a taker", "chosen": True},
+         {"action": "complete the pair instead",
+          "why_not": "only available while the opposite side is quotable; "
+                     "the exit path exists for when it is not"}],
+        {"observed": "no material exit in this corpus",
+         "scenario": _exit_scenario(),
+         "uncertainty": "the exit price. The scenario prices the exit at "
+                        "the opposite touch, which is the best case for a "
+                        "taker; a wider book costs more."},
+        "EXIT AS TAKER when the recovery window expires",
+        "a bounded loss taken on time is cheaper than an unbounded carry. "
+        "The rule is implemented and fires; its ECONOMICS are shown by "
+        "scenario because the corpus never exercised them.",
+        "Loss-taking discipline.",
+        "%d observed taker exits, both at $0.00 realised -- reported "
+        "rather than dressed up" % len(exited),
+        SCENARIO))
+
+    # ── 8. HOLDING ───────────────────────────────────────────────────
+    ds.append(decision(
+        "8  HOLDING -- resting through a quiet market",
+        {"quote_horizon_s": POLICY.quote_horizon_s,
+         "episodes_that_never_filled": len(never),
+         "fraction": round(len(never) / len(eps), 4)},
+        [{"action": "rest for the full horizon", "chosen": True},
+         {"action": "cancel early and re-quote",
+          "why_not": "under the incentive programme, resting time IS the "
+                     "product being paid for -- cancelling early forfeits "
+                     "qualifying uptime"}],
+        {"capital_committed_while_resting_usd":
+             round(sum(e["collateral_incl_resting"] for e in never)
+                   / max(1, len(never)), 2),
+         "cash_earned_usd": 0.0,
+         "uncertainty": "whether a fill ever arrives. %.0f%% of episodes "
+                        "answer no." % (100.0 * len(never) / len(eps))},
+        "REST FOR THE FULL HORIZON",
+        "collateral is committed at entry whether or not a fill arrives, "
+        "so a quote that never fills still costs capital-hours. That cost "
+        "is counted, not ignored.",
+        "Liquidity provision -- the shape an incentive programme pays "
+        "for, and the reason C4 exists as a separate candidate.",
+        "capital-hours integrate collateral_incl_resting over every "
+        "episode's own life, filled or not",
+        REPLAY))
+
+    # ── 9. CAPITAL REUSE ─────────────────────────────────────────────
+    cap = sum(_caph(e) for e in eps)
+    ds.append(decision(
+        "9  CAPITAL REUSE -- how often can the same dollar work?",
+        {"capital_hours": round(cap, 1),
+         "episodes": len(eps),
+         "mean_hours_per_episode": round(cap / max(1, len(eps)), 2)},
+        [{"action": "recycle on settlement", "chosen": True},
+         {"action": "recycle on netting", "supported": False,
+          "why": "see decision 6 -- not available at this venue"}],
+        {"turnover_limit": "a dollar committed to an episode cannot be "
+                           "committed to another until that event settles",
+         "consequence": "supportable turnover is bounded by settlement "
+                        "cadence, not by the engine's speed"},
+        "RECYCLE ONLY ON SETTLEMENT",
+        "with no netting call, capital velocity is set by how fast events "
+        "resolve. This is the binding constraint on scale, and it is a "
+        "venue property.",
+        "Capital velocity.",
+        "capital-hours measured per candidate in economic_verdict.json",
+        REPLAY, supported=False))
+
+    # ── 10. INCENTIVE ELIGIBILITY -- labelled scenario ───────────────
+    prog = inc.Program("(scenario)", "culture_low_20260921", "daily_event",
+                       reward_pool=50.0, discount_factor=0.25,
+                       target_size=500)
+    rows = []
+    for c in (400.0, 450.0, 496.0, 500.0, 1000.0):
+        r = inc.snapshot_share([(0.50, c)], "BID", prog, 0.50, 100.0)
+        rows.append({"competing_at_our_price": c, "qualifies": r["qualifies"],
+                     "created_eligibility": r.get("created_eligibility"),
+                     "our_share": round(r["share"], 6)})
+    ds.append(decision(
+        "10 INCENTIVE ELIGIBILITY -- does resting here earn a reward?",
+        {"target_size": prog.target_size, "our_clip": 100.0,
+         "discount_factor": prog.discount_factor,
+         "pool_per_day_usd": prog.reward_pool,
+         "competing_depth": "NOT OBSERVABLE in this corpus -- so the rows "
+                            "below are a SCENARIO sweep, not a measurement"},
+        [{"action": "rest at the touch", "chosen": True},
+         {"action": "rest one tick back",
+          "why_not": "the discount factor is 0.25 per tick -- one tick "
+                     "back is a 75% cut to our score"}],
+        {"scenario_sweep": rows,
+         "reading": "our 100 contracts create eligibility only where the "
+                    "side already holds 400-499. Below that the side "
+                    "never reaches Target Size; far above it our share is "
+                    "diluted.",
+         "uncertainty": "TOTAL on the competing depth -- this is precisely "
+                        "the quantity the observation release measures."},
+        "REST AT THE TOUCH, and measure the depth before committing",
+        "the reward is a share of a pool whose denominator is competing "
+        "size. Without that number the reward cannot be computed, only "
+        "bracketed.",
+        "Liquidity-incentive capture.",
+        "bettor_incentive_score, pinned against the venue's own worked "
+        "example (1000 at four levels, DF 0.30 -> 70.6% / 1.9%)",
+        SCENARIO))
+    return ds
+
+
+def _exit_scenario():
+    """What a taker exit of one unmatched clip actually costs.
+
+    Arithmetic only, at the verified SEP2026 taker rate. Nothing here
+    is an observation, and the returned dict says so.
+    """
+    size, bid, ask = 100.0, 0.71, 0.73
+    # We are long 100 YES at 0.73 (we lifted, or our bid filled at the
+    # touch) and must sell at the bid to get flat.
+    proceeds = size * bid
+    cost = size * ask
+    taker = fee(THETA_TAKER, size, bid)
+    return {"label": "SCENARIO -- not observed",
+            "position": "long %d YES at %.2f" % (int(size), ask),
+            "exit_at_opposite_touch": bid,
+            "gross_loss_usd": round(cost - proceeds, 4),
+            "taker_fee_usd": round(taker, 4),
+            "total_cost_to_flatten_usd": round(cost - proceeds + taker, 4),
+            "alternative_if_carried":
+                "unbounded until settlement; a YES that settles at 0 loses "
+                "the full %.2f USD" % cost,
+            "reading": "the exit costs a known %.2f USD; carrying risks "
+                       "%.2f USD. That ratio is why the rule exists."
+                       % (cost - proceeds + taker, cost)}
+
+
+def _secs(e):
+    a, b = _t(e.get("t0")), _t(e.get("t_end"))
+    return round(b - a, 1) if (a and b and b > a) else None
+
+
+def _t(s):
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(s).timestamp()
+    except ValueError:
+        return None
+
+
+def _caph(e):
+    a, b = _t(e.get("t0")), _t(e.get("t_end"))
+    if a is None or b is None or b <= a:
+        return 0.0
+    return e.get("collateral_incl_resting", 0.0) * (b - a) / 3600.0
+
+
+def main():
+    if not prints_mod.tape_dir():
+        print("NO TAPE -- refusing to demonstrate tape-backed execution "
+              "without the tape.")
+        return 1
+    eps = epi.run_all(size=100.0, rebates_on=True, policy=POLICY,
+                      use_tape=True)
+    ds = walk(eps)
+
+    print("=" * 78)
+    print("BETTOR DECISION ENGINE -- MANAGEMENT DEMONSTRATION")
+    print("policy C3 (inventory-aware), queue fraction 0.25, tape-backed")
+    print("NO ORDER WAS SENT. Every fill below is a REPLAY fill.")
+    print("=" * 78)
+    for d in ds:
+        print()
+        print("-" * 78)
+        print("%s   [%s]%s" % (d["stage"], d["label"].split(" --")[0],
+                               "" if d["supported"] else "   NOT SUPPORTED"))
+        print("-" * 78)
+        print("  INPUTS AT DECISION TIME")
+        for k, v in d["inputs_at_decision_time"].items():
+            print("    %-34s %s" % (k, _fmt(v)))
+        print("  ALTERNATIVES")
+        for a in d["alternatives_considered"]:
+            mark = "->" if a.get("chosen") else "  "
+            extra = a.get("why_not") or a.get("why") or ""
+            if a.get("supported") is False:
+                extra = "NOT SUPPORTED: " + extra
+            print("    %s %-40s %s" % (mark, a.get("action", ""),
+                                       _wrap(extra, 30)))
+        print("  ECONOMICS")
+        for k, v in d["economics"].items():
+            print("    %-34s %s" % (k, _fmt(v)))
+        print("  ACTION   %s" % d["action"])
+        print("  REASON   %s" % _wrap(d["reason"], 9))
+        print("  MECHANISM %s" % _wrap(d["case_study_mechanism"], 10))
+        print("  EVIDENCE %s" % _wrap(d["evidence"], 9))
+
+    unsupported = [d["stage"] for d in ds if not d["supported"]]
+    print()
+    print("=" * 78)
+    print("CAPABILITIES THE ENGINE DOES NOT HAVE")
+    print("=" * 78)
+    for u in unsupported:
+        print("  - %s" % u)
+    print()
+    print("These are stated so the demonstration cannot be read as")
+    print("evidence of a complete capability.")
+
+    with open(OUT, "w") as fh:
+        json.dump({"demo": "BETTOR_MANAGEMENT_DEMO_V1",
+                   "policy": POLICY.name,
+                   "queue_fraction": POLICY.queue_ahead_fraction,
+                   "orders_sent": 0,
+                   "execution": "REPLAY against the venue's time-and-sales "
+                                "tape; NOT account executions",
+                   "episodes": len(eps),
+                   "status_counts": dict(collections.Counter(
+                       e["status"] for e in eps)),
+                   "decisions": ds,
+                   "unsupported": unsupported}, fh, indent=2, default=str)
+    print("\nwritten: %s" % OUT)
+    return 0
+
+
+def _fmt(v):
+    if isinstance(v, (list, tuple)):
+        if v and isinstance(v[0], dict):
+            return "\n" + "\n".join(
+                "        " + json.dumps(x, default=str) for x in v)
+        return json.dumps(v, default=str)
+    if isinstance(v, dict):
+        return json.dumps(v, default=str)
+    return str(v)
+
+
+def _wrap(s, indent):
+    out, line = [], ""
+    for w in str(s).split():
+        if len(line) + len(w) > 68:
+            out.append(line)
+            line = w
+        else:
+            line = (line + " " + w).strip()
+    out.append(line)
+    return ("\n" + " " * indent).join(out)
+
+
+if __name__ == "__main__":
+    sys.exit(main())

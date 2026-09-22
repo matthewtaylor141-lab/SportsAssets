@@ -1,0 +1,15 @@
+{
+  "_note": "The prior probe's budget row, read from production at 2026-09-22T13:43:42Z and preserved here BEFORE obs-arm overwrites it. obs-arm writes the same key, so this file is the only surviving copy.",
+  "_read_by": "render-ops sql obs-budget, run 35735379839",
+  "probe_id": "3c413436-68ba-4e50-b106-5d349b372567",
+  "started_at": "2026-09-22T11:37:30+00:00",
+  "deadline_at": "2026-09-22T12:07:30+00:00",
+  "max_distinct": 40,
+  "max_bbo_attempts": 160,
+  "max_listing_attempts": 18,
+  "distinct_reserved": 40,
+  "bbo_attempts_reserved": 50,
+  "listing_attempts_reserved": 1,
+  "_the_defect_is_visible_here": "listing_attempts_reserved = 1 while the run hit the 6-page bound. One reserved unit covered up to six outbound requests. The candidate build records one unit per request; L3B reconciles 6 dispatched against 6 reserved.",
+  "_slugs": "40 markets, every one aachc-mlb-bavg-2026-09-29-leader-* -- the single-family sample the seeded ordering replaces"
+}

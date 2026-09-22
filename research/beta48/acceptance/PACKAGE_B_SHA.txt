@@ -1,0 +1,42 @@
+PACKAGE B — pinned code SHA
+===========================
+
+content SHA — review and run THIS:
+  bd56ee2d21cb92f368e6283e1ab9041347eaa911
+
+branch: claude/bettor-none-pool-fix   (no Render service tracks it)
+
+Code in this SHA
+  research/beta48/bettor_incentive_score.py        the reward calculation
+  research/beta48/test_bettor_incentive_score.py   10 tests, all passing,
+                                                   incl. the venue's own
+                                                   worked example (70.6% /
+                                                   1.9%)
+  research/beta48/acceptance/PACKAGE_B_INCENTIVE_MEASUREMENT.md
+
+NO PRODUCTION CODE. Package B adds nothing under backend/. Merging it
+alone changes no service behaviour; the redeploy of sportsassets-api
+and sportsassets-workers that a merge to claude/session-njaewf triggers
+would be a no-op for Package B.
+
+Run parameters (see the package for the full specification)
+  duration        00:00:00 -> 23:59:59 ET, ONE date, date-aligned
+  subscription    1, <=100 slugs
+  public HTTP     <=8 total INCLUDING retries and pagination
+  authenticated   ZERO -- the 9 account-read requests are untouched
+  probe budget    untouched; this run's HTTP budget is its own
+  orders          BETTOR_LIVE_MAX_CONTRACTS = 0, none can be sized
+  stop            UPDATE ingestion_state SET value='false'
+                    WHERE key='bettor_live_observation'
+
+State
+  NOT ACTIVATED. M4 and M5 unexecuted. $0.00 at risk.
+
+Outcomes: INSUFFICIENT COVERAGE / UNDETERMINED / FAIL / PASS.
+A PASS supports PROPOSING an execution experiment. It does not declare
+profitability and authorizes nothing.
+
+Note on this file
+  A file cannot contain its own hash, so this pin is committed after the
+  content SHA and changes no code. Verify:
+      git diff --stat bd56ee2 HEAD -- research/beta48/*.py   (expect empty)

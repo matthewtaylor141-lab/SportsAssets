@@ -1,0 +1,15 @@
+{
+  "median_spread": 0.005,
+  "median_half_spread": 0.0025,
+  "median_mid": 0.13,
+  "rebate_per_contract_at_median_mid": 0.0014,
+  "breakeven_as_fill_at_median_mid": -0.0014,
+  "toxic_stress_case": -0.009,
+  "toxic_stress_scope": "global CLOB, ask side only, counterparty-selected; SELECTION_BIAS = SEVERE",
+  "breakeven_toxic_fraction": 0.3391,
+  "observations": 1551,
+  "distinct_markets": 11,
+  "data_status": "DEVELOPMENT -- these segments were opened by the Class C analysis; no untouched PMUS holdout remains",
+  "p_fill_affects": "rate and capacity, NOT the sign",
+  "missing_quantity": "TOXIC_FILL_FRACTION on PMUS, and the mid-is-fair-value assumption underneath it"
+}

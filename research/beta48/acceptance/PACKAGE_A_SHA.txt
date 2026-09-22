@@ -1,0 +1,40 @@
+PACKAGE A (complete) — pinned deploy SHA
+========================================
+
+content SHA — review and deploy THIS:
+  71918fc59c954109f3f7108d3d4a7228fadb692e
+
+branch: claude/bettor-none-pool-fix   (no Render service tracks it)
+
+Code in this SHA
+  backend/sportsassets/api/app.py            +63, 0 modified, 0 removed
+      GET /api/desk/venue-identity           identity gate, 0 parameters
+      GET /api/desk/venue-resting-orders     venue resting orders
+      GET /api/desk/venue-activity           TRADE + POSITION_RESOLUTION
+  backend/sportsassets/config.py             +10, additive and inert
+      pmus_account_ref: str = ""             owner-set OUT OF BAND
+  backend/sportsassets/workers/bettor_live_loop.py
+      lifetime repair 5874d21, verified an ancestor of this SHA
+
+Tests passing at this SHA
+  backend/tests/test_venue_identity_route.py        8
+  backend/tests/test_reconcile_read.py
+  backend/tests/test_bettor_live_loop.py
+  research/beta48/test_bettor_policy_ev.py
+  research/beta48/test_venue_seven_books_read_only.py
+  -> 197 + 4 passed, no broad re-run
+
+Deploy effect
+  merging to claude/session-njaewf redeploys sportsassets-api AND
+  sportsassets-workers (both track it, autoDeploy=yes). Routes are
+  additive; no existing route's behaviour changes; no worker path
+  changes; no migration; no secret added.
+
+State
+  NOT deployed. NOT armed. BETTOR_LIVE_MAX_CONTRACTS = 0, so no order
+  can be sized. M4 and M5 unexecuted. Trading controls unchanged.
+
+Note on this file
+  A file cannot contain its own hash, so this pin is committed after
+  the content SHA and changes no code. Verify with:
+      git diff --stat 71918fc HEAD -- backend/     (expect empty)

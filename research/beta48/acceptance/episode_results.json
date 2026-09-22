@@ -1,0 +1,750 @@
+{
+  "fee_table": [
+    {
+      "min_fill_for_nonzero_rebate": 81,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": -0.0,
+        "4": -0.0,
+        "5": -0.0,
+        "10": -0.0,
+        "25": -0.0,
+        "100": 0.0001,
+        "1000": 6e-05
+      },
+      "price": 0.005,
+      "raw_rebate_1_contract": 6.219e-05
+    },
+    {
+      "min_fill_for_nonzero_rebate": 41,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": -0.0,
+        "4": -0.0,
+        "5": -0.0,
+        "10": -0.0,
+        "25": -0.0,
+        "100": 0.0001,
+        "1000": 0.00012
+      },
+      "price": 0.01,
+      "raw_rebate_1_contract": 0.00012375
+    },
+    {
+      "min_fill_for_nonzero_rebate": 21,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": -0.0,
+        "4": -0.0,
+        "5": -0.0,
+        "10": -0.0,
+        "25": 0.0004,
+        "100": 0.0002,
+        "1000": 0.00024
+      },
+      "price": 0.02,
+      "raw_rebate_1_contract": 0.000245
+    },
+    {
+      "min_fill_for_nonzero_rebate": 9,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": -0.0,
+        "4": -0.0,
+        "5": -0.0,
+        "10": 0.001,
+        "25": 0.0004,
+        "100": 0.0006,
+        "1000": 0.00059
+      },
+      "price": 0.05,
+      "raw_rebate_1_contract": 0.00059375
+    },
+    {
+      "min_fill_for_nonzero_rebate": 5,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": -0.0,
+        "4": -0.0,
+        "5": 0.002,
+        "10": 0.001,
+        "25": 0.0012,
+        "100": 0.0011,
+        "1000": 0.00112
+      },
+      "price": 0.1,
+      "raw_rebate_1_contract": 0.001125
+    },
+    {
+      "min_fill_for_nonzero_rebate": 4,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": -0.0,
+        "4": 0.0025,
+        "5": 0.002,
+        "10": 0.001,
+        "25": 0.0016,
+        "100": 0.0014,
+        "1000": 0.00141
+      },
+      "price": 0.13,
+      "raw_rebate_1_contract": 0.00141375
+    },
+    {
+      "min_fill_for_nonzero_rebate": 3,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": 0.00333333,
+        "4": 0.0025,
+        "5": 0.002,
+        "10": 0.002,
+        "25": 0.002,
+        "100": 0.002,
+        "1000": 0.002
+      },
+      "price": 0.2,
+      "raw_rebate_1_contract": 0.002
+    },
+    {
+      "min_fill_for_nonzero_rebate": 2,
+      "per_contract": {
+        "1": -0.0,
+        "2": 0.005,
+        "3": 0.00333333,
+        "4": 0.0025,
+        "5": 0.002,
+        "10": 0.003,
+        "25": 0.0028,
+        "100": 0.0026,
+        "1000": 0.00262
+      },
+      "price": 0.3,
+      "raw_rebate_1_contract": 0.002625
+    },
+    {
+      "min_fill_for_nonzero_rebate": 2,
+      "per_contract": {
+        "1": -0.0,
+        "2": 0.005,
+        "3": 0.00333333,
+        "4": 0.0025,
+        "5": 0.004,
+        "10": 0.003,
+        "25": 0.0032,
+        "100": 0.003,
+        "1000": 0.003
+      },
+      "price": 0.4,
+      "raw_rebate_1_contract": 0.003
+    },
+    {
+      "min_fill_for_nonzero_rebate": 2,
+      "per_contract": {
+        "1": -0.0,
+        "2": 0.005,
+        "3": 0.00333333,
+        "4": 0.0025,
+        "5": 0.004,
+        "10": 0.003,
+        "25": 0.0032,
+        "100": 0.0031,
+        "1000": 0.00312
+      },
+      "price": 0.5,
+      "raw_rebate_1_contract": 0.003125
+    },
+    {
+      "min_fill_for_nonzero_rebate": 2,
+      "per_contract": {
+        "1": -0.0,
+        "2": 0.005,
+        "3": 0.00333333,
+        "4": 0.0025,
+        "5": 0.004,
+        "10": 0.003,
+        "25": 0.0032,
+        "100": 0.003,
+        "1000": 0.003
+      },
+      "price": 0.6,
+      "raw_rebate_1_contract": 0.003
+    },
+    {
+      "min_fill_for_nonzero_rebate": 3,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": 0.00333333,
+        "4": 0.0025,
+        "5": 0.002,
+        "10": 0.002,
+        "25": 0.0024,
+        "100": 0.0025,
+        "1000": 0.00246
+      },
+      "price": 0.73,
+      "raw_rebate_1_contract": 0.00246375
+    },
+    {
+      "min_fill_for_nonzero_rebate": 5,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": -0.0,
+        "4": -0.0,
+        "5": 0.002,
+        "10": 0.001,
+        "25": 0.0012,
+        "100": 0.0011,
+        "1000": 0.00112
+      },
+      "price": 0.9,
+      "raw_rebate_1_contract": 0.001125
+    },
+    {
+      "min_fill_for_nonzero_rebate": 9,
+      "per_contract": {
+        "1": -0.0,
+        "2": -0.0,
+        "3": -0.0,
+        "4": -0.0,
+        "5": -0.0,
+        "10": 0.001,
+        "25": 0.0004,
+        "100": 0.0006,
+        "1000": 0.00059
+      },
+      "price": 0.95,
+      "raw_rebate_1_contract": 0.00059375
+    }
+  ],
+  "policy": {
+    "EXCLUDED|QUEUE_BEHIND_ALWAYS": {
+      "any_fill_rate": 0.3824,
+      "double_fill_rate_q": 0.0721,
+      "episodes": 957,
+      "events": 11,
+      "markets": 11,
+      "per_contract": {
+        "ci": [
+          -0.141749,
+          0.080782
+        ],
+        "cluster_means": [
+          -0.405,
+          -0.205,
+          -0.006527,
+          -0.004713,
+          -0.002933,
+          -0.000549,
+          -4e-06,
+          0.001817,
+          0.002587,
+          0.005,
+          0.28
+        ],
+        "cluster_se": 0.04994,
+        "clusters": 11,
+        "naive_se": 0.001027,
+        "point": -0.030484,
+        "se_inflation_vs_naive": 48.64
+      },
+      "per_episode": {
+        "ci": [
+          -14.17494,
+          8.078179
+        ],
+        "cluster_means": [
+          -40.5,
+          -20.5,
+          -0.652676,
+          -0.4713,
+          -0.293255,
+          -0.054879,
+          -0.000443,
+          0.181716,
+          0.258654,
+          0.5,
+          28.0
+        ],
+        "cluster_se": 4.993967,
+        "clusters": 11,
+        "naive_se": 0.102666,
+        "point": -3.04838,
+        "se_inflation_vs_naive": 48.64
+      },
+      "positive_episodes": 127,
+      "rebates_received_total": 0.0,
+      "statuses": {
+        "CARRIED_OPEN_AT_HORIZON": 2,
+        "CARRIED_SETTLED": 6,
+        "FLAT_EXITED_MAKER": 42,
+        "FLAT_EXITED_TAKER": 249,
+        "FLAT_PAIRED": 69,
+        "NEVER_FILLED": 589
+      },
+      "sum_total": -265.4015,
+      "taker_fees_total": -92.43,
+      "unmatched_at_end": 6
+    },
+    "EXCLUDED|QUEUE_FRONT_IF_INSIDE": {
+      "any_fill_rate": 0.4274,
+      "double_fill_rate_q": 0.0753,
+      "episodes": 943,
+      "events": 11,
+      "markets": 11,
+      "per_contract": {
+        "ci": [
+          -0.141795,
+          0.080726
+        ],
+        "cluster_means": [
+          -0.405,
+          -0.205,
+          -0.007031,
+          -0.004797,
+          -0.002894,
+          -0.000549,
+          -1.4e-05,
+          0.001817,
+          0.002587,
+          0.005,
+          0.28
+        ],
+        "cluster_se": 0.049937,
+        "clusters": 11,
+        "naive_se": 0.001042,
+        "point": -0.030535,
+        "se_inflation_vs_naive": 47.93
+      },
+      "per_episode": {
+        "ci": [
+          -14.179478,
+          8.072559
+        ],
+        "cluster_means": [
+          -40.5,
+          -20.5,
+          -0.70311,
+          -0.479696,
+          -0.289361,
+          -0.054879,
+          -0.001375,
+          0.181716,
+          0.258654,
+          0.5,
+          28.0
+        ],
+        "cluster_se": 4.993725,
+        "clusters": 11,
+        "naive_se": 0.104197,
+        "point": -3.053459,
+        "se_inflation_vs_naive": 47.93
+      },
+      "positive_episodes": 133,
+      "rebates_received_total": 0.0,
+      "statuses": {
+        "CARRIED_OPEN_AT_HORIZON": 2,
+        "CARRIED_SETTLED": 6,
+        "FLAT_EXITED_MAKER": 46,
+        "FLAT_EXITED_TAKER": 280,
+        "FLAT_PAIRED": 71,
+        "NEVER_FILLED": 538
+      },
+      "sum_total": -269.3262,
+      "taker_fees_total": -94.44,
+      "unmatched_at_end": 6
+    },
+    "PUBLISHED|QUEUE_BEHIND_ALWAYS": {
+      "any_fill_rate": 0.3824,
+      "double_fill_rate_q": 0.0721,
+      "episodes": 957,
+      "events": 11,
+      "markets": 11,
+      "per_contract": {
+        "ci": [
+          -0.140131,
+          0.082077
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.00633,
+          -0.003245,
+          -0.002476,
+          -0.000438,
+          -4e-06,
+          0.001946,
+          0.002751,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.049867,
+        "clusters": 11,
+        "naive_se": 0.001019,
+        "point": -0.029027,
+        "se_inflation_vs_naive": 48.93
+      },
+      "per_episode": {
+        "ci": [
+          -14.013083,
+          8.20771
+        ],
+        "cluster_means": [
+          -40.2,
+          -20.3,
+          -0.632998,
+          -0.3245,
+          -0.247588,
+          -0.04375,
+          -0.000443,
+          0.194625,
+          0.275106,
+          1.1,
+          28.25
+        ],
+        "cluster_se": 4.986713,
+        "clusters": 11,
+        "naive_se": 0.101926,
+        "point": -2.902686,
+        "se_inflation_vs_naive": 48.93
+      },
+      "positive_episodes": 138,
+      "rebates_received_total": 43.42,
+      "statuses": {
+        "CARRIED_OPEN_AT_HORIZON": 2,
+        "CARRIED_SETTLED": 6,
+        "FLAT_EXITED_MAKER": 42,
+        "FLAT_EXITED_TAKER": 249,
+        "FLAT_PAIRED": 69,
+        "NEVER_FILLED": 589
+      },
+      "sum_total": -221.9815,
+      "taker_fees_total": -92.43,
+      "unmatched_at_end": 6
+    },
+    "PUBLISHED|QUEUE_FRONT_IF_INSIDE": {
+      "any_fill_rate": 0.4274,
+      "double_fill_rate_q": 0.0753,
+      "episodes": 943,
+      "events": 11,
+      "markets": 11,
+      "per_contract": {
+        "ci": [
+          -0.140163,
+          0.082038
+        ],
+        "cluster_means": [
+          -0.402,
+          -0.203,
+          -0.006768,
+          -0.003326,
+          -0.002343,
+          -0.000438,
+          -1.4e-05,
+          0.001946,
+          0.002751,
+          0.011,
+          0.2825
+        ],
+        "cluster_se": 0.049866,
+        "clusters": 11,
+        "naive_se": 0.001035,
+        "point": -0.029063,
+        "se_inflation_vs_naive": 48.19
+      },
+      "per_episode": {
+        "ci": [
+          -14.016328,
+          8.20376
+        ],
+        "cluster_means": [
+          -40.2,
+          -20.3,
+          -0.676832,
+          -0.332611,
+          -0.234287,
+          -0.04375,
+          -0.001375,
+          0.194625,
+          0.275106,
+          1.1,
+          28.25
+        ],
+        "cluster_se": 4.986555,
+        "clusters": 11,
+        "naive_se": 0.103474,
+        "point": -2.906284,
+        "se_inflation_vs_naive": 48.19
+      },
+      "positive_episodes": 149,
+      "rebates_received_total": 46.13,
+      "statuses": {
+        "CARRIED_OPEN_AT_HORIZON": 2,
+        "CARRIED_SETTLED": 6,
+        "FLAT_EXITED_MAKER": 46,
+        "FLAT_EXITED_TAKER": 280,
+        "FLAT_PAIRED": 71,
+        "NEVER_FILLED": 538
+      },
+      "sum_total": -223.1962,
+      "taker_fees_total": -94.44,
+      "unmatched_at_end": 6
+    }
+  },
+  "realised_fills": {
+    "fills": 958,
+    "max": 100.0,
+    "mean_fill": 59.306,
+    "median_fill": 63.01500000001397,
+    "min": 0.060000000000002274,
+    "partial_fills_below_order_size": 581,
+    "size_buckets": {
+      "1": 21,
+      "10-99": 419,
+      "2": 24,
+      "3-4": 27,
+      "5-9": 90,
+      ">=100": 377
+    }
+  },
+  "sensitivity": {
+    "horizon=10 size=100": {
+      "episodes": 1570,
+      "per_contract_point": -0.001522,
+      "positive": 148,
+      "q_double_fill": 0.0248,
+      "sum_total": -238.9277
+    },
+    "horizon=10 size=4": {
+      "episodes": 1595,
+      "per_contract_point": -0.002311,
+      "positive": 173,
+      "q_double_fill": 0.0426,
+      "sum_total": -14.745
+    },
+    "horizon=20 size=100": {
+      "episodes": 943,
+      "per_contract_point": -0.002367,
+      "positive": 149,
+      "q_double_fill": 0.0753,
+      "sum_total": -223.1962
+    },
+    "horizon=20 size=4": {
+      "episodes": 970,
+      "per_contract_point": -0.00314,
+      "positive": 176,
+      "q_double_fill": 0.1165,
+      "sum_total": -12.1822
+    },
+    "horizon=40 size=100": {
+      "episodes": 562,
+      "per_contract_point": -0.001717,
+      "positive": 147,
+      "q_double_fill": 0.1744,
+      "sum_total": -96.4957
+    },
+    "horizon=40 size=4": {
+      "episodes": 602,
+      "per_contract_point": -0.004132,
+      "positive": 200,
+      "q_double_fill": 0.2558,
+      "sum_total": -9.9491
+    },
+    "horizon=5 size=100": {
+      "episodes": 2527,
+      "per_contract_point": -0.000774,
+      "positive": 115,
+      "q_double_fill": 0.0055,
+      "sum_total": -195.6068
+    },
+    "horizon=5 size=4": {
+      "episodes": 2549,
+      "per_contract_point": -0.001139,
+      "positive": 136,
+      "q_double_fill": 0.0114,
+      "sum_total": -11.6095
+    }
+  },
+  "settlement": {
+    "buy_no_market_level": {
+      "ci": [
+        -0.169,
+        0.259733
+      ],
+      "cluster_means": [
+        -0.41,
+        -0.4,
+        0.005,
+        0.005,
+        0.1764,
+        0.195,
+        0.2074,
+        0.281,
+        0.3485
+      ],
+      "cluster_se": 0.09296,
+      "clusters": 9,
+      "naive_se": 0.087644,
+      "point": 0.045367,
+      "se_inflation_vs_naive": 1.06
+    },
+    "buy_yes_market_level": {
+      "ci": [
+        -0.268918,
+        0.162451
+      ],
+      "cluster_means": [
+        -0.3542,
+        -0.286,
+        -0.2176,
+        -0.2013,
+        -0.2,
+        -0.01,
+        -0.01,
+        0.395,
+        0.405
+      ],
+      "cluster_se": 0.093532,
+      "clusters": 9,
+      "naive_se": 0.088183,
+      "point": -0.053233,
+      "se_inflation_vs_naive": 1.06
+    },
+    "markets": [
+      {
+        "settlement": "SETTLEMENT_NOT_OBSERVED",
+        "slug": "aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi",
+        "why": "market never reached EXPIRED inside the capture"
+      },
+      {
+        "buy_no_at_1_minus_bid_mean_return": 0.3485,
+        "buy_yes_at_ask_mean_return": -0.3542,
+        "event": "aec-cfb-coast-del-2026-09-19",
+        "first_mid": 0.365,
+        "last_mid": 0.04,
+        "last_mid_called_it": true,
+        "mean_mid": 0.3513,
+        "settlement": 0.0,
+        "slug": "aec-cfb-coast-del-2026-09-19",
+        "two_sided_open_rows": 4640
+      },
+      {
+        "buy_no_at_1_minus_bid_mean_return": 0.005,
+        "buy_yes_at_ask_mean_return": -0.01,
+        "event": "aec-cfb-kentst-ohiost-2026-09-19",
+        "first_mid": 0.0075,
+        "last_mid": 0.0125,
+        "last_mid_called_it": true,
+        "mean_mid": 0.0075,
+        "settlement": 0.0,
+        "slug": "aec-cfb-kentst-ohiost-2026-09-19",
+        "two_sided_open_rows": 3055
+      },
+      {
+        "buy_no_at_1_minus_bid_mean_return": 0.005,
+        "buy_yes_at_ask_mean_return": -0.01,
+        "event": "aec-cfb-portst-ore-2026-09-18",
+        "first_mid": 0.0075,
+        "last_mid": 0.0075,
+        "last_mid_called_it": true,
+        "mean_mid": 0.0075,
+        "settlement": 0.0,
+        "slug": "aec-cfb-portst-ore-2026-09-18",
+        "two_sided_open_rows": 1373
+      },
+      {
+        "buy_no_at_1_minus_bid_mean_return": 0.1764,
+        "buy_yes_at_ask_mean_return": -0.2013,
+        "event": "aec-cfb-uwg-etnst-2026-09-19",
+        "first_mid": 0.3,
+        "last_mid": 0.095,
+        "last_mid_called_it": true,
+        "mean_mid": 0.1888,
+        "settlement": 0.0,
+        "slug": "aec-cfb-uwg-etnst-2026-09-19",
+        "two_sided_open_rows": 4540
+      },
+      {
+        "buy_no_at_1_minus_bid_mean_return": 0.281,
+        "buy_yes_at_ask_mean_return": -0.286,
+        "event": "aec-nfl-atl-pit-2026-09-13",
+        "first_mid": 0.2775,
+        "last_mid": 0.2975,
+        "last_mid_called_it": true,
+        "mean_mid": 0.2835,
+        "settlement": 0.0,
+        "slug": "aec-nfl-atl-pit-2026-09-13",
+        "two_sided_open_rows": 10
+      },
+      {
+        "buy_no_at_1_minus_bid_mean_return": -0.41,
+        "buy_yes_at_ask_mean_return": 0.405,
+        "event": "aec-nfl-bal-ind-2026-09-13",
+        "first_mid": 0.5925,
+        "last_mid": 0.5925,
+        "last_mid_called_it": true,
+        "mean_mid": 0.5925,
+        "settlement": 1.0,
+        "slug": "aec-nfl-bal-ind-2026-09-13",
+        "two_sided_open_rows": 10
+      },
+      {
+        "buy_no_at_1_minus_bid_mean_return": -0.4,
+        "buy_yes_at_ask_mean_return": 0.395,
+        "event": "aec-nfl-chi-car-2026-09-13",
+        "first_mid": 0.6025,
+        "last_mid": 0.6025,
+        "last_mid_called_it": true,
+        "mean_mid": 0.6025,
+        "settlement": 1.0,
+        "slug": "aec-nfl-chi-car-2026-09-13",
+        "two_sided_open_rows": 10
+      },
+      {
+        "buy_no_at_1_minus_bid_mean_return": 0.195,
+        "buy_yes_at_ask_mean_return": -0.2,
+        "event": "aec-nfl-cle-jax-2026-09-13",
+        "first_mid": 0.2075,
+        "last_mid": 0.1575,
+        "last_mid_called_it": true,
+        "mean_mid": 0.1975,
+        "settlement": 0.0,
+        "slug": "aec-nfl-cle-jax-2026-09-13",
+        "two_sided_open_rows": 10
+      },
+      {
+        "settlement": 0.0,
+        "slug": "asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5",
+        "two_sided_open_rows": 0
+      },
+      {
+        "settlement": "SETTLEMENT_NOT_OBSERVED",
+        "slug": "atc-lmx-ame-tij-2026-09-05-tij",
+        "why": "settlementPx never moved off its open-state value after expiry -- the outcome had not been published by the end of the capture"
+      },
+      {
+        "buy_no_at_1_minus_bid_mean_return": 0.2074,
+        "buy_yes_at_ask_mean_return": -0.2176,
+        "event": "atc-lmx-pue-tol-2026-09-04",
+        "first_mid": 0.215,
+        "last_mid": 0.205,
+        "last_mid_called_it": true,
+        "mean_mid": 0.2125,
+        "settlement": 0.0,
+        "slug": "atc-lmx-pue-tol-2026-09-04-draw",
+        "two_sided_open_rows": 1480
+      }
+    ],
+    "note": "DEVELOPMENT data. Ten labelled markets on ten events, eight of which settled at 0. Any estimate here is dominated by that class balance and by four NFL markets sharing one afternoon.",
+    "settled_at_0": 8,
+    "settled_at_1": 2
+  }
+}

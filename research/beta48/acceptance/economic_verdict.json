@@ -1,0 +1,1252 @@
+{
+  "verdict": "BETTOR_ECONOMIC_VERDICT_V1",
+  "assumptions": {
+    "book": "ENTRY BOOK HELD CONSTANT for the episode's life -- the corpus has one book per episode, not a ladder time series",
+    "transfer": "the retrieved programme terms are applied to a corpus captured on OTHER markets",
+    "execution": "tape-backed fills, queue fraction swept",
+    "corpus": "fully consumed -- nothing here is out of sample"
+  },
+  "programmes_retrieved_at": "2026-09-22T18:14Z (unauthenticated)",
+  "candidates": [
+    {
+      "candidate": "C3  inventory-aware",
+      "qfrac": 0.0,
+      "net_usd": -90.2197,
+      "capital_hours": 27955.08,
+      "per_capital_hour": -0.003227,
+      "drawdown_usd": -90.4514,
+      "residual": {
+        "open_episodes": 0,
+        "net_directional_contracts": 0.0,
+        "residual_value_usd": 6932.51,
+        "note": "residual value is a MARK, not cash. It is reported beside net P&L and never inside it."
+      },
+      "turnover": {
+        "contracts": 13865.02,
+        "notional_usd": 0.0,
+        "days": 8,
+        "notional_per_day": 0.0
+      },
+      "episodes": 470,
+      "any_fill": 179
+    },
+    {
+      "candidate": "C3  inventory-aware",
+      "qfrac": 0.25,
+      "net_usd": -87.2383,
+      "capital_hours": 27694.57,
+      "per_capital_hour": -0.00315,
+      "drawdown_usd": -87.2383,
+      "residual": {
+        "open_episodes": 0,
+        "net_directional_contracts": 0.0,
+        "residual_value_usd": 2594.03,
+        "note": "residual value is a MARK, not cash. It is reported beside net P&L and never inside it."
+      },
+      "turnover": {
+        "contracts": 5188.06,
+        "notional_usd": 0.0,
+        "days": 8,
+        "notional_per_day": 0.0
+      },
+      "episodes": 420,
+      "any_fill": 60
+    },
+    {
+      "candidate": "C3  inventory-aware",
+      "qfrac": 0.5,
+      "net_usd": -58.7408,
+      "capital_hours": 27957.31,
+      "per_capital_hour": -0.002101,
+      "drawdown_usd": -58.7407,
+      "residual": {
+        "open_episodes": 1,
+        "net_directional_contracts": 16.63,
+        "residual_value_usd": 2052.735,
+        "note": "residual value is a MARK, not cash. It is reported beside net P&L and never inside it."
+      },
+      "turnover": {
+        "contracts": 4122.1,
+        "notional_usd": 0.0,
+        "days": 8,
+        "notional_per_day": 0.0
+      },
+      "episodes": 414,
+      "any_fill": 45
+    },
+    {
+      "candidate": "C3  inventory-aware",
+      "qfrac": 1.0,
+      "net_usd": -75.8432,
+      "capital_hours": 27935.85,
+      "per_capital_hour": -0.002715,
+      "drawdown_usd": -75.8432,
+      "residual": {
+        "open_episodes": 1,
+        "net_directional_contracts": 76.98,
+        "residual_value_usd": 1788.79,
+        "note": "residual value is a MARK, not cash. It is reported beside net P&L and never inside it."
+      },
+      "turnover": {
+        "contracts": 3654.56,
+        "notional_usd": 0.0,
+        "days": 8,
+        "notional_per_day": 0.0
+      },
+      "episodes": 410,
+      "any_fill": 33
+    },
+    {
+      "candidate": "C4  incentive-aware LP",
+      "qfrac": 0.0,
+      "net_usd": -10.2254,
+      "capital_hours": 50505.67,
+      "per_capital_hour": -0.000202,
+      "drawdown_usd": -20.8923,
+      "residual": {
+        "open_episodes": 6,
+        "net_directional_contracts": 292.88,
+        "residual_value_usd": 1172.44,
+        "note": "residual value is a MARK, not cash. It is reported beside net P&L and never inside it."
+      },
+      "turnover": {
+        "contracts": 2395.72,
+        "notional_usd": 0.0,
+        "days": 6,
+        "notional_per_day": 0.0
+      },
+      "episodes": 44,
+      "any_fill": 16,
+      "incentive": {
+        "computable": false,
+        "why_not": "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS",
+        "corpus_depth_check": {
+          "episodes": 44,
+          "episodes_with_any_size": 0,
+          "entry_book_keys": [
+            "ask",
+            "bid",
+            "bid_at_touch",
+            "mid",
+            "offer_at_touch",
+            "spread",
+            "spread_ticks"
+          ],
+          "depth_available": false
+        },
+        "period_exposure": {
+          "summed_period_fractions": 7.7777,
+          "market_days": 13,
+          "mean_fraction_per_market_day": 0.5983
+        },
+        "programmes": {
+          "culture_daily": {
+            "pool_per_day": 50.0,
+            "discount_factor": 0.25,
+            "target_size": 500,
+            "required_to_break_even": {
+              "pool_per_day": 50.0,
+              "summed_period_fractions": 7.7777,
+              "pool_dollars_addressable": 388.885,
+              "loss_to_cover_usd": 10.2254,
+              "required_share": 0.026294,
+              "required_share_pct": 2.6294,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.2,
+                "reward_usd_if_that_held_throughout": 77.777,
+                "covers_loss": true,
+                "mean_per_market_day": 5.9828,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.166667,
+                "reward_usd_if_that_held_throughout": 64.8142,
+                "covers_loss": true,
+                "mean_per_market_day": 4.9857,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.090909,
+                "reward_usd_if_that_held_throughout": 35.3532,
+                "covers_loss": true,
+                "mean_per_market_day": 2.7195,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.038462,
+                "reward_usd_if_that_held_throughout": 14.9571,
+                "covers_loss": true,
+                "mean_per_market_day": 1.1505,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          },
+          "crypto_1h": {
+            "pool_per_day": 30.0,
+            "discount_factor": 0.25,
+            "target_size": 500,
+            "required_to_break_even": {
+              "pool_per_day": 30.0,
+              "summed_period_fractions": 7.7777,
+              "pool_dollars_addressable": 233.331,
+              "loss_to_cover_usd": 10.2254,
+              "required_share": 0.043824,
+              "required_share_pct": 4.3824,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.2,
+                "reward_usd_if_that_held_throughout": 46.6662,
+                "covers_loss": true,
+                "mean_per_market_day": 3.5897,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.166667,
+                "reward_usd_if_that_held_throughout": 38.8885,
+                "covers_loss": true,
+                "mean_per_market_day": 2.9914,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.090909,
+                "reward_usd_if_that_held_throughout": 21.2119,
+                "covers_loss": true,
+                "mean_per_market_day": 1.6317,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.038462,
+                "reward_usd_if_that_held_throughout": 8.9743,
+                "covers_loss": false,
+                "mean_per_market_day": 0.6903,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          },
+          "efootball_live": {
+            "pool_per_day": 100.0,
+            "discount_factor": 0.5,
+            "target_size": 5000,
+            "required_to_break_even": {
+              "pool_per_day": 100.0,
+              "summed_period_fractions": 7.7777,
+              "pool_dollars_addressable": 777.77,
+              "loss_to_cover_usd": 10.2254,
+              "required_share": 0.013147,
+              "required_share_pct": 1.3147,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          }
+        },
+        "detail": "entry_book carries ask, bid, bid_at_touch, mid, offer_at_touch, spread, spread_ticks -- prices only, no sizes. The reward's denominator is the discounted size walked to Target Size, so no share can be formed. This is an ABSENCE OF INPUT, not a reward of zero."
+      }
+    },
+    {
+      "candidate": "C4  incentive-aware LP",
+      "qfrac": 0.25,
+      "net_usd": -9.619,
+      "capital_hours": 51200.44,
+      "per_capital_hour": -0.000188,
+      "drawdown_usd": -10.719,
+      "residual": {
+        "open_episodes": 4,
+        "net_directional_contracts": 134.88,
+        "residual_value_usd": 171.63,
+        "note": "residual value is a MARK, not cash. It is reported beside net P&L and never inside it."
+      },
+      "turnover": {
+        "contracts": 334.88,
+        "notional_usd": 0.0,
+        "days": 7,
+        "notional_per_day": 0.0
+      },
+      "episodes": 52,
+      "any_fill": 5,
+      "incentive": {
+        "computable": false,
+        "why_not": "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS",
+        "corpus_depth_check": {
+          "episodes": 52,
+          "episodes_with_any_size": 0,
+          "entry_book_keys": [
+            "ask",
+            "bid",
+            "bid_at_touch",
+            "mid",
+            "offer_at_touch",
+            "spread",
+            "spread_ticks"
+          ],
+          "depth_available": false
+        },
+        "period_exposure": {
+          "summed_period_fractions": 8.6737,
+          "market_days": 15,
+          "mean_fraction_per_market_day": 0.5782
+        },
+        "programmes": {
+          "culture_daily": {
+            "pool_per_day": 50.0,
+            "discount_factor": 0.25,
+            "target_size": 500,
+            "required_to_break_even": {
+              "pool_per_day": 50.0,
+              "summed_period_fractions": 8.6737,
+              "pool_dollars_addressable": 433.685,
+              "loss_to_cover_usd": 9.619,
+              "required_share": 0.02218,
+              "required_share_pct": 2.218,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.2,
+                "reward_usd_if_that_held_throughout": 86.737,
+                "covers_loss": true,
+                "mean_per_market_day": 5.7825,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.166667,
+                "reward_usd_if_that_held_throughout": 72.2808,
+                "covers_loss": true,
+                "mean_per_market_day": 4.8187,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.090909,
+                "reward_usd_if_that_held_throughout": 39.4259,
+                "covers_loss": true,
+                "mean_per_market_day": 2.6284,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.038462,
+                "reward_usd_if_that_held_throughout": 16.6802,
+                "covers_loss": true,
+                "mean_per_market_day": 1.112,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          },
+          "crypto_1h": {
+            "pool_per_day": 30.0,
+            "discount_factor": 0.25,
+            "target_size": 500,
+            "required_to_break_even": {
+              "pool_per_day": 30.0,
+              "summed_period_fractions": 8.6737,
+              "pool_dollars_addressable": 260.211,
+              "loss_to_cover_usd": 9.619,
+              "required_share": 0.036966,
+              "required_share_pct": 3.6966,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.2,
+                "reward_usd_if_that_held_throughout": 52.0422,
+                "covers_loss": true,
+                "mean_per_market_day": 3.4695,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.166667,
+                "reward_usd_if_that_held_throughout": 43.3685,
+                "covers_loss": true,
+                "mean_per_market_day": 2.8912,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.090909,
+                "reward_usd_if_that_held_throughout": 23.6555,
+                "covers_loss": true,
+                "mean_per_market_day": 1.577,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.038462,
+                "reward_usd_if_that_held_throughout": 10.0081,
+                "covers_loss": true,
+                "mean_per_market_day": 0.6672,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          },
+          "efootball_live": {
+            "pool_per_day": 100.0,
+            "discount_factor": 0.5,
+            "target_size": 5000,
+            "required_to_break_even": {
+              "pool_per_day": 100.0,
+              "summed_period_fractions": 8.6737,
+              "pool_dollars_addressable": 867.37,
+              "loss_to_cover_usd": 9.619,
+              "required_share": 0.01109,
+              "required_share_pct": 1.109,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          }
+        },
+        "detail": "entry_book carries ask, bid, bid_at_touch, mid, offer_at_touch, spread, spread_ticks -- prices only, no sizes. The reward's denominator is the discounted size walked to Target Size, so no share can be formed. This is an ABSENCE OF INPUT, not a reward of zero."
+      }
+    },
+    {
+      "candidate": "C4  incentive-aware LP",
+      "qfrac": 0.5,
+      "net_usd": -49.9633,
+      "capital_hours": 51211.36,
+      "per_capital_hour": -0.000976,
+      "drawdown_usd": -49.9633,
+      "residual": {
+        "open_episodes": 5,
+        "net_directional_contracts": 233.79,
+        "residual_value_usd": 71.63,
+        "note": "residual value is a MARK, not cash. It is reported beside net P&L and never inside it."
+      },
+      "turnover": {
+        "contracts": 233.79,
+        "notional_usd": 0.0,
+        "days": 7,
+        "notional_per_day": 0.0
+      },
+      "episodes": 53,
+      "any_fill": 5,
+      "incentive": {
+        "computable": false,
+        "why_not": "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS",
+        "corpus_depth_check": {
+          "episodes": 53,
+          "episodes_with_any_size": 0,
+          "entry_book_keys": [
+            "ask",
+            "bid",
+            "bid_at_touch",
+            "mid",
+            "offer_at_touch",
+            "spread",
+            "spread_ticks"
+          ],
+          "depth_available": false
+        },
+        "period_exposure": {
+          "summed_period_fractions": 8.8283,
+          "market_days": 15,
+          "mean_fraction_per_market_day": 0.5886
+        },
+        "programmes": {
+          "culture_daily": {
+            "pool_per_day": 50.0,
+            "discount_factor": 0.25,
+            "target_size": 500,
+            "required_to_break_even": {
+              "pool_per_day": 50.0,
+              "summed_period_fractions": 8.8283,
+              "pool_dollars_addressable": 441.415,
+              "loss_to_cover_usd": 49.9633,
+              "required_share": 0.113189,
+              "required_share_pct": 11.3189,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.2,
+                "reward_usd_if_that_held_throughout": 88.283,
+                "covers_loss": true,
+                "mean_per_market_day": 5.8855,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.166667,
+                "reward_usd_if_that_held_throughout": 73.5692,
+                "covers_loss": true,
+                "mean_per_market_day": 4.9046,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.090909,
+                "reward_usd_if_that_held_throughout": 40.1286,
+                "covers_loss": false,
+                "mean_per_market_day": 2.6752,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.038462,
+                "reward_usd_if_that_held_throughout": 16.9775,
+                "covers_loss": false,
+                "mean_per_market_day": 1.1318,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          },
+          "crypto_1h": {
+            "pool_per_day": 30.0,
+            "discount_factor": 0.25,
+            "target_size": 500,
+            "required_to_break_even": {
+              "pool_per_day": 30.0,
+              "summed_period_fractions": 8.8283,
+              "pool_dollars_addressable": 264.849,
+              "loss_to_cover_usd": 49.9633,
+              "required_share": 0.188648,
+              "required_share_pct": 18.8648,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.2,
+                "reward_usd_if_that_held_throughout": 52.9698,
+                "covers_loss": true,
+                "mean_per_market_day": 3.5313,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.166667,
+                "reward_usd_if_that_held_throughout": 44.1415,
+                "covers_loss": false,
+                "mean_per_market_day": 2.9428,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.090909,
+                "reward_usd_if_that_held_throughout": 24.0772,
+                "covers_loss": false,
+                "mean_per_market_day": 1.6051,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.038462,
+                "reward_usd_if_that_held_throughout": 10.1865,
+                "covers_loss": false,
+                "mean_per_market_day": 0.6791,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          },
+          "efootball_live": {
+            "pool_per_day": 100.0,
+            "discount_factor": 0.5,
+            "target_size": 5000,
+            "required_to_break_even": {
+              "pool_per_day": 100.0,
+              "summed_period_fractions": 8.8283,
+              "pool_dollars_addressable": 882.83,
+              "loss_to_cover_usd": 49.9633,
+              "required_share": 0.056594,
+              "required_share_pct": 5.6594,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          }
+        },
+        "detail": "entry_book carries ask, bid, bid_at_touch, mid, offer_at_touch, spread, spread_ticks -- prices only, no sizes. The reward's denominator is the discounted size walked to Target Size, so no share can be formed. This is an ABSENCE OF INPUT, not a reward of zero."
+      }
+    },
+    {
+      "candidate": "C4  incentive-aware LP",
+      "qfrac": 1.0,
+      "net_usd": -35.1531,
+      "capital_hours": 51242.13,
+      "per_capital_hour": -0.000686,
+      "drawdown_usd": -35.1531,
+      "residual": {
+        "open_episodes": 3,
+        "net_directional_contracts": 201.29,
+        "residual_value_usd": 71.63,
+        "note": "residual value is a MARK, not cash. It is reported beside net P&L and never inside it."
+      },
+      "turnover": {
+        "contracts": 201.29,
+        "notional_usd": 0.0,
+        "days": 7,
+        "notional_per_day": 0.0
+      },
+      "episodes": 79,
+      "any_fill": 3,
+      "incentive": {
+        "computable": false,
+        "why_not": "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS",
+        "corpus_depth_check": {
+          "episodes": 79,
+          "episodes_with_any_size": 0,
+          "entry_book_keys": [
+            "ask",
+            "bid",
+            "bid_at_touch",
+            "mid",
+            "offer_at_touch",
+            "spread",
+            "spread_ticks"
+          ],
+          "depth_available": false
+        },
+        "period_exposure": {
+          "summed_period_fractions": 10.7827,
+          "market_days": 17,
+          "mean_fraction_per_market_day": 0.6343
+        },
+        "programmes": {
+          "culture_daily": {
+            "pool_per_day": 50.0,
+            "discount_factor": 0.25,
+            "target_size": 500,
+            "required_to_break_even": {
+              "pool_per_day": 50.0,
+              "summed_period_fractions": 10.7827,
+              "pool_dollars_addressable": 539.135,
+              "loss_to_cover_usd": 35.1531,
+              "required_share": 0.065203,
+              "required_share_pct": 6.5203,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.2,
+                "reward_usd_if_that_held_throughout": 107.827,
+                "covers_loss": true,
+                "mean_per_market_day": 6.3428,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.166667,
+                "reward_usd_if_that_held_throughout": 89.8558,
+                "covers_loss": true,
+                "mean_per_market_day": 5.2856,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.090909,
+                "reward_usd_if_that_held_throughout": 49.0123,
+                "covers_loss": true,
+                "mean_per_market_day": 2.8831,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.038462,
+                "reward_usd_if_that_held_throughout": 20.736,
+                "covers_loss": false,
+                "mean_per_market_day": 1.2198,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          },
+          "crypto_1h": {
+            "pool_per_day": 30.0,
+            "discount_factor": 0.25,
+            "target_size": 500,
+            "required_to_break_even": {
+              "pool_per_day": 30.0,
+              "summed_period_fractions": 10.7827,
+              "pool_dollars_addressable": 323.481,
+              "loss_to_cover_usd": 35.1531,
+              "required_share": 0.108671,
+              "required_share_pct": 10.8671,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.2,
+                "reward_usd_if_that_held_throughout": 64.6962,
+                "covers_loss": true,
+                "mean_per_market_day": 3.8057,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.166667,
+                "reward_usd_if_that_held_throughout": 53.9135,
+                "covers_loss": true,
+                "mean_per_market_day": 3.1714,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.090909,
+                "reward_usd_if_that_held_throughout": 29.4074,
+                "covers_loss": false,
+                "mean_per_market_day": 1.7298,
+                "clears_1_dollar_floor_per_market_day": true,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.038462,
+                "reward_usd_if_that_held_throughout": 12.4416,
+                "covers_loss": false,
+                "mean_per_market_day": 0.7319,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          },
+          "efootball_live": {
+            "pool_per_day": 100.0,
+            "discount_factor": 0.5,
+            "target_size": 5000,
+            "required_to_break_even": {
+              "pool_per_day": 100.0,
+              "summed_period_fractions": 10.7827,
+              "pool_dollars_addressable": 1078.27,
+              "loss_to_cover_usd": 35.1531,
+              "required_share": 0.032601,
+              "required_share_pct": 3.2601,
+              "feasible_at_all": true,
+              "why": "OK"
+            },
+            "sensitivity_over_competing_depth": [
+              {
+                "competing_size_at_our_price": 0.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 100.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 250.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 400.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 500.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 1000.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              },
+              {
+                "competing_size_at_our_price": 2500.0,
+                "our_share": 0.0,
+                "reward_usd_if_that_held_throughout": 0.0,
+                "covers_loss": false,
+                "mean_per_market_day": 0.0,
+                "clears_1_dollar_floor_per_market_day": false,
+                "label": "SCENARIO -- competing depth is a parameter, not an observation"
+              }
+            ]
+          }
+        },
+        "detail": "entry_book carries ask, bid, bid_at_touch, mid, offer_at_touch, spread, spread_ticks -- prices only, no sizes. The reward's denominator is the discounted size walked to Target Size, so no share can be formed. This is an ABSENCE OF INPUT, not a reward of zero."
+      }
+    }
+  ]
+}

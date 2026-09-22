@@ -1,0 +1,69 @@
+{
+  "attribution_convention": "average cost per outcome; the TOTAL is convention-free, the SPLIT between channels is not",
+  "by_sport": {
+    "MLB": {
+      "conditions": 464,
+      "pair": 30602.23,
+      "settlement": 14668.43
+    },
+    "MMA": {
+      "conditions": 29,
+      "pair": -3580.06,
+      "settlement": 1783.6
+    },
+    "NBA": {
+      "conditions": 25,
+      "pair": -3483.36,
+      "settlement": 2848.84
+    },
+    "NFL": {
+      "conditions": 367,
+      "pair": 10428.3,
+      "settlement": 41654.55
+    },
+    "Non-Sports": {
+      "conditions": 1384,
+      "pair": -8376.3,
+      "settlement": 23984.76
+    },
+    "Other-Sports": {
+      "conditions": 299,
+      "pair": 26822.24,
+      "settlement": 15174.42
+    },
+    "Soccer": {
+      "conditions": 4676,
+      "pair": 223570.65,
+      "settlement": 82771.14
+    },
+    "Tennis": {
+      "conditions": 2298,
+      "pair": 34270.79,
+      "settlement": -17406.36
+    }
+  },
+  "capital": {
+    "pair": 14558910.11,
+    "settlement": 10468652.07
+  },
+  "capital_share_pct": {
+    "pair": 58.17,
+    "settlement": 41.83
+  },
+  "conditions_attributed": 9542,
+  "conditions_purely_directional": 4540,
+  "conditions_with_any_matched_pair": 5002,
+  "fees": "GROSS -- global Polymarket CLOB, not the PMUS schedule",
+  "profit": {
+    "pair": 310254.49,
+    "settlement": 165479.38,
+    "total": 475733.87
+  },
+  "profit_share_pct": {
+    "pair": 65.22,
+    "settlement": 34.78
+  },
+  "skipped": {
+    "no_resolved_settlement": 8210
+  }
+}

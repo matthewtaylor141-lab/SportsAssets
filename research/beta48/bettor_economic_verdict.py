@@ -1,0 +1,432 @@
+"""The economic verdict: does any declared candidate qualify?
+
+WHAT THIS CLOSES. `bettor_policy_final` ran C4 at a reward of ZERO and
+reported the BREAK-EVEN rate, because the venue's incentive terms had
+never been retrieved. They have been now -- unauthenticated, on
+2026-09-22, from `GET /v1/incentives` -- so the hurdle can be compared
+against a real schedule instead of left open.
+
+THE THREE KINDS OF EVIDENCE, KEPT APART AND NEVER ADDED:
+
+  ACTUAL ACCOUNT      what the venue's own records say happened. Fees
+                      and rebates on 3,285 real executions; the
+                      account's current position state.
+  DEVELOPMENT REPLAY  policies run over a captured corpus with
+                      tape-backed execution. Simulated. The corpus is
+                      fully consumed, so nothing here is out of sample.
+  PROSPECTIVE         what a future measurement could establish, and
+                      what it cannot.
+
+THE REWARD IS COMPUTED, NOT ASSUMED. `bettor_incentive_score`
+implements the documented rules -- the discounted walk to Target Size,
+per-side normalisation, our own order's effect on eligibility -- and is
+pinned against the venue's own worked example. What is assumed here is
+ONE thing, stated plainly and carried into every output:
+
+    THE BOOK IS TAKEN AT ENTRY AND HELD CONSTANT for the episode's
+    life. The corpus has one book per episode entry, not a second-by-
+    second ladder, so a reward integrated over real snapshots cannot be
+    computed from it. This is exactly the measurement the observation
+    release exists to take, and until it is taken the reward figure
+    here is an ESTIMATE UNDER A STATED ASSUMPTION, not a measurement.
+
+AND THE CORPUS MARKETS ARE NOT THE PROGRAMME MARKETS. The 12-market
+corpus was captured for a different purpose; the retrieved programmes
+run on culture, crypto and eFootball markets. Applying those terms to
+these books is a TRANSFER, and a transfer is an assumption too.
+
+Run:  python research/beta48/bettor_economic_verdict.py
+"""
+from __future__ import annotations
+
+import collections
+import datetime as dt
+import json
+import os
+import sys
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+sys.path.insert(0, HERE)
+
+import bettor_episodes as epi                                # noqa: E402
+import bettor_incentive_score as inc                         # noqa: E402
+import bettor_policy_final as pf                             # noqa: E402
+import bettor_prints as prints_mod                           # noqa: E402
+
+OUT = os.path.join(HERE, "acceptance", "economic_verdict.json")
+
+# ── the retrieved programme terms ────────────────────────────────────
+#
+# Retrieved 2026-09-22T18:14Z from the unauthenticated
+# `GET /v1/incentives`. These are the venue's numbers, not ours.
+PROGRAMMES = {
+    "culture_daily": inc.Program(
+        market_slug="(transferred)", program_id="culture_low_20260921",
+        period="daily_event", reward_pool=50.0, discount_factor=0.25,
+        target_size=500),
+    "crypto_1h": inc.Program(
+        market_slug="(transferred)", program_id="crypto_1h",
+        period="daily_event", reward_pool=30.0, discount_factor=0.25,
+        target_size=500),
+    "efootball_live": inc.Program(
+        market_slug="(transferred)", program_id="efootball_live",
+        period="daily_event", reward_pool=100.0, discount_factor=0.50,
+        target_size=5000),
+}
+
+# The documented minimum payout, and the three candidate aggregations
+# the documentation does NOT settle between.
+MIN_PAYOUT = 1.00
+A1 = "PER_MARKET_PER_DATE"      # each (market, date) must clear $1
+A2 = "PER_DATE_ALL_MARKETS"     # a day's total across markets must clear
+A3 = "PER_PROGRAMME_PERIOD"     # the whole programme period must clear
+
+CLIP = 100.0                    # contracts per side, as C4 quotes
+
+
+def _t(s):
+    if not s:
+        return None
+    try:
+        return dt.datetime.fromisoformat(s).timestamp()
+    except ValueError:
+        return None
+
+
+# ── WHAT THE CORPUS ACTUALLY CARRIES, AND WHAT IT DOES NOT ───────────
+#
+# MEASURED, NOT ASSUMED. An episode's `entry_book` is
+#
+#     {"bid": 0.72, "ask": 0.73, "spread": 0.01, "spread_ticks": 1,
+#      "mid": 0.725, "bid_at_touch": true, "offer_at_touch": true}
+#
+# -- PRICES ONLY. There are no sizes at any level, on either side.
+#
+# The reward formula's denominator is the DISCOUNTED SIZE walked from
+# the best price out to Target Size. With no sizes there is no walk, no
+# denominator, and no share. So the reward is NOT COMPUTABLE from this
+# corpus. It does not compute to zero; zero would be a finding, and
+# this is an absence of input.
+#
+# The first version of this module read the book with a parser that
+# returned None on every episode and then reported a gross reward of
+# $0.0000 across the board. That number was an artifact of the reader,
+# and reporting it as a result would have been a false negative dressed
+# as a measurement. It is named here so it cannot come back.
+NOT_COMPUTABLE = "REWARD_NOT_COMPUTABLE_FROM_THIS_CORPUS"
+
+# The competing sizes the sensitivity is run at. These are SCENARIO
+# PARAMETERS, not observations -- the whole point is that the corpus
+# cannot supply the real ones.
+COMPETING_DEPTHS = (0.0, 100.0, 250.0, 400.0, 500.0, 1000.0, 2500.0)
+
+
+def corpus_supplies_depth(eps) -> dict:
+    """Does any episode carry a size anywhere in its book? Checked."""
+    keys, with_size = set(), 0
+    for e in eps:
+        b = e.get("entry_book")
+        if isinstance(b, dict):
+            keys |= set(b)
+            if any(k in b for k in ("bid_size", "ask_size", "bids", "asks",
+                                    "bid_levels", "ask_levels",
+                                    "multi_level_depth")):
+                with_size += 1
+    return {"episodes": len(eps), "episodes_with_any_size": with_size,
+            "entry_book_keys": sorted(keys),
+            "depth_available": with_size > 0}
+
+
+def period_exposure(eps) -> dict:
+    """How much of a daily period C4's quotes are actually resting for.
+
+    This IS computable without depth, and it is the multiplier the
+    required-share calculation needs: a pool is earned over a period,
+    and an episode that rests two hours can earn at most two hours of
+    it.
+    """
+    period_s = 86400.0
+    total_frac, market_days = 0.0, set()
+    for e in eps:
+        t0, t1 = _t(e.get("t0")), _t(e.get("t_end"))
+        if t0 is None or t1 is None or t1 <= t0:
+            continue
+        total_frac += min(1.0, (t1 - t0) / period_s)
+        market_days.add((e.get("slug"), (e.get("t0") or "")[:10]))
+    return {"summed_period_fractions": round(total_frac, 4),
+            "market_days": len(market_days),
+            "mean_fraction_per_market_day":
+                round(total_frac / len(market_days), 4)
+                if market_days else None}
+
+
+def required_share(loss_usd, prog, exposure) -> dict:
+    """The share of the pool C4 must win to stop losing money.
+
+    Computable WITHOUT depth, because it inverts the formula rather
+    than evaluating it: reward = pool x share x period-fraction, so
+    share = loss / (pool x summed period-fractions).
+    """
+    denom = prog.reward_pool * exposure["summed_period_fractions"]
+    if denom <= 0:
+        return {"required_share": None, "why": "NO_RESTING_TIME"}
+    share = loss_usd / denom
+    return {"pool_per_day": prog.reward_pool,
+            "summed_period_fractions": exposure["summed_period_fractions"],
+            "pool_dollars_addressable": round(denom, 4),
+            "loss_to_cover_usd": round(loss_usd, 4),
+            "required_share": round(share, 6),
+            "required_share_pct": round(100.0 * share, 4),
+            "feasible_at_all": share <= 1.0,
+            "why": "OK" if share <= 1.0 else
+                   "EXCEEDS_100_PCT_OF_THE_ADDRESSABLE_POOL"}
+
+
+def share_at_depth(prog, our_price, our_size, competing, walk=None) -> float:
+    """Our share when the rest of the side holds `competing` at our price.
+
+    SCENARIO. The competing size is a parameter here, not an
+    observation, and the returned share inherits that status.
+    """
+    levels = [(our_price, competing)] if competing > 0 else []
+    r = inc.snapshot_share(levels, "BID", prog, our_price, our_size,
+                           walk or inc.WALK_WHOLE_LEVEL)
+    return r["share"] if r["qualifies"] else 0.0
+
+
+def apply_floor(rows, aggregation):
+    """The $1 minimum, applied to the unit the aggregation names.
+
+    WHICH UNIT IS NOT DOCUMENTED. A response grouped by market and date
+    does not prove earnings are combined at that grain before the
+    minimum bites, so all three candidates are carried and the verdict
+    reports whether they disagree.
+    """
+    if aggregation == A1:
+        key = lambda r: (r["slug"], r["date"])          # noqa: E731
+    elif aggregation == A2:
+        key = lambda r: (r["date"],)                    # noqa: E731
+    else:
+        key = lambda r: ("PROGRAMME",)                  # noqa: E731
+    buckets = collections.defaultdict(float)
+    for r in rows:
+        buckets[key(r)] += r["reward_gross"]
+    paid = sum(v for v in buckets.values() if v >= MIN_PAYOUT)
+    dropped = sum(v for v in buckets.values() if v < MIN_PAYOUT)
+    return {"aggregation": aggregation, "units": len(buckets),
+            "units_paid": sum(1 for v in buckets.values()
+                              if v >= MIN_PAYOUT),
+            "reward_paid": round(paid, 4),
+            "reward_forfeited_to_floor": round(dropped, 4)}
+
+
+def drawdown(eps):
+    """Peak-to-trough on the episode cash series, in entry order."""
+    ordered = sorted((e for e in eps if e.get("t0")), key=lambda e: e["t0"])
+    run, peak, dd = 0.0, 0.0, 0.0
+    for e in ordered:
+        run += e.get("total_if_residual_realises", 0.0)
+        peak = max(peak, run)
+        dd = min(dd, run - peak)
+    return round(dd, 4)
+
+
+def residual(eps):
+    """What is still open when the replay ends, kept apart from cash."""
+    contracts = sum(abs(e.get("residual_contracts", {})
+                        .get("net_directional", 0.0)) for e in eps)
+    value = sum(e.get("residual_value", 0.0) for e in eps
+                if not e.get("residual_is_cash"))
+    unresolved = sum(1 for e in eps
+                     if abs(e.get("residual_contracts", {})
+                            .get("net_directional", 0.0)) > 1e-9)
+    return {"open_episodes": unresolved,
+            "net_directional_contracts": round(contracts, 2),
+            "residual_value_usd": round(value, 4),
+            "note": "residual value is a MARK, not cash. It is reported "
+                    "beside net P&L and never inside it."}
+
+
+def turnover(eps, days):
+    """Contracts and notional the replay actually transacted."""
+    ctr = sum(sum(abs(x) for x in e.get("fill_sizes") or ()) for e in eps)
+    notional = 0.0
+    for e in eps:
+        for px, sz in zip(e.get("fill_prices") or (),
+                          e.get("fill_sizes") or ()):
+            try:
+                notional += abs(float(px) * float(sz))
+            except (TypeError, ValueError):
+                pass
+    return {"contracts": round(ctr, 2), "notional_usd": round(notional, 2),
+            "days": days,
+            "notional_per_day": round(notional / days, 2) if days else None}
+
+
+def main():
+    if not prints_mod.tape_dir():
+        print("NO TAPE -- refusing to report a tape-backed result without "
+              "the tape.")
+        return 1
+
+    print("=" * 78)
+    print("ECONOMIC VERDICT -- DEVELOPMENT REPLAY (simulated execution)")
+    print("These are NOT account results. See the ACTUAL section below.")
+    print("=" * 78)
+
+    out = {"verdict": "BETTOR_ECONOMIC_VERDICT_V1",
+           "assumptions": {
+               "book": "ENTRY BOOK HELD CONSTANT for the episode's life -- "
+                       "the corpus has one book per episode, not a ladder "
+                       "time series",
+               "transfer": "the retrieved programme terms are applied to a "
+                           "corpus captured on OTHER markets",
+               "execution": "tape-backed fills, queue fraction swept",
+               "corpus": "fully consumed -- nothing here is out of sample"},
+           "programmes_retrieved_at": "2026-09-22T18:14Z (unauthenticated)",
+           "candidates": []}
+
+    # ── the two declared candidates the directive names ──────────────
+    wanted = {"C3  inventory-aware", "C4  incentive-aware LP"}
+    for name, pol in pf.CANDIDATES:
+        if name not in wanted:
+            continue
+        for q in pf.QFRACS:
+            p = epi.dataclasses.replace(pol, queue_ahead_fraction=q)
+            eps = epi.run_all(size=CLIP, rebates_on=True, policy=p,
+                              use_tape=True)
+            s = pf.summarise(eps)
+            assert s["snapshot_intervals"] == 0, "snapshot fallback leaked"
+
+            days = len({(e.get("t0") or "")[:10] for e in eps if e.get("t0")})
+            row = {"candidate": name, "qfrac": q,
+                   "net_usd": s["net_usd"],
+                   "capital_hours": s["capital_hours"],
+                   "per_capital_hour": s["per_capital_hour"],
+                   "drawdown_usd": drawdown(eps),
+                   "residual": residual(eps),
+                   "turnover": turnover(eps, days),
+                   "episodes": s["episodes"], "any_fill": s["any_fill"]}
+
+            if name.startswith("C4"):
+                row["incentive"] = _incentive_block(eps, s)
+            out["candidates"].append(row)
+
+    _report(out)
+    with open(OUT, "w") as fh:
+        json.dump(out, fh, indent=2, default=str)
+    print("\nwritten: %s" % OUT)
+    return 0
+
+
+def _incentive_block(eps, s):
+    """C4 against the retrieved terms -- and what the corpus cannot say.
+
+    Three separate statements, never merged:
+      1. whether the reward is COMPUTABLE from this corpus (it is not,
+         and why);
+      2. the REQUIRED SHARE, which inverts the formula and needs no
+         depth;
+      3. a labelled SENSITIVITY over competing depth, which is a
+         scenario and says so.
+    """
+    depth = corpus_supplies_depth(eps)
+    exposure = period_exposure(eps)
+    loss = -s["net_usd"]
+    block = {"computable": depth["depth_available"],
+             "why_not": None if depth["depth_available"] else NOT_COMPUTABLE,
+             "corpus_depth_check": depth,
+             "period_exposure": exposure,
+             "programmes": {}}
+    if not depth["depth_available"]:
+        block["detail"] = (
+            "entry_book carries %s -- prices only, no sizes. The reward's "
+            "denominator is the discounted size walked to Target Size, so "
+            "no share can be formed. This is an ABSENCE OF INPUT, not a "
+            "reward of zero." % ", ".join(depth["entry_book_keys"]))
+
+    for pname, prog in PROGRAMMES.items():
+        req = required_share(loss, prog, exposure)
+        sens = []
+        # The clip rests at the touch, so our price is the best price;
+        # only the competing size at that level is unknown.
+        for c in COMPETING_DEPTHS:
+            sh = share_at_depth(prog, 0.50, CLIP, c)
+            reward = (prog.reward_pool * sh
+                      * exposure["summed_period_fractions"])
+            per_unit = (reward / exposure["market_days"]
+                        if exposure["market_days"] else 0.0)
+            sens.append({
+                "competing_size_at_our_price": c,
+                "our_share": round(sh, 6),
+                "reward_usd_if_that_held_throughout": round(reward, 4),
+                "covers_loss": reward >= loss,
+                "mean_per_market_day": round(per_unit, 4),
+                "clears_1_dollar_floor_per_market_day":
+                    per_unit >= MIN_PAYOUT,
+                "label": "SCENARIO -- competing depth is a parameter, "
+                         "not an observation"})
+        block["programmes"][pname] = {
+            "pool_per_day": prog.reward_pool,
+            "discount_factor": prog.discount_factor,
+            "target_size": prog.target_size,
+            "required_to_break_even": req,
+            "sensitivity_over_competing_depth": sens,
+        }
+    return block
+
+
+def _report(out):
+    print()
+    print("%-22s %5s %9s %9s %10s %9s %11s" % (
+        "candidate", "qfrac", "net$", "drawdn$", "cap_hrs", "resid_ct",
+        "per_cap_hr"))
+    print("-" * 82)
+    for r in out["candidates"]:
+        print("%-22s %5.2f %9.2f %9.2f %10.1f %9.1f %11s" % (
+            r["candidate"], r["qfrac"], r["net_usd"], r["drawdown_usd"],
+            r["capital_hours"],
+            r["residual"]["net_directional_contracts"],
+            ("%.6f" % r["per_capital_hour"])
+            if r["per_capital_hour"] is not None else "-"))
+
+    print()
+    print("=" * 78)
+    print("C4 AGAINST THE RETRIEVED PROGRAMME TERMS")
+    print("=" * 78)
+    for r in out["candidates"]:
+        if "incentive" not in r:
+            continue
+        b = r["incentive"]
+        print("\nqfrac %.2f   trading net $%.2f   capital-hours %.1f"
+              % (r["qfrac"], r["net_usd"], r["capital_hours"]))
+        if not b["computable"]:
+            print("  REWARD NOT COMPUTABLE FROM THIS CORPUS (%s)"
+                  % b["why_not"])
+            print("  %s" % b["detail"])
+        ex = b["period_exposure"]
+        print("  resting exposure: %.4f summed period-fractions over %d "
+              "market-days (mean %.4f of a day each)"
+              % (ex["summed_period_fractions"], ex["market_days"],
+                 ex["mean_fraction_per_market_day"] or 0.0))
+        for pname, p in b["programmes"].items():
+            q = p["required_to_break_even"]
+            print("  %-16s pool $%-5.0f -> addressable $%8.4f; "
+                  "REQUIRED SHARE %.2f%%  %s"
+                  % (pname, p["pool_per_day"], q["pool_dollars_addressable"],
+                     q["required_share_pct"],
+                     "" if q["feasible_at_all"] else "** IMPOSSIBLE **"))
+            print("      scenario: competing size at our price -> share -> "
+                  "reward (covers? / clears $1/market-day?)")
+            for sv in p["sensitivity_over_competing_depth"]:
+                print("        %7.0f  share %7.4f  $%8.4f   %-7s %s"
+                      % (sv["competing_size_at_our_price"], sv["our_share"],
+                         sv["reward_usd_if_that_held_throughout"],
+                         "COVERS" if sv["covers_loss"] else "no",
+                         "floor-ok" if
+                         sv["clears_1_dollar_floor_per_market_day"]
+                         else "below-$1"))
+
+
+if __name__ == "__main__":
+    sys.exit(main())

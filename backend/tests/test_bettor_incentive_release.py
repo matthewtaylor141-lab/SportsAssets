@@ -988,8 +988,45 @@ def test_no_test_here_builds_its_own_event_loop():
 
     Running this file alone hid it completely. It only appeared when
     the selection widened enough to put another async suite after it.
+
+    THE CHECK IS AST-BASED, not a grep. A grep for these names finds
+    them in THIS function's own assertions, so a text search could
+    never pass -- which is how the first version of this guard was
+    written, and it failed on the first run that included it. An
+    attribute reference is a call; a string constant is a sentence
+    about one.
     """
-    src = open(os.path.join(HERE, "test_bettor_incentive_release.py"),
-               encoding="utf-8").read()
-    assert "new_event_loop" not in src
-    assert "run_until_complete" not in src
+    tree = ast.parse(open(os.path.join(HERE,
+                                       "test_bettor_incentive_release.py"),
+                          encoding="utf-8").read())
+    banned = {"new_event_loop", "run_until_complete", "get_event_loop"}
+    found = sorted({n.attr for n in ast.walk(tree)
+                    if isinstance(n, ast.Attribute) and n.attr in banned})
+    assert not found, "this file calls %s" % found
+
+
+def test_resubscriptions_are_counted_per_epoch_crossed_not_per_detection():
+    """THE RECONNECT-BUDGET DEFECT, pinned.
+
+    The loop polls every 0.5 s while the stream reconnects on its own
+    thread, so the epoch can advance several times between two polls.
+    Counting one resubscription per DETECTED change makes the
+    resubscribe ceiling -- the bound that exists specifically to catch
+    a subscribe storm -- the one bound that does not bind.
+    """
+    src = _code_only("workers/bettor_incentive_observe.py")
+    assert "epoch - last_epoch" in src, "the delta is not computed"
+    # And the arithmetic itself: 12 slugs is one batch, five epochs
+    # crossed is five batch-sets, not one.
+    b = bud.ReconnectBounds(max_reconnects=100, max_resubscribes=4)
+    b.note_resubscribe(1 * 5)
+    v = b.check(5)
+    assert v["ok"] is False and v["why"] == bud.RC_RESUBSCRIBES
+    assert v["this_boot"]["resubscribes"] == 5
+
+
+def test_a_single_epoch_step_still_counts_one_batch_set():
+    b = bud.ReconnectBounds(max_reconnects=100, max_resubscribes=4)
+    b.note_resubscribe(1)
+    assert b.check(1)["ok"] is True
+    assert b.check(1)["this_boot"]["resubscribes"] == 1

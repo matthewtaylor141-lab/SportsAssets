@@ -1,0 +1,393 @@
+{
+  "demo": "BETTOR_MANAGEMENT_DEMO_V1",
+  "policy": "C3",
+  "queue_fraction": 0.25,
+  "orders_sent": 0,
+  "execution": "REPLAY against the venue's time-and-sales tape; NOT account executions",
+  "episodes": 420,
+  "status_counts": {
+    "FLAT_PAIRED": 60,
+    "NEVER_FILLED": 358,
+    "FLAT_EXITED_TAKER": 2
+  },
+  "decisions": [
+    {
+      "stage": "1  ENTRY -- is this market worth quoting at all?",
+      "label": "REPLAY -- tape-priced, NOT an execution",
+      "supported": true,
+      "inputs_at_decision_time": {
+        "slug": "aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi",
+        "at": "2026-09-13T20:32:19.802096+00:00",
+        "best_bid": 0.71,
+        "best_ask": 0.73,
+        "spread_ticks": 2,
+        "mid": 0.72,
+        "depth_at_touch": "NOT OBSERVABLE in this corpus -- prices only",
+        "known_at_this_instant": "the book and the clock. Nothing about what the price later did."
+      },
+      "alternatives_considered": [
+        {
+          "action": "quote both sides",
+          "admitted": true
+        },
+        {
+          "action": "quote one side only",
+          "admitted": false,
+          "why": "the policy is two-sided; a one-sided quote is a directional bet, which is a different mandate"
+        },
+        {
+          "action": "stand aside",
+          "admitted": false,
+          "why": "spread 2 ticks >= the 2-tick minimum"
+        }
+      ],
+      "economics": {
+        "expected_gross_if_both_legs_fill_usd": 2.0,
+        "maker_rebate_both_legs_usd": 0.51,
+        "capital_committed_usd": 113.1793,
+        "uncertainty": "whether EITHER leg fills. Across the corpus 358 of 420 episodes never filled at all (85%)."
+      },
+      "action": "QUOTE BOTH SIDES at 0.71 / 0.73, 100 contracts",
+      "reason": "the spread clears the minimum and the book is two-sided, so a paired fill is worth the spread less fees. The engine does not forecast direction; it is paid for the spread.",
+      "case_study_mechanism": "Two-sided market making -- the mechanism the maker case studies describe: earn the spread and the maker rebate, avoid carrying direction.",
+      "evidence": "entry rule frozen in Policy(min_spread_ticks=2); 420 episodes admitted from the corpus"
+    },
+    {
+      "stage": "2  QUOTE PLACEMENT -- where in the book?",
+      "label": "REPLAY -- tape-priced, NOT an execution",
+      "supported": true,
+      "inputs_at_decision_time": {
+        "best_bid": 0.71,
+        "best_ask": 0.73,
+        "our_bid": 0.71,
+        "our_offer": 0.73,
+        "queue_position": "NOT OBSERVABLE -- see the unsupported list"
+      },
+      "alternatives_considered": [
+        {
+          "action": "AT_TOUCH (join the best price)",
+          "chosen": true
+        },
+        {
+          "action": "improve by one tick",
+          "why_not": "costs a tick of edge on every fill to buy queue priority that cannot be measured"
+        },
+        {
+          "action": "DEEPER_1 (one tick behind)",
+          "why_not": "better price conditional on filling, worse odds of filling; the corpus already shows fills are scarce"
+        }
+      ],
+      "economics": {
+        "edge_per_paired_fill_usd": 2.0,
+        "queue_uncertainty": "swept, not known: qfrac 0.00/0.25/0.50/1.00. Every fill count in this demonstration is reported at qfrac 0.25.",
+        "capital_committed_usd": 113.1793
+      },
+      "action": "JOIN THE TOUCH on both sides",
+      "reason": "the engine cannot observe queue position, so paying a tick for priority buys something unmeasurable. Joining is the only placement whose cost is known.",
+      "case_study_mechanism": "Passive liquidity provision at the touch.",
+      "evidence": "placement=AT_TOUCH, frozen; queue effect swept across four fractions rather than assumed"
+    },
+    {
+      "stage": "3  SIZE -- how many contracts?",
+      "label": "REPLAY -- tape-priced, NOT an execution",
+      "supported": false,
+      "inputs_at_decision_time": {
+        "clip": 100.0,
+        "book_depth": "NOT OBSERVABLE -- the sizing input is missing"
+      },
+      "alternatives_considered": [
+        {
+          "action": "fixed clip",
+          "chosen": true
+        },
+        {
+          "action": "size to a fraction of resting depth",
+          "why_not": "the corpus carries no depth, so this cannot be computed, let alone validated"
+        }
+      ],
+      "economics": {
+        "capital_per_side_usd": 71.0,
+        "uncertainty": "none in the input -- it is a constant"
+      },
+      "action": "FIXED 100-CONTRACT CLIP",
+      "reason": "there is no size model. This is stated as a LIMITATION rather than presented as a decision: the engine does not size to depth, imbalance or volatility.",
+      "case_study_mechanism": "n/a -- no case study supports a sizing rule we have validated.",
+      "evidence": "size is a constant in every run"
+    },
+    {
+      "stage": "4  PARTIAL FILL -- one leg filled, and only partly",
+      "label": "REPLAY -- tape-priced, NOT an execution",
+      "supported": true,
+      "inputs_at_decision_time": {
+        "slug": "aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi",
+        "clip": 100.0,
+        "filled": 52.3425,
+        "leg": [
+          "YES"
+        ],
+        "unmatched_contracts": 52.3425,
+        "known_at_this_instant": "the size that traded against us. Not whether more will follow."
+      },
+      "alternatives_considered": [
+        {
+          "action": "leave the other side resting",
+          "why_not": "it could also fill, doubling exposure before the first leg is matched"
+        },
+        {
+          "action": "cancel the other side",
+          "chosen": true
+        },
+        {
+          "action": "immediately take the other side to flatten",
+          "why_not": "pays the taker fee at once for an exposure that may still be matched passively"
+        }
+      ],
+      "economics": {
+        "unmatched_exposure_usd": 37.16,
+        "maker_rebate_earned_usd": 0.13,
+        "capital_committed_usd": 113.1793,
+        "uncertainty": "43 of 60 filled episodes were partial -- a partial is the NORMAL case, not the exception"
+      },
+      "action": "CANCEL THE RESTING LEG; hold 52.34 unmatched",
+      "reason": "the inventory cap is half a clip. Letting the second side rest while a leg is unmatched is how a market maker becomes a directional trader by accident.",
+      "case_study_mechanism": "Inventory control -- the case-study mechanism that separates market making from position taking.",
+      "evidence": "note recorded on the episode: cancelled the resting leg on the first fill (policy)"
+    },
+    {
+      "stage": "5  COMPLETION -- how does the unmatched leg get closed?",
+      "label": "REPLAY -- tape-priced, NOT an execution",
+      "supported": true,
+      "inputs_at_decision_time": {
+        "unmatched": 52.3425,
+        "elapsed_s": 2105.0,
+        "recovery_rule": "COMPLETE_PAIR"
+      },
+      "alternatives_considered": [
+        {
+          "action": "wait for a passive match",
+          "why_not": "ties capital up for an unbounded time at an unknown probability"
+        },
+        {
+          "action": "complete the pair as a taker",
+          "chosen": true
+        },
+        {
+          "action": "exit the leg as a taker",
+          "why_not": "realises the loss and abandons the $1 pair value"
+        }
+      ],
+      "economics": {
+        "taker_fee_paid_usd": -0.65,
+        "maker_rebate_received_usd": 0.13,
+        "realised_cash_usd": -52.8625,
+        "residual_value_usd": 52.3425,
+        "residual_basis": "MATCHED_PAIR_PAYS_1 -- certain, but not cash until settlement",
+        "net_if_residual_realises_usd": -0.52,
+        "capital_committed_usd": 113.1793,
+        "uncertainty": "NONE on the pair's value -- a matched pair pays exactly $1. The uncertainty is WHEN."
+      },
+      "action": "COMPLETE THE PAIR as a taker",
+      "reason": "a matched pair is worth exactly $1 at settlement, which is certain. Paying the taker fee converts an uncertain directional position into a certain one.",
+      "case_study_mechanism": "Pair completion / netting -- the case-study mechanism for turning a half-filled quote into a riskless holding.",
+      "evidence": "60 of 60 filled episodes reached FLAT_PAIRED"
+    },
+    {
+      "stage": "6  NETTING TO CASH -- can the pair be turned into cash now?",
+      "label": "REPLAY -- tape-priced, NOT an execution",
+      "supported": false,
+      "inputs_at_decision_time": {
+        "matched_pairs": 52.3425,
+        "certain_value_usd": 52.3425,
+        "basis": "MATCHED_PAIR_PAYS_1 -- certain, but not cash until settlement"
+      },
+      "alternatives_considered": [
+        {
+          "action": "merge/net the pair into cash at the venue",
+          "supported": false,
+          "why": "no merge or netting call has been demonstrated against this venue, and none appears in the contract we have exercised. The engine therefore CANNOT release this capital before settlement."
+        },
+        {
+          "action": "hold to settlement",
+          "chosen": true
+        }
+      ],
+      "economics": {
+        "capital_locked_usd": 52.3425,
+        "locked_until": "event settlement",
+        "consequence": "capital-hours accrue at the full committed amount for the whole holding period, and this is the dominant term in every per-capital-hour figure in the economic verdict."
+      },
+      "action": "HOLD TO SETTLEMENT -- because nothing else is available",
+      "reason": "this is a VENUE CAPABILITY LIMIT, not a policy preference. It is reported here rather than implied away.",
+      "case_study_mechanism": "Capital recycling -- the case-study mechanism this engine CANNOT currently perform.",
+      "evidence": "residual_basis on every paired episode: 'certain, but not cash until settlement'"
+    },
+    {
+      "stage": "7  EXIT -- taking a loss rather than carrying a leg",
+      "label": "SCENARIO -- constructed to exercise a path the corpus does not contain",
+      "supported": true,
+      "inputs_at_decision_time": {
+        "observed_taker_exits": 2,
+        "largest_observed_realised_cash_usd": 0.0,
+        "observed_verdict": "the path FIRES but closes nothing -- the recovery window expired before size traded. The corpus does not contain a material loss-taking event.",
+        "recovery_wait_s": 1200.0
+      },
+      "alternatives_considered": [
+        {
+          "action": "keep waiting for a passive match",
+          "why_not": "the recovery window expired; waiting longer is an unbounded commitment of capital at an unknown probability"
+        },
+        {
+          "action": "exit the leg as a taker",
+          "chosen": true
+        },
+        {
+          "action": "complete the pair instead",
+          "why_not": "only available while the opposite side is quotable; the exit path exists for when it is not"
+        }
+      ],
+      "economics": {
+        "observed": "no material exit in this corpus",
+        "scenario": {
+          "label": "SCENARIO -- not observed",
+          "position": "long 100 YES at 0.73",
+          "exit_at_opposite_touch": 0.71,
+          "gross_loss_usd": 2.0,
+          "taker_fee_usd": 1.43,
+          "total_cost_to_flatten_usd": 3.43,
+          "alternative_if_carried": "unbounded until settlement; a YES that settles at 0 loses the full 73.00 USD",
+          "reading": "the exit costs a known 3.43 USD; carrying risks 73.00 USD. That ratio is why the rule exists."
+        },
+        "uncertainty": "the exit price. The scenario prices the exit at the opposite touch, which is the best case for a taker; a wider book costs more."
+      },
+      "action": "EXIT AS TAKER when the recovery window expires",
+      "reason": "a bounded loss taken on time is cheaper than an unbounded carry. The rule is implemented and fires; its ECONOMICS are shown by scenario because the corpus never exercised them.",
+      "case_study_mechanism": "Loss-taking discipline.",
+      "evidence": "2 observed taker exits, both at $0.00 realised -- reported rather than dressed up"
+    },
+    {
+      "stage": "8  HOLDING -- resting through a quiet market",
+      "label": "REPLAY -- tape-priced, NOT an execution",
+      "supported": true,
+      "inputs_at_decision_time": {
+        "quote_horizon_s": 2400.0,
+        "episodes_that_never_filled": 358,
+        "fraction": 0.8524
+      },
+      "alternatives_considered": [
+        {
+          "action": "rest for the full horizon",
+          "chosen": true
+        },
+        {
+          "action": "cancel early and re-quote",
+          "why_not": "under the incentive programme, resting time IS the product being paid for -- cancelling early forfeits qualifying uptime"
+        }
+      ],
+      "economics": {
+        "capital_committed_while_resting_usd": 79.86,
+        "cash_earned_usd": 0.0,
+        "uncertainty": "whether a fill ever arrives. 85% of episodes answer no."
+      },
+      "action": "REST FOR THE FULL HORIZON",
+      "reason": "collateral is committed at entry whether or not a fill arrives, so a quote that never fills still costs capital-hours. That cost is counted, not ignored.",
+      "case_study_mechanism": "Liquidity provision -- the shape an incentive programme pays for, and the reason C4 exists as a separate candidate.",
+      "evidence": "capital-hours integrate collateral_incl_resting over every episode's own life, filled or not"
+    },
+    {
+      "stage": "9  CAPITAL REUSE -- how often can the same dollar work?",
+      "label": "REPLAY -- tape-priced, NOT an execution",
+      "supported": false,
+      "inputs_at_decision_time": {
+        "capital_hours": 27694.6,
+        "episodes": 420,
+        "mean_hours_per_episode": 65.94
+      },
+      "alternatives_considered": [
+        {
+          "action": "recycle on settlement",
+          "chosen": true
+        },
+        {
+          "action": "recycle on netting",
+          "supported": false,
+          "why": "see decision 6 -- not available at this venue"
+        }
+      ],
+      "economics": {
+        "turnover_limit": "a dollar committed to an episode cannot be committed to another until that event settles",
+        "consequence": "supportable turnover is bounded by settlement cadence, not by the engine's speed"
+      },
+      "action": "RECYCLE ONLY ON SETTLEMENT",
+      "reason": "with no netting call, capital velocity is set by how fast events resolve. This is the binding constraint on scale, and it is a venue property.",
+      "case_study_mechanism": "Capital velocity.",
+      "evidence": "capital-hours measured per candidate in economic_verdict.json"
+    },
+    {
+      "stage": "10 INCENTIVE ELIGIBILITY -- does resting here earn a reward?",
+      "label": "SCENARIO -- constructed to exercise a path the corpus does not contain",
+      "supported": true,
+      "inputs_at_decision_time": {
+        "target_size": 500,
+        "our_clip": 100.0,
+        "discount_factor": 0.25,
+        "pool_per_day_usd": 50.0,
+        "competing_depth": "NOT OBSERVABLE in this corpus -- so the rows below are a SCENARIO sweep, not a measurement"
+      },
+      "alternatives_considered": [
+        {
+          "action": "rest at the touch",
+          "chosen": true
+        },
+        {
+          "action": "rest one tick back",
+          "why_not": "the discount factor is 0.25 per tick -- one tick back is a 75% cut to our score"
+        }
+      ],
+      "economics": {
+        "scenario_sweep": [
+          {
+            "competing_at_our_price": 400.0,
+            "qualifies": true,
+            "created_eligibility": true,
+            "our_share": 0.2
+          },
+          {
+            "competing_at_our_price": 450.0,
+            "qualifies": true,
+            "created_eligibility": true,
+            "our_share": 0.181818
+          },
+          {
+            "competing_at_our_price": 496.0,
+            "qualifies": true,
+            "created_eligibility": true,
+            "our_share": 0.167785
+          },
+          {
+            "competing_at_our_price": 500.0,
+            "qualifies": true,
+            "created_eligibility": false,
+            "our_share": 0.166667
+          },
+          {
+            "competing_at_our_price": 1000.0,
+            "qualifies": true,
+            "created_eligibility": false,
+            "our_share": 0.090909
+          }
+        ],
+        "reading": "our 100 contracts create eligibility only where the side already holds 400-499. Below that the side never reaches Target Size; far above it our share is diluted.",
+        "uncertainty": "TOTAL on the competing depth -- this is precisely the quantity the observation release measures."
+      },
+      "action": "REST AT THE TOUCH, and measure the depth before committing",
+      "reason": "the reward is a share of a pool whose denominator is competing size. Without that number the reward cannot be computed, only bracketed.",
+      "case_study_mechanism": "Liquidity-incentive capture.",
+      "evidence": "bettor_incentive_score, pinned against the venue's own worked example (1000 at four levels, DF 0.30 -> 70.6% / 1.9%)"
+    }
+  ],
+  "unsupported": [
+    "3  SIZE -- how many contracts?",
+    "6  NETTING TO CASH -- can the pair be turned into cash now?",
+    "9  CAPITAL REUSE -- how often can the same dollar work?"
+  ]
+}

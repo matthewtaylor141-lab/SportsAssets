@@ -180,6 +180,78 @@ class TestTheModuleDescribesItsOwnLimits:
             m.U_P_FILL, m.U_AS_FILL, m.U_REBATE}
 
     def test_the_fee_schedule_is_the_verified_one(self):
+        """THE REGIME MOVED AND THIS TEST PINNED THE OLD ONE.
+
+        theta_taker went 0.06 -> 0.0695 at 2026-09-17T03:59Z. This
+        assertion held the engine on the JUL2026 coefficient, so every
+        taker fee it computed after the cutover was 13.7% too small --
+        favouring exactly the policies that exit inventory as takers.
+        """
         f = m.describe()["fee_schedule"]
-        assert f["theta_taker"] == 0.06 and f["theta_maker"] == -0.0125
+        assert f["theta_taker"] == 0.0695 and f["theta_maker"] == -0.0125
         assert f["status"] == "VERIFIED"
+
+    def test_it_reproduces_all_five_published_fee_examples(self):
+        """https://docs.polymarket.us/fees, fetched 2026-09-22.
+
+        These are the venue's own worked examples. If the coefficient
+        or the rounding is wrong, they do not reproduce.
+        """
+        for n, p, taker, maker in ((1000, 0.10, -6.26, +1.12),
+                                   (1000, 0.65, -15.81, +2.84),
+                                   (1000, 0.30, -14.60, +2.62),
+                                   (1000, 0.90, -6.26, +1.12),
+                                   (1000, 0.50, -17.38, +3.12)):
+            assert abs(m.fee(p, n, maker=False) - taker) < 0.011
+            assert abs(m.fee(p, n, maker=True) - maker) < 0.011
+
+    def test_the_regime_boundary_is_0000_eastern_not_0359_utc(self):
+        """00:00 ET on 2026-09-17 is 04:00:00Z in EDT (UTC-4).
+
+        Both this engine and forward/fees_v2.py had 03:59Z -- one
+        minute early -- so a fill inside that minute was charged the
+        new coefficient before it applied. Tested AT the boundary and
+        one second before it.
+        """
+        b = m.REGIME_CUTOVER_EPOCH
+        assert b == 1789617600.0
+        import datetime as _dt
+        assert _dt.datetime.fromtimestamp(
+            b, _dt.timezone.utc).isoformat() == "2026-09-17T04:00:00+00:00"
+        # strictly before -> old regime, right up to the last second
+        assert m.theta_taker_at(b - 1.0) == m.THETA_TAKER_JUL2026
+        assert m.theta_taker_at(b - 0.001) == m.THETA_TAKER_JUL2026
+        # AT the boundary -> new regime
+        assert m.theta_taker_at(b) == m.THETA_TAKER_SEP2026
+        assert m.theta_taker_at(b + 0.001) == m.THETA_TAKER_SEP2026
+        # and the minute that used to be mis-charged is now the OLD one
+        assert m.theta_taker_at(b - 60.0) == m.THETA_TAKER_JUL2026
+
+    def test_the_taker_regime_is_selected_by_the_fills_timestamp(self):
+        """The capture straddles the cutover, so one constant is wrong
+        for one side of it whichever value it takes."""
+        before = 1789200000.0          # 2026-09-13
+        after = 1789800000.0           # 2026-09-20
+        assert m.theta_taker_at(before) == m.THETA_TAKER_JUL2026
+        assert m.theta_taker_at(after) == m.THETA_TAKER_SEP2026
+        assert m.theta_taker_at(None) == m.THETA_TAKER_SEP2026
+        # and the fee actually differs across it
+        assert (abs(m.fee(0.50, 1000, maker=False, at_epoch=before))
+                < abs(m.fee(0.50, 1000, maker=False, at_epoch=after)))
+
+    def test_a_multi_level_sweep_is_capped_at_the_cumulative_rounding(self):
+        """The published rule: per-fill rounding, "adjusted so that the
+        total commission collected across the order's fills never
+        exceeds the banker's rounding of the cumulative exact fee. The
+        adjustment can only reduce a fill's charge, never increase it."
+
+        Per-fill rounding alone OVER-charges a sweep; this is the cap.
+        """
+        fills = [(0.13, 1)] * 10
+        capped = m.taker_fee_for_order(fills)
+        per_fill = sum(m.fee(p, n, maker=False) for p, n in fills)
+        assert capped >= per_fill, "the cap may only reduce the charge"
+        # a case where per-fill rounding genuinely over-charges
+        many = [(0.50, 1)] * 7
+        assert m.taker_fee_for_order(many) >= sum(
+            m.fee(p, n, maker=False) for p, n in many)

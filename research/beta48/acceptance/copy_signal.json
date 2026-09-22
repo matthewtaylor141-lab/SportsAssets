@@ -1,0 +1,51 @@
+{
+  "depth_at_detection": {
+    "n": 0,
+    "note": "the `depth` field is present on the record but carries no parseable number on any fill that also has a book -- size available to a copy is therefore NOT ESTABLISHED from this snapshot"
+  },
+  "detection_lag_s": {
+    "max": 127.2,
+    "median": -0.67,
+    "n": 214609,
+    "note": "negative values are a clock-offset artefact between the venue stamp and our detection stamp; the spread of the distribution is the usable part, not its sign",
+    "p10": -1.15,
+    "p90": 1.84
+  },
+  "fills": 214609,
+  "slippage_best_ask_at_detection_minus_their_price": {
+    "fraction_already_moved_against_us": 0.8953,
+    "fraction_still_at_or_below_their_price": 0.1047,
+    "mean": 0.0232,
+    "median": 0.01,
+    "n": 214609,
+    "p10": 0.0,
+    "p90": 0.04
+  },
+  "venue": {
+    "fills_in_a_PMUS_slug_namespace": 0,
+    "note": "PMUS lists under aec/atc/asc/tec. These fills are global Polymarket CLOB slugs (itf, atp, wta, cs2, lal, ucl, epl, ...). Sports overlap; slug namespaces do not, and no market-level linkage between the two venues has ever been established in this repository.",
+    "pmus_prefixes_checked": [
+      "aec",
+      "atc",
+      "asc",
+      "tec"
+    ],
+    "slug_prefixes": {
+      "?": 17822,
+      "atp": 24813,
+      "cfb": 5899,
+      "cs2": 16997,
+      "elc": 3520,
+      "epl": 6845,
+      "fl1": 3014,
+      "itf": 37480,
+      "lal": 7750,
+      "mlb": 10178,
+      "nfl": 3337,
+      "sea": 5268,
+      "spl": 4003,
+      "ucl": 7349,
+      "wta": 11526
+    }
+  }
+}
