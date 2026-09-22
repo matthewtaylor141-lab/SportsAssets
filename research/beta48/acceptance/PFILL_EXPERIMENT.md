@@ -60,25 +60,119 @@ refuses to produce.
 
 ---
 
-## The bound: smallest honest design
+## The recommended numbers
 
-| | |
-|---|---|
-| **markets** | the 12 frozen incentive markets, or a named sports set — one set, fixed before the first order |
-| **clip** | 1–5 contracts per side. Large enough to fill, small enough that the loss ceiling is trivial |
-| **max concurrent orders** | 2 (one per side, one market at a time) |
-| **hard contract cap** | a fixed total across the whole experiment, enforced by the same durable reservation as the request allowance — `bettor_live_control.reserve()` before dispatch, so a crash or an overlapping worker cannot replenish it |
-| **wall-clock window** | one fixed window, no extension, no replacement run |
-| **kill switch** | the existing DB-backed stop control, fail-closed, checked at the same cadence as the observation loop |
-| **loss ceiling** | bounded by construction: worst case is every contract bought at its quoted price and settling worthless |
+These are derived, not chosen. The derivation is below each one.
 
-### What "worst case" actually is
+| parameter | recommended | binds because |
+|---|---|---|
+| **clip** | **5 contracts per side** | banker's rounding |
+| **price band** | **mid ∈ [0.20, 0.80]** | banker's rounding |
+| **market set** | **6 markets, selected by measured depth** — see below | fills must be reachable |
+| **max concurrent two-sided quotes** | **6** (12 resting orders) | committed collateral |
+| **hard contract cap** | **300 filled contracts**, both sides, whole experiment | the $250 cap |
+| **worst-case cash at risk** | **$240** | 300 × max price 0.80 |
+| **pre-trade cap** | **worst_case_remaining_loss ≤ $250**, unchanged | already defined in ECONOMIC_PACKAGE §8 |
+| **wall clock** | one fixed 6-hour window, no extension, no replacement | — |
 
-At a 5-contract clip on both sides of one market at a mid near 0.50, the
-maximum at risk per round trip is about **$5**, plus fees. Multiply by
-the hard contract cap to get the experiment's ceiling. **That number
-must be stated and approved as a cash figure before any order** — not
-derived afterwards.
+### Why clip 5, and why a price band at all
+
+The fee is **banker-rounded to the cent per fill**, so the maker rebate
+at a small clip is not merely small — it is **exactly zero**. The
+minimum clip for a non-zero rebate is `C ≥ 0.4 / p(1−p)`:
+
+| p | 0.50 | 0.30 | 0.20 | 0.10 | 0.05 | 0.02 |
+|---|---|---|---|---|---|---|
+| min contracts | 2 | 2 | 3 | 5 | 9 | 21 |
+
+A clip of 5 inside `mid ∈ [0.20, 0.80]` clears it everywhere in the
+band. Outside the band the required clip rises fast, and a bigger clip
+is a bigger loss ceiling for no extra information — so the band is a
+cost control, not a strategy choice. (If a market below 0.10 is ever
+wanted, the clip must rise to 9, and the contract cap must fall to keep
+$240.)
+
+**What the fees actually are at clip 5** — and the asymmetry is the
+whole economic problem, visible in cents:
+
+| p | maker rebate | taker fee |
+|---|---|---|
+| 0.20 | +$0.0100 (1¢) | −$0.0556 (6¢) |
+| 0.50 | +$0.0156 (2¢) | −$0.0869 (9¢) |
+| 0.80 | +$0.0100 (1¢) | −$0.0556 (6¢) |
+
+### Why the market set cannot be named yet, and the rule that names it
+
+The 12 frozen incentive markets carry **Target Size 500**, which implies
+books deep enough that a 5-contract order may sit behind hundreds and
+**never be reached**. An experiment that returns P_FILL ≈ 0 because the
+clip was invisible has measured nothing.
+
+So the selection rule, fixed now:
+
+> Take the **6 markets with the highest ratio of observed trade flow to
+> median touch depth** over the observation window — the books where a
+> small resting order is actually reachable. Require `mid ∈ [0.20,
+> 0.80]` and `INSTRUMENT_STATE_OPEN` throughout.
+
+That ratio is exactly what the 2026-09-23 observation run measures. The
+two experiments connect: the observation picks the experiment's markets.
+If no market clears a reachability floor, **the honest outcome is to say
+so and not run** — not to quote into books where the answer is known in
+advance.
+
+### Why 300 contracts
+
+Worst case is every filled contract naked and settling worthless:
+
+| cap | worst case | |
+|---|---|---|
+| 200 | $160 | inside |
+| **300** | **$240** | **inside — recommended** |
+| 400 | $320 | exceeds $250 |
+
+300 is the largest round cap that stays inside the existing $250 limit
+at the top of the price band. It is conservative twice over: matched
+pairs have **zero** exposure (a pair pays exactly 1.00), and not every
+fill settles against us.
+
+At clip 5 that is **60 fills**. If the fill rate is 15–30 %, that needs
+roughly 200–400 placements — which the 6-hour window at 6 concurrent
+two-sided quotes supplies.
+
+### Committed collateral, separately
+
+Per ECONOMIC_PACKAGE §8, a two-sided quote of size S encumbers
+`(p_bid + 1 − p_offer)·S` — just under S dollars per contract-pair even
+with **zero** fills. At clip 5 near mid 0.50 that is ≈ **$4.90 per
+market**, so 6 concurrent quotes commit ≈ **$29.40** at any instant.
+That is collateral, not loss, and it is separate from the $240 ceiling.
+
+### The pre-trade check is the real control
+
+`worst_case_remaining_loss ≤ $250` must hold **at the instant each order
+is submitted**, with the pending-order race counted as though every
+resting order fills. Enforced at the order path, not reconciled
+afterwards. The 300-contract cap is a second, cruder backstop; both
+apply, and the durable reservation (`bettor_live_control.reserve()`
+before dispatch) is what makes the contract cap survive a crash or an
+overlapping worker.
+
+### A prerequisite stage, roughly $4
+
+ECONOMIC_PACKAGE §8 lists four things that must be **read from a live
+account** before any capital claim is made, and until they are, the
+conservative assumption stands that resting orders fully encumber:
+
+1. Does a resting order move `UserBalance.openOrders` and `buyingPower`?
+2. Is `UserPosition.qtyAvailable` less than `netPosition` after a fill?
+3. Does the venue net a matched pair, and **when** does the cash leave
+   `unsettledFunds`?
+4. Cancel→acknowledgement latency, and whether a fill lands inside it.
+
+These need one order and a few reads. They should run **first**, as a
+separate sub-stage, because every capital figure above assumes an answer
+to (1).
 
 ---
 
