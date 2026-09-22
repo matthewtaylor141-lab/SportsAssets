@@ -329,16 +329,31 @@ now describes the **process**.
 
 **Worst case under the authorized budget, at 0.10 req/s:**
 
-| counter | cap | seconds of pacing |
+| counter | cap | pacing between first and last START |
 |---|---|---|
-| `max_listing_attempts` | 18 | 180 |
-| `max_bbo_attempts` | 160 | 1,600 |
-| **total outbound requests** | **178** | **1,780** |
+| `max_listing_attempts` | 18 | 180 s |
+| `max_bbo_attempts` | 160 | 1,600 s |
+| **total outbound requests** | **178** | **≈ 1,770 s** |
 
-The absolute deadline is **1,800 s**, so the request budget and the
-deadline bind at very nearly the same point — neither can be exceeded
-by the other running long. Both are durable and survive a restart:
-the counters do not reset and the deadline is an absolute timestamp.
+**These 178 requests are NOT guaranteed to fit.** ≈1,770 s is the
+pacing interval between the *first* and *last* request START — 177
+gaps of 10 s. It excludes response time on every request (up to
+`PROBE_TIMEOUT_S = 8 s` each, and `LISTING_TIMEOUT_S = 20 s` for a
+listing page), every retry backoff, and any `Retry-After` the venue
+imposes. Against an **1,800 s** absolute deadline, the realistic
+outcome under a fully-spent allowance is that **the deadline arrives
+first and some allowance goes unused.**
+
+That is the intended ordering, and it is enforced rather than hoped
+for: `ctl.reserve` refuses with `RESERVATION_DEADLINE_PASSED` once the
+deadline is past, and **nothing is dispatched without a grant**. The
+loop also re-reads the budget every 30 s and `disarm`s the control at
+expiry, so the supervisor's restart does not resume the probe.
+
+```
+THE DEADLINE STOPS DISPATCH REGARDLESS OF UNUSED ALLOWANCE.
+Unused allowance at the deadline is the expected case, not a fault.
+```
 
 **Expected case:** ~6 listing + 40 BBO = **46 requests ≈ 460 s**, after
 which the distinct-market allowance (40) is exhausted and any later
@@ -352,7 +367,7 @@ refresh is refused at the reservation before a request is issued.
 On the last run, obs-stop was issued while the worker sat in an
 `EMPTY_UNIVERSE` backoff. It refused, correctly, and measured nothing.
 
-### 5a. The trigger is the SOCKET, not the HTTP counters
+### 5a. The trigger, and what it does not prove
 
 An earlier draft required `bbo_attempts_reserved` to be **rising** at
 the moment of the stop, and manufactured a discovery refresh (by
@@ -365,20 +380,39 @@ wrong:
   acquisition allowance is already exhausted — which is exactly what a
   40-market budget does within the first eight minutes.
 
-The transport question does not need an HTTP request in flight. The
-trigger is:
+The transport question does not need an HTTP request in flight.
+
+**A FRESH JOURNAL ROW ESTABLISHES RECENT PROCESSING, NOT AN OPEN
+SOCKET.** It says a frame was received, parsed and decided within the
+window. It does not say the connection is open at the instant of
+reading: it could have dropped in between, with the worker either
+reconnecting on a new epoch or sitting disconnected while the last
+rows still read as fresh. Calling that "the socket is open" — as an
+earlier draft did — overstates it.
+
+So the row's own identity is read beside it and must match the process
+and probe under test:
 
 ```
-issue obs-stop when the socket is confirmed open AND fresh evidence
-has arrived:
+issue obs-stop only when ALL of these hold on one obs-live read:
 
-  journal_rows_last_60s  > 0        durable observations, this minute
+  journal_rows_last_60s  > 0        durable observations this minute
   journal_age_s          < 60       the newest row is fresh
+  newest_boot_id         == the boot_id in the running worker's log
+  armed_probe_id         == the probe_id issued by obs-arm
+  newest_stream_epoch    recorded, and unchanged across two reads
 ```
 
-A committed journal row means a frame arrived, parsed, and was
-decided — so the socket is open and delivering. That is the condition,
-read from the database, from the worker's own durable output.
+The identity checks are what stop a row from a *previous* process
+being read as evidence about this one. An epoch that changed between
+two reads means the socket dropped and reconnected, which is itself
+worth recording before stopping.
+
+**Whether the connection was in fact open is settled
+retrospectively**, by the stop receipt: it carries the epoch, the
+frame count and the close verdict from the process that did the
+closing. The live read selects the moment; the receipt supplies the
+proof.
 
 `BETTOR_PROBE_BATCH` is left at its default. No request is issued to
 manufacture a window.
@@ -549,25 +583,68 @@ branch and recorded in §6 then — not before.
 
 ---
 
-## 7b. Forward rollback
+## 7b. Rollback — three tiers, smallest first
 
 **Nothing is reverted by rewinding history.** The tracked branch
-auto-deploys, so a rollback is a commit that moves forward.
+auto-deploys, so every code rollback is a commit that moves forward.
 
-### Tier 1 — stop, no deploy (seconds)
+An earlier draft presented the full `backend/` restoration as *the*
+rollback. That conflates two very different actions: stopping this
+observation loop, and undoing a release. The minimal action comes
+first, and each tier is reached only when the one above it is not
+enough.
+
+### Tier 1 — stop observing. No deploy, seconds.
 
 ```
 render-ops sql obs-stop  confirm=DO
 ```
 
-The loop re-reads the control every 30 s and fails closed. This stops
-observation without touching code, and is the first move in every
-scenario. The budget row additionally disarms itself at the deadline.
+The loop re-reads the control every 30 s and fails closed; an
+unreadable control also stops it. The budget row additionally disarms
+itself at the deadline. **This is the first move in every scenario**,
+and for an ordinary stop it is the only one. It changes no code, so
+every unrelated change and all collected evidence are untouched.
 
-### Tier 2 — restore the running code (one deploy)
+### Tier 2 — forward DEREGISTRATION. One deploy, two lines.
 
-The deployable surface of this release is **four modules**, all
-modifications — no file is added, renamed or deleted under `backend/`:
+For when the database control is not enough: `obs-stop` cannot be
+written, or a running process is not honouring it.
+
+Remove the registration line and its import from
+`backend/sportsassets/workers/all.py`:
+
+```
+-from . import (analytics, bettor_live_loop, bettor_state,
++from . import (analytics, bettor_state,
+...
+-    ("bettor_live", bettor_live_loop.main),
+```
+
+**The supervisor cannot start a loop it is not handed.** Nothing else
+in the release is reverted — the repairs, the telemetry, the stop
+receipt and every unrelated change stay exactly where they are, and no
+evidence is disturbed. This is the same shape as deregistration
+`d161d276`, prepared against the tip it rolls back so it
+fast-forwards.
+
+Verify before pushing, by AST rather than by reading the diff:
+
+```
+python - <<'EOF'
+import ast, sys
+t = ast.parse(open("backend/sportsassets/workers/all.py").read())
+src = ast.dump(t)
+assert "bettor_live_loop" not in src, "still imported or referenced"
+EOF
+```
+
+### Tier 3 — restore the running code. One deploy, last resort.
+
+Only when the release itself is implicated, not merely this loop.
+
+The deployable surface is **four modules**, all modifications — no
+file is added, renamed or deleted under `backend/`:
 
 ```
 backend/sportsassets/bettor_live_control.py        +37
@@ -579,29 +656,25 @@ backend/tests/test_bettor_live_loop.py            +680   (not executed in produc
 
 `backend/Dockerfile` and `render.yaml` are **byte-identical to
 e8f616a**, verified by `git diff e8f616a HEAD -- backend/Dockerfile
-render.yaml` returning empty. So the image build and the service
-configuration are unchanged, and the rollback is a source-only change:
+render.yaml` returning empty — so the image build and the service
+configuration do not change and this is a source-only rollback:
 
 ```
 git fetch origin claude/session-njaewf
 git checkout claude/session-njaewf
 git checkout e8f616a -- backend/
+git diff e8f616a HEAD -- backend/      # MUST BE EMPTY before committing
 git commit -m "forward rollback: backend/ to e8f616a"
 git push origin claude/session-njaewf          # no force
 ```
 
-Because every change under `backend/` is a modification of a file that
-already existed at e8f616a, `git checkout e8f616a -- backend/`
-restores that tree exactly; there is no added file left behind. Verify
-before pushing:
+Because every change under `backend/` modifies a file that already
+existed at e8f616a, this restores that tree exactly — there is no
+added file left behind. **It also discards the repairs**, which is why
+it is third and not first.
 
-```
-git diff e8f616a HEAD -- backend/      # must be EMPTY
-```
-
-The auto-deploy then returns both services to the code that is running
-today. No database change is needed: the stop receipt lives under its
-own `ingestion_state` key and is only ever read.
+No database change is needed at any tier: the stop receipt lives under
+its own `ingestion_state` key and is only ever read.
 
 ---
 

@@ -221,13 +221,25 @@ jobs:
                 #
                 # THE TRIGGER IS THE SOCKET, NOT THE HTTP COUNTERS:
                 #   journal_rows_last_60s > 0  and  journal_age_s < 60
-                # A committed journal row means a frame arrived, parsed and
-                # was decided, so the socket is open and delivering. Requiring
-                # the budget counters to be RISING as well would make the stop
-                # test impossible once the acquisition allowance is spent --
-                # which it is, within the first few minutes of a 40-market
-                # probe -- and would tempt an operator into spending requests
-                # purely to manufacture a window.
+                # Requiring the budget counters to be RISING as well would
+                # make the stop test impossible once the acquisition
+                # allowance is spent -- which it is, within the first few
+                # minutes of a 40-market probe -- and would tempt an operator
+                # into spending requests purely to manufacture a window.
+                #
+                # WHAT A FRESH ROW DOES AND DOES NOT ESTABLISH. It shows that
+                # a frame was received, parsed and decided RECENTLY. It does
+                # NOT show the socket is open at the instant of reading: the
+                # connection could have dropped in between, and the worker
+                # would reconnect (a new epoch) or sit disconnected while the
+                # last rows still look fresh. So the row's OWN IDENTITY is
+                # reported beside it -- newest_boot_id and newest_stream_epoch
+                # -- and the operator must confirm they match the RUNNING
+                # process and the ARMED probe before issuing the stop.
+                # Whether the connection was in fact open is settled
+                # RETROSPECTIVELY by obs-stop-receipt, which carries the
+                # epoch, the frame count and the close verdict from the
+                # process that did the closing.
                 #
                 # The counters are still reported, for the SEPARATE question
                 # of whether acquisition happened to be active at stop time.
@@ -241,7 +253,7 @@ jobs:
                 # written_at is the TIMESTAMPTZ the database set, and is the
                 # right clock for "is it writing right now". The JSONB column
                 # is `record`, not `payload`.
-                obs-live) SQL="SELECT 'journal_rows' AS what, count(*)::text AS v FROM bettor_live_journal UNION ALL SELECT 'journal_newest_written_at', coalesce(max(written_at)::text,'none') FROM bettor_live_journal UNION ALL SELECT 'journal_age_s', coalesce(round(extract(epoch FROM now() - max(written_at))::numeric, 1)::text, 'none') FROM bettor_live_journal UNION ALL SELECT 'journal_rows_last_60s', count(*)::text FROM bettor_live_journal WHERE written_at > now() - interval '60 seconds' UNION ALL SELECT 'observation_only_rows', count(*)::text FROM bettor_live_journal WHERE record->>'observation_basis' = 'OBSERVATION_ONLY' UNION ALL SELECT 'strategy_admitted_rows', count(*)::text FROM bettor_live_journal WHERE record->>'observation_basis' = 'STRATEGY_ADMITTED' UNION ALL SELECT 'distinct_markets_seen', count(DISTINCT market_id)::text FROM bettor_live_journal UNION ALL SELECT 'bbo_attempts_reserved', coalesce((SELECT value->>'bbo_attempts_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'listing_attempts_reserved', coalesce((SELECT value->>'listing_attempts_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'distinct_reserved', coalesce((SELECT value->>'distinct_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'observation_control', coalesce((SELECT value::text FROM ingestion_state WHERE key = 'bettor_live_observation'), 'ROW ABSENT -- NOT OBSERVING');"; TO=30000 ;;
+                obs-live) SQL="SELECT 'journal_rows' AS what, count(*)::text AS v FROM bettor_live_journal UNION ALL SELECT 'journal_newest_written_at', coalesce(max(written_at)::text,'none') FROM bettor_live_journal UNION ALL SELECT 'journal_age_s', coalesce(round(extract(epoch FROM now() - max(written_at))::numeric, 1)::text, 'none') FROM bettor_live_journal UNION ALL SELECT 'journal_rows_last_60s', count(*)::text FROM bettor_live_journal WHERE written_at > now() - interval '60 seconds' UNION ALL SELECT 'observation_only_rows', count(*)::text FROM bettor_live_journal WHERE record->>'observation_basis' = 'OBSERVATION_ONLY' UNION ALL SELECT 'strategy_admitted_rows', count(*)::text FROM bettor_live_journal WHERE record->>'observation_basis' = 'STRATEGY_ADMITTED' UNION ALL SELECT 'distinct_markets_seen', count(DISTINCT market_id)::text FROM bettor_live_journal UNION ALL SELECT 'newest_boot_id', coalesce((SELECT boot_id FROM bettor_live_journal ORDER BY written_at DESC, id DESC LIMIT 1), 'none') UNION ALL SELECT 'newest_stream_epoch', coalesce((SELECT record->>'stream_epoch' FROM bettor_live_journal ORDER BY written_at DESC, id DESC LIMIT 1), 'none') UNION ALL SELECT 'armed_probe_id', coalesce((SELECT value->>'probe_id' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'bbo_attempts_reserved', coalesce((SELECT value->>'bbo_attempts_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'listing_attempts_reserved', coalesce((SELECT value->>'listing_attempts_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'distinct_reserved', coalesce((SELECT value->>'distinct_reserved' FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'none') UNION ALL SELECT 'observation_control', coalesce((SELECT value::text FROM ingestion_state WHERE key = 'bettor_live_observation'), 'ROW ABSENT -- NOT OBSERVING');"; TO=30000 ;;
                 # [R14] READ-ONLY schema metadata. On 2026-09-22 a reservation
                 # UPDATE named ingestion_state.updated_at, a column that does
                 # not exist, and every local fixture had CREATEd the table
