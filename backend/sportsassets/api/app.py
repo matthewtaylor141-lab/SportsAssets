@@ -4356,6 +4356,46 @@ async def api_manual_limit(body: ManualLimitBody,
                                       note=body.note)
 
 
+# ── PROPOSED, NOT DEPLOYED ────────────────────────────────────────────
+# Two read-only routes that expose reconcile_read's EXISTING venue reads
+# over HTTP. Nothing new reaches the venue: reconcile_read.resting_orders
+# and .historical_activity already exist, are already covered by
+# backend/tests/test_reconcile_read.py, and already run under the API
+# service's own credentials. The only thing missing was a route, so the
+# reconciliation job had to fall back on /api/admin/open-orders -- which
+# is a DATABASE read of live_orders WHERE whale_username='manual' and
+# therefore cannot answer "is anything of ours still resting AT THE
+# VENUE".
+#
+# WHY THIS IS THE SMALLEST CHANGE. No new venue capability, no new
+# credential, no new dependency, no write path, no change to any
+# existing route's behaviour. Two GETs behind require_desk, the same
+# guard /api/admin/open-orders already uses, each returning the module's
+# own dict verbatim -- including its `ok`, `complete`, `pages` and
+# `stop_reason` fields, so an incomplete walk cannot be mistaken for an
+# empty book.
+#
+# NOT DEPLOYED. This lives on a branch no service tracks and is offered
+# for review, not shipped. It is the difference between "no resting
+# orders" and "not established", which is currently the one open
+# question in the seven-book reconciliation.
+@app.get("/api/desk/venue-resting-orders",
+         dependencies=[Depends(require_desk)])
+async def api_venue_resting_orders() -> dict:
+    """Resting orders AT THE VENUE, not the live_orders view."""
+    from .reconcile_read import resting_orders
+
+    return resting_orders()
+
+
+@app.get("/api/desk/venue-activity", dependencies=[Depends(require_desk)])
+async def api_venue_activity(since_iso: str | None = None) -> dict:
+    """TRADE and POSITION_RESOLUTION activity, paged and bounded."""
+    from .reconcile_read import historical_activity
+
+    return historical_activity(since_iso=since_iso)
+
+
 @app.get("/api/admin/open-orders", dependencies=[Depends(require_desk)])
 async def api_open_orders() -> dict:
     """Every working desk order, both venues, one list: PM resting
