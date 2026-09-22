@@ -66,116 +66,32 @@ jobs:
           python -m pip install --quiet pytest pytest-asyncio
 
       - name: Prove the reconciler cannot trade, BEFORE giving it keys
-        working-directory: backend
         run: |
           set -e
-          # This ordering is the control. The credentials are not in the
-          # environment of this step, and the job does not reach the
-          # account until these pass.
+          # THE ORDERING IS THE CONTROL. Credentials are not in this
+          # step's environment and the job does not reach the account
+          # until these pass. BOTH reconcilers are proven: the original
+          # module, and the seven-book reader that makes its own calls.
           python -m pytest -q -p no:randomly \
-            tests/test_venue_reconcile_is_read_only.py
+            backend/tests/test_venue_reconcile_is_read_only.py \
+            research/beta48/test_venue_seven_books_read_only.py
 
-      - name: Reconcile
-        working-directory: backend
+      - name: Seven-book reconciliation, counted and capped
         env:
           PMUS_DOMAIN_RESERVATION: pmus-public-read-global
           PMUS_KEY_ID: ${{ secrets.PMUS_KEY_ID }}
           PMUS_SECRET_KEY: ${{ secrets.PMUS_SECRET_KEY }}
-          RENDER_KEY: ${{ secrets.RENDER_API_KEY }}
-          RECONCILE_OUT: reconcile_${{ github.run_id }}.json
+          MAX_REQUESTS: '14'
+          # `since_days` is the existing input; the schema is fixed by
+          # the default branch's copy of this file, so it carries the
+          # window rather than a new input being added to production.
           SINCE_DAYS: ${{ inputs.since_days }}
-          HEAD: ${{ inputs.head }}
+          SEVEN_SLUGS: >-
+            aec-wta-cadbra-sartor-2026-09-08,aec-wta-ireesc-mirbul-2026-09-09,aec-itfme-trimcc-xavpal-2026-09-09,astatc-cs2-ice-nemi-2026-09-09-map1,atc-spl-fat-dir-2026-09-09-dir,aec-itfwo-yuhwan-yufren-2026-09-10,astatc-cs2-mibr-bb-2026-09-10-map2
         run: |
-          set -o pipefail
-          # THE DSN COMES FROM RENDER, NOT FROM A SECRET. There is no
-          # DATABASE_URL secret in this repository; research-sql reaches
-          # the database by asking Render's API for the connection
-          # string, and so does this. Without it asyncpg silently falls
-          # back to localhost and the job reports "could not connect to
-          # Postgres" after six retries against 127.0.0.1, which is what
-          # the first run did.
-          #
-          # The string and its password are masked before they can reach
-          # a log line.
           set -e
-          [ -z "$RENDER_KEY" ] && { echo "::error::RENDER_API_KEY is not set; cannot resolve the database"; exit 1; }
-          echo "::add-mask::$RENDER_KEY"
-          API=https://api.render.com/v1
-          get() { curl -sS --max-time 45 -H "Authorization: Bearer $RENDER_KEY" -H "Accept: application/json" "$API$1"; }
-          PG=$(get "/postgres?name=sportsassets-db&limit=20" | jq -r '.[]? | select(.postgres.name=="sportsassets-db") | .postgres.id' | head -1)
-          [ -z "$PG" ] && { echo "::error::no database named sportsassets-db"; exit 1; }
-          get "/postgres/$PG/connection-info" > /tmp/ci.json
-          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
-          PW=$(jq -r '.password // empty' /tmp/ci.json)
-          [ -n "$PW" ] && echo "::add-mask::$PW"
-          [ -n "$EXT" ] && echo "::add-mask::$EXT"
-          [ -z "$EXT" ] && { echo "::error::no external connection string returned"; exit 1; }
-          export DATABASE_URL="$EXT"
-          echo "database resolved: sportsassets-db ($PG)"
-
-          set +e
-          python -m sportsassets.venue_reconcile > recon_stdout.txt 2> recon_stderr.txt
-          RC=$?
-          set -e
-
-          # STDERR FIRST, ALWAYS. A failure printed after two hundred
-          # lines of summary is a failure nobody reads, and the last two
-          # runs each cost a round trip because the traceback was buried
-          # behind an artifact upload in the log tail.
-          if [ "$RC" -ne 0 ]; then
-            echo "== RECONCILIATION FAILED (rc=$RC) =="
-            sed -n '1,60p' recon_stderr.txt
-            echo "== end of error =="
-            echo
-          fi
-
-          echo "== SUMMARY =="
-          cat recon_stdout.txt
-
-          echo
-          echo "== ROW DETAIL (first ${HEAD:-80}) =="
-          python - <<'PY' || true
-          import json, os, glob
-          f = sorted(glob.glob("reconcile_*.json"))
-          if not f:
-              print("no JSON produced")
-              raise SystemExit(0)
-          d = json.load(open(f[-1]))
-          rows = d.get("rows") or []
-          n = int(os.environ.get("HEAD") or 80)
-          print("%-6s %-26s %-22s %-12s %10s %10s %10s"
-                % ("id", "verdict", "slug", "status", "int_sh",
-                   "ven_sh", "d_usd"))
-          for r in rows[:n]:
-              print("%-6s %-26s %-22s %-12s %10s %10s %10s"
-                    % (r.get("live_order_id"), r.get("verdict"),
-                       str(r.get("slug"))[:22], r.get("status"),
-                       r.get("internal_shares"), r.get("venue_shares", "-"),
-                       r.get("delta_usd", "-")))
-          print()
-          print("VENUE ORDERS WITH NO live_orders ROW:")
-          for o in (d.get("venue_orders_not_in_live_orders") or [])[:20]:
-              print("   ", o.get("order_id"), o.get("slug"),
-                    o.get("shares"), o.get("avg_price"))
-          print()
-          print("SETTLEMENTS SEEN AT THE VENUE:")
-          for s in (d.get("settled") or [])[:20]:
-              print("   ", s.get("slug"), "events", s.get("events"),
-                    "proceeds", round(s.get("proceeds") or 0, 2))
-          PY
-
-          if [ "$RC" -ne 0 ]; then
-            echo "::error::the reconciliation did not complete -- treat every figure above as absent, not as zero"
-          fi
-          exit "$RC"
-
-      - name: Keep the evidence
-        if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: venue-reconciliation-${{ github.run_id }}
-          path: |
-            backend/reconcile_*.json
-            backend/recon_stdout.txt
-            backend/recon_stderr.txt
-          retention-days: 30
+          # NO DATABASE. The seven slugs were resolved by SQL already and
+          # are pinned above, so this step needs the venue and nothing
+          # else. Fewer moving parts around a live account read.
+          export SINCE_TS=$(python3 -c "import time,os; print(time.time() - float(os.environ.get('SINCE_DAYS') or 30) * 86400)")
+          python research/beta48/venue_seven_books.py
