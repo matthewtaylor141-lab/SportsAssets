@@ -431,7 +431,11 @@ def part3_capacity(rows, maker):
     print("    been observed, and the third needs a venue fact we have")
     print("    not read back. The figures below are a SCENARIO on")
     print("    component 1 alone, with 2 and 3 set to zero -- which is a")
-    print("    LOWER BOUND, not an estimate.")
+    print("    SCENARIO under a stated holding assumption and a stated
+    turnover convention -- a bound ONLY WITHIN those two
+    conditions, and unconditionally neither a bound nor an
+    estimate. Change the holding period and the number moves
+    with it.")
     for hold_h in (2.0, q_hours):
         cap = TARGET * hold_h / 24.0
         print("      inventory held %5.1f h -> %5.2f turns/day -> >= %9.0f"
