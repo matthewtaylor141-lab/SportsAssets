@@ -1,388 +1,274 @@
-# Closeout — bounded package, 2026-09-21
+# Open-order verdict, incentive-adjusted economics, out-of-sample result
 
-Branch `claude/session-njaewf`. Production is `3349219` and **nothing in
-this package is deployed**. Standing restrictions untouched:
-`mirror_live=false`, no new orders, no new capital, COMMAND undeployed,
-no Phase X re-dispatch, no Track A modification. No credential was
-printed, extracted, transferred or added to GitHub.
-
-## Five separate decisions
-
-| Decision | Verdict | Basis |
-|---|---|---|
-| **Implementation** (gate, harness, release controls) | **PASS** | 275 focused tests; whole 228-file surface matches the `fc80f95` baseline |
-| **Production verification** (gate) | **NOT PROVEN — code-only** | the gate has never run in production; `3349219` predates it |
-| **Reconciliation** | **BLOCKED, partially routed** | venue identity settled; API path works; venue positions list came back EMPTY, cause unresolved; activities read still blocked |
-| **Collector feasibility** | **INFEASIBLE at current budget; recommendation contingent** | measured 1.19–1.28× oversubscribed |
-| **Strategy readiness** | **NOT ASSESSED** | out of scope; no claim made |
-
-Artifacts: `full_diff_from_3349219.patch` (8,458 lines),
-`diff_stat.txt`, `focused_tests.json`, `baseline_comparison.json`,
-`capacity_options.txt`.
+No order placed, cancelled or closed. No production deployed. No
+credential moved. **5 of 14 requests remain spent; 9 unspent** — no new
+venue call was made this round, for the reason in §2.
 
 ---
 
-## 1. The gate, without suite-wide authorization
+## 1. The reconciliation verdict, narrowed
 
-### The fixture, and what it was concealing
+**Verdict, as it should have been stated:**
 
-`_install_snapshot_for_tests` does not merely supply a snapshot — it
-**replaces the module global `_current`**. Armed suite-wide, `bind()`,
-`read_state()` and the entire live read path were never executed by any
-test. A broken production binding would have been indistinguishable
-from a working one.
+> At **2026-09-22T17:51:18Z**, the venue reported **no filled positions**
+> for the authenticated account. Two orders of ours are of unknown
+> disposition, so **total exposure is not established as zero.**
 
-**Narrowed to an explicit allowlist of six modules** whose subject is
-what the adapter puts on the wire: `test_pmus`, `test_pmus_commission`,
-`test_preview_guard`, `test_s4_review_pins`, `test_side_intent`,
-`test_calibration_adapter`. Every other module now runs with the gate in
-its production default — unbound, denying. The non-allowlisted branch
-restores *before* yielding as well as after, so a previous module's
-arming cannot leak in. Exact diff and scope in `focused_tests.json`
-under `gate_fixture`.
-
-### The integration suite, fixture off
-
-`backend/tests/test_execution_gate_integration.py`, **36 tests**, drives
-`bind → authorize → read_state` with a fake pool, a real running loop,
-and `submit_fok` called from a worker thread exactly as production calls
-it. First test asserts `_current` has not been replaced, so if the
-allowlist ever grows to include this file the whole set stops silently
-pretending.
-
-| Required | Covered |
+| | |
 |---|---|
-| cold start / unbound denies | `test_cold_start_denies`, `..._close_too` |
-| missing / malformed / unreadable / expired denies | 4 parametrised cases + `test_a_read_that_never_returns_denies` |
-| authorized state permits | `test_an_authorized_bound_gate_permits_the_submission` |
-| pause or halt blocks queued & retried | `test_a_pause_between_queueing_and_submitting_blocks_it`, `test_a_retry_after_a_halt_is_blocked` |
-| startup binds every entry point | `test_the_binding_helper_actually_binds`, workers + API asserted |
-| undeclared identity gets no extra permission | `test_an_undeclared_lane_...`, 10 parametrised near-miss lane strings |
-| cancellation available | `test_cancel_works_while_paused` — exercised, not inspected |
+| read at | 2026-09-22T17:51:18Z |
+| route | `GET /api/desk/accounts`, API service's own venue credentials |
+| response completeness | `configured: True`, `error: None`, positions list present and empty, `cash 20972.89`, `open_value 0.00`, `account_value 20972.89` |
+| **account identity** | **NOT ESTABLISHED.** The payload carries no identity key — *"identity keys present in pm: NONE — the account cannot be identified from this payload."* The read is of *an* authenticated account; that it is the account which generated our 11,183 orders is **inferred, not verified.** |
+| filled positions | **none reported** |
+| resting orders | **NOT READ.** `/api/admin/open-orders` is a database view of `live_orders WHERE whale_username='manual'`. |
+| settlement vs traded-out | **not distinguished** |
 
-### It found a real design flaw
+**Still outstanding, and not netted to zero:**
 
-`authorize()` called from the event loop's **own thread** deadlocked its
-own read: `run_coroutine_threadsafe` scheduled the read on the loop the
-caller was blocking, so it waited out `READ_TIMEOUT_S` and denied for the
-wrong reason. Production never lands there — every order path goes
-through `asyncio.to_thread` — but a future caller checking early from
-async code would have. It now detects the loop thread, uses a snapshot
-inside `MAX_STALE_S`, and denies immediately otherwise. Both behaviours
-pinned.
+| book | order id | local state | side | qty | wire | notional |
+|---:|---|---|---|---:|---:|---:|
+| 838 | *(none recorded)* | `lost` | SELL_LONG | 32 | 0.41 | $13.12 |
+| 1200 | `CD0NCD3GESK5` | `unknown` | BUY_LONG | 54 | 0.35 | $18.90 |
 
-The binding helper moved to `execution_gate.bind_current_loop()` so the
-test that proves production binds is not skippable because
-`workers/all.py` imports a notification stack needing `pywebpush`, which
-is absent here.
+**~$32.02 of notional is unresolved.** `open_value: 0.00` does not close
+it: it is a positions figure, and $32 against a $20,972.89 balance is
+inside the rounding of every number on that card. Book 838's order has
+no venue id at all, so we cannot even ask about it by id.
 
-### The decision, kept separate
-
-**Implementation: PASS. Production verification: NOT PROVEN.** The gate
-is not deployed. `3349219` has none of it. Every statement above is
-about code and tests; none is evidence that the deployed system
-behaves this way, and an AST census plus a green suite is not a
-substitute for running it.
+I previously wrote "all seven carry zero current venue exposure." The
+supportable claim is **no filled positions at that timestamp**.
 
 ---
 
-## 2. Reconciliation — identity settled, path partially routed
+## 2. The nine remaining requests — not spent, and why
 
-### Venue and account identity, settled first
+**No existing deployed route can read venue resting orders.** Searched
+and confirmed:
 
-Run `35619235781`. **All 52 fills are `polymarket-us`.** This mattered:
-migration 008 defaults `live_orders.venue` to `polymarket-clob`, and
-this session found a second submission path
-(`live_executor._submit_fok`) that reaches the CLOB without touching
-`pmus.submit_fok`. The reconciler could have been querying an account
-that never saw these rows and reporting 52 `NOT_FOUND_AT_VENUE`.
-
-Polymarket US and the CLOB route are kept distinct throughout. The CLOB
-path is gated but carries none of these fills.
-
-### A new limit the ledger itself imposes
-
-Only **46 of 52 rows carry an `order_id`**. The six newest — the
-`mirror` lane, **$8,911.89**, the most valuable of the set — have a
-`condition_id` and no order id. Two recording regimes: older rows have
-`order_id` and no `condition_id`, newer the reverse. An `order_id` join
-cannot match those six whatever the venue returns; they need a
-slug+time+quantity match, which is weaker evidence and must be labelled
-as such.
-
-Lanes: `mirror`/rn1 6 orders $8,911.89 · `ioc`/RN1 7 orders $3,340.23 ·
-then `swisstony`, `ferrariChampions2026`, `HomeRunHazard`, `underdog`
-and raw addresses.
-
-### The authenticated runtime path
-
-`sportsassets-api` is running, already holds working venue credentials
-in its own environment, and already exposes read-only endpoints that use
-them. `GET /api/desk/accounts` **already separates platform positions
-from EXTERNAL ones** — a venue position on a market our ledger never
-ordered — which is one of the exact questions reconciliation must
-answer. `GET /api/admin/open-orders` gives resting commitments.
-
-`venue-reconcile-via-api.yml` calls both with `X-Admin-Token`, using
-`ADMIN_TOKEN`, which **already exists** as a repository secret and is
-already used by `gate-lever.yml`. No venue credential moves; the API
-uses its own.
-
-**IT WORKS — run 35619426313, HTTP 200 on both endpoints.** The first
-venue evidence in this effort:
-
-```
-pm.committed_usd      14500.0
-pm.trading_capital    35472.89
-pm.external_count     0
-```
-
-**One of these is not venue evidence, and I nearly used it as such.**
-`committed_usd` is `settings().committed_capital_pm_usd` — an
-owner-set configuration constant. Compared against the ledger's
-$16,180.53 it would have manufactured a $1,680.53 "discrepancy" out of
-a config value. It is now labelled at the point of printing.
-
-What *is* venue-derived: `external_count`, computed from the venue
-portfolio's `open_positions` against our own order ledger. **Zero
-externals** — no venue position on a market we never ordered.
-
-**Zero externals was ambiguous**, and resolving it exposed a bug in my
-own reader.
-
-The parser did `rows = pm.get(key) or acc.get(key)`. **An empty list is
-falsy**, so an empty `positions` list fell through to `acc.get(key)` →
-`None` → "not a list" → skipped without a word. The first run printed
-no positions line and I could not tell whether the key was missing or
-the list was empty.
-
-Reading the endpoint settles that much: `pm["positions"]` is assigned
-unconditionally, so the key exists. **The list was empty.** The venue
-returned no platform positions while `live_orders` carries 52 rows in
-`status='filled'` worth $16,180.53.
-
-**That is a large claim and it has a second reading I am not going to
-skip.** An empty list also results from `account_snapshot()` failing or
-the venue being unconfigured — in which case the read is inconclusive,
-not a zero. `pm.configured` and `pm.error` distinguish them:
-
-- `configured` true, no `error`, empty `positions` → **the venue holds
-  nothing**, and essentially the whole $16,180.53 is stale ledger state.
-- anything else → **inconclusive**, and a failed call must not be read
-  as a zero.
-
-The parser is fixed to print `EMPTY LIST (present, zero rows)` versus
-`KEY ABSENT` explicitly, and to print `configured`, `error`, `cash`,
-`open_value` and `account_value`. Two runs are dispatched
-(35620634497, 35621014265); **both have been queued behind saturated
-GitHub runners for roughly thirty minutes.** Blocked on runner
-availability, not on analysis.
-
-**STATUS: the venue's platform-positions list is empty. Whether that
-means "holds nothing" or "read failed" is UNRESOLVED.**
-
-**Scope:** these endpoints return *current* state. No trade-level
-activity, no settlement events, so this lane **cannot** match the 52
-historical fills row by row or establish settled proceeds.
-
-### Remaining blocker, precisely
-
-Two, now distinguished:
-
-1. **Row-level fill match and settled proceeds** — needs
-   `portfolio.activities` (TRADE + POSITION_RESOLUTION). No existing
-   endpoint exposes it. Either repository secrets `PMUS_KEY_ID` /
-   `PMUS_SECRET_KEY` (read-only venue scope) for `venue-reconcile.yml`,
-   **or** a new read-only endpoint on the API — which is a deployment,
-   outside existing authorization.
-2. **The six order-id-less rows** — unmatched by any join even with
-   full venue access.
-
-Exact invocation if the secrets are granted:
-`Actions → venue-reconcile → Run workflow (since_days=75)`.
-
-**Reconciliation remains ABSENT, not zero.** No accounting record has
-been altered and internal-ledger agreement has not been substituted for
-venue confirmation. The four figures stay separated: historical
-acquisition cost ($16,180.53, a sum over fill records); current
-holdings; open-order commitments; settled cash — the last three
-unmeasured.
-
----
-
-## 3. Collector capacity — definitions, qualifications, options
-
-### The window and the definitions
-
-From `bettor_capacity_inputs.sql`, 12-hour window, V4 rows
-(568 ticks, span ≈ 39,150 s ≈ 10.9 h):
-
-```
-created/min = sum(obs_written) * 60 * |horizons| / span_seconds
-            = 507 * 60 * 4 / 39150  = 3.106 tasks/min
-served/min  = sum(fu_attempted) * 60 / span_seconds
-            = 1590 * 60 / 39150     = 2.435 reads/min
-```
-
-### Observed throughput is not demonstrated capacity
-
-**2.435/min is what the system did, not what it could do.** The system
-was never run with a full queue at full budget. Pacing averaged 2.054,
-which cuts the tick budget to `int(10/2.054) = 4` and the reserve to 2;
-observed use was 2.80 reads/tick, a mix across pacing regimes. At
-sustained pacing 1.0 the reserve would be 5, giving ≈ 4.34 reads/min —
-so observed service is roughly **56% of the full-budget ceiling**, and
-that ceiling is itself an arithmetic bound, not a measured maximum.
-
-The backlog stood at 11.8–17.0 with drain times 317–487 s, so work was
-available: the system was budget-limited rather than work-limited.
-
-**Measured directly (run 35619569497): `pct_of_reserve_used = 94.4%`** —
-2.83 reads used against 3.00 available per tick. So observed throughput
-*is* essentially the capacity available **under the prevailing pacing**,
-and pacing is adaptive and set by the venue's 429s. The remaining
-headroom is not in the scheduler; it is in what the gateway will serve.
-
-The rate window is rolling. The later run gives V4 = 444 ticks,
-03:39:29Z–12:08:24Z, span 30,535 s, 395 obs_written, 1,196 fu_attempted
-→ created 3.104/min, served 2.350/min. The earlier figures (3.106 /
-2.435) came from a window shifted eight hours later; both are
-internally consistent and each is cited with its run.
-
-### The 86.9% is an assumption-based upper bound, not a measured ceiling
-
-I called 60 / 69.03 a scheduling ceiling. It is not automatically one.
-It holds under five assumptions I neither stated nor tested:
-
-| | Assumption | Status |
+| route | reads | verdict |
 |---|---|---|
-| A1 | service is instantaneous at a tick instant | idealisation |
-| A2 | ticks are exactly periodic at the mean gap | **FALSE** — min 34.21 s, max 92.92 s |
-| A3 | due moments are uniform relative to tick phase | untested |
-| A4 | one tick inside the window suffices | holds only if capacity is free |
-| A5 | within-tick processing costs nothing | **FALSE** — reads are serial and paced |
+| `/api/desk/accounts` | venue portfolio, 30 s cached | positions only; no resting orders |
+| `/api/admin/open-orders` | `live_orders` table | **database**, not venue |
+| `reconcile_read.resting_orders()` | `client.orders.list` — **the right call** | **exists, tested, no HTTP route** |
+| `reconcile_read.historical_activity()` | TRADE + POSITION_RESOLUTION, paged | **exists, tested, no HTTP route** |
+| `bettor-capability-probe.yml` | imports `reconcile_read` | **the credentialless CI route — not retried** |
 
-The correct bound is `E[min(G, 2·tolerance)] / E[G]` over the actual
-gaps, not `2·tolerance / E[G]` over their mean.
+The capability exists inside the running service and has no door. So per
+instruction, the **smallest exact read-only change** is prepared and
+**not deployed**:
 
-**Measured (run 35619569497), and the correction is small:**
+```
+backend/sportsassets/api/app.py   +40 lines, 0 changed, 0 removed
 
-| | value |
+  GET /api/desk/venue-resting-orders   -> reconcile_read.resting_orders()
+  GET /api/desk/venue-activity         -> reconcile_read.historical_activity()
+```
+
+Both behind `require_desk`, the guard `/api/admin/open-orders` already
+uses. Both return the module's dict verbatim, including `ok`,
+`complete`, `pages` and `stop_reason`, so a bounded walk cannot be read
+as an empty book. **No new venue capability** (the SDK calls already
+exist and are already exercised by `backend/tests/test_reconcile_read.py`),
+no new credential, no new dependency, no write path, no change to any
+existing route's behaviour. It sits on a branch no service tracks.
+
+**With those two routes deployed, the nine requests close the file:**
+R2 resting orders (1 request) answers the $32.02; R1 activity for
+2026-09-08..10 (≤4) separates settled from traded-out; R3 (≤2) resolves
+the two order ids. **Total ≤7 of 9.**
+
+---
+
+## 3. The fee count reconciles — and two different claims
+
+**134 + 66 = 200, and I reported 201.** The missing order is the
+`neither` column, which I printed and then failed to carry into the
+sentence:
+
+```
+discriminating orders (cap ≠ per-fill)   201
+  venue matched the order-level cap      134
+  venue matched the per-fill sum          66
+  venue matched NEITHER                    1     <- the 201st
+                                         ---
+                                         201
+```
+
+That order is `CCY7S6CKCT75`: 6 executions, 40.00 shares, base 9.7582;
+per-fill sum **0.57**, order-level cap **0.59**, actually charged
+**0.58** — strictly between the two.
+
+**Full reconciliation across all 1,929 aggressor orders:**
+
+| | orders |
+|---|---:|
+| matched the order-level cap | **1,848** |
+| below the cap, matched the per-fill sum | 66 |
+| below the cap, matched **neither** rule | **15** |
+| **total** | **1,929** |
+
+Of the 15: 14 sit in the non-discriminating set (cap = per-fill, charged
+one cent below both) and 1 is `CCY7S6CKCT75` above.
+
+### The two claims, kept apart
+
+| claim | status | evidence |
+|---|---|---|
+| **The charges satisfy the published bound.** Charge ≤ `banker(Θ·Σ n·p·(1−p))` | **TRUE, with zero violations** | 1,929 of 1,929 orders; every deviation is negative (−$0.01 on 77 orders, −$0.02 on 4) |
+| **Our fee calculation reproduces every charge.** | **FALSE** | reproduces **1,848 of 1,929 = 95.80%**. 81 orders (4.20%) are charged 1–2 cents *below* what we compute. 15 are not reproduced by any rule tested. |
+
+Our engine is **conservative and correct as a bound** — it never
+under-charges — and **imprecise as a predictor** on about one multi-fill
+order in twenty-four, by one or two cents. For a replay this is
+immaterial; for a reconciliation that asserts "our arithmetic matches
+the venue's," it is not, and I had been asserting the stronger claim.
+
+**And the September regime remains unvalidated:** every fill is
+2026-09-06..10, zero executions after the 2026-09-17T04:00Z cutover.
+Θ_taker = 0.0695 has never met a real charge.
+
+---
+
+## 4. What $1.46/day actually is
+
+Re-derived from the run rather than restated. **It is $1.47/day**; the
+$1.46 used a rounded 7.0-day span against an actual 6.96.
+
+| | |
 |---|---|
-| bound from the gap distribution | **87.05%** |
-| bound from the mean alone | 87.50% |
-| **overstatement** | **0.45 pp** |
+| **window** | 2026-09-13T16:56:15Z → 2026-09-20T15:52:47Z, **6.96 days** |
+| **policy** | C4 only, `queue_ahead_fraction = 0.00` — the most favourable of the four queue assumptions |
+| **market population** | **9 of 12** markets, and concentrated: **30 of 44 episodes in two Liga MX markets** (`ame-tij` 20, `pue-tol` 10), one of which has a **65-tick median spread**. The four NFL markets contribute 11; three markets contribute 1 each. |
+| **capital** | 100 contracts per leg; **50,505.7 capital-hours**; **mean concurrent capital $302.53** |
+| **contracts filled** | 2,395.7 |
+| **result** | **−$10.23** → **$1.47/day** |
 
-Gaps are far more regular than min/max suggested: 629 gaps, mean
-68.57 s, **SD 5.62 s**, p10 64.41, p90 73.40, and only **5 of 629 below
-60 s**. So A2 is approximately true in practice and my arithmetic error
-was under half a percentage point.
+**Costs included in that −$10.23:**
 
-A5 is real but modest: 2.83 reads per tick at 2.027 s pacing is
-**5.75 s of serial pacing inside a tick**, about a tenth of the 60 s
-window.
+| | |
+|---|---:|
+| maker rebates received (published schedule, validated θ = −0.0125) | **+$6.48** |
+| taker fees paid | $0.00 — C4 holds and never crosses |
+| **net with rebates** | **−$10.23** |
+| **net without rebates** | **−$16.71** → **$2.40/day** |
 
-**Label: ~87% is an assumption-based upper bound on on-time service at
-this tick cadence, now computed from the gap distribution rather than
-its mean.** It is a property of this cadence, not a universal
-scheduling ceiling. The number was nearly right; presenting it as a
-measured limit was not.
+**Not included:** incentive rewards (run at zero), financing, slippage
+beyond the replayed ladder, and any market impact from our own quote —
+the recorded book never saw it.
 
-### Both V1 failures preserved, separately
+### Against the actual incentive terms
 
-They are two defects and a candidate must survive each alone.
-Collapsing them would let a policy that fixed only the brake look
-complete.
+The hurdle is **$10.23 over the window**. But rewards are paid
+**per event-period**, with a **$1.00 floor per payout**. C4 quoted in 9
+markets; at 3 qualifying periods each that is ~27 period-entries.
 
-- `test_v1_failure_one_integer_division_reduces_admission_to_zero` —
-  demonstrated with an **empty** queue at reserves 1, 2, 3, so the brake
-  cannot be the cause.
-- `test_v1_failure_two_a_level_is_compared_with_a_per_tick_flow` —
-  demonstrated at reserve 8, where `8 // 4 == 2`, so the divisor cannot
-  be the cause.
-- `test_the_candidate_survives_both_failures_independently` at every
-  reserve.
+- $10.23 spread over 27 periods is **$0.38 per period** — **below the
+  floor, so it pays nothing at all.**
+- To be paid in most periods we would need ≥$1.00 in each, i.e. **≥$27
+  over the window** — **2.6× the hurdle.**
 
-### The four options, measured
+**So the floor, not the total, is the binding constraint.** The question
+is not "can this earn $10" — it is "can we place high enough in enough
+individual pools to be paid at all." Clearing the floor would
+*over*-cover the shortfall.
 
-Same workload (0.777 obs/min, 69.03 s tick, budget 6, inherited queue,
-240 min). **Absolute rates are optimistic** — the harness aligns
-arrivals to tick boundaries, so treat these as a *relative* ranking:
+**Conservative share scenarios**, against ~$34 committed per market
+(mean $302.53 over 9 markets):
 
-| Option | oversub | obs admitted | on-time | expired |
-|---|---|---|---|---|
-| baseline | 1.19× | 185 | 73.3% | 133 |
-| **read_more** (budget 12) | 0.60× | 185 | **89.2%** | 2 |
-| **fewer_horizons** (drop 3600 s) | 0.89× | 185 | **93.8%** | 18 |
-| shorter_tick (50 s) | 0.86× | 186 | 77.7% | 16 |
-| admit_less (0.65/min) | 1.00× | **155** | 77.1% | 16 |
+| pool per period | share needed for $1.00 | plausible at $34 committed? |
+|---:|---:|---|
+| $200 | 0.50% | possibly |
+| $1,000 | 0.10% | plausibly |
+| $5,000 | 0.02% | plausibly |
 
-### Recommendation
-
-**`read_more` — raise the follow-up reserve — contingent on a venue
-capacity probe that has not been run.**
-
-Reasoning against the evidence requirements: BETTOR needs
-`E[SETTLEMENT − QUOTE | STATE]` at the declared horizons, and
-statistical power scales with coverage. `read_more` is the only option
-that costs **neither coverage nor a horizon**, and it gives the largest
-feasibility margin. The pacing backoff already makes the collector yield
-to the venue, so a higher reserve raises its ceiling without removing
-the protection the money path relies on.
-
-**The contingency is not a formality.** The harness models the budget as
-*available*; it does not model whether the venue would serve 12 reads a
-tick. Production logged 88 rate-limited and 48 unreadable reads over 568
-ticks at a budget of 4–10. Until a probe measures what the gateway will
-actually serve, `read_more`'s benefit is assumed, not demonstrated.
-
-**Named fallback if the venue will not serve it: `fewer_horizons`.** It
-scores best on timing at no coverage cost — but permanently loses the
-3600 s horizon, which cannot be reconstructed later. That is a research-
-design decision, not an engineering one, and it stays with you.
-
-`admit_less` is the worst trade: 16% of coverage for 77.1%.
-
-**V2 measure-only remains the production baseline. No candidate is
-deployed. Horizons, tolerances and denominators are unchanged** — the
-on-time rate is taken over every task created, and declined observations
-are reported beside it, never inside it.
+**Unknown, not ruled out.** Pool size, scoring formula, per-person cap
+and competing liquidity are all unretrieved. A $1.47/day hurdle is small
+enough to be worth investigating and is **not** established as feasible.
+Annualising it establishes nothing in either direction, which is why it
+does not appear here.
 
 ---
 
-## 4. Evidence for the grouped-test hang — CONFIRMED
+## 5. The genuinely out-of-sample result — and its leak, removed
 
-Claim: the hang predates this branch.
+The earlier model conditioned on the **exposure band**: how long the
+order actually rested before filling or being cancelled. **That is an
+outcome.** A policy pricing an order does not know it. Per-market order
+counts were the same error — the *final* count is unknown at the first
+order.
 
-Files 71–90 of the regression surface hang when run *together*, though
-every file passes alone. Run on the **`fc80f95` worktree** — an
-untouched tree — with the 19 files both trees share, the run was
-terminated at the 200 s bound exactly as on HEAD.
+Refitted on **decision-time predictors only**: spread at placement,
+distance inside the touch, and the count of orders *already* placed in
+that market before this one (a running count, known when the decision is
+made). Same chronological split, same market-clustered variance.
 
-```
-cd /tmp/claude-0/base-fc80f95/backend && \
-  timeout -k 5 200 python -m pytest -q -p no:randomly <files 71-90>
-→ Terminated (rc=143)
-```
+| | leaky model | **decision-time model** |
+|---|---:|---:|
+| observed | 1,099 | 1,099 |
+| predicted | 1,299.3 | **1,317.5** |
+| error | −200.3 | **−218.5 (−5.66 pp)** |
+| s.e. independent | 27.29 | 28.69 |
+| **s.e. market-clustered** | 41.13 | **45.68** |
+| z independent | −7.34 | −7.61 |
+| **z market-clustered** | **−4.87** | **−4.78** |
+| design effect | 2.27 | **2.53** |
 
-**Predates this branch: confirmed. Root cause: unconfirmed** — the
-behaviour is consistent with leaked module-level database state, but I
-have not isolated it and do not claim it.
+**Removing the leak barely moved the result.** The exposure band carried
+most of the *apparent* signal — 16.5% / 43.8% / 51.7% / 11.2% across its
+four levels — and none of it was usable. The honest decision-time
+predictors are much weaker:
+
+| predictor | training fill rate |
+|---|---|
+| spread 1 / 2 / 3 / 4+ cents | 38.0% / 34.3% / 37.7% / 27.2% — weak, non-monotonic |
+| prior orders in that market 0 / 1–3 / 4–10 / 11+ | **40.6% / 37.7% / 34.3% / 29.4% — monotonic** |
+
+**Diagnosis:** the failure is a **level shift**, not a broken shape. A
+single recalibration factor of 1,099 / 1,317.5 = **0.834** removes it.
+The model over-predicts held-out fills by a constant ~17% relative.
+
+**What this is and is not.** It is a genuine out-of-sample result for
+**fill prediction**, on days whose outcomes were not used in fitting,
+with dependence-aware errors. It is **not** an out-of-sample *policy*
+result: it says nothing about profitability, and the validation days
+09-09..10 have now been examined, so they are spent for any future test.
 
 ---
 
-## What no claim here rests on
+## 6. The out-of-sample policy result does not exist yet — the exact missing measurement
 
-- No deployment or capital-readiness claim rests on a permissive test
-  fixture: the fixture is now an opt-in allowlist of six modules, and
-  the gate's initialization is proven with it off.
-- No claim rests on an unreconciled internal ledger: reconciliation is
-  reported absent, and $16,180.53 is labelled a sum of acquisition costs
-  throughout.
-- No assumption is presented as a measured limit: the timing bound is
-  now computed from the gap distribution (87.05%) rather than from its
-  mean (87.50%), and labelled a property of this tick cadence rather
-  than a universal ceiling.
-- No configuration constant is reported as venue evidence:
-  `committed_usd` is labelled as `settings().committed_capital_pm_usd`
-  at the point of printing, and is not compared with the ledger.
+**It cannot be produced from anything currently held.**
+
+| candidate source | span | why it cannot serve |
+|---|---|---|
+| BBO capture + 8 T&S files | 09-13..20 | **inspected while selecting the rule** (§ `FROZEN_SELECTION_RULE.md`) |
+| `mirror_orders` | 09-06..10 | inspected; also no ladders, and a different policy |
+| `mirror_shadow` | 09-02..22 | **top-of-book only — no ladder.** Cannot support queue position. |
+| `copy_probes` | 08-16..22 | `best_ask` + vwap depth, but **probe-triggered on whale fills**, not a time series |
+| fresh T&S (09-21, 09-22) | retrievable | prints without a contemporaneous book are not a replay |
+
+**The missing measurement, exactly:**
+
+> A **BBO capture with full ladder depth**, at ≤30 s cadence, over
+> **≥5 distinct event clusters** admitted by the frozen rule
+> (F1 ≥ 0.15, F2 ≤ 2 ticks, F3 ≥ 60 print-minutes), on dates
+> **after 2026-09-22**, none of which is inspected before the run
+> completes. Paired with the Time & Sales files covering those dates.
+
+That is the same instrument as the expired observation probe, pointed at
+rule-admitted markets instead of a fixed list. It requires a **new
+observation budget** and is a separate authorization. Without it there
+is no honest out-of-sample policy number, and I am not going to
+manufacture one from data I have already read.
+
+---
+
+## 7. Standing
+
+- **M4 unexecuted.** No trading activity created to observe a balance.
+- The two profitable markets are **development evidence**, permanently.
+- Four negative replay results stay scoped to C0/C2/C3/C4, four queue
+  assumptions, 12 markets, 09-13..20, 100 contracts, and Θ = 0.0695
+  which is itself unvalidated.
+- Trading controls, deployment boundaries and lane separation unchanged.

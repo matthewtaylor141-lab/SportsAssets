@@ -1,4 +1,31 @@
-# Frozen market-selection rule — pre-registered 2026-09-22
+# Frozen market-selection rule
+
+| | |
+|---|---|
+| **Frozen at** | **2026-09-22T18:05Z** |
+| **Frozen in commit** | the commit that adds this table (see `git log` for this file) |
+| **Status of the rule** | HYPOTHESIS. Not validated, not an edge. |
+| **Status of the two profitable markets** | **DEVELOPMENT EVIDENCE.** They generated the hypothesis; they cannot also test it. |
+
+## Data inspected while selecting this rule — all of it disqualified as validation
+
+A dataset is fresh validation only if it was **not inspected** while the
+rule was being chosen. Everything below was, so none of it can validate
+this rule at any later date:
+
+| inspected | what was looked at |
+|---|---|
+| BBO capture 2026-09-13T16:55Z → 09-20T15:52Z, 12 markets, 30,590 rows | per-market spreads, ladders, replay outcomes, per-market net |
+| Time & Sales 20260913–20260920, 8 files, 121,723 prints for those 12 markets | per-market print counts, per-interval print fractions — **the rule's own F1 input** |
+| `mirror_orders` 2026-09-06 → 09-10 | fill rates, exposure, distances, per-market residuals |
+| `mirror_shadow`, `copy_probes`, `trades` | row counts, date ranges and coverage only — **no row-level book or price data** |
+
+**Consequence:** the frozen rule cannot be tested on any 2026-09-13..20
+data, nor on the mirror-order window. The two football markets that
+suggested it are development evidence and stay that way permanently.
+
+---
+
 
 **This rule is frozen BEFORE it is evaluated on any data it has not
 already been fitted to. It is registered here precisely because it was

@@ -68,24 +68,37 @@ account_val: 20972.89
 positions  : (empty list)
 ```
 
-The endpoint's own disambiguation applies: **configured true, no error,
-empty positions list ⇒ the venue holds nothing.** Not "the read came
-back blank."
+The endpoint's own disambiguation applies: configured true, no error,
+empty positions list ⇒ **the venue reported NO FILLED POSITIONS**. Not
+"the read came back blank" — but also not "the account holds nothing",
+because this payload carries **positions only**. Resting orders are a
+different surface and were not read.
+
+**Account identity is NOT established.** The same payload reports
+*"identity keys present in pm: NONE -- the account cannot be identified
+from this payload."* This is a read of *an* authenticated account; that
+it is the account which placed our 11,183 orders is inferred from the
+service's configuration, not verified against an identifier.
 
 ### Classification
 
-| book | venue position | resting order | settled? | classification |
+| book | filled position at 17:51:18Z | resting order | settled? | classification |
 |---:|---|---|---|---|
-| 838 | **none** | not established | not established | **NO CURRENT EXPOSURE; local record stale** |
-| 1075 | **none** | not established | not established | **NO CURRENT EXPOSURE; local record stale** |
-| 1090 | **none** | not established | not established | **NO CURRENT EXPOSURE; local record stale** |
-| 1200 | **none** | not established | not established | **NO CURRENT EXPOSURE; local record stale** |
-| 1218 | **none** | not established | not established | **NO CURRENT EXPOSURE; local record stale** |
-| 1426 | **none** | not established | not established | **NO CURRENT EXPOSURE; local record stale** |
-| 1581 | **none** | not established | not established | **NO CURRENT EXPOSURE; local record stale** |
+| 838 | **none** | not established | not established | **NO FILLED POSITION REPORTED; local record stale** |
+| 1075 | **none** | not established | not established | **NO FILLED POSITION REPORTED; local record stale** |
+| 1090 | **none** | not established | not established | **NO FILLED POSITION REPORTED; local record stale** |
+| 1200 | **none** | not established | not established | **NO FILLED POSITION REPORTED; local record stale** |
+| 1218 | **none** | not established | not established | **NO FILLED POSITION REPORTED; local record stale** |
+| 1426 | **none** | not established | not established | **NO FILLED POSITION REPORTED; local record stale** |
+| 1581 | **none** | not established | not established | **NO FILLED POSITION REPORTED; local record stale** |
 
-**All seven carry zero current venue exposure.** The `closing`/`frozen`
-states are stale local records, including the −1,444 on book 1200.
+**NARROWED in `CLOSEOUT.md` §1.** The supportable claim is: at
+**2026-09-22T17:51:18Z** the venue reported **no filled positions**.
+Two orders (~$32.02 notional) are of unknown disposition and
+resting orders were never read, so **total exposure is NOT
+established as zero**. The account's identity is also unverified —
+the payload carries no identity key. The `closing`/`frozen` states
+are stale local records, including the −1,444 on book 1200.
 
 **What is NOT established, and why I am not asserting it:**
 
@@ -146,7 +159,8 @@ On the **201 orders where the two candidate rules disagree**:
 |---|---:|
 | venue matched the **order-level cap** | **134** |
 | venue matched the **per-fill sum** | 66 |
-| neither | 1 |
+| neither | **1** (`CCY7S6CKCT75`: charged 0.58, between per-fill 0.57 and cap 0.59) |
+| **total** | **201** |
 
 So neither rule alone reproduces every order. The cap is a true upper
 bound (never violated), the per-fill sum is not, and 66 orders land on
