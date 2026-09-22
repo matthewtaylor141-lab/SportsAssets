@@ -210,3 +210,48 @@ NAME and says which value to pass. Pinned by a test.
 Scope: three services, one variable, one observation day. Preflight
 allowance EXHAUSTED (6/6). Socket allowances separate. Rollback is
 stop-and-verify first.
+
+### 2026-09-23 MANIFEST CAPTURED — allowance raised, not reset
+Run 35793974775, dispatched at cf29391 (a branch taken from DEPLOYED
+d630d3d, so 67d7a93 and every other release-branch change stayed out).
+SUCCESS. 441 programme rows, 4 pages, zero errors, unauthenticated.
+
+  allowance   cap 10, spent 10, remaining 0
+              the four new units went one per page, exactly as sized
+  freeze OK   12 markets / 1 programme / 1 event
+  programme   culture_low_20260921, pool $50, DF 0.25, target 500
+
+THE PROGRAMME IS THE SAME ROW AS YESTERDAY, and that settles F2's
+ambiguity in the direction the venue docs already stated. start is
+still 2026-09-22T00:00:00Z and end is still null on today's capture --
+an unchanged, continuing programme record, NOT a per-day period row. So
+`start` is the programme ACTIVATION instant, not a daily scoring
+boundary, and the daily period is the venue's documented
+midnight-to-midnight ET. The window [2026-09-23T04:00Z,
+2026-09-24T04:00Z) is correct. API start/end preserved verbatim; no
+widened window.
+
+### DEPLOYED 7f76fd9 — and [skip render] nearly hid it
+d630d3d..7f76fd9 is exactly two data files: incentive_manifest.json and
+preflight_allowance.json. Fast-forward from the deployed SHA. 67d7a93
+verified absent.
+
+THE CAPTURE COMMIT CARRIES `[skip render]`, which the capture workflow
+adds on purpose so evidence commits do not auto-deploy. Pushing it to
+the auto-deploy branch therefore did NOT deploy it: workers still read
+d630d3d from 22:21Z a minute after the push. Caught by reading the
+deploy list instead of assuming the push was the deployment. Resolved
+with an explicit render-ops `deploy` dispatch on both services.
+
+### ARM SCHEDULED, not executed early
+obs-arm-incentive sets deadline = now + 26h. Arming now (22:53Z) would
+give a deadline of 00:53Z on 09-24, which does NOT cover the window end
+at 04:00Z on 09-24. The valid arm window is therefore
+[2026-09-23T02:00Z, 04:00Z].
+
+Separately, the worker has NO gate on the window START -- `start_epoch`
+appears once, in the mid-run recheck timing, and the loop only breaks
+on `now >= end_epoch`. Armed early it would connect and collect hours
+before 04:00Z, spending socket allowance outside the window. Adding a
+start gate would be an unrelated code change, so the arm is TIMED
+instead: scheduled for 03:50Z, trig_012jP2v4wuEhiVatwybx6MAc.
