@@ -5,16 +5,31 @@ below asks for a new limit, a new capability or a schema change.
 
 ## The SHA
 
-**`<FINAL_SHA>`** on `claude/bettor-none-pool-fix`.
+**Verified code SHA: `cf77a0fa842e013a33b643f750fa2373c9826aab`** on
+`claude/bettor-none-pool-fix`. This is the commit the image was built from and
+the check was run against.
+
+**Deploy the branch tip.** `render-ops deploy` deploys the latest commit of the
+branch, and a document cannot contain its own hash — so this request names the
+verified SHA here and the exact tip hash is given with it in the accompanying
+report. Any commit after `cf77a0f` on this branch is documentation only:
+`git diff cf77a0f <tip> -- backend/` is **empty**, and `backend/` is the only
+tree `backend/Dockerfile` builds from. Whichever of the two is deployed, the
+image is byte-identical. Confirm that diff is empty before deploying.
 
 - `0` behind / `3` ahead of the deployed tip `fd39a0a9` on
   `claude/session-njaewf`, which is an **ancestor** — so it fast-forwards.
   Never force.
-- The code tree is **identical to `4b2c7bdd`**, the SHA the check was asked
-  against: `git diff 4b2c7bdd <FINAL_SHA> -- backend/ scripts/` is empty of
-  runtime changes; the two commits on top add the preserved probe row, the
-  incident wording correction, a read-only `render-ops sql obs-schema`, and
-  the image-check harness and its evidence.
+- **`backend/` is byte-identical to `4b2c7bdd`**, the SHA the check was asked
+  against — `git diff 4b2c7bdd cf77a0fa842e013a33b643f750fa2373c9826aab -- backend/`
+  is empty, and `backend/` is the only tree the image ships from.
+  The two commits on top add, outside it: the preserved probe row, the
+  incident wording correction, a read-only `render-ops sql obs-schema`, the
+  image-check evidence, and two harness files in `scripts/`
+  (`bettor_image_migrate.py`, `bettor_image_startup_check.py`, +527 lines).
+  `backend/Dockerfile` copies no `scripts/`, so neither reaches the image —
+  verified in the built image: `/app/scripts` does not exist and
+  `import scripts.*` raises `ModuleNotFoundError`.
 
 ### The whole runtime diff from what is deployed
 
@@ -92,7 +107,8 @@ extended. A replacement probe takes a new identity.
 
 ## What is requested
 
-1. **Deploy `<FINAL_SHA>` while stopped.** Recheck destination ancestry and
+1. **Deploy the branch tip (verified code SHA `cf77a0f`) while stopped.**
+   Recheck destination ancestry and
    `obs-state=false` first; fast-forward, never force. Then confirm both
    services' running SHA, API health, effective limits, and that the database
    control is holding observation idle.
@@ -122,8 +138,9 @@ extended. A replacement probe takes a new identity.
 
 ## Rollback
 
-Forward deregistration `claude/bettor-deregister-<final>` at
-**`<DEREG_SHA>`** — 0 behind / 1 ahead of `<FINAL_SHA>`, with `fd39a0a9` an
+Forward deregistration `claude/bettor-deregister-cf77a0f` at
+**`f7345128c184dca7774d4a617ab21cbe5d71ad4b`** — 0 behind / 1 ahead of
+`cf77a0f`, with `fd39a0a9` an
 ancestor of both, so it fast-forwards whether or not the repair deployed. It
 comments out the one registration line and its import; the supervisor cannot
 start a loop it is not handed. 24 other loops untouched, no trading control
