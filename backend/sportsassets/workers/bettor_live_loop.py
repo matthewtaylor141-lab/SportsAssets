@@ -78,16 +78,24 @@ about 73 rounds of six listing pages and one advisory-locked DDL
 transaction each. `main()` now HOLDS before it returns, on an
 escalating schedule, and a run that starts resets it.
 
-A KILL SWITCH THAT DID NOT KILL. `BETTOR_LIVE_LOOP=off` was set and
-acknowledged, the service was demonstrably restarted
+A KILL SWITCH THAT A RESTART DID NOT DELIVER. `BETTOR_LIVE_LOOP=off`
+was set and acknowledged, the service was demonstrably restarted
 (`server_restarted` 22:43:40.131647Z), and the restarted process still
-ran discovery. The authoritative stop is now a database row --
-`bettor_live_control` -- read before anything else and re-read while
-running. It FAILS CLOSED four ways and needs no deploy to change.
+ran discovery. Stage 1 then established the other half: a NEW DEPLOY
+does reload the environment -- 00:31:22.805Z, where the new process
+read `off`, logged its refusal and returned. The precise finding is
+therefore about the delivery mechanism, not the variable: a restart
+API call does not reload the environment on this service; a deploy
+does.
+
+That is why the environment variable is a POOR OPERATIONAL CONTROL and
+not a useless one. Stopping through it costs a deploy, which is minutes
+and a new process; stopping through the database costs one UPDATE and
+takes effect within `CONTROL_EVERY_S` in the process already running.
 
 Stop: `bettor_live_observation` in `ingestion_state` (authoritative).
 The `BETTOR_LIVE_LOOP=off` environment variable is kept as a cheap
-pre-check only, and is NOT a demonstrated control on this service.
+pre-check that is only as prompt as the next deploy.
 """
 
 from __future__ import annotations

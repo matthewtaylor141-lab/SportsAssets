@@ -7,9 +7,16 @@ explicit restart was then requested and DID happen --
 `server_restarted` at 22:43:40.131647Z in the service's own event log
 -- and at 22:47:29Z the loop was still running the discovery path
 rather than logging that it was disabled. **The restarted process did
-not read the new value.** An environment variable on this service is
-therefore not a demonstrated control, and the loop must not depend on
-one to stop.
+not read the new value.**
+
+Stage 1 completed that finding rather than overturning it. A NEW DEPLOY
+of the same variable WAS read: at 2026-09-22T00:31:22.805Z the new
+process logged that `BETTOR_LIVE_LOOP=off` and returned before
+constructing a client. So the variable is readable, but only a deploy
+delivers it -- minutes, and a new process -- whereas this row takes
+effect inside the process already running, within `CONTROL_EVERY_S`.
+That is the reason the loop must not depend on the environment to stop:
+not that the variable is inert, but that it is not PROMPT.
 
 This control lives in `ingestion_state`, the same table the execution
 gate's pause switch lives in, and it is read by the running process on

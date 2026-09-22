@@ -5,8 +5,11 @@ sportsassets-workers at 2026-09-21T22:38:58Z and acknowledged with
 HTTP 200. Render raised no deploy for it. A restart was then requested
 and DID happen -- `server_restarted` at 22:43:40.131647Z in the
 service's own event log -- and at 22:47:29Z the loop was still running
-the discovery path instead of reporting itself disabled. The
-environment variable is not a demonstrated control on that service.
+the discovery path instead of reporting itself disabled. Stage 1 later
+showed a new DEPLOY of the same variable is read (00:31:22.805Z), so
+the defect is the delivery path: on this service a restart does not
+reload the environment, only a deploy does, and a stop that costs a
+deploy is not a prompt stop.
 
 So the control moved into the database, where changing it needs no
 deploy, and the tests below are mostly about the ways it REFUSES.

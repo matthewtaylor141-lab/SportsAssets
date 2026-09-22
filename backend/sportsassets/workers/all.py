@@ -414,10 +414,13 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # behaviour.
     #
     # The environment variable BETTOR_LIVE_LOOP=off is kept as a cheap
-    # pre-check and is NOT a demonstrated control on this service: it
-    # was set and acknowledged on 2026-09-21, the service was
-    # demonstrably restarted (`server_restarted` 22:43:40.131647Z), and
-    # the restarted process still ran discovery.
+    # pre-check, and it IS read -- but only by a new deploy. Set and
+    # acknowledged 2026-09-21T22:38:58Z, it survived a demonstrated
+    # restart (`server_restarted` 22:43:40.131647Z) still running
+    # discovery at 22:47:29Z; the deploy at 00:31:22.805Z read it and
+    # refused within the same millisecond. Restart does not reload the
+    # environment on this service; a deploy does. The database row is
+    # the authoritative stop because it is the PROMPT one.
     #
     # Deregistering is this one line, commented out.
     ("bettor_live", bettor_live_loop.main),
