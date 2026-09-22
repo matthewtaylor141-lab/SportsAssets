@@ -2,8 +2,8 @@
   "_note": "THE DURABLE PREFLIGHT ALLOWANCE. Committed on purpose: an in-process counter is reset by the next process, and the whole point of an allowance is that it is not. capture_incentive_manifest.py seeds from this file and writes back to it, so a re-dispatch of the capture workflow resumes from what was already spent instead of starting again at zero.",
   "_scope": "PRE-DEPLOY, out of band. This is NOT the observation run's eight-request row budget, which is held in Postgres by bettor_live_control.reserve() and is untouched by anything here.",
   "cap": 10,
-  "spent": 6,
-  "remaining": 4,
+  "spent": 10,
+  "remaining": 0,
   "attempts": [
     {
       "at": "2026-09-22T20:40:26Z",
@@ -55,6 +55,42 @@
       "where": "github-actions run 35788331780",
       "kind": "manifest",
       "n_total": 6,
+      "why": "incentives page 4 attempt 1",
+      "outcome": "recorded",
+      "counted": true
+    },
+    {
+      "at": "2026-09-22T22:44:58Z",
+      "where": "github-actions run 35793974775",
+      "kind": "manifest",
+      "n_total": 7,
+      "why": "incentives page 1 attempt 1",
+      "outcome": "recorded",
+      "counted": true
+    },
+    {
+      "at": "2026-09-22T22:44:58Z",
+      "where": "github-actions run 35793974775",
+      "kind": "manifest",
+      "n_total": 8,
+      "why": "incentives page 2 attempt 1",
+      "outcome": "recorded",
+      "counted": true
+    },
+    {
+      "at": "2026-09-22T22:44:58Z",
+      "where": "github-actions run 35793974775",
+      "kind": "manifest",
+      "n_total": 9,
+      "why": "incentives page 3 attempt 1",
+      "outcome": "recorded",
+      "counted": true
+    },
+    {
+      "at": "2026-09-22T22:44:58Z",
+      "where": "github-actions run 35793974775",
+      "kind": "manifest",
+      "n_total": 10,
       "why": "incentives page 4 attempt 1",
       "outcome": "recorded",
       "counted": true
