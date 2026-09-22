@@ -185,6 +185,16 @@ class Settings(BaseSettings):
     # for US-based accounts.
     pmus_key_id: str = ""
     pmus_secret_key: str = ""
+    # THE TRUSTED ACCOUNT REFERENCE, for reconciliation only.
+    # Set OUT OF BAND by the owner from the venue's own web UI.
+    # It exists so account_identity() has something to compare
+    # against that did NOT come from the venue response it is
+    # checking -- comparing a payload to itself proves nothing.
+    # Empty by default; empty yields the verdict "no_expected",
+    # which is an honest blocker rather than a false pass.
+    # NEVER logged, never returned: account_identity reports a
+    # verdict and a field NAME only.
+    pmus_account_ref: str = ""
     # Global CLOB (non-US accounts only) — unused when PMUS keys are set.
     pm_private_key: str = ""       # dedicated wallet key (export from PM settings)
     pm_funder: str = ""            # your Polymarket profile (proxy) address

@@ -4379,6 +4379,29 @@ async def api_manual_limit(body: ManualLimitBody,
 # for review, not shipped. It is the difference between "no resting
 # orders" and "not established", which is currently the one open
 # question in the seven-book reconciliation.
+@app.get("/api/desk/venue-identity", dependencies=[Depends(require_desk)])
+async def api_venue_identity() -> dict:
+    """Is the authenticated account the one we think it is?
+
+    THE COMPARISON VALUE COMES FROM OUR CONFIGURATION, NEVER FROM THE
+    CALLER AND NEVER FROM THE VENUE RESPONSE BEING CHECKED. A payload
+    compared against a value extracted from that same payload would
+    match trivially and prove nothing, which is the failure mode this
+    route exists to avoid.
+
+    Returns a VERDICT and a field NAME. It never returns the account
+    identifier, the configured reference, or any credential, so the
+    answer can be recorded in a reconciliation log while the account
+    cannot.
+
+    An unset reference yields "no_expected" -- a blocker, not a pass.
+    """
+    from ..config import settings
+    from .reconcile_read import account_identity
+
+    return account_identity(settings().pmus_account_ref or None)
+
+
 @app.get("/api/desk/venue-resting-orders",
          dependencies=[Depends(require_desk)])
 async def api_venue_resting_orders() -> dict:
