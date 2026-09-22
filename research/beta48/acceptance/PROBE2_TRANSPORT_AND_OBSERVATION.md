@@ -549,6 +549,62 @@ branch and recorded in §6 then — not before.
 
 ---
 
+## 7b. Forward rollback
+
+**Nothing is reverted by rewinding history.** The tracked branch
+auto-deploys, so a rollback is a commit that moves forward.
+
+### Tier 1 — stop, no deploy (seconds)
+
+```
+render-ops sql obs-stop  confirm=DO
+```
+
+The loop re-reads the control every 30 s and fails closed. This stops
+observation without touching code, and is the first move in every
+scenario. The budget row additionally disarms itself at the deadline.
+
+### Tier 2 — restore the running code (one deploy)
+
+The deployable surface of this release is **four modules**, all
+modifications — no file is added, renamed or deleted under `backend/`:
+
+```
+backend/sportsassets/bettor_live_control.py        +37
+backend/sportsassets/bettor_market_stream.py      +153
+backend/sportsassets/bettor_universe_probe.py     +406
+backend/sportsassets/workers/bettor_live_loop.py  +809
+backend/tests/test_bettor_live_loop.py            +680   (not executed in production)
+```
+
+`backend/Dockerfile` and `render.yaml` are **byte-identical to
+e8f616a**, verified by `git diff e8f616a HEAD -- backend/Dockerfile
+render.yaml` returning empty. So the image build and the service
+configuration are unchanged, and the rollback is a source-only change:
+
+```
+git fetch origin claude/session-njaewf
+git checkout claude/session-njaewf
+git checkout e8f616a -- backend/
+git commit -m "forward rollback: backend/ to e8f616a"
+git push origin claude/session-njaewf          # no force
+```
+
+Because every change under `backend/` is a modification of a file that
+already existed at e8f616a, `git checkout e8f616a -- backend/`
+restores that tree exactly; there is no added file left behind. Verify
+before pushing:
+
+```
+git diff e8f616a HEAD -- backend/      # must be EMPTY
+```
+
+The auto-deploy then returns both services to the code that is running
+today. No database change is needed: the stop receipt lives under its
+own `ingestion_state` key and is only ever read.
+
+---
+
 ## 8. What this probe still cannot establish
 
 * **Fill-conditioned maker EV.** It rests no order, so it observes no
