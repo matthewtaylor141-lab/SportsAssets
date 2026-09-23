@@ -237,3 +237,90 @@ def test_the_shadow_module_is_loaded_before_app_js():
 
 def test_the_shadow_view_stops_polling_when_it_is_left():
     assert "window.BTShadow?.stop()" in APP_JS
+
+
+# ── THE RN1-SEEDED MANAGEMENT TAB ───────────────────────────────────
+#
+# The audit recorded "no published trace route" for this experiment, and
+# the brief asked for a view showing "actual operation, decisions,
+# results and remaining blockers". These check the four routes exist and
+# that the page draws all four sections -- in particular that the
+# BLOCKERS panel is not conditional on the experiment being empty.
+
+RN1X_ROUTES = ("/api/command/rn1x/overview", "/api/command/rn1x/positions",
+               "/api/command/rn1x/learning")
+
+
+def test_the_rn1x_routes_are_registered():
+    paths = {getattr(r, "path", "") for r in APP.app.routes}
+    for route in RN1X_ROUTES:
+        assert route in paths, route
+    assert any(p.startswith("/api/command/rn1x/trace/") for p in paths), paths
+
+
+def test_the_rn1x_routes_require_a_command_session(client):
+    for route in RN1X_ROUTES:
+        res = client.get(route)
+        assert res.status_code in (401, 403), (route, res.status_code)
+
+
+def test_rn1x_is_a_tab_and_has_a_renderer():
+    assert "['rn1x', 'RN1 seeded management']" in SHADOW_JS
+    assert "rn1x: rn1xTab," in SHADOW_JS
+    assert "function rn1xTab()" in SHADOW_JS
+
+
+def test_the_rn1x_cache_key_is_namespaced():
+    """Three namespaces now serve a route called `overview`.
+
+    An unkeyed cache would paint the desk's replay numbers under the
+    rn1x heading -- one mode's figures beneath another mode's title,
+    which is the exact error the mode separation exists to prevent.
+    """
+    assert "pullRn1x" in SHADOW_JS
+    assert "return pull(path, 'rn1x', 'rn1x/' + path);" in SHADOW_JS
+    for key in ("'rn1x/overview'", "'rn1x/learning'", "'rn1x/positions'"):
+        assert key in SHADOW_JS, key
+
+
+def test_the_rn1x_blockers_panel_is_not_conditional():
+    """A screen that hides its blockers once rows arrive is how "the loss
+    exit has never been available" stops being visible.
+
+    The blockers section is built unconditionally and concatenated into
+    every return, so it renders while the experiment is running and
+    writing. This asserts over the source because that is where the
+    property lives.
+    """
+    body = SHADOW_JS[SHADOW_JS.index("function rn1xTab()"):]
+    body = body[:body.index("\n  const VIEW = {")]
+    # built with no guard around it
+    assert "const blockers = `<section" in body
+    # and present in the full-render return
+    tail = body[body.rindex("return "):]
+    assert "blockers" in tail, tail
+    # the empty-state branch must not be the ONLY place it appears
+    assert body.count("blockers") >= 3, body.count("blockers")
+
+
+def test_the_rn1x_tab_draws_all_four_required_sections():
+    body = SHADOW_JS[SHADOW_JS.index("function rn1xTab()"):]
+    body = body[:body.index("\n  const VIEW = {")]
+    for needed in ("Is it operating?", "What is persisted",
+                   "Decisions by operating state", "Remaining blockers",
+                   "Learning cycle", "Seeded positions"):
+        assert needed in body, needed
+
+
+def test_the_rn1x_tab_never_prints_a_bare_zero_for_an_unknown():
+    """`zeroOk` prints a real 0 and NOT IDENTIFIED for absent.
+
+    The counts on this tab are genuinely zero for a long while, so they
+    must use the formatter that can tell 0 from unknown rather than a
+    raw interpolation that would render `undefined`.
+    """
+    body = SHADOW_JS[SHADOW_JS.index("function rn1xTab()"):]
+    body = body[:body.index("\n  const VIEW = {")]
+    for field in ("c.positions", "c.decisions", "c.orders", "c.fills",
+                  "c.outcomes"):
+        assert "zeroOk(%s)" % field in body, field
