@@ -255,3 +255,51 @@ on `now >= end_epoch`. Armed early it would connect and collect hours
 before 04:00Z, spending socket allowance outside the window. Adding a
 start gate would be an unrelated code change, so the arm is TIMED
 instead: scheduled for 03:50Z, trig_012jP2v4wuEhiVatwybx6MAc.
+
+### 2026-09-23T01:12Z — PRE-START VERIFICATION, and the deadline blocker
+Verified before touching anything:
+
+  deployed       7f76fd9 live on sportsassets-api and sportsassets-workers
+  control        false  -- NOT observing
+  http_total     0 of 8
+  socket         null / null  (row has no socket fields -- see below)
+  general cap    max_distinct 40   <- GENERAL-loop shape, not the arm shape
+  deadline_at    2026-09-22T14:35:09Z  -- STALE, expired ~10.6h ago
+  journal table  absent -- no run has started
+  preflight      10/10 spent, 0 remaining
+
+VERDICT: UNARMED. The probe row is a leftover from a prior session, with
+the general-loop cap of 40 rather than the incentive arm's zero, and an
+expired deadline. So this is the "arm exactly once" case.
+
+THE DEADLINE BLOCKER, stated precisely.
+`render-ops` action=sql accepts ONLY named statements from a fixed bash
+`case` list -- there is no parameter and no arbitrary-SQL path. The
+`obs-arm-incentive` statement hardcodes
+
+    'deadline_at', to_char((now() + interval '26 hours') ...)
+
+so an EXPLICIT deadline of 2026-09-24T04:00:00Z cannot be set through
+the existing mechanism. Arming at 01:12Z would have produced
+2026-09-24T03:12:00Z -- 48 MINUTES SHORT of the required window end,
+truncating the measurement window at its tail.
+
+THE RESOLUTION, which needs no code change and no deployment:
+now+26h >= the window end exactly when now >= 2026-09-23T02:00:00Z.
+
+    arm 01:12Z -> 2026-09-24T03:12Z   SHORT by 48 min
+    arm 02:00Z -> 2026-09-24T04:00Z   covers, zero margin
+    arm 02:10Z -> 2026-09-24T04:10Z   covers, +10 min  <- CHOSEN
+
+So the arm waits 58 minutes rather than being forced through a mechanism
+change. The cost is 58 minutes of EARLY collection, not any of the
+measurement window. Early collection is [02:10Z, 04:00Z), ~1.83h, and it
+is operational evidence only -- excluded from the economic window's
+coverage and reward calculations.
+
+Both pending triggers DISABLED so neither can duplicate or reset this
+run: trig_012jP2v4wuEhiVatwybx6MAc (03:50Z arm) and
+trig_01CiGjRDEb9mTjihzYPJqZov (04:00Z start). Replaced by a single
+trig_0156xerpzsYKoJLkDvvv2PxT at 02:10Z that arms once and starts, with
+an idempotency guard that refuses to re-arm a row already in the armed
+shape with a sufficient deadline.
