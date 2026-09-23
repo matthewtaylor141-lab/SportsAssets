@@ -1182,10 +1182,22 @@ async def command_desk_live_book(response: Response,
             # blotter would show the closed, unattributable period mixed
             # into the new book -- which is the exact confusion the
             # account id exists to end.
+            # THE PAUSE AND ACCOUNTING COLUMNS COME FROM THE ROW, not
+            # from the loop's in-memory status. A halt held only in a
+            # process's memory disappears when that process restarts,
+            # and an older build that never learned to report it would
+            # render the desk as healthy. The row is the durable truth
+            # and it is what the page must show.
             acct = await conn.fetchrow(
                 """
                 SELECT account_id, opening_balance::float8 AS opening_balance,
-                       opened_at, note
+                       opened_at, note, paused, pause_reason, paused_at,
+                       accounting_status, last_verified_at,
+                       -- the one field the page renders, pulled out so
+                       -- the client is not parsing a jsonb blob it got
+                       -- as a string
+                       accounting_detail->>'performance_qualification'
+                           AS performance_qualification
                   FROM bettor_desk_accounts
                  WHERE desk_id = 'live1' AND status = $1
                 """, ACC.ACTIVE)
