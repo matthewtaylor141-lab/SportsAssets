@@ -184,6 +184,45 @@ grid. Gate V2, declared in commit `2e23798` **before** this cycle ran.
 `d(realized)/d(queue_share)` flips sign between partitions for **every
 policy tested, including the frozen active one.**
 
+### CORRECTION: what the instability does and does not establish
+
+I wrote that the sign flip "is a property of **the corpus**, not of the
+challengers, so it is not fixable by another entry/exit/sizing knob."
+
+**That claim outruns the evidence and is withdrawn as stated.** What
+was measured is a sensitivity of *this policy family*, evaluated
+through *this execution model*, on *this data*. Three candidate causes
+remain live and the run does not separate them:
+
+1. **The data** — two partitions drawn from different market regimes.
+2. **The execution model** — `PRINT_THROUGH_WITH_QUEUE_SHARE_V1` is
+   itself an assumption, and the flip is a response to *its* free
+   parameter. A different fill model could show a different sign.
+3. **The policy family** — every variant shares an entry band, a pair
+   rule and one learned exit. A structurally different policy was
+   never tried.
+
+The correct statement is: **under the current data and execution model,
+no policy tested has a stable response to the one execution parameter
+we cannot identify.** That is a reason not to promote anything. It is
+not a finding about the corpus, and it does not license skipping
+further policy work.
+
+### FROZEN, 2026-09-23
+
+No further strategy change, candidate or parameter search until the
+management release is verified. Both unsuccessful cycles are preserved
+exactly as run — they are the sensitivity evidence, and deleting or
+re-running them would destroy the only record of it.
+
+**Neither side of a scenario comparison is promoted.** The VALIDATION
+figures that are positive at high `queue_share` are half of a sign
+flip, not a result.
+
+**All previously inspected validation data remains DEVELOPMENT
+EVIDENCE**, including the VALIDATION partition. It has been read; it is
+not a held-out test set and must not be relabelled as one.
+
 ### What cycle 2 establishes
 
 1. **No promotion.** The active policy stays frozen. Two cycles, ten

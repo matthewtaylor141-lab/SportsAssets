@@ -2,10 +2,12 @@
 
 ## 0. THE HEADLINE, in four lines
 
-1. **The live shadow desk is running and writing.** Verified at
-   `14:41:49Z`: 375 decisions (newest 9 s old), 35 orders, 20
-   positions, 18 ledger snapshots, cursor advancing, **ledger identity
-   exact on all 18**. The chain the audit found broken is closed.
+1. **The live shadow desk is running and writing.** The chain the
+   audit found broken is closed end to end.
+   **But two of my claims about it were wrong and are corrected in
+   §3b–§3c: it was not restart-safe, and the fee diagnosis overreached.**
+   Both are now fixed in code and the accounting gap is published as a
+   bounded correction rather than a number.
 2. **Nothing it has done is a result yet.** Under an hour of running,
    realized **+$11.48** (maker rebate income), nothing settled. Its
    first 37 minutes were booked with **no fee schedule at all** — a
@@ -170,13 +172,80 @@ spot itself rather than commenting on it.
 
 That closes the chain end to end — live market data → independent
 selection → risk check → resting shadow order → simulated execution →
-inventory → reconciled ledger — persistent and restart-safe.
+inventory → reconciled ledger — persistent. **See §3c: it was NOT
+restart-safe, and I reported that it was.**
 
 **It is six minutes old, has realized $0.00 and has settled nothing.**
 It is not evidence of profitability and is not offered as any. Its
 value today is that the prospective decisions are being recorded
 **before** their outcomes, which is what will make them usable as the
 final evaluation set later (§8).
+
+### 3c. CORRECTION — "restart-safety demonstrated" was WRONG
+
+I reported that yesterday. It was not demonstrated, and the four things
+I cited could not have demonstrated it.
+
+**The book was never restored.** `run()` constructed a fresh `Desk` and
+read back `cursor_event_id` and nothing else. Cash, legs and orders
+were never recovered, so **every process start began the account again
+at $100,000 with no positions**, and the first write then overwrote
+`bettor_desk_state.cash_usd` with that fresh figure. An AST walk over
+the module confirms it reads exactly one table.
+
+Why the evidence I gave was empty:
+
+| what I cited | what it actually shows |
+|---|---|
+| one `desk_state` row | what an UPSERT on a primary key gives for **any** number of writers |
+| monotone cursor | what `max()` over a serial gives regardless |
+| unchanged earliest timestamps | only that history was not re-read |
+| `invariant_ok` | a desk against its **own** starting cash — an emptied book reconciles perfectly |
+
+**The measured data already said so and I did not look:** inventory fell
+from $3,652.96 to $1,782.68 across the 15:17 restart with **no `EXIT`
+decision** to explain it.
+
+**Consequence for the accounting.** Figures spanning a restart are not
+running totals. And `boot_id` was written as a per-row timestamp, so
+restarts are **not locatable** in the historical ledger at all — that is
+reported as an incompleteness rather than guessed at.
+
+**Fixed.** `_restore` rebuilds cash and legs before the first event is
+stepped and reports whether the rebuilt book reconciles. Open orders are
+closed with the reason recorded, not re-armed, because the consumption
+ledger is not persisted and re-arming could fill them twice against
+evidence already consumed. A real epoch id is minted once per process
+and stamped on every row.
+
+### 3d. The corrected ledger, and why it is an interval
+
+`bettor_desk_fills` was created by migration 094 and **never written**,
+so no per-fill quantity, price, role or timestamp exists for anything
+the live lane has simulated. PMUS rounds **per fill**, so a fee
+recomputed from an order's average price is not the sum of its fills'
+fees; and `p(1-p)` is concave, so the aggregate **overstates** the
+rebate's magnitude. Both push the same way.
+
+So the correction is published as an **interval**:
+
+| bound | meaning |
+|---|---|
+| **lower — $0.00** | every fill's amount rounded away. Not a formality: a fill needs ~2 contracts at p=0.50 and ~41 at p=0.01 before its rebate survives rounding |
+| **upper** | the concavity bound from the order's average price |
+
+Reporting the upper bound as *the* answer would be a number that
+flatters the book — the same class of error as the entry-fee leak this
+system already caught once.
+
+**Originals are untouched.** Corrections are written beside them, with
+two duplicate guards: `UNIQUE (desk_id, version)` on the run and
+`correction_id = version:kind:subject` on each row. Ledger rows written
+before the fee basis existed read as `FEE_BASIS_NOT_RECORDED` — they do
+**not** acquire a net-of-fees label because the current process has a
+schedule.
+
+Fills are now persisted per fill, so the next correction can be exact.
 
 **This lane is separate from the production engine above.** Different
 tables, different decision stream, label `DESK_SHADOW_EXPERIMENTAL`.
@@ -289,7 +358,7 @@ How it satisfies the isolation requirements:
 | single active writer | `pg_try_advisory_lock(7723901544120031)` — the instance that wins runs; every other reports `STANDBY` and writes nothing, so the overlapping instances a deploy creates cannot run duplicate desks |
 | idempotent intake | cursor is the evidence's **serial id**, not a timestamp; every insert is `ON CONFLICT DO NOTHING`/`DO UPDATE` on a natural key; the consumption ledger is keyed on the event id |
 | non-blocking | awaited on the shared pool, sleeps between cycles |
-| restart-safe | decisions, orders, positions, cash and cursor in Postgres; the in-memory desk is a cache of the ledger |
+| restart-safe | **CORRECTED — this row was false.** Only the CURSOR was restored; cash, legs and orders were not, so each start began the book again at $100,000. `_restore` now rebuilds cash and legs before the first event is stepped and reports whether the rebuilt book reconciles. Open orders are closed, not re-armed, because the consumption ledger is not persisted and re-arming could fill them twice. |
 | a failed cycle | does **not** advance the cursor — the batch is retried and the idempotent keys absorb it |
 | no funded path | **absent from the import graph**, not flagged off; a test reads the module's source and fails the build if a venue import or order-submitting symbol appears |
 | no venue requests | its only input is evidence already in our database — the collector's allowance is untouched |
