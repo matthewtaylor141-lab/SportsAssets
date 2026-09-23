@@ -261,6 +261,111 @@ RULE_DECLARATION = {
 }
 
 
+# ── WHEN to close exposure, which is a different question from HOW ───
+#
+# THE GAP THIS CLOSES. Ranking DIRECT_EXIT against TAKE_COMPLEMENT picks
+# an exit METHOD. It says nothing about whether exposure should be closed
+# at all. I had been treating the method comparison as though it were the
+# decision, which quietly made "act" the default whenever any action was
+# priceable.
+#
+# UNTIL A TRIGGER FIRES, HOLD IS A VALID OPERATING STATE -- not a
+# fallback, not an absence of decision, and not something to be escaped
+# as soon as a number exists.
+#
+# WHAT A TRIGGER MAY USE. Only information available at that instant: the
+# last observed price on our own leg, our entry basis, and how long the
+# exposure has been open. No settlement forecast, no future print, no
+# knowledge of what the cohort does next.
+#
+# IT IS A RULE, NOT A MODEL. No validated estimator says when closing
+# beats holding -- that comparison needs EV_HOLD. These thresholds are
+# DECLARED, they are not fitted, and they were not tuned on any result.
+# A rule that fires on a 20% adverse move is a stated risk preference;
+# calling it optimal would be the claim this stack refuses.
+TRIGGER_ID = "EXPOSURE_TRIGGER_RULE_V1"
+TRIGGER_ADVERSE_FRACTION = 0.20      # of basis, on the last observed price
+TRIGGER_MAX_SECONDS_OPEN = 86_400.0  # one day unpaired
+
+TRIGGER_DECLARATION = {
+    "id": TRIGGER_ID,
+    "kind": "RULE",
+    "question_it_answers": "WHETHER to close exposure, not HOW",
+    "inputs_available_now": ["last observed price on our leg",
+                            "entry basis", "seconds exposure has been open"],
+    "inputs_refused": ["settlement forecast", "future prints",
+                       "the cohort's later actions"],
+    "thresholds_are": "DECLARED, not fitted and not tuned on any result",
+    "is_not": ("evidence that closing beats holding. That comparison "
+               "needs EV_HOLD, which is NOT_IDENTIFIED"),
+    "hold_is_valid": ("until a trigger fires, HOLD is the operating "
+                      "state. It is not a fallback and not an absence of "
+                      "a decision"),
+    "adverse_fraction": TRIGGER_ADVERSE_FRACTION,
+    "max_seconds_open": TRIGGER_MAX_SECONDS_OPEN,
+}
+
+
+def exposure_trigger(*, basis_per_contract, last_price=None,
+                     seconds_open=None) -> dict:
+    """Should exposure be closed at all? A declared rule.
+
+    Returns fired=False with HOLD as the operating state when no
+    condition is met. Returns fired=True and the condition that fired,
+    which the METHOD comparison then answers separately.
+    """
+    out = {"trigger": TRIGGER_DECLARATION, "fired": False,
+           "conditions": [], "operating_state": "HOLD"}
+    b = float(basis_per_contract)
+
+    if last_price is None:
+        out["conditions"].append({
+            "name": "ADVERSE_MOVE", "status": NOT_IDENTIFIED,
+            "why": ("no price has been observed on our leg since entry, "
+                    "so the move is unknown -- not zero")})
+    else:
+        move = (float(last_price) - b) / b if b > 0 else 0.0
+        hit = move <= -TRIGGER_ADVERSE_FRACTION
+        out["conditions"].append({
+            "name": "ADVERSE_MOVE", "status": "EVALUATED", "fired": hit,
+            "observed_move_fraction": move,
+            "threshold": -TRIGGER_ADVERSE_FRACTION,
+            "why": ("last observed %.4f against basis %.4f is %.2f%%; "
+                    "the declared threshold is %.0f%%"
+                    % (float(last_price), b, move * 100.0,
+                       -TRIGGER_ADVERSE_FRACTION * 100.0))})
+        if hit:
+            out["fired"] = True
+
+    if seconds_open is None:
+        out["conditions"].append({
+            "name": "TIME_OPEN", "status": NOT_IDENTIFIED,
+            "why": "how long the exposure has been open was not supplied"})
+    else:
+        hit = float(seconds_open) >= TRIGGER_MAX_SECONDS_OPEN
+        out["conditions"].append({
+            "name": "TIME_OPEN", "status": "EVALUATED", "fired": hit,
+            "seconds_open": float(seconds_open),
+            "threshold": TRIGGER_MAX_SECONDS_OPEN,
+            "why": ("%.0fs open against a declared maximum of %.0fs"
+                    % (float(seconds_open), TRIGGER_MAX_SECONDS_OPEN))})
+        if hit:
+            out["fired"] = True
+
+    if out["fired"]:
+        out["operating_state"] = "CLOSING"
+        out["reason"] = ("a declared trigger fired: %s. The METHOD is a "
+                         "separate comparison and does not justify "
+                         "closing by itself"
+                         % ", ".join(c["name"] for c in out["conditions"]
+                                     if c.get("fired")))
+    else:
+        out["reason"] = ("no declared trigger fired, so HOLD remains the "
+                         "operating state. A priceable exit existing is "
+                         "NOT a reason to take it")
+    return out
+
+
 def rank_priced_actions(qty, own_basis_per_contract, *, bid=None,
                          bid_size=None, complement_ask=None,
                          complement_ask_size=None, fee_fn=None) -> dict:
@@ -301,6 +406,13 @@ def rank_priced_actions(qty, own_basis_per_contract, *, bid=None,
                 "outcome_if_filled_usd": float(bid) * sz - f - rel,
                 "execution_secured": False, "fees_usd": f,
                 "depth_limited": sz < q - 1e-12,
+                # CASH NOW vs CASH LATER. A sale returns cash at
+                # execution. A completion does not. Comparing the two on
+                # net outcome alone hides that difference entirely.
+                "cash_now_usd": float(bid) * sz - f,
+                "cash_at_settlement_usd": 0.0,
+                "collateral_released_now": True,
+                "remaining_exposure_qty": q - sz,
                 "arithmetic": ("%.4f x %.4g - fees %.4f - basis %.4f"
                                % (float(bid), sz, f, rel))})
 
@@ -322,10 +434,27 @@ def rank_priced_actions(qty, own_basis_per_contract, *, bid=None,
             val = 1.00 * sz - float(complement_ask) * sz - f - rel
             cands.append({
                 "action": "TAKE_COMPLEMENT", "qty": sz,
-                "outcome_if_filled_usd": val, "execution_secured": False, "fees_usd": f,
+                "outcome_if_filled_usd": val, "execution_secured": False,
+                "fees_usd": f,
                 "depth_limited": sz < q - 1e-12,
                 "locks_a_loss": val < 0,
                 "unpaired_after": q - sz,
+                # COMPLETING SPENDS CASH AND RETURNS NONE UNTIL
+                # SETTLEMENT. A HELD PAIR IS NOT AVAILABLE CASH: the
+                # matched quantity only frees collateral if the venue
+                # lets it be merged or netted, and the institutional
+                # MERGE_MECHANISM is NOT_IDENTIFIED. So this action
+                # INCREASES capital committed at the moment it fills.
+                "cash_now_usd": -(float(complement_ask) * sz + f),
+                "cash_at_settlement_usd": 1.00 * sz,
+                "collateral_released_now": False,
+                "collateral_release": NOT_IDENTIFIED,
+                "collateral_release_why": (
+                    "a matched pair is not cash. Releasing it needs a "
+                    "merge or net the venue has not established for this "
+                    "account, so the capital stays committed until "
+                    "settlement"),
+                "remaining_exposure_qty": q - sz,
                 "arithmetic": ("1.00 x %.4g - %.4f x %.4g - fees %.4f - "
                                "basis %.4f" % (sz, float(complement_ask),
                                                sz, f, rel))})
@@ -359,7 +488,10 @@ def rank_priced_actions(qty, own_basis_per_contract, *, bid=None,
                       best["outcome_if_filled_usd"] - runner["outcome_if_filled_usd"]))
         # The clean test, stated so it can be checked independently.
         if (complement_ask is not None and bid is not None):
-            reason += ("; equivalently 1 - ask = %.4f vs bid = %.4f"
+            reason += ("; the SIMPLIFIED pre-cost test is 1 - ask = "
+                       "%.4f vs bid = %.4f, and the figures above "
+                       "are the NET ones after action-specific fees "
+                       "and depth caps"
                        % (1.0 - float(complement_ask), float(bid)))
     if best["outcome_if_filled_usd"] < 0:
         reason += (". THIS LOCKS A LOSS and is selected anyway because "

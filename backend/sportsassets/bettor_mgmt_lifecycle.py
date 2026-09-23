@@ -103,6 +103,9 @@ class Managed:
         self.cons = dk.Consumption()
         self.orders = {}
         self.decisions = []
+        # Fills that exceeded remaining inventory. Recorded,
+        # never silently trimmed away.
+        self.discrepancies = []
         self._n = 0
         self.seed_qty = float(seed_qty)
         self.seed_price = float(seed_price)
@@ -171,6 +174,68 @@ class Managed:
                 "qty": want, "capped": want < float(qty) - 1e-12,
                 "liquidity": liquidity, "refused": None}
 
+    # ── THE CONNECTION THAT DID NOT EXIST ────────────────────────────
+    #
+    # This module imported `bettor_mgmt_select` and never called it. The
+    # lifecycle was driven only by test code handing it actions, so
+    # "selector -> order manager" was an unused import rather than a
+    # connection. `decide_and_act` is that connection.
+    def decide_and_act(self, *, at, last_price=None, bid=None,
+                       bid_size=None, complement_ask=None,
+                       complement_ask_size=None, seconds_open=None,
+                       decision_id=None) -> dict:
+        """WHETHER to close, then HOW, then place it. In that order.
+
+        The two questions are separate and the order matters: a priceable
+        exit existing is not a reason to take it, so the trigger runs
+        first and HOLD stands until it fires.
+        """
+        q = self.residual()
+        if q <= 1e-9:
+            return {"at": at, "operating_state": "NO_RESIDUAL",
+                    "acted": False,
+                    "why": "no unpaired exposure on the seeded leg"}
+        basis_per = (self.pf._leg(self.condition_id, self.leg)["cost"]
+                     / max(self.held(self.leg), 1e-12))
+
+        # 1. WHETHER.
+        trig = sel.exposure_trigger(basis_per_contract=basis_per,
+                                    last_price=last_price,
+                                    seconds_open=seconds_open)
+        rec = {"at": at, "residual_qty": q,
+               "basis_per_contract": basis_per,
+               "trigger": trig, "operating_state": trig["operating_state"]}
+        if not trig["fired"]:
+            rec.update(acted=False, method=None,
+                       why=("HOLD remains the operating state: %s"
+                            % trig["reason"]))
+            self.decisions.append(rec)
+            return rec
+
+        # 2. HOW -- only now, and over the residual quantity alone.
+        rank = sel.rank_priced_actions(
+            q, basis_per, bid=bid, bid_size=bid_size,
+            complement_ask=complement_ask,
+            complement_ask_size=complement_ask_size, fee_fn=self.fee_fn)
+        rec["method"] = rank
+        if not rank.get("selected"):
+            rec.update(acted=False,
+                       why=("the trigger fired but no method is "
+                            "executable: %s" % rank["selection_reason"]))
+            self.decisions.append(rec)
+            return rec
+
+        # 3. PLACE. The order is sized to the residual, not the leg.
+        chosen = rank["priced_actions"][0]
+        px = (bid if chosen["action"] == "DIRECT_EXIT" else complement_ask)
+        placed = self.place(chosen["action"], at=at, price=px,
+                            qty=chosen["qty"],
+                            decision_id=decision_id or "d-%s" % int(at))
+        rec.update(acted=placed.get("placed") is not None, placement=placed,
+                   why=rank["selection_reason"])
+        self.decisions.append(rec)
+        return rec
+
     def acknowledge_cancels(self, at) -> list:
         """CANCEL_PENDING -> CANCELLED. Separate from requesting the
         cancel, because the gap between the two is where the race lives.
@@ -211,21 +276,43 @@ class Managed:
                        else price >= o.limit_price)
             if not crosses or o.remaining <= 1e-9:
                 continue
-            # RE-CHECK THE CAP AT FILL TIME.
-            cap = (self.held(self.leg) if o.side == "SELL"
-                   else self.residual())
-            want = min(o.remaining, cap)
-            if want <= 1e-9:
-                o.transition(dk.CANCELLED, at,
-                             "inventory no longer supports this order")
-                out.append({"order_id": o.order_id, "qty": 0.0,
-                            "why": "CAP_EXHAUSTED"})
-                continue
-            got = self.cons.take(evidence_id, want)
+            # A REPORTED FILL IS NEVER CLIPPED. THIS WAS A BUG I SHIPPED.
+            #
+            # The previous version computed `want = min(o.remaining, cap)`
+            # and took only that much from the print -- silently trimming
+            # a fill to fit the inventory it expected. That is not how an
+            # execution works. RESIZING AN ORDER BEFORE SUBMISSION is
+            # valid and happens in `place()`. SILENTLY CLIPPING A
+            # REPORTED FILL hides a real discrepancy: the venue filled
+            # what it filled, and a book that quietly records less than
+            # was executed is wrong in the direction that looks tidy.
+            #
+            # So the whole execution is taken and recorded. If it exceeds
+            # what remaining inventory supports, the surplus is reported
+            # as an INVENTORY DISCREPANCY on the fill and in the state,
+            # rather than deleted.
+            got = self.cons.take(evidence_id, o.remaining)
             if got <= 1e-9:
                 continue
             fee = float(self.fee_fn(qty=got, price=price))
             raced = o.state == dk.CANCEL_PENDING
+            # THE DISCREPANCY, MEASURED BEFORE THE BOOK MOVES. A SELL
+            # cannot exceed the held quantity and a completion cannot
+            # exceed the unpaired remainder; a fill that does is recorded
+            # in full and the surplus is surfaced.
+            cap = (self.held(self.leg) if o.side == "SELL"
+                   else self.residual())
+            surplus = max(0.0, got - cap)
+            if surplus > 1e-9:
+                self.discrepancies.append({
+                    "at": at, "order_id": o.order_id,
+                    "evidence_id": evidence_id,
+                    "filled_qty": got, "inventory_cap": cap,
+                    "surplus_qty": surplus, "side": o.side,
+                    "why": ("the execution exceeded what remaining "
+                            "inventory supported. It is recorded IN FULL "
+                            "rather than clipped, and this is the "
+                            "resulting discrepancy")})
             if o.side == "BUY":
                 self.pf.buy(self.condition_id, o.outcome_index, got,
                             price, fee, at)
@@ -238,6 +325,8 @@ class Managed:
                             "fee_usd": round(fee, 6),
                             "evidence_id": evidence_id,
                             "raced_a_pending_cancel": raced,
+                            "inventory_surplus_qty": round(surplus, 6),
+                            "was_clipped": False,
                             "exec_model": dk.FILL_MODEL})
             o.transition(dk.FILLED if o.remaining <= 1e-9
                          else (dk.CANCEL_PENDING if raced
@@ -248,6 +337,7 @@ class Managed:
                          qty=round(got, 6), evidence_id=evidence_id)
             out.append({"order_id": o.order_id, "qty": got, "price": price,
                         "fee_usd": fee, "raced_a_pending_cancel": raced,
+                        "inventory_surplus_qty": surplus,
                         "remaining_after": o.remaining,
                         "residual_after": self.residual()})
         return out
@@ -290,6 +380,9 @@ class Managed:
             "residual_note": ("the unpaired remainder stays under "
                               "management: a partial completion reduces "
                               "it, it does not remove the position"),
+            "inventory_discrepancies": list(self.discrepancies),
+            "inventory_discrepancy_qty": round(
+                sum(d["surplus_qty"] for d in self.discrepancies), 6),
             "open_orders": [o.to_dict() for o in open_o],
             "all_orders": [o.to_dict() for o in self.orders.values()],
             "portfolio": d,
