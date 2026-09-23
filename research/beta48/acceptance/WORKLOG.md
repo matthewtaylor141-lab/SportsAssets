@@ -303,3 +303,68 @@ trig_01CiGjRDEb9mTjihzYPJqZov (04:00Z start). Replaced by a single
 trig_0156xerpzsYKoJLkDvvv2PxT at 02:10Z that arms once and starts, with
 an idempotency guard that refuses to re-arm a row already in the armed
 shape with a sufficient deadline.
+
+## 2026-09-23 19:36Z — RN1X integration deployed and verified from persisted rows
+
+Authorization: "complete the integration and deploy the functioning
+shadow systems… Report completion only from persisted end-to-end
+evidence and the published interface."
+
+### The migration question, settled from the catalog
+
+`100_rn1_seeded_experiment.sql` applied **19:02:46Z**. My earlier readback
+reported `rn1x_tables = 0` at 19:02:19Z — twenty-seven seconds before the
+`6c9a9fb` deploy finished at 19:02:51Z. The tables were absent because the
+build had not landed, not because the migration failed. I had been about
+to diagnose a migration failure that never happened.
+
+### Persisted evidence
+
+| At (UTC) | positions | decisions | orders | fills | outcomes | cursor |
+|---|---|---|---|---|---|---|
+| 19:23:28 | 0 | 0 | 0 | 0 | 0 | — (control row absent) |
+| 19:28:47 | 19 | 1,158 | 40 | 4 | 19 | 41 |
+| 19:35:58 | — | 1,706 | — | — | — | 145 |
+
+Decisions by operating state at 19:35:58Z:
+`ORDER_WORKING 1300`, `NO_RESIDUAL 271`, `HOLD_NO_FEASIBLE_PAIR 135`.
+
+`reconciles = true` on the written positions. Both writer locks held
+(`desk_lock_free = f`, `rn1x_lock_free = f`) — the rn1x loop is the single
+writer on its own key, not a standby of the desk's.
+
+### The fail-closed sequence, observed rather than asserted
+
+- 19:21:31Z heartbeat: `{"ran": false, "why": "CONTROL_ROW_ABSENT",
+  "state": "STOPPED"}` — deployed, holding its lock, writing nothing.
+- 19:24:36Z `rn1x-on` → `rn1x_shadow = true`.
+- 19:28:26Z heartbeat: `REPLAYED`, wrote a position AND refused another
+  for `initial flat inventory/history completeness not verified`.
+
+Registration did not start it; a database write did.
+
+### Containment, unchanged throughout
+
+`acct_fc2d773a2afa4851` still `paused = t`, `ACCOUNTING_UNCERTAIN`, and
+the last desk decision is still **16:37:30Z**. Nothing in this work reads
+or writes the desk's tables.
+
+### Blockers, still named and still not worked around
+
+- `SECOND_HALF_UNDEFINED` — no event-progress feed, so the loss exit is
+  unavailable on every position and only the PAIRING half of the policy
+  is under test. Missing dependency: a per-sport event clock with observed
+  period boundaries, joined point-in-time.
+- `NO_CONTEMPORANEOUS_BOOK` — no archived bid/ask/depth for these
+  instants. Tape prints are executions by others, not a standing book.
+- `FEED_POSTDATES_SETTLEMENT` — 15.07 h detection lag on the measured
+  seed, postdating settlement by 11.22 h. No forward lane can be seeded
+  from this feed, so the experiment is HISTORICAL_REPLAY by necessity.
+
+### Deployment constraint recorded, not routed around
+
+Both `sportsassets-api` and `sportsassets-workers` track the same
+auto-deploy branch, so registering the loop in `workers/all.py` would need
+a push that restarts the observation collector mid-window. Both loops are
+hosted in the API lifespan instead and released by commit id; the frontend
+went to the Netlify branch with `[skip render]`.
