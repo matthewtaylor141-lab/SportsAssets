@@ -224,6 +224,13 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         "identical_starting_inventory": True}
 
     out["final_state"] = final
+    # EVERY DECISION, NOT JUST THE ONES THAT ACTED. `steps.MANAGE.events`
+    # carries only the instants where an order moved or a fill landed,
+    # which is the activity-looking subset; a persisted record built from
+    # it alone would show the experiment doing things and hide the state
+    # it is in most of the time, which for this policy is
+    # HOLD_NO_FEASIBLE_PAIR. The store writes this list.
+    out["all_decisions"] = list(m.decisions)
     out["accounting"] = {
         "realized_pnl_usd": final["portfolio"]["realized_pnl_usd"],
         "fees_usd": final["portfolio"]["fees_usd"],

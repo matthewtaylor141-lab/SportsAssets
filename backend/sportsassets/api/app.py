@@ -287,10 +287,42 @@ async def lifespan(_: FastAPI):
             _DESKLOOP.run(_desk_pool))
         log.info("shadow desk loop armed (contends for the writer lock)")
 
+    # ── THE RN1-SEEDED MANAGEMENT EXPERIMENT (2026-09-23) ───────────
+    #
+    # The audit's row for this path read: no worker caller, no
+    # persistence caller, no published trace route. This is the caller.
+    #
+    # HOSTED HERE RATHER THAN IN THE WORKER SERVICE because both
+    # services track the same auto-deploy branch, so a push that
+    # registers a loop there restarts the observation collector
+    # mid-window. The API is released by commit id with no push. Same
+    # reason the desk loop above lives here.
+    #
+    # TWO INDEPENDENT STOPS, and neither is this deploy. RN1X_SHADOW
+    # must be on (an env change, which Render applies on redeploy) AND
+    # the `rn1x_shadow` control row must read true (a database write,
+    # which takes effect within a cycle). With either absent the loop
+    # takes its lock, reads one column and sleeps. Absence is not
+    # permission.
+    #
+    # NO VENUE REQUESTS: its only input is evidence already in our own
+    # database, so the collector's allowance is untouched. NO ORDER
+    # PATH: every order it writes is modelled and migration 100 CHECKs
+    # is_modelled true. It never reads or writes the desk's tables or
+    # the paused ACCOUNTING_UNCERTAIN account.
+    from ..workers import rn1x_shadow as _RN1X
+    rn1x_task = None
+    if _RN1X.enabled():
+        from ..db import get_pool as _rn1x_pool
+        rn1x_task = asyncio.get_running_loop().create_task(
+            _RN1X.run(_rn1x_pool))
+        log.info("rn1x shadow loop armed (contends for its own writer lock)")
+
     try:
         yield
     finally:
-        tasks = [t for t in (desk_task, trim_task, poller_task) if t is not None]
+        tasks = [t for t in (desk_task, rn1x_task, trim_task, poller_task)
+                 if t is not None]
         for task in tasks:
             task.cancel()
         # The desk owns a pooled connection and a session advisory lock.
@@ -1626,6 +1658,49 @@ async def command_shadow_accounting_all(response: Response) -> dict:
         return await CS.accounting_all(await get_pool())
     except CS.RetrievalIncomplete as inc:
         raise _shadow_unavailable(inc) from inc
+
+
+# ── THE RN1-SEEDED MANAGEMENT EXPERIMENT ────────────────────────────
+#
+# The published trace the audit recorded as absent. Read-only: these
+# three routes select from the rn1x_* tables and nothing else. They do
+# not start, stop or seed the experiment -- the control row does that.
+@app.get("/api/command/rn1x/overview",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_overview(response: Response) -> dict:
+    """Operation, decisions-by-state, settled totals and blockers.
+
+    Every count is scoped to one experiment id, which the payload says
+    on the row rather than in a footnote.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    return await CR.overview(await get_pool())
+
+
+@app.get("/api/command/rn1x/positions",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_positions(response: Response,
+                                 limit: int = 50) -> dict:
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    rows = await CR.positions(await get_pool(), limit=max(1, min(200, limit)))
+    return {"scope": CR.SCOPE, "label": CR.LABEL, "positions": rows}
+
+
+@app.get("/api/command/rn1x/trace/{position_id:path}",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_trace(position_id: str, response: Response) -> dict:
+    """ONE position end to end: every decision, order, fill and outcome."""
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    return await CR.trace(await get_pool(), position_id)
 
 
 @app.get("/api/command/shadow/comparison",
