@@ -191,8 +191,11 @@ def evaluate(seeds, *, scenarios=None, fee_fn=None) -> dict:
                     # policy), so dropping it keeps the arms comparable.
                     continue
                 rows.append(_metrics(out, qs))
-            per_scenario.append(_sum_rows(rows))
-        results[arm["name"]] = [r for r in per_scenario if r]
+            row = _sum_rows(rows)
+            # A SCENARIO THAT PRODUCED NOTHING IS KEPT AS A HOLE, not
+            # dropped. Dropping it renumbers every later scenario.
+            per_scenario.append(row or {"queue_share": qs, "empty": True})
+        results[arm["name"]] = per_scenario
     return {"version": VERSION, "scenarios": list(scen), "arms": results,
             # The eligibility floor is a COUNT, so it is an int. A float
             # here would read "6.0 decided orders" on the receipt.
@@ -217,6 +220,29 @@ def recommend(evaluation: dict, challenger: str) -> dict:
                         "produced %d scenario rows and the challenger %d. "
                         "An unevaluable comparison RETAINS -- it is not "
                         "an improvement" % (len(base), len(cand)))}
+    # THE ROWS MUST LINE UP BY SCENARIO, NOT MERELY BY COUNT. `gate_v2`
+    # zips base against cand by index, so two lists of equal length whose
+    # queue_shares differ would be compared across two different
+    # execution assumptions and reported as like-for-like. A length check
+    # alone does not catch that.
+    mismatched = [(b.get("queue_share"), c.get("queue_share"))
+                  for b, c in zip(base, cand)
+                  if b.get("queue_share") != c.get("queue_share")]
+    if mismatched:
+        return {"verdict": RETAIN, "challenger": challenger, "gate": None,
+                "why": ("the comparison is not evaluable: scenario rows do "
+                        "not line up (%s). Comparing one queue_share "
+                        "against another is not a comparison"
+                        % mismatched)}
+    # AND AN EMPTY SCENARIO IS NOT A ZERO. An arm that produced no rows
+    # for a declared scenario has not been evaluated under it, and the
+    # gate requires every scenario.
+    holes = [r.get("queue_share") for r in base + cand if r.get("empty")]
+    if holes:
+        return {"verdict": RETAIN, "challenger": challenger, "gate": None,
+                "why": ("the comparison is not evaluable: no rows were "
+                        "produced for queue_share %s, and the gate "
+                        "requires EVERY declared scenario" % holes)}
     verdict = gate_mod.gate_v2(base, cand, evaluation.get("decided", 0))
     return {
         "challenger": challenger,

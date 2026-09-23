@@ -547,3 +547,89 @@ async def test_learning_has_no_promotion_path_in_its_source():
     # exactly two verdicts, and neither is a promotion
     assert {L.RETAIN, L.ELIGIBLE} == {"RETAIN_CHAMPION",
                                       "CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT"}
+
+
+# ── 8. THE COMPARISON MUST BE APPLES TO APPLES ──────────────────────
+#
+# `learn_gate.gate_v2` zips the champion's scenario rows against the
+# challenger's BY INDEX. Two lists of equal length whose queue_shares
+# differ would be compared across two different execution assumptions and
+# the verdict reported as like-for-like. A length check does not catch it.
+#
+# This matters concretely: a challenger has already reached
+# CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT on production data, so the
+# comparison behind that verdict has to be verifiably aligned.
+
+_GATE_ROW = dict(realized_pnl_usd=0.0, turnover_usd=1.0,
+                 unresolved_cost_usd=0.0, terminal_upper_usd=0.0,
+                 terminal_lower_usd=0.0, terminal_lower_vs_start=0.0,
+                 max_drawdown_usd=0.0, peak_committed_usd=0.0,
+                 invariant_ok=True)
+
+
+def test_a_reordered_scenario_comparison_refuses():
+    from sportsassets import bettor_rn1x_learn as L
+
+    ev = {"arms": {"CHAMPION": [dict(_GATE_ROW, queue_share=0.10)],
+                   "PAIR_092": [dict(_GATE_ROW, queue_share=0.50,
+                                     realized_pnl_usd=99.0)]},
+          "decided": 999}
+    rec = L.recommend(ev, "PAIR_092")
+    assert rec["verdict"] == L.RETAIN, rec
+    assert "do not line up" in rec["why"], rec["why"]
+    assert rec["gate"] is None
+
+
+def test_an_empty_scenario_is_not_a_zero():
+    """An arm not evaluated under a scenario has not passed it.
+
+    The gate requires EVERY declared scenario because P_FILL is
+    NOT_IDENTIFIED. Treating a missing row as a zero would let a
+    challenger win a scenario it never ran.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+
+    ev = {"arms": {"CHAMPION": [{"queue_share": 0.10, "empty": True}],
+                   "PAIR_092": [{"queue_share": 0.10, "empty": True}]},
+          "decided": 999}
+    rec = L.recommend(ev, "PAIR_092")
+    assert rec["verdict"] == L.RETAIN
+    assert "requires EVERY declared scenario" in rec["why"]
+
+
+def test_the_alignment_guards_do_not_make_the_gate_unpassable():
+    """The guards must refuse mismatches, not refuse everything.
+
+    Without this, the two checks above could be satisfied by a gate that
+    never returns ELIGIBLE at all -- which would look like rigour and be
+    a check that cannot fail in the other direction.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+
+    ev = {"arms": {"CHAMPION": [dict(_GATE_ROW, queue_share=0.10)],
+                   "PAIR_092": [dict(_GATE_ROW, queue_share=0.10,
+                                     realized_pnl_usd=99.0)]},
+          "decided": 999}
+    rec = L.recommend(ev, "PAIR_092")
+    assert rec["verdict"] == L.ELIGIBLE, rec
+    assert rec["gate"]["accepted"] is True
+
+
+async def test_evaluate_keeps_a_hole_rather_than_renumbering(conn):
+    """`evaluate` must not drop an empty scenario row.
+
+    Dropping it renumbers every later scenario, which is precisely what
+    makes the index-zip unsafe.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+
+    ids = await _seed_evidence(conn)
+    seed = {"rows": [], "payouts": {0: 1.0, 1: 0.0}, "resolved_at": None,
+            "source_whale_id": WHALE, "condition_id": COND,
+            "initial_inventory_verified": True}
+    ev = L.evaluate([seed])
+    for name, rows in ev["arms"].items():
+        assert len(rows) == len(ev["scenarios"]), (name, len(rows))
+        for row, qs in zip(rows, ev["scenarios"]):
+            assert row["queue_share"] == qs, (name, row, qs)
+    assert ids
