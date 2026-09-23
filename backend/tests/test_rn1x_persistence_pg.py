@@ -644,10 +644,19 @@ async def test_evaluate_keeps_a_hole_rather_than_renumbering(conn):
 # the ON CONFLICT clause could never fire. That filled a production table
 # with duplicates and made `version` useless as a comparison ledger.
 
-async def test_an_unchanged_re_evaluation_writes_no_new_rows(conn):
+async def test_an_unchanged_re_evaluation_writes_no_new_rows(conn,
+                                                            monkeypatch):
     from sportsassets import bettor_rn1x_learn as L
     from sportsassets.workers import rn1x_learn_loop as WL
 
+    # THE TWO GATES ARE LAYERED AND THIS TEST ISOLATES THE SECOND.
+    # MIN_NEW_POSITIONS would refuse the re-run before the dataset digest
+    # was ever consulted, so it is lowered here to reach the digest --
+    # which is the backstop for the case where enough new positions HAVE
+    # arrived but the evidence actually fed to the arms is identical
+    # (the seed list is capped at MAX_POSITIONS, and a restart re-runs
+    # the same set). Its own gate is tested separately below.
+    monkeypatch.setattr(WL, "MIN_NEW_POSITIONS", 0)
     await _armed_with_a_settled_position(conn)
     await conn.execute(_LEARN_REGISTRY)
     try:
@@ -676,7 +685,7 @@ async def test_an_unchanged_re_evaluation_writes_no_new_rows(conn):
         await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
 
 
-async def test_a_changed_verdict_still_gets_a_new_version(conn):
+async def test_a_changed_verdict_still_gets_a_new_version(conn, monkeypatch):
     """The dedup must not suppress a real change.
 
     Without this, the test above could be satisfied by a loop that stopped
@@ -686,6 +695,14 @@ async def test_a_changed_verdict_still_gets_a_new_version(conn):
     from sportsassets import bettor_rn1x_learn as L
     from sportsassets.workers import rn1x_learn_loop as WL
 
+    # THE TWO GATES ARE LAYERED AND THIS TEST ISOLATES THE SECOND.
+    # MIN_NEW_POSITIONS would refuse the re-run before the dataset digest
+    # was ever consulted, so it is lowered here to reach the digest --
+    # which is the backstop for the case where enough new positions HAVE
+    # arrived but the evidence actually fed to the arms is identical
+    # (the seed list is capped at MAX_POSITIONS, and a restart re-runs
+    # the same set). Its own gate is tested separately below.
+    monkeypatch.setattr(WL, "MIN_NEW_POSITIONS", 0)
     await _armed_with_a_settled_position(conn)
     await conn.execute(_LEARN_REGISTRY)
     try:
@@ -707,5 +724,60 @@ async def test_a_changed_verdict_still_gets_a_new_version(conn):
         assert n2 == n1 + 1, (n1, n2)
         wrote = [r for r in res["receipts"] if r.get("written")]
         assert len(wrote) == 1 and wrote[0]["challenger"] == "PAIR_090", res
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+async def test_a_trivial_increase_in_evidence_skips_the_evaluation(conn):
+    """One more settled position is not a new result.
+
+    Without this the loop re-runs every cycle throughout the backfill and
+    writes four LEGITIMATE rows each time -- real evaluations on marginally
+    more data, which is worse than duplicates because nothing flags them.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        first = await WL.cycle(conn)
+        assert first["state"] == "EVALUATED", first
+        # the receipt must record how many positions the verdict rests on,
+        # or the gate below has nothing to compare against
+        stored = await conn.fetchval(
+            "SELECT (evaluation->>'positions')::int FROM bettor_learn_model "
+            "WHERE model_key = $1 ORDER BY version DESC LIMIT 1",
+            L.MODEL_KEY)
+        assert stored == 1, stored
+
+        res = await WL.cycle(conn)
+        assert res["state"] == "TOO_FEW_NEW_POSITIONS", res
+        assert res["min_new_positions"] == WL.MIN_NEW_POSITIONS
+        assert "would say nothing" in res["why"]
+        n = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        assert n == len(L.CHALLENGERS), n
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+async def test_the_skip_gate_does_not_block_the_first_evaluation(conn):
+    """With no prior row there is nothing to compare against.
+
+    A gate that also blocked the FIRST evaluation would leave the register
+    permanently empty and the panel permanently blank -- rigour that
+    produces no evidence at all.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        res = await WL.cycle(conn)
+        assert res["state"] == "EVALUATED", res
+        assert res["new_rows"] == len(L.CHALLENGERS), res
     finally:
         await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")

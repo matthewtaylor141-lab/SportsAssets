@@ -55,11 +55,27 @@ CONTROL_KEY = "rn1x_learn"
 LOCK_KEY = 7723901544120033
 
 # Evaluation is not a tick-rate activity: it re-runs every arm over every
-# settled position, and running it every twenty seconds would burn the
-# database for a number that cannot have moved.
-CYCLE_S = 900.0
+# settled position, and running it often burns the database for a number
+# that has barely moved.
+#
+# ONE HOUR, NOT FIFTEEN MINUTES. The dataset digest suppresses an
+# IDENTICAL re-evaluation, but while the experiment is still backfilling
+# every cycle genuinely sees new positions, so the digest never matches and
+# four legitimate rows land each cycle. At fifteen minutes that is sixteen
+# rows an hour for as long as the backfill runs, and the backlog is large.
+# The rows would not be duplicates -- they would be real evaluations on
+# marginally more data -- which is worse in a way, because nothing would
+# flag them.
+CYCLE_S = 3600.0
 IDLE_S = 300.0
 MAX_POSITIONS = 200
+
+# AND A TRIVIAL INCREASE IS NOT A NEW RESULT. One more settled position
+# does not change a verdict that already rests on hundreds of decided
+# orders, and writing a row for it spends a register entry to say nothing.
+# A cycle that sees fewer than this many new settled positions since the
+# last recorded evaluation skips, and says so.
+MIN_NEW_POSITIONS = 5
 
 
 def enabled() -> bool:
@@ -204,6 +220,24 @@ async def cycle(conn, *, code_sha="unknown") -> dict:
                            "(render-ops sql learn-schema creates it); this "
                            "loop does not create a competing register of "
                            "its own")}
+
+    settled = await conn.fetchval(
+        "SELECT count(*) FROM rn1x_outcomes WHERE settled_at IS NOT NULL")
+    prior_n = await conn.fetchval(
+        "SELECT (evaluation->>'positions')::int FROM bettor_learn_model "
+        "WHERE model_key = $1 ORDER BY version DESC LIMIT 1",
+        learn.MODEL_KEY)
+    if prior_n is not None and int(settled or 0) - int(prior_n) < MIN_NEW_POSITIONS:
+        return {"ran": True, "state": "TOO_FEW_NEW_POSITIONS",
+                "settled_positions": int(settled or 0),
+                "evaluated_at_positions": int(prior_n),
+                "min_new_positions": MIN_NEW_POSITIONS,
+                "why": ("%d settled positions against %d at the last "
+                        "recorded evaluation. A verdict resting on hundreds "
+                        "of decided orders does not change on %d more, and "
+                        "a register row for it would say nothing"
+                        % (int(settled or 0), int(prior_n),
+                           int(settled or 0) - int(prior_n)))}
 
     seeds = await _seeds(conn, MAX_POSITIONS)
     if not seeds:

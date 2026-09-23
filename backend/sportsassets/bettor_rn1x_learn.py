@@ -197,6 +197,11 @@ def evaluate(seeds, *, scenarios=None, fee_fn=None) -> dict:
             per_scenario.append(row or {"queue_share": qs, "empty": True})
         results[arm["name"]] = per_scenario
     return {"version": VERSION, "scenarios": list(scen), "arms": results,
+            # The number of positions every arm was run over -- the same
+            # for all arms by construction, which is the point.
+            "positions": max((r.get("positions", 0)
+                              for r in results.get("CHAMPION", [])),
+                             default=0),
             # The eligibility floor is a COUNT, so it is an int. A float
             # here would read "6.0 decided orders" on the receipt.
             "decided": int(sum(r.get("orders", 0)
@@ -281,6 +286,12 @@ def registry_row(challenger: str, evaluation: dict, rec: dict, *,
         "evaluation": {"arms": evaluation.get("arms"),
                        "scenarios": evaluation.get("scenarios"),
                        "decided": evaluation.get("decided"),
+                       # HOW MANY POSITIONS THIS VERDICT RESTS ON. The
+                       # loop reads it back to decide whether enough new
+                       # evidence has accumulated to be worth re-running,
+                       # so a receipt without it disables that gate
+                       # silently.
+                       "positions": evaluation.get("positions"),
                        "recommendation": rec},
         "status": rec["verdict"],
         "note": ("challenger evaluated against the frozen management "
