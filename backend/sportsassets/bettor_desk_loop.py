@@ -659,6 +659,43 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
             # overwrote a preserved row or dropped a new one.
             desk.id_prefix = account_id
             desk.pf.starting_cash = float(acct["opening_balance"])
+            # THE PAUSE IS READ BEFORE ANY STARTUP WRITE, and this is a
+            # CORRECTION. The check used to sit only at the top of the
+            # cycle loop, so a paused account still got its epoch row
+            # ended and a new one opened on every boot -- a paused desk
+            # writing. Production shows it: epoch 4 was opened at
+            # 16:51:40Z, on a build that came up to an account already
+            # flagged paused at 16:51:38Z. Nothing accounting-bearing
+            # moved, but "writes nothing" was not true, and a claim that
+            # is nearly true is the kind this release keeps having to
+            # withdraw.
+            #
+            # `ensure_account` has to run first because the account id is
+            # what the flag is keyed on; it is an INSERT ... ON CONFLICT
+            # that is a no-op for an existing book.
+            #
+            # IT IDLES HERE RATHER THAN RESTORING. Restoring and then
+            # idling would leave a live book in memory behind a pause,
+            # and clearing the flag mid-cycle would resume from it. It
+            # waits, re-reading the flag, and only when the flag clears
+            # does it fall through to the restore -- so a resumed desk
+            # always restores before it trades, which is the failure
+            # that cost $2,367.72.
+            while True:
+                pz0 = await _pause(conn, account_id)
+                if not pz0["paused"]:
+                    break
+                _status.update(state=STATE_PAUSED, error=None,
+                               epoch_id=EPOCH_ID, account_id=account_id,
+                               paused=True, pause_reason=pz0["reason"],
+                               accounting_status=pz0["accounting_status"],
+                               restore={"restored": False, "why":
+                                        "PAUSED_AT_STARTUP: the book is "
+                                        "not restored while paused, so "
+                                        "nothing is held in memory that "
+                                        "a cleared flag could resume."},
+                               last_cycle_at=time.time())
+                await asyncio.sleep(CYCLE_S)
             cursor = await _load_cursor(conn, account_id)
             # THE BOOK COMES BACK BEFORE THE FIRST EVENT IS STEPPED.
             # Restoring after the first cycle would book that cycle's

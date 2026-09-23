@@ -788,6 +788,18 @@ async def test_a_paused_account_processes_nothing_and_writes_nothing():
     assert st.ledger == []
     assert st.orders == {}
     assert st.fills == {}
+    # AND NOT AN EPOCH ROW EITHER, which is the assertion this test was
+    # missing. `Store` tracked epochs all along and nothing looked at
+    # them, so "writes nothing" passed while the desk was in fact
+    # ending one epoch and opening another on every paused boot --
+    # visible in production as epoch 4 opened at 16:51:40Z against an
+    # account flagged paused at 16:51:38Z. The pause is now read before
+    # any startup write, and this is what holds it there.
+    assert st.epochs == {}, st.epochs
+    # The book is deliberately NOT restored while paused: restoring and
+    # then idling would leave a live portfolio in memory that a cleared
+    # flag could resume from without re-reading it.
+    assert (DL.status().get("restore") or {}).get("restored") is False
 
 
 @pytest.mark.anyio
