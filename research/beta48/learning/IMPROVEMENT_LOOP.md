@@ -161,7 +161,95 @@ seeing its results is exactly the tuning this loop exists to prevent.
 
 ---
 
-## 4. STANDING CONSTRAINTS
+## 4. CYCLE 2 — RESULT: **NO CANDIDATE QUALIFIED**
+
+Same five variants, same opportunity set, same capital, same scenario
+grid. Gate V2, declared in commit `2e23798` **before** this cycle ran.
+
+| candidate | TRAIN verdict | VALIDATION verdict |
+|---|---|---|
+| C1_NARROW_BAND | reject — `NOT_RESOLVED`: $381 improvement vs $6,071 bound-width change | reject — dose reduction, turnover 43% of baseline |
+| C2_REQUIRE_CLEARANCE | reject — `NOT_RESOLVED`: $191 vs $968 | reject — `NOT_RESOLVED`: $3 vs $41 |
+| C3_PATIENT_EXIT | reject — capital parked: unresolved $17,241 vs $15,589 | reject — improves 0/3 scenarios |
+| C4_SMALLER_CLIP | reject — `NOT_RESOLVED`: $237 vs $8,739 | reject — improves 2/3 scenarios |
+| C5_SHORTER_REST | reject — improves 0/3 scenarios | reject — improves 0/3 scenarios |
+
+### G7 applies to the baseline, and the baseline fails it
+
+| policy | TRAIN slope | VALIDATION slope | |
+|---|---|---|---|
+| **BASELINE** | negative | positive | **UNSTABLE** |
+| C1 … C5 | negative | positive | **UNSTABLE** |
+
+`d(realized)/d(queue_share)` flips sign between partitions for **every
+policy tested, including the frozen active one.**
+
+### What cycle 2 establishes
+
+1. **No promotion.** The active policy stays frozen. Two cycles, ten
+   variant-evaluations, zero acceptances.
+2. **The dominant rejection reason changed** from "worse drawdown"
+   (V1, a noise-scale comparison) to **`NOT_RESOLVED`** (V2) — the
+   candidates' effects are genuinely smaller than the measurement
+   uncertainty. That is a sharper and more useful statement.
+3. **C1 and C4's apparent wins were dose reductions**, and V2 names them
+   as such rather than accepting them.
+4. **The instability is a property of the corpus, not of the
+   challengers.** It is not fixable by another entry/exit/sizing
+   variant.
+
+### Therefore the next justified experiment is not another policy variant
+
+Five more knob-turns would produce five more `NOT_RESOLVED` verdicts.
+The binding constraint is **measurement**, so the next cycle targets
+uncertainty rather than P&L:
+
+- **Resolve more inventory.** 24,542 unresolved shares carry the whole
+  bound width. Extending settlement coverage narrows the instrument
+  directly, and costs nothing in trading risk.
+- **Reduce the fill-assumption dependence.** The sign flip is a
+  response to `queue_share` — the one thing we cannot identify. A
+  contemporaneous book is what would remove it, and until then no
+  variant's result can be stable.
+- **Accrue the FINAL set.** The live shadow lane is now writing
+  prospective decisions forward of the freeze instant (§5). That is the
+  only genuinely uninspected evidence that will exist.
+
+---
+
+## 5. THE LIVE LANE IS WRITING — the FINAL set has started accruing
+
+Verified `2026-09-23T14:41:49Z` against the production database, six
+minutes after the loop came up:
+
+| table | rows | newest |
+|---|---|---|
+| `bettor_desk_decisions` | 375 | 9 s old |
+| `bettor_desk_orders` | 35 | 6 s old |
+| `bettor_desk_positions` | 20 | 6 s old |
+| `bettor_desk_ledger` | 18 | 6 s old |
+
+Decisions: `NO_TRADE` 133 · `HOLD` 121 · `FILLED` 86 · `ENTER` 24 ·
+`COMPLETE_PAIR` 11. Orders: `RESTING` 14 · `PARTIALLY_FILLED` 16 ·
+`FILLED` 5. Cursor `221,451,008` and advancing.
+
+**The ledger identity holds on every snapshot** (`invariant_ok = t`,
+18 of 18): cash $98,850.22 + inventory $1,149.78 − realized $0.00 =
+$100,000.00 exactly.
+
+This closes the chain the audit found broken — live market data →
+independent selection → risk check → resting shadow order → simulated
+execution → inventory → reconciled ledger — all of it persistent and
+restart-safe. These prospective decisions are recorded **before** their
+outcomes, which is what makes them usable as FINAL evidence later.
+
+They are **not yet evidence of anything**: six minutes, realized $0.00,
+and no position has settled. Reporting them as a result would be the
+error this document exists to prevent.
+
+---
+
+## 6. STANDING CONSTRAINTS
 
 - **The learner never raises its own risk limits.** Candidate params are
   checked against the policy's declared knobs and a mistyped knob is a

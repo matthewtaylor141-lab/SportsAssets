@@ -1067,6 +1067,64 @@ async def command_desk_scenarios(response: Response) -> dict:
         raise _desk_unavailable(exc) from exc
 
 
+# ── THE POLICY-IMPROVEMENT LOOP, displayed ───────────────────────────
+#
+# READ-ONLY, and structurally incapable of promoting anything. These
+# three routes import a module with no INSERT, no UPDATE and no venue
+# client in its graph. Promotion is a reviewed commit; there is no
+# route through which a displayed result can change what the live desk
+# is running.
+#
+# A FAILED READ IS 503, NEVER AN EMPTY PAGE. "The loop has run no
+# experiments" and "I could not find out" are different facts, and the
+# screenshot blocker was exactly what happens when they render the
+# same. `LearningUnavailable` carries its own reason so the panel can
+# print WHY rather than a blank.
+
+def _learning_unavailable(exc) -> HTTPException:
+    return HTTPException(status_code=503, detail={
+        "reason": "LEARNING_ARTIFACT_UNAVAILABLE", "detail": str(exc),
+        "note": "artifact unread -- COMMAND shows unavailable, not "
+                "'no experiments have run'",
+    })
+
+
+@app.get("/api/command/learning/overview",
+         dependencies=[Depends(require_command)])
+async def command_learning_overview(response: Response) -> dict:
+    from . import command_learning as CL
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CL.overview()
+    except CL.LearningUnavailable as exc:
+        raise _learning_unavailable(exc) from exc
+
+
+@app.get("/api/command/learning/cycles",
+         dependencies=[Depends(require_command)])
+async def command_learning_cycles(response: Response) -> dict:
+    from . import command_learning as CL
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CL.cycles()
+    except CL.LearningUnavailable as exc:
+        raise _learning_unavailable(exc) from exc
+
+
+@app.get("/api/command/learning/results",
+         dependencies=[Depends(require_command)])
+async def command_learning_results(response: Response) -> dict:
+    from . import command_learning as CL
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CL.results()
+    except CL.LearningUnavailable as exc:
+        raise _learning_unavailable(exc) from exc
+
+
 # ── COMMAND SHADOW: the read-only shadow data contract (2026-09-19) ──
 #
 # Owner directive: COMMAND IS P0. These routes serve the REAL

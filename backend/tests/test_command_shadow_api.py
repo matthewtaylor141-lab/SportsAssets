@@ -155,7 +155,25 @@ def test_the_shadow_ui_fetches_only_command_paths_through_the_guard():
     assert fetches, "no fetch found — the check would pass vacuously"
     for target in fetches:
         assert "C.endpoint(" in target, target
-    assert "'/api/command/shadow/'" in SHADOW_JS
+
+    # THE PREFIX IS NOW BUILT, NOT A LITERAL. Three namespaces are
+    # served -- shadow, desk and learning -- so this used to assert on
+    # the string "'/api/command/shadow/'" and had gone stale: the
+    # literal disappeared when the desk namespace was added, and the
+    # test failed for a reason that had nothing to do with the safety
+    # property it names. Assert the property instead.
+    #
+    # The property is that the namespace is a BOUNDED ALLOWLIST chosen
+    # in this file, never a value derived from a response, a query
+    # parameter or the URL -- because a namespace under caller control
+    # would let the built path escape /api/command/.
+    assert "'/api/command/' + (ns || 'shadow') + '/'" in SHADOW_JS
+    callers = set(re.findall(r"return pull\([^,]+,\s*'([a-z]+)'",
+                             SHADOW_JS))
+    assert callers, "no namespaced caller found — vacuous"
+    assert callers <= {"shadow", "desk", "learning"}, callers
+    # And no caller may pass a namespace it computed.
+    assert not re.search(r"return pull\([^,]+,\s*[^'\s)]", SHADOW_JS)
 
 
 def test_the_ui_distinguishes_zero_from_unreadable():

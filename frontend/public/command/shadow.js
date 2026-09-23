@@ -55,7 +55,12 @@
     // on this tab is HISTORICAL REPLAY: a declared past window run
     // through the same engine, on a tape that was never ours. It is
     // never added to anything above it.
-    ['desk', 'Desk · REPLAY']
+    ['desk', 'Desk · REPLAY'],
+    // THE IMPROVEMENT LOOP. Its own tab because it is neither a live
+    // result nor a replay result: it is the record of which policy
+    // variants were tried, on which partitions, and why each was
+    // refused. Nothing on it has ever traded.
+    ['learning', 'Learning loop']
   ];
 
   const POLL_MS = 8000;
@@ -80,8 +85,21 @@
   // The desk lives under /api/command/desk/. Same guard, same refusal
   // behaviour; only the prefix differs, so the two cannot drift.
   async function pullDesk(path) { return pull(path, 'desk'); }
+  // Same guard, same refusal behaviour, different prefix -- so a 503
+  // from the learning routes prints its reason exactly like the desk's
+  // rather than collapsing into an empty panel.
+  // THE CACHE KEY IS NAMESPACED, and it has to be. `state.data` was
+  // keyed on the bare path, and three namespaces now serve a route
+  // called `overview`. Without this, switching tabs would paint the
+  // desk's replay overview into the learning panel -- one mode's
+  // numbers under another mode's heading, which is the exact class of
+  // error the mode separation exists to prevent.
+  async function pullLearn(path) {
+    return pull(path, 'learning', 'learning/' + path);
+  }
 
-  async function pull(path, ns) {
+  async function pull(path, ns, key) {
+    const K = key || path;
     try {
       // THE PATH GOES THROUGH core.endpoint() AND THE QUERY DOES NOT.
       // That guard refuses anything outside /api/command/ and refuses a
@@ -101,23 +119,23 @@
         // unlock.js owns the sign-in panel and acts on its own 401. This
         // screen only reports the state; two password prompts racing
         // each other is worse than one.
-        state.error[path] = { status: res.status, reason: 'LOCKED',
+        state.error[K] = { status: res.status, reason: 'LOCKED',
           detail: 'COMMAND session required' };
         return null;
       }
       const body = await res.json().catch(() => null);
       if (!res.ok) {
         const d = body && body.detail || {};
-        state.error[path] = { status: res.status,
+        state.error[K] = { status: res.status,
           reason: d.reason || ('HTTP_' + res.status),
           detail: d.detail || '' };
         return null;
       }
-      delete state.error[path];
-      state.data[path] = body;
+      delete state.error[K];
+      state.data[K] = body;
       return body;
     } catch (e) {
-      state.error[path] = { status: 0, reason: 'NETWORK',
+      state.error[K] = { status: 0, reason: 'NETWORK',
         detail: String(e && e.message || e).slice(0, 120) };
       return null;
     }
@@ -134,7 +152,8 @@
     accounting: ['accounting/all'],
     performance: ['equity', 'summary'],
     experimental: ['experimental', 'experimental/tape?limit=60'],
-    desk: []
+    desk: [],
+    learning: []
   };
 
   async function refresh() {
@@ -145,6 +164,8 @@
       if (state.tab === 'desk')
         await Promise.all(['overview', 'attribution', 'lifecycles?limit=20']
           .map(pullDesk));
+      if (state.tab === 'learning')
+        await Promise.all(['overview', 'cycles', 'results'].map(pullLearn));
       if (state.tab === 'audit' && state.trade)
         await pull('trades/' + encodeURIComponent(state.trade));
       state.lastUiUpdate = new Date().toISOString();
@@ -1361,7 +1382,151 @@
     return banner + maturity + pnl + attr + orders + lifes;
   }
 
+  /* ── THE LEARNING LOOP ─────────────────────────────────────────────
+   * What a reader must not be able to conclude from this panel:
+   *   - that a candidate is trading (none has ever placed an order)
+   *   - that an empty accept list means the loop is broken
+   *   - that the lower bound is a loss (it is one of three marks)
+   * So the accept/reject REASONS are the body of the panel, the three
+   * marks are always shown together, and the active policy's FROZEN
+   * badge sits above everything. */
+  function learningTab() {
+    const ov = state.data['learning/overview'];
+    const cy = state.data['learning/cycles'];
+    const rs = state.data['learning/results'];
+    const problem = feedProblem('learning/overview');
+    if (problem) return `${problem}`;
+    if (!ov) return panelNote('LOADING', 'Reading the experiment artifact.');
+
+    const money = v => !isNum(v) ? NI : (v < 0 ? '−$' : '$')
+      + Math.abs(v).toLocaleString('en-US',
+        { minimumFractionDigits: 0, maximumFractionDigits: 0 });
+
+    const head = `<div class="sh-panel" style="border-color:#2f6f4f">
+      <div class="sh-panel-body">
+        <strong style="letter-spacing:.08em">ACTIVE POLICY —
+          ${esc(ov.active_policy.status)}</strong>
+        <p class="mono">${esc(ov.active_policy.version)} ·
+          changed by this loop:
+          ${ov.active_policy.changed_by_this_loop ? 'YES' : 'NO'}</p>
+        <p>${esc(ov.active_policy.note)}</p>
+        <p>${esc(ov.candidates_are_not_live)}</p>
+      </div></div>`;
+
+    const g = ov.gate || {};
+    const summary = `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>Cycle ${esc(String(ov.cycle))} of ${esc(String(ov.cycles_run))}
+        · gate ${esc(g.id || 'V1')}</h3>
+      <p class="mono">${esc(ov.artifact)} · code ${esc(ov.code_version)} ·
+        variants tried ${esc(String(ov.variants_tried))} ·
+        promoted ${ov.promotion_occurred
+          ? esc(ov.accepted.join(', ')) : 'NONE'}</p>
+      <p><strong>${esc(ov.outcome)}</strong></p>
+      <p>${esc(ov.why_no_promotion_is_a_result)}</p>
+      <h4>Acceptance gate, declared before this cycle ran</h4>
+      <ul>${(g.criteria || []).map(c =>
+        `<li>${esc(c)}</li>`).join('')}</ul>
+      ${g.v1_is_not_reapplied_to_cycle_1
+        ? `<p><em>${esc(g.v1_is_not_reapplied_to_cycle_1)}</em></p>` : ''}
+    </div></section>`;
+
+    const pt = ov.partitions || {};
+    const fe = ov.final_evaluation_set || {};
+    const ea = ov.execution_assumptions || {};
+    const setup = `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>Training environment</h3>
+      <p class="mono">event class ${esc(ea.event_class || NI)} ·
+        venue ${esc(ea.source_venue || NI)} ·
+        fee schedule ${esc(ea.fee_schedule_venue || NI)}
+        (${esc(ea.venue_basis || NI)}) ·
+        P_FILL ${esc(ea.p_fill || NI)}</p>
+      <p>${esc(ea.note || '')}</p>
+      <p class="mono">partitions — TRAIN ${esc(String(pt.train_conditions))}
+        · VALIDATION ${esc(String(pt.validation_conditions))}
+        · HELD BACK ${esc(String(pt.held_back_conditions))} (unused)</p>
+      <p>${esc(ov.partition_rule || '')}</p>
+      <h4>Final evaluation set — ${esc(fe.where || NI)}</h4>
+      <p>${esc(fe.why_not_a_history_slice || '')}</p>
+    </div></section>`;
+
+    // EVERY CANDIDATE, AND EVERY REASON. A candidate rejected on one
+    // partition and accepted on the other is the interesting case, so
+    // both verdicts are always shown rather than an aggregate.
+    const cands = `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>Candidates — ${esc(String((ov.candidates || []).length))} tried,
+        none live</h3>
+      ${(ov.candidates || []).map(c => `<div class="sh-sub">
+        <p class="mono"><strong>${esc(c.id)}</strong> ·
+          targets ${esc(c.targets_loss_line)} ·
+          ${esc(JSON.stringify(c.params))}</p>
+        <p>${esc(c.hypothesis)}</p>
+        <p class="mono">TRAIN ${c.train_accepted ? 'ACCEPT' : 'REJECT'}
+          · VALIDATION ${c.validation_accepted ? 'ACCEPT' : 'REJECT'}
+          · promoted ${c.promoted ? 'YES' : 'NO'}</p>
+        <ul>${[].concat(c.train_reasons || [], c.validation_reasons || [])
+          .map(r => `<li>${esc(r)}</li>`).join('')}</ul>
+        ${c.sign_stability ? `<p class="mono">G7 ${
+          c.sign_stability.stable ? 'STABLE' : 'UNSTABLE'} —
+          ${esc(c.sign_stability.detail)}</p>` : ''}
+      </div>`).join('')}
+    </div></section>`;
+
+    const marks = rs && rs.marks_explained || {};
+    const tbl = part => {
+      const rows = (rs && rs.scenarios && rs.scenarios[part]) || [];
+      if (!rows.length) return '';
+      return `<h4>${esc(part)}</h4>
+      <table class="sh-table"><thead><tr>
+        <th>policy</th><th>queue_share</th>
+        <th>mark COST (point)</th><th>mark ZERO (lower)</th>
+        <th>mark ONE (upper)</th><th>unresolved</th>
+        <th>drawdown</th><th>turnover</th><th>orders</th>
+        <th>ledger</th></tr></thead><tbody>
+      ${rows.map(r => `<tr>
+        <td class="mono">${esc(r.policy)}</td>
+        <td class="mono">${r.queue_share}</td>
+        <td class="mono"><strong>${money(r.mark_cost_usd)}</strong></td>
+        <td class="mono">${money(r.mark_zero_usd)}</td>
+        <td class="mono">${money(r.mark_one_usd)}</td>
+        <td class="mono">${money(r.unresolved_cost_usd)}</td>
+        <td class="mono">${money(r.max_drawdown_usd)}</td>
+        <td class="mono">${money(r.turnover_usd)}</td>
+        <td class="mono">${r.orders}</td>
+        <td class="mono">${r.invariant_ok ? 'ok' : 'FAILED'}</td>
+      </tr>`).join('')}</tbody></table>`;
+    };
+    const results = rs ? `<section class="sh-panel">
+      <div class="sh-panel-body">
+      <h3>Training and validation results</h3>
+      <p>${esc(marks.why_all_three || '')}</p>
+      <ul>
+        <li><strong>COST</strong> — ${esc(marks.mark_cost_usd || '')}</li>
+        <li><strong>ZERO</strong> — ${esc(marks.mark_zero_usd || '')}</li>
+        <li><strong>ONE</strong> — ${esc(marks.mark_one_usd || '')}</li>
+      </ul>
+      ${tbl('TRAIN')}${tbl('VALIDATION')}
+    </div></section>` : '';
+
+    const hist = cy ? `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>Cycles completed — ${esc(String(cy.n))}</h3>
+      <table class="sh-table"><thead><tr><th>cycle</th><th>gate</th>
+        <th>variants</th><th>promoted</th><th>outcome</th>
+        <th>code</th></tr></thead><tbody>
+      ${(cy.cycles || []).map(c => `<tr>
+        <td class="mono">${c.cycle}</td><td class="mono">${esc(c.gate)}</td>
+        <td class="mono">${c.variants_tried}</td>
+        <td class="mono">${(c.accepted || []).length
+          ? esc(c.accepted.join(', ')) : 'none'}</td>
+        <td>${esc(c.outcome)}</td>
+        <td class="mono">${esc(c.code_version)}</td>
+      </tr>`).join('')}</tbody></table>
+    </div></section>` : '';
+
+    return head + summary + setup + cands + results + hist;
+  }
+
   const VIEW = {
+    learning: learningTab,
     desk: deskTab,
     overview, decisions: decisionsTab, positions: positionsTab,
     execution: executionTab, pairing: pairingTab, comparison: comparisonTab,
