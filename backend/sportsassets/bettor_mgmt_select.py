@@ -161,3 +161,88 @@ def select(inventory: dict, *, held_book=None, complement_book=None,
         "guessing at a rule for a table whose shape has changed."
         % len(ranked)))
     return out
+
+
+# ── the experimental rule ────────────────────────────────────────────
+#
+# WHAT IT IS AND WHAT IT IS NOT. It is a DECLARED RULE that can be
+# tested. It is NOT an EV-optimal decision, and it must never be
+# reported as one: the EV comparison that would justify calling it
+# optimal is NOT_IDENTIFIED, which is exactly why a rule is needed.
+#
+# WHY IT CAN ACT WHEN THE RANKING CANNOT. Completing a pair has a value
+# that contains no forecast -- a completed pair pays 1.00 per contract
+# however the event resolves -- so the locked gain is arithmetic. What
+# is NOT available is whether locking it beats holding, because holding
+# is worth payout x qty and no payout estimate exists. So the rule
+# expresses a PREFERENCE FOR CERTAINTY, declared as such, rather than a
+# belief about the mean.
+#
+# IT WILL LOSE TO HOLDING on positions that settle in our favour. That
+# is not a defect of the rule; it is what preferring certainty costs,
+# and any report of this rule must carry it.
+RULE_ID = "EXPERIMENTAL_COMPLETE_ON_LOCKED_GAIN_V1"
+RULE_HURDLE_PER_CONTRACT = 0.01
+
+RULE_DECLARATION = {
+    "id": RULE_ID,
+    "kind": "RULE",
+    "is_not": ("an EV-optimal decision, an optimisation, or evidence "
+               "that completing beats holding"),
+    "objective": ("take a CERTAIN gain per contract when it clears a "
+                  "declared hurdle, in preference to an uncertain "
+                  "outcome of unknown mean"),
+    "hurdle_per_contract_usd": RULE_HURDLE_PER_CONTRACT,
+    "hurdle_is": "DECLARED, not fitted and not tuned on any result",
+    "known_cost": ("it forgoes upside on positions that settle in our "
+                   "favour, and will underperform HOLD on those"),
+    "inputs": {
+        "own_basis": "OBSERVED (average-cost convention)",
+        "complement_ask": "OBSERVED (the venue's own book)",
+        "fees": "OBSERVED schedule, or the action is refused",
+        "settlement": "NOT USED -- the rule contains no forecast",
+        "p_fill": "NOT USED -- it crosses the ask rather than resting",
+    },
+}
+
+
+def experimental_rule(qty, own_basis_per_contract, complement_ask, *,
+                      fee_fn=None) -> dict:
+    """Would the declared rule act, and at what locked gain?
+
+    Returns the decision AND the arithmetic, so the number can be
+    checked rather than trusted.
+    """
+    base = {"rule": RULE_DECLARATION, "acts": False}
+    if complement_ask is None:
+        return {**base, "why": ("no complement ask was observed, so no "
+                                "completion price exists"),
+                "locked_gain_usd": None}
+    q = float(qty)
+    own = float(own_basis_per_contract) * q
+    comp = float(complement_ask) * q
+    fee = 0.0 if fee_fn is None else float(fee_fn(qty=q,
+                                                 price=complement_ask))
+    if fee_fn is None:
+        return {**base, "why": ("no fee schedule was supplied. An "
+                                "unknown cost is not a zero cost, so the "
+                                "rule refuses rather than acting on a "
+                                "gain it cannot verify"),
+                "locked_gain_usd": None}
+    locked = 1.00 * q - own - comp - fee
+    hurdle = RULE_HURDLE_PER_CONTRACT * q
+    return {
+        **base,
+        "acts": locked >= hurdle,
+        "locked_gain_usd": locked,
+        "hurdle_usd": hurdle,
+        "arithmetic": ("1.00 x %.4g = %.4f, less own basis %.4f, less "
+                       "completion %.4f, less fees %.4f => %.4f; hurdle "
+                       "%.4f" % (q, q, own, comp, fee, locked, hurdle)),
+        "why": ("locked gain %.4f %s the declared hurdle %.4f"
+                % (locked, "clears" if locked >= hurdle else "is below",
+                   hurdle)),
+        "carries": ("this is a RULE. It is not an EV ranking against "
+                    "HOLD, and HOLD remains NOT_IDENTIFIED at decision "
+                    "time"),
+    }
