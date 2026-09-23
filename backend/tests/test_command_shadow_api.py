@@ -324,3 +324,68 @@ def test_the_rn1x_tab_never_prints_a_bare_zero_for_an_unknown():
     for field in ("c.positions", "c.decisions", "c.orders", "c.fills",
                   "c.outcomes"):
         assert "zeroOk(%s)" % field in body, field
+
+
+# ── ITEM 5: SEPARATED STATUSES, LIVE BADGE, CLICK PATH ──────────────
+
+def test_the_statuses_route_is_registered_and_guarded(client):
+    paths = {getattr(r, "path", "") for r in APP.app.routes}
+    assert "/api/command/rn1x/statuses" in paths
+    assert client.get("/api/command/rn1x/statuses").status_code in (401, 403)
+
+
+def test_all_seven_statuses_are_declared_separately():
+    from sportsassets.api import command_rn1x as CR
+
+    assert CR.STATUS_KEYS == (
+        "historical_replay", "prospective_rn1_management",
+        "independent_ev_entries", "pairing", "second_half_loss_exit",
+        "accounting_health", "learning_evaluation")
+
+
+def test_the_live_badge_distinguishes_live_armed_and_stopped():
+    """A LIVE badge must identify what is live.
+
+    Three states, not two: "running and producing", "running and
+    producing nothing yet" and "not running" are different claims.
+    """
+    from sportsassets.api import command_rn1x as CR
+
+    live = CR._live(True, True, what="x", why="y")
+    armed = CR._live(True, False, what="x", why="y")
+    stopped = CR._live(False, False, what="x", why="y")
+    assert live["badge"] == "LIVE" and live["live"] is True
+    assert armed["badge"] == "ARMED" and armed["producing"] is False
+    assert stopped["badge"] == "STOPPED" and stopped["live"] is False
+    # every badge names its subject
+    for b in (live, armed, stopped):
+        assert b["what"] and b["why"]
+
+
+def test_the_ui_renders_every_status_tile_and_the_click_path():
+    body = SHADOW_JS[SHADOW_JS.index("function rn1xTab()"):]
+    body = body[:body.index("\n  const VIEW = {")]
+    for key in ("historical_replay", "prospective_rn1_management",
+                "independent_ev_entries", "pairing",
+                "second_half_loss_exit", "accounting_health",
+                "learning_evaluation"):
+        assert key in body, key
+    # the click path's six stages
+    for stage in ("Source event", "The three clocks", "Decisions",
+                  "Orders", "Modelled fills", "Inventory and outcome"):
+        assert stage in body, stage
+    # and the row is clickable, with a handler that reads it
+    assert "data-rn1x-pos" in SHADOW_JS
+    assert "state.rn1xPosition" in SHADOW_JS
+    assert "closest('[data-rn1x-pos]')" in SHADOW_JS
+
+
+def test_the_learning_tile_cannot_describe_itself_as_fitting():
+    """The screen renders the module's own words, so it cannot be
+    more generous than the module."""
+    from sportsassets import bettor_rn1x_learn as L
+
+    assert L.DESCRIPTION["what_it_is"] == "A POLICY COMPARATOR"
+    assert L.DESCRIPTION["fits"] == []
+    assert L.DESCRIPTION["changes"] == []
+    assert "NOTHING IS FITTED" in L.DESCRIPTION["fits_note"]

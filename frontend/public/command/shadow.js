@@ -83,6 +83,7 @@
     lastUiUpdate: null,
     seen: new Set(),   // decision ids already drawn, so "new" means new
     trade: null,       // the open audit subject
+    rn1xPosition: null,  // the selected RN1X position, for the click path
     timer: null,
     inflight: false
   };
@@ -191,9 +192,14 @@
           .map(pullDesk));
       if (state.tab === 'learning')
         await Promise.all(['overview', 'cycles', 'results'].map(pullLearn));
-      if (state.tab === 'rn1x')
-        await Promise.all(['overview', 'learning', 'positions?limit=40']
-          .map(pullRn1x));
+      if (state.tab === 'rn1x') {
+        await Promise.all(['overview', 'statuses', 'learning',
+          'positions?limit=40'].map(pullRn1x));
+        // THE CLICK PATH. One selected position, fetched on demand, so
+        // the list stays cheap and the trace is complete.
+        if (state.rn1xPosition)
+          await pullRn1x('trace/' + encodeURIComponent(state.rn1xPosition));
+      }
       if (state.tab === 'audit' && state.trade)
         await pull('trades/' + encodeURIComponent(state.trade));
       state.lastUiUpdate = new Date().toISOString();
@@ -2007,6 +2013,52 @@
         : '<p class="mono">ZERO \u2014 no decision has been persisted yet.</p>'}
     </div></section>`;
 
+    // ── THE SEVEN STATUSES, SEPARATELY ────────────────────────────
+    // One blended badge hid which of these was true. A LIVE badge must
+    // say WHAT is live, so each tile names its subject and its reason.
+    const sd = (state.data['rn1x/statuses'] || {}).statuses
+      || (ov.statuses || {});
+    const ORDER = [
+      ['historical_replay', 'Historical replay'],
+      ['prospective_rn1_management', 'Prospective RN1 management'],
+      ['independent_ev_entries', 'Independent EV entries'],
+      ['pairing', 'Pairing'],
+      ['second_half_loss_exit', 'Second-half loss exit'],
+      ['accounting_health', 'Accounting health'],
+      ['learning_evaluation', 'Learning evaluation']
+    ];
+    const badgeColour = b => ({
+      LIVE: '#2f6f4f', ARMED: '#7a5a2f', OK: '#2f6f4f',
+      STOPPED: '#555', BLOCKED: '#7a2f2f', UNAVAILABLE: '#7a2f2f',
+      CHECK: '#7a5a2f', EMPTY: '#555'
+    }[b] || '#555');
+    const statuses = `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>Status \u2014 seven independent lanes</h3>
+      <p><em>These fail independently, so they are reported
+        independently. A badge names WHAT is live, not just that
+        something is.</em></p>
+      ${ORDER.map(([k, label]) => {
+        const v = sd[k] || {};
+        return `<div class="sh-sub" style="border-left:3px solid ${
+          badgeColour(v.badge)};padding-left:8px;margin-bottom:8px">
+          <p class="mono"><strong>${esc(label)}</strong> \u2014
+            <span style="color:${badgeColour(v.badge)}">${
+              esc(v.badge || NI)}</span>${
+            v.producing === false && v.badge === 'ARMED'
+              ? ' (running, nothing produced yet)' : ''}</p>
+          <p>${esc(v.what || NI)}</p>
+          <p class="sh-sub">${esc(v.why || '')}</p>
+          ${k === 'second_half_loss_exit' ? `<p class="mono">rules written:
+            ${esc((v.rules_written || []).join(', ') || 'none')} \u00b7
+            feeds connected: ${esc((v.feeds_connected || []).join(', ')
+              || 'NONE')} \u00b7 admitted:
+            ${esc((v.admitted || []).join(', ') || 'NONE')}</p>` : ''}
+          ${k === 'independent_ev_entries' ? `<p class="mono">requires:
+            ${esc((v.requirements || []).join(', '))}</p>` : ''}
+        </div>`;
+      }).join('')}
+    </div></section>`;
+
     // THE BLOCKERS. Unconditional.
     const bl = ov.blockers || {};
     const keys = Object.keys(bl);
@@ -2072,7 +2124,8 @@
         <th>Entry kind</th><th>Qty</th><th>Seed px</th>
         <th>Detection lag</th><th>Decisions</th><th>Orders</th>
         <th>Net</th><th>Residual</th></tr></thead><tbody>
-      ${list.map(r => `<tr>
+      ${list.map(r => `<tr data-rn1x-pos="${esc(r.position_id)}"
+          style="cursor:pointer">
         <td class="mono">${esc(r.entry_kind)}</td>
         <td class="mono">${qty(r.seed_qty)}</td>
         <td class="mono">${px(r.seed_price)}</td>
@@ -2084,11 +2137,78 @@
         <td class="mono">${qty(r.residual_qty)}</td></tr>`).join('')}
       </tbody></table>
       <p><em>The seed price is RN1's own fill, ASSIGNED. It is not
-        evidence that we could have obtained that fill.</em></p>`
+        evidence that we could have obtained that fill. Click a row for
+        its full trace.</em></p>`
         : '<p class="mono">ZERO \u2014 nothing seeded yet.</p>'}
     </div></section>`;
 
-    return head + op + rows + states + positions + learn + blockers;
+    // ── THE CLICK PATH: one position, end to end ──────────────────
+    const tr = state.data['rn1x/trace/' + state.rn1xPosition];
+    let trace = '';
+    if (state.rn1xPosition && tr && tr.found) {
+      const pos = tr.position || {};
+      trace = `<section class="sh-panel" style="border-color:#2f5f7a">
+        <div class="sh-panel-body">
+        <h3>Traced position \u2014 ${esc(String(pos.entry_kind || NI))}</h3>
+        <p class="mono">${esc(String(state.rn1xPosition))}</p>
+        <h4>1 \u00b7 Source event</h4>
+        <p class="mono">trade ${esc(String(pos.source_trade_id))} \u00b7
+          account ${esc(String(pos.source_account))} \u00b7
+          condition ${esc(String(pos.condition_id || '').slice(0, 20))}\u2026
+          \u00b7 leg ${esc(String(pos.outcome_index))}</p>
+        <h4>2 \u00b7 The three clocks</h4>
+        <p class="mono">source ${day(pos.source_ts)}<br>
+          RECEIPT ${day(pos.detected_ts)}<br>
+          decision ${day(pos.decision_ts)}</p>
+        <h4>3 \u00b7 Decisions (${(tr.decisions || []).length})</h4>
+        <table class="sh-table"><thead><tr><th>At</th><th>State</th>
+          <th>Action</th></tr></thead><tbody>
+        ${(tr.decisions || []).slice(0, 12).map(d => `<tr>
+          <td class="mono">${day(d.decision_ts)}</td>
+          <td class="mono">${esc(d.selection_reason)}</td>
+          <td class="mono">${esc(d.selected_action || '\u2014')}</td>
+        </tr>`).join('')}</tbody></table>
+        <h4>4 \u00b7 Orders (${(tr.orders || []).length})</h4>
+        <table class="sh-table"><thead><tr><th>Side</th><th>Intent</th>
+          <th>Liq</th><th>Limit</th><th>Qty</th><th>Filled</th>
+          <th>State</th></tr></thead><tbody>
+        ${(tr.orders || []).map(o => `<tr>
+          <td class="mono">${esc(o.side)}</td>
+          <td class="mono">${esc(o.intent)}</td>
+          <td class="mono">${esc(o.liquidity)}</td>
+          <td class="mono">${px(o.limit_price)}</td>
+          <td class="mono">${qty(o.qty)}</td>
+          <td class="mono">${zeroOk(o.filled_qty)}</td>
+          <td class="mono">${esc(o.state)}</td>
+        </tr>`).join('')}</tbody></table>
+        <h4>5 \u00b7 Modelled fills (${(tr.fills || []).length})</h4>
+        ${(tr.fills || []).length ? `<table class="sh-table"><thead><tr>
+          <th>At</th><th>Qty</th><th>Price</th><th>Fee</th>
+          <th>Licensed by</th></tr></thead><tbody>
+        ${(tr.fills || []).map(f => `<tr>
+          <td class="mono">${day(f.at)}</td>
+          <td class="mono">${qty(f.qty)}</td>
+          <td class="mono">${px(f.price)}</td>
+          <td class="mono">${money(f.fee_usd)}</td>
+          <td class="mono">${esc(f.evidence_id)}</td>
+        </tr>`).join('')}</tbody></table>`
+          : '<p class="mono">ZERO \u2014 no modelled fill.</p>'}
+        <p class="sh-sub">${esc(tr.fill_semantics || '')}</p>
+        <h4>6 \u00b7 Inventory and outcome</h4>
+        ${tr.outcome ? `<p class="mono">residual
+          ${qty(tr.outcome.residual_qty)} \u00b7 unpaired
+          ${qty(tr.outcome.unpaired_qty)} \u00b7 fees
+          ${money(tr.outcome.fees_usd)} \u00b7 net
+          ${money(tr.outcome.net_usd)} \u00b7 settled
+          ${tr.outcome.settled_at ? day(tr.outcome.settled_at) : NI}</p>`
+          : '<p class="mono">NOT SETTLED \u2014 no outcome row.</p>'}
+      </div></section>`;
+    } else if (state.rn1xPosition) {
+      trace = panelNote('LOADING TRACE', 'Reading the position.');
+    }
+
+    return head + statuses + op + rows + states + positions + trace
+      + learn + blockers;
   }
 
   const VIEW = {
@@ -2159,6 +2279,15 @@
       state.trade = trade.dataset.shadowTrade;
       state.tab = 'audit';
       history.replaceState(null, '', '#shadow/audit');
+      paint(); refresh(); return;
+    }
+    // THE RN1X CLICK PATH. One position row -> its full trace: source
+    // event, receipt time, decisions, orders, modelled fills, inventory
+    // and outcome. Clicking the same row again closes it.
+    const pos = ev.target.closest && ev.target.closest('[data-rn1x-pos]');
+    if (pos && pos.dataset.rn1xPos) {
+      state.rn1xPosition = (state.rn1xPosition === pos.dataset.rn1xPos)
+        ? null : pos.dataset.rn1xPos;
       paint(); refresh();
     }
   });

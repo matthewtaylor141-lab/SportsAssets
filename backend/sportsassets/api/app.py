@@ -1702,6 +1702,24 @@ async def command_rn1x_overview(response: Response) -> dict:
     return await CR.overview(await get_pool())
 
 
+@app.get("/api/command/rn1x/statuses",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_statuses(response: Response) -> dict:
+    """Seven independent statuses, each naming what is LIVE and why.
+
+    Historical replay, prospective RN1 management, independent EV entries,
+    pairing, the second-half loss exit, accounting health and learning
+    evaluation fail independently, so they are reported independently
+    rather than behind one blended badge.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    return {"scope": CR.SCOPE, "label": CR.LABEL,
+            "statuses": await CR.statuses(await get_pool())}
+
+
 @app.get("/api/command/rn1x/learning",
          dependencies=[Depends(require_command)])
 async def command_rn1x_learning(response: Response) -> dict:

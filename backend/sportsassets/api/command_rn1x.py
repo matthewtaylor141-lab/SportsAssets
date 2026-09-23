@@ -70,6 +70,133 @@ async def _control(pool) -> dict:
             "state": "RUNNING" if running else "STOPPED_BY_CONTROL_ROW"}
 
 
+# ── THE SEVEN STATUSES, SEPARATELY ──────────────────────────────────
+#
+# One screen showing one blended "running / not running" hid which of
+# these was true. They fail independently and are reported independently.
+STATUS_KEYS = ("historical_replay", "prospective_rn1_management",
+               "independent_ev_entries", "pairing",
+               "second_half_loss_exit", "accounting_health",
+               "learning_evaluation")
+
+
+def _live(running: bool, has_rows: bool, *, what: str, why: str) -> dict:
+    """A LIVE badge must say WHAT is live.
+
+    Three states, not two: LIVE (running and producing), ARMED (running,
+    nothing produced yet) and STOPPED. "Running and found nothing" and
+    "not running" are different claims and a single badge conflated them.
+    """
+    if not running:
+        return {"badge": "STOPPED", "live": False, "what": what, "why": why}
+    return {"badge": "LIVE" if has_rows else "ARMED", "live": bool(running),
+            "producing": bool(has_rows), "what": what, "why": why}
+
+
+async def statuses(pool) -> dict:
+    """Seven independent statuses, each naming what is live and why."""
+    from .. import bettor_entry_gate as egate
+    from .. import bettor_rn1x_learn as L
+    from .. import bettor_rn1x_policy as pol
+    from ..workers import rn1x_shadow as W
+
+    async def _ctl(key):
+        raw = await pool.fetchval(
+            "SELECT value::text FROM ingestion_state WHERE key = $1", key)
+        return bool(raw and raw.strip().lower() == "true")
+
+    shadow_on = await _ctl("rn1x_shadow")
+    learn_on = await _ctl("rn1x_learn")
+    have = await pool.fetchval(
+        "SELECT count(*) FROM information_schema.tables WHERE "
+        "table_schema = 'public' AND table_name = 'rn1x_positions'")
+    hist = prosp = 0
+    exits = pairs = 0
+    inv_ok = None
+    if have:
+        hist = await pool.fetchval(
+            "SELECT count(*) FROM rn1x_positions WHERE experiment_id = $1",
+            W.HISTORICAL_EXPERIMENT_ID) or 0
+        prosp = await pool.fetchval(
+            "SELECT count(*) FROM rn1x_positions WHERE experiment_id = $1",
+            W.PROSPECTIVE_EXPERIMENT_ID) or 0
+        pairs = await pool.fetchval(
+            "SELECT count(*) FROM rn1x_orders WHERE intent = "
+            "'COMPLETE_PAIR'") or 0
+        exits = await pool.fetchval(
+            "SELECT count(*) FROM rn1x_orders WHERE intent = 'EXIT'") or 0
+        inv_ok = await pool.fetchval(
+            "SELECT bool_and(coalesce(net_usd, 0) IS NOT NULL) "
+            "FROM rn1x_outcomes")
+
+    ev_rows = await pool.fetchval(
+        "SELECT count(*) FROM information_schema.tables WHERE "
+        "table_schema = 'public' AND table_name = 'bettor_learn_model'")
+    verdicts = 0
+    if ev_rows:
+        verdicts = await pool.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY) or 0
+
+    return {
+        "historical_replay": _live(
+            shadow_on, hist > 0, what="the HISTORICAL lane: resolved "
+            "markets, scored against the observed payout",
+            why="replays the record; its cursor walks from the start"),
+        "prospective_rn1_management": _live(
+            shadow_on, prosp > 0, what="the PROSPECTIVE lane: UNRESOLVED "
+            "markets, live ingestion lanes only",
+            why=("decisions recorded before resolution; NOT scored and "
+                 "never summed with a scored result")),
+        "independent_ev_entries": {
+            "badge": "BLOCKED", "live": False, "producing": False,
+            "what": "independently selected EV entries",
+            "why": ("the path EXISTS (bettor_entry_gate) and refuses: no "
+                    "qualified model, no independent fair value, no "
+                    "execution estimate, no sizing policy. A connected "
+                    "engine without a qualified model is not the same as "
+                    "an unimplemented path"),
+            "requirements": list(egate.REQUIREMENTS),
+        },
+        "pairing": _live(
+            shadow_on, pairs > 0,
+            what="the PAIRING half of the frozen policy",
+            why="combined cost <= 0.91 including fees"),
+        "second_half_loss_exit": {
+            "badge": "UNAVAILABLE", "live": False,
+            "producing": exits > 0,
+            "orders_ever_placed": int(exits),
+            "what": "the SECOND-HALF loss exit (84% of allocated cost)",
+            "why": ("implemented and demonstrated in controlled tests, but "
+                    "no sport is admitted: a halfway rule is written for "
+                    "soccer/basketball/football and NO progress feed is "
+                    "connected for any of them. The only temporal "
+                    "integration is game_start_time, a scheduled start "
+                    "instant, and start + wall-clock is forbidden"),
+            "rules_written": sorted(k for k, v in
+                                    pol.DOCUMENTED_MAPPINGS.items()
+                                    if v is not None),
+            "feeds_connected": sorted(pol.PROGRESS_FEED_CONNECTED),
+            "admitted": sorted(pol.SECOND_HALF_MAPPING),
+        },
+        "accounting_health": {
+            "badge": "OK" if inv_ok else ("EMPTY" if not hist else "CHECK"),
+            "live": bool(have), "what": "the experiment's own ledger",
+            "why": ("cash + inventory_cost - realized == starting_cash on "
+                    "every written position. This is a CONSISTENCY check, "
+                    "not a completeness one"),
+            "reconciles": inv_ok,
+        },
+        "learning_evaluation": {
+            **_live(learn_on, verdicts > 0,
+                    what="the POLICY COMPARATOR",
+                    why=L.DESCRIPTION["fits_note"]),
+            "verdicts_recorded": int(verdicts),
+            "description": L.DESCRIPTION,
+        },
+    }
+
+
 async def overview(pool) -> dict:
     """Operation, totals and blockers in one read."""
     from ..workers import rn1x_shadow as W
@@ -125,6 +252,7 @@ async def overview(pool) -> dict:
                       "TRANSFERRED PMUS fee scenario. NOT a realised "
                       "return and NOT same-venue historical fees")},
         "blockers": W.BLOCKERS,
+        "statuses": await statuses(pool),
     }
 
 

@@ -1,4 +1,39 @@
-"""CONTINUOUS IMPROVEMENT FOR THE RN1X MANAGEMENT POLICY.
+"""A POLICY COMPARATOR. IT FITS NOTHING, AND THE NAME OVERSTATED IT.
+
+CALLED PRECISELY: this module RE-RUNS a frozen policy under four declared
+parameterisations and compares the results through an existing gate. That
+is all it does.
+
+  IT FITS NOTHING.        No parameter is estimated from data. There is no
+                          training step, no gradient, no likelihood, no
+                          calibration, no cross-validation and no search.
+                          Every number it uses was written down by a human
+                          before it ran: management's 0.91 and 0.84, and
+                          the four challenger constants in `CHALLENGERS`.
+  IT CHANGES NOTHING.     `recommend` returns RETAIN_CHAMPION or
+                          CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT. There is
+                          no third value and no code path that edits the
+                          active policy.
+  WHAT IT COMPARES.       The frozen champion against each challenger over
+                          the SAME assigned inventory and the SAME observed
+                          evidence, across the whole declared queue_share
+                          grid, scored by `learn_gate.gate_v2`.
+  WHICH DATA.             Settled positions from `rn1x_outcomes`, whose
+                          source fills are re-read from `trades` each
+                          cycle. Every receipt records `dataset_sha` and
+                          the position count, so two verdicts are only
+                          comparable when those match.
+
+WHY THE DISTINCTION MATTERS. A system that fits would need held-out data,
+a calibration story and an overfitting argument. A comparator needs none
+of those and must not be credited with them. Conversely a comparator
+cannot discover anything its declared challenger list does not contain --
+it can only rank what a human proposed. Neither fact is a defect; reporting
+one as the other would be.
+
+──────────────────────────────────────────────────────────────────────
+
+CONTINUOUS IMPROVEMENT FOR THE RN1X MANAGEMENT POLICY.
 
 The brief: "records outcomes, evaluates challengers and retains the
 existing policy unless improvement is demonstrated." Those are three
@@ -55,6 +90,46 @@ MODEL_KEY = "rn1x_mgmt_policy"
 TARGET = "MANAGEMENT_PAIR_NET_USD_PER_ASSIGNED_POSITION"
 KIND = "POLICY"
 KERNEL = "REPLAY_THROUGH_BETTOR_MGMT_LIFECYCLE"
+
+# ── THE PRECISE DESCRIPTION, PUBLISHED ──────────────────────────────
+#
+# The command centre renders this verbatim, so the screen cannot describe
+# the system more generously than the module does.
+DESCRIPTION = {
+    "what_it_is": "A POLICY COMPARATOR",
+    "fits": [],
+    "fits_note": ("NOTHING IS FITTED. No parameter is estimated from data: "
+                  "no training step, no gradient, no likelihood, no "
+                  "calibration, no search. Every constant it uses was "
+                  "written down by a human before it ran."),
+    "compares": [
+        "the frozen management champion against each declared challenger",
+        "over the SAME assigned inventory and the SAME observed evidence",
+        "across every declared queue_share scenario, because P_FILL is "
+        "NOT_IDENTIFIED",
+    ],
+    "changes": [],
+    "changes_note": ("NOTHING IS CHANGED. The only two verdicts are "
+                     "RETAIN_CHAMPION and "
+                     "CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT, and no code "
+                     "path edits the active policy."),
+    "data_per_evaluation": {
+        "population": ("settled positions in rn1x_outcomes for the "
+                       "HISTORICAL experiment"),
+        "evidence": ("each position's source fills, re-read from `trades` "
+                     "every cycle rather than cached, so a comparison is "
+                     "never between two code versions' stored numbers"),
+        "identified_by": ("dataset_sha over the fill ids, sizes and "
+                          "prices, plus the position count; two verdicts "
+                          "are comparable only when both match"),
+        "excluded": ("prospective positions -- they have no observed "
+                     "payout and cannot be scored"),
+    },
+    "cannot_discover": ("anything outside the declared challenger list. A "
+                        "comparator ranks what a human proposed; it does "
+                        "not search a space."),
+    "gate": "learn_gate.gate_v2, moved unchanged from tools/desk_experiments",
+}
 
 RETAIN = "RETAIN_CHAMPION"
 ELIGIBLE = "CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT"
