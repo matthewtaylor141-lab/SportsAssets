@@ -303,3 +303,112 @@ trig_01CiGjRDEb9mTjihzYPJqZov (04:00Z start). Replaced by a single
 trig_0156xerpzsYKoJLkDvvv2PxT at 02:10Z that arms once and starts, with
 an idempotency guard that refuses to re-arm a row already in the armed
 shape with a sufficient deadline.
+
+---
+
+## CHECK 1 — 2026-09-23T13:49Z–13:51Z. STILL COLLECTING.
+
+Read from durable records only, via `render-ops` at ref
+`claude/command-center`. `claude/session-njaewf` verified still at
+`7f76fd9`.
+
+### Control (`obs-incentive`, run 35869755487, read 13:49:29Z)
+
+| field | read | required | |
+|---|---|---|---|
+| control | **true** | true | ✓ |
+| http_total_used | **0** | against 8 | ✓ |
+| general_max_distinct | **0** | must be 0 (the arm's shape) | ✓ |
+| sock_connects | **2** | against 20 | ✓ |
+| sock_subs | **4** | against 40 | ✓ |
+| deadline_at | **2026-09-24T04:35:48+00:00** | unchanged | ✓ |
+| boots / reconnects / resubscribes | 2 / 1 / 2 | | |
+
+**`probe_id` is not returned by `obs-incentive`.** It was read instead
+from `obs-live` (run 35869867079, 13:50:24Z), which exposes it
+read-only:
+
+    armed_probe_id = d5e9ae3d-257f-4948-a808-90d1bd3c5e48   UNCHANGED
+
+So the stop-and-report condition is **not** triggered. Nothing re-armed.
+
+The same read shows `bettor_live_journal` at **84,831 s** old with 0
+rows in the last 60 s. **That is not the collector.** It is the GENERAL
+loop's journal, which is idle by design while the incentive arm runs;
+the arm writes `bettor_incentive_journal`. Recorded here so a later
+reader does not mistake an idle general loop for a dead collector.
+
+### Journal (`obs-incentive-journal`, run 35869799788, read 13:49:51Z)
+
+| kind | rows | first | last |
+|---|---:|---|---|
+| LADDER | **5,858** | 10:28:29Z | **13:49:51Z** |
+| EPOCH | 4 | 10:28:29Z | 10:31:15Z |
+| GAP | 6 | 10:28:29Z | 10:31:15Z |
+| PROGRAM_VERSION | 2 | 10:28:29Z | 10:31:14Z |
+| RUN_OPEN / RUN_CLOSE | 2 / 1 | | |
+
+**The max LADDER `at` is 13:49:51Z — the same second as the query.**
+The journal is growing. This is the reading to compare the next check
+against.
+
+| boot_id | rows | first | last |
+|---|---:|---|---|
+| `7435b23a98d049f3` | 43 | 10:28:29Z | 10:28:59Z |
+| `8702807518fe44b4` | **5,830** | 10:31:14Z | **13:49:51Z** |
+
+Gaps, all three with from/to:
+
+| why | duration | when |
+|---|---:|---|
+| `PROCESS_REPLACED` | **135.191 s** | 10:28:59Z → 10:31:14Z |
+| `GAP_DISCONNECTED` | 0.5268 s | 10:28:28Z |
+| `GAP_DISCONNECTED` | 0.5003 s | 10:31:14Z |
+
+**Total recorded gap 136.218 s.** The `PROCESS_REPLACED` is the worker
+restart at the deploy changeover, recorded as an event, not treated as
+a fault.
+
+### Markets (`obs-incentive-markets`, run 35869937056, read 13:51:02Z)
+
+    markets_receiving     12 of 12
+    markets_with_depth    12 of 12
+    frames_total          5,921
+    frames_in_window      5,921
+    frames_before_window  0
+
+Per-market frames range 139 (`chaxcx`) to 1,063 (`eminem`); every one
+of the twelve has depth on every frame, max ask levels 6–23.
+
+### The API deploy at 13:46Z did NOT disturb the collector
+
+An API-only release (`2d7ed3f`, `dep-daptgg9srm7s73aq624g`, live
+13:47:37Z) went out between the last check and this one. Three
+independent confirmations that the collector was untouched:
+
+1. the deploy action printed the worker deploy list **before and
+   after** and it is byte-identical (`dep-dapqirrbc2fs73bms6fg live
+   7f76fd9` both times);
+2. `claude/session-njaewf` — the branch both services track — is still
+   at `7f76fd9`, so no auto-deploy fired;
+3. **the journal itself**: no GAP and no new boot after 10:31:14Z, and
+   LADDER rows continue through 13:49:51Z. A worker restart at 13:46Z
+   would have written a `PROCESS_REPLACED` gap and a third boot_id.
+   Neither exists.
+
+### THE DENOMINATOR, stated before anyone quotes a coverage number
+
+The measurement window opened at **04:00:00Z**. Collection began at
+**10:28:29Z**.
+
+    unobserved head   23,309 s = 6.47 h
+                      65.9% of the window elapsed so far
+                      27.0% of the full 24 h window
+    elapsed           9.83 h of 24.00 h
+
+**This is not a complete-day observation and must not be reported as
+one.** The first 6.47 hours are unobserved and belong in the
+denominator of every coverage and reward figure computed from this run.
+
+The stop at 2026-09-24T04:00:00Z (`trig_01RKm5XcVvaUXCqLgbAnV2T6`) is
+unchanged. No counter was reset and nothing was re-armed.
