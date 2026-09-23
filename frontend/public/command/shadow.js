@@ -55,7 +55,11 @@
     // on this tab is HISTORICAL REPLAY: a declared past window run
     // through the same engine, on a tape that was never ours. It is
     // never added to anything above it.
-    ['desk', 'Desk · REPLAY'],
+    // NAMED FOR WHAT IT HOLDS. It was 'Desk · REPLAY', which did not
+    // identify the LIVE shadow account that also lives on it -- a live
+    // blotter inside a tab labelled REPLAY. Both are on it, each under
+    // its own banner, and the label now says both.
+    ['desk', 'Shadow desk — LIVE + REPLAY'],
     // THE IMPROVEMENT LOOP. Its own tab because it is neither a live
     // result nor a replay result: it is the record of which policy
     // variants were tried, on which partitions, and why each was
@@ -164,6 +168,12 @@
       if (state.tab === 'desk')
         await Promise.all(['overview', 'attribution', 'lifecycles?limit=20',
           'live', 'live/book?limit=60', 'correction'].map(pullDesk));
+      // OVERVIEW NEEDS THE DESK'S STATE to name the three systems, and
+      // it reads the SAME endpoints the Desk tab does -- so the two
+      // cannot disagree about whether the desk is paused.
+      if (state.tab === 'overview')
+        await Promise.all(['live', 'live/book?limit=60', 'correction']
+          .map(pullDesk));
       if (state.tab === 'learning')
         await Promise.all(['overview', 'cycles', 'results'].map(pullLearn));
       if (state.tab === 'audit' && state.trade)
@@ -234,12 +244,39 @@
    * "Do not turn browser heartbeat into source freshness." The two
    * clocks are shown side by side and labelled, so a page happily
    * polling a dead writer reads STALE next to a ticking UI clock. */
+  /* SOURCE FRESHNESS AND TRADING-SYSTEM HEALTH ARE TWO DIFFERENT
+   * THINGS, and this chip used to say only "LIVE".
+   *
+   * "LIVE" here has always meant one narrow thing: A PRINT ARRIVED
+   * RECENTLY. It says nothing about whether any system is trading,
+   * whether the desk is halted, or whether the accounting is sound --
+   * and beside a green dot at the top of a management page it reads as
+   * "everything is fine". Incoming data refreshing must not paint over
+   * an accounting halt, so the chip now names its own subject and a
+   * second chip carries the desk's state next to it. */
   function freshness(s) {
     const src = s && s.lastSourceTimestamp;
     const st = s && s.sourceState || 'NO_DATA_YET';
     const tone = st === 'LIVE' ? 'green' : st === 'STALE' ? 'amber' : 'grey';
+    const lv = state.data['live'];
+    const bk = state.data['live/book?limit=60'];
+    const loop = (lv && lv.loop) || {};
+    const ac = (bk && bk.account) || null;
+    const rowPaused = ac ? ac.paused : undefined;
+    const paused = rowPaused === true || loop.paused === true
+      || loop.state === 'PAUSED_ACCOUNTING_RECOVERY';
+    const known = rowPaused === false || loop.paused === false;
+    // THE DESK CHIP IS NEVER GREEN ON SILENCE. Not-yet-read is amber.
+    // It is omitted entirely on tabs that never asked for the desk's
+    // state, rather than asserting UNVERIFIED about a page that made no
+    // such read -- an alarm on every tab is an alarm nobody reads.
+    const desk = !lv ? null
+      : paused ? ['amber', 'SHADOW DESK PAUSED']
+      : known ? ['green', 'SHADOW DESK RUNNING']
+              : ['amber', 'SHADOW DESK STATE UNVERIFIED'];
     return `<div class="sh-fresh">
-      <span class="sh-chip ${tone}"><i class="sh-beat ${st === 'LIVE' ? 'on' : ''}"></i>${esc(st.replace(/_/g, ' '))}</span>
+      <span class="sh-chip ${tone}"><i class="sh-beat ${st === 'LIVE' ? 'on' : ''}"></i>SOURCE DATA ${esc(st.replace(/_/g, ' '))}</span>
+      ${desk ? `<span class="sh-chip ${desk[0]}">${esc(desk[1])}</span>` : ''}
       <span class="sh-fresh-pair"><label>LAST SOURCE UPDATE</label><b>${src ? day(src) : NI}</b></span>
       <span class="sh-fresh-pair"><label>LAST UI UPDATE</label><b>${state.lastUiUpdate ? day(state.lastUiUpdate) : '—'}</b></span>
     </div>`;
@@ -561,11 +598,145 @@
     return head + `<div class="sh-tape">${html}</div></section>`;
   }
 
+  /* THREE SYSTEMS, NAMED AT THE TOP OF THE PAGE.
+   *
+   * The Overview's NO_TRADE count, zero positions and unidentified P&L
+   * are the INDEPENDENT EV ENGINE's truthful output and stay exactly as
+   * they are. What was missing is that a reader could not tell which of
+   * three different systems any figure belonged to, and "Desk · Replay"
+   * did not identify a live desk at all -- I put a live blotter inside
+   * a tab labelled REPLAY, which is the confusion the mode separation
+   * exists to prevent. */
+  function threeSystems(s) {
+    const lv = state.data['live'];
+    const bk = state.data['live/book?limit=60'];
+    const cx = state.data['correction'];
+    const loop = (lv && lv.loop) || {};
+    const ac = (bk && bk.account) || null;
+    const env = (s && s.environment) || {};
+
+    // THE DESK'S STATE, AND IT FAILS CLOSED.
+    //
+    // THE ACCOUNT ROW IS PREFERRED OVER THE LOOP'S MEMORY. A halt held
+    // only in a process's `_status` vanishes when that process restarts,
+    // and a build that predates the pause flag reports no pause at all
+    // -- so reading the loop first would render a contained desk as
+    // RUNNING. The row is durable; the loop is corroboration.
+    //
+    // THERE ARE THREE STATES, NOT TWO. "not paused" and "verified
+    // running" are different claims, and a page that collapses them
+    // asserts health it never read. If neither source says, the badge
+    // says UNVERIFIED -- never RUNNING.
+    const st = loop.state || 'NOT_REPORTED';
+    const rowPaused = ac ? ac.paused : undefined;
+    const paused = rowPaused === true
+      || st === 'PAUSED_ACCOUNTING_RECOVERY' || loop.paused === true;
+    const stateKnown = rowPaused === false || loop.paused === false;
+    const acctStatus = (ac && ac.accounting_status)
+      || loop.accounting_status || 'NOT_REPORTED';
+    const uncertain = acctStatus === 'ACCOUNTING_UNCERTAIN';
+    const reason = (ac && ac.pause_reason) || loop.pause_reason || '';
+    const perfQual = (ac && ac.performance_qualification) || null;
+
+    const badge = (txt, col) => `<span class="mono" style="padding:2px 6px;
+      border:1px solid ${col};color:${col};letter-spacing:.06em">${esc(txt)}</span>`;
+
+    return `<section class="sh-panel"><div class="sh-panel-head">
+      <h2>Three separate systems</h2>
+      <span class="sh-sub">Different engines, different evidence,
+        different claims. No figure below is added across them.</span>
+      </div><div class="sh-panel-body">
+
+      <div class="sh-sub2"><h3>1 · Independent EV engine — production</h3>
+        <p>${badge('RECEIVING DATA', '#3f7f5f')}
+           ${badge('ALL TRADES REFUSED', '#8a6d1f')}</p>
+        <p>This is what the counters on this page describe. It refuses
+           every trade, and the refusals are UNIMPLEMENTED REQUIREMENTS
+           rather than tuning choices:</p>
+        <ul>
+          <li><b>INDEPENDENT_EV_NOT_ESTABLISHED</b> — no fair value is
+              computed independently of the cohort's own prices. Not
+              implemented.</li>
+          <li><b>P_FILL_NOT_IDENTIFIED</b> — the probability our resting
+              order would fill is unmeasured. It needs queue position and
+              book depth at our own size, which a funded pilot would
+              measure. Not implemented.</li>
+          <li><b>NO_FAIR_VALUE</b> — no contemporaneous book is retained
+              for the decision instant. Not implemented.</li>
+        </ul>
+        <p><b>A refusal count is not investment judgment.</b> Nothing
+           here demonstrates profitability, and a large NO_TRADE total
+           shows the gate is closed, not that a strategy works.</p>
+      </div>
+
+      <div class="sh-sub2"><h3>2 · Experimental autonomous shadow desk</h3>
+        <p>${paused ? badge('PAUSED — ACCOUNTING RECOVERY', '#b04a4a')
+                    : stateKnown ? badge('RUNNING', '#3f7f5f')
+                                 : badge('STATE UNVERIFIED', '#8a6d1f')}
+           ${uncertain ? badge('ACCOUNTING_UNCERTAIN', '#b04a4a')
+                       : badge('ACCOUNTING ' + esc(acctStatus), '#6a6a6a')}
+           ${perfQual === 'SUPPRESSED'
+             ? badge('PERFORMANCE QUALIFICATION SUPPRESSED', '#b04a4a') : ''}</p>
+        <p class="mono">account ${ac ? esc(ac.account_id) : NI}
+           · opened ${ac ? esc(String(ac.opened_at || '').slice(0, 19)) : NI}
+           · last processed event ${zeroOk(loop.last_event_id)}
+           · loop state ${esc(st)}</p>
+        ${paused ? `<p><b>Shadow desk paused for accounting recovery.</b>
+           ${esc(reason)}</p>` : ''}
+        ${!paused && !stateKnown ? `<p><b>This desk's run state was not
+           reported.</b> Neither the account row nor the running process
+           stated whether it is paused, so it is shown as UNVERIFIED
+           rather than as running. An unreported state is not a healthy
+           one.</p>` : ''}
+        ${uncertain ? `<p><b>Its figures are NOT a performance result.</b>
+           An identifier collision across restarts means records written
+           in the affected window may have been overwritten. The fix
+           prevents future collisions and repairs nothing already
+           overwritten, so performance qualification is SUPPRESSED.</p>`
+         : ''}
+        <p class="mono">last verified
+           ${ac && ac.last_verified_at
+             ? esc(String(ac.last_verified_at).slice(0, 19))
+             : 'NOT YET VERIFIED ON THE CORRECTED BUILD'}</p>
+        <p>This is a separate experimental lane. It does not weaken or
+           bypass the EV engine's refusals above.</p>
+        <p><button class="sh-jump" data-shadow-tab="desk">Open this live
+           shadow account →</button>
+           <span class="sh-sub">the LIVE block at the top of
+           <b>Shadow desk — LIVE + REPLAY</b>: this account's decisions,
+           orders, positions and ledger. ${paused
+             ? 'It is paused, so the newest rows stop at the pause time.'
+             : ''}</span></p>
+      </div>
+
+      <div class="sh-sub2"><h3>3 · Historical replay</h3>
+        <p>${badge('HISTORICAL DATA', '#6a6a6a')}
+           ${badge('MODELLED EXECUTION', '#8a6d1f')}</p>
+        <p>A fixed past window run through the same engine on a tape
+           that was never ours, under an ASSUMED fill model. Its results
+           are never combined with either system above.</p>
+        <p><button class="sh-jump" data-shadow-tab="desk">Open the
+           historical replay →</button>
+           <span class="sh-sub">the same tab, BELOW the live block,
+           under its HISTORICAL REPLAY — NOT LIVE, NOT FUNDED
+           banner.</span></p>
+      </div>
+
+      <p class="mono">funded trading DISABLED · real order submission
+         ${env.realOrderSubmissionEnabled ? 'ENABLED' : 'DISABLED'}
+         · capital at risk ${zeroOk(env.capitalAtRisk)}</p>
+      ${cx && cx.incident ? `<p class="mono">open incident
+         ${esc(cx.incident.incident_id)} —
+         ${esc(cx.incident.pnl_reliability || '')}</p>` : ''}
+      </div></section>`;
+  }
+
   function overview() {
     const s = state.data['summary'];
     const problem = feedProblem('summary');
     if (!s) return `<div class="sh-body">${problem || emptyState('Reading the shadow ledger…', 'One moment.')}</div>`;
     return `${disclosure(s.environment)}${freshness(s)}
+      ${threeSystems(s)}
       ${kpiGrid(s)}
       ${laneCards(s)}
       <div class="sh-two">

@@ -561,3 +561,15 @@
   font: 500 10px/1.5 var(--sans, system-ui);
   letter-spacing: .04em; color: var(--sh-muted); overflow-wrap: anywhere;
 }
+
+/* A JUMP TO ANOTHER TAB. The global reset strips buttons of border and
+   background, so without this a navigation control renders as plain
+   text and nobody clicks it -- which is how "Desk · Replay" came to be
+   the only route to the live desk. */
+.sh-jump {
+  font: 600 11px/1.2 var(--mono, ui-monospace);
+  letter-spacing: .06em; padding: 7px 10px; border-radius: 6px;
+  border: 1px solid var(--sh-cyan); color: var(--sh-cyan);
+  background: transparent;
+}
+.sh-jump:hover { background: rgba(102, 173, 255, .10) }
