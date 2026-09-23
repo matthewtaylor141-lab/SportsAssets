@@ -294,6 +294,15 @@ def scenarios() -> dict:
                 "note": "SYNTHETIC", "superseded_by": None},
         })
 
+    # THE REAL RUN. Not a fixture: every boundary, gap and per-market
+    # count below was read back from production. Labelled distinctly so
+    # a screenshot of it cannot be confused with a synthetic one.
+    try:
+        import command_center_live_fixture as LIVE
+        S["real-2026-09-23"] = LIVE.scenario()
+    except Exception as exc:                                   # noqa: BLE001
+        pass
+
     S["unavailable"] = {
         "why": "The database read fails. The page must say UNAVAILABLE, "
                "not render a well-formed page of zeros.",
@@ -387,12 +396,22 @@ def make_app(default_scenario: str, password: str):
     async def preview_snapshot(pool=None, *, now=None):
         sc = S[chosen["name"]]
         payload = await real_snapshot(StubPool(sc), now=sc["now"])
+        real = bool(sc.get("real"))
         payload["preview"] = {
-            "SYNTHETIC": True,
+            "SYNTHETIC": not real,
+            "REAL_READINGS": real,
             "scenario": chosen["name"],
             "why": sc["why"],
-            "warning": "EVERY RECORD BEHIND THIS PAGE IS A SYNTHETIC "
-                       "FIXTURE. It is not venue data and not a run result.",
+            "read_at": sc.get("read_at"),
+            "warning": (
+                "RECONSTRUCTED FROM REAL READINGS read back from "
+                "production at %s. Segment boundaries, gaps and "
+                "per-market counts are measured. Ladder BODIES are not "
+                "real -- each frame carries only its measured level "
+                "count." % sc.get("read_at")
+                if real else
+                "EVERY RECORD BEHIND THIS PAGE IS A SYNTHETIC FIXTURE. "
+                "It is not venue data and not a run result."),
         }
         return payload
 

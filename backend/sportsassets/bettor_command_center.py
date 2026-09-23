@@ -208,11 +208,30 @@ def lifecycle(*, control, probe, ladders, gaps, errors, run_close,
                        % (p.get("detail") or p.get("why") or "unspecified"),
                 "evidence": "journal RUN_ERROR"}
 
+    # COMPLETED MEANS NOTHING CAME AFTER, and a RUN_CLOSE alone does not
+    # establish that.
+    #
+    # THE BUG THIS FIXES, caught by reconciling against the real run.
+    # Boot A was replaced mid-run and wrote a RUN_CLOSE on its way out;
+    # boot B then reopened and has been persisting frames ever since.
+    # Treating any RUN_CLOSE as terminal reported the live run as
+    # COMPLETED -- the most dangerous possible error on this page,
+    # because it says "nothing more is owed" about a run that is still
+    # going and still needs to be stopped at its fixed end.
+    #
+    # A close is terminal only when NO FRAME FOLLOWS IT.
     if run_close and n_ladders > 0:
-        return {"state": L_COMPLETED,
-                "why": "the run closed and frames were persisted",
-                "evidence": "journal RUN_CLOSE + %d ladder records"
-                            % n_ladders}
+        close_at = float((run_close.get("at") if isinstance(run_close, dict)
+                          else 0) or 0)
+        after = [r for r in ladders
+                 if float(r.get("at") or 0.0) > close_at]
+        if not after:
+            return {"state": L_COMPLETED,
+                    "why": "the run closed and no frame followed the close",
+                    "evidence": "journal RUN_CLOSE at %s + %d ladder "
+                                "records, none after it"
+                                % (iso(close_at), n_ladders)}
+        # else: a later boot reopened. Fall through to the live branches.
 
     if not control:
         if n_ladders > 0:
@@ -429,6 +448,177 @@ def allowance(probe) -> dict:
                  "arm's row"),
         "deadline_at": cell(probe.get("deadline_at"),
                             "ingestion_state.bettor_live_probe_state"),
+    }
+
+
+def _merge(intervals) -> list:
+    """Union of half-open intervals, sorted and coalesced."""
+    out = []
+    for a, b in sorted((x for x in intervals if x[1] > x[0])):
+        if out and a <= out[-1][1]:
+            out[-1][1] = max(out[-1][1], b)
+        else:
+            out.append([a, b])
+    return [tuple(x) for x in out]
+
+
+def _subtract(base, cuts) -> list:
+    """`base` minus `cuts`, both unions of intervals."""
+    out = []
+    for a, b in base:
+        pieces = [(a, b)]
+        for ca, cb in cuts:
+            nxt = []
+            for pa, pb in pieces:
+                if cb <= pa or ca >= pb:
+                    nxt.append((pa, pb))
+                    continue
+                if ca > pa:
+                    nxt.append((pa, ca))
+                if cb < pb:
+                    nxt.append((cb, pb))
+            pieces = nxt
+        out.extend(p for p in pieces if p[1] > p[0])
+    return out
+
+
+def _clip(intervals, a, b) -> list:
+    return [(max(x, a), min(y, b)) for x, y in intervals
+            if min(y, b) > max(x, a)]
+
+
+def coverage_intervals(records, *, now, allowlist=None,
+                       window_start=None, window_end=None) -> dict:
+    """OBSERVED TIME AS A UNION OF INTERVALS. Not a subtraction.
+
+    THE ARITHMETIC THIS REPLACES WAS WRONG IN TWO WAYS AT ONCE, and the
+    two errors nearly cancelled, which is how it survived a reading.
+
+      1. It treated everything before the LAST boot's start as
+         unobserved. Boot A collected for thirty seconds before the
+         process was replaced; that time was observed and was being
+         thrown away.
+
+      2. It then subtracted the PROCESS_REPLACED gap as well -- but
+         that gap lies BETWEEN the two boots' segments, so it was
+         never inside the observed set to begin with. Subtracting it
+         removed time that had already been excluded.
+
+    A union cannot make either mistake. Observed time is built up from
+    the segments that exist, then the recorded gaps are removed by
+    INTERSECTION, so a gap outside every segment contributes nothing
+    and a gap inside one is removed exactly once.
+
+    TWO DIFFERENT QUESTIONS, ANSWERED SEPARATELY:
+
+      achieved   -- what has actually been observed, as of `now`.
+      attainable -- achieved, plus the time still remaining to the
+                    FIXED end, IF collection continues unbroken. It is
+                    a ceiling and is labelled one; it is not a
+                    forecast and nothing may be reported from it.
+
+    AND VALIDITY IS NOT ACTIVITY. A market that sent nothing during a
+    segment was still observed for that segment: the feed is
+    change-driven and silence is the market, not the collector. So
+    per-market observed time is the segment union, and frame counts are
+    reported beside it as activity rather than instead of it.
+    """
+    a = _epoch(window_start or WINDOW_START)
+    b = _epoch(window_end or WINDOW_END)
+    recs = list(records or [])
+
+    try:
+        from .bettor_incentive_journal import segments as _segs
+        segs = _segs(recs)
+    except Exception:                                         # noqa: BLE001
+        segs = []
+
+    seg_iv = _merge([(float(s["start"]), float(s["end"])) for s in segs])
+
+    # Gaps that carry BOTH ends. A GAP_OPENED with no close has no
+    # measurable extent, so it cannot be subtracted -- it is reported
+    # as an open gap and bounds nothing.
+    gv = gap_view(recs)
+    cuts = _merge([(float(g["from"]), float(g["to"]))
+                   for g in gv["closed"]
+                   if g.get("from") is not None and g.get("to") is not None])
+
+    observed = _subtract(seg_iv, cuts)
+    in_window = _clip(observed, a, b)
+    observed_s = round(sum(y - x for x, y in in_window), 3)
+
+    # The remaining time to the FIXED end, from the latest instant that
+    # is actually covered -- not from `now`, because the stretch between
+    # the last covered instant and now is not observed either.
+    last_covered = max((y for _, y in in_window), default=a)
+    remaining_s = round(max(0.0, b - max(last_covered, min(now, b))), 3)
+
+    per_market = []
+    for slug in sorted(allowlist or []):
+        mine = _merge([(float(s["start"]), float(s["end"])) for s in segs
+                       if slug in (s.get("slugs") or [])])
+        # A market present in the allowlist but silent in a segment was
+        # still watched for it. `segments()` only lists slugs that sent
+        # something, so silence would otherwise read as absence.
+        watched = seg_iv if slug in (allowlist or []) else mine
+        m_obs = _clip(_subtract(watched, cuts), a, b)
+        frames = sum(1 for r in recs if r.get("kind") == "LADDER"
+                     and r.get("slug") == slug and a <= float(r.get("at") or 0) < b)
+        last = max((float(r["at"]) for r in recs
+                    if r.get("kind") == "LADDER" and r.get("slug") == slug),
+                   default=None)
+        per_market.append({
+            "slug": slug,
+            "observed_s": round(sum(y - x for x, y in m_obs), 3),
+            "frames": frames,
+            "last_frame": iso(last),
+            "sent_in_segments": len(mine),
+            "watched_but_silent": frames == 0,
+        })
+
+    return {
+        "window": {"start": iso(a), "end": iso(b), "span_s": round(b - a, 3)},
+        "segments": [{"start": iso(x), "end": iso(y),
+                      "seconds": round(y - x, 3)} for x, y in seg_iv],
+        "gaps_subtracted": [{"from": iso(x), "to": iso(y),
+                             "seconds": round(y - x, 3)} for x, y in cuts],
+        "gaps_outside_segments": [
+            {"from": iso(x), "to": iso(y), "seconds": round(y - x, 3),
+             "why": "lies between segments, so it was never inside the "
+                    "observed set and is NOT subtracted again"}
+            for x, y in cuts if not _clip(seg_iv, x, y)],
+        "observed_intervals": [{"from": iso(x), "to": iso(y),
+                                "seconds": round(y - x, 3)}
+                               for x, y in in_window],
+        "achieved": cell(
+            {"observed_s": observed_s,
+             "window_s": round(b - a, 3),
+             "fraction_of_window": round(observed_s / (b - a), 6)
+             if b > a else None,
+             "elapsed_window_s": round(max(0.0, min(now, b) - a), 3),
+             "fraction_of_elapsed": (
+                 round(observed_s / max(1e-9, min(now, b) - a), 6)
+                 if now > a else None)},
+            "journal segments minus recorded gaps, unioned",
+            as_of=iso(now),
+            note="ACHIEVED. Union of observed intervals clipped to the "
+                 "window; each recorded gap removed exactly once, and "
+                 "only where it intersects a segment."),
+        "attainable_at_fixed_end": cell(
+            {"if_unbroken_from_now_s": round(observed_s + remaining_s, 3),
+             "remaining_s": remaining_s,
+             "fraction_of_window": round((observed_s + remaining_s) / (b - a), 6)
+             if b > a else None},
+            "achieved + time remaining to the fixed end",
+            as_of=iso(now),
+            note="A CEILING, NOT A FORECAST. It assumes collection "
+                 "continues unbroken to 2026-09-24T04:00:00Z. Nothing "
+                 "may be reported from it as though it had happened."),
+        "per_market": per_market,
+        "validity_is_not_activity": "observed_s is how long a market was "
+                                    "WATCHED. frames is how often it "
+                                    "CHANGED. A watched market with zero "
+                                    "frames was quiet, not missing.",
     }
 
 
@@ -927,12 +1117,17 @@ def build(*, records, control, probe, run_row, allowlist, suites,
     """
     ladders = [r for r in records or [] if r.get("kind") == "LADDER"]
     gaps = gap_view(records)
-    run_close = [r for r in records or [] if r.get("kind") == "RUN_CLOSE"]
+    run_close = sorted([r for r in records or []
+                        if r.get("kind") == "RUN_CLOSE"],
+                       key=lambda r: float(r.get("at") or 0.0))
     run_open = [r for r in records or [] if r.get("kind") == "RUN_OPEN"]
 
     lc = lifecycle(control=control, probe=probe, ladders=ladders,
                    gaps=gaps["open"], errors=gaps["errors"],
-                   run_close=run_close[0] if run_close else None,
+                   # THE LATEST close, not the first: an early boot's
+                   # close says nothing about whether a later boot is
+                   # still running.
+                   run_close=run_close[-1] if run_close else None,
                    now=now, window_end=window_end)
     periods = split_periods(ladders, window_start=window_start,
                             window_end=window_end)
@@ -1021,6 +1216,9 @@ def build(*, records, control, probe, run_row, allowlist, suites,
                                     "are outside the measurement window and "
                                     "are excluded from every reward figure."),
         "health": health,
+        "coverage_time": coverage_intervals(
+            records, now=now, allowlist=allowlist,
+            window_start=window_start, window_end=window_end),
         "gaps": gaps,
         "allowance": allowance(probe),
         "segments": _segments_safe(records),

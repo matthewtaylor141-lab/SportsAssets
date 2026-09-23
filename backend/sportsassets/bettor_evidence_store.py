@@ -27,6 +27,27 @@ of its exact bytes, and the instant it was published. A figure on the
 page can therefore name the commit it describes, and two artifacts that
 disagree can be told apart by digest rather than by filename.
 
+WHAT THE DIGEST PROVES, AND WHAT IT DOES NOT. It proves CONTENT
+INTEGRITY: these bytes are the bytes that were published, unaltered
+since. It proves NOTHING about where they came from. `source_sha` is
+supplied by whoever ran the publisher; it is a RECORDED CLAIM, not a
+verified fact, and someone can publish last week's XML against today's
+commit without the store noticing. So attribution here is labelled
+RECORDED PROVENANCE, never "verified".
+
+VERIFIED provenance would need three things this store does not yet
+have, and `attestation` is the field reserved for them:
+
+    ci_run          the CI run id that produced the artifact
+    checked_out_sha the commit that run actually checked out, as
+                    reported by the runner rather than by a publisher
+    artifact_ref    the association between that run and these bytes,
+                    from the CI system rather than from the uploader
+
+Until an attestation is present and checked, `provenance_class` is
+RECORDED and the page says so. Calling it verified would assert a chain
+of custody that does not exist.
+
 WHAT IT REFUSES TO STORE. `scan_for_secrets()` runs on every publish and
 rejects anything carrying a credential-shaped key or a PEM block. An
 evidence-publishing path is a general-purpose way to move bytes from a
@@ -80,6 +101,7 @@ CREATE TABLE IF NOT EXISTS bettor_evidence_artifact (
     body          TEXT             NOT NULL,
     published_at  DOUBLE PRECISION NOT NULL,
     note          TEXT,
+    attestation   JSONB,
     superseded_by BIGINT
 );
 CREATE INDEX IF NOT EXISTS bettor_evidence_artifact_name
@@ -90,7 +112,7 @@ CREATE UNIQUE INDEX IF NOT EXISTS bettor_evidence_artifact_ident
 
 REQUIRED_COLUMNS = ("id", "name", "kind", "source_sha", "content_type",
                     "digest", "size_bytes", "body", "published_at",
-                    "note", "superseded_by")
+                    "note", "attestation", "superseded_by")
 
 # What a name is allowed to look like. Deliberately narrow: a name is a
 # logical key, not a path, so a traversal cannot be smuggled through it.
@@ -102,6 +124,43 @@ SHA_RE = re.compile(r"^[0-9a-f]{7,64}$")
 
 def digest_of(body: str) -> str:
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
+
+
+P_RECORDED = "RECORDED"
+P_ATTESTED = "ATTESTED"
+
+ATTESTATION_FIELDS = ("ci_run", "checked_out_sha", "artifact_ref")
+
+
+def provenance_class(row: dict) -> dict:
+    """RECORDED or ATTESTED, and exactly what each one licenses.
+
+    A digest establishes that the bytes are unchanged since publish. It
+    establishes nothing about which commit was tested to produce them --
+    `source_sha` is whatever the publisher passed. Those are different
+    claims and collapsing them is how a page ends up asserting a chain
+    of custody it never had.
+    """
+    att = (row or {}).get("attestation") or {}
+    have = [f for f in ATTESTATION_FIELDS if att.get(f)]
+    if len(have) == len(ATTESTATION_FIELDS):
+        return {"class": P_ATTESTED, "attestation": att,
+                "integrity": "sha256 of the stored bytes",
+                "attribution": "the CI run that produced these bytes "
+                               "reported the commit it checked out",
+                "licenses": "attributing these results to that commit"}
+    return {
+        "class": P_RECORDED,
+        "missing_attestation": [f for f in ATTESTATION_FIELDS
+                                if f not in have],
+        "integrity": "sha256 of the stored bytes -- these ARE the bytes "
+                     "that were published, unaltered",
+        "attribution": "source_sha was supplied by the publisher. Nothing "
+                       "here checked that these bytes came from testing "
+                       "that commit.",
+        "licenses": "saying WHICH BYTES are on screen. NOT attributing "
+                    "the results to a commit as a verified fact.",
+    }
 
 
 # ── the refusal at the write ─────────────────────────────────────────
@@ -227,7 +286,8 @@ async def ensure_schema(pool) -> dict:
 # ── the write. NOT reachable from the API. ───────────────────────────
 
 async def publish(pool, *, name, kind, source_sha, body,
-                  content_type="text/plain", note=None) -> dict:
+                  content_type="text/plain", note=None,
+                  attestation=None) -> dict:
     """Append one artifact version and supersede the previous one.
 
     IDEMPOTENT ON (name, digest). Re-publishing identical bytes returns
@@ -258,10 +318,12 @@ async def publish(pool, *, name, kind, source_sha, body,
             row = await con.fetchrow(
                 "INSERT INTO " + TABLE +
                 " (name, kind, source_sha, content_type, digest,"
-                "  size_bytes, body, published_at, note)"
-                " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9) RETURNING id",
+                "  size_bytes, body, published_at, note, attestation)"
+                " VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)"
+                " RETURNING id",
                 name, kind, v["source_sha"], content_type, v["digest"],
-                v["size_bytes"], body, time.time(), note)
+                v["size_bytes"], body, time.time(), note,
+                json.dumps(attestation) if attestation else None)
             new_id = row["id"]
             # SUPERSEDE, do not delete. The old bytes stay readable and
             # now carry a pointer to what replaced them.
@@ -281,7 +343,8 @@ async def latest(pool, name: str) -> dict | None:
     try:
         row = await pool.fetchrow(
             "SELECT id, name, kind, source_sha, content_type, digest,"
-            "       size_bytes, body, published_at, note, superseded_by"
+            "       size_bytes, body, published_at, note, attestation,"
+            "       superseded_by"
             " FROM " + TABLE +
             " WHERE name = $1 AND superseded_by IS NULL"
             " ORDER BY published_at DESC LIMIT 1", name)
@@ -297,7 +360,7 @@ async def latest_many(pool, names: list) -> dict:
     rows = await pool.fetch(
         "SELECT DISTINCT ON (name) id, name, kind, source_sha,"
         "       content_type, digest, size_bytes, body, published_at,"
-        "       note, superseded_by"
+        "       note, attestation, superseded_by"
         " FROM " + TABLE +
         " WHERE name = ANY($1::text[]) AND superseded_by IS NULL"
         " ORDER BY name, published_at DESC", list(names))
@@ -314,7 +377,7 @@ async def history(pool, name: str, limit: int = 50) -> list:
     """
     rows = await pool.fetch(
         "SELECT id, name, kind, source_sha, content_type, digest,"
-        "       size_bytes, published_at, note, superseded_by"
+        "       size_bytes, published_at, note, attestation, superseded_by"
         " FROM " + TABLE +
         " WHERE name = $1 ORDER BY published_at DESC LIMIT $2",
         name, int(limit))
@@ -426,6 +489,12 @@ def describe() -> dict:
         "append_only": True,
         "superseded_rows": "kept, with superseded_by naming the replacement",
         "versioned_by": ["source_sha", "digest", "published_at"],
+        "digest_proves": "content integrity only -- these are the bytes "
+                         "that were published",
+        "digest_does_not_prove": "that the bytes came from testing "
+                                 "source_sha; that is a publisher claim",
+        "provenance_classes": [P_RECORDED, P_ATTESTED],
+        "attestation_fields": list(ATTESTATION_FIELDS),
         "idempotent_on": ["name", "digest"],
         "max_bytes": MAX_BYTES,
         "refuses": [

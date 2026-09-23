@@ -78,6 +78,30 @@ STORE_FIRST = "evidence store (postgres)"
 TREE_FALLBACK = "working tree (development)"
 
 
+def _prov(hit):
+    """Provenance for one store hit, with its class made explicit.
+
+    A store read gives CONTENT INTEGRITY -- the digest says these are
+    the published bytes. It does NOT give verified attribution:
+    `source_sha` came from whoever ran the publisher. The class says
+    which of the two is on offer, so the page never has to guess.
+    """
+    from .. import bettor_evidence_store as ES
+
+    cls = ES.provenance_class(hit)
+    return {"source": STORE_FIRST,
+            "provenance_class": cls["class"],
+            "integrity": cls["integrity"],
+            "attribution": cls["attribution"],
+            "licenses": cls["licenses"],
+            "missing_attestation": cls.get("missing_attestation"),
+            "attestation": cls.get("attestation"),
+            "source_sha": hit.get("source_sha"),
+            "digest": hit.get("digest"),
+            "published_at": CC.iso(hit.get("published_at")),
+            "size_bytes": hit.get("size_bytes")}
+
+
 def evidence_root() -> str:
     return os.environ.get("BETTOR_EVIDENCE_ROOT") or "research/beta48/acceptance"
 
@@ -218,16 +242,11 @@ def load_suites(store: dict | None = None) -> list:
                 superseded_by=spec.get("superseded_by"),
                 artifact_label="evidence store: %s@%s"
                                % (hit["name"], hit["digest"][:12]))
-            row["provenance"] = {
-                "source": STORE_FIRST,
-                "source_sha": hit.get("source_sha"),
-                "digest": hit.get("digest"),
-                "published_at": CC.iso(hit.get("published_at")),
-                "size_bytes": hit.get("size_bytes"),
+            row["provenance"] = dict(_prov(hit), **{
                 "declared_sha": spec["sha"],
                 "sha_matches_declared": (
                     (hit.get("source_sha") or "")[:7] == spec["sha"][:7]),
-            }
+            })
         else:
             path = os.path.join(evidence_root(), spec["file"])
             row = parse_junit(
@@ -236,12 +255,15 @@ def load_suites(store: dict | None = None) -> list:
                 superseded_by=spec.get("superseded_by"))
             row["provenance"] = {
                 "source": TREE_FALLBACK,
+                "provenance_class": "NONE",
+                "integrity": "none -- a file on disk carries no digest, "
+                             "so nothing establishes these are the bytes "
+                             "any run produced",
+                "attribution": "the declared commit, unchecked",
+                "licenses": "nothing beyond 'this is what is on this "
+                            "machine right now'",
                 "source_sha": None,
                 "digest": None,
-                "why": "read from disk, not from the evidence store: a "
-                       "file carries no commit and no digest, so its "
-                       "attribution is the declared one and nothing "
-                       "verified it",
                 "declared_sha": spec["sha"],
             }
         rows.append(row)
@@ -269,10 +291,7 @@ def load_artifacts(store: dict | None = None) -> dict:
         if hit:
             try:
                 out[key] = json.loads(hit["body"])
-                prov[key] = {"source": STORE_FIRST,
-                             "source_sha": hit.get("source_sha"),
-                             "digest": hit.get("digest"),
-                             "published_at": CC.iso(hit.get("published_at"))}
+                prov[key] = _prov(hit)
                 continue
             except Exception:                                  # noqa: BLE001
                 prov[key] = {"source": STORE_FIRST, "unparseable": True,

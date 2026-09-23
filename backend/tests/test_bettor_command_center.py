@@ -214,6 +214,34 @@ class TestLifecycleStates:
         assert out["views"]["live_operation"]["lifecycle"]["state"] \
             == CC.L_COMPLETED
 
+    def test_a_close_followed_by_frames_is_not_completed(self):
+        """THE REGRESSION THIS PINS, found by reconciling against the
+        real run. A replaced boot writes RUN_CLOSE on its way out; the
+        next boot reopens and keeps collecting. Reading any RUN_CLOSE as
+        terminal reported a LIVE run as COMPLETED -- which says "nothing
+        more is owed" about a run that still has to be stopped at its
+        fixed end."""
+        recs = [fake_ladder(T0 + 10, SLUGS[0], boot="bootA"),
+                {"boot_id": "bootA", "at": T0 + 30, "kind": "RUN_CLOSE",
+                 "epoch": None, "slug": None,
+                 "payload": {"synthetic": True,
+                             "why": "STOPPED_BY_CONTROL"}},
+                fake_ladder(T0 + 200, SLUGS[1], boot="bootB"),
+                fake_ladder(T0 + 300, SLUGS[2], boot="bootB")]
+        out = build(recs, control=True, now=T0 + 320)
+        lc = out["views"]["live_operation"]["lifecycle"]
+        assert lc["state"] == CC.L_COLLECTING
+        assert lc["state"] != CC.L_COMPLETED
+
+    def test_a_close_with_nothing_after_it_IS_completed(self):
+        recs = [fake_ladder(T0 + 10, SLUGS[0]),
+                {"boot_id": "bootA", "at": T0 + 30, "kind": "RUN_CLOSE",
+                 "epoch": None, "slug": None,
+                 "payload": {"synthetic": True, "why": "WINDOW_END"}}]
+        out = build(recs, control=False, now=T0 + 100)
+        assert out["views"]["live_operation"]["lifecycle"]["state"] \
+            == CC.L_COMPLETED
+
     def test_failed_run_error(self):
         recs = [fake_ladder(T0 + 10, SLUGS[0]),
                 fake_gap(T0 + 20, "RUN_ERROR", why="RUN_ERROR",

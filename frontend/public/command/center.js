@@ -175,6 +175,7 @@
       + ' · last ' + clock((per.measurement || {}).last) + '</p></div>'
       + '</div></section>');
 
+    out.push(coverageTimeHtml(v.coverage_time));
     out.push(coverageTable('Market coverage — measurement window',
                            v.coverage));
     out.push(coverageTable('Market coverage — early period (operational)',
@@ -259,6 +260,62 @@
     return out.join('');
   }
 
+  function coverageTimeHtml(ct) {
+    /* OBSERVED TIME, AS A UNION. Two numbers that must never be one:
+     * what has been observed, and the ceiling if collection runs
+     * unbroken to the fixed end. The ceiling is not a forecast and is
+     * labelled so on the page, not only in the payload. */
+    if (!ct) return '';
+    var a = (ct.achieved || {}).value || {};
+    var b = (ct.attainable_at_fixed_end || {}).value || {};
+    var pct = function (x) {
+      return (typeof x === 'number') ? (x * 100).toFixed(2) + '%'
+        : '<em class="cc-unknown">UNKNOWN</em>';
+    };
+    var hrs = function (x) {
+      return (typeof x === 'number') ? (x / 3600).toFixed(2) + ' h' : '—';
+    };
+    return '<section class="cc-panel"><h2>Observed time against the '
+      + 'fixed window</h2>'
+      + '<div class="cc-two">'
+      + '<div class="cc-half cc-window"><h3>Achieved</h3>'
+      + '<p class="cc-big">' + pct(a.fraction_of_window) + '</p>'
+      + '<p class="cc-sub">' + hrs(a.observed_s) + ' observed of '
+      + hrs(a.window_s) + ' in the window</p>'
+      + '<p class="cc-sub">' + pct(a.fraction_of_elapsed)
+      + ' of the ' + hrs(a.elapsed_window_s)
+      + ' of window elapsed so far</p>'
+      + '<p class="cc-note">' + esc((ct.achieved || {}).note || '')
+      + '</p></div>'
+      + '<div class="cc-half cc-early"><h3>Attainable — a ceiling</h3>'
+      + '<p class="cc-big">' + pct(b.fraction_of_window) + '</p>'
+      + '<p class="cc-sub">' + hrs(b.if_unbroken_from_now_s)
+      + ' if unbroken · ' + hrs(b.remaining_s) + ' still to run</p>'
+      + '<p class="cc-note">'
+      + esc((ct.attainable_at_fixed_end || {}).note || '') + '</p></div>'
+      + '</div>'
+      + '<table class="cc-table"><thead><tr><th>Interval</th>'
+      + '<th>From</th><th>To</th><th>Seconds</th></tr></thead><tbody>'
+      + (ct.observed_intervals || []).map(function (i) {
+        return '<tr><td>observed</td><td>' + clock(i.from) + '</td><td>'
+          + clock(i.to) + '</td><td>' + esc(i.seconds) + '</td></tr>';
+      }).join('')
+      + (ct.gaps_subtracted || []).map(function (i) {
+        return '<tr><td>gap</td><td>' + clock(i.from) + '</td><td>'
+          + clock(i.to) + '</td><td>−' + esc(i.seconds) + '</td></tr>';
+      }).join('')
+      + '</tbody></table>'
+      + ((ct.gaps_outside_segments || []).length
+        ? '<p class="cc-note"><b>Not subtracted twice:</b> '
+          + (ct.gaps_outside_segments || []).map(function (g) {
+              return clock(g.from) + ' → ' + clock(g.to) + ' ('
+                + esc(g.seconds) + 's) ' + esc(g.why);
+            }).join('; ') + '</p>'
+        : '')
+      + '<p class="cc-note">' + esc(ct.validity_is_not_activity || '')
+      + '</p></section>';
+  }
+
   function iso(t) {
     if (t === null || t === undefined) return null;
     if (typeof t === 'string') return t;
@@ -330,34 +387,46 @@
   }
 
   function provenanceHtml(p) {
-    /* WHERE THE BYTES CAME FROM, ON THE PAGE.
+    /* WHAT THE EVIDENCE LICENSES, ON THE PAGE.
      *
-     * A row read from the evidence store carries the commit it was
-     * produced at and a digest of its exact bytes, so its attribution
-     * was verified. A row read from a file on disk carries neither --
-     * its SHA is whatever someone typed into the manifest. Those are
-     * different epistemic states and the page says which one it is
-     * rather than leaving the reader to infer it from a path.
+     * THREE DIFFERENT CLAIMS, AND THEY ARE NOT INTERCHANGEABLE:
      *
-     * And when the stored commit DISAGREES with the declared one, that
-     * is shown, not reconciled. Silently preferring either is how a
-     * page ends up attributing results to a commit that did not
-     * produce them. */
+     *   a digest proves CONTENT INTEGRITY -- these are the bytes that
+     *     were published, unaltered since;
+     *   a publisher-supplied source_sha is a RECORDED CLAIM about where
+     *     they came from, and nothing checked it;
+     *   an ATTESTATION from the CI run -- its id, the commit it
+     *     actually checked out, and its association with these bytes --
+     *     is what would make the attribution verified.
+     *
+     * The page had these collapsed into the word "VERIFIED", which
+     * asserted a chain of custody that does not exist. It now says
+     * RECORDED, and names what is missing. */
     if (!p) return '';
     if (p.source !== 'evidence store (postgres)') {
-      return '<p class="cc-prov cc-prov-tree"><b>UNVERIFIED PROVENANCE</b> — '
-        + esc(p.why || 'read from disk') + '. Declared commit '
-        + '<code>' + esc(p.declared_sha) + '</code>.</p>';
+      return '<p class="cc-prov cc-prov-tree"><b>NO PROVENANCE</b> — '
+        + esc(p.integrity || 'read from disk') + '. Declared commit '
+        + '<code>' + esc(p.declared_sha) + '</code>, unchecked.</p>';
     }
+    var attested = p.provenance_class === 'ATTESTED';
     var mismatch = (p.sha_matches_declared === false)
-      ? '<span class="cc-warn"> · the stored commit DISAGREES with the '
-        + 'declared <code>' + esc(p.declared_sha) + '</code>; the stored '
-        + 'one is shown because it travelled with the bytes</span>'
+      ? '<br><span class="cc-warn">The recorded commit DISAGREES with the '
+        + 'declared <code>' + esc(p.declared_sha) + '</code>. Both are '
+        + 'shown; neither is verified.</span>'
       : '';
-    return '<p class="cc-prov cc-prov-store"><b>VERIFIED PROVENANCE</b> — '
-      + 'evidence store, commit <code>' + esc(p.source_sha) + '</code>, '
-      + 'sha256 <code>' + esc(String(p.digest || '').slice(0, 16)) + '</code>, '
-      + 'published ' + clock(p.published_at) + mismatch + '</p>';
+    var gap = (!attested && (p.missing_attestation || []).length)
+      ? '<br><span class="cc-sub">To become ATTESTED this needs: '
+        + esc((p.missing_attestation || []).join(', ')) + '.</span>'
+      : '';
+    return '<p class="cc-prov ' + (attested ? 'cc-prov-attested'
+                                            : 'cc-prov-store') + '">'
+      + '<b>' + (attested ? 'ATTESTED PROVENANCE'
+                          : 'RECORDED PROVENANCE') + '</b> — '
+      + 'integrity: sha256 <code>'
+      + esc(String(p.digest || '').slice(0, 16)) + '</code>, published '
+      + clock(p.published_at) + '.<br>'
+      + 'attribution: <code>' + esc(p.source_sha) + '</code> — '
+      + esc(p.attribution || '') + mismatch + gap + '</p>';
   }
 
   function failuresHtml(r, i) {
@@ -588,6 +657,16 @@
      * production snapshots carry no `preview` key and show nothing. */
     var p = (state.data || {}).preview;
     if (!p) return '';
+    /* REAL READINGS AND SYNTHETIC FIXTURES GET DIFFERENT BANNERS. Both
+     * are loud; they are not the same claim, and one banner for both
+     * would make a screenshot of the run indistinguishable from a
+     * screenshot of a fixture. */
+    if (p.REAL_READINGS) {
+      return '<div class="cc-real" role="alert">'
+        + '<b>RECONSTRUCTED FROM REAL READINGS</b> — scenario <code>'
+        + esc(p.scenario) + '</code>, read back from production at '
+        + clock(p.read_at) + '. ' + esc(p.warning) + '</div>';
+    }
     return '<div class="cc-synthetic" role="alert">'
       + '<b>SYNTHETIC FIXTURE — NOT VENUE DATA, NOT A RUN RESULT.</b> '
       + 'scenario <code>' + esc(p.scenario) + '</code>. '

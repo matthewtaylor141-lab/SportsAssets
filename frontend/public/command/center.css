@@ -68,6 +68,22 @@ body.cc {
   font-family: var(--cc-mono);
 }
 
+/* REAL READINGS. Blue, not red: this is not a fixture warning, it is a
+ * statement that the numbers came from production and the book bodies
+ * did not. */
+.cc-real {
+  position: sticky; top: 0; z-index: 10;
+  margin: 0 calc(-1 * var(--cc-gutter));
+  padding: 10px var(--cc-gutter);
+  background: var(--cc-accent); color: #04101f;
+  font-size: 12.5px; line-height: 1.45;
+  border-bottom: 2px solid #2c5fa8;
+}
+.cc-real code {
+  background: rgba(0,0,0,0.18); padding: 1px 5px; border-radius: 3px;
+  font-family: var(--cc-mono);
+}
+
 /* ── header ─────────────────────────────────────────────────────── */
 
 .cc-head {
@@ -193,7 +209,13 @@ em.cc-na { color: var(--cc-ink-3); font-style: italic; }
   border-radius: 0 4px 4px 0; line-height: 1.5;
 }
 .cc-prov code { font-family: var(--cc-mono); font-size: 11.5px; }
+/* RECORDED is not a pass. It is amber-neutral: the bytes are intact and
+ * the attribution is a claim nobody checked. Only ATTESTED earns green. */
 .cc-prov-store {
+  background: rgba(91,157,249,0.07); border-left: 2px solid var(--cc-accent);
+  color: var(--cc-ink-2);
+}
+.cc-prov-attested {
   background: rgba(63,191,135,0.08); border-left: 2px solid var(--cc-good);
   color: var(--cc-ink-2);
 }

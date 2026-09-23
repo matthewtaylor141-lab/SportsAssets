@@ -124,6 +124,8 @@ class _Con:
                 "source_sha": args[2], "content_type": args[3],
                 "digest": args[4], "size_bytes": args[5], "body": args[6],
                 "published_at": args[7], "note": args[8],
+                "attestation": (json.loads(args[9]) if len(args) > 9
+                                and args[9] else None),
                 "superseded_by": None})
             return {"id": rid}
         return None
@@ -255,6 +257,49 @@ class TestVersioning:
         again = pub(p, body="<testsuites/>", source_sha="4b83924")
         assert again["unchanged"] is True
         assert len(p.rows) == 1
+
+
+class TestProvenanceClass:
+    """A DIGEST IS NOT A CHAIN OF CUSTODY."""
+
+    def test_a_publisher_supplied_sha_is_only_RECORDED(self):
+        p = FakePool()
+        pub(p, body="<testsuites/>", source_sha="4b83924")
+        row = asyncio.run(ES.latest(p, "release_tests.xml"))
+        cls = ES.provenance_class(row)
+        assert cls["class"] == ES.P_RECORDED
+        assert "supplied by the publisher" in cls["attribution"]
+        assert "NOT attributing" in cls["licenses"]
+
+    def test_the_integrity_claim_is_kept_separate_from_attribution(self):
+        cls = ES.provenance_class({"digest": "x"})
+        assert "sha256" in cls["integrity"]
+        assert cls["integrity"] != cls["attribution"]
+
+    def test_what_is_missing_for_attestation_is_named(self):
+        cls = ES.provenance_class({})
+        assert set(cls["missing_attestation"]) == set(ES.ATTESTATION_FIELDS)
+
+    def test_a_partial_attestation_is_still_only_RECORDED(self):
+        cls = ES.provenance_class({"attestation": {"ci_run": "123"}})
+        assert cls["class"] == ES.P_RECORDED
+        assert "checked_out_sha" in cls["missing_attestation"]
+
+    def test_a_full_attestation_is_ATTESTED(self):
+        cls = ES.provenance_class({"attestation": {
+            "ci_run": "35849377608", "checked_out_sha": "4b83924",
+            "artifact_ref": "actions/artifact/1"}})
+        assert cls["class"] == ES.P_ATTESTED
+        assert "checked out" in cls["attribution"]
+
+    def test_the_reader_never_labels_a_store_hit_verified(self):
+        body = "<testsuites/>"
+        store = {"release_tests.xml": _store_hit("release_tests.xml", body)}
+        rows = IO.load_suites(store)
+        p = rows[0]["provenance"]
+        assert p["provenance_class"] == ES.P_RECORDED
+        assert "verified" not in json.dumps(p).lower() or \
+            "NOT" in p["licenses"]
 
 
 # ── the command centre reads it ──────────────────────────────────────
