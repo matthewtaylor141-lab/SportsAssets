@@ -1171,21 +1171,34 @@ async def command_desk_live_book(response: Response,
     """
     from ..db import get_pool
     from .. import bettor_desk as DK
+    from .. import bettor_desk_accounts as ACC
 
     response.headers["Cache-Control"] = "no-store"
     lim = min(max(int(limit), 1), 200)
     try:
         pool = await get_pool()
         async with pool.acquire() as conn:
+            # THE ACTIVE ACCOUNT SCOPES EVERY READ BELOW. Without it the
+            # blotter would show the closed, unattributable period mixed
+            # into the new book -- which is the exact confusion the
+            # account id exists to end.
+            acct = await conn.fetchrow(
+                """
+                SELECT account_id, opening_balance::float8 AS opening_balance,
+                       opened_at, note
+                  FROM bettor_desk_accounts
+                 WHERE desk_id = 'live1' AND status = $1
+                """, ACC.ACTIVE)
+            aid = acct["account_id"] if acct else None
             decisions = await conn.fetch(
                 """
                 SELECT desk_decision_id, decided_at, condition_id,
                        outcome_index, action, reason, proposed_price,
                        proposed_qty, risk, ev
                   FROM bettor_desk_decisions
-                 WHERE desk_id = 'live1'
+                 WHERE desk_id = 'live1' AND account_id = $2
                  ORDER BY decided_at DESC LIMIT $1
-                """, lim)
+                """, lim, aid)
             orders = await conn.fetch(
                 """
                 SELECT order_id, condition_id, outcome_index, side,
@@ -1196,14 +1209,15 @@ async def command_desk_live_book(response: Response,
                        fees_usd::float8 AS fees_usd, state,
                        state_reason, placed_at, expires_at, terminal_at
                   FROM bettor_desk_orders
-                 WHERE desk_id = 'live1'
+                 WHERE desk_id = 'live1' AND account_id = $2
                  ORDER BY updated_at DESC LIMIT $1
-                """, lim)
+                """, lim, aid)
             states = await conn.fetch(
                 """
                 SELECT state, count(*) AS n FROM bettor_desk_orders
-                 WHERE desk_id = 'live1' GROUP BY 1 ORDER BY 1
-                """)
+                 WHERE desk_id = 'live1' AND account_id = $1
+                 GROUP BY 1 ORDER BY 1
+                """, aid)
             # POSITIONS WITH THEIR NEXT INTENDED ACTION. The intent is
             # the desk's most recent decision on that leg, joined here
             # rather than guessed by the page.
@@ -1227,9 +1241,10 @@ async def command_desk_live_book(response: Response,
                           AND dd.condition_id = p.condition_id
                           AND dd.outcome_index = p.outcome_index
                         ORDER BY decided_at DESC LIMIT 1) d ON TRUE
-                 WHERE p.desk_id = 'live1' AND p.qty > 0
+                 WHERE p.desk_id = 'live1' AND p.account_id = $2
+                   AND p.qty > 0
                  ORDER BY p.cost_basis_usd DESC LIMIT $1
-                """, lim)
+                """, lim, aid)
             led = await conn.fetchrow(
                 """
                 SELECT at, cash_usd::float8 AS cash_usd,
@@ -1240,9 +1255,9 @@ async def command_desk_live_book(response: Response,
                        open_positions, invariant_ok, invariant_detail,
                        epoch_id
                   FROM bettor_desk_ledger
-                 WHERE desk_id = 'live1'
+                 WHERE desk_id = 'live1' AND account_id = $1
                  ORDER BY at DESC LIMIT 1
-                """)
+                """, aid)
     except Exception as exc:                                # noqa: BLE001
         raise HTTPException(status_code=503, detail={
             "reason": "DESK_LIVE_BOOK_UNREADABLE",
@@ -1252,21 +1267,33 @@ async def command_desk_live_book(response: Response,
         }) from exc
 
     lim_obj = DK.Limits()
-    acct = dict(led) if led else None
+    a = dict(led) if led else None
     return {
         "mode": "LIVE_SHADOW",
         "read_ok": True,
+        # THE ACCOUNT, NAMED. Everything below belongs to this book and
+        # to no other; the closed period is a separate read.
+        "account": dict(acct) if acct else None,
+        "account_missing_because": (
+            None if acct else
+            "no ACTIVE shadow account exists yet. The loop creates it "
+            "once, on its next start."),
+        "incident_record": "/api/command/desk/correction",
+        "never_combined": (
+            "this account's performance is never added to the closed "
+            "account's, and the closed account's P&L is marked "
+            "UNRELIABLE_DO_NOT_QUOTE."),
         "decisions": [dict(r) for r in decisions],
         "orders": [dict(r) for r in orders],
         "order_states": {r["state"]: r["n"] for r in states},
         "positions": [dict(r) for r in positions],
-        "accounting": acct,
+        "accounting": a,
         "accounting_is_null_because": (
-            None if acct else
+            None if a else
             "the ledger has no row for this desk yet. That is an "
             "explicit zero, not a failed read -- read_ok is true."),
         "exposure": {
-            "inventory_cost_usd": acct["inventory_cost"] if acct else 0.0,
+            "inventory_cost_usd": a["inventory_cost"] if a else 0.0,
             "inventory_mark_usd": "NOT_IDENTIFIED",
             "executable_liquidation_usd": "NOT_IDENTIFIED",
             "why": "no contemporaneous book is retained for these "
@@ -1275,11 +1302,11 @@ async def command_desk_live_book(response: Response,
         },
         "capital": {
             "starting_cash_usd": lim_obj.starting_cash,
-            "cash_usd": acct["cash_usd"] if acct else None,
-            "committed_usd": acct["committed_usd"] if acct else None,
+            "cash_usd": a["cash_usd"] if a else None,
+            "committed_usd": a["committed_usd"] if a else None,
             "remaining_headroom_usd": (
-                round(lim_obj.max_committed_usd - acct["committed_usd"], 2)
-                if acct else None),
+                round(lim_obj.max_committed_usd - a["committed_usd"], 2)
+                if a else None),
         },
         "risk_limits": lim_obj.to_dict(),
         "corrected_accounting": "/api/command/desk/correction",
@@ -1328,6 +1355,20 @@ async def command_desk_correction(response: Response) -> dict:
                   FROM bettor_desk_epochs WHERE desk_id = 'live1'
                  ORDER BY started_at DESC LIMIT 20
                 """)
+            incident = await conn.fetchrow(
+                """
+                SELECT * FROM bettor_desk_incidents
+                 WHERE desk_id = 'live1'
+                 ORDER BY occurred_at DESC LIMIT 1
+                """)
+            accounts = await conn.fetch(
+                """
+                SELECT account_id, status,
+                       opening_balance::float8 AS opening_balance,
+                       opened_at, closed_at, note
+                  FROM bettor_desk_accounts WHERE desk_id = 'live1'
+                 ORDER BY opened_at DESC
+                """)
     except Exception as exc:                                # noqa: BLE001
         raise HTTPException(status_code=503, detail={
             "reason": "CORRECTION_UNREADABLE",
@@ -1338,6 +1379,23 @@ async def command_desk_correction(response: Response) -> dict:
     return {
         "version": CORR.VERSION,
         "applied": run is not None,
+        # ── THE INCIDENT, kept as a record rather than a footnote ────
+        "incident": dict(incident) if incident else None,
+        "accounts": [dict(r) for r in accounts],
+        "closed_period": (
+            "Records written before shadow accounts existed carry "
+            "account_id IS NULL. They are PRESERVED and excluded from "
+            "every live read by that fact alone. Their reported P&L is "
+            "UNRELIABLE_DO_NOT_QUOTE, and their inventory is "
+            "UNATTRIBUTABLE -- not closed, not zero, not valued."),
+        "never_combined": (
+            "the closed account's figures are never added to the new "
+            "account's. They are different books and one of them does "
+            "not reconcile."),
+        "nothing_deleted": (
+            "no record was removed and no compensating cash entry was "
+            "posted. The $2,367.73 discrepancy is recorded, not "
+            "absorbed."),
         "run": dict(run) if run else None,
         "by_status": [dict(r) for r in rows],
         "epochs": [dict(e) for e in epochs],

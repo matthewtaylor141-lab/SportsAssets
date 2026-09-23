@@ -504,11 +504,30 @@ class TestTheLiveLoopCannotTradeOrDuplicate:
         assert "async with conn.transaction():" in src
 
     def test_standby_reports_itself_and_writes_nothing(self):
+        """PARSE, DON'T SLICE. The earlier version cut a character
+        window between two markers and asserted "INSERT" was absent from
+        it -- then matched a COMMENT containing the word INSERT and
+        failed for prose. The behavioural test lives in
+        test_desk_recovery.py, which drives the loop with the lock
+        denied and asserts the store received nothing; this one checks
+        the structure: the STANDBY branch never falls through.
+        """
+        import ast
         from sportsassets import bettor_desk_loop as L
-        src = open(L.__file__).read()
-        i = src.index("STANDBY: another instance")
-        j = src.index("_status.update(state=STATE_RUNNING", i)
-        assert "INSERT" not in src[i:j]
+        fn = next(n for n in ast.walk(ast.parse(open(L.__file__).read()))
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "run")
+        # Find the `if not await _acquire(conn):` branch and confirm its
+        # body ends in an unbounded wait -- so nothing after it runs.
+        standby = [n for n in ast.walk(fn)
+                   if isinstance(n, ast.If)
+                   and "_acquire" in ast.unparse(n.test)]
+        assert standby, "the lock branch is gone"
+        body = ast.unparse(standby[0])
+        assert "STATE_STANDBY" in body
+        assert "while True" in body
+        # and it writes nothing: no execute/INSERT call in that branch
+        assert "INSERT" not in body.upper()
+        assert ".execute(" not in body
 
     def test_a_first_start_seeds_at_the_head_not_at_zero(self):
         """`trades` holds 5.85M rows back to March. A cursor of 0 would
@@ -543,7 +562,11 @@ class TestTheLiveLoopCannotTradeOrDuplicate:
         fn = next(n for n in ast.walk(ast.parse(src))
                   if isinstance(n, ast.AsyncFunctionDef) and n.name == "run")
         code = ast.unparse(fn)
-        i = code.index("_load_cursor(conn, desk_id)")
+        # The cursor is now loaded per ACCOUNT, so the call text moved.
+        # Locate it by the function name rather than by its old argument
+        # list, which is what a signature change should be allowed to
+        # do without breaking a test about guarding.
+        i = code.index("_load_cursor(")
         guard = code.rindex("try:", 0, i)
         assert "STATE_RUNNING" not in code[guard:i], \
             "RUNNING must not be published before the cursor is readable"

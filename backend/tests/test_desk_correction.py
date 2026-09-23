@@ -203,12 +203,34 @@ def test_the_loop_restores_the_book_before_stepping_any_event():
     assert order.index("_restore") < order.index("step")
 
 
-def test_open_orders_are_not_resurrected_across_a_restart():
-    src = _loop_src()
-    i = src.index("async def _restore")
-    body = src[i:i + 4200]
-    assert "EXPIRED" in body
-    assert "PROCESS_RESTART" in body
+def test_resting_orders_are_restored_with_their_consumption_ledger():
+    """SUPERSEDED BEHAVIOUR, and the reason it changed.
+
+    Orders used to be EXPIRED on every restart, because the consumption
+    ledger was not persisted and re-arming one could have filled it a
+    second time against evidence already spent. The ledger IS persisted
+    now -- keyed on the evidence id, scoped to the account -- so the
+    orders come back instead, which is what makes a restart restore the
+    same resting book rather than a smaller one.
+    """
+    # PARSE THE FUNCTION, don't slice a character window. A fixed
+    # src[i:i+N] window kept cutting off before the block it was meant
+    # to check, so the test failed for reaching the wrong text rather
+    # than for the behaviour being absent.
+    tree = ast.parse(_loop_src())
+    fn = next(n for n in ast.walk(tree)
+              if isinstance(n, ast.AsyncFunctionDef) and n.name == "_restore")
+    body = ast.unparse(fn)
+    assert "RESTING" in body and "PARTIALLY_FILLED" in body
+    assert "bettor_desk_consumption" in body
+    assert "desk.cons.available" in body
+    assert "desk.cons.consumed" in body
+    # and the fills come back, or a restored partial would report a
+    # filled quantity at no price
+    assert "bettor_desk_fills" in body
+    assert "o.fills.append" in body
+    # the whole restore is account-scoped
+    assert "account_id" in [a.arg for a in fn.args.args]
 
 
 def test_the_epoch_id_is_per_process_not_per_row():
@@ -273,4 +295,7 @@ def test_the_module_docstring_no_longer_claims_a_rebuild_that_did_not_exist():
     head = src[:src.index('"""', 3)]
     assert "CORRECTION" in head
     assert "FALSE WHEN FIRST WRITTEN" in head
-    assert "OPEN ORDERS ARE NOT RESTORED" in head
+    # The two ids are distinguished in the docstring, because conflating
+    # them is what caused the $2,367.73 defect.
+    assert "ONE DURABLE ACCOUNT" in head
+    assert "account_id IS NULL" in head

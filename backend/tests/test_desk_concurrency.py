@@ -238,137 +238,19 @@ def test_a_failed_cycle_does_not_advance_the_cursor():
 
 
 # ── the restore is checked, not trusted ──────────────────────────────
-
-@pytest.mark.anyio
-async def test_a_restore_reports_whether_the_rebuilt_book_reconciles():
-    conn = FakeConn()
-    conn.rows["state"] = {"cash": 97797.00, "start": 100000.0}
-    conn.rows["legs"] = [{
-        "condition_id": "c1", "outcome_index": 0, "qty": 4000.0,
-        "cost": 2217.62, "realized": 14.62, "fees": -14.62,
-        "opened": 1.0, "settled": False, "payout": None}]
-    desk = DK.Desk(policy=DK.Policy(), limits=DK.Limits(),
-                   fee_fn=DL.live_fee_fn)
-    out = await DL._restore(conn, "live1", desk)
-    assert out["restored"] is True
-    assert desk.pf.cash == 97797.00
-    assert out["reconciles"] is True
-    assert abs(desk.pf.realized - 14.62) < 1e-9
-
-
-@pytest.mark.anyio
-async def test_a_restore_that_does_not_reconcile_says_so():
-    """CONTROL. If `reconciles` were hard-coded True it would be noise."""
-    conn = FakeConn()
-    conn.rows["state"] = {"cash": 50000.0, "start": 100000.0}
-    conn.rows["legs"] = []
-    desk = DK.Desk(policy=DK.Policy(), limits=DK.Limits(),
-                   fee_fn=DL.live_fee_fn)
-    out = await DL._restore(conn, "live1", desk)
-    assert out["restored"] is True
-    assert out["reconciles"] is False
-
-
-@pytest.mark.anyio
-async def test_a_first_start_is_not_mistaken_for_a_restart():
-    conn = FakeConn()
-    desk = DK.Desk(policy=DK.Policy(), limits=DK.Limits())
-    out = await DL._restore(conn, "live1", desk)
-    assert out["restored"] is False
-    assert "NO_PRIOR_STATE" in out["reason"]
-    assert desk.pf.cash == desk.pf.starting_cash
+#
+# THESE MOVED. `_restore` is now scoped to a durable ACCOUNT, so a
+# fixture for it has to model `bettor_desk_accounts` and
+# `bettor_desk_account_state` as well. That fixture lives in
+# test_desk_recovery.py, which covers: identical cash / positions /
+# basis / realized / resting orders across a restart, a surviving
+# partial fill, an interrupted write, overlapping processes, and the
+# rule that account_id IS NULL rows cannot enter the new book.
+#
+# Leaving thin duplicates here that construct a Desk without an account
+# would have tested a path the loop no longer takes.
 
 
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
-
-
-# ── fail closed: a book that does not reconcile must not trade ───────
-
-@pytest.mark.anyio
-async def test_a_non_reconciling_restore_halts_before_any_event_is_stepped():
-    """FOUND IN PRODUCTION, by the check this test now pins.
-
-    `_restore` took cash from the last epoch and legs from every epoch,
-    because the rows carry no epoch to separate them. Open positions
-    went 52 -> 96 and the identity drifted +$2,367.73. The desk must
-    stop rather than continue carefully: no arithmetic recovers which
-    legs belong to which book, and any rule that picked would be an
-    invented accounting treatment.
-    """
-    os.environ["BETTOR_DESK_LOOP"] = "1"
-    DL.CYCLE_S = 0.01
-    conn = FakeConn(lock_granted=True)
-    # cash from one era, a leg from another: the identity cannot hold.
-    conn.rows["state"] = {"cash": 96405.37, "start": 100000.0}
-    conn.rows["legs"] = [{
-        "condition_id": "orphan", "outcome_index": 0, "qty": 9000.0,
-        "cost": 5985.31, "realized": 22.95, "fees": 0.0,
-        "opened": 1.0, "settled": False, "payout": None}]
-
-    class _Pool:
-        def acquire(self):
-            class _A:
-                async def __aenter__(self_):
-                    return conn
-
-                async def __aexit__(self_, *e):
-                    return False
-            return _A()
-
-    async def _pool():
-        return _Pool()
-
-    task = asyncio.get_running_loop().create_task(DL.run(_pool))
-    await asyncio.sleep(0.08)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    st = DL.status()
-    assert st["state"] == DL.STATE_ERROR, st
-    assert "RESTORED_BOOK_DOES_NOT_RECONCILE" in (st["error"] or "")
-    # AND IT WROTE NO SNAPSHOT. A halted desk that kept appending
-    # non-reconciling ledger rows would be worse than one that stopped.
-    ledger = [c for c in conn.calls
-              if "bettor_desk_ledger" in str(c[1]).lower()]
-    assert ledger == [], ledger
-
-
-@pytest.mark.anyio
-async def test_a_reconciling_restore_does_NOT_halt():
-    """CONTROL. If the halt fired regardless, the desk could never run."""
-    os.environ["BETTOR_DESK_LOOP"] = "1"
-    DL.CYCLE_S = 0.01
-    conn = FakeConn(lock_granted=True)
-    conn.rows["state"] = {"cash": 97797.00, "start": 100000.0}
-    conn.rows["legs"] = [{
-        "condition_id": "c1", "outcome_index": 0, "qty": 4000.0,
-        "cost": 2217.62, "realized": 14.62, "fees": 0.0,
-        "opened": 1.0, "settled": False, "payout": None}]
-
-    class _Pool:
-        def acquire(self):
-            class _A:
-                async def __aenter__(self_):
-                    return conn
-
-                async def __aexit__(self_, *e):
-                    return False
-            return _A()
-
-    async def _pool():
-        return _Pool()
-
-    task = asyncio.get_running_loop().create_task(DL.run(_pool))
-    await asyncio.sleep(0.08)
-    task.cancel()
-    try:
-        await task
-    except asyncio.CancelledError:
-        pass
-
-    assert DL.status()["state"] == DL.STATE_RUNNING, DL.status()
