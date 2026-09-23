@@ -94,7 +94,11 @@ STATE_ERROR = "ERROR"
 _status = {"state": STATE_DISABLED, "since": None, "cycles": 0,
            "last_cycle_at": None, "last_event_id": None,
            "events_seen": 0, "decisions": 0, "orders": 0, "error": None,
-           "lane": LANE, "makes_venue_requests": False}
+           "lane": LANE, "makes_venue_requests": False,
+           "seeded": False, "seeded_at_event_id": None,
+           "universe": "all tracked cohort accounts in `trades`, not "
+                       "Ferrari alone -- the policy decides, the feed "
+                       "is whatever flow we already observe"}
 
 
 def status() -> dict:
@@ -114,10 +118,31 @@ async def _acquire(conn) -> bool:
 
 
 async def _load_cursor(conn, desk_id) -> int:
+    """Resume where we left off -- or, on a FIRST start, at NOW.
+
+    THE DEFECT THIS AVOIDS. `trades` holds 5.85 million rows going back
+    to 2026-03-31. A cursor initialised to 0 would make the "live" lane
+    grind through five months of history at BATCH rows a cycle, and
+    every decision it published would be labelled LIVE while being a
+    replay of March. A live lane consumes evidence that arrives AFTER
+    it starts; that is what makes it live.
+
+    A RESTART IS DIFFERENT AND MUST NOT DO THIS. When a state row
+    exists we resume from it exactly, so a redeploy loses nothing. Only
+    the genuine first start seeds from max(id), and the seeding is
+    recorded so nobody later reads the gap as missing data.
+    """
     row = await conn.fetchrow(
         "SELECT cursor_event_id FROM bettor_desk_state WHERE desk_id = $1",
         desk_id)
-    return int(row["cursor_event_id"]) if row and row["cursor_event_id"] else 0
+    if row and row["cursor_event_id"]:
+        return int(row["cursor_event_id"])
+    head = await conn.fetchval("SELECT coalesce(max(id), 0) FROM trades")
+    _status["seeded_at_event_id"] = int(head)
+    _status["seeded"] = True
+    log.info("desk loop FIRST START: seeding cursor at current head %s "
+             "(history before it is not replayed as live)", head)
+    return int(head)
 
 
 async def _events(conn, after_id, limit):

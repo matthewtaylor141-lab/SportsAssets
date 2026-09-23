@@ -497,3 +497,27 @@ class TestTheLiveLoopCannotTradeOrDuplicate:
         i = src.index("STANDBY: another instance")
         j = src.index("_status.update(state=STATE_RUNNING", i)
         assert "INSERT" not in src[i:j]
+
+    def test_a_first_start_seeds_at_the_head_not_at_zero(self):
+        """`trades` holds 5.85M rows back to March. A cursor of 0 would
+        grind through five months of history while labelling every
+        decision LIVE."""
+        from sportsassets import bettor_desk_loop as L
+        src = open(L.__file__).read()
+        assert "coalesce(max(id), 0) FROM trades" in src
+        # PARSE THE FUNCTION, do not grep its prose. The first version
+        # of this test compared positions in the raw text and failed on
+        # the DOCSTRING, which mentions max(id) before the code does --
+        # an assertion about wording pretending to be one about
+        # behaviour.
+        import ast
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.AsyncFunctionDef)
+                  and n.name == "_load_cursor")
+        stmts = [x for x in fn.body if not (
+            isinstance(x, ast.Expr) and isinstance(x.value, ast.Constant))]
+        code = "\n".join(ast.unparse(x) for x in stmts)
+        assert code.index("cursor_event_id']") < code.index("max(id)"), \
+            "the stored cursor must be returned before the head is read"
+        assert "return int(row['cursor_event_id'])" in code, \
+            "a RESTART must resume exactly, not reseed"
