@@ -387,3 +387,26 @@ independent replication.
 
 Experiment at 19:51:13Z: cursor 294; `ORDER_WORKING 1808`,
 `NO_RESIDUAL 425`, `HOLD_NO_FEASIBLE_PAIR 136`. Containment unchanged.
+
+### 19:57Z — end state, and one fix not yet the active writer
+
+THE REGISTER POLLUTION, CAUGHT IN THE ACT. Versions 9–12 were written at
+**598 decided orders — the same count and the same four verdicts as
+versions 5–8**. Same dataset, same conclusions, four more rows. That is
+direct production evidence of the defect: `_next_version` always returns
+`max + 1`, so the `ON CONFLICT (model_key, version)` clause could never
+fire.
+
+CURRENT STATE, STATED PRECISELY. `5d9493e` (dataset digest +
+`MIN_NEW_POSITIONS` + hourly cadence) is deployed, but at 19:57:32Z the new
+instance reports `STANDBY_NOT_THE_WRITER` — the outgoing instance still
+holds both locks and is still the one writing (`ORDER_WORKING` 1853).
+
+So the pollution has **not** been observed to stop yet, and I am not
+claiming it has. The register may take one more redundant set before the
+gates become active. What is verified is that the fix is live as code and
+that the handover mechanism works — demonstrated earlier at 19:51:13Z, when
+a standby acquired the lock and resumed evaluating.
+
+Experiment at 19:57:41Z: `ORDER_WORKING 1853`, `NO_RESIDUAL 425`,
+`HOLD_NO_FEASIBLE_PAIR 136`. Both locks held. Containment unchanged.
