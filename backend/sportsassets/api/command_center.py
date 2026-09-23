@@ -390,7 +390,14 @@ async def read_journal(pool, run_id: str) -> list:
             "SELECT boot_id, at, epoch, slug,"
             " (jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb))"
             "  + jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb)))"
-            "   AS levels"
+            "   AS levels,"
+            # THE CLASS COMES BACK TOO, and it is not cosmetic. Coverage
+            # begins at a market's first INITIAL_LADDER in the current
+            # connection epoch; an UPDATE is a delta against a book this
+            # process may never have seen. Dropping the column made
+            # every first-frame-after-a-reconnect look like a rebuilt
+            # book, which is the exact thing the rule exists to refuse.
+            " payload->>'ladder_class' AS ladder_class"
             " FROM " + JOURNAL_TABLE +
             " WHERE run_id = $1 AND kind = 'LADDER' ORDER BY at, id",
             run_id)
@@ -412,7 +419,8 @@ async def read_journal(pool, run_id: str) -> list:
                     # Shaped, not truncated: the views ask only whether
                     # depth was persisted, and this answers exactly that.
                     "payload": {"bids": [1] * n, "offers": [],
-                                "levels": n}})
+                                "levels": n,
+                                "ladder_class": r["ladder_class"]}})
     out.sort(key=lambda r: r["at"])
     return out
 

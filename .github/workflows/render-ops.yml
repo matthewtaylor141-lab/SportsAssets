@@ -306,25 +306,30 @@ jobs:
                 # day. SELECT only.
                 obs-incentive-markets) SQL="SELECT slug, count(*) AS frames, count(*) FILTER (WHERE jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb)) > 0 OR jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb)) > 0) AS with_depth, max(jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb))) AS max_bid_levels, max(jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb))) AS max_ask_levels, min(to_timestamp(at))::timestamptz(0) AS first, max(to_timestamp(at))::timestamptz(0) AS last FROM bettor_incentive_journal WHERE kind = 'LADDER' GROUP BY slug ORDER BY slug; SELECT count(DISTINCT slug) AS markets_receiving, count(DISTINCT slug) FILTER (WHERE jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb)) > 0 OR jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb)) > 0) AS markets_with_depth, count(*) AS frames_total, count(*) FILTER (WHERE at >= 1790136000 AND at < 1790222400) AS frames_in_window, count(*) FILTER (WHERE at < 1790136000) AS frames_before_window FROM bettor_incentive_journal WHERE kind = 'LADDER';"; TO=30000 ;;
                 # [R80] THE ACTUAL ROWS, READ-ONLY, WITH THE BOOK BODIES
-                # ELIDED. The command centre's arithmetic is driven by
-                # (boot_id, at, kind, epoch, slug) and, for a LADDER, by
-                # how many levels it carried and whether it was that
-                # market's INITIAL_LADDER for the epoch. Those fields come
-                # back verbatim, one JSON object per row, in journal order.
+                # ELIDED AND THE REST LOSSLESSLY PACKED.
                 #
-                # THE BIDS AND OFFERS THEMSELVES DO NOT. Pulling thousands
-                # of full order books through a workflow log would be both
-                # impractical and pointless -- no displayed figure is
-                # computed from a price. Each ladder therefore carries its
-                # two level counts and `bodies_elided: true`, so nothing
-                # downstream can mistake this for the book.
+                # Every figure the command centre displays is computed
+                # from (boot_id, at, kind, epoch, slug) and, for a
+                # ladder, from how many levels it carried and whether it
+                # was that market's INITIAL_LADDER for the epoch. All of
+                # that comes back. THE BIDS AND OFFERS DO NOT: no
+                # displayed number is computed from a price, and pulling
+                # thousands of order books through a workflow log would
+                # be neither practical nor evidence of anything more.
                 #
-                # arg = obs-incentive-rows[:OFFSET:LIMIT], default 0:5000.
+                # Three statements. A header naming the boot and slug
+                # dictionaries, the time base and the totals; then the
+                # non-ladder records with their payloads WHOLE, since
+                # there are a handful of them and they carry the gaps,
+                # the epochs and the close reasons; then the ladders as
+                # one array of fixed-shape tuples, which is what keeps a
+                # day of frames to a readable size.
+                #
+                # arg = obs-incentive-rows[:OFFSET:LIMIT] (ladders only).
                 # SELECT only.
                 obs-incentive-rows|obs-incentive-rows:*)
                   # `arg` already names the statement, so the page is
-                  # appended to it: obs-incentive-rows:OFFSET:LIMIT.
-                  # RANGE is interpolated into SQL, so it is checked
+                  # appended to it. RANGE reaches SQL, so it is checked
                   # first and may hold nothing but digits and a colon.
                   RANGE="${ARG#obs-incentive-rows}"; RANGE="${RANGE#:}"
                   case "$RANGE" in
@@ -332,7 +337,7 @@ jobs:
                     *[!0-9:]*) echo "refused: obs-incentive-rows page must be OFFSET:LIMIT (digits and one colon), got '$RANGE'"; exit 1 ;;
                   esac
                   HEAD=200000; PFMT="-A -t"
-                  SQL="SELECT jsonb_build_object('boot_id', boot_id, 'at', at, 'kind', kind, 'epoch', epoch, 'slug', slug, 'payload', CASE WHEN kind = 'LADDER' THEN jsonb_build_object('bid_levels', jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb)), 'ask_levels', jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb)), 'ladder_class', payload->>'ladder_class', 'bodies_elided', true) ELSE payload END)::text AS row FROM bettor_incentive_journal ORDER BY at, id OFFSET COALESCE(NULLIF(split_part('$RANGE', ':', 1), '')::int, 0) LIMIT COALESCE(NULLIF(split_part('$RANGE', ':', 2), '')::int, 5000); SELECT count(*) AS rows_total, min(at) AS first_at, max(at) AS last_at, count(DISTINCT boot_id) AS boots, extract(epoch FROM now()) AS read_at FROM bettor_incentive_journal;"; TO=60000 ;;
+                  SQL="SELECT jsonb_build_object('boots', (SELECT jsonb_agg(boot_id ORDER BY t) FROM (SELECT boot_id, min(at) AS t FROM bettor_incentive_journal GROUP BY boot_id) q), 'slugs', (SELECT jsonb_agg(DISTINCT slug) FROM bettor_incentive_journal WHERE slug IS NOT NULL), 'base_at', (SELECT min(at) FROM bettor_incentive_journal), 'read_at', extract(epoch FROM now()), 'rows_total', (SELECT count(*) FROM bettor_incentive_journal), 'ladders_total', (SELECT count(*) FROM bettor_incentive_journal WHERE kind = 'LADDER'), 'encoding', 'boots ordered by first record, slugs alphabetical. Each ladder is [boot_index, ms_since_base_at, epoch, slug_index, bid_levels, ask_levels, class]; class 0=absent 1=INITIAL_LADDER 2=UPDATE 3=other. BOOK BODIES ARE NOT INCLUDED.')::text AS header; SELECT jsonb_build_object('boot_id', boot_id, 'at', at, 'kind', kind, 'epoch', epoch, 'slug', slug, 'payload', payload)::text AS meta_row FROM bettor_incentive_journal WHERE kind <> 'LADDER' ORDER BY at, id; WITH base AS (SELECT min(at) AS m FROM bettor_incentive_journal), bi AS (SELECT boot_id, (row_number() OVER (ORDER BY min(at))) - 1 AS i FROM bettor_incentive_journal GROUP BY boot_id), si AS (SELECT slug, (row_number() OVER (ORDER BY slug)) - 1 AS i FROM bettor_incentive_journal WHERE slug IS NOT NULL GROUP BY slug), j AS (SELECT * FROM bettor_incentive_journal WHERE kind = 'LADDER' ORDER BY at, id OFFSET COALESCE(NULLIF(split_part('$RANGE', ':', 1), '')::int, 0) LIMIT COALESCE(NULLIF(split_part('$RANGE', ':', 2), '')::int, 200000)) SELECT jsonb_agg(jsonb_build_array(bi.i, round((j.at - base.m) * 1000)::bigint, j.epoch, si.i, jsonb_array_length(COALESCE(j.payload->'bids','[]'::jsonb)), jsonb_array_length(COALESCE(j.payload->'offers','[]'::jsonb)), CASE COALESCE(j.payload->>'ladder_class','') WHEN 'INITIAL_LADDER' THEN 1 WHEN 'UPDATE' THEN 2 WHEN '' THEN 0 ELSE 3 END) ORDER BY j.at, j.id)::text AS ladders FROM j CROSS JOIN base JOIN bi ON bi.boot_id = j.boot_id JOIN si ON si.slug = j.slug;"; TO=60000 ;;
                 # [R09] see .github/workflows/RENDER_OPS_NOTES.md
                 mirror-preflight) SQL="SELECT what, value FROM (SELECT key AS what, left(value::text, 240) AS value FROM ingestion_state WHERE key IN ('mirror_live','mirror_live_whales','mirror_live_demoted','mirror_loss_stop','mapping_quarantine','premap_live','side_echo_last','live_trading_paused','copy_overspend_halt','live_verified_whales','live_clip_overrides','workers_boot','roster_auto_last') UNION ALL SELECT 'zz mirror_books live/24h', (SELECT count(*) FILTER (WHERE state <> 'closed') || '/' || count(*) FILTER (WHERE opened_at > now() - interval '24 hours') FROM mirror_books) UNION ALL SELECT 'zz mirror_orders by state', (SELECT COALESCE(string_agg(state || '=' || n, ' ' ORDER BY state), 'none') FROM (SELECT state, count(*) AS n FROM mirror_orders GROUP BY state) s) UNION ALL SELECT 'zz kalshi_claims rn1 24h', (SELECT count(*) FROM kalshi_claims WHERE lower(whale) = 'rn1' AND claimed_at > now() - interval '24 hours')::text UNION ALL SELECT 'zz live_orders 24h by status', (SELECT COALESCE(string_agg(status || '=' || n, ' ' ORDER BY status), 'none') FROM (SELECT status, count(*) AS n FROM live_orders WHERE placed_at > now() - interval '24 hours' GROUP BY status) s) UNION ALL SELECT 'zz live_orders last placed', (SELECT COALESCE(max(placed_at)::text, 'none') FROM live_orders)) t ORDER BY what;"; TO=30000 ;;
                 # [R10] see .github/workflows/RENDER_OPS_NOTES.md

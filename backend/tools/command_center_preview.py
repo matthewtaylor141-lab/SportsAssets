@@ -362,6 +362,7 @@ class StubPool:
                 out.append(_Row({
                     "boot_id": r["boot_id"], "at": r["at"],
                     "epoch": r["epoch"], "slug": r["slug"],
+                    "ladder_class": p.get("ladder_class"),
                     "levels": len(p.get("bids") or [])
                               + len(p.get("offers") or [])}))
             return out
