@@ -334,13 +334,24 @@ def test_the_statuses_route_is_registered_and_guarded(client):
     assert client.get("/api/command/rn1x/statuses").status_code in (401, 403)
 
 
-def test_all_seven_statuses_are_declared_separately():
+def test_all_eight_statuses_are_declared_separately():
+    """Seven, plus the EXTERNAL source as its own eighth.
+
+    `independent_ev_entries` is the INTERNAL settlement-model path, which
+    refuses for want of a qualified model. `external_valuation` is a
+    bookmaker's de-vigged price -- a different source class, blocked for a
+    different reason (its credential is not on this service). One badge
+    over both would hide which of the two moved, which is the exact defect
+    the separated statuses exist to prevent.
+    """
     from sportsassets.api import command_rn1x as CR
 
     assert CR.STATUS_KEYS == (
         "historical_replay", "prospective_rn1_management",
         "independent_ev_entries", "pairing", "second_half_loss_exit",
-        "accounting_health", "learning_evaluation")
+        "accounting_health", "learning_evaluation", "external_valuation")
+    # and the two belief paths are NOT the same key
+    assert "independent_ev_entries" != "external_valuation"
 
 
 def test_the_live_badge_distinguishes_live_armed_and_stopped():

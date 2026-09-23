@@ -77,7 +77,12 @@ async def _control(pool) -> dict:
 STATUS_KEYS = ("historical_replay", "prospective_rn1_management",
                "independent_ev_entries", "pairing",
                "second_half_loss_exit", "accounting_health",
-               "learning_evaluation")
+               "learning_evaluation",
+               # The EXTERNAL source is its own status. `independent_ev_
+               # entries` is the internal settlement-model path; this is a
+               # bookmaker's price. Different source class, different
+               # reason to be blocked, so a separate badge.
+               "external_valuation")
 
 
 def _live(running: bool, has_rows: bool, *, what: str, why: str) -> dict:
@@ -194,7 +199,62 @@ async def statuses(pool) -> dict:
             "verdicts_recorded": int(verdicts),
             "description": L.DESCRIPTION,
         },
+        # AN EIGHTH STATUS, and it is deliberately not folded into
+        # `independent_ev_entries`. That one reports the internal
+        # settlement-model path, which refuses for want of a qualified
+        # model. This reports an EXTERNAL BOOKMAKER valuation, which is a
+        # different source class with a different reason to be blocked, and
+        # one badge over both would hide which of the two moved.
+        "external_valuation": await _external_status(pool),
     }
+
+
+async def _external_status(pool) -> dict:
+    """PINNACLE_DEVIG_V1's own tile: what it valued, and why it refused."""
+    from .. import bettor_external_shadow as EX
+
+    have = await pool.fetchval(
+        "SELECT count(*) FROM information_schema.tables WHERE "
+        "table_schema = 'public' AND table_name = 'external_valuations'")
+    cred = EX.credential_present()
+    out = {
+        "what": ("EXTERNAL BOOKMAKER VALUATION -- Pinnacle's own de-vigged "
+                 "price, not a trained model and not an internally "
+                 "qualified settlement model"),
+        "experiment_id": EX.EXPERIMENT_ID,
+        "label": EX.LABEL,
+        "source": EX.describe()["source"],
+        "credential": cred,
+        "table_present": bool(have),
+    }
+    if not have:
+        out.update(badge="UNAVAILABLE", live=False,
+                   why=("migration 103 has not been applied here, so no "
+                        "valuation can be recorded"))
+        return out
+    summ = await pool.fetchrow(EX.SUMMARY, EX.EXPERIMENT_ID)
+    rows = await pool.fetch(EX.REFUSAL_CENSUS, EX.EXPERIMENT_ID, "24")
+    n = int((summ or {}).get("evaluated") or 0)
+    adm = int((summ or {}).get("admissible") or 0)
+    out["summary"] = dict(summ) if summ is not None else {}
+    # THE REFUSAL DISTRIBUTION IS THE POINT OF THE TILE. Management's
+    # question is not "did it buy" but "why did it not", and that answer is
+    # a histogram rather than a sentence.
+    out["refusals_24h"] = {r["refusal"]: int(r["n"]) for r in rows}
+    if not cred["present"]:
+        out.update(badge="BLOCKED", live=False,
+                   why=("the odds credential is not present on this "
+                        "service, so the source cannot price anything "
+                        "here. " + (cred["why"] or "")))
+    elif n == 0:
+        out.update(badge="ARMED", live=True,
+                   why="connected and has evaluated nothing yet")
+    else:
+        out.update(badge="LIVE", live=True, producing=True,
+                   why=("%d evaluated in this experiment, %d admissible; "
+                        "the refusal histogram says why the rest were not"
+                        % (n, adm)))
+    return out
 
 
 async def overview(pool) -> dict:
