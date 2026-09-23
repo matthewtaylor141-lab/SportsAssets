@@ -64,7 +64,14 @@
     // result nor a replay result: it is the record of which policy
     // variants were tried, on which partitions, and why each was
     // refused. Nothing on it has ever traded.
-    ['learning', 'Learning loop']
+    ['learning', 'Learning loop'],
+    // THE RN1-SEEDED MANAGEMENT EXPERIMENT. Its own tab because it is a
+    // third mode again: not the live decision lane, not the desk's
+    // replay, but management's frozen pairing-and-exit policy driving
+    // assigned inventory through the existing lifecycle. Every position
+    // on it is HISTORICAL REPLAY and every order on it is MODELLED, and
+    // nothing on it is ever added to a figure on another tab.
+    ['rn1x', 'RN1 seeded management']
   ];
 
   const POLL_MS = 8000;
@@ -100,6 +107,13 @@
   // error the mode separation exists to prevent.
   async function pullLearn(path) {
     return pull(path, 'learning', 'learning/' + path);
+  }
+
+  // Namespaced for the same reason the learning routes are: this
+  // namespace ALSO serves a route called `overview`, and an unkeyed
+  // cache would paint one mode's numbers under another mode's heading.
+  async function pullRn1x(path) {
+    return pull(path, 'rn1x', 'rn1x/' + path);
   }
 
   async function pull(path, ns, key) {
@@ -157,7 +171,8 @@
     performance: ['equity', 'summary'],
     experimental: ['experimental', 'experimental/tape?limit=60'],
     desk: [],
-    learning: []
+    learning: [],
+    rn1x: []
   };
 
   async function refresh() {
@@ -176,6 +191,9 @@
           .map(pullDesk));
       if (state.tab === 'learning')
         await Promise.all(['overview', 'cycles', 'results'].map(pullLearn));
+      if (state.tab === 'rn1x')
+        await Promise.all(['overview', 'learning', 'positions?limit=40']
+          .map(pullRn1x));
       if (state.tab === 'audit' && state.trade)
         await pull('trades/' + encodeURIComponent(state.trade));
       state.lastUiUpdate = new Date().toISOString();
@@ -1890,7 +1908,191 @@
     return head + summary + setup + cands + results + hist;
   }
 
+
+  /* ── THE RN1-SEEDED MANAGEMENT EXPERIMENT ─────────────────────────
+   * The four things the brief asked a command-centre view to show, and
+   * each one is drawn whether or not it has a value:
+   *
+   *   IS IT OPERATING   the control row, the heartbeat, the cursor
+   *   DECISIONS         counted BY OPERATING STATE, so a policy whose
+   *                     honest answer is mostly HOLD reads as mostly
+   *                     HOLD rather than as busy
+   *   RESULTS           settled totals, and the learning verdict
+   *   BLOCKERS          the named external dependencies, ALWAYS
+   *
+   * THE BLOCKERS PANEL IS NOT CONDITIONAL. A screen that hides its
+   * blockers once some rows arrive is how "the loss exit has never been
+   * available" stops being visible. It renders while the experiment is
+   * running and writing.
+   */
+  function rn1xTab() {
+    const ov = state.data['rn1x/overview'];
+    const ln = state.data['rn1x/learning'];
+    const ps = state.data['rn1x/positions'];
+    const problem = feedProblem('rn1x/overview');
+    if (problem) return problem;
+    if (!ov) return panelNote('LOADING', 'Reading the experiment tables.');
+
+    const money = v => !isNum(v) ? NI : (v < 0 ? '\u2212$' : '$')
+      + Math.abs(v).toLocaleString('en-US',
+        { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+
+    // THE LABEL FIRST, AND IT IS THE SERVER'S WORDS. Management-defined
+    // and experimental; not learned, not proven profitable.
+    const head = `<div class="sh-panel" style="border-color:#7a5a2f">
+      <div class="sh-panel-body">
+        <strong style="letter-spacing:.08em">${esc(ov.mode || NI)} \u00b7
+          MODELLED ORDERS \u00b7 NO CAPITAL</strong>
+        <p>${esc(ov.label || '')}</p>
+        <p class="mono">experiment ${esc(ov.experiment_id || NI)} \u00b7
+          prospective ${ov.prospective ? 'YES' : 'NO'}</p>
+        <p><em>${esc(ov.scope || '')}</em></p>
+      </div></div>`;
+
+    if (ov.operation && ov.operation.state === 'SCHEMA_ABSENT')
+      return head + panelNote('SCHEMA ABSENT', ov.operation.why);
+
+    const ctl = ov.control || {};
+    const hb = ov.heartbeat || {};
+    const d = hb.detail || {};
+    // OPERATING, STOPPED and NEVER BEAT are three different claims and
+    // are drawn as three different states. "Running and found nothing"
+    // is not the same as "never started".
+    const live = ctl.running && hb.status === 'ok';
+    const op = `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>Is it operating?
+        <span class="mono">${live ? 'RUNNING' : esc(ctl.state || NI)}</span></h3>
+      <p class="mono">control row ${esc(String(ctl.value))} \u00b7
+        heartbeat ${esc(hb.status || 'NEVER BEAT')}
+        ${hb.at ? 'at ' + day(hb.at) : ''} \u00b7
+        cursor ${str(d.cursor)}</p>
+      ${ctl.why ? `<p>${esc(ctl.why)}</p>` : ''}
+      ${hb.why ? `<p>${esc(hb.why)}</p>` : ''}
+      ${d.state ? `<p class="mono">last cycle ${esc(d.state)}
+        ${isNum(d.written) ? '\u00b7 wrote ' + d.written : ''}
+        ${isNum(d.examined) ? '\u00b7 examined ' + d.examined : ''}</p>` : ''}
+      ${d.why ? `<p>${esc(d.why)}</p>` : ''}
+    </div></section>`;
+
+    const c = ov.counts || {};
+    const t = ov.settled_totals || {};
+    const rows = `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>What is persisted</h3>
+      <p class="mono">positions ${zeroOk(c.positions)} \u00b7
+        decisions ${zeroOk(c.decisions)} \u00b7
+        orders ${zeroOk(c.orders)} \u00b7
+        fills ${zeroOk(c.fills)} \u00b7
+        outcomes ${zeroOk(c.outcomes)}</p>
+      <p class="mono">last decision ${c.last_decision ? day(c.last_decision)
+        : NI} \u00b7 last outcome ${c.last_outcome ? day(c.last_outcome)
+        : NI}</p>
+      <h4>Settled totals \u2014 ${zeroOk(t.positions_settled)} positions</h4>
+      <p class="mono">net ${money(t.net_usd)} \u00b7
+        fees ${money(t.fees_usd)}</p>
+      <p><em>${esc(t.basis || '')}</em></p>
+    </div></section>`;
+
+    // DECISIONS BY OPERATING STATE. The whole point: HOLD is a decision
+    // and it is the most common one this policy makes.
+    const st = ov.operating_states || [];
+    const states = `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>Decisions by operating state</h3>
+      ${st.length ? `<table class="sh-table"><thead><tr>
+        <th>State</th><th>Count</th></tr></thead><tbody>
+        ${st.map(r => `<tr><td class="mono">${esc(r.state)}</td>
+          <td class="mono">${zeroOk(r.n)}</td></tr>`).join('')}
+      </tbody></table>
+      <p><em>HOLD is a decision. A panel showing only the orders would
+        report this policy as busier than it is.</em></p>`
+        : '<p class="mono">ZERO \u2014 no decision has been persisted yet.</p>'}
+    </div></section>`;
+
+    // THE BLOCKERS. Unconditional.
+    const bl = ov.blockers || {};
+    const keys = Object.keys(bl);
+    const blockers = `<section class="sh-panel" style="border-color:#7a2f2f">
+      <div class="sh-panel-body">
+      <h3>Remaining blockers \u2014 ${keys.length}</h3>
+      ${keys.length ? keys.map(k => `<div class="sh-sub">
+        <p class="mono"><strong>${esc(k)}</strong></p>
+        <p>${esc(bl[k])}</p></div>`).join('')
+        : '<p>None declared. That is itself a claim to check.</p>'}
+      <p><em>These are external dependencies, not switches. None of them
+        is worked around anywhere in the experiment.</em></p>
+    </div></section>`;
+
+    // THE LEARNING VERDICT, including a rejection.
+    let learn = '';
+    if (ln) {
+      const lc = ln.control || {};
+      const lhb = ln.heartbeat || {};
+      learn = `<section class="sh-panel"><div class="sh-panel-body">
+        <h3>Learning cycle \u2014 ${esc(lc.state || NI)}</h3>
+        <p class="mono">champion ${esc(ln.champion || NI)} \u00b7
+          management-defined ${ln.champion_is_management_defined
+            ? 'YES' : 'NO'} \u00b7 gate ${esc(ln.gate || NI)}</p>
+        <p class="mono">scenario grid
+          ${esc((ln.scenario_grid || []).join(', '))} \u00b7
+          eligibility floor
+          ${zeroOk(ln.eligibility_floor_decided_orders)} decided orders</p>
+        <p class="mono">heartbeat ${esc(lhb.status || 'NEVER BEAT')}
+          ${lhb.at ? 'at ' + day(lhb.at) : ''}</p>
+        <p><strong>${esc(ln.no_promotion_path || '')}</strong></p>
+        ${ln.blocker ? `<p class="mono">BLOCKER
+          ${esc(ln.blocker)}</p>` : ''}
+        ${ln.latest_result ? `<p>${esc(ln.latest_result)}</p>` : ''}
+        <h4>Declared challengers \u2014 fixed in code, not searched</h4>
+        <table class="sh-table"><thead><tr><th>Name</th><th>Params</th>
+          <th>Question</th></tr></thead><tbody>
+        ${(ln.challengers || []).map(ch => `<tr>
+          <td class="mono">${esc(ch.name)}</td>
+          <td class="mono">${esc(JSON.stringify(ch.params))}</td>
+          <td>${esc(ch.question)}</td></tr>`).join('')}
+        </tbody></table>
+        ${(ln.latest || []).length ? `<h4>Latest verdicts \u2014 a rejection
+          is a result</h4>
+        <table class="sh-table"><thead><tr><th>Ver</th><th>Challenger</th>
+          <th>Verdict</th><th>Dataset</th></tr></thead><tbody>
+        ${(ln.latest || []).map(r => `<tr>
+          <td class="mono">${esc(String(r.version))}</td>
+          <td class="mono">${esc((r.params || {}).challenger || NI)}</td>
+          <td class="mono">${esc(r.status)}</td>
+          <td class="mono">${esc(r.dataset || NI)}</td></tr>`).join('')}
+        </tbody></table>` : ''}
+      </div></section>`;
+    }
+
+    // THE POSITIONS. Detection lag is shown per position, because on
+    // this feed it is the figure that decides whether a forward lane
+    // could ever exist.
+    const list = (ps && ps.positions) || [];
+    const positions = `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>Seeded positions \u2014 ${list.length}</h3>
+      ${list.length ? `<table class="sh-table"><thead><tr>
+        <th>Entry kind</th><th>Qty</th><th>Seed px</th>
+        <th>Detection lag</th><th>Decisions</th><th>Orders</th>
+        <th>Net</th><th>Residual</th></tr></thead><tbody>
+      ${list.map(r => `<tr>
+        <td class="mono">${esc(r.entry_kind)}</td>
+        <td class="mono">${qty(r.seed_qty)}</td>
+        <td class="mono">${px(r.seed_price)}</td>
+        <td class="mono">${isNum(r.detection_lag_s)
+          ? (r.detection_lag_s / 3600).toFixed(2) + ' h' : NI}</td>
+        <td class="mono">${zeroOk(r.decisions)}</td>
+        <td class="mono">${zeroOk(r.orders)}</td>
+        <td class="mono">${money(r.net_usd)}</td>
+        <td class="mono">${qty(r.residual_qty)}</td></tr>`).join('')}
+      </tbody></table>
+      <p><em>The seed price is RN1's own fill, ASSIGNED. It is not
+        evidence that we could have obtained that fill.</em></p>`
+        : '<p class="mono">ZERO \u2014 nothing seeded yet.</p>'}
+    </div></section>`;
+
+    return head + op + rows + states + positions + learn + blockers;
+  }
+
   const VIEW = {
+    rn1x: rn1xTab,
     learning: learningTab,
     desk: deskTab,
     overview, decisions: decisionsTab, positions: positionsTab,
