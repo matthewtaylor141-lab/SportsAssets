@@ -162,8 +162,8 @@
     try {
       await Promise.all((NEEDS[state.tab] || []).map(p => pull(p)));
       if (state.tab === 'desk')
-        await Promise.all(['overview', 'attribution', 'lifecycles?limit=20']
-          .map(pullDesk));
+        await Promise.all(['overview', 'attribution', 'lifecycles?limit=20',
+          'live', 'live/book?limit=60', 'correction'].map(pullDesk));
       if (state.tab === 'learning')
         await Promise.all(['overview', 'cycles', 'results'].map(pullLearn));
       if (state.tab === 'audit' && state.trade)
@@ -1294,6 +1294,154 @@
 
   /* ── DESK (MODE B: HISTORICAL REPLAY) ──────────────────────────── */
 
+  /* THE LIVE LANE, ABOVE THE REPLAY AND NEVER SUMMED WITH IT.
+   *
+   * The Desk tab used to carry only HISTORICAL_REPLAY. Management also
+   * has to see what the desk is doing NOW -- its decisions and their
+   * reasons, its resting/partial/filled/expired orders, its positions
+   * with cost basis and next intended action, and the corrected
+   * accounting. Those are all LIVE_SHADOW and are drawn in their own
+   * block with their own banner so the two modes cannot be read as one
+   * number. */
+  function liveBlock() {
+    const lv = state.data['live'];
+    const bk = state.data['live/book?limit=60'];
+    const cx = state.data['correction'];
+    const problem = feedProblem('live/book?limit=60') || feedProblem('live');
+    if (problem) return problem;
+    if (!lv) return '';
+
+    const money = v => !isNum(v) ? NI : (v < 0 ? '−$' : '$')
+      + Math.abs(v).toLocaleString('en-US',
+        { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+    const sim = lv.simulates || {};
+    const a = (bk && bk.accounting) || null;
+
+    const banner = `<div class="sh-panel" style="border-color:#2f6f4f">
+      <div class="sh-panel-body">
+        <strong style="letter-spacing:.08em">LIVE SHADOW — NOT FUNDED,
+          NOT A MARKET TAPE</strong>
+        <p>${esc(sim.event_class_means || '')}</p>
+        <p>${esc(sim.venue_basis_means || '')}</p>
+        <p class="mono">source ${esc(sim.source_venue || NI)} ·
+          fees ${esc(sim.fee_schedule_venue || NI)} ·
+          basis ${esc(sim.venue_basis || NI)} ·
+          fill model ${esc(sim.fill_model || NI)} ·
+          queue_share ${sim.queue_share_ASSUMED} (ASSUMED) ·
+          P_FILL ${esc(lv.p_fill || NI)}</p>
+        <p class="mono">book ${esc(sim.order_book || NI)} ·
+          market impact ${esc(sim.market_impact || NI)} ·
+          loop ${esc((lv.loop && lv.loop.state) || NI)}</p>
+      </div></div>`;
+
+    const acct = `<section class="sh-panel"><div class="sh-panel-body">
+      <h3>Live accounting and exposure</h3>
+      ${a ? `<table class="sh-table"><tbody>
+        <tr><td>Cash</td><td class="mono">${money(a.cash_usd)}</td></tr>
+        <tr><td>Committed (open orders)</td>
+            <td class="mono">${money(a.committed_usd)}</td></tr>
+        <tr><td>Inventory at COST</td>
+            <td class="mono">${money(a.inventory_cost)}</td></tr>
+        <tr><td>Inventory MARK</td><td class="mono">${NI}</td></tr>
+        <tr><td>Realised (simulated)</td>
+            <td class="mono">${money(a.realized_pnl_usd)}</td></tr>
+        <tr><td>Fees</td><td class="mono">${money(a.fees_usd)}</td></tr>
+        <tr><td>Ledger identity</td>
+            <td class="mono">${a.invariant_ok ? 'reconciles' : 'FAILS'}</td></tr>
+        <tr><td>Epoch</td><td class="mono">${esc(a.epoch_id || 'UNSEGMENTED')}</td></tr>
+      </tbody></table>
+      <p>${esc((bk.exposure && bk.exposure.why) || '')}</p>`
+      : `<p>${esc(bk && bk.accounting_is_null_because || 'No ledger row yet.')}</p>`}
+      ${bk && bk.capital ? `<p class="mono">starting
+        ${money(bk.capital.starting_cash_usd)} · remaining committed
+        headroom ${money(bk.capital.remaining_headroom_usd)}</p>` : ''}
+      ${bk && bk.risk_limits ? `<p class="mono">limits — ${
+        Object.entries(bk.risk_limits).map(
+          ([k, v]) => k + ' ' + v).join(' · ')}</p>` : ''}
+    </div></section>`;
+
+    // THE CORRECTION, SHOWN AS AN INTERVAL. A single number here would
+    // be the upper bound presented as fact.
+    const corr = cx ? `<section class="sh-panel">
+      <div class="sh-panel-body">
+      <h3>Corrected accounting — ${esc(cx.version)}</h3>
+      <p class="mono">applied ${cx.applied ? 'YES' : 'NO'}${
+        cx.run ? ' · status ' + esc(cx.run.accounting_status) : ''}</p>
+      ${cx.run && cx.run.incomplete_reasons
+        && cx.run.incomplete_reasons.length
+        ? `<ul>${cx.run.incomplete_reasons.map(
+            r => `<li>${esc(r)}</li>`).join('')}</ul>` : ''}
+      ${(cx.by_status || []).length ? `<table class="sh-table"><thead><tr>
+        <th>status</th><th>orders</th>
+        <th>realised correction (lower)</th>
+        <th>realised correction (upper)</th></tr></thead><tbody>
+        ${cx.by_status.map(r => `<tr><td class="mono">${esc(r.status)}</td>
+          <td class="mono">${r.n}</td>
+          <td class="mono">${money(r.lo)}</td>
+          <td class="mono">${money(r.hi)}</td></tr>`).join('')}
+      </tbody></table>` : '<p>No correction rows.</p>'}
+      <p>${esc(cx.why_an_interval || '')}</p>
+      <p>${esc(cx.originals_preserved || '')}</p>
+      <p>${esc(cx.historical_labels || '')}</p>
+      </div></section>` : '';
+
+    const dec = bk && bk.decisions ? `<section class="sh-panel">
+      <div class="sh-panel-body">
+      <h3>Live decisions and their reasons —
+        ${C.count(bk.decisions.length)} shown</h3>
+      <table class="sh-table"><thead><tr><th>at</th><th>action</th>
+        <th>condition</th><th>leg</th><th>price</th><th>qty</th>
+        <th>reason</th></tr></thead><tbody>
+      ${bk.decisions.map(d => `<tr>
+        <td class="mono">${esc(String(d.decided_at || '').slice(11, 19))}</td>
+        <td class="mono">${esc(d.action)}</td>
+        <td class="mono">${esc(String(d.condition_id || '').slice(0, 14))}…</td>
+        <td class="mono">${d.outcome_index}</td>
+        <td class="mono">${isNum(d.proposed_price) ? px(d.proposed_price) : NI}</td>
+        <td class="mono">${isNum(d.proposed_qty) ? C.count(d.proposed_qty) : NI}</td>
+        <td>${esc(String(d.reason || '').slice(0, 90))}</td>
+      </tr>`).join('')}</tbody></table></div></section>` : '';
+
+    const ords = bk && bk.orders ? `<section class="sh-panel">
+      <div class="sh-panel-body">
+      <h3>Orders — ${Object.entries(bk.order_states || {}).map(
+        ([k, v]) => k + ' ' + v).join(' · ') || 'none'}</h3>
+      <table class="sh-table"><thead><tr><th>state</th><th>side</th>
+        <th>intent</th><th>limit</th><th>qty</th><th>filled</th>
+        <th>avg fill</th><th>fees</th><th>why</th></tr></thead><tbody>
+      ${bk.orders.map(o => `<tr>
+        <td class="mono">${esc(o.state)}</td><td class="mono">${esc(o.side)}</td>
+        <td class="mono">${esc(o.intent)}</td>
+        <td class="mono">${px(o.limit_price)}</td>
+        <td class="mono">${C.count(o.qty)}</td>
+        <td class="mono">${C.count(o.filled_qty)}</td>
+        <td class="mono">${isNum(o.avg_fill_price) ? px(o.avg_fill_price) : NI}</td>
+        <td class="mono">${money(o.fees_usd)}</td>
+        <td>${esc(String(o.state_reason || '').slice(0, 70))}</td>
+      </tr>`).join('')}</tbody></table></div></section>` : '';
+
+    const pos = bk && bk.positions ? `<section class="sh-panel">
+      <div class="sh-panel-body">
+      <h3>Positions — cost basis and next intended action</h3>
+      <table class="sh-table"><thead><tr><th>condition</th><th>leg</th>
+        <th>qty</th><th>cost basis</th><th>realised</th><th>fees</th>
+        <th>next intended action</th><th>why</th></tr></thead><tbody>
+      ${bk.positions.map(p => `<tr>
+        <td class="mono">${esc(String(p.condition_id || '').slice(0, 14))}…</td>
+        <td class="mono">${p.outcome_index}</td>
+        <td class="mono">${C.count(p.qty)}</td>
+        <td class="mono">${money(p.cost_basis_usd)}</td>
+        <td class="mono">${money(p.realized_pnl_usd)}</td>
+        <td class="mono">${money(p.fees_usd)}</td>
+        <td class="mono">${esc(p.next_intended_action || NI)}</td>
+        <td>${esc(String(p.next_intended_reason || '').slice(0, 70))}</td>
+      </tr>`).join('')}</tbody></table>
+      <p>${esc((bk.no_combined_total) || '')}</p>
+      </div></section>` : '';
+
+    return banner + acct + corr + dec + ords + pos;
+  }
+
   function deskTab() {
     const ov = state.data['overview'];
     const at = state.data['attribution'];
@@ -1379,7 +1527,11 @@
         <td class="mono">${c.decisions}</td></tr>`).join('')}</tbody>
       </table></div></section>` : '';
 
-    return banner + maturity + pnl + attr + orders + lifes;
+    // THE LIVE BLOCK COMES FIRST, because it is what is happening
+    // now; the replay follows under its own banner. They are
+    // concatenated, never summed, and no element of this page adds a
+    // figure from one to a figure from the other.
+    return liveBlock() + banner + maturity + pnl + attr + orders + lifes;
   }
 
   /* ── THE LEARNING LOOP ─────────────────────────────────────────────
