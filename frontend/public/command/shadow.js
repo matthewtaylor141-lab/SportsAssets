@@ -1317,6 +1317,47 @@
     const sim = lv.simulates || {};
     const a = (bk && bk.accounting) || null;
 
+    // ── THE TWO ACCOUNTS, SIDE BY SIDE AND NEVER SUMMED ──────────
+    //
+    // The closed account is an INCIDENT RECORD, not a performance
+    // panel. Its P&L is unreliable and its inventory is unattributable,
+    // so it is drawn with those words on it and with no total.
+    const ac = bk && bk.account;
+    const accounts = (cx && cx.accounts) || [];
+    const closed = accounts.filter(x => x.status !== 'ACTIVE');
+    const inc = cx && cx.incident;
+
+    const acctHead = `<div class="sh-panel" style="border-color:#2f6f4f">
+      <div class="sh-panel-body">
+        <strong style="letter-spacing:.08em">ACTIVE SHADOW ACCOUNT</strong>
+        ${ac ? `<p class="mono">${esc(ac.account_id)} · opened
+           ${esc(String(ac.opened_at || '').slice(0, 19))} · opening balance
+           ${money(ac.opening_balance)}</p>
+         <p>${esc(ac.note || '')}</p>`
+        : `<p>${esc((bk && bk.account_missing_because)
+                    || 'No active shadow account.')}</p>`}
+        <p class="mono">${esc((bk && bk.never_combined) || '')}</p>
+      </div></div>`;
+
+    const incidentPanel = (inc || closed.length) ? `<section class="sh-panel"
+      style="border-color:#8a3f3f"><div class="sh-panel-body">
+      <h3>Incident record — previous shadow account</h3>
+      ${inc ? `<p class="mono">${esc(inc.incident_id)} ·
+         ${esc(inc.kind || '')} · P&amp;L
+         <strong>${esc(inc.pnl_reliability || '')}</strong></p>
+       <p>${esc(inc.summary || '')}</p>` : ''}
+      ${closed.map(x => `<p class="mono">${esc(x.account_id)} ·
+         ${esc(x.status)} · closed
+         ${esc(String(x.closed_at || '').slice(0, 19))}</p>
+         <p>${esc(x.note || '')}</p>`).join('')}
+      <p>${esc((cx && cx.closed_period) || '')}</p>
+      <p>${esc((cx && cx.nothing_deleted) || '')}</p>
+      <p><strong>${esc((cx && cx.never_combined) || '')}</strong></p>
+      <p>No total is shown for this period. Its reported P&amp;L is
+         unreliable and its inventory is unattributable — which is not
+         closed, not zero and not valued.</p>
+      </div></section>` : '';
+
     const banner = `<div class="sh-panel" style="border-color:#2f6f4f">
       <div class="sh-panel-body">
         <strong style="letter-spacing:.08em">LIVE SHADOW — NOT FUNDED,
@@ -1439,7 +1480,8 @@
       <p>${esc((bk.no_combined_total) || '')}</p>
       </div></section>` : '';
 
-    return banner + acct + corr + dec + ords + pos;
+    return acctHead + banner + acct + corr + incidentPanel
+      + dec + ords + pos;
   }
 
   function deskTab() {
