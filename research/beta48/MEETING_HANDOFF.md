@@ -57,39 +57,68 @@ deployed** — see §7.
 
 ## 4. Reconciled shadow P&L — HISTORICAL REPLAY
 
-**Window 2026-08-21T14:28:09Z → 2026-09-23T13:07:08Z. 19,890 recorded
-Ferrari prints, 1,006 conditions, $100,000 starting capital.**
+### Three corrections to what I said in the first handoff
+
+**1. The replay tape is NOT the market tape.** I called its events
+"recorded prints". `trades` is keyed on `whale_id`; every row is **one
+tracked account's own execution**. Ferrari filling at a price is
+evidence that *Ferrari's* order filled — not that ours would have.
+Labelled `SINGLE_ACCOUNT_EXECUTIONS` throughout.
+
+**2. Wrong venue.** The fills come from the on-chain listener
+(`polygon_ws_url`, `PM_EXCHANGE_V3_ADDRESSES`,
+`ts_provenance = polygon_block_timestamp`) — **Polymarket global**. The
+fees applied are the published **PMUS** schedule. That is a
+`TRANSFERRED_SCENARIO`, not same-venue execution evidence.
+
+**3. The learned exit had lookahead, and it is measured.** 2,404 of
+7,364 training rows (**32.6%**) come from markets that traded *inside*
+the replay window, and **2,402** training markets resolved *after* the
+replay's first event. Verdict: **`DEVELOPMENT_EVIDENCE`**. Its own
+pre-registered test was **NOT SUPPORTED** (paired log-loss difference
++0.0052, 95% CI [−0.0017, +0.0120]).
+
+**Withdrawn:** *"the measured edge is in the tails."* Gross of costs,
+measured on prices Ferrari *chose* to buy, and formed after I had
+already inspected that data. **Now a research hypothesis, not a
+finding.**
+
+### The full economic position
+
+Window 2026-08-21T14:28:09Z → 2026-09-23T13:07:08Z, 19,890 single-account
+executions, 1,006 conditions, $100,000 start.
 
 | | |
 |---|---:|
-| **Realized P&L** | **−$1,898.29** |
-| Fees | **+$381.75** (maker **rebate income**) |
-| Residual inventory at cost | $24,530.33 (396 legs, unresolved) |
+| Realized P&L | −$1,898.29 |
 | Cash | $73,571.39 |
-| **Ledger identity** | **RECONCILES, drift −0.0** |
+| **Unvalued exposure** | **$24,530.37 across 396 legs** |
+| Inventory mark | **NOT_IDENTIFIED** |
+| Executable liquidation | **NOT_IDENTIFIED** |
+| **Total portfolio performance** | **NOT_IDENTIFIED** |
 
-Orders: **687 filled · 529 partial · 782 expired never filled ·
-34.4% fill rate.** Consumption ledger: 14,752 prints offered 2.33M,
-released 139k — the cap binds hard.
+**The realised figure is one component, not the whole.** No mark and no
+depth exist for the 396 unresolved legs, so neither an unrealised
+figure nor a liquidation estimate can be produced. The ledger identity
+reconciles (drift −0.0) — **that proves accounting consistency only,
+and validates neither the valuations nor the fill assumptions.**
+
+Orders: 687 filled · 529 partial · **782 expired never filled** ·
+34.4% fill rate. Consumption: 14,752 events offered 2.33M, released
+139k.
 
 ### Why it lost
 
 | cause | USD |
 |---|---:|
-| Settlement (57 legs won, 65 lost) | **−$1,358.88** |
-| Exit vs basis | **−$921.16** |
-| Fees | **+$381.75** |
-| Stranded capital | $24,530.33 in 396 unresolved legs |
+| Settlement (57 won / 65 lost) | −$1,358.88 |
+| Exit vs basis | −$921.16 |
+| Fees | **+$381.75** (maker rebate income) |
 
-**Diagnosis:** the entry band [0.40, 0.65] sits exactly where the
-fair-value work measured **no** edge — that band's mean(payout − price)
-interval straddles zero — while the measured edge lives in the tails
-this policy does not trade. Entries with no edge, then spread paid on
-the way out. Fees are **not** the cause; they are income.
-
-**The band is not being retuned against this window.** Making the
-obvious change now, on the same data that suggested it, is how a
-replay becomes a curve fit.
+**What is established:** the entry band [0.40, 0.65] sits where the
+fair-value study found mean(payout − price) indistinguishable from
+zero, so entries there carry no demonstrated edge and spread is paid on
+the way out. **The band is not being retuned against this window.**
 
 ## 5. Inspectable lifecycle
 
