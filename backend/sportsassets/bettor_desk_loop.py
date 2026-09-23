@@ -519,6 +519,44 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
             # fills against an empty portfolio and then overwrite them.
             restore = await _restore(conn, desk_id, desk)
             await _open_epoch(conn, desk_id, desk, cursor, restore)
+            # A BOOK THAT DOES NOT RECONCILE MUST NOT TRADE.
+            #
+            # FOUND IN PRODUCTION at 15:48Z, by this check, on the
+            # first run of the restore it guards. `_restore` took CASH
+            # from `bettor_desk_state` -- which reflects the LAST epoch
+            # -- and LEGS from `bettor_desk_positions`, which still
+            # holds every leg ever written, including those of earlier
+            # books abandoned when the loop restarted without restoring
+            # them. Cash from one era, legs from several: open
+            # positions jumped 52 -> 96 and the identity drifted
+            # +$2,367.73.
+            #
+            # WHICH LEGS BELONG TO THIS BOOK IS NOT RECOVERABLE. The
+            # rows carry no epoch, because boot_id was a per-row
+            # timestamp until this release. So there is no arithmetic
+            # that repairs it, and any rule I picked -- drop the
+            # oldest, keep the largest, scale to fit -- would be an
+            # invented accounting treatment presented as a recovery.
+            #
+            # Therefore: halt. Do not step events, do not write further
+            # snapshots, publish the drift. A desk whose book is wrong
+            # by $2,367 must stop, not continue carefully.
+            if restore.get("restored") and not restore.get("reconciles"):
+                inv = restore.get("invariant_after_restore") or {}
+                _status.update(
+                    state=STATE_ERROR, epoch_id=EPOCH_ID, restore=restore,
+                    error=("RESTORED_BOOK_DOES_NOT_RECONCILE: drift %s. "
+                           "Cash is from the last epoch; legs include "
+                           "earlier abandoned epochs, and the rows carry "
+                           "no epoch to separate them. HALTED: no events "
+                           "are processed and no snapshot is written. "
+                           "Resolution is an explicit accounting "
+                           "decision, not a default."
+                           % inv.get("drift")))
+                log.error("desk loop HALTED: restored book drifts %s",
+                          inv.get("drift"))
+                while True:
+                    await asyncio.sleep(CYCLE_S)
             # THE CORRECTION RUNS HERE, under the writer lock, exactly
             # once per version. Holding the lock is what makes it safe;
             # the unique index on (desk_id, version) is what makes it

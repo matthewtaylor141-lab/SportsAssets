@@ -51,11 +51,20 @@ class FakeConn:
 
     async def fetchrow(self, sql, *a):
         self.calls.append(("fetchrow", sql, a))
+        # ROUTE BY QUERY. A single canned row for every fetchrow made
+        # the cursor read return the state row and raise KeyError on
+        # 'cursor_event_id' -- the fake was wrong, not the code.
+        if "cursor_event_id" in sql:
+            return self.rows.get("cursor")
         return self.rows.get("state")
 
     async def fetch(self, sql, *a):
         self.calls.append(("fetch", sql, a))
-        return self.rows.get("legs", [])
+        if "bettor_desk_positions" in sql:
+            return self.rows.get("legs", [])
+        if "bettor_desk_orders" in sql:
+            return self.rows.get("orders", [])
+        return []
 
     async def execute(self, sql, *a):
         self.calls.append(("execute", sql, a))
@@ -273,3 +282,93 @@ async def test_a_first_start_is_not_mistaken_for_a_restart():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+# ── fail closed: a book that does not reconcile must not trade ───────
+
+@pytest.mark.anyio
+async def test_a_non_reconciling_restore_halts_before_any_event_is_stepped():
+    """FOUND IN PRODUCTION, by the check this test now pins.
+
+    `_restore` took cash from the last epoch and legs from every epoch,
+    because the rows carry no epoch to separate them. Open positions
+    went 52 -> 96 and the identity drifted +$2,367.73. The desk must
+    stop rather than continue carefully: no arithmetic recovers which
+    legs belong to which book, and any rule that picked would be an
+    invented accounting treatment.
+    """
+    os.environ["BETTOR_DESK_LOOP"] = "1"
+    DL.CYCLE_S = 0.01
+    conn = FakeConn(lock_granted=True)
+    # cash from one era, a leg from another: the identity cannot hold.
+    conn.rows["state"] = {"cash": 96405.37, "start": 100000.0}
+    conn.rows["legs"] = [{
+        "condition_id": "orphan", "outcome_index": 0, "qty": 9000.0,
+        "cost": 5985.31, "realized": 22.95, "fees": 0.0,
+        "opened": 1.0, "settled": False, "payout": None}]
+
+    class _Pool:
+        def acquire(self):
+            class _A:
+                async def __aenter__(self_):
+                    return conn
+
+                async def __aexit__(self_, *e):
+                    return False
+            return _A()
+
+    async def _pool():
+        return _Pool()
+
+    task = asyncio.get_running_loop().create_task(DL.run(_pool))
+    await asyncio.sleep(0.08)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    st = DL.status()
+    assert st["state"] == DL.STATE_ERROR, st
+    assert "RESTORED_BOOK_DOES_NOT_RECONCILE" in (st["error"] or "")
+    # AND IT WROTE NO SNAPSHOT. A halted desk that kept appending
+    # non-reconciling ledger rows would be worse than one that stopped.
+    ledger = [c for c in conn.calls
+              if "bettor_desk_ledger" in str(c[1]).lower()]
+    assert ledger == [], ledger
+
+
+@pytest.mark.anyio
+async def test_a_reconciling_restore_does_NOT_halt():
+    """CONTROL. If the halt fired regardless, the desk could never run."""
+    os.environ["BETTOR_DESK_LOOP"] = "1"
+    DL.CYCLE_S = 0.01
+    conn = FakeConn(lock_granted=True)
+    conn.rows["state"] = {"cash": 97797.00, "start": 100000.0}
+    conn.rows["legs"] = [{
+        "condition_id": "c1", "outcome_index": 0, "qty": 4000.0,
+        "cost": 2217.62, "realized": 14.62, "fees": 0.0,
+        "opened": 1.0, "settled": False, "payout": None}]
+
+    class _Pool:
+        def acquire(self):
+            class _A:
+                async def __aenter__(self_):
+                    return conn
+
+                async def __aexit__(self_, *e):
+                    return False
+            return _A()
+
+    async def _pool():
+        return _Pool()
+
+    task = asyncio.get_running_loop().create_task(DL.run(_pool))
+    await asyncio.sleep(0.08)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+    assert DL.status()["state"] == DL.STATE_RUNNING, DL.status()
