@@ -738,7 +738,8 @@ class TestUnavailableData:
         for var in ("RENDER_GIT_COMMIT", "GIT_COMMIT", "SOURCE_COMMIT",
                     "BETTOR_DEPLOYED_SHA"):
             monkeypatch.delenv(var, raising=False)
-        d = IO.deployed_identity()
+        import asyncio
+        d = asyncio.run(IO.deployed_identity(None))
         assert d["sha"] is None
         assert "UNKNOWN rather than guessed" in d["why"]
         out = build([], deployed=d)

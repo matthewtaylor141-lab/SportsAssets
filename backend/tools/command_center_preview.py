@@ -117,6 +117,24 @@ def _busy(t_from, t_to, slugs, every=4.0, boot="boot-synth-A", epoch=1,
     return out
 
 
+def _digest(body):
+    import hashlib
+    return hashlib.sha256(body.encode()).hexdigest()
+
+
+_EVAL_JSON = json.dumps({
+    "cut": "2026-09-17T00:00:00+00:00", "selected": "R7",
+    "qualifies": False,
+    "provenance": {"independent_holdout": False,
+                   "status_of_every_figure_here": "DEVELOPMENT DIAGNOSTIC",
+                   "why": "these dates were inspected before the protocol "
+                          "existed"},
+    "eval": [{"qfrac": 0.25, "net_usd": -74.29, "events": 5,
+              "capital_hours": 3696.0, "taker_fees_usd": -24.98,
+              "rebates_usd": 6.33, "per_capital_hour": -0.0201}],
+})
+
+
 def scenarios() -> dict:
     """Every state the brief names, as a named fixture."""
     S = {}
@@ -248,6 +266,34 @@ def scenarios() -> dict:
         "now": T0 - 7200, "records": [],
     }
 
+    # THE STORE PATH. Same collecting run, but the test and economic
+    # artifacts arrive from the evidence store instead of from disk, so
+    # the page shows a verified commit and digest rather than "read from
+    # disk, nothing verified it".
+    _xml = ('<?xml version="1.0"?><testsuites><testsuite name="pytest" '
+            'errors="0" failures="0" skipped="5" tests="264" '
+            'timestamp="2026-09-21T18:58:24+00:00"/></testsuites>')
+    S["evidence-from-store"] = dict(
+        S["collecting"],
+        why="THE PRODUCTION PATH. Test and economic artifacts read from "
+            "the evidence store, each carrying the commit it was "
+            "produced at and a digest of its exact bytes.",
+        store={
+            "release_tests.xml": {
+                "id": 1, "name": "release_tests.xml", "kind": "junit",
+                "source_sha": "4b83924", "content_type": "text/xml",
+                "digest": _digest(_xml), "size_bytes": len(_xml),
+                "body": _xml, "published_at": 1790159309.0,
+                "note": "SYNTHETIC", "superseded_by": None},
+            "evaluation.json": {
+                "id": 2, "name": "evaluation.json", "kind": "economics",
+                "source_sha": "4b83924",
+                "content_type": "application/json",
+                "digest": _digest(_EVAL_JSON), "size_bytes": len(_EVAL_JSON),
+                "body": _EVAL_JSON, "published_at": 1790159309.0,
+                "note": "SYNTHETIC", "superseded_by": None},
+        })
+
     S["unavailable"] = {
         "why": "The database read fails. The page must say UNAVAILABLE, "
                "not render a well-formed page of zeros.",
@@ -284,6 +330,11 @@ class StubPool:
         raise AssertionError("preview stub saw an unexpected key: %r" % key)
 
     async def fetch(self, sql, *args):
+        if "bettor_evidence_artifact" in sql:
+            # THE EVIDENCE STORE. A scenario opts in with `store: {...}`;
+            # by default the preview returns nothing here so the working
+            # tree answers and the page shows the FALLBACK provenance.
+            return list((self.s.get("store") or {}).values())
         if self.s.get("raise"):
             raise OSError(self.s["raise"][1])
         recs = self.s["records"]

@@ -186,6 +186,22 @@ em.cc-na { color: var(--cc-ink-3); font-style: italic; }
   border-radius: 0 4px 4px 0; color: var(--cc-ink-2);
 }
 
+/* Provenance. Verified and unverified read differently at a glance,
+ * because they are different claims about where a number came from. */
+.cc-prov {
+  margin: 10px 0 0; padding: 7px 10px; font-size: 12px;
+  border-radius: 0 4px 4px 0; line-height: 1.5;
+}
+.cc-prov code { font-family: var(--cc-mono); font-size: 11.5px; }
+.cc-prov-store {
+  background: rgba(63,191,135,0.08); border-left: 2px solid var(--cc-good);
+  color: var(--cc-ink-2);
+}
+.cc-prov-tree {
+  background: rgba(217,164,65,0.08); border-left: 2px solid var(--cc-wait);
+  color: var(--cc-ink-2);
+}
+
 /* ── key/value ──────────────────────────────────────────────────── */
 
 .cc-kv, .cc-kinds { display: grid; grid-template-columns: auto 1fr;

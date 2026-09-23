@@ -321,11 +321,43 @@
             + esc(r.superseded_by) + '</b> — this evidence is kept, not '
             + 'deleted, and its replacement is named</dd>' : '')
         + '</dl>'
+        + provenanceHtml(r.provenance)
         + '<p class="cc-counts">' + counts + '</p>'
         + failuresHtml(r, i)
         + '</section>');
     });
     return out.join('');
+  }
+
+  function provenanceHtml(p) {
+    /* WHERE THE BYTES CAME FROM, ON THE PAGE.
+     *
+     * A row read from the evidence store carries the commit it was
+     * produced at and a digest of its exact bytes, so its attribution
+     * was verified. A row read from a file on disk carries neither --
+     * its SHA is whatever someone typed into the manifest. Those are
+     * different epistemic states and the page says which one it is
+     * rather than leaving the reader to infer it from a path.
+     *
+     * And when the stored commit DISAGREES with the declared one, that
+     * is shown, not reconciled. Silently preferring either is how a
+     * page ends up attributing results to a commit that did not
+     * produce them. */
+    if (!p) return '';
+    if (p.source !== 'evidence store (postgres)') {
+      return '<p class="cc-prov cc-prov-tree"><b>UNVERIFIED PROVENANCE</b> — '
+        + esc(p.why || 'read from disk') + '. Declared commit '
+        + '<code>' + esc(p.declared_sha) + '</code>.</p>';
+    }
+    var mismatch = (p.sha_matches_declared === false)
+      ? '<span class="cc-warn"> · the stored commit DISAGREES with the '
+        + 'declared <code>' + esc(p.declared_sha) + '</code>; the stored '
+        + 'one is shown because it travelled with the bytes</span>'
+      : '';
+    return '<p class="cc-prov cc-prov-store"><b>VERIFIED PROVENANCE</b> — '
+      + 'evidence store, commit <code>' + esc(p.source_sha) + '</code>, '
+      + 'sha256 <code>' + esc(String(p.digest || '').slice(0, 16)) + '</code>, '
+      + 'published ' + clock(p.published_at) + mismatch + '</p>';
   }
 
   function failuresHtml(r, i) {
@@ -590,6 +622,13 @@
       + (d.evidence_availability
         ? '<p class="cc-note">Evidence artifacts present: '
           + esc(JSON.stringify(d.evidence_availability.artifacts))
+          + '. From the evidence store: '
+          + ((d.evidence_availability.from_store || []).length
+             ? esc((d.evidence_availability.from_store || []).join(', '))
+             : 'none — everything below was read from disk and its '
+               + 'attribution is unverified')
+          + '. Store reachable: '
+          + esc(String((d.evidence_availability.store || {}).reachable))
           + '. ' + esc(d.evidence_availability.why_absent) + '</p>' : '')
       + '</footer>';
   }

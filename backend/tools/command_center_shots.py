@@ -28,11 +28,19 @@ FOCUS = {
     "disconnected": "live", "restart": "live", "stopped": "live",
     "exhausted-allowance": "live", "partial-coverage": "live",
     "failed": "live", "scheduled": "live", "unavailable": "management",
+    "evidence-from-store": "live",
 }
 
 # Scenarios that also get a management shot, because the overview is
 # what the reader sees first and its wording is part of the deliverable.
 ALSO_MANAGEMENT = ("collecting", "armed-no-frames", "scheduled", "failed")
+
+# The store scenario is about PROVENANCE, so it is shot on the economics
+# view too -- that is where a stored commit and digest change what the
+# reader can conclude.
+# ...and on the two views where a stored commit and digest change what
+# the reader can conclude.
+ALSO_ECONOMICS = ("evidence-from-store",)
 
 
 def get(base, path):
@@ -99,6 +107,8 @@ def main() -> int:
                 page.set_viewport_size(vp)
                 if width_name == "desktop" and name == "collecting":
                     views = VIEWS
+                elif name in ALSO_ECONOMICS:
+                    views = [focus, "tests", "economics"]
                 elif name in ALSO_MANAGEMENT:
                     views = [focus, "management"]
                 else:

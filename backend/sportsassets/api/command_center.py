@@ -48,14 +48,35 @@ class RetrievalIncomplete(Exception):
 
 # ── where the evidence artifacts live ────────────────────────────────
 #
-# THE PRODUCTION IMAGE DOES NOT CARRY THEM. `backend/Dockerfile` copies
-# `research/beta48/shadow`, the top-level JSON and exactly one
-# acceptance file (incentive_manifest.json) -- deliberately, so that
-# 4.9 MB of patches and suite XML stays out of a production image. So
-# in the deployed API the test and economic artifacts are ABSENT, and
-# every figure that depends on them renders UNKNOWN with that reason
-# named. It does not render zero and it does not render a stale number
-# from somewhere else.
+# TWO SOURCES, IN ORDER, AND THE PAGE IS TOLD WHICH ONE ANSWERED.
+#
+#   1. THE EVIDENCE STORE in Postgres (`bettor_evidence_store`). This is
+#      the production path. Each artifact carries the commit it was
+#      produced at, a SHA-256 of its exact bytes and the instant it was
+#      published, so a figure on screen can name the commit it
+#      describes.
+#
+#   2. THE WORKING TREE under `BETTOR_EVIDENCE_ROOT`. This is the
+#      development and preview path, and it is a fallback rather than a
+#      peer: a file on disk carries no commit and no digest, so anything
+#      read this way is labelled `provenance: "working tree"` and its
+#      source_sha is UNKNOWN.
+#
+# THE PRODUCTION IMAGE STILL DOES NOT CARRY THEM, deliberately --
+# `backend/Dockerfile` ships exactly one acceptance file so that 4.9 MB
+# of patches and suite XML stays out of a production image. That is why
+# the store exists. Before the store was wired the deployed API had no
+# route to this evidence at all and rendered UNKNOWN for all of it; that
+# was honest about an UNFINISHED INTEGRATION, not about a missing
+# measurement, and the two are different things.
+#
+# When NEITHER source has it, it is genuinely unavailable and UNKNOWN is
+# the right answer -- with "not published to the evidence store, and not
+# present on disk" as the stated reason.
+
+STORE_FIRST = "evidence store (postgres)"
+TREE_FALLBACK = "working tree (development)"
+
 
 def evidence_root() -> str:
     return os.environ.get("BETTOR_EVIDENCE_ROOT") or "research/beta48/acceptance"
@@ -70,24 +91,60 @@ def _artifact(name: str):
         return None, path
 
 
+def _text(name: str):
+    path = os.path.join(evidence_root(), name)
+    try:
+        with open(path, "r", encoding="utf-8") as fh:
+            return fh.read(), path
+    except Exception:                                          # noqa: BLE001
+        return None, path
+
+
+async def read_store(pool, names: list) -> dict:
+    """Every named artifact the store holds. Never raises.
+
+    A store that is absent or unreadable is NOT an error here: the
+    fallback covers it and the caller reports which source answered. It
+    would be an error to silently present a tree read as a store read,
+    which is why provenance travels with every hit.
+    """
+    if pool is None:
+        return {}
+    try:
+        from .. import bettor_evidence_store as ES
+        return await ES.latest_many(pool, names)
+    except Exception as exc:                                   # noqa: BLE001
+        log_detail = type(exc).__name__
+        return {"__error__": log_detail}
+
+
 # ── JUnit ────────────────────────────────────────────────────────────
 
 def parse_junit(path: str, *, name, kind, sha, environment,
-                superseded_by=None) -> dict:
-    """One JUnit file to one suite row.
+                superseded_by=None, body=None, artifact_label=None) -> dict:
+    """One JUnit document to one suite row.
 
     COMPLETION IS READ, NOT ASSUMED. pytest writes the XML at the end of
-    a run, so a file that parses is a run that finished -- but a file
+    a run, so a document that parses is a run that finished -- but one
     that is absent, truncated or malformed is an INCOMPLETE run, and
     `suite_row` withholds its counts rather than showing the prefix that
     happened to survive.
+
+    `body` is the document text when it came from the evidence store;
+    `path` is used only when reading from disk. The parse and every
+    refusal below are identical either way -- the same bytes must
+    produce the same row whichever side of the integration they arrived
+    from, or the store would be a second opinion rather than a
+    transport.
     """
+    label = artifact_label or path
     try:
-        root = ET.parse(path).getroot()
+        root = (ET.fromstring(body) if body is not None
+                else ET.parse(path).getroot())
     except Exception as exc:                                   # noqa: BLE001
         return CC.suite_row(name=name, kind=kind, sha=sha,
                             environment=environment, at=None, complete=False,
-                            artifact=path, superseded_by=superseded_by,
+                            artifact=label, superseded_by=superseded_by,
                             failure_ids=[])
     suites = ([root] if root.tag == "testsuite"
               else list(root.iter("testsuite")))
@@ -114,7 +171,7 @@ def parse_junit(path: str, *, name, kind, sha, environment,
                        environment=environment, at=at, complete=True,
                        passed=tests - failures - errors - skipped,
                        failed=failures + errors, skipped=skipped,
-                       failure_ids=failure_ids, artifact=path,
+                       failure_ids=failure_ids, artifact=label,
                        superseded_by=superseded_by)
     row["failures"] = failure_detail
     row["total"] = tests
@@ -140,31 +197,112 @@ SUITE_MANIFEST = [
 ]
 
 
-def load_suites() -> list:
+def load_suites(store: dict | None = None) -> list:
+    """Suite rows, PREFERRING the evidence store.
+
+    THE SHA ON A ROW IS THE COMMIT THE RUN TESTED, and where the store
+    answered it is read from the stored `source_sha` rather than from
+    the hardcoded entry in SUITE_MANIFEST. A declared SHA is a claim
+    someone typed; a stored one travelled with the bytes.
+    """
+    store = store or {}
     rows = []
     for spec in SUITE_MANIFEST:
-        path = os.path.join(evidence_root(), spec["file"])
-        rows.append(parse_junit(
-            path, name=spec["name"], kind=spec["kind"], sha=spec["sha"],
-            environment=spec["environment"],
-            superseded_by=spec.get("superseded_by")))
+        hit = store.get(spec["file"])
+        if hit:
+            row = parse_junit(
+                None, body=hit["body"], name=spec["name"],
+                kind=spec["kind"],
+                sha=hit.get("source_sha") or spec["sha"],
+                environment=spec["environment"],
+                superseded_by=spec.get("superseded_by"),
+                artifact_label="evidence store: %s@%s"
+                               % (hit["name"], hit["digest"][:12]))
+            row["provenance"] = {
+                "source": STORE_FIRST,
+                "source_sha": hit.get("source_sha"),
+                "digest": hit.get("digest"),
+                "published_at": CC.iso(hit.get("published_at")),
+                "size_bytes": hit.get("size_bytes"),
+                "declared_sha": spec["sha"],
+                "sha_matches_declared": (
+                    (hit.get("source_sha") or "")[:7] == spec["sha"][:7]),
+            }
+        else:
+            path = os.path.join(evidence_root(), spec["file"])
+            row = parse_junit(
+                path, name=spec["name"], kind=spec["kind"], sha=spec["sha"],
+                environment=spec["environment"],
+                superseded_by=spec.get("superseded_by"))
+            row["provenance"] = {
+                "source": TREE_FALLBACK,
+                "source_sha": None,
+                "digest": None,
+                "why": "read from disk, not from the evidence store: a "
+                       "file carries no commit and no digest, so its "
+                       "attribution is the declared one and nothing "
+                       "verified it",
+                "declared_sha": spec["sha"],
+            }
+        rows.append(row)
     return rows
 
 
-def load_artifacts() -> dict:
-    ev, ev_path = _artifact("evaluation.json")
-    opp, opp_path = _artifact("incentive_opportunity.json")
-    man, man_path = _artifact("incentive_manifest.json")
-    return {"evaluation": ev, "opportunity": opp, "manifest": man,
-            "paths": {"evaluation": ev_path, "opportunity": opp_path,
-                      "manifest": man_path},
-            "present": {"evaluation": ev is not None,
-                        "opportunity": opp is not None,
-                        "manifest": man is not None},
-            "why_absent": "the production image carries only "
-                          "incentive_manifest.json from acceptance/; the "
-                          "rest are evidence artifacts kept out of a "
-                          "production image on purpose"}
+ECON_ARTIFACTS = ("evaluation.json", "incentive_opportunity.json",
+                  "incentive_manifest.json")
+
+
+def load_artifacts(store: dict | None = None) -> dict:
+    """Economic artifacts, PREFERRING the evidence store.
+
+    A store hit is parsed from its stored bytes and carries its commit
+    and digest. A miss falls back to disk. A miss on BOTH is genuinely
+    unavailable, and the reason says which of the two things is true --
+    "never published" is a different fact from "not in this image".
+    """
+    store = store or {}
+    out, prov = {}, {}
+    for fname, key in (("evaluation.json", "evaluation"),
+                       ("incentive_opportunity.json", "opportunity"),
+                       ("incentive_manifest.json", "manifest")):
+        hit = store.get(fname)
+        if hit:
+            try:
+                out[key] = json.loads(hit["body"])
+                prov[key] = {"source": STORE_FIRST,
+                             "source_sha": hit.get("source_sha"),
+                             "digest": hit.get("digest"),
+                             "published_at": CC.iso(hit.get("published_at"))}
+                continue
+            except Exception:                                  # noqa: BLE001
+                prov[key] = {"source": STORE_FIRST, "unparseable": True,
+                             "digest": hit.get("digest"),
+                             "why": "stored bytes are not valid JSON; "
+                                    "falling back to disk"}
+        val, path = _artifact(fname)
+        out[key] = val
+        if key not in prov or val is not None:
+            prov[key] = {"source": TREE_FALLBACK if val is not None else None,
+                         "path": path,
+                         "source_sha": None, "digest": None,
+                         "why": None if val is not None else
+                                "not published to the evidence store, and "
+                                "not present on disk -- genuinely "
+                                "unavailable, which is what UNKNOWN means"}
+    present = {k: (out.get(k) is not None) for k in
+               ("evaluation", "opportunity", "manifest")}
+    return {"evaluation": out.get("evaluation"),
+            "opportunity": out.get("opportunity"),
+            "manifest": out.get("manifest"),
+            "provenance": prov,
+            "present": present,
+            "from_store": sorted(k for k, v in prov.items()
+                                 if v.get("source") == STORE_FIRST),
+            "why_absent": "an artifact absent from BOTH the evidence "
+                          "store and the working tree is genuinely "
+                          "unavailable. The production image ships only "
+                          "incentive_manifest.json from acceptance/ on "
+                          "purpose, which is why the store exists."}
 
 
 # ── the database side ────────────────────────────────────────────────
@@ -260,18 +398,21 @@ async def read_journal(pool, run_id: str) -> list:
     return out
 
 
-def deployed_identity() -> dict:
-    """The SHA this process is actually running, if anything recorded it."""
-    for var in ("RENDER_GIT_COMMIT", "GIT_COMMIT", "SOURCE_COMMIT",
-                "BETTOR_DEPLOYED_SHA"):
-        val = os.environ.get(var)
-        if val:
-            return {"sha": val, "source": "environment %s" % var}
-    return {"sha": None, "source": "environment",
-            "why": "no deployment stamped a commit into this process's "
-                   "environment; the running SHA is UNKNOWN rather than "
-                   "guessed from the working tree, which is not what is "
-                   "deployed"}
+async def deployed_identity(pool=None) -> dict:
+    """The SHA this process is actually running, from every source.
+
+    Delegates to `bettor_evidence_store.deployed_identity`, which reads
+    the environment, a build stamp and the evidence store's newest
+    source_sha, and reports disagreement rather than picking a winner.
+    Shaped here into the flat form `CC.build()` expects.
+    """
+    from .. import bettor_evidence_store as ES
+
+    got = await ES.deployed_identity(pool)
+    return {"sha": got["running_sha"],
+            "source": got["source"] or "environment / build stamp",
+            "why": got["why"],
+            "detail": got}
 
 
 def allowlist_from(artifacts: dict) -> list:
@@ -292,7 +433,17 @@ async def snapshot(pool=None, *, now=None) -> dict:
     control, control_state = await read_control(pool)
     probe = await read_probe(pool)
     run_row = await read_run_row(pool)
-    artifacts = load_artifacts()
+
+    # THE STORE FIRST, THE TREE AS FALLBACK. One round trip for every
+    # artifact the page can show; a store that is absent or unreadable
+    # returns nothing and the tree covers it, with provenance saying so.
+    wanted = [s["file"] for s in SUITE_MANIFEST] + list(ECON_ARTIFACTS)
+    store = await read_store(pool, wanted)
+    store_error = store.pop("__error__", None) if isinstance(store, dict) \
+        else None
+
+    artifacts = load_artifacts(store)
+    suites = load_suites(store)
 
     records = []
     if run_row and run_row.get("run_id"):
@@ -301,8 +452,8 @@ async def snapshot(pool=None, *, now=None) -> dict:
     payload = CC.build(records=records, control=control, probe=probe,
                        run_row=run_row,
                        allowlist=allowlist_from(artifacts),
-                       suites=load_suites(), artifacts=artifacts,
-                       deployed=deployed_identity(),
+                       suites=suites, artifacts=artifacts,
+                       deployed=await deployed_identity(pool),
                        now=now if now is not None else time.time())
     payload["views"]["live_operation"]["control_row"] = {
         "why": control_state.get("why"),
@@ -312,7 +463,17 @@ async def snapshot(pool=None, *, now=None) -> dict:
     }
     payload["evidence_availability"] = {
         "artifacts": artifacts["present"],
+        "provenance": artifacts["provenance"],
+        "from_store": artifacts["from_store"],
+        "store": {
+            "reachable": store_error is None,
+            "error": store_error,
+            "names_found": sorted(k for k in store) if store else [],
+            "table": "bettor_evidence_artifact",
+        },
         "root": evidence_root(),
         "why_absent": artifacts["why_absent"],
     }
+    payload["views"]["live_operation"]["identity"]["identity_detail"] = \
+        (await deployed_identity(pool))["detail"]
     return payload
