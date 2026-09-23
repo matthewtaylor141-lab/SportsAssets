@@ -22,7 +22,7 @@ on:
           - api-branch-get    # read the branch and autoDeploy of the api and the worker
           - api-branch-set    # confirm=DO: arg = branch; repoints ONLY sportsassets-api
           - metrics       # a service's memory (MB) and CPU per instance over the last N minutes (arg, default 120)
-          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | pause-on (DO) | pause-off (DO) | pause-state | mirror-preflight | mirror-rearm (DO) | mirror-register (DO) | mirror-frozen | obs-arm-incentive (DO) | obs-incentive | obs-incentive-journal | obs-incentive-markets | obs-incentive-rows[:OFFSET:LIMIT]
+          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | pause-on (DO) | pause-off (DO) | pause-state | mirror-preflight | mirror-rearm (DO) | mirror-register (DO) | mirror-frozen | obs-arm-incentive (DO) | obs-incentive | obs-incentive-journal | obs-incentive-markets | obs-incentive-rows[:OFFSET:LIMIT] | evidence-schema (DO) | evidence-inventory | evidence-drop (DO)
           - env-keys      # the service's env var KEYS (never values)
           - env-get       # arg = comma-separated OPERATOR FLAGS (LIVE_COPY_HALT, ...); values of flags only
           - env-set       # confirm=DO: arg = KEY=VALUE (value masked in the log; Render redeploys)
@@ -208,11 +208,11 @@ jobs:
             # release rides a commit id, not a push.
             deploy-api-commit)
               need_confirm
+              [ "$SERVICE" = "sportsassets-api" ] || echo "note: service='$SERVICE' is IGNORED; this action only ever deploys sportsassets-api"
               case "$ARG" in
                 [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
                 *) echo "refused: deploy-api-commit needs arg = a full 40-hex commit sha (got '$ARG')"; exit 1 ;;
               esac
-              [ "$SERVICE" = "sportsassets-api" ] || echo "note: service='$SERVICE' is IGNORED; this action only ever deploys sportsassets-api"
               API_ID=$(svc_id "sportsassets-api")
               [ -z "$API_ID" ] && { echo "no service named sportsassets-api"; exit 1; }
               API_TYPE=$(get "/services/$API_ID" | jq -r '.type // "?"')
@@ -420,6 +420,30 @@ jobs:
                   esac
                   HEAD=200000; PFMT="-A -t"
                   SQL="SELECT jsonb_build_object('boots', (SELECT jsonb_agg(boot_id ORDER BY t) FROM (SELECT boot_id, min(at) AS t FROM bettor_incentive_journal GROUP BY boot_id) q), 'slugs', (SELECT jsonb_agg(DISTINCT slug) FROM bettor_incentive_journal WHERE slug IS NOT NULL), 'base_at', (SELECT min(at) FROM bettor_incentive_journal), 'read_at', extract(epoch FROM now()), 'rows_total', (SELECT count(*) FROM bettor_incentive_journal), 'ladders_total', (SELECT count(*) FROM bettor_incentive_journal WHERE kind = 'LADDER'), 'encoding', 'boots ordered by first record, slugs alphabetical. Each ladder is [boot_index, ms_since_base_at, epoch, slug_index, bid_levels, ask_levels, class]; class 0=absent 1=INITIAL_LADDER 2=UPDATE 3=other. BOOK BODIES ARE NOT INCLUDED.')::text AS header; SELECT jsonb_build_object('boot_id', boot_id, 'at', at, 'kind', kind, 'epoch', epoch, 'slug', slug, 'payload', payload)::text AS meta_row FROM bettor_incentive_journal WHERE kind <> 'LADDER' ORDER BY at, id; WITH base AS (SELECT min(at) AS m FROM bettor_incentive_journal), bi AS (SELECT boot_id, (row_number() OVER (ORDER BY min(at))) - 1 AS i FROM bettor_incentive_journal GROUP BY boot_id), si AS (SELECT slug, (row_number() OVER (ORDER BY slug)) - 1 AS i FROM bettor_incentive_journal WHERE slug IS NOT NULL GROUP BY slug), j AS (SELECT * FROM bettor_incentive_journal WHERE kind = 'LADDER' ORDER BY at, id OFFSET COALESCE(NULLIF(split_part('$RANGE', ':', 1), '')::int, 0) LIMIT COALESCE(NULLIF(split_part('$RANGE', ':', 2), '')::int, 200000)) SELECT jsonb_agg(jsonb_build_array(bi.i, round((j.at - base.m) * 1000)::bigint, j.epoch, si.i, jsonb_array_length(COALESCE(j.payload->'bids','[]'::jsonb)), jsonb_array_length(COALESCE(j.payload->'offers','[]'::jsonb)), CASE COALESCE(j.payload->>'ladder_class','') WHEN 'INITIAL_LADDER' THEN 1 WHEN 'UPDATE' THEN 2 WHEN '' THEN 0 ELSE 3 END) ORDER BY j.at, j.id)::text AS ladders FROM j CROSS JOIN base JOIN bi ON bi.boot_id = j.boot_id JOIN si ON si.slug = j.slug; SELECT jsonb_build_object('control', (SELECT value FROM ingestion_state WHERE key = 'bettor_live_observation'), 'probe', (SELECT value FROM ingestion_state WHERE key = 'bettor_live_probe_state'), 'run_row', (SELECT value FROM ingestion_state WHERE key = 'bettor_incentive_run'), 'state_read_at', extract(epoch FROM now()))::text AS state;"; TO=60000 ;;
+                # [R84] THE EVIDENCE TABLE. Three statements, one per
+                # step of the release, and each is separately runnable.
+                #
+                # evidence-schema (DO)  create it, then READ BACK the
+                #                       columns and indexes. A CREATE
+                #                       that returned no error is not
+                #                       evidence the table is right;
+                #                       the catalog is.
+                # evidence-inventory    what is in it, by name and
+                #                       version, without bodies.
+                # evidence-drop (DO)    the rollback, and it REFUSES
+                #                       while rows exist. Published
+                #                       evidence is append-only and
+                #                       superseded versions are kept on
+                #                       purpose; a rollback that could
+                #                       erase them would be a worse
+                #                       outcome than the thing it undid.
+                #                       The API needs no rollback of its
+                #                       own here: with the table absent
+                #                       it falls back to the working
+                #                       tree and says so in provenance.
+                evidence-schema) need_confirm; SQL="CREATE TABLE IF NOT EXISTS bettor_evidence_artifact (id BIGSERIAL PRIMARY KEY, name TEXT NOT NULL, kind TEXT NOT NULL, source_sha TEXT NOT NULL, content_type TEXT NOT NULL, digest TEXT NOT NULL, size_bytes INTEGER NOT NULL, body TEXT NOT NULL, published_at DOUBLE PRECISION NOT NULL, note TEXT, attestation JSONB, superseded_by BIGINT); CREATE INDEX IF NOT EXISTS bettor_evidence_artifact_name ON bettor_evidence_artifact (name, published_at DESC); CREATE UNIQUE INDEX IF NOT EXISTS bettor_evidence_artifact_ident ON bettor_evidence_artifact (name, digest); SELECT column_name, data_type, is_nullable FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'bettor_evidence_artifact' ORDER BY ordinal_position; SELECT indexname FROM pg_indexes WHERE tablename = 'bettor_evidence_artifact' ORDER BY indexname;"; TO=60000 ;;
+                evidence-inventory) SQL="SELECT name, kind, source_sha, left(digest, 12) AS digest12, size_bytes, to_timestamp(published_at)::timestamptz(0) AS published, superseded_by, left(COALESCE(note,''), 60) AS note FROM bettor_evidence_artifact ORDER BY name, published_at; SELECT count(*) AS versions, count(DISTINCT name) AS artifacts, count(*) FILTER (WHERE superseded_by IS NULL) AS current_versions, pg_size_pretty(pg_total_relation_size('bettor_evidence_artifact')) AS size FROM bettor_evidence_artifact;"; TO=30000 ;;
+                evidence-drop) need_confirm; SQL="DO \$\$ DECLARE n bigint; BEGIN IF to_regclass('public.bettor_evidence_artifact') IS NULL THEN RAISE NOTICE 'already absent'; RETURN; END IF; EXECUTE 'SELECT count(*) FROM bettor_evidence_artifact' INTO n; IF n > 0 THEN RAISE EXCEPTION 'refused: % published rows exist; evidence is append-only and is not dropped to roll back code', n; END IF; DROP TABLE bettor_evidence_artifact; END \$\$; SELECT CASE WHEN to_regclass('public.bettor_evidence_artifact') IS NULL THEN 'table absent' ELSE 'table still present' END AS state;"; TO=60000 ;;
                 # [R09] see .github/workflows/RENDER_OPS_NOTES.md
                 mirror-preflight) SQL="SELECT what, value FROM (SELECT key AS what, left(value::text, 240) AS value FROM ingestion_state WHERE key IN ('mirror_live','mirror_live_whales','mirror_live_demoted','mirror_loss_stop','mapping_quarantine','premap_live','side_echo_last','live_trading_paused','copy_overspend_halt','live_verified_whales','live_clip_overrides','workers_boot','roster_auto_last') UNION ALL SELECT 'zz mirror_books live/24h', (SELECT count(*) FILTER (WHERE state <> 'closed') || '/' || count(*) FILTER (WHERE opened_at > now() - interval '24 hours') FROM mirror_books) UNION ALL SELECT 'zz mirror_orders by state', (SELECT COALESCE(string_agg(state || '=' || n, ' ' ORDER BY state), 'none') FROM (SELECT state, count(*) AS n FROM mirror_orders GROUP BY state) s) UNION ALL SELECT 'zz kalshi_claims rn1 24h', (SELECT count(*) FROM kalshi_claims WHERE lower(whale) = 'rn1' AND claimed_at > now() - interval '24 hours')::text UNION ALL SELECT 'zz live_orders 24h by status', (SELECT COALESCE(string_agg(status || '=' || n, ' ' ORDER BY status), 'none') FROM (SELECT status, count(*) AS n FROM live_orders WHERE placed_at > now() - interval '24 hours' GROUP BY status) s) UNION ALL SELECT 'zz live_orders last placed', (SELECT COALESCE(max(placed_at)::text, 'none') FROM live_orders)) t ORDER BY what;"; TO=30000 ;;
                 # [R10] see .github/workflows/RENDER_OPS_NOTES.md
