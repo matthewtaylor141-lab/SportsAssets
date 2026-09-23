@@ -91,6 +91,7 @@ rebates occur only on execution.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import date as _date
 from decimal import Decimal, ROUND_HALF_EVEN
 
 SOURCE = "https://docs.polymarket.us/fees"
@@ -267,9 +268,29 @@ def for_date(iso_date: str) -> Schedule:
     was charged, and a caller that cannot name the date is a caller that
     would silently apply 0.0695 to a July fill.
     """
+    # THE LENGTH CHECK ALONE WAS NOT ENOUGH, and the gap was a silent
+    # one. Any string of ten or more characters passed it, and the
+    # comparison below is LEXICOGRAPHIC -- so "not-a-date" sorted above
+    # every effective_from and quietly selected the NEWEST schedule.
+    # That is exactly the "silently apply 0.0695 to a July fill"
+    # outcome this function's docstring promises to refuse, reached by
+    # a malformed date instead of a missing one. Found when a caller
+    # asserted the refusal and got a Schedule back.
+    #
+    # The existing test covered None, "", "2026" and an int -- all of
+    # which fail on type or length. None of them was long enough to
+    # reach the comparison, which is why this survived.
     if not isinstance(iso_date, str) or len(iso_date) < 10:
         raise ValueError("a fee date must be an ISO date, got %r" % (iso_date,))
     day = iso_date[:10]
+    try:
+        _date.fromisoformat(day)
+    except ValueError:
+        raise ValueError(
+            "a fee date must be a real ISO date (YYYY-MM-DD), got %r. It is "
+            "refused rather than compared, because string comparison would "
+            "rank a malformed date above every published schedule and "
+            "return the newest one." % (iso_date,)) from None
     chosen = None
     for s in SCHEDULES:
         if s.effective_from <= day:

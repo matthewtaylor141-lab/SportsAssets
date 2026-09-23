@@ -28,10 +28,30 @@ internally while describing nothing. So:
                            holds the event loop and it never blocks a
                            request.
 
-    RESTART-SAFE           orders, fills, positions, cash and the
-                           cursor are in Postgres. The in-memory Desk
-                           is rebuilt from them on start; it is a cache
-                           of the ledger, never the ledger.
+    RESTART-SAFE           cash, legs and the cursor are read back from
+                           Postgres by `_restore` before the first
+                           event is stepped. Fills are now persisted
+                           per fill. OPEN ORDERS ARE NOT RESTORED: the
+                           consumption ledger is not persisted, so
+                           re-arming a resting order could fill it a
+                           second time against evidence already
+                           consumed. They are marked EXPIRED with that
+                           reason instead.
+
+CORRECTION, 2026-09-23. THIS PARAGRAPH WAS FALSE WHEN FIRST WRITTEN.
+It claimed the Desk was "rebuilt from them on start; a cache of the
+ledger, never the ledger". No such rebuild existed. `run()` constructed
+a fresh `Desk` and `_load_cursor` read the cursor and nothing else, so
+every process start began the book again at `starting_cash` with no
+positions, and the first `_persist` then overwrote
+`bettor_desk_state.cash_usd` with the fresh figure.
+
+None of the checks in place could see it. `invariant_ok` compares a
+desk against its OWN starting cash, so a freshly emptied book
+reconciles perfectly; the cursor still advanced; one state row still
+existed; the earliest decision timestamps never moved because no
+history was re-read. I cited those four and reported "restart-safety
+demonstrated", and that conclusion did not follow from them.
 
 ────────────────────────────────────────────────────────────────────
 WHAT IT CANNOT DO, STRUCTURALLY.
@@ -65,6 +85,7 @@ import json
 import logging
 import os
 import time
+import uuid
 
 from decimal import Decimal
 
@@ -85,6 +106,22 @@ ENABLE_ENV = "BETTOR_DESK_LOOP"
 # holder releases it by disconnecting -- which is what makes a killed
 # instance hand over without anyone having to time it out.
 LOCK_KEY = 7723901544120031  # 'bettor-desk-loop'
+
+# ONE ID PER PROCESS, generated once at import.
+#
+# `boot_id` was previously computed as `str(int(time.time()))` INSIDE
+# each INSERT, so it changed from row to row and identified a write
+# rather than a boot. Restarts were therefore not locatable in the
+# historical ledger at all -- which is why the correction run has to
+# report the epochs of that period as NOT_IDENTIFIABLE rather than
+# segment them.
+EPOCH_ID = uuid.uuid4().hex
+
+# THE ONE PLACE THE ASSUMED QUEUE SHARE IS WRITTEN. It is both the
+# runtime default and the value the command centre displays, so the
+# number management reads cannot drift from the number that produced
+# the fills. It remains an ASSUMPTION: P_FILL is NOT_IDENTIFIED.
+QUEUE_SHARE_DEFAULT = 0.25
 
 CYCLE_S = float(os.getenv("BETTOR_DESK_CYCLE_S", "20"))
 BATCH = int(os.getenv("BETTOR_DESK_BATCH", "500"))
@@ -118,6 +155,237 @@ async def _acquire(conn) -> bool:
     """Session-level advisory lock. True only for the single writer."""
     got = await conn.fetchval("SELECT pg_try_advisory_lock($1)", LOCK_KEY)
     return bool(got)
+
+
+async def _open_epoch(conn, desk_id, desk, cursor, restore) -> None:
+    """Record where this book begins, so a restart is visible."""
+    await conn.execute(
+        """
+        UPDATE bettor_desk_epochs SET ended_at = now()
+         WHERE desk_id = $1 AND ended_at IS NULL
+        """, desk_id)
+    await conn.execute(
+        """
+        INSERT INTO bettor_desk_epochs
+               (epoch_id, desk_id, starting_cash, restored,
+                restore_detail, cursor_at_start, code_version)
+        VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7)
+        ON CONFLICT (epoch_id) DO NOTHING
+        """, EPOCH_ID, desk_id, float(desk.pf.starting_cash),
+        bool(restore.get("restored")), _js(restore), int(cursor),
+        DK.VERSION)
+
+
+async def apply_corrections(conn, desk_id) -> dict:
+    """Publish the fee correction ONCE, under the writer's lock.
+
+    IDEMPOTENCE HAS TWO INDEPENDENT GUARDS, because one of them is a
+    convention and the other is the database:
+
+      1. `bettor_desk_correction_runs` has a UNIQUE index on
+         (desk_id, version). A second run of the same version fails the
+         insert and returns without writing a single correction row.
+      2. `bettor_desk_corrections.correction_id` is
+         version:kind:subject, so even a caller that fabricated a fresh
+         run_id could not apply the same subject twice.
+
+    THE ORIGINALS ARE NOT TOUCHED. This reads `bettor_desk_orders` and
+    writes only to the two correction tables.
+    """
+    from . import bettor_desk_correction as CORR
+
+    run_id = "%s:%s" % (CORR.VERSION, desk_id)
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                """
+                INSERT INTO bettor_desk_correction_runs
+                       (run_id, version, desk_id, code_version,
+                        accounting_status)
+                VALUES ($1,$2,$3,$4,'PENDING')
+                """, run_id, CORR.VERSION, desk_id, DK.VERSION)
+    except Exception as exc:                                # noqa: BLE001
+        # The unique index did its job: this version is already applied.
+        log.info("desk correction %s already applied (%s)",
+                 CORR.VERSION, type(exc).__name__)
+        return {"applied": False, "reason": "ALREADY_APPLIED"}
+
+    rows = await conn.fetch(
+        """
+        SELECT order_id, intent, filled_qty::float8 AS filled_qty,
+               avg_fill_price::float8 AS avg_fill_price,
+               fees_usd::float8 AS fees_usd, placed_at, terminal_at
+          FROM bettor_desk_orders
+         WHERE desk_id = $1
+        """, desk_id)
+
+    # EPOCHS OF THE HISTORICAL PERIOD ARE NOT IDENTIFIABLE. `boot_id`
+    # was a per-row timestamp, so a restart cannot be located in rows
+    # written before this release. Rows carrying a real `epoch_id` are
+    # the ones written from here on.
+    seg = await conn.fetchval(
+        "SELECT count(*) FROM bettor_desk_ledger"
+        " WHERE desk_id = $1 AND epoch_id IS NOT NULL", desk_id)
+    total = await conn.fetchval(
+        "SELECT count(*) FROM bettor_desk_ledger WHERE desk_id = $1",
+        desk_id)
+    epochs_identifiable = bool(total) and int(seg) == int(total)
+
+    corr = [CORR.order_correction(dict(r)) for r in rows]
+    summary = CORR.summarise(corr, epochs_identifiable=epochs_identifiable)
+
+    written = 0
+    async with conn.transaction():
+        for c in corr:
+            cid = "%s:ORDER:%s" % (CORR.VERSION, c["subject_id"])
+            res = await conn.execute(
+                """
+                INSERT INTO bettor_desk_corrections
+                       (correction_id, run_id, version, desk_id,
+                        subject_kind, subject_id, status, reason,
+                        schedule_id, original_fees_usd,
+                        delta_fees_lower_usd, delta_fees_upper_usd,
+                        delta_realized_lower_usd, delta_realized_upper_usd,
+                        delta_cash_lower_usd, delta_cash_upper_usd,
+                        delta_basis_usd, detail)
+                VALUES ($1,$2,$3,$4,'ORDER',$5,$6,$7,$8,$9,$10,$11,$12,
+                        $13,$14,$15,$16,$17::jsonb)
+                ON CONFLICT (correction_id) DO NOTHING
+                """, cid, run_id, CORR.VERSION, desk_id,
+                c["subject_id"], c["status"], c["reason"],
+                c.get("schedule_id"), c.get("original_fees_usd"),
+                c.get("delta_fees_lower_usd"), c.get("delta_fees_upper_usd"),
+                c.get("delta_realized_lower_usd"),
+                c.get("delta_realized_upper_usd"),
+                c.get("delta_cash_lower_usd"), c.get("delta_cash_upper_usd"),
+                c.get("delta_basis_usd"), _js(c.get("detail")))
+            if res and res.endswith("1"):
+                written += 1
+        await conn.execute(
+            """
+            UPDATE bettor_desk_correction_runs
+               SET finished_at = now(), subjects_seen = $2,
+                   subjects_exact = $3, subjects_bounded = $4,
+                   subjects_incomplete = $5, subjects_written = $6,
+                   accounting_status = $7, incomplete_reasons = $8::jsonb,
+                   totals = $9::jsonb, reconciles = $10,
+                   reconcile_detail = $11::jsonb
+             WHERE run_id = $1
+            """, run_id, len(corr),
+            summary["counts"].get(CORR.EXACT, 0),
+            summary["counts"].get(CORR.BOUNDED, 0),
+            summary["counts"].get(CORR.INCOMPLETE, 0),
+            written, summary["accounting_status"],
+            _js(summary["incomplete_reasons"]), _js(summary["totals"]),
+            bool(summary["reconcile"]["ok"]), _js(summary["reconcile"]))
+    log.info("desk correction %s: %d subjects, %d written, status %s",
+             CORR.VERSION, len(corr), written,
+             summary["accounting_status"])
+    return {"applied": True, "written": written, **summary}
+
+
+async def _restore(conn, desk_id, desk) -> dict:
+    """REBUILD THE BOOK FROM POSTGRES. This did not exist, and the
+    module docstring claimed it did.
+
+    THE DEFECT. `run()` constructed a fresh `Desk` and called
+    `_load_cursor`, which reads `bettor_desk_state.cursor_event_id` and
+    nothing else. Cash, legs and orders were never read back, so every
+    process start began the book again at `starting_cash` with no
+    positions -- and the first `_persist` then overwrote
+    `bettor_desk_state.cash_usd` with the fresh desk's figure.
+
+    IT PASSED EVERY CHECK WE HAD. `invariant_ok` stayed true because a
+    fresh desk is internally consistent with its OWN starting cash; the
+    cursor still advanced monotonically; exactly one state row still
+    existed; and the decisions' earliest timestamps never moved,
+    because no history was re-read. None of those can see a book that
+    was silently discarded and begun again. I reported "restart-safety
+    demonstrated" on the strength of them, and that was wrong.
+
+    WHAT IS RESTORED, and what deliberately is not:
+
+        cash, legs      from bettor_desk_positions and the state row.
+        open orders     NOT restored. An order resting in the table
+                        cannot be matched again without its
+                        consumption ledger, which was never written
+                        either; re-arming it would risk filling it a
+                        second time against evidence already consumed.
+                        They are marked terminal instead -- an expiry
+                        that is recorded as what it is.
+
+    The return value is written to `bettor_desk_epochs.restore_detail`
+    so the first cycle after a restart can be read rather than assumed.
+    """
+    st = await conn.fetchrow(
+        "SELECT cash_usd::float8 AS cash, starting_cash_usd::float8 AS start"
+        "  FROM bettor_desk_state WHERE desk_id = $1", desk_id)
+    legs = await conn.fetch(
+        """
+        SELECT condition_id, outcome_index, qty::float8 AS qty,
+               cost_basis_usd::float8 AS cost,
+               realized_pnl_usd::float8 AS realized,
+               fees_usd::float8 AS fees,
+               extract(epoch FROM opened_at)::float8 AS opened,
+               settled, settled_payout::float8 AS payout
+          FROM bettor_desk_positions
+         WHERE desk_id = $1
+        """, desk_id)
+
+    if st is None and not legs:
+        return {"restored": False,
+                "reason": "NO_PRIOR_STATE: this is a first start, not a "
+                          "restart. The book begins at starting_cash."}
+
+    if st is not None and st["cash"] is not None:
+        desk.pf.cash = float(st["cash"])
+    if st is not None and st["start"] is not None:
+        desk.pf.starting_cash = float(st["start"])
+
+    realized = 0.0
+    for r in legs:
+        leg = desk.pf._leg(r["condition_id"], r["outcome_index"])
+        leg["qty"] = float(r["qty"] or 0.0)
+        leg["cost"] = float(r["cost"] or 0.0)
+        leg["realized"] = float(r["realized"] or 0.0)
+        leg["fees"] = float(r["fees"] or 0.0)
+        leg["opened_at"] = r["opened"]
+        leg["settled"] = bool(r["settled"])
+        leg["payout"] = r["payout"]
+        realized += leg["realized"]
+        desk.pf.fees += leg["fees"]
+    desk.pf.realized = realized
+
+    # ORDERS RESTING AT THE MOMENT OF THE RESTART ARE CLOSED, not
+    # resurrected, and the reason is written on them rather than left
+    # to be inferred from a gap.
+    closed = await conn.execute(
+        """
+        UPDATE bettor_desk_orders
+           SET state = 'EXPIRED',
+               state_reason = 'PROCESS_RESTART: the consumption ledger '
+                              'is not persisted, so re-arming this order '
+                              'could fill it twice against evidence '
+                              'already consumed',
+               terminal_at = now(), updated_at = now()
+         WHERE desk_id = $1
+           AND state IN ('RESTING', 'PARTIALLY_FILLED', 'CANCEL_PENDING',
+                         'PROPOSED')
+        """, desk_id)
+
+    inv = desk.pf.invariant()
+    return {"restored": True, "legs": len(legs),
+            "cash_usd": round(desk.pf.cash, 2),
+            "realized_usd": round(desk.pf.realized, 2),
+            "inventory_cost_usd": round(desk.pf.inventory_cost(), 2),
+            "orders_closed_on_restart": closed,
+            "invariant_after_restore": inv,
+            # THE RESTORE IS NOT TRUSTED BLINDLY. If the rebuilt book
+            # does not satisfy the identity, that is reported here and
+            # the epoch row carries it; a restore that silently
+            # produced an inconsistent book would be worse than no
+            # restore at all.
+            "reconciles": bool(inv["ok"])}
 
 
 async def _load_cursor(conn, desk_id) -> int:
@@ -213,7 +481,7 @@ def live_fee_fn(qty, price, maker):
 
 
 async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
-              fee_fn=live_fee_fn, queue_share=0.25):
+              fee_fn=live_fee_fn, queue_share=QUEUE_SHARE_DEFAULT):
     """The loop. Returns only when cancelled."""
     if not enabled():
         _status.update(state=STATE_DISABLED,
@@ -246,16 +514,28 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
         # reporting ERROR.
         try:
             cursor = await _load_cursor(conn, desk_id)
+            # THE BOOK COMES BACK BEFORE THE FIRST EVENT IS STEPPED.
+            # Restoring after the first cycle would book that cycle's
+            # fills against an empty portfolio and then overwrite them.
+            restore = await _restore(conn, desk_id, desk)
+            await _open_epoch(conn, desk_id, desk, cursor, restore)
+            # THE CORRECTION RUNS HERE, under the writer lock, exactly
+            # once per version. Holding the lock is what makes it safe;
+            # the unique index on (desk_id, version) is what makes it
+            # idempotent even if the lock were lost.
+            await apply_corrections(conn, desk_id)
         except Exception as exc:                            # noqa: BLE001
             _status.update(state=STATE_ERROR,
                            error="STARTUP: %s: %s" % (type(exc).__name__,
                                                       str(exc)[:200]))
-            log.exception("desk loop could not read its cursor")
+            log.exception("desk loop could not complete startup")
             while True:
                 await asyncio.sleep(CYCLE_S)
 
-        _status.update(state=STATE_RUNNING, since=time.time(), error=None)
-        log.info("desk loop RUNNING from event id %s", cursor)
+        _status.update(state=STATE_RUNNING, since=time.time(), error=None,
+                       epoch_id=EPOCH_ID, restore=restore)
+        log.info("desk loop RUNNING from event id %s (epoch %s, restored "
+                 "%s)", cursor, EPOCH_ID, restore.get("restored"))
 
         while True:
             try:
@@ -311,7 +591,7 @@ async def _persist(conn, desk_id, desk, cursor):
                         $15::jsonb,$16::jsonb,$17)
                 ON CONFLICT (desk_decision_id) DO NOTHING
                 """,
-                d["desk_decision_id"], desk_id, str(int(time.time())),
+                d["desk_decision_id"], desk_id, EPOCH_ID,
                 float(d["at"]), d.get("condition_id"),
                 d.get("outcome_index"), d["action"], d["reason"],
                 d["policy_version"], d.get("learned_artifact_sha") or "",
@@ -334,7 +614,7 @@ async def _persist(conn, desk_id, desk, cursor):
                SET cursor_event_id = EXCLUDED.cursor_event_id,
                    cash_usd = EXCLUDED.cash_usd,
                    updated_at = now()
-            """, desk_id, str(int(time.time())), DK.POLICY_VERSION,
+            """, desk_id, EPOCH_ID, DK.POLICY_VERSION,
             desk.policy.curve_sha, int(cursor),
             float(desk.pf.cash), float(desk.pf.starting_cash))
 
@@ -360,11 +640,43 @@ async def _persist(conn, desk_id, desk, cursor):
                        state_reason = EXCLUDED.state_reason,
                        terminal_at = EXCLUDED.terminal_at,
                        updated_at = now()
-                """, o.order_id, desk_id, str(int(time.time())),
+                """, o.order_id, desk_id, EPOCH_ID,
                 o.decision_id, o.condition_id, o.outcome_index, o.side,
                 o.intent, o.limit_price, o.qty, o.filled_qty, o.notional,
                 o.avg_fill_price, o.fees, o.state, o.state_reason,
                 o.placed_at, o.expires_at, o.terminal_at)
+
+            # EVERY FILL, PER FILL. This table was created by migration
+            # 094 and never written, which is the whole reason today's
+            # fee correction can only be an INTERVAL: PMUS rounds per
+            # fill, and an order's average price cannot reconstruct the
+            # sum of independently rounded amounts.
+            #
+            # The evidence id is the natural key, so re-reading an
+            # event after a failed cycle cannot book the fill twice.
+            for i, f in enumerate(o.fills):
+                await conn.execute(
+                    """
+                    INSERT INTO bettor_desk_fills
+                           (fill_id, order_id, at, qty, price, fee_usd,
+                            liquidity, evidence_kind, evidence_id,
+                            evidence_ts, exec_model)
+                    VALUES ($1,$2,to_timestamp($3),$4,$5,$6,$7,$8,$9,
+                            to_timestamp($10),$11)
+                    ON CONFLICT (fill_id) DO NOTHING
+                    """,
+                    # THE KEYS ARE READ WITHOUT DEFAULTS ON PURPOSE.
+                    # My first version reached for f["fee"], which the
+                    # engine does not produce -- it writes `fee_usd` --
+                    # so a `.get("fee", 0.0)` would have written 0.00
+                    # into every row and recreated, in the fills table,
+                    # the exact fee-free book this release exists to
+                    # correct. A KeyError here fails the cycle loudly.
+                    "%s:%d" % (o.order_id, i), o.order_id,
+                    float(f["at"]), float(f["qty"]), float(f["price"]),
+                    float(f["fee_usd"]), f["liquidity"],
+                    f["evidence_kind"], str(f["evidence_id"]),
+                    float(f["at"]), f["exec_model"])
 
         for (cond, oi), leg in desk.pf.legs.items():
             await conn.execute(
@@ -397,10 +709,10 @@ async def _persist(conn, desk_id, desk, cursor):
                     inventory_cost, inventory_mark, mark_basis,
                     realized_pnl_usd, unrealized_pnl_usd, fees_usd,
                     open_orders, open_positions, invariant_ok,
-                    invariant_detail)
+                    invariant_detail, epoch_id)
             VALUES ($1,$2,now(),$3,$4,$5,NULL,$6,$7,NULL,$8,$9,$10,$11,
-                    $12::jsonb)
-            """, desk_id, str(int(time.time())),
+                    $12::jsonb,$13)
+            """, desk_id, EPOCH_ID,
             float(desk.pf.cash), float(desk.committed_usd()),
             float(desk.pf.inventory_cost()),
             "NOT_IDENTIFIED: no contemporaneous book is retained for "
@@ -416,7 +728,8 @@ async def _persist(conn, desk_id, desk, cursor):
             bool(inv["ok"]),
             _js(dict(inv, fee_basis=desk.fee_basis,
                      pnl_is_net_of_fees=(
-                         desk.fee_basis == DK.FEE_BASIS_APPLIED))))
+                         desk.fee_basis == DK.FEE_BASIS_APPLIED))),
+            EPOCH_ID)
 
     # DRAIN ONLY WHAT WAS COMMITTED. The transaction has returned, so
     # these rows are durable; dropping them keeps the in-memory desk a

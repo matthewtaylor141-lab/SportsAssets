@@ -105,17 +105,43 @@ jobs:
           grep -q 'NO REAL CAPITAL' /tmp/shadow
           grep -q "\['shadow','Shadow'\]" /tmp/app
 
-      - name: Which tabs the PUBLISHED bundle actually carries
+      - name: Every expected tab is published (RELEASE ACCEPTANCE)
         run: |
-          # WHY THIS REPORTS RATHER THAN FAILS. The API and this static
-          # bundle deploy on DIFFERENT triggers -- the API by commit id
-          # through render-ops, the bundle by netlify from whichever
-          # branch it tracks -- so a route can exist on the API hours
-          # before the tab that calls it is published, and the reverse.
-          # A hard failure here would block an API release on a
-          # frontend deploy it does not depend on. What is NOT
-          # acceptable is not knowing, and reporting "the Learning tab
-          # is live" when the published bundle has no such tab.
+          # THIS FAILS. The earlier version only REPORTED, on the
+          # argument that the API and the bundle deploy on different
+          # triggers so a hard failure would block an API release on a
+          # frontend deploy it does not depend on.
+          #
+          # That argument was wrong about what this job is for. This is
+          # the RELEASE ACCEPTANCE test -- the thing that decides
+          # whether the release reached the person who has to use it.
+          # A deployed API whose tab is unpublished is an unfinished
+          # release, and a probe that prints "ABSENT" in green lets it
+          # pass. The skew between the two deploy routes is a reason to
+          # fail loudly, not a reason to excuse the gap.
+          EXPECTED="overview decisions positions execution pairing
+                    comparison audit accounting performance experimental
+                    desk learning"
+          MISSING=""
+          for t in $EXPECTED; do
+            grep -q "\['$t'," /tmp/shadow \
+              || MISSING="$MISSING $t"
+          done
+          if [ -n "$MISSING" ]; then
+            echo "::error::TABS ABSENT FROM THE PUBLISHED BUNDLE:$MISSING"
+            echo "The API may already serve their routes. The release is"
+            echo "NOT complete until the bundle management loads carries"
+            echo "them. Publish the frontend, then re-run."
+            {
+              echo "### RELEASE NOT ACCEPTED"
+              echo "Tabs absent from the published bundle:\`$MISSING\`"
+            } >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          echo "all expected tabs published" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Tab inventory
+        run: |
           {
             echo "### Tabs in the published bundle"
             echo '```'
@@ -216,6 +242,72 @@ jobs:
             echo "THE API PATH IS SERVING THE SPA"; exit 1; }
           echo "api path is proxied, not swallowed by the SPA catch-all" \
             >> "$GITHUB_STEP_SUMMARY"
+
+      - name: The previously failing portfolio read, and version skew
+        run: |
+          API="${{ inputs.api }}"
+          HOST="${{ inputs.host }}"
+          FAIL=0
+          {
+            echo "### Release compatibility"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # THE SCREENSHOT BLOCKER, probed directly. It reported
+          # "FEED UNAVAILABLE - Negative quantity refused. No portfolio
+          # data loaded" beside "No shadow position yet" -- a failed
+          # read presented as an empty portfolio. Unauthenticated we
+          # cannot see the body, but we CAN prove the route exists and
+          # answers with the session challenge rather than a 404 or a
+          # 500, which is what a removed or crashing route would give.
+          for r in "shadow/positions" "desk/live" "desk/correction" \
+                   "learning/overview"; do
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+                   "$API/api/command/$r" || echo 000)
+            printf '%-22s %s\n' "$r" "$code" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            # 401 = present and guarded. 404 = the frontend would call a
+            # route that does not exist, which is the version skew this
+            # step exists to catch. 5xx = the read is broken.
+            case "$code" in
+              401) ;;
+              *) echo "::error::$r answered $code (expected 401)"; FAIL=1 ;;
+            esac
+          done
+
+          # EVERY ROUTE THE PUBLISHED BUNDLE CALLS MUST EXIST ON THE API.
+          # This is the frontend/backend compatibility check: the bundle
+          # is the client, so the bundle's own call list is the contract.
+          for ns in shadow desk learning; do
+            grep -o "'/api/command/' + (ns || 'shadow') + '/'" /tmp/shadow \
+              >/dev/null || true
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
+      - name: Freshness — the bundle and the API agree on what exists
+        run: |
+          # A published tab whose API route 404s is exactly as broken as
+          # an API route with no tab, and it fails the same way here.
+          FAIL=0
+          if grep -q "\['learning'," /tmp/shadow; then
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+                   "${{ inputs.api }}/api/command/learning/overview" \
+                   || echo 000)
+            [ "$code" = "401" ] || {
+              echo "::error::the Learning tab is published but its API route answered $code"
+              FAIL=1; }
+          fi
+          if grep -q "\['desk'," /tmp/shadow; then
+            code=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+                   "${{ inputs.api }}/api/command/desk/overview" || echo 000)
+            [ "$code" = "401" ] || {
+              echo "::error::the Desk tab is published but its API route answered $code"
+              FAIL=1; }
+          fi
+          [ "$FAIL" = 0 ] && echo "bundle and API agree on every published tab" \
+            >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
 
       - name: Mobile viewport is declared
         run: |

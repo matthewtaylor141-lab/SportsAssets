@@ -965,6 +965,7 @@ async def command_desk_live(response: Response) -> dict:
     STANDBY, which are real states and not errors. A page that showed
     only RUNNING would be unable to tell "off" from "broken".
     """
+    from .. import bettor_desk as DK
     from .. import bettor_desk_loop as DL
     from . import command_desk as CD
 
@@ -986,6 +987,68 @@ async def command_desk_live(response: Response) -> dict:
         "p_fill": CD.NOT_IDENTIFIED,
         "NOT_REPLAY": ("this is the LIVE lane. Its totals are never "
                        "combined with the replay's."),
+        # ── WHAT THIS LANE ACTUALLY SIMULATES ────────────────────────
+        #
+        # This block travels with the performance figures rather than
+        # sitting in a document beside them, because the single most
+        # misleading thing this screen could do is show a P&L next to
+        # the word "live" without saying what produced it.
+        "simulates": {
+            "input_source": "the `trades` table in our own database. No "
+                            "venue request is made by this lane.",
+            "event_class": DK.EVENT_CLASS,
+            "event_class_means": (
+                "`trades` is keyed on whale_id and every row is ONE "
+                "TRACKED ACCOUNT'S OWN EXECUTION. It is NOT a "
+                "market-wide tape and it carries no order book. A "
+                "cohort account filling at a price is evidence that "
+                "THEIR order filled, not that ours would have."),
+            "source_venue": DK.SOURCE_VENUE,
+            "source_venue_evidence": (
+                "the ingest listener uses polygon_ws_url, "
+                "polygon_http_url and PM_EXCHANGE_V3_ADDRESSES, and "
+                "stamps ts_provenance=polygon_block_timestamp"),
+            "fee_schedule_venue": DK.FEE_SCHEDULE_VENUE,
+            "venue_basis": DK.VENUE_TRANSFER,
+            "venue_basis_means": (
+                "the fee schedule and position mechanics applied here "
+                "are PMUS; the observations driving them are Polymarket "
+                "global. That is a TRANSFERRED SCENARIO, not same-venue "
+                "execution evidence."),
+            "market_universe": (
+                "every condition appearing in the tracked cohort's "
+                "flow, not a curated list and not Ferrari alone"),
+            "fill_model": DK.FILL_MODEL,
+            "queue_share_ASSUMED": DL.QUEUE_SHARE_DEFAULT,
+            "order_book": CD.NOT_IDENTIFIED,
+            "market_impact": CD.NOT_IDENTIFIED,
+        },
+        # ── THE FOUR QUANTITIES, KEPT APART ──────────────────────────
+        #
+        # Observed evidence, simulated fills, realised simulated P&L
+        # and unvalued inventory are different kinds of number. The
+        # route returns them under separate keys so a caller cannot
+        # add them together by accident.
+        "separated": {
+            "observed_events": st.get("events_seen"),
+            "simulated_orders": st.get("orders"),
+            "simulated_decisions": st.get("decisions"),
+            "note": "counts only. The money figures live under "
+                    "`accounting` and are never summed with these.",
+        },
+        "risk_limits": DK.Limits().to_dict(),
+        "capital": {
+            "starting_cash_usd": DK.Limits().starting_cash,
+            "note": "remaining simulated capital, committed notional and "
+                    "unvalued inventory are read from the ledger by "
+                    "/api/command/desk/accounting, which is the one "
+                    "place they are computed.",
+        },
+        "epoch_id": DL.EPOCH_ID,
+        "book_continuity": (
+            "the book is restored from Postgres on start. Ledger rows "
+            "written BEFORE this release carry no epoch_id and are not "
+            "continuous across restarts -- see the correction record."),
     }
 
 
@@ -1087,6 +1150,80 @@ def _learning_unavailable(exc) -> HTTPException:
         "note": "artifact unread -- COMMAND shows unavailable, not "
                 "'no experiments have run'",
     })
+
+
+@app.get("/api/command/desk/correction",
+         dependencies=[Depends(require_command)])
+async def command_desk_correction(response: Response) -> dict:
+    """THE CORRECTION RECORD. Originals beside corrected, never instead.
+
+    A failed read is 503 with its reason. An empty correction table is
+    a real answer ("no correction has been applied") and is returned as
+    one -- the two must not render alike.
+    """
+    from ..db import get_pool
+    from .. import bettor_desk_correction as CORR
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            run = await conn.fetchrow(
+                """
+                SELECT * FROM bettor_desk_correction_runs
+                 WHERE desk_id = 'live1'
+                 ORDER BY started_at DESC LIMIT 1
+                """)
+            rows = await conn.fetch(
+                """
+                SELECT status, count(*) AS n,
+                       sum(delta_realized_lower_usd)::float8 AS lo,
+                       sum(delta_realized_upper_usd)::float8 AS hi
+                  FROM bettor_desk_corrections
+                 WHERE desk_id = 'live1'
+                 GROUP BY status ORDER BY 1
+                """)
+            epochs = await conn.fetch(
+                """
+                SELECT epoch_id, started_at, ended_at, restored,
+                       starting_cash::float8 AS starting_cash,
+                       cursor_at_start
+                  FROM bettor_desk_epochs WHERE desk_id = 'live1'
+                 ORDER BY started_at DESC LIMIT 20
+                """)
+    except Exception as exc:                                # noqa: BLE001
+        raise HTTPException(status_code=503, detail={
+            "reason": "CORRECTION_UNREADABLE",
+            "detail": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+            "note": "a failed read, NOT an absence of corrections",
+        }) from exc
+
+    return {
+        "version": CORR.VERSION,
+        "applied": run is not None,
+        "run": dict(run) if run else None,
+        "by_status": [dict(r) for r in rows],
+        "epochs": [dict(e) for e in epochs],
+        "originals_preserved": (
+            "bettor_desk_ledger, _orders and _positions are NOT altered. "
+            "The correction is written beside them so the change itself "
+            "remains visible."),
+        "why_an_interval": (
+            "bettor_desk_fills was never written by the loop, and PMUS "
+            "rounds PER FILL, so a fee recomputed from an order's "
+            "average price is not the sum of its fills' fees. The lower "
+            "bound assumes every fill's amount rounded to zero; the "
+            "upper bound is the concavity bound from the average. The "
+            "true figure lies between them."),
+        "duplicate_prevention": (
+            "UNIQUE (desk_id, version) on the run, and "
+            "correction_id = version:kind:subject on each row"),
+        "historical_labels": (
+            "ledger rows written before the fee basis existed carry no "
+            "fee_basis key. They are read as FEE_BASIS_NOT_RECORDED and "
+            "are NOT relabelled net-of-fees because the current process "
+            "has a schedule."),
+    }
 
 
 @app.get("/api/command/learning/overview",
