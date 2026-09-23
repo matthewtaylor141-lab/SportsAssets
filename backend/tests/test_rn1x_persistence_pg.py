@@ -64,7 +64,7 @@ async def _reset(conn):
     await conn.execute("DELETE FROM markets WHERE condition_id = $1", COND)
     await conn.execute(
         "DELETE FROM ingestion_state WHERE key IN "
-        "('rn1x_shadow', 'rn1x_source_cursor')")
+        "('rn1x_shadow', 'rn1x_source_cursor', 'rn1x_learn')")
 
 
 async def _seed_evidence(conn):
@@ -414,3 +414,136 @@ async def test_refusal_is_reported_not_written_as_a_position(conn):
     assert await conn.fetchval("SELECT count(*) FROM rn1x_positions") == 0
     got = [r for r in res["results"] if r.get("refused_at")]
     assert got and got[0]["refused_at"] == "CLASSIFY", res
+
+
+# ── 7. THE LEARNING CYCLE, against real rows ────────────────────────
+#
+# The audit's list of missing learning connections included "evaluation
+# on new data" and "promotion/rejection receipts". These assert both, and
+# assert the thing that matters most about this loop: that it CANNOT
+# promote anything.
+
+_LEARN_REGISTRY = """
+CREATE TABLE IF NOT EXISTS bettor_learn_model (
+    id BIGSERIAL PRIMARY KEY, model_key TEXT NOT NULL,
+    version INTEGER NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL,
+    horizon_s DOUBLE PRECISION NOT NULL, kernel TEXT NOT NULL,
+    dataset_sha TEXT NOT NULL, train_cutoff DOUBLE PRECISION NOT NULL,
+    calib_cutoff DOUBLE PRECISION NOT NULL, code_sha TEXT NOT NULL,
+    params JSONB NOT NULL, evaluation JSONB NOT NULL, status TEXT NOT NULL,
+    trained_at DOUBLE PRECISION NOT NULL, note TEXT, superseded_by BIGINT);
+CREATE UNIQUE INDEX IF NOT EXISTS bettor_learn_model_kv
+    ON bettor_learn_model (model_key, version);
+"""
+
+
+async def _armed_with_a_settled_position(conn):
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_source_cursor', $1::jsonb)", str(ids[0] - 1))
+    await W.cycle(conn)
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_outcomes") == 1
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_learn', 'true'::jsonb) ON CONFLICT (key) DO UPDATE "
+        "SET value = 'true'::jsonb")
+    return ids
+
+
+async def test_learning_is_blocked_by_name_when_the_registry_is_absent(conn):
+    """It uses the EXISTING register and says so when it is not there.
+
+    The alternative -- creating its own table on the fly -- is the
+    competing research stack the brief forbids, and it would be invisible
+    until someone noticed two registers.
+    """
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+    res = await WL.cycle(conn)
+    assert res["state"] == "BLOCKED"
+    assert res["why"] == "LEARN_REGISTRY_ABSENT"
+    assert "does not create a competing register" in res["detail"]
+
+
+async def test_learning_fails_closed_on_its_own_control_row(conn):
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute("DELETE FROM ingestion_state WHERE key = 'rn1x_learn'")
+    res = await WL.cycle(conn)
+    assert res == {"ran": False, "state": "STOPPED",
+                   "why": "CONTROL_ROW_ABSENT"}, res
+
+
+async def test_learning_writes_a_receipt_for_every_challenger(conn):
+    """A REJECTION IS A RESULT and is written exactly like an acceptance.
+
+    On one position the gate's 50-decided floor cannot be met, so the
+    expected verdict is RETAIN_CHAMPION with INELIGIBLE among the
+    reasons. A loop that wrote nothing until it agreed with itself would
+    leave the panel blank and look like it had not run.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        res = await WL.cycle(conn)
+        assert res["state"] == "EVALUATED", res
+        assert res["positions"] == 1
+        assert res["champion_retained"] is True
+
+        rows = await conn.fetch(
+            "SELECT version, params, status, evaluation FROM "
+            "bettor_learn_model WHERE model_key = $1 ORDER BY version",
+            L.MODEL_KEY)
+        assert len(rows) == len(L.CHALLENGERS), (
+            "%d receipts for %d challengers" % (len(rows), len(L.CHALLENGERS)))
+        import json as _json
+        seen = set()
+        for r in rows:
+            params = r["params"]
+            params = _json.loads(params) if isinstance(params, str) else params
+            seen.add(params["challenger"])
+            # THE ONLY TWO LEGAL VERDICTS. A third would mean a promotion
+            # path had been added.
+            assert r["status"] in (L.RETAIN, L.ELIGIBLE), r["status"]
+        assert seen == set(L.challenger_names()), seen
+
+        # the gate's own reason must be preserved verbatim, not summarised
+        ev = rows[0]["evaluation"]
+        ev = _json.loads(ev) if isinstance(ev, str) else ev
+        assert "INELIGIBLE" in ev["recommendation"]["why"], ev[
+            "recommendation"]["why"]
+        assert ev["scenarios"] == [0.10, 0.25, 0.50]
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+async def test_learning_has_no_promotion_path_in_its_source():
+    """Asserted over the source, because this is the claim that matters.
+
+    A loop that could swap out a MANAGEMENT-DEFINED frozen policy would
+    be an agent rewriting management policy. There must be no UPDATE
+    against the champion and no write to the experiment's policy.
+    """
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "sportsassets"
+           / "workers" / "rn1x_learn_loop.py").read_text()
+    lowered = src.lower()
+    for forbidden in ("update rn1x_experiments", "update bettor_learn_model",
+                      "policy_register =", "pair_target_cost =",
+                      "loss_trigger_fraction ="):
+        assert forbidden not in lowered, forbidden
+    from sportsassets import bettor_rn1x_learn as L
+    # exactly two verdicts, and neither is a promotion
+    assert {L.RETAIN, L.ELIGIBLE} == {"RETAIN_CHAMPION",
+                                      "CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT"}

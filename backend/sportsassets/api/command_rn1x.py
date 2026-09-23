@@ -128,6 +128,65 @@ async def overview(pool) -> dict:
     }
 
 
+async def learning(pool) -> dict:
+    """THE LEARNING CYCLE'S STATE AND ITS LATEST RESULT.
+
+    The acceptance screen must show "learning cycle status and latest
+    result", and a rejection IS a result. The most likely state for a long
+    while is INELIGIBLE on the gate's 50-decided floor, and this reports
+    that rather than leaving the panel blank.
+    """
+    from .. import bettor_rn1x_learn as L
+    from .. import learn_gate as G
+
+    have = await pool.fetchval(
+        "SELECT 1 FROM information_schema.tables WHERE table_schema = "
+        "'public' AND table_name = 'bettor_learn_model'")
+    raw = await pool.fetchval(
+        "SELECT value::text FROM ingestion_state WHERE key = 'rn1x_learn'")
+    hb = await pool.fetchrow(
+        "SELECT status, detail, beat_at FROM service_heartbeats "
+        "WHERE service = 'rn1x_learn'")
+    out = {
+        "champion": L.MODEL_KEY,
+        "champion_is_management_defined": True,
+        "gate": "GATE_V2 (sportsassets.learn_gate, unchanged)",
+        "scenario_grid": list(G.SCENARIOS),
+        "eligibility_floor_decided_orders": G.MIN_DECIDED,
+        "challengers": [{"name": c["name"], "params": c["params"],
+                         "question": c["question"]} for c in L.CHALLENGERS],
+        "control": {"value": raw,
+                    "running": bool(raw and raw.strip().lower() == "true"),
+                    "state": ("RUNNING" if raw and raw.strip().lower() ==
+                              "true" else "STOPPED_OR_ABSENT")},
+        "heartbeat": ({"status": hb["status"], "at": hb["beat_at"],
+                       "detail": hb["detail"]} if hb else
+                      {"status": "NEVER_BEAT"}),
+        "verdicts": ["RETAIN_CHAMPION",
+                     "CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT"],
+        "no_promotion_path": (
+            "ELIGIBLE records that a challenger cleared every declared "
+            "condition. It does NOT change the active policy, and this "
+            "service holds no code that would."),
+        "registry": "bettor_learn_model (the EXISTING register)",
+    }
+    if not have:
+        out["blocker"] = "LEARN_REGISTRY_ABSENT"
+        out["latest"] = []
+        return out
+    rows = await pool.fetch(
+        "SELECT version, params, status, note, left(dataset_sha, 12) "
+        "dataset, to_timestamp(trained_at) at, evaluation "
+        "FROM bettor_learn_model WHERE model_key = $1 "
+        "ORDER BY version DESC LIMIT 8", L.MODEL_KEY)
+    out["latest"] = [dict(r) for r in rows]
+    if not rows:
+        out["latest_result"] = (
+            "NO EVALUATION HAS RUN YET on this deployment. Not 'no "
+            "improvement found' -- no comparison has been made.")
+    return out
+
+
 async def positions(pool, limit: int = 50) -> list:
     """The positions themselves, newest first, with their outcome."""
     rows = await pool.fetch(

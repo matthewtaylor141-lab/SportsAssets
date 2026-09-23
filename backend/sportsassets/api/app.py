@@ -318,10 +318,32 @@ async def lifespan(_: FastAPI):
             _RN1X.run(_rn1x_pool))
         log.info("rn1x shadow loop armed (contends for its own writer lock)")
 
+    # ── THE CONTINUOUS EVALUATION CYCLE ─────────────────────────────
+    #
+    # Separate loop, separate lock, separate control row and separate env
+    # flag from the experiment above. They are separate because they fail
+    # for different reasons and one must be stoppable without the other:
+    # an evaluation that is wrong should not take the collection of
+    # evidence down with it, and evidence that has stopped arriving is not
+    # a reason to stop scoring what already arrived.
+    #
+    # IT HAS NO PROMOTION PATH. The champion is management-defined and
+    # frozen; a cleared challenger is recorded ELIGIBLE in the EXISTING
+    # `bettor_learn_model` register and a human decides. This process
+    # cannot change the active policy and holds no code that would.
+    from ..workers import rn1x_learn_loop as _RN1XL
+    rn1x_learn_task = None
+    if _RN1XL.enabled():
+        from ..db import get_pool as _rn1xl_pool
+        rn1x_learn_task = asyncio.get_running_loop().create_task(
+            _RN1XL.run(_rn1xl_pool))
+        log.info("rn1x learning loop armed (contends for its own lock)")
+
     try:
         yield
     finally:
-        tasks = [t for t in (desk_task, rn1x_task, trim_task, poller_task)
+        tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
+                             trim_task, poller_task)
                  if t is not None]
         for task in tasks:
             task.cancel()
@@ -1678,6 +1700,22 @@ async def command_rn1x_overview(response: Response) -> dict:
 
     response.headers["Cache-Control"] = "no-store"
     return await CR.overview(await get_pool())
+
+
+@app.get("/api/command/rn1x/learning",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_learning(response: Response) -> dict:
+    """Learning-cycle status and the LATEST RESULT, rejection included.
+
+    A rejection is a result. The gate's eligibility floor is 50 decided
+    orders and this experiment will sit under it for a while, so the
+    panel reports INELIGIBLE rather than going blank.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    return await CR.learning(await get_pool())
 
 
 @app.get("/api/command/rn1x/positions",

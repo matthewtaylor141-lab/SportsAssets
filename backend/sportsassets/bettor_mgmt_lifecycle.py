@@ -182,28 +182,48 @@ class Managed:
                 "liquidity": liquidity, "refused": None}
 
     def manage_policy(self, *, at, decision_id, sport=None, progress=None,
-                      bid=None, bid_size=None) -> dict:
+                      bid=None, bid_size=None, policy_params=None) -> dict:
         """Management's frozen policy; prints are never executable bids.
 
         Callers may supply bid/depth only from a contemporaneous book.
         No sport is currently admitted by the event-phase registry.
+
+        `policy_params` IS FOR CHALLENGER EVALUATION ONLY and defaults to
+        None, which is the frozen policy exactly. Production callers omit
+        it. A challenger must be able to vary the one number it questions
+        without editing a frozen module -- an edit is how a frozen policy
+        quietly becomes a tuned one. Every decision records which
+        parameters it ran under, so a row cannot be mistaken for the
+        champion's.
         """
         from . import bettor_rn1x_policy as policy
 
+        pp = dict(policy_params or {})
+        managed = pp.pop("manage", True)
         q = self.residual()
         rec = {"at": at, "policy_id": policy.POLICY_ID,
                "residual_qty": q, "acted": False,
-               "execution_secured": False}
+               "execution_secured": False,
+               "policy_params": dict(pp) or None,
+               "is_champion_policy": not pp and managed}
+        if not managed:
+            # THE NULL ARM. Assigned inventory, no management at all --
+            # which is a legitimate comparator, not an error state.
+            rec["operating_state"] = "HOLD_TO_SETTLEMENT_UNMANAGED"
+            self.decisions.append(rec)
+            return rec
         if q <= 1e-9:
             rec["operating_state"] = "NO_RESIDUAL"
             self.decisions.append(rec)
             return rec
         basis = self.pf._leg(self.condition_id, self.leg)["cost"] / self.held()
         phase = policy.event_phase(progress=progress, sport=sport)
-        stop = policy.loss_trigger(allocated_cost_usd=q * basis, qty=q,
-                                   bid=bid, bid_size=bid_size,
-                                   fee_fn=self.fee_fn)
-        target = policy.pair_limit(basis, q, fee_fn=self.fee_fn)
+        stop = policy.loss_trigger(
+            allocated_cost_usd=q * basis, qty=q, bid=bid,
+            bid_size=bid_size, fee_fn=self.fee_fn,
+            trigger_fraction=pp.get("trigger_fraction"))
+        target = policy.pair_limit(basis, q, fee_fn=self.fee_fn,
+                                   target_cost=pp.get("target_cost"))
         rec.update(phase=phase, loss_trigger=stop, pair_target=target)
         if phase["loss_exit_available"] and stop["fired"]:
             action, price, qty = "DIRECT_EXIT", bid, stop["sellable_qty"]

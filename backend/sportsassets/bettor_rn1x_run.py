@@ -55,7 +55,7 @@ def _fee_fn():
 def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         queue_share=0.25, condition_id=None, fee_fn=None,
         fee_basis="TRANSFERRED_PMUS_LATEST_SCENARIO",
-        initial_inventory_verified=False):
+        initial_inventory_verified=False, policy_params=None):
     """`rows` are the condition's fills, ours and others', in any order.
 
     Each row: id, whale_id, outcome_index, side, size, price, ts,
@@ -80,7 +80,11 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
     out = {"version": VERSION, "mode": mode,
            "policy": pol.describe(), "steps": {},
            "condition_id": condition_id, "queue_share": qs,
-           "fee_basis": fee_basis, "prospective": False}
+           "fee_basis": fee_basis, "prospective": False,
+           # None is the FROZEN champion. Anything else is a challenger
+           # arm and is labelled as one on the run, not only per decision.
+           "policy_params": dict(policy_params) if policy_params else None,
+           "arm": "CHAMPION" if not policy_params else "CHALLENGER"}
 
     # ── 1 SOURCE ────────────────────────────────────────────────────
     if not mine:
@@ -151,7 +155,8 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
 
     # ── 4-7, walking forward. Only rows after the decision instant. ──
     events = []
-    m.manage_policy(at=decision_ts, decision_id="seed:%s" % seed_row["id"])
+    m.manage_policy(at=decision_ts, decision_id="seed:%s" % seed_row["id"],
+                    policy_params=policy_params)
     for r in rows:
         at = float(r["detected_at"])
         if at <= decision_ts:
@@ -168,7 +173,8 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
                            size=float(r["size"]), evidence_id=eid)
         m.acknowledge_cancels(at)
         # Tape prints are not bids, asks, depth or event progress.
-        d = m.manage_policy(at=at, decision_id="rn1x-%s" % r["id"])
+        d = m.manage_policy(at=at, decision_id="rn1x-%s" % r["id"],
+                            policy_params=policy_params)
         if d.get("acted") or fills:
             events.append({"at": at, "evidence_id": eid,
                            "by_source_account":

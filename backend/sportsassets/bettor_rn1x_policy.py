@@ -185,13 +185,21 @@ def _fee_taker(qty, price) -> float:
 
 
 def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0,
-               fee_fn=None) -> dict:
+               fee_fn=None, target_cost=None) -> dict:
     """§1. The highest complementary limit that still meets the target.
 
     Solved on the TICK GRID, descending, and rounded CONSERVATIVELY: the
     limit is the largest tick at which combined cost including fees is
-    still <= 0.91, so the policy never bids a price that would miss the
-    target by a rounding step.
+    still <= the target, so the policy never bids a price that would miss
+    it by a rounding step.
+
+    `target_cost` EXISTS ONLY SO A CHALLENGER CAN BE PRICED, and it
+    defaults to the frozen PAIR_TARGET_COST. Passing it does not change
+    the policy: the champion is whatever `POLICY_ID` names, and every
+    production caller omits this argument. A challenger evaluation must
+    be able to vary the one number it is questioning without editing a
+    frozen module -- editing it is how a frozen policy silently becomes a
+    tuned one.
     """
     b = float(held_basis_per_contract)
     q = float(qty)
@@ -199,11 +207,15 @@ def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0,
             or not 0 <= b <= 1 or q <= 0):
         raise ValueError("pair limit requires a finite price and positive quantity")
     entry_per = float(entry_fee_usd) / q if q > 0 else 0.0
-    budget = PAIR_TARGET_COST - b - entry_per
+    tgt = PAIR_TARGET_COST if target_cost is None else float(target_cost)
+    if not math.isfinite(tgt) or not 0 < tgt <= 1:
+        raise ValueError("a combined-cost target must lie in (0, 1]")
+    budget = tgt - b - entry_per
     out = {"policy_id": POLICY_ID, "held_basis_per_contract": b,
            "entry_fee_per_contract": entry_per,
-           "target_combined_cost": PAIR_TARGET_COST,
-           "min_net_per_pair": PAIR_MIN_NET_PER_PAIR,
+           "target_combined_cost": tgt,
+           "target_is_frozen_default": target_cost is None,
+           "min_net_per_pair": round(1.00 - tgt, 6),
            "tick": TICK, "qty": q,
            "fee_side_used": "TAKER (the rebate is not relied on)",
            "source_class": SOURCE_CLASS["pair_target_cost"]}
@@ -211,7 +223,7 @@ def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0,
         out.update(limit=None, feasible=False,
                    why=("the held basis %.4f already leaves no room under "
                         "a %.2f combined target, so no complementary "
-                        "limit can meet it" % (b, PAIR_TARGET_COST)))
+                        "limit can meet it" % (b, tgt)))
         return out
     # Descend the tick grid from the budget. The fee depends on the
     # price, so each candidate is checked rather than solved in closed
@@ -227,7 +239,7 @@ def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0,
             raise ValueError("fee estimate must be finite")
         fee_per = max(0.0, charge) / q  # never rely on a rebate
         combined = b + entry_per + a + fee_per
-        if combined <= PAIR_TARGET_COST + 1e-12:
+        if combined <= tgt + 1e-12:
             out.update(limit=a, feasible=True,
                        completion_fee_per_contract=fee_per,
                        combined_cost_per_pair=combined,
@@ -237,7 +249,7 @@ def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0,
                             "%.4f combined, netting %.4f per completed "
                             "pair against a %.2f minimum"
                             % (a, b, entry_per, a, fee_per, combined,
-                               1.00 - combined, PAIR_MIN_NET_PER_PAIR)))
+                               1.00 - combined, round(1.00 - tgt, 6))))
             return out
     out.update(limit=None, feasible=False,
                why=("no tick at or below %.4f meets the target once the "
@@ -277,7 +289,7 @@ def event_phase(*, progress=None, sport=None) -> dict:
 
 
 def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None,
-                 fee_fn=None) -> dict:
+                 fee_fn=None, trigger_fraction=None) -> dict:
     """§2. Are net executable proceeds <= 84% of allocated cost?
 
     USES EXECUTABLE BIDS AND DEPTH. Not the last trade, not the midpoint
@@ -291,9 +303,16 @@ def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None,
     """
     q = float(qty)
     cost = float(allocated_cost_usd)
+    # Defaults to the FROZEN fraction; see pair_limit's note on why a
+    # challenger varies it by argument rather than by edit.
+    frac = (LOSS_TRIGGER_FRACTION if trigger_fraction is None
+            else float(trigger_fraction))
+    if not math.isfinite(frac) or not 0 < frac <= 1:
+        raise ValueError("a loss-trigger fraction must lie in (0, 1]")
     out = {"policy_id": POLICY_ID, "qty": q,
            "allocated_cost_usd": cost,
-           "trigger_fraction": LOSS_TRIGGER_FRACTION,
+           "trigger_fraction": frac,
+           "fraction_is_frozen_default": trigger_fraction is None,
            "source_class": SOURCE_CLASS["loss_trigger_fraction"],
            "price_input": "EXECUTABLE_BID_AND_DEPTH",
            "not_used": ["last trade price", "midpoint"]}
@@ -317,7 +336,7 @@ def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None,
     # cost.
     cost_alloc = cost * (sellable / q) if q > 0 else 0.0
     ratio = (proceeds / cost_alloc) if cost_alloc > 0 else None
-    fired = ratio is not None and ratio <= LOSS_TRIGGER_FRACTION
+    fired = ratio is not None and ratio <= frac
     out.update(
         fired=fired, status="EVALUATED",
         sellable_qty=sellable, depth_limited=sellable < q - 1e-12,
@@ -325,7 +344,7 @@ def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None,
         net_proceeds_usd=proceeds, fees_usd=fee,
         allocated_cost_for_sellable_usd=cost_alloc,
         proceeds_over_cost=ratio,
-        trigger_level_bid=(LOSS_TRIGGER_FRACTION * cost_alloc / sellable
+        trigger_level_bid=(frac * cost_alloc / sellable
                            if sellable > 0 else None),
         trigger_price_is_not_execution_price=(
             "this is the level the rule fires at. What a sale achieves is "
@@ -333,7 +352,7 @@ def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None,
         why=("net proceeds %.4f on %.4g sellable against allocated cost "
              "%.4f is %.4f of cost; the trigger is %.2f"
              % (proceeds, sellable, cost_alloc, ratio or 0.0,
-                LOSS_TRIGGER_FRACTION)))
+                frac)))
     return out
 
 
