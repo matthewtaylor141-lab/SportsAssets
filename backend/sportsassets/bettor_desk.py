@@ -550,7 +550,11 @@ class Desk:
         self.desk_id = desk_id
         # Overridden by the live loop with the account id. See _next_id.
         self.id_prefix = desk_id
+        # `_n` counts WITHIN one event and is reset by `step`, so it is
+        # no longer an identity -- see _next_id.
         self._n = 0
+        self._evt_key = None
+        self._boot_key = _sha({"desk": desk_id, "start": True})[:8]
         self.halted = False
         self.halt_reason = None
         self.last_price = {}
@@ -572,28 +576,51 @@ class Desk:
 
     # ── bookkeeping ──────────────────────────────────────────────────
     def _next_id(self, kind):
-        """IDS ARE NAMESPACED BY THE BOOK, not by the desk.
+        """IDS ARE DERIVED FROM THE SOURCE EVENT, not from a counter.
 
-        THE DEFECT THIS FIXES, caught in production minutes after the
-        account reset. The prefix was `desk_id` -- a constant, "live1"
-        -- and `self._n` restarts at zero in every process. So a new
-        book's first order was `live1-O-000001`, which the PREVIOUS
-        book had already written, and the persist layer then did what
-        it was told with a colliding key:
+        THE SECOND DEFECT, and the first fix did not close it. Moving
+        the prefix from `desk_id` to `account_id` separated the two
+        BOOKS, but `self._n` still restarted at zero in every process,
+        so two successive processes on the SAME account generated
+        byte-identical ids:
 
-            orders     ON CONFLICT DO UPDATE -> OVERWROTE a preserved
-                       record
-            decisions  ON CONFLICT DO NOTHING -> SILENTLY DROPPED the
-                       new book's decision
-            fills      fill_id is order_id:index, so it collided too
+            process 1  acct_fc2d...-O-000001, -000002, -000003
+            process 2  acct_fc2d...-O-000001, -000002, -000003
 
-        Preserved rows were being consumed by the new account and new
-        rows were vanishing, in the same release whose whole purpose
-        was to keep the two books apart.
+        and the upserts then did the same damage inside one account
+        that they had done between two: orders OVERWRITTEN, decisions
+        DROPPED by ON CONFLICT DO NOTHING, fills collided. An
+        account-scoped prefix fixes account separation and nothing
+        about restarts.
 
-        `id_prefix` defaults to `desk_id` so replay and tests are
-        unchanged; the live loop sets it to the ACCOUNT id, which is
-        unique per book and never reused.
+        SO THE COUNTER IS NOT THE IDENTITY. The id is built from the
+        EVIDENCE ID of the event being processed plus a position within
+        that event, both of which are properties of the input rather
+        than of the process:
+
+            acct_fc2d...-O-trade:221480822-01
+
+        This is restart-safe because the evidence id does not restart,
+        and it is IDEMPOTENT because re-processing the same event
+        regenerates the same id -- so a replayed event is absorbed by
+        ON CONFLICT instead of duplicating. A persisted counter would
+        have delivered uniqueness only; this delivers both.
+        """
+        self._n += 1
+        key = self._evt_key or "boot:%s" % self._boot_key
+        return "%s-%s-%s-%02d" % (self.id_prefix, kind, key, self._n)
+
+    def _legacy_next_id(self, kind):
+        """THE SUPERSEDED FORM. Kept ONLY so a test can construct it and
+        demonstrate that it collides -- a control for the real id.
+
+        It prefixed with `id_prefix` and a per-process counter that
+        restarts at zero, so two successive processes on the SAME
+        account produced byte-identical ids. Moving the prefix from
+        desk_id to account_id separated the two BOOKS and did nothing
+        about restarts, which is the distinction the first fix missed.
+
+        Nothing in the engine calls this.
         """
         self._n += 1
         return "%s-%s-%06d" % (self.id_prefix, kind, self._n)
@@ -718,6 +745,20 @@ class Desk:
     def step(self, evt) -> list:
         """One market event. Returns the decisions taken at it."""
         at = float(evt["at"])
+        # THE EVENT IS THE ID NAMESPACE. Set before anything that can
+        # create a record -- `_expire` records decisions too.
+        # THE MARKET IS PART OF THE KEY, not only the evidence id.
+        # Two events cannot share a `trades.id` in production, but
+        # nothing in the engine enforced that, and with the evidence id
+        # alone two events that did share one would generate the same
+        # order id and silently overwrite each other IN MEMORY. A short
+        # digest of the market keeps the trade id readable and traceable
+        # while removing the collision.
+        self._evt_key = "%s~%s" % (
+            evt.get("evidence_id") or "at:%.3f" % at,
+            _sha({"c": evt.get("condition_id"),
+                  "o": evt.get("outcome_index")})[:6])
+        self._n = 0
         made = []
         self._expire(at)
         fills = self._match(evt) if evt.get("kind") == "PRINT" else []

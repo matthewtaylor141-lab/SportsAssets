@@ -583,6 +583,104 @@ def anyio_backend():
 
 # ── ids must not collide between books ───────────────────────────────
 
+def test_ids_do_not_collide_across_restarts_of_the_SAME_account():
+    """THE DEFECT THE FIRST FIX DID NOT CLOSE.
+
+    Moving the prefix from desk_id to account_id separated the two
+    BOOKS. It did nothing about restarts: `self._n` still restarted at
+    zero in every process, so two successive processes on the SAME
+    account produced byte-identical ids and the upserts did the same
+    damage inside one account that they had done between two.
+    """
+    def proc():
+        d = DK.Desk(policy=DK.Policy(), limits=DK.Limits(),
+                    desk_id="live1")
+        d.id_prefix = "acct_same"
+        return d
+
+    def ids_of(d):
+        for i in range(1, 8):
+            d.step(_evt(i))
+        return sorted(d.orders) + sorted(
+            x["desk_decision_id"] for x in d.decisions)
+
+    p1, p2 = proc(), proc()
+    a, b = ids_of(p1), ids_of(p2)
+
+    # THE SAME EVENTS REGENERATE THE SAME IDS -- that is idempotency,
+    # and it is why a replayed event is absorbed by ON CONFLICT rather
+    # than duplicating.
+    assert a == b
+
+    # DIFFERENT EVENTS MUST NOT COLLIDE. This is the property the
+    # counter lost on restart.
+    p3 = proc()
+    for i in range(100, 108):
+        p3.step(_evt(i))
+    later = set(p3.orders) | {x["desk_decision_id"] for x in p3.decisions}
+    assert not (set(a) & later), sorted(set(a) & later)[:3]
+
+    # And the id carries the EVIDENCE ID, so it is traceable to input.
+    assert any("trade:1" in x for x in a), a[:3]
+
+
+def test_the_superseded_counter_id_really_did_collide():
+    """CONTROL. Without this, the test above could be asserting a
+    property the old code also had."""
+    def proc():
+        d = DK.Desk(policy=DK.Policy(), limits=DK.Limits(),
+                    desk_id="live1")
+        d.id_prefix = "acct_same"
+        return d
+    p1, p2 = proc(), proc()
+    old1 = [p1._legacy_next_id("O") for _ in range(6)]
+    old2 = [p2._legacy_next_id("O") for _ in range(6)]
+    assert old1 == old2, "the superseded form did not collide"
+    # and it carries no trace of the event that produced it
+    assert not any("trade:" in x for x in old1)
+
+
+@pytest.mark.anyio
+async def test_a_restart_of_the_same_account_overwrites_none_of_its_own_rows():
+    """THE REQUIREMENT: tested against EXISTING rows in the SAME
+    account, not only against UNASSIGNED ones."""
+    st = Store()
+    conn = FakeConn(st)
+    acct = await ACC.ensure_account(conn, "live1", opening_balance=OPENING)
+    aid = acct["account_id"]
+
+    # PROCESS 1 trades events 1..8 and commits.
+    p1 = _fresh_desk()
+    p1.account_id = aid
+    p1.id_prefix = aid
+    for i in range(1, 9):
+        p1.step(_evt(i))
+    await DL._persist(conn, "live1", aid, p1, 8)
+    orders_after_1 = {k: dict(v) for k, v in st.orders.items()}
+    fills_after_1 = {k: dict(v) for k, v in st.fills.items()}
+    decisions_after_1 = set(st.decisions)
+    assert orders_after_1, "the fixture wrote no orders"
+
+    # PROCESS 2: restart, restore, then trade NEW events 9..16.
+    p2 = _fresh_desk()
+    p2.account_id = aid
+    p2.id_prefix = aid
+    await DL._restore(conn, "live1", aid, p2)
+    for i in range(9, 17):
+        p2.step(_evt(i))
+    await DL._persist(conn, "live1", aid, p2, 16)
+
+    # NOT ONE of process 1's rows changed.
+    for oid, before in orders_after_1.items():
+        assert st.orders[oid] == before, oid
+    for fid, before in fills_after_1.items():
+        assert st.fills[fid] == before, fid
+    # and process 1's decisions are all still present
+    assert decisions_after_1 <= set(st.decisions)
+    # and process 2 actually wrote something, or this proves nothing
+    assert len(st.decisions) > len(decisions_after_1)
+
+
 def test_generated_ids_are_namespaced_by_the_book_not_the_desk():
     """CAUGHT IN PRODUCTION minutes after the reset.
 
