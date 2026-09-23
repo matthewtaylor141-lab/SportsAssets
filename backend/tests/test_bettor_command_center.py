@@ -31,11 +31,14 @@ SLUGS = ["m%02d" % i for i in range(12)]
 
 # ── synthetic fixtures. NOT VENUE DATA. ──────────────────────────────
 
-def fake_ladder(at, slug, *, levels=4, boot="bootA", epoch=1):
+def fake_ladder(at, slug, *, levels=4, boot="bootA", epoch=1,
+                ladder_class=None):
+    p = {"synthetic": True, "levels": levels,
+         "bids": [1] * levels, "offers": []}
+    if ladder_class is not None:
+        p["ladder_class"] = ladder_class
     return {"boot_id": boot, "at": at, "kind": "LADDER", "epoch": epoch,
-            "slug": slug,
-            "payload": {"synthetic": True, "levels": levels,
-                        "bids": [1] * levels, "offers": []}}
+            "slug": slug, "payload": p}
 
 
 def fake_gap(at, event, *, why="LINK_DOWN", frm=None, to=None, dur=None,
@@ -233,14 +236,80 @@ class TestLifecycleStates:
         assert lc["state"] == CC.L_COLLECTING
         assert lc["state"] != CC.L_COMPLETED
 
-    def test_a_close_with_nothing_after_it_IS_completed(self):
+    def test_a_close_at_the_fixed_end_with_nothing_after_it_IS_completed(
+            self):
+        """The ONE shape that earns COMPLETED: the latest boot closed,
+        it closed at or after the fixed end, the close was not an
+        interruption, and nothing followed it."""
         recs = [fake_ladder(T0 + 10, SLUGS[0]),
-                {"boot_id": "bootA", "at": T0 + 30, "kind": "RUN_CLOSE",
+                {"boot_id": "bootA", "at": T_END, "kind": "RUN_CLOSE",
                  "epoch": None, "slug": None,
                  "payload": {"synthetic": True, "why": "WINDOW_END"}}]
-        out = build(recs, control=False, now=T0 + 100)
+        out = build(recs, control=False, now=T_END + 100)
         assert out["views"]["live_operation"]["lifecycle"]["state"] \
             == CC.L_COMPLETED
+
+    # ── THE TWO SHAPES THE BRIEF NAMES EXPLICITLY ────────────────────
+
+    def test_restart_before_first_frame_is_not_completed(self):
+        """A CLOSE FOLLOWED BY NO FRAME DOES NOT PROVE COMPLETION.
+
+        bootA collected and was replaced. bootB has opened, subscribed
+        and persisted NOTHING. The last record in the whole journal is
+        bootA's close -- which is exactly the shape of a finished run,
+        and is not one. The run is waiting to resume and still owes
+        collection up to its fixed end."""
+        recs = [
+            fake_ladder(T0 + 10, SLUGS[0], boot="bootA"),
+            fake_ladder(T0 + 20, SLUGS[1], boot="bootA"),
+            {"boot_id": "bootA", "at": T0 + 30, "kind": "RUN_CLOSE",
+             "epoch": None, "slug": None,
+             "payload": {"synthetic": True, "why": "STOPPED_BY_CONTROL",
+                         "frames": 2}},
+            # bootB opens AFTER the close and produces no ladder.
+            fake_gap(T0 + 300, "BOOT_GAP", why="PROCESS_REPLACED",
+                     frm=T0 + 30, to=T0 + 300, dur=270.0, boot="bootB"),
+            fake_epoch(T0 + 301, "RUN_STARTED", boot="bootB", subscribed=12),
+        ]
+        lb = CC.latest_boot(recs)
+        assert lb["boot_id"] == "bootB"
+        assert lb["frames"] == 0
+        assert lb["closed"] is None
+
+        out = build(recs, control=True, now=T0 + 400)
+        lc = out["views"]["live_operation"]["lifecycle"]
+        assert lc["state"] == CC.L_ARMED_NO_FRAMES
+        assert lc["state"] != CC.L_COMPLETED
+        assert lc["state"] != CC.L_COLLECTING
+        assert "bootB" in lc["why"]
+
+    def test_a_stopped_partial_run_is_partial_not_complete(self):
+        """A run stopped BEFORE the fixed end is a PARTIAL run. The
+        close is clean, the control is down, nothing followed -- and it
+        is still not COMPLETED, because the window had hours left."""
+        recs = [fake_ladder(T0 + 10, SLUGS[0], boot="bootA"),
+                fake_ladder(T0 + 600, SLUGS[1], boot="bootA"),
+                {"boot_id": "bootA", "at": T0 + 900, "kind": "RUN_CLOSE",
+                 "epoch": None, "slug": None,
+                 "payload": {"synthetic": True, "why": "STOPPED_BY_CONTROL",
+                             "frames": 2}}]
+        out = build(recs, control=False, now=T0 + 1200)
+        lc = out["views"]["live_operation"]["lifecycle"]
+        assert lc["state"] == CC.L_STOPPED
+        assert lc["state"] != CC.L_COMPLETED
+        assert "PARTIAL" in lc["why"]
+
+    def test_an_interrupted_boot_is_not_a_completed_run(self):
+        """The close reason decides. A boot that ended because it was
+        replaced did not finish the job, whatever the clock says."""
+        recs = [fake_ladder(T0 + 10, SLUGS[0], boot="bootA"),
+                {"boot_id": "bootA", "at": T_END + 5, "kind": "RUN_CLOSE",
+                 "epoch": None, "slug": None,
+                 "payload": {"synthetic": True, "why": "PROCESS_REPLACED"}}]
+        out = build(recs, control=False, now=T_END + 60)
+        lc = out["views"]["live_operation"]["lifecycle"]
+        assert lc["state"] == CC.L_INTERRUPTED
+        assert lc["state"] != CC.L_COMPLETED
 
     def test_failed_run_error(self):
         recs = [fake_ladder(T0 + 10, SLUGS[0]),
@@ -368,6 +437,125 @@ class TestCoverage:
         out = build([], control=True)
         cov = out["views"]["live_operation"]["coverage"]
         assert "not independent" in cov["independence_note"].lower()
+
+
+class TestWatchedIsNotObserved:
+    """A SUBSCRIBED MARKET WITH NO BOOK IS UNOBSERVED, NOT QUIET.
+
+    "Nothing has changed" presupposes a book to change FROM. Before a
+    market's first full snapshot in the current connection epoch there
+    is none, so that stretch is time nobody observed -- and calling it
+    quiet is how a market that never arrived gets counted as covered.
+    """
+
+    def _iv(self, out):
+        return out["views"]["live_operation"]["coverage_time"]
+
+    def test_a_market_with_no_snapshot_is_unobserved_not_quiet(self):
+        # Three markets arrive; the other nine are subscribed and send
+        # nothing at all. The segment runs T0+10 .. T0+600.
+        recs = [fake_ladder(T0 + 10, SLUGS[i]) for i in range(3)]
+        recs.append(fake_ladder(T0 + 600, SLUGS[0]))
+        out = build(recs, control=True, now=T0 + 700)
+        iv = self._iv(out)
+        by = {m["slug"]: m for m in iv["per_market"]}
+
+        arrived, never = by[SLUGS[0]], by[SLUGS[11]]
+        assert arrived["observed_s"] == 590.0
+        assert arrived["never_observed"] is False
+
+        assert never["observed_s"] == 0.0
+        assert never["never_observed"] is True
+        assert never["epochs_with_snapshot"] == 0
+        # The whole segment is time that market was watched, not observed.
+        assert never["awaiting_first_snapshot_s"] == 590.0
+
+    def test_one_market_without_a_book_makes_the_instant_unusable(self):
+        """The reward is scored across the board, so the run figure is
+        the time EVERY allowlisted market held a valid book -- which is
+        zero while one of them has never sent a snapshot."""
+        recs = [fake_ladder(T0 + 10, SLUGS[i]) for i in range(11)]
+        recs.append(fake_ladder(T0 + 600, SLUGS[0]))
+        out = build(recs, control=True, now=T0 + 700)
+        iv = self._iv(out)
+        assert iv["achieved"]["value"]["observed_s"] == 0.0
+        # The socket was up the whole time, and that is reported apart.
+        assert iv["feed_up_s"] == 590.0
+        assert iv["observed_best_market_s"] == 590.0
+
+    def test_coverage_begins_at_the_first_snapshot_not_the_segment(self):
+        recs = [fake_ladder(T0 + 10, s) for s in SLUGS[:11]] + [
+            fake_ladder(T0 + 310, SLUGS[11]),            # late arrival
+            fake_ladder(T0 + 610, SLUGS[0])]
+        out = build(recs, control=True, now=T0 + 700)
+        by = {m["slug"]: m for m in self._iv(out)["per_market"]}
+        assert by[SLUGS[0]]["observed_s"] == 600.0
+        assert by[SLUGS[11]]["observed_s"] == 300.0
+        assert by[SLUGS[11]]["awaiting_first_snapshot_s"] == 300.0
+        # Every market valid only from the latest arrival onwards.
+        assert self._iv(out)["achieved"]["value"]["observed_s"] == 300.0
+
+    def test_an_update_alone_does_not_establish_a_book(self):
+        """A delta against a snapshot this process never saw is not a
+        book. Only an INITIAL_LADDER starts the clock."""
+        recs = [fake_ladder(T0 + 10, s, ladder_class="INITIAL_LADDER")
+                for s in SLUGS[:11]] + [
+            fake_ladder(T0 + 20, SLUGS[11], ladder_class="UPDATE"),
+            fake_ladder(T0 + 600, SLUGS[0], ladder_class="UPDATE")]
+        out = build(recs, control=True, now=T0 + 700)
+        by = {m["slug"]: m for m in self._iv(out)["per_market"]}
+        stray = by[SLUGS[11]]
+        assert stray["frames"] == 1           # it IS receiving
+        assert stray["observed_s"] == 0.0     # and it is NOT observed
+        assert stray["watched_but_silent"] is False
+        assert stray["never_observed"] is True
+
+    def test_a_reconnect_voids_the_book_until_it_is_rebuilt(self):
+        """`MarketStream.epoch` counts connections and the journal
+        forbids carrying a ladder across one. So the second epoch's
+        clock starts at that epoch's OWN snapshot, and a market that
+        did not re-send one is unobserved for the whole of it."""
+        recs = []
+        for s in SLUGS:                                  # epoch 1: all 12
+            recs.append(fake_ladder(T0 + 10, s, epoch=1,
+                                    ladder_class="INITIAL_LADDER"))
+        recs.append(fake_ladder(T0 + 300, SLUGS[0], epoch=1,
+                                ladder_class="UPDATE"))
+        # A reconnect. Epoch 2 re-snapshots eleven markets, not the 12th.
+        for s in SLUGS[:11]:
+            recs.append(fake_ladder(T0 + 400, s, epoch=2,
+                                    ladder_class="INITIAL_LADDER"))
+        recs.append(fake_ladder(T0 + 900, SLUGS[0], epoch=2,
+                                ladder_class="UPDATE"))
+        out = build(recs, control=True, now=T0 + 1000)
+        iv = self._iv(out)
+        by = {m["slug"]: m for m in iv["per_market"]}
+
+        assert iv["segments"] == [
+            {"start": CC.iso(T0 + 10), "end": CC.iso(T0 + 300),
+             "seconds": 290.0},
+            {"start": CC.iso(T0 + 400), "end": CC.iso(T0 + 900),
+             "seconds": 500.0}]
+
+        rebuilt = by[SLUGS[0]]
+        assert rebuilt["epochs_with_snapshot"] == 2
+        assert rebuilt["observed_s"] == 790.0
+
+        stale = by[SLUGS[11]]
+        assert stale["epochs_with_snapshot"] == 1
+        # Epoch 1 only. The 500s of epoch 2 are NOT carried over.
+        assert stale["observed_s"] == 290.0
+        assert stale["awaiting_first_snapshot_s"] == 500.0
+
+        # And the run figure stops at the reconnect for the same reason.
+        assert iv["achieved"]["value"]["observed_s"] == 290.0
+
+    def test_the_page_says_watched_is_not_observed_in_words(self):
+        out = build([fake_ladder(T0 + 10, SLUGS[0])], control=True,
+                    now=T0 + 60)
+        note = self._iv(out)["watched_is_not_observed"]
+        assert "UNOBSERVED" in note
+        assert "reconnect" in note.lower()
 
 
 class TestEarlyVersusWindow:

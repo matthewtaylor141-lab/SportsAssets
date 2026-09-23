@@ -185,8 +185,48 @@ def gap_view(records) -> dict:
                     "not one -- see connection_health()."}
 
 
+def latest_boot(records) -> dict:
+    """The NEWEST boot, with its own ordered lifecycle records.
+
+    A RUN IS NOT ONE TIMELINE. A replaced process ends its boot and the
+    next one starts its own, so asking "did the run close" of the whole
+    record set answers about whichever boot happened to close -- not
+    about the one running now.
+
+    The newest boot is the one whose FIRST record is latest. Picking by
+    the latest row would be wrong: a late journal flush from a dying
+    boot can land after the next boot has already opened.
+    """
+    recs = [r for r in records or [] if r.get("boot_id")]
+    if not recs:
+        return {"boot_id": None, "records": [], "opened_at": None,
+                "closed": None, "close_reason": None, "first_frame": None,
+                "frames": 0, "n_boots": 0}
+    firsts = {}
+    for r in recs:
+        b, t = r["boot_id"], float(r.get("at") or 0.0)
+        if b not in firsts or t < firsts[b]:
+            firsts[b] = t
+    newest = max(firsts, key=lambda b: firsts[b])
+    mine = sorted([r for r in recs if r["boot_id"] == newest],
+                  key=lambda r: float(r.get("at") or 0.0))
+    lads = [r for r in mine if r.get("kind") == "LADDER"]
+    closes = [r for r in mine if r.get("kind") == "RUN_CLOSE"]
+    return {
+        "boot_id": newest,
+        "records": mine,
+        "opened_at": firsts[newest],
+        "closed": closes[-1] if closes else None,
+        "close_reason": ((closes[-1].get("payload") or {}).get("why")
+                         if closes else None),
+        "first_frame": float(lads[0]["at"]) if lads else None,
+        "frames": len(lads),
+        "n_boots": len(firsts),
+    }
+
+
 def lifecycle(*, control, probe, ladders, gaps, errors, run_close,
-              now, window_end=None) -> dict:
+              now, window_end=None, boot=None) -> dict:
     """Which state the run is ACTUALLY in, from evidence only.
 
     THE ORDER MATTERS AND IS NOT ARBITRARY. Failure and completion are
@@ -208,30 +248,82 @@ def lifecycle(*, control, probe, ladders, gaps, errors, run_close,
                        % (p.get("detail") or p.get("why") or "unspecified"),
                 "evidence": "journal RUN_ERROR"}
 
-    # COMPLETED MEANS NOTHING CAME AFTER, and a RUN_CLOSE alone does not
-    # establish that.
+    # ── THE LATEST BOOT DECIDES ──────────────────────────────────────
     #
-    # THE BUG THIS FIXES, caught by reconciling against the real run.
-    # Boot A was replaced mid-run and wrote a RUN_CLOSE on its way out;
-    # boot B then reopened and has been persisting frames ever since.
-    # Treating any RUN_CLOSE as terminal reported the live run as
-    # COMPLETED -- the most dangerous possible error on this page,
-    # because it says "nothing more is owed" about a run that is still
-    # going and still needs to be stopped at its fixed end.
+    # TWO BUGS LIVED HERE AND BOTH CALLED A LIVE RUN "COMPLETED".
     #
-    # A close is terminal only when NO FRAME FOLLOWS IT.
-    if run_close and n_ladders > 0:
-        close_at = float((run_close.get("at") if isinstance(run_close, dict)
-                          else 0) or 0)
-        after = [r for r in ladders
+    #   1. Any RUN_CLOSE was terminal. A boot being replaced writes one
+    #      on its way out while the next boot keeps collecting.
+    #
+    #   2. "A close with nothing after it" was terminal. That is exactly
+    #      what A NEW BOOT WAITING FOR ITS FIRST FRAME looks like: the
+    #      old boot's close is the last record and the new boot has
+    #      produced nothing yet. Reporting that as COMPLETED says
+    #      "nothing more is owed" about a run that has collected nothing
+    #      since restarting and still has to be stopped at its fixed end.
+    #
+    # Completion is therefore asked of the LATEST BOOT, and it is
+    # complete only when THAT boot closed, nothing followed its close,
+    # the close was not an interruption, and the window had run out. An
+    # interrupted boot is not a completed run, whatever earlier boots
+    # did.
+    lb = boot or {}
+    lb_close = lb.get("closed")
+
+    if lb.get("boot_id") and lb_close is None and lb.get("frames", 0) == 0 \
+            and n_ladders > 0:
+        # RESTART BEFORE FIRST FRAME. Earlier boots collected; this one
+        # has opened and produced nothing.
+        return {"state": L_ARMED_NO_FRAMES,
+                "why": "boot %s opened at %s and has not persisted a "
+                       "frame. Earlier boots collected; THIS one has "
+                       "produced nothing, so the run is waiting to "
+                       "resume, not finished."
+                       % (lb.get("boot_id"), iso(lb.get("opened_at"))),
+                "evidence": "latest boot has 0 ladders; %d exist from "
+                            "earlier boots" % n_ladders}
+
+    if lb_close is not None:
+        close_at = float(lb_close.get("at") or 0.0)
+        after = [r for r in (lb.get("records") or [])
                  if float(r.get("at") or 0.0) > close_at]
+        reason = str(lb.get("close_reason") or "").upper()
+        interrupted = any(k in reason for k in
+                          ("ERROR", "REPLACED", "SOCKET", "ALLOWANCE",
+                           "EXHAUST"))
+        if interrupted:
+            return {"state": L_INTERRUPTED,
+                    "why": "the latest boot ended on %s. An interrupted "
+                           "boot is not a completed run."
+                           % (lb.get("close_reason") or "an interruption"),
+                    "evidence": "latest boot %s, close reason %s"
+                                % (lb.get("boot_id"), lb.get("close_reason"))}
         if not after:
-            return {"state": L_COMPLETED,
-                    "why": "the run closed and no frame followed the close",
-                    "evidence": "journal RUN_CLOSE at %s + %d ladder "
-                                "records, none after it"
-                                % (iso(close_at), n_ladders)}
-        # else: a later boot reopened. Fall through to the live branches.
+            if control:
+                return {"state": L_INTERRUPTED,
+                        "why": "the latest boot closed (%s) while the "
+                               "control is still true -- the boot ended "
+                               "without the run being stopped"
+                               % (lb.get("close_reason") or "unnamed"),
+                        "evidence": "latest boot %s closed, control true"
+                                    % lb.get("boot_id")}
+            if n_ladders > 0 and close_at < end:
+                return {"state": L_STOPPED,
+                        "why": "the latest boot closed at %s, BEFORE the "
+                               "fixed end %s (%s). This is a PARTIAL run "
+                               "and is not complete."
+                               % (iso(close_at), iso(end),
+                                  lb.get("close_reason") or "unnamed"),
+                        "evidence": "latest boot %s closed before the "
+                                    "window end" % lb.get("boot_id")}
+            if n_ladders > 0:
+                return {"state": L_COMPLETED,
+                        "why": "the latest boot closed at or after the "
+                               "fixed end (%s) and nothing followed"
+                               % (lb.get("close_reason") or "unnamed"),
+                        "evidence": "latest boot %s closed at %s, %d "
+                                    "ladders" % (lb.get("boot_id"),
+                                                 iso(close_at), n_ladders)}
 
     if not control:
         if n_ladders > 0:
@@ -487,6 +579,16 @@ def _clip(intervals, a, b) -> list:
             if min(y, b) > max(x, a)]
 
 
+def _intersect(a, b) -> list:
+    """Intersection of two unions of intervals.
+
+    Used for "every market held a valid book at this instant". The
+    MINIMUM of the per-market totals is not that answer: two markets
+    can each be valid for an hour without sharing a single second.
+    """
+    return _merge([p for x, y in b for p in _clip(a, x, y)])
+
+
 def coverage_intervals(records, *, now, allowlist=None,
                        window_start=None, window_end=None) -> dict:
     """OBSERVED TIME AS A UNION OF INTERVALS. Not a subtraction.
@@ -553,28 +655,91 @@ def coverage_intervals(records, *, now, allowlist=None,
     last_covered = max((y for _, y in in_window), default=a)
     remaining_s = round(max(0.0, b - max(last_covered, min(now, b))), 3)
 
-    per_market = []
+    # ── WATCHED IS NOT OBSERVED ──────────────────────────────────────
+    #
+    # A subscribed market with no ladder yet is UNOBSERVED, not quiet.
+    # "Nothing has changed" presupposes a book to change FROM, and
+    # before the first full snapshot there is none.
+    #
+    # AND A RECONNECT VOIDS IT. `MarketStream.epoch` counts connections,
+    # and the journal's own reconstruction rule forbids carrying a
+    # ladder across an epoch or boot boundary. So the clock restarts per
+    # (boot, epoch): a market is observed from its first INITIAL_LADDER
+    # in THAT epoch to the end of that segment, and the stretch between
+    # the epoch opening and that snapshot is a REBUILD interval nobody
+    # observed. This is the record-side twin of the live feed's own
+    # GAP_NO_INITIAL_LADDER_THIS_EPOCH.
+    seg_by_key = {(x["boot_id"], x["epoch"]): (float(x["start"]),
+                                               float(x["end"]))
+                  for x in segs}
+    first_snap = {}
+    for r in recs:
+        if r.get("kind") != "LADDER":
+            continue
+        pay = r.get("payload") or {}
+        # A record with no class predates the classification; treat it
+        # as a snapshot rather than inventing a rebuild gap for it.
+        if pay.get("ladder_class") not in (None, "INITIAL_LADDER"):
+            continue
+        k = (r.get("boot_id"), r.get("epoch"), r.get("slug"))
+        t = float(r.get("at") or 0.0)
+        if k not in first_snap or t < first_snap[k]:
+            first_snap[k] = t
+
+    per_market, rebuild_total, every_market = [], 0.0, None
     for slug in sorted(allowlist or []):
-        mine = _merge([(float(s["start"]), float(s["end"])) for s in segs
-                       if slug in (s.get("slugs") or [])])
-        # A market present in the allowlist but silent in a segment was
-        # still watched for it. `segments()` only lists slugs that sent
-        # something, so silence would otherwise read as absence.
-        watched = seg_iv if slug in (allowlist or []) else mine
-        m_obs = _clip(_subtract(watched, cuts), a, b)
+        valid, rebuild = [], []
+        for (bt, ep), (s0, s1) in seg_by_key.items():
+            snap = first_snap.get((bt, ep, slug))
+            if snap is None:
+                rebuild.append((s0, s1))
+                continue
+            valid.append((max(snap, s0), s1))
+            if snap > s0:
+                rebuild.append((s0, min(snap, s1)))
+        m_obs = _clip(_subtract(_merge(valid), cuts), a, b)
+        m_reb = _clip(_merge(rebuild), a, b)
+        every_market = m_obs if every_market is None \
+            else _intersect(every_market, m_obs)
+        obs_s = round(sum(y - x for x, y in m_obs), 3)
+        reb_s = round(sum(y - x for x, y in m_reb), 3)
+        rebuild_total += reb_s
         frames = sum(1 for r in recs if r.get("kind") == "LADDER"
-                     and r.get("slug") == slug and a <= float(r.get("at") or 0) < b)
+                     and r.get("slug") == slug
+                     and a <= float(r.get("at") or 0) < b)
         last = max((float(r["at"]) for r in recs
                     if r.get("kind") == "LADDER" and r.get("slug") == slug),
                    default=None)
         per_market.append({
             "slug": slug,
-            "observed_s": round(sum(y - x for x, y in m_obs), 3),
+            "observed_s": obs_s,
+            "awaiting_first_snapshot_s": reb_s,
+            "epochs_total": len(seg_by_key),
+            "epochs_with_snapshot": sum(1 for k in first_snap
+                                        if k[2] == slug),
             "frames": frames,
             "last_frame": iso(last),
-            "sent_in_segments": len(mine),
+            "never_observed": obs_s <= 0.0,
             "watched_but_silent": frames == 0,
         })
+
+    # THE RUN FIGURE IS THE MARKETS' MINIMUM, not the segment union. A
+    # window instant is usable for the programme only if EVERY
+    # allowlisted market held a valid book at it: the reward is scored
+    # across the board, so one market still rebuilding makes that
+    # instant unusable however healthy the socket was. `feed_up_s`
+    # keeps the socket's own uptime visible beside it.
+    feed_up_s = round(sum(y - x for x, y in in_window), 3)
+    observed_best = feed_up_s
+    if per_market:
+        every = every_market or []
+        observed_s = round(sum(y - x for x, y in every), 3)
+        observed_best = round(max(m["observed_s"] for m in per_market), 3)
+        # The ceiling counts from the last instant EVERY market was
+        # valid, not from `now` and not from the socket's uptime.
+        last_covered = max((y for _, y in every), default=a)
+        remaining_s = round(max(0.0, b - max(last_covered,
+                                             min(now, b))), 3)
 
     return {
         "window": {"start": iso(a), "end": iso(b), "span_s": round(b - a, 3)},
@@ -590,8 +755,19 @@ def coverage_intervals(records, *, now, allowlist=None,
         "observed_intervals": [{"from": iso(x), "to": iso(y),
                                 "seconds": round(y - x, 3)}
                                for x, y in in_window],
+        "feed_up_s": feed_up_s,
+        "observed_best_market_s": observed_best,
+        "awaiting_first_snapshot_s": round(rebuild_total, 3),
+        "watched_is_not_observed": "A subscribed market with no initial "
+                                   "ladder in the current epoch is "
+                                   "UNOBSERVED, not quiet -- there is no "
+                                   "book yet for 'unchanged' to refer to. "
+                                   "A reconnect voids the cached book and "
+                                   "the clock restarts.",
         "achieved": cell(
             {"observed_s": observed_s,
+             "basis": "EVERY allowlisted market held a valid book",
+             "feed_up_s": feed_up_s,
              "window_s": round(b - a, 3),
              "fraction_of_window": round(observed_s / (b - a), 6)
              if b > a else None,
@@ -615,10 +791,12 @@ def coverage_intervals(records, *, now, allowlist=None,
                  "continues unbroken to 2026-09-24T04:00:00Z. Nothing "
                  "may be reported from it as though it had happened."),
         "per_market": per_market,
-        "validity_is_not_activity": "observed_s is how long a market was "
-                                    "WATCHED. frames is how often it "
-                                    "CHANGED. A watched market with zero "
-                                    "frames was quiet, not missing.",
+        "validity_is_not_activity": "observed_s is how long a market had "
+                                    "a VALID BOOK. frames is how often it "
+                                    "CHANGED. A market with a valid book "
+                                    "and zero frames was quiet; a market "
+                                    "with no snapshot yet was not "
+                                    "observed at all.",
     }
 
 
@@ -1122,7 +1300,9 @@ def build(*, records, control, probe, run_row, allowlist, suites,
                        key=lambda r: float(r.get("at") or 0.0))
     run_open = [r for r in records or [] if r.get("kind") == "RUN_OPEN"]
 
+    boot = latest_boot(records)
     lc = lifecycle(control=control, probe=probe, ladders=ladders,
+                   boot=boot,
                    gaps=gaps["open"], errors=gaps["errors"],
                    # THE LATEST close, not the first: an early boot's
                    # close says nothing about whether a later boot is
@@ -1174,6 +1354,18 @@ def build(*, records, control, probe, run_row, allowlist, suites,
                                "means the collector was replaced, and a "
                                "BOOT_GAP was written for the interval."),
             "boot_count": cell(len(boots), "journal boot_id column"),
+            "latest_boot": cell(
+                {"boot_id": boot.get("boot_id"),
+                 "opened_at": iso(boot.get("opened_at")),
+                 "frames": boot.get("frames"),
+                 "first_frame": iso(boot.get("first_frame")),
+                 "closed_at": iso((boot.get("closed") or {}).get("at"))
+                 if boot.get("closed") else None,
+                 "close_reason": boot.get("close_reason")},
+                "journal, newest boot only",
+                note="THE LATEST BOOT DECIDES the lifecycle. An earlier "
+                     "boot's close says nothing about whether this one "
+                     "is running."),
             "journal_run_open": cell(
                 {"allowlist": len(first_open.get("allowlist") or []),
                  "window": first_open.get("window")},
