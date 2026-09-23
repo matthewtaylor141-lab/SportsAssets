@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#0b0f17">
+  <meta name="robots" content="noindex,nofollow">
+  <meta name="description" content="BETTOR Command Centre — a read-only evidence view over the observation run, test results, economics and capability traceability.">
+  <title>BETTOR Command Centre</title>
+  <link rel="stylesheet" href="center.css">
+</head>
+<body class="cc">
+  <!-- The session is the existing HttpOnly COMMAND cookie, minted by
+       /api/command/session on the main page and scoped to
+       Path=/api/command. This page reads no credential, holds no token
+       and sends no custom header; the browser attaches the cookie
+       because the request is same-origin. A 401 here means "unlock on
+       the main Command page first", and that is what it says. -->
+  <div id="cc-root"><p style="padding:24px;color:#9fb0c8">Opening the command centre…</p></div>
+  <script src="center.js"></script>
+</body>
+</html>

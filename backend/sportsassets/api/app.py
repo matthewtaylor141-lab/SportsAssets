@@ -1115,6 +1115,46 @@ async def command_shadow_health(response: Response) -> dict:
         raise _shadow_unavailable(inc) from inc
 
 
+# ── THE BETTOR COMMAND CENTRE (2026-09-23) ──────────────────────────
+#
+# FIVE VIEWS OVER ONE READ: live operation, test and release evidence,
+# economic evidence, capability traceability and a management overview.
+# It is a GET behind `require_command` like everything else here, and
+# the module it calls holds no mutating statement and no venue client.
+#
+# CACHE-CONTROL: NO-STORE, AND THAT IS LOAD-BEARING. This page reports
+# whether a collection run is alive. A cached answer served as the
+# current one is the specific failure it exists to prevent, so the
+# response is never storable and every figure carries its own `as_of`.
+
+
+@app.get("/api/command/center/snapshot",
+         dependencies=[Depends(require_command)])
+async def command_center_snapshot(response: Response) -> dict:
+    from . import command_center as CCTR
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    try:
+        return await CCTR.snapshot()
+    except CCTR.RetrievalIncomplete as inc:
+        raise HTTPException(status_code=503, detail={
+            "reason": inc.reason, "detail": inc.detail,
+            "note": "evidence unread -- the command centre shows "
+                    "UNAVAILABLE, never a page of zeros",
+        }) from inc
+
+
+@app.get("/api/command/center/describe",
+         dependencies=[Depends(require_command)])
+async def command_center_describe(response: Response) -> dict:
+    """The read model's own contract: its states, buckets and refusals."""
+    from .. import bettor_command_center as CC
+
+    response.headers["Cache-Control"] = "no-store"
+    return CC.describe()
+
+
 # ── BETTOR_EXPERIMENTAL_SHADOW (2026-09-19 §13) ─────────────────────
 # A SEPARATE LANE WITH ITS OWN ENDPOINTS, and deliberately not folded
 # into /shadow/summary. The decision-grade lane's totals may not absorb

@@ -1,0 +1,293 @@
+/* BETTOR COMMAND CENTRE.
+ *
+ * The palette carries meaning and only meaning. There are three tones
+ * and each one has a job:
+ *
+ *   good  -- the evidence supports it
+ *   wait  -- nothing is wrong and nothing is proven
+ *   bad   -- the evidence says something is wrong
+ *
+ * CONNECTED_QUIET IS DELIBERATELY `good`. A change-driven feed says
+ * nothing about a market nobody is trading, and a dashboard that paints
+ * every quiet hour red teaches its reader to stop believing red.
+ *
+ * UNKNOWN has its own treatment -- struck, muted, never a number. It is
+ * the one thing on this page that must not be mistakable for a zero.
+ */
+
+:root {
+  --cc-bg: #0b0f17;
+  --cc-panel: #131a26;
+  --cc-panel-2: #182231;
+  --cc-line: #263346;
+  --cc-ink: #e6edf7;
+  --cc-ink-2: #9fb0c8;
+  --cc-ink-3: #6b7d96;
+  --cc-good: #3fbf87;
+  --cc-wait: #d9a441;
+  --cc-bad: #e0544f;
+  --cc-accent: #5b9df9;
+  --cc-unknown: #7a8aa3;
+  --cc-gutter: 16px;
+  --cc-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas,
+             "Liberation Mono", monospace;
+}
+
+* { box-sizing: border-box; }
+
+body.cc {
+  margin: 0;
+  background: var(--cc-bg);
+  color: var(--cc-ink);
+  font: 15px/1.55 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  -webkit-text-size-adjust: 100%;
+}
+
+#cc-root { max-width: 1120px; margin: 0 auto;
+           padding: 0 var(--cc-gutter) 64px; }
+
+/* ── the synthetic-fixture banner ───────────────────────────────── */
+/* Loud on purpose. A screenshot of a fixture must never be mistakable
+ * for a screenshot of the run. */
+
+.cc-synthetic {
+  position: sticky; top: 0; z-index: 10;
+  /* Bleeds to the page edge, so it is tied to the SAME gutter token
+   * the container uses. Hard-coding -16px here against a 12px gutter
+   * is 4px of horizontal scroll on a phone -- which is exactly the
+   * bug the overflow check caught. */
+  margin: 0 calc(-1 * var(--cc-gutter));
+  padding: 10px var(--cc-gutter);
+  background: var(--cc-bad); color: #16060a;
+  font-size: 12.5px; line-height: 1.45;
+  border-bottom: 2px solid #7d2320;
+}
+.cc-synthetic b { letter-spacing: 0.03em; }
+.cc-synthetic code {
+  background: rgba(0,0,0,0.22); padding: 1px 5px; border-radius: 3px;
+  font-family: var(--cc-mono);
+}
+
+/* ── header ─────────────────────────────────────────────────────── */
+
+.cc-head {
+  position: sticky; top: 0; z-index: 5;
+  background: linear-gradient(var(--cc-bg) 82%, rgba(11,15,23,0));
+  padding: 20px 0 8px;
+}
+.cc-title h1 { margin: 0; font-size: 21px; letter-spacing: -0.01em; }
+.cc-asofbar {
+  display: flex; align-items: center; gap: 12px; flex-wrap: wrap;
+  margin: 8px 0; color: var(--cc-ink-3); font-size: 12px;
+}
+.cc-btn {
+  background: var(--cc-panel-2); color: var(--cc-ink);
+  border: 1px solid var(--cc-line); border-radius: 6px;
+  padding: 5px 11px; font-size: 12px; cursor: pointer;
+}
+.cc-btn:hover { border-color: var(--cc-accent); }
+
+.cc-tabs {
+  display: flex; gap: 4px; flex-wrap: wrap;
+  border-bottom: 1px solid var(--cc-line); padding-bottom: 0;
+}
+.cc-tab {
+  background: none; border: none; border-bottom: 2px solid transparent;
+  color: var(--cc-ink-2); padding: 9px 12px; font-size: 13px;
+  cursor: pointer; white-space: nowrap;
+}
+.cc-tab.cc-on { color: var(--cc-ink); border-bottom-color: var(--cc-accent); }
+.cc-tab:focus-visible { outline: 2px solid var(--cc-accent); outline-offset: -2px; }
+
+/* ── panels ─────────────────────────────────────────────────────── */
+
+.cc-body { display: flex; flex-direction: column; gap: 14px; margin-top: 16px; }
+
+.cc-panel {
+  background: var(--cc-panel);
+  border: 1px solid var(--cc-line);
+  border-radius: 10px;
+  padding: 16px;
+}
+.cc-panel h2 {
+  margin: 0 0 10px; font-size: 13px; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--cc-ink-2); font-weight: 600;
+}
+.cc-panel h3 { margin: 0 0 6px; font-size: 13px; }
+
+.cc-warnbox { border-left: 3px solid var(--cc-wait); }
+.cc-unavailable { border-left: 3px solid var(--cc-bad); }
+.cc-unavailable h2 { color: var(--cc-bad); }
+
+/* ── badges ─────────────────────────────────────────────────────── */
+
+.cc-badges { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.cc-badge {
+  display: inline-block; padding: 3px 10px; border-radius: 999px;
+  font-size: 11px; font-weight: 700; letter-spacing: 0.06em;
+  border: 1px solid;
+}
+.cc-badge.cc-good { color: var(--cc-good); border-color: var(--cc-good); }
+.cc-badge.cc-wait { color: var(--cc-wait); border-color: var(--cc-wait); }
+.cc-badge.cc-bad  { color: var(--cc-bad);  border-color: var(--cc-bad); }
+.cc-badge.cc-kind { color: var(--cc-ink-2); border-color: var(--cc-line); }
+
+.cc-good { color: var(--cc-good); }
+.cc-warn { color: var(--cc-wait); }
+.cc-bad  { color: var(--cc-bad); }
+.cc-pass { color: var(--cc-good); }
+
+/* ── cells: value + source, never one without the other ─────────── */
+
+.cc-cells {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 10px; margin: 0;
+}
+.cc-cell {
+  background: var(--cc-panel-2); border: 1px solid var(--cc-line);
+  border-radius: 8px; padding: 10px 12px; min-width: 0;
+}
+.cc-cell dt {
+  font-size: 11px; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--cc-ink-3); margin-bottom: 3px;
+}
+.cc-cell dd {
+  margin: 0; font-size: 15px; word-break: break-word;
+  font-variant-numeric: tabular-nums;
+}
+.cc-cell.cc-unknown-status, .cc-cell.cc-unknown { opacity: 0.85; }
+.cc-cell.cc-broken { border-color: var(--cc-bad); }
+
+.cc-meta {
+  margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap;
+  font-size: 10.5px; color: var(--cc-ink-3);
+}
+.cc-src { font-family: var(--cc-mono); }
+.cc-asof { white-space: nowrap; }
+
+/* UNKNOWN. Muted, italic, and never a numeral. */
+.cc-unknown, em.cc-unknown {
+  color: var(--cc-unknown); font-style: italic; letter-spacing: 0.04em;
+  font-size: 13px;
+}
+em.cc-na { color: var(--cc-ink-3); font-style: italic; }
+
+.cc-note {
+  margin: 6px 0 0; font-size: 12px; color: var(--cc-ink-3);
+  line-height: 1.5;
+}
+.cc-why { margin: 4px 0; color: var(--cc-ink-2); font-size: 13.5px; }
+.cc-evidence { margin: 2px 0; font-size: 12px; color: var(--cc-ink-3);
+               font-family: var(--cc-mono); }
+.cc-sub { margin: 3px 0; font-size: 12px; color: var(--cc-ink-3); }
+.cc-caveat {
+  margin: 10px 0 0; padding: 8px 10px; font-size: 12.5px;
+  background: rgba(217,164,65,0.08); border-left: 2px solid var(--cc-wait);
+  border-radius: 0 4px 4px 0; color: var(--cc-ink-2);
+}
+
+/* ── key/value ──────────────────────────────────────────────────── */
+
+.cc-kv, .cc-kinds { display: grid; grid-template-columns: auto 1fr;
+                    gap: 4px 14px; margin: 8px 0 0; font-size: 13px; }
+.cc-kv dt, .cc-kinds dt {
+  color: var(--cc-ink-3); font-size: 11px; text-transform: uppercase;
+  letter-spacing: 0.05em; padding-top: 3px; white-space: nowrap;
+}
+.cc-kv dd, .cc-kinds dd { margin: 0; word-break: break-word; }
+.cc-mono { font-family: var(--cc-mono); font-size: 12.5px; }
+
+/* ── the two periods ────────────────────────────────────────────── */
+
+.cc-two { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
+.cc-half {
+  padding: 12px; border-radius: 8px; background: var(--cc-panel-2);
+  border: 1px solid var(--cc-line);
+}
+.cc-early { border-left: 3px solid var(--cc-ink-3); }
+.cc-window { border-left: 3px solid var(--cc-accent); }
+.cc-big {
+  margin: 4px 0; font-size: 32px; font-weight: 700;
+  font-variant-numeric: tabular-nums;
+}
+.cc-big-text { margin: 4px 0; font-size: 17px; font-weight: 600; }
+
+/* ── tables ─────────────────────────────────────────────────────── */
+
+.cc-table-wrap, .cc-panel { overflow-x: auto; }
+.cc-table {
+  width: 100%; border-collapse: collapse; font-size: 12.5px;
+  margin-top: 8px; font-variant-numeric: tabular-nums;
+}
+.cc-table th {
+  text-align: left; padding: 6px 8px; color: var(--cc-ink-3);
+  font-size: 10.5px; text-transform: uppercase; letter-spacing: 0.05em;
+  border-bottom: 1px solid var(--cc-line); white-space: nowrap;
+}
+.cc-table td {
+  padding: 6px 8px; border-bottom: 1px solid rgba(38,51,70,0.5);
+  vertical-align: top;
+}
+.cc-row-bad td { background: rgba(224,84,79,0.07); }
+
+.cc-json {
+  margin: 2px 0 0; font-family: var(--cc-mono); font-size: 11.5px;
+  color: var(--cc-ink-2); background: rgba(0,0,0,0.25);
+  padding: 6px 8px; border-radius: 5px; overflow-x: auto; max-height: 240px;
+}
+
+.cc-drill { margin-top: 10px; }
+.cc-drill summary {
+  cursor: pointer; font-size: 12.5px; color: var(--cc-accent);
+  padding: 4px 0;
+}
+.cc-counts { margin: 10px 0 0; font-size: 13.5px; }
+
+.cc-blocker {
+  border-left: 3px solid var(--cc-bad); padding: 8px 12px;
+  background: var(--cc-panel-2); border-radius: 0 6px 6px 0;
+  margin-bottom: 10px;
+}
+.cc-blocker h3 { color: var(--cc-bad); font-size: 13px; }
+.cc-blocker p { margin: 4px 0; font-size: 13px; }
+
+.cc-next { border-left: 3px solid var(--cc-accent); }
+
+/* ── footer ─────────────────────────────────────────────────────── */
+
+.cc-foot {
+  margin-top: 24px; padding-top: 14px; border-top: 1px solid var(--cc-line);
+  color: var(--cc-ink-3); font-size: 12px;
+}
+.cc-foot h3 { font-size: 11px; text-transform: uppercase;
+              letter-spacing: 0.06em; margin: 0 0 6px; }
+.cc-foot ul { margin: 0; padding-left: 18px; }
+.cc-foot li { margin: 2px 0; }
+
+/* ── narrow screens ─────────────────────────────────────────────── */
+
+@media (max-width: 760px) {
+  :root { --cc-gutter: 12px; }
+  #cc-root { padding: 0 var(--cc-gutter) 48px; }
+  .cc-title h1 { font-size: 18px; }
+  .cc-two { grid-template-columns: 1fr; }
+  .cc-cells { grid-template-columns: 1fr; }
+  .cc-kv, .cc-kinds { grid-template-columns: 1fr; gap: 2px; }
+  .cc-kv dt, .cc-kinds dt { padding-top: 8px; }
+  .cc-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+  /* A TABLE SCROLLS; IT DOES NOT SQUEEZE. Compressed into a phone's
+   * width, a 33-character market slug wraps to six lines and the row
+   * becomes taller than the screen. The panel already scrolls
+   * horizontally, so giving the table a floor lets it use that instead
+   * of destroying its own rows. The PAGE still never scrolls sideways
+   * -- the overflow check in tools/command_center_shots.py asserts it. */
+  .cc-table { min-width: 460px; }
+  .cc-table td:first-child, .cc-table th:first-child { white-space: nowrap; }
+  .cc-tab { padding: 9px 9px; font-size: 12.5px; }
+  .cc-big { font-size: 26px; }
+  .cc-panel { padding: 13px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
