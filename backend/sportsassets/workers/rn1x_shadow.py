@@ -651,7 +651,25 @@ async def run(pool_factory=None) -> None:
                 # one blended one.
                 res_p = await cycle(conn, lane="PROSPECTIVE")
                 res_h = await cycle(conn, lane="HISTORICAL")
-                res = {"prospective": res_p, "historical": res_h,
+                # A COMPACT SUMMARY THAT SURVIVES TRUNCATION. The
+                # operational readback prints left(detail, 1400) and the
+                # historical lane's `results` array fills that on its own,
+                # so the prospective lane -- the one whose state is in
+                # question -- was invisible in every production read I
+                # took. jsonb orders keys by length then bytewise, so a
+                # 5-character key lands before "state" and well inside the
+                # window. This adds no facts; it makes the ones already
+                # there readable without widening the query.
+                res = {"lanes": {
+                           "P": {"state": res_p.get("state"),
+                                 "cursor": res_p.get("cursor"),
+                                 "examined": res_p.get("examined", 0),
+                                 "written": res_p.get("written", 0)},
+                           "H": {"state": res_h.get("state"),
+                                 "cursor": res_h.get("cursor"),
+                                 "examined": res_h.get("examined", 0),
+                                 "written": res_h.get("written", 0)}},
+                       "prospective": res_p, "historical": res_h,
                        "lane_census": (res_h.get("lane_census")
                                        or res_p.get("lane_census"))}
                 states = (res_p.get("state"), res_h.get("state"))

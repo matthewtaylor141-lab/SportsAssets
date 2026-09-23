@@ -219,3 +219,31 @@ def test_every_blocker_is_a_named_external_dependency():
     from sportsassets import bettor_rn1x_policy as pol
     if not pol.SECOND_HALF_MAPPING:
         assert "SECOND_HALF_UNDEFINED" in W.BLOCKERS
+
+
+def test_the_heartbeat_summary_lands_before_the_readback_truncation():
+    """The operational readback prints left(detail, 1400). jsonb orders
+    keys by LENGTH then bytewise, so the compact per-lane summary must be
+    short enough to precede the historical lane's `results` array -- which
+    filled the whole window on its own and made the prospective lane
+    invisible in every production read I took.
+    """
+    import json
+    from sportsassets.workers import rn1x_shadow as W
+
+    res = {"lanes": {"P": {"state": "IDLE_NO_CANDIDATES", "cursor": 221561718,
+                           "examined": 0, "written": 0},
+                     "H": {"state": "REPLAYED", "cursor": 646,
+                           "examined": 400, "written": 1}},
+           "prospective": {"results": [{"why": "x" * 900}]},
+           "historical": {"results": [{"why": "y" * 900}]},
+           "state": "REPLAYED"}
+    # jsonb's ordering, reproduced: length first, then bytewise.
+    order = sorted(res, key=lambda k: (len(k), k))
+    assert order[0] == "lanes", order
+    assert order.index("lanes") < order.index("historical"), order
+    # and the summary itself fits the window with room to spare
+    assert len(json.dumps(res["lanes"])) < 400, len(json.dumps(res["lanes"]))
+    # the key must be exactly the one the worker emits
+    src = open(W.__file__).read()
+    assert '"lanes": {' in src, "the worker no longer emits the summary"
