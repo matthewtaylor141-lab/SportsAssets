@@ -69,6 +69,43 @@ TICK = 0.01                    # venue price tick
 LOSS_TRIGGER_FRACTION = 0.84   # net proceeds / allocated cost
 SECOND_HALF_ONLY = True
 
+# ── BOTH THRESHOLDS WERE QUERIED AND CONFIRMED, 2026-09-23 ───────────
+#
+# Management read the policy back as "buy the opposite side at $0.34 or
+# better, or sell the $0.57 position at $0.41". Both are the fee-FREE
+# arithmetic, and on a 961.58-contract position the difference is
+# material, so each was put back rather than assumed.
+#
+# PAIRING, on a 0.57 basis. CONFIRMED: the 0.91 is ALL-IN, fees INSIDE.
+#     limit 0.32 -> purchase 0.8900, fee 0.0151, combined 0.9051,
+#                   NET per completed pair 0.0949   <-- meets ">= $0.09 net"
+#     limit 0.33 -> combined 0.9154, net 0.0846     (over the target)
+#     limit 0.34 -> purchase EXACTLY 0.9100, but combined 0.9256 once
+#                   the completion fee lands, net only 0.0744
+#   0.34 and ">= $0.09 net" are not simultaneously satisfiable at this
+#   basis. The net floor was kept.
+#
+# LOSS EXIT, on a 0.57 basis. CONFIRMED: 84% OF ALLOCATED COST.
+#     0.57 x 0.84 = 0.4788, so the trigger bid is ~0.48
+#     0.41 is 71.9% of cost -- a 28.1% loss, not 16%. It equals
+#     0.57 - 0.16, i.e. 16 POINTS of the $1 payout rather than 16% of
+#     cost. That reading was declined.
+#   The two differ by 0.0688 per contract = $66.16 on this position.
+#
+# No code changed: the implementation already matched both confirmations.
+THRESHOLD_CONFIRMATIONS = {
+    "asked_on": "2026-09-23",
+    "pair_target_basis": "ALL_IN_INCLUDING_FEES",
+    "pair_limit_at_057_basis": 0.32,
+    "pair_net_at_057_basis": 0.0949,
+    "pair_reading_declined": ("0.34, which is the purchase cost alone and "
+                             "nets 0.0744 -- below the $0.09 floor"),
+    "loss_trigger_basis": "84_PERCENT_OF_ALLOCATED_COST",
+    "loss_trigger_bid_at_057_basis": 0.4788,
+    "loss_reading_declined": ("0.41, which is 16 POINTS of the $1 payout "
+                             "and 71.9% of cost -- a 28.1% loss, not 16%"),
+}
+
 # ── §3 event phase ───────────────────────────────────────────────────
 SECOND_HALF_UNDEFINED = "SECOND_HALF_UNDEFINED"
 PROGRESS_UNAVAILABLE = "EVENT_PROGRESS_UNAVAILABLE"
