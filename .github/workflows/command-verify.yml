@@ -443,7 +443,21 @@ jobs:
           code=$(curl -s -o /tmp/pos.json -w '%{http_code}' --max-time 45 \
                  -H "$H" "$API/api/command/rn1x/positions" || echo 000)
           echo "positions HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
-          PID=$(jq -r '(.positions // [])[0].position_id // empty' /tmp/pos.json)
+          # PREFER A PROSPECTIVE POSITION when one exists. Relying on
+          # ORDER BY decision_ts DESC to surface it would make this
+          # verification depend on a sort rather than on the lane it is
+          # meant to be about, and the two lanes are the whole point.
+          PID=$(jq -r '((.positions // [])
+                        | map(select(.position_id
+                              | test("_PROSPECTIVE")))
+                        | .[0].position_id)
+                       // (.positions // [])[0].position_id // empty' \
+                /tmp/pos.json)
+          case "$PID" in
+            *_PROSPECTIVE*) echo "tracing a PROSPECTIVE position" ;;
+            "") : ;;
+            *) echo "no prospective position yet; tracing a historical one" ;;
+          esac | tee -a "$GITHUB_STEP_SUMMARY"
           if [ -z "$PID" ]; then
             echo "no position to trace yet" | tee -a "$GITHUB_STEP_SUMMARY"
           else
