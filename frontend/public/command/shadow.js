@@ -50,7 +50,12 @@
     ['performance', 'Performance'],
     // §13's SEPARATE LANE. It is last, and it is labelled, because
     // nothing on it is evidence about the decision-grade lane above.
-    ['experimental', 'Experimental shadow']
+    ['experimental', 'Experimental shadow'],
+    // THE DESK. A DIFFERENT MODE, AND THE LABEL IS THE POINT. Everything
+    // on this tab is HISTORICAL REPLAY: a declared past window run
+    // through the same engine, on a tape that was never ours. It is
+    // never added to anything above it.
+    ['desk', 'Desk · REPLAY']
   ];
 
   const POLL_MS = 8000;
@@ -72,7 +77,11 @@
    * could not read), and an auth challenge. A network failure never
    * becomes an empty payload -- that is the single most dangerous
    * bug this screen could have. */
-  async function pull(path) {
+  // The desk lives under /api/command/desk/. Same guard, same refusal
+  // behaviour; only the prefix differs, so the two cannot drift.
+  async function pullDesk(path) { return pull(path, 'desk'); }
+
+  async function pull(path, ns) {
     try {
       // THE PATH GOES THROUGH core.endpoint() AND THE QUERY DOES NOT.
       // That guard refuses anything outside /api/command/ and refuses a
@@ -84,7 +93,7 @@
       const base = cut < 0 ? path : path.slice(0, cut);
       const query = cut < 0 ? '' : path.slice(cut);
       const res = await fetch(
-        C.endpoint('/api/command/shadow/' + base) + query, {
+        C.endpoint('/api/command/' + (ns || 'shadow') + '/' + base) + query, {
           credentials: 'same-origin', cache: 'no-store',
           headers: { 'Accept': 'application/json' }
         });
@@ -124,14 +133,18 @@
     audit: ['decisions?limit=60'],
     accounting: ['accounting/all'],
     performance: ['equity', 'summary'],
-    experimental: ['experimental', 'experimental/tape?limit=60']
+    experimental: ['experimental', 'experimental/tape?limit=60'],
+    desk: []
   };
 
   async function refresh() {
     if (state.inflight) return;
     state.inflight = true;
     try {
-      await Promise.all((NEEDS[state.tab] || []).map(pull));
+      await Promise.all((NEEDS[state.tab] || []).map(p => pull(p)));
+      if (state.tab === 'desk')
+        await Promise.all(['overview', 'attribution', 'lifecycles?limit=20']
+          .map(pullDesk));
       if (state.tab === 'audit' && state.trade)
         await pull('trades/' + encodeURIComponent(state.trade));
       state.lastUiUpdate = new Date().toISOString();
@@ -1257,7 +1270,99 @@
 
   /* ── shell ─────────────────────────────────────────────────────── */
 
+
+  /* ── DESK (MODE B: HISTORICAL REPLAY) ──────────────────────────── */
+
+  function deskTab() {
+    const ov = state.data['overview'];
+    const at = state.data['attribution'];
+    const lc = state.data['lifecycles?limit=20'];
+    const problem = feedProblem('overview') || feedProblem('attribution');
+    if (problem) return `${problem}`;
+    if (!ov) return panelNote('LOADING', 'Reading the replay artifact.');
+
+    const p = ov.provenance, n = ov.net, oc = ov.order_outcomes;
+    const money = v => (v < 0 ? '−$' : '$') + Math.abs(v).toLocaleString(
+      'en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
+
+    // THE MODE BANNER IS NOT DECORATION. Everything below is a replay on
+    // a tape that was never ours, and a reader who misses that reads a
+    // simulated loss as a trading result.
+    const banner = `<div class="sh-panel" style="border-color:#8a6d1f">
+      <div class="sh-panel-body">
+        <strong style="letter-spacing:.08em">HISTORICAL REPLAY — NOT LIVE, NOT FUNDED</strong>
+        <p>${esc(p.window.first_event_iso)} → ${esc(p.window.last_event_iso)} ·
+           ${C.count(p.window.events)} recorded prints over
+           ${C.count(p.window.conditions)} conditions.</p>
+        <p>${esc(p.execution_assumptions.THE_TAPE_IS_NOT_OURS)}</p>
+        <p class="mono">policy ${esc(p.policy_version)} ·
+           fill model ${esc(p.execution_assumptions.fill_model)} ·
+           queue_share ${p.execution_assumptions.queue_share} (ASSUMED) ·
+           P_FILL ${esc(p.execution_assumptions.p_fill)}</p>
+      </div></div>`;
+
+    const maturity = `<section class="sh-panel"><div class="sh-panel-head">
+      <h2>Policy maturity, per rule</h2><span class="sh-sub">Calling this
+      "the Ferrari model" would be false. One rule is learned.</span></div>
+      <div class="sh-scroll"><table class="sh-table"><tbody>
+      ${Object.entries(p.policy_maturity).filter(([k]) => k !== 'note')
+        .map(([k, v]) => `<tr><td>${esc(k.replace(/_/g, ' '))}</td>
+          <td class="mono"><span class="sh-tag ${v === 'LEARNED' ? 'bettor' : 'rn1'}">${esc(v)}</span></td></tr>`).join('')}
+      <tr><td>learned artifact</td><td class="mono">${esc(p.learned_artifact_sha)}</td></tr>
+      </tbody></table></div></section>`;
+
+    const pnl = `<section class="sh-panel"><div class="sh-panel-head">
+      <h2>Reconciled replay P&amp;L</h2><span class="sh-sub">${esc(ov.what_this_is_not)}</span></div>
+      <div class="sh-scroll"><table class="sh-table"><tbody>
+      <tr><td>Realized</td><td class="mono">${money(n.realized_pnl_usd)}</td></tr>
+      <tr><td>Fees (negative = maker rebate income)</td><td class="mono">${money(n.fees_usd)}</td></tr>
+      <tr><td>Residual inventory at cost</td><td class="mono">${money(n.residual_cost_usd)}</td></tr>
+      <tr><td>Cash</td><td class="mono">${money(n.cash_usd)}</td></tr>
+      <tr><td>Starting capital</td><td class="mono">${money(n.starting_cash_usd)}</td></tr>
+      <tr><td>Ledger identity</td><td class="mono">${ov.invariant.ok
+        ? 'RECONCILES (drift ' + ov.invariant.drift + ')'
+        : 'DOES NOT RECONCILE — drift ' + ov.invariant.drift}</td></tr>
+      </tbody></table></div></section>`;
+
+    const orders = `<section class="sh-panel"><div class="sh-panel-head">
+      <h2>Orders — every outcome, including the ones that never filled</h2></div>
+      <div class="sh-scroll"><table class="sh-table"><tbody>
+      <tr><td>Fully filled</td><td class="mono">${C.count(oc.fully_filled)}</td></tr>
+      <tr><td>Partially filled / expired part-filled</td><td class="mono">${C.count(oc.partially_filled_or_expired_partial)}</td></tr>
+      <tr><td>Expired with no fill</td><td class="mono">${C.count(oc.expired_with_no_fill)}</td></tr>
+      <tr><td>Order fill rate</td><td class="mono">${(oc.fill_rate_of_orders * 100).toFixed(1)}%</td></tr>
+      <tr><td>Prints offered / consumed</td><td class="mono">${C.count(Math.round(ov.consumption.offered_qty))} / ${C.count(Math.round(ov.consumption.consumed_qty))}</td></tr>
+      </tbody></table></div>
+      <div class="sh-panel-body"><p>${esc(ov.consumption.rule)}</p></div></section>`;
+
+    const attr = at ? `<section class="sh-panel"><div class="sh-panel-head">
+      <h2>Why it lost</h2><span class="sh-sub">A loss that is not attributed cannot be fixed.</span></div>
+      <div class="sh-scroll"><table class="sh-table">
+      <thead><tr><th>Cause</th><th>USD</th><th>Detail</th></tr></thead><tbody>
+      ${at.by_cause.map(c => `<tr><td>${esc(c.cause)}</td>
+        <td class="mono">${money(c.usd)}</td><td>${esc(c.detail)}</td></tr>`).join('')}
+      <tr><td>STRANDED CAPITAL</td><td class="mono">${money(at.stranded_capital.usd)}</td>
+        <td>${C.count(at.stranded_capital.legs)} legs · ${esc(at.stranded_capital.detail)}</td></tr>
+      </tbody></table></div>
+      <div class="sh-panel-body"><p><strong>Diagnosis.</strong> ${esc(at.diagnosis)}</p></div>
+      </section>` : '';
+
+    const lifes = lc ? `<section class="sh-panel"><div class="sh-panel-head">
+      <h2>Inspectable lifecycles</h2><span class="sh-sub">${esc(lc.selection_rule)}</span></div>
+      <div class="sh-scroll"><table class="sh-table">
+      <thead><tr><th>Condition</th><th>Realized</th><th>Orders</th><th>Fills</th><th>Decisions</th></tr></thead>
+      <tbody>${lc.conditions.map(c => `<tr>
+        <td class="mono">${esc(c.condition_id.slice(0, 18))}…</td>
+        <td class="mono">${money(c.realized_usd)}</td>
+        <td class="mono">${c.orders}</td><td class="mono">${c.fills}</td>
+        <td class="mono">${c.decisions}</td></tr>`).join('')}</tbody>
+      </table></div></section>` : '';
+
+    return banner + maturity + pnl + attr + orders + lifes;
+  }
+
   const VIEW = {
+    desk: deskTab,
     overview, decisions: decisionsTab, positions: positionsTab,
     execution: executionTab, pairing: pairingTab, comparison: comparisonTab,
     audit: auditTab, accounting: accountingTab,

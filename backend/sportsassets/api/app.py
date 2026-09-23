@@ -936,6 +936,84 @@ async def command_investor_snapshot_route(response: Response) -> dict:
             "reason": inc.reason, "detail": inc.detail}) from inc
 
 
+# ── COMMAND DESK: the shadow desk's read surface (2026-09-23) ────────
+#
+# The chain audit found shadow_executions and shadow_positions empty
+# because record_execution() and record_position() had no callers. The
+# desk engine is what calls them; these routes are what management
+# reads. Every payload carries its MODE, and no route returns a
+# combined live+replay total -- there is no such number.
+
+
+def _desk_unavailable(exc) -> HTTPException:
+    return HTTPException(status_code=503, detail={
+        "reason": "DESK_REPLAY_UNAVAILABLE", "detail": str(exc),
+        "note": "artifact unread -- COMMAND shows unavailable, not zero",
+    })
+
+
+@app.get("/api/command/desk/overview",
+         dependencies=[Depends(require_command)])
+async def command_desk_overview(response: Response) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.overview()
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
+@app.get("/api/command/desk/attribution",
+         dependencies=[Depends(require_command)])
+async def command_desk_attribution(response: Response) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.attribution()
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
+@app.get("/api/command/desk/lifecycles",
+         dependencies=[Depends(require_command)])
+async def command_desk_lifecycles(response: Response,
+                                  limit: int = 20) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.lifecycles(limit=min(max(int(limit), 1), 50))
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
+@app.get("/api/command/desk/lifecycle/{condition_id}",
+         dependencies=[Depends(require_command)])
+async def command_desk_lifecycle(condition_id: str,
+                                 response: Response) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.lifecycle(condition_id)
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
+@app.get("/api/command/desk/scenarios",
+         dependencies=[Depends(require_command)])
+async def command_desk_scenarios(response: Response) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.scenarios()
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
 # ── COMMAND SHADOW: the read-only shadow data contract (2026-09-19) ──
 #
 # Owner directive: COMMAND IS P0. These routes serve the REAL
