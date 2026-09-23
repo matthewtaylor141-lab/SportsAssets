@@ -518,3 +518,54 @@ async def test_the_table_refuses_a_submitted_order_and_an_early_outcome():
                 + ")")
     finally:
         await conn.close()
+
+
+# ── the PRODUCTION shadow decision path ─────────────────────────────
+
+def test_the_external_source_reaches_a_BUY_through_shadow_bettor_decide():
+    """THE PRODUCTION PATH, not a parallel one. CONTROLLED inputs.
+
+    `shadow_bettor.decide` forwards `opportunity["entryInputs"]` straight
+    into `bettor_entry_gate.admit`, so the two additive parameters are
+    carried by the real worker path with no separate plumbing. Nothing is
+    monkeypatched and `decide` is called exactly as the worker calls it.
+    """
+    from sportsassets import shadow_bettor as SB
+    from sportsassets import shadow as sh
+
+    out = D.valuation(contract=_contract(), quote=_quote(), now=NOW)
+    ask = round(out["probability"] - 0.08, 2)
+    book = {"readable": True, "ask": ask, "depth": 500.0, "leg": "YES",
+            "bestBid": ask - 0.01, "bestAsk": ask,
+            "microstructure": {"depth": 500.0, "spreadRelative": 0.02}}
+    opp = {
+        "bettorOpportunityId": "opp-ext-1", "symbol": "EPL-ARS-YES",
+        "outcomeLeg": "YES", "eventId": "ev-ext", "marketId": "mk-ext",
+        "sport": "soccer", "league": "epl", "evidenceSource": "PMUS_BBO",
+        "observedAt": NOW, "featureLineage": {},
+        "microstructure": {"depth": 500.0, "spreadRelative": 0.02},
+        "entryInputs": {
+            "external_source": out,
+            "external_enabled": True,
+            "execution_estimate": {"p_fill": 0.25},
+            "size": 100.0,
+            "risk": {"permitted": True},
+            "fee_fn": _fee,
+            "fair_value": {"value": out["probability"],
+                           "kind": D.SOURCE_CLASS},
+        },
+    }
+    rec = SB.decide(opp, book, decision_ts=NOW)
+    assert rec["proposedAction"] == gate.ENTRY_ACTION, rec
+    assert rec["entryGate"]["admissible"] is True, rec["entryGate"]
+    # AND IT IS STILL A SHADOW DECISION.
+    assert rec["orderSubmitted"] is False
+    assert rec["shadowOnly"] is True
+    # the belief is labelled external at the decision record's own level
+    det = rec["entryGate"]["detail"]
+    assert det["qualified_model"] is False
+    assert det["belief_provenance"] == "EXTERNAL_BOOKMAKER_VALUATION"
+    # the production default is untouched: no entryInputs, no BUY
+    plain = SB.decide({k: v for k, v in opp.items() if k != "entryInputs"},
+                      book, decision_ts=NOW)
+    assert plain["proposedAction"] == sh.NO_TRADE, plain

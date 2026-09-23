@@ -1,0 +1,69 @@
+# PINNACLE_DEVIG_V1 against the real feed, from where the key already is.
+#
+# WHY HERE. `EDGE_ODDS_API_KEY` is provisioned on edge-shadow and as a
+# repository secret; it is NOT on sportsassets-api, where the shadow
+# decision path runs, and a production credential is never copied between
+# services. A runner already holds both that key and DATABASE_URL, and
+# `feed-coverage.yml` established this pattern for exactly this reason.
+#
+# WHAT IT WRITES. Rows in `external_valuations`, and nothing else. That
+# table's `order_submitted` column has a CHECK that it is FALSE, so this
+# job cannot place an order even if its code tried to. No trading flag, no
+# control row, no position, no legacy accounting record is touched.
+#
+# WHAT IT READS. The provider's h2h odds for the three sports Pinnacle was
+# measured to quote, and `markets` for the venue mapping. Both read-only.
+#
+# The key is never printed: GitHub masks registered secrets, and the script
+# only ever emits market keys, counts and refusal codes.
+
+name: ext-valuation-run
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "Free-text note recorded in the run log"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ext-valuation-run
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency the script needs
+        run: pip install --quiet "asyncpg>=0.29"
+
+      - name: Value the slate and record every refusal
+        env:
+          EDGE_ODDS_API_KEY: ${{ secrets.EDGE_ODDS_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          NOTE: ${{ github.event.inputs.note }}
+        run: |
+          set -o pipefail
+          if [ -z "${EDGE_ODDS_API_KEY:-}" ]; then
+            echo "::error::EDGE_ODDS_API_KEY is not set"; exit 1; fi
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL is not set"; exit 1; fi
+          echo "note: ${NOTE:-(none)}"
+          python research/beta48/ext_pinnacle_run.py 2>&1 | tee /tmp/out.txt
+          {
+            echo "### PINNACLE_DEVIG_V1 run"
+            echo '```'
+            cat /tmp/out.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
