@@ -375,6 +375,91 @@ jobs:
           fi
           exit $FAIL
 
+      - name: RN1X — the AUTHENTICATED read, against the persisted records
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          # THE HALF THE UNAUTHENTICATED PROBE CANNOT SEE. `require_command`
+          # accepts X-Admin-Token as well as the COMMAND cookie, and the
+          # repository secret is the same one pair-probe already uses
+          # against this API. COMMAND is READ-ONLY for every role -- there
+          # is no write path behind this header -- so this mints no
+          # session, moves no credential and changes nothing.
+          set +e
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "SKIPPED: no ADMIN_TOKEN secret, so the authenticated read is not available from here" \
+              >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          API="${{ inputs.api }}"
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          FAIL=0
+          {
+            echo "### RN1X, read with a COMMAND role"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          code=$(curl -s -o /tmp/st.json -w '%{http_code}' --max-time 45 \
+                 -H "$H" "$API/api/command/rn1x/statuses" || echo 000)
+          echo "statuses HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ "$code" != "200" ]; then
+            echo "the token is not accepted by this service; the authenticated read is unavailable" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+
+          # EVERY BADGE MUST NAME ITS SUBJECT. A LIVE that does not say
+          # what is live is the defect the seven statuses exist to fix.
+          jq -r '.statuses | to_entries[]
+                 | "\(.key)\t\(.value.state)\t\(.value.what // "NO WHAT")"' \
+            /tmp/st.json | tee -a "$GITHUB_STEP_SUMMARY"
+          for k in historical_replay prospective_rn1_management \
+                   independent_ev_entries pairing second_half_loss_exit \
+                   accounting_health learning_evaluation; do
+            jq -e --arg k "$k" '.statuses[$k].state' /tmp/st.json >/dev/null \
+              || { echo "::error::status $k is missing from the payload"
+                   FAIL=1; }
+            jq -e --arg k "$k" '.statuses[$k].what | strings | length > 0' \
+              /tmp/st.json >/dev/null \
+              || { echo "::error::status $k has no what, so its badge names nothing"
+                   FAIL=1; }
+          done
+
+          # ONE COMPLETE TRACE, followed from the list to the stages.
+          code=$(curl -s -o /tmp/pos.json -w '%{http_code}' --max-time 45 \
+                 -H "$H" "$API/api/command/rn1x/positions" || echo 000)
+          echo "positions HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+          PID=$(jq -r '(.positions // [])[0].position_id // empty' /tmp/pos.json)
+          if [ -z "$PID" ]; then
+            echo "no position to trace yet" | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            code=$(curl -s -o /tmp/tr.json -w '%{http_code}' --max-time 45 \
+                   -H "$H" "$API/api/command/rn1x/trace/$PID" || echo 000)
+            echo "trace HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+            # The counts are the comparison against the persisted records:
+            # these are read back from rn1x_positions/decisions/orders/
+            # fills/outcomes by the same query the manager's click runs.
+            jq -r '"experiment\t" + (.position.experiment_id // "?"),
+                   "source_ts\t"   + (.position.source_ts   // "?" | tostring),
+                   "detected_ts\t" + (.position.detected_ts // "?" | tostring),
+                   "decision_ts\t" + (.position.decision_ts // "?" | tostring),
+                   "decisions\t"   + ((.decisions // []) | length | tostring),
+                   "orders\t"      + ((.orders    // []) | length | tostring),
+                   "fills\t"       + ((.fills     // []) | length | tostring),
+                   "outcome\t"     + ((.outcome != null) | tostring)' \
+              /tmp/tr.json | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "$code" = "200" ] || {
+              echo "::error::the trace for $PID answered $code"; FAIL=1; }
+            jq -e '.position.source_ts and .position.detected_ts
+                   and .position.decision_ts' /tmp/tr.json >/dev/null \
+              || { echo "::error::the trace is missing one of the three clocks"
+                   FAIL=1; }
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
       - name: Mobile viewport is declared
         run: |
           grep -q 'name="viewport"' /tmp/index
