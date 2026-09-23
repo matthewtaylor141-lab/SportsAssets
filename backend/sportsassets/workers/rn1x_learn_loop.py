@@ -284,12 +284,23 @@ async def cycle(conn, *, code_sha="unknown") -> dict:
                          "verdict": rec["verdict"], "written": True,
                          "why": rec["why"][:400]})
 
-    retained = all(r["verdict"] == learn.RETAIN for r in receipts)
+    # NAMED FOR WHAT IT MEANS. `champion_retained: false` read as though
+    # the champion had been REPLACED -- it had not, and cannot be. One
+    # challenger being ELIGIBLE is not the champion losing its place. The
+    # heartbeat published that field and it was an alarm waiting to be
+    # misread, so both facts are now stated separately and the one that
+    # cannot vary is a constant.
+    all_retain = all(r["verdict"] == learn.RETAIN for r in receipts)
+    eligible = [r["challenger"] for r in receipts
+                if r["verdict"] == learn.ELIGIBLE]
     return {"ran": True, "state": "EVALUATED",
+            "champion_unchanged": True,
+            "champion": learn.MODEL_KEY,
+            "all_verdicts_retain": all_retain,
+            "eligible_pending_management": eligible,
             "positions": len(seeds), "decided": ev["decided"],
             "dataset_sha": sha[:12], "receipts": receipts,
             "new_rows": sum(1 for r in receipts if r.get("written")),
-            "champion_retained": retained,
             "note": ("ELIGIBLE never changes the active policy. The "
                      "champion is management-defined and frozen; this loop "
                      "has no promotion path.")}

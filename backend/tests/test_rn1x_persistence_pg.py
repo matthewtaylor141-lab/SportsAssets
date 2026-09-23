@@ -516,7 +516,18 @@ async def test_learning_writes_a_receipt_for_every_challenger(conn):
         res = await WL.cycle(conn)
         assert res["state"] == "EVALUATED", res
         assert res["positions"] == 1
-        assert res["champion_retained"] is True
+        # TWO SEPARATE FACTS, because the old single field conflated them.
+        # The champion cannot be replaced by this loop at all -- that is a
+        # constant, not an outcome. Whether every verdict came back RETAIN
+        # is the outcome, and on one position (below the gate's 50-decided
+        # floor) it must, with nothing left pending for management.
+        assert res["champion_unchanged"] is True
+        assert res["champion"] == L.MODEL_KEY
+        assert res["all_verdicts_retain"] is True
+        assert res["eligible_pending_management"] == []
+        assert "champion_retained" not in res, (
+            "the conflated field is gone; a reader must not be able to "
+            "read `false` as the champion having been replaced")
 
         rows = await conn.fetch(
             "SELECT version, params, status, evaluation FROM "
