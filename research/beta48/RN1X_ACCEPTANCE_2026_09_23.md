@@ -55,9 +55,9 @@ that is the cell's point.
 | What it **changes** | **Nothing.** Two verdicts exist; no code path edits the policy | `DESCRIPTION["changes"] == []`; a test asserts no UPDATE against the register or policy constants | — |
 | Which data each evaluation uses | Settled `rn1x_outcomes`; fills **re-read** from `trades` each cycle; identified by `dataset_sha` + position count; prospective excluded | `DESCRIPTION["data_per_evaluation"]` | — |
 | Keep the frozen policy unchanged | `PAIR_TARGET_COST` 0.91 / `LOSS_TRIGGER_FRACTION` 0.84 untouched; challengers vary by **argument**, never by edit | Frozen path still prices the completion at **0.32** on a 0.57 basis | — |
-| PAIR_092 is exploratory, not a promotion | Status `CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT`; no promotion path | Eligible at 420 and 598 decided — **and at 649 decided it was NOT.** Heartbeat 20:47:19Z, version 14: `RETAIN_CHAMPION`, "improves cost-marked P&L in **1 of 3** scenarios… has found a liquidity assumption, not an edge". The seven positions the unwedged cursor added were enough to withdraw it. **PAIR_090 is now the eligible one** (version 13), on its first appearance | Nested datasets, so none of these three is a replication of another — and the one that changed its mind shows why that distinction was worth keeping |
+| PAIR_092 is exploratory, not a promotion | Status `CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT`; no promotion path | Eligible at 420 and 598 decided — **and at 649 decided it was NOT.** Heartbeat 20:47:19Z, version 14: `RETAIN_CHAMPION`, "improves cost-marked P&L in **1 of 3** scenarios… has found a liquidity assumption, not an edge". The seven positions the unwedged cursor added were enough to withdraw it. **PAIR_090 is now the eligible one** (version 13), and again at **865 decided** (version 17, 21:51:39Z), where PAIR_092 fell to **0 of 3** | Nested datasets, so none of these four is a replication of another — and the one that changed its mind shows why that distinction was worth keeping |
 | Check the next due cycle by **receipt and heartbeat** | Receipts carry `written` and the reason | **`rn1x_learn` heartbeat 20:38:46Z: `"new_rows": 0`, `"positions": 65`, `"dataset_sha": "8488d060ec7d"`, and all four receipts `"written": false` with "unchanged from version N on the same dataset"** — deduplication confirmed from each receipt's own reason, not inferred from a row count that happened not to move. **And the complement, which is the stronger half:** at 20:47:19Z, after the unwedged cursor moved the dataset to **71 positions / 649 decided**, the same loop wrote `"new_rows": 4`, versions 13–16. It skips on an unchanged dataset and writes on a changed one — so the earlier zero was identity, not inactivity. At 20:51:34Z it then declined again, naming the arithmetic: `TOO_FEW_NEW_POSITIONS`, "72 settled positions against 71 at the last recorded evaluation… a verdict resting on hundreds of decided orders does not change on 1 more" | — |
-| *(found while doing this)* | The heartbeat also published `champion_retained`, which production returned as **`false`** | It was only `all(verdict == RETAIN)`, and PAIR_092 is ELIGIBLE — so a correct evaluation printed what reads as *the champion was replaced*. It cannot be: there is no promotion path. Split into `champion_unchanged` (a constant), `champion`, `all_verdicts_retain` and `eligible_pending_management`; a test asserts the old key is **absent** | — |
+| *(found while doing this)* | The heartbeat also published `champion_retained`, which production returned as **`false`** | It was only `all(verdict == RETAIN)`, and PAIR_092 is ELIGIBLE — so a correct evaluation printed what reads as *the champion was replaced*. It cannot be: there is no promotion path. Split into `champion_unchanged` (a constant), `champion`, `all_verdicts_retain` and `eligible_pending_management`; a test asserts the old key is **absent**. **Confirmed in production, not inferred: heartbeat 21:51:39Z carries `"champion": "rn1x_mgmt_policy"` in an `EVALUATED` payload** — the key the old code could not emit | — |
 
 ## 5 · The command centre
 
@@ -138,6 +138,24 @@ had given for not doing the work did not exist.
 The caveat still holds for every `deploy-api-commit` run **before** this
 commit: a green one is not evidence of a deploy — the `HTTP` line and the
 deploy id are. That is how `dep-daq3kp3tqb8s73e7cpog` was confirmed.
+
+**The edit's cost, measured rather than assumed.** All 34 test files that
+read `render-ops.yml` were run twice — once with the guard, once with the
+file reverted to `44a350c~1` — and the failure sets are **identical: 92
+failed, 474 passed, 56 skipped both times, with an empty diff in both
+directions.** The 92 are pre-existing, and they are pre-existing for a
+reason that is visible in them: they pin migration `064_` as the newest
+and the repository is on `100_rn1_seeded_experiment.sql`. This edit
+introduced none of them and fixed none of them.
+
+## What is NOT verified from the published interface
+
+Nothing in this document was read from `sportsassets-api.onrender.com`.
+This container's network policy denies that host — `CONNECT tunnel failed,
+response 403` — so the command-centre endpoints are evidenced by the
+deployed commit, the 38 command-centre tests and the database rows they
+read, **not** by a live HTTP response. Anyone wanting that last step needs
+either the host allowed for this environment or a browser session.
 
 ## What none of this establishes
 
