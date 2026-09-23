@@ -242,3 +242,44 @@ rather than raising. The check now asserts the property that matters —
 neither side yields a usable number — and notes that `nan` is the
 weaker refusal, because it propagates silently through a comparison
 while the kernel's `UNDEFINED` carries its reason.
+
+## 2026-09-23 12:35Z — Entry 6. The command-centre regression, closed
+
+**Tested commit: `9f7387c590596f7e7a342ce017bce7b2ae123bc9`** on
+`claude/command-center`.
+
+Focused rerun of the repaired pin, not a broad cycle:
+
+```
+tests/test_l1_review_pins.py::test_review_the_preset_as_the_runner_executes_it
+    1 passed
+tests/test_l1_review_pins.py                       32 passed
+command centre + evidence store + learning kernel 168 passed
+```
+
+### Collected ids reconciled against terminal outcomes
+
+| | Collected (unique ids) | Terminal outcomes | passed | failed | skipped | xfailed | Unexplained |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| base `c8b9704` | 11,266 | 11,266 | 10,675 | 445 | 143 | 3 | **0** |
+| head `c600a24` | 11,401 | 11,389 | 10,797 | 446 | 143 | 3 | **0** |
+
+The head's −12 is **exactly** the twelve tests added in `b5634ff`
+(`TestTheReleaseMigrationMatchesTheCode` ×5,
+`TestTheApiReleaseCannotReachAWorker` ×7), which landed **after** the
+head suite run began at `c600a24` and so were visible to the later
+`--collect-only` but not to the run. Named individually in the commit;
+nothing is unaccounted for.
+
+**Dynamic ids.** Four collected ids differ between the two collections
+— `test_bettor_live_loop::test_it_fails_closed_on_every_bad_budget`
+and `test_l2_review_pins::test_review_the_preset_reads_a_naive_or_future_at`
+embed `datetime.now()` in their parametrize ids. They pair 1:1 across
+the two runs, so they shift which string appears and never the count.
+They are the only reason the raw id sets differ by 4 in each direction.
+
+**xfails and skips are carried, not netted.** 143 skipped and 3 xfailed
+on both sides, unchanged by this work.
+
+No further broad run. The 445 pre-existing base failures remain
+out of scope and untouched.
