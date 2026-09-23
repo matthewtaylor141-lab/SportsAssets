@@ -66,7 +66,10 @@ import logging
 import os
 import time
 
+from decimal import Decimal
+
 from . import bettor_desk as DK
+from . import bettor_fee_schedule as FEES
 
 log = logging.getLogger(__name__)
 
@@ -182,8 +185,35 @@ def _to_event(r) -> dict:
             "evidence_id": "trade:%d" % int(r["id"])}
 
 
+def live_fee_fn(qty, price, maker):
+    """THE FEE SCHEDULE THE LIVE LANE BOOKS AGAINST.
+
+    The loop was started as `run(_desk_pool)` with `fee_fn` defaulting
+    to None, so `Desk` fell back to a silent zero-fee lambda and every
+    live fill was booked FREE. The ledger still reported `invariant_ok`
+    throughout, because the identity holds whether or not a cost was
+    ever charged -- so the one check watching the book could not see
+    the gap. The default is now supplied here rather than left to a
+    caller to remember.
+
+    SAME SCHEDULE AS THE REPLAY, deliberately: a live total and a
+    replay total already differ in execution assumptions, and letting
+    them differ in COSTS as well would make them incomparable for a
+    second, avoidable reason.
+
+    THIS IS STILL A TRANSFERRED SCENARIO. The schedule is PMUS; the
+    evidence driving the live lane is Polymarket global. `fee_basis`
+    records that costs were applied, not that they were the right
+    venue's -- `DK.VENUE_TRANSFER` is what carries that, and it is
+    unchanged.
+    """
+    return float(FEES.LATEST.fill_fee(Decimal(str(round(qty, 6))),
+                                      Decimal(str(round(price, 6))),
+                                      maker=bool(maker)))
+
+
 async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
-              fee_fn=None, queue_share=0.25):
+              fee_fn=live_fee_fn, queue_share=0.25):
     """The loop. Returns only when cancelled."""
     if not enabled():
         _status.update(state=STATE_DISABLED,
@@ -378,7 +408,15 @@ async def _persist(conn, desk_id, desk, cursor):
             "estimate",
             float(desk.pf.realized), float(desk.pf.fees),
             len(desk.open_orders()), len(desk.pf.open_legs()),
-            bool(inv["ok"]), _js(inv))
+            # THE FEE BASIS IS STORED WITH THE ROW, not inferred from
+            # a zero. `fees_usd = 0` is ambiguous on its own -- it is
+            # equally what a fee-free book and a genuinely costless
+            # window look like -- and the live lane ran fee-free for 37
+            # minutes without that being visible anywhere.
+            bool(inv["ok"]),
+            _js(dict(inv, fee_basis=desk.fee_basis,
+                     pnl_is_net_of_fees=(
+                         desk.fee_basis == DK.FEE_BASIS_APPLIED))))
 
     # DRAIN ONLY WHAT WAS COMMITTED. The transaction has returned, so
     # these rows are durable; dropping them keeps the in-memory desk a

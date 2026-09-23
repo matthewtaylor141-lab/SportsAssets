@@ -351,3 +351,84 @@ def test_the_committed_cycles_promoted_nothing():
         rep = json.load(open(os.path.join(root, d, "report.json")))
         assert rep["accepted"] == [], (d, rep["accepted"])
         assert rep["variants_tried"] == 5, d
+
+
+# ── the fee basis: a gross book must not read as a net one ───────────
+
+def test_a_desk_without_a_schedule_is_labelled_gross():
+    from sportsassets import bettor_desk as DK
+    d = DK.Desk(policy=DK.Policy(), limits=DK.Limits(starting_cash=1000.0))
+    assert d.fee_basis == DK.FEE_BASIS_NONE
+    assert d.snapshot()["pnl_is_net_of_fees"] is False
+
+
+def test_a_desk_with_a_schedule_is_labelled_net():
+    """THE CONTROL. If the label were constant it would carry nothing."""
+    from sportsassets import bettor_desk as DK
+    d = DK.Desk(policy=DK.Policy(), limits=DK.Limits(starting_cash=1000.0),
+                fee_fn=lambda q, p, m: 0.01)
+    assert d.fee_basis == DK.FEE_BASIS_APPLIED
+    assert d.snapshot()["pnl_is_net_of_fees"] is True
+
+
+def test_the_invariant_cannot_detect_a_missing_fee_schedule():
+    """THE DEFECT, pinned so it cannot be forgotten again.
+
+    A fee-free book reconciles exactly as well as a costed one. That is
+    not a bug in the identity -- it is what a consistency check is --
+    but it IS why `invariant_ok` was not evidence that costs were
+    charged, and why the basis has to travel separately.
+    """
+    from sportsassets import bettor_desk as DK
+    gross = DK.Desk(policy=DK.Policy(), limits=DK.Limits(starting_cash=1e4))
+    net = DK.Desk(policy=DK.Policy(), limits=DK.Limits(starting_cash=1e4),
+                  fee_fn=lambda q, p, m: 0.02)
+    ev = {"kind": "PRINT", "at": 1.0, "condition_id": "c1",
+          "outcome_index": 0, "price": 0.50, "size": 5000.0,
+          "evidence_id": "e1"}
+    for d in (gross, net):
+        for i in range(4):
+            d.step(dict(ev, at=float(i + 1), evidence_id="e%d" % i))
+    # Both reconcile...
+    assert gross.pf.invariant()["ok"] and net.pf.invariant()["ok"]
+    # ...and the identity is blind to the difference between them, so
+    # the label is the only thing that distinguishes the two books.
+    assert gross.fee_basis != net.fee_basis
+    assert "does_not_prove" in gross.pf.invariant()
+
+
+def test_the_live_loop_supplies_a_fee_schedule_by_default():
+    """The loop was started as run(pool) with fee_fn defaulting to None."""
+    import inspect
+    from sportsassets import bettor_desk as DK
+    from sportsassets import bettor_desk_loop as DL
+    default = inspect.signature(DL.run).parameters["fee_fn"].default
+    assert default is not None, "the live lane would book every fill free"
+    assert callable(default)
+    d = DK.Desk(policy=DK.Policy(), limits=DK.Limits(starting_cash=1000.0),
+                fee_fn=default)
+    assert d.fee_basis == DK.FEE_BASIS_APPLIED
+    # And it must be a REAL schedule: a maker fill is a rebate, so the
+    # fee is negative, and a taker fill is a charge, so it is positive.
+    assert default(100.0, 0.50, True) < 0.0
+    assert default(100.0, 0.50, False) > 0.0
+
+
+def test_the_api_starts_the_loop_without_overriding_the_schedule():
+    """A call site passing fee_fn=None would reintroduce the defect."""
+    src = open(os.path.join(_ROOT, "sportsassets", "api", "app.py")).read()
+    tree = ast.parse(src)
+    calls = []
+    for node in ast.walk(tree):
+        if (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "run"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id.endswith("DESKLOOP")):
+            calls.append(node)
+    assert calls, "the desk loop start was not found at all"
+    for c in calls:
+        for kw in c.keywords:
+            assert kw.arg != "fee_fn" or not (
+                isinstance(kw.value, ast.Constant)
+                and kw.value.value is None), "fee_fn=None at the call site"

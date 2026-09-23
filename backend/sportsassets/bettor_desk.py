@@ -75,6 +75,16 @@ import math
 
 VERSION = "BETTOR_DESK_V1"
 
+# ── WHETHER FEES WERE EVER CHARGED ───────────────────────────────────
+#
+# `NO_FEE_SCHEDULE` is a GROSS book. Its realized P&L is a before-costs
+# figure and must never be presented as a net one. It exists because a
+# desk can legitimately be run without a schedule -- an engine test, a
+# mechanism demonstration -- but the resulting numbers have to carry
+# the label rather than look identical to a costed book.
+FEE_BASIS_NONE = "NO_FEE_SCHEDULE_GROSS"
+FEE_BASIS_APPLIED = "FEE_SCHEDULE_APPLIED"
+
 # ── WHAT THE REPLAY TAPE ACTUALLY IS ─────────────────────────────────
 #
 # CORRECTED 2026-09-23 AFTER THE FIRST HANDOFF. I described the replay
@@ -439,6 +449,20 @@ class Portfolio:
             "starting_cash": round(self.starting_cash, 6),
             "drift": round(drift, 6),
             "ok": abs(drift) < 0.01,
+            # WHAT THIS CHECK DOES NOT COVER, said here rather than
+            # left for a reader to discover. It is a CONSISTENCY check.
+            # It passed for 37 minutes on a live book whose fee
+            # schedule had never been supplied, because the identity
+            # holds equally well when no fee was ever charged.
+            "proves": "internal consistency of cash, inventory and "
+                      "realized against the starting balance",
+            "does_not_prove": [
+                "that costs were charged -- see fee_basis on the "
+                "snapshot; a gross book reconciles exactly as well as "
+                "a net one",
+                "that the valuations are right",
+                "that the fill assumptions are right",
+            ],
         }
 
 
@@ -528,6 +552,20 @@ class Desk:
         self.halted = False
         self.halt_reason = None
         self.last_price = {}
+        # A ZERO-FEE BOOK MUST SAY SO. This was `fee_fn or (lambda ...:
+        # 0.0)` -- an anonymous silent fallback -- and the live loop was
+        # constructed without a schedule, so every live fill was booked
+        # FREE for 37 minutes while the ledger reported `invariant_ok`.
+        #
+        # It reported ok because the identity
+        #     cash + inventory_cost - realized == starting_cash
+        # holds whether or not fees were ever charged. The invariant is
+        # a CONSISTENCY check, not a COMPLETENESS one, and it cannot
+        # detect an accounting input that was never supplied. So the
+        # basis travels with the book instead, and every snapshot
+        # carries it: a reader can no longer mistake a fee-free total
+        # for a net one.
+        self.fee_basis = FEE_BASIS_NONE if fee_fn is None else FEE_BASIS_APPLIED
         self.fee_fn = fee_fn or (lambda qty, px, maker: 0.0)
 
     # ── bookkeeping ──────────────────────────────────────────────────
@@ -826,6 +864,10 @@ class Desk:
             "fill_model": FILL_MODEL,
             "queue_share_ASSUMED": self.queue_share,
             "p_fill": NOT_IDENTIFIED,
+            # TRAVELS WITH EVERY SNAPSHOT. A gross book and a net book
+            # are different numbers and must not render identically.
+            "fee_basis": self.fee_basis,
+            "pnl_is_net_of_fees": self.fee_basis == FEE_BASIS_APPLIED,
             "portfolio": self.pf.to_dict(),
             "marks": m,
             "consumption": self.cons.to_dict(),
