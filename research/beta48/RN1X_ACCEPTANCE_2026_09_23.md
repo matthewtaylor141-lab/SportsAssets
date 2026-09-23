@@ -1,0 +1,104 @@
+# Acceptance table — 23 September 2026
+
+Shadow-only authorization. No funded orders. The paused
+accounting-uncertain account, the observation collector and all existing
+limits are preserved.
+
+Every "observed evidence" cell is read from production Postgres, the Render
+deploy record, or a named test run. Where a cell says a thing is not done,
+that is the cell's point.
+
+---
+
+## 1 · Historical vs prospective
+
+| Requested | Deployed | Observed | Blocker |
+|---|---|---|---|
+| Establish whether the experiment is historical or prospective | Two lanes, separately keyed: `HISTORICAL_EXPERIMENT_ID` / `PROSPECTIVE_EXPERIMENT_ID`, `rn1x_source_cursor` / `rn1x_prospective_cursor` | Both declared in `workers/rn1x_shadow.py`; 32 real-Postgres tests incl. different ids, different cursors | — |
+| Trace source query, ingestion lane, cursor ordering, timestamp semantics | `_CANDIDATES_HISTORICAL` requires `m.resolved`; `_CANDIDATES_PROSPECTIVE` requires `NOT m.resolved` + live lanes; both `ORDER BY t.id` (serial, monotonic — a timestamp can repeat) | **The experiment was historical because of MY filter, not the feed.** Cursor defaults to 0 → walking from `trades.id` 1 of ~6.1M; observed at 294 | — |
+| Separate backfill from newly received activity | `trades.source`: `chain`/`poll` live, `backfill` historical, `s1` synthetic. `LIVE_SOURCES` / `SEEDABLE_SOURCES`; `lane_census` measures latency on live lanes only | Migration 033 states the rule; **my query had no source filter at all, so `s1` emitter rows were eligible seeds** — now excluded and tested | — |
+| Investigate chain and other live paths before declaring a feed blocker | Traced `ingestion/pipeline.py` (`detected_at = now()` at insert) and `ingestion/history.py` (`source='backfill'`) | **`FEED_POSTDATES_SETTLEMENT` WITHDRAWN.** The 15.07 h figure was one seed; on a backfill row `detected_at − ts` is the age of the backfill | — |
+| Do not reset the historical cursor or discard its evidence | Historical cursor still defaults to 0 and is never written backwards; only the prospective cursor seeds at the feed head | Test: a prospective cycle does not move the historical cursor | — |
+| Persist historical and prospective separately | Different experiment ids; prospective `_replay_one` **refuses to read a payout even if the market resolves mid-cycle** | Test: prospective run has `scored=False`, `resolved_at=None`, `SETTLE.settled=None`, while the historical run on the same data scores | Prospective lane has produced **no positions yet** — its cursor starts at the feed head and cohort BUYs on unresolved markets must arrive after it started |
+
+## 2 · The complete management policy
+
+| Requested | Deployed | Observed | Blocker |
+|---|---|---|---|
+| Trace available event-progress integrations | Only `game_start_time` from the CLOB market record, consumed by `edge_marks.fetch_game_start`, `underdog`, `premap`, `clob` | **No period, half, quarter, inning, clock or score signal exists** in the schema or the code | — |
+| Connect a reliable second-half signal for supported sports | `DOCUMENTED_MAPPINGS` (soccer 2, basketball 4, football 4; hockey `None` — odd structure, no rule); `PROGRESS_FEED_CONNECTED` empty; `SECOND_HALF_MAPPING` = the intersection | Three absences named separately: `NO_HALFWAY_RULE_FOR_THIS_SPORT`, `PROGRESS_FEED_NOT_CONNECTED`, `PROGRESS_OBSERVATION_MISSING_NOW` | **NOT CONNECTED.** Missing: a timestamped per-sport progress observation (period index + in-play), joined point-in-time |
+| Do not infer the second half from wall-clock | The progress contract is `(observed_at, period, period_type, in_play)` — **no elapsed field exists**, so a rule physically cannot do it | `PROGRESS_FIELDS`; rules consume only `period` | — |
+| Implement and demonstrate the 16% loss trigger | `pol.loss_trigger` + `Managed.manage_policy`, driven through the real lifecycle | 14 controlled tests. Fires in 2nd half, never in 1st; stoppage and unadmitted sport refuse | Needs a progress feed **and** an executable bid to fire on real evidence |
+| …cancellation acknowledgement | `place()` returns `WAIT_CANCEL_ACK`; `acknowledge_cancels` frees the slot | Test: exactly one order live, in `CANCEL_PENDING`; replacement refused until ack | — |
+| …late fills | `on_print` fills a `CANCEL_PENDING` order and flags `raced_a_pending_cancel` | Test: fill lands before ack, book reconciles | — |
+| …remaining inventory | Depth caps the sell; residual stays under management, carried at **cost**, never marked | Test: 40 of 100 sellable, 20 filled, 80 held, `mark_usd = NOT_IDENTIFIED` | — |
+| …accounting | `invariant.ok` asserted on every path | **Measured: 0.57 basis, 100 contracts, executed 0.47 → realised −11.73 on 57.00 = a 20.58% loss against a 16% TRIGGER** | — |
+| Explicitly exclude unsupported events | `admitted_to_complete_policy` is False unless a rule **and** a feed exist | Test: `cricket` and `hockey` both excluded, each with its own reason | — |
+| *(found while doing this)* | `trigger_level_bid` was 84% of cost computed **without** the exit fee, while the rule correctly fires on net proceeds | **Reported 0.4788 when the exit truly fires at 0.49** — understated by 1.74 ¢. Both levels now reported; boundary asserted exact | — |
+
+## 3 · The independent entry path
+
+| Requested | Deployed | Observed | Blocker |
+|---|---|---|---|
+| Show the actual caller chain | `workers/all.py` → `workers/shadow_bettor.py` `tick` → `shadow_bettor.decide` → `bettor_ev_bridge.evaluate` → `shadow_lanes.not_yet_eligible` | **Confirmed unconditional NO_TRADE.** `decide`'s own docstring: "has no path that produces a BUY or a SELL" | — |
+| Identify the commit that replaces it, or finish | **No such commit exists.** Closest is `869b662` "Wire the built EV machinery into the BETTOR decision lane" — wired the evaluation, left the refusal unconditional. So: finished it | `bettor_entry_gate.admit`, six requirements, wired into `decide` | — |
+| Demonstrate an admissible BUY **and** a correct refusal through the same path | Both through `shadow_bettor.decide`, no monkeypatching | 23 tests. A test asserts the two cases differ **only in their inputs** | Inputs are **supplied by the test** — labelled controlled tests |
+| Do not weaken production requirements | Every requirement parameterised so removing a check fails exactly one test; circularity guard refuses any venue-derived fair value | Production path still refuses on **all six**: `NO_QUALIFIED_MODEL`, `INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED`, `EXECUTION_ESTIMATE_NOT_IDENTIFIED`, `SIZING_POLICY_NOT_APPLICABLE`, `RISK_GATE_BLOCKED`, `NO_ACTION_HAS_POSITIVE_NET_EDGE` | — |
+| Does any current model qualify? | `qualify_model` checks target, status and prediction validity independently | **NO.** `rn1_complement_1h` v1 (`SUPERSEDED_TARGET_MISMATCH`) and v2 (`FROZEN`) both fail on **target** — a complement forecast is not a settlement forecast, and retraining does not fix a target. Predictions were all `INVALID_AS_ENTRY_TIME` | **A connected engine without a qualified model.** Needs a settlement-target model with entry-time-valid predictions |
+
+## 4 · The learning system, precisely
+
+| Requested | Deployed | Observed | Blocker |
+|---|---|---|---|
+| What it actually **fits** | **Nothing.** No training step, no gradient, no likelihood, no calibration, no search | `DESCRIPTION["fits"] == []`, asserted | — |
+| What it merely **compares** | Frozen champion vs 4 declared challengers, same assigned inventory, same evidence, whole queue_share grid, via `learn_gate.gate_v2` | `DESCRIPTION["compares"]`, 3 declared comparisons | Cannot discover anything outside the declared list |
+| What it **changes** | **Nothing.** Two verdicts exist; no code path edits the policy | `DESCRIPTION["changes"] == []`; a test asserts no UPDATE against the register or policy constants | — |
+| Which data each evaluation uses | Settled `rn1x_outcomes`; fills **re-read** from `trades` each cycle; identified by `dataset_sha` + position count; prospective excluded | `DESCRIPTION["data_per_evaluation"]` | — |
+| Keep the frozen policy unchanged | `PAIR_TARGET_COST` 0.91 / `LOSS_TRIGGER_FRACTION` 0.84 untouched; challengers vary by **argument**, never by edit | Frozen path still prices the completion at **0.32** on a 0.57 basis | — |
+| PAIR_092 is exploratory, not a promotion | Status `CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT`; no promotion path | v2/v6/v10 eligible on 420 then 598 decided. **The datasets are nested, so this is one result at two sample sizes, not a replication** | — |
+| Check the next due cycle by **receipt and heartbeat** | Receipts carry `written` and the reason | **`rn1x_learn` heartbeat 19:57:41Z: `"new_rows": 0`, receipts `"unchanged from version 9 on the same dataset", "written": false`** — confirmed from the receipt, not a row count | — |
+
+## 5 · The command centre
+
+| Requested | Deployed | Observed | Blocker |
+|---|---|---|---|
+| Separate statuses for all seven concerns | `STATUS_KEYS` = historical replay, prospective RN1 management, independent EV entries, pairing, second-half loss exit, accounting health, learning evaluation | `/api/command/rn1x/statuses`; 38 command-centre tests | — |
+| A LIVE badge must identify what is live | Three states — **LIVE** (running and producing), **ARMED** (running, nothing produced yet), **STOPPED** — and every badge carries `what` and `why` | Test asserts all three and that each names its subject | — |
+| Click path to one traceable position | Row click → six stages: source event, three clocks with **receipt** time, decisions, orders (side/intent/liquidity/state), modelled fills with the print that licensed each, inventory and outcome | `data-rn1x-pos` handler + `/trace/{position_id}`; rendered stages asserted | — |
+
+---
+
+## Production defect found and fixed during this work
+
+The lane change exposed a wedge, observed at 20:34:29Z:
+
+```
+{"state":"REPLAYED","cursor":294,"examined":400,"written":0,
+ "results":[{"error":"ValueError: settlement must have an observed time
+  after the seed","trade_id":295}],"stopped_at_error":295}
+```
+
+Trade 295 raised, and because the cursor correctly refuses to advance past
+a failed write, that one condition blocked every later one — 400 candidates
+examined per cycle, nothing written, indefinitely. A `backfill` row's
+`detected_at` can postdate the market's resolution, so this is a real data
+shape and needs a refusal, not an exception.
+
+Refused at **SEED**, before any inventory is assigned:
+`SETTLED_BEFORE_DETECTION` with the gap in hours. My first attempt refused
+at step 8, which left `MANAGE` already run and would have written a
+position with no orders — the half-written shape that made the desk's book
+uncertain.
+
+## What none of this establishes
+
+- **No realised return.** Every fill is modelled, licensed by an observed
+  print by someone else at a declared queue share. `P_FILL` is
+  `NOT_IDENTIFIED`.
+- **No profitability claim** for the management policy.
+- **The loss exit has never fired on real evidence.** Its mechanism is
+  demonstrated in controlled tests only.
+- **No independent entry has ever been admitted in production.** The path
+  exists and refuses.
+- **Containment unchanged**: `acct_fc2d773a2afa4851` remains `paused = t`,
+  `ACCOUNTING_UNCERTAIN`; last desk decision 16:37:30Z.
