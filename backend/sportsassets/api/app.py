@@ -1152,6 +1152,143 @@ def _learning_unavailable(exc) -> HTTPException:
     })
 
 
+@app.get("/api/command/desk/live/book",
+         dependencies=[Depends(require_command)])
+async def command_desk_live_book(response: Response,
+                                 limit: int = 60) -> dict:
+    """THE LIVE BLOTTER: decisions, orders, positions, accounting.
+
+    FOUR KINDS OF NUMBER, RETURNED UNDER FOUR KEYS. Observed evidence,
+    simulated orders, realised simulated P&L and unvalued inventory are
+    different things; they are never added here and the route offers no
+    total that would combine them.
+
+    A FAILED READ IS 503 WITH ITS REASON. The original management
+    screenshot showed "FEED UNAVAILABLE" beside "No shadow position
+    yet" -- a failed read rendered as an empty portfolio. Every query
+    below is inside one try, and an empty result is returned as an
+    explicit zero with `read_ok: true` beside it.
+    """
+    from ..db import get_pool
+    from .. import bettor_desk as DK
+
+    response.headers["Cache-Control"] = "no-store"
+    lim = min(max(int(limit), 1), 200)
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            decisions = await conn.fetch(
+                """
+                SELECT desk_decision_id, decided_at, condition_id,
+                       outcome_index, action, reason, proposed_price,
+                       proposed_qty, risk, ev
+                  FROM bettor_desk_decisions
+                 WHERE desk_id = 'live1'
+                 ORDER BY decided_at DESC LIMIT $1
+                """, lim)
+            orders = await conn.fetch(
+                """
+                SELECT order_id, condition_id, outcome_index, side,
+                       intent, limit_price::float8 AS limit_price,
+                       qty::float8 AS qty,
+                       filled_qty::float8 AS filled_qty,
+                       avg_fill_price::float8 AS avg_fill_price,
+                       fees_usd::float8 AS fees_usd, state,
+                       state_reason, placed_at, expires_at, terminal_at
+                  FROM bettor_desk_orders
+                 WHERE desk_id = 'live1'
+                 ORDER BY updated_at DESC LIMIT $1
+                """, lim)
+            states = await conn.fetch(
+                """
+                SELECT state, count(*) AS n FROM bettor_desk_orders
+                 WHERE desk_id = 'live1' GROUP BY 1 ORDER BY 1
+                """)
+            # POSITIONS WITH THEIR NEXT INTENDED ACTION. The intent is
+            # the desk's most recent decision on that leg, joined here
+            # rather than guessed by the page.
+            positions = await conn.fetch(
+                """
+                SELECT p.condition_id, p.outcome_index,
+                       p.qty::float8 AS qty,
+                       p.cost_basis_usd::float8 AS cost_basis_usd,
+                       p.realized_pnl_usd::float8 AS realized_pnl_usd,
+                       p.fees_usd::float8 AS fees_usd,
+                       p.opened_at, p.settled,
+                       p.settled_payout::float8 AS settled_payout,
+                       d.action AS next_intended_action,
+                       d.reason AS next_intended_reason,
+                       d.decided_at AS intent_decided_at
+                  FROM bettor_desk_positions p
+                  LEFT JOIN LATERAL (
+                       SELECT action, reason, decided_at
+                         FROM bettor_desk_decisions dd
+                        WHERE dd.desk_id = p.desk_id
+                          AND dd.condition_id = p.condition_id
+                          AND dd.outcome_index = p.outcome_index
+                        ORDER BY decided_at DESC LIMIT 1) d ON TRUE
+                 WHERE p.desk_id = 'live1' AND p.qty > 0
+                 ORDER BY p.cost_basis_usd DESC LIMIT $1
+                """, lim)
+            led = await conn.fetchrow(
+                """
+                SELECT at, cash_usd::float8 AS cash_usd,
+                       committed_usd::float8 AS committed_usd,
+                       inventory_cost::float8 AS inventory_cost,
+                       realized_pnl_usd::float8 AS realized_pnl_usd,
+                       fees_usd::float8 AS fees_usd, open_orders,
+                       open_positions, invariant_ok, invariant_detail,
+                       epoch_id
+                  FROM bettor_desk_ledger
+                 WHERE desk_id = 'live1'
+                 ORDER BY at DESC LIMIT 1
+                """)
+    except Exception as exc:                                # noqa: BLE001
+        raise HTTPException(status_code=503, detail={
+            "reason": "DESK_LIVE_BOOK_UNREADABLE",
+            "detail": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+            "note": "a failed read. NOT an empty book, and not a "
+                    "reading of zero.",
+        }) from exc
+
+    lim_obj = DK.Limits()
+    acct = dict(led) if led else None
+    return {
+        "mode": "LIVE_SHADOW",
+        "read_ok": True,
+        "decisions": [dict(r) for r in decisions],
+        "orders": [dict(r) for r in orders],
+        "order_states": {r["state"]: r["n"] for r in states},
+        "positions": [dict(r) for r in positions],
+        "accounting": acct,
+        "accounting_is_null_because": (
+            None if acct else
+            "the ledger has no row for this desk yet. That is an "
+            "explicit zero, not a failed read -- read_ok is true."),
+        "exposure": {
+            "inventory_cost_usd": acct["inventory_cost"] if acct else 0.0,
+            "inventory_mark_usd": "NOT_IDENTIFIED",
+            "executable_liquidation_usd": "NOT_IDENTIFIED",
+            "why": "no contemporaneous book is retained for these "
+                   "instants, so neither a mark nor a liquidation "
+                   "estimate can be produced. Cost basis is not a mark.",
+        },
+        "capital": {
+            "starting_cash_usd": lim_obj.starting_cash,
+            "cash_usd": acct["cash_usd"] if acct else None,
+            "committed_usd": acct["committed_usd"] if acct else None,
+            "remaining_headroom_usd": (
+                round(lim_obj.max_committed_usd - acct["committed_usd"], 2)
+                if acct else None),
+        },
+        "risk_limits": lim_obj.to_dict(),
+        "corrected_accounting": "/api/command/desk/correction",
+        "no_combined_total": (
+            "this lane's figures are never added to the replay's. The "
+            "two are produced under different execution assumptions."),
+    }
+
+
 @app.get("/api/command/desk/correction",
          dependencies=[Depends(require_command)])
 async def command_desk_correction(response: Response) -> dict:
