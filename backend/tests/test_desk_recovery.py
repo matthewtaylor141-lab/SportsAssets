@@ -579,3 +579,70 @@ def test_the_closed_period_is_preserved_and_marked_unreliable():
 @pytest.fixture
 def anyio_backend():
     return "asyncio"
+
+
+# ── ids must not collide between books ───────────────────────────────
+
+def test_generated_ids_are_namespaced_by_the_book_not_the_desk():
+    """CAUGHT IN PRODUCTION minutes after the reset.
+
+    `_next_id` prefixed with `desk_id` -- a constant -- and the counter
+    restarts at zero in every process. So the new book's first order was
+    `live1-O-000001`, which the PREVIOUS book had already written, and
+    the upserts did what they were told with a colliding key: orders
+    OVERWROTE a preserved record, decisions were SILENTLY DROPPED, and
+    fills collided because fill_id is order_id:index.
+    """
+    a = DK.Desk(policy=DK.Policy(), limits=DK.Limits(), desk_id="live1")
+    b = DK.Desk(policy=DK.Policy(), limits=DK.Limits(), desk_id="live1")
+    a.id_prefix, b.id_prefix = "acct_aaa", "acct_bbb"
+    ids_a = {a._next_id("O") for _ in range(50)}
+    ids_b = {b._next_id("O") for _ in range(50)}
+    assert not (ids_a & ids_b), sorted(ids_a & ids_b)[:3]
+
+    # CONTROL: with the OLD behaviour the two books collide completely,
+    # so the test above is detecting a real property and not a tautology.
+    c = DK.Desk(policy=DK.Policy(), limits=DK.Limits(), desk_id="live1")
+    d = DK.Desk(policy=DK.Policy(), limits=DK.Limits(), desk_id="live1")
+    assert {c._next_id("O") for _ in range(50)} == \
+           {d._next_id("O") for _ in range(50)}
+
+
+@pytest.mark.anyio
+async def test_a_new_book_does_not_overwrite_the_closed_books_rows():
+    """The whole point of the account id, verified end to end."""
+    st = Store()
+    conn = FakeConn(st)
+    # A preserved row from the closed period.
+    st.positions[(None, "shared", 0)] = {
+        "condition_id": "shared", "outcome_index": 0, "qty": 500.0,
+        "cost": 240.0, "realized": 0.0, "fees": 0.0, "opened": 1.0,
+        "settled": False, "payout": None, "account_id": None}
+    st.orders["live1-O-000001"] = {
+        "order_id": "live1-O-000001", "state": "FILLED",
+        "account_id": None, "condition_id": "shared",
+        "outcome_index": 0, "side": "BUY", "intent": "ENTER",
+        "limit_price": 0.48, "qty": 500.0, "filled_qty": 500.0,
+        "avg_fill_price": 0.48, "fees_usd": 0.0,
+        "desk_decision_id": "live1-D-000001", "placed": 1.0,
+        "expires": 2.0}
+
+    acct = await ACC.ensure_account(conn, "live1", opening_balance=OPENING)
+    aid = acct["account_id"]
+    live = _fresh_desk()
+    live.account_id = aid
+    live.id_prefix = aid
+    for i in range(12):
+        live.step(_evt(i, cond="shared"))
+    await DL._persist(conn, "live1", aid, live, 9012)
+
+    # The preserved row is untouched, and still unassigned.
+    old = st.positions[(None, "shared", 0)]
+    assert old["qty"] == 500.0 and old["cost"] == 240.0
+    assert old["account_id"] is None
+    assert st.orders["live1-O-000001"]["account_id"] is None
+    assert st.orders["live1-O-000001"]["state"] == "FILLED"
+    # and the new book wrote its own rows under its own key
+    assert any(k[0] == aid for k in st.positions)
+    assert all(o["account_id"] == aid for oid, o in st.orders.items()
+               if oid.startswith(aid))

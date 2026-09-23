@@ -612,6 +612,11 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
                 conn, desk_id, opening_balance=lim.starting_cash)
             account_id = acct["account_id"]
             desk.account_id = account_id
+            # EVERY GENERATED ID IS NAMESPACED BY THE BOOK from here.
+            # With the desk_id prefix, a new account's first order id
+            # collided with the previous book's and the upserts either
+            # overwrote a preserved row or dropped a new one.
+            desk.id_prefix = account_id
             desk.pf.starting_cash = float(acct["opening_balance"])
             cursor = await _load_cursor(conn, account_id)
             # THE BOOK COMES BACK BEFORE THE FIRST EVENT IS STEPPED.
@@ -880,14 +885,14 @@ async def _persist(conn, desk_id, account_id, desk, cursor):
                         CASE WHEN $8::float8 IS NULL THEN NULL
                              ELSE to_timestamp($8) END, now(), $9, $10,
                         $11)
-                ON CONFLICT (desk_id, condition_id, outcome_index)
+                ON CONFLICT (desk_id, coalesce(account_id, ''),
+                             condition_id, outcome_index)
                 DO UPDATE SET qty = EXCLUDED.qty,
                               cost_basis_usd = EXCLUDED.cost_basis_usd,
                               realized_pnl_usd = EXCLUDED.realized_pnl_usd,
                               fees_usd = EXCLUDED.fees_usd,
                               settled = EXCLUDED.settled,
                               settled_payout = EXCLUDED.settled_payout,
-                              account_id = EXCLUDED.account_id,
                               updated_at = now()
                 """, desk_id, cond, int(oi), float(leg["qty"]),
                 float(leg["cost"]), float(leg["realized"]),

@@ -548,6 +548,8 @@ class Desk:
         self.decisions = []
         self.queue_share = float(queue_share)
         self.desk_id = desk_id
+        # Overridden by the live loop with the account id. See _next_id.
+        self.id_prefix = desk_id
         self._n = 0
         self.halted = False
         self.halt_reason = None
@@ -570,8 +572,31 @@ class Desk:
 
     # ── bookkeeping ──────────────────────────────────────────────────
     def _next_id(self, kind):
+        """IDS ARE NAMESPACED BY THE BOOK, not by the desk.
+
+        THE DEFECT THIS FIXES, caught in production minutes after the
+        account reset. The prefix was `desk_id` -- a constant, "live1"
+        -- and `self._n` restarts at zero in every process. So a new
+        book's first order was `live1-O-000001`, which the PREVIOUS
+        book had already written, and the persist layer then did what
+        it was told with a colliding key:
+
+            orders     ON CONFLICT DO UPDATE -> OVERWROTE a preserved
+                       record
+            decisions  ON CONFLICT DO NOTHING -> SILENTLY DROPPED the
+                       new book's decision
+            fills      fill_id is order_id:index, so it collided too
+
+        Preserved rows were being consumed by the new account and new
+        rows were vanishing, in the same release whose whole purpose
+        was to keep the two books apart.
+
+        `id_prefix` defaults to `desk_id` so replay and tests are
+        unchanged; the live loop sets it to the ACCOUNT id, which is
+        unique per book and never reused.
+        """
         self._n += 1
-        return "%s-%s-%06d" % (self.desk_id, kind, self._n)
+        return "%s-%s-%06d" % (self.id_prefix, kind, self._n)
 
     def _record(self, at, action, reason, **kw):
         d = {"desk_decision_id": self._next_id("D"), "at": float(at),

@@ -22,6 +22,66 @@
    assumption **flips sign between partitions — including the frozen
    baseline.**
 
+## 0a. THE SHADOW ACCOUNT WAS RESET — authorized, 2026-09-23T16:06:51Z
+
+**New account: `acct_fc2d773a2afa4851`** · opening balance **$100,000.00**
+· zero positions · *"New shadow account following an accounting-recovery
+defect."*
+
+**This is a shadow-account reset only.** No real money, no venue order,
+no observation control and no collection allowance changed.
+
+### Why
+
+The loop restarted repeatedly without restoring its book. Position rows
+accumulated from several abandoned books while cash tracked only the
+last, and when the restore was finally added it adopted all of them
+against that single cash figure — **96 legs where the running book had
+52, and the ledger identity off by $2,367.72.** Which leg belongs to
+which book is **not in the record**, because `boot_id` was written as a
+per-row timestamp, so no arithmetic recovers it.
+
+### What was preserved, not repaired
+
+| | (UNASSIGNED) — preserved |
+|---|---:|
+| decisions | 2,308 |
+| orders | 183 |
+| fills | 6 |
+| positions | 98 legs, $6,084.00 |
+| ledger snapshots | 213, `invariant_ok = f` |
+
+Incident `DESK_ACCOUNTING_RECOVERY_2026_09_23` · **records_deleted 0** ·
+**compensating_cash_posted $0.00**. Its P&L is
+**`UNRELIABLE_DO_NOT_QUOTE`**. Its inventory is **UNATTRIBUTABLE** —
+which is *not* closed, *not* zero and *not* valued.
+
+### The new book, read back at 16:07:33Z
+
+cash $99,994.92 + inventory $5.11 − realized $0.03 = **$100,000.00
+exactly**, `invariant_ok = t`.
+
+### What now enforces it
+
+- **`account_id` (durable book) ≠ `epoch_id` (per process).** Conflating
+  them is what caused the defect.
+- **Created exactly once** — a partial unique index admits one ACTIVE
+  account per desk, so a raced second insert fails at the database.
+- **Capital cannot be replenished.** `opening_balance` is written by the
+  creating INSERT alone; the resume path never touches it.
+- **Unassigned rows cannot enter the new book** — excluded by
+  `account_id IS NULL`, not by a filter anyone must remember.
+- **Cash and cursor move in one statement** inside the persist
+  transaction.
+- **Consumption ledger persisted** at `(evidence_id, account_id)`, which
+  is what lets resting orders be *restored* rather than expired.
+
+### Not a FINAL evaluation set
+
+The new period is **not** automatically one. That status requires a
+frozen policy, criteria declared in advance and genuinely prospective
+decisions. The account row says so explicitly.
+
 ## 0b. Published and verified at 15:30:47Z
 
 The acceptance probe against the live host confirms both new tabs are
