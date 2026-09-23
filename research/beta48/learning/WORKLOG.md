@@ -283,3 +283,116 @@ on both sides, unchanged by this work.
 
 No further broad run. The 445 pre-existing base failures remain
 out of scope and untouched.
+
+## 2026-09-23 12:45Z — Entry 7. The first trained model, and the chain end to end
+
+### Corrections handled inside the implementation, not beside it
+
+**Forward ingestion is identified by LANE, not by date.**
+`learn/dataset.ingestion_mode()` classifies `chain` and `s1` as live
+listeners by construction and splits `poll` at `shadow_v2.py`'s own
+`LATE_POLL_ROW_S = 900`, because the poller both tails live and repairs
+history. Filtering on a recent `ts` excludes old fills, not recent
+backfills, and that was the flaw.
+
+**The negative difference is a clock-semantics finding, and the
+repository already knew it.** `obs/clock.py` (run 83B): *"92.04% of the
+chain lane's `detected_at - ts` differences are NEGATIVE — an elapsed
+time cannot be negative, so those numbers were never elapsed times."*
+My "sub-second forward latency" in Entry 4 was therefore **also wrong**,
+in the other direction. It was never a latency at all.
+
+Timestamp origins, read from the code:
+
+| Field | Origin | Set when | Mutated later? |
+|---|---|---|---|
+| `ts` | block producer (chain) or venue (poll) | at ingest | **no** |
+| `detected_at` | our process wall clock, `pipeline.py:331` | immediately before the INSERT | **no** — the `ON CONFLICT DO UPDATE SET` list touches only `condition_id`, `outcome`, `outcome_index`, `enriched_at` and `venue_seen_at` |
+| `venue_seen_at` | the **venue's** feed, migration 034 | on a poll duplicate of an s1-won fill | first stamp wins |
+
+Chain `ts` also has a declared fallback: when the RPC returns 200 with
+no block timestamp, `chain.py` substitutes the local wall clock and
+counts it. Those rows' `ts` is not a chain time.
+
+**`available_at = max(ts, detected_at)` is used and labelled a
+CONSERVATIVE CUTOFF.** It does not establish persistence, indexing, or
+that any consumer was running, and `clock_note` says so in the dataset.
+`venue_seen_at` is carried through so a later reader can do better.
+
+**The 5,967 s interval is an UNEXPLAINED DETECTION GAP, not a confirmed
+outage.** No source-health record, cursor or reconnect log has been
+examined. It is excluded and the exclusion is recorded: 56 entry rows
+fell inside it and 25 more had horizons overlapping it — all 81 dropped,
+because a complementary fill could have happened in the hole and
+scoring that as a negative would teach the model RN1 does not complete.
+
+### The trained baseline
+
+RN1, last 10 days, deterministic 1-in-20 condition sample: **4,860
+fills, 443 conditions, 1,186 entry rows, 0 censored, base rate 0.552.**
+Target: will RN1 be OBSERVED buying the complement within 1 hour.
+
+EVAL block: **114 decided rows, 31 conditions.**
+
+| Model | Log loss | AUC | Skill vs base | ECE |
+|---|---:|---:|---:|---:|
+| base rate | 0.6160 | 0.500 | 0.0% | 0.118 |
+| **ridge** | **0.5172** | **0.725** | **+16.0%** | **0.084** |
+| stumps | 0.5579 | 0.635 | +9.4% | 0.103 |
+| ridge + isotonic | 0.6117 | 0.703 | +0.7% | 0.218 |
+
+**Calibration made it worse and was NOT promoted.** Block base rates:
+TRAIN 0.610, CALIB 0.384, EVAL 0.728. The target is strongly
+non-stationary across ten days, so an isotonic curve fitted on the
+middle block encodes that block's low rate and drags predictions down
+where the rate has risen. `p_calibrated` is NULL on every stored row.
+
+What it says, in words: RN1 completes **less** as entry price moves from
+0.50 (−1.32 log-odds per unit) and **less** on the first fill in a
+market (−0.61); **more** once several fills are in it (the stumps break
+at 7.5 prior fills, +1.17).
+
+### Persisted, and prospective
+
+`bettor_learn_model` / `bettor_learn_prediction` created and verified
+from the catalog (35 columns, 6 indexes). Model `rn1_complement_1h`
+v1, status **CANDIDATE**, code_sha `8976c227`.
+
+**Five predictions whose outcomes could not exist when they were
+computed** — `decision_at + 3600` beyond the extract's read instant.
+p 0.496–0.604 against a 0.610 base rate; maturing
+**13:22:34Z–13:31:59Z**. All five `unmatured`. The model was **refitted
+from the training extract** before scoring and the script asserts the
+refitted base rate matches the report's to 1e-12, so a loss of
+determinism fails loudly instead of scoring with different coefficients.
+
+### The EV engine's answer: a documented refusal
+
+`bettor_ev_bridge.evaluate()` on a live-shaped book returns:
+
+```
+bestAction        NO_TRADE
+actionEvStatus    NOT_IDENTIFIED
+P_FILL_STATUS     NOT_IDENTIFIED
+P_FILL_SOURCE     BETTOR_NATIVE_ADMITTED_FILLS_REQUIRED
+FV_BETTOR_INDEPENDENT  NOT_IDENTIFIED
+```
+
+**This model does not change that, and must not.** It predicts RN1's
+next observed action. The EV engine is blocked on P_FILL — the
+probability that **our** resting order fills — which requires our own
+admitted fills and cannot be supplied by any amount of cohort
+behaviour. The refusal is the correct output and the correct
+integration result.
+
+**The chain, end to end, as it actually stands:**
+
+    cohort record (4,860 real fills)            DONE
+    reconstructed state (1,186 entry rows)      DONE
+    model prediction (ridge, +16.0% skill)      DONE
+    persisted, versioned, unmatured (5 rows)    DONE
+    our EV decision                             REFUSED, and named
+    risk check                                  not reached
+    auditable proposal                          not reached
+    later outcome                               matures 13:22Z
+    evaluation                                  pending maturity
