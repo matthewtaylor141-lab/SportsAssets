@@ -18,6 +18,9 @@ on:
           - suspend       # confirm=DO
           - restart       # confirm=DO
           - deploy        # confirm=DO: deploy the latest commit of the service's branch
+          - deploy-api-commit # confirm=DO: arg = 40-hex sha; deploys ONLY sportsassets-api, by commit id. Cannot reach a worker.
+          - api-branch-get    # read the branch and autoDeploy of the api and the worker
+          - api-branch-set    # confirm=DO: arg = branch; repoints ONLY sportsassets-api
           - metrics       # a service's memory (MB) and CPU per instance over the last N minutes (arg, default 120)
           - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | pause-on (DO) | pause-off (DO) | pause-state | mirror-preflight | mirror-rearm (DO) | mirror-register (DO) | mirror-frozen | obs-arm-incentive (DO) | obs-incentive | obs-incentive-journal | obs-incentive-markets | obs-incentive-rows[:OFFSET:LIMIT]
           - env-keys      # the service's env var KEYS (never values)
@@ -175,6 +178,83 @@ jobs:
               echo "deploy latest -> $SERVICE ($ID)"
               CODE=$(post "/services/$ID/deploys" '{"clearCache":"do_not_clear"}'); echo "HTTP $CODE"
               jq -r '"deploy \(.id // "?") status=\(.status // "?") commit=\(.commit.id // "?" | .[0:7])"' /tmp/post.json 2>/dev/null || head -c 400 /tmp/post.json
+              ;;
+            # [R82] API-ONLY RELEASE. See RENDER_OPS_NOTES.md.
+            #
+            # WHY THIS EXISTS AT ALL. `services` reports that
+            # sportsassets-api AND sportsassets-workers both track the
+            # branch claude/session-njaewf with autoDeploy=yes. Separate
+            # services do NOT give isolation when they share an
+            # auto-deploy branch: one push to that branch deploys the web
+            # service and RESTARTS THE COLLECTOR, mid-window, losing the
+            # connection epoch and writing a PROCESS_REPLACED gap. That
+            # has already happened once in this run.
+            #
+            # A worker deploy has exactly three triggers:
+            #   (a) a push to the branch it tracks;
+            #   (b) a Blueprint sync, i.e. a render.yaml change on that
+            #       branch;
+            #   (c) an explicit API call naming the worker's service id.
+            #
+            # This action does none of them. It pushes nothing, changes
+            # no render.yaml, and the service it calls is not a
+            # parameter: the name is a literal below, the type is
+            # asserted to be web_service, and a worker id cannot be
+            # reached through it however `service` is set. `service` is
+            # ignored entirely.
+            #
+            # arg = the 40-character commit to deploy. It need not be on
+            # the branch the service tracks -- that is the point: the
+            # release rides a commit id, not a push.
+            deploy-api-commit)
+              need_confirm
+              case "$ARG" in
+                [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+                *) echo "refused: deploy-api-commit needs arg = a full 40-hex commit sha (got '$ARG')"; exit 1 ;;
+              esac
+              [ "$SERVICE" = "sportsassets-api" ] || echo "note: service='$SERVICE' is IGNORED; this action only ever deploys sportsassets-api"
+              API_ID=$(svc_id "sportsassets-api")
+              [ -z "$API_ID" ] && { echo "no service named sportsassets-api"; exit 1; }
+              API_TYPE=$(get "/services/$API_ID" | jq -r '.type // "?"')
+              API_NAME=$(get "/services/$API_ID" | jq -r '.name // "?"')
+              if [ "$API_TYPE" != "web_service" ] || [ "$API_NAME" != "sportsassets-api" ]; then
+                echo "refused: $API_ID resolves to name=$API_NAME type=$API_TYPE, not the web service"; exit 1
+              fi
+              WK_ID=$(svc_id "sportsassets-workers")
+              echo "-- worker deploys BEFORE (must be unchanged after) --"
+              get "/services/$WK_ID/deploys?limit=3" | jq -r '.[]? | .deploy | "  \(.id) \(.status) \(.commit.id // "?" | .[0:7]) \(.createdAt)"'
+              echo "deploy commit $ARG -> sportsassets-api ($API_ID), web service, by commit id"
+              CODE=$(post "/services/$API_ID/deploys" "{\"clearCache\":\"do_not_clear\",\"commitId\":\"$ARG\"}"); echo "HTTP $CODE"
+              jq -r '"deploy \(.id // "?") status=\(.status // "?") commit=\(.commit.id // "?" | .[0:7])"' /tmp/post.json 2>/dev/null || head -c 400 /tmp/post.json
+              echo "-- worker deploys AFTER --"
+              get "/services/$WK_ID/deploys?limit=3" | jq -r '.[]? | .deploy | "  \(.id) \(.status) \(.commit.id // "?" | .[0:7]) \(.createdAt)"'
+              ;;
+            # [R83] The API service's OWN tracked branch, read and set.
+            # Pointing the web service at its own branch is what ends the
+            # shared-branch coupling for good: after it, a command-centre
+            # push can never reach the collector because the collector
+            # does not watch that branch. Like the action above, the
+            # service is a literal and a worker cannot be named.
+            api-branch-get)
+              API_ID=$(svc_id "sportsassets-api")
+              get "/services/$API_ID" | jq -r '"sportsassets-api \(.id) branch=\(.branch // "?") autoDeploy=\(.autoDeploy // "?")"'
+              WK_ID=$(svc_id "sportsassets-workers")
+              get "/services/$WK_ID" | jq -r '"sportsassets-workers \(.id) branch=\(.branch // "?") autoDeploy=\(.autoDeploy // "?")"'
+              ;;
+            api-branch-set)
+              need_confirm
+              [ -n "$ARG" ] || { echo "refused: api-branch-set needs arg = the branch name"; exit 1; }
+              API_ID=$(svc_id "sportsassets-api")
+              API_TYPE=$(get "/services/$API_ID" | jq -r '.type // "?"')
+              [ "$API_TYPE" = "web_service" ] || { echo "refused: sportsassets-api resolves to type=$API_TYPE"; exit 1; }
+              WK_BEFORE=$(get "/services/$(svc_id sportsassets-workers)" | jq -r '.branch // "?"')
+              echo "sportsassets-api branch -> $ARG (worker stays on $WK_BEFORE)"
+              CODE=$(curl -sS --max-time 45 -o /tmp/post.json -w '%{http_code}' -X PATCH \
+                     -H "Authorization: Bearer $KEY" -H "Accept: application/json" \
+                     -H "Content-Type: application/json" -d "{\"branch\":\"$ARG\"}" "$API/services/$API_ID")
+              echo "HTTP $CODE"
+              get "/services/$API_ID" | jq -r '"now: sportsassets-api branch=\(.branch // "?") autoDeploy=\(.autoDeploy // "?")"'
+              get "/services/$(svc_id sportsassets-workers)" | jq -r '"now: sportsassets-workers branch=\(.branch // "?") autoDeploy=\(.autoDeploy // "?")"'
               ;;
             sql)
               PG=$(pg_id "$SERVICE"); [ -z "$PG" ] && { echo "no database named $SERVICE"; exit 1; }
