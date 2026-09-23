@@ -55,8 +55,8 @@ that is the cell's point.
 | What it **changes** | **Nothing.** Two verdicts exist; no code path edits the policy | `DESCRIPTION["changes"] == []`; a test asserts no UPDATE against the register or policy constants | — |
 | Which data each evaluation uses | Settled `rn1x_outcomes`; fills **re-read** from `trades` each cycle; identified by `dataset_sha` + position count; prospective excluded | `DESCRIPTION["data_per_evaluation"]` | — |
 | Keep the frozen policy unchanged | `PAIR_TARGET_COST` 0.91 / `LOSS_TRIGGER_FRACTION` 0.84 untouched; challengers vary by **argument**, never by edit | Frozen path still prices the completion at **0.32** on a 0.57 basis | — |
-| PAIR_092 is exploratory, not a promotion | Status `CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT`; no promotion path | v2/v6/v10 eligible on 420 then 598 decided. **The datasets are nested, so this is one result at two sample sizes, not a replication** | — |
-| Check the next due cycle by **receipt and heartbeat** | Receipts carry `written` and the reason | **`rn1x_learn` heartbeat 20:38:46Z: `"new_rows": 0`, `"positions": 65`, `"dataset_sha": "8488d060ec7d"`, and all four receipts `"written": false` with "unchanged from version N on the same dataset"** — deduplication confirmed from each receipt's own reason, not inferred from a row count that happened not to move | — |
+| PAIR_092 is exploratory, not a promotion | Status `CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT`; no promotion path | Eligible at 420 and 598 decided — **and at 649 decided it was NOT.** Heartbeat 20:47:19Z, version 14: `RETAIN_CHAMPION`, "improves cost-marked P&L in **1 of 3** scenarios… has found a liquidity assumption, not an edge". The seven positions the unwedged cursor added were enough to withdraw it. **PAIR_090 is now the eligible one** (version 13), on its first appearance | Nested datasets, so none of these three is a replication of another — and the one that changed its mind shows why that distinction was worth keeping |
+| Check the next due cycle by **receipt and heartbeat** | Receipts carry `written` and the reason | **`rn1x_learn` heartbeat 20:38:46Z: `"new_rows": 0`, `"positions": 65`, `"dataset_sha": "8488d060ec7d"`, and all four receipts `"written": false` with "unchanged from version N on the same dataset"** — deduplication confirmed from each receipt's own reason, not inferred from a row count that happened not to move. **And the complement, which is the stronger half:** at 20:47:19Z, after the unwedged cursor moved the dataset to **71 positions / 649 decided**, the same loop wrote `"new_rows": 4`, versions 13–16. It skips on an unchanged dataset and writes on a changed one — so the earlier zero was identity, not inactivity. At 20:51:34Z it then declined again, naming the arithmetic: `TOO_FEW_NEW_POSITIONS`, "72 settled positions against 71 at the last recorded evaluation… a verdict resting on hundreds of decided orders does not change on 1 more" | — |
 | *(found while doing this)* | The heartbeat also published `champion_retained`, which production returned as **`false`** | It was only `all(verdict == RETAIN)`, and PAIR_092 is ELIGIBLE — so a correct evaluation printed what reads as *the champion was replaced*. It cannot be: there is no promotion path. Split into `champion_unchanged` (a constant), `champion`, `all_verdicts_retain` and `eligible_pending_management`; a test asserts the old key is **absent** | — |
 
 ## 5 · The command centre
@@ -90,6 +90,19 @@ Refused at **SEED**, before any inventory is assigned:
 at step 8, which left `MANAGE` already run and would have written a
 position with no orders — the half-written shape that made the desk's book
 uncertain.
+
+**Cleared in production, measured at 20:49:23Z.** The cursor moved
+**294 → 334** (and **350** by 20:55:25Z — it is still walking), positions
+**65 → 72**, outcomes 72, decisions 2,748, orders 216, fills 23. Trade 331
+wrote a whole position — 6 decisions, 1 order, `outcome: true`,
+`reconciles: true`. Trades 333 and 334 refused at `CLASSIFY` with
+`"written": false` and the refusal returned to the caller as a blocker,
+which is the half-written shape not happening.
+
+The deploy carrying the fix: **`aea4203`, live 20:46:37Z** (`ee5387d`
+deactivated), on `sportsassets-api` only — `sportsassets-workers` held
+`dep-dapqirrbc2fs73bms6fg live 7f76fd9` across every deploy in this
+session, so the observation collector was never restarted.
 
 ## A second defect found and fixed
 
