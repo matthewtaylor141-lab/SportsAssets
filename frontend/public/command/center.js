@@ -99,9 +99,10 @@
      * must never have to guess which of the two they are looking at. */
     if (c.as_of) {
       meta += '<span class="cc-asof">as of ' + clock(c.as_of) + '</span>';
-    } else if (state.at) {
+    } else if (payloadAsOf()) {
+      /* The EVIDENCE's instant, not the browser's fetch. */
       meta += '<span class="cc-asof cc-asof-read">as of this read, '
-        + clock(state.at) + '</span>';
+        + clock(payloadAsOf()) + '</span>';
     } else {
       meta += '<span class="cc-asof cc-unknown">as of UNKNOWN</span>';
     }
@@ -191,7 +192,8 @@
     out.push(coverageTable('Market coverage — measurement window',
                            v.coverage));
     out.push(coverageTable('Market coverage — early period (operational)',
-                           v.early_coverage));
+                           v.early_coverage,
+                           {nothing_ran: ((per.early || {}).frames === 0)}));
 
     /* Allowance against limits. */
     var al = v.allowance || {};
@@ -334,21 +336,38 @@
     return new Date(Number(t) * 1000).toISOString();
   }
 
-  function coverageTable(title, cov) {
+  function coverageTable(title, cov, opts) {
     if (!cov) return '';
+    /* NOTHING ARRIVED IS NOT THE SAME FAULT AS A MARKET GOING QUIET.
+     *
+     * The early period ran before the collector existed, so every
+     * market showed SILENT in red -- twelve alarms about a process
+     * that was not running. A period in which NOTHING was persisted
+     * says nothing about any individual market, so it says that
+     * instead of accusing each of them in turn. */
+    var nothing = (cov.receiving === 0);
+    var empty = nothing && (opts || {}).nothing_ran;
     return '<section class="cc-panel"><h2>' + esc(title) + '</h2>'
       + '<p class="cc-sub">' + esc(cov.receiving) + ' of '
-      + esc(cov.allowlisted) + ' receiving · ' + esc(cov.with_depth)
+      + esc(cov.allowlisted) + ' receiving \u00b7 ' + esc(cov.with_depth)
       + ' with depth persisted</p>'
+      + (empty
+        ? '<p class="cc-note">NOT COLLECTING IN THIS PERIOD. No frame was '
+          + 'persisted by any market, so this is not evidence about the '
+          + 'markets -- it is the absence of a collector. Each row below '
+          + 'reads NOT COLLECTED rather than SILENT.</p>'
+        : '')
       + '<p class="cc-note">' + esc(cov.independence_note || cov.note || '')
       + '</p>'
       + '<table class="cc-table"><thead><tr><th>Market</th>'
       + '<th>Frames</th><th>With depth</th><th>State</th></tr></thead>'
       + '<tbody>' + (cov.markets || []).map(function (m) {
-        var st = !m.receiving ? '<b class="cc-bad">SILENT</b>'
+        var st = !m.receiving
+            ? (empty ? '<b class="cc-na">NOT COLLECTED</b>'
+                     : '<b class="cc-bad">SILENT</b>')
           : !m.depth_persisted ? '<b class="cc-warn">NO DEPTH</b>'
           : 'depth persisted';
-        return '<tr class="' + (m.receiving ? '' : 'cc-row-bad')
+        return '<tr class="' + (m.receiving || empty ? '' : 'cc-row-bad')
           + '"><td class="cc-mono">' + esc(m.slug) + '</td><td>'
           + esc(m.frames) + '</td><td>' + esc(m.frames_with_depth)
           + '</td><td>' + st + '</td></tr>';
@@ -677,6 +696,15 @@
     if (r) r.addEventListener('click', function () { load(); });
   }
 
+  /* The banner already names the class and the instant, and the
+   * warning it carries opens by naming them again. Drop that opening
+   * clause rather than printing the same sentence twice. */
+  function trimLead(w) {
+    return String(w || '').replace(
+      /^(ACTUAL JOURNAL RECORDS|RECONSTRUCTED FROM REAL READINGS)[^.]*\.\s*/,
+      '');
+  }
+
   function previewBanner() {
     /* SYNTHETIC FIXTURES ANNOUNCE THEMSELVES, at the top, in red.
      * A screenshot of a fixture is worthless as evidence and dangerous
@@ -695,14 +723,14 @@
       return '<div class="cc-actual" role="alert">'
         + '<b>ACTUAL JOURNAL RECORDS</b> — scenario <code>'
         + esc(p.scenario) + '</code>, read back from production at '
-        + clock(p.read_at) + '. ' + esc(p.warning) + '</div>';
+        + clock(p.read_at) + '. ' + esc(trimLead(p.warning)) + '</div>';
     }
     if (p.REAL_READINGS) {
       return '<div class="cc-real" role="alert">'
         + '<b>RECONSTRUCTED FROM REAL READINGS — NOT THE COLLECTOR’S '
         + 'OWN ROWS</b> — scenario <code>'
         + esc(p.scenario) + '</code>, read back from production at '
-        + clock(p.read_at) + '. ' + esc(p.warning) + '</div>';
+        + clock(p.read_at) + '. ' + esc(trimLead(p.warning)) + '</div>';
     }
     return '<div class="cc-synthetic" role="alert">'
       + '<b>SYNTHETIC FIXTURE — NOT VENUE DATA, NOT A RUN RESULT.</b> '
@@ -710,15 +738,45 @@
       + esc(p.why) + '</div>';
   }
 
+  /* THE EVIDENCE'S INSTANT, NOT THE BROWSER'S.
+   *
+   * This printed the moment the page FETCHED, labelled "read", with an
+   * age of "0s ago" beside it. For a payload whose figures were
+   * measured thirteen minutes earlier that is exactly the failure this
+   * page exists to prevent: a stale reading wearing a fresh timestamp.
+   * The evidence's own as_of is the headline and the age is computed
+   * from it; the fetch appears separately, and only when it is
+   * meaningfully later, so the lag is visible rather than averaged
+   * away. */
+  function payloadAsOf() {
+    return (state.data && state.data.as_of) || null;
+  }
+
+  function asOfBar() {
+    var evidence = payloadAsOf();
+    if (!evidence) {
+      return state.at
+        ? '<span class="cc-asof-read">fetched ' + clock(state.at)
+          + ' \u00b7 evidence instant UNKNOWN</span>'
+        : '';
+    }
+    var out = '<span>evidence as of ' + clock(evidence) + ' \u00b7 '
+      + ago(evidence) + '</span>';
+    var lag = state.at
+      ? (Date.parse(state.at) - Date.parse(evidence)) / 1000 : 0;
+    if (Number.isFinite(lag) && lag > 5) {
+      out += '<span class="cc-asof-read">fetched ' + clock(state.at)
+        + ', ' + Math.round(lag) + 's later</span>';
+    }
+    return out;
+  }
+
   function header() {
     return previewBanner() + '<header class="cc-head">'
       + '<div class="cc-title"><h1>BETTOR Command Centre</h1>'
       + '<p class="cc-sub">Read-only. Five views over one evidence read.'
       + '</p></div>'
-      + '<div class="cc-asofbar">'
-      + (state.at
-        ? '<span>read ' + clock(state.at) + ' · ' + ago(state.at)
-          + '</span>' : '')
+      + '<div class="cc-asofbar">' + asOfBar()
       + '<button data-refresh class="cc-btn">Re-read</button></div>'
       + '<nav class="cc-tabs">' + TABS.map(function (t) {
         return '<button data-view="' + t[0] + '" class="cc-tab'
