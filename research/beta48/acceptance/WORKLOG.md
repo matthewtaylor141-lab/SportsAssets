@@ -368,3 +368,22 @@ auto-deploy branch, so registering the loop in `workers/all.py` would need
 a push that restarts the observation collector mid-window. Both loops are
 hosted in the API lifespan instead and released by commit id; the frontend
 went to the Netlify branch with `[skip render]`.
+
+### 19:51Z — the writer-lock handover, verified on a real deploy
+
+`d71cfc1` live 19:45:47Z. The new API instance reported
+`STANDBY_NOT_THE_EVALUATOR` at 19:45:45Z (the outgoing instance still held
+the evaluator lock), then acquired it on retry and wrote learning
+versions 5–8 at 19:51:13Z on 598 decided orders.
+
+This is the audit's defect 7 shown working in production rather than in a
+test: the old standby slept forever and could never take over, which is
+the containment incident at 16:41 I had attributed to a deploy.
+
+Learning verdicts unchanged in kind across both evaluations — three
+RETAIN, one ELIGIBLE (PAIR_092). The 598-decided dataset CONTAINS the
+420-decided one, so this is one result at two sample sizes, not an
+independent replication.
+
+Experiment at 19:51:13Z: cursor 294; `ORDER_WORKING 1808`,
+`NO_RESIDUAL 425`, `HOLD_NO_FEASIBLE_PAIR 136`. Containment unchanged.

@@ -163,6 +163,35 @@ pass, which is the same defect facing the other way.
 The production verdict above stands as computed: all four arms produced
 three rows from the same scenario tuple, so they were aligned.
 
+### Re-evaluated under the fixed code, and the lock handover verified live
+
+`d71cfc1` went live at **19:45:47Z**. The new instance booted, found the
+evaluator lock still held by the outgoing instance, and reported
+`{"state": "STANDBY_NOT_THE_EVALUATOR"}` at 19:45:45Z — then **took the
+lock on its next retry and re-evaluated**, writing versions 5–8 at
+19:51:13Z:
+
+| Ver | Challenger | Verdict | Decided |
+|---|---|---|---|
+| 5 | `PAIR_090` | RETAIN_CHAMPION | 598 |
+| 6 | `PAIR_092` | CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT | 598 |
+| 7 | `STOP_80` | RETAIN_CHAMPION | 598 |
+| 8 | `HOLD_TO_SETTLEMENT` | RETAIN_CHAMPION (*turnover 0 is 0% of the baseline's 129*) | 598 |
+
+**This is the audit's defect 7 demonstrated on a real deploy, not in a
+test.** The old standby did `if not acquired: while True: sleep` and could
+never take over — the containment incident at 16:41 that I wrongly
+attributed to a deploy. Here the standby retried, acquired, and resumed
+evaluating. (asyncpg's pooled-connection reset runs
+`SELECT pg_advisory_unlock_all()` — connection.py:1748 — so the outgoing
+instance's cancelled task genuinely frees the lock.)
+
+**THE TWO EVALUATIONS ARE NOT INDEPENDENT REPLICATIONS.** The 598-decided
+dataset CONTAINS the 420-decided one; the experiment kept seeding between
+the two runs. PAIR_092 clearing twice on nested data is one result
+observed at two sample sizes, not two confirmations. Its earlier caveats
+stand unchanged.
+
 **IT HAS NO PROMOTION PATH.** `recommend()` returns `RETAIN_CHAMPION` or
 `CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT` and there is no third value. The
 champion is management-defined and frozen; a loop that could swap it would
