@@ -226,6 +226,7 @@ jobs:
               echo "deploy commit $ARG -> sportsassets-api ($API_ID), web service, by commit id"
               CODE=$(post "/services/$API_ID/deploys" "{\"clearCache\":\"do_not_clear\",\"commitId\":\"$ARG\"}"); echo "HTTP $CODE"
               jq -r '"deploy \(.id // "?") status=\(.status // "?") commit=\(.commit.id // "?" | .[0:7])"' /tmp/post.json 2>/dev/null || head -c 400 /tmp/post.json
+              case "$CODE" in 2??) : ;; *) echo "FAILED: Render refused it (HTTP $CODE); NO deploy was created"; exit 1 ;; esac
               echo "-- worker deploys AFTER --"
               get "/services/$WK_ID/deploys?limit=3" | jq -r '.[]? | .deploy | "  \(.id) \(.status) \(.commit.id // "?" | .[0:7]) \(.createdAt)"'
               ;;

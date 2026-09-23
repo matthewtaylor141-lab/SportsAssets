@@ -91,7 +91,7 @@ at step 8, which left `MANAGE` already run and would have written a
 position with no orders — the half-written shape that made the desk's book
 uncertain.
 
-## A second defect found, reported and NOT fixed here
+## A second defect found and fixed
 
 `render-ops`'s `deploy-api-commit` **reports `conclusion: success` when
 Render refuses the deploy.** Observed directly: run 35917975665 at
@@ -101,15 +101,30 @@ and the workflow said it had. (Confirmed harmless in this instance: the
 worker's deploy list is byte-identical before and after, still
 `dep-dapqirrbc2fs73bms6fg live 7f76fd9`.)
 
-The fix is one line — a non-2xx `$CODE` must `exit 1`. It is **not applied**
-because `test_e30_post_only_body.py` pins `render-ops.yml`'s sha256 and
-that pin currently **passes**; editing the file to fix an issue outside
-these five items would break a standing freeze from an earlier approved
-lane, and the file has 550 bytes of headroom under GitHub's 512,000-byte
-ceiling. Flagged for whoever owns that pin.
+Fixed in one line — a non-2xx `$CODE` now `exit 1`s:
 
-Until then, a green `deploy-api-commit` is **not** evidence of a deploy —
-the job log's `HTTP` line and the deploy id are.
+```
+case "$CODE" in 2??) : ;; *) echo "FAILED: Render refused it (HTTP $CODE); NO deploy was created"; exit 1 ;; esac
+```
+
+Verified three ways before committing: the guard exits 0 on 201 and 1 on
+404 and 500; the YAML still parses; and the file is **511,578 bytes, 422
+under** GitHub's 512,000-byte ceiling (over it, the workflow fails at
+startup with no log at all).
+
+I first wrote here that I was **leaving this unfixed** because
+`test_e30_post_only_body.py` pins this workflow's sha256 and that pin
+passed. That was wrong, and checking it is what showed why: the pin's value
+(`0ad40506f7460915`) is stale against the actual file (`0cd389dc6bd13397`)
+because `c205528` legitimately widened the readback earlier today, and both
+pin tests (`e27`, `e30`) already fail one assertion **earlier**, on
+migration `100_rn1_seeded_experiment.sql` being newer than their pinned
+`064_`. So this edit changes nothing about their status, and the reason I
+had given for not doing the work did not exist.
+
+The caveat still holds for every `deploy-api-commit` run **before** this
+commit: a green one is not evidence of a deploy — the `HTTP` line and the
+deploy id are. That is how `dep-daq3kp3tqb8s73e7cpog` was confirmed.
 
 ## What none of this establishes
 
