@@ -134,6 +134,7 @@ CYCLE_S = float(os.getenv("BETTOR_DESK_CYCLE_S", "20"))
 BATCH = int(os.getenv("BETTOR_DESK_BATCH", "500"))
 
 STATE_STANDBY = "STANDBY_NOT_LOCK_HOLDER"
+STATE_PAUSED = "PAUSED_ACCOUNTING_RECOVERY"
 STATE_RUNNING = "RUNNING"
 STATE_DISABLED = "DISABLED_BY_ENV"
 STATE_ERROR = "ERROR"
@@ -479,6 +480,46 @@ async def _restore(conn, desk_id, account_id, desk) -> dict:
             "reconciles": bool(inv["ok"])}
 
 
+async def _pause(conn, account_id) -> dict:
+    """Is this account paused? Read EVERY cycle, and FAIL CLOSED.
+
+    WHY EVERY CYCLE rather than once at startup: pausing and resuming
+    then need no deploy, which matters because a deploy is the thing
+    that was destabilising the release.
+
+    WHY FAIL CLOSED: if the flag cannot be read we do not know whether
+    we are paused, and a desk that trades while unsure whether it has
+    been stopped is worse than one that idles. An unreadable flag is
+    treated as PAUSED and says so.
+
+    THE FLAG ALONE CANNOT STOP A PROCESS RUNNING OLDER CODE. Nothing
+    read this column before this build, so the previous writer will
+    ignore it no matter what the row says. The flag stops THIS build;
+    the lock handover is what stops the previous one, and that has to
+    be VERIFIED rather than assumed.
+    """
+    try:
+        row = await conn.fetchrow(
+            """
+            SELECT paused, pause_reason, accounting_status
+              FROM bettor_desk_accounts WHERE account_id = $1
+            """, account_id)
+    except Exception as exc:                                # noqa: BLE001
+        return {"paused": True,
+                "reason": "PAUSE_FLAG_UNREADABLE (%s) -- treated as "
+                          "paused, because a desk that trades while "
+                          "unsure whether it was stopped is worse than "
+                          "one that idles" % type(exc).__name__,
+                "accounting_status": "UNKNOWN"}
+    if row is None:
+        return {"paused": True,
+                "reason": "ACCOUNT_ROW_MISSING -- treated as paused",
+                "accounting_status": "UNKNOWN"}
+    return {"paused": bool(row["paused"]),
+            "reason": row["pause_reason"],
+            "accounting_status": row["accounting_status"]}
+
+
 async def _load_cursor(conn, account_id) -> int:
     """Resume where we left off -- or, on a FIRST start, at NOW.
 
@@ -688,6 +729,22 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
 
         while True:
             try:
+                # THE PAUSE IS CHECKED BEFORE ANY EVENT IS READ, so a
+                # paused desk performs no work and writes nothing --
+                # not even a ledger snapshot, which would otherwise
+                # make a stopped desk look like a running one.
+                pz = await _pause(conn, account_id)
+                if pz["paused"]:
+                    _status.update(state=STATE_PAUSED, error=None,
+                                   account_id=account_id,
+                                   paused=True,
+                                   pause_reason=pz["reason"],
+                                   accounting_status=pz["accounting_status"],
+                                   last_cycle_at=time.time())
+                    await asyncio.sleep(CYCLE_S)
+                    continue
+                _status.update(paused=False, pause_reason=None,
+                               accounting_status=pz["accounting_status"])
                 rows = await _events(conn, cursor, BATCH)
                 for r in rows:
                     desk.step(_to_event(r))

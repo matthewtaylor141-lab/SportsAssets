@@ -744,3 +744,83 @@ async def test_a_new_book_does_not_overwrite_the_closed_books_rows():
     assert any(k[0] == aid for k in st.positions)
     assert all(o["account_id"] == aid for oid, o in st.orders.items()
                if oid.startswith(aid))
+
+
+# ── containment: a paused desk performs no work and writes nothing ────
+
+class PausedConn(FakeConn):
+    def __init__(self, store, paused=True, readable=True):
+        super().__init__(store, lock_granted=True)
+        self.paused = paused
+        self.readable = readable
+
+    async def fetchrow(self, sql, *a):
+        if "paused" in sql and "bettor_desk_accounts" in sql:
+            if not self.readable:
+                raise RuntimeError("flag read failed")
+            return {"paused": self.paused,
+                    "pause_reason": "ACCOUNTING_RECOVERY",
+                    "accounting_status": "ACCOUNTING_UNCERTAIN"}
+        return await super().fetchrow(sql, *a)
+
+
+async def _drive(conn, seconds=0.09):
+    os.environ["BETTOR_DESK_LOOP"] = "1"
+    DL.CYCLE_S = 0.01
+    task = asyncio.get_running_loop().create_task(DL.run(_pool_for(conn)))
+    await asyncio.sleep(seconds)
+    task.cancel()
+    try:
+        await task
+    except asyncio.CancelledError:
+        pass
+
+
+@pytest.mark.anyio
+async def test_a_paused_account_processes_nothing_and_writes_nothing():
+    st = Store()
+    conn = PausedConn(st, paused=True)
+    await _drive(conn)
+    assert DL.status()["state"] == DL.STATE_PAUSED, DL.status()
+    assert DL.status()["paused"] is True
+    # NOT EVEN A LEDGER SNAPSHOT. A paused desk that kept appending
+    # snapshots would look like a running one on the page.
+    assert st.ledger == []
+    assert st.orders == {}
+    assert st.fills == {}
+
+
+@pytest.mark.anyio
+async def test_an_unreadable_pause_flag_is_treated_as_paused():
+    """FAIL CLOSED. A desk that trades while unsure whether it was
+    stopped is worse than one that idles."""
+    st = Store()
+    conn = PausedConn(st, readable=False)
+    await _drive(conn)
+    s = DL.status()
+    assert s["state"] == DL.STATE_PAUSED, s
+    assert "UNREADABLE" in (s["pause_reason"] or "")
+    assert st.ledger == []
+
+
+@pytest.mark.anyio
+async def test_an_unpaused_account_is_NOT_held(monkeypatch):
+    """CONTROL. If the pause fired regardless, the desk could never run
+    and the two tests above would prove nothing."""
+    st = Store()
+    conn = PausedConn(st, paused=False)
+    await _drive(conn)
+    assert DL.status()["state"] == DL.STATE_RUNNING, DL.status()
+    assert DL.status()["paused"] is False
+
+
+def test_the_pause_is_read_every_cycle_not_once_at_startup():
+    """So pausing and resuming need no deploy."""
+    import ast
+    src = open(os.path.join(_ROOT, "sportsassets",
+                            "bettor_desk_loop.py")).read()
+    run = next(n for n in ast.walk(ast.parse(src))
+               if isinstance(n, ast.AsyncFunctionDef) and n.name == "run")
+    loops = [n for n in ast.walk(run) if isinstance(n, ast.While)]
+    cyclic = [lp for lp in loops if "_pause" in ast.unparse(lp)]
+    assert cyclic, "the pause is not checked inside the cycle loop"
