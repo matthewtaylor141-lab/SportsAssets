@@ -65,9 +65,18 @@ CANNOT_ESTABLISH = (
 
 
 def read_fills(path: str) -> list:
-    """`id|condition_id|outcome_index|side|price|size|source|ts|det|vseen`,
-    psql unaligned. A row that cannot be parsed is an ERROR, never a
-    skipped row: a silently dropped fill is a manufactured negative."""
+    """`id|condition_id|outcome_index|side|source|ts|detected_at`, psql
+    unaligned.
+
+    SEVEN COLUMNS, not ten. price, size and venue_seen_at were dropped
+    from the statement when `render-ops.yml` hit its 512,000-byte
+    ceiling; none of them enters the complement rule, which needs only
+    the leg, the side and both clocks. The field count is asserted so a
+    statement that changes shape fails loudly here instead of silently
+    scoring the wrong column.
+
+    A row that cannot be parsed is an ERROR, never a skipped row: a
+    silently dropped fill is a manufactured negative."""
     out = []
     for n, line in enumerate(open(path), 1):
         line = line.rstrip("\n")
@@ -76,20 +85,18 @@ def read_fills(path: str) -> list:
         f = line.split("|")
         if f[0] in ("id",):
             continue
-        if len(f) != 10:
-            raise ValueError("line %d has %d fields, expected 10: %r"
-                             % (n, len(f), line[:120]))
+        if len(f) != 7:
+            raise ValueError("line %d has %d fields, expected 7 "
+                             "(id|condition_id|outcome_index|side|source|"
+                             "ts|detected_at): %r" % (n, len(f), line[:120]))
         out.append({
             "id": f[0],
             "condition_id": f[1],
             "outcome_index": int(f[2]),
             "side": f[3].strip().upper(),
-            "price": float(f[4]),
-            "size": float(f[5]),
-            "source": f[6],
-            "ts": float(f[7]),
-            "detected_at": float(f[8]),
-            "venue_seen_at": float(f[9]) if f[9] else None,
+            "source": f[4],
+            "ts": float(f[5]),
+            "detected_at": float(f[6]),
         })
     return out
 
