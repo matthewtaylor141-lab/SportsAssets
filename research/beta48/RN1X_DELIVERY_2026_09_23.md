@@ -113,10 +113,55 @@ into the package **unchanged** so the offline tool and the runtime loop
 share one implementation; `backend/tools/` is not in the API image, so the
 alternative was a second copy that would drift.
 
-The expected and observed verdict is `RETAIN_CHAMPION`, for a stated
-reason: **INELIGIBLE at 6 decided orders against the gate's floor of 50.**
-A rejection is written exactly like an acceptance, so the panel shows why
-rather than going blank.
+**IT RAN, AND THE RECEIPTS ARE IN THE REGISTER.** Read out of
+`bettor_learn_model` at 19:42:27Z, all four on dataset `b088f4022d15`,
+420 decided orders:
+
+| Ver | Challenger | Verdict | The gate's own reason |
+|---|---|---|---|
+| 1 | `PAIR_090` | RETAIN_CHAMPION | *NOT ROBUST: improves cost-marked P&L in 0 of 3 scenarios… NOT_RESOLVED: the 0 improvement is smaller than the 0 change in the terminal-value bound width.* |
+| 2 | `PAIR_092` | **CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT** | *passed every declared V2 condition* |
+| 3 | `STOP_80` | RETAIN_CHAMPION | same as PAIR_090 — and **expected**: with the loss exit unavailable, a different stop fraction changes nothing, so this arm is numerically identical to the champion. |
+| 4 | `HOLD_TO_SETTLEMENT` | RETAIN_CHAMPION | *DOSE REDUCTION, NOT AN EDGE: turnover 0 is 0% of the baseline's 63.* |
+
+### On PAIR_092, carefully
+
+A challenger cleared the gate. **This is not a result to act on yet, and
+it is not a profitability finding.** What it says precisely: on 19
+historical replayed positions, with MODELLED fills licensed by other
+people's prints at three declared queue shares, under a TRANSFERRED PMUS
+fee scenario, a 0.92 combined-cost ceiling beat the frozen 0.91 ceiling on
+cost-marked P&L in all three scenarios without breaching the turnover,
+unresolved-capital, drawdown, committed-capital or reconciliation
+conditions.
+
+What it does **not** say: that 0.92 is better. Nineteen positions is a
+small sample, the fills are modelled, the fees are the wrong venue's, and
+`P_FILL` is `NOT_IDENTIFIED`. The economically interesting mechanism —
+a looser ceiling completes more pairs at a thinner margin — is exactly the
+kind of effect that reverses with more data.
+
+**It changed nothing.** The champion is still
+`MANAGEMENT_PAIR_091_STOP_16_V1`, unchanged, and the loop has no code path
+that could change it. ELIGIBLE is a recommendation to a human.
+
+### One defect this surfaced, in my own gate plumbing
+
+`gate_v2` zips the champion's scenario rows against the challenger's **by
+index**, and `evaluate` was dropping an empty scenario row. An arm
+producing nothing at queue_share 0.10 would have had its 0.25 row compared
+against the champion's 0.10 — one execution assumption against another,
+reported as like-for-like. `recommend` checked *length*, which does not
+catch a reordering.
+
+Fixed: an empty scenario is kept as a hole, and `recommend` refuses on
+either a queue_share mismatch or any scenario with no rows. A third test
+asserts an aligned, genuinely better candidate still reaches ELIGIBLE —
+without it, the refusal tests could be satisfied by a gate that can never
+pass, which is the same defect facing the other way.
+
+The production verdict above stands as computed: all four arms produced
+three rows from the same scenario tuple, so they were aligned.
 
 **IT HAS NO PROMOTION PATH.** `recommend()` returns `RETAIN_CHAMPION` or
 `CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT` and there is no third value. The
