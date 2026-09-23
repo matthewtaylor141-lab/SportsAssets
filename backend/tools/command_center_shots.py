@@ -127,7 +127,21 @@ def main() -> int:
                                            timeout=15000)
                     if page.query_selector('[data-view="%s"]' % view):
                         page.click('[data-view="%s"]' % view)
-                        page.wait_for_timeout(250)
+                        # WAIT FOR THE PAGE TO SAY IT SWITCHED, not for a
+                        # timer. A fixed 250 ms raced the render under
+                        # load and scraped the PREVIOUS view into the new
+                        # view's record -- a capture that the
+                        # reconciliation then checked and passed, against
+                        # the wrong page.
+                        page.wait_for_selector(
+                            '#cc-root[data-current-view="%s"]' % view,
+                            timeout=15000)
+                    else:
+                        # The unavailable page has no tabs. Its panel is
+                        # the evidence, so require THAT rather than
+                        # silently screenshotting whatever is there.
+                        page.wait_for_selector(".cc-unavailable, .cc-panel",
+                                               timeout=15000)
                     fn = "%s--%s--%s.png" % (name, view, width_name)
                     page.screenshot(path=os.path.join(a.out, fn),
                                     full_page=True)
@@ -148,6 +162,13 @@ def main() -> int:
                     shot["h2"] = page.eval_on_selector_all(
                         "h2", "els => els.map(e => e.textContent.trim())")
                     shot["body_text"] = page.inner_text("#cc-root")
+                    # WHAT THE PAGE SAYS IT IS SHOWING, recorded beside
+                    # what was scraped, so a mislabelled capture is
+                    # visible in the report rather than inferred.
+                    shot["rendered_view"] = page.get_attribute(
+                        "#cc-root", "data-current-view")
+                    shot["view_matches"] = (shot["rendered_view"] == view
+                                            or shot["rendered_view"] is None)
                     # HORIZONTAL OVERFLOW is the mobile failure that a
                     # screenshot alone hides, so it is measured.
                     shot["scroll_width"] = page.evaluate(

@@ -198,6 +198,9 @@ body.cc {
 }
 .cc-src { font-family: var(--cc-mono); }
 .cc-asof { white-space: nowrap; }
+/* A figure stamped by the read rather than by itself is dimmer, so the
+ * two kinds of "as of" are told apart at a glance. */
+.cc-asof-read { opacity: 0.68; font-style: italic; }
 
 /* UNKNOWN. Muted, italic, and never a numeral. */
 .cc-unknown, em.cc-unknown {

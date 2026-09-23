@@ -91,8 +91,20 @@
     }
     var meta = '<span class="cc-src" title="source">' + esc(c.source)
       + '</span>';
-    if (c.as_of) meta += '<span class="cc-asof">as of ' + clock(c.as_of)
-      + '</span>';
+    /* EVERY FIGURE CARRIES AN "AS OF", and a blank one is not an
+     * answer. A cell computed from the journal has no stamp of its own
+     * -- its currency is the currency of the read that produced it --
+     * so the read's instant is shown instead, marked as the read
+     * rather than dressed up as a per-figure measurement. A reader
+     * must never have to guess which of the two they are looking at. */
+    if (c.as_of) {
+      meta += '<span class="cc-asof">as of ' + clock(c.as_of) + '</span>';
+    } else if (state.at) {
+      meta += '<span class="cc-asof cc-asof-read">as of this read, '
+        + clock(state.at) + '</span>';
+    } else {
+      meta += '<span class="cc-asof cc-unknown">as of UNKNOWN</span>';
+    }
     var note = c.note
       ? '<p class="cc-note">' + esc(c.note) + '</p>' : '';
     return '<div class="cc-cell cc-' + esc((c.status || 'ok').toLowerCase())
@@ -611,6 +623,22 @@
   function render() {
     var el = document.getElementById('cc-root');
     if (!el) return;
+
+    /* THE PAGE SAYS WHICH VIEW IT IS SHOWING, in the DOM, and it says
+     * it on EVERY path -- including the unavailable one, which returns
+     * early and would otherwise never stamp it.
+     *
+     * A screenshot tool that clicks a tab and then waits a fixed
+     * number of milliseconds is racing the render: under load it
+     * scrapes the PREVIOUS view and files it under the new one's name,
+     * and a reconciliation run against that capture checks the wrong
+     * page and passes. That happened. Anything automated waits for
+     * this attribute instead of for a timer.
+     *
+     * Setting it here rather than after the write is not a second
+     * race: rendering is synchronous, so nothing outside can observe
+     * the attribute until the body beside it is already in place. */
+    el.setAttribute('data-current-view', state.view);
 
     if (state.error) {
       el.innerHTML = header()

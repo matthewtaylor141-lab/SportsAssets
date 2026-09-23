@@ -71,9 +71,22 @@ def main() -> int:
     a = ap.parse_args()
 
     shots = json.load(open(os.path.join(a.shots, "reconcile.json")))
-    screen = {}
+
+    # EVERY CAPTURE IS CHECKED, AT EVERY WIDTH.
+    #
+    # This indexed on (scenario, view) alone, so the phone capture
+    # overwrote the desktop one and half the screenshots were never
+    # looked at -- while the report still said the screen agreed. Both
+    # widths are kept and both must carry the figures.
+    screen, mislabelled = {}, []
     for s in shots["shots"]:
-        screen.setdefault(s["scenario"], {})[s["view"]] = s["body_text"]
+        screen.setdefault(s["scenario"], {}).setdefault(
+            s["view"], []).append(
+                {"width": s.get("width"), "text": s["body_text"]})
+        if s.get("view_matches") is False:
+            mislabelled.append("%s/%s/%s captured %s"
+                               % (s["scenario"], s["view"], s.get("width"),
+                                  s.get("rendered_view")))
 
     # THE SAME CLIENT THE PAGE USES, and not a second one.
     #
@@ -142,9 +155,16 @@ def main() -> int:
             det = (payload.get("_body") or {}).get("detail")
             row["route_reason"] = (det.get("reason")
                                    if isinstance(det, dict) else det)
-            txt = screen.get(name, {}).get("management", "")
-            row["screen_says_unavailable"] = "EVIDENCE UNAVAILABLE" in txt
-            row["screen_shows_no_zero_table"] = "0 of 12" not in txt
+            caps = screen.get(name, {}).get("management") or []
+            # EVERY captured width, and there must BE one. An empty list
+            # would make both tests below vacuously true, which is how
+            # this check quietly stopped meaning anything when the
+            # index changed shape underneath it.
+            row["captured_widths"] = [c["width"] for c in caps]
+            row["screen_says_unavailable"] = bool(caps) and all(
+                "EVIDENCE UNAVAILABLE" in c["text"] for c in caps)
+            row["screen_shows_no_zero_table"] = all(
+                "0 of 12" not in c["text"] for c in caps)
             ok = (row["route_status"] == 503
                   and row["screen_says_unavailable"]
                   and row["screen_shows_no_zero_table"])
@@ -181,8 +201,9 @@ def main() -> int:
 
         # NOW THE PIXELS. The state and the coverage line must be on the
         # page a browser actually rendered.
-        txt = screen.get(name, {}).get("live") or \
-            screen.get(name, {}).get("management") or ""
+        caps = (screen.get(name, {}).get("live")
+                or screen.get(name, {}).get("management") or [])
+        txt = "\n".join(c["text"] for c in caps)
         state = lo["lifecycle"]["state"]
         cov_line = "%d of %d receiving" % (got["receiving"],
                                            lo["coverage"]["allowlisted"])
@@ -208,6 +229,15 @@ def main() -> int:
                          % re.escape(CC.H_DISCONNECTED), txt)
         row["screen"]["quiet_not_called_broken"] = not (
             lo["health"]["verdict"] == CC.H_LIVE_QUIET and bare)
+        cov_line = "%d of %d receiving" % (got["receiving"],
+                                           lo["coverage"]["allowlisted"])
+        row["screen"]["per_width"] = {
+            c["width"]: {"state": state in c["text"],
+                         "coverage_line": cov_line in c["text"],
+                         "health": lo["health"]["verdict"] in c["text"]}
+            for c in caps}
+        row["screen"]["every_width_agrees"] = all(
+            all(d.values()) for d in row["screen"]["per_width"].values())
         row["screen_agrees"] = all(
             v for k, v in row["screen"].items()
             if isinstance(v, bool))
@@ -217,7 +247,8 @@ def main() -> int:
         rows.append(row)
 
     out = {"rows": rows, "failures": failures,
-           "all_agree": not failures,
+           "mislabelled_captures": mislabelled,
+           "all_agree": not failures and not mislabelled,
            "note": "records recounted independently, compared to the "
                    "payload the real route returned, compared to the text "
                    "a real browser rendered"}
@@ -235,6 +266,8 @@ def main() -> int:
             print("%s%-22s HTTP %s %s" % (mark, r["scenario"],
                                           r.get("route_status"),
                                           r.get("route_reason")))
+    for m in mislabelled:
+        print("XX MISLABELLED CAPTURE:", m)
     print("\nall three sides agree:", out["all_agree"])
     print("written:", path)
     browser.close()
