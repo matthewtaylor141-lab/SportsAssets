@@ -37,6 +37,7 @@ import json
 import logging
 from datetime import datetime, timezone
 
+from . import bettor_entry_gate as entry_gate
 from . import bettor_ev_bridge as evb
 from . import bettor_inventory as binv
 from . import bettor_sport_mapping as sportmap
@@ -330,6 +331,55 @@ def blockers_for(opportunity: dict, market_state: dict | None) -> list:
     return out
 
 
+def _admissible_entry_record(opportunity, market_state, ev, gate, *,
+                             decision_ts, blocks) -> dict:
+    """The record for an ENTRY the gate admitted.
+
+    Built through the SAME `bettor_lane_decision` constructor the refusal
+    uses, so lineage assertion, lane labelling and signal-source stamping
+    are identical. The only difference is `proposedAction` and the fields
+    that only exist when there is something to act on.
+
+    IT IS STILL A SHADOW DECISION. `orderSubmitted` is false, there is no
+    order path in this module's import closure, and
+    `conditional_on_our_fill.execution_secured` is false.
+    """
+    record = lanes.bettor_lane_decision(
+        opportunity.get("featureLineage") or {},
+        shadowDecisionId=_id("bdec", opportunity["bettorOpportunityId"],
+                             POLICY_VERSION),
+        symbol=opportunity["symbol"],
+        outcomeLeg=opportunity.get("outcomeLeg") or "UNRESOLVED",
+        eventId=opportunity.get("eventId"),
+        marketId=opportunity.get("marketId"),
+        sport=opportunity.get("sport"),
+        league=opportunity.get("league"),
+        modelVersion=MODEL_VERSION,
+        policyVersion=POLICY_VERSION,
+        evidenceSource=opportunity["evidenceSource"],
+        decisionTs=decision_ts,
+        featureAsofTs=opportunity.get("observedAt"),
+        proposedAction=gate["action"],
+        reasonCodes=["ENTRY_GATE_ADMITTED"],
+        blockers=[],
+        gateResults={"marketState": bool(
+            market_state and market_state.get("readable")),
+            "entryGate": "ADMITTED"},
+    )
+    record["entryGate"] = gate
+    record["pBettor"] = gate.get("fair_value")
+    record["pBettorStatus"] = "ESTABLISHED_BY_QUALIFIED_MODEL"
+    record["proposedSize"] = gate["size"]
+    record["proposedLimitPrice"] = gate.get("limit_price")
+    record["expectedNetDollarsPerContract"] = gate[
+        "expected_net_per_contract"]
+    record["pFill"] = gate["p_fill"]
+    record["conditionalOnOurFill"] = gate["conditional_on_our_fill"]
+    record["orderSubmitted"] = False
+    record["shadowOnly"] = True
+    return record
+
+
 def decide(opportunity: dict, market_state: dict | None, *,
            decision_ts=None, inventory=None) -> dict:
     """BETTOR's own prospective decision.
@@ -370,6 +420,30 @@ def decide(opportunity: dict, market_state: dict | None, *,
     # inventory we could not see.
     ev = evb.evaluate(market_state, inventory=inventory,
                       state_reference=opportunity.get("marketId"))
+
+    # ── THE ENTRY GATE, AND IT IS NOW A BRANCH ──────────────────────
+    #
+    # This function previously had no path to a BUY at all -- the refusal
+    # was unconditional, which is a different thing from a verdict that
+    # happens to be negative. `bettor_entry_gate.admit` evaluates the six
+    # declared requirements and either returns an admissible entry or
+    # every reason there is not one. NOTHING WAS RELAXED to make this
+    # reachable: with production's inputs it still refuses, and it now
+    # names each missing input separately.
+    #
+    # The inputs come from the caller. `entry_inputs` is absent on the
+    # production path, so the gate sees no model, no independent fair
+    # value, no execution estimate and no size -- and refuses on all of
+    # them. A controlled test supplies them explicitly and is labelled.
+    gate = entry_gate.admit(
+        action_table=(ev or {}).get("table"),
+        market_state=market_state,
+        **(opportunity.get("entryInputs") or {}))
+    if gate["admissible"]:
+        return _admissible_entry_record(
+            opportunity, market_state, ev, gate,
+            decision_ts=decision_ts, blocks=blocks)
+
     record = lanes.not_yet_eligible(
         features=opportunity.get("featureLineage") or {},
         shadowDecisionId=_id("bdec", opportunity["bettorOpportunityId"],
