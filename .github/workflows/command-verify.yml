@@ -309,6 +309,72 @@ jobs:
             >> "$GITHUB_STEP_SUMMARY"
           exit $FAIL
 
+      - name: RN1X — the shadow surface is published, and it is guarded
+        run: |
+          # THE FOUR DISTINCTIONS THE TAB EXISTS TO KEEP APART are
+          # historical replay, prospective operation, controlled tests and
+          # unavailable functions. This step cannot read them: doing that
+          # needs a manager session, and this job deliberately mints none.
+          # What it CAN establish, from outside, is the half that a
+          # session would otherwise hide -- that each route is SERVED and
+          # SESSION-GATED, and that the published bundle and the API agree
+          # on which routes exist.
+          #
+          # 401 = published and guarded. 404 = the tab calls a route that
+          # is not there. 200 = the shadow ledger is public, which is the
+          # one outcome that must fail loudly.
+          API="${{ inputs.api }}"
+          HOST="${{ inputs.host }}"
+          FAIL=0
+          {
+            echo "### RN1X command surface (401 is the PASS)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          for r in "rn1x/overview" "rn1x/positions" "rn1x/statuses" \
+                   "rn1x/learning" "rn1x/trace/none"; do
+            direct=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+                     "$API/api/command/$r" || echo 000)
+            proxied=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+                      "https://$HOST/api/command/$r" || echo 000)
+            printf '%-20s api=%s  proxied=%s\n' "$r" "$direct" "$proxied" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "$direct" = "200" ] && {
+              echo "::error::OPEN ROUTE: $r is served without a session"
+              FAIL=1; }
+            [ "$proxied" = "200" ] && {
+              echo "::error::OPEN VIA PROXY: $r"; FAIL=1; }
+            case "$direct" in
+              401) ;;
+              *) echo "::error::$r answered $direct (expected 401)"
+                 FAIL=1 ;;
+            esac
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # The published bundle is the client, so its own contents are
+          # the contract for what the manager is shown.
+          if grep -q "\['rn1x'," /tmp/shadow; then
+            echo "bundle publishes the RN1X tab" >> "$GITHUB_STEP_SUMMARY"
+            for token in "data-rn1x-pos" "historical_replay" \
+                         "prospective_rn1_management" \
+                         "independent_ev_entries" \
+                         "pairing" "second_half_loss_exit" \
+                         "accounting_health" "learning_evaluation"; do
+              grep -q "$token" /tmp/shadow || {
+                echo "::error::the bundle is missing $token, so a status or the trace click path is not published"
+                FAIL=1; }
+            done
+            # A LIVE badge that does not say what is live is the defect
+            # this check exists for.
+            grep -q "ARMED" /tmp/shadow || {
+              echo "::error::the bundle has no ARMED state, so a not-yet-producing lane would read as LIVE or STOPPED"
+              FAIL=1; }
+          else
+            echo "::error::the RN1X tab is not in the published bundle"
+            FAIL=1
+          fi
+          exit $FAIL
+
       - name: Mobile viewport is declared
         run: |
           grep -q 'name="viewport"' /tmp/index
