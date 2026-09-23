@@ -478,3 +478,66 @@ frame arrived.
 
 Check 3 is armed. Check 1 disabled itself and left fourteen hours
 unwatched; each check now leaves its successor scheduled.
+
+---
+
+## Observation check 3 — read 21:13:46Z / 21:14:55Z
+
+Two reads, both from durable records via `render-ops` on ref
+`claude/command-center`: `obs-incentive` (run 35921099203) and
+`obs-incentive-journal` (run 35921219616).
+
+### Control and budget — every figure UNCHANGED since check 2
+
+| | check 2 (17:30Z) | check 3 (21:13Z) | |
+|---|---|---|---|
+| `bettor_live_observation` | true | **true** | still collecting |
+| http total used | 1 | **1** | recheck only |
+| socket connects | 3 | **3** | |
+| socket subscribes | 6 | **6** | |
+| `boots` / `reconnects` / `resubscribes` | 2 / 2 / 4 | **2 / 2 / 4** | |
+| `deadline_at` | 2026-09-24T04:35:48+00:00 | **unchanged** | not moved |
+
+**No new disconnect in three and a half hours.** The four counters that
+would have recorded one did not move.
+
+### Journal
+
+| kind | rows | newest |
+|---|---|---|
+| LADDER | **26,756** (was 14,662) | **21:14:45Z**, ten seconds before the read |
+| GAP | 8 (4 carry a `from`) | 14:18:32Z |
+| EPOCH | 5 | 14:18:32Z |
+| PROGRAM_VERSION | **3** | **16:00:00Z** |
+| RUN_OPEN / RUN_CLOSE | 2 / 1 | 10:31:14Z / 10:28:59Z |
+
+**+12,094 LADDER rows** since check 2, and the newest is ten seconds old:
+the collector is live at the moment of reading, not merely un-stopped.
+
+**No new gap.** The newest is still the 1.5055 s `GAP_DISCONNECTED` at
+~14:18:30Z that check 2 reported. All four, oldest last: 0.5268 s,
+135.191 s `PROCESS_REPLACED`, 0.5003 s, 1.5055 s — **137.7236 s total**,
+unchanged.
+
+`boot_id 8702807518fe44b4` is now unbroken from **10:31:14Z to
+21:14:45Z** and carries 26,732 of the 26,775 journal rows.
+
+**Check 2's open question is answered.** `PROGRAM_VERSION` still stands at
+3 rows, newest 16:00:00Z — so the third row was already there at check 2
+and nothing has stamped a version since. It was not a gap then and there
+is no new one now.
+
+### Coverage, with the unobserved head still in the denominator
+
+- Full window: 24 h (04:00Z → 04:00Z)
+- Elapsed at this read: **17.246 h**
+- Observed span: 10:28:29Z → 21:14:45Z = 10.771 h, less 137.72 s of gaps
+  = **10.733 h**
+- **Coverage of elapsed window: 62.2%** (was 51.8%)
+- Of the full 24 h: **44.7%** so far
+
+The **6.475 h before collection started stays in the denominator** and
+always will. Even a flawless remainder cannot make this a complete-day
+observation: 27.0% of the window was unobservable before the first frame.
+
+Check 4 is armed. The stop at 2026-09-24T04:00:00Z has not moved.
