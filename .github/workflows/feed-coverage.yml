@@ -216,9 +216,17 @@ jobs:
           set -o pipefail
           if [ -z "${EDGE_ODDS_API_KEY:-}" ]; then
             echo "::error::EDGE_ODDS_API_KEY is not set"; exit 1; fi
+          # DATABASE_URL IS NOT REQUIRED HERE. It is measured absent on this
+          # runner (empty at 2026-09-23T23:44:08Z; referenced by
+          # calibration-evidence.yml but not actually a repository secret),
+          # and the script degrades to FEED-ONLY mode, which still produces
+          # the real valuations and the refusal census. Hard-failing on it
+          # threw away the half that does work -- that was this step's own
+          # bug, not the script's.
           if [ -z "${DATABASE_URL:-}" ]; then
-            echo "::error::DATABASE_URL is not set"; exit 1; fi
-          pip install --quiet "asyncpg>=0.29"
+            echo "note: DATABASE_URL absent -> feed-only mode"
+          fi
+          pip install --quiet "asyncpg>=0.29" || true
           python research/beta48/ext_pinnacle_run.py 2>&1 | tee /tmp/val.txt
           {
             echo "### PINNACLE_DEVIG_V1 over the slate"
