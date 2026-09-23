@@ -146,8 +146,11 @@ def _num(v, default=0.0) -> float:
         return default
 
 
-def build(fills, *, horizon_s, observation_end,
-          coverage_exclusions=(), min_prior_gap_s=0.0) -> dict:
+LABEL_COMPLEMENT_CONDITIONAL = "COMPLEMENT_FILL_IN_REMAINDER_GIVEN_SURVIVAL"
+
+
+def build(fills, *, horizon_s, observation_end, coverage_exclusions=(),
+          min_prior_gap_s=0.0, elapsed_s=0.0) -> dict:
     """Turn a cohort fill stream into entry rows with censored labels.
 
     `fills`      dicts with account, condition_id, outcome_index, side,
@@ -170,6 +173,8 @@ def build(fills, *, horizon_s, observation_end,
     """
     if horizon_s <= 0:
         raise ValueError("horizon_s must be positive")
+    if elapsed_s < 0 or elapsed_s >= horizon_s:
+        raise ValueError("elapsed_s must be in [0, horizon_s)")
     end = float(observation_end)
     excl = [(float(a), float(b)) for a, b in coverage_exclusions]
 
@@ -190,7 +195,8 @@ def build(fills, *, horizon_s, observation_end,
     # Per (account, condition) running state, folded forward.
     state = {}
     out, skipped = [], {"non_buy": 0, "no_condition": 0, "unknown_outcome": 0,
-                        "in_excluded_window": 0, "horizon_overlaps_gap": 0}
+                        "in_excluded_window": 0, "horizon_overlaps_gap": 0,
+                        "completed_before_elapsed": 0}
 
     # First pass: index each (account, condition) fill list for lookahead.
     by_key = {}
@@ -233,7 +239,11 @@ def build(fills, *, horizon_s, observation_end,
             elif overlaps:
                 skipped["horizon_overlaps_gap"] += 1
             else:
-                out.append(_row(r, st, by_key[k], horizon_s, end))
+                row = _row(r, st, by_key[k], horizon_s, end, elapsed_s)
+                if row is not None:
+                    out.append(row)
+                else:
+                    skipped["completed_before_elapsed"] += 1
 
         # ── fold this fill into the running state, AFTER the row ────
         st["n"] += 1
@@ -247,7 +257,19 @@ def build(fills, *, horizon_s, observation_end,
     n_cens = sum(1 for o in out if o["censored"])
     return {
         "version": VERSION,
-        "target": LABEL_COMPLEMENT,
+        "target": (LABEL_COMPLEMENT if elapsed_s <= 0.0
+                   else LABEL_COMPLEMENT_CONDITIONAL),
+        "elapsed_s": float(elapsed_s),
+        "conditional_note": (
+            "UNCONDITIONAL: the label covers the whole horizon from the "
+            "entry, and a prediction using it is only valid if it is made "
+            "AT the entry." if elapsed_s <= 0.0 else
+            "CONDITIONAL. Every row here survived %.0f s after its entry "
+            "with no complementary fill, and the label covers only the "
+            "REMAINING %.0f s. This is the target a prediction made "
+            "mid-horizon actually answers; scoring such a prediction "
+            "against the unconditional target credits it with information "
+            "it already had." % (elapsed_s, horizon_s - elapsed_s)),
         "horizon_s": float(horizon_s),
         "observation_end": end,
         "coverage_exclusions": [list(x) for x in excl],
@@ -292,35 +314,18 @@ FEATURES = (
 )
 
 
-def _row(r, st, siblings, horizon_s, end) -> dict:
+def _features(r, st) -> dict:
+    """Decision-time features. Shared by both targets, so the
+    conditional and unconditional rows cannot drift apart."""
     import math
-
     t0 = r["_avail"]
     price = _num(r.get("price"))
     size = _num(r.get("size"))
-    comp = 1 - r["_oi"]
-
     gap_prev = (t0 - st["last_avail"]) if st["last_avail"] is not None else None
     gap_first = (t0 - st["first_avail"]) if st["first_avail"] is not None \
         else None
-
-    # ── the label, looked up STRICTLY forward ───────────────────────
-    # A complementary BUY whose own AVAILABLE_AT falls in (t0, t0 + H].
-    # Using ts here instead would count a fill we could not have known
-    # about at the time we claim to have observed it.
-    hit_at = None
-    for s in siblings:
-        if s is r or s["_side"] != "BUY" or s["_oi"] != comp:
-            continue
-        if t0 < s["_avail"] <= t0 + horizon_s:
-            if hit_at is None or s["_avail"] < hit_at:
-                hit_at = s["_avail"]
-
-    censored = (t0 + horizon_s) > end and hit_at is None
-    label = 1 if hit_at is not None else 0
-
     hour = (t0 % 86400.0) / 86400.0
-    feats = {
+    return {
         "entry_price": price,
         "entry_price_dist_from_half": abs(price - 0.5),
         "entry_size_log": math.log1p(max(0.0, size)),
@@ -346,20 +351,63 @@ def _row(r, st, siblings, horizon_s, end) -> dict:
         "hour_of_day_cos": math.cos(2.0 * math.pi * hour),
     }
 
+
+def _row(r, st, siblings, horizon_s, end, elapsed_s=0.0):
+    """One decision row, or None if it left the risk set before
+    `elapsed_s` under the conditional target."""
+    t0 = r["_avail"]
+    comp = 1 - r["_oi"]
+
+    # THE LABEL, looked up STRICTLY forward. A complementary BUY whose
+    # own AVAILABLE_AT falls in (t0, t0 + H]. Using `ts` here instead
+    # would count a fill we could not have known about at the time we
+    # claim to have observed it.
+    hit_at = None
+    for s in siblings:
+        if s is r or s["_side"] != "BUY" or s["_oi"] != comp:
+            continue
+        if t0 < s["_avail"] <= t0 + horizon_s:
+            if hit_at is None or s["_avail"] < hit_at:
+                hit_at = s["_avail"]
+
+    # ── THE CONDITIONAL TARGET ──────────────────────────────────────
+    #
+    # A prediction written `elapsed_s` after the entry knows one thing
+    # an entry-time forecaster does not: that nothing has completed
+    # yet. Scoring it against the whole-horizon label credits it with
+    # that knowledge. So under `elapsed_s` a row that ALREADY completed
+    # inside the elapsed window is not a row at all -- it is a subject
+    # that left the risk set -- and the label covers only what remains.
+    if elapsed_s > 0.0 and hit_at is not None and hit_at <= t0 + elapsed_s:
+        return None
+
+    censored = (t0 + horizon_s) > end and hit_at is None
+    label = 1 if hit_at is not None else 0
+    window_from = t0 + elapsed_s
+
     return {
         "account": r.get("account"),
         "condition_id": r.get("condition_id"),
         "market_slug": r.get("market_slug"),
         "sport": r.get("sport"),
         "outcome_index": r["_oi"],
-        "decision_at": t0,
+        "entry_at": t0,
+        # THE INSTANT THE PREDICTION IS ENTITLED TO BE MADE. Equal to
+        # the entry under the unconditional target; `elapsed_s` later
+        # under the conditional one.
+        "decision_at": window_from,
+        "feature_cutoff_at": t0,
+        "elapsed_s": float(elapsed_s),
+        "label_window": [window_from, t0 + horizon_s],
+        "remaining_s": float(horizon_s - elapsed_s),
         "event_ts": r["_ts"],
         "ingestion_mode": r["_mode"],
         "source": r.get("source"),
         "venue_seen_at": r.get("venue_seen_at"),
-        "features": feats,
+        "features": _features(r, st),
         "label": label,
-        "label_name": LABEL_COMPLEMENT,
+        "label_name": (LABEL_COMPLEMENT if elapsed_s <= 0.0
+                       else LABEL_COMPLEMENT_CONDITIONAL),
         "time_to_event_s": (hit_at - t0) if hit_at is not None else None,
         "censored": censored,
         "horizon_s": float(horizon_s),

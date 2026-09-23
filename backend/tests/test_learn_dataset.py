@@ -300,3 +300,80 @@ class TestLifecycleHonesty:
 def test_the_horizon_must_be_positive():
     with pytest.raises(ValueError):
         D.build([], horizon_s=0.0, observation_end=T0)
+
+
+class TestConditionalTarget:
+    """A PREDICTION MADE MID-HORIZON ANSWERS A DIFFERENT QUESTION.
+
+    Written `elapsed_s` after the entry, it already knows nothing has
+    completed yet. Scoring it against the whole-horizon label credits
+    it with information it had. The conditional target is the one it
+    actually answers: completion in the REMAINDER, given survival so
+    far.
+    """
+
+    def test_a_row_that_completed_inside_the_elapsed_window_is_removed(self):
+        """It left the risk set. It is not a positive and it is not a
+        negative -- it is not a row."""
+        ds = D.build([fill("a", "c", 0, T0), fill("a", "c", 1, T0 + 300.0)],
+                     horizon_s=H, observation_end=T0 + 100000.0,
+                     elapsed_s=600.0)
+        assert ds["n_rows"] == 0
+        assert ds["skipped"]["completed_before_elapsed"] == 1
+
+    def test_a_row_that_survived_keeps_only_the_remaining_window(self):
+        ds = D.build([fill("a", "c", 0, T0), fill("a", "c", 1, T0 + 900.0)],
+                     horizon_s=H, observation_end=T0 + 100000.0,
+                     elapsed_s=600.0)
+        r = ds["rows"][0]
+        assert r["label"] == 1
+        assert r["entry_at"] == T0
+        assert r["decision_at"] == T0 + 600.0
+        assert r["feature_cutoff_at"] == T0
+        assert r["remaining_s"] == H - 600.0
+        assert r["label_window"] == [T0 + 600.0, T0 + H]
+        assert r["label_name"] == D.LABEL_COMPLEMENT_CONDITIONAL
+
+    def test_the_features_are_still_entry_time(self):
+        """The decision moves; the information does not. A feature built
+        from the elapsed window would be the leak this target exists to
+        avoid confusing with the other one."""
+        a = D.build([fill("a", "c", 0, T0), fill("a", "c", 0, T0 + 30.0)],
+                    horizon_s=H, observation_end=T0 + 100000.0)
+        b = D.build([fill("a", "c", 0, T0), fill("a", "c", 0, T0 + 30.0)],
+                    horizon_s=H, observation_end=T0 + 100000.0,
+                    elapsed_s=600.0)
+        assert a["rows"][0]["features"] == b["rows"][0]["features"]
+
+    def test_the_two_targets_have_different_names_and_notes(self):
+        u = D.build([fill("a", "c", 0, T0)], horizon_s=H,
+                    observation_end=T0 + 100000.0)
+        c = D.build([fill("a", "c", 0, T0)], horizon_s=H,
+                    observation_end=T0 + 100000.0, elapsed_s=600.0)
+        assert u["target"] == D.LABEL_COMPLEMENT
+        assert c["target"] == D.LABEL_COMPLEMENT_CONDITIONAL
+        assert "UNCONDITIONAL" in u["conditional_note"]
+        assert "CONDITIONAL" in c["conditional_note"]
+        assert "information it already had" in c["conditional_note"]
+
+    def test_the_conditional_base_rate_is_lower(self):
+        """Survivors are the slow ones, so removing the fast completers
+        must lower the rate. If it did not, the filter is not working."""
+        f = []
+        for i in range(40):
+            f.append(fill("a", "c%02d" % i, 0, T0 + i * 10000.0))
+            # half complete quickly, half slowly, half not at all
+            if i % 3 == 0:
+                f.append(fill("a", "c%02d" % i, 1, T0 + i * 10000.0 + 60.0))
+            elif i % 3 == 1:
+                f.append(fill("a", "c%02d" % i, 1, T0 + i * 10000.0 + 2400.0))
+        kw = dict(horizon_s=H, observation_end=T0 + 10_000_000.0)
+        u = D.build(f, **kw)
+        c = D.build(f, elapsed_s=600.0, **kw)
+        assert u["base_rate_uncensored"] > c["base_rate_uncensored"]
+        assert c["skipped"]["completed_before_elapsed"] > 0
+
+    def test_elapsed_must_be_inside_the_horizon(self):
+        for bad in (-1.0, H, H + 1.0):
+            with pytest.raises(ValueError, match="elapsed_s"):
+                D.build([], horizon_s=H, observation_end=T0, elapsed_s=bad)
