@@ -139,6 +139,69 @@ def main() -> int:
                 if o.state == DK.EXPIRED and o.filled_qty <= 0]
 
     unresolved_cost = round(sum(u["cost"] for u in unresolved), 2)
+
+    # ── THE LEARNED COMPONENT'S PROVENANCE, MEASURED ────────────────
+    #
+    # "Learned" is not a quality claim, and a curve fitted on markets
+    # that trade INSIDE the window it is then evaluated over is not
+    # out-of-sample. So the overlap is computed here rather than
+    # asserted, and the verdict follows the number.
+    fv_rows = decode_fv(fv)
+    fv_rows.sort(key=lambda r: (r["first_ts"], r["condition_id"], r["leg"]))
+    seen, order_c = set(), []
+    for r in fv_rows:
+        if r["condition_id"] not in seen:
+            seen.add(r["condition_id"])
+            order_c.append(r["condition_id"])
+    train_set = set(order_c[:int(len(order_c) * 0.6)])
+    trn = [r for r in fv_rows if r["condition_id"] in train_set]
+    r0 = tape[0]["at"] if tape else 0.0
+    r1 = last_at
+    overlap = [r for r in trn if not (r["last_ts"] < r0 or r["first_ts"] > r1)]
+    after = [r for r in trn if r["resolved_at"] > r0]
+    contaminated = bool(after)
+    learned_prov = {
+        "component": "residual_exit",
+        "estimator": "isotonic (PAV) with a shared-n shrink",
+        "feature": "the leg's volume-weighted purchase price",
+        "target": "that leg's realised settlement payout in {0, 1}",
+        "training_rows": len(trn),
+        "training_markets": len(train_set),
+        "training_first_fill": (time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ", time.gmtime(min(r["first_ts"] for r in trn)))
+            if trn else None),
+        "training_last_resolved": (time.strftime(
+            "%Y-%m-%dT%H:%M:%SZ",
+            time.gmtime(max(r["resolved_at"] for r in trn))) if trn else None),
+        "calibration": "none separate -- the isotonic IS the calibration; "
+                       "no held-out calibration split was used for it",
+        "evaluation_population": (
+            "the fair-value study evaluated it on the LATER 40% of "
+            "resolved markets and the pre-registered test was NOT "
+            "SUPPORTED: the paired log-loss difference against the "
+            "identity was +0.0052 with a 95% interval of [-0.0017, "
+            "+0.0120]. It is not established as a better forecast."),
+        "training_rows_inside_replay_window": len(overlap),
+        "training_rows_inside_replay_window_pct": (
+            round(100.0 * len(overlap) / len(trn), 1) if trn else None),
+        "training_markets_resolving_after_replay_start": len(after),
+        "LOOKAHEAD": contaminated,
+        "verdict": ("DEVELOPMENT_EVIDENCE" if contaminated else
+                    "OUT_OF_SAMPLE_FOR_THIS_WINDOW"),
+        "why": (
+            "%d training rows (%s%%) come from markets that traded INSIDE "
+            "this replay window, and %d training markets resolved AFTER "
+            "the replay's first event. During those decisions the exit "
+            "rule consulted a curve fitted using settlements that did not "
+            "yet exist at the decision instant. THIS REPLAY'S EXIT "
+            "BEHAVIOUR IS DEVELOPMENT EVIDENCE, not a validated result, "
+            "and calling the curve 'learned' does not establish that its "
+            "exits improve returns." % (
+                len(overlap),
+                round(100.0 * len(overlap) / len(trn), 1) if trn else 0,
+                len(after))) if contaminated else
+            "no training market resolved after the replay began",
+    }
     report = {
         "mode": MODE,
         "generated_at": time.time(),
@@ -160,14 +223,34 @@ def main() -> int:
         "execution_assumptions": {
             "fill_model": DK.FILL_MODEL,
             "queue_share": a.queue_share,
+            "event_class": DK.EVENT_CLASS,
+            "event_class_note": DK.EVENT_CLASS_NOTE,
+            "source_venue": DK.SOURCE_VENUE,
+            "fee_schedule_venue": DK.FEE_SCHEDULE_VENUE,
+            "venue_basis": DK.VENUE_TRANSFER,
+            "venue_note": DK.VENUE_TRANSFER_NOTE,
+            "counterfactual_allocation": (
+                "our hypothetical order is allocated qty = min(order "
+                "remaining, event_size x queue_share - already consumed "
+                "from that event). PRICE: we are filled at the price of "
+                "the observed execution, never at our own limit. QUEUE: "
+                "orders are served oldest-first, which is an assumption "
+                "about priority -- no venue told us our position. REUSE: "
+                "a single source event CANNOT be spent twice; the "
+                "consumption ledger is keyed on the event id so the same "
+                "execution re-delivered by a second ingestion lane "
+                "allocates nothing further."),
             "THE_TAPE_IS_NOT_OURS": (
-                "every print replayed here is FERRARI's. We were never "
-                "in the queue for any of them, so every fill the desk "
-                "takes is an ASSUMPTION under queue_share, capped by "
-                "the consumption ledger. This is the largest caveat on "
-                "every number in this file."),
+                "every event replayed here is FERRARI's OWN EXECUTION, "
+                "not a market print. We were never in the queue for any "
+                "of them. Ferrari filling at a price is evidence that "
+                "FERRARI's order filled, not that ours would have. Every "
+                "fill the desk takes is an ASSUMPTION under queue_share, "
+                "capped by the consumption ledger. This is the largest "
+                "caveat on every number in this file."),
             "p_fill": DK.NOT_IDENTIFIED,
-            "fees": "published PMUS schedule; maker is a REBATE",
+            "fees": "published PMUS schedule applied to GLOBAL-venue "
+                    "data; maker is a REBATE",
         },
         "policy": snap["policy"],
         "limits": snap["limits"],
@@ -204,6 +287,34 @@ def main() -> int:
                 "live shadow total; they are different modes with "
                 "different execution assumptions."),
         },
+        # THE FULL POSITION. A realised figure standing alone while 396
+        # legs are still open is not portfolio performance, and quoting
+        # it as though it were is what this block exists to prevent.
+        "economic_position": {
+            "realized_pnl_usd": snap["portfolio"]["realized_pnl_usd"],
+            "cash_usd": snap["portfolio"]["cash"],
+            "unvalued_exposure_usd": unresolved_cost,
+            "unvalued_legs": len(unresolved),
+            "inventory_mark_usd": DK.NOT_IDENTIFIED,
+            "executable_liquidation_usd": DK.NOT_IDENTIFIED,
+            "total_portfolio_performance": DK.NOT_IDENTIFIED,
+            "why_not_identified": (
+                "%d legs carry %s of cost with NO settlement and NO "
+                "contemporaneous book in our records for the replay's "
+                "end instant. Without a mark there is no unrealised "
+                "figure, and without depth there is no liquidation "
+                "estimate. TOTAL PORTFOLIO PERFORMANCE IS THEREFORE "
+                "NOT IDENTIFIED: the realised -%s is one component of "
+                "it, not the whole of it." % (
+                    len(unresolved), "$%0.2f" % unresolved_cost,
+                    "$%0.2f" % abs(snap["portfolio"]["realized_pnl_usd"]))),
+            "what_the_ledger_identity_proves": (
+                "accounting consistency only -- that cash, cost basis "
+                "and realised P&L reconcile to the starting capital. It "
+                "does NOT validate any valuation and does NOT validate "
+                "the fill assumptions that produced the positions."),
+        },
+        "learned_component_provenance": learned_prov,
     }
 
     os.makedirs(a.out, exist_ok=True)

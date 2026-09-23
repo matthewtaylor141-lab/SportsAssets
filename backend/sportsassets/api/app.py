@@ -266,6 +266,26 @@ async def lifespan(_: FastAPI):
     trim_task = asyncio.get_running_loop().create_task(_trim_loop())
 
     asyncio.get_running_loop().create_task(_rescore_once())
+
+    # ── THE SHADOW DESK LOOP (2026-09-23) ───────────────────────────
+    #
+    # NOT an unguarded background task. The loop's FIRST act is to take
+    # a Postgres session advisory lock; an instance that does not get it
+    # reports STANDBY and writes nothing, so the several API instances
+    # that exist during a deploy cannot run duplicate desks. It is also
+    # off unless BETTOR_DESK_LOOP is set, so this deploy changes nothing
+    # until the flag is turned on deliberately.
+    #
+    # It makes NO venue requests -- its only input is evidence already
+    # in our own database -- so the observation collector's allowance is
+    # untouched by it.
+    from .. import bettor_desk_loop as _DESKLOOP
+    if _DESKLOOP.enabled():
+        from ..db import get_pool as _desk_pool
+        asyncio.get_running_loop().create_task(
+            _DESKLOOP.run(_desk_pool))
+        log.info("shadow desk loop armed (contends for the writer lock)")
+
     yield
     trim_task.cancel()
     if poller_task is not None:
@@ -934,6 +954,39 @@ async def command_investor_snapshot_route(response: Response) -> dict:
     except CSNAP.RetrievalIncomplete as inc:
         raise HTTPException(status_code=503, detail={
             "reason": inc.reason, "detail": inc.detail}) from inc
+
+
+@app.get("/api/command/desk/live",
+         dependencies=[Depends(require_command)])
+async def command_desk_live(response: Response) -> dict:
+    """The LIVE lane's operating state. Separate from the replay.
+
+    Returns what the loop is actually doing -- including DISABLED and
+    STANDBY, which are real states and not errors. A page that showed
+    only RUNNING would be unable to tell "off" from "broken".
+    """
+    from .. import bettor_desk_loop as DL
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    st = DL.status()
+    return {
+        "mode": CD.MODE_LIVE,
+        "lane": DL.LANE,
+        "separate_from_production": (
+            "the production engine's refusals are untouched. This is a "
+            "separate, explicitly labelled experimental lane with its "
+            "own execution model and its own tables."),
+        "loop": st,
+        "enabled": DL.enabled(),
+        "enable_env": DL.ENABLE_ENV,
+        "single_writer": "postgres session advisory lock %d" % DL.LOCK_KEY,
+        "makes_venue_requests": False,
+        "funded_order_path": "ABSENT_FROM_THE_IMPORT_GRAPH",
+        "p_fill": CD.NOT_IDENTIFIED,
+        "NOT_REPLAY": ("this is the LIVE lane. Its totals are never "
+                       "combined with the replay's."),
+    }
 
 
 # ── COMMAND DESK: the shadow desk's read surface (2026-09-23) ────────

@@ -74,6 +74,45 @@ import json
 import math
 
 VERSION = "BETTOR_DESK_V1"
+
+# ── WHAT THE REPLAY TAPE ACTUALLY IS ─────────────────────────────────
+#
+# CORRECTED 2026-09-23 AFTER THE FIRST HANDOFF. I described the replay
+# events as "prints" and as "recorded prints over 1,006 conditions",
+# which reads as market-wide transactions. They are not.
+#
+# `trades` is keyed on `whale_id` and every row is ONE TRACKED
+# ACCOUNT'S OWN EXECUTION (001_init.sql:56). The replay tape is
+# ferrariChampions2026's fills and nothing else. It is a single
+# participant's executed flow, not the market tape, and it therefore
+# says nothing about the depth that stood beside Ferrari's orders or
+# about what a DIFFERENT order at the same price would have met.
+EVENT_CLASS = "SINGLE_ACCOUNT_EXECUTIONS"
+EVENT_CLASS_NOTE = (
+    "every replay event is one tracked account's own executed fill, "
+    "read from `trades` which is keyed on whale_id. It is NOT the "
+    "market tape and NOT a record of resting liquidity. Ferrari's "
+    "execution at a price is not evidence that OUR order at that price "
+    "would have filled -- it is evidence that Ferrari's did.")
+
+# ── WHICH VENUE, AND WHICH FEE SCHEDULE ──────────────────────────────
+#
+# ALSO CORRECTED. The fills come from the on-chain listener --
+# `ingestion/chain.py` uses polygon_ws_url, polygon_http_url,
+# PM_EXCHANGE_V3_ADDRESSES and stamps ts_provenance
+# "polygon_block_timestamp". That is Polymarket on Polygon, the GLOBAL
+# venue. The fee arithmetic applied to it is the published PMUS
+# schedule. Those are two different venues.
+SOURCE_VENUE = "POLYMARKET_GLOBAL_POLYGON"
+FEE_SCHEDULE_VENUE = "PMUS"
+VENUE_TRANSFER = "TRANSFERRED_SCENARIO"
+VENUE_TRANSFER_NOTE = (
+    "the tape is GLOBAL-venue (Polygon) execution data and the fees and "
+    "position mechanics applied to it are PMUS's. This is a TRANSFERRED "
+    "SCENARIO -- what this policy would have cost under PMUS economics "
+    "against global-venue flow -- and it is NOT same-venue execution "
+    "evidence. Liquidity, tick structure, participant mix and fee "
+    "incidence all differ between the two.")
 FILL_MODEL = "PRINT_THROUGH_WITH_QUEUE_SHARE_V1"
 
 POLICY_KEY = "ferrari_inspired_dev"

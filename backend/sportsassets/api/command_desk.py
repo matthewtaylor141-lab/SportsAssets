@@ -97,6 +97,7 @@ def _provenance(b) -> dict:
         "learned_artifact_sha": r.get("policy", {}).get(
             "learned_artifact_sha", NOT_IDENTIFIED),
         "execution_assumptions": r.get("execution_assumptions"),
+        "learned_component": r.get("learned_component_provenance"),
         "NOT_LIVE": ("HISTORICAL_REPLAY. Never combine this with a live "
                      "shadow total; the two are produced under different "
                      "execution assumptions."),
@@ -121,6 +122,8 @@ def overview() -> dict:
         "portfolio": {k: v for k, v in r["portfolio"].items()
                       if k != "legs"},
         "residual_exposure_usd": r["portfolio"]["inventory_cost_usd"],
+        # THE FULL POSITION, not the realised figure standing alone.
+        "economic_position": r.get("economic_position"),
         "p_fill": NOT_IDENTIFIED,
         "what_this_is_not": (
             "a live result, a funded result, or evidence that the policy "
@@ -161,12 +164,30 @@ def attribution() -> dict:
                       "assumed to have paid zero, and not dropped.",
         },
         "diagnosis": (
-            "the entry band [0.40, 0.65] sits where the fair-value work "
-            "measured NO edge -- that band's mean(payout - price) "
-            "interval straddles zero -- while the measured edge lives in "
-            "the tails this policy does not trade. Entries with no edge, "
-            "then spread paid on the way out. The band is NOT being "
-            "retuned against this window."),
+            "what IS established: the entry band [0.40, 0.65] sits where "
+            "the fair-value study found mean(payout - price) "
+            "indistinguishable from zero, so entries in it carry no "
+            "demonstrated edge, and spread is then paid on the way out. "
+            "The band is NOT being retuned against this window."),
+        "WITHDRAWN_CLAIM": {
+            "claim": "the measured edge is in the tails",
+            "status": "WITHDRAWN -- DOWNGRADED TO A RESEARCH HYPOTHESIS",
+            "why": (
+                "I stated that as a finding in the first handoff and it "
+                "does not carry that weight. Three reasons, each "
+                "sufficient on its own. (1) COSTS: the tail figures are "
+                "GROSS -- no fee, no spread, no impact -- and a 5-cent "
+                "gross gap is not a 5-cent net one. (2) SELECTION: the "
+                "prices are the ones FERRARI CHOSE TO BUY, so 'the venue "
+                "over-prices longshots' and 'Ferrari overpays for "
+                "longshots' fit the same data and only a contemporaneous "
+                "book separates them. (3) PRIOR INSPECTION: I had "
+                "already looked at that data when the hypothesis was "
+                "formed, so the later intervals are not the clean "
+                "out-of-sample test they would need to be. It remains a "
+                "hypothesis worth testing prospectively, and it is not "
+                "evidence for a policy change."),
+        },
     }
 
 

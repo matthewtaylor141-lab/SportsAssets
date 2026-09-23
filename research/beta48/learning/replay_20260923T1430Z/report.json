@@ -1,0 +1,5985 @@
+{
+ "mode": "HISTORICAL_REPLAY",
+ "generated_at": 1790173552.252471,
+ "elapsed_s": 3.94,
+ "desk_version": "BETTOR_DESK_V1",
+ "window": {
+  "first_event": 1787322489.0,
+  "last_event": 1790168828.0,
+  "first_event_iso": "2026-08-21T14:28:09Z",
+  "last_event_iso": "2026-09-23T13:07:08Z",
+  "events": 19890,
+  "conditions": 1006,
+  "source": "recorded ferrariChampions2026 BUY fills, 1 in 20 conditions by hashtext, then ALL fills of each sampled condition inside the window. Whole markets are kept intact so the pair reconstruction is not cut in half by the sampler."
+ },
+ "execution_assumptions": {
+  "fill_model": "PRINT_THROUGH_WITH_QUEUE_SHARE_V1",
+  "queue_share": 0.25,
+  "event_class": "SINGLE_ACCOUNT_EXECUTIONS",
+  "event_class_note": "every replay event is one tracked account's own executed fill, read from `trades` which is keyed on whale_id. It is NOT the market tape and NOT a record of resting liquidity. Ferrari's execution at a price is not evidence that OUR order at that price would have filled -- it is evidence that Ferrari's did.",
+  "source_venue": "POLYMARKET_GLOBAL_POLYGON",
+  "fee_schedule_venue": "PMUS",
+  "venue_basis": "TRANSFERRED_SCENARIO",
+  "venue_note": "the tape is GLOBAL-venue (Polygon) execution data and the fees and position mechanics applied to it are PMUS's. This is a TRANSFERRED SCENARIO -- what this policy would have cost under PMUS economics against global-venue flow -- and it is NOT same-venue execution evidence. Liquidity, tick structure, participant mix and fee incidence all differ between the two.",
+  "counterfactual_allocation": "our hypothetical order is allocated qty = min(order remaining, event_size x queue_share - already consumed from that event). PRICE: we are filled at the price of the observed execution, never at our own limit. QUEUE: orders are served oldest-first, which is an assumption about priority -- no venue told us our position. REUSE: a single source event CANNOT be spent twice; the consumption ledger is keyed on the event id so the same execution re-delivered by a second ingestion lane allocates nothing further.",
+  "THE_TAPE_IS_NOT_OURS": "every event replayed here is FERRARI's OWN EXECUTION, not a market print. We were never in the queue for any of them. Ferrari filling at a price is evidence that FERRARI's order filled, not that ours would have. Every fill the desk takes is an ASSUMPTION under queue_share, capped by the consumption ledger. This is the largest caveat on every number in this file.",
+  "p_fill": "NOT_IDENTIFIED",
+  "fees": "published PMUS schedule applied to GLOBAL-venue data; maker is a REBATE"
+ },
+ "policy": {
+  "policy_key": "ferrari_inspired_dev",
+  "policy_version": "FERRARI_INSPIRED_DEV_V1",
+  "maturity": {
+   "entry_band": "HAND_WRITTEN",
+   "pair_completion": "HAND_WRITTEN",
+   "residual_exit": "LEARNED",
+   "fill_probability": "ASSUMED",
+   "note": "one learned rule. Calling this 'the Ferrari model' would be false; it is a Ferrari-INSPIRED development policy."
+  },
+  "entry_band": [
+   0.4,
+   0.65
+  ],
+  "order_usd": 250.0,
+  "expiry_s": 900.0,
+  "min_clear": 0.005,
+  "exit_edge": 0.02,
+  "learned_artifact_sha": "64c5c15211e04802",
+  "departs_from_ferrari": "Ferrari's residual sits at a mean 0.4460 and the fair-value work measured a ~5 cent deficit on legs priced 0.05-0.40. This policy does not buy that tail. It is the one deliberate departure from the case study."
+ },
+ "limits": {
+  "starting_cash": 100000.0,
+  "max_position_usd": 2500.0,
+  "max_condition_usd": 5000.0,
+  "max_committed_usd": 60000.0,
+  "max_open_orders": 40,
+  "loss_limit_usd": 10000.0,
+  "max_order_usd": 1000.0
+ },
+ "decision_census": {
+  "ENTER": 764,
+  "FILLED": 2735,
+  "HOLD": 6239,
+  "NO_TRADE": 6169,
+  "COMPLETE_PAIR": 708,
+  "EXIT": 3853,
+  "SETTLED": 122
+ },
+ "orders": {
+  "total": 1999,
+  "open": 1,
+  "by_state": {
+   "PROPOSED": 0,
+   "RESTING": 1,
+   "PARTIALLY_FILLED": 0,
+   "FILLED": 687,
+   "CANCELLED": 0,
+   "EXPIRED": 1311,
+   "REJECTED": 0
+  }
+ },
+ "order_outcomes": {
+  "fully_filled": 687,
+  "partially_filled_or_expired_partial": 529,
+  "expired_with_no_fill": 782,
+  "fill_rate_of_orders": 0.3437
+ },
+ "portfolio": {
+  "starting_cash": 100000.0,
+  "cash": 73571.39,
+  "realized_pnl_usd": -1898.29,
+  "fees_usd": -381.75,
+  "inventory_cost_usd": 24530.33,
+  "open_legs": 396,
+  "legs": {
+   "0x951ddcae1939533e6fe8b75e95ce7367a508f78dffb046e4022b486339368354:1": {
+    "qty": 48.5325,
+    "cost": 23.78,
+    "avg_cost": 0.49,
+    "realized": 0.14,
+    "fees": -0.14,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787322567.0
+   },
+   "0xe3d1ecb51019aa8a7449879b71b1c903c6b96870911aece69a2ea27d151b6f0d:1": {
+    "qty": 191.9625,
+    "cost": 114.59,
+    "avg_cost": 0.596946,
+    "realized": 0.57,
+    "fees": -0.57,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787327290.0
+   },
+   "0xc306f1e66703bba2977be508ca724976642f0bd66ca5f6594b3eb57bddb2dc2c:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -33.54,
+    "fees": -2.82,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787330322.0
+   },
+   "0x8e25696db01f1c05ea3da6c23a6561c8cd2d91b8403995dba87983265c93269c:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -1.8,
+    "fees": -0.01,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787332596.0
+   },
+   "0x46bdefd33f18092a011f1ca66ddf1258929b91cea59bdd36751892f0538d6056:1": {
+    "qty": 2.4975,
+    "cost": 1.32,
+    "avg_cost": 0.53,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787332602.0
+   },
+   "0xe3d1ecb51019aa8a7449879b71b1c903c6b96870911aece69a2ea27d151b6f0d:0": {
+    "qty": 141.9625,
+    "cost": 19.87,
+    "avg_cost": 0.14,
+    "realized": 0.37,
+    "fees": -0.37,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787333889.0
+   },
+   "0xdee37cc787bfe76e743a3f9f8d44e2b6d43a814fbdbac1adf397dd7742f5c70e:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -141.35,
+    "fees": -2.17,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787337195.0
+   },
+   "0xdee37cc787bfe76e743a3f9f8d44e2b6d43a814fbdbac1adf397dd7742f5c70e:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 1.6,
+    "fees": -0.23,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787337226.0
+   },
+   "0xb8ee02cdb54a6062b3f69be1a50c08c377581d022081b988de858ff6d49f557e:1": {
+    "qty": 131.09,
+    "cost": 38.02,
+    "avg_cost": 0.29,
+    "realized": 0.34,
+    "fees": -0.34,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787357607.0
+   },
+   "0xb8ee02cdb54a6062b3f69be1a50c08c377581d022081b988de858ff6d49f557e:0": {
+    "qty": 131.09,
+    "cost": 51.13,
+    "avg_cost": 0.39,
+    "realized": -0.52,
+    "fees": -1.16,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787358081.0
+   },
+   "0x3845452e8d96e3009239de8ef84f54e8aa9773f409328f8c9b05397a3dac5c30:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -14.64,
+    "fees": -0.09,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787360922.0
+   },
+   "0x7c6cd7a3bc858e069d886098c7909b2c733a7f8f586f72a012eb56f7a6686fcb:1": {
+    "qty": 454.5455,
+    "cost": 250.0,
+    "avg_cost": 0.55,
+    "realized": 1.41,
+    "fees": -1.41,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787371465.0
+   },
+   "0x02db65de487f25e56a4e08ea0ea0f1866ecb7f57c927e162bcc0b8f881d121c8:1": {
+    "qty": 352.805,
+    "cost": 156.82,
+    "avg_cost": 0.444499,
+    "realized": 1.07,
+    "fees": -1.07,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787406142.0
+   },
+   "0x8435cf5d81966501bc3abdfed85f458c6425f486d92811ef1231f110b435926a:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 10.83,
+    "fees": -0.05,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787408245.0
+   },
+   "0x951d3d74587f359a64effb6d186bdbf23b510e08beed908aec4d020bb13b2c41:0": {
+    "qty": 480.7692,
+    "cost": 250.0,
+    "avg_cost": 0.52,
+    "realized": 1.5,
+    "fees": -1.5,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787416213.0
+   },
+   "0x20f8654f7e554a3aea113e45b16084d5eec761cc025a6aa3eaa85b2f7dacfc58:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -74.82,
+    "fees": -0.45,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787418552.0
+   },
+   "0xf0f0efef9dec631c32f01590b9e0b89e8ef539d7a8640799e0916ec1a28a0d0f:0": {
+    "qty": 142.015,
+    "cost": 57.73,
+    "avg_cost": 0.406532,
+    "realized": 0.42,
+    "fees": -0.42,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787418838.0
+   },
+   "0xd3a34e2a83d8f61dc180c5d3061cc6a6ac2750b3bdce59227b8abc891a3af323:1": {
+    "qty": 83.7261,
+    "cost": 50.52,
+    "avg_cost": 0.603423,
+    "realized": -41.52,
+    "fees": -2.22,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787421517.0
+   },
+   "0xd3a34e2a83d8f61dc180c5d3061cc6a6ac2750b3bdce59227b8abc891a3af323:0": {
+    "qty": 83.7261,
+    "cost": 9.23,
+    "avg_cost": 0.110236,
+    "realized": 10.3,
+    "fees": -1.78,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787421885.0
+   },
+   "0x951d3d74587f359a64effb6d186bdbf23b510e08beed908aec4d020bb13b2c41:1": {
+    "qty": 2.4575,
+    "cost": 1.03,
+    "avg_cost": 0.42,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787422339.0
+   },
+   "0xe0f4a4faf0b88f93cb402a86447bb335bf1bb7260d4b551c32cabb26dba3cb8e:0": {
+    "qty": 384.6154,
+    "cost": 200.29,
+    "avg_cost": 0.520759,
+    "realized": 1.18,
+    "fees": -1.18,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787422429.0
+   },
+   "0xe0f4a4faf0b88f93cb402a86447bb335bf1bb7260d4b551c32cabb26dba3cb8e:1": {
+    "qty": 382.0879,
+    "cost": 52.54,
+    "avg_cost": 0.137502,
+    "realized": 0.44,
+    "fees": -0.53,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787424462.0
+   },
+   "0x384f7983675bd803df078d60274609274bf23a8b4577bc540d97beba06acb62d:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 59.32,
+    "fees": -0.37,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787432068.0
+   },
+   "0x04020b0b14363fb0c76ad250742f57ad7840fe637a4ce0493a03033f02690b78:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -99.87,
+    "fees": -0.62,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787438316.0
+   },
+   "0x544ad971fa6e6fe217544a09593d288b14de2fca8818a631b7428889c2430fb0:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -170.33,
+    "fees": -2.09,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787438457.0
+   },
+   "0xbbe06cec475b7f847625fca82ee67fca692cd8c87937ed37912d0712aa1dc030:0": {
+    "qty": 91.3175,
+    "cost": 48.37,
+    "avg_cost": 0.529715,
+    "realized": 0.28,
+    "fees": -0.28,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787439387.0
+   },
+   "0x544ad971fa6e6fe217544a09593d288b14de2fca8818a631b7428889c2430fb0:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 0.85,
+    "fees": -2.3,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787441635.0
+   },
+   "0x8649981b1e026557ff3ca5fc49fbb96c511fd70a617141847e09440ceddbc2b3:1": {
+    "qty": 4.5,
+    "cost": 2.21,
+    "avg_cost": 0.49,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787441752.0
+   },
+   "0x17e7f1ee782bac97ba86306d5b5ebe1d6ad0f8190cf6eb27272f74a43d50e21f:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 16.03,
+    "fees": -0.08,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787442646.0
+   },
+   "0x11a36de9ec85268724153e53171b40df694ac1879da49d1e4aa8e41fed770249:0": {
+    "qty": 37.9875,
+    "cost": 17.09,
+    "avg_cost": 0.45,
+    "realized": 0.12,
+    "fees": -0.12,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787449182.0
+   },
+   "0x11a36de9ec85268724153e53171b40df694ac1879da49d1e4aa8e41fed770249:1": {
+    "qty": 36.8325,
+    "cost": 14.28,
+    "avg_cost": 0.3877,
+    "realized": 0.12,
+    "fees": -0.11,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787449486.0
+   },
+   "0xbd4e8eb292fe7cb7fccc5eafdcc5c7ffbc8c368c81c8c7e7e52ec81b12874a61:0": {
+    "qty": 112.91,
+    "cost": 57.97,
+    "avg_cost": 0.5134,
+    "realized": 0.36,
+    "fees": -0.36,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787450865.0
+   },
+   "0x44729d777b81469d199f57a7c014d36791119e77a369b471175986b563465fc7:0": {
+    "qty": 480.7692,
+    "cost": 250.0,
+    "avg_cost": 0.52,
+    "realized": 1.5,
+    "fees": -1.5,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787452123.0
+   },
+   "0x7bf0ece7c56008151cca074368a2c27045a00eee767e30e8b982d71a88b3aaf0:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -101.66,
+    "fees": -2.19,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787478055.0
+   },
+   "0x24576f82e5b189d2236ad0af0d41a7312147e5504269b7c87eb7bd9156ac5704:1": {
+    "qty": 384.6154,
+    "cost": 117.17,
+    "avg_cost": 0.304644,
+    "realized": 0.86,
+    "fees": -0.86,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787483277.0
+   },
+   "0x24576f82e5b189d2236ad0af0d41a7312147e5504269b7c87eb7bd9156ac5704:0": {
+    "qty": 9.495,
+    "cost": 5.32,
+    "avg_cost": 0.56,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787484330.0
+   },
+   "0xae19646ab0707d899fc91294975ebd4c393cc831d2c02fb643c210184d9a8852:1": {
+    "qty": 1.2675,
+    "cost": 0.39,
+    "avg_cost": 0.31,
+    "realized": -116.22,
+    "fees": -2.36,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787490777.0
+   },
+   "0xae19646ab0707d899fc91294975ebd4c393cc831d2c02fb643c210184d9a8852:0": {
+    "qty": 1.2675,
+    "cost": 0.22,
+    "avg_cost": 0.17,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787492650.0
+   },
+   "0x1e8a83f910fa36cd2ca16f45a3c35e423b85821a3cc8b8843a23fe59af345425:1": {
+    "qty": 169.4525,
+    "cost": 69.63,
+    "avg_cost": 0.410925,
+    "realized": -3.15,
+    "fees": -1.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787494149.0
+   },
+   "0x1e8a83f910fa36cd2ca16f45a3c35e423b85821a3cc8b8843a23fe59af345425:0": {
+    "qty": 46.805,
+    "cost": 18.82,
+    "avg_cost": 0.401988,
+    "realized": 0.15,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787498820.0
+   },
+   "0xf8673cb45674ac790f54352c92f9eb973bbf0e204b12d0b42cb718b6314ad455:1": {
+    "qty": 1.0875,
+    "cost": 0.65,
+    "avg_cost": 0.6,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787501344.0
+   },
+   "0xf8673cb45674ac790f54352c92f9eb973bbf0e204b12d0b42cb718b6314ad455:0": {
+    "qty": 1.0875,
+    "cost": 0.35,
+    "avg_cost": 0.32,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787502670.0
+   },
+   "0x05c201a3e239f40f80e3cecff946b12fa5d0661e49360e1ebb52df7e0a04db70:1": {
+    "qty": 300.0,
+    "cost": 129.0,
+    "avg_cost": 0.43,
+    "realized": 0.92,
+    "fees": -0.92,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787510688.0
+   },
+   "0xe0c234f8d247f094d86d619254c06ef8ddf571bd42f6851b527c3ce5ec729c0c:0": {
+    "qty": 555.5556,
+    "cost": 250.0,
+    "avg_cost": 0.45,
+    "realized": 1.72,
+    "fees": -1.72,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787517537.0
+   },
+   "0x0010d266346ecacedb3dbbce654dbfb68a95aeb170e3f5088b29c75b6eb76ed6:0": {
+    "qty": 49.875,
+    "cost": 23.44,
+    "avg_cost": 0.47,
+    "realized": 28.85,
+    "fees": -3.52,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787518548.0
+   },
+   "0xb318b8051ca882e3e4e3a57f571215b60ed0b5f37014920521d0eb19c9ad4db5:0": {
+    "qty": 0.5,
+    "cost": 0.25,
+    "avg_cost": 0.5,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787520048.0
+   },
+   "0x06f5d46038c3badeb0e44bd9975dffd1555766a7cf4f8a04dad901d06a8df73d:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 1.26,
+    "fees": -0.01,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787522325.0
+   },
+   "0x6b7d862cefe10afefb358f8c7419ba3cf7a6ca825b9e267a06806eb069b0b9d3:0": {
+    "qty": 18.3375,
+    "cost": 8.71,
+    "avg_cost": 0.475147,
+    "realized": 0.06,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787526297.0
+   },
+   "0x19f864b772f5c4e1d20106a6f4dd52901d505f67436ba476b58fe9b072960844:1": {
+    "qty": 33.9725,
+    "cost": 18.35,
+    "avg_cost": 0.54,
+    "realized": 0.11,
+    "fees": -0.11,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787531281.0
+   },
+   "0x6aeef65014c7c0bda680c42953a9c50ee0a35cd4bb74395bab4558c6849ae2c8:1": {
+    "qty": 480.7692,
+    "cost": 245.19,
+    "avg_cost": 0.51,
+    "realized": 1.5,
+    "fees": -1.5,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787532037.0
+   },
+   "0x70edbf93a23edd38c2c471b1f5e13a5bb057286ca98699ccb30b51d94bde2d27:0": {
+    "qty": 520.8333,
+    "cost": 224.8,
+    "avg_cost": 0.431615,
+    "realized": 1.59,
+    "fees": -1.59,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787584359.0
+   },
+   "0x9e502edfb1cc5838cfd7fed57938aaf11b2b290fb1e0c1ce651a7bfee773d8f7:0": {
+    "qty": 451.4265,
+    "cost": 244.4,
+    "avg_cost": 0.5414,
+    "realized": 1.4,
+    "fees": -1.4,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787585500.0
+   },
+   "0x70edbf93a23edd38c2c471b1f5e13a5bb057286ca98699ccb30b51d94bde2d27:1": {
+    "qty": 276.4975,
+    "cost": 104.32,
+    "avg_cost": 0.377288,
+    "realized": 0.81,
+    "fees": -0.81,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787587227.0
+   },
+   "0x59b1a1a94cfa00b588d16b9ec6365e82df1fa4219e5aaeb0c11811e94dd67a99:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 146.88,
+    "fees": -1.13,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787588109.0
+   },
+   "0x59b1a1a94cfa00b588d16b9ec6365e82df1fa4219e5aaeb0c11811e94dd67a99:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -93.29,
+    "fees": -1.11,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787588977.0
+   },
+   "0x3bc02fd1e9e927ef20dd91bc0b0dcde4917ff4f3766f1bcb18f7394a41f66929:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 58.51,
+    "fees": -1.58,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787590947.0
+   },
+   "0x3bc02fd1e9e927ef20dd91bc0b0dcde4917ff4f3766f1bcb18f7394a41f66929:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -48.78,
+    "fees": -2.77,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787591572.0
+   },
+   "0xe600b2da5421cc7ba2e0938c6736369fc54be2dde83696fd3811edef2d710d4a:1": {
+    "qty": 0.185,
+    "cost": 0.12,
+    "avg_cost": 0.635,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787594943.0
+   },
+   "0x53954f4c3e2dc33b9463b7e006612fbcd32e484e12041725a2b1a09e2dfa480f:0": {
+    "qty": 350.63,
+    "cost": 182.33,
+    "avg_cost": 0.52,
+    "realized": 1.09,
+    "fees": -1.09,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787597793.0
+   },
+   "0x9184ee1de8b9d48fa20110af2bfdcac7e495c6de6510f978430bba3bbff7a150:1": {
+    "qty": 36.85,
+    "cost": 16.05,
+    "avg_cost": 0.435633,
+    "realized": -1.51,
+    "fees": -0.57,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787609779.0
+   },
+   "0x71394bd49a9d6c38304f9f85bb87a1c04ac2be361ca12cd4a3e8286bd8537070:0": {
+    "qty": 1.635,
+    "cost": 0.97,
+    "avg_cost": 0.595115,
+    "realized": -0.05,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787610651.0
+   },
+   "0x71394bd49a9d6c38304f9f85bb87a1c04ac2be361ca12cd4a3e8286bd8537070:1": {
+    "qty": 1.365,
+    "cost": 0.51,
+    "avg_cost": 0.37,
+    "realized": 0.31,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787611000.0
+   },
+   "0x9184ee1de8b9d48fa20110af2bfdcac7e495c6de6510f978430bba3bbff7a150:0": {
+    "qty": 8.4925,
+    "cost": 1.82,
+    "avg_cost": 0.214157,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787613202.0
+   },
+   "0x464d217b4f52067b67f36129db4523500e2f89e7d7cf8b0380f737d0065eb5f9:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 26.13,
+    "fees": -0.16,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787614473.0
+   },
+   "0x464d217b4f52067b67f36129db4523500e2f89e7d7cf8b0380f737d0065eb5f9:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -6.9,
+    "fees": -0.07,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787614938.0
+   },
+   "0xf9a2431e9c3c60c4e5f2755ddc8e6184fc0d20980c6b0cb5fb11195ae0f12ed6:0": {
+    "qty": 40.5,
+    "cost": 18.63,
+    "avg_cost": 0.46,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787629120.0
+   },
+   "0x46ae268ecdf13aefdf5aee8591ff5a0f7bba26e98b67b79890ceb70b1f7060d4:1": {
+    "qty": 23.365,
+    "cost": 14.61,
+    "avg_cost": 0.6254,
+    "realized": 0.07,
+    "fees": -0.07,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787651961.0
+   },
+   "0xb7d4dfbcf5cb490caab97a477f5fd58e4181f2cc707dc47e9b17fa989eb71d16:1": {
+    "qty": 42.95,
+    "cost": 24.05,
+    "avg_cost": 0.56,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787655202.0
+   },
+   "0x9a78dd5ee058298ab9eb2b77e336e01ba6de93d01def6c535351186a633ae12d:1": {
+    "qty": 33.8175,
+    "cost": 15.64,
+    "avg_cost": 0.4624,
+    "realized": -4.35,
+    "fees": -0.52,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787661592.0
+   },
+   "0x9a78dd5ee058298ab9eb2b77e336e01ba6de93d01def6c535351186a633ae12d:0": {
+    "qty": 33.8175,
+    "cost": 13.87,
+    "avg_cost": 0.41,
+    "realized": 0.64,
+    "fees": -0.3,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787663014.0
+   },
+   "0x64280f02c9a3acf788486dad96db015799002e1e14b6c3317e764772aea83c51:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -242.98,
+    "fees": -1.41,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787698479.0
+   },
+   "0x08c7c30327d1639172960d7c971f04b15810c463e7a702801c198d953d309252:1": {
+    "qty": 529.2125,
+    "cost": 243.44,
+    "avg_cost": 0.46,
+    "realized": 1.64,
+    "fees": -1.64,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787698710.0
+   },
+   "0x2bc981f9b0269c3fe385de1648d45d5d3da1003d76f4d2ade711d2a8902b72e5:0": {
+    "qty": 1.25,
+    "cost": 0.66,
+    "avg_cost": 0.53,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787711451.0
+   },
+   "0x750f70393b89e9f0401a08f290a49a249c2da16d6b0adad6357cb53fb50c23d0:1": {
+    "qty": 300.49,
+    "cost": 101.29,
+    "avg_cost": 0.337083,
+    "realized": 0.83,
+    "fees": -0.83,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787733385.0
+   },
+   "0x06893d14f9a562a5d96d635e19040cf615771969a87fb05ce63d34e1458fbf3e:1": {
+    "qty": 36.895,
+    "cost": 17.37,
+    "avg_cost": 0.470782,
+    "realized": 0.12,
+    "fees": -0.12,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787734948.0
+   },
+   "0xc1174046e907b786a419e92d44b7126f472401f92a3e8709a0fcab080bdcf0aa:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.01,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787736363.0
+   },
+   "0xd9d5ca6099cab76ac45ecbfa9ff5e7c24782276566977a24547681bcd4fd3258:1": {
+    "qty": 438.5965,
+    "cost": 250.0,
+    "avg_cost": 0.57,
+    "realized": 1.34,
+    "fees": -1.34,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787738335.0
+   },
+   "0xafe68e1483d40328b5dab00f28a88fd45aae31618d8cacd75f4b086c2bb96a5f:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -51.69,
+    "fees": -1.49,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787756796.0
+   },
+   "0x2d523794d30f00ba32f4e67c7d659c3b73b519909208850937ab8e5868064fd4:1": {
+    "qty": 0.7225,
+    "cost": 0.23,
+    "avg_cost": 0.32,
+    "realized": -3.05,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787757514.0
+   },
+   "0x2d523794d30f00ba32f4e67c7d659c3b73b519909208850937ab8e5868064fd4:0": {
+    "qty": 0.7225,
+    "cost": 0.22,
+    "avg_cost": 0.31,
+    "realized": 2.55,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787757999.0
+   },
+   "0xc3fec16275e0ad7465edc69287bf5880d2a5305a4ed65b1c937a56dbca6aae25:0": {
+    "qty": 6.475,
+    "cost": 3.76,
+    "avg_cost": 0.58,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787758525.0
+   },
+   "0xc3fec16275e0ad7465edc69287bf5880d2a5305a4ed65b1c937a56dbca6aae25:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.25,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787758671.0
+   },
+   "0x2373ba697bbb1901d31cb79814a68482bf9aa5c94d73db88fea7416107ac2465:0": {
+    "qty": 0.915,
+    "cost": 0.53,
+    "avg_cost": 0.58,
+    "realized": -0.53,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787759412.0
+   },
+   "0x2373ba697bbb1901d31cb79814a68482bf9aa5c94d73db88fea7416107ac2465:1": {
+    "qty": 0.915,
+    "cost": 0.24,
+    "avg_cost": 0.26,
+    "realized": 0.03,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787763562.0
+   },
+   "0xafe68e1483d40328b5dab00f28a88fd45aae31618d8cacd75f4b086c2bb96a5f:1": {
+    "qty": 101.8725,
+    "cost": 11.21,
+    "avg_cost": 0.11,
+    "realized": 18.46,
+    "fees": -1.62,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787766091.0
+   },
+   "0xc8f1b9a179c62bc45efa46ad66e6db1412a244df5deb1e117741bf38a52bbff7:1": {
+    "qty": 21.0325,
+    "cost": 13.32,
+    "avg_cost": 0.633394,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787767341.0
+   },
+   "0xc8f1b9a179c62bc45efa46ad66e6db1412a244df5deb1e117741bf38a52bbff7:0": {
+    "qty": 4.7775,
+    "cost": 1.34,
+    "avg_cost": 0.28,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787767638.0
+   },
+   "0x29b95cac2f9ce705682304cd975fdda96f8c335b87b7024d00054f880afe8226:0": {
+    "qty": 245.195,
+    "cost": 127.53,
+    "avg_cost": 0.520125,
+    "realized": 0.77,
+    "fees": -0.77,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787773272.0
+   },
+   "0x9577cf244e24620acc80fa7a1689f42316de09808f6537817cc0b7eb2f17c812:0": {
+    "qty": 0.43,
+    "cost": 0.18,
+    "avg_cost": 0.42,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787773663.0
+   },
+   "0x9577cf244e24620acc80fa7a1689f42316de09808f6537817cc0b7eb2f17c812:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787775634.0
+   },
+   "0x3f1645d7916088f3eedb20296c0aa8062aa6df7ff2f615e5b3b0c932619f8fa5:1": {
+    "qty": 18.295,
+    "cost": 10.2,
+    "avg_cost": 0.557579,
+    "realized": 0.08,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787782275.0
+   },
+   "0xaae3cb6fa788012eb9934e26a269e21c9958bc190bc5978ca0ac1fcf925086c4:1": {
+    "qty": 46.0,
+    "cost": 25.59,
+    "avg_cost": 0.5564,
+    "realized": 0.14,
+    "fees": -0.14,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787784616.0
+   },
+   "0x2f2a3b6ae680fc58a56f37c78f4e87a376e06a5ada79d1ec9f3a34cb33e34637:1": {
+    "qty": -0.0,
+    "cost": -0.0,
+    "avg_cost": null,
+    "realized": -6.95,
+    "fees": -0.17,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787798881.0
+   },
+   "0x833cb5b48b6cd3f946eca99f3b83744c2102681a38080ed0bd907e5db45f2136:1": {
+    "qty": 3.1725,
+    "cost": 0.87,
+    "avg_cost": 0.275,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787800107.0
+   },
+   "0xe3bf8e96a6a6d667b2e4ae1e8f3f6d5f50153e03af0b68d0d9e066ae4f7174fd:0": {
+    "qty": 7.5,
+    "cost": 4.27,
+    "avg_cost": 0.57,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787828325.0
+   },
+   "0xdf07b1eb890f8c3a00649dd0398b2d00b1c4bca27a366cc83055d83c76908d28:1": {
+    "qty": 1.25,
+    "cost": 0.47,
+    "avg_cost": 0.38,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787831316.0
+   },
+   "0xdf07b1eb890f8c3a00649dd0398b2d00b1c4bca27a366cc83055d83c76908d28:0": {
+    "qty": 1.25,
+    "cost": 0.24,
+    "avg_cost": 0.19506,
+    "realized": -0.23,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787832399.0
+   },
+   "0x800de50882cecb93faa6d68a0d58875e43c86ec611ebe107ce93e8a3ca357eb2:1": {
+    "qty": 446.4286,
+    "cost": 230.44,
+    "avg_cost": 0.516185,
+    "realized": 1.38,
+    "fees": -1.38,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787833261.0
+   },
+   "0xf245331ea752c799ec78b102c6ec7429c020c0444dc95c4e1c8d58b8bfccf885:1": {
+    "qty": 0.5825,
+    "cost": 0.33,
+    "avg_cost": 0.57,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787838588.0
+   },
+   "0xf245331ea752c799ec78b102c6ec7429c020c0444dc95c4e1c8d58b8bfccf885:0": {
+    "qty": 0.5825,
+    "cost": 0.04,
+    "avg_cost": 0.07,
+    "realized": -0.13,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787838597.0
+   },
+   "0x102e7523916c564a030eccc69815293cb1aa330e68a0e7bccd2877da2a6253e3:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 10.22,
+    "fees": -0.06,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787843205.0
+   },
+   "0xe010b8a8a5233b5856fccf879592723e4874beee46d07d7aab30ab3b24ad5c13:0": {
+    "qty": 62.73,
+    "cost": 36.38,
+    "avg_cost": 0.58,
+    "realized": -1.54,
+    "fees": -0.21,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787847856.0
+   },
+   "0x099c4dd4ce8399c0b70244e018deab7dfcb727f1fceeb13a50a7352061b8dc71:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 0.62,
+    "fees": 0.0,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787851212.0
+   },
+   "0x22d8ec6f2446768a953e0e13c4a1d8aeee591ef7040b21d2983a1836c6e576ca:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -1.96,
+    "fees": -0.02,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787853403.0
+   },
+   "0x7471b7b1fe26de9c5e45ac0f32009caa395bff1596d8e7ddc07367154af789c7:0": {
+    "qty": 59.1025,
+    "cost": 26.55,
+    "avg_cost": 0.449185,
+    "realized": -2.5,
+    "fees": -0.27,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787854104.0
+   },
+   "0x334db72d0fea4858907cc47d7c640e96f0b4a47171c760e760eeefb328b74bee:1": {
+    "qty": 48.81,
+    "cost": 30.75,
+    "avg_cost": 0.63,
+    "realized": 0.14,
+    "fees": -0.14,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787854455.0
+   },
+   "0x334db72d0fea4858907cc47d7c640e96f0b4a47171c760e760eeefb328b74bee:0": {
+    "qty": 18.6275,
+    "cost": 1.12,
+    "avg_cost": 0.06,
+    "realized": 0.08,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787855317.0
+   },
+   "0xab1bf271ab558886bd257b0a4b23ba8b58efa90ad96220c2251332a1a6c2d96f:0": {
+    "qty": 20.0,
+    "cost": 10.41,
+    "avg_cost": 0.52025,
+    "realized": 0.06,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787855775.0
+   },
+   "0x322e51e4a21f58a6b84492c875135cbdd0683b1641a9b6d12189ec135ae4e312:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -1.71,
+    "fees": -0.01,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787856499.0
+   },
+   "0x322e51e4a21f58a6b84492c875135cbdd0683b1641a9b6d12189ec135ae4e312:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 1.96,
+    "fees": -0.01,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787857105.0
+   },
+   "0x7471b7b1fe26de9c5e45ac0f32009caa395bff1596d8e7ddc07367154af789c7:1": {
+    "qty": 17.875,
+    "cost": 2.5,
+    "avg_cost": 0.14,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787859066.0
+   },
+   "0xea1069eb876b8c9dec792de2c142e5b90f9b84bda044aeb4384e09f64a325f41:0": {
+    "qty": 191.2375,
+    "cost": 41.11,
+    "avg_cost": 0.214981,
+    "realized": 0.4,
+    "fees": -0.4,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787861590.0
+   },
+   "0x53964641784dc22d947f82e3fcf4b9ea3c338d74ad7c51f9a7785a8a889b8461:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.81,
+    "fees": 0.0,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787875303.0
+   },
+   "0xb6fd694e7fc155e6a017d0098feead4d9b060295453c35144c45e8836bf61ab7:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -12.43,
+    "fees": -0.29,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787912011.0
+   },
+   "0x4d075d45e57f2f7d7565daeba5add905b5c895a0b981d329b991c4621bbd73b3:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 297.92,
+    "fees": -1.31,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1787914195.0
+   },
+   "0x4d075d45e57f2f7d7565daeba5add905b5c895a0b981d329b991c4621bbd73b3:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -159.02,
+    "fees": -1.09,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1787914935.0
+   },
+   "0xe5487dd77daa6c4ed6b20c1191b4d4624f8362775d22b7958ef0c3ccaebc48a8:0": {
+    "qty": 552.7305,
+    "cost": 243.2,
+    "avg_cost": 0.44,
+    "realized": 1.7,
+    "fees": -1.7,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787924973.0
+   },
+   "0x54a674f82ced3f2c7c769feaa3b2325ba2fb3276d7bb7254d2f6527a0e8c61e6:1": {
+    "qty": 83.5825,
+    "cost": 50.15,
+    "avg_cost": 0.6,
+    "realized": 0.25,
+    "fees": -0.25,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787926717.0
+   },
+   "0x1b7f884cbd416ab1d4fd217419e2fe6fd9be419f4bc6468707f7c7972c61b9f6:1": {
+    "qty": 1.25,
+    "cost": 0.43,
+    "avg_cost": 0.34,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787936913.0
+   },
+   "0x8b45f12d5ab37f094a2d92e47490f15e6f789b4aa227db62f9bcf1d087d01a75:0": {
+    "qty": 16.475,
+    "cost": 6.49,
+    "avg_cost": 0.394112,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787940328.0
+   },
+   "0x8b45f12d5ab37f094a2d92e47490f15e6f789b4aa227db62f9bcf1d087d01a75:1": {
+    "qty": 5.84,
+    "cost": 1.24,
+    "avg_cost": 0.212449,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787940813.0
+   },
+   "0xd92edbce762450b84884e37fac1d48e685a151e2a0c64a8cb4a0134d8a2e41f2:1": {
+    "qty": 0.4225,
+    "cost": 0.17,
+    "avg_cost": 0.41,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787962024.0
+   },
+   "0x0d95607a8ae67a7f55ee40ef256035f402e2359f8bbabbd9787a2b64132d9797:1": {
+    "qty": 0.5825,
+    "cost": 0.33,
+    "avg_cost": 0.57,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787966686.0
+   },
+   "0xf150430906938ce01dd5ba0540946a9b5d6a21e7b9832a7abeaafe15060e91ef:1": {
+    "qty": 14.235,
+    "cost": 6.98,
+    "avg_cost": 0.49,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787969571.0
+   },
+   "0x4e2a7b4210462684e0582e8191081796680a994e585f6191996d9a1279db2430:1": {
+    "qty": 1.8175,
+    "cost": 1.02,
+    "avg_cost": 0.56,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787973039.0
+   },
+   "0xf150430906938ce01dd5ba0540946a9b5d6a21e7b9832a7abeaafe15060e91ef:0": {
+    "qty": 1.385,
+    "cost": 0.57,
+    "avg_cost": 0.41,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787974483.0
+   },
+   "0x887b08b3deb184f20e699b637c501503b6b0a9c994b5bbf39dd2e815cd9df021:0": {
+    "qty": 2.5,
+    "cost": 1.07,
+    "avg_cost": 0.43,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787975485.0
+   },
+   "0x3aee1278ad98989747938d04cd31486aeff311e30e510eb7976d964563da88f3:0": {
+    "qty": 9.2675,
+    "cost": 4.77,
+    "avg_cost": 0.515016,
+    "realized": -22.76,
+    "fees": -0.19,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787990953.0
+   },
+   "0x1382022bdd2fce26b789c555186a85011b945f9ab42aa73c844477d3ddbb7b4e:0": {
+    "qty": 2.9325,
+    "cost": 1.52,
+    "avg_cost": 0.52,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787991222.0
+   },
+   "0x1382022bdd2fce26b789c555186a85011b945f9ab42aa73c844477d3ddbb7b4e:1": {
+    "qty": 0.695,
+    "cost": 0.07,
+    "avg_cost": 0.1,
+    "realized": -0.23,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787991319.0
+   },
+   "0x3aee1278ad98989747938d04cd31486aeff311e30e510eb7976d964563da88f3:1": {
+    "qty": 52.0325,
+    "cost": 19.12,
+    "avg_cost": 0.367492,
+    "realized": 0.15,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787991688.0
+   },
+   "0xb4808eb77c9540070952d342ca1dd2a3d698234ffaed238ef7c7527bb7d72f06:1": {
+    "qty": 178.9975,
+    "cost": 79.24,
+    "avg_cost": 0.442687,
+    "realized": 0.55,
+    "fees": -0.55,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787992986.0
+   },
+   "0x7df1d4ec251ba238a5578afbaf4a83e5650c69d2b92d59a0629fc3d67cbcb05f:0": {
+    "qty": 55.3425,
+    "cost": 23.22,
+    "avg_cost": 0.419572,
+    "realized": -23.24,
+    "fees": -1.64,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787995096.0
+   },
+   "0xb4808eb77c9540070952d342ca1dd2a3d698234ffaed238ef7c7527bb7d72f06:0": {
+    "qty": 48.55,
+    "cost": 2.48,
+    "avg_cost": 0.051067,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787995252.0
+   },
+   "0xceff0353832fd6a55c510d210fbe9fb8300e72e90b6b5eb532bf5da59842b423:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -28.99,
+    "fees": -1.11,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787995314.0
+   },
+   "0x7df1d4ec251ba238a5578afbaf4a83e5650c69d2b92d59a0629fc3d67cbcb05f:1": {
+    "qty": 57.9375,
+    "cost": 16.22,
+    "avg_cost": 0.28,
+    "realized": 0.15,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1787995752.0
+   },
+   "0x37c5a7345d5f894bed703927293e91e44cb16383ad0630a2f0ca18cd7062ca9c:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -14.38,
+    "fees": -0.13,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788001164.0
+   },
+   "0x08312088babfac34a630a90de3043754bbc176af096cce68871b4bd4e1dd02ea:1": {
+    "qty": 12.5,
+    "cost": 7.5,
+    "avg_cost": 0.6,
+    "realized": 0.04,
+    "fees": -0.04,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788012597.0
+   },
+   "0x08312088babfac34a630a90de3043754bbc176af096cce68871b4bd4e1dd02ea:0": {
+    "qty": 12.5,
+    "cost": 3.25,
+    "avg_cost": 0.26,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788013534.0
+   },
+   "0xaeb705d997e6ad70663bbb46d239c80d47b969dcd4cdd98aaaf7f99c0fe1a157:1": {
+    "qty": 39.76,
+    "cost": 17.8,
+    "avg_cost": 0.447568,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788014494.0
+   },
+   "0xaeb705d997e6ad70663bbb46d239c80d47b969dcd4cdd98aaaf7f99c0fe1a157:0": {
+    "qty": 39.76,
+    "cost": 20.39,
+    "avg_cost": 0.512882,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788014625.0
+   },
+   "0x21c9931eae1d896cbb2cd6809c2e4865ac04c3ae7dd7f56f62a12fb233cb274e:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 176.29,
+    "fees": -0.86,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788026986.0
+   },
+   "0x9a1338eafe6425b02e0ef3ebc916bcca123b4da1e5d584146099601bc6302d0c:0": {
+    "qty": 263.55,
+    "cost": 147.59,
+    "avg_cost": 0.56,
+    "realized": 0.81,
+    "fees": -0.81,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788031164.0
+   },
+   "0x57361dd73326b02b54919cc3e481be941339f22ad6e493da44f56546546fe424:1": {
+    "qty": 100.0,
+    "cost": 50.0,
+    "avg_cost": 0.5,
+    "realized": 0.31,
+    "fees": -0.31,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788031902.0
+   },
+   "0xf76af9bd9d69ed323f76a182199641a203f52216be5c682fc404b270024215c2:0": {
+    "qty": 460.8295,
+    "cost": 244.24,
+    "avg_cost": 0.53,
+    "realized": 1.43,
+    "fees": -1.43,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788032805.0
+   },
+   "0xcaf66fcf5def3a3d1a5d977cf13299087c78858f5acd49fa6d947c2342b78156:1": {
+    "qty": 25.7025,
+    "cost": 16.45,
+    "avg_cost": 0.64,
+    "realized": 0.07,
+    "fees": -0.07,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788046062.0
+   },
+   "0x80b270f01faa95955d9254d455f4be3ac2b6264824adf6d405f86974bc55223b:0": {
+    "qty": 384.6154,
+    "cost": 250.0,
+    "avg_cost": 0.65,
+    "realized": 1.09,
+    "fees": -1.09,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788046308.0
+   },
+   "0x80b270f01faa95955d9254d455f4be3ac2b6264824adf6d405f86974bc55223b:1": {
+    "qty": 21.435,
+    "cost": 6.43,
+    "avg_cost": 0.3,
+    "realized": 67.32,
+    "fees": -6.51,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788046683.0
+   },
+   "0xf627716a03d946710e9ca289a8bfb4495d3b38144c8c3cde9c77eb6c004f085a:1": {
+    "qty": 0.555,
+    "cost": 0.31,
+    "avg_cost": 0.55,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788046759.0
+   },
+   "0xd9ed39890baf277ba8332030319e7234d3d5e2122e34b5cce8ffaf5a3e69eb21:1": {
+    "qty": 1.98,
+    "cost": 0.55,
+    "avg_cost": 0.28,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788048592.0
+   },
+   "0xd9ed39890baf277ba8332030319e7234d3d5e2122e34b5cce8ffaf5a3e69eb21:0": {
+    "qty": 1.98,
+    "cost": 1.3,
+    "avg_cost": 0.656667,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788048595.0
+   },
+   "0xf627716a03d946710e9ca289a8bfb4495d3b38144c8c3cde9c77eb6c004f085a:0": {
+    "qty": 0.555,
+    "cost": 0.19,
+    "avg_cost": 0.34,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788049558.0
+   },
+   "0xea5e0fa99b312e42e216c6c5004d5011ffc6302be8db14efff56927175287489:0": {
+    "qty": 27.53,
+    "cost": 13.77,
+    "avg_cost": 0.5,
+    "realized": 0.09,
+    "fees": -0.09,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788051174.0
+   },
+   "0xb6d562e7df8dec9d677dd4a6a3ce088c71aad454023a1cff1af3c93cdf1f312a:0": {
+    "qty": 529.2125,
+    "cost": 243.44,
+    "avg_cost": 0.46,
+    "realized": 1.64,
+    "fees": -1.64,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788056586.0
+   },
+   "0xadaedf732c19b74380f459e0cdd8d799711a14c865a4dec0648278a8386816bc:1": {
+    "qty": 239.955,
+    "cost": 120.58,
+    "avg_cost": 0.5025,
+    "realized": 0.75,
+    "fees": -0.75,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788075469.0
+   },
+   "0xbb3c1e3f719299ba2641efe2c5769c2a2ac613a4454a7c20abbf0cba10cb6cdb:1": {
+    "qty": 509.9025,
+    "cost": 229.46,
+    "avg_cost": 0.45,
+    "realized": 1.58,
+    "fees": -1.58,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788077223.0
+   },
+   "0x42219f79789b44d49e5f49bd28a432515db9011b2f9a784646187a0d2ec0c08c:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -32.1,
+    "fees": -0.22,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788083671.0
+   },
+   "0x758920aa6be8acc6fa33e32d2f05354504bee9cf5852b268798f4bc689a9fa47:0": {
+    "qty": 415.2134,
+    "cost": 244.98,
+    "avg_cost": 0.59,
+    "realized": 1.26,
+    "fees": -1.26,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788092842.0
+   },
+   "0xfb76a8f3f5c464614846861e9395a91505b866950f66d4f9990d256fe1134ae3:1": {
+    "qty": 298.2236,
+    "cost": 128.65,
+    "avg_cost": 0.431376,
+    "realized": -13.57,
+    "fees": -2.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788093004.0
+   },
+   "0x4b515913e00fbc2e4254a8dcf7e58272a50e52d652a0ee4879aa0980ea73e9ad:0": {
+    "qty": 436.8338,
+    "cost": 244.63,
+    "avg_cost": 0.56,
+    "realized": 1.35,
+    "fees": -1.35,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788093130.0
+   },
+   "0xb5024f6898681caec21146e109bc7d03d7552329f0a19a8e553b3239548f1aeb:0": {
+    "qty": 44.475,
+    "cost": 22.89,
+    "avg_cost": 0.514684,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788097884.0
+   },
+   "0xea5c7b9e75d3f29a4ba05608aef9f897f9dc50c098655926bf106eea01b69cbc:0": {
+    "qty": 592.2767,
+    "cost": 242.83,
+    "avg_cost": 0.41,
+    "realized": 1.79,
+    "fees": -1.79,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788103183.0
+   },
+   "0xf58e1d788fd158ebfb669528bccf2c688ff5a534b479731ec34978a96aee5575:0": {
+    "qty": 415.4892,
+    "cost": 170.35,
+    "avg_cost": 0.41,
+    "realized": -27.19,
+    "fees": -2.16,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788104437.0
+   },
+   "0xadaedf732c19b74380f459e0cdd8d799711a14c865a4dec0648278a8386816bc:0": {
+    "qty": 2.0275,
+    "cost": 0.53,
+    "avg_cost": 0.26,
+    "realized": 22.6,
+    "fees": -1.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788115395.0
+   },
+   "0x90b035a50ed1427e0c780e16e5d1e514035e982491944c146aeddde8c910e2ea:0": {
+    "qty": 12.37,
+    "cost": 5.87,
+    "avg_cost": 0.474446,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788120679.0
+   },
+   "0x90b035a50ed1427e0c780e16e5d1e514035e982491944c146aeddde8c910e2ea:1": {
+    "qty": 2.905,
+    "cost": 1.23,
+    "avg_cost": 0.424414,
+    "realized": -2.11,
+    "fees": -0.25,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788121036.0
+   },
+   "0x64d310d9de5aeb89f9edca622c3bbd1c45c9ba63c5b67d10ab6384b0b13c9088:1": {
+    "qty": 82.2225,
+    "cost": 38.96,
+    "avg_cost": 0.473862,
+    "realized": 0.28,
+    "fees": -0.28,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788121309.0
+   },
+   "0xde836e2941deb261e050b8c72d8464f3fe9dde8c42ade1c9b6bec67dc88b2932:0": {
+    "qty": 139.48,
+    "cost": 69.3,
+    "avg_cost": 0.496859,
+    "realized": 0.43,
+    "fees": -0.43,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788121641.0
+   },
+   "0x64d310d9de5aeb89f9edca622c3bbd1c45c9ba63c5b67d10ab6384b0b13c9088:0": {
+    "qty": 14.8425,
+    "cost": 1.21,
+    "avg_cost": 0.081777,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788122196.0
+   },
+   "0xde836e2941deb261e050b8c72d8464f3fe9dde8c42ade1c9b6bec67dc88b2932:1": {
+    "qty": 136.32,
+    "cost": 13.35,
+    "avg_cost": 0.097936,
+    "realized": 0.12,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788123465.0
+   },
+   "0xb82a9d6d186f93e65c5b43309d8d487ec3b35feafc338aacf35a238fb6d336e5:0": {
+    "qty": 51.5975,
+    "cost": 27.86,
+    "avg_cost": 0.54,
+    "realized": 0.16,
+    "fees": -0.16,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788125182.0
+   },
+   "0xbba325174c1aa28c29ca9a6ba78e61a5ca838f0c296b2e1888c4dc8965028a3b:0": {
+    "qty": 79.4575,
+    "cost": 31.78,
+    "avg_cost": 0.4,
+    "realized": 0.24,
+    "fees": -0.24,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788128289.0
+   },
+   "0xb11986258b5f4ba002782153a2542c88ba622b0a673d0f77743a9e598761c6c0:1": {
+    "qty": 497.5124,
+    "cost": 243.78,
+    "avg_cost": 0.49,
+    "realized": 1.55,
+    "fees": -1.55,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788128565.0
+   },
+   "0xbba325174c1aa28c29ca9a6ba78e61a5ca838f0c296b2e1888c4dc8965028a3b:1": {
+    "qty": 21.1875,
+    "cost": 5.3,
+    "avg_cost": 0.25,
+    "realized": -0.84,
+    "fees": -0.33,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788130594.0
+   },
+   "0xb11986258b5f4ba002782153a2542c88ba622b0a673d0f77743a9e598761c6c0:0": {
+    "qty": 280.37,
+    "cost": 128.97,
+    "avg_cost": 0.46,
+    "realized": 0.87,
+    "fees": -0.87,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788131526.0
+   },
+   "0x525778c0f0ab711d54bb4ed319a63be9c1a8fcf9731169a85a9fb85f09d16970:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 4.07,
+    "fees": -0.33,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788132409.0
+   },
+   "0x525778c0f0ab711d54bb4ed319a63be9c1a8fcf9731169a85a9fb85f09d16970:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -16.28,
+    "fees": -0.16,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788134056.0
+   },
+   "0xd9ca196f0d8b95cb00f51f2e4fb8aa65f8ffae8f186572a4af2300feea53a87c:1": {
+    "qty": 29.6725,
+    "cost": 14.67,
+    "avg_cost": 0.494463,
+    "realized": 0.08,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788177660.0
+   },
+   "0xd9ca196f0d8b95cb00f51f2e4fb8aa65f8ffae8f186572a4af2300feea53a87c:0": {
+    "qty": 4.0,
+    "cost": 0.12,
+    "avg_cost": 0.03,
+    "realized": -0.03,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788179280.0
+   },
+   "0x1bac254336778ff5e963772eea802abca13e37e82454e425686b56b607cb4c32:1": {
+    "qty": 2.9625,
+    "cost": 1.36,
+    "avg_cost": 0.46,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788217596.0
+   },
+   "0x1bac254336778ff5e963772eea802abca13e37e82454e425686b56b607cb4c32:0": {
+    "qty": 1.0,
+    "cost": 0.46,
+    "avg_cost": 0.46,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788217863.0
+   },
+   "0x78c89e47ea99a183919d1b26c514adb6e83cea92fcd274dffbb4d81fac885219:0": {
+    "qty": 568.1818,
+    "cost": 250.0,
+    "avg_cost": 0.44,
+    "realized": 1.75,
+    "fees": -1.75,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788237681.0
+   },
+   "0x454a5450420d55e66c7e55e1d92150653e75a081dd7ee118bd79b38edece7a15:1": {
+    "qty": 2.5,
+    "cost": 0.47,
+    "avg_cost": 0.19,
+    "realized": 141.22,
+    "fees": -2.81,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788247222.0
+   },
+   "0x454a5450420d55e66c7e55e1d92150653e75a081dd7ee118bd79b38edece7a15:0": {
+    "qty": 6.425,
+    "cost": 1.86,
+    "avg_cost": 0.29,
+    "realized": -99.4,
+    "fees": -2.8,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788248446.0
+   },
+   "0x6de09f7b89c2f573fa7950047a3e738011148f2e583b74cf301cf36def1ea715:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.06,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788256627.0
+   },
+   "0xc3b31ae3b8cdd2edbaa0372ab04a2180d3d5abdbf2eaad7c8079963e79509fe6:0": {
+    "qty": 0.4375,
+    "cost": 0.19,
+    "avg_cost": 0.43,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788272565.0
+   },
+   "0xdee7062c12ce9193286aa7b5b93df17aa3bb5fac283ed29de0a0ab55626b944b:1": {
+    "qty": 50.6425,
+    "cost": 28.36,
+    "avg_cost": 0.56,
+    "realized": 0.16,
+    "fees": -0.16,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788300655.0
+   },
+   "0xdee7062c12ce9193286aa7b5b93df17aa3bb5fac283ed29de0a0ab55626b944b:0": {
+    "qty": 50.6425,
+    "cost": 20.11,
+    "avg_cost": 0.397152,
+    "realized": 0.15,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788301551.0
+   },
+   "0x651033af54f028163f4bc59d718ad71a7fad54ac7c9cb0edf840b891c97547a7:1": {
+    "qty": 0.75,
+    "cost": 0.47,
+    "avg_cost": 0.63,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788306606.0
+   },
+   "0xb31efa0621c310597da0889d81ba6e2e361f15735376b4b8e023e20c0c98362d:1": {
+    "qty": 0.75,
+    "cost": 0.4,
+    "avg_cost": 0.53,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788306606.0
+   },
+   "0x0aa6aab594d8f143b0565b6e328a6d86b46bec7afbb2e595fd705e518cceadf7:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -29.75,
+    "fees": -0.13,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788308487.0
+   },
+   "0x3786377c454e004d875ba8d82f78405e73d233492879fa4d5e608bcd6d7c64fe:0": {
+    "qty": 27.8775,
+    "cost": 12.78,
+    "avg_cost": 0.458491,
+    "realized": 0.08,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788332272.0
+   },
+   "0x3786377c454e004d875ba8d82f78405e73d233492879fa4d5e608bcd6d7c64fe:1": {
+    "qty": 2.3075,
+    "cost": 0.77,
+    "avg_cost": 0.332351,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788332826.0
+   },
+   "0x255b758241897eb7640a14e1d27cc569c286ed769426ecfe8c0a8ef25cf6d67a:0": {
+    "qty": 3.2225,
+    "cost": 2.06,
+    "avg_cost": 0.64,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788358077.0
+   },
+   "0x255b758241897eb7640a14e1d27cc569c286ed769426ecfe8c0a8ef25cf6d67a:1": {
+    "qty": 3.2225,
+    "cost": 0.66,
+    "avg_cost": 0.205,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788358605.0
+   },
+   "0xcea784ebe66b9fe95c686b29b24c49817a77779776d42eeddd75724d73991ba7:0": {
+    "qty": 401.9939,
+    "cost": 245.22,
+    "avg_cost": 0.61,
+    "realized": 1.2,
+    "fees": -1.2,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788361930.0
+   },
+   "0xcea784ebe66b9fe95c686b29b24c49817a77779776d42eeddd75724d73991ba7:1": {
+    "qty": 401.9939,
+    "cost": 48.24,
+    "avg_cost": 0.12,
+    "realized": -43.94,
+    "fees": -4.44,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788362742.0
+   },
+   "0x6b98f1ba16dde32b4d57d8c65fc0635080fd509054c8a349fadcfcdf8fc1193e:0": {
+    "qty": 21.3975,
+    "cost": 13.48,
+    "avg_cost": 0.630081,
+    "realized": 0.08,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788368985.0
+   },
+   "0x6b98f1ba16dde32b4d57d8c65fc0635080fd509054c8a349fadcfcdf8fc1193e:1": {
+    "qty": 21.3975,
+    "cost": 6.07,
+    "avg_cost": 0.283773,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788369121.0
+   },
+   "0x8c6431f5557af3630d58c99e752961ae5a7bc8b25a76a0049e37d6a1f2438a31:0": {
+    "qty": 8.3575,
+    "cost": 4.6,
+    "avg_cost": 0.55,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788377364.0
+   },
+   "0x8c6431f5557af3630d58c99e752961ae5a7bc8b25a76a0049e37d6a1f2438a31:1": {
+    "qty": 8.3575,
+    "cost": 0.59,
+    "avg_cost": 0.07,
+    "realized": -1.66,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788377532.0
+   },
+   "0xb9b5aa457e81057c73145f19d73eecdc3da0b8c49752adc08bee2033e66bfbac:1": {
+    "qty": 431.0345,
+    "cost": 185.47,
+    "avg_cost": 0.430284,
+    "realized": 1.31,
+    "fees": -1.31,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788434142.0
+   },
+   "0xb9b5aa457e81057c73145f19d73eecdc3da0b8c49752adc08bee2033e66bfbac:0": {
+    "qty": 52.0925,
+    "cost": 1.82,
+    "avg_cost": 0.034925,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788435192.0
+   },
+   "0xe4f4c2076bf5c7d288e97b382f1fb7c48472648a336a7fb43b75cd874aaeeb96:0": {
+    "qty": 252.5,
+    "cost": 131.3,
+    "avg_cost": 0.52,
+    "realized": 0.79,
+    "fees": -0.79,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788437832.0
+   },
+   "0x49c6992be39a7e1ac7205111330403ee032c0eb364073633909c73dece56f39d:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 4.59,
+    "fees": -0.02,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788443496.0
+   },
+   "0x49c6992be39a7e1ac7205111330403ee032c0eb364073633909c73dece56f39d:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.87,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788444058.0
+   },
+   "0x932a86fa4fe3350c948b3dc9eda34adfa5f23b8a557a3bb411c9b5fa3f561dc8:0": {
+    "qty": 103.2125,
+    "cost": 50.72,
+    "avg_cost": 0.491398,
+    "realized": 0.26,
+    "fees": -0.26,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788448383.0
+   },
+   "0x932a86fa4fe3350c948b3dc9eda34adfa5f23b8a557a3bb411c9b5fa3f561dc8:1": {
+    "qty": 5.7975,
+    "cost": 2.05,
+    "avg_cost": 0.353394,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788449395.0
+   },
+   "0xb1c11e12915964250f1519d16bee4cf1f0619be202fd8bc2abb90bb9b18f3138:0": {
+    "qty": 45.4225,
+    "cost": 27.25,
+    "avg_cost": 0.6,
+    "realized": 0.14,
+    "fees": -0.14,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788464629.0
+   },
+   "0x967961d7efa2304da489bee31bdd619416655b6c6aa4f7da4ba1df1d177815f9:1": {
+    "qty": 47.155,
+    "cost": 24.52,
+    "avg_cost": 0.52,
+    "realized": 0.15,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788470532.0
+   },
+   "0x09a337a29b16afe662d4315ece7c355283837d57e01bd8f2b4631cd5d295d44f:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 2.52,
+    "fees": -0.02,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788487581.0
+   },
+   "0xd5c6f635b9b0d4d20d2563fe4994b1472ef53fe05e8ad4e42922e6bfd2c76228:0": {
+    "qty": 565.2272,
+    "cost": 243.05,
+    "avg_cost": 0.43,
+    "realized": 1.73,
+    "fees": -1.73,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788512013.0
+   },
+   "0x90a30f4edcb4501bf30a07b4a46c78114c3798669e68a1a3c470e8ce99c8f13b:1": {
+    "qty": 48.7,
+    "cost": 29.54,
+    "avg_cost": 0.606645,
+    "realized": 0.15,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788513511.0
+   },
+   "0x90a30f4edcb4501bf30a07b4a46c78114c3798669e68a1a3c470e8ce99c8f13b:0": {
+    "qty": 44.4525,
+    "cost": 4.71,
+    "avg_cost": 0.105949,
+    "realized": 0.06,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788514026.0
+   },
+   "0xd1978d7fcee0893d8585c8f940f636f60b45d8d11f3c1469c3b88e2683050779:1": {
+    "qty": 241.555,
+    "cost": 147.35,
+    "avg_cost": 0.61,
+    "realized": -20.34,
+    "fees": -1.18,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788516282.0
+   },
+   "0x5142fca34d278ae99f05d486a2fe73175a33e1cc6bebd4d7781ad4f561d124ad:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -121.68,
+    "fees": -1.3,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788522423.0
+   },
+   "0x5142fca34d278ae99f05d486a2fe73175a33e1cc6bebd4d7781ad4f561d124ad:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 32.93,
+    "fees": -4.77,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788525040.0
+   },
+   "0xd1978d7fcee0893d8585c8f940f636f60b45d8d11f3c1469c3b88e2683050779:0": {
+    "qty": 241.555,
+    "cost": 86.96,
+    "avg_cost": 0.36,
+    "realized": 71.85,
+    "fees": -2.55,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788543502.0
+   },
+   "0xeb7a8e8fb089927579b62145d3a5e0e6f4bb6834233bdde82e74b47984be59ef:1": {
+    "qty": 76.9575,
+    "cost": 42.71,
+    "avg_cost": 0.554942,
+    "realized": 0.23,
+    "fees": -0.23,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788544950.0
+   },
+   "0xeb7a8e8fb089927579b62145d3a5e0e6f4bb6834233bdde82e74b47984be59ef:0": {
+    "qty": 2.5425,
+    "cost": 0.58,
+    "avg_cost": 0.228995,
+    "realized": -6.6,
+    "fees": -0.27,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788545239.0
+   },
+   "0x4bdb2cf6e97d0eddf71433ff860292cb3c91cfa14b3f4187f81c95d5e179bd3c:0": {
+    "qty": 9.72,
+    "cost": 4.86,
+    "avg_cost": 0.5,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788551013.0
+   },
+   "0x7a8deeb4ee8cb6fe557b09ab8057cbf3bac945734f3eca81749c5a904cde367c:1": {
+    "qty": 507.6142,
+    "cost": 243.65,
+    "avg_cost": 0.48,
+    "realized": 1.58,
+    "fees": -1.58,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788553705.0
+   },
+   "0x7a8deeb4ee8cb6fe557b09ab8057cbf3bac945734f3eca81749c5a904cde367c:0": {
+    "qty": 98.6825,
+    "cost": 22.7,
+    "avg_cost": 0.23,
+    "realized": 0.22,
+    "fees": -0.22,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788556188.0
+   },
+   "0x7ae5a4073aa14abb28f6c1916026fb2c979642a79161c53f91c7205a0add669d:0": {
+    "qty": 4.1975,
+    "cost": 2.45,
+    "avg_cost": 0.583,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788563916.0
+   },
+   "0x22c7b56311a80a23260eb5c06d7827e9314e8f3bd76c247ec52cdd2c1f67ca71:1": {
+    "qty": 460.8295,
+    "cost": 244.24,
+    "avg_cost": 0.53,
+    "realized": 1.43,
+    "fees": -1.43,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788624451.0
+   },
+   "0xec7f9a8c0f7d5ee3d881a6169d78a9a0a1b8b0f84e3006faf39152b705c0ab50:1": {
+    "qty": 383.9231,
+    "cost": 195.76,
+    "avg_cost": 0.509895,
+    "realized": -30.88,
+    "fees": -1.59,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788628440.0
+   },
+   "0xec7f9a8c0f7d5ee3d881a6169d78a9a0a1b8b0f84e3006faf39152b705c0ab50:0": {
+    "qty": -0.0,
+    "cost": -0.0,
+    "avg_cost": null,
+    "realized": 28.31,
+    "fees": -2.58,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788629034.0
+   },
+   "0x22c7b56311a80a23260eb5c06d7827e9314e8f3bd76c247ec52cdd2c1f67ca71:0": {
+    "qty": 460.8295,
+    "cost": 207.37,
+    "avg_cost": 0.45,
+    "realized": 1.43,
+    "fees": -1.43,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788633364.0
+   },
+   "0xd7eee44e684bf70b3b5c5b0581ace1d5f4b0dc789082a0caf614ed8482221035:1": {
+    "qty": 2.155,
+    "cost": 0.91,
+    "avg_cost": 0.42,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788635313.0
+   },
+   "0x8ff5375fe98397d47a32ef5deb2f7eb1e7af1f8390e97bb95a4d2d0651495303:0": {
+    "qty": 384.6154,
+    "cost": 248.31,
+    "avg_cost": 0.645603,
+    "realized": 1.1,
+    "fees": -1.1,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788635698.0
+   },
+   "0x679ece81e640f56639491fa669595308dbe23ae5973abb046d43900b2bcaaa2b:0": {
+    "qty": 471.6981,
+    "cost": 231.23,
+    "avg_cost": 0.490212,
+    "realized": 1.48,
+    "fees": -1.48,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788639046.0
+   },
+   "0x679ece81e640f56639491fa669595308dbe23ae5973abb046d43900b2bcaaa2b:1": {
+    "qty": 374.3331,
+    "cost": 124.63,
+    "avg_cost": 0.332946,
+    "realized": -2.54,
+    "fees": -1.62,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788639415.0
+   },
+   "0xb3bac12e12256a12da004e7bc8cc2127ed209d3781028293d3ad54ec2e0ef907:1": {
+    "qty": 254.4935,
+    "cost": 106.33,
+    "avg_cost": 0.417802,
+    "realized": -19.13,
+    "fees": -7.72,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788639460.0
+   },
+   "0x200e622589aa7012240572b7c3db42f953c4f43d020965f6695a9a4f8fe2a20e:1": {
+    "qty": 75.8475,
+    "cost": 42.13,
+    "avg_cost": 0.555449,
+    "realized": 0.24,
+    "fees": -0.24,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788641845.0
+   },
+   "0x8ef82605a2c071dc2caeefe9d17fb96ca3d728c4901f7d81885fc7006bd1f415:0": {
+    "qty": 48.965,
+    "cost": 31.83,
+    "avg_cost": 0.65,
+    "realized": 0.14,
+    "fees": -0.14,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788647044.0
+   },
+   "0xe59cb0819d7ebde337aea77cf8d980cbd5d6a07a66f143588574cc0b3e7ad985:1": {
+    "qty": 0.595,
+    "cost": 0.35,
+    "avg_cost": 0.58,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788647920.0
+   },
+   "0x7532cf63042596fdd56951faa9affb5ccfd230c304932e29bb3037b821016c7c:1": {
+    "qty": 480.7692,
+    "cost": 230.77,
+    "avg_cost": 0.48,
+    "realized": 1.5,
+    "fees": -1.5,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788648478.0
+   },
+   "0x7532cf63042596fdd56951faa9affb5ccfd230c304932e29bb3037b821016c7c:0": {
+    "qty": 0.3675,
+    "cost": 0.12,
+    "avg_cost": 0.32,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788649797.0
+   },
+   "0x686ec6b196f0cc9b797ac6b084b24c27cd02177e5c39382093ed90545048cdd2:0": {
+    "qty": 287.5,
+    "cost": 103.5,
+    "avg_cost": 0.36,
+    "realized": 0.82,
+    "fees": -0.82,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788650383.0
+   },
+   "0x1f5c675ee6e125252d9313071e159a5d10857ff3ca95446dd24667ddcd134a5b:1": {
+    "qty": 0.0475,
+    "cost": 0.02,
+    "avg_cost": 0.5,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788652593.0
+   },
+   "0x4bc0d7b35b62569c073e1ba2c87f3139fc3bd7f83a60ec7d0e4258d708913a06:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.35,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788657643.0
+   },
+   "0xb3bac12e12256a12da004e7bc8cc2127ed209d3781028293d3ad54ec2e0ef907:0": {
+    "qty": 254.4935,
+    "cost": 64.1,
+    "avg_cost": 0.251874,
+    "realized": 55.31,
+    "fees": -5.96,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788661986.0
+   },
+   "0x12bd6eeff1f2bb3e17e25a411bfcfa92d4e26b55f2cce9f67c891d1d32a74338:1": {
+    "qty": 5.5,
+    "cost": 3.03,
+    "avg_cost": 0.55,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788686949.0
+   },
+   "0x51f202ddd52fdc3917d1c334181eb62cffb82587391cfbabfd29c576fb4bd3ba:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -29.21,
+    "fees": -0.19,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788687693.0
+   },
+   "0x75daf5c17786712fcb314f8b2c80d8210c1a375ddda84eb869bc2d06fe010441:0": {
+    "qty": 162.0925,
+    "cost": 75.24,
+    "avg_cost": 0.46418,
+    "realized": 0.5,
+    "fees": -0.5,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788687984.0
+   },
+   "0x9b61fa8beebcd479aad72812001941188964a5d056bbe1a83fdb77419c06ec82:1": {
+    "qty": 94.685,
+    "cost": 32.99,
+    "avg_cost": 0.348445,
+    "realized": 0.24,
+    "fees": -0.24,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788689098.0
+   },
+   "0x75daf5c17786712fcb314f8b2c80d8210c1a375ddda84eb869bc2d06fe010441:1": {
+    "qty": 162.0925,
+    "cost": 38.1,
+    "avg_cost": 0.235052,
+    "realized": 0.31,
+    "fees": -0.31,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788689265.0
+   },
+   "0x9b61fa8beebcd479aad72812001941188964a5d056bbe1a83fdb77419c06ec82:0": {
+    "qty": 36.48,
+    "cost": 15.02,
+    "avg_cost": 0.411597,
+    "realized": 0.11,
+    "fees": -0.11,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788689745.0
+   },
+   "0x12bd6eeff1f2bb3e17e25a411bfcfa92d4e26b55f2cce9f67c891d1d32a74338:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 1.11,
+    "fees": -0.4,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788690906.0
+   },
+   "0x994cead3d52d619b9c075105603195403abb0be9d347ad7de0eb98c564b08fbc:1": {
+    "qty": 57.36,
+    "cost": 35.03,
+    "avg_cost": 0.610654,
+    "realized": 0.17,
+    "fees": -0.17,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788694060.0
+   },
+   "0x15f485238c7dce25595a6d147337966b4908aab5f933c8668b14ff6994a3394c:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 16.37,
+    "fees": -0.08,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788704166.0
+   },
+   "0x15f485238c7dce25595a6d147337966b4908aab5f933c8668b14ff6994a3394c:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -13.04,
+    "fees": -0.08,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788704214.0
+   },
+   "0x4cdcaab6858e58532de3b6a37b8fe024f4345afe5f827a1405f70383b41612dd:0": {
+    "qty": 67.2325,
+    "cost": 35.63,
+    "avg_cost": 0.53,
+    "realized": 0.21,
+    "fees": -0.21,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788708966.0
+   },
+   "0x7c31674f6f8b1d7ac4b5ddacc81299949efb8ba8d1705cd06428aa891a51857c:0": {
+    "qty": 41.4525,
+    "cost": 15.78,
+    "avg_cost": 0.38062,
+    "realized": 0.12,
+    "fees": -0.12,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788710302.0
+   },
+   "0xa57c11c3f2ae058a8fec2f89d4263f6fe0b6ede3d28ab756d73450f9cfb2b602:1": {
+    "qty": 125.0,
+    "cost": 65.0,
+    "avg_cost": 0.52,
+    "realized": 0.39,
+    "fees": -0.39,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788711807.0
+   },
+   "0x4cdcaab6858e58532de3b6a37b8fe024f4345afe5f827a1405f70383b41612dd:1": {
+    "qty": 11.2975,
+    "cost": 2.26,
+    "avg_cost": 0.2,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788713107.0
+   },
+   "0x3787db38b4e9b32e5bd264d16ffe74e5752285fd4acb9d96f05c105d57812e07:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 1.29,
+    "fees": -0.09,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788714630.0
+   },
+   "0x8e6beb590d3a45c0f2a2c1827ac16fa868c036cc72b59342ab0a0603522d1a6f:1": {
+    "qty": 140.8,
+    "cost": 21.12,
+    "avg_cost": 0.15,
+    "realized": -40.46,
+    "fees": -3.96,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788716767.0
+   },
+   "0x8e6beb590d3a45c0f2a2c1827ac16fa868c036cc72b59342ab0a0603522d1a6f:0": {
+    "qty": 140.8,
+    "cost": 67.58,
+    "avg_cost": 0.48,
+    "realized": 0.44,
+    "fees": -0.44,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788718123.0
+   },
+   "0xb235367fb6a6dc222fa05b999e468b2db97e573cd25cd490f5e110bbce4f074d:1": {
+    "qty": 10.4625,
+    "cost": 5.13,
+    "avg_cost": 0.49,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788719488.0
+   },
+   "0x3787db38b4e9b32e5bd264d16ffe74e5752285fd4acb9d96f05c105d57812e07:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -4.21,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788723448.0
+   },
+   "0xedcbdfd91464331e2aaee2ed3ea4e8be68deb67aaed5d462bd7b0f575621a664:0": {
+    "qty": 529.2125,
+    "cost": 248.71,
+    "avg_cost": 0.469959,
+    "realized": 1.64,
+    "fees": -1.64,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788729562.0
+   },
+   "0xedcbdfd91464331e2aaee2ed3ea4e8be68deb67aaed5d462bd7b0f575621a664:1": {
+    "qty": 32.0975,
+    "cost": 11.23,
+    "avg_cost": 0.35,
+    "realized": 0.09,
+    "fees": -0.09,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788736927.0
+   },
+   "0xee92165c9a9f2da8af095a37b088738570d1b1d10e72f39263ff6a7aa805f6af:1": {
+    "qty": 390.625,
+    "cost": 222.19,
+    "avg_cost": 0.568802,
+    "realized": 1.17,
+    "fees": -1.17,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788769362.0
+   },
+   "0xee92165c9a9f2da8af095a37b088738570d1b1d10e72f39263ff6a7aa805f6af:0": {
+    "qty": 157.245,
+    "cost": 46.48,
+    "avg_cost": 0.295575,
+    "realized": 0.41,
+    "fees": -0.41,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788770208.0
+   },
+   "0x72e6f4325ce193a0dfc3b27e00b8c300afeb2f435ae123592ad89963e7675eba:1": {
+    "qty": 429.332,
+    "cost": 244.72,
+    "avg_cost": 0.57,
+    "realized": 1.32,
+    "fees": -1.32,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788771165.0
+   },
+   "0x602077c9dbb66c185c801150c107bf625cbc0fba29f4e254aa984f597fadc61a:1": {
+    "qty": 10.4225,
+    "cost": 6.67,
+    "avg_cost": 0.64,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788772687.0
+   },
+   "0x602077c9dbb66c185c801150c107bf625cbc0fba29f4e254aa984f597fadc61a:0": {
+    "qty": 10.4225,
+    "cost": 2.19,
+    "avg_cost": 0.21,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788772887.0
+   },
+   "0xf675821af87f3466e14ef8402d5bc1f3d06e60f2a1d83f97e5cde62f65b01272:0": {
+    "qty": 20.715,
+    "cost": 7.39,
+    "avg_cost": 0.356905,
+    "realized": -1.83,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788776815.0
+   },
+   "0xf675821af87f3466e14ef8402d5bc1f3d06e60f2a1d83f97e5cde62f65b01272:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 7.94,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788777756.0
+   },
+   "0x67ac7e1f7c87f7ce002761b3b150a805383ddc75b33ce565373579e6afe2ffc0:1": {
+    "qty": 27.405,
+    "cost": 12.88,
+    "avg_cost": 0.47,
+    "realized": 0.09,
+    "fees": -0.09,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788779800.0
+   },
+   "0x020f4776d946879440ed85d908924fb12158e2d2492c9d5e66881b73c3f5b5ec:0": {
+    "qty": 137.9178,
+    "cost": 52.69,
+    "avg_cost": 0.38204,
+    "realized": -22.83,
+    "fees": -1.79,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788780462.0
+   },
+   "0x020f4776d946879440ed85d908924fb12158e2d2492c9d5e66881b73c3f5b5ec:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.14,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788781195.0
+   },
+   "0x67ac7e1f7c87f7ce002761b3b150a805383ddc75b33ce565373579e6afe2ffc0:0": {
+    "qty": 22.775,
+    "cost": 11.69,
+    "avg_cost": 0.51337,
+    "realized": -0.26,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788782064.0
+   },
+   "0x9184c18f441bd3bafdecc60bd1b657b2feaad30cb0541647d12eda46ecb44436:1": {
+    "qty": 9.75,
+    "cost": 3.51,
+    "avg_cost": 0.36,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788785110.0
+   },
+   "0x9184c18f441bd3bafdecc60bd1b657b2feaad30cb0541647d12eda46ecb44436:0": {
+    "qty": 5.7975,
+    "cost": 0.24,
+    "avg_cost": 0.041,
+    "realized": -3.18,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788788595.0
+   },
+   "0xdd62fa6916876aba341efd7ca0ec1410ee6e7f221f9824508411ee3d3dc30036:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 337.25,
+    "fees": -1.76,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788797263.0
+   },
+   "0x89239acef4899b6ac39c22064086f08fb565dab44d69b965bd22da7dd43b06a2:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 145.29,
+    "fees": -1.14,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788798651.0
+   },
+   "0x89239acef4899b6ac39c22064086f08fb565dab44d69b965bd22da7dd43b06a2:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -21.62,
+    "fees": -16.01,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788802104.0
+   },
+   "0x967ae947189baf7b87b23854bcc33d6a599dfdf8ca1887a90a77af4540b26a01:0": {
+    "qty": 361.3436,
+    "cost": 143.75,
+    "avg_cost": 0.397824,
+    "realized": -4.37,
+    "fees": -2.54,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788804048.0
+   },
+   "0xb066186363189737b36a72507e454ccb7242fdf661af71ba62ca3cea029dc416:0": {
+    "qty": 414.34,
+    "cost": 182.31,
+    "avg_cost": 0.44,
+    "realized": 1.28,
+    "fees": -1.28,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788804781.0
+   },
+   "0x9940aa8965a2c3d7d4304e8f3d69c8e4a1b2dec67047c7e2ba865550ba15756a:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 197.8,
+    "fees": -1.37,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788805852.0
+   },
+   "0xaf82511ef9176344159bff32be55276c7f1654d9149e0a5708be2c3c3daca4c0:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -24.22,
+    "fees": -0.12,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788806497.0
+   },
+   "0x9940aa8965a2c3d7d4304e8f3d69c8e4a1b2dec67047c7e2ba865550ba15756a:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -148.39,
+    "fees": -1.1,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788806827.0
+   },
+   "0xeaa0550995d0dc84586a8659919533c0db2f3d42e966db4ebf20f6968eaa5ce2:1": {
+    "qty": 36.7825,
+    "cost": 19.86,
+    "avg_cost": 0.54,
+    "realized": 0.11,
+    "fees": -0.11,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788808170.0
+   },
+   "0x7c7fd9b839fa30083043999ae88003737e9c6bb9602c23614a279a3669c9980e:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.61,
+    "fees": 0.0,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788809386.0
+   },
+   "0x72e6f4325ce193a0dfc3b27e00b8c300afeb2f435ae123592ad89963e7675eba:0": {
+    "qty": 130.372,
+    "cost": 12.91,
+    "avg_cost": 0.099033,
+    "realized": -35.33,
+    "fees": -4.71,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788812266.0
+   },
+   "0x44810d86d3133ad49a36e76b33697b60426f3c18ca0d4a135dc6ffcce7e7df41:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -64.09,
+    "fees": -0.4,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788813262.0
+   },
+   "0x7d1327ce9bfc767069afe7f9b98a21a11ea812c5a92c5d6de20f90e912ec8b9f:1": {
+    "qty": 283.6525,
+    "cost": 141.83,
+    "avg_cost": 0.5,
+    "realized": 0.89,
+    "fees": -0.89,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788815352.0
+   },
+   "0xad17a72950a17a385ff01e4c80d802aec13e963aa6feb9d8ec6ddaed8b9ed70d:0": {
+    "qty": 403.2258,
+    "cost": 228.62,
+    "avg_cost": 0.566983,
+    "realized": 1.24,
+    "fees": -1.24,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788837937.0
+   },
+   "0x2d51dbc4c959571fe37d90aba0d5f924333b9c9856f0c3a5d00484f771be77fb:1": {
+    "qty": 3.75,
+    "cost": 2.36,
+    "avg_cost": 0.63,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788839818.0
+   },
+   "0x8ca6b6bfd00f3a2759e051c55bc5f69a62286f838192ca3c985ec692a177f7a0:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -245.62,
+    "fees": -1.11,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788846175.0
+   },
+   "0x8ca6b6bfd00f3a2759e051c55bc5f69a62286f838192ca3c985ec692a177f7a0:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 90.42,
+    "fees": -1.32,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788847086.0
+   },
+   "0x1d38e3a06c23db44490aca18189a21da8996131054dd99e07c780195bc3ca5d4:0": {
+    "qty": 12.69,
+    "cost": 2.28,
+    "avg_cost": 0.18,
+    "realized": -9.07,
+    "fees": -0.2,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788860151.0
+   },
+   "0x1d38e3a06c23db44490aca18189a21da8996131054dd99e07c780195bc3ca5d4:1": {
+    "qty": 12.69,
+    "cost": 6.98,
+    "avg_cost": 0.55,
+    "realized": 0.04,
+    "fees": -0.04,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788867660.0
+   },
+   "0xb7963ff9e89ca72bdd35b06060622b4ad932dbacc67e874130cea4db4b537022:0": {
+    "qty": 41.75,
+    "cost": 16.7,
+    "avg_cost": 0.4,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788871780.0
+   },
+   "0x726e25c3283dff77dfe54ed33ec67c8b2444cab5fccd7d245b5eb77aeeddda86:1": {
+    "qty": 116.525,
+    "cost": 45.01,
+    "avg_cost": 0.386282,
+    "realized": 0.77,
+    "fees": -0.4,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788878757.0
+   },
+   "0x8f5c1071797e554e634cb3faf86c4b0f643303d7e9d5c608cb10b163c7aebfec:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -130.42,
+    "fees": -2.56,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788879991.0
+   },
+   "0x726e25c3283dff77dfe54ed33ec67c8b2444cab5fccd7d245b5eb77aeeddda86:0": {
+    "qty": 74.3375,
+    "cost": 34.04,
+    "avg_cost": 0.457938,
+    "realized": -8.21,
+    "fees": -0.87,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788882912.0
+   },
+   "0x04c44b9f10b87a88259f067e6a439d8dbea98d01bacbc49a45ba857cc3ce35c6:0": {
+    "qty": 12.565,
+    "cost": 4.58,
+    "avg_cost": 0.364739,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788891736.0
+   },
+   "0x04c44b9f10b87a88259f067e6a439d8dbea98d01bacbc49a45ba857cc3ce35c6:1": {
+    "qty": 11.1025,
+    "cost": 6.54,
+    "avg_cost": 0.589395,
+    "realized": 0.05,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788892140.0
+   },
+   "0x2ac334fb74e5e48b8f6a4a561c902c2521b5b40792fb968f3a1899793ca6c003:1": {
+    "qty": 166.22,
+    "cost": 54.85,
+    "avg_cost": 0.33,
+    "realized": 0.46,
+    "fees": -0.46,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788894889.0
+   },
+   "0x2ac334fb74e5e48b8f6a4a561c902c2521b5b40792fb968f3a1899793ca6c003:0": {
+    "qty": 65.11,
+    "cost": 2.73,
+    "avg_cost": 0.041924,
+    "realized": -0.9,
+    "fees": -0.1,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788894891.0
+   },
+   "0xd2c4d57bce81d654297cc7a0ec33f50ff71ff53c1b667491252b45e32a3531e9:0": {
+    "qty": 451.3333,
+    "cost": 171.51,
+    "avg_cost": 0.38,
+    "realized": -2.26,
+    "fees": -1.71,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788901840.0
+   },
+   "0xd2c4d57bce81d654297cc7a0ec33f50ff71ff53c1b667491252b45e32a3531e9:1": {
+    "qty": 284.1325,
+    "cost": 78.19,
+    "avg_cost": 0.275204,
+    "realized": -56.5,
+    "fees": -3.48,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788907983.0
+   },
+   "0xdc370ca5499cf6ab3b48b83bffd78da9280fe73dc5ab404ed4effb177ffa911f:1": {
+    "qty": 581.3953,
+    "cost": 238.37,
+    "avg_cost": 0.41,
+    "realized": 1.76,
+    "fees": -1.76,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788908400.0
+   },
+   "0x1a97f4fc74ba4ad3aa340a6d209b1d7ea56ab1521a6c6c0f0f5d67c60274725f:1": {
+    "qty": 423.7288,
+    "cost": 224.58,
+    "avg_cost": 0.53,
+    "realized": 1.32,
+    "fees": -1.32,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788908848.0
+   },
+   "0xb089875db26af36779a84f9b352b11e9203cdd678220601533f2e73ce7dcfcdc:1": {
+    "qty": 429.332,
+    "cost": 244.72,
+    "avg_cost": 0.57,
+    "realized": 1.32,
+    "fees": -1.32,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788909244.0
+   },
+   "0x7fba9c9110a439547dead13333ed56f1ecba13fc0cdb0b7d1ffe91a8c3604645:1": {
+    "qty": 1.7225,
+    "cost": 0.71,
+    "avg_cost": 0.41,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788925720.0
+   },
+   "0xb0e18b89ed798235acb695d9203bd8bde35047067d2809e02a7bcb5a547fdca5:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -103.0,
+    "fees": -0.55,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788929200.0
+   },
+   "0x46aebe9c45168faef7fb029932e438b16949a0e8792d9e4cf32e2b8f490fefad:0": {
+    "qty": 83.355,
+    "cost": 35.77,
+    "avg_cost": 0.429108,
+    "realized": 0.25,
+    "fees": -0.25,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788947016.0
+   },
+   "0xbb47eaf601430170a289fc18f48b803df2fe01f70f5f8f8aa225a85cc62dad08:0": {
+    "qty": 22.7,
+    "cost": 8.87,
+    "avg_cost": 0.390899,
+    "realized": 0.06,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788949885.0
+   },
+   "0xbb47eaf601430170a289fc18f48b803df2fe01f70f5f8f8aa225a85cc62dad08:1": {
+    "qty": 5.6025,
+    "cost": 2.42,
+    "avg_cost": 0.432771,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788950409.0
+   },
+   "0xd6364a6161cc85d9ae01dfcff519a29eb31a1a1177fdb78a81e26a6e7e5948f5:0": {
+    "qty": 567.3578,
+    "cost": 221.27,
+    "avg_cost": 0.39,
+    "realized": -14.5,
+    "fees": -1.91,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788951012.0
+   },
+   "0xc26844f4dfce31f73fe505813bc2061ea0545cfdc09cab3e5c7e03a12957e3b9:0": {
+    "qty": 26.05,
+    "cost": 11.98,
+    "avg_cost": 0.46,
+    "realized": 0.08,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788953118.0
+   },
+   "0xb983ceee02eb40f67a874c11d36f26d4685f63fc5890a31b1195cc04f04a1af3:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -99.74,
+    "fees": -0.73,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788953400.0
+   },
+   "0xfb2c5775505e58f692ca7449e1c9e27da5a12054fd310b619a401c92aa4a95af:1": {
+    "qty": 21.5,
+    "cost": 8.26,
+    "avg_cost": 0.38407,
+    "realized": 0.06,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788956565.0
+   },
+   "0xfb2c5775505e58f692ca7449e1c9e27da5a12054fd310b619a401c92aa4a95af:0": {
+    "qty": 21.5,
+    "cost": 10.75,
+    "avg_cost": 0.5,
+    "realized": 0.07,
+    "fees": -0.07,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788958270.0
+   },
+   "0x181735be5d83f66fad2a8f128fc2fa8cb2f75c0d6f4d46429fa13fe8a2da3b1f:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -12.42,
+    "fees": -0.08,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788958861.0
+   },
+   "0xd325cd3ac39726589e00f494f097592a2900c798819c92426334fb8b9202bba9:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -52.8,
+    "fees": -0.33,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788961113.0
+   },
+   "0xa546ac0a1d32cebaccb86eed72d9cb8552f3bcd4ed9b8379ef8d0ae4b0822f8a:0": {
+    "qty": 5.4925,
+    "cost": 3.08,
+    "avg_cost": 0.56,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788967086.0
+   },
+   "0xa546ac0a1d32cebaccb86eed72d9cb8552f3bcd4ed9b8379ef8d0ae4b0822f8a:1": {
+    "qty": 5.4925,
+    "cost": 0.93,
+    "avg_cost": 0.17,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788967962.0
+   },
+   "0x8f86a0c001883e12930c49caedb94025136528e46181961f88e2c680403645f0:1": {
+    "qty": 357.1,
+    "cost": 232.12,
+    "avg_cost": 0.65,
+    "realized": 1.02,
+    "fees": -1.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788970389.0
+   },
+   "0x8f86a0c001883e12930c49caedb94025136528e46181961f88e2c680403645f0:0": {
+    "qty": 353.675,
+    "cost": 108.1,
+    "avg_cost": 0.305645,
+    "realized": 1.98,
+    "fees": -1.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788970453.0
+   },
+   "0x106e3f7da5aa9a9fd19bec1a56f60a46cf85bf371afc4206683e698c84feda78:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 12.52,
+    "fees": -0.09,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788979557.0
+   },
+   "0xd9d9bee7c50fba34bc0d606f270e3cbafa7a3b96427b7614ea05814676534f46:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -3.3,
+    "fees": -0.16,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788982599.0
+   },
+   "0x04aa0aedfc2efcab7c9812925608ca3f517cf60a56ccd95c64ece2f71657df02:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -13.52,
+    "fees": -0.1,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1788982842.0
+   },
+   "0x32bea9571a8f43a4931a7c0b17b4e86c594ad5ecae66635f1d34dbbf8e7999b6:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.24,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788991629.0
+   },
+   "0x2b9c37f20ac18807a1b3f6ed5f761edf3b449f4ad54548a48cf3263bddc61011:1": {
+    "qty": 1.5675,
+    "cost": 0.88,
+    "avg_cost": 0.56,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788994708.0
+   },
+   "0xc8197c6004e2ff2fed63b4c68f24681c97dd494f508a5944f8192761fa74b81e:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 15.33,
+    "fees": -0.08,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1788995403.0
+   },
+   "0x23253b25214723c1fc043dad6cd770594b18ccc8f3612a7e3e8598353b0e048a:0": {
+    "qty": 45.0,
+    "cost": 26.1,
+    "avg_cost": 0.58,
+    "realized": 0.14,
+    "fees": -0.14,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1788998959.0
+   },
+   "0xa464feee5c71b34c9a36ef36fd3ae0ba81424bc21fd763334b79b2edec7a3979:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 117.33,
+    "fees": -0.87,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789001469.0
+   },
+   "0xc670cc75456e4d76006c77d5196ad39bbf24721cadc21a7d151c8ed436bede34:0": {
+    "qty": 5.555,
+    "cost": 3.06,
+    "avg_cost": 0.55,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789002669.0
+   },
+   "0xc670cc75456e4d76006c77d5196ad39bbf24721cadc21a7d151c8ed436bede34:1": {
+    "qty": 5.555,
+    "cost": 1.89,
+    "avg_cost": 0.34,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789005709.0
+   },
+   "0x57549197e88771d475fc158b00befa2f7749036deda260172a4a98914e842bd8:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 19.45,
+    "fees": -0.13,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789006878.0
+   },
+   "0x8bef011641148017514266c50403f5c169964cc9cf5fea82212f85c95a99eb47:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -7.56,
+    "fees": -0.1,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789008634.0
+   },
+   "0x19a338b0a04ca46001b41c2c9c89cc21165b0cfe498c5c035eaf0a6327d3c204:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 2.98,
+    "fees": -0.02,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789011688.0
+   },
+   "0x57549197e88771d475fc158b00befa2f7749036deda260172a4a98914e842bd8:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -9.49,
+    "fees": -0.06,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789019715.0
+   },
+   "0x5c16abbc419987ba4872561d5d816a8aac330762c08d31db1f665048dbc94a8f:0": {
+    "qty": 6.3,
+    "cost": 3.91,
+    "avg_cost": 0.62,
+    "realized": 0.39,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789049895.0
+   },
+   "0x5c16abbc419987ba4872561d5d816a8aac330762c08d31db1f665048dbc94a8f:1": {
+    "qty": 6.3,
+    "cost": 2.02,
+    "avg_cost": 0.32,
+    "realized": 1.32,
+    "fees": -0.1,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789050397.0
+   },
+   "0xf08ac70b296d3372945e02343b7e8384b860f1712411001e39b97fa2accfbe7b:1": {
+    "qty": 1.25,
+    "cost": 0.76,
+    "avg_cost": 0.61,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789052670.0
+   },
+   "0x84ef81fd9adc6d7fc351fbf20de0314b304ce5015cb8edf3b6c3047ae7fdedc2:0": {
+    "qty": 484.888,
+    "cost": 213.35,
+    "avg_cost": 0.44,
+    "realized": 1.87,
+    "fees": -1.92,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789066546.0
+   },
+   "0x2713a79b509edb946dae6a45b86c56d748c65fc8f4286473902f2888d5f56f6f:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 64.9,
+    "fees": -0.38,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789068090.0
+   },
+   "0xb5d26aa7e0e83550a7dc4ef677111d8ee840de04142cbe91577bf842bccb0ac1:1": {
+    "qty": 0.5125,
+    "cost": 0.32,
+    "avg_cost": 0.62,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789069347.0
+   },
+   "0xb5d26aa7e0e83550a7dc4ef677111d8ee840de04142cbe91577bf842bccb0ac1:0": {
+    "qty": 0.5125,
+    "cost": 0.17,
+    "avg_cost": 0.33,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789070841.0
+   },
+   "0x98839b3f55fe1c5a42fc3d250fc45f7810e003d7f0666b17c5587ca4ffdb0a01:1": {
+    "qty": 2.4225,
+    "cost": 1.07,
+    "avg_cost": 0.44,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789087651.0
+   },
+   "0xc27fb580e4d3953adf120010a569f61be194a41842ece30bacdb175f0cc8745d:1": {
+    "qty": 476.0817,
+    "cost": 228.52,
+    "avg_cost": 0.48,
+    "realized": -5.86,
+    "fees": -1.64,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789110546.0
+   },
+   "0x2d6a13f2f5507e8a6ab0c4450f727bf57729a8390ab6cbb2f0940cf77e5c89d7:1": {
+    "qty": 16.3775,
+    "cost": 10.32,
+    "avg_cost": 0.63,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789118832.0
+   },
+   "0x2d6a13f2f5507e8a6ab0c4450f727bf57729a8390ab6cbb2f0940cf77e5c89d7:0": {
+    "qty": 1.25,
+    "cost": 0.25,
+    "avg_cost": 0.2,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789119415.0
+   },
+   "0x08ab4bac8534d6f1fb914ee5147d43c6663e3412fae3cf3e1eb6e4bd52015c72:0": {
+    "qty": 201.1925,
+    "cost": 90.93,
+    "avg_cost": 0.451933,
+    "realized": -1.6,
+    "fees": -0.92,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789124653.0
+   },
+   "0x1108fae32d871766e051f78d3c7f117a5f61eb8b810e031a3f58742ae98e9c02:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 38.88,
+    "fees": -0.26,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789137798.0
+   },
+   "0x5574fbec5a3a2ad323c93013118147a08eafdb68488926b771569eb77cd168da:1": {
+    "qty": 0.4725,
+    "cost": 0.22,
+    "avg_cost": 0.47,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789171224.0
+   },
+   "0xc1e0abe9d8cdc6cba9507cc3f31e728d77fc53f2f92c7e6273c9d2bebbe1e52f:1": {
+    "qty": 158.93,
+    "cost": 100.13,
+    "avg_cost": 0.63,
+    "realized": 0.46,
+    "fees": -0.46,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789186891.0
+   },
+   "0x1c31b3d1bfc1927dee20586ca45257d48795c761b2a4601d727479327e883430:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -241.04,
+    "fees": -1.79,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789186960.0
+   },
+   "0x5e00bf6bfb389b22dd308bc44ceac07c8604f8edaf45b00b71dd984faa6f00a4:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -74.19,
+    "fees": -0.57,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789188088.0
+   },
+   "0x82ae92f614bb8104b6c0c777b50b34c075fbebf730b1fc5a03fc2c5474ca3116:1": {
+    "qty": 312.34,
+    "cost": 156.17,
+    "avg_cost": 0.5,
+    "realized": 0.98,
+    "fees": -0.98,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789194925.0
+   },
+   "0x3bfb437b5761e5fb341b474ce3710f39701e4f05626508857d9605e97deec649:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 18.26,
+    "fees": -0.15,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789195240.0
+   },
+   "0xadcb2ce0dc8334b52c4240be5aed15a1b28996212acf237c32d34d66fb63fba3:0": {
+    "qty": 28.6625,
+    "cost": 12.61,
+    "avg_cost": 0.44,
+    "realized": 0.09,
+    "fees": -0.09,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789196121.0
+   },
+   "0x3bfb437b5761e5fb341b474ce3710f39701e4f05626508857d9605e97deec649:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 1.02,
+    "fees": -0.83,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789197121.0
+   },
+   "0x39d73519e991f138dafdcadc8e9d0ad4976b53d95955c1b0eb09bfb098826e5e:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -2.23,
+    "fees": -0.02,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789198375.0
+   },
+   "0x39d73519e991f138dafdcadc8e9d0ad4976b53d95955c1b0eb09bfb098826e5e:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 2.6,
+    "fees": -0.02,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789198375.0
+   },
+   "0x82ae92f614bb8104b6c0c777b50b34c075fbebf730b1fc5a03fc2c5474ca3116:0": {
+    "qty": 29.015,
+    "cost": 6.38,
+    "avg_cost": 0.22,
+    "realized": 0.06,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789200102.0
+   },
+   "0x9e8a350da1b54cb688cdb8931739203ff6505bc11b66517e1f973edc27455cd6:0": {
+    "qty": 84.785,
+    "cost": 35.28,
+    "avg_cost": 0.416137,
+    "realized": 0.25,
+    "fees": -0.25,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789207801.0
+   },
+   "0x9e8a350da1b54cb688cdb8931739203ff6505bc11b66517e1f973edc27455cd6:1": {
+    "qty": 48.9775,
+    "cost": 9.3,
+    "avg_cost": 0.189801,
+    "realized": 0.09,
+    "fees": -0.09,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789209183.0
+   },
+   "0x159719f599ca19d5d99b71e552e635c2a39ea3eeaa7e1a627ff3292f18205e70:0": {
+    "qty": 43.0175,
+    "cost": 21.08,
+    "avg_cost": 0.49,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789211661.0
+   },
+   "0xa3dedbe2ba08c1465531ba5e5ac83f5b8da827c3a82ba49e62545c49b278e11d:0": {
+    "qty": 43.63,
+    "cost": 18.32,
+    "avg_cost": 0.42,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789214704.0
+   },
+   "0xa3dedbe2ba08c1465531ba5e5ac83f5b8da827c3a82ba49e62545c49b278e11d:1": {
+    "qty": 43.63,
+    "cost": 24.87,
+    "avg_cost": 0.57,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789214862.0
+   },
+   "0xf06002721ef649aef2b5c12e09fe24c26f811387b1aec6a7cb9c4ab2fc4149b4:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 245.42,
+    "fees": -1.52,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789218660.0
+   },
+   "0xc1e0abe9d8cdc6cba9507cc3f31e728d77fc53f2f92c7e6273c9d2bebbe1e52f:0": {
+    "qty": 137.01,
+    "cost": 21.22,
+    "avg_cost": 0.154899,
+    "realized": 0.18,
+    "fees": -0.18,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789221898.0
+   },
+   "0x49e8c420dac8db99693cadbe17eb67a1162f1e4e119bb1d949263c92a911939a:0": {
+    "qty": 73.715,
+    "cost": 23.37,
+    "avg_cost": 0.317017,
+    "realized": 0.17,
+    "fees": -0.17,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789224079.0
+   },
+   "0x49e8c420dac8db99693cadbe17eb67a1162f1e4e119bb1d949263c92a911939a:1": {
+    "qty": 12.8325,
+    "cost": 5.87,
+    "avg_cost": 0.457502,
+    "realized": 0.04,
+    "fees": -0.04,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789224853.0
+   },
+   "0xb9bd43060fd883c4965a61df6ae632bd2800da66664277c32e29d28ba01f9e36:0": {
+    "qty": 98.865,
+    "cost": 42.51,
+    "avg_cost": 0.43,
+    "realized": 0.3,
+    "fees": -0.3,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789229268.0
+   },
+   "0xb9bd43060fd883c4965a61df6ae632bd2800da66664277c32e29d28ba01f9e36:1": {
+    "qty": 11.53,
+    "cost": 3.32,
+    "avg_cost": 0.287981,
+    "realized": 16.34,
+    "fees": -0.52,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789229958.0
+   },
+   "0x831eb7388cc8eebab11a93b5996f62dd8091eb2eda8cb490391b4ccefbe31a9f:0": {
+    "qty": 83.6325,
+    "cost": 49.34,
+    "avg_cost": 0.59,
+    "realized": 0.25,
+    "fees": -0.25,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789236048.0
+   },
+   "0x046b53e0bb62404bebe056caa644e7d68e99538083ca4909d20e83d2e6e78ab6:0": {
+    "qty": 43.77,
+    "cost": 17.61,
+    "avg_cost": 0.402311,
+    "realized": 0.12,
+    "fees": -0.12,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789236351.0
+   },
+   "0x9a335f49ebe356247a1ba8751f493f78f12ac22037efa93c8fa18b2cfcc568d9:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 21.52,
+    "fees": -0.16,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789239046.0
+   },
+   "0x9a335f49ebe356247a1ba8751f493f78f12ac22037efa93c8fa18b2cfcc568d9:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -6.83,
+    "fees": -0.05,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789239798.0
+   },
+   "0x01bbd50250cc3e6271cc1bef07aa2c366df7e6256b24e1a69e8e0be812d91b5d:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -16.58,
+    "fees": -0.09,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789259257.0
+   },
+   "0x96af0dafca46d220b8950b15ce57368135b5cbf9cb0389083a8ed4577a3d2b86:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -12.62,
+    "fees": -0.08,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789262589.0
+   },
+   "0x144e22d06b74e1a93dbbf40c458a4366e46cf6554e15a27649d286947634d1dc:1": {
+    "qty": 0.8975,
+    "cost": 0.57,
+    "avg_cost": 0.64,
+    "realized": -0.27,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789287918.0
+   },
+   "0x9cb60cf64e1bfa96116c8bf169c9c51a084a1608fd585ffa9b19f515679c32e3:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 26.11,
+    "fees": -0.2,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789291498.0
+   },
+   "0x944c96561d45fc122e70d2b7b48e124bfbdc854d48c6b6ecbed38648de116831:0": {
+    "qty": 446.4286,
+    "cost": 250.0,
+    "avg_cost": 0.56,
+    "realized": 1.37,
+    "fees": -1.37,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789294900.0
+   },
+   "0xe62ff530fc27b46ab55e6b8b4ef05dab56ef360d722fb582f5e09ac8117fe19e:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 61.95,
+    "fees": -0.45,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789295965.0
+   },
+   "0x590181a7c2addf20e87782c6c166d1ffd651259291082aac4b207ec521bb6caa:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 119.86,
+    "fees": -0.72,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789297042.0
+   },
+   "0xc76710e372080cf2494469ded2468d1bc7fc4d19409d19d977c1f4549df42f04:1": {
+    "qty": 6.25,
+    "cost": 3.69,
+    "avg_cost": 0.591,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789298430.0
+   },
+   "0x7e684fa0bc15360c6499d4b4a7555a4985c0d790b663ba98d4ffe6dab2a089fa:1": {
+    "qty": 452.5706,
+    "cost": 245.67,
+    "avg_cost": 0.542843,
+    "realized": 1.41,
+    "fees": -1.41,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789302966.0
+   },
+   "0x0a6558a22f3c0b44bc444d9af811f46d0b5ec756c0dcc208ce2d95351dd107f0:1": {
+    "qty": 33.3075,
+    "cost": 13.18,
+    "avg_cost": 0.395639,
+    "realized": 0.09,
+    "fees": -0.09,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789303119.0
+   },
+   "0xdb2351d1071355f8a8a49a958809fdd17b4c6004a5d9af2054bf1f92c7ac23a7:0": {
+    "qty": 113.0625,
+    "cost": 50.88,
+    "avg_cost": 0.45,
+    "realized": 0.35,
+    "fees": -0.35,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789303642.0
+   },
+   "0x0a6558a22f3c0b44bc444d9af811f46d0b5ec756c0dcc208ce2d95351dd107f0:0": {
+    "qty": 22.57,
+    "cost": 5.51,
+    "avg_cost": 0.244025,
+    "realized": 0.04,
+    "fees": -0.04,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789303683.0
+   },
+   "0x944c96561d45fc122e70d2b7b48e124bfbdc854d48c6b6ecbed38648de116831:1": {
+    "qty": 76.0125,
+    "cost": 21.28,
+    "avg_cost": 0.28,
+    "realized": 0.19,
+    "fees": -0.19,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789304446.0
+   },
+   "0x11f1c770db9218ae4562f29b849d6df818ac3d5c6f674f32d8abace68c66d8d4:0": {
+    "qty": 507.6142,
+    "cost": 243.65,
+    "avg_cost": 0.48,
+    "realized": 1.58,
+    "fees": -1.58,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789305367.0
+   },
+   "0x1dd891c5bde413e3100e4057039b5fb7f4c37977052c4e543b62d3dc727e50c2:0": {
+    "qty": 552.7305,
+    "cost": 243.2,
+    "avg_cost": 0.44,
+    "realized": 1.7,
+    "fees": -1.7,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789307943.0
+   },
+   "0x7b3fc27a180c8cf48356a0050253dd4b13240f321f0f0608a2eeba3fa537fbc3:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -4.52,
+    "fees": -0.03,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789310041.0
+   },
+   "0x34d4b95e01e0d9273b6a6b67ff7ce09dbe6898b711a9f564964bb77b8acb1ac3:0": {
+    "qty": 21.97,
+    "cost": 7.96,
+    "avg_cost": 0.362382,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789311957.0
+   },
+   "0x34d4b95e01e0d9273b6a6b67ff7ce09dbe6898b711a9f564964bb77b8acb1ac3:1": {
+    "qty": 6.4475,
+    "cost": 1.57,
+    "avg_cost": 0.244,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789315872.0
+   },
+   "0x3c36ff88d8a5c66e985f4f33a5031daacc4a47b6c96b23ce959a2e579f02a6fa:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 113.96,
+    "fees": -0.72,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789316167.0
+   },
+   "0xfb9af4ef2f96e0484a90c708e292836603be61c63b8bb9e0a12c4acf55fb8898:0": {
+    "qty": 429.332,
+    "cost": 244.72,
+    "avg_cost": 0.57,
+    "realized": 1.32,
+    "fees": -1.32,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789316361.0
+   },
+   "0x8838fb5db18cef53d55d94cc0c6b326b420d95f96f78877cf6aa8e164fe7bc7b:0": {
+    "qty": 15.3825,
+    "cost": 5.12,
+    "avg_cost": 0.33256,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789319418.0
+   },
+   "0x8838fb5db18cef53d55d94cc0c6b326b420d95f96f78877cf6aa8e164fe7bc7b:1": {
+    "qty": 8.08,
+    "cost": 4.33,
+    "avg_cost": 0.535396,
+    "realized": -2.1,
+    "fees": -0.04,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789319500.0
+   },
+   "0xbac7c64642bca263638e32edf1c5bb7e57f001e3cbc2696ac522e513519086ee:0": {
+    "qty": 4.1475,
+    "cost": 1.7,
+    "avg_cost": 0.41,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789320160.0
+   },
+   "0xfb9af4ef2f96e0484a90c708e292836603be61c63b8bb9e0a12c4acf55fb8898:1": {
+    "qty": 1.0,
+    "cost": 0.42,
+    "avg_cost": 0.42,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789323685.0
+   },
+   "0x76db574348dc89694e330b106c8fc9b5225f52b7f81198bd9042325efc9ae025:1": {
+    "qty": 3.2875,
+    "cost": 2.07,
+    "avg_cost": 0.63,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789331631.0
+   },
+   "0x76db574348dc89694e330b106c8fc9b5225f52b7f81198bd9042325efc9ae025:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 0.39,
+    "fees": -0.06,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789332327.0
+   },
+   "0xb662e1262c74dcefabe56d1da4c7e88eb274d6b3ef71eabac26cf9aac87f4933:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -39.94,
+    "fees": -0.25,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789333912.0
+   },
+   "0x1dd891c5bde413e3100e4057039b5fb7f4c37977052c4e543b62d3dc727e50c2:1": {
+    "qty": 10.925,
+    "cost": 4.81,
+    "avg_cost": 0.44,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789333972.0
+   },
+   "0xf3e5dfd1f1897ab978e9c5250eb1d877dc956c3d8a32150b6e608e942f031709:1": {
+    "qty": 0.555,
+    "cost": 0.31,
+    "avg_cost": 0.55,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789334398.0
+   },
+   "0xb662e1262c74dcefabe56d1da4c7e88eb274d6b3ef71eabac26cf9aac87f4933:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 12.04,
+    "fees": -0.06,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789334497.0
+   },
+   "0xaaf72709571c24cb40af4894e5ed061c5d11fbaca16cd0d1ecd648aa80451e7d:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.31,
+    "fees": 0.0,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789338990.0
+   },
+   "0xd67580b3f2833230f406b227c9992868cc39c129044483a9bed26d75f937e850:0": {
+    "qty": 500.0,
+    "cost": 250.0,
+    "avg_cost": 0.5,
+    "realized": 1.56,
+    "fees": -1.56,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789343343.0
+   },
+   "0x1e9e6d9956b360e360ec43f69dc97a7ed765c9631bc0cd50a80fce099bf2c626:0": {
+    "qty": 106.89,
+    "cost": 45.97,
+    "avg_cost": 0.430033,
+    "realized": 0.33,
+    "fees": -0.33,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789353243.0
+   },
+   "0x2f847eed6e6447b3d99ec3298becbb66b3e553ba87011df78974fad358d20961:1": {
+    "qty": 565.2272,
+    "cost": 243.05,
+    "avg_cost": 0.43,
+    "realized": 1.73,
+    "fees": -1.73,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789363195.0
+   },
+   "0xe5aeb84ebe22a3abeb1f4ea2b50ec4281b34f1263f2e660fb7b21e5108e64d9e:1": {
+    "qty": 144.2825,
+    "cost": 45.91,
+    "avg_cost": 0.318168,
+    "realized": 39.22,
+    "fees": -4.75,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789389348.0
+   },
+   "0xe5aeb84ebe22a3abeb1f4ea2b50ec4281b34f1263f2e660fb7b21e5108e64d9e:0": {
+    "qty": 144.2825,
+    "cost": 59.16,
+    "avg_cost": 0.41,
+    "realized": 12.65,
+    "fees": -1.32,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789397218.0
+   },
+   "0x0b080a43a8b349c3cb82eea3e3fb9a727f86cac66871e0567162752e1361cc67:0": {
+    "qty": 4.25,
+    "cost": 2.38,
+    "avg_cost": 0.56,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789399231.0
+   },
+   "0xfdd3444a586eff700a0f14923bef7f08e268d267b2611d7b4f1e324fd1368c1e:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.2,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789412671.0
+   },
+   "0x6bbbf9b6fcbca4306d6d6c18ccff96b52fe201c6d911d94e8538ecaa87d96d43:1": {
+    "qty": 0.52,
+    "cost": 0.27,
+    "avg_cost": 0.52,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789427199.0
+   },
+   "0xcb1259138418ba68dc6788c9826d285144b362d41d0d6eb04861873a22029225:0": {
+    "qty": 460.8295,
+    "cost": 244.24,
+    "avg_cost": 0.53,
+    "realized": 1.43,
+    "fees": -1.43,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789427707.0
+   },
+   "0x793089de36be061fcbcacae7257d582e6d603836efd521cd644ebf5b815c774b:0": {
+    "qty": 54.875,
+    "cost": 24.05,
+    "avg_cost": 0.438178,
+    "realized": 0.17,
+    "fees": -0.17,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789428769.0
+   },
+   "0xd75778a9d002d54d49a258f0f516b0f9e85bd950638650a808260e66b00e20fd:1": {
+    "qty": 52.77,
+    "cost": 28.87,
+    "avg_cost": 0.547106,
+    "realized": 0.17,
+    "fees": -0.17,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789429290.0
+   },
+   "0x8bf2f9e350e591862886a7153354e73c1a36f7c4aa220b7a03ff6edee5c0f2fd:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 0.26,
+    "fees": 0.0,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789436925.0
+   },
+   "0xa162e17ab25ab0961c77e8bac97247898451b0a393f3ff7eb93237568b2494a2:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 20.22,
+    "fees": -0.13,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789469571.0
+   },
+   "0x3ae9c81a88c1b252dee0cc68c91fde6ba070fb55dfbbc9eaa3d8adf5a8111fd7:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -208.8,
+    "fees": -5.35,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789477960.0
+   },
+   "0xa6cb998a36d7f2995cbe604513c2aa249a0e2fd5f017d9bfe900a307a207077b:1": {
+    "qty": 487.1349,
+    "cost": 243.57,
+    "avg_cost": 0.5,
+    "realized": 1.38,
+    "fees": -1.52,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789479301.0
+   },
+   "0xa7fd10fd367701b44f39c77ef211a6dd38a40d9fae7c3c22f0311561f21ba43e:1": {
+    "qty": 25.78,
+    "cost": 11.34,
+    "avg_cost": 0.44,
+    "realized": 0.08,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789487463.0
+   },
+   "0x1764ab6a571ce9bfad982020401cd0db5bf5ecd9a0ed4018fbd8f42a70476b3f:0": {
+    "qty": 384.9115,
+    "cost": 245.57,
+    "avg_cost": 0.638,
+    "realized": 1.11,
+    "fees": -1.11,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789491385.0
+   },
+   "0xc1f5dda6b2b370182ade20ce9f9580c83212b9f24c539e521468f8907f786b52:0": {
+    "qty": 250.8475,
+    "cost": 101.11,
+    "avg_cost": 0.403065,
+    "realized": 19.37,
+    "fees": -1.42,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789492570.0
+   },
+   "0x014310542d341f0c29f5b919d6103bdbe2cbb382ebfcda318c33ac052fd0684e:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 111.21,
+    "fees": -0.61,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789498492.0
+   },
+   "0x109b9fb07fe48041c3280b50c60e49a5f34f0729da2f2ea03aaeac3d42c96834:0": {
+    "qty": 1.25,
+    "cost": 0.56,
+    "avg_cost": 0.45,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789499005.0
+   },
+   "0x014310542d341f0c29f5b919d6103bdbe2cbb382ebfcda318c33ac052fd0684e:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -13.55,
+    "fees": -0.11,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789501308.0
+   },
+   "0x32d1652c84df2568d6d28018f5605e651136e564e77611bf4ef7f76b98311fa7:1": {
+    "qty": 1.5625,
+    "cost": 0.81,
+    "avg_cost": 0.52,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789512115.0
+   },
+   "0x2e450c9c561ceedc2a71ab123288af2073815d2eb54099d13f2281645a195a03:1": {
+    "qty": 581.3953,
+    "cost": 250.0,
+    "avg_cost": 0.43,
+    "realized": 33.92,
+    "fees": -9.1,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789514014.0
+   },
+   "0x1b6bb2199d457a7ff8ed985995994e65a30bec8b414dd5b204e4b74f71b80f6b:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -48.06,
+    "fees": -0.32,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789519518.0
+   },
+   "0xc7ebb3eca7eb23506eee0a37ef07f2b573d200d74fb169fd1cca31787fe75c07:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -2.32,
+    "fees": -0.16,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789523742.0
+   },
+   "0x2e450c9c561ceedc2a71ab123288af2073815d2eb54099d13f2281645a195a03:0": {
+    "qty": 577.4053,
+    "cost": 121.26,
+    "avg_cost": 0.21,
+    "realized": -133.67,
+    "fees": -7.23,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789526712.0
+   },
+   "0x42a94ac86777e71776f1608d83998d6732e1526de2f512450a28bb907b34a1a5:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 28.89,
+    "fees": -0.14,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789553344.0
+   },
+   "0x42a94ac86777e71776f1608d83998d6732e1526de2f512450a28bb907b34a1a5:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -6.36,
+    "fees": -0.59,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789554823.0
+   },
+   "0xd9c53a37b91c4043833b25a9bff5b5e4b01d1d0959539009cbccae517ff573a1:1": {
+    "qty": 13.13,
+    "cost": 8.4,
+    "avg_cost": 0.64,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789564858.0
+   },
+   "0xd9c53a37b91c4043833b25a9bff5b5e4b01d1d0959539009cbccae517ff573a1:0": {
+    "qty": 13.13,
+    "cost": 4.6,
+    "avg_cost": 0.35,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789564860.0
+   },
+   "0xc3495eaa0b99cff71883862a323a9122f2173302a6370b620fb498b4320828c3:1": {
+    "qty": 529.2125,
+    "cost": 243.44,
+    "avg_cost": 0.46,
+    "realized": 1.64,
+    "fees": -1.64,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789574547.0
+   },
+   "0xa1155a103dda85133bf720ed319f486201393cef1c4db4e57ba2ab01afb4f98b:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 235.94,
+    "fees": -1.49,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789576331.0
+   },
+   "0x0eb2d39aa92c41d167d9e1b2e17d09cb8ce0078971fb1451b7f04daffaf27e29:0": {
+    "qty": 20.3075,
+    "cost": 10.83,
+    "avg_cost": 0.53312,
+    "realized": -1.33,
+    "fees": -0.14,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789578652.0
+   },
+   "0x0eb2d39aa92c41d167d9e1b2e17d09cb8ce0078971fb1451b7f04daffaf27e29:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -7.67,
+    "fees": -0.16,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789578655.0
+   },
+   "0x2420220264234f83ece69192b10023e8d3be5ad4f237204a5d6822d40bdc9f57:0": {
+    "qty": 195.3675,
+    "cost": 82.4,
+    "avg_cost": 0.421777,
+    "realized": -1.16,
+    "fees": -0.91,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789586524.0
+   },
+   "0xa1155a103dda85133bf720ed319f486201393cef1c4db4e57ba2ab01afb4f98b:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -147.29,
+    "fees": -0.97,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789586878.0
+   },
+   "0x882ce3302ef250f9dd743a12deb6f16f3f99e952c8ac0c3bc09d2b85f9ca1417:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -82.89,
+    "fees": -0.54,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789588426.0
+   },
+   "0x3a36526cbd50b73e2b7a22c2aa419fb142c6ff7eeeae2041a1ef3af1280b0cd5:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -97.65,
+    "fees": -0.75,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789589932.0
+   },
+   "0x87b27763a382a285eb3cd71e2f9fecf1e4912eb46abcd51180e612d064b19b9a:1": {
+    "qty": 158.965,
+    "cost": 86.07,
+    "avg_cost": 0.541467,
+    "realized": 0.5,
+    "fees": -0.5,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789590409.0
+   },
+   "0x2f472209201eb5960ae235f56429a96fca6660cc8ae233866b5d3c0635065c09:1": {
+    "qty": 81.91,
+    "cost": 34.4,
+    "avg_cost": 0.420023,
+    "realized": 0.25,
+    "fees": -0.25,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789590919.0
+   },
+   "0xf63d52a26eb61d5c35417e5735f1cce021570b6efd4418c3e9177bdc2369c3db:1": {
+    "qty": 13.585,
+    "cost": 7.34,
+    "avg_cost": 0.54,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789591761.0
+   },
+   "0xeb93a532e0ed0b1366722e18927cc107ff95a35f3e7bba0881f5265b8c8b5aae:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 265.54,
+    "fees": -1.58,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789595634.0
+   },
+   "0x10683c7ff1f01001e2789bebe211759bf047fd74301b92b333d6d40f39781023:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.1,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789598862.0
+   },
+   "0x1bdbc370353a6b044fb77624bf33e896e4bc44e0d8a6c53c250f75ecb7c43949:1": {
+    "qty": 199.5,
+    "cost": 127.18,
+    "avg_cost": 0.6375,
+    "realized": 0.57,
+    "fees": -0.57,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789599987.0
+   },
+   "0x1bdbc370353a6b044fb77624bf33e896e4bc44e0d8a6c53c250f75ecb7c43949:0": {
+    "qty": 149.625,
+    "cost": 49.38,
+    "avg_cost": 0.33,
+    "realized": 0.41,
+    "fees": -0.41,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789600272.0
+   },
+   "0xc3495eaa0b99cff71883862a323a9122f2173302a6370b620fb498b4320828c3:0": {
+    "qty": 272.2225,
+    "cost": 125.22,
+    "avg_cost": 0.46,
+    "realized": 0.85,
+    "fees": -0.85,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789600272.0
+   },
+   "0xeb93a532e0ed0b1366722e18927cc107ff95a35f3e7bba0881f5265b8c8b5aae:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -196.46,
+    "fees": -1.51,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789601263.0
+   },
+   "0x75ae5b2cfff15e7da697c5f32401613980b9c06437d9e4ebeba2fbe8f1894cae:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 18.27,
+    "fees": -0.11,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789604259.0
+   },
+   "0x8e855f49b77c0e764299e570dba1dbcf3ff2476acbecad07ef8998f22e326753:1": {
+    "qty": 11.93,
+    "cost": 6.68,
+    "avg_cost": 0.56,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789607008.0
+   },
+   "0x4ca1e7436698253816ab315b00b7024f09ae760e45d0f091ccbdb0b1f1db697b:1": {
+    "qty": 49.875,
+    "cost": 20.95,
+    "avg_cost": 0.42,
+    "realized": 0.15,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789608406.0
+   },
+   "0x97d1d6a82501593f0beecf0aed53a9b5d63118e5ebcdf176d8094641f51e3cb0:0": {
+    "qty": 136.395,
+    "cost": 87.29,
+    "avg_cost": 0.64,
+    "realized": 0.4,
+    "fees": -0.4,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789641130.0
+   },
+   "0xd7f55792003370e924baa99638d1d6e2c8ee696808ef49f7dbc229928bb861b6:0": {
+    "qty": 487.9001,
+    "cost": 243.9,
+    "avg_cost": 0.4999,
+    "realized": 1.52,
+    "fees": -1.52,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789653685.0
+   },
+   "0x794be6d6b26665b710ca91167bb15360239bc5d960293f6cba06f89d94d205eb:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -233.67,
+    "fees": -1.42,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789672047.0
+   },
+   "0x21df102464c7e3cb88d0f11689eb26f6c1d6279a63aa02c5a2f5ab2efb5eb254:0": {
+    "qty": 62.5,
+    "cost": 36.88,
+    "avg_cost": 0.59,
+    "realized": 0.19,
+    "fees": -0.19,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789672558.0
+   },
+   "0xab8d936a831c30ae9d95f2ca764eba1e3e47841da29981ccaf3a71fc4d1b231d:1": {
+    "qty": 79.0525,
+    "cost": 34.73,
+    "avg_cost": 0.439346,
+    "realized": 0.24,
+    "fees": -0.24,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789674571.0
+   },
+   "0xebb137cc297595b66b04af7fecd79078fe4eaf1920d9fd26125dabec544a8134:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -237.9,
+    "fees": -1.82,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789678033.0
+   },
+   "0xcc6c615f7d8bdbc8a48c00b4ee03047ffaf784e11eeeba86ff5a144adb7c8803:0": {
+    "qty": 117.555,
+    "cost": 74.55,
+    "avg_cost": 0.634177,
+    "realized": 0.33,
+    "fees": -0.33,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789684380.0
+   },
+   "0xcc6c615f7d8bdbc8a48c00b4ee03047ffaf784e11eeeba86ff5a144adb7c8803:1": {
+    "qty": 105.93,
+    "cost": 27.79,
+    "avg_cost": 0.262355,
+    "realized": -1.14,
+    "fees": -0.28,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789684563.0
+   },
+   "0xebb137cc297595b66b04af7fecd79078fe4eaf1920d9fd26125dabec544a8134:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 90.92,
+    "fees": -0.54,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789687350.0
+   },
+   "0xd7f55792003370e924baa99638d1d6e2c8ee696808ef49f7dbc229928bb861b6:1": {
+    "qty": 472.9001,
+    "cost": 226.99,
+    "avg_cost": 0.48,
+    "realized": 2.17,
+    "fees": -1.57,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789687848.0
+   },
+   "0x1902630c67c2520c5d9293952adf5fa818bda2bb67b1894cb48a3d4e8eb497fe:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -57.53,
+    "fees": -0.32,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789691541.0
+   },
+   "0xaeecca696fd5f11bc64b1655122a9c89943f4e8778c5e23338b20b4820b8999c:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 251.5,
+    "fees": -1.5,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789694517.0
+   },
+   "0x3520801db1ecaadbe58027b72b3936ca86a5447450bdff852c61022c3ae53ee8:1": {
+    "qty": 487.8049,
+    "cost": 243.9,
+    "avg_cost": 0.5,
+    "realized": 1.52,
+    "fees": -1.52,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789696758.0
+   },
+   "0xaeecca696fd5f11bc64b1655122a9c89943f4e8778c5e23338b20b4820b8999c:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -25.06,
+    "fees": -0.28,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789697520.0
+   },
+   "0x295c727ca8f6cc7a90cfdc67a11e3a2225bee6dd7b9ffc523834eb3d586cfc15:0": {
+    "qty": 248.5,
+    "cost": 111.83,
+    "avg_cost": 0.45,
+    "realized": 0.77,
+    "fees": -0.77,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789725777.0
+   },
+   "0x53d013c6b3b878ee74244c440707e8dc0f96f3d105f90ced2e1babe30cc0a153:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 164.63,
+    "fees": -1.23,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789732080.0
+   },
+   "0xf65b5c82fd33b7dfc9a05261f092f549d9ad5d2b6a7b0e27c96b7b942fa97e2d:1": {
+    "qty": 21.085,
+    "cost": 10.33,
+    "avg_cost": 0.49,
+    "realized": 0.07,
+    "fees": -0.07,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789733641.0
+   },
+   "0xa3a3db2b020de051c38a41c95a4a3928e3e9a2aea6e3e568140bd198e0b7a09e:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 157.98,
+    "fees": -1.2,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789735802.0
+   },
+   "0x38d9ae1b3fb7e97151b8097d4f879e98ab7ee88ce42d240b7c74a269b544f1c4:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -21.91,
+    "fees": -1.41,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789745860.0
+   },
+   "0x38d9ae1b3fb7e97151b8097d4f879e98ab7ee88ce42d240b7c74a269b544f1c4:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -39.42,
+    "fees": -0.37,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789746151.0
+   },
+   "0x40d3283c198a23c7a0e27efb3559510ab03f64a01be87af528bbe6d27e0b5fe7:0": {
+    "qty": 24.9325,
+    "cost": 13.21,
+    "avg_cost": 0.53,
+    "realized": 0.08,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789751479.0
+   },
+   "0xa3a3db2b020de051c38a41c95a4a3928e3e9a2aea6e3e568140bd198e0b7a09e:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -123.32,
+    "fees": -2.35,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789755610.0
+   },
+   "0xa415c9932afcfb358c27cb637b85216dbe0004c727567f3221d0f2ea96f01314:1": {
+    "qty": 32.44,
+    "cost": 18.55,
+    "avg_cost": 0.571746,
+    "realized": 0.1,
+    "fees": -0.1,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789758171.0
+   },
+   "0xd069530c48082c82e2b419326fcaca6a8f2fa54044c02b07a919379b4532241b:1": {
+    "qty": 7.29,
+    "cost": 2.84,
+    "avg_cost": 0.39,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789759383.0
+   },
+   "0x53d013c6b3b878ee74244c440707e8dc0f96f3d105f90ced2e1babe30cc0a153:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -88.36,
+    "fees": -0.77,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789760515.0
+   },
+   "0xfbfea2ec7ed26885a79dd4ef1528d53ba591ad33afc9497ed3238e4c02173969:1": {
+    "qty": 438.5965,
+    "cost": 202.81,
+    "avg_cost": 0.4624,
+    "realized": 1.36,
+    "fees": -1.36,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789770613.0
+   },
+   "0xfbfea2ec7ed26885a79dd4ef1528d53ba591ad33afc9497ed3238e4c02173969:0": {
+    "qty": 438.5965,
+    "cost": 120.89,
+    "avg_cost": 0.275639,
+    "realized": 1.1,
+    "fees": -1.1,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789772146.0
+   },
+   "0x44fab62cebae8d102bb2d3b693c38ee4e94a428518d98700876a19d97ed1ebc4:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 1.02,
+    "fees": 0.0,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789777258.0
+   },
+   "0xeb29ea93e51ce6c281b02b3b4260e82d95dc31f0c5f8d48a9c9427a1e9004e9d:1": {
+    "qty": 5.0,
+    "cost": 1.95,
+    "avg_cost": 0.39,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789779108.0
+   },
+   "0x9bc009270d0b13afca864fbfb0dc316b09bcdd691f9a9db8e8296018e01fced0:1": {
+    "qty": 401.9939,
+    "cost": 245.22,
+    "avg_cost": 0.61,
+    "realized": 1.2,
+    "fees": -1.2,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789780707.0
+   },
+   "0x9bc009270d0b13afca864fbfb0dc316b09bcdd691f9a9db8e8296018e01fced0:0": {
+    "qty": 261.47,
+    "cost": 35.96,
+    "avg_cost": 0.137547,
+    "realized": 0.36,
+    "fees": -0.36,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789782412.0
+   },
+   "0x77ac66222ed94babecf43b528e391722586b2fd656ce525b6fdb0c7fa320058f:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 21.26,
+    "fees": -0.16,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789783701.0
+   },
+   "0xf6e5694a903d0de311b861ea5aaba8b56bcdbd0c92d65c0818332b90f807ae7b:1": {
+    "qty": 4.3275,
+    "cost": 1.95,
+    "avg_cost": 0.45,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789789080.0
+   },
+   "0x455cacf122e4ec61c2d04fc1034615a3de25c1de21990da4873d4126a7ab2435:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -244.47,
+    "fees": -1.29,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789789320.0
+   },
+   "0xf6e5694a903d0de311b861ea5aaba8b56bcdbd0c92d65c0818332b90f807ae7b:0": {
+    "qty": 4.3275,
+    "cost": 1.81,
+    "avg_cost": 0.418,
+    "realized": 1.41,
+    "fees": -0.2,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789790287.0
+   },
+   "0x7505fdd9ff38b4e85d84f7d137dd2888ccab319a3506df2fe8195e583757f3d6:1": {
+    "qty": 87.4225,
+    "cost": 37.92,
+    "avg_cost": 0.4337,
+    "realized": 0.27,
+    "fees": -0.27,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789794903.0
+   },
+   "0x1cfaa34d7f48c6678f6511d3a2efc5407d69e6d1cfdf53b99b8c0f1b7e1d8a82:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -33.52,
+    "fees": -0.4,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789818273.0
+   },
+   "0x57e021bfd916d7322b643b1be7a1ffb7415d318db4b77cb128fbab97884e06bd:1": {
+    "qty": 50.625,
+    "cost": 32.4,
+    "avg_cost": 0.64,
+    "realized": 0.15,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789822094.0
+   },
+   "0x57e021bfd916d7322b643b1be7a1ffb7415d318db4b77cb128fbab97884e06bd:0": {
+    "qty": 3.4025,
+    "cost": 0.37,
+    "avg_cost": 0.11,
+    "realized": 2.28,
+    "fees": -0.92,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789823558.0
+   },
+   "0x96e190279b16f1cb3d724f7113851cf2dfb7c39490e3c814209db31bc6e151a1:1": {
+    "qty": 497.7105,
+    "cost": 243.78,
+    "avg_cost": 0.4898,
+    "realized": 1.55,
+    "fees": -1.55,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789823606.0
+   },
+   "0xd71a0ec73f6294b7d3eeac33ba1c9bcc888ba0e05f75211bcb618d76f5b12bc2:1": {
+    "qty": 395.7575,
+    "cost": 245.33,
+    "avg_cost": 0.6199,
+    "realized": 1.17,
+    "fees": -1.17,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789823606.0
+   },
+   "0xa8739f1c2a002faccbd4a1ef9c72fdb82764c72c7f1e2060441db3a62ac388a4:0": {
+    "qty": 3.555,
+    "cost": 1.25,
+    "avg_cost": 0.350338,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789826369.0
+   },
+   "0xe87689bb3ee11ed13641a0481cf10da3123e3e91f3ebeccd96d5d41bb01e374c:0": {
+    "qty": 166.3425,
+    "cost": 73.19,
+    "avg_cost": 0.44,
+    "realized": 0.51,
+    "fees": -0.51,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789830300.0
+   },
+   "0xd1325bc28cfc69a343adf1a8db0c5a60d5f2644cdcef3fab5112f91f5bc1a30f:0": {
+    "qty": 609.7561,
+    "cost": 201.22,
+    "avg_cost": 0.33,
+    "realized": 1.69,
+    "fees": -1.69,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789830312.0
+   },
+   "0xd1325bc28cfc69a343adf1a8db0c5a60d5f2644cdcef3fab5112f91f5bc1a30f:1": {
+    "qty": 609.7561,
+    "cost": 41.69,
+    "avg_cost": 0.068366,
+    "realized": -96.91,
+    "fees": -5.89,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789830885.0
+   },
+   "0xefed69f741f97f19f32320f9d7421d30a102491615e6e18c58f25f9115c9c9a3:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -1.5,
+    "fees": -0.01,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789832639.0
+   },
+   "0x2ad102a7b42b9c456242d1e7c87893da5ae981eac8ddddd44bf572cf796dde78:0": {
+    "qty": 37.1175,
+    "cost": 8.39,
+    "avg_cost": 0.225959,
+    "realized": 0.08,
+    "fees": -0.08,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789849112.0
+   },
+   "0xb3b9389053251ec6f8eba09f4f635c414e5f01290ef091684d376daa3b1531f3:1": {
+    "qty": 45.9075,
+    "cost": 28.46,
+    "avg_cost": 0.62,
+    "realized": 0.13,
+    "fees": -0.13,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789854488.0
+   },
+   "0x0b5f60ef0be139cfda21d0429193d04a29d4b4ab2411e9ed0a29fc421fc08b5e:1": {
+    "qty": 118.25,
+    "cost": 72.13,
+    "avg_cost": 0.61,
+    "realized": 0.35,
+    "fees": -0.35,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789857321.0
+   },
+   "0xac77966ed6fddab263351cdef0a37e017183d5a49c797764ffa6e6d9a2828155:0": {
+    "qty": 1.25,
+    "cost": 0.5,
+    "avg_cost": 0.4,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789862046.0
+   },
+   "0xac77966ed6fddab263351cdef0a37e017183d5a49c797764ffa6e6d9a2828155:1": {
+    "qty": 1.25,
+    "cost": 0.35,
+    "avg_cost": 0.28,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789866241.0
+   },
+   "0x96e190279b16f1cb3d724f7113851cf2dfb7c39490e3c814209db31bc6e151a1:0": {
+    "qty": 66.5525,
+    "cost": 2.92,
+    "avg_cost": 0.043824,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789867362.0
+   },
+   "0x5568ca1302e03ce99e2b30ae3910d9649dc8a883ea08a12081db49e247a3204b:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -240.75,
+    "fees": -1.85,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789880248.0
+   },
+   "0x2019e9bb1db6e72b1d078d8e61fb70ac24ec4da4ce0ca592029ebf37b2f5bff2:1": {
+    "qty": 5.895,
+    "cost": 2.87,
+    "avg_cost": 0.4873,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789881852.0
+   },
+   "0xb613875378ab80ca4328f4c223b23dd07dcad27a14dd738c21fd35f40baa5995:0": {
+    "qty": 5.0,
+    "cost": 2.35,
+    "avg_cost": 0.47,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789892361.0
+   },
+   "0x5d4b6c5bc4b9731147cba298bb6b0d80c4cd81b1030d96f2f6ed3ca4ae63c904:1": {
+    "qty": 18.0,
+    "cost": 10.61,
+    "avg_cost": 0.589306,
+    "realized": 0.05,
+    "fees": -0.05,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789895790.0
+   },
+   "0x0f1da704b58f56ce0556040a95cf25f3b5408250fadf659ec2c3e14c24ed6ebb:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 22.39,
+    "fees": -0.14,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789910928.0
+   },
+   "0xcb14441b057972ccc5d55e5c29677bf433dd960c4f0a957bd86add88d3e87e70:1": {
+    "qty": 1.53,
+    "cost": 0.08,
+    "avg_cost": 0.05,
+    "realized": -0.34,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789912248.0
+   },
+   "0xcb14441b057972ccc5d55e5c29677bf433dd960c4f0a957bd86add88d3e87e70:0": {
+    "qty": 1.53,
+    "cost": 0.73,
+    "avg_cost": 0.48,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789912518.0
+   },
+   "0x0f1da704b58f56ce0556040a95cf25f3b5408250fadf659ec2c3e14c24ed6ebb:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -1.2,
+    "fees": -0.11,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789916118.0
+   },
+   "0xee179f7b2f20369a9826681f10f26a28bf4993471078262c4fe5566071c0b4a8:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 1.37,
+    "fees": -0.01,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789917705.0
+   },
+   "0xe118d0f5af0bb953dec42530144803a1be59c0ca9e0734bdbce78177ca1b4c7b:1": {
+    "qty": 39.0,
+    "cost": 22.23,
+    "avg_cost": 0.57,
+    "realized": 0.12,
+    "fees": -0.12,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789919107.0
+   },
+   "0xadec28112f452801f2e062dc7dc92e3ff8ad9218c12e4bee442a088c4ef42728:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 0.25,
+    "fees": 0.0,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789925910.0
+   },
+   "0x32fbc78c8f58aed32591af9916915a377e7a4454406dabe01b0cccaf39fcc78b:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -242.53,
+    "fees": -1.49,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789926429.0
+   },
+   "0x8c0acefbb992126a251c9986cbe43dcab58ab83984b1ec0befa9376c4cc3260c:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 8.92,
+    "fees": -0.05,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789928001.0
+   },
+   "0x2c7f7478d2e1ce54216366b6cc85efe23aacbf96a1cf0e360bec9ce4ae396bf4:0": {
+    "qty": 149.625,
+    "cost": 65.34,
+    "avg_cost": 0.436667,
+    "realized": 0.46,
+    "fees": -0.46,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789930070.0
+   },
+   "0x32fbc78c8f58aed32591af9916915a377e7a4454406dabe01b0cccaf39fcc78b:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 22.96,
+    "fees": -0.12,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789931305.0
+   },
+   "0xc6a6cec41b1335ebad84d678647aad0b5bf94bf8258bf3d8fdb7f02157a45f86:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -180.84,
+    "fees": -1.09,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1789931480.0
+   },
+   "0x52fe6f15704c139c1b10829e60d1eae4bf4c18165347f81f1e799be2000067c9:0": {
+    "qty": 38.335,
+    "cost": 19.43,
+    "avg_cost": 0.506735,
+    "realized": 0.12,
+    "fees": -0.12,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789933289.0
+   },
+   "0x009a74e57c6c8a466f12c5f89d27bdde2d0f012a9ca1b88223de7396b7eca90f:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 70.52,
+    "fees": -0.45,
+    "settled": true,
+    "payout": 1.0,
+    "opened_at": 1789943959.0
+   },
+   "0xcd5eca2e644fd9f24ee0ff323d09d9cd971ec8b3edf55e6e094ece32eef946ab:1": {
+    "qty": 92.2875,
+    "cost": 43.38,
+    "avg_cost": 0.47,
+    "realized": 0.29,
+    "fees": -0.29,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789950767.0
+   },
+   "0x262dc391ac9c5bf5afb64c6b778c28efd6aabdaa309d065fcc0d99b684b7a961:1": {
+    "qty": 7.1975,
+    "cost": 3.2,
+    "avg_cost": 0.444168,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789995641.0
+   },
+   "0xdc668e056f354ba5cf3169c16b77bb3266b9a01b7d4959b74ac26783eb7e1858:1": {
+    "qty": 408.4967,
+    "cost": 245.1,
+    "avg_cost": 0.6,
+    "realized": 1.23,
+    "fees": -1.23,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1789996814.0
+   },
+   "0x1c7411b13681b7591f5b8ab41ecbf69c4c18a53fcebf1e020fa3764932c3d69b:1": {
+    "qty": 384.6154,
+    "cost": 203.13,
+    "avg_cost": 0.528139,
+    "realized": 1.2,
+    "fees": -1.2,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790017477.0
+   },
+   "0x9b89b747482fc6c694cc6c8b68f436eb6ee7f17a00b661bd0ae3fb5843e80d9a:0": {
+    "qty": 43.4825,
+    "cost": 14.8,
+    "avg_cost": 0.340307,
+    "realized": -4.12,
+    "fees": -0.4,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790018698.0
+   },
+   "0x9b89b747482fc6c694cc6c8b68f436eb6ee7f17a00b661bd0ae3fb5843e80d9a:1": {
+    "qty": 14.2125,
+    "cost": 4.58,
+    "avg_cost": 0.321945,
+    "realized": 1.58,
+    "fees": -0.19,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790025883.0
+   },
+   "0x05877726250f4903cbe937cd159419b2be8a9a604f36ae38c062b10b090d4f68:1": {
+    "qty": 0.0525,
+    "cost": 0.01,
+    "avg_cost": 0.16,
+    "realized": -0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790036275.0
+   },
+   "0x05877726250f4903cbe937cd159419b2be8a9a604f36ae38c062b10b090d4f68:0": {
+    "qty": 0.0525,
+    "cost": 0.02,
+    "avg_cost": 0.41,
+    "realized": -0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790036910.0
+   },
+   "0xf4b2d965575fb5896454f2aacfe598b797e73e2576c8cf34851af5492676bb9d:1": {
+    "qty": 86.2075,
+    "cost": 36.21,
+    "avg_cost": 0.42,
+    "realized": 0.26,
+    "fees": -0.26,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790043204.0
+   },
+   "0xdc668e056f354ba5cf3169c16b77bb3266b9a01b7d4959b74ac26783eb7e1858:0": {
+    "qty": 308.4967,
+    "cost": 9.56,
+    "avg_cost": 0.031,
+    "realized": -59.24,
+    "fees": -3.16,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790046771.0
+   },
+   "0x5559b0cf13216ba95ca10bcd9a53c139ddc8ea00c11a0d5e9ab8128432c5a728:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.3,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790068783.0
+   },
+   "0x5559b0cf13216ba95ca10bcd9a53c139ddc8ea00c11a0d5e9ab8128432c5a728:1": {
+    "qty": 0.865,
+    "cost": 0.35,
+    "avg_cost": 0.4,
+    "realized": 0.0,
+    "fees": 0.0,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790070558.0
+   },
+   "0xffef0edb89e1015014b9ed967363ccaec77bc0eb69b61fe3acd8a80f46e62b9b:1": {
+    "qty": 50.455,
+    "cost": 27.43,
+    "avg_cost": 0.543651,
+    "realized": 54.59,
+    "fees": -3.63,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790097003.0
+   },
+   "0xffef0edb89e1015014b9ed967363ccaec77bc0eb69b61fe3acd8a80f46e62b9b:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": 16.42,
+    "fees": -8.94,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790098669.0
+   },
+   "0xf6868a6ee1bdf2d704e9e56e0526a7160ce3a3ee52b0953c0e74fdc97053eb48:1": {
+    "qty": 7.6125,
+    "cost": 2.98,
+    "avg_cost": 0.390887,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790101474.0
+   },
+   "0xf6868a6ee1bdf2d704e9e56e0526a7160ce3a3ee52b0953c0e74fdc97053eb48:0": {
+    "qty": 6.3875,
+    "cost": 0.7,
+    "avg_cost": 0.109726,
+    "realized": 0.01,
+    "fees": -0.01,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790102350.0
+   },
+   "0x6d7b112bdc60736e974abdd8e3c57b950e99b276696f76b4b06ca18cd4d97aa3:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -242.07,
+    "fees": -1.58,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1790106303.0
+   },
+   "0x58f4fbf0e1d3cb5fcb541baf4990aa3fae68a2d541d25eb2499d75f0e36918ce:0": {
+    "qty": 0.0,
+    "cost": -0.0,
+    "avg_cost": null,
+    "realized": -0.31,
+    "fees": -0.04,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790122565.0
+   },
+   "0x6463dee57e04acb6227208d2cf53f1854cb6255048bc33c0e1ada90ca0d0cbee:1": {
+    "qty": 11.25,
+    "cost": 4.61,
+    "avg_cost": 0.41,
+    "realized": 0.03,
+    "fees": -0.03,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790133448.0
+   },
+   "0x1636f9ba7b64c603e94d97bd16469831bf929cb81d52454ed7e2d76269d921df:0": {
+    "qty": 49.875,
+    "cost": 20.95,
+    "avg_cost": 0.42,
+    "realized": 0.15,
+    "fees": -0.15,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790133565.0
+   },
+   "0xbc8d440ae7078a5ea6fb7b813360215384986390fd2409ebdc5df5123f5ec7a2:1": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -4.36,
+    "fees": -0.07,
+    "settled": true,
+    "payout": 0.0,
+    "opened_at": 1790134978.0
+   },
+   "0xb263b5fe56a9feda0398d8e30bd4274fa3dd3a45e1ba7643368530fc4da06833:1": {
+    "qty": 70.5,
+    "cost": 32.43,
+    "avg_cost": 0.46,
+    "realized": 0.22,
+    "fees": -0.22,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790147572.0
+   },
+   "0x0956a59b5613c4d8d5a76d6579654d996f835142e15d25b89cfa767e101c1b41:1": {
+    "qty": 4.7625,
+    "cost": 2.26,
+    "avg_cost": 0.47505,
+    "realized": 0.02,
+    "fees": -0.02,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790151998.0
+   },
+   "0x0956a59b5613c4d8d5a76d6579654d996f835142e15d25b89cfa767e101c1b41:0": {
+    "qty": 0.0,
+    "cost": 0.0,
+    "avg_cost": null,
+    "realized": -0.14,
+    "fees": -0.1,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790153464.0
+   },
+   "0x8af2dbf5536892901ac08c0d8086916aa71173244fda3fdf14328d7f1f00a9e0:0": {
+    "qty": 436.8338,
+    "cost": 226.24,
+    "avg_cost": 0.517918,
+    "realized": 1.32,
+    "fees": -1.32,
+    "settled": false,
+    "payout": null,
+    "opened_at": 1790158180.0
+   }
+  }
+ },
+ "invariant": {
+  "identity": "cash + inventory_cost - realized == starting_cash",
+  "lhs": 100000.0,
+  "starting_cash": 100000.0,
+  "drift": -0.0,
+  "ok": true
+ },
+ "consumption": {
+  "prints": 14752,
+  "offered_qty": 2333979.485,
+  "consumed_qty": 138965.3296,
+  "rule": "one print, one finite size, allocated once; keyed on the print id so a re-delivery by a second lane cannot be spent twice"
+ },
+ "settlement": {
+  "legs_settled": 122,
+  "legs_unresolved": 396,
+  "unresolved_cost_usd": 24530.37,
+  "unresolved": [
+   {
+    "condition_id": "0x951ddcae1939533e6fe8b75e95ce7367a508f78dffb046e4022b486339368354",
+    "outcome_index": 1,
+    "qty": 48.5325,
+    "cost": 23.78
+   },
+   {
+    "condition_id": "0xe3d1ecb51019aa8a7449879b71b1c903c6b96870911aece69a2ea27d151b6f0d",
+    "outcome_index": 1,
+    "qty": 191.9625,
+    "cost": 114.59
+   },
+   {
+    "condition_id": "0x46bdefd33f18092a011f1ca66ddf1258929b91cea59bdd36751892f0538d6056",
+    "outcome_index": 1,
+    "qty": 2.4975,
+    "cost": 1.32
+   },
+   {
+    "condition_id": "0xe3d1ecb51019aa8a7449879b71b1c903c6b96870911aece69a2ea27d151b6f0d",
+    "outcome_index": 0,
+    "qty": 141.9625,
+    "cost": 19.87
+   },
+   {
+    "condition_id": "0xb8ee02cdb54a6062b3f69be1a50c08c377581d022081b988de858ff6d49f557e",
+    "outcome_index": 1,
+    "qty": 131.09,
+    "cost": 38.02
+   },
+   {
+    "condition_id": "0xb8ee02cdb54a6062b3f69be1a50c08c377581d022081b988de858ff6d49f557e",
+    "outcome_index": 0,
+    "qty": 131.09,
+    "cost": 51.13
+   },
+   {
+    "condition_id": "0x7c6cd7a3bc858e069d886098c7909b2c733a7f8f586f72a012eb56f7a6686fcb",
+    "outcome_index": 1,
+    "qty": 454.5455,
+    "cost": 250.0
+   },
+   {
+    "condition_id": "0x02db65de487f25e56a4e08ea0ea0f1866ecb7f57c927e162bcc0b8f881d121c8",
+    "outcome_index": 1,
+    "qty": 352.805,
+    "cost": 156.82
+   },
+   {
+    "condition_id": "0x951d3d74587f359a64effb6d186bdbf23b510e08beed908aec4d020bb13b2c41",
+    "outcome_index": 0,
+    "qty": 480.7692,
+    "cost": 250.0
+   },
+   {
+    "condition_id": "0xf0f0efef9dec631c32f01590b9e0b89e8ef539d7a8640799e0916ec1a28a0d0f",
+    "outcome_index": 0,
+    "qty": 142.015,
+    "cost": 57.73
+   },
+   {
+    "condition_id": "0xd3a34e2a83d8f61dc180c5d3061cc6a6ac2750b3bdce59227b8abc891a3af323",
+    "outcome_index": 1,
+    "qty": 83.7261,
+    "cost": 50.52
+   },
+   {
+    "condition_id": "0xd3a34e2a83d8f61dc180c5d3061cc6a6ac2750b3bdce59227b8abc891a3af323",
+    "outcome_index": 0,
+    "qty": 83.7261,
+    "cost": 9.23
+   },
+   {
+    "condition_id": "0x951d3d74587f359a64effb6d186bdbf23b510e08beed908aec4d020bb13b2c41",
+    "outcome_index": 1,
+    "qty": 2.4575,
+    "cost": 1.03
+   },
+   {
+    "condition_id": "0xe0f4a4faf0b88f93cb402a86447bb335bf1bb7260d4b551c32cabb26dba3cb8e",
+    "outcome_index": 0,
+    "qty": 384.6154,
+    "cost": 200.29
+   },
+   {
+    "condition_id": "0xe0f4a4faf0b88f93cb402a86447bb335bf1bb7260d4b551c32cabb26dba3cb8e",
+    "outcome_index": 1,
+    "qty": 382.0879,
+    "cost": 52.54
+   },
+   {
+    "condition_id": "0xbbe06cec475b7f847625fca82ee67fca692cd8c87937ed37912d0712aa1dc030",
+    "outcome_index": 0,
+    "qty": 91.3175,
+    "cost": 48.37
+   },
+   {
+    "condition_id": "0x8649981b1e026557ff3ca5fc49fbb96c511fd70a617141847e09440ceddbc2b3",
+    "outcome_index": 1,
+    "qty": 4.5,
+    "cost": 2.21
+   },
+   {
+    "condition_id": "0x11a36de9ec85268724153e53171b40df694ac1879da49d1e4aa8e41fed770249",
+    "outcome_index": 0,
+    "qty": 37.9875,
+    "cost": 17.09
+   },
+   {
+    "condition_id": "0x11a36de9ec85268724153e53171b40df694ac1879da49d1e4aa8e41fed770249",
+    "outcome_index": 1,
+    "qty": 36.8325,
+    "cost": 14.28
+   },
+   {
+    "condition_id": "0xbd4e8eb292fe7cb7fccc5eafdcc5c7ffbc8c368c81c8c7e7e52ec81b12874a61",
+    "outcome_index": 0,
+    "qty": 112.91,
+    "cost": 57.97
+   },
+   {
+    "condition_id": "0x44729d777b81469d199f57a7c014d36791119e77a369b471175986b563465fc7",
+    "outcome_index": 0,
+    "qty": 480.7692,
+    "cost": 250.0
+   },
+   {
+    "condition_id": "0x24576f82e5b189d2236ad0af0d41a7312147e5504269b7c87eb7bd9156ac5704",
+    "outcome_index": 1,
+    "qty": 384.6154,
+    "cost": 117.17
+   },
+   {
+    "condition_id": "0x24576f82e5b189d2236ad0af0d41a7312147e5504269b7c87eb7bd9156ac5704",
+    "outcome_index": 0,
+    "qty": 9.495,
+    "cost": 5.32
+   },
+   {
+    "condition_id": "0xae19646ab0707d899fc91294975ebd4c393cc831d2c02fb643c210184d9a8852",
+    "outcome_index": 1,
+    "qty": 1.2675,
+    "cost": 0.39
+   },
+   {
+    "condition_id": "0xae19646ab0707d899fc91294975ebd4c393cc831d2c02fb643c210184d9a8852",
+    "outcome_index": 0,
+    "qty": 1.2675,
+    "cost": 0.22
+   },
+   {
+    "condition_id": "0x1e8a83f910fa36cd2ca16f45a3c35e423b85821a3cc8b8843a23fe59af345425",
+    "outcome_index": 1,
+    "qty": 169.4525,
+    "cost": 69.63
+   },
+   {
+    "condition_id": "0x1e8a83f910fa36cd2ca16f45a3c35e423b85821a3cc8b8843a23fe59af345425",
+    "outcome_index": 0,
+    "qty": 46.805,
+    "cost": 18.82
+   },
+   {
+    "condition_id": "0xf8673cb45674ac790f54352c92f9eb973bbf0e204b12d0b42cb718b6314ad455",
+    "outcome_index": 1,
+    "qty": 1.0875,
+    "cost": 0.65
+   },
+   {
+    "condition_id": "0xf8673cb45674ac790f54352c92f9eb973bbf0e204b12d0b42cb718b6314ad455",
+    "outcome_index": 0,
+    "qty": 1.0875,
+    "cost": 0.35
+   },
+   {
+    "condition_id": "0x05c201a3e239f40f80e3cecff946b12fa5d0661e49360e1ebb52df7e0a04db70",
+    "outcome_index": 1,
+    "qty": 300.0,
+    "cost": 129.0
+   },
+   {
+    "condition_id": "0xe0c234f8d247f094d86d619254c06ef8ddf571bd42f6851b527c3ce5ec729c0c",
+    "outcome_index": 0,
+    "qty": 555.5556,
+    "cost": 250.0
+   },
+   {
+    "condition_id": "0x0010d266346ecacedb3dbbce654dbfb68a95aeb170e3f5088b29c75b6eb76ed6",
+    "outcome_index": 0,
+    "qty": 49.875,
+    "cost": 23.44
+   },
+   {
+    "condition_id": "0xb318b8051ca882e3e4e3a57f571215b60ed0b5f37014920521d0eb19c9ad4db5",
+    "outcome_index": 0,
+    "qty": 0.5,
+    "cost": 0.25
+   },
+   {
+    "condition_id": "0x6b7d862cefe10afefb358f8c7419ba3cf7a6ca825b9e267a06806eb069b0b9d3",
+    "outcome_index": 0,
+    "qty": 18.3375,
+    "cost": 8.71
+   },
+   {
+    "condition_id": "0x19f864b772f5c4e1d20106a6f4dd52901d505f67436ba476b58fe9b072960844",
+    "outcome_index": 1,
+    "qty": 33.9725,
+    "cost": 18.35
+   },
+   {
+    "condition_id": "0x6aeef65014c7c0bda680c42953a9c50ee0a35cd4bb74395bab4558c6849ae2c8",
+    "outcome_index": 1,
+    "qty": 480.7692,
+    "cost": 245.19
+   },
+   {
+    "condition_id": "0x70edbf93a23edd38c2c471b1f5e13a5bb057286ca98699ccb30b51d94bde2d27",
+    "outcome_index": 0,
+    "qty": 520.8333,
+    "cost": 224.8
+   },
+   {
+    "condition_id": "0x9e502edfb1cc5838cfd7fed57938aaf11b2b290fb1e0c1ce651a7bfee773d8f7",
+    "outcome_index": 0,
+    "qty": 451.4265,
+    "cost": 244.4
+   },
+   {
+    "condition_id": "0x70edbf93a23edd38c2c471b1f5e13a5bb057286ca98699ccb30b51d94bde2d27",
+    "outcome_index": 1,
+    "qty": 276.4975,
+    "cost": 104.32
+   },
+   {
+    "condition_id": "0xe600b2da5421cc7ba2e0938c6736369fc54be2dde83696fd3811edef2d710d4a",
+    "outcome_index": 1,
+    "qty": 0.185,
+    "cost": 0.12
+   },
+   {
+    "condition_id": "0x53954f4c3e2dc33b9463b7e006612fbcd32e484e12041725a2b1a09e2dfa480f",
+    "outcome_index": 0,
+    "qty": 350.63,
+    "cost": 182.33
+   },
+   {
+    "condition_id": "0x9184ee1de8b9d48fa20110af2bfdcac7e495c6de6510f978430bba3bbff7a150",
+    "outcome_index": 1,
+    "qty": 36.85,
+    "cost": 16.05
+   },
+   {
+    "condition_id": "0x71394bd49a9d6c38304f9f85bb87a1c04ac2be361ca12cd4a3e8286bd8537070",
+    "outcome_index": 0,
+    "qty": 1.635,
+    "cost": 0.97
+   },
+   {
+    "condition_id": "0x71394bd49a9d6c38304f9f85bb87a1c04ac2be361ca12cd4a3e8286bd8537070",
+    "outcome_index": 1,
+    "qty": 1.365,
+    "cost": 0.51
+   },
+   {
+    "condition_id": "0x9184ee1de8b9d48fa20110af2bfdcac7e495c6de6510f978430bba3bbff7a150",
+    "outcome_index": 0,
+    "qty": 8.4925,
+    "cost": 1.82
+   },
+   {
+    "condition_id": "0xf9a2431e9c3c60c4e5f2755ddc8e6184fc0d20980c6b0cb5fb11195ae0f12ed6",
+    "outcome_index": 0,
+    "qty": 40.5,
+    "cost": 18.63
+   },
+   {
+    "condition_id": "0x46ae268ecdf13aefdf5aee8591ff5a0f7bba26e98b67b79890ceb70b1f7060d4",
+    "outcome_index": 1,
+    "qty": 23.365,
+    "cost": 14.61
+   },
+   {
+    "condition_id": "0xb7d4dfbcf5cb490caab97a477f5fd58e4181f2cc707dc47e9b17fa989eb71d16",
+    "outcome_index": 1,
+    "qty": 42.95,
+    "cost": 24.05
+   },
+   {
+    "condition_id": "0x9a78dd5ee058298ab9eb2b77e336e01ba6de93d01def6c535351186a633ae12d",
+    "outcome_index": 1,
+    "qty": 33.8175,
+    "cost": 15.64
+   },
+   {
+    "condition_id": "0x9a78dd5ee058298ab9eb2b77e336e01ba6de93d01def6c535351186a633ae12d",
+    "outcome_index": 0,
+    "qty": 33.8175,
+    "cost": 13.87
+   }
+  ],
+  "rule": "a leg with no settlement in our records stays OPEN and is reported as unresolved exposure. Assuming it paid zero would manufacture losses; assuming one would manufacture gains."
+ },
+ "net": {
+  "realized_pnl_usd": -1898.29,
+  "fees_usd": -381.75,
+  "residual_cost_usd": 24530.33,
+  "cash_usd": 73571.39,
+  "starting_cash_usd": 100000.0,
+  "NOT_A_LIVE_RESULT": "HISTORICAL_REPLAY. This must never be combined with a live shadow total; they are different modes with different execution assumptions."
+ },
+ "economic_position": {
+  "realized_pnl_usd": -1898.29,
+  "cash_usd": 73571.39,
+  "unvalued_exposure_usd": 24530.37,
+  "unvalued_legs": 396,
+  "inventory_mark_usd": "NOT_IDENTIFIED",
+  "executable_liquidation_usd": "NOT_IDENTIFIED",
+  "total_portfolio_performance": "NOT_IDENTIFIED",
+  "why_not_identified": "396 legs carry $24530.37 of cost with NO settlement and NO contemporaneous book in our records for the replay's end instant. Without a mark there is no unrealised figure, and without depth there is no liquidation estimate. TOTAL PORTFOLIO PERFORMANCE IS THEREFORE NOT IDENTIFIED: the realised -$1898.29 is one component of it, not the whole of it.",
+  "what_the_ledger_identity_proves": "accounting consistency only -- that cash, cost basis and realised P&L reconcile to the starting capital. It does NOT validate any valuation and does NOT validate the fill assumptions that produced the positions."
+ },
+ "learned_component_provenance": {
+  "component": "residual_exit",
+  "estimator": "isotonic (PAV) with a shared-n shrink",
+  "feature": "the leg's volume-weighted purchase price",
+  "target": "that leg's realised settlement payout in {0, 1}",
+  "training_rows": 7364,
+  "training_markets": 4649,
+  "training_first_fill": "2026-03-31T20:13:01Z",
+  "training_last_resolved": "2026-09-08T04:05:19Z",
+  "calibration": "none separate -- the isotonic IS the calibration; no held-out calibration split was used for it",
+  "evaluation_population": "the fair-value study evaluated it on the LATER 40% of resolved markets and the pre-registered test was NOT SUPPORTED: the paired log-loss difference against the identity was +0.0052 with a 95% interval of [-0.0017, +0.0120]. It is not established as a better forecast.",
+  "training_rows_inside_replay_window": 2404,
+  "training_rows_inside_replay_window_pct": 32.6,
+  "training_markets_resolving_after_replay_start": 2402,
+  "LOOKAHEAD": true,
+  "verdict": "DEVELOPMENT_EVIDENCE",
+  "why": "2404 training rows (32.6%) come from markets that traded INSIDE this replay window, and 2402 training markets resolved AFTER the replay's first event. During those decisions the exit rule consulted a curve fitted using settlements that did not yet exist at the decision instant. THIS REPLAY'S EXIT BEHAVIOUR IS DEVELOPMENT EVIDENCE, not a validated result, and calling the curve 'learned' does not establish that its exits improve returns."
+ }
+}

@@ -38,11 +38,14 @@ CREATE TABLE IF NOT EXISTS bettor_desk_state (
     boot_id            TEXT NOT NULL,
     policy_version     TEXT NOT NULL,
     model_version      TEXT NOT NULL,
-    -- THE CURSOR IS WHY A RESTART DOES NOT DUPLICATE. The loop consumes
-    -- shadow_decisions strictly after this instant and advances it only
-    -- after the orders for that batch are committed.
-    cursor_decision_ts TIMESTAMPTZ,
-    cursor_decision_id TEXT,
+    -- THE CURSOR IS WHY A RESTART DOES NOT DUPLICATE. It advances only
+    -- after the batch's decisions, orders and positions are committed
+    -- in the same transaction.
+    -- THE CURSOR IS THE EVIDENCE'S OWN SERIAL ID, not a timestamp. A
+    -- timestamp repeats and arrives out of order across ingestion
+    -- lanes; a cursor that can go backwards replays work and a replay
+    -- that is not idempotent duplicates orders.
+    cursor_event_id    BIGINT,
     cash_usd           NUMERIC NOT NULL,
     starting_cash_usd  NUMERIC NOT NULL,
     halted             BOOLEAN NOT NULL DEFAULT FALSE,

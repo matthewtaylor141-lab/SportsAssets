@@ -404,3 +404,96 @@ class TestTheInvariantCatchesFeeLeakage:
         inv = d.pf.invariant()
         assert inv["ok"] is False
         assert abs(inv["drift"] - 7.0) < 1e-9
+
+
+class TestTheLiveLoopCannotTradeOrDuplicate:
+    """The loop is the part that runs unattended, so the properties that
+    matter are structural: it cannot reach a venue, it cannot run twice,
+    and re-reading an event cannot create a second order."""
+
+    def test_no_venue_client_is_reachable_from_the_loop(self):
+        """Not gated by a flag -- ABSENT. A funded path that exists and
+        is switched off is a path."""
+        from sportsassets import bettor_desk_loop as L
+        src = open(L.__file__).read()
+        for forbidden in ("pmus", "import httpx", "requests.",
+                          "place_order", "submit_order", "create_order",
+                          "cancel_order", "LIVE_TRADING"):
+            assert forbidden not in src, forbidden
+
+    def test_it_makes_no_venue_requests_at_all(self):
+        """Its only input is evidence already collected under existing
+        authorization, read from our own database. The collector's
+        allowance is untouched because nothing here spends it."""
+        from sportsassets import bettor_desk_loop as L
+        assert L.status()["makes_venue_requests"] is False
+        src = open(L.__file__).read()
+        assert "http://" not in src and "https://" not in src
+
+    def test_it_is_disabled_unless_the_env_flag_is_set(self):
+        from sportsassets import bettor_desk_loop as L
+        import os
+        old = os.environ.pop(L.ENABLE_ENV, None)
+        try:
+            assert L.enabled() is False
+            for v in ("1", "true", "YES", "on"):
+                os.environ[L.ENABLE_ENV] = v
+                assert L.enabled() is True
+            os.environ[L.ENABLE_ENV] = "0"
+            assert L.enabled() is False
+        finally:
+            os.environ.pop(L.ENABLE_ENV, None)
+            if old is not None:
+                os.environ[L.ENABLE_ENV] = old
+
+    def test_the_lock_key_is_fixed_so_two_instances_contend(self):
+        """A per-process or random key would let every instance 'win'."""
+        from sportsassets import bettor_desk_loop as L
+        assert isinstance(L.LOCK_KEY, int)
+        src = open(L.__file__).read()
+        assert "pg_try_advisory_lock" in src
+        assert "pg_advisory_lock(" not in src, \
+            "the blocking variant would queue instances, not reject them"
+
+    def test_the_cursor_is_the_serial_id_not_a_timestamp(self):
+        """A timestamp repeats and arrives out of order across lanes."""
+        from sportsassets import bettor_desk_loop as L
+        src = open(L.__file__).read()
+        assert "ORDER BY t.id" in src
+        assert "t.id > $1" in src
+
+    def test_re_reading_an_event_cannot_create_a_second_order(self):
+        """IDEMPOTENCE, at the engine level: the consumption key is the
+        evidence row id, so the same trade replayed allocates nothing
+        further and no second fill appears."""
+        d = mk()
+        d.step(ev(1, 0.50))
+        o = d.open_orders()[0]
+        d.step(ev(2, 0.50, size=o.qty, eid="trade:9001"))
+        filled, norders = o.filled_qty, len(d.orders)
+        d.step(ev(2, 0.50, size=o.qty, eid="trade:9001"))
+        assert abs(o.filled_qty - filled) < 1e-9
+        assert len(d.orders) == norders
+
+    def test_a_failed_cycle_does_not_advance_the_cursor(self):
+        from sportsassets import bettor_desk_loop as L
+        src = open(L.__file__).read()
+        i = src.index("except Exception as exc:")
+        j = src.index("await asyncio.sleep(CYCLE_S)", i)
+        assert "cursor" not in src[i:j], \
+            "the error path must not move the cursor"
+
+    def test_the_in_memory_desk_is_a_cache_not_the_ledger(self):
+        from sportsassets import bettor_desk_loop as L
+        src = open(L.__file__).read()
+        assert "INSERT INTO bettor_desk_orders" in src
+        assert "INSERT INTO bettor_desk_positions" in src
+        assert "INSERT INTO bettor_desk_state" in src
+        assert "async with conn.transaction():" in src
+
+    def test_standby_reports_itself_and_writes_nothing(self):
+        from sportsassets import bettor_desk_loop as L
+        src = open(L.__file__).read()
+        i = src.index("STANDBY: another instance")
+        j = src.index("_status.update(state=STATE_RUNNING", i)
+        assert "INSERT" not in src[i:j]
