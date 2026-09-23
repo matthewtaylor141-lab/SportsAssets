@@ -113,11 +113,76 @@ PROGRESS_UNAVAILABLE = "EVENT_PROGRESS_UNAVAILABLE"
 FIRST_HALF = "FIRST_HALF"
 SECOND_HALF = "SECOND_HALF"
 
-# Sports admitted to the loss-exit experiment, with their mapping. EMPTY
-# BY CONSTRUCTION: a sport is added here only when a timestamped
-# progress feed for it exists AND its halfway mapping is written down.
-# An empty registry is the honest state, not an oversight.
-SECOND_HALF_MAPPING: dict = {}
+# ── THE PROGRESS CONTRACT ────────────────────────────────────────────
+#
+# A mapping rule reads ONE dict, and every rule below reads only these
+# keys. Nothing here may read a clock, a wall-time or a scheduled start:
+#
+#   observed_at   float epoch -- when the progress was OBSERVED
+#   period        int, 1-based, as the feed reports it
+#   period_type   'HALF' | 'QUARTER' | 'INNING' | 'SET' | 'PERIOD'
+#   in_play       bool -- the event is running, not in an interval
+#
+# `period` is the only progress quantity a rule consumes. An elapsed
+# figure is deliberately NOT part of the contract, so a rule physically
+# cannot infer the halfway point from wall-clock time -- the thing
+# section 3 forbids. Injury time, stoppages and a halftime interval all
+# make wall-clock and played time differ, which is why.
+PROGRESS_FIELDS = ("observed_at", "period", "period_type", "in_play")
+
+
+def _halfway_by_period(total_periods: int):
+    """Second half = the period index strictly past the midpoint.
+
+    For an even structure (2 halves, 4 quarters) the second half begins at
+    period > total/2. For an odd structure this would need its own rule
+    and none is written, so only even structures are registered below.
+    """
+    def rule(progress) -> str:
+        try:
+            period = int(progress["period"])
+        except (KeyError, TypeError, ValueError):
+            return PROGRESS_UNAVAILABLE
+        if period <= 0:
+            return PROGRESS_UNAVAILABLE
+        # OVERTIME IS PAST HALFWAY, unambiguously.
+        if period > total_periods:
+            return SECOND_HALF
+        return SECOND_HALF if period * 2 > total_periods else FIRST_HALF
+    rule.total_periods = total_periods
+    return rule
+
+
+# THE DOCUMENTED RULES. Writing a rule down is not the same as having the
+# data to run it, and these two registries are deliberately separate.
+DOCUMENTED_MAPPINGS = {
+    "soccer": _halfway_by_period(2),      # 2 halves; 2nd half is period 2
+    "basketball": _halfway_by_period(4),  # 4 quarters; 2nd half is Q3+
+    "football": _halfway_by_period(4),    # 4 quarters; 2nd half is Q3+
+    "hockey": None,                       # 3 periods: ODD, no rule written
+}
+
+# WHICH SPORTS HAVE A CONNECTED PROGRESS FEED. EMPTY BY CONSTRUCTION, and
+# it is what admits a condition to the COMPLETE-policy experiment. A sport
+# is added here only when a timestamped progress observation for it is
+# actually readable at decision time -- not when its rule is written.
+#
+# Nothing in production supplies one today. The only temporal integration
+# that exists is the CLOB market record's `game_start_time`
+# (workers/edge_marks.fetch_game_start, workers/underdog, workers/premap),
+# which is a SCHEDULED START INSTANT. Start plus elapsed wall-clock is
+# exactly the inference section 3 refuses.
+PROGRESS_FEED_CONNECTED: dict = {}
+
+# The registry `event_phase` consults. A sport needs BOTH a written rule
+# and a connected feed, so this is the intersection.
+SECOND_HALF_MAPPING: dict = {
+    sport: rule for sport, rule in DOCUMENTED_MAPPINGS.items()
+    if rule is not None and sport in PROGRESS_FEED_CONNECTED
+}
+
+PROGRESS_FEED_ABSENT = "PROGRESS_FEED_NOT_CONNECTED"
+NO_RULE_WRITTEN = "NO_HALFWAY_RULE_FOR_THIS_SPORT"
 
 MAPPING_REQUIREMENTS = (
     "a timestamped progress field observed from the venue or a feed "
@@ -267,25 +332,89 @@ def event_phase(*, progress=None, sport=None) -> dict:
     """
     out = {"source_class": SOURCE_CLASS["event_progress"],
            "sport": sport, "mapping_requirements": list(MAPPING_REQUIREMENTS)}
+    # THREE DIFFERENT ABSENCES, NAMED SEPARATELY. "no rule exists for this
+    # sport", "a rule exists but nothing feeds it" and "the feed exists but
+    # went quiet" are different facts with different remedies, and
+    # collapsing them into one UNDEFINED hides which one to fix.
     if sport not in SECOND_HALF_MAPPING:
-        out.update(phase=SECOND_HALF_UNDEFINED, loss_exit_available=False,
+        rule = DOCUMENTED_MAPPINGS.get(sport)
+        if rule is None:
+            reason, phase = NO_RULE_WRITTEN, SECOND_HALF_UNDEFINED
+            why = ("no halfway rule is written for %r. Its period structure "
+                   "is odd or unmapped, so a midpoint would be a guess"
+                   % (sport,))
+        else:
+            reason, phase = PROGRESS_FEED_ABSENT, SECOND_HALF_UNDEFINED
+            why = ("a halfway rule IS written for %r (%d periods), but no "
+                   "progress feed is connected for it, so the rule has "
+                   "nothing to read. %s"
+                   % (sport, getattr(rule, "total_periods", 0),
+                      WHY_NO_SPORT_IS_ADMITTED))
+        out.update(phase=phase, loss_exit_available=False,
                    admitted_to_experiment=False,
-                   why=WHY_NO_SPORT_IS_ADMITTED)
+                   admitted_to_complete_policy=False,
+                   absence=reason, rule_written=rule is not None,
+                   feed_connected=sport in PROGRESS_FEED_CONNECTED,
+                   why=why)
         return out
     if progress is None:
         # Admitted sport, but progress went missing after entry.
         out.update(phase=PROGRESS_UNAVAILABLE, loss_exit_available=False,
                    admitted_to_experiment=True,
+                   admitted_to_complete_policy=True,
+                   absence="PROGRESS_OBSERVATION_MISSING_NOW",
                    why=("this sport has a mapping but no progress "
                         "observation is available now. The loss exit is "
                         "UNAVAILABLE and the exposure is retained "
                         "visibly rather than exited on a guess"))
         return out
     rule = SECOND_HALF_MAPPING[sport]
+    # AN OBSERVATION THAT IS NOT IN PLAY IS NOT A PHASE. A halftime
+    # interval reports period 1 or 2 depending on the feed; exiting into a
+    # suspended market on that reading is not what the policy says.
+    if isinstance(progress, dict) and progress.get("in_play") is False:
+        out.update(phase=PROGRESS_UNAVAILABLE, loss_exit_available=False,
+                   admitted_to_experiment=True,
+                   admitted_to_complete_policy=True,
+                   absence="EVENT_NOT_IN_PLAY",
+                   observed_progress=progress,
+                   why=("the event is not in play at this observation, so "
+                        "no phase is asserted and the exposure is retained "
+                        "visibly rather than exited during a stoppage"))
+        return out
     phase = rule(progress)
     out.update(phase=phase, loss_exit_available=(phase == SECOND_HALF),
-               admitted_to_experiment=True, observed_progress=progress)
+               admitted_to_experiment=True,
+               admitted_to_complete_policy=True,
+               progress_fields_read=list(PROGRESS_FIELDS),
+               observed_progress=progress)
     return out
+
+
+def _net_trigger_bid(frac, cost_alloc, sellable, fee_fn) -> float | None:
+    """The bid at which NET proceeds equal `frac` of allocated cost.
+
+    Solved on the tick grid rather than in closed form: the fee is
+    theta*C*p*(1-p), so the closed form is a quadratic whose root depends
+    on the schedule, and the grid stays correct if the schedule ever stops
+    being quadratic.
+
+    Returns the HIGHEST tick at which the rule still FIRES, so the name
+    means what it says: at this bid and below, the exit triggers. The
+    first non-firing tick sits one tick above it.
+    """
+    if sellable <= 0 or cost_alloc <= 0:
+        return None
+    target = frac * cost_alloc
+    highest_firing = None
+    for i in range(1, 101):
+        b = round(i * TICK, 2)
+        charge = float(fee_fn(qty=sellable, price=b))
+        if b * sellable - max(0.0, charge) <= target:
+            highest_firing = b
+        else:
+            break
+    return highest_firing
 
 
 def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None,
@@ -344,8 +473,27 @@ def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None,
         net_proceeds_usd=proceeds, fees_usd=fee,
         allocated_cost_for_sellable_usd=cost_alloc,
         proceeds_over_cost=ratio,
-        trigger_level_bid=(frac * cost_alloc / sellable
-                           if sellable > 0 else None),
+        # TWO LEVELS, AND THEY ARE NOT THE SAME NUMBER. The rule fires on
+        # NET proceeds (§2: "including fees"), so the bid at which it
+        # actually fires is HIGHER than the bid at which GROSS proceeds
+        # reach the fraction -- by 1.74 cents on a 0.57 basis. Reporting
+        # only the gross level understated the exposure: a reader would
+        # expect the exit at 0.4788 when it fires at 0.4962. Management
+        # confirmed 0.4788 as 84% OF COST, which is the gross figure and
+        # is kept under a name that says so. The firing behaviour is
+        # unchanged; only the reported labels are corrected.
+        trigger_level_bid_gross=(frac * cost_alloc / sellable
+                                 if sellable > 0 else None),
+        trigger_level_bid=_net_trigger_bid(frac, cost_alloc, sellable,
+                                           fee_fn or _fee_taker),
+        trigger_level_basis=("`trigger_level_bid` is the HIGHEST tick at "
+                             "which the rule still fires, on NET proceeds "
+                             "after the taker fee. "
+                             "`trigger_level_bid_gross` is the same "
+                             "fraction applied to cost BEFORE fees -- the "
+                             "figure management confirmed as 84% of cost. "
+                             "The two differ by the exit fee and the net "
+                             "one is the operative boundary"),
         trigger_price_is_not_execution_price=(
             "this is the level the rule fires at. What a sale achieves is "
             "reported separately; a gap through the level can be worse"),

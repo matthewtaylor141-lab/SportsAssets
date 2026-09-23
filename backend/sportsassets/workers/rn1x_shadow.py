@@ -22,14 +22,31 @@ WHAT IT DOES, ONCE PER CYCLE.
        existing `Managed` lifecycle over `bettor_desk.Order`/`Portfolio`.
     6. PERSIST the whole thing in one transaction, or record the refusal.
 
-IT IS A HISTORICAL REPLAY AND SAYS SO IN EVERY ROW. Not a forward
-shadow. The runner hard-codes `mode = HISTORICAL_REPLAY` and
-`prospective = false`, and that is not a limitation of this loop -- it is
-forced by the feed. The measured RN1 detection lag on the Santos
-condition was 15.07 hours, POSTDATING that market's settlement by 11.22
-hours. A forward lane seeded by this feed would be deciding on events
-that had already resolved. The external dependency that would change
-that is named in `BLOCKERS` and nowhere is it worked around.
+TWO LANES, AND I HAD ONLY BUILT ONE WHILE BLAMING THE FEED FOR IT.
+
+I reported that no forward lane could be seeded from this feed, citing a
+15.07 h detection lag on one seed that postdated settlement. That was a
+wrong diagnosis of my own code. The candidate query required
+`m.resolved`, so the experiment could only ever see settled markets --
+HISTORICAL BY MY OWN FILTER, not by any property of the feed. The cursor
+also defaults to 0, so it walks `trades` from the first row ever
+recorded: at id ~300 of ~6.1M it is replaying March.
+
+And the lag figure could not carry that weight. `trades.source`
+separates `chain`/`poll` (live, `detected_at` stamped at insert) from
+`backfill` (inserted months later) and `s1` (a synthetic emitter). On a
+backfill row `detected_at - ts` is the age of the backfill. `lane_census`
+now measures latency over LIVE lanes only, every cycle, into the
+heartbeat.
+
+  HISTORICAL   resolved markets; scored against the observed payout; its
+               cursor walks from the start and is never reset here.
+  PROSPECTIVE  UNRESOLVED markets, LIVE lanes only; cursor seeded at the
+               feed head on a genuine first start. Decisions are recorded
+               while the outcome is unknown, and no payout is read.
+
+The two are keyed to different experiment ids and different cursors, so
+their rows and their totals are never mixed.
 
 NO CAPITAL, NO ORDERS, NO VENUE. Every order it writes is modelled and
 the schema CHECKs `is_modelled`. There is no submit, cancel or funding
@@ -43,6 +60,7 @@ Kill: the control row (prompt, no deploy) or RN1X_SHADOW=off (a deploy).
 from __future__ import annotations
 
 import asyncio
+import decimal
 import logging
 import os
 
@@ -66,7 +84,44 @@ SCAN_BATCH = 400          # trades rows examined per cycle
 MAX_SEEDS_PER_CYCLE = 3   # conditions replayed per cycle
 MAX_ROWS_PER_CONDITION = 4000
 
-EXPERIMENT_ID = "RN1X_MGMT_PAIR091_STOP16_V1"
+# ── TWO LANES, SEPARATELY KEYED AND SEPARATELY PERSISTED ────────────
+#
+# I PREVIOUSLY REPORTED THAT NO FORWARD LANE WAS POSSIBLE FROM THIS FEED.
+# That was wrong, and the mistake was mine rather than the feed's. The
+# candidate query below required `m.resolved`, so the experiment could only
+# ever see settled markets -- historical BY MY OWN FILTER. On top of that
+# the cursor defaults to 0, so it walks `trades` from the very first row:
+# at id ~300 of ~6.1M it is replaying March, not consuming new activity.
+# The 15.07 h "detection lag" I generalised into a feed blocker came from
+# ONE seed, and `trades.source` shows why that figure cannot bear the
+# weight I put on it: for a `backfill` row, `detected_at - ts` is when we
+# BACKFILLED it, not when anything was detected.
+#
+# So there are two lanes and they never share a total:
+#   HISTORICAL   resolved markets, any lane, cursor walks from the start.
+#                Scored against the observed payout. Its cursor and its
+#                rows are PRESERVED -- nothing here resets or discards it.
+#   PROSPECTIVE  UNRESOLVED markets, LIVE lanes only, cursor seeded at the
+#                feed head on first start so it consumes what arrives
+#                after it begins. No payout exists yet, so it is not
+#                scored; it records decisions at the time they were taken.
+HISTORICAL_EXPERIMENT_ID = "RN1X_MGMT_PAIR091_STOP16_V1"
+PROSPECTIVE_EXPERIMENT_ID = "RN1X_MGMT_PAIR091_STOP16_V1_PROSPECTIVE"
+# Kept under the old name so existing rows, tests and readbacks that speak
+# of "the experiment id" keep meaning the historical one.
+EXPERIMENT_ID = HISTORICAL_EXPERIMENT_ID
+
+HISTORICAL_CURSOR_KEY = "rn1x_source_cursor"      # unchanged, preserved
+PROSPECTIVE_CURSOR_KEY = "rn1x_prospective_cursor"
+
+# THE LIVE LANES, BY NAME. Migration 033 is explicit that the shadow
+# instrument's evidence queries filter `source IN ('chain','poll')` so the
+# S1 emitter's own rows can never be read as venue coverage. My candidate
+# query had NO source filter at all, so 's1' rows were eligible seeds --
+# a rule the project had written down and I had not honoured.
+LIVE_SOURCES = ("chain", "poll")
+SEEDABLE_SOURCES = ("chain", "poll", "backfill")   # never 's1'
+
 EXECUTION_BASIS = "PRINT_THROUGH_WITH_QUEUE_SHARE_V1"
 
 # Named blockers, so the command centre shows a reason rather than an
@@ -87,11 +142,30 @@ BLOCKERS = {
         "trigger that needs an executable bid cannot fire. MISSING "
         "DEPENDENCY: an archived same-venue order book at the decision "
         "instants."),
-    "FEED_POSTDATES_SETTLEMENT": (
-        "RN1 fill detection lagged 15.07 hours on the measured seed and "
-        "postdated that market's settlement by 11.22 hours, so no "
-        "forward lane can be seeded from this feed. This experiment is "
-        "a HISTORICAL REPLAY and is labelled so in every row."),
+    # WITHDRAWN AS A BLOCKER. It was never one. Kept under its own name
+    # rather than deleted, because a claim I published and then retracted
+    # should stay visible as a retraction rather than disappear.
+    "FEED_POSTDATES_SETTLEMENT_WITHDRAWN": (
+        "WITHDRAWN 2026-09-23. I reported that RN1 detection postdated "
+        "settlement by 11.22 hours and concluded no forward lane was "
+        "possible. The 15.07 h figure came from ONE seed and could not "
+        "bear that weight: `trades.source` shows `backfill` rows, whose "
+        "`detected_at - ts` is the age of the backfill and not a "
+        "detection latency. The experiment was historical because my own "
+        "candidate query required `m.resolved`, not because of the feed. "
+        "A PROSPECTIVE lane on unresolved markets and live lanes only now "
+        "exists, and `lane_census` measures live latency every cycle so "
+        "this is answered from persisted state rather than one sample."),
+}
+
+# Blockers that apply ONLY to the prospective lane, because a decision
+# taken before resolution genuinely cannot be scored yet.
+PROSPECTIVE_NOTES = {
+    "NOT_YET_SCORED": (
+        "A prospective decision has no observed payout, because the "
+        "market has not resolved. These rows record what was decided and "
+        "when; the historical lane scores the same conditions once they "
+        "settle. A prospective total is never added to a scored one."),
 }
 
 
@@ -122,20 +196,43 @@ async def _running(conn) -> tuple[bool, str]:
     return True, "RUNNING"
 
 
-async def _cursor(conn) -> int:
+async def _cursor(conn, key: str = HISTORICAL_CURSOR_KEY,
+                  *, seed_at_head: bool = False) -> int:
+    """Resume exactly, or -- for the prospective lane only -- start at NOW.
+
+    THE HISTORICAL CURSOR IS NEVER RESET. It defaults to 0 so the
+    historical lane keeps walking `trades` from the beginning, which is
+    what makes its evidence a replay of the record. Nothing in this module
+    writes it backwards.
+
+    THE PROSPECTIVE CURSOR IS DIFFERENT AND MUST BE. A prospective lane
+    seeded at 0 would grind through five months of history while every row
+    it published claimed to be new activity -- the same defect the desk
+    loop documents at `_load_cursor`. On a genuine FIRST start it takes
+    max(id), so it consumes only what arrives after it begins. A restart
+    resumes from the stored value exactly, so a redeploy loses nothing.
+    """
     raw = await conn.fetchval(
-        "SELECT value::text FROM ingestion_state WHERE key = $1", CURSOR_KEY)
+        "SELECT value::text FROM ingestion_state WHERE key = $1", key)
     try:
         return int(str(raw).strip().strip('"'))
     except (TypeError, ValueError):
+        pass
+    if not seed_at_head:
         return 0
+    head = int(await conn.fetchval(
+        "SELECT coalesce(max(id), 0) FROM trades") or 0)
+    log.info("rn1x prospective FIRST START: seeding cursor at head %s; "
+             "history before it is not replayed as new activity", head)
+    return head
 
 
-async def _save_cursor(conn, value: int) -> None:
+async def _save_cursor(conn, value: int,
+                       key: str = HISTORICAL_CURSOR_KEY) -> None:
     await conn.execute(
         "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
         "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-        CURSOR_KEY, str(int(value)))
+        key, str(int(value)))
 
 
 # ── seed candidates: real cohort fills on RESOLVED conditions ───────
@@ -145,7 +242,7 @@ async def _save_cursor(conn, value: int) -> None:
 # sold. The join to `markets` is what makes the replay scorable -- an
 # unresolved condition has no observed payout and step 8 would have
 # nothing to read.
-_CANDIDATES = """
+_CANDIDATES_HISTORICAL = """
     SELECT t.id, t.whale_id, t.condition_id
       FROM trades t
       JOIN markets m ON m.condition_id = t.condition_id
@@ -153,11 +250,88 @@ _CANDIDATES = """
        AND t.condition_id IS NOT NULL
        AND t.outcome_index IN (0, 1)
        AND t.side = 'BUY'
+       AND t.source = ANY($3::text[])
        AND m.resolved
        AND m.resolved_prices IS NOT NULL
      ORDER BY t.id
      LIMIT $2
 """
+
+# THE PROSPECTIVE LANE. Live lanes only, and markets that have NOT
+# resolved -- so a decision here is taken while the outcome is genuinely
+# unknown. No payout is read because none exists; these rows are scored
+# later, by the historical lane, once the market settles.
+_CANDIDATES_PROSPECTIVE = """
+    SELECT t.id, t.whale_id, t.condition_id
+      FROM trades t
+      JOIN markets m ON m.condition_id = t.condition_id
+     WHERE t.id > $1
+       AND t.condition_id IS NOT NULL
+       AND t.outcome_index IN (0, 1)
+       AND t.side = 'BUY'
+       AND t.source = ANY($3::text[])
+       AND NOT m.resolved
+     ORDER BY t.id
+     LIMIT $2
+"""
+
+# ── THE PROVENANCE CENSUS ───────────────────────────────────────────
+#
+# Rides the heartbeat every cycle, so "is this historical or prospective"
+# is answered by persisted operational state rather than by reading the
+# source of a query. It is deliberately ONE bounded statement on the
+# `trades_detected_live_idx` window plus one cheap join on the PK.
+_LANE_CENSUS = """
+    SELECT count(*) FILTER (WHERE t.source = ANY($1::text[])) AS live_24h,
+           count(*) FILTER (WHERE t.source = 'backfill') AS backfill_24h,
+           count(*) FILTER (WHERE t.source = 's1') AS s1_24h,
+           count(*) FILTER (WHERE t.source = ANY($1::text[])
+                            AND t.side = 'BUY' AND NOT m.resolved)
+               AS live_unresolved_buys_24h,
+           round(max(extract(epoch FROM (t.detected_at - t.ts)))
+                 FILTER (WHERE t.source = ANY($1::text[]))::numeric, 1)
+               AS live_max_latency_s,
+           round(avg(extract(epoch FROM (t.detected_at - t.ts)))
+                 FILTER (WHERE t.source = ANY($1::text[]))::numeric, 1)
+               AS live_avg_latency_s
+      FROM trades t
+      JOIN markets m ON m.condition_id = t.condition_id
+     WHERE t.detected_at > now() - interval '24 hours'
+"""
+
+_SEEDED_BY_SOURCE = """
+    SELECT t.source, count(*) AS seeded
+      FROM rn1x_positions p
+      JOIN trades t ON t.id = p.source_trade_id
+     GROUP BY 1 ORDER BY 2 DESC
+"""
+
+
+async def lane_census(conn) -> dict:
+    """What the feed actually delivered in the last 24 hours, by lane.
+
+    THE FIGURE THAT MATTERS FOR THE BLOCKER I WRONGLY DECLARED is
+    `live_unresolved_buys_24h`: live-lane BUY fills on markets that have
+    not resolved. If it is non-zero then a prospective lane has evidence
+    to work with, and "the feed postdates settlement" was a statement
+    about backfill rows and one seed, not about the feed.
+
+    `live_max_latency_s` is computed over LIVE lanes only, because
+    `detected_at - ts` on a backfill row is the age of the backfill.
+    """
+    row = await conn.fetchrow(_LANE_CENSUS, list(LIVE_SOURCES))
+    seeded = await conn.fetch(_SEEDED_BY_SOURCE)
+    # `round(...)::numeric` comes back as Decimal, which json.dumps refuses.
+    # A figure that cannot be read stays None rather than becoming 0.
+    out = {k: (float(v) if isinstance(v, decimal.Decimal) else v)
+           for k, v in (dict(row) if row else {}).items()}
+    out["seeded_by_source"] = {r["source"]: int(r["seeded"]) for r in seeded}
+    out["live_sources"] = list(LIVE_SOURCES)
+    out["latency_note"] = (
+        "live lanes only. For a backfill row detected_at - ts is the age "
+        "of the backfill, not a detection latency")
+    return out
+
 
 # Every recorded fill on the condition, ours and others'. The others'
 # are the EVIDENCE that licenses a modelled fill; without them a resting
@@ -229,7 +403,8 @@ async def verify_initial_inventory(conn, *, whale_id, condition_id,
     }
 
 
-async def _replay_one(conn, *, trade_id, whale_id, condition_id) -> dict:
+async def _replay_one(conn, *, trade_id, whale_id, condition_id,
+                      prospective: bool = False) -> dict:
     rows = await conn.fetch(_CONDITION_ROWS, condition_id,
                             MAX_ROWS_PER_CONDITION)
     inv = await verify_initial_inventory(
@@ -241,7 +416,11 @@ async def _replay_one(conn, *, trade_id, whale_id, condition_id) -> dict:
 
     payouts = None
     resolved_at = None
-    if mkt is not None and mkt["resolved_prices"] is not None:
+    # A PROSPECTIVE RUN READS NO PAYOUT, FULL STOP. Not "there happens not
+    # to be one" -- the lane refuses it. A market that resolves between
+    # the candidate query and this read would otherwise hand a prospective
+    # decision its own outcome, which is look-ahead arriving by a race.
+    if (not prospective) and mkt is not None and mkt["resolved_prices"] is not None:
         import json as _json
         raw = mkt["resolved_prices"]
         prices = _json.loads(raw) if isinstance(raw, str) else raw
@@ -259,11 +438,27 @@ async def _replay_one(conn, *, trade_id, whale_id, condition_id) -> dict:
     out["initial_inventory_evidence"] = inv
     out["resolved_at"] = resolved_at
     out["blockers"] = sorted(BLOCKERS)
+    out["lane"] = "PROSPECTIVE" if prospective else "HISTORICAL"
+    if prospective:
+        out["prospective_notes"] = dict(PROSPECTIVE_NOTES)
+        out["scored"] = False
+    else:
+        out["scored"] = payouts is not None
     return out
 
 
-async def cycle(conn) -> dict:
-    """One cycle. Never raises; returns what it did or why it did not."""
+async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
+    """One cycle on ONE lane. Never raises.
+
+    `lane` selects the candidate query, the experiment id, the cursor and
+    whether a payout may be read. The two lanes share this code path
+    deliberately -- a separate prospective implementation would be a
+    second experiment that could drift from the frozen policy -- but they
+    share no identifier, no cursor and no total.
+    """
+    if lane not in ("HISTORICAL", "PROSPECTIVE"):
+        raise ValueError("unknown lane %r" % (lane,))
+    prospective = lane == "PROSPECTIVE"
     running, why = await _running(conn)
     if not running:
         return {"ran": False, "state": "STOPPED", "why": why}
@@ -273,26 +468,48 @@ async def cycle(conn) -> dict:
         return {"ran": False, "state": "BLOCKED", "why": rdy["blocker"],
                 "missing_tables": rdy["missing"]}
 
+    experiment_id = (PROSPECTIVE_EXPERIMENT_ID if prospective
+                     else HISTORICAL_EXPERIMENT_ID)
+    cursor_key = (PROSPECTIVE_CURSOR_KEY if prospective
+                  else HISTORICAL_CURSOR_KEY)
+    query = (_CANDIDATES_PROSPECTIVE if prospective
+             else _CANDIDATES_HISTORICAL)
+    sources = list(LIVE_SOURCES if prospective else SEEDABLE_SOURCES)
+
     await store.declare_experiment(
-        conn, experiment_id=EXPERIMENT_ID,
+        conn, experiment_id=experiment_id,
         code_version=runner.VERSION,
         seed_rule={
-            "source": "cohort BUY fill in `trades` on a RESOLVED market",
+            "lane": lane,
+            "source": ("cohort BUY fill in `trades` on an UNRESOLVED "
+                       "market, live lanes only"
+                       if prospective else
+                       "cohort BUY fill in `trades` on a RESOLVED market"),
+            "trades_source_filter": sources,
+            "excludes": ("'s1' -- migration 033: the shadow instrument "
+                         "must never read the emitter's own rows"),
             "venue": "POLYMARKET_GLOBAL_POLYGON",
             "event_class": "SINGLE_ACCOUNT_EXECUTIONS",
             "seed_price": "RN1's own fill price, ASSIGNED",
+            "cursor_start": ("feed head on first start"
+                             if prospective else "0 (walks the record)"),
             "not_evidence_of": ("that we could have obtained this fill"),
         },
         policy_register=pol.describe(),
         execution_basis=EXECUTION_BASIS,
-        notes=("HISTORICAL REPLAY. Management-defined and experimental; "
-               "not learned and not proven profitable."))
+        notes=(("PROSPECTIVE SHADOW. Decisions recorded before the market "
+                "resolved; NOT scored, and never summed with a scored "
+                "result." if prospective else
+                "HISTORICAL REPLAY, scored against the observed payout.")
+               + " Management-defined and experimental; not learned and "
+                 "not proven profitable."))
 
-    start = await _cursor(conn)
-    cands = await conn.fetch(_CANDIDATES, start, SCAN_BATCH)
+    start = await _cursor(conn, cursor_key, seed_at_head=prospective)
+    cands = await conn.fetch(query, start, SCAN_BATCH, sources)
+    census = await lane_census(conn)
     if not cands:
-        return {"ran": True, "state": "IDLE_NO_CANDIDATES",
-                "cursor": start}
+        return {"ran": True, "state": "IDLE_NO_CANDIDATES", "lane": lane,
+                "cursor": start, "lane_census": census}
 
     seen_conditions: set[str] = set()
     results = []
@@ -322,7 +539,7 @@ async def cycle(conn) -> dict:
         # Already replayed under this experiment and policy? The store's
         # key is derived, so this is a cheap check rather than a second
         # write that would be a no-op anyway.
-        pid = store.position_id(EXPERIMENT_ID, pol.POLICY_ID, rid)
+        pid = store.position_id(experiment_id, pol.POLICY_ID, rid)
         if await conn.fetchval(
                 "SELECT 1 FROM rn1x_positions WHERE position_id = $1", pid):
             safe_id = rid
@@ -330,9 +547,9 @@ async def cycle(conn) -> dict:
         try:
             out = await _replay_one(
                 conn, trade_id=rid, whale_id=int(r["whale_id"]),
-                condition_id=r["condition_id"])
+                condition_id=r["condition_id"], prospective=prospective)
             wrote = await store.persist_run(
-                conn, out, experiment_id=EXPERIMENT_ID,
+                conn, out, experiment_id=experiment_id,
                 source_account=str(r["whale_id"]))
         except Exception as exc:                               # noqa: BLE001
             log.exception("rn1x replay failed for trade %s", rid)
@@ -347,10 +564,11 @@ async def cycle(conn) -> dict:
                         "condition_id": r["condition_id"], **wrote})
         safe_id = rid
 
-    await _save_cursor(conn, safe_id)
-    return {"ran": True, "state": "REPLAYED", "cursor": safe_id,
-            "examined": len(cands), "results": results,
+    await _save_cursor(conn, safe_id, cursor_key)
+    return {"ran": True, "state": "REPLAYED", "lane": lane,
+            "cursor": safe_id, "examined": len(cands), "results": results,
             "stopped_at_error": stopped_at_error,
+            "lane_census": census,
             "written": sum(1 for x in results if x.get("written"))}
 
 
@@ -406,9 +624,28 @@ async def run(pool_factory=None) -> None:
         while True:
             delay = TICK_S
             try:
-                res = await cycle(conn)
-                idle = res.get("state") in ("STOPPED", "BLOCKED",
-                                            "IDLE_NO_CANDIDATES")
+                # BOTH LANES, EVERY CYCLE, in this order. Prospective runs
+                # first: it consumes what has just arrived, and making it
+                # wait behind a multi-month backfill would be the same
+                # mistake as seeding its cursor at zero. Each lane keeps
+                # its own result so the heartbeat shows two states, never
+                # one blended one.
+                res_p = await cycle(conn, lane="PROSPECTIVE")
+                res_h = await cycle(conn, lane="HISTORICAL")
+                res = {"prospective": res_p, "historical": res_h,
+                       "lane_census": (res_h.get("lane_census")
+                                       or res_p.get("lane_census"))}
+                states = (res_p.get("state"), res_h.get("state"))
+                if "STOPPED" in states:
+                    res["state"] = "STOPPED"
+                elif "BLOCKED" in states:
+                    res["state"] = "BLOCKED"
+                elif "REPLAYED" in states:
+                    res["state"] = "REPLAYED"
+                else:
+                    res["state"] = "IDLE_NO_CANDIDATES"
+                idle = res["state"] in ("STOPPED", "BLOCKED",
+                                        "IDLE_NO_CANDIDATES")
                 delay = IDLE_S if idle else TICK_S
                 await heartbeat(SERVICE, "idle" if idle else "ok", res)
             except asyncio.CancelledError:

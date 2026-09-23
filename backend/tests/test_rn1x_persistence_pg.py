@@ -64,7 +64,8 @@ async def _reset(conn):
     await conn.execute("DELETE FROM markets WHERE condition_id = $1", COND)
     await conn.execute(
         "DELETE FROM ingestion_state WHERE key IN "
-        "('rn1x_shadow', 'rn1x_source_cursor', 'rn1x_learn')")
+        "('rn1x_shadow', 'rn1x_source_cursor', 'rn1x_learn', "
+        "'rn1x_prospective_cursor')")
 
 
 async def _seed_evidence(conn):
@@ -109,9 +110,26 @@ async def _seed_evidence(conn):
     return ids
 
 
+async def _match_production_constraints(c):
+    """Bring the throwaway cluster's `trades.source` CHECK up to migration
+    033, which admits 's1'.
+
+    WITHOUT THIS the s1-exclusion test cannot even insert its fixture and
+    fails with a CheckViolation that looks like a bug in the test rather
+    than a stale local schema. Applied here rather than by hand so the
+    suite is reproducible: the local migration run stops at 031, which
+    fails on an unrelated table (`us_premap`).
+    """
+    await c.execute(
+        "ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_source_check; "
+        "ALTER TABLE trades ADD CONSTRAINT trades_source_check "
+        "CHECK (source IN ('chain','poll','backfill','s1'))")
+
+
 @pytest.fixture
 async def conn():
     c = await asyncpg.connect(DSN)
+    await _match_production_constraints(c)
     await _reset(c)
     try:
         yield c
@@ -781,3 +799,162 @@ async def test_the_skip_gate_does_not_block_the_first_evaluation(conn):
         assert res["new_rows"] == len(L.CHALLENGERS), res
     finally:
         await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+# ══ ITEM 1: HISTORICAL vs PROSPECTIVE, AND LANE PROVENANCE ══════════
+#
+# I had reported that no forward lane was possible from this feed. It was
+# possible; the experiment was historical because my own candidate query
+# required `m.resolved`. These assert the separation that replaces that.
+
+async def _unresolved_evidence(conn, *, source="chain"):
+    """A live-lane BUY on a market that has NOT resolved."""
+    cond = COND + "_unres"
+    await conn.execute(
+        "INSERT INTO whales (id, address, username) VALUES (777001, "
+        "'0xprosp', 'prosp') ON CONFLICT (id) DO NOTHING")
+    await conn.execute(
+        "INSERT INTO markets (condition_id, title, resolved) "
+        "VALUES ($1, 'unresolved', FALSE) "
+        "ON CONFLICT (condition_id) DO UPDATE SET resolved = FALSE, "
+        "resolved_prices = NULL", cond)
+    rid = await conn.fetchval(
+        "INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, "
+        "outcome_index, size, price, notional, ts, source, detected_at, "
+        "dedupe_key) VALUES (777001,'0xp1','a0',$1,'BUY',0,50,0.55,27.5,"
+        "$2,$3,$2,$4) RETURNING id",
+        cond, T0, source, "prosp-%s" % source)
+    return int(rid), cond
+
+
+async def test_the_historical_lane_never_seeds_from_an_unresolved_market(conn):
+    from sportsassets.workers import rn1x_shadow as W
+
+    rid, cond = await _unresolved_evidence(conn)
+    try:
+        await _arm(conn)
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            W.HISTORICAL_CURSOR_KEY, str(rid - 1))
+        res = await W.cycle(conn, lane="HISTORICAL")
+        got = [r["trade_id"] for r in res.get("results", [])]
+        assert rid not in got, res
+    finally:
+        await conn.execute("DELETE FROM trades WHERE condition_id = $1", cond)
+        await conn.execute("DELETE FROM markets WHERE condition_id = $1", cond)
+
+
+async def test_an_s1_emitter_row_can_never_seed_either_lane(conn):
+    """Migration 033's rule, which my query had not honoured.
+
+    "the shadow instrument (whose evidence queries filter source IN
+    ('chain','poll')) can never see the emitter's own rows as venue
+    coverage". My `_CANDIDATES` had no source filter at all.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    rid, cond = await _unresolved_evidence(conn, source="s1")
+    try:
+        await _arm(conn)
+        for lane, key in (("PROSPECTIVE", W.PROSPECTIVE_CURSOR_KEY),
+                          ("HISTORICAL", W.HISTORICAL_CURSOR_KEY)):
+            await conn.execute(
+                "INSERT INTO ingestion_state (key, value) VALUES "
+                "($1, $2::jsonb) ON CONFLICT (key) DO UPDATE "
+                "SET value = $2::jsonb", key, str(rid - 1))
+            res = await W.cycle(conn, lane=lane)
+            got = [r["trade_id"] for r in res.get("results", [])]
+            assert rid not in got, (lane, res)
+        assert "s1" not in [
+            r["source"] for r in await conn.fetch(W._SEEDED_BY_SOURCE)]
+    finally:
+        await conn.execute("DELETE FROM trades WHERE condition_id = $1", cond)
+        await conn.execute("DELETE FROM markets WHERE condition_id = $1", cond)
+
+
+async def test_a_prospective_run_reads_no_payout_even_if_one_exists(conn):
+    """Look-ahead must not arrive by a race.
+
+    If a market resolves between the candidate query and the payout read,
+    a prospective decision would otherwise be handed its own outcome. The
+    LANE refuses the payout, not the absence of one.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)          # this market IS resolved
+    out = await W._replay_one(conn, trade_id=ids[0], whale_id=WHALE,
+                              condition_id=COND, prospective=True)
+    assert out["lane"] == "PROSPECTIVE"
+    assert out["scored"] is False
+    assert out["resolved_at"] is None
+    assert out["steps"]["SETTLE"]["settled"] is None, out["steps"]["SETTLE"]
+
+    scored = await W._replay_one(conn, trade_id=ids[0], whale_id=WHALE,
+                                 condition_id=COND, prospective=False)
+    assert scored["scored"] is True, (
+        "the historical lane must still read the payout, or this test "
+        "would pass against a build that never scores anything")
+
+
+async def test_the_two_lanes_persist_under_different_experiment_ids(conn):
+    from sportsassets.workers import rn1x_shadow as W
+
+    assert W.PROSPECTIVE_EXPERIMENT_ID != W.HISTORICAL_EXPERIMENT_ID
+    assert W.PROSPECTIVE_CURSOR_KEY != W.HISTORICAL_CURSOR_KEY
+    # and the legacy alias still means the historical one, so existing rows
+    # and readbacks keep their meaning
+    assert W.EXPERIMENT_ID == W.HISTORICAL_EXPERIMENT_ID
+
+
+async def test_a_prospective_cycle_does_not_move_the_historical_cursor(conn):
+    """The historical evidence must not be disturbed by the new lane."""
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        W.HISTORICAL_CURSOR_KEY, str(ids[0] - 1))
+    before = await conn.fetchval(
+        "SELECT value::text FROM ingestion_state WHERE key = $1",
+        W.HISTORICAL_CURSOR_KEY)
+    await W.cycle(conn, lane="PROSPECTIVE")
+    after = await conn.fetchval(
+        "SELECT value::text FROM ingestion_state WHERE key = $1",
+        W.HISTORICAL_CURSOR_KEY)
+    assert before == after, (before, after)
+
+
+async def test_the_prospective_cursor_starts_at_the_feed_head(conn):
+    """Seeded at 0 it would replay five months while claiming to be new."""
+    from sportsassets.workers import rn1x_shadow as W
+
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.PROSPECTIVE_CURSOR_KEY)
+    head = int(await conn.fetchval(
+        "SELECT coalesce(max(id), 0) FROM trades") or 0)
+    got = await W._cursor(conn, W.PROSPECTIVE_CURSOR_KEY, seed_at_head=True)
+    assert got == head, (got, head)
+    # the HISTORICAL cursor must still default to 0, not the head
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.HISTORICAL_CURSOR_KEY)
+    assert await W._cursor(conn, W.HISTORICAL_CURSOR_KEY) == 0
+
+
+async def test_the_lane_census_measures_latency_on_live_lanes_only(conn):
+    """A backfill row's detected_at - ts is the age of the backfill.
+
+    This is the measurement that replaces the one seed I generalised into
+    a feed blocker.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    cen = await W.lane_census(conn)
+    assert cen["live_sources"] == list(W.LIVE_SOURCES)
+    assert "backfill" not in cen["live_sources"]
+    for key in ("live_24h", "backfill_24h", "s1_24h",
+                "live_unresolved_buys_24h"):
+        assert key in cen, key
+    assert "age of the backfill" in cen["latency_note"]
