@@ -160,44 +160,94 @@ def test_every_input_carries_a_model_rule_or_assumption_label():
     assert "FORBIDDEN" in lab["P_PAIR_COMPLETION"]
 
 
-# ── the experimental rule ────────────────────────────────────────────
+# ── the priced-action ranking (the rule) ─────────────────────────────
 
-def test_the_rule_acts_on_a_pair_below_par_and_shows_its_arithmetic():
-    r = MS.experimental_rule(60, 0.45, 0.49, fee_fn=fee)
-    assert r["acts"] is True
-    # 60.00 - 27.00 - 29.40 - 0.294 = 3.306
-    assert abs(r["locked_gain_usd"] - 3.306) < 1e-9
-    assert "29.4000" in r["arithmetic"]
-
-
-def test_the_rule_refuses_a_pair_above_par():
-    r = MS.experimental_rule(60, 0.45, 0.56, fee_fn=fee)
-    assert r["acts"] is False
-    assert r["locked_gain_usd"] < 0
+def test_the_ranking_prefers_completion_when_1_minus_ask_beats_the_bid():
+    r = MS.rank_priced_actions(60, 0.45, bid=0.40, bid_size=500,
+                               complement_ask=0.49, complement_ask_size=500,
+                               fee_fn=fee)
+    assert r["selected"] == "TAKE_COMPLEMENT"
+    # 1 - 0.49 = 0.51 > bid 0.40
+    assert "1 - ask = 0.5100 vs bid = 0.4000" in r["selection_reason"]
 
 
-def test_the_rule_refuses_when_fees_are_unknown_rather_than_free():
-    r = MS.experimental_rule(60, 0.45, 0.49, fee_fn=None)
-    assert r["acts"] is False
-    assert "not a zero cost" in r["why"]
+def test_the_ranking_prefers_the_sale_when_the_bid_beats_it():
+    """CONTROL: the ranking is a calculation, not a bias toward pairing."""
+    r = MS.rank_priced_actions(60, 0.45, bid=0.60, bid_size=500,
+                               complement_ask=0.55, complement_ask_size=500,
+                               fee_fn=fee)
+    assert r["selected"] == "DIRECT_EXIT"
 
 
-def test_the_rule_never_claims_to_be_EV_optimal():
-    """It may be TESTED. It may not borrow the authority of an
-    optimisation it did not perform."""
+def test_above_par_completion_is_SELECTABLE_when_it_limits_a_loss():
+    """THE BLANKET SUB-PAR GATE IS WITHDRAWN. Basis 0.45 and a 0.55
+    complement locks a loss, and it still beats selling into a 0.10
+    bid."""
+    r = MS.rank_priced_actions(60, 0.45, bid=0.10, bid_size=500,
+                               complement_ask=0.55, complement_ask_size=500,
+                               fee_fn=fee)
+    assert r["selected"] == "TAKE_COMPLEMENT"
+    best = r["priced_actions"][0]
+    assert best["locks_a_loss"] is True
+    assert "LOCKS A LOSS and is selected anyway" in r["selection_reason"]
+    assert "below-par" not in r["selection_reason"]
+
+
+def test_a_priced_action_is_NOT_a_secured_execution():
+    """Computing an attractive completion does not obtain it."""
+    r = MS.rank_priced_actions(60, 0.45, bid=0.40, bid_size=500,
+                               complement_ask=0.49, complement_ask_size=500,
+                               fee_fn=fee)
+    for c in r["priced_actions"]:
+        assert c["execution_secured"] is False
+        assert "outcome_if_filled_usd" in c
+        assert "value_usd" not in c
+
+
+def test_a_price_without_depth_is_refused_not_ranked():
+    r = MS.rank_priced_actions(60, 0.45, bid=0.40, bid_size=0,
+                               complement_ask=0.49, complement_ask_size=0,
+                               fee_fn=fee)
+    assert r["selected"] is None
+    blockers = {x["action"]: x["blocker"] for x in r["refused"]}
+    assert blockers["DIRECT_EXIT"] == "NO_EXECUTABLE_DEPTH"
+    assert blockers["TAKE_COMPLEMENT"] == "NO_EXECUTABLE_DEPTH"
+
+
+def test_depth_shorter_than_our_size_releases_basis_pro_rata():
+    r = MS.rank_priced_actions(100, 0.45, bid=0.50, bid_size=25,
+                               complement_ask=None, fee_fn=fee)
+    c = r["priced_actions"][0]
+    assert c["qty"] == 25.0
+    assert c["depth_limited"] is True
+    # 0.50*25 = 12.50 - fee 0.125 - basis 45*(25/100)=11.25 -> 1.125
+    assert abs(c["outcome_if_filled_usd"] - 1.125) < 1e-9
+
+
+def test_unknown_fees_refuse_rather_than_pricing_execution_as_free():
+    r = MS.rank_priced_actions(60, 0.45, bid=0.40, bid_size=500,
+                               complement_ask=0.49, complement_ask_size=500,
+                               fee_fn=None)
+    assert r["selected"] is None
+    assert all(x["blocker"] == "FEE_SCHEDULE_NOT_ESTABLISHED"
+               for x in r["refused"])
+
+
+def test_hold_is_named_as_not_comparable_never_as_zero():
+    r = MS.rank_priced_actions(60, 0.45, bid=0.40, bid_size=500,
+                               complement_ask=0.49, complement_ask_size=500,
+                               fee_fn=fee)
+    assert r["hold"]["value_usd"] is None
+    assert r["hold"]["status"] == MS.NOT_IDENTIFIED
+    assert "NOT zero" in r["hold"]["why"]
+    assert "HOLD is NOT comparable" in r["selection_reason"]
+
+
+def test_the_rule_never_claims_to_be_EV_optimal_or_executed():
     d = MS.RULE_DECLARATION
-    assert d["kind"] == "RULE"
-    assert "EV-optimal" in d["is_not"]
+    assert "EV-optimal" not in d.get("claims", "")
+    assert "evidence that acting beats holding" in d["is_not"]
+    assert "may not fill at all" in d["is_not"]
+    assert d["supports_loss_limiting"].startswith("YES")
+    assert "blanket" in d["withdrawn"]
     assert d["inputs"]["settlement"].startswith("NOT USED")
-    assert d["inputs"]["p_fill"].startswith("NOT USED")
-    # and it states what preferring certainty costs
-    assert "underperform HOLD" in d["known_cost"]
-
-
-def test_the_rule_contains_no_settlement_forecast():
-    """Its value is the same whichever way the event resolves, so no
-    payout appears in its arithmetic at all."""
-    a = MS.experimental_rule(60, 0.45, 0.49, fee_fn=fee)
-    assert "payout" not in a["arithmetic"].lower()
-    assert a["rule"]["inputs"]["settlement"] == \
-        "NOT USED -- the rule contains no forecast"

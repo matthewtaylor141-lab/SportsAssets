@@ -170,79 +170,205 @@ def select(inventory: dict, *, held_book=None, complement_book=None,
 # reported as one: the EV comparison that would justify calling it
 # optimal is NOT_IDENTIFIED, which is exactly why a rule is needed.
 #
-# WHY IT CAN ACT WHEN THE RANKING CANNOT. Completing a pair has a value
-# that contains no forecast -- a completed pair pays 1.00 per contract
-# however the event resolves -- so the locked gain is arithmetic. What
-# is NOT available is whether locking it beats holding, because holding
-# is worth payout x qty and no payout estimate exists. So the rule
-# expresses a PREFERENCE FOR CERTAINTY, declared as such, rather than a
-# belief about the mean.
+# WHY IT CAN ACT WHEN THE ENGINE'S RANKING CANNOT. Completing a pair and
+# selling into the bid both have outcomes that contain NO forecast: a
+# completed pair pays 1.00 per contract however the event resolves, and a
+# sale realises the bid. So both are exact arithmetic and comparable to
+# each other. What is NOT available is whether either beats HOLDING,
+# because holding is worth payout x qty and no payout estimate exists.
+# The rule therefore ranks within the priced subset and says plainly that
+# HOLD is outside it.
 #
-# IT WILL LOSE TO HOLDING on positions that settle in our favour. That
-# is not a defect of the rule; it is what preferring certainty costs,
-# and any report of this rule must carry it.
-RULE_ID = "EXPERIMENTAL_COMPLETE_ON_LOCKED_GAIN_V1"
-RULE_HURDLE_PER_CONTRACT = 0.01
+# IT MAY LOSE TO HOLDING, on positions that settle in our favour. That is
+# not a defect of the rule; it is the cost of acting on what can be
+# priced, and any report of this rule must carry it.
+RULE_ID = "PRICED_ACTION_RANKING_V1"
+
+# THE BLANKET SUB-PAR RULE IS WITHDRAWN, AND IT WAS WRONG.
+#
+# My previous rule acted only when the complement could be bought below
+# (1 - basis), i.e. when the completed pair locked a GAIN. The desk's own
+# Ferrari policy carries the same rule at bettor_desk.py:808
+# (`clears_below = 1.0 - avg - min_clear`) and states the reasoning:
+# "complete when the complement can be bought below (1 - our entry) ...
+# anything above that locks a loss."
+#
+# TRUE, AND NOT A REASON TO REFUSE. Completing above par locks a loss of
+# (basis + ask - 1). Holding a leg that may settle at zero risks the
+# WHOLE basis. Selling into a thin bid realises (bid - basis), which can
+# be worse than the locked loss. A rule that refuses every completion
+# above $1 cannot ever limit a loss by completing, which is a real and
+# sometimes best action -- and Ferrari's residual book is the standing
+# example of what refusing it costs.
+#
+# WHAT MAKES THIS RANKABLE WITHOUT A FORECAST, AND THE WORD I GOT WRONG.
+# Two actions have outcomes that are EXACTLY PRICED at decision time:
+#
+#   DIRECT_EXIT       sell at the bid q   ->  q - basis
+#   TAKE_COMPLEMENT   buy the ask a       ->  1.00 - a - basis
+#
+# I first called these CERTAIN. They are not. The ARITHMETIC is exact;
+# the EXECUTION is not secured. Computing an attractive completion does
+# not obtain it: an immediate order still needs executable price AND
+# depth, and it may fill partially or not at all. So the figure is
+# `outcome_if_filled_usd` and every row carries
+# `execution_secured: False`. A locked profit is CONDITIONAL until the
+# matching quantity actually fills, and a partial fill leaves residual
+# exposure that is still under management.
+#
+# With that said, the two are comparable to each other exactly, and the
+# comparison reduces to one clean test:
+#
+#       COMPLETE beats SELL  <=>  (1.00 - a) > q
+#
+# ... the complement is cheaper than one dollar minus the bid. No
+# settlement model, no fill probability, no assumption. HOLD stays
+# NOT_IDENTIFIED and is reported as not comparable, which is the honest
+# shape: a RANKING OVER THE EXACTLY-PRICED SUBSET, with the uncertain
+# action named and excluded rather than assigned a number.
 
 RULE_DECLARATION = {
     "id": RULE_ID,
-    "kind": "RULE",
-    "is_not": ("an EV-optimal decision, an optimisation, or evidence "
-               "that completing beats holding"),
-    "objective": ("take a CERTAIN gain per contract when it clears a "
-                  "declared hurdle, in preference to an uncertain "
-                  "outcome of unknown mean"),
-    "hurdle_per_contract_usd": RULE_HURDLE_PER_CONTRACT,
-    "hurdle_is": "DECLARED, not fitted and not tuned on any result",
-    "known_cost": ("it forgoes upside on positions that settle in our "
-                   "favour, and will underperform HOLD on those"),
+    "kind": "RULE over an EXACT sub-comparison",
+    "what_is_ranked": ("DIRECT_EXIT and TAKE_COMPLEMENT only. Both have "
+                       "outcomes EXACTLY PRICED at decision time, so the "
+                       "comparison between them is arithmetic. Exactly "
+                       "priced is NOT executed: see execution_secured"),
+    "what_is_NOT_ranked": ("HOLD and HOLD_TO_SETTLEMENT. Their value is "
+                           "payout x qty and no validated settlement "
+                           "model exists. They are reported as NOT "
+                           "COMPARABLE, never as zero"),
+    "is_not": ("evidence that acting beats holding, or that the "
+               "chosen action will execute. The best priced action may "
+               "still be worse than holding -- that comparison is "
+               "unavailable -- and it may not fill at all"),
+    "supports_loss_limiting": ("YES. Completing above par is permitted "
+                               "and is selected whenever (1 - ask) "
+                               "exceeds the bid, even though the locked "
+                               "result is a loss"),
+    "withdrawn": ("the blanket 'combined cost must be below $1' gate. It "
+                  "made loss-limiting completion structurally impossible"),
     "inputs": {
         "own_basis": "OBSERVED (average-cost convention)",
-        "complement_ask": "OBSERVED (the venue's own book)",
+        "bid / complement_ask": "OBSERVED (the venue's own book)",
+        "depth": "OBSERVED -- a price without size is not executable",
         "fees": "OBSERVED schedule, or the action is refused",
-        "settlement": "NOT USED -- the rule contains no forecast",
-        "p_fill": "NOT USED -- it crosses the ask rather than resting",
+        "settlement": "NOT USED -- neither priced action needs a forecast",
+        "p_fill": ("NOT USED -- both are TAKER actions against displayed "
+                   "depth. The RESTING variants are a different question "
+                   "and stay NOT_IDENTIFIED"),
     },
 }
 
 
-def experimental_rule(qty, own_basis_per_contract, complement_ask, *,
-                      fee_fn=None) -> dict:
-    """Would the declared rule act, and at what locked gain?
+def rank_priced_actions(qty, own_basis_per_contract, *, bid=None,
+                         bid_size=None, complement_ask=None,
+                         complement_ask_size=None, fee_fn=None) -> dict:
+    """Rank the EXACTLY-PRICED actions. Publish the arithmetic.
 
-    Returns the decision AND the arithmetic, so the number can be
-    checked rather than trusted.
+    Returns each action's exactly-priced outcome over the SAME quantity,
+    winner, the margin, and HOLD named as not comparable. Sizes matter:
+    a price without depth behind it is not an executable action and is
+    refused rather than ranked.
     """
-    base = {"rule": RULE_DECLARATION, "acts": False}
-    if complement_ask is None:
-        return {**base, "why": ("no complement ask was observed, so no "
-                                "completion price exists"),
-                "locked_gain_usd": None}
     q = float(qty)
-    own = float(own_basis_per_contract) * q
-    comp = float(complement_ask) * q
-    fee = 0.0 if fee_fn is None else float(fee_fn(qty=q,
-                                                 price=complement_ask))
-    if fee_fn is None:
-        return {**base, "why": ("no fee schedule was supplied. An "
-                                "unknown cost is not a zero cost, so the "
-                                "rule refuses rather than acting on a "
-                                "gain it cannot verify"),
-                "locked_gain_usd": None}
-    locked = 1.00 * q - own - comp - fee
-    hurdle = RULE_HURDLE_PER_CONTRACT * q
-    return {
-        **base,
-        "acts": locked >= hurdle,
-        "locked_gain_usd": locked,
-        "hurdle_usd": hurdle,
-        "arithmetic": ("1.00 x %.4g = %.4f, less own basis %.4f, less "
-                       "completion %.4f, less fees %.4f => %.4f; hurdle "
-                       "%.4f" % (q, q, own, comp, fee, locked, hurdle)),
-        "why": ("locked gain %.4f %s the declared hurdle %.4f"
-                % (locked, "clears" if locked >= hurdle else "is below",
-                   hurdle)),
-        "carries": ("this is a RULE. It is not an EV ranking against "
-                    "HOLD, and HOLD remains NOT_IDENTIFIED at decision "
-                    "time"),
+    basis = float(own_basis_per_contract) * q
+    cands, refused = [], []
+
+    def _fee(sz, px):
+        if fee_fn is None:
+            return None
+        return float(fee_fn(qty=sz, price=px))
+
+    # DIRECT_EXIT -- sell the held leg into the bid.
+    if bid is None:
+        refused.append({"action": "DIRECT_EXIT", "blocker": "NO_BID"})
+    elif not bid_size or float(bid_size) <= 0:
+        refused.append({"action": "DIRECT_EXIT",
+                        "blocker": "NO_EXECUTABLE_DEPTH"})
+    else:
+        sz = min(q, float(bid_size))
+        f = _fee(sz, bid)
+        if f is None:
+            refused.append({"action": "DIRECT_EXIT",
+                            "blocker": "FEE_SCHEDULE_NOT_ESTABLISHED"})
+        else:
+            # Basis is released pro-rata on what the bid could actually
+            # take, not on what we wanted to sell.
+            rel = basis * (sz / q)
+            cands.append({
+                "action": "DIRECT_EXIT", "qty": sz,
+                "outcome_if_filled_usd": float(bid) * sz - f - rel,
+                "execution_secured": False, "fees_usd": f,
+                "depth_limited": sz < q - 1e-12,
+                "arithmetic": ("%.4f x %.4g - fees %.4f - basis %.4f"
+                               % (float(bid), sz, f, rel))})
+
+    # TAKE_COMPLEMENT -- buy the other leg; the pair then pays 1.00.
+    if complement_ask is None:
+        refused.append({"action": "TAKE_COMPLEMENT",
+                        "blocker": "COMPLEMENT_ASK_NOT_OBSERVED"})
+    elif not complement_ask_size or float(complement_ask_size) <= 0:
+        refused.append({"action": "TAKE_COMPLEMENT",
+                        "blocker": "NO_EXECUTABLE_DEPTH"})
+    else:
+        sz = min(q, float(complement_ask_size))
+        f = _fee(sz, complement_ask)
+        if f is None:
+            refused.append({"action": "TAKE_COMPLEMENT",
+                            "blocker": "FEE_SCHEDULE_NOT_ESTABLISHED"})
+        else:
+            rel = basis * (sz / q)
+            val = 1.00 * sz - float(complement_ask) * sz - f - rel
+            cands.append({
+                "action": "TAKE_COMPLEMENT", "qty": sz,
+                "outcome_if_filled_usd": val, "execution_secured": False, "fees_usd": f,
+                "depth_limited": sz < q - 1e-12,
+                "locks_a_loss": val < 0,
+                "unpaired_after": q - sz,
+                "arithmetic": ("1.00 x %.4g - %.4f x %.4g - fees %.4f - "
+                               "basis %.4f" % (sz, float(complement_ask),
+                                               sz, f, rel))})
+
+    out = {
+        "rule": RULE_DECLARATION,
+        "qty_compared": q,
+        "priced_actions": cands,
+        "refused": refused,
+        "hold": {"action": "HOLD", "value_usd": None,
+                 "status": NOT_IDENTIFIED,
+                 "why": ("worth payout x qty, and no validated "
+                         "settlement model exists. NOT zero, and NOT "
+                         "comparable to the actions above")},
     }
+    if not cands:
+        out.update(selected=None, selection_reason=(
+            "no action has an exactly priced outcome: %s"
+            % ", ".join("%s (%s)" % (r["action"], r["blocker"])
+                        for r in refused)))
+        return out
+
+    cands.sort(key=lambda c: c["outcome_if_filled_usd"], reverse=True)
+    best = cands[0]
+    runner = cands[1] if len(cands) > 1 else None
+    reason = ("%s at %.4f is the best PRICED action" %
+              (best["action"], best["outcome_if_filled_usd"]))
+    if runner:
+        reason += (" , beating %s at %.4f by %.4f"
+                   % (runner["action"], runner["outcome_if_filled_usd"],
+                      best["outcome_if_filled_usd"] - runner["outcome_if_filled_usd"]))
+        # The clean test, stated so it can be checked independently.
+        if (complement_ask is not None and bid is not None):
+            reason += ("; equivalently 1 - ask = %.4f vs bid = %.4f"
+                       % (1.0 - float(complement_ask), float(bid)))
+    if best["outcome_if_filled_usd"] < 0:
+        reason += (". THIS LOCKS A LOSS and is selected anyway because "
+                   "every other priced action is worse")
+    reason += (". HOLD is NOT comparable -- it needs a settlement model "
+               "that does not exist, so this is a ranking over the "
+               "exactly-priced subset, not a claim that acting beats "
+               "holding, and not a guarantee that it fills")
+    out.update(selected=best["action"], selection_reason=reason,
+               margin_usd=(best["outcome_if_filled_usd"] - runner["outcome_if_filled_usd"]
+                           if runner else None))
+    return out
