@@ -78,10 +78,31 @@ lists 43 keys. `BETTOR_INCENTIVE_MANIFEST` is not among them.
    — `bettor_live_control.py:771-799`. That is also correct behaviour:
    it exists so a spent allowance survives the supervisor's restart.
 
-So every component did exactly what it was built to do. The arm zeroed
-the general loop; the general loop, being the one that was running,
-correctly read that as "no allowance" and correctly shut itself down.
-THE ONLY THING WRONG IS WHICH LOOP WAS RUNNING.
+THIS IS AN EXECUTION FAILURE, NOT A SET OF CORRECT PARTS.
+
+Each component behaved as specified in isolation. That is not a defence
+and it is not the finding. The SYSTEM was asked to collect an ET date of
+order-book depth and it collected NOTHING -- zero frames, zero rows,
+no journal table. "Every component worked" is a sentence that can be
+true of a system that delivered nothing, which is exactly why it is not
+an acceptable description of one.
+
+The failures were mine and they were three:
+
+  1. THE CONFIGURATION WAS NEVER SET. The release was deployed on
+     2026-09-22 and reported as ready to run. The one variable that
+     selects the incentive observer was never set on the worker, and I
+     did not check for it before reporting readiness.
+
+  2. THE READINESS CHECK COULD NOT FAIL. I verified "the release is
+     deployed" and "the manifest is in the image". Both were true. Neither
+     could detect that the loop which reads them was switched off. A check
+     that cannot fail is not a check, and this programme has now produced
+     that same defect more than once.
+
+  3. STARTUP WAS NOT VERIFIED AGAINST PERSISTED DATA. I set the control
+     and treated the readback of `true` as progress. The only evidence
+     that matters is a persisted frame, and there was never one.
 
 ## WHAT THIS COST
 
@@ -194,3 +215,45 @@ THE ARM IS STILL VALID. probe_id d5e9ae3d-257f-4948-a808-90d1bd3c5e48,
 deadline 2026-09-24T04:35:48Z, which still covers the fixed end at
 2026-09-24T04:00:00Z. No re-arm is needed or permitted, and no counter
 has moved: HTTP 0 of 8, connects 0 of 20, subscribes 0 of 40.
+
+---
+
+## AND A FOURTH FAILURE, FOUND WHILE FIXING THE THIRD
+
+Setting the variable was not enough, twice over:
+
+    10:15:05Z  env-set     HTTP 200. render-ops prints "Render redeploys
+                           the service on an env change".
+    10:21:18Z  env-keys    BETTOR_INCENTIVE_MANIFEST (55 chars) -- STORED.
+    10:22:20Z  worker log  still `bettor_live_loop` general mode.
+    10:23:13Z  deploys     NO new deploy row. The auto-redeploy the tool
+                           promised never happened.
+    10:23:34Z  restart     HTTP 200, accepted.
+    10:25:45Z  worker log  STILL general mode after the restart.
+    10:26:55Z  deploy      dep-dapqirrbc2fs73bms6fg, commit=7f76fd9.
+
+TWO SEPARATE THINGS THAT LOOK LIKE "APPLYING CONFIGURATION" AND ARE NOT:
+
+  * an env-set returns 200 and the key lists, and the RUNNING PROCESS
+    still holds its old environment;
+  * a restart returns 200 and cycles the process, and it comes back with
+    the environment of the DEPLOY it belongs to -- which was created
+    before the variable existed.
+
+Only a DEPLOY re-reads the service's environment. `claude/session-njaewf`
+HEAD is 7f76fd90ad6862b7440abafd024d04e1e89c1b5f, which is 7f76fd9, the
+approved release already live -- so this deploy rebuilds the SAME COMMIT
+with the new environment and the deployed identity does not move.
+
+THE RULE THIS ESTABLISHES, and it is the same rule as the third failure
+above: a stored configuration value is not a configured process, and a
+successful API call is not an applied change. The only acceptable
+evidence that the worker is in incentive mode is its own log line
+`bettor_live_loop: delegating to BETTOR_INCENTIVE_OBSERVE_*`, and the
+only acceptable evidence of collection is a persisted frame.
+
+This is recorded because the codebase already carried this exact
+warning, from 2026-09-21: "BETTOR_LIVE_LOOP=off was stored,
+acknowledged, and survived a demonstrated restart without ever reaching
+the process that was supposed to read it." It was written down, it was
+true, and it happened again.
