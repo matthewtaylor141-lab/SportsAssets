@@ -584,9 +584,27 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
         safe_id = rid
 
     await _save_cursor(conn, safe_id, cursor_key)
+    # THE REFUSAL DISTRIBUTION, not just the count of writes. "400
+    # examined, 0 written" is the same line whether every candidate was
+    # refused for a stated reason or the first one raised and the lane
+    # never got past it -- and those need opposite responses. Tallied by
+    # the reason each result actually carries.
+    tally: dict = {}
+    for x in results:
+        if x.get("written"):
+            key = "WRITTEN"
+        elif x.get("error"):
+            key = "ERROR:" + str(x["error"]).split(":")[0]
+        else:
+            key = str(x.get("refused_at") or "REFUSED_UNSPECIFIED")
+            if x.get("unknown_reason"):
+                key += "/" + str(x["unknown_reason"])
+        tally[key] = tally.get(key, 0) + 1
     return {"ran": True, "state": "REPLAYED", "lane": lane,
             "cursor": safe_id, "examined": len(cands), "results": results,
             "stopped_at_error": stopped_at_error,
+            "refusals": tally,
+            "cursor_moved": safe_id != start,
             "lane_census": census,
             "written": sum(1 for x in results if x.get("written"))}
 
@@ -660,15 +678,15 @@ async def run(pool_factory=None) -> None:
                 # 5-character key lands before "state" and well inside the
                 # window. This adds no facts; it makes the ones already
                 # there readable without widening the query.
-                res = {"lanes": {
-                           "P": {"state": res_p.get("state"),
-                                 "cursor": res_p.get("cursor"),
-                                 "examined": res_p.get("examined", 0),
-                                 "written": res_p.get("written", 0)},
-                           "H": {"state": res_h.get("state"),
-                                 "cursor": res_h.get("cursor"),
-                                 "examined": res_h.get("examined", 0),
-                                 "written": res_h.get("written", 0)}},
+                def _sum(r):
+                    return {"state": r.get("state"),
+                            "cursor": r.get("cursor"),
+                            "examined": r.get("examined", 0),
+                            "written": r.get("written", 0),
+                            "moved": r.get("cursor_moved"),
+                            "stopped": r.get("stopped_at_error"),
+                            "refusals": r.get("refusals") or {}}
+                res = {"lanes": {"P": _sum(res_p), "H": _sum(res_h)},
                        "prospective": res_p, "historical": res_h,
                        "lane_census": (res_h.get("lane_census")
                                        or res_p.get("lane_census"))}

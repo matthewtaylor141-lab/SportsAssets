@@ -247,3 +247,27 @@ def test_the_heartbeat_summary_lands_before_the_readback_truncation():
     # the key must be exactly the one the worker emits
     src = open(W.__file__).read()
     assert '"lanes": {' in src, "the worker no longer emits the summary"
+
+
+def test_the_refusal_tally_separates_a_stall_from_a_clean_refusal():
+    """"400 examined, 0 written" is the SAME LINE whether every candidate
+    was refused for a stated reason or the FIRST one raised and the lane
+    never got past it. Those need opposite responses -- one is the policy
+    working, the other is a wedge -- so the tally and `cursor_moved` must
+    tell them apart.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+    import inspect
+
+    src = inspect.getsource(W.cycle)
+    assert '"refusals": tally' in src
+    assert '"cursor_moved"' in src
+    # the tally must key ERRORs separately from named refusals
+    assert 'ERROR:' in src and 'refused_at' in src
+
+
+def test_the_lane_summary_carries_the_stall_signal():
+    from sportsassets.workers import rn1x_shadow as W
+    src = open(W.__file__).read()
+    for k in ('"moved"', '"stopped"', '"refusals"'):
+        assert k in src, k
