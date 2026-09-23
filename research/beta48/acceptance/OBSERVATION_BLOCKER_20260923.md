@@ -257,3 +257,90 @@ warning, from 2026-09-21: "BETTOR_LIVE_LOOP=off was stored,
 acknowledged, and survived a demonstrated restart without ever reaching
 the process that was supposed to read it." It was written down, it was
 true, and it happened again.
+
+---
+
+## COLLECTION IS LIVE. Verified from persisted frames.
+
+    10:26:55Z  deploy      dep-dapqirrbc2fs73bms6fg, commit=7f76fd9
+    10:27:48Z  worker      bettor_live_loop: delegating to
+                           BETTOR_INCENTIVE_OBSERVE_V1
+                           manifest_path /app/research/beta48/acceptance/
+                             incentive_manifest.json, watch_max 12, http_cap 8
+    10:28:27Z  obs-run     control true
+    10:28:29Z  FIRST FRAME persisted -- 2 seconds after the flip
+    10:28:40Z  DISARMED by the OLD pre-deploy instance (see below)
+    10:28:59Z  run closed  STOPPED_BY_CONTROL after 30.2s;
+                           {"frames": 35, "epochs": 1, "http_row": 0, "rows": 43}
+    10:31:13Z  obs-run     control true again -- SAME probe, NO re-arm
+    10:31:14Z  second boot opens, BOOT_GAP written for the interval
+    10:32:59Z  control     still true, sustained
+
+THE 30-SECOND INTERRUPTION, NAMED. Render does a zero-downtime
+changeover: the OLD instance, which had no BETTOR_INCENTIVE_MANIFEST and
+so ran the GENERAL loop, was still alive while the new incentive-mode
+instance started. At 10:28:40 it read the arm's deliberate
+max_distinct=0 as BUDGET_EXHAUSTED and disarmed the control -- the same
+mechanism as the 02:36 failure, from a process that was on its way out.
+Its last log line is 10:28:40; nothing in general mode appears after it.
+Restarting observation was therefore a control flip against the existing
+probe, not a re-arm, and nothing was replenished.
+
+### MEASURED STATE at 10:32:35Z
+
+    probe_id             d5e9ae3d-257f-4948-a808-90d1bd3c5e48  (unchanged)
+    deadline_at          2026-09-24T04:35:48+00:00             (unchanged)
+    boots                2
+      7435b23a98d049f3   43 rows   10:28:29 -> 10:28:59
+      8702807518fe44b4   live      10:31:14 -> ongoing
+    first frame          2026-09-23 10:28:29+00
+    latest frame         2026-09-23 10:32:35+00
+    markets receiving    12 of 12
+    markets WITH DEPTH   12 of 12
+    frames total         90
+    frames in window     90
+    frames before window 0
+
+    max ladder levels observed, per market (bid / ask):
+      alewar 3/10   benboo 2/14   beyonc 7/6    bileil 3/16
+      charoa 3/8    chaxcx 2/6    coldpl 2/18   doechi 5/17
+      dualip 4/8    eminem 8/18   fraoce 4/22   jusbie 2/17
+
+    FULL DEPTH, NOT BBO. Up to 22 ask levels on one book. A top-of-book
+    feed would show 1/1 everywhere.
+
+### GAPS, all three closed
+
+    GAP_DISCONNECTED     0.5268s   boot A startup
+    PROCESS_REPLACED   135.191s   10:28:59 -> 10:31:14
+    GAP_DISCONNECTED     0.5003s   boot B startup
+
+The PROCESS_REPLACED gap is the journal doing its job: the interval
+between two boots is recorded as explicitly unobserved rather than
+being forward-filled across the boundary.
+
+### ALLOWANCE at 10:32:59Z
+
+    HTTP                 0 of 8
+    socket connects      2 of 20
+    socket subscribes    4 of 40
+    general_max_distinct 0        (the incentive arm's shape, intact)
+    preflight            10 of 10 spent, untouched
+
+### WHAT THIS IS, AND WHAT IT IS NOT
+
+THIS IS A PARTIAL RUN. The measurement window
+[2026-09-23T04:00:00Z, 2026-09-24T04:00:00Z) is 24 hours. Collection
+began at 10:31:14Z. The first 6h31m of the window was never observed,
+and 135s of the remainder is a recorded gap.
+
+    window                    86,400 s
+    unobserved before start   23,474 s   (04:00:00 -> 10:31:14)
+    recorded gap                 135 s
+    MAXIMUM observable        62,791 s   =  72.7% of the day
+
+It does not pass complete-day acceptance and must not be presented as
+though it did. Any reward arithmetic is computed per scoring instant
+over the whole ET date; an instant nobody observed contributes nothing
+and cannot be extrapolated from the instants that were observed.
+Twelve markets remain ONE programme and ONE event.
