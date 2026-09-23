@@ -53,6 +53,7 @@ with a documented mapping exists. Part 1 needs no event state and runs.
 from __future__ import annotations
 
 from decimal import Decimal
+import math
 
 POLICY_ID = "MANAGEMENT_PAIR_091_STOP_16_V1"
 POLICY_CLASS = "MANAGEMENT_DEFINED_EXPERIMENTAL"
@@ -183,7 +184,8 @@ def _fee_taker(qty, price) -> float:
                                       maker=False))
 
 
-def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0) -> dict:
+def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0,
+               fee_fn=None) -> dict:
     """§1. The highest complementary limit that still meets the target.
 
     Solved on the TICK GRID, descending, and rounded CONSERVATIVELY: the
@@ -193,6 +195,9 @@ def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0) -> dict:
     """
     b = float(held_basis_per_contract)
     q = float(qty)
+    if (not all(math.isfinite(x) for x in (b, q, float(entry_fee_usd)))
+            or not 0 <= b <= 1 or q <= 0):
+        raise ValueError("pair limit requires a finite price and positive quantity")
     entry_per = float(entry_fee_usd) / q if q > 0 else 0.0
     budget = PAIR_TARGET_COST - b - entry_per
     out = {"policy_id": POLICY_ID, "held_basis_per_contract": b,
@@ -217,7 +222,10 @@ def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0) -> dict:
         a = round(i * TICK, 2)
         if a <= 0:
             continue
-        fee_per = _fee_taker(q, a) / q if q > 0 else 0.0
+        charge = float((fee_fn or _fee_taker)(qty=q, price=a))
+        if not math.isfinite(charge):
+            raise ValueError("fee estimate must be finite")
+        fee_per = max(0.0, charge) / q  # never rely on a rebate
         combined = b + entry_per + a + fee_per
         if combined <= PAIR_TARGET_COST + 1e-12:
             out.update(limit=a, feasible=True,
@@ -268,7 +276,8 @@ def event_phase(*, progress=None, sport=None) -> dict:
     return out
 
 
-def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None) -> dict:
+def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None,
+                 fee_fn=None) -> dict:
     """§2. Are net executable proceeds <= 84% of allocated cost?
 
     USES EXECUTABLE BIDS AND DEPTH. Not the last trade, not the midpoint
@@ -301,7 +310,7 @@ def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None) -> dict:
                    why="a bid with no size behind it is not an exit")
         return out
     sellable = min(q, depth)
-    fee = _fee_taker(sellable, bid)
+    fee = (fee_fn or _fee_taker)(qty=sellable, price=bid)
     proceeds = float(bid) * sellable - fee
     # The cost allocated to the quantity actually sellable, so a
     # depth-limited exit is not compared against the whole position's

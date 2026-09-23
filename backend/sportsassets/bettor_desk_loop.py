@@ -628,15 +628,14 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
 
     pool = await get_pool()
     async with pool.acquire() as conn:
-        if not await _acquire(conn):
+        while not await _acquire(conn):
             # ANOTHER INSTANCE HOLDS IT. This one does not write, does
             # not decide, and says so. During a deploy both are up for
             # a few seconds and exactly one of them trades.
             _status.update(state=STATE_STANDBY, since=time.time(),
                            error=None)
             log.info("desk loop STANDBY: another instance holds the lock")
-            while True:
-                await asyncio.sleep(CYCLE_S)
+            await asyncio.sleep(CYCLE_S)
 
         # STARTUP CAN FAIL, AND MUST SAY SO RATHER THAN DIE QUIETLY.
         # The first version read the cursor outside any try, so a schema
@@ -764,6 +763,8 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
         log.info("desk loop RUNNING from event id %s (epoch %s, restored "
                  "%s)", cursor, EPOCH_ID, restore.get("restored"))
 
+        recovery_required = False
+        committed_cursor = cursor
         while True:
             try:
                 # THE PAUSE IS CHECKED BEFORE ANY EVENT IS READ, so a
@@ -782,6 +783,18 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
                     continue
                 _status.update(paused=False, pause_reason=None,
                                accounting_status=pz["accounting_status"])
+                if recovery_required:
+                    # A rollback does not undo Python objects. Also,
+                    # a lost commit acknowledgement is ambiguous: read
+                    # the durable book rather than guessing which won.
+                    desk, cursor = await _recover_cycle(
+                        conn, desk_id=desk_id, account_id=account_id,
+                        policy=pol, limits=lim, fee_fn=fee_fn,
+                        queue_share=queue_share,
+                        opening_balance=acct["opening_balance"],
+                        fallback_cursor=committed_cursor)
+                    committed_cursor = cursor
+                    recovery_required = False
                 rows = await _events(conn, cursor, BATCH)
                 for r in rows:
                     desk.step(_to_event(r))
@@ -790,7 +803,8 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
                 if rows:
                     await _persist(conn, desk_id, account_id,
                                    desk, cursor)
-                _status.update(cycles=_status["cycles"] + 1,
+                committed_cursor = cursor
+                _status.update(state=STATE_RUNNING, cycles=_status["cycles"] + 1,
                                last_cycle_at=time.time(),
                                last_event_id=cursor,
                                decisions=len(desk.decisions),
@@ -798,14 +812,35 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
             except asyncio.CancelledError:
                 raise
             except Exception as exc:                        # noqa: BLE001
-                # A CYCLE THAT FAILS DOES NOT ADVANCE THE CURSOR. The
-                # same events are retried next cycle, and the inserts
-                # are idempotent, so a partial write cannot duplicate.
+                recovery_required = True
                 _status.update(state=STATE_ERROR,
                                error="%s: %s" % (type(exc).__name__,
                                                  str(exc)[:200]))
                 log.exception("desk loop cycle failed")
             await asyncio.sleep(CYCLE_S)
+
+
+async def _recover_cycle(conn, *, desk_id, account_id, policy, limits,
+                         fee_fn, queue_share, opening_balance, fallback_cursor):
+    """Restore a fresh cache and cursor after any ambiguous cycle failure.
+
+    Caller still holds the writer lock. No new account/epoch is created.
+    If the first persist rolled back there is no durable cursor: retain
+    the original startup cursor, never skip forward to the new feed head.
+    """
+    fresh = DK.Desk(policy=policy, limits=limits, fee_fn=fee_fn,
+                    queue_share=queue_share, desk_id=desk_id)
+    fresh.account_id = account_id
+    fresh.id_prefix = account_id
+    fresh.pf.starting_cash = fresh.pf.cash = float(opening_balance)
+    await _restore(conn, desk_id, account_id, fresh)
+    row = await conn.fetchrow(
+        "SELECT cursor_event_id FROM bettor_desk_account_state WHERE account_id = $1",
+        account_id)
+    cursor = int(row["cursor_event_id"]) if row is not None else fallback_cursor
+    if not fresh.pf.invariant()["ok"]:
+        raise RuntimeError("RECOVERY_BOOK_DOES_NOT_RECONCILE")
+    return fresh, cursor
 
 
 async def _persist(conn, desk_id, account_id, desk, cursor):

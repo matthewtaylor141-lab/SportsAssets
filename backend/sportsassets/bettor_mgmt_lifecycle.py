@@ -143,16 +143,23 @@ class Managed:
         """Place ONE management order, cancelling any incumbent first."""
         cancelled = []
         for o in self.open_orders():
-            o.transition(dk.CANCEL_PENDING, at,
-                         "superseded by %s" % action)
+            if o.state != dk.CANCEL_PENDING:
+                o.transition(dk.CANCEL_PENDING, at,
+                             "superseded by %s" % action)
             cancelled.append(o.order_id)
+
+        # Pending cancellation is still executable. Re-evaluate quantity
+        # after acknowledgement, including any intervening fills.
+        if cancelled:
+            return {"placed": None, "cancelled": cancelled, "qty": 0.0,
+                    "refused": "WAIT_CANCEL_ACK"}
 
         side = "SELL" if action in ("DIRECT_EXIT", "REDUCE") else "BUY"
         leg = self.leg if side == "SELL" else self.other_leg()
         # THE CAP. A sell may not exceed the held quantity; a completion
         # may not exceed the unpaired remainder. Checked here and again
         # at fill time, because inventory moves under a resting order.
-        cap = self.held(self.leg) if side == "SELL" else self.residual()
+        cap = self.residual()
         want = min(float(qty), cap)
         if want <= 1e-9:
             return {"placed": None, "cancelled": cancelled,
@@ -173,6 +180,57 @@ class Managed:
         return {"placed": o.order_id, "cancelled": cancelled,
                 "qty": want, "capped": want < float(qty) - 1e-12,
                 "liquidity": liquidity, "refused": None}
+
+    def manage_policy(self, *, at, decision_id, sport=None, progress=None,
+                      bid=None, bid_size=None) -> dict:
+        """Management's frozen policy; prints are never executable bids.
+
+        Callers may supply bid/depth only from a contemporaneous book.
+        No sport is currently admitted by the event-phase registry.
+        """
+        from . import bettor_rn1x_policy as policy
+
+        q = self.residual()
+        rec = {"at": at, "policy_id": policy.POLICY_ID,
+               "residual_qty": q, "acted": False,
+               "execution_secured": False}
+        if q <= 1e-9:
+            rec["operating_state"] = "NO_RESIDUAL"
+            self.decisions.append(rec)
+            return rec
+        basis = self.pf._leg(self.condition_id, self.leg)["cost"] / self.held()
+        phase = policy.event_phase(progress=progress, sport=sport)
+        stop = policy.loss_trigger(allocated_cost_usd=q * basis, qty=q,
+                                   bid=bid, bid_size=bid_size,
+                                   fee_fn=self.fee_fn)
+        target = policy.pair_limit(basis, q, fee_fn=self.fee_fn)
+        rec.update(phase=phase, loss_trigger=stop, pair_target=target)
+        if phase["loss_exit_available"] and stop["fired"]:
+            action, price, qty = "DIRECT_EXIT", bid, stop["sellable_qty"]
+        elif target["feasible"]:
+            action, price, qty = "POST_COMPLEMENT", target["limit"], q
+        else:
+            rec["operating_state"] = "HOLD_NO_FEASIBLE_PAIR"
+            self.decisions.append(rec)
+            return rec
+        side = "SELL" if action == "DIRECT_EXIT" else "BUY"
+        existing = self.open_orders()
+        # Keep queue priority; do not cancel/repost an unchanged intent.
+        if (len(existing) == 1 and existing[0].state != dk.CANCEL_PENDING
+                and existing[0].side == side
+                and abs(existing[0].limit_price - price) < 1e-12
+                and abs(existing[0].remaining - qty) < 1e-9):
+            rec.update(operating_state="ORDER_WORKING",
+                       order_id=existing[0].order_id)
+        else:
+            placed = self.place(action, at=at, price=price, qty=qty,
+                                decision_id=decision_id,
+                                liquidity="MAKER" if side == "BUY" else "TAKER")
+            rec.update(placement=placed, selected_action=action,
+                       acted=placed["placed"] is not None,
+                       operating_state=placed["refused"] or "ORDER_WORKING")
+        self.decisions.append(rec)
+        return rec
 
     # ── THE CONNECTION THAT DID NOT EXIST ────────────────────────────
     #
@@ -269,6 +327,7 @@ class Managed:
         out = []
         cands = [o for o in self.orders.values()
                  if o.state in dk.OPEN_STATES
+                 and o.placed_at < float(at) < o.expires_at
                  and o.outcome_index == int(outcome_index)]
         cands.sort(key=lambda o: o.placed_at)
         for o in cands:
@@ -345,6 +404,8 @@ class Managed:
     # ── settlement, reachable only from here ────────────────────────
     def settle_at_observed_payout(self, payouts: dict, at) -> dict:
         """SEPARATE ENTRY POINT. Nothing in the decision path calls it."""
+        for order in self.open_orders():
+            order.transition(dk.EXPIRED, at, "observed settlement ends modelled order")
         done = {}
         for leg in (self.leg, self.other_leg()):
             q = self.held(leg)

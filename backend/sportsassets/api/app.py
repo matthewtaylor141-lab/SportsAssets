@@ -280,17 +280,23 @@ async def lifespan(_: FastAPI):
     # in our own database -- so the observation collector's allowance is
     # untouched by it.
     from .. import bettor_desk_loop as _DESKLOOP
+    desk_task = None
     if _DESKLOOP.enabled():
         from ..db import get_pool as _desk_pool
-        asyncio.get_running_loop().create_task(
+        desk_task = asyncio.get_running_loop().create_task(
             _DESKLOOP.run(_desk_pool))
         log.info("shadow desk loop armed (contends for the writer lock)")
 
-    yield
-    trim_task.cancel()
-    if poller_task is not None:
-        poller_task.cancel()
-    await close_pool()
+    try:
+        yield
+    finally:
+        tasks = [t for t in (desk_task, trim_task, poller_task) if t is not None]
+        for task in tasks:
+            task.cancel()
+        # The desk owns a pooled connection and a session advisory lock.
+        # Release it before waiting for pool.close(), including on deploy.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await close_pool()
 
 
 app = FastAPI(title="SportsAssets Hub API", lifespan=lifespan)

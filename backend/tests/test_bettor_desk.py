@@ -510,21 +510,20 @@ class TestTheLiveLoopCannotTradeOrDuplicate:
         failed for prose. The behavioural test lives in
         test_desk_recovery.py, which drives the loop with the lock
         denied and asserts the store received nothing; this one checks
-        the structure: the STANDBY branch never falls through.
+        the structure: standby retries and cannot write before acquiring.
         """
         import ast
         from sportsassets import bettor_desk_loop as L
         fn = next(n for n in ast.walk(ast.parse(open(L.__file__).read()))
                   if isinstance(n, ast.AsyncFunctionDef) and n.name == "run")
-        # Find the `if not await _acquire(conn):` branch and confirm its
-        # body ends in an unbounded wait -- so nothing after it runs.
+        # Failed attempts wait; success alone permits startup.
         standby = [n for n in ast.walk(fn)
-                   if isinstance(n, ast.If)
+                   if isinstance(n, ast.While)
                    and "_acquire" in ast.unparse(n.test)]
         assert standby, "the lock branch is gone"
         body = ast.unparse(standby[0])
         assert "STATE_STANDBY" in body
-        assert "while True" in body
+        assert "await asyncio.sleep" in body
         # and it writes nothing: no execute/INSERT call in that branch
         assert "INSERT" not in body.upper()
         assert ".execute(" not in body

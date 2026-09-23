@@ -42,7 +42,7 @@ FORWARD = "FORWARD_SHADOW"
 
 def _fee_fn():
     """The production schedule, taker side for our own executions."""
-    from .bettor_fee_schedule import FEES
+    from . import bettor_fee_schedule as FEES
     from decimal import Decimal
 
     def fee(qty, price, maker=False):
@@ -53,22 +53,34 @@ def _fee_fn():
 
 
 def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
-        queue_share=None, condition_id=None):
+        queue_share=0.25, condition_id=None, fee_fn=None,
+        fee_basis="TRANSFERRED_PMUS_LATEST_SCENARIO",
+        initial_inventory_verified=False):
     """`rows` are the condition's fills, ours and others', in any order.
 
     Each row: id, whale_id, outcome_index, side, size, price, ts,
     detected_at. `payouts` maps outcome_index -> observed payout and is
     used at step 8 ONLY.
     """
-    fee = _fee_fn()
-    qs = pol.QUEUE_SHARE if queue_share is None else float(queue_share)
-    mode = HISTORICAL if payouts else FORWARD
-    rows = sorted(rows, key=lambda r: (float(r["ts"]), int(r["id"])))
+    fee = fee_fn or _fee_fn()
+    qs = float(queue_share)
+    if not 0 <= qs <= 1:
+        raise ValueError("queue_share must be between zero and one")
+    # A retrospective replay of an unresolved market is not prospective.
+    mode = HISTORICAL
+    unique = {}
+    for row in rows:
+        key = int(row["id"])
+        if key in unique and unique[key] != row:
+            raise ValueError("conflicting records for trade %s" % key)
+        unique[key] = row
+    rows = sorted(unique.values(), key=lambda r: (float(r["detected_at"]), int(r["id"])))
     mine = [r for r in rows if int(r["whale_id"]) == int(source_whale_id)]
 
     out = {"version": VERSION, "mode": mode,
            "policy": pol.describe(), "steps": {},
-           "condition_id": condition_id, "queue_share": qs}
+           "condition_id": condition_id, "queue_share": qs,
+           "fee_basis": fee_basis, "prospective": False}
 
     # ── 1 SOURCE ────────────────────────────────────────────────────
     if not mine:
@@ -78,7 +90,7 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         return out
     seed_row = mine[0]
     out["steps"]["SOURCE"] = {
-        "ok": True, "source_class": pol.SOURCE_CLASS["assigned_basis"],
+        "ok": True, "source_class": "OBSERVED_INPUT",
         "trade_id": seed_row["id"], "whale_id": seed_row["whale_id"],
         "outcome_index": seed_row["outcome_index"],
         "side": seed_row["side"], "size": float(seed_row["size"]),
@@ -93,7 +105,15 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
                     size=float(r["size"]), price=float(r["price"]),
                     trade_id=int(r["id"]))
             for r in mine]
-    cls = ek.classify_condition(hist)
+    if not initial_inventory_verified:
+        out["failed_step"] = "CLASSIFY"
+        out["steps"]["CLASSIFY"] = {
+            "ok": False, "kind": ek.UNKNOWN,
+            "why": "initial flat inventory/history completeness not verified"}
+        return out
+    # Classify only the available seed; future or late-received history
+    # cannot retroactively establish inventory at this decision.
+    cls = ek.classify_condition(hist[:1])
     first = cls[0]
     out["steps"]["CLASSIFY"] = {"ok": True,
                                 "source_class": "OBSERVED_INPUT",
@@ -120,7 +140,7 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
                    seed_qty=float(seed_row["size"]),
                    seed_price=float(seed_row["price"]),
                    at=decision_ts, fee_fn=fee, queue_share=qs,
-                   expiry_s=pol.ORDER_EXPIRY_S, account="rn1x")
+                   expiry_s=900.0, account="rn1x-%s" % seed_row["id"])
     out["steps"]["SEED"] = {
         "ok": True, "source_class": "ASSIGNED",
         "entry_kind": first.kind, "qty": m.seed_qty,
@@ -130,10 +150,10 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
                   "that we could have obtained this fill")}
 
     # ── 4-7, walking forward. Only rows after the decision instant. ──
-    last_price = None
     events = []
+    m.manage_policy(at=decision_ts, decision_id="seed:%s" % seed_row["id"])
     for r in rows:
-        at = float(r["ts"])
+        at = float(r["detected_at"])
         if at <= decision_ts:
             continue
         if resolved_at and at > float(resolved_at):
@@ -141,22 +161,14 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         oi = int(r["outcome_index"])
         px = float(r["price"])
         eid = "trade:%s" % r["id"]
-        if oi == m.leg:
-            last_price = px
         m.expire(at)
-        # A print on OUR leg is a bid reference; on the other leg an ask.
-        bid = px if oi == m.leg else None
-        comp = px if oi != m.leg else None
-        d = m.decide_and_act(
-            at=at, last_price=last_price,
-            bid=bid, bid_size=(float(r["size"]) if bid is not None else 0),
-            complement_ask=comp,
-            complement_ask_size=(float(r["size"]) if comp is not None else 0),
-            seconds_open=at - decision_ts,
-            decision_id="rn1x-%s" % r["id"])
-        fills = m.on_print(at=at, outcome_index=oi, price=px,
+        # Only an order predating the source print can consume it. Late
+        # receipt does not create a new execution opportunity.
+        fills = m.on_print(at=float(r["ts"]), outcome_index=oi, price=px,
                            size=float(r["size"]), evidence_id=eid)
         m.acknowledge_cancels(at)
+        # Tape prints are not bids, asks, depth or event progress.
+        d = m.manage_policy(at=at, decision_id="rn1x-%s" % r["id"])
         if d.get("acted") or fills:
             events.append({"at": at, "evidence_id": eid,
                            "by_source_account":
@@ -166,14 +178,17 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         "ok": True, "decisions": len(m.decisions),
         "acted": sum(1 for d in m.decisions if d.get("acted")),
         "events": events,
-        "source_class": {"trigger": pol.SOURCE_CLASS["adverse_move_threshold"],
-                         "method": pol.SOURCE_CLASS["exit_method_ranking"],
+        "source_class": {"trigger": pol.SOURCE_CLASS["loss_trigger_fraction"],
+                         "method": pol.SOURCE_CLASS["pair_target_cost"],
                          "fills": pol.SOURCE_CLASS["our_fill"]}}
 
     # ── 8 SETTLE, the only place a payout is read ────────────────────
     st_before = m.state()
     settled = None
     if payouts:
+        if resolved_at is None or float(resolved_at) < decision_ts:
+            raise ValueError("settlement must have an observed time after the seed")
+        payouts = {int(k): float(v) for k, v in payouts.items()}
         settled = m.settle_at_observed_payout(
             {int(k): float(v) for k, v in payouts.items()},
             float(resolved_at or decision_ts))

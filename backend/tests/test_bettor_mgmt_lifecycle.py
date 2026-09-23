@@ -175,8 +175,12 @@ def test_4_a_partial_fill_leaves_residual_exposure_under_management():
     r2 = m.place("DIRECT_EXIT", at=1003.0, price=0.52, qty=100.0,
                  decision_id="d5")
     assert r2["cancelled"] == [r["placed"]]
-    assert abs(r2["qty"] - 100.0) < 1e-9      # a SELL is capped at held
+    assert r2["placed"] is None and r2["refused"] == "WAIT_CANCEL_ACK"
     assert m.orders[r["placed"]].state == DK.CANCEL_PENDING
+    m.acknowledge_cancels(1004.0)
+    replacement = m.place("DIRECT_EXIT", at=1005.0, price=0.52, qty=100.0,
+                          decision_id="d5-after-ack")
+    assert replacement["qty"] == 70.0  # matched inventory is retained
 
 
 def test_4b_a_completion_order_cannot_exceed_the_unpaired_remainder():
@@ -189,6 +193,10 @@ def test_4b_a_completion_order_cannot_exceed_the_unpaired_remainder():
     # 40 matched, 60 unpaired. A completion for 100 must cap at 60.
     r = m.place("TAKE_COMPLEMENT", at=1004.0, price=0.49, qty=100.0,
                 decision_id="d6")
+    assert r["refused"] == "WAIT_CANCEL_ACK"
+    m.acknowledge_cancels(1005.0)
+    r = m.place("TAKE_COMPLEMENT", at=1006.0, price=0.49, qty=100.0,
+                decision_id="d6-after-ack")
     assert abs(r["qty"] - 60.0) < 1e-9
     assert r["capped"] is True
 
@@ -240,8 +248,8 @@ def test_5c_only_one_management_order_is_ever_open():
             decision_id="dA")
     m.place("DIRECT_EXIT", at=1002.0, price=0.52, qty=100.0,
             decision_id="dB")
-    resting = [o for o in m.open_orders() if o.state == DK.RESTING]
-    assert len(resting) == 1
+    assert len(m.open_orders()) == 1
+    assert m.open_orders()[0].state == DK.CANCEL_PENDING
     assert m.state()["supports_simultaneous_orders"] is False
 
 

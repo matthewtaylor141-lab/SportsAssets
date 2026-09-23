@@ -417,6 +417,29 @@ async def test_an_interrupted_persist_advances_neither_cursor_nor_cash():
     assert st.account_state[aid]["cursor_event_id"] == 7012
     assert len(st.ledger) == ledger_rows
 
+    # A DB rollback alone never reverted the live Python book/cursor.
+    # Recovery must discard that mutated cache before reading more events.
+    fresh, cursor = await DL._recover_cycle(
+        conn, desk_id="live1", account_id=aid, policy=live.policy,
+        limits=live.limits, fee_fn=live.fee_fn, queue_share=live.queue_share,
+        opening_balance=OPENING, fallback_cursor=7000)
+    assert fresh is not live and cursor == 7012
+    assert fresh.pf.cash == settled["cash"]
+    assert fresh.pf.realized == settled["realized"]
+    assert fresh.pf.invariant()["ok"]
+    assert fresh.decisions == []
+
+
+@pytest.mark.anyio
+async def test_failed_first_cycle_recovery_does_not_jump_to_feed_head():
+    conn = FakeConn(Store())  # fake feed head is 9000, no committed book
+    fresh, cursor = await DL._recover_cycle(
+        conn, desk_id="live1", account_id="a", policy=DK.Policy(),
+        limits=DK.Limits(), fee_fn=DL.live_fee_fn, queue_share=.25,
+        opening_balance=OPENING, fallback_cursor=1234)
+    assert cursor == 1234
+    assert fresh.pf.cash == OPENING and fresh.pf.invariant()["ok"]
+
 
 @pytest.mark.anyio
 async def test_replaying_the_same_events_does_not_duplicate_fills():
