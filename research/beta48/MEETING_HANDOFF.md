@@ -2,14 +2,14 @@
 
 ## 1. Where to look
 
-**`https://command.bettortoken.com`** → **Desk · REPLAY** tab.
+**`https://command.bettortoken.com`** → **Desk · REPLAY** tab (replay) and `/api/command/desk/live` (live-lane state).
 Desk password unlock; HttpOnly session cookie scoped to `/api/command`.
 
 ## 2. Release, policy, model
 
 | | |
 |---|---|
-| API release | `2da37d2` (previous live: `2d7ed3f`, 13:47:37Z) |
+| API release | `534484c` (live chain today: `2d7ed3f` → `2da37d2` → `534484c`) |
 | Engine | `BETTOR_DESK_V1` |
 | Policy | `FERRARI_INSPIRED_DEV_V1` — **development policy, not a trained strategy** |
 | Fill model | `PRINT_THROUGH_WITH_QUEUE_SHARE_V1`, queue_share **0.25 (ASSUMED)** |
@@ -149,21 +149,30 @@ whether a cancellation was ours or the venue's — the three
 measurements that would turn `P_FILL` from `NOT_IDENTIFIED` into a
 number. **Not requested in this directive and not requested here.**
 
-## 7. The one remaining deployment action
+## 7. The live lane — deployed, guarded, and what it is
 
-The **live desk loop is not deployed.** The engine, its tests and the
-read surface are in the API release; the loop that steps it against
-incoming data needs a process, and the only processes that exist are
-`sportsassets-api` and `sportsassets-workers`. **`sportsassets-workers`
-runs the observation collector**, which must not restart before its
-fixed stop at 2026-09-24T04:00:00Z.
+**`BETTOR_DESK_LOOP=1` is set on `sportsassets-api` and release
+`534484c` carries the loop.** No new service, no new cost, no worker
+restart, no additional venue allowance.
 
-**Recommended: host the loop in `sportsassets-api` behind an env flag**
-— no new service, no new cost, no worker restart, and it ships by the
-same isolated `deploy-api-commit` route already used twice today. That
-needs no authorization beyond what is in force.
+How it satisfies the isolation requirements:
 
-Preserved throughout: collector untouched (worker deploy list
-byte-identical across both deploys; `claude/session-njaewf` still at
-`7f76fd9`; journal shows no new gap or boot), allowance 0/8 · 2/20 ·
-4/40, fixed stop unmoved.
+| requirement | how |
+|---|---|
+| single active writer | `pg_try_advisory_lock(7723901544120031)` — the instance that wins runs; every other reports `STANDBY` and writes nothing, so the overlapping instances a deploy creates cannot run duplicate desks |
+| idempotent intake | cursor is the evidence's **serial id**, not a timestamp; every insert is `ON CONFLICT DO NOTHING`/`DO UPDATE` on a natural key; the consumption ledger is keyed on the event id |
+| non-blocking | awaited on the shared pool, sleeps between cycles |
+| restart-safe | decisions, orders, positions, cash and cursor in Postgres; the in-memory desk is a cache of the ledger |
+| a failed cycle | does **not** advance the cursor — the batch is retried and the idempotent keys absorb it |
+| no funded path | **absent from the import graph**, not flagged off; a test reads the module's source and fails the build if a venue import or order-submitting symbol appears |
+| no venue requests | its only input is evidence already in our database — the collector's allowance is untouched |
+| first start | seeds the cursor at `max(trades.id)`, so five months of history is **not** replayed wearing the live label; a restart resumes exactly |
+
+**It does not weaken production.** The production engine's refusals are
+unchanged; this is a separate labelled lane (`DESK_SHADOW_EXPERIMENTAL`)
+with its own tables, execution model and decision stream.
+
+Collector preserved across every deploy today: worker deploy list
+byte-identical each time, `claude/session-njaewf` still `7f76fd9`,
+journal shows no new gap or boot, allowance 0/8 · 2/20 · 4/40, fixed
+stop unmoved.
