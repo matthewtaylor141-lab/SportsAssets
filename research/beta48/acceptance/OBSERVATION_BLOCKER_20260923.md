@@ -153,3 +153,44 @@ This is the same failure this programme keeps finding: a check that
 could not fail. "The release is deployed" and "the manifest is in the
 image" were both true and neither could have detected that the loop
 selecting them was switched off.
+
+---
+
+## RESOLUTION, AND A TIMING CORRECTION THAT MATTERS
+
+Authorized 2026-09-23. `BETTOR_INCENTIVE_MANIFEST` set on
+sportsassets-workers to
+
+    /app/research/beta48/acceptance/incentive_manifest.json
+
+at 10:15:05Z (readback: 55 chars, which is that path exactly). Render
+restarts the service on an env change. One variable and no other: the
+ET date falls back to the manifest's own `2026-09-23`
+(`bettor_incentive_observe.py:131`), so no second variable is needed.
+
+THE TIMING IS NOT WHAT THE APPROVAL ASSUMED, AND SAYING SO IS THE POINT.
+The blocker was put to the owner at about 02:57Z, when starting
+immediately would still have covered the whole window. The session then
+sat idle awaiting the answer and the answer arrived at 10:15Z.
+
+    window opens        2026-09-23T04:00:00Z
+    answer received     2026-09-23T10:15Z
+    already elapsed     6h 15m of 24h, unobserved and unrecoverable
+
+So the option chosen ("run the window") is being executed, but its
+premise no longer holds. What this run can produce is AT MOST about
+17h45m of a 24h ET date, and the first 6h15m is a coverage gap that
+existed before the collector ever opened a socket.
+
+This is recorded here rather than absorbed quietly, because "the window
+ran" and "the window was covered" are different claims and only the
+first one will be true. Every coverage figure from this run must be
+stated against the full 24h denominator, with the pre-start gap shown
+as part of it. The reward arithmetic is scored per scoring instant over
+the whole ET date; a run that observed three quarters of those instants
+cannot report a full-day figure.
+
+THE ARM IS STILL VALID. probe_id d5e9ae3d-257f-4948-a808-90d1bd3c5e48,
+deadline 2026-09-24T04:35:48Z, which still covers the fixed end at
+2026-09-24T04:00:00Z. No re-arm is needed or permitted, and no counter
+has moved: HTTP 0 of 8, connects 0 of 20, subscribes 0 of 40.
