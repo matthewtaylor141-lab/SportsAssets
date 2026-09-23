@@ -20,6 +20,40 @@
    assumption **flips sign between partitions — including the frozen
    baseline.**
 
+## 0b. Published and verified at 15:30:47Z
+
+The acceptance probe against the live host confirms both new tabs are
+now in the bundle management actually loads:
+
+```
+['desk', 'Desk · REPLAY']
+['learning', 'Learning loop']
+```
+
+All nine pre-existing COMMAND views still routed · no credential-shaped
+string in the bundle · no order or mutation path in `shadow.js` · every
+shadow route 401 unauthenticated, direct and proxied.
+
+**The collector was not disturbed.** Publishing required a commit on
+`claude/session-njaewf`, which both Render services track with
+`autoDeploy=yes`. The `[skip render]` mechanism was verified from the
+deploy history *before* being relied on — `7f76fd9` carries the
+directive and appears only with trigger `api`, never `new_commit`,
+while `d630d3d` without it deployed as `new_commit`. After the push,
+the worker's deploy list is byte-identical to the baseline (newest row
+still `7f76fd9 · live · api · 10:26:55Z`) and the API is still on
+`503a42b`. No `new_commit` row on either service.
+
+### One open observation, not smoothed over
+
+`ENTER` last fired at 15:13:47 and `COMPLETE_PAIR` at 15:15:20 —
+**no new entries in the last ~16 minutes** — while `HOLD` (15:30:38)
+and `NO_TRADE` (15:30:14) continue. The desk is alive and deciding; it
+is refusing. Whether that is risk limits binding or an absence of
+qualifying opportunities is **not yet established**, and it is the
+first thing to check on the next read rather than something to assume
+is healthy.
+
 ## 1. Where to look
 
 **`https://command.bettortoken.com`** →
