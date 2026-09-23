@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 
 import pytest
@@ -493,3 +494,153 @@ class TestWriteIsolation:
     def test_ensure_schema_is_not_called_by_the_reader(self):
         src = open(IO.__file__, encoding="utf-8").read()
         assert "ensure_schema" not in src
+
+
+class TestTheReleaseMigrationMatchesTheCode:
+    """THE MIGRATION AND THE MODULE MUST NOT DRIFT.
+
+    The release creates the table through `render-ops sql
+    evidence-schema`, because this environment reaches production
+    through that workflow and nothing else. That statement is a
+    TRANSCRIPTION of `bettor_evidence_store.DDL`, and a transcription
+    is exactly the kind of thing that is right the day it is written
+    and wrong six weeks later -- at which point `ensure_schema` would
+    report a missing column against a table the release had just
+    declared correct.
+
+    So the two are compared here, token by token, with whitespace
+    normalised and nothing else forgiven.
+    """
+
+    WORKFLOW = os.path.join(
+        os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__)))),
+        ".github/workflows/render-ops.yml")
+
+    def _case(self, label):
+        src = open(self.WORKFLOW, encoding="utf-8").read()
+        needle = "\n                %s)" % label
+        assert needle in src, "no %s case in render-ops" % label
+        i = src.index(needle)
+        j = src.index('"; TO=', i)
+        k = src.index('SQL="', i) + len('SQL="')
+        return src[k:j]
+
+    @staticmethod
+    def _norm(sql):
+        """Whitespace and punctuation spacing only. Nothing else."""
+        s = " ".join(sql.replace("\n", " ").split())
+        for p in "(),":
+            s = s.replace(" " + p, p).replace(p + " ", p)
+        return s.rstrip(";")
+
+    def test_the_create_and_both_indexes_are_the_modules_own(self):
+        case = self._norm(self._case("evidence-schema"))
+        for stmt in self._norm(ES.DDL).split(";"):
+            stmt = stmt.strip()
+            if not stmt:
+                continue
+            assert stmt in case, (
+                "render-ops evidence-schema is missing, or has drifted "
+                "from, this statement in bettor_evidence_store.DDL:\n  %s"
+                % stmt)
+
+    def test_every_required_column_is_created_by_the_migration(self):
+        case = self._case("evidence-schema")
+        for col in ES.REQUIRED_COLUMNS:
+            assert col in case, (
+                "%r is in REQUIRED_COLUMNS, so ensure_schema will refuse "
+                "a table without it -- but the release migration never "
+                "creates it" % col)
+
+    def test_the_migration_reads_the_catalog_back(self):
+        """A CREATE that returned no error is not evidence."""
+        case = self._case("evidence-schema").upper()
+        assert "INFORMATION_SCHEMA.COLUMNS" in case
+        assert "PG_INDEXES" in case
+
+    def test_the_rollback_refuses_while_rows_exist(self):
+        case = self._case("evidence-drop").upper()
+        assert "RAISE EXCEPTION" in case
+        assert "COUNT(*)" in case
+        assert "DROP TABLE" in case
+
+    def test_the_inventory_never_returns_a_body(self):
+        """Bodies can be megabytes and can carry anything. The
+        inventory answers what exists, not what it says."""
+        case = self._case("evidence-inventory")
+        cols = case[:case.index("FROM")]
+        assert "body" not in cols.lower()
+        assert "digest" in cols
+
+
+class TestTheApiReleaseCannotReachAWorker:
+    """THE SHARED AUTO-DEPLOY BRANCH, AND THE ONE INSTRUMENT THAT IS
+    SAFE ON IT.
+
+    sportsassets-api and sportsassets-workers both track
+    claude/session-njaewf with autoDeploy=yes, so separate services buy
+    no isolation at all. `deploy-api-commit` is the release's only
+    deploy instrument, and these pin the properties that make it safe
+    rather than leaving them to a reviewer's memory.
+    """
+
+    WORKFLOW = TestTheReleaseMigrationMatchesTheCode.WORKFLOW
+
+    def _block(self):
+        src = open(self.WORKFLOW, encoding="utf-8").read()
+        i = src.index("\n            deploy-api-commit)")
+        return src[i:src.index("\n            api-branch-get)", i)]
+
+    def test_the_service_deployed_is_a_literal_not_the_input(self):
+        b = self._block()
+        assert 'svc_id "sportsassets-api"' in b
+        assert 'svc_id "$SERVICE"' not in b
+        assert "is IGNORED" in b
+
+    def test_it_asserts_the_resolved_service_is_the_web_service(self):
+        b = self._block()
+        assert '"$API_TYPE" != "web_service"' in b
+        assert '"$API_NAME" != "sportsassets-api"' in b
+
+    def test_it_deploys_by_commit_id_so_no_push_is_needed(self):
+        assert "commitId" in self._block()
+
+    def test_it_only_ever_posts_to_the_api_service(self):
+        """The worker's id is read, never written to."""
+        b = self._block()
+        posts = [ln for ln in b.split("\n") if "post " in ln or "post(" in ln
+                 or "$(post " in ln]
+        assert posts, "no deploy call found"
+        for ln in posts:
+            assert "$API_ID" in ln and "$WK_ID" not in ln, ln
+
+    def test_it_shows_the_workers_deploys_before_and_after(self):
+        b = self._block()
+        assert b.count("/services/$WK_ID/deploys") == 2
+
+    def test_a_full_sha_is_required_before_anything_is_called(self):
+        """A branch name, a short sha or a tag is refused, and refused
+        BEFORE any Render call is made."""
+        b = self._block()
+        i_guard = b.index("refused: deploy-api-commit needs arg")
+        i_call = b.index("svc_id")
+        assert i_guard < i_call, "the sha guard runs after a Render call"
+        assert b.count("[0-9a-f]") == 40
+
+    def test_render_yaml_is_not_touched_by_this_branch(self):
+        """A Blueprint sync is the OTHER way a worker gets deployed."""
+        import subprocess
+        repo = os.path.dirname(os.path.dirname(os.path.dirname(
+            os.path.abspath(__file__))))
+        base = subprocess.run(["git", "-C", repo, "merge-base", "HEAD",
+                               "c8b9704"], capture_output=True, text=True)
+        if base.returncode != 0:
+            pytest.skip("branch point not available in this checkout")
+        diff = subprocess.run(
+            ["git", "-C", repo, "diff", "--name-only",
+             base.stdout.strip() + "..HEAD", "--", "render.yaml"],
+            capture_output=True, text=True)
+        assert diff.stdout.strip() == "", (
+            "render.yaml changed on this branch: merging it would "
+            "Blueprint-sync and redeploy the collector")
