@@ -543,3 +543,108 @@ scale of the question, and the per-price calibration curve — does a leg
 bought at 0.30 win 30% of the time? — is the next artifact, fittable
 with the same isotonic estimator now that §8 has made it safe to trust
 at the tails.
+
+---
+
+## 11. Is the price the probability? The input EV_HOLD was missing
+
+`backend/tools/learn_fairvalue_ferrari.py`, on
+`render-ops sql ferrari-fairvalue` run 35866953120, read
+2026-09-23T13:25:32Z. **12,195 (condition, leg) rows over 7,749
+resolved markets**, 1 in 3 by hashtext.
+
+**The hypothesis was registered in the tool before the run:** *a
+calibration fitted on earlier settlements beats the identity — price =
+probability — out of time.* The identity is the BASELINE, not the
+conclusion, because if the market is fair then EV_HOLD is just the mark
+and the residual decision collapses to execution cost.
+
+Split by a market's first fill, **a market lands entirely in one part**
+(its two legs share one outcome, so splitting between them would put
+the answer in TRAIN): 4,649 train markets / 3,100 eval markets.
+
+### The registered test: NOT SUPPORTED
+
+Paired per-row log-loss difference, jackknifed over the 3,100 eval
+markets. Comparing two separate intervals is not a comparison, so the
+*difference* is the statistic:
+
+| | diff | 95% CI | verdict |
+|---|---:|---|---|
+| isotonic (unweighted) vs identity | +0.0052 | **[−0.0017, +0.0120]** | **NOT SUPPORTED** |
+| isotonic (qty-weighted) vs identity | −0.0223 | [−0.0364, −0.0082] | **the identity WINS** |
+
+The curve is better *calibrated* — ECE 0.0232 against the identity's
+0.0440, halved — and it still does not produce a better probability
+forecast. The quantity-weighted variant is significantly worse. **We do
+not have a model that beats the price.**
+
+### And yet the price is demonstrably not the probability
+
+The band table showed a large monotone gap, so it was re-asked in a
+form where one market cannot answer twice. A market's two legs are
+perfectly anti-correlated — their payouts sum to exactly 1.00, verified
+— so an all-rows table sees one event from both sides and reports one
+phenomenon as two. Each slice below takes **at most one row per
+market**, and the first slice is disjoint from the other two.
+
+mean(payout − price), cents per share, **eval markets only**,
+jackknifed over markets:
+
+| slice | markets | 0.05–0.40 | 0.40–0.60 | 0.60–0.95 |
+|---|---:|---:|---:|---:|
+| **single-leg markets** (never paired) | 1,369 | **−5.42** [−8.18, −2.67] | −2.24 [−6.94, +2.46] | **+7.67** [+2.80, +12.53] |
+| two-leg, larger leg | 1,731 | **−4.48** [−7.34, −1.61] | +4.54 [+0.54, +8.54] | **+6.24** [+2.69, +9.79] |
+| two-leg, smaller leg | 1,731 | −1.55 [−4.95, +1.85] | +0.95 [−3.31, +5.21] | **+9.81** [+6.93, +12.68] |
+
+**A favourite–longshot bias, out of time, with intervals that exclude
+zero in two disjoint slices.** Cheap legs pay about **5 cents less**
+than they cost; expensive legs pay **6 to 10 cents more**.
+
+**The two results are consistent, and the distinction matters.** Log
+loss is dominated by the crowded 0.40–0.60 middle, where the gap is
+small, and the fitted curve over-corrects there on new markets
+(fitted 0.639 against an observed 0.586). So: **there is a measured
+systematic bias in the direction of prices, and there is not yet a
+fitted curve that converts it into a better forecast.** Those are two
+different claims and only the first is supported.
+
+### The caveat that decides whether any of this is tradeable
+
+**These are the prices at which Ferrari chose to buy.** A longshot
+premium measured on one account's purchases is equally consistent with
+
+- *the venue over-prices longshots* — a bias anyone can trade, and
+- *Ferrari overpays for longshots* — for example by crossing the
+  spread, which makes the recorded price the ask and not the mid.
+
+**Nothing in this data separates those two**, and only a
+contemporaneous book can. That is the same missing fact §7 named for
+entry selection, now blocking a third thing. The **direction** for our
+own account is the same under both readings; the **size** of the
+opportunity is not, and no size is claimed.
+
+### What it gives component 3
+
+The §10 aggregate said the residual returns 98.26 cents on the dollar.
+**That drag is not uniform.** It is concentrated in the cheap legs:
+
+| residual leg marked at | gross expectation vs the mark |
+|---|---|
+| 0.05–0.40 | about **−5 cents per share** |
+| 0.40–0.60 | not distinguishable from the mark |
+| 0.60–0.95 | about **+6 to +10 cents per share** |
+
+Ferrari's mean residual entry price is 0.4460 — mostly in the band
+where holding is roughly fair. The loss sits in the tail it keeps
+buying.
+
+**This is a ranking input, not a policy.** An exit crosses a spread
+this table does not contain, and whether our order fills at all is
+`P_FILL`, still `NOT_IDENTIFIED`. What it does is turn
+`bettor_exit_engine`'s `EV_HOLD = NOT_IDENTIFIED` into a bounded
+quantity for the first time: **EV_HOLD ≈ mark − 5¢ on a cheap leg**,
+so a cheap residual leg only needs an exit cheaper than 5 cents of
+spread to beat holding, and an expensive one needs the exit to beat 6
+to 10. That is a number a funded pilot can test against, and it is the
+first time the comparison has had one on both sides.
