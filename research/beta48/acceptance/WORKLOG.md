@@ -412,3 +412,69 @@ denominator of every coverage and reward figure computed from this run.
 
 The stop at 2026-09-24T04:00:00Z (`trig_01RKm5XcVvaUXCqLgbAnV2T6`) is
 unchanged. No counter was reset and nothing was re-armed.
+
+---
+
+## Observation verification CHECK 2 — 2026-09-23T17:30:24–17:30:58Z
+
+Durable records only, dispatched at `ref=claude/command-center`. Nothing
+re-armed, no counter reset, the stop untouched.
+
+**Collection is live and growing.** The LADDER journal has more than
+doubled since check 1 and its newest row is 5 seconds old at read time.
+
+| | check 1 (13:49–13:51Z) | check 2 (17:30Z) | |
+|---|---|---|---|
+| LADDER rows | 5,858 | **14,662** | +8,804 |
+| LADDER max `at` | 13:49:51Z | **17:30:29Z** | +3 h 40 m |
+| boots | 2 | **2** | no third boot |
+| gaps carrying from/to | 3 | **4** | **one new** |
+| total gap | 136.218 s | **137.7235 s** | +1.5055 s |
+| markets receiving | 12 of 12 | **12 of 12** | |
+| markets with depth | 12 of 12 | **12 of 12** | |
+| frames in window | 5,921 | **14,666** | |
+| frames before window | 0 | **0** | |
+| control | true | **true** | |
+| `general_max_distinct` | 0 | **0** | general loop still idle |
+| http | 0 of 8 | **1 of 8** | one recheck |
+| socket connects | 2 of 20 | **3 of 20** | |
+| socket subscribes | 4 of 40 | **6 of 40** | |
+| `deadline_at` | 2026-09-24T04:35:48+00:00 | **unchanged** | |
+| `probe_id` | d5e9ae3d-257f-4948-a808-90d1bd3c5e48 | **unchanged** | no stop condition |
+
+**THE ONE NEW GAP.** `GAP_DISCONNECTED`, from `1790173110.146661` to
+`1790173111.6521392`, **1.5055 s**, at approximately **14:18:30Z** —
+which agrees with the EPOCH and GAP rows' newest `at` of 14:18:32Z. It is
+a disconnect-and-recover, not a process replacement: `boot_id`
+`8702807518fe44b4` is unbroken from 10:31:14Z to 17:30:29Z and carries
+14,638 of the 14,681 journal rows. The socket counters corroborate it —
+connects 2 → 3, subscribes 4 → 6, with `run_reconnects` 2 and
+`run_resubscribes` 4.
+
+**One thing check 1 did not record, noted now so check 3 has a baseline:**
+`PROGRAM_VERSION` stands at **3 rows, newest 16:00:00Z**. I cannot say
+whether that third row is new since check 1 because the count was not
+captured then. It is a version stamp, not a gap, and no gap or boot
+accompanies it.
+
+**All 12 markets are individually live**, newest per-market rows spanning
+17:28:57Z → 17:30:34Z. None has gone quiet.
+
+### Coverage, with the unobserved head in the denominator
+
+The window opened **04:00:00Z**; collection began **10:28:29Z**. So
+**6.475 h is unobserved before the run started** and stays in the
+denominator.
+
+- Full window: 24 h (04:00Z → 04:00Z)
+- Elapsed at this read: 13.508 h
+- Observed span: 10:28:29Z → 17:30:29Z = 7.033 h, less 137.7 s of gaps
+  = **6.995 h**
+- **Coverage of elapsed window: 51.8%.** Of the full 24 h: 29.1% so far.
+
+This is **not** a complete-day observation and must not be reported as
+one. 27.0% of the full window was already unobservable before the first
+frame arrived.
+
+Check 3 is armed. Check 1 disabled itself and left fourteen hours
+unwatched; each check now leaves its successor scheduled.
