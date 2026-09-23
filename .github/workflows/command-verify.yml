@@ -413,13 +413,22 @@ jobs:
           # EVERY BADGE MUST NAME ITS SUBJECT. A LIVE that does not say
           # what is live is the defect the seven statuses exist to fix.
           jq -r '.statuses | to_entries[]
-                 | "\(.key)\t\(.value.state)\t\(.value.what // "NO WHAT")"' \
+                 | "\(.key)\t\(.value.badge)\t\(.value.what // "NO WHAT")"' \
             /tmp/st.json | tee -a "$GITHUB_STEP_SUMMARY"
           for k in historical_replay prospective_rn1_management \
                    independent_ev_entries pairing second_half_loss_exit \
                    accounting_health learning_evaluation; do
-            jq -e --arg k "$k" '.statuses[$k].state' /tmp/st.json >/dev/null \
-              || { echo "::error::status $k is missing from the payload"
+            # The key is `badge`. I asked for `state` on the first run,
+            # got seven nulls, and reported them as "missing from the
+            # payload" -- which was my check being wrong about the
+            # contract, not the payload being wrong. The message now says
+            # which of the two it is.
+            jq -e --arg k "$k" '.statuses[$k].badge
+                                | strings
+                                | . == "LIVE" or . == "ARMED"
+                                  or . == "STOPPED"' \
+              /tmp/st.json >/dev/null \
+              || { echo "::error::status $k has no badge of LIVE/ARMED/STOPPED"
                    FAIL=1; }
             jq -e --arg k "$k" '.statuses[$k].what | strings | length > 0' \
               /tmp/st.json >/dev/null \
