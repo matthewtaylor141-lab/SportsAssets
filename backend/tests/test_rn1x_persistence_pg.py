@@ -954,6 +954,102 @@ async def test_the_prospective_cursor_starts_at_the_feed_head(conn):
     assert await W._cursor(conn, W.HISTORICAL_CURSOR_KEY) == 0
 
 
+async def test_an_idle_prospective_cycle_PERSISTS_its_seed(conn):
+    """THE LANE COULD NEVER HAVE PRODUCED A POSITION, and the old test
+    could not see it because it checked the READ and never the WRITE.
+
+    `cycle` returned IDLE_NO_CANDIDATES *before* `_save_cursor`. So the
+    seed evaporated: the next cycle found no stored row, re-seeded at the
+    NEW head, and everything that had arrived in between was skipped
+    permanently. The only candidate the lane could ever see was one
+    inserted between `max(id)` and the query microseconds later -- a race,
+    not a design.
+
+    Production said exactly this and I read past it four times:
+    `rn1x_prospective_cursor` was ABSENT from `ingestion_state` while the
+    lane reported IDLE_NO_CANDIDATES every cycle, with 9,444 eligible live
+    BUYs a day going by.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    await _arm(conn)
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.PROSPECTIVE_CURSOR_KEY)
+    head = int(await conn.fetchval(
+        "SELECT coalesce(max(id), 0) FROM trades") or 0)
+
+    first = await W.cycle(conn, lane="PROSPECTIVE")
+    assert first["state"] == "IDLE_NO_CANDIDATES", first
+    assert first["cursor"] == head, (first["cursor"], head)
+
+    # THE POINT: the seed is on disk, not only in that return value.
+    stored = await conn.fetchval(
+        "SELECT value::text FROM ingestion_state WHERE key = $1",
+        W.PROSPECTIVE_CURSOR_KEY)
+    assert stored is not None, (
+        "an idle prospective cycle left no cursor row, so the next cycle "
+        "re-seeds at the new head and skips every row that arrived")
+    assert int(str(stored).strip().strip('"')) == head, stored
+
+
+async def test_a_row_arriving_between_cycles_is_NOT_skipped(conn):
+    """The consequence, stated as behaviour rather than as a stored value.
+
+    This is what the lane is FOR. A cohort BUY that lands after the lane
+    started must be examined by the next cycle. Under the old code it was
+    not: the re-seeded head had already moved past it.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    await _arm(conn)
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.PROSPECTIVE_CURSOR_KEY)
+    await W.cycle(conn, lane="PROSPECTIVE")          # seeds and stores
+
+    # An UNRESOLVED market and one live-lane cohort BUY on it, arriving
+    # after the lane began -- the exact shape the lane exists to catch.
+    cond = "0xcondition_rn1x_prospective_arrival"
+    await conn.execute("DELETE FROM trades WHERE condition_id = $1", cond)
+    await conn.execute("DELETE FROM markets WHERE condition_id = $1", cond)
+    await conn.execute(
+        "INSERT INTO markets (condition_id, title, resolved) "
+        "VALUES ($1, $2, FALSE) ON CONFLICT (condition_id) DO UPDATE "
+        "SET resolved = FALSE, resolved_prices = NULL", cond, "arriving")
+    newid = await conn.fetchval(
+        "INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, "
+        "outcome_index, size, price, notional, ts, source, detected_at, "
+        "dedupe_key) VALUES ($1,$2,$3,$4,'BUY',0,100,0.60,60,$5,'chain',"
+        "$6,$7) RETURNING id",
+        WHALE, "0xtx_arriving", "asset0", cond,
+        T0 + timedelta(hours=9), T0 + timedelta(hours=9, seconds=7),
+        "rn1x-arriving")
+
+    second = await W.cycle(conn, lane="PROSPECTIVE")
+    assert second["state"] == "REPLAYED", second
+    examined = [r["trade_id"] for r in second["results"]]
+    assert int(newid) in examined, (
+        "the newly arrived BUY was never examined: %r (cursor %r)"
+        % (second["results"], second["cursor"]))
+    # and it is PROSPECTIVE evidence: the right experiment, the three
+    # clocks ordered source -> receipt -> decision, and NO settled payout.
+    row = await conn.fetchrow(
+        "SELECT p.experiment_id, p.source_ts, p.detected_ts, p.decision_ts, "
+        "       o.settled_at, o.outcome_basis "
+        "  FROM rn1x_positions p LEFT JOIN rn1x_outcomes o "
+        "    ON o.position_id = p.position_id "
+        " WHERE p.source_trade_id = $1 AND p.experiment_id = $2",
+        int(newid), W.PROSPECTIVE_EXPERIMENT_ID)
+    # NOT `if row is not None` -- that guard would make every assertion
+    # below skippable, which is the check-that-cannot-fail shape.
+    assert row is not None, (
+        "the arriving BUY was examined but no prospective position row "
+        "exists for it; results were %r" % (second["results"],))
+    assert row["source_ts"] <= row["detected_ts"] <= row["decision_ts"], (
+        dict(row))
+    assert row["settled_at"] is None, (
+        "a prospective position must not carry a settlement: %r" % dict(row))
+
+
 async def test_the_lane_census_measures_latency_on_live_lanes_only(conn):
     """A backfill row's detected_at - ts is the age of the backfill.
 

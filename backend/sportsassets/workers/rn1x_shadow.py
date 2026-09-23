@@ -508,8 +508,27 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
     cands = await conn.fetch(query, start, SCAN_BATCH, sources)
     census = await lane_census(conn)
     if not cands:
+        # PERSIST THE POSITION EVEN WHEN NOTHING WAS FOUND. Returning here
+        # without saving is what made the prospective lane incapable of
+        # ever producing a position: the seed lived only in this return
+        # value, so the next cycle found no stored row, re-seeded at the
+        # NEW head, and every row that had arrived in between was skipped
+        # permanently. The only candidate it could ever catch was one
+        # inserted between `max(id)` and the query microseconds later.
+        #
+        # Production stated it plainly and I read past it four times:
+        # `rn1x_prospective_cursor` was ABSENT from `ingestion_state` while
+        # the lane reported IDLE_NO_CANDIDATES every cycle, against 9,444
+        # eligible live BUYs a day.
+        #
+        # This is safe for the historical lane and changes nothing there:
+        # `start` is the value already stored (or 0 when absent, which is
+        # what absence already means), so it never moves the cursor
+        # backwards and never past unexamined evidence.
+        await _save_cursor(conn, start, cursor_key)
         return {"ran": True, "state": "IDLE_NO_CANDIDATES", "lane": lane,
-                "cursor": start, "lane_census": census}
+                "cursor": start, "cursor_persisted": True,
+                "lane_census": census}
 
     seen_conditions: set[str] = set()
     results = []
