@@ -1,0 +1,1163 @@
+{
+ "generated_at": 1790174414.1824775,
+ "elapsed_s": 35.3,
+ "code_version": "2fa8d06",
+ "desk_version": "BETTOR_DESK_V1",
+ "variants_tried": 5,
+ "scenarios_queue_share": [
+  0.1,
+  0.25,
+  0.5
+ ],
+ "partitions": {
+  "train_conditions": 603,
+  "validation_conditions": 201,
+  "held_back_conditions": 202
+ },
+ "partition_rule": "chronological by a market's first event; a CONDITION lands entirely in one part, so a position's entry and its outcome are never split across partitions",
+ "FINAL_EVALUATION_SET": {
+  "where": "the LIVE shadow lane, forward of the freeze instant",
+  "why_not_a_history_slice": "every row of this corpus has been inspected -- the loss decomposition was built from it and these candidates were proposed from that decomposition. A slice carved out of data I have already read is not uninspected, and treating it as if it were is the easiest way to manufacture a positive result. The held-back 20% is NOT USED here and is not a substitute."
+ },
+ "execution_assumptions": {
+  "event_class": "SINGLE_ACCOUNT_EXECUTIONS",
+  "source_venue": "POLYMARKET_GLOBAL_POLYGON",
+  "fee_schedule_venue": "PMUS",
+  "venue_basis": "TRANSFERRED_SCENARIO",
+  "p_fill": "NOT_IDENTIFIED",
+  "note": "a candidate must beat the baseline under EVERY queue_share scenario. Winning at 0.50 and losing at 0.10 is a liquidity assumption, not an edge."
+ },
+ "gate": {
+  "declared_before_any_candidate_ran": true,
+  "min_decided_orders": 50,
+  "criteria": [
+   "eligible (activity floor)",
+   "improves the LOWER terminal bound in EVERY scenario",
+   "drawdown not worse by >10%",
+   "peak committed capital not worse by >10%",
+   "ledger reconciles in every scenario"
+  ]
+ },
+ "candidates": [
+  {
+   "id": "BASELINE",
+   "hypothesis": "the frozen active policy",
+   "targets": "-",
+   "params": {}
+  },
+  {
+   "id": "C1_NARROW_BAND",
+   "hypothesis": "entries in [0.40,0.65] sit where the fair-value study found mean(payout-price) indistinguishable from zero. Narrowing toward the centre should not help; if it does, the band was not the binding constraint.",
+   "targets": "SETTLEMENT",
+   "params": {
+    "entry_lo": 0.45,
+    "entry_hi": 0.55
+   }
+  },
+  {
+   "id": "C2_REQUIRE_CLEARANCE",
+   "hypothesis": "exit-vs-basis lost $921. Requiring a wider clearing margin before completing a pair should cut the completions that lock a loss.",
+   "targets": "EXIT_VS_BASIS",
+   "params": {
+    "min_clear": 0.03
+   }
+  },
+  {
+   "id": "C3_PATIENT_EXIT",
+   "hypothesis": "the learned exit fires on a 2c edge. A wider threshold holds more legs to settlement, trading exit losses for settlement variance.",
+   "targets": "EXIT_VS_BASIS",
+   "params": {
+    "exit_edge": 0.06
+   }
+  },
+  {
+   "id": "C4_SMALLER_CLIP",
+   "hypothesis": "$24,530 stranded in 396 legs is a capital problem before it is a P&L one. A smaller clip should cut committed capital and turnover at the same win rate.",
+   "targets": "STRANDED_CAPITAL",
+   "params": {
+    "order_usd": 120.0
+   }
+  },
+  {
+   "id": "C5_SHORTER_REST",
+   "hypothesis": "782 orders expired unfilled. A shorter expiry frees the intent sooner; if outcomes are unchanged the resting time was not buying anything.",
+   "targets": "TURNOVER",
+   "params": {
+    "expiry_s": 300.0
+   }
+  }
+ ],
+ "results": {
+  "TRAIN": {
+   "BASELINE": [
+    {
+     "realized_pnl_usd": -543.53,
+     "fees_usd": -151.41,
+     "terminal_lower_usd": 88582.71,
+     "terminal_upper_usd": 113124.93,
+     "terminal_lower_vs_start": -11417.29,
+     "unresolved_legs": 252,
+     "unresolved_cost_usd": 10873.76,
+     "max_drawdown_usd": 327.53,
+     "peak_committed_usd": 1001.08,
+     "mean_committed_usd": 176.36,
+     "turnover_usd": 22881.39,
+     "turnover_x_capital": 0.229,
+     "orders": 1208,
+     "decided_orders": 1208,
+     "fills": 1896,
+     "decisions": {
+      "ENTER": 479,
+      "FILLED": 1896,
+      "HOLD": 4523,
+      "NO_TRADE": 3656,
+      "COMPLETE_PAIR": 430,
+      "EXIT": 2774,
+      "SETTLED": 55
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -969.39,
+     "fees_usd": -234.92,
+     "terminal_lower_usd": 83441.88,
+     "terminal_upper_usd": 117976.05,
+     "terminal_lower_vs_start": -16558.12,
+     "unresolved_legs": 251,
+     "unresolved_cost_usd": 15588.73,
+     "max_drawdown_usd": 648.63,
+     "peak_committed_usd": 1002.69,
+     "mean_committed_usd": 183.49,
+     "turnover_usd": 34799.58,
+     "turnover_x_capital": 0.348,
+     "orders": 1252,
+     "decided_orders": 1252,
+     "fills": 1813,
+     "decisions": {
+      "ENTER": 482,
+      "FILLED": 1813,
+      "HOLD": 4428,
+      "NO_TRADE": 3717,
+      "COMPLETE_PAIR": 446,
+      "EXIT": 2704,
+      "SETTLED": 54
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -1768.55,
+     "fees_usd": -300.57,
+     "terminal_lower_usd": 79290.5,
+     "terminal_upper_usd": 121719.12,
+     "terminal_lower_vs_start": -20709.5,
+     "unresolved_legs": 248,
+     "unresolved_cost_usd": 18940.95,
+     "max_drawdown_usd": 899.47,
+     "peak_committed_usd": 1005.38,
+     "mean_committed_usd": 178.48,
+     "turnover_usd": 44151.83,
+     "turnover_x_capital": 0.442,
+     "orders": 1262,
+     "decided_orders": 1262,
+     "fills": 1657,
+     "decisions": {
+      "ENTER": 485,
+      "FILLED": 1657,
+      "HOLD": 4458,
+      "NO_TRADE": 3729,
+      "COMPLETE_PAIR": 438,
+      "EXIT": 2676,
+      "SETTLED": 52
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C1_NARROW_BAND": [
+    {
+     "realized_pnl_usd": -162.18,
+     "fees_usd": -106.39,
+     "terminal_lower_usd": 91823.37,
+     "terminal_upper_usd": 110294.16,
+     "terminal_lower_vs_start": -8176.63,
+     "unresolved_legs": 188,
+     "unresolved_cost_usd": 8014.45,
+     "max_drawdown_usd": 319.89,
+     "peak_committed_usd": 750.35,
+     "mean_committed_usd": 130.54,
+     "turnover_usd": 15712.74,
+     "turnover_x_capital": 0.157,
+     "orders": 787,
+     "decided_orders": 787,
+     "fills": 1405,
+     "decisions": {
+      "ENTER": 298,
+      "FILLED": 1405,
+      "HOLD": 3311,
+      "NO_TRADE": 6340,
+      "COMPLETE_PAIR": 300,
+      "EXIT": 1968,
+      "SETTLED": 42
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -69.04,
+     "fees_usd": -164.57,
+     "terminal_lower_usd": 87978.63,
+     "terminal_upper_usd": 115544.74,
+     "terminal_lower_vs_start": -12021.37,
+     "unresolved_legs": 186,
+     "unresolved_cost_usd": 11952.34,
+     "max_drawdown_usd": 360.13,
+     "peak_committed_usd": 750.88,
+     "mean_committed_usd": 141.74,
+     "turnover_usd": 23881.99,
+     "turnover_x_capital": 0.239,
+     "orders": 802,
+     "decided_orders": 802,
+     "fills": 1321,
+     "decisions": {
+      "ENTER": 300,
+      "FILLED": 1321,
+      "HOLD": 3216,
+      "NO_TRADE": 6419,
+      "COMPLETE_PAIR": 307,
+      "EXIT": 1914,
+      "SETTLED": 42
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -394.4,
+     "fees_usd": -229.77,
+     "terminal_lower_usd": 83555.9,
+     "terminal_upper_usd": 120505.49,
+     "terminal_lower_vs_start": -16444.1,
+     "unresolved_legs": 186,
+     "unresolved_cost_usd": 16049.7,
+     "max_drawdown_usd": 261.84,
+     "peak_committed_usd": 751.76,
+     "mean_committed_usd": 140.78,
+     "turnover_usd": 32934.75,
+     "turnover_x_capital": 0.329,
+     "orders": 804,
+     "decided_orders": 804,
+     "fills": 1245,
+     "decisions": {
+      "ENTER": 302,
+      "FILLED": 1245,
+      "HOLD": 3250,
+      "NO_TRADE": 6422,
+      "COMPLETE_PAIR": 296,
+      "EXIT": 1886,
+      "SETTLED": 40
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C2_REQUIRE_CLEARANCE": [
+    {
+     "realized_pnl_usd": -352.93,
+     "fees_usd": -141.93,
+     "terminal_lower_usd": 89170.72,
+     "terminal_upper_usd": 112745.18,
+     "terminal_lower_vs_start": -10829.28,
+     "unresolved_legs": 248,
+     "unresolved_cost_usd": 10476.35,
+     "max_drawdown_usd": 420.4,
+     "peak_committed_usd": 1001.08,
+     "mean_committed_usd": 177.57,
+     "turnover_usd": 21365.19,
+     "turnover_x_capital": 0.214,
+     "orders": 1158,
+     "decided_orders": 1158,
+     "fills": 1864,
+     "decisions": {
+      "ENTER": 481,
+      "FILLED": 1864,
+      "HOLD": 4303,
+      "NO_TRADE": 3795,
+      "COMPLETE_PAIR": 385,
+      "EXIT": 2682,
+      "SETTLED": 54
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -586.58,
+     "fees_usd": -213.42,
+     "terminal_lower_usd": 84178.46,
+     "terminal_upper_usd": 118263.44,
+     "terminal_lower_vs_start": -15821.54,
+     "unresolved_legs": 247,
+     "unresolved_cost_usd": 15234.96,
+     "max_drawdown_usd": 617.64,
+     "peak_committed_usd": 1002.69,
+     "mean_committed_usd": 182.54,
+     "turnover_usd": 32002.56,
+     "turnover_x_capital": 0.32,
+     "orders": 1178,
+     "decided_orders": 1178,
+     "fills": 1773,
+     "decisions": {
+      "ENTER": 485,
+      "FILLED": 1773,
+      "HOLD": 4233,
+      "NO_TRADE": 3868,
+      "COMPLETE_PAIR": 388,
+      "EXIT": 2616,
+      "SETTLED": 53
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -1263.13,
+     "fees_usd": -279.18,
+     "terminal_lower_usd": 80467.95,
+     "terminal_upper_usd": 121794.86,
+     "terminal_lower_vs_start": -19532.05,
+     "unresolved_legs": 245,
+     "unresolved_cost_usd": 18268.92,
+     "max_drawdown_usd": 899.51,
+     "peak_committed_usd": 1005.38,
+     "mean_committed_usd": 175.92,
+     "turnover_usd": 41410.67,
+     "turnover_x_capital": 0.414,
+     "orders": 1181,
+     "decided_orders": 1181,
+     "fills": 1636,
+     "decisions": {
+      "ENTER": 487,
+      "FILLED": 1636,
+      "HOLD": 4265,
+      "NO_TRADE": 3884,
+      "COMPLETE_PAIR": 384,
+      "EXIT": 2585,
+      "SETTLED": 51
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C3_PATIENT_EXIT": [
+    {
+     "realized_pnl_usd": -479.65,
+     "fees_usd": -123.96,
+     "terminal_lower_usd": 88120.57,
+     "terminal_upper_usd": 113247.09,
+     "terminal_lower_vs_start": -11879.43,
+     "unresolved_legs": 263,
+     "unresolved_cost_usd": 11399.79,
+     "max_drawdown_usd": 555.98,
+     "peak_committed_usd": 995.76,
+     "mean_committed_usd": 175.41,
+     "turnover_usd": 18667.53,
+     "turnover_x_capital": 0.187,
+     "orders": 960,
+     "decided_orders": 960,
+     "fills": 1464,
+     "decisions": {
+      "ENTER": 473,
+      "FILLED": 1464,
+      "HOLD": 6865,
+      "NO_TRADE": 3675,
+      "COMPLETE_PAIR": 345,
+      "EXIT": 638,
+      "SETTLED": 58
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -503.26,
+     "fees_usd": -193.37,
+     "terminal_lower_usd": 82255.8,
+     "terminal_upper_usd": 120507.8,
+     "terminal_lower_vs_start": -17744.2,
+     "unresolved_legs": 261,
+     "unresolved_cost_usd": 17240.93,
+     "max_drawdown_usd": 716.09,
+     "peak_committed_usd": 989.4,
+     "mean_committed_usd": 175.0,
+     "turnover_usd": 28832.09,
+     "turnover_x_capital": 0.288,
+     "orders": 986,
+     "decided_orders": 986,
+     "fills": 1412,
+     "decisions": {
+      "ENTER": 474,
+      "FILLED": 1412,
+      "HOLD": 6808,
+      "NO_TRADE": 3726,
+      "COMPLETE_PAIR": 356,
+      "EXIT": 592,
+      "SETTLED": 57
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -998.68,
+     "fees_usd": -246.83,
+     "terminal_lower_usd": 77573.73,
+     "terminal_upper_usd": 126193.7,
+     "terminal_lower_vs_start": -22426.27,
+     "unresolved_legs": 264,
+     "unresolved_cost_usd": 21427.58,
+     "max_drawdown_usd": 1110.33,
+     "peak_committed_usd": 978.8,
+     "mean_committed_usd": 162.72,
+     "turnover_usd": 36335.8,
+     "turnover_x_capital": 0.363,
+     "orders": 982,
+     "decided_orders": 982,
+     "fills": 1273,
+     "decisions": {
+      "ENTER": 476,
+      "FILLED": 1273,
+      "HOLD": 6846,
+      "NO_TRADE": 3708,
+      "COMPLETE_PAIR": 349,
+      "EXIT": 594,
+      "SETTLED": 57
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C4_SMALLER_CLIP": [
+    {
+     "realized_pnl_usd": -306.65,
+     "fees_usd": -103.55,
+     "terminal_lower_usd": 92498.41,
+     "terminal_upper_usd": 108301.28,
+     "terminal_lower_vs_start": -7501.59,
+     "unresolved_legs": 251,
+     "unresolved_cost_usd": 7194.94,
+     "max_drawdown_usd": 181.77,
+     "peak_committed_usd": 481.08,
+     "mean_committed_usd": 88.53,
+     "turnover_usd": 15476.6,
+     "turnover_x_capital": 0.155,
+     "orders": 1242,
+     "decided_orders": 1242,
+     "fills": 1821,
+     "decisions": {
+      "ENTER": 481,
+      "FILLED": 1821,
+      "HOLD": 4426,
+      "NO_TRADE": 3707,
+      "COMPLETE_PAIR": 443,
+      "EXIT": 2734,
+      "SETTLED": 54
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -886.44,
+     "fees_usd": -145.0,
+     "terminal_lower_usd": 89949.89,
+     "terminal_upper_usd": 110493.0,
+     "terminal_lower_vs_start": -10050.11,
+     "unresolved_legs": 249,
+     "unresolved_cost_usd": 9163.66,
+     "max_drawdown_usd": 456.83,
+     "peak_committed_usd": 482.69,
+     "mean_committed_usd": 85.52,
+     "turnover_usd": 21412.27,
+     "turnover_x_capital": 0.214,
+     "orders": 1264,
+     "decided_orders": 1264,
+     "fills": 1651,
+     "decisions": {
+      "ENTER": 485,
+      "FILLED": 1651,
+      "HOLD": 4462,
+      "NO_TRADE": 3724,
+      "COMPLETE_PAIR": 439,
+      "EXIT": 2672,
+      "SETTLED": 52
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -1360.57,
+     "fees_usd": -186.31,
+     "terminal_lower_usd": 87635.2,
+     "terminal_upper_usd": 112387.12,
+     "terminal_lower_vs_start": -12364.8,
+     "unresolved_legs": 242,
+     "unresolved_cost_usd": 11004.23,
+     "max_drawdown_usd": 761.59,
+     "peak_committed_usd": 485.38,
+     "mean_committed_usd": 85.77,
+     "turnover_usd": 26965.56,
+     "turnover_x_capital": 0.27,
+     "orders": 1264,
+     "decided_orders": 1264,
+     "fills": 1546,
+     "decisions": {
+      "ENTER": 490,
+      "FILLED": 1546,
+      "HOLD": 4395,
+      "NO_TRADE": 3792,
+      "COMPLETE_PAIR": 442,
+      "EXIT": 2623,
+      "SETTLED": 54
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C5_SHORTER_REST": [
+    {
+     "realized_pnl_usd": -827.84,
+     "fees_usd": -127.92,
+     "terminal_lower_usd": 89896.78,
+     "terminal_upper_usd": 110348.48,
+     "terminal_lower_vs_start": -10103.22,
+     "unresolved_legs": 247,
+     "unresolved_cost_usd": 9275.38,
+     "max_drawdown_usd": 783.29,
+     "peak_committed_usd": 465.14,
+     "mean_committed_usd": 90.61,
+     "turnover_usd": 18832.15,
+     "turnover_x_capital": 0.188,
+     "orders": 1752,
+     "decided_orders": 1752,
+     "fills": 1765,
+     "decisions": {
+      "ENTER": 575,
+      "FILLED": 1765,
+      "HOLD": 4484,
+      "NO_TRADE": 4125,
+      "COMPLETE_PAIR": 708,
+      "EXIT": 2520,
+      "SETTLED": 55
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -1240.62,
+     "fees_usd": -202.43,
+     "terminal_lower_usd": 85617.97,
+     "terminal_upper_usd": 114274.97,
+     "terminal_lower_vs_start": -14382.03,
+     "unresolved_legs": 242,
+     "unresolved_cost_usd": 13141.41,
+     "max_drawdown_usd": 853.48,
+     "peak_committed_usd": 412.85,
+     "mean_committed_usd": 89.62,
+     "turnover_usd": 29585.4,
+     "turnover_x_capital": 0.296,
+     "orders": 1778,
+     "decided_orders": 1778,
+     "fills": 1759,
+     "decisions": {
+      "ENTER": 577,
+      "FILLED": 1759,
+      "HOLD": 4453,
+      "NO_TRADE": 4206,
+      "COMPLETE_PAIR": 714,
+      "EXIT": 2441,
+      "SETTLED": 55
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": -1994.35,
+     "fees_usd": -258.01,
+     "terminal_lower_usd": 82226.53,
+     "terminal_upper_usd": 117100.77,
+     "terminal_lower_vs_start": -17773.47,
+     "unresolved_legs": 241,
+     "unresolved_cost_usd": 15779.12,
+     "max_drawdown_usd": 1375.27,
+     "peak_committed_usd": 433.96,
+     "mean_committed_usd": 92.4,
+     "turnover_usd": 37648.05,
+     "turnover_x_capital": 0.376,
+     "orders": 1776,
+     "decided_orders": 1776,
+     "fills": 1621,
+     "decisions": {
+      "ENTER": 578,
+      "FILLED": 1621,
+      "HOLD": 4406,
+      "NO_TRADE": 4330,
+      "COMPLETE_PAIR": 702,
+      "EXIT": 2399,
+      "SETTLED": 55
+     },
+     "invariant_ok": true
+    }
+   ]
+  },
+  "VALIDATION": {
+   "BASELINE": [
+    {
+     "realized_pnl_usd": 40.61,
+     "fees_usd": -51.05,
+     "terminal_lower_usd": 96685.16,
+     "terminal_upper_usd": 103752.59,
+     "terminal_lower_vs_start": -3314.84,
+     "unresolved_legs": 70,
+     "unresolved_cost_usd": 3355.45,
+     "max_drawdown_usd": 2.3,
+     "peak_committed_usd": 474.0,
+     "mean_committed_usd": 157.59,
+     "turnover_usd": 7562.47,
+     "turnover_x_capital": 0.076,
+     "orders": 296,
+     "decided_orders": 295,
+     "fills": 424,
+     "decisions": {
+      "ENTER": 130,
+      "NO_TRADE": 1039,
+      "FILLED": 424,
+      "HOLD": 848,
+      "COMPLETE_PAIR": 99,
+      "EXIT": 428,
+      "SETTLED": 30
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 377.2,
+     "fees_usd": -64.83,
+     "terminal_lower_usd": 95977.31,
+     "terminal_upper_usd": 105543.68,
+     "terminal_lower_vs_start": -4022.69,
+     "unresolved_legs": 70,
+     "unresolved_cost_usd": 4399.88,
+     "max_drawdown_usd": 6.78,
+     "peak_committed_usd": 445.19,
+     "mean_committed_usd": 144.66,
+     "turnover_usd": 9613.45,
+     "turnover_x_capital": 0.096,
+     "orders": 301,
+     "decided_orders": 300,
+     "fills": 396,
+     "decisions": {
+      "ENTER": 130,
+      "NO_TRADE": 1044,
+      "FILLED": 396,
+      "HOLD": 847,
+      "COMPLETE_PAIR": 99,
+      "EXIT": 426,
+      "SETTLED": 30
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 974.34,
+     "fees_usd": -82.12,
+     "terminal_lower_usd": 95564.88,
+     "terminal_upper_usd": 107520.19,
+     "terminal_lower_vs_start": -4435.12,
+     "unresolved_legs": 70,
+     "unresolved_cost_usd": 5409.46,
+     "max_drawdown_usd": 19.15,
+     "peak_committed_usd": 397.18,
+     "mean_committed_usd": 133.91,
+     "turnover_usd": 12237.71,
+     "turnover_x_capital": 0.122,
+     "orders": 301,
+     "decided_orders": 300,
+     "fills": 388,
+     "decisions": {
+      "ENTER": 130,
+      "NO_TRADE": 1044,
+      "FILLED": 388,
+      "HOLD": 848,
+      "COMPLETE_PAIR": 99,
+      "EXIT": 425,
+      "SETTLED": 30
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C1_NARROW_BAND": [
+    {
+     "realized_pnl_usd": 311.91,
+     "fees_usd": -21.84,
+     "terminal_lower_usd": 98256.67,
+     "terminal_upper_usd": 102816.13,
+     "terminal_lower_vs_start": -1743.33,
+     "unresolved_legs": 50,
+     "unresolved_cost_usd": 2055.24,
+     "max_drawdown_usd": 2.15,
+     "peak_committed_usd": 487.47,
+     "mean_committed_usd": 139.33,
+     "turnover_usd": 3289.31,
+     "turnover_x_capital": 0.033,
+     "orders": 175,
+     "decided_orders": 174,
+     "fills": 338,
+     "decisions": {
+      "NO_TRADE": 1572,
+      "ENTER": 78,
+      "FILLED": 338,
+      "HOLD": 697,
+      "EXIT": 324,
+      "COMPLETE_PAIR": 64,
+      "SETTLED": 19
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 835.36,
+     "fees_usd": -33.89,
+     "terminal_lower_usd": 97699.76,
+     "terminal_upper_usd": 104635.48,
+     "terminal_lower_vs_start": -2300.24,
+     "unresolved_legs": 50,
+     "unresolved_cost_usd": 3135.6,
+     "max_drawdown_usd": 8.39,
+     "peak_committed_usd": 478.87,
+     "mean_committed_usd": 128.72,
+     "turnover_usd": 5008.68,
+     "turnover_x_capital": 0.05,
+     "orders": 175,
+     "decided_orders": 174,
+     "fills": 315,
+     "decisions": {
+      "NO_TRADE": 1573,
+      "ENTER": 78,
+      "FILLED": 315,
+      "HOLD": 701,
+      "EXIT": 323,
+      "COMPLETE_PAIR": 64,
+      "SETTLED": 19
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 1116.63,
+     "fees_usd": -42.7,
+     "terminal_lower_usd": 97336.26,
+     "terminal_upper_usd": 105785.58,
+     "terminal_lower_vs_start": -2663.74,
+     "unresolved_legs": 50,
+     "unresolved_cost_usd": 3780.37,
+     "max_drawdown_usd": 119.03,
+     "peak_committed_usd": 464.54,
+     "mean_committed_usd": 111.04,
+     "turnover_usd": 6324.74,
+     "turnover_x_capital": 0.063,
+     "orders": 174,
+     "decided_orders": 173,
+     "fills": 300,
+     "decisions": {
+      "NO_TRADE": 1576,
+      "ENTER": 78,
+      "FILLED": 300,
+      "HOLD": 713,
+      "EXIT": 322,
+      "COMPLETE_PAIR": 64,
+      "SETTLED": 19
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C2_REQUIRE_CLEARANCE": [
+    {
+     "realized_pnl_usd": 43.23,
+     "fees_usd": -50.9,
+     "terminal_lower_usd": 96705.87,
+     "terminal_upper_usd": 103732.14,
+     "terminal_lower_vs_start": -3294.13,
+     "unresolved_legs": 68,
+     "unresolved_cost_usd": 3337.36,
+     "max_drawdown_usd": 2.3,
+     "peak_committed_usd": 474.0,
+     "mean_committed_usd": 157.55,
+     "turnover_usd": 7537.55,
+     "turnover_x_capital": 0.075,
+     "orders": 278,
+     "decided_orders": 277,
+     "fills": 412,
+     "decisions": {
+      "ENTER": 130,
+      "NO_TRADE": 1084,
+      "FILLED": 412,
+      "HOLD": 841,
+      "COMPLETE_PAIR": 82,
+      "EXIT": 397,
+      "SETTLED": 30
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 383.7,
+     "fees_usd": -64.41,
+     "terminal_lower_usd": 96029.04,
+     "terminal_upper_usd": 105492.52,
+     "terminal_lower_vs_start": -3970.96,
+     "unresolved_legs": 68,
+     "unresolved_cost_usd": 4354.66,
+     "max_drawdown_usd": 6.78,
+     "peak_committed_usd": 445.19,
+     "mean_committed_usd": 144.56,
+     "turnover_usd": 9551.16,
+     "turnover_x_capital": 0.096,
+     "orders": 284,
+     "decided_orders": 283,
+     "fills": 384,
+     "decisions": {
+      "ENTER": 130,
+      "NO_TRADE": 1087,
+      "FILLED": 384,
+      "HOLD": 840,
+      "COMPLETE_PAIR": 83,
+      "EXIT": 395,
+      "SETTLED": 30
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 987.32,
+     "fees_usd": -81.25,
+     "terminal_lower_usd": 95668.31,
+     "terminal_upper_usd": 107417.85,
+     "terminal_lower_vs_start": -4331.69,
+     "unresolved_legs": 68,
+     "unresolved_cost_usd": 5319.02,
+     "max_drawdown_usd": 19.15,
+     "peak_committed_usd": 397.18,
+     "mean_committed_usd": 133.71,
+     "turnover_usd": 12113.14,
+     "turnover_x_capital": 0.121,
+     "orders": 284,
+     "decided_orders": 283,
+     "fills": 376,
+     "decisions": {
+      "ENTER": 130,
+      "NO_TRADE": 1087,
+      "FILLED": 376,
+      "HOLD": 841,
+      "COMPLETE_PAIR": 83,
+      "EXIT": 394,
+      "SETTLED": 30
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C3_PATIENT_EXIT": [
+    {
+     "realized_pnl_usd": -198.78,
+     "fees_usd": -36.05,
+     "terminal_lower_usd": 96156.16,
+     "terminal_upper_usd": 104039.65,
+     "terminal_lower_vs_start": -3843.84,
+     "unresolved_legs": 71,
+     "unresolved_cost_usd": 3645.06,
+     "max_drawdown_usd": 2.5,
+     "peak_committed_usd": 474.0,
+     "mean_committed_usd": 157.59,
+     "turnover_usd": 5469.74,
+     "turnover_x_capital": 0.055,
+     "orders": 244,
+     "decided_orders": 243,
+     "fills": 358,
+     "decisions": {
+      "ENTER": 124,
+      "NO_TRADE": 1074,
+      "FILLED": 358,
+      "HOLD": 1197,
+      "COMPLETE_PAIR": 98,
+      "EXIT": 124,
+      "SETTLED": 31
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 148.01,
+     "fees_usd": -50.07,
+     "terminal_lower_usd": 95440.37,
+     "terminal_upper_usd": 105894.09,
+     "terminal_lower_vs_start": -4559.63,
+     "unresolved_legs": 71,
+     "unresolved_cost_usd": 4707.63,
+     "max_drawdown_usd": 7.48,
+     "peak_committed_usd": 445.19,
+     "mean_committed_usd": 144.66,
+     "turnover_usd": 7585.28,
+     "turnover_x_capital": 0.076,
+     "orders": 244,
+     "decided_orders": 244,
+     "fills": 347,
+     "decisions": {
+      "ENTER": 124,
+      "NO_TRADE": 1083,
+      "FILLED": 347,
+      "HOLD": 1221,
+      "COMPLETE_PAIR": 97,
+      "EXIT": 101,
+      "SETTLED": 31
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 668.46,
+     "fees_usd": -63.3,
+     "terminal_lower_usd": 95015.62,
+     "terminal_upper_usd": 107495.39,
+     "terminal_lower_vs_start": -4984.38,
+     "unresolved_legs": 71,
+     "unresolved_cost_usd": 5652.84,
+     "max_drawdown_usd": 17.14,
+     "peak_committed_usd": 397.18,
+     "mean_committed_usd": 133.89,
+     "turnover_usd": 9642.58,
+     "turnover_x_capital": 0.096,
+     "orders": 242,
+     "decided_orders": 242,
+     "fills": 331,
+     "decisions": {
+      "ENTER": 124,
+      "NO_TRADE": 1079,
+      "FILLED": 331,
+      "HOLD": 1221,
+      "COMPLETE_PAIR": 94,
+      "EXIT": 104,
+      "SETTLED": 31
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C4_SMALLER_CLIP": [
+    {
+     "realized_pnl_usd": 118.55,
+     "fees_usd": -29.45,
+     "terminal_lower_usd": 98097.8,
+     "terminal_upper_usd": 102476.71,
+     "terminal_lower_vs_start": -1902.2,
+     "unresolved_legs": 70,
+     "unresolved_cost_usd": 2020.75,
+     "max_drawdown_usd": 2.44,
+     "peak_committed_usd": 217.53,
+     "mean_committed_usd": 71.16,
+     "turnover_usd": 4377.09,
+     "turnover_x_capital": 0.044,
+     "orders": 301,
+     "decided_orders": 300,
+     "fills": 397,
+     "decisions": {
+      "ENTER": 130,
+      "NO_TRADE": 1042,
+      "FILLED": 397,
+      "HOLD": 845,
+      "COMPLETE_PAIR": 99,
+      "EXIT": 428,
+      "SETTLED": 30
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 488.52,
+     "fees_usd": -39.99,
+     "terminal_lower_usd": 97860.6,
+     "terminal_upper_usd": 103674.15,
+     "terminal_lower_vs_start": -2139.4,
+     "unresolved_legs": 70,
+     "unresolved_cost_usd": 2627.92,
+     "max_drawdown_usd": 10.36,
+     "peak_committed_usd": 188.73,
+     "mean_committed_usd": 63.64,
+     "turnover_usd": 5972.23,
+     "turnover_x_capital": 0.06,
+     "orders": 301,
+     "decided_orders": 300,
+     "fills": 388,
+     "decisions": {
+      "ENTER": 130,
+      "NO_TRADE": 1044,
+      "FILLED": 388,
+      "HOLD": 847,
+      "COMPLETE_PAIR": 99,
+      "EXIT": 426,
+      "SETTLED": 30
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 718.78,
+     "fees_usd": -52.64,
+     "terminal_lower_usd": 97691.63,
+     "terminal_upper_usd": 104241.57,
+     "terminal_lower_vs_start": -2308.37,
+     "unresolved_legs": 68,
+     "unresolved_cost_usd": 3027.15,
+     "max_drawdown_usd": 25.01,
+     "peak_committed_usd": 140.72,
+     "mean_committed_usd": 60.54,
+     "turnover_usd": 7945.61,
+     "turnover_x_capital": 0.079,
+     "orders": 306,
+     "decided_orders": 305,
+     "fills": 364,
+     "decisions": {
+      "ENTER": 131,
+      "NO_TRADE": 1049,
+      "FILLED": 364,
+      "HOLD": 841,
+      "COMPLETE_PAIR": 101,
+      "EXIT": 419,
+      "SETTLED": 30
+     },
+     "invariant_ok": true
+    }
+   ],
+   "C5_SHORTER_REST": [
+    {
+     "realized_pnl_usd": -75.84,
+     "fees_usd": -45.03,
+     "terminal_lower_usd": 96580.06,
+     "terminal_upper_usd": 103474.35,
+     "terminal_lower_vs_start": -3419.94,
+     "unresolved_legs": 67,
+     "unresolved_cost_usd": 3344.1,
+     "max_drawdown_usd": 4.63,
+     "peak_committed_usd": 452.85,
+     "mean_committed_usd": 82.41,
+     "turnover_usd": 6732.07,
+     "turnover_x_capital": 0.067,
+     "orders": 391,
+     "decided_orders": 390,
+     "fills": 349,
+     "decisions": {
+      "ENTER": 149,
+      "FILLED": 349,
+      "HOLD": 838,
+      "EXIT": 400,
+      "NO_TRADE": 1104,
+      "COMPLETE_PAIR": 158,
+      "SETTLED": 28
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 271.18,
+     "fees_usd": -62.03,
+     "terminal_lower_usd": 96015.28,
+     "terminal_upper_usd": 105017.54,
+     "terminal_lower_vs_start": -3984.72,
+     "unresolved_legs": 67,
+     "unresolved_cost_usd": 4255.9,
+     "max_drawdown_usd": 54.07,
+     "peak_committed_usd": 382.14,
+     "mean_committed_usd": 81.7,
+     "turnover_usd": 9219.54,
+     "turnover_x_capital": 0.092,
+     "orders": 399,
+     "decided_orders": 398,
+     "fills": 344,
+     "decisions": {
+      "ENTER": 150,
+      "FILLED": 344,
+      "HOLD": 838,
+      "EXIT": 396,
+      "NO_TRADE": 1106,
+      "COMPLETE_PAIR": 157,
+      "SETTLED": 28
+     },
+     "invariant_ok": true
+    },
+    {
+     "realized_pnl_usd": 723.2,
+     "fees_usd": -76.83,
+     "terminal_lower_usd": 95594.09,
+     "terminal_upper_usd": 106451.15,
+     "terminal_lower_vs_start": -4405.91,
+     "unresolved_legs": 67,
+     "unresolved_cost_usd": 5129.11,
+     "max_drawdown_usd": 119.26,
+     "peak_committed_usd": 264.27,
+     "mean_committed_usd": 80.51,
+     "turnover_usd": 11512.01,
+     "turnover_x_capital": 0.115,
+     "orders": 399,
+     "decided_orders": 398,
+     "fills": 342,
+     "decisions": {
+      "ENTER": 150,
+      "FILLED": 342,
+      "HOLD": 839,
+      "EXIT": 395,
+      "NO_TRADE": 1106,
+      "COMPLETE_PAIR": 157,
+      "SETTLED": 28
+     },
+     "invariant_ok": true
+    }
+   ]
+  }
+ },
+ "verdicts": {
+  "TRAIN": {
+   "C1_NARROW_BAND": {
+    "accepted": true,
+    "reasons": [
+     "passed every declared condition"
+    ]
+   },
+   "C2_REQUIRE_CLEARANCE": {
+    "accepted": false,
+    "reasons": [
+     "WORSE DRAWDOWN: 420.40 vs 327.53"
+    ]
+   },
+   "C3_PATIENT_EXIT": {
+    "accepted": false,
+    "reasons": [
+     "NOT ROBUST: improves the lower terminal bound in 0 of 3 scenarios; a candidate that needs a particular fill assumption has found a liquidity assumption, not an edge",
+     "WORSE DRAWDOWN: 555.98 vs 327.53"
+    ]
+   },
+   "C4_SMALLER_CLIP": {
+    "accepted": true,
+    "reasons": [
+     "passed every declared condition"
+    ]
+   },
+   "C5_SHORTER_REST": {
+    "accepted": false,
+    "reasons": [
+     "WORSE DRAWDOWN: 783.29 vs 327.53"
+    ]
+   }
+  },
+  "VALIDATION": {
+   "C1_NARROW_BAND": {
+    "accepted": false,
+    "reasons": [
+     "WORSE DRAWDOWN: 119.03 vs 19.15",
+     "MORE CAPITAL AT RISK: 464.54 vs 397.18"
+    ]
+   },
+   "C2_REQUIRE_CLEARANCE": {
+    "accepted": true,
+    "reasons": [
+     "passed every declared condition"
+    ]
+   },
+   "C3_PATIENT_EXIT": {
+    "accepted": false,
+    "reasons": [
+     "NOT ROBUST: improves the lower terminal bound in 0 of 3 scenarios; a candidate that needs a particular fill assumption has found a liquidity assumption, not an edge"
+    ]
+   },
+   "C4_SMALLER_CLIP": {
+    "accepted": false,
+    "reasons": [
+     "WORSE DRAWDOWN: 10.36 vs 6.78"
+    ]
+   },
+   "C5_SHORTER_REST": {
+    "accepted": false,
+    "reasons": [
+     "NOT ROBUST: improves the lower terminal bound in 2 of 3 scenarios; a candidate that needs a particular fill assumption has found a liquidity assumption, not an edge",
+     "WORSE DRAWDOWN: 4.63 vs 2.30"
+    ]
+   }
+  }
+ },
+ "accepted": [],
+ "outcome": "NO CANDIDATE QUALIFIED. The active policy stays frozen and unchanged."
+}
