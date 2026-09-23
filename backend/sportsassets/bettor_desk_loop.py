@@ -208,8 +208,23 @@ async def run(get_pool, *, desk_id="live1", policy=None, limits=None,
             while True:
                 await asyncio.sleep(CYCLE_S)
 
+        # STARTUP CAN FAIL, AND MUST SAY SO RATHER THAN DIE QUIETLY.
+        # The first version read the cursor outside any try, so a schema
+        # mismatch raised straight out of the task: the loop vanished,
+        # every desk table stayed empty, and the status endpoint still
+        # said RUNNING. A dead loop reporting RUNNING is worse than one
+        # reporting ERROR.
+        try:
+            cursor = await _load_cursor(conn, desk_id)
+        except Exception as exc:                            # noqa: BLE001
+            _status.update(state=STATE_ERROR,
+                           error="STARTUP: %s: %s" % (type(exc).__name__,
+                                                      str(exc)[:200]))
+            log.exception("desk loop could not read its cursor")
+            while True:
+                await asyncio.sleep(CYCLE_S)
+
         _status.update(state=STATE_RUNNING, since=time.time(), error=None)
-        cursor = await _load_cursor(conn, desk_id)
         log.info("desk loop RUNNING from event id %s", cursor)
 
         while True:

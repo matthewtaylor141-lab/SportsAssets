@@ -476,12 +476,24 @@ class TestTheLiveLoopCannotTradeOrDuplicate:
         assert len(d.orders) == norders
 
     def test_a_failed_cycle_does_not_advance_the_cursor(self):
+        """PARSE THE HANDLER, do not slice the text. The first version
+        found whichever `except` came first and broke the moment a
+        startup guard was added above the cycle's -- a test that fails
+        on unrelated edits is measuring layout, not behaviour."""
+        import ast
         from sportsassets import bettor_desk_loop as L
-        src = open(L.__file__).read()
-        i = src.index("except Exception as exc:")
-        j = src.index("await asyncio.sleep(CYCLE_S)", i)
-        assert "cursor" not in src[i:j], \
-            "the error path must not move the cursor"
+        fn = next(n for n in ast.walk(ast.parse(open(L.__file__).read()))
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "run")
+        # The cycle's handler is the one inside the `while True` body.
+        loops = [n for n in ast.walk(fn) if isinstance(n, ast.While)]
+        handlers = [h for lp in loops for n in ast.walk(lp)
+                    if isinstance(n, ast.Try) for h in n.handlers
+                    if isinstance(h.type, ast.Name) and h.type.id == "Exception"]
+        assert handlers, "the cycle must have its own Exception handler"
+        for h in handlers:
+            body = ast.unparse(ast.Module(body=h.body, type_ignores=[]))
+            assert "cursor =" not in body, \
+                "the error path must not move the cursor"
 
     def test_the_in_memory_desk_is_a_cache_not_the_ledger(self):
         from sportsassets import bettor_desk_loop as L
@@ -521,3 +533,29 @@ class TestTheLiveLoopCannotTradeOrDuplicate:
             "the stored cursor must be returned before the head is read"
         assert "return int(row['cursor_event_id'])" in code, \
             "a RESTART must resume exactly, not reseed"
+
+    def test_a_startup_failure_reports_ERROR_instead_of_dying(self):
+        """A dead loop whose status still says RUNNING is worse than one
+        that says ERROR. The cursor read is inside a guard."""
+        from sportsassets import bettor_desk_loop as L
+        import ast
+        src = open(L.__file__).read()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.AsyncFunctionDef) and n.name == "run")
+        code = ast.unparse(fn)
+        i = code.index("_load_cursor(conn, desk_id)")
+        guard = code.rindex("try:", 0, i)
+        assert "STATE_RUNNING" not in code[guard:i], \
+            "RUNNING must not be published before the cursor is readable"
+        assert "STARTUP:" in code
+
+    def test_migration_095_repairs_the_column_forward(self):
+        """094 was edited after it had been applied. CREATE TABLE IF NOT
+        EXISTS does not reshape an existing table, so the edit changed
+        the file and not the database. Migrations move forward."""
+        import os
+        here = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+        p = os.path.join(here, "migrations", "095_bettor_desk_cursor.sql")
+        sql = open(p).read()
+        assert "ADD COLUMN IF NOT EXISTS cursor_event_id" in sql
+        assert "DROP COLUMN" not in sql
