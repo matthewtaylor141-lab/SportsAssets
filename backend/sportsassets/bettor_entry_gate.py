@@ -114,10 +114,22 @@ def _num(v):
     return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
 
 
+R_EXTERNAL_NOT_ENABLED = "EXTERNAL_SOURCE_NOT_ENABLED_FOR_THIS_EXPERIMENT"
+R_EXTERNAL_NO_PROBABILITY = "EXTERNAL_SOURCE_PRODUCED_NO_PROBABILITY"
+
+#: The only source classes that may stand in for a qualified model, and
+#: they do NOT become one. An external bookmaker valuation satisfies the
+#: "what do you believe" requirement under an explicitly enabled
+#: experiment; it never satisfies QUALIFIED_MODEL, and the output says so
+#: in both directions so nothing downstream can confuse them.
+EXTERNAL_SOURCE_CLASSES = ("EXTERNAL_BOOKMAKER_VALUATION",)
+
+
 def admit(*, action_table=None, model=None, fair_value=None,
           execution_estimate=None, size=None, risk=None,
           market_state=None, fee_fn=None,
-          min_net_edge_per_contract=0.0) -> dict:
+          min_net_edge_per_contract=0.0,
+          external_source=None, external_enabled=False) -> dict:
     """Return an admissible entry, or every reason there is not one.
 
     `action_table` is `bettor_ev_bridge.evaluate()`'s table, unchanged.
@@ -138,7 +150,43 @@ def admit(*, action_table=None, model=None, fair_value=None,
     # ── the model ───────────────────────────────────────────────────
     q = qualify_model(model)
     detail["model_qualification"] = q
-    refusals.extend(q["refusals"])
+    # ── the belief's PROVENANCE, and the two ways to have one ────────
+    #
+    # A qualified internal settlement model, or -- under an explicitly
+    # enabled experiment -- a declared EXTERNAL source. The second is not
+    # a promotion of the first: `qualified_model` stays False, the source
+    # class is recorded by name, and every other requirement below is
+    # unchanged. Without `external_source` this branch does nothing and
+    # the gate behaves exactly as before; a test asserts that.
+    ext = external_source or None
+    ext_class = str((ext or {}).get("source_class") or "")
+    if ext is None:
+        refusals.extend(q["refusals"])
+    elif not external_enabled:
+        # A source supplied but the experiment not switched on is a
+        # refusal, not a silent acceptance.
+        refusals.append(R_EXTERNAL_NOT_ENABLED)
+    elif ext_class not in EXTERNAL_SOURCE_CLASSES:
+        refusals.append(R_NO_QUALIFIED_MODEL)
+        detail["external_rejected_class"] = ext_class
+    elif _num(ext.get("probability")) is None:
+        refusals.append(R_EXTERNAL_NO_PROBABILITY)
+        detail["external_refusals"] = list(ext.get("refusals") or [])
+    else:
+        detail["external_valuation"] = {
+            "source_class": ext_class,
+            "version": ext.get("version"),
+            "label": ext.get("label"),
+            "probability": _num(ext.get("probability")),
+            "is_a_qualified_settlement_model": False,
+            "satisfies": ("the INDEPENDENT_FAIR_VALUE requirement under a "
+                          "labelled experiment, and QUALIFIED_MODEL not at "
+                          "all"),
+        }
+    detail["qualified_model"] = bool(q["qualified"])
+    detail["belief_provenance"] = (
+        "QUALIFIED_INTERNAL_MODEL" if q["qualified"]
+        else (ext_class or "NONE"))
 
     # ── the belief, which may not be the benchmark ──────────────────
     fv = fair_value or {}
