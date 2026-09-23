@@ -84,7 +84,7 @@ fake transaction store; they are not a real-Postgres or production restart
 acceptance."*
 
 A throwaway cluster was stood up, the migrations applied, and the new
-tests drive real rows. 16 of them, including:
+tests drive real rows. 20 of them, including:
 
 - **Rollback.** A failure injected mid-transaction leaves **zero**
   positions and zero orders. Orders without a position is the shape that
@@ -100,8 +100,8 @@ tests drive real rows. 16 of them, including:
   promise in a comment.
 - **Fail-closed control** on absent / false / malformed / unreadable.
 
-## 4. Continuous learning — **RUNNING, AND ITS FIRST VERDICT IS A
-REJECTION**
+## 4. Continuous learning — **RUNNING. THREE REJECTIONS AND ONE
+ELIGIBILITY**
 
 `rn1x_learn` loop, own lock, own control row, own env flag. It writes one
 receipt per challenger per cycle into the **existing**
