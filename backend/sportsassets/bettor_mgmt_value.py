@@ -89,13 +89,25 @@ IDENTIFIED = "IDENTIFIED"
 # The management actions, and each one's meaning stated once so two
 # call sites cannot disagree about what REDUCE means.
 HOLD = "HOLD"                    # carry the position as it stands
-EXIT_NOW = "EXIT_NOW"            # sell the whole leg into the bid
-REDUCE = "REDUCE"                # sell a declared fraction into the bid
-COMPLETE_PAIR = "COMPLETE_PAIR"  # buy the complement to lock par
+EXIT_NOW = "EXIT_NOW"            # sell the whole leg INTO THE BID (taker)
+REDUCE = "REDUCE"                # sell a declared fraction (taker)
+COMPLETE_PAIR = "COMPLETE_PAIR"  # buy the complement AT THE ASK (taker)
 WAIT = "WAIT"                    # act later at a better price
 REPRICE = "REPRICE"              # move a resting order
 
-ACTIONS = (HOLD, EXIT_NOW, REDUCE, COMPLETE_PAIR, WAIT, REPRICE)
+# THE RESTING ALTERNATIVES, AND THEY ARE SEPARATE ACTIONS.
+#
+# It would be wrong to treat every completion and exit as a taker order.
+# Resting inside the spread is a real alternative with a better price and
+# a worse certainty, and collapsing the two would either (a) credit a
+# resting order with a taker's certainty, or (b) hide the better price
+# behind a blanket refusal. Both are priced HERE, conditionally, and
+# neither is selectable.
+EXIT_RESTING = "EXIT_RESTING"
+COMPLETE_PAIR_RESTING = "COMPLETE_PAIR_RESTING"
+
+ACTIONS = (HOLD, EXIT_NOW, REDUCE, COMPLETE_PAIR, WAIT, REPRICE,
+           EXIT_RESTING, COMPLETE_PAIR_RESTING)
 
 # Settlement-estimate provenance. The distinction is the whole reason
 # the historical test can run and the live one cannot.
@@ -120,6 +132,13 @@ class Candidate:
     blocker: str | None = None
     why: str = ""
     requires_our_fill: bool = False
+    # WHAT IT WOULD BE WORTH IF OUR ORDER FILLED. Populated only for the
+    # resting actions. It is reported BESIDE a null `ev_usd` rather than
+    # instead of one, so a reader sees the better price AND that its
+    # probability is unknown. Putting this number in `ev_usd` would be
+    # the substitution that turns an unmeasured fill rate into an
+    # expected value.
+    ev_if_filled_usd: float | None = None
     assumptions: list = field(default_factory=list)
     uncertainty: str = ""
 
@@ -131,6 +150,7 @@ class Candidate:
             "cash_at_settlement_usd": self.cash_at_settlement_usd,
             "blocker": self.blocker, "why": self.why,
             "requires_our_fill": self.requires_our_fill,
+            "ev_if_filled_usd": self.ev_if_filled_usd,
             "assumptions": list(self.assumptions),
             "uncertainty": self.uncertainty,
         }
@@ -371,6 +391,111 @@ def value_complete_pair(pos: Position, mk: Market, *, fee_fn=None) -> Candidate:
                      "directional position"))
 
 
+def value_resting(pos: Position, mk: Market, *, fee_fn=None,
+                  improve=0.01, which=EXIT_RESTING) -> Candidate:
+    """REST INSIDE THE SPREAD instead of crossing it.
+
+    WHY THIS IS A SEPARATE ACTION AND NOT A VARIANT. A resting order gets
+    a better price and gives up certainty. Folding it into the taker
+    action would either credit it with a taker's certainty or bury its
+    better price under a blanket refusal, and both are wrong in ways that
+    matter to the decision.
+
+    SO IT IS PRICED CONDITIONALLY AND IS NEVER SELECTABLE. `ev_if_filled`
+    says what it would be worth; `ev_usd` stays None; `requires_our_fill`
+    is True. Multiplying the two would require the fill rate, which is
+    the one number this stack does not have -- and inventing it here is
+    exactly the substitution the standing directives forbid.
+
+    `improve` is the price improvement sought, in dollars per contract.
+    It is an ASSUMPTION about where we would rest, not a measurement of
+    where we would get filled.
+    """
+    if which == EXIT_RESTING:
+        if mk.bid is None:
+            return Candidate(
+                action=which, status=NOT_IDENTIFIED, blocker="NO_BID",
+                why="no bid, so there is nothing to rest above",
+                requires_our_fill=True,
+                uncertainty="the reference price is unknown")
+        px = mk.bid + improve
+        # An offer above the bid cannot lift the bid; it must also sit
+        # below our own leg's ask or it is simply a taker order.
+        if mk.ask is not None and px >= mk.ask - 1e-12:
+            return Candidate(
+                action=which, status=BLOCKED,
+                blocker="IMPROVEMENT_EXCEEDS_THE_SPREAD",
+                why=("resting at %.4f is at or through the ask of %.4f, "
+                     "which is a taker order wearing a maker's label"
+                     % (px, mk.ask)),
+                requires_our_fill=True,
+                uncertainty="none; this is an arithmetic contradiction")
+        size = pos.qty
+        fee = _fee(fee_fn, size, px)
+        if fee is None:
+            return Candidate(
+                action=which, status=NOT_IDENTIFIED,
+                blocker="FEE_SCHEDULE_NOT_ESTABLISHED",
+                why="a resting exit's fee is not established",
+                requires_our_fill=True,
+                uncertainty="execution cost unknown")
+        released = pos.basis_usd
+        return Candidate(
+            action=which, status=NOT_IDENTIFIED,
+            blocker="P_FILL_NOT_IDENTIFIED",
+            ev_if_filled_usd=px * size - fee - released,
+            requires_our_fill=True,
+            why=("rest an offer at %.4f, %.4f above the bid. IF it filled "
+                 "in full it would be worth %.4f, against %.4f for "
+                 "crossing now -- but whether it fills is unmeasured"
+                 % (px, improve, px * size - fee - released,
+                    (mk.bid * min(size, mk.bid_size)
+                     - (_fee(fee_fn, min(size, mk.bid_size), mk.bid) or 0.0)
+                     - released) if mk.bid_size > 0 else float("nan"))),
+            assumptions=["that we would rest at this price and not be "
+                         "outbid, and that resting does not itself move "
+                         "the book"],
+            uncertainty=("the fill rate for OUR resting order requires an "
+                         "execution-tape join with queue position, which "
+                         "no observational dataset here supplies. The "
+                         "conditional value is NOT an expected value"))
+    # COMPLETE_PAIR_RESTING: bid for the complement BELOW its ask.
+    if mk.comp_source != "OBSERVED" or mk.comp_ask is None:
+        return Candidate(
+            action=which, status=NOT_IDENTIFIED,
+            blocker="COMPLEMENT_%s" % mk.comp_source,
+            why=("the complement's own book was not read, so there is no "
+                 "reference price to rest below"),
+            requires_our_fill=True,
+            uncertainty="the completion price is unknown, not absent")
+    px = max(0.0, mk.comp_ask - improve)
+    size = pos.qty
+    fee = _fee(fee_fn, size, px)
+    if fee is None:
+        return Candidate(
+            action=which, status=NOT_IDENTIFIED,
+            blocker="FEE_SCHEDULE_NOT_ESTABLISHED",
+            why="a resting completion's fee is not established",
+            requires_our_fill=True,
+            uncertainty="execution cost unknown")
+    cost = px * size + fee
+    return Candidate(
+        action=which, status=NOT_IDENTIFIED,
+        blocker="P_FILL_NOT_IDENTIFIED",
+        ev_if_filled_usd=1.00 * size - cost - pos.basis_usd,
+        requires_our_fill=True,
+        why=("rest a bid for the complement at %.4f, %.4f below its ask. "
+             "IF it filled in full the pair would lock %.4f"
+             % (px, improve, 1.00 * size - cost - pos.basis_usd)),
+        assumptions=["that we would rest at this price and not be "
+                     "outbid, and that the account holds both legs "
+                     "independently"],
+        uncertainty=("conditional on OUR fill, which is unmeasured. A "
+                     "PARTIAL fill here is the dangerous case: it leaves "
+                     "the unpaired remainder directionally exposed while "
+                     "having spent capital on the paired part"))
+
+
 def compare(pos: Position, mk: Market, *, fee_fn=None,
             reduce_fractions=(0.5,)) -> dict:
     """THE ACTION COMPARISON, which is the deliverable.
@@ -391,6 +516,10 @@ def compare(pos: Position, mk: Market, *, fee_fn=None,
              value_complete_pair(pos, mk, fee_fn=fee_fn)]
     for f in reduce_fractions:
         cands.append(value_exit(pos, mk, fee_fn=fee_fn, fraction=f))
+    # THE RESTING ALTERNATIVES, priced conditionally and never selected.
+    cands.append(value_resting(pos, mk, fee_fn=fee_fn, which=EXIT_RESTING))
+    cands.append(value_resting(pos, mk, fee_fn=fee_fn,
+                               which=COMPLETE_PAIR_RESTING))
     # WAIT AND REPRICE ARE NAMED AND REFUSED rather than omitted. An
     # action missing from the table reads as an action nobody thought
     # of; an action present and refused reads as one we cannot value.
@@ -446,10 +575,19 @@ def compare(pos: Position, mk: Market, *, fee_fn=None,
         "selection_reason": reason,
         "unvalued_actions": [c.action for c in cands
                              if c.status != IDENTIFIED],
+        # THE CONDITIONAL VALUES, SEGREGATED. They are reported so the
+        # better resting price is visible, and kept out of `candidates`'
+        # selectable set so it cannot be chosen.
+        "conditional_on_our_fill": {
+            c.action: c.ev_if_filled_usd for c in cands
+            if c.requires_our_fill and c.ev_if_filled_usd is not None},
         "p_fill": NOT_IDENTIFIED,
-        "p_fill_note": ("no action selected above requires one of OUR "
-                        "orders to fill. EXIT_NOW and COMPLETE_PAIR are "
-                        "taker actions against displayed depth; REPRICE "
-                        "is refused precisely because it would need a "
-                        "fill rate"),
+        "p_fill_note": ("no SELECTABLE action requires one of OUR orders "
+                        "to fill. EXIT_NOW, REDUCE and COMPLETE_PAIR are "
+                        "taker actions against displayed depth. The "
+                        "RESTING variants of exit and completion are "
+                        "priced CONDITIONALLY and are never selected -- "
+                        "their better price is real and their fill rate "
+                        "is unmeasured, and multiplying the two would "
+                        "invent the number this stack does not have"),
     }

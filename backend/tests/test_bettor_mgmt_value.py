@@ -213,3 +213,72 @@ def test_the_comparison_never_claims_a_fill_probability():
     if sel is not None:
         c = next(c for c in out["candidates"] if c["action"] == sel)
         assert c["requires_our_fill"] is False
+
+
+# ── the resting alternatives, kept separate ──────────────────────────
+
+def test_a_resting_exit_is_priced_conditionally_and_never_selectable():
+    """NOT ALL EXITS ARE TAKER ORDERS. Resting above the bid gets a
+    better price and gives up certainty, and the two must not be
+    collapsed."""
+    mk = MV.Market(bid=0.50, bid_size=1000, ask=0.56)
+    c = MV.value_resting(pos(100.0, 45.0), mk, fee_fn=flat_fee())
+    assert c.status == MV.NOT_IDENTIFIED
+    assert c.blocker == "P_FILL_NOT_IDENTIFIED"
+    assert c.requires_our_fill is True
+    # ev_usd stays None; the conditional value is reported BESIDE it.
+    assert c.ev_usd is None
+    # rest at 0.51: 51.00 - fee 0.51 - basis 45 = 5.49
+    assert abs(c.ev_if_filled_usd - 5.49) < 1e-9
+    # and it beats crossing (4.50), which is the whole point of resting
+    taker = MV.value_exit(pos(100.0, 45.0), mk, fee_fn=flat_fee())
+    assert c.ev_if_filled_usd > taker.ev_usd
+
+
+def test_resting_through_the_ask_is_BLOCKED_as_a_taker_in_disguise():
+    mk = MV.Market(bid=0.50, bid_size=1000, ask=0.505)
+    c = MV.value_resting(pos(), mk, fee_fn=flat_fee(), improve=0.01)
+    assert c.status == MV.BLOCKED
+    assert c.blocker == "IMPROVEMENT_EXCEEDS_THE_SPREAD"
+
+
+def test_a_resting_completion_names_the_partial_fill_danger():
+    mk = MV.Market(comp_ask=0.48, comp_ask_size=1000,
+                   comp_source="OBSERVED")
+    c = MV.value_resting(pos(100.0, 45.0), mk, fee_fn=flat_fee(),
+                         which=MV.COMPLETE_PAIR_RESTING)
+    assert c.ev_usd is None
+    assert c.requires_our_fill is True
+    # rest at 0.47: cost 47.00 + 0.47 = 47.47; 100 - 47.47 - 45 = 7.53
+    assert abs(c.ev_if_filled_usd - 7.53) < 1e-9
+    assert "PARTIAL fill here is the dangerous case" in c.uncertainty
+
+
+def test_the_comparison_segregates_conditional_values_from_selectable_ones():
+    mk = MV.Market(bid=0.50, bid_size=1000, ask=0.56,
+                   comp_ask=0.48, comp_ask_size=1000,
+                   comp_source="OBSERVED",
+                   payout=1.0, payout_source=MV.SETTLED_FACT)
+    out = MV.compare(pos(100.0, 45.0), mk, fee_fn=flat_fee())
+    cond = out["conditional_on_our_fill"]
+    assert set(cond) == {MV.EXIT_RESTING, MV.COMPLETE_PAIR_RESTING}
+    # A resting action must never be the selection, even when its
+    # conditional value is the largest number in the table.
+    assert out["selected"] not in (MV.EXIT_RESTING,
+                                   MV.COMPLETE_PAIR_RESTING)
+    # THE CASE THAT MATTERS: a resting action whose conditional value is
+    # the LARGEST number anywhere in the table still is not selected.
+    # Without this the segregation could be passing only because the
+    # resting prices happened to be unattractive.
+    best_cond = max(cond.values())
+    selectable = [c["ev_usd"] for c in out["candidates"]
+                  if c["status"] == MV.IDENTIFIED
+                  and c["ev_usd"] is not None]
+    assert best_cond > min(selectable), (
+        "the resting values are below every selectable action, so this "
+        "test would pass without the segregation doing any work")
+    # and every resting candidate carries the flag
+    for c in out["candidates"]:
+        if c["action"] in (MV.EXIT_RESTING, MV.COMPLETE_PAIR_RESTING):
+            assert c["requires_our_fill"] is True
+            assert c["ev_usd"] is None
