@@ -573,7 +573,14 @@ async def positions(pool, *, lane=None, limit=100) -> dict:
             "policyVersion": r["policy_version"],
             "originatingDecisionId": r["originating_decision_id"],
         })
-    return {"environment": environment(), "rows": out, "count": len(out)}
+    return {"environment": environment(), "rows": out,
+            "count": len(out),
+            # THE INSTANT THIS FEED WAS READ. Each panel carries its
+            # own, because COMMAND shows several independent feeds at
+            # once and a panel that borrows a neighbour's clock can
+            # report a successful empty read as though it were part of
+            # whatever the panel beside it was doing.
+            "readAt": _iso(datetime.now(timezone.utc))}
 
 
 # ── executions ───────────────────────────────────────────────────────
@@ -629,7 +636,14 @@ async def executions(pool, *, lane=None, limit=100) -> dict:
             "spreadCost": _f(r["spread_cost"]),
             "arrivalTs": _iso(r["arrival_ts"]),
         })
-    return {"environment": environment(), "rows": out, "count": len(out)}
+    return {"environment": environment(), "rows": out,
+            "count": len(out),
+            # THE INSTANT THIS FEED WAS READ. Each panel carries its
+            # own, because COMMAND shows several independent feeds at
+            # once and a panel that borrows a neighbour's clock can
+            # report a successful empty read as though it were part of
+            # whatever the panel beside it was doing.
+            "readAt": _iso(datetime.now(timezone.utc))}
 
 
 # ── the comparison lane ──────────────────────────────────────────────

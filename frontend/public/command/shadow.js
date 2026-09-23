@@ -593,6 +593,9 @@
     const p = state.data['positions'];
     const problem = feedProblem('positions');
     const rows = p && p.rows || [];
+    // The instant THIS feed was read, so the empty state below can say
+    // which read produced it rather than borrowing another panel's clock.
+    const asOf = (p && (p.asOf || p.readAt || p.generatedAt)) || '';
     return `${disclosure(p && p.environment)}
       ${problem || ''}
       <section class="sh-panel"><div class="sh-panel-head"><h2>Shadow blotter</h2>
@@ -614,9 +617,17 @@
           <td>${str(r.exitIntention).replace(/_/g, ' ')}</td>
           <td>${isNum(r.capitalHours) ? r.capitalHours.toFixed(2) : NI}</td>
           <td class="mono">${str(r.policyVersion)}</td></tr>`).join('')}</tbody></table></div>`
-        : `<div class="sh-panel-body">${problem ? '' : emptyState('No shadow position yet',
-            'A position opens when a decision produces a reconstructed fill. '
-            + 'Until then this blotter is empty — it is not a zero-value portfolio.')}</div>`}
+        : `<div class="sh-panel-body">${problem ? '' : emptyState(
+            'Shadow ledger read OK — zero positions',
+            'THIS IS A SUCCESSFUL READ RETURNING NONE, not a failed one. It is '
+            + 'stated that way because on 2026-09-23 this panel sat beside a '
+            + 'FEED UNAVAILABLE banner from the PORTFOLIO feed, and the two '
+            + 'together read as "the portfolio is empty" when the portfolio '
+            + 'had simply not loaded. They are different feeds with different '
+            + 'timestamps. A position opens here when a decision produces a '
+            + 'reconstructed fill; until then this blotter is empty, and it is '
+            + 'not a zero-value portfolio.'
+            + (asOf ? ` Read at ${esc(asOf)}.` : ''))}</div>`}
       </section>`;
   }
 
