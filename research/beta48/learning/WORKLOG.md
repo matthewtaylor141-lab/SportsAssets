@@ -396,3 +396,103 @@ integration result.
     auditable proposal                          not reached
     later outcome                               matures 13:22Z
     evaluation                                  pending maturity
+
+## 2026-09-23 12:55Z — Entry 8. The five were not entry-time forecasts
+
+### Timing, verified
+
+| | |
+|---|---|
+| feature / label data cutoff | **12:43:28.070Z** (extract `read_at`) |
+| scoring | 12:44:16.819Z |
+| durable write | **12:45:15Z** |
+| entries | 12:22:34Z – 12:31:59Z |
+| **entry → durable write** | **796 – 1,361 s (22% – 38% of the horizon)** |
+
+**They cannot be read as entry-time forecasts of the following hour,
+and I presented them that way.**
+
+What is true: the features **are** entry-time — `D.build` uses only
+fills whose `available_at` is strictly before the entry — and no
+qualifying complement had been seen through the 12:43:28Z cutoff, which
+is how those rows were selected. What is **not** true: the write is
+107 s after that cutoff, so there is a blind window in which a
+complement could have landed unseen. Both facts are stored on the rows.
+
+### The target, redefined and retrained
+
+v2 predicts completion in the **remainder** of the hour **given no
+completion so far** — the question a mid-horizon prediction answers.
+Trained and evaluated on that same target, not transplanted:
+
+| | unconditional | conditional (1,117 s) |
+|---|---:|---:|
+| entry rows | 1,186 | 749 |
+| left risk set early | 0 | **437** |
+| train base rate | 0.610 | **0.308** |
+| EVAL decided | 114 | **65** |
+| EVAL conditions | 31 | **23** |
+| ridge log loss | 0.5172 | 0.7402 |
+| ridge AUC | 0.725 | 0.706 |
+| **ridge skill** | +16.0% | **+6.5%** |
+| ridge ECE | 0.084 | 0.213 |
+
+**+6.5% on 65 decided rows across 23 conditions** is the honest figure.
++16.0% was for a target those predictions do not answer.
+
+### The artifact
+
+sha256 `81b249a86f52423380ae4df8...`, 1,376 bytes, 14 coefficients with
+centre, scale and feature schema. **Loading it reproduces every EVAL
+prediction to 1e-15.** Scoring now loads this artifact; it does not
+refit. My previous determinism assertion checked only the base rate,
+which does not establish identical coefficients.
+
+### Claim discipline
+
+* **Ridge is FROZEN.** It was chosen after comparing EVAL results, so
+  that split served **model selection** and its numbers are not an
+  unbiased estimate of future skill. No further variant is compared
+  on it.
+* Prior inspection: every row at or before the CALIB boundary was
+  inspected while this pipeline was built.
+* **These coefficients describe an association in observed fills. They
+  are not RN1's reason for acting**, and no causal reading is offered.
+* v1's five rows are **relabelled `INVALID_AS_ENTRY_TIME` and
+  preserved**, never deleted. v1's model row is
+  `SUPERSEDED_TARGET_MISMATCH`.
+
+### Execution history — the other half, and it exists
+
+`exec-history`, read 12:55:47Z:
+
+| table | rows | span | states |
+|---|---:|---|---|
+| `mirror_orders` | **11,183** | 2026-09-06 → 09-10 | filled **3,876**, cancelled 5,417, expired 1,571, rejected 270, lost 48 |
+| `live_orders` | 6,939 | — | settled 5,271, merged 581, cashed_out 457, cancelled 382, error 196, filled 52 |
+| `engine_fills` | 349,411 | — | — |
+
+**`mirror_orders` is 11,183 of OUR OWN orders with terminal states** —
+a 34.7% raw fill rate, with limit prices and timestamps. That is the
+raw material for an execution baseline, and it is a different evidence
+class from the four forbidden P_FILL substitutes `bettor_p_fill.py`
+names: these are our orders, not a whale's completion, a touch, a price
+move or displayed depth.
+
+What it does **not** obviously carry, and what a bounded funded pilot
+would have to measure: **queue position at placement**, **book depth at
+our price**, and **whether a cancellation was ours or the venue's**.
+Those three are the specific missing measurements.
+
+`P_FILL_NOT_IDENTIFIED` stays intact until that is settled.
+
+### What runs automatically vs what I ran by hand
+
+**Nothing in this learning loop runs automatically yet.** Every step so
+far — extract, train, score, seed — was a manual dispatch or a local
+script. The scheduled scoring worker and outcome joiner are not built.
+That distinction is recorded here rather than implied by the existence
+of tables.
+
+Outcome resolution is scheduled for 13:35Z, after the last prediction
+matures at 13:31:59Z plus a margin for delayed poll arrivals.
