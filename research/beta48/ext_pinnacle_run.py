@@ -153,6 +153,87 @@ MARKET_LOOKUP = """
 """
 
 
+async def feed_only() -> int:
+    """The feed half, fully measured, with no database.
+
+    This is the real valuation: Pinnacle's own complete outcome sets,
+    de-vigged, aged against the 30 s rule, with sharp-book depth counted
+    per outcome. What it CANNOT do is compare against a venue price or
+    persist, so it reports the refusals it can establish and names the two
+    it cannot reach.
+    """
+    key = (os.environ.get("EDGE_ODDS_API_KEY") or "").strip()
+    census: dict = {}
+    rows = []
+    for sport_key, family in SPORTS:
+        try:
+            events, hdrs = _get("/sports/%s/odds" % sport_key,
+                                {"apiKey": key, "regions": REGIONS,
+                                 "markets": "h2h", "oddsFormat": "decimal"})
+        except Exception as exc:                           # noqa: BLE001
+            print("\n%s: provider error %s: %s"
+                  % (sport_key, type(exc).__name__, exc))
+            continue
+        fetched_at = time.time()
+        print("\n== %s: %d events  (credits used=%s remaining=%s) =="
+              % (sport_key, len(events), hdrs.get("x-requests-used"),
+                 hdrs.get("x-requests-remaining")))
+        for rec in pinnacle_sets(events, fetched_at):
+            ev = rec["event"]
+            home, away = ev.get("home_team"), ev.get("away_team")
+            if rec["quote"] is None:
+                census["NO_PINNACLE_ON_EVENT"] = census.get(
+                    "NO_PINNACLE_ON_EVENT", 0) + 1
+                continue
+            q = rec["quote"]
+            ekey = "%s|%s|%s" % (sport_key, _norm(home), _norm(away))
+            q["event_key"] = ekey
+            q["settlement_rule"] = ("REGULATION_90" if family == "soccer"
+                                    else "FULL_GAME_9")
+            contract = {"venue": "PMUS", "sport_family": family,
+                        "market": "h2h", "selection": home,
+                        "event_key": ekey, "period": "FULL_GAME",
+                        "line": None,
+                        "settlement_rule": q["settlement_rule"]}
+            val = D.valuation(contract=contract, quote=q, now=fetched_at)
+            books = len(rec["depth"].get(_norm(home), ()))
+            for code in val["refusals"]:
+                census[code] = census.get(code, 0) + 1
+            if val["probability"] is None:
+                continue
+            rows.append({
+                "event": "%s vs %s" % (home, away), "sport": sport_key,
+                "p": val["probability"], "age_s": val["age_s"],
+                "overround": val["overround"], "books": books,
+                "odds": val["raw_odds"],
+            })
+    print("\n===================== VALUATIONS =====================")
+    print("%-44s %-7s %-7s %-6s %s" % ("event", "p(home)", "age_s",
+                                       "books", "overround"))
+    for r in sorted(rows, key=lambda x: -x["p"])[:40]:
+        print("%-44s %-7.4f %-7.1f %-6d %.4f"
+              % (r["event"][:44], r["p"], r["age_s"], r["books"],
+                 r["overround"]))
+    print("\npriced outcomes ......... %d" % len(rows))
+    if rows:
+        ages = sorted(r["age_s"] for r in rows)
+        print("quote age s: min %.1f  median %.1f  max %.1f"
+              % (ages[0], ages[len(ages) // 2], ages[-1]))
+        thin = sum(1 for r in rows if r["books"] < X.MIN_OUTCOME_BOOKS)
+        print("below the %d-book outcome floor: %d of %d"
+              % (X.MIN_OUTCOME_BOOKS, thin, len(rows)))
+    print("\n-- refusal census, most common first --")
+    for code, n in sorted(census.items(), key=lambda kv: -kv[1]):
+        print("   %-46s %d" % (code, n))
+    print("\n-- what this run could NOT establish --")
+    print("   NO_MAPPING            no venue contract lookup: no DATABASE_URL")
+    print("   NO_EXECUTABLE_ASK     no same-venue price to compare against")
+    print("   (nothing persisted)   external_valuations needs the database")
+    print("\nNo entry decision is claimed either way. A probability with no")
+    print("executable price beside it is not an opportunity.")
+    return 0
+
+
 async def main() -> int:
     key = (os.environ.get("EDGE_ODDS_API_KEY") or "").strip()
     if not key:
@@ -160,8 +241,25 @@ async def main() -> int:
         return 1
     dsn = (os.environ.get("DATABASE_URL") or "").strip()
     if not dsn:
-        print("REFUSED: DATABASE_URL is not set in this environment")
-        return 1
+        # NEITHER AUTHORIZED CONTEXT HOLDS BOTH HALVES, and that is the
+        # finding rather than a reason to stop:
+        #
+        #   this runner        EDGE_ODDS_API_KEY yes, DATABASE_URL NO
+        #                      (referenced by calibration-evidence.yml but
+        #                       not set as a repository secret -- measured
+        #                       empty at 2026-09-23T23:44:08Z)
+        #   sportsassets-api   DATABASE_URL yes, EDGE_ODDS_API_KEY NO
+        #                      (env-keys, 22:10:54Z)
+        #
+        # So the feed half runs here and is fully measured; the venue
+        # mapping and the persistence cannot, and are reported as absent
+        # instead of skipped quietly.
+        print("== FEED-ONLY MODE ==")
+        print("DATABASE_URL is not set in this environment, so:")
+        print("  * no venue contract mapping is attempted")
+        print("  * nothing is persisted to external_valuations")
+        print("The valuation itself is REAL and is measured below.")
+        return await feed_only()
     import asyncpg
 
     conn = await asyncpg.connect(dsn)
