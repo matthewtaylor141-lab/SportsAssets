@@ -559,3 +559,68 @@ RN1 v2 has no calibrator). Cross-check 33/33 with three new checks.
 Kernel tests 39 → 46.
 
 **Still nothing in this loop runs automatically.**
+
+---
+
+## 10. The five v1 predictions, resolved
+
+2026-09-23T13:55:35Z read; `render-ops sql rn1-resolve` run 35870471085.
+
+| entry | p | UNCOND | hit | lane | t-to-event |
+|---|---:|---:|---|---|---:|
+| 12:22:34Z | 0.4960 | **0** | — | — | — |
+| 12:24:04Z | 0.6040 | **0** | — | — | — |
+| 12:25:25Z | 0.5166 | **1** | 13:13:08Z | chain | 2,863 s |
+| 12:29:06Z | 0.5590 | **1** | 13:13:08Z | chain | 2,641 s |
+| 12:31:59Z | 0.5702 | **1** | 13:26:19Z | chain | 3,260 s |
+
+Base rate 0.6099 on all five. **3 of 5 completed.**
+
+**The labels are FINAL, not provisional — measured, not assumed.** A
+passed deadline is not "no complement": a lane that stopped delivering
+is indistinguishable from a quiet book in the fills alone. So per-lane
+recency was read at the same instant.
+
+| lane | RN1 fills / age | all whales / age |
+|---|---|---|
+| chain | 489 / **1 s** | 4,820 / **0 s** |
+| poll | 244 / 68 s | 2,134 / 20 s |
+| s1 | 16 / 177 s | 36 / 35 s |
+
+No lane stale. Every row had matured **1,416–1,981 s** before the read,
+all past the ten-minute completeness margin.
+
+**The 2026-09-19 gap cannot reach these rows.** Every horizon lies in
+2026-09-23, so none overlaps 09-19. Exclusion and inclusion give
+identical labels on all five, and the report carries
+`changes_the_label: false` per row rather than asserting it in prose.
+
+**Both targets scored.** All five were still in the risk set at
+entry + 1117 s — the three hits landed at 2,641–3,260 s — so the
+conditional target agrees with the unconditional one *here*. That is a
+fact about these five rows, not a general property.
+
+`validity` stays **INVALID_AS_ENTRY_TIME** on all five. They were
+written at 12:44:16Z, twelve to twenty-two minutes after their entries,
+so as entry-time forecasts of the whole following hour they are
+invalid. Scoring a target does not repair the claim a row was recorded
+under.
+
+### What five outcomes demonstrate
+
+**That the join runs end to end. Nothing else.** For the record, `p`
+was 0.4960 and 0.6040 on the two that did NOT complete and 0.5166–
+0.5702 on the three that did — which orders no better than chance, and
+at n = 5 could not have shown anything either way. No skill,
+calibration or profitability claim is made or available.
+
+### Two things this cost, worth keeping
+
+1. **The smoke test earned its place.** It caught the scorer expecting
+   ten columns after the statement had been shrunk to seven — before a
+   single real row was parsed.
+2. **`render-ops.yml` is against a hard 512,000-byte ceiling.** The
+   first `rn1-resolve` dispatch returned `startup_failure` with no log
+   and no annotation, which looks exactly like a quoting bug and is
+   not one. See `research/beta48/acceptance/RENDER_OPS_SIZE_CEILING.md`;
+   the first thing to check is `wc -c`.
