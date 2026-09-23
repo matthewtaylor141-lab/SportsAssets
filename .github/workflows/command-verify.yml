@@ -418,17 +418,20 @@ jobs:
           for k in historical_replay prospective_rn1_management \
                    independent_ev_entries pairing second_half_loss_exit \
                    accounting_health learning_evaluation; do
-            # The key is `badge`. I asked for `state` on the first run,
-            # got seven nulls, and reported them as "missing from the
-            # payload" -- which was my check being wrong about the
-            # contract, not the payload being wrong. The message now says
-            # which of the two it is.
-            jq -e --arg k "$k" '.statuses[$k].badge
-                                | strings
-                                | . == "LIVE" or . == "ARMED"
-                                  or . == "STOPPED"' \
+            # THE VOCABULARY, READ OUT OF command_rn1x.py RATHER THAN
+            # ASSUMED. I got this wrong twice: first asking for `state`
+            # (the key is `badge`), then allowing only LIVE/ARMED/STOPPED.
+            # The real set is wider, and the extra values are the whole
+            # point -- BLOCKED is a path that exists and refuses,
+            # UNAVAILABLE is a function with no input, OK/EMPTY/CHECK is
+            # the ledger's own health. Collapsing those into STOPPED would
+            # have erased the distinction the seven statuses exist for.
+            jq -e --arg k "$k" '.statuses[$k].badge as $b
+                                | ["LIVE","ARMED","STOPPED","BLOCKED",
+                                   "UNAVAILABLE","OK","EMPTY","CHECK"]
+                                | index($b) != null' \
               /tmp/st.json >/dev/null \
-              || { echo "::error::status $k has no badge of LIVE/ARMED/STOPPED"
+              || { echo "::error::status $k has an unknown badge (not one of LIVE/ARMED/STOPPED/BLOCKED/UNAVAILABLE/OK/EMPTY/CHECK)"
                    FAIL=1; }
             jq -e --arg k "$k" '.statuses[$k].what | strings | length > 0' \
               /tmp/st.json >/dev/null \
