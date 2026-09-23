@@ -657,11 +657,29 @@ class Hazard:
             k = self.bucket_of(float(t))
             if not ob:
                 n_cens += 1
-                # Censored: it survived every bucket STRICTLY BEFORE the
-                # one it was last seen in, and says nothing about that
-                # one. Censoring at or beyond the last edge contributes
-                # every bucket as a survival.
-                last = min(k, len(self.edges)) - 1
+                # CENSORED: it contributes a survival for every bucket it
+                # got all the way THROUGH, and says nothing about a
+                # bucket it was only partway into.
+                #
+                # THE BOUNDARY CASE IS NOT COSMETIC, and the cross-check
+                # against Kaplan-Meier is what found it. A subject last
+                # seen at exactly a bucket's end edge survived that
+                # whole bucket. The first version of this line indexed
+                # off `bucket_of`, which puts t == edge INSIDE that
+                # bucket, so those subjects were dropped from it -- 340
+                # at risk where Kaplan-Meier counted 380, and a hazard
+                # of 0.2647 where the truth was 0.2368.
+                #
+                # THE BIAS RAN THE WRONG WAY. A denominator that is too
+                # small OVER-states the hazard, i.e. over-predicts that
+                # the action happens, which is the direction that makes
+                # a trading system act when it should wait.
+                #
+                # So: the largest bucket whose END EDGE is at or before
+                # the censoring time. A subject censored before the
+                # first edge contributes nothing at all, which is
+                # correct -- it never completed a single bucket.
+                last = sum(1 for e in self.edges if e <= float(t)) - 1
             else:
                 if k >= len(self.edges):
                     # The event happened after the last edge. Within the
@@ -694,9 +712,14 @@ class Hazard:
         if weights is not None:
             ew, i = [], 0
             for r, t, ob in zip(rows, times, observed):
-                k = self.bucket_of(float(t))
-                last = (min(k, len(self.edges)) - 1 if not ob
-                        else min(k, len(self.edges) - 1))
+                # THE SAME RULE AS `_expand`, and it has to be: a
+                # weight vector of a different length than the design
+                # is a silent misalignment, not an error.
+                if not ob:
+                    last = sum(1 for e in self.edges if e <= float(t)) - 1
+                else:
+                    last = min(self.bucket_of(float(t)),
+                               len(self.edges) - 1)
                 ew.extend([float(weights[i])] * max(0, last + 1))
                 i += 1
         self.inner.fit(er, ey, ew)

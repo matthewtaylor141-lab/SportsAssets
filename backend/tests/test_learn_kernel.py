@@ -326,3 +326,60 @@ class TestHazard:
         for r in ({"x": 0.0}, {"x": 3.0}):
             for k in range(4):
                 assert abs(h.p_by(r, k) - back.p_by(r, k)) < 1e-15
+
+    def test_censoring_at_a_bucket_edge_survives_that_bucket(self):
+        """THE BIAS THE SKLEARN CROSS-CHECK FOUND, pinned here so it
+        cannot come back in an environment without sklearn.
+
+        A subject last seen at exactly a bucket's END EDGE survived that
+        whole bucket and owes it a survival. The first version indexed
+        off `bucket_of`, which puts t == edge INSIDE that bucket, so
+        those subjects were dropped from it -- shrinking the denominator
+        and OVER-STATING the hazard, which is the direction that makes a
+        trading system act when it should wait.
+
+        Checked against Kaplan-Meier computed by hand below.
+        """
+        edges = [60.0, 300.0, 900.0, 3600.0]
+        plan = [(60.0, True, 120), (300.0, True, 90), (300.0, False, 40),
+                (900.0, True, 60), (3600.0, True, 30), (9999.0, False, 160)]
+        rows, times, obs = [], [], []
+        for t, ob, n in plan:
+            rows += [{"x": 0.0}] * n
+            times += [t] * n
+            obs += [ob] * n
+        h = K.Hazard(["x"], buckets=edges, l2=1e-8).fit(rows, times, obs)
+
+        # Kaplan-Meier, by hand. A censoring tied with an event is
+        # treated as occurring after it, so it IS at risk in that bucket.
+        at_risk, surv, km = 500, 1.0, []
+        for k, e in enumerate(edges):
+            lo = edges[k - 1] if k else -1.0
+            ev = sum(n for t, ob, n in plan if ob and lo < t <= e)
+            cn = sum(n for t, ob, n in plan if not ob and lo < t <= e)
+            surv *= (1.0 - ev / at_risk)
+            km.append(1.0 - surv)
+            at_risk -= (ev + cn)
+
+        for k in range(len(edges)):
+            assert abs(h.p_by({"x": 0.0}, k) - km[k]) < 1e-6, (
+                "bucket %d: hazard model %.6f vs Kaplan-Meier %.6f"
+                % (k, h.p_by({"x": 0.0}, k), km[k]))
+
+        # The 40 subjects censored AT the 300s edge each owe TWO
+        # survivals (buckets 0 and 1), not one.
+        assert h.n_periods == (120 * 1 + 90 * 2 + 40 * 2 + 60 * 3
+                               + 30 * 4 + 160 * 4)
+
+    def test_censoring_before_the_first_edge_contributes_nothing(self):
+        """It did not complete a single bucket, so it has nothing to
+        say about any of them -- and must not be read as a survival."""
+        edges = [60.0, 300.0]
+        h = K.Hazard(["x"], buckets=edges, l2=1.0).fit(
+            [{"x": 0.0}] * 3 + [{"x": 1.0}] * 5,
+            [30.0] * 3 + [300.0] * 5,
+            [False] * 3 + [True] * 5)
+        assert h.n_censored == 3
+        # 3 censored early contribute 0; 5 events in bucket 1 contribute
+        # 2 each.
+        assert h.n_periods == 10

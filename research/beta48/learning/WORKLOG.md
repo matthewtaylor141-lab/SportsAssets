@@ -151,3 +151,94 @@ assert that the render-ops help line names every case label; they
 failed at the branch point and still do, and the read-only cases added
 here are additional labels they would also want named. Recorded so it
 is not a surprise later.
+
+## 2026-09-23 12:22Z — Entry 4. A correction: the latency ceiling I reported was wrong
+
+`render-ops sql ingest-latency`, run 35859981810. Restricted to fills
+whose OWN time is inside the last 7 days, so no historical backfill can
+enter the sample.
+
+**Forward ingestion is sub-second on the chain path, not months.**
+
+| Account | Source | Fills (7d) | Median lag | p95 | Max |
+|---|---|---:|---:|---:|---:|
+| RN1 | chain | 80,305 | **−0.6 s** | 0.3 s | 88.4 s |
+| ferrariChampions2026 | chain | 59,173 | **−0.6 s** | 0.3 s | 117.8 s |
+| 0x99a093burst | chain | 40,748 | −0.6 s | 0.2 s | 118.6 s |
+| nigiri99 | chain | 33,842 | −0.6 s | 0.4 s | 118.6 s |
+| HomeRunHazard | chain | 26,493 | −0.6 s | 0.3 s | 118.5 s |
+| RN1 | poll | 13,741 | 145.7 s | 299.0 s | 4,163 s |
+| RN1 | s1 | 953 | 4.4 s | 5.5 s | 36.0 s |
+
+**Entry 2 was wrong about the ceiling and is corrected here.** Ferrari's
+lifetime median of 87 days was entirely an artifact of a historical
+import. Its forward lag is **−0.6 seconds**. Nothing about "three of
+the four case studies cannot support a claim about acting in time"
+survives this read: on the chain path they all can. What the lifetime
+figure actually measured was WHEN THE HISTORY WAS IMPORTED, which is a
+fact about our backfill and not about our latency.
+
+**THREE SOURCES, NOT TWO.** `chain` (sub-second), `poll` (~150–300 s
+median) and `s1` (~4.4 s). The `trades` DDL in the repository declares
+`CHECK (source IN ('chain','poll'))`, so `s1` arrived after that
+constraint was written — worth reconciling separately.
+
+**THE NEGATIVE LAG IS REAL AND MATTERS.** `detected_at` is a median 0.6 s
+BEFORE `ts` on the chain path, min −1.3 s. `ts` is the block timestamp
+and `detected_at` is our receipt instant, so they are two different
+clocks and ours is not strictly later. Any point-in-time feature cut
+must therefore use `max(ts, detected_at)` rather than assuming
+`detected_at >= ts`; assuming otherwise would let a feature be built
+from a fill we had not yet seen.
+
+**A REAL INGESTION OUTAGE, now visible.** The largest detection gap in
+seven days is **5,967 s (1 h 39 m) on 2026-09-19 17:16→18:56**, with
+further gaps of 20 m, 15 m, 10 m and 5 m the same afternoon. Since
+2026-09-21 the largest is 95 s. That afternoon is a hole in coverage
+and must be excluded from any window a model is evaluated on, rather
+than read as a quiet cohort.
+
+**What this changes.** A model that requires a newly detected cohort
+action is feasible on the chain path. The distinction the mandate asks
+for still stands and is now separable:
+
+* **reactive models** — conditioned on a newly detected cohort action.
+  Feasible; budget ~1 s detection on chain, ~150–300 s on poll.
+* **historical policies** — trained on cohort history, generating our
+  decisions independently of any live cohort event. Unaffected by
+  detection latency entirely.
+
+## 2026-09-23 12:30Z — Entry 5. The cross-check found a real bug
+
+`backend/tools/learn_crosscheck.py`, against numpy 2.4.6 / scikit-learn
+1.9.1 installed with `pip --target` into a scratch directory. **No
+production dependency changed.** 30 checks: 7 logistic cases against
+`LogisticRegression` with matched objectives (C = 1/l2 on
+pre-standardised features), 6 isotonic against `IsotonicRegression`,
+the hazard's inner logistic against sklearn on its own person-period
+design, log loss / Brier / AUC against sklearn, and 9 refusal and
+stability cases.
+
+**It found a genuine bug on the first run.** The hazard's survival
+curve disagreed with a hand-computed Kaplan-Meier by 0.021. Cause: a
+subject censored at exactly a bucket's END EDGE survived that whole
+bucket, and `_expand` indexed off `bucket_of`, which puts `t == edge`
+INSIDE that bucket — so those subjects were dropped from it. At-risk
+340 where Kaplan-Meier counted 380; hazard 0.2647 where the truth was
+0.2368.
+
+**The bias ran the wrong way.** A denominator that is too small
+over-states the hazard — over-predicting that the action happens, which
+is the direction that makes a trading system act when it should wait.
+
+Fixed: a censored subject contributes a survival for every bucket whose
+END EDGE is at or before its censoring time. Agreement is now 1.4e-12.
+Pinned by two tests in the repository suite so it cannot return in an
+environment without sklearn. 33 kernel tests pass.
+
+The second initial failure was the check being wrong about sklearn, not
+the kernel: sklearn 1.9 warns and returns `nan` for a single-class AUC
+rather than raising. The check now asserts the property that matters —
+neither side yields a usable number — and notes that `nan` is the
+weaker refusal, because it propagates silently through a comparison
+while the kernel's `UNDEFINED` carries its reason.

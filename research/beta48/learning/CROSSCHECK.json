@@ -1,0 +1,158 @@
+{
+ "kernel_version": "BETTOR_LEARN_KERNEL_V1",
+ "numpy": "2.4.6",
+ "checks": [
+  {
+   "check": "logistic / well-conditioned",
+   "ok": true,
+   "detail": "max|dcoef|=1.85e-10 max|dintercept|=3.39e-12 max|dp|=5.43e-11"
+  },
+  {
+   "check": "logistic / perfect separation",
+   "ok": true,
+   "detail": "max|dcoef|=1.81e-12 max|dintercept|=4.83e-17 max|dp|=2.92e-13"
+  },
+  {
+   "check": "logistic / exactly collinear columns",
+   "ok": true,
+   "detail": "max|dcoef|=1.06e-09 max|dintercept|=1.49e-09 max|dp|=3.16e-10"
+  },
+  {
+   "check": "logistic / scales 1e-6 vs 1e6",
+   "ok": true,
+   "detail": "max|dcoef|=1.81e-10 max|dintercept|=1.79e-10 max|dp|=1.05e-10"
+  },
+  {
+   "check": "logistic / heavy penalty l2=100",
+   "ok": true,
+   "detail": "max|dcoef|=7.79e-09 max|dintercept|=9.82e-09 max|dp|=4.45e-09"
+  },
+  {
+   "check": "logistic / separable, light penalty l2=0.01",
+   "ok": true,
+   "detail": "max|dcoef|=8.62e-14 max|dintercept|=6.05e-16 max|dp|=2.33e-15"
+  },
+  {
+   "check": "logistic / one constant feature",
+   "ok": true,
+   "detail": "max|dcoef|=1.08e-11 max|dintercept|=2.24e-16 max|dp|=3.5e-13"
+  },
+  {
+   "check": "isotonic / classic inversion",
+   "ok": true,
+   "detail": "max|d|=0"
+  },
+  {
+   "check": "isotonic / ties at one score",
+   "ok": true,
+   "detail": "max|d|=0"
+  },
+  {
+   "check": "isotonic / already monotone",
+   "ok": true,
+   "detail": "max|d|=0"
+  },
+  {
+   "check": "isotonic / fully reversed",
+   "ok": true,
+   "detail": "max|d|=0"
+  },
+  {
+   "check": "isotonic / long noisy run",
+   "ok": true,
+   "detail": "max|d|=0"
+  },
+  {
+   "check": "isotonic / outside the fitted range",
+   "ok": true,
+   "detail": "max|d|=0"
+  },
+  {
+   "check": "hazard / inner logistic vs sklearn",
+   "ok": true,
+   "detail": "max|dcoef|=1.82e-11 over 1950 person-periods"
+  },
+  {
+   "check": "hazard / survival vs hand-computed Kaplan-Meier",
+   "ok": true,
+   "detail": "max|d|=1.36e-12; mine=[0.24, 0.42, 0.5592, 0.6288] km=[0.24, 0.42, 0.5592, 0.6288]"
+  },
+  {
+   "check": "metrics / log loss vs sklearn",
+   "ok": true,
+   "detail": "|d|=0"
+  },
+  {
+   "check": "metrics / brier vs sklearn",
+   "ok": true,
+   "detail": "|d|=0"
+  },
+  {
+   "check": "metrics / AUC with ties vs sklearn",
+   "ok": true,
+   "detail": "|d|=0"
+  },
+  {
+   "check": "metrics / AUC on a constant score",
+   "ok": true,
+   "detail": "|d|=0"
+  },
+  {
+   "check": "metrics / single-class AUC yields no usable number",
+   "ok": true,
+   "detail": "kernel=UNDEFINED (+reason); sklearn returns nan or raises"
+  },
+  {
+   "check": "metrics / weighted log loss vs sklearn",
+   "ok": true,
+   "detail": "|d|=0"
+  },
+  {
+   "check": "refusal / a None feature value",
+   "ok": true,
+   "detail": "ValueError raised rather than a silent zero"
+  },
+  {
+   "check": "refusal / NaN feature value",
+   "ok": true,
+   "detail": "ValueError raised"
+  },
+  {
+   "check": "refusal / a label outside [0,1]",
+   "ok": true,
+   "detail": "ValueError raised"
+  },
+  {
+   "check": "refusal / zero rows",
+   "ok": true,
+   "detail": "ValueError raised"
+  },
+  {
+   "check": "refusal / a non-positive ridge",
+   "ok": true,
+   "detail": "ValueError raised; an unpenalised fit is not offered"
+  },
+  {
+   "check": "refusal / a model from a different kernel version",
+   "ok": true,
+   "detail": "ValueError raised"
+  },
+  {
+   "check": "stability / weights spanning 1e18",
+   "ok": true,
+   "detail": "coef=[0.0] intercept=-26.8052"
+  },
+  {
+   "check": "stability / all-one-class labels",
+   "ok": true,
+   "detail": "p=1.000000"
+  },
+  {
+   "check": "stability / 40 features, 500 rows",
+   "ok": true,
+   "detail": "converged in 4 IRLS iterations"
+  }
+ ],
+ "passed": 30,
+ "total": 30
+}
