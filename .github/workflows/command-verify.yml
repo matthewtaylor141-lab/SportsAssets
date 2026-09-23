@@ -105,6 +105,36 @@ jobs:
           grep -q 'NO REAL CAPITAL' /tmp/shadow
           grep -q "\['shadow','Shadow'\]" /tmp/app
 
+      - name: Which tabs the PUBLISHED bundle actually carries
+        run: |
+          # WHY THIS REPORTS RATHER THAN FAILS. The API and this static
+          # bundle deploy on DIFFERENT triggers -- the API by commit id
+          # through render-ops, the bundle by netlify from whichever
+          # branch it tracks -- so a route can exist on the API hours
+          # before the tab that calls it is published, and the reverse.
+          # A hard failure here would block an API release on a
+          # frontend deploy it does not depend on. What is NOT
+          # acceptable is not knowing, and reporting "the Learning tab
+          # is live" when the published bundle has no such tab.
+          {
+            echo "### Tabs in the published bundle"
+            echo '```'
+            printf 'published shadow.js: %s bytes\n' "$(wc -c < /tmp/shadow)"
+            for t in overview decisions positions execution pairing \
+                     comparison audit accounting performance \
+                     experimental desk learning; do
+              if grep -q "\['$t'," /tmp/shadow || \
+                 grep -q "\['$t'\]" /tmp/shadow; then
+                printf '  %-14s PUBLISHED\n' "$t"
+              else
+                printf '  %-14s ABSENT FROM THE PUBLISHED BUNDLE\n' "$t"
+              fi
+            done
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Echo to the log too, so it is readable without the summary.
+          grep -o "\['[a-z]*', *'[^']*'\]" /tmp/shadow | head -20 || true
+
       - name: Existing COMMAND navigation is intact
         run: |
           for view in command portfolio orders decisions risk models \
