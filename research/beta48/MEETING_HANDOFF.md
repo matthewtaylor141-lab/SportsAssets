@@ -76,6 +76,43 @@ exactly**, `invariant_ok = t`.
 - **Consumption ledger persisted** at `(evidence_id, account_id)`, which
   is what lets resting orders be *restored* rather than expired.
 
+### Restart resumption — PROVEN IN PRODUCTION
+
+`fe20e0e` deployed **twice**: `16:05:56→16:06:54` and
+`16:08:49→16:09:34`. The account was created during the first and the
+second was a genuine process restart.
+
+**The account id, opening balance and `opened_at` were unchanged after
+it** — `acct_fc2d773a2afa4851`, $100,000.00, `16:06:51Z`. A restart
+resumed the same book; no second account appeared, and capital was not
+replenished.
+
+### A defect I introduced, and the records it cost
+
+Twelve minutes after the reset, `(UNASSIGNED)` positions fell **98 → 95**
+and closed-period order states shifted (EXPIRED 130→129, FILLED 35→34).
+The new book was **consuming the preserved one**.
+
+`_next_id` prefixed ids with `desk_id` — the constant `"live1"` — and
+the counter restarts at zero each process, so the new book's first
+order was `live1-O-000001`, an id the closed book already held. With a
+colliding key the upserts did what they were told: orders **overwrote**
+a preserved record, decisions were **silently dropped**, fills
+collided, and the positions primary key excluded `account_id` so a
+shared market **absorbed** the preserved leg.
+
+**Lost: 3 position legs and 1 order row**, between `16:07:33Z` and
+`16:11:19Z`. Not recoverable from the rows themselves. Bounded by the
+213 preserved ledger snapshots, which still carry the period's
+aggregates, and by the incident's `preserved_counts` (98 positions, 183
+orders as at `16:06:51Z`).
+
+**Fixed in `f10e072`, live since `16:15:03Z`**: ids are namespaced by
+the account, and migration 098 keys positions on
+`(desk_id, coalesce(account_id,''), condition_id, outcome_index)`.
+Preserved counts have been stable at 95 / 129 / 34 / 5 / 15 / 213 / 6
+across that deployment.
+
 ### Not a FINAL evaluation set
 
 The new period is **not** automatically one. That status requires a
