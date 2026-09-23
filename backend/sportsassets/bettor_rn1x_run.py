@@ -139,6 +139,36 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
 
     # ── 3 SEED ──────────────────────────────────────────────────────
     decision_ts = float(seed_row["detected_at"])
+
+    # SETTLED BEFORE WE SAW THE ENTRY -- REFUSED HERE, BEFORE SEEDING.
+    #
+    # This was a `raise` at step 8 and in production it WEDGED the
+    # historical lane: the cursor rightly refuses to advance past a failed
+    # row, so one such condition blocked every later one behind it. Trade
+    # 295 held the lane at cursor 294 while examining 400 candidates a
+    # cycle and writing nothing.
+    #
+    # It is a REAL data shape, not a corner case. A backfill row's
+    # `detected_at` is when we backfilled it, which can easily postdate the
+    # market's resolution -- the same pathology I earlier mis-generalised
+    # into a feed-wide blocker.
+    #
+    # AND IT IS REFUSED BEFORE THE SEED, not at settlement. Refusing at
+    # step 8 left MANAGE already run and would have persisted a position
+    # with no orders and no accounting -- a half-written record, which is
+    # the shape that made the desk's book uncertain. If the answer was
+    # known before we saw the entry there is no experiment here at all.
+    if resolved_at is not None and float(resolved_at) < decision_ts:
+        out["failed_step"] = "SEED"
+        out["steps"]["SEED"] = {
+            "ok": False, "refusal": "SETTLED_BEFORE_DETECTION",
+            "resolved_at": float(resolved_at), "decision_ts": decision_ts,
+            "gap_hours": round((decision_ts - float(resolved_at)) / 3600.0, 2),
+            "why": ("the market's observed resolution precedes the instant "
+                    "we detected the seed fill, so there is no window in "
+                    "which this policy could have decided. Replaying it "
+                    "would be deciding after the answer was known")}
+        return out
     m = lc.Managed(condition_id=condition_id or "c",
                    outcome_index=int(seed_row["outcome_index"]),
                    seed_qty=float(seed_row["size"]),
@@ -192,8 +222,6 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
     st_before = m.state()
     settled = None
     if payouts:
-        if resolved_at is None or float(resolved_at) < decision_ts:
-            raise ValueError("settlement must have an observed time after the seed")
         payouts = {int(k): float(v) for k, v in payouts.items()}
         settled = m.settle_at_observed_payout(
             {int(k): float(v) for k, v in payouts.items()},

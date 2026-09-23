@@ -958,3 +958,45 @@ async def test_the_lane_census_measures_latency_on_live_lanes_only(conn):
                 "live_unresolved_buys_24h"):
         assert key in cen, key
     assert "age of the backfill" in cen["latency_note"]
+
+
+async def test_a_market_settled_before_detection_refuses_and_the_lane_advances(conn):
+    """THE WEDGE THIS FIXES, observed in production.
+
+    `run` raised ValueError("settlement must have an observed time after
+    the seed"). The cursor rightly refuses to advance past a failed row,
+    so ONE such condition blocked every later one: trade 295 held the lane
+    at cursor 294, examining 400 candidates a cycle and writing nothing.
+
+    It is a real data shape -- a backfill row's detected_at can postdate
+    the market's resolution -- so it must be a named refusal, and the
+    cursor must move past it.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    # resolve the market BEFORE the seed was detected
+    await conn.execute(
+        "UPDATE markets SET resolved_at = $1 WHERE condition_id = $2",
+        T0 - timedelta(hours=3), COND)
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        W.HISTORICAL_CURSOR_KEY, str(ids[0] - 1))
+
+    res = await W.cycle(conn, lane="HISTORICAL")
+    # NO EXCEPTION, and the lane did not stop at an error
+    assert res["state"] == "REPLAYED", res
+    assert res.get("stopped_at_error") is None, res
+    refused = [r for r in res["results"]
+               if r.get("refused_at") == "SEED"]
+    assert refused, res
+    # NOTHING was half-written: no position, so no orphan orders either
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_positions") == 0
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_orders") == 0
+    # AND THE CURSOR MOVED PAST IT, which is the whole point
+    saved = await conn.fetchval(
+        "SELECT value::text FROM ingestion_state WHERE key = $1",
+        W.HISTORICAL_CURSOR_KEY)
+    assert int(saved.strip('"')) >= ids[0], (saved, ids[0])
