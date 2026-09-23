@@ -184,6 +184,12 @@ SECOND_HALF_MAPPING: dict = {
 PROGRESS_FEED_ABSENT = "PROGRESS_FEED_NOT_CONNECTED"
 NO_RULE_WRITTEN = "NO_HALFWAY_RULE_FOR_THIS_SPORT"
 
+# How old a progress observation may be and still license an exit. Kept
+# here, beside the rules that consume it, rather than only in the store:
+# `event_phase` is the last reader before a sale and must not depend on a
+# caller having remembered to age the row.
+PROGRESS_MAX_AGE_S = 120.0
+
 MAPPING_REQUIREMENTS = (
     "a timestamped progress field observed from the venue or a feed "
     "(period/quarter/inning/clock), NOT derived from game_start",
@@ -322,7 +328,7 @@ def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0,
     return out
 
 
-def event_phase(*, progress=None, sport=None) -> dict:
+def event_phase(*, progress=None, sport=None, now=None, max_age_s=None) -> dict:
     """§3. The event phase, from OBSERVED progress or not at all.
 
     `progress` must be a timestamped observation of event state. There
@@ -369,6 +375,47 @@ def event_phase(*, progress=None, sport=None) -> dict:
                         "visibly rather than exited on a guess"))
         return out
     rule = SECOND_HALF_MAPPING[sport]
+    # FRESHNESS IS PART OF THE READING, not a caller's courtesy. A period
+    # index from nine minutes ago is correctly typed and useless: play
+    # moved. The caller may pass `now` and `max_age_s`; when it passes
+    # neither, ageing is the caller's responsibility and this says so in
+    # the output rather than silently accepting any age.
+    if isinstance(progress, dict) and now is not None:
+        obs_at = progress.get("observed_at")
+        try:
+            age = float(now) - float(obs_at)
+        except (TypeError, ValueError):
+            age = None
+        limit = float(PROGRESS_MAX_AGE_S if max_age_s is None else max_age_s)
+        if age is None:
+            out.update(phase=PROGRESS_UNAVAILABLE, loss_exit_available=False,
+                       admitted_to_experiment=True,
+                       admitted_to_complete_policy=True,
+                       absence="PROGRESS_OBSERVATION_UNDATED",
+                       observed_progress=progress,
+                       why=("the observation carries no usable observed_at, "
+                            "so it cannot be aged and is not read"))
+            return out
+        if age > limit or age < 0:
+            out.update(phase=PROGRESS_UNAVAILABLE, loss_exit_available=False,
+                       admitted_to_experiment=True,
+                       admitted_to_complete_policy=True,
+                       absence=("PROGRESS_OBSERVATION_STALE" if age > limit
+                                else "PROGRESS_OBSERVATION_FROM_THE_FUTURE"),
+                       observed_progress=progress,
+                       age_s=age, max_age_s=limit,
+                       why=("the observation is %.1f s old against a %.0f s "
+                            "limit, so it does not license an exit now"
+                            % (age, limit) if age > limit else
+                            "the observation is stamped %.1f s ahead of now; "
+                            "a clock disagreement is not freshness" % (-age,)))
+            return out
+        out.update(age_s=age, max_age_s=limit)
+    elif isinstance(progress, dict):
+        out.update(freshness_checked=False,
+                   freshness_note=("no `now` was supplied, so this reading "
+                                   "is NOT age-gated and the caller owns "
+                                   "freshness"))
     # AN OBSERVATION THAT IS NOT IN PLAY IS NOT A PHASE. A halftime
     # interval reports period 1 or 2 depending on the feed; exiting into a
     # suspended market on that reading is not what the policy says.
@@ -501,6 +548,55 @@ def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None,
              "%.4f is %.4f of cost; the trigger is %.2f"
              % (proceeds, sellable, cost_alloc, ratio or 0.0,
                 frac)))
+    return out
+
+
+def realised_vs_trigger(*, allocated_cost_usd, realised_net_usd,
+                        trigger_fraction=None) -> dict:
+    """§2, stated as two numbers instead of a caveat.
+
+    THE 16% IS A TRIGGER, NOT A CEILING. It names the level at which the
+    rule fires. What the sale achieves depends on the bid it reaches, the
+    depth behind it and the fee, and a gap through the level makes it
+    worse. Reporting only the trigger invites a reader to treat 16% as a
+    maximum loss, which it has never been.
+
+    The measured case, from the lifecycle test: a 0.57 basis on 100
+    contracts executing at 0.47 realises -11.73 on 57.00 allocated cost.
+    That is a 20.58% loss against a 16% trigger -- 4.58 points worse, and
+    the difference is execution, not the policy being wrong.
+    """
+    cost = float(allocated_cost_usd)
+    frac = (LOSS_TRIGGER_FRACTION if trigger_fraction is None
+            else float(trigger_fraction))
+    trigger_loss = 1.0 - frac
+    out = {"policy_id": POLICY_ID,
+           "trigger_loss_fraction": trigger_loss,
+           "trigger_is_a_level_not_a_maximum": True,
+           "allocated_cost_usd": cost,
+           "realised_net_usd": (None if realised_net_usd is None
+                                else float(realised_net_usd))}
+    if cost <= 0 or realised_net_usd is None:
+        out.update(status=NOT_IDENTIFIED,
+                   realised_loss_fraction=None,
+                   worse_than_trigger_by=None,
+                   why=("no realised figure to compare: "
+                        + ("allocated cost is not positive"
+                           if cost <= 0 else
+                           "the position has not executed an exit")))
+        return out
+    realised_loss = -float(realised_net_usd) / cost
+    out.update(status="EVALUATED",
+               realised_loss_fraction=realised_loss,
+               worse_than_trigger_by=realised_loss - trigger_loss,
+               why=("the rule fires at a %.2f%% loss; this exit realised "
+                    "%.2f%%, which is %.2f points %s. The gap is execution "
+                    "-- the bid reached, the depth behind it and the fee -- "
+                    "not the trigger being mis-set"
+                    % (100 * trigger_loss, 100 * realised_loss,
+                       abs(100 * (realised_loss - trigger_loss)),
+                       "WORSE" if realised_loss > trigger_loss
+                       else "better")))
     return out
 
 
