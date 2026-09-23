@@ -16,10 +16,10 @@ that is the cell's point.
 |---|---|---|---|
 | Establish whether the experiment is historical or prospective | Two lanes, separately keyed: `HISTORICAL_EXPERIMENT_ID` / `PROSPECTIVE_EXPERIMENT_ID`, `rn1x_source_cursor` / `rn1x_prospective_cursor` | Both declared in `workers/rn1x_shadow.py`; 32 real-Postgres tests incl. different ids, different cursors | — |
 | Trace source query, ingestion lane, cursor ordering, timestamp semantics | `_CANDIDATES_HISTORICAL` requires `m.resolved`; `_CANDIDATES_PROSPECTIVE` requires `NOT m.resolved` + live lanes; both `ORDER BY t.id` (serial, monotonic — a timestamp can repeat) | **The experiment was historical because of MY filter, not the feed.** Cursor defaults to 0 → walking from `trades.id` 1 of ~6.1M; observed at 294 | — |
-| Separate backfill from newly received activity | `trades.source`: `chain`/`poll` live, `backfill` historical, `s1` synthetic. `LIVE_SOURCES` / `SEEDABLE_SOURCES`; `lane_census` measures latency on live lanes only | Migration 033 states the rule; **my query had no source filter at all, so `s1` emitter rows were eligible seeds** — now excluded and tested | — |
-| Investigate chain and other live paths before declaring a feed blocker | Traced `ingestion/pipeline.py` (`detected_at = now()` at insert) and `ingestion/history.py` (`source='backfill'`) | **`FEED_POSTDATES_SETTLEMENT` WITHDRAWN.** The 15.07 h figure was one seed; on a backfill row `detected_at − ts` is the age of the backfill | — |
+| Separate backfill from newly received activity | `trades.source`: `chain`/`poll` live, `backfill` historical, `s1` synthetic. `LIVE_SOURCES` / `SEEDABLE_SOURCES`; `lane_census` measures latency on live lanes only | Migration 033 states the rule; **my query had no source filter at all, so `s1` emitter rows were eligible seeds** — now excluded and tested. Census at 20:39:41Z over 24 h: **live 49,586 · backfill 0 · s1 427** | — |
+| Investigate chain and other live paths before declaring a feed blocker | Traced `ingestion/pipeline.py` (`detected_at = now()` at insert) and `ingestion/history.py` (`source='backfill'`) | **`FEED_POSTDATES_SETTLEMENT` WITHDRAWN,** and the measurement is what withdrew it: live-lane detection latency **avg 72.9 s, max 4,129.2 s (68.8 min)**, with **9,444 live unresolved cohort BUYs in 24 h**. The 15.07 h figure was one seed, and **all 65 historical positions came from one lane: `seeded_by_source = {"backfill": 65}`** — on a backfill row `detected_at − ts` is the age of the backfill, not a detection latency | — |
 | Do not reset the historical cursor or discard its evidence | Historical cursor still defaults to 0 and is never written backwards; only the prospective cursor seeds at the feed head | Test: a prospective cycle does not move the historical cursor | — |
-| Persist historical and prospective separately | Different experiment ids; prospective `_replay_one` **refuses to read a payout even if the market resolves mid-cycle** | Test: prospective run has `scored=False`, `resolved_at=None`, `SETTLE.settled=None`, while the historical run on the same data scores | Prospective lane has produced **no positions yet** — its cursor starts at the feed head and cohort BUYs on unresolved markets must arrive after it started |
+| Persist historical and prospective separately | Different experiment ids; prospective `_replay_one` **refuses to read a payout even if the market resolves mid-cycle** | Test: prospective run has `scored=False`, `resolved_at=None`, `SETTLE.settled=None`, while the historical run on the same data scores. In production at 20:39:41Z the two lanes sat at **different cursors on the same table — prospective 221,545,303 (the feed head), historical 294** | Prospective lane has produced **no positions yet** (`IDLE_NO_CANDIDATES`) — its cursor starts at the feed head, so cohort BUYs on unresolved markets must arrive after it started. **Not a feed blocker: the lane is ARMED and the feed is delivering 9,444 eligible BUYs a day** |
 
 ## 2 · The complete management policy
 
@@ -56,7 +56,8 @@ that is the cell's point.
 | Which data each evaluation uses | Settled `rn1x_outcomes`; fills **re-read** from `trades` each cycle; identified by `dataset_sha` + position count; prospective excluded | `DESCRIPTION["data_per_evaluation"]` | — |
 | Keep the frozen policy unchanged | `PAIR_TARGET_COST` 0.91 / `LOSS_TRIGGER_FRACTION` 0.84 untouched; challengers vary by **argument**, never by edit | Frozen path still prices the completion at **0.32** on a 0.57 basis | — |
 | PAIR_092 is exploratory, not a promotion | Status `CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT`; no promotion path | v2/v6/v10 eligible on 420 then 598 decided. **The datasets are nested, so this is one result at two sample sizes, not a replication** | — |
-| Check the next due cycle by **receipt and heartbeat** | Receipts carry `written` and the reason | **`rn1x_learn` heartbeat 19:57:41Z: `"new_rows": 0`, receipts `"unchanged from version 9 on the same dataset", "written": false`** — confirmed from the receipt, not a row count | — |
+| Check the next due cycle by **receipt and heartbeat** | Receipts carry `written` and the reason | **`rn1x_learn` heartbeat 20:38:46Z: `"new_rows": 0`, `"positions": 65`, `"dataset_sha": "8488d060ec7d"`, and all four receipts `"written": false` with "unchanged from version N on the same dataset"** — deduplication confirmed from each receipt's own reason, not inferred from a row count that happened not to move | — |
+| *(found while doing this)* | The heartbeat also published `champion_retained`, which production returned as **`false`** | It was only `all(verdict == RETAIN)`, and PAIR_092 is ELIGIBLE — so a correct evaluation printed what reads as *the champion was replaced*. It cannot be: there is no promotion path. Split into `champion_unchanged` (a constant), `champion`, `all_verdicts_retain` and `eligible_pending_management`; a test asserts the old key is **absent** | — |
 
 ## 5 · The command centre
 
@@ -89,6 +90,26 @@ Refused at **SEED**, before any inventory is assigned:
 at step 8, which left `MANAGE` already run and would have written a
 position with no orders — the half-written shape that made the desk's book
 uncertain.
+
+## A second defect found, reported and NOT fixed here
+
+`render-ops`'s `deploy-api-commit` **reports `conclusion: success` when
+Render refuses the deploy.** Observed directly: run 35917975665 at
+20:44:39Z posted a commit id Render did not have, logged `HTTP 404`,
+created no deploy — and the job exited 0 and went green. Nothing shipped,
+and the workflow said it had. (Confirmed harmless in this instance: the
+worker's deploy list is byte-identical before and after, still
+`dep-dapqirrbc2fs73bms6fg live 7f76fd9`.)
+
+The fix is one line — a non-2xx `$CODE` must `exit 1`. It is **not applied**
+because `test_e30_post_only_body.py` pins `render-ops.yml`'s sha256 and
+that pin currently **passes**; editing the file to fix an issue outside
+these five items would break a standing freeze from an earlier approved
+lane, and the file has 550 bytes of headroom under GitHub's 512,000-byte
+ceiling. Flagged for whoever owns that pin.
+
+Until then, a green `deploy-api-commit` is **not** evidence of a deploy —
+the job log's `HTTP` line and the deploy id are.
 
 ## What none of this establishes
 
