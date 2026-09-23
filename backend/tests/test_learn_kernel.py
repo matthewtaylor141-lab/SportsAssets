@@ -129,17 +129,20 @@ class TestIsotonic:
         """The classic PAV case, worked by hand: the middle two are out
         of order and pool to their mean; the ends do not move."""
         c = K.Isotonic().fit([1.0, 2.0, 3.0, 4.0], [0.0, 1.0, 0.0, 1.0])
-        assert abs(c.predict(1.0) - 0.0) < 1e-12
+        # Block means 0.0, 0.5, 0.5, 1.0, each through the shared shrink
+        # (4m + 0.5) / 5. The ORDERING is what PAV decides and it is
+        # unchanged; only the certainty at the ends is given up.
+        assert abs(c.predict(1.0) - 0.1) < 1e-12
         assert abs(c.predict(2.0) - 0.5) < 1e-12
         assert abs(c.predict(3.0) - 0.5) < 1e-12
-        assert abs(c.predict(4.0) - 1.0) < 1e-12
+        assert abs(c.predict(4.0) - 0.9) < 1e-12
 
     def test_ties_are_pooled_before_the_pav_pass(self):
         """Two rows at the same score with different labels are ONE
         point at their mean, not an ordering violation."""
         c = K.Isotonic().fit([1.0, 1.0, 2.0], [0.0, 1.0, 1.0])
-        assert abs(c.predict(1.0) - 0.5) < 1e-12
-        assert abs(c.predict(2.0) - 1.0) < 1e-12
+        assert abs(c.predict(1.0) - 0.5) < 1e-12          # 0.5 is fixed
+        assert abs(c.predict(2.0) - 0.875) < 1e-12        # (3 + 0.5) / 4
 
     def test_the_curve_is_monotone_everywhere(self):
         scores = [i / 50.0 for i in range(51)]
@@ -174,6 +177,69 @@ class TestIsotonic:
         back = K.load(c.to_dict())
         for s in (0.5, 1.0, 1.5, 2.5, 9.0):
             assert abs(c.predict(s) - back.predict(s)) < 1e-15
+
+    # ── the certainty claim PAV makes, and must not ──────────────────
+
+    def test_a_block_of_zeros_is_not_a_probability_of_zero(self):
+        """THE FERRARI REGRESSION. A pooled block of zeros used to come
+        out at exactly 0.0, and six held-out rows that got that value
+        went on to complete. -log(0) is not a score, it is a bug with a
+        number attached."""
+        c = K.Isotonic().fit([float(i) for i in range(40)],
+                             [0.0] * 20 + [1.0] * 20)
+        assert c.predict(0.0) > 0.0
+        assert c.predict(39.0) < 1.0
+        assert abs(c.predict(0.0) - 0.5 / 41.0) < 1e-12
+        assert abs(c.predict(39.0) - 40.5 / 41.0) < 1e-12
+
+    def test_no_fitted_value_is_ever_exactly_zero_or_one(self):
+        for labels in ([0.0] * 30, [1.0] * 30, [0.0] * 15 + [1.0] * 15,
+                       [float(i % 2) for i in range(30)]):
+            c = K.Isotonic().fit([float(i) for i in range(30)], labels)
+            assert all(0.0 < v < 1.0 for v in c.y), labels[:3]
+
+    def test_the_floor_states_the_resolution_the_sample_has(self):
+        """More calibration rows earn a lower floor; fewer do not."""
+        small = K.Isotonic().fit([float(i) for i in range(10)], [0.0] * 10)
+        large = K.Isotonic().fit([float(i) for i in range(1000)],
+                                 [0.0] * 1000)
+        assert large.y[0] < small.y[0]
+        assert abs(small.y[0] - 0.5 / 11.0) < 1e-12
+        assert abs(large.y[0] - 0.5 / 1001.0) < 1e-12
+
+    def test_the_correction_cannot_reorder_the_curve(self):
+        """A PER-BLOCK Laplace correction shrinks a two-row block harder
+        than a thousand-row one and can lift the first above the second.
+        The shared-n map cannot, and this is the case that shows it:
+        two zeros at the bottom, then a large block just above."""
+        scores = [0.0, 0.1] + [1.0 + i * 0.001 for i in range(1000)]
+        labels = [0.0, 0.0] + [1.0 if i < 50 else 0.0 for i in range(1000)]
+        c = K.Isotonic().fit(scores, labels)
+        got = [c.predict(s) for s in scores]
+        assert all(got[i] <= got[i + 1] + 1e-12 for i in range(len(got) - 1))
+        # and the naive per-block rule would NOT have been monotone here
+        naive_small = (0.0 * 2 + 0.5) / (2 + 1.0)
+        naive_large = (50.0 + 0.5) / (1000 + 1.0)
+        assert naive_small > naive_large
+
+    def test_an_artifact_frozen_before_the_correction_is_not_moved(self):
+        """`from_dict` reproduces stored values verbatim, so a model
+        frozen earlier scores exactly as it did. The absence of the
+        shrinkage record is reported, not silently filled in."""
+        old = {"kind": "ISOTONIC", "kernel": K.VERSION,
+               "x": [0.1, 0.9], "y": [0.0, 1.0], "n_rows": 200}
+        c = K.Isotonic.from_dict(old)
+        assert c.predict(0.05) == 0.0 and c.predict(2.0) == 1.0
+        assert c.shrinkage is None
+        assert c.to_dict()["shrinkage"] is None
+
+    def test_the_shrinkage_record_is_carried_and_round_trips(self):
+        c = K.Isotonic().fit([1.0, 2.0, 3.0], [0.0, 1.0, 1.0])
+        d = c.to_dict()
+        assert d["shrinkage"]["n"] == 3
+        assert abs(d["shrinkage"]["floor"] - 0.125) < 1e-12
+        assert abs(d["shrinkage"]["ceiling"] - 0.875) < 1e-12
+        assert K.Isotonic.from_dict(d).shrinkage == d["shrinkage"]
 
 
 # ── boosted stumps ───────────────────────────────────────────────────
@@ -383,3 +449,82 @@ class TestHazard:
         # 3 censored early contribute 0; 5 events in bucket 1 contribute
         # 2 each.
         assert h.n_periods == 10
+
+
+# ── clustered uncertainty ────────────────────────────────────────────
+
+class TestClusteredJackknife:
+    """837 rows in 172 markets is 172 observations, not 837."""
+
+    def _data(self, g_n=40, per=6):
+        p, y, g = [], [], []
+        for c in range(g_n):
+            # Every row in a market shares its outcome -- which is the
+            # whole reason the rows are not independent.
+            lab = 1.0 if (c % 2) else 0.0
+            for k in range(per):
+                p.append(0.35 + 0.3 * lab + 0.01 * k)
+                y.append(lab)
+                g.append("m%03d" % c)
+        return p, y, g
+
+    def test_it_refuses_an_estimate_from_too_few_clusters(self):
+        p, y, g = self._data(g_n=4, per=20)
+        r = M.clustered_jackknife(p, y, g, M.auc_stat, min_groups=8)
+        assert r["status"] == "INSUFFICIENT_CLUSTERS"
+        assert r["n_groups"] == 4 and r["n_rows"] == 80
+        assert "se_clustered" not in r
+
+    def test_the_error_is_over_markets_not_rows(self):
+        """Ten times the rows in the SAME markets must not shrink the
+        interval. That is the error the function exists to prevent."""
+        thin = M.clustered_jackknife(*self._data(g_n=20, per=2),
+                                     stat=M.auc_stat)
+        fat = M.clustered_jackknife(*self._data(g_n=20, per=20),
+                                    stat=M.auc_stat)
+        assert thin["status"] == fat["status"] == "OK"
+        assert thin["n_rows"] == 40 and fat["n_rows"] == 400
+        assert abs(thin["se_clustered"] - fat["se_clustered"]) < 1e-9
+
+    def test_more_markets_do_shrink_it(self):
+        few = M.clustered_jackknife(*self._data(g_n=10, per=6),
+                                    stat=M.auc_stat)
+        many = M.clustered_jackknife(*self._data(g_n=200, per=6),
+                                     stat=M.auc_stat)
+        assert many["se_clustered"] <= few["se_clustered"]
+
+    def test_an_undefined_deletion_is_dropped_and_counted(self):
+        """Deleting the only market that carries the positives leaves a
+        single-class set, which has no AUC. That deletion is not a
+        zero."""
+        p = [0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 0.25, 0.35]
+        y = [0.0] * 8 + [1.0, 1.0]
+        g = ["a", "a", "b", "b", "c", "c", "d", "d", "e", "e"]
+        r = M.clustered_jackknife(p, y, g, M.auc_stat, min_groups=3)
+        assert r["n_deletions_undefined"] == 1
+        assert r["n_deletions_used"] == 4
+
+    def test_it_is_deterministic(self):
+        p, y, g = self._data()
+        a = M.clustered_jackknife(p, y, g, M.auc_stat)
+        b = M.clustered_jackknife(p, y, g, M.auc_stat)
+        assert a == b
+
+    def test_the_skill_baseline_stays_pinned_under_deletion(self):
+        """Recomputing the baseline per deletion would move the thing
+        being compared against, so the spread would measure the
+        baseline's wobble rather than the model's."""
+        p, y, g = self._data()
+        r = M.clustered_jackknife(p, y, g, M.skill_stat(0.5))
+        assert r["status"] == "OK"
+        full = M.skill(M.log_loss(p, y), M.log_loss([0.5] * len(p), y))
+        assert abs(r["statistic"] - full["skill"]) < 1e-12
+
+    def test_it_reports_how_concentrated_the_clusters_are(self):
+        """A jackknife interval is not valid when one market carries
+        most of the rows, so the share is on the result."""
+        p = [0.5] * 100 + [0.6, 0.7, 0.8, 0.9] * 2
+        y = [float(i % 2) for i in range(108)]
+        g = ["big"] * 100 + ["g%d" % i for i in range(8)]
+        r = M.clustered_jackknife(p, y, g, M.auc_stat, min_groups=5)
+        assert r["largest_cluster_share"] > 0.9

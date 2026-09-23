@@ -164,23 +164,50 @@ def isotonic_suite():
             ([i / 60.0 for i in range(61)],
              [float((i * 7 % 11) < 5) for i in range(61)]),
     }
+    # OURS IS PAV PLUS A SHARED AFFINE SHRINK, so the comparison has to
+    # undo the shrink before it means anything. Undoing it is exact --
+    # (y*(n+1) - 0.5) / n -- and if the PAV pass itself had drifted, the
+    # unshrunk values would not land on sklearn's.
+    def unshrink(v, n):
+        return (v * (n + 1.0) - 0.5) / n
+
     for name, (x, yv) in cases.items():
         c = K.Isotonic().fit(x, yv)
         sk = IsotonicRegression(increasing=True, out_of_bounds="clip")
         sk.fit(np.array(x), np.array(yv))
-        mine = [c.predict(v) for v in x]
+        mine = [unshrink(c.predict(v), len(x)) for v in x]
         theirs = list(sk.predict(np.array(x)))
         d = max(abs(mine[i] - theirs[i]) for i in range(len(x)))
-        check(name, d < 1e-9, "max|d|=%.3g" % d)
+        check(name, d < 1e-9, "max|d|=%.3g (unshrunk)" % d)
 
     # Clipping outside the fitted range must agree too.
     c = K.Isotonic().fit([0.2, 0.5, 0.8], [0.0, 0.5, 1.0])
     sk = IsotonicRegression(increasing=True, out_of_bounds="clip")
     sk.fit(np.array([0.2, 0.5, 0.8]), np.array([0.0, 0.5, 1.0]))
-    d = max(abs(c.predict(v) - float(sk.predict(np.array([v]))[0]))
+    d = max(abs(unshrink(c.predict(v), 3) - float(sk.predict(np.array([v]))[0]))
             for v in (-3.0, 0.0, 0.35, 0.65, 1.0, 9.0))
     check("isotonic / outside the fitted range", d < 1e-9,
-          "max|d|=%.3g" % d)
+          "max|d|=%.3g (unshrunk)" % d)
+
+    # AND THE SHRINK ITSELF: sklearn does NOT do it, and that is the
+    # point -- its curve asserts p = 0 on a block of zeros. Ours must
+    # differ from sklearn exactly there and nowhere else.
+    x = [float(i) for i in range(40)]
+    yv = [0.0] * 20 + [1.0] * 20
+    c = K.Isotonic().fit(x, yv)
+    sk = IsotonicRegression(increasing=True, out_of_bounds="clip")
+    sk.fit(np.array(x), np.array(yv))
+    theirs = list(sk.predict(np.array(x)))
+    check("isotonic / sklearn does assert certainty here",
+          min(theirs) == 0.0 and max(theirs) == 1.0,
+          "sklearn min=%.3g max=%.3g" % (min(theirs), max(theirs)))
+    check("isotonic / ours does not",
+          min(c.y) > 0.0 and max(c.y) < 1.0,
+          "ours min=%.6g max=%.6g" % (min(c.y), max(c.y)))
+    d = max(abs(unshrink(c.predict(v), len(x)) - theirs[i])
+            for i, v in enumerate(x))
+    check("isotonic / the difference is exactly the shared affine map",
+          d < 1e-12, "max|d|=%.3g" % d)
 
 
 # ── 3. hazard ────────────────────────────────────────────────────────

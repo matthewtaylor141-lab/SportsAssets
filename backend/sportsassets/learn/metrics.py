@@ -210,3 +210,115 @@ def by_group(p, y, groups, *, baseline_rate, min_n=30, weights=None) -> dict:
         r["status"] = "OK"
         out[g] = r
     return out
+
+
+def clustered_jackknife(p, y, groups, stat, *, min_groups=8) -> dict:
+    """Delete-one-CLUSTER jackknife around any statistic of (p, y).
+
+    WHY THIS EXISTS. An AUC of 0.60 over 837 rows sounds like 837
+    observations. It is not. Those rows sit in 172 markets, one event
+    drives every row in a market, and the number that decides whether
+    0.60 means anything is the count of MARKETS. Quoting a row-count
+    precision on clustered data is the same error as scoring a censored
+    row as a negative: a number that outruns its evidence.
+
+    WHY JACKKNIFE AND NOT BOOTSTRAP. A cluster bootstrap needs a random
+    number generator and therefore a seed, and this kernel is
+    deterministic on purpose -- every artifact here must reproduce
+    exactly from its inputs. Deleting each cluster once is fully
+    determined by the data, costs G recomputations, and gives the same
+    first-order answer.
+
+    `stat(p, y) -> float or None`. A deletion that makes the statistic
+    undefined (one class left, say) is DROPPED and counted, not treated
+    as zero.
+
+    Returns the full-sample value, the clustered standard error, and a
+    normal-approximation 95% interval. The interval is an approximation
+    and the result says so; it is not a hypothesis test.
+    """
+    if not (len(p) == len(y) == len(groups)):
+        raise ValueError("p, y and groups differ in length")
+    if not p:
+        raise ValueError("cannot jackknife zero rows")
+
+    idx = {}
+    for i, g in enumerate(groups):
+        idx.setdefault(str(g), []).append(i)
+    keys = sorted(idx)
+    g_n = len(keys)
+
+    full = stat(list(p), list(y))
+    base = {"statistic": full, "n_rows": len(p), "n_groups": g_n}
+    if g_n < min_groups:
+        base.update({
+            "status": "INSUFFICIENT_CLUSTERS",
+            "why": "%d clusters is below the %d-cluster floor; a "
+                   "jackknife over that few deletions is not an "
+                   "uncertainty estimate" % (g_n, min_groups),
+        })
+        return base
+    if full is None:
+        base.update({"status": "STATISTIC_UNDEFINED_ON_FULL_SAMPLE"})
+        return base
+
+    vals, dropped = [], 0
+    for k in keys:
+        drop = set(idx[k])
+        kp = [p[i] for i in range(len(p)) if i not in drop]
+        ky = [y[i] for i in range(len(y)) if i not in drop]
+        v = stat(kp, ky) if kp else None
+        if v is None:
+            dropped += 1
+            continue
+        vals.append(float(v))
+
+    used = len(vals)
+    if used < min_groups:
+        base.update({
+            "status": "TOO_MANY_UNDEFINED_DELETIONS",
+            "n_deletions_undefined": dropped,
+        })
+        return base
+
+    mean = sum(vals) / used
+    var = (used - 1.0) / used * sum((v - mean) ** 2 for v in vals)
+    se = math.sqrt(var) if var > 0 else 0.0
+    base.update({
+        "status": "OK",
+        "se_clustered": se,
+        "ci95": [full - 1.96 * se, full + 1.96 * se],
+        "n_deletions_used": used,
+        "n_deletions_undefined": dropped,
+        "cluster_note":
+            "clusters are markets. The standard error is over MARKETS, "
+            "not rows, because one event drives every row in a market.",
+        "ci_note":
+            "normal-approximation interval from a delete-one-cluster "
+            "jackknife. An approximation, not a hypothesis test, and "
+            "not valid if a handful of markets carry most of the rows.",
+        "largest_cluster_share": round(
+            max(len(v) for v in idx.values()) / float(len(p)), 4),
+    })
+    return base
+
+
+def auc_stat(p, y):
+    """`auc` reduced to a plain float or None, for `clustered_jackknife`."""
+    r = auc(p, y)
+    return r.get("auc") if r.get("status") == "OK" else None
+
+
+def skill_stat(baseline_rate):
+    """Skill against a FIXED baseline rate, as a statistic.
+
+    The baseline stays pinned to the training rate under every deletion.
+    Recomputing it per deletion would move the thing being compared
+    against and the spread would stop meaning what it says.
+    """
+    def _f(p, y):
+        if not p:
+            return None
+        b = [baseline_rate] * len(p)
+        return skill(log_loss(p, y), log_loss(b, y)).get("skill")
+    return _f

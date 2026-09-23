@@ -40,30 +40,45 @@
   {
    "check": "isotonic / classic inversion",
    "ok": true,
-   "detail": "max|d|=0"
+   "detail": "max|d|=0 (unshrunk)"
   },
   {
    "check": "isotonic / ties at one score",
    "ok": true,
-   "detail": "max|d|=0"
+   "detail": "max|d|=0 (unshrunk)"
   },
   {
    "check": "isotonic / already monotone",
    "ok": true,
-   "detail": "max|d|=0"
+   "detail": "max|d|=0 (unshrunk)"
   },
   {
    "check": "isotonic / fully reversed",
    "ok": true,
-   "detail": "max|d|=0"
+   "detail": "max|d|=0 (unshrunk)"
   },
   {
    "check": "isotonic / long noisy run",
    "ok": true,
-   "detail": "max|d|=0"
+   "detail": "max|d|=0 (unshrunk)"
   },
   {
    "check": "isotonic / outside the fitted range",
+   "ok": true,
+   "detail": "max|d|=5.55e-17 (unshrunk)"
+  },
+  {
+   "check": "isotonic / sklearn does assert certainty here",
+   "ok": true,
+   "detail": "sklearn min=0 max=1"
+  },
+  {
+   "check": "isotonic / ours does not",
+   "ok": true,
+   "detail": "ours min=0.0121951 max=0.987805"
+  },
+  {
+   "check": "isotonic / the difference is exactly the shared affine map",
    "ok": true,
    "detail": "max|d|=0"
   },
@@ -153,6 +168,6 @@
    "detail": "converged in 4 IRLS iterations"
   }
  ],
- "passed": 30,
- "total": 30
+ "passed": 33,
+ "total": 33
 }

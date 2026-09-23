@@ -335,12 +335,46 @@ class Isotonic:
     and produces a curve that looks perfect and is worthless. The caller
     is responsible for that split; `fit` records how many rows it saw so
     a suspiciously perfect curve is at least visible.
+
+    PAV ALONE CLAIMS CERTAINTY IT HAS NOT EARNED, AND IT COSTS REAL
+    MONEY. A pooled block of twenty zeros has mean exactly 0.0, and the
+    raw curve then says an event is IMPOSSIBLE on the strength of twenty
+    observations. It is not impossible. Ferrari run 20260923T1308Z
+    measured the damage: 12 of 837 held-out rows were handed p = 0 and
+    SIX of them completed. Those six rows alone contributed 0.198 of a
+    0.857 log loss -- without them the calibrated model scored 0.669
+    against a 0.689 base rate, so the calibrator was helping and one
+    unearned certainty buried it.
+
+    THE CORRECTION IS AFFINE AND SHARED, WHICH IS THE WHOLE POINT.
+    Every block mean is shrunk by
+
+        m -> (n * m + 0.5) / (n + 1)
+
+    with the SAME n -- the total number of calibration rows -- for every
+    block. A per-block Laplace correction, (w*m + 0.5) / (w + 2*0.5), is
+    the more obvious choice and it is WRONG HERE: it shrinks small
+    blocks harder than large ones, so a two-row block at 0.0 can be
+    lifted above a thousand-row block at 0.05 and the curve stops being
+    monotone. Monotonicity is the one property PAV exists to provide,
+    and a correction that breaks it is not a correction.
+
+    A shared affine map cannot reorder anything, and its floor --
+    0.5/(n+1) -- states the resolution the sample actually has: with n
+    observations you cannot distinguish a probability from zero below
+    about 1/n.
+
+    APPLIED AT FIT TIME, NOT AT PREDICT TIME. A stored artifact keeps
+    the exact values it was fitted with, so `from_dict` on a model
+    frozen before this change reproduces that model unchanged. Nothing
+    already frozen moves; only a NEW fit gets the correction.
     """
 
     def __init__(self):
         self.x = []          # breakpoints, ascending
         self.y = []          # fitted values, non-decreasing
         self.n_rows = 0
+        self.shrinkage = None
 
     def fit(self, scores, labels, weights=None):
         if len(scores) != len(labels):
@@ -377,17 +411,33 @@ class Isotonic:
                 stack.pop()
                 stack.append([a[0] + c[0], a[1] + c[1], c[2]])
 
+        n = float(len(scores))
+
+        def _shrink(m: float) -> float:
+            """See the class docstring. Shared n, so strictly monotone."""
+            return (n * m + 0.5) / (n + 1.0)
+
         self.x, self.y = [], []
         lo = 0
         for blk in stack:
             mean = blk[0] / blk[1] if blk[1] else 0.0
+            value = _shrink(mean)
             # Every original breakpoint inside the merged block takes
             # the block's value, so `predict` can interpolate.
             while lo < len(blocks) and blocks[lo][2] <= blk[2]:
                 self.x.append(blocks[lo][2])
-                self.y.append(mean)
+                self.y.append(value)
                 lo += 1
         self.n_rows = len(scores)
+        self.shrinkage = {
+            "rule": "(n * block_mean + 0.5) / (n + 1), one shared n",
+            "n": len(scores),
+            "floor": _shrink(0.0),
+            "ceiling": _shrink(1.0),
+            "why": "PAV's raw 0.0 and 1.0 are certainty claims a finite "
+                   "sample cannot support. A shared affine map removes "
+                   "them without reordering the curve.",
+        }
         return self
 
     def predict(self, score: float) -> float:
@@ -420,7 +470,8 @@ class Isotonic:
 
     def to_dict(self) -> dict:
         return {"kind": "ISOTONIC", "kernel": VERSION,
-                "x": list(self.x), "y": list(self.y), "n_rows": self.n_rows}
+                "x": list(self.x), "y": list(self.y), "n_rows": self.n_rows,
+                "shrinkage": self.shrinkage}
 
     @classmethod
     def from_dict(cls, d: dict) -> "Isotonic":
@@ -430,6 +481,10 @@ class Isotonic:
         c.x = list(d["x"])
         c.y = list(d["y"])
         c.n_rows = d.get("n_rows", 0)
+        # ABSENT MEANS FITTED BEFORE THE CORRECTION EXISTED, not
+        # "corrected with no record". An artifact frozen earlier keeps
+        # its own values and reports the fact rather than pretending.
+        c.shrinkage = d.get("shrinkage")
         return c
 
 

@@ -496,3 +496,66 @@ of tables.
 
 Outcome resolution is scheduled for 13:35Z, after the last prediction
 matures at 13:31:59Z plus a margin for delayed poll arrivals.
+
+---
+
+## 9. Ferrari components 1 and 2 — a null result, and a kernel defect
+
+2026-09-23T13:08Z → 13:2xZ.
+
+**Built.** `learn/ferrari.py` (`BETTOR_LEARN_FERRARI_V1`) and
+`tools/learn_train_ferrari.py`, on the extract case
+`train-extract-ferrari` (run 35864978620). Reuses the kernel, metrics,
+split, clock and coverage rules unchanged.
+
+**Sampled by CONDITION, not by fill** — 1 in 20 markets, then every
+fill of each. Sampling fills would cut pairs in half and the
+reconstruction would measure the sampler. 19,890 fills, 1,006
+conditions, zero SELLs.
+
+**Missing prior inventory: asked and answered.** The query counted
+Ferrari's pre-window fills per sampled condition. It returned **zero
+conditions** — and that is corroborated, not assumed: Ferrari's
+conditions live a **median 0.02 days**, p95 0.2, max 1.69. A market
+that lives under two days cannot carry inventory from sixty days back.
+
+**Component 1 census.** 1,006 new positions and 3,719 adds to a leg
+that is not yet paired: **Ferrari builds a position over ~3.7 further
+fills before anything pairs.** No entry classifier was fitted, on
+purpose — NEW-vs-ADD is determined by a feature in the vector, and
+ENTER-vs-SKIP needs the markets Ferrari passed over, which fills do not
+hold. Named missing fact: a point-in-time record of live markets.
+
+**Component 2, two targets.** `complete` 46.7%, `clears` 27.4%,
+**cleared given completed 58.7%** — so **41.3% of hour-horizon
+completions lock a loss**, against 37.0% at condition level in §6.
+Different measures, different windows; neither confirms the other.
+Median pair price 0.9800, p95 1.1700, mean gross edge +3.09¢, mean
+paired share of the entry 0.69. Gross throughout: `trades` has no fees.
+
+**THE RESULT IS NULL AND IT IS RECORDED AS NULL.** Ridge AUC 0.598
+(complete) / 0.584 (clears) looked like signal. The EVAL rows sit in
+**169 markets**, not 837 independent draws. A delete-one-market
+jackknife — `metrics.clustered_jackknife`, deterministic, no RNG, so
+artifacts still reproduce — puts **every AUC interval across 0.5 and
+every skill interval across 0**. No demonstrated skill, either target.
+Largest market is 4.4% of rows, so the interval's own validity
+condition holds. Not retuned.
+
+Why: the features are Ferrari's own fills and the clock — no book, no
+opposing flow, no price path. Strongest weight in both models is
+`entry_price_dist_from_half`, which is a fact about market structure,
+not about Ferrari.
+
+**A defect in the shared kernel, found by this run.** `Isotonic`
+returned exactly 0.0 on a pooled block of zeros. **12 of 837 held-out
+rows got p = 0 and six of them completed**, contributing 0.198 of a
+0.857 log loss on their own; excluding them the calibrated model was
+0.669 against a 0.689 base rate. Fixed with a shared affine shrink at
+fit time. The per-block Laplace correction — the obvious fix — breaks
+monotonicity, and there is a test that asserts it would have inverted
+that exact pair. Frozen artifacts unmoved (`from_dict` is verbatim, and
+RN1 v2 has no calibrator). Cross-check 33/33 with three new checks.
+Kernel tests 39 → 46.
+
+**Still nothing in this loop runs automatically.**
