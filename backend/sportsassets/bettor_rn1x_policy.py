@@ -1,195 +1,327 @@
-"""THE FROZEN MANAGEMENT POLICY FOR THE RN1-SEEDED EXPERIMENT.
+"""MANAGEMENT_PAIR_091_STOP_16_V1 — management's explicit exit policy.
 
-FROZEN BEFORE THE FORWARD TEST. Every threshold below is fixed here, at
-this commit, before any forward evaluation window opens. Changing one
-produces a NEW policy id, not a new version of this one, and the old
-verdict survives the change.
+MANAGEMENT-DEFINED AND EXPERIMENTAL. Not learned, not fitted, not shown
+to be profitable. Every threshold was supplied by management and is
+frozen here before any forward evaluation; changing one produces a NEW
+policy id and this one's verdict survives the change.
 
-WHAT THIS POLICY DOES AND DOES NOT DECIDE. It manages a position it was
-HANDED. Entry is RN1's; we do not select it, do not claim we could have
-obtained RN1's fill, and the assigned basis is labelled as assigned
-everywhere it appears.
+It replaces the provisional adverse-move/time trigger I had written for
+this experiment. That rule is withdrawn.
+
+WHAT IT DECIDES, IN TWO INDEPENDENT PARTS.
+
+  1 PAIRING, allowed throughout the event. Rest a complementary buy
+    whose limit keeps the COMBINED pair cost at or below $0.91
+    INCLUDING known entry and completion fees, so a fully completed $1
+    pair nets at least $0.09.
+
+  2 LOSS EXIT, second half only. Sell unpaired inventory when estimated
+    net executable proceeds fall to 84% or less of that inventory's
+    ALLOCATED acquisition cost, fees included.
 
 ════════════════════════════════════════════════════════════════════
-THE RESEARCH TRACE. Located before this policy was written, and
-preserved here so nothing below can be mistaken for new research.
+THE BLOCKER ON PART 2, ESTABLISHED BY INSPECTION BEFORE IMPLEMENTING.
 
-FERRARI_INSPIRED_DEV_V1 is `bettor_desk.Policy`. Its own maturity
-declaration reads:
+§3 requires the second half to come from OBSERVED, TIMESTAMPED EVENT
+PROGRESS under a documented sport-specific mapping, and forbids
+estimating it from elapsed wall-clock time or an assumed duration.
 
-    entry_band        HAND_WRITTEN
-    pair_completion   HAND_WRITTEN
-    residual_exit     LEARNED
-    fill_probability  ASSUMED
+WE HAVE NO SUCH FEED. Searched: no `period`, `quarter`, `inning`,
+`half`, `game_clock` or score column exists anywhere in the migrations.
+The only event-state we hold is `live_status`, and
+`bettor_state_capture._live` derives it as
 
-  BUY     `Policy.entry_lo/entry_hi` = 0.40-0.65, bettor_desk.py:887.
-          HAND_WRITTEN. Deliberately does NOT buy the 0.05-0.40 tail
-          Ferrari kept buying, on a measured ~5c fair-value deficit.
-          NOT USED HERE: RN1 supplies the entry.
+    secs = game_start - observed_at
+    PREGAME if secs > 0 else LIVE
 
-  PAIR    `clears_below = 1.0 - avg - min_clear`, bettor_desk.py:808.
-          HAND_WRITTEN. It refuses every completion above par, which
-          makes loss-limiting completion structurally impossible. NOT
-          USED HERE, and its absence from this path is asserted by test.
+-- a SCHEDULED-START WALL-CLOCK derivation, which is precisely the
+estimate §3 rules out. Using it to place a halfway point would be the
+forbidden inference wearing a different name.
 
-  EXIT    `Policy.ev_hold(price)` -> `edge = net_exit - ev_hold`,
-          `act = EXIT if edge > exit_edge`, bettor_desk.py:844-848.
-          Backed by a LEARNED isotonic curve: PAV with a shared-n
-          shrink, feature = the leg's volume-weighted purchase price,
-          target = that leg's realised payout in {0, 1}.
+SO EVERY MARKET IS CURRENTLY SECOND_HALF_UNDEFINED. Part 2 is
+implemented in full and reports LOSS_EXIT_UNAVAILABLE with the exposure
+retained visibly, exactly as §3 directs. No event type is admitted to
+the loss-exit experiment yet, and none will be until a progress feed
+with a documented mapping exists. Part 1 needs no event state and runs.
 
-          *** ITS PRE-REGISTERED FORECAST TEST WAS NOT SUPPORTED. ***
-          On the later 40% of resolved markets the paired log-loss
-          difference against the identity was +0.0052, 95% interval
-          [-0.0017, +0.0120]. desk_replay.py records the verdict
-          verbatim: "It is not established as a better forecast."
-          THE CURVE IS NOT ACTIVATED BY THIS POLICY. It is retained as a
-          separately labelled RESEARCH CANDIDATE (see CURVE_CANDIDATE)
-          and its forecast test is kept distinct from any economic test.
-
-  REDUCE  NOT IMPLEMENTED. `REDUCE` exists as a string constant and
-          inside one `alternatives=[...]` list. It is never selected,
-          sized or placed. It remained descriptive research and never
-          became an executable policy.
-
-WHY THE PRODUCTION EXIT RULE CANNOT FIRE, verified numerically rather
-than inferred from an assumption about the fee's sign -- which is a real
-hazard here, because `theta_maker` is -0.0125, a REBATE.
-
-    Production builds `DK.Policy()` (bettor_desk_loop.py:624), so
-    `curve is None` and `ev_hold(px)` returns px itself, basis
-    IDENTITY_PRICE_IS_PROBABILITY. Then
-
-        edge = (px - fee/qty) - px = -fee/qty
-
-    and EXIT needs edge > exit_edge = 0.02, i.e. a REBATE of more than
-    2 cents per contract.
-
-    TWO INDEPENDENT REASONS IT NEVER HAPPENS.
-    1. The call site hardcodes the TAKER side --
-       `self.fee_fn(held["qty"], px, False)` -- and theta_taker is
-       +0.0695. Measured: qty 100 at 0.45 gives fee +1.7200, edge
-       -0.017200 -> HOLD. Also HOLD at 0.05, 0.95, qty 1 and qty 2000.
-    2. EVEN IF IT USED THE MAKER SIDE, the rebate is theta*p*(1-p) per
-       contract and p(1-p) <= 0.25, so it is bounded by
-       0.0125 * 0.25 = 0.003125 per contract -- an order of magnitude
-       below the 0.02 threshold. Measured: +0.0031/contract at p=0.50.
-
-    So with no curve loaded, EXIT is UNREACHABLE for any quantity, any
-    price and either fee side. The desk has never exited a residual on
-    the learned rule and structurally could not have.
+    THE SMALLEST MISSING INPUT is a timestamped period/clock feed for
+    ONE sport, plus its documented mapping to a halfway point. Nothing
+    else in this policy is blocked.
 ════════════════════════════════════════════════════════════════════
-
-SO EXIT TIMING HERE IS A DECLARED RULE, AND IT REPLACES NOTHING
-VALIDATED. There is no operating timing logic to displace: the learned
-one is unreachable and its forecast test was not supported. The rule
-below is a stopgap that makes position management TESTABLE without
-waiting on a settlement forecast, and a successful forecast is
-explicitly NOT a prerequisite for that test.
 """
 
 from __future__ import annotations
 
-POLICY_ID = "RN1X_MGMT_FROZEN_V1"
+from decimal import Decimal
+
+POLICY_ID = "MANAGEMENT_PAIR_091_STOP_16_V1"
+POLICY_CLASS = "MANAGEMENT_DEFINED_EXPERIMENTAL"
 FROZEN_AT = "2026-09-23"
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 
-# ── the frozen thresholds ────────────────────────────────────────────
-# DECLARED, not fitted, and not tuned against any evaluation window.
-ADVERSE_MOVE_FRACTION = 0.20      # of assigned basis, on last OBSERVED price
-MAX_SECONDS_OPEN = 86_400.0       # one day of unpaired exposure
-QUEUE_SHARE = 0.25                # execution ASSUMPTION, swept in reports
-ORDER_EXPIRY_S = 900.0
+# ── §1 the pairing target ────────────────────────────────────────────
+PAIR_TARGET_COST = 0.91        # combined, INCLUDING fees
+PAIR_MIN_NET_PER_PAIR = 0.09   # 1.00 - 0.91, stated so both move together
+TICK = 0.01                    # venue price tick
 
-# Every input this policy can read, with its SOURCE CLASS. A decision
-# record cites these, so no figure in a trace is unattributed.
+# ── §2 the loss trigger ──────────────────────────────────────────────
+LOSS_TRIGGER_FRACTION = 0.84   # net proceeds / allocated cost
+SECOND_HALF_ONLY = True
+
+# ── §3 event phase ───────────────────────────────────────────────────
+SECOND_HALF_UNDEFINED = "SECOND_HALF_UNDEFINED"
+PROGRESS_UNAVAILABLE = "EVENT_PROGRESS_UNAVAILABLE"
+FIRST_HALF = "FIRST_HALF"
+SECOND_HALF = "SECOND_HALF"
+
+# Sports admitted to the loss-exit experiment, with their mapping. EMPTY
+# BY CONSTRUCTION: a sport is added here only when a timestamped
+# progress feed for it exists AND its halfway mapping is written down.
+# An empty registry is the honest state, not an oversight.
+SECOND_HALF_MAPPING: dict = {}
+
+MAPPING_REQUIREMENTS = (
+    "a timestamped progress field observed from the venue or a feed "
+    "(period/quarter/inning/clock), NOT derived from game_start",
+    "a documented rule mapping that field to a halfway point for THAT "
+    "sport",
+    "the field present on the rows this policy reads, at decision time",
+)
+
+WHY_NO_SPORT_IS_ADMITTED = (
+    "no period, quarter, inning, half, clock or score column exists in "
+    "the schema. `live_status` is PREGAME/LIVE derived from "
+    "game_start - observed_at, a scheduled-start wall-clock estimate, "
+    "which section 3 forbids as a basis for the halfway point")
+
+# ── provenance of every readable input ───────────────────────────────
 SOURCE_CLASS = {
-    "assigned_basis": "OBSERVED_INPUT (RN1's own executed fill price)",
-    "last_price": "OBSERVED_INPUT (a print on the tape)",
-    "bid / complement_ask": "OBSERVED_INPUT (the venue's own book)",
-    "depth": "OBSERVED_INPUT",
-    "fees": "OBSERVED_INPUT (the published PMUS schedule)",
-    "seconds_open": "OBSERVED_INPUT (clock arithmetic on observed stamps)",
-    "adverse_move_threshold": "DECLARED_RULE",
-    "max_seconds_open": "DECLARED_RULE",
-    "exit_method_ranking": "DECLARED_RULE over exact arithmetic",
-    "queue_share": "EXECUTION_ASSUMPTION",
+    "held_basis": "OBSERVED_INPUT (the recorded cost basis of held inventory)",
+    "entry_fee": "OBSERVED_INPUT (published schedule; zero on an assigned seed)",
+    "completion_fee": "OBSERVED_INPUT (published schedule, TAKER side)",
+    "executable_bid": "OBSERVED_INPUT (the venue's own book)",
+    "bid_depth": "OBSERVED_INPUT",
+    "event_progress": "OBSERVED_INPUT -- ABSENT, see WHY_NO_SPORT_IS_ADMITTED",
+    "pair_target_cost": "MANAGEMENT_DEFINED (0.91)",
+    "loss_trigger_fraction": "MANAGEMENT_DEFINED (0.84)",
+    "tick_rounding": "VENUE_MECHANIC, rounded conservatively",
     "our_fill": "EXECUTION_ASSUMPTION (print-through; P_FILL NOT_IDENTIFIED)",
-    "ev_hold": "MODEL_ESTIMATE -- NOT USED, see CURVE_CANDIDATE",
     "settlement_payout": "OBSERVED_INPUT, available only for SCORING",
 }
 
-# The rejected curve, kept visible and inert.
-CURVE_CANDIDATE = {
-    "id": "FERRARI_RESIDUAL_EXIT_ISOTONIC",
-    "status": "RESEARCH_CANDIDATE_NOT_ACTIVATED",
-    "forecast_test": ("NOT_SUPPORTED. Paired log-loss difference against "
-                      "the identity +0.0052, 95% interval [-0.0017, "
-                      "+0.0120], on the later 40% of resolved markets"),
-    "forecast_test_is_distinct_from": (
-        "any economic test of a management policy. A curve can forecast "
-        "no better than the price and still sit inside a policy that "
-        "manages well or badly; the two questions do not substitute for "
-        "each other and are never reported as one result"),
-    "activated_by_this_policy": False,
-    "how_it_would_be_activated": (
-        "explicitly, by constructing DK.Policy(curve=...) -- which "
-        "happens today only in tools/desk_replay.py and "
-        "tools/desk_experiments.py, both offline. Nothing in this policy "
-        "or in bettor_mgmt_lifecycle does it"),
-}
-
 BENCHMARKS = {
-    "HOLD_TO_SETTLEMENT": ("the same assigned inventory, carried to the "
-                           "observed payout. No action, no fees"),
-    "RN1_MANAGEMENT": ("what the source account itself did next on the "
-                       "same condition. OBSERVED, at their size and "
-                       "their order policy -- WHALE_ORDER_POLICY is "
-                       "NOT_IDENTIFIED, so it is a benchmark and not an "
+    "HOLD_TO_SETTLEMENT": ("the same assigned inventory carried to the "
+                           "observed payout; no action, no fees"),
+    "RN1_MANAGEMENT": ("what the source account did next on the same "
+                       "condition. OBSERVED, at their size and their "
+                       "order policy -- WHALE_ORDER_POLICY is "
+                       "NOT_IDENTIFIED, so a benchmark and not an "
                        "achievable return"),
 }
 
-MUST_REPORT = (
-    "realised P&L", "open inventory at COST, separately",
-    "fees", "matched and residual quantities",
-    "unpaired exposure", "capital committed",
-    "unresolved positions", "losing positions",
-    "inventory discrepancies",
+DOES_NOT_ESTABLISH = (
+    "profitability -- this is management-defined and experimental",
+    "that it is learned: nothing here is fitted",
+    "our fill probability: P_FILL is NOT_IDENTIFIED, and the resting "
+    "complementary buy depends on it",
+    "a 16% trigger is not a 16% realised loss: the trigger price and "
+    "the execution price are reported separately",
+    "that RN1's prices were available to us: assigned-entry testing",
 )
 
-DOES_NOT_ESTABLISH = (
-    "our fill probability -- P_FILL is NOT_IDENTIFIED",
-    "profitability -- one venue, an assumed execution model, no "
-    "capacity limit, no adverse selection against our own presence",
-    "that RN1's prices were available to us: this is ASSIGNED-ENTRY "
-    "testing, not executable replication",
-    "that the learned curve forecasts better -- its test said otherwise "
-    "and this policy does not consult it",
-)
+
+def _fee_taker(qty, price) -> float:
+    """The published TAKER fee. Used even for a RESTING order's limit.
+
+    WHY THE TAKER SIDE. A resting buy that fills is a MAKER fill and
+    earns a rebate (theta_maker -0.0125). Section 1 says not to rely on
+    an uncertain rebate to meet the target, so the limit is solved
+    against the POSITIVE taker fee. If the rebate arrives it is upside
+    the target never counted on.
+    """
+    from . import bettor_fee_schedule as FEES
+    return float(FEES.LATEST.fill_fee(Decimal(str(round(float(qty), 6))),
+                                      Decimal(str(round(float(price), 6))),
+                                      maker=False))
+
+
+def pair_limit(held_basis_per_contract, qty, *, entry_fee_usd=0.0) -> dict:
+    """§1. The highest complementary limit that still meets the target.
+
+    Solved on the TICK GRID, descending, and rounded CONSERVATIVELY: the
+    limit is the largest tick at which combined cost including fees is
+    still <= 0.91, so the policy never bids a price that would miss the
+    target by a rounding step.
+    """
+    b = float(held_basis_per_contract)
+    q = float(qty)
+    entry_per = float(entry_fee_usd) / q if q > 0 else 0.0
+    budget = PAIR_TARGET_COST - b - entry_per
+    out = {"policy_id": POLICY_ID, "held_basis_per_contract": b,
+           "entry_fee_per_contract": entry_per,
+           "target_combined_cost": PAIR_TARGET_COST,
+           "min_net_per_pair": PAIR_MIN_NET_PER_PAIR,
+           "tick": TICK, "qty": q,
+           "fee_side_used": "TAKER (the rebate is not relied on)",
+           "source_class": SOURCE_CLASS["pair_target_cost"]}
+    if budget <= 0:
+        out.update(limit=None, feasible=False,
+                   why=("the held basis %.4f already leaves no room under "
+                        "a %.2f combined target, so no complementary "
+                        "limit can meet it" % (b, PAIR_TARGET_COST)))
+        return out
+    # Descend the tick grid from the budget. The fee depends on the
+    # price, so each candidate is checked rather than solved in closed
+    # form -- p(1-p) makes the closed form a quadratic and the grid is
+    # exact and obvious.
+    ticks = int(budget / TICK) + 2
+    for i in range(ticks, 0, -1):
+        a = round(i * TICK, 2)
+        if a <= 0:
+            continue
+        fee_per = _fee_taker(q, a) / q if q > 0 else 0.0
+        combined = b + entry_per + a + fee_per
+        if combined <= PAIR_TARGET_COST + 1e-12:
+            out.update(limit=a, feasible=True,
+                       completion_fee_per_contract=fee_per,
+                       combined_cost_per_pair=combined,
+                       net_per_completed_pair=1.00 - combined,
+                       why=("bid %.2f: %.4f basis + %.4f entry fee + "
+                            "%.2f completion + %.4f completion fee = "
+                            "%.4f combined, netting %.4f per completed "
+                            "pair against a %.2f minimum"
+                            % (a, b, entry_per, a, fee_per, combined,
+                               1.00 - combined, PAIR_MIN_NET_PER_PAIR)))
+            return out
+    out.update(limit=None, feasible=False,
+               why=("no tick at or below %.4f meets the target once the "
+                    "completion fee is included" % budget))
+    return out
+
+
+def event_phase(*, progress=None, sport=None) -> dict:
+    """§3. The event phase, from OBSERVED progress or not at all.
+
+    `progress` must be a timestamped observation of event state. There
+    is no fallback: absent a feed and a mapping this returns
+    SECOND_HALF_UNDEFINED, which excludes the market from the loss-exit
+    experiment rather than guessing.
+    """
+    out = {"source_class": SOURCE_CLASS["event_progress"],
+           "sport": sport, "mapping_requirements": list(MAPPING_REQUIREMENTS)}
+    if sport not in SECOND_HALF_MAPPING:
+        out.update(phase=SECOND_HALF_UNDEFINED, loss_exit_available=False,
+                   admitted_to_experiment=False,
+                   why=WHY_NO_SPORT_IS_ADMITTED)
+        return out
+    if progress is None:
+        # Admitted sport, but progress went missing after entry.
+        out.update(phase=PROGRESS_UNAVAILABLE, loss_exit_available=False,
+                   admitted_to_experiment=True,
+                   why=("this sport has a mapping but no progress "
+                        "observation is available now. The loss exit is "
+                        "UNAVAILABLE and the exposure is retained "
+                        "visibly rather than exited on a guess"))
+        return out
+    rule = SECOND_HALF_MAPPING[sport]
+    phase = rule(progress)
+    out.update(phase=phase, loss_exit_available=(phase == SECOND_HALF),
+               admitted_to_experiment=True, observed_progress=progress)
+    return out
+
+
+def loss_trigger(*, allocated_cost_usd, qty, bid=None, bid_size=None) -> dict:
+    """§2. Are net executable proceeds <= 84% of allocated cost?
+
+    USES EXECUTABLE BIDS AND DEPTH. Not the last trade, not the midpoint
+    -- a last trade is where someone else transacted and a midpoint is
+    where nobody did.
+
+    THE TRIGGER PRICE IS NOT THE EXECUTION PRICE. This returns the level
+    at which the rule fires; what the sale actually achieves is a
+    separate number reported beside it. A 16% trigger does not guarantee
+    a 16% realised loss, and a gap through the level can make it worse.
+    """
+    q = float(qty)
+    cost = float(allocated_cost_usd)
+    out = {"policy_id": POLICY_ID, "qty": q,
+           "allocated_cost_usd": cost,
+           "trigger_fraction": LOSS_TRIGGER_FRACTION,
+           "source_class": SOURCE_CLASS["loss_trigger_fraction"],
+           "price_input": "EXECUTABLE_BID_AND_DEPTH",
+           "not_used": ["last trade price", "midpoint"]}
+    if bid is None:
+        out.update(fired=False, status=NOT_IDENTIFIED,
+                   blocker="NO_EXECUTABLE_BID",
+                   why=("no bid was readable, so net proceeds are unknown "
+                        "-- not zero, and not a reason to sell"))
+        return out
+    depth = float(bid_size or 0.0)
+    if depth <= 0:
+        out.update(fired=False, status=NOT_IDENTIFIED,
+                   blocker="NO_EXECUTABLE_DEPTH",
+                   why="a bid with no size behind it is not an exit")
+        return out
+    sellable = min(q, depth)
+    fee = _fee_taker(sellable, bid)
+    proceeds = float(bid) * sellable - fee
+    # The cost allocated to the quantity actually sellable, so a
+    # depth-limited exit is not compared against the whole position's
+    # cost.
+    cost_alloc = cost * (sellable / q) if q > 0 else 0.0
+    ratio = (proceeds / cost_alloc) if cost_alloc > 0 else None
+    fired = ratio is not None and ratio <= LOSS_TRIGGER_FRACTION
+    out.update(
+        fired=fired, status="EVALUATED",
+        sellable_qty=sellable, depth_limited=sellable < q - 1e-12,
+        trigger_bid=float(bid),
+        net_proceeds_usd=proceeds, fees_usd=fee,
+        allocated_cost_for_sellable_usd=cost_alloc,
+        proceeds_over_cost=ratio,
+        trigger_level_bid=(LOSS_TRIGGER_FRACTION * cost_alloc / sellable
+                           if sellable > 0 else None),
+        trigger_price_is_not_execution_price=(
+            "this is the level the rule fires at. What a sale achieves is "
+            "reported separately; a gap through the level can be worse"),
+        why=("net proceeds %.4f on %.4g sellable against allocated cost "
+             "%.4f is %.4f of cost; the trigger is %.2f"
+             % (proceeds, sellable, cost_alloc, ratio or 0.0,
+                LOSS_TRIGGER_FRACTION)))
+    return out
 
 
 def describe() -> dict:
     return {
-        "policy_id": POLICY_ID, "frozen_at": FROZEN_AT,
-        "manages": "a position it was HANDED; entry is RN1's",
-        "thresholds": {
-            "adverse_move_fraction": ADVERSE_MOVE_FRACTION,
-            "max_seconds_open": MAX_SECONDS_OPEN,
-            "queue_share": QUEUE_SHARE,
-            "order_expiry_s": ORDER_EXPIRY_S,
+        "policy_id": POLICY_ID, "policy_class": POLICY_CLASS,
+        "frozen_at": FROZEN_AT,
+        "label": ("MANAGEMENT-DEFINED and EXPERIMENTAL. Not learned, not "
+                  "fitted, not shown to be profitable"),
+        "replaces": ("the provisional adverse-move / time-open trigger, "
+                     "which is withdrawn for this experiment"),
+        "pairing": {
+            "target_combined_cost": PAIR_TARGET_COST,
+            "min_net_per_completed_pair": PAIR_MIN_NET_PER_PAIR,
+            "allowed_throughout_event": True,
+            "fee_side": "TAKER -- the maker rebate is not relied on",
+            "tick": TICK, "rounding": "CONSERVATIVE",
+            "requires": ("a CONFIRMED complementary contract with the "
+                         "applicable $1 combined payout"),
         },
-        "thresholds_are": "DECLARED, frozen before the forward test, "
-                          "not fitted and not tuned on any window",
+        "loss_exit": {
+            "trigger_fraction": LOSS_TRIGGER_FRACTION,
+            "second_half_only": SECOND_HALF_ONLY,
+            "price_input": "EXECUTABLE_BID_AND_DEPTH",
+            "availability": "UNAVAILABLE -- no admitted sport",
+            "why_unavailable": WHY_NO_SPORT_IS_ADMITTED,
+            "admitted_sports": sorted(SECOND_HALF_MAPPING),
+            "mapping_requirements": list(MAPPING_REQUIREMENTS),
+            "smallest_missing_input": (
+                "a timestamped period/clock feed for ONE sport plus its "
+                "documented halfway mapping. Nothing else is blocked"),
+        },
         "source_class": dict(SOURCE_CLASS),
-        "curve_candidate": dict(CURVE_CANDIDATE),
         "benchmarks": dict(BENCHMARKS),
-        "must_report": list(MUST_REPORT),
         "does_not_establish": list(DOES_NOT_ESTABLISH),
-        "replaces_no_validated_timing_logic": (
-            "the learned residual-exit rule is unreachable in production "
-            "(no curve is loaded, and EXIT would need a rebate above 2c "
-            "per contract that the schedule cannot produce) and its "
-            "forecast test was NOT_SUPPORTED. This rule displaces "
-            "nothing that was working"),
+        "authorizes": "SHADOW BEHAVIOUR ONLY. Not funded trading.",
     }
