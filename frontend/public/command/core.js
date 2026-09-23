@@ -156,7 +156,23 @@
         const controller=new AbortController();this.controller=controller;const timeout=setTimeout(()=>controller.abort(),10000);
         try {const response=await fetch(path,{method:'GET',credentials:'same-origin',cache:'no-store',headers:{Accept:'application/json'},signal:this.controller.signal});
           if(response.status===401||response.status===403){this.current=null;throw new Error('Authentication required. Sign in through the secured host.');}
-          if(!response.ok) throw new Error(`Snapshot endpoint returned ${response.status}.`);
+          // A 503 FROM THIS API CARRIES A REASON, AND IT USED TO BE
+          // THROWN AWAY. The server names the specific failure --
+          // which retrieval was incomplete, or which builder
+          // produced a row the contract refuses -- and rendering
+          // only the status code turned a precise diagnosis into
+          // "Snapshot endpoint returned 503" on management's screen.
+          // The body is read defensively: a proxy error page is not
+          // JSON, and a failure to parse the reason must not replace
+          // the failure being reported.
+          if(!response.ok){let why='';
+            try{const b=await response.json();
+              why=typeof b?.detail==='string'?b.detail
+                 :typeof b?.detail?.reason==='string'
+                   ?[b.detail.reason,b.detail.detail].filter(Boolean).join(': ')
+                 :typeof b?.reason==='string'?b.reason:'';}catch(_){}
+            throw new Error(why?`Snapshot endpoint returned ${response.status}. ${why}`
+                               :`Snapshot endpoint returned ${response.status}.`);}
           const payload=await response.json();if(this.closed||gen!==this.generation)return;consume(payload);
         } catch(e){if(this.closed||gen!==this.generation)return;this.onState({status:'disconnected',snapshot:this.current,error:e.message||'Feed unavailable.'});}
         finally{clearTimeout(timeout);if(!this.closed&&gen===this.generation)this.timer=setTimeout(poll,Math.max(5000,this.config.pollMs||15000));}
