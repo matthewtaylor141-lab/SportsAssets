@@ -29,11 +29,18 @@ FOCUS = {
     "exhausted-allowance": "live", "partial-coverage": "live",
     "failed": "live", "scheduled": "live", "unavailable": "management",
     "evidence-from-store": "live",
+    # The two 2026-09-23 scenarios are the run itself, and they are
+    # SEPARATE entries on purpose: one is built from the collector's own
+    # rows, the other from records rebuilt to match its measurements.
+    # Shot side by side, a reader can see which banner each carries.
+    "actual-journal-2026-09-23": "live",
+    "reconstructed-2026-09-23": "live",
 }
 
 # Scenarios that also get a management shot, because the overview is
 # what the reader sees first and its wording is part of the deliverable.
-ALSO_MANAGEMENT = ("collecting", "armed-no-frames", "scheduled", "failed")
+ALSO_MANAGEMENT = ("collecting", "armed-no-frames", "scheduled", "failed",
+                   "actual-journal-2026-09-23")
 
 # The store scenario is about PROVENANCE, so it is shot on the economics
 # view too -- that is where a stored commit and digest change what the

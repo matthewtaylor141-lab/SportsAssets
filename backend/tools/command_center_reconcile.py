@@ -16,6 +16,7 @@ import argparse
 import datetime as dt
 import json
 import os
+import re
 import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
@@ -194,9 +195,19 @@ def main() -> int:
             "health": lo["health"]["verdict"],
         }
         # A quiet book must never be painted as a broken feed.
+        #
+        # THE BARE WORD IS NOT THE TEST, and reading it as one is how
+        # this check first fired on a page that was entirely correct.
+        # The real run's gap table lists two RECOVERED gaps whose
+        # recorded reason is `GAP_DISCONNECTED` -- history, closed,
+        # already counted -- and a substring search found that word and
+        # called the page broken. What the reader must not see is the
+        # VERDICT `DISCONNECTED` standing on its own, so the pattern
+        # requires no identifier character before it.
+        bare = re.search(r"(?<![A-Za-z0-9_])%s(?![A-Za-z0-9_])"
+                         % re.escape(CC.H_DISCONNECTED), txt)
         row["screen"]["quiet_not_called_broken"] = not (
-            lo["health"]["verdict"] == CC.H_LIVE_QUIET
-            and "DISCONNECTED" in txt)
+            lo["health"]["verdict"] == CC.H_LIVE_QUIET and bare)
         row["screen_agrees"] = all(
             v for k, v in row["screen"].items()
             if isinstance(v, bool))

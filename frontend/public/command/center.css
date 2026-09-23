@@ -84,6 +84,24 @@ body.cc {
   font-family: var(--cc-mono);
 }
 
+/* ACTUAL RECORDS. Green, and a third colour on purpose: the rows the
+ * collector wrote are a different claim from records rebuilt to match
+ * them, and two shades of the same banner would invite exactly the
+ * substitution the label exists to stop. */
+.cc-actual {
+  position: sticky; top: 0; z-index: 10;
+  margin: 0 calc(-1 * var(--cc-gutter));
+  padding: 10px var(--cc-gutter);
+  background: var(--cc-good); color: #04160e;
+  font-size: 12.5px; line-height: 1.45;
+  border-bottom: 2px solid #1f7a55;
+}
+.cc-actual b { letter-spacing: 0.03em; }
+.cc-actual code {
+  background: rgba(0,0,0,0.18); padding: 1px 5px; border-radius: 3px;
+  font-family: var(--cc-mono);
+}
+
 /* ── header ─────────────────────────────────────────────────────── */
 
 .cc-head {

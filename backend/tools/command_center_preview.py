@@ -299,9 +299,28 @@ def scenarios() -> dict:
     # a screenshot of it cannot be confused with a synthetic one.
     try:
         import command_center_live_fixture as LIVE
-        S["real-2026-09-23"] = LIVE.scenario()
-    except Exception as exc:                                   # noqa: BLE001
+        S["reconstructed-2026-09-23"] = LIVE.scenario()
+    except Exception:                                          # noqa: BLE001
         pass
+
+    # THE RUN'S OWN ROWS. Not measurements rebuilt into records: the
+    # records. Kept as a SEPARATE scenario from the reconstruction above
+    # so the two can never be mistaken for one another, and absent
+    # rather than faked if the export is missing -- a scenario that
+    # quietly fell back to a fixture would be the substitution the
+    # labelling exists to prevent.
+    try:
+        import command_center_journal_export as EXPORT
+        S["actual-journal-2026-09-23"] = EXPORT.load()
+    except Exception as exc:                                   # noqa: BLE001
+        S["actual-journal-2026-09-23"] = {
+            "why": "THE EXPORT IS NOT READABLE (%s: %s). This scenario "
+                   "shows nothing rather than falling back to a fixture."
+                   % (type(exc).__name__, exc),
+            "raise": ("JOURNAL_EXPORT_UNREADABLE", type(exc).__name__),
+            "control": False, "probe": None, "run_row": RUN_ROW,
+            "now": T0, "records": [],
+        }
 
     S["unavailable"] = {
         "why": "The database read fails. The page must say UNAVAILABLE, "
@@ -397,22 +416,48 @@ def make_app(default_scenario: str, password: str):
     async def preview_snapshot(pool=None, *, now=None):
         sc = S[chosen["name"]]
         payload = await real_snapshot(StubPool(sc), now=sc["now"])
+        # THREE CLASSES, NOT TWO, and the third is the one that counts.
+        #
+        #   SYNTHETIC      invented records exercising a named state.
+        #   RECONSTRUCTED  records built to match measurements read back
+        #                  from production -- the right shape, but not
+        #                  the rows the collector wrote.
+        #   ACTUAL         the rows the collector wrote, books elided.
+        #
+        # Collapsing the last two would let a page drawn from a
+        # reconstruction be presented as a page drawn from the journal,
+        # which is exactly the substitution this label exists to stop.
+        actual = bool(sc.get("actual_records"))
         real = bool(sc.get("real"))
+        if actual:
+            kind, warn = "ACTUAL_RECORDS", (
+                "ACTUAL JOURNAL RECORDS read back from production at %s. "
+                "Every boot, epoch, gap, close, slug and ladder class "
+                "below is a row the collector wrote. The book BODIES are "
+                "NOT here -- each ladder carries its two level counts "
+                "and is stamped bodies_elided -- and ladder instants are "
+                "rounded to the millisecond. No figure on this page is "
+                "computed from a price." % sc.get("read_at"))
+        elif real:
+            kind, warn = "RECONSTRUCTED", (
+                "RECONSTRUCTED FROM REAL READINGS read back from "
+                "production at %s. Segment boundaries, gaps and "
+                "per-market counts are measured; the individual records "
+                "are built to match them and are NOT the rows the "
+                "collector wrote." % sc.get("read_at"))
+        else:
+            kind, warn = "SYNTHETIC", (
+                "EVERY RECORD BEHIND THIS PAGE IS A SYNTHETIC FIXTURE. "
+                "It is not venue data and not a run result.")
         payload["preview"] = {
-            "SYNTHETIC": not real,
-            "REAL_READINGS": real,
+            "SYNTHETIC": kind == "SYNTHETIC",
+            "REAL_READINGS": real or actual,
+            "ACTUAL_RECORDS": actual,
+            "provenance": kind,
             "scenario": chosen["name"],
             "why": sc["why"],
             "read_at": sc.get("read_at"),
-            "warning": (
-                "RECONSTRUCTED FROM REAL READINGS read back from "
-                "production at %s. Segment boundaries, gaps and "
-                "per-market counts are measured. Ladder BODIES are not "
-                "real -- each frame carries only its measured level "
-                "count." % sc.get("read_at")
-                if real else
-                "EVERY RECORD BEHIND THIS PAGE IS A SYNTHETIC FIXTURE. "
-                "It is not venue data and not a run result."),
+            "warning": warn,
         }
         return payload
 

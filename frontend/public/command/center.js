@@ -657,13 +657,22 @@
      * production snapshots carry no `preview` key and show nothing. */
     var p = (state.data || {}).preview;
     if (!p) return '';
-    /* REAL READINGS AND SYNTHETIC FIXTURES GET DIFFERENT BANNERS. Both
-     * are loud; they are not the same claim, and one banner for both
-     * would make a screenshot of the run indistinguishable from a
-     * screenshot of a fixture. */
+    /* THREE CLASSES, THREE BANNERS. They are three different claims:
+     * the rows the collector wrote; records rebuilt to match figures
+     * read back from production; and invented fixtures. One banner for
+     * any two of them would make a screenshot of one pass for a
+     * screenshot of another, which is the whole reason the banner
+     * exists. */
+    if (p.ACTUAL_RECORDS) {
+      return '<div class="cc-actual" role="alert">'
+        + '<b>ACTUAL JOURNAL RECORDS</b> — scenario <code>'
+        + esc(p.scenario) + '</code>, read back from production at '
+        + clock(p.read_at) + '. ' + esc(p.warning) + '</div>';
+    }
     if (p.REAL_READINGS) {
       return '<div class="cc-real" role="alert">'
-        + '<b>RECONSTRUCTED FROM REAL READINGS</b> — scenario <code>'
+        + '<b>RECONSTRUCTED FROM REAL READINGS — NOT THE COLLECTOR’S '
+        + 'OWN ROWS</b> — scenario <code>'
         + esc(p.scenario) + '</code>, read back from production at '
         + clock(p.read_at) + '. ' + esc(p.warning) + '</div>';
     }

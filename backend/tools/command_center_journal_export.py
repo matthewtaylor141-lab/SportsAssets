@@ -201,7 +201,7 @@ def scenario(text: str) -> dict:
 DEFAULT_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.dirname(
         os.path.abspath(__file__)))),
-    "research/beta48/acceptance/journal_export_20260923T1127Z.txt")
+    "research/beta48/acceptance/journal_export_20260923T1130Z.txt")
 
 
 def load(path: str = None) -> dict:
