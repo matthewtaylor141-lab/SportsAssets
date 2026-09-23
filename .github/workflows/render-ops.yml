@@ -19,7 +19,7 @@ on:
           - restart       # confirm=DO
           - deploy        # confirm=DO: deploy the latest commit of the service's branch
           - metrics       # a service's memory (MB) and CPU per instance over the last N minutes (arg, default 120)
-          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | pause-on (DO) | pause-off (DO) | pause-state | mirror-preflight | mirror-rearm (DO) | mirror-register (DO) | mirror-frozen | obs-arm-incentive (DO) | obs-incentive | obs-incentive-journal | obs-incentive-markets | obs-incentive-rows
+          - sql           # arg = activity | tables | sizes | indexes | analyze (DO) | index053 (DO) | mirror-on (DO) | mirror-off (DO) | mirror-state | pause-on (DO) | pause-off (DO) | pause-state | mirror-preflight | mirror-rearm (DO) | mirror-register (DO) | mirror-frozen | obs-arm-incentive (DO) | obs-incentive | obs-incentive-journal | obs-incentive-markets | obs-incentive-rows[:OFFSET:LIMIT]
           - env-keys      # the service's env var KEYS (never values)
           - env-get       # arg = comma-separated OPERATOR FLAGS (LIVE_COPY_HALT, ...); values of flags only
           - env-set       # confirm=DO: arg = KEY=VALUE (value masked in the log; Render redeploys)
@@ -319,15 +319,20 @@ jobs:
                 # two level counts and `bodies_elided: true`, so nothing
                 # downstream can mistake this for the book.
                 #
-                # arg = OFFSET:LIMIT (default 0:5000). SELECT only.
-                obs-incentive-rows)
-                  # ARG is interpolated into the statement, so it is
-                  # checked first. Only digits and one colon.
-                  case "$ARG" in
-                    ""|*[!0-9:]*) [ -z "$ARG" ] || { echo "refused: obs-incentive-rows arg must be OFFSET:LIMIT (digits and one colon)"; exit 1; } ;;
+                # arg = obs-incentive-rows[:OFFSET:LIMIT], default 0:5000.
+                # SELECT only.
+                obs-incentive-rows|obs-incentive-rows:*)
+                  # `arg` already names the statement, so the page is
+                  # appended to it: obs-incentive-rows:OFFSET:LIMIT.
+                  # RANGE is interpolated into SQL, so it is checked
+                  # first and may hold nothing but digits and a colon.
+                  RANGE="${ARG#obs-incentive-rows}"; RANGE="${RANGE#:}"
+                  case "$RANGE" in
+                    "") : ;;
+                    *[!0-9:]*) echo "refused: obs-incentive-rows page must be OFFSET:LIMIT (digits and one colon), got '$RANGE'"; exit 1 ;;
                   esac
                   HEAD=200000; PFMT="-A -t"
-                  SQL="SELECT jsonb_build_object('boot_id', boot_id, 'at', at, 'kind', kind, 'epoch', epoch, 'slug', slug, 'payload', CASE WHEN kind = 'LADDER' THEN jsonb_build_object('bid_levels', jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb)), 'ask_levels', jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb)), 'ladder_class', payload->>'ladder_class', 'bodies_elided', true) ELSE payload END)::text AS row FROM bettor_incentive_journal ORDER BY at, id OFFSET COALESCE(NULLIF(split_part('$ARG', ':', 1), '')::int, 0) LIMIT COALESCE(NULLIF(split_part('$ARG', ':', 2), '')::int, 5000); SELECT count(*) AS rows_total, min(at) AS first_at, max(at) AS last_at, count(DISTINCT boot_id) AS boots, extract(epoch FROM now()) AS read_at FROM bettor_incentive_journal;"; TO=60000 ;;
+                  SQL="SELECT jsonb_build_object('boot_id', boot_id, 'at', at, 'kind', kind, 'epoch', epoch, 'slug', slug, 'payload', CASE WHEN kind = 'LADDER' THEN jsonb_build_object('bid_levels', jsonb_array_length(COALESCE(payload->'bids','[]'::jsonb)), 'ask_levels', jsonb_array_length(COALESCE(payload->'offers','[]'::jsonb)), 'ladder_class', payload->>'ladder_class', 'bodies_elided', true) ELSE payload END)::text AS row FROM bettor_incentive_journal ORDER BY at, id OFFSET COALESCE(NULLIF(split_part('$RANGE', ':', 1), '')::int, 0) LIMIT COALESCE(NULLIF(split_part('$RANGE', ':', 2), '')::int, 5000); SELECT count(*) AS rows_total, min(at) AS first_at, max(at) AS last_at, count(DISTINCT boot_id) AS boots, extract(epoch FROM now()) AS read_at FROM bettor_incentive_journal;"; TO=60000 ;;
                 # [R09] see .github/workflows/RENDER_OPS_NOTES.md
                 mirror-preflight) SQL="SELECT what, value FROM (SELECT key AS what, left(value::text, 240) AS value FROM ingestion_state WHERE key IN ('mirror_live','mirror_live_whales','mirror_live_demoted','mirror_loss_stop','mapping_quarantine','premap_live','side_echo_last','live_trading_paused','copy_overspend_halt','live_verified_whales','live_clip_overrides','workers_boot','roster_auto_last') UNION ALL SELECT 'zz mirror_books live/24h', (SELECT count(*) FILTER (WHERE state <> 'closed') || '/' || count(*) FILTER (WHERE opened_at > now() - interval '24 hours') FROM mirror_books) UNION ALL SELECT 'zz mirror_orders by state', (SELECT COALESCE(string_agg(state || '=' || n, ' ' ORDER BY state), 'none') FROM (SELECT state, count(*) AS n FROM mirror_orders GROUP BY state) s) UNION ALL SELECT 'zz kalshi_claims rn1 24h', (SELECT count(*) FROM kalshi_claims WHERE lower(whale) = 'rn1' AND claimed_at > now() - interval '24 hours')::text UNION ALL SELECT 'zz live_orders 24h by status', (SELECT COALESCE(string_agg(status || '=' || n, ' ' ORDER BY status), 'none') FROM (SELECT status, count(*) AS n FROM live_orders WHERE placed_at > now() - interval '24 hours' GROUP BY status) s) UNION ALL SELECT 'zz live_orders last placed', (SELECT COALESCE(max(placed_at)::text, 'none') FROM live_orders)) t ORDER BY what;"; TO=30000 ;;
                 # [R10] see .github/workflows/RENDER_OPS_NOTES.md
