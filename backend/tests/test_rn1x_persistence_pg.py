@@ -633,3 +633,79 @@ async def test_evaluate_keeps_a_hole_rather_than_renumbering(conn):
         for row, qs in zip(rows, ev["scenarios"]):
             assert row["queue_share"] == qs, (name, row, qs)
     assert ids
+
+
+# ── 9. THE REGISTER MUST NOT GROW ON AN UNCHANGED RE-EVALUATION ─────
+#
+# `bettor_learn_model` is the EXISTING shared register that
+# `render-ops sql learn-inventory` reads. The loop re-evaluates every
+# CYCLE_S, and before this was fixed every cycle appended four more rows
+# -- roughly 384 a day -- because `_next_version` always returns max+1 so
+# the ON CONFLICT clause could never fire. That filled a production table
+# with duplicates and made `version` useless as a comparison ledger.
+
+async def test_an_unchanged_re_evaluation_writes_no_new_rows(conn):
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        first = await WL.cycle(conn)
+        assert first["state"] == "EVALUATED", first
+        n1 = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        assert n1 == len(L.CHALLENGERS), n1
+        assert first["new_rows"] == len(L.CHALLENGERS), first
+
+        # SAME DATA, SAME VERDICTS -> no new rows, and the receipts say so
+        second = await WL.cycle(conn)
+        assert second["state"] == "EVALUATED", second
+        assert second["new_rows"] == 0, second
+        n2 = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        assert n2 == n1, (
+            "the register grew from %d to %d on an unchanged "
+            "re-evaluation" % (n1, n2))
+        assert all(r["written"] is False for r in second["receipts"]), second
+        assert all("unchanged from version" in r["why"]
+                   for r in second["receipts"]), second
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+async def test_a_changed_verdict_still_gets_a_new_version(conn):
+    """The dedup must not suppress a real change.
+
+    Without this, the test above could be satisfied by a loop that stopped
+    writing altogether -- which would look like tidiness and be a worse
+    defect than the duplicates.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        await WL.cycle(conn)
+        n1 = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        # Rewrite one challenger's stored verdict so the next cycle's
+        # conclusion differs from what the register holds.
+        await conn.execute(
+            "UPDATE bettor_learn_model SET status = $1 "
+            "WHERE model_key = $2 AND params->>'challenger' = $3",
+            L.ELIGIBLE, L.MODEL_KEY, "PAIR_090")
+        res = await WL.cycle(conn)
+        assert res["new_rows"] == 1, res
+        n2 = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        assert n2 == n1 + 1, (n1, n2)
+        wrote = [r for r in res["receipts"] if r.get("written")]
+        assert len(wrote) == 1 and wrote[0]["challenger"] == "PAIR_090", res
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")

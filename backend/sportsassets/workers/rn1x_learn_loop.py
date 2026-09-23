@@ -161,6 +161,33 @@ async def _next_version(conn, challenger: str) -> int:
     return int(v or 0) + 1
 
 
+async def _already_recorded(conn, challenger: str, sha: str,
+                            status: str) -> int | None:
+    """Has this exact verdict on this exact dataset already been written?
+
+    THE DEFECT THIS FIXES WAS MINE AND IT WAS WRITING JUNK EVERY CYCLE.
+    The loop re-evaluates every CYCLE_S and `_next_version` always returns
+    `max + 1`, so the `ON CONFLICT (model_key, version)` clause below could
+    never fire and each cycle appended four MORE rows -- about 384 a day --
+    to `bettor_learn_model`. That register is the EXISTING shared one that
+    `render-ops sql learn-inventory` reads, so this was steadily filling a
+    production table other things depend on with duplicates, and making
+    `version` useless as the comparison ledger it is meant to be.
+
+    A new version is warranted when the DATASET changed or the VERDICT
+    changed. Re-evaluating identical data and reaching the same conclusion
+    is not a new result and gets no row; the heartbeat still records that
+    the cycle ran, so "it is working and nothing moved" stays visible
+    without polluting the register.
+    """
+    return await conn.fetchval(
+        "SELECT version FROM bettor_learn_model "
+        "WHERE model_key = $1 AND params->>'challenger' = $2 "
+        "AND dataset_sha = $3 AND status = $4 "
+        "ORDER BY version DESC LIMIT 1",
+        learn.MODEL_KEY, challenger, sha, status)
+
+
 async def cycle(conn, *, code_sha="unknown") -> dict:
     running, why = await _running(conn)
     if not running:
@@ -192,6 +219,14 @@ async def cycle(conn, *, code_sha="unknown") -> dict:
     receipts = []
     for name in learn.challenger_names():
         rec = learn.recommend(ev, name)
+        prior = await _already_recorded(conn, name, sha, rec["verdict"])
+        if prior is not None:
+            # SAME DATA, SAME VERDICT. Not a new result, so not a new row.
+            receipts.append({"challenger": name, "version": int(prior),
+                             "verdict": rec["verdict"], "written": False,
+                             "why": ("unchanged from version %d on the "
+                                     "same dataset" % int(prior))})
+            continue
         version = await _next_version(conn, name)
         row = learn.registry_row(
             name, ev, rec, dataset_sha=sha, code_sha=code_sha,
@@ -212,13 +247,14 @@ async def cycle(conn, *, code_sha="unknown") -> dict:
                                                   default=str),
             row["status"], cutoff, row["note"])
         receipts.append({"challenger": name, "version": version,
-                         "verdict": rec["verdict"],
+                         "verdict": rec["verdict"], "written": True,
                          "why": rec["why"][:400]})
 
     retained = all(r["verdict"] == learn.RETAIN for r in receipts)
     return {"ran": True, "state": "EVALUATED",
             "positions": len(seeds), "decided": ev["decided"],
             "dataset_sha": sha[:12], "receipts": receipts,
+            "new_rows": sum(1 for r in receipts if r.get("written")),
             "champion_retained": retained,
             "note": ("ELIGIBLE never changes the active policy. The "
                      "champion is management-defined and frozen; this loop "
