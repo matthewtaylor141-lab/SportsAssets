@@ -39,6 +39,14 @@ VERSION = "BETTOR_RN1X_RUN_V1"
 HISTORICAL = "HISTORICAL_REPLAY"
 FORWARD = "FORWARD_SHADOW"
 
+#: How far a fill's own timestamp may run AHEAD of our detection stamp and
+#: still be treated as clock skew rather than a broken timestamp. Measured
+#: basis: over 7 days the chain lane's worst observed skew on any tracked
+#: account is -1.3 s (RN1: 77,712 fills, median -0.6, p95 +0.3). 120 s is
+#: two orders of magnitude of headroom over what the feed actually does,
+#: and still refuses anything that is not a clock disagreement.
+CLOCK_SKEW_TOLERANCE_S = 120.0
+
 
 def _fee_fn():
     """The production schedule, taker side for our own executions."""
@@ -93,14 +101,63 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
                                   "why": "no fill by the source account"}
         return out
     seed_row = mine[0]
+    # THE CHAIN LANE'S DETECTION STAMP PRECEDES THE FILL'S OWN STAMP, and
+    # not rarely -- RN1's chain median lag over 7 days is -0.6 s (77,712
+    # fills, p95 +0.3, min -1.3). The venue's clock simply runs a little
+    # ahead of ours. `rn1x_clocks_ordered` requires
+    # detected_ts >= source_ts, so the PROSPECTIVE lane -- which reads the
+    # freshest chain rows, exactly where this shows -- died on a
+    # CheckViolationError at its first candidate and its cursor correctly
+    # refused to advance. Observed 22:56:30Z:
+    #   "P": {"moved": false, "stopped": 221561719, "written": 0,
+    #         "examined": 400, "refusals": {"ERROR:CheckViolationError": 1}}
+    # The historical lane never hit it because backfill rows postdate
+    # their fills by hours.
+    #
+    # THE FIX IS THIS REPOSITORY'S OWN ESTABLISHED CONVENTION, not a new
+    # rule: `learn/dataset.available_at` already uses max(ts, detected_at)
+    # and cites Run 82's finding about chain-lane differences. Taking the
+    # LATER of the two can only ever DELAY when we treat a fill as known,
+    # so it cannot grant look-ahead -- which is the one thing the CHECK
+    # exists to prevent. Clamping the other way, or relaxing the
+    # constraint, would.
+    #
+    # BOUNDED, because a small skew and a broken timestamp are different
+    # facts. Beyond the tolerance the row is refused by name below rather
+    # than silently repaired.
+    src_ts = float(seed_row["ts"])
+    det_raw = float(seed_row["detected_at"])
+    skew = src_ts - det_raw
+    if skew > CLOCK_SKEW_TOLERANCE_S:
+        out["failed_step"] = "SOURCE"
+        out["steps"]["SOURCE"] = {
+            "ok": False, "refusal": "SOURCE_POSTDATES_DETECTION",
+            "source_ts": src_ts, "detected_at": det_raw,
+            "skew_s": skew, "tolerance_s": CLOCK_SKEW_TOLERANCE_S,
+            "why": ("the fill's own timestamp is %.1f s AFTER we recorded "
+                    "seeing it, beyond the %.0f s clock-skew tolerance. A "
+                    "second of venue clock skew is one thing; this is a "
+                    "broken timestamp, and treating it as observed "
+                    "evidence would date the decision before the event"
+                    % (skew, CLOCK_SKEW_TOLERANCE_S))}
+        return out
+    detected_ts = max(src_ts, det_raw)
     out["steps"]["SOURCE"] = {
         "ok": True, "source_class": "OBSERVED_INPUT",
         "trade_id": seed_row["id"], "whale_id": seed_row["whale_id"],
         "outcome_index": seed_row["outcome_index"],
         "side": seed_row["side"], "size": float(seed_row["size"]),
         "price": float(seed_row["price"]),
-        "source_ts": float(seed_row["ts"]),
-        "detected_ts": float(seed_row["detected_at"])}
+        "source_ts": src_ts,
+        "detected_ts": detected_ts,
+        "detected_at_raw": det_raw,
+        "clock_skew_s": skew,
+        "detected_ts_basis": (
+            "max(ts, detected_at). The chain lane's detected_at can "
+            "precede the fill's own ts by up to a second or so of venue "
+            "clock skew; taking the later of the two can only delay when "
+            "we treat the fill as known, never advance it"
+            if skew > 0 else "detected_at, which already follows ts")}
 
     # ── 2 CLASSIFY, over the account's OWN prior fills only ─────────
     hist = [ek.Fill(source_ts=float(r["ts"]),
@@ -138,7 +195,10 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         return out
 
     # ── 3 SEED ──────────────────────────────────────────────────────
-    decision_ts = float(seed_row["detected_at"])
+    # The SAME clock the SOURCE step settled on, not the raw column: the
+    # schema requires decision_ts >= detected_ts, and reading detected_at
+    # again here would reintroduce the violation the step above resolved.
+    decision_ts = detected_ts
 
     # SETTLED BEFORE WE SAW THE ENTRY -- REFUSED HERE, BEFORE SEEDING.
     #

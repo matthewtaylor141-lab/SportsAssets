@@ -1050,6 +1050,92 @@ async def test_a_row_arriving_between_cycles_is_NOT_skipped(conn):
         "a prospective position must not carry a settlement: %r" % dict(row))
 
 
+async def test_a_chain_row_whose_ts_LEADS_detected_at_still_persists(conn):
+    """THE PROSPECTIVE LANE'S ACTUAL PRODUCTION FAILURE, reproduced.
+
+    Observed 22:56:30Z: the lane examined 400 candidates, wrote 0, and its
+    cursor did not move -- `refusals: {"ERROR:CheckViolationError": 1}`,
+    `stopped: 221561719`. The constraint is `rn1x_clocks_ordered`
+    (detected_ts >= source_ts), and the chain lane violates it routinely:
+    RN1's median chain lag over 7 days is **-0.6 s** across 77,712 fills
+    (p95 +0.3, min -1.3). The venue's clock runs slightly ahead of ours.
+
+    The historical lane never hit this because backfill rows postdate
+    their fills by hours. The prospective lane reads the freshest rows,
+    which is exactly where it shows.
+
+    The fix is this repository's own convention -- max(ts, detected_at),
+    as `learn/dataset.available_at` already does citing Run 82 -- and
+    taking the LATER of the two can only delay when a fill is treated as
+    known, never advance it, so it cannot grant look-ahead.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    await _arm(conn)
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.PROSPECTIVE_CURSOR_KEY)
+    await W.cycle(conn, lane="PROSPECTIVE")          # seed and store
+
+    cond = "0xcondition_rn1x_clock_skew"
+    await conn.execute("DELETE FROM trades WHERE condition_id = $1", cond)
+    await conn.execute("DELETE FROM markets WHERE condition_id = $1", cond)
+    await conn.execute(
+        "INSERT INTO markets (condition_id, title, resolved) "
+        "VALUES ($1, $2, FALSE) ON CONFLICT (condition_id) DO UPDATE "
+        "SET resolved = FALSE, resolved_prices = NULL", cond, "skewed")
+    # ts is 0.6 s AFTER detected_at -- the production median, not an edge.
+    base = T0 + timedelta(hours=11)
+    newid = await conn.fetchval(
+        "INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, "
+        "outcome_index, size, price, notional, ts, source, detected_at, "
+        "dedupe_key) VALUES ($1,$2,$3,$4,'BUY',0,100,0.60,60,$5,'chain',"
+        "$6,$7) RETURNING id",
+        WHALE, "0xtx_skew", "asset0", cond,
+        base + timedelta(milliseconds=600), base, "rn1x-skew")
+
+    res = await W.cycle(conn, lane="PROSPECTIVE")
+    assert res["state"] == "REPLAYED", res
+    assert res["stopped_at_error"] is None, (
+        "the clock skew still raises: %r" % (res["results"],))
+    assert res["cursor_moved"] is True, res
+    assert int(newid) in [r["trade_id"] for r in res["results"]], res
+
+    row = await conn.fetchrow(
+        "SELECT source_ts, detected_ts, decision_ts FROM rn1x_positions "
+        "WHERE source_trade_id = $1 AND experiment_id = $2",
+        int(newid), W.PROSPECTIVE_EXPERIMENT_ID)
+    assert row is not None, (
+        "no position was written for the skewed row: %r" % (res["results"],))
+    # THE CLOCKS ARE ORDERED, and detected_ts is the LATER of the two --
+    # never the earlier, which would date our decision before the event.
+    assert row["source_ts"] <= row["detected_ts"] <= row["decision_ts"], dict(row)
+    assert row["detected_ts"] == row["source_ts"], (
+        "detected_ts should be max(ts, detected_at) = ts here: %r" % dict(row))
+
+
+async def test_a_wildly_future_timestamp_is_REFUSED_not_repaired(conn):
+    """A second of skew and a broken timestamp are different facts.
+
+    max(ts, detected_at) must not become a licence to accept any ts at
+    all: a fill stamped an hour after we saw it is not clock skew, and
+    silently repairing it would date a decision before its event.
+    """
+    from sportsassets import bettor_rn1x_run as R
+
+    assert R.CLOCK_SKEW_TOLERANCE_S == 120.0
+    src = 1_790_000_000.0
+    out = R.run(
+        rows=[{"id": 1, "whale_id": WHALE, "condition_id": COND,
+               "outcome_index": 0, "side": "BUY", "size": 100.0,
+               "price": 0.60, "ts": src,
+               "detected_at": src - 3600.0}],
+        source_whale_id=WHALE, condition_id=COND,
+        initial_inventory_verified=True)
+    assert out["failed_step"] == "SOURCE", out
+    assert out["steps"]["SOURCE"]["refusal"] == "SOURCE_POSTDATES_DETECTION"
+    assert out["steps"]["SOURCE"]["skew_s"] == pytest.approx(3600.0)
+
+
 async def test_the_lane_census_measures_latency_on_live_lanes_only(conn):
     """A backfill row's detected_at - ts is the age of the backfill.
 
