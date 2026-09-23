@@ -541,3 +541,47 @@ always will. Even a flawless remainder cannot make this a complete-day
 observation: 27.0% of the window was unobservable before the first frame.
 
 Check 4 is armed. The stop at 2026-09-24T04:00:00Z has not moved.
+
+### Check 3, steps 2 and 4 — completed at 21:58:46Z and 22:00:06Z
+
+My first write-up of check 3 covered only steps 1 and 3. The check
+specifies four readbacks and I had run two. The missing two, run now:
+
+**Step 2 — `obs-live` (run 35925670080, 21:58:46Z). The stop condition did
+not fire.** `armed_probe_id` is still
+**`d5e9ae3d-257f-4948-a808-90d1bd3c5e48`**, unchanged since check 1, so the
+arm was never replaced. `observation_control` true; `bbo_attempts_reserved`,
+`listing_attempts_reserved` and `distinct_reserved` all **0**.
+
+`bettor_live_journal` reads 14 rows, newest **2026-09-22 14:16:33Z**, age
+**114,133.5 s** (31.7 h), 0 rows in the last 60 s. **That is the GENERAL
+loop and it is idle by design while the arm runs** — reading its age as
+collector silence would be a category error. All 14 of its rows are
+`OBSERVATION_ONLY`, 0 `STRATEGY_ADMITTED`, across 8 markets, newest
+`boot_id 3ddd79c916e54190` — a different boot lineage from the incentive
+run's, which is exactly why the two must not be read as one instrument.
+
+**Step 4 — `obs-incentive-markets` (run 35925793462, 22:00:06Z).**
+
+| | check 2 (17:30Z) | check 3 (22:00Z) |
+|---|---|---|
+| `markets_receiving` | 12 of 12 | **12 of 12** |
+| `markets_with_depth` | 12 of 12 | **12 of 12** |
+| `frames_total` | 14,666 | **27,838** |
+| `frames_in_window` | 14,666 | **27,838** |
+| `frames_before_window` | **0** | **0** |
+
+**No market has gone quiet.** Every one of the 12 has depth on every frame
+it recorded (`frames == with_depth` for all twelve), each starts at
+10:28:29Z, and the newest per-market frames span **21:59:07Z → 22:00:03Z** —
+all inside a minute of the read. Frame counts are very uneven (benboo
+7,193, coldpl 5,238, chaxcx 509), which is market activity, not coverage:
+the quietest market is as continuously subscribed as the busiest.
+
+`frames_before_window` is **0** again — nothing outside the window has
+leaked into the denominator.
+
+**One correction to the check's own preamble:** it states `render-ops.yml`
+is 511,233 bytes. It is **511,578** as of `44a350c`, which added a
+non-2xx guard to `deploy-api-commit`. Still **422 bytes under** the
+512,000 ceiling, measured directly rather than taken from the note.
