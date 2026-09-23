@@ -624,3 +624,118 @@ calibration or profitability claim is made or available.
    and no annotation, which looks exactly like a quoting bug and is
    not one. See `research/beta48/acceptance/RENDER_OPS_SIZE_CEILING.md`;
    the first thing to check is `wc -c`.
+
+## 11. The improvement loop — two cycles, nothing promoted, and two defects the checks could not see
+
+### 11.1 Cycle 1 (gate V1) — five variants, five rejections
+
+Each candidate was tied to a measured line of the loss attribution:
+`C1_NARROW_BAND` → settlement, `C2_REQUIRE_CLEARANCE` and
+`C3_PATIENT_EXIT` → exit-vs-basis, `C4_SMALLER_CLIP` → stranded
+capital, `C5_SHORTER_REST` → turnover. None passed both partitions.
+
+**The more useful result was about the gate itself.** V1 ranked on the
+zero-marked lower terminal bound, which has three measured defects:
+
+1. **No resolving power.** `lower = realized − unresolved_cost`; the
+   bound spans ~$34,000 on $100,000 while the realized figures are
+   ±$1,000. The instrument is 9–34× wider than its effect.
+2. **A degenerate objective.** Its optimum is to hold no inventory,
+   i.e. trade nothing. `MIN_DECIDED = 50` was meant to bind there and
+   did not — every candidate decided 300–1,800 orders. Both of V1's
+   TRAIN accepts (C1, C4) are dose reductions.
+3. **It inverted the sign.** V1 scored the baseline *worse* on
+   VALIDATION at queue_share 0.50 (−$4,435 vs −$3,315) while its
+   realized P&L *rose* (+$974 vs +$41).
+
+### 11.2 Gate V2 — declared in `2e23798`, before cycle 2 ran
+
+Ranks on the **cost-marked** terminal (= `realized`, by the ledger
+identity) with the bounds as a required disclosure. Then closes the
+three holes that opens: G1 turnover floor (a dose reduction cannot win
+by shrinking), G3 unresolved-cost ceiling (capital cannot be parked and
+called profit), G4 margin must exceed the bound-width change else
+`NOT_RESOLVED`, G7 `d(realized)/d(queue_share)` must agree in sign
+across partitions.
+
+**V1 was not reapplied to cycle 1.** Rescoring a finished cycle under a
+gate written after seeing its results is the tuning this loop exists to
+prevent.
+
+### 11.3 Cycle 2 — five rejections again, with a sharper reason
+
+The dominant rejection moved from "worse drawdown" (a noise-scale
+comparison) to **`NOT_RESOLVED`**: C1's $381 against a $6,071
+bound-width change, C4's $237 against $8,739, C2's $3 against $41.
+
+**G7 fails on the BASELINE.** `d(realized)/d(queue_share)` is negative
+on TRAIN and positive on VALIDATION for every policy tested including
+the frozen active one. Applying the criterion only to challengers would
+have hidden that. The instability is a property of the corpus, so it is
+not fixable by another entry/exit/sizing knob — and the next justified
+experiment therefore targets the uncertainty (resolve inventory, accrue
+the live lane) rather than the P&L.
+
+### 11.4 Two checks that could not fail, both found by reading numbers
+
+**(a) A bare `setattr` on the policy.** A mistyped candidate knob would
+have attached a dead attribute, left the policy UNCHANGED, and reported
+"no difference from baseline" — a null result manufactured by a typo.
+It now refuses with the list of real knobs.
+
+**(b) The live lane booked every fill free for 37 minutes.**
+`bettor_desk_loop.run()` took `fee_fn=None` and `Desk` turned it into a
+silent zero-fee lambda. The tell was realized P&L reading *exactly*
+$0.00 after 334 fills, which is impossible under a schedule whose maker
+side is a rebate.
+
+**And `invariant_ok` read `t` on all 109 snapshots, truthfully.** The
+identity `cash + inventory_cost − realized == starting_cash` holds
+equally well when no cost was ever charged — it is a CONSISTENCY check,
+not a COMPLETENESS one, and cannot see an accounting input that was
+never supplied. `fees_usd = 0` is equally what a fee-free book and a
+costless window look like.
+
+Fixed by making the schedule the default on `run()` (the same one the
+replay books against), by giving every snapshot and ledger row a
+`fee_basis` of `NO_FEE_SCHEDULE_GROSS` or `FEE_SCHEDULE_APPLIED`, and
+by having the invariant publish its own `does_not_prove` list. Verified
+in production at `15:24:19Z`: realized accruing $10.06 → $11.48 with
+the identity still exact.
+
+### 11.5 The live lane, verified
+
+| | 14:41:49Z | 15:12:46Z | 15:24:31Z |
+|---|---:|---:|---:|
+| decisions | 375 | 2,176 | 2,278 |
+| orders | 35 | 100 | 136 |
+| ledger | 18 | 109 | — |
+| cursor | 221,451,008 | 221,465,688 | 221,466,298 |
+
+**Restart-safety demonstrated across the `503a42b` deploy**, not
+asserted: every action's `first` timestamp is unchanged (NO_TRADE
+14:35:43, ENTER 14:35:44, FILLED 14:35:56, HOLD 14:36:01), so no
+history was replayed under the live label; the cursor is monotone;
+there is exactly one `desk_state` row (single writer); the identity is
+exact on every snapshot.
+
+### 11.6 The publish route, and what it cost
+
+The acceptance probe found the published bundle carried **neither the
+`desk` nor the `learning` tab** — Netlify had not built since before
+the desk work. Both Render services track `claude/session-njaewf` with
+`autoDeploy=yes`, and `deploy-api-commit` explicitly cannot reach a
+worker or Netlify; there is no Netlify hook or token in the repository.
+So publishing required a commit on the collector's branch.
+
+**The `[skip render]` mechanism was verified from the deploy history
+before relying on it**, not assumed: `7f76fd9` carries the directive
+and appears only with trigger `api`, never `new_commit`, while
+`d630d3d` without it deployed as `new_commit`.
+
+Pushed `3d2bc87` — `frontend/public/command/` plus one test file whose
+fetch-guard assertion had gone stale, verified by path to contain no
+backend runtime code, migration, workflow or service config.
+**Afterwards the worker's deploy list was byte-identical to the
+baseline**: newest row still `7f76fd9 · live · api · 10:26:55Z`, no
+`new_commit` row. The collector was not touched.
