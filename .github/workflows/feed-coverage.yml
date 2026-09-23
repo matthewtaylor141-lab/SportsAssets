@@ -25,6 +25,22 @@ on:
         description: "Comma-separated sport keys (blank = probe the defaults)"
         required: false
         default: ""
+      value_slate:
+        description: >-
+          Also run PINNACLE_DEVIG_V1 over the slate and record every
+          decision and refusal in `external_valuations`. Reads the feed and
+          `markets`; writes only that one table, whose order_submitted
+          column has a CHECK that it is FALSE.
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      probe:
+        description: "Run the original coverage probe (set false to only value)"
+        required: false
+        default: "true"
+        type: choice
+        options: ["true", "false"]
 
 permissions:
   contents: read
@@ -37,6 +53,7 @@ jobs:
       - uses: actions/checkout@v4
 
       - name: Ask the provider what it carries
+        if: ${{ github.event.inputs.probe != 'false' }}
         env:
           EDGE_ODDS_API_KEY: ${{ secrets.EDGE_ODDS_API_KEY }}
           SPORTS_IN: ${{ github.event.inputs.sports }}
@@ -175,3 +192,37 @@ jobs:
           echo "  per-event 422/404        -> not on this plan; an upgrade would be needed"
           echo "  COST is credits per EVENT — multiply by the slate to size the bill"
           echo "==========================================================="
+
+      # ── PINNACLE_DEVIG_V1 over the same slate ─────────────────────
+      #
+      # WHY HERE. `EDGE_ODDS_API_KEY` is on edge-shadow and as a repository
+      # secret; it is NOT on sportsassets-api, where the shadow decision
+      # path runs, and a production credential is never copied between
+      # services. This workflow already holds the key and already asks the
+      # provider what it carries, so valuing what it carries belongs beside
+      # that question rather than in a second place with a second copy of
+      # the credential.
+      #
+      # IT WRITES ONE TABLE. `external_valuations`, whose order_submitted
+      # column has a CHECK that it is FALSE -- so this step cannot place an
+      # order even if its code tried to. No trading flag, control row,
+      # position or legacy accounting record is touched.
+      - name: Value the slate with PINNACLE_DEVIG_V1
+        if: ${{ github.event.inputs.value_slate == 'true' }}
+        env:
+          EDGE_ODDS_API_KEY: ${{ secrets.EDGE_ODDS_API_KEY }}
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -o pipefail
+          if [ -z "${EDGE_ODDS_API_KEY:-}" ]; then
+            echo "::error::EDGE_ODDS_API_KEY is not set"; exit 1; fi
+          if [ -z "${DATABASE_URL:-}" ]; then
+            echo "::error::DATABASE_URL is not set"; exit 1; fi
+          pip install --quiet "asyncpg>=0.29"
+          python research/beta48/ext_pinnacle_run.py 2>&1 | tee /tmp/val.txt
+          {
+            echo "### PINNACLE_DEVIG_V1 over the slate"
+            echo '```'
+            cat /tmp/val.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
