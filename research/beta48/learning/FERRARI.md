@@ -443,3 +443,103 @@ the naive rule would have inverted that exact pair.
 | **The three-way comparison** | reconstructed Ferrari vs Ferrari-inspired entry with our residual policies vs simple baselines, on the same opportunities. |
 | **The residual's outcome** | $114.1M of cost whose settlement has still not been queried. |
 | **+$6.22M vs +$10.80M** | still not reconciled, and still not presented as if it were. |
+
+---
+
+## 10. The residual's outcome — the open item, closed
+
+`render-ops sql ferrari-residual`, run 35866605168, read
+2026-09-23T13:23:01Z. Three statements, because three different things
+were unknown and collapsing them would hide which.
+
+### Coverage first, because a P&L over whatever happens to have resolved is a selected sample
+
+| | | |
+|---|---:|---:|
+| Ferrari conditions | 35,162 | |
+| present in `markets` | 28,756 | 81.8% |
+| **absent from `markets` entirely** | **6,406** | **18.2%** |
+| resolved, with payouts | 23,083 | 65.6% |
+| known unresolved | 5,673 | 16.1% |
+
+### The residual, settled where settlement is known
+
+| | |
+|---:|---|
+| residual conditions | 35,151 |
+| settlement **known** | 23,074 — 65.6% |
+| settlement **unknown** | 12,077 — 34.4% |
+| residual cost, all | $114,110,783 |
+| residual cost, settlement known | **$76,983,170** (67.5% of the cost) |
+| residual payout received | $75,647,486 |
+| **residual P&L** | **−$1,335,685** |
+| **payout ÷ cost** | **0.9826** |
+| conditions won / lost | 10,249 / 12,825 — **44.4% win rate** |
+| mean residual entry price | **0.4460** |
+
+**Capital lock-up**, first fill to resolution: p05 0.73 h, **median 3.30
+h**, p95 8.83 h. (801 conditions show `resolved_at` BEFORE the first
+fill. That is an anomaly, not a finding — most likely a backfilled
+resolution timestamp — and it is flagged rather than averaged in.)
+
+**An orientation check, because an index error here would invert
+everything.** `resolved_prices` is indexed by outcome index; if the
+residual leg were read off the wrong index, payout ÷ cost would land
+near 1.25, not 0.98. It lands at 0.9826, and the mean entry price
+(0.4460) sits beside a 44.4% win rate. The orientation is corroborated
+by the magnitudes, not assumed from the column comment.
+
+### This materially reframes the hypothesis, in Ferrari's favour
+
+**Ferrari's residual returns 98.26 cents on the dollar.** Holding
+unpaired inventory to settlement cost it **1.74% gross** over
+$76.98M — not a catastrophe. Its entry prices were **nearly
+calibrated**: it paid a mean 0.4460 for legs that won 44.4% of the
+time, so the passive policy is roughly a fair bet minus a small edge
+against.
+
+**And that is the number an exit policy has to beat.** Any exit —
+DIRECT_EXIT, TAKE_COMPLEMENT, a requote — crosses a spread. On these
+markets a 1.74% gross drag is a *low* bar for a spread to clear.
+**On this evidence there is no case for an aggressive residual-exit
+policy**, and imposing one because §2's aggregate showed −$8.4M would
+have been exactly the error the mandate warns against: *do not impose
+a stop-loss or forced exit merely because Ferrari suffered a large
+loss.* The alternatives now have a measured number to beat instead of
+an assumed disaster to avoid.
+
+### What this does NOT establish
+
+1. **It is 67.5% of the residual capital, not all of it.** $37.1M sits
+   in 12,077 conditions with no settlement in our records, and 6,406
+   conditions are not in `markets` at all. If unresolved markets are
+   systematically different — voided, disputed, long-dated — −1.74% is
+   a **selected** estimate. The selection is measured above and is not
+   argued away.
+2. **Gross.** No fees, no incentives. `bettor_fee_schedule` carries the
+   published PMUS schedule; applying it is a separate step, and a
+   1.74% gross drag is thin enough that fees could change the sign of
+   the comparison against any alternative.
+3. **It still does not reconcile with §2.** The prior account-level
+   aggregate puts the SETTLED channel at **−$8,417,042**; this
+   per-condition reconstruction gives **−$1,335,685** on 67.5% of the
+   cost. Scaling naively to the whole residual gives about −$2.0M,
+   which is still nowhere near −$8.4M. Different windows, different
+   methods, different venues. **Two of the three figures in this file
+   now disagree with the prior aggregates and none of them is being
+   presented as confirming another.**
+
+### What it unblocks
+
+`bettor_exit_engine` states its own central refusal: *"It CANNOT rank
+the actions, because ranking needs EV_HOLD — the value of doing nothing
+— and that requires an independent fair value that does not exist."*
+
+This is the first measured input to EV_HOLD: at the portfolio level,
+**E[payout] ≈ 0.98 × price**, with a 3.3-hour median capital duration.
+It is an aggregate, not a per-position fair value, so it does not by
+itself lift the engine's `NOT_IDENTIFIED`. What it does is fix the
+scale of the question, and the per-price calibration curve — does a leg
+bought at 0.30 win 30% of the time? — is the next artifact, fittable
+with the same isotonic estimator now that §8 has made it safe to trust
+at the tails.
