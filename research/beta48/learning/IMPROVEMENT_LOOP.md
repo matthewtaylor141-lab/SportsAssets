@@ -237,6 +237,28 @@ Decisions: `NO_TRADE` 133 · `HOLD` 121 · `FILLED` 86 · `ENTER` 24 ·
 18 of 18): cash $98,850.22 + inventory $1,149.78 − realized $0.00 =
 $100,000.00 exactly.
 
+### The $0.00 was a defect the identity could not see
+
+Exactly zero realized after 334 fills is impossible under a schedule
+whose maker side is a rebate. `run()` took `fee_fn=None` and `Desk`
+turned it into a silent zero-fee lambda, so **the live lane booked
+every fill free for 37 minutes** — while `invariant_ok` read `t`
+throughout, truthfully, because the identity holds whether or not a
+cost was ever charged. It is a consistency check, not a completeness
+one.
+
+Fixed and verified in production at `15:24:19Z`: realized is now
+accruing ($10.06 → $11.48, maker rebate income) and the identity is
+still exact. `fee_basis` now travels on every snapshot and ledger row,
+and the invariant publishes its own `does_not_prove` list.
+
+**This matters to the loop, not only to the desk.** The replay and the
+experiments have always booked the real schedule, so cycles 1 and 2 are
+unaffected. But the live lane is where the FINAL evaluation set
+accrues, and a gross live book compared against a costed replay would
+have been a second, avoidable incomparability on top of the execution
+assumptions. Both now use the same schedule.
+
 This closes the chain the audit found broken — live market data →
 independent selection → risk check → resting shadow order → simulated
 execution → inventory → reconciled ledger — all of it persistent and

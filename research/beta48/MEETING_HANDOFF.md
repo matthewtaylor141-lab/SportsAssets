@@ -6,8 +6,11 @@
    `14:41:49Z`: 375 decisions (newest 9 s old), 35 orders, 20
    positions, 18 ledger snapshots, cursor advancing, **ledger identity
    exact on all 18**. The chain the audit found broken is closed.
-2. **Nothing it has done is a result yet.** Six minutes, $0.00
-   realized, nothing settled.
+2. **Nothing it has done is a result yet.** Under an hour of running,
+   realized **+$11.48** (maker rebate income), nothing settled. Its
+   first 37 minutes were booked with **no fee schedule at all** — a
+   defect found by reading the numbers, fixed, and described in §3b,
+   along with why `invariant_ok` could not detect it.
 3. **The improvement loop ran two complete cycles and promoted
    nothing.** Ten variant-evaluations, zero acceptances. The active
    policy is unchanged and frozen.
@@ -94,6 +97,42 @@ Cursor `221,451,008`, advancing.
 **The ledger identity holds on every snapshot** (18 of 18):
 cash $98,850.22 + inventory $1,149.78 − realized $0.00 =
 **$100,000.00 exactly**.
+
+### 3b. That $0.00 was a defect, and the identity could not see it
+
+Realized P&L reading **exactly** $0.00 after 334 fills is arithmetically
+impossible under the PMUS schedule, whose maker side is a rebate. The
+cause: `bettor_desk_loop.run()` took `fee_fn=None` and `Desk` turned
+that into a silent zero-fee lambda. **The live lane booked every fill
+free for 37 minutes.**
+
+The worse half: **`invariant_ok` read `t` on all 109 snapshots, and it
+was telling the truth.** The identity `cash + inventory_cost − realized
+== starting_cash` holds equally well when no cost was ever charged. It
+is a *consistency* check, not a *completeness* one, and it is
+structurally incapable of noticing an accounting input that was never
+supplied. `fees_usd = 0` is likewise ambiguous on its own — it is
+equally what a fee-free book and a genuinely costless window look like.
+
+**Fixed and verified in production at `15:24:19Z`:** realized P&L is
+now non-zero and accruing — $10.06 → $10.18 → $10.21 → $10.48 →
+**$11.48** — which is the maker rebate income that had been invisible.
+Identity still exact: $98,228.80 + $1,782.68 = $100,011.48.
+
+Three durable changes, not just the missing argument:
+- the schedule is now the **default** on `run()`, not something a call
+  site must remember, and it is the **same** schedule the replay books
+  against so the two remain comparable on cost;
+- `fee_basis` (`NO_FEE_SCHEDULE_GROSS` / `FEE_SCHEDULE_APPLIED`) travels
+  on every snapshot and into every ledger row, so a gross book can
+  never again render identically to a net one;
+- the invariant now publishes its own `does_not_prove` list — that
+  costs were charged, that the valuations are right, that the fill
+  assumptions are right.
+
+Five tests with controls, including one that runs a gross and a net
+book side by side and asserts **both reconcile** — pinning the blind
+spot itself rather than commenting on it.
 
 That closes the chain end to end — live market data → independent
 selection → risk check → resting shadow order → simulated execution →
