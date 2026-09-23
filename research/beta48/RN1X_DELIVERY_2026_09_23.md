@@ -186,6 +186,28 @@ evaluating. (asyncpg's pooled-connection reset runs
 `SELECT pg_advisory_unlock_all()` — connection.py:1748 — so the outgoing
 instance's cancelled task genuinely frees the lock.)
 
+### And the loop was polluting the register it writes to
+
+Reviewing what I had left running, `_next_version` always returns `max + 1`,
+so the `ON CONFLICT (model_key, version)` clause could never fire and every
+cycle appended four more rows to `bettor_learn_model` — the EXISTING shared
+register that `render-ops sql learn-inventory` reads. Sixteen an hour.
+
+The first fix (skip when dataset digest AND verdict are unchanged) would
+not have helped, and I checked that before claiming it had: while the
+experiment is still backfilling, every cycle genuinely sees new positions,
+so the digest never matches and four *legitimate* rows land anyway. Those
+are worse than duplicates in one respect — real evaluations on marginally
+more data, which nothing would flag as noise.
+
+So the substantive gate is `MIN_NEW_POSITIONS = 5`: a verdict resting on
+hundreds of decided orders does not change on one more settled position,
+and a cycle below the threshold returns `TOO_FEW_NEW_POSITIONS` with both
+counts, so "working, not enough new evidence" stays visible. `CYCLE_S` went
+900 → 3600 for cost. The gate deliberately does **not** block the first
+evaluation — a gate that did would leave the register permanently empty and
+the panel permanently blank, which is rigour that produces no evidence.
+
 **THE TWO EVALUATIONS ARE NOT INDEPENDENT REPLICATIONS.** The 598-decided
 dataset CONTAINS the 420-decided one; the experiment kept seeding between
 the two runs. PAIR_092 clearing twice on nested data is one result
