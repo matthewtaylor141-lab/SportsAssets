@@ -599,6 +599,54 @@ jobs:
             /tmp/ca.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
             || head -c 400 /tmp/ca.json
 
+          # 5b · ARM THE FITTING LOOP and read its tile, plus the two
+          # book tiles. Separate from the comparator on purpose.
+          code=$(curl -s -o /tmp/mf.json -w '%{http_code}' --max-time 45 \
+                 -X POST -H "$H" \
+                 "$API/api/admin/rn1x-model-fit/$WANT" || echo 000)
+          say "model-fit arm($WANT) HTTP $code"
+          jq -c . /tmp/mf.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 200 /tmp/mf.json
+          [ "$WANT" = "on" ] && sleep 150
+
+          code=$(curl -s -o /tmp/st2.json -w '%{http_code}' --max-time 60 \
+                 -H "$H" "$API/api/command/rn1x/statuses" || echo 000)
+          say "statuses HTTP $code"
+          jq -r '.statuses | to_entries[]
+                 | "\(.key)\t\(.value.badge)\t\((.value.why // "")[0:78])"' \
+            /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 300 /tmp/st2.json
+          echo "-- model fitting, in detail --" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.statuses.model_fitting
+                 | "target\t"        + (.target // "?"),
+                   "armed\t"         + ((.armed)|tostring),
+                   "predictions\t"   + ((.predictions // 0)|tostring),
+                   "joined\t"        + ((.joined_outcomes // 0)|tostring),
+                   "promotes\t"      + ((.promotes_a_winner)|tostring),
+                   "not_settlement\t"+ ((.this_is_not_a_settlement_forecast)|tostring),
+                   "last_cycle\t"    + ((.last_cycle // "none")|tostring)' \
+            /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo "-- order book + P&L --" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '"orders_total\t"  + ((.statuses.order_book_state.orders_total // 0)|tostring),
+                 "settled_total\t" + ((.statuses.shadow_pnl.settled_total // 0)|tostring),
+                 "unrealised\t"    + ((.statuses.shadow_pnl.unrealised // "?")|tostring)' \
+            /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo "-- the second-half blocker, measured --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.progress_probe
+                 | "scores_http\t"       + ((.status // "?")|tostring),
+                   "events\t"            + ((.events // 0)|tostring),
+                   "in_play\t"           + ((.in_play_with_scores // 0)|tostring),
+                   "progress_fields\t"   + ((.progress_fields_present // [])|tostring),
+                   "carries_period\t"    + ((.carries_observed_period)|tostring),
+                   "verdict\t"           + ((.verdict // "?")|tostring)' \
+            /tmp/pr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          jq -r '.second_half_exit
+                 | "rule_written_for\t"  + ((.sports_with_a_written_rule // [])|tostring),
+                   "feed_connected\t"    + ((.sports_with_a_connected_feed // [])|tostring),
+                   "missing\t"           + ((.missing_capability // "?")|tostring)' \
+            /tmp/pr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+
           # 6 · ONE COMPLETE VALUATION TRACE, if any row exists. Every
           # field the directive lists, on one row, from production.
           RID=$(jq -r '.summary.evaluated // 0' /tmp/cs.json 2>/dev/null)
