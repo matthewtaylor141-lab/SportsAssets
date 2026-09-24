@@ -38,9 +38,9 @@ from sportsassets.workers import ext_pinnacle_loop as loop
 DSN = os.environ.get("RN1X_TEST_DSN")
 pg = pytest.mark.skipif(not DSN, reason="RN1X_TEST_DSN is not set")
 
-CONDITION = "c-entry-ari-col"
-SLUG = "ari-col-entry"
-US_SLUG = "aec-mlb-ari-col-2026-09-24-ari"
+CONDITION = "c-entry-sea-hou"
+SLUG = "sea-hou-entry"
+US_SLUG = "aec-mlb-sea-hou-2026-09-24-hou"
 EVENT_KEY = "evt-entry-1"
 
 #: Venue prose that agrees with Pinnacle's captured pre-game baseball
@@ -82,10 +82,10 @@ def _event(price=1.36, stamp_age_s=2.0, at=None):
     # the favourite here. Getting this backwards priced p(underdog) 0.28
     # against an ask of 0.62 and refused with NO_OBSERVED_DEPTH_INSIDE_THE
     # _BREAK_EVEN_LIMIT, which was the engine being right.
-    prices = [{"name": "Colorado Rockies", "price": price},
-              {"name": "Arizona Diamondbacks", "price": 3.55}]
-    return {"id": EVENT_KEY, "home_team": "Colorado Rockies",
-            "away_team": "Arizona Diamondbacks",
+    prices = [{"name": "Houston Astros", "price": price},
+              {"name": "Seattle Mariners", "price": 3.55}]
+    return {"id": EVENT_KEY, "home_team": "Houston Astros",
+            "away_team": "Seattle Mariners",
             "commence_time": "2026-09-24T19:10:00Z",
             "bookmakers": [
                 {"key": "pinnacle", "last_update": stamp,
@@ -127,23 +127,20 @@ async def _seed(conn):
     await conn.execute(
         "INSERT INTO ingestion_state (key, value) VALUES ($1,'true') "
         "ON CONFLICT (key) DO UPDATE SET value = 'true'", loop.CONTROL_KEY)
-    # ONE MARKET FOR THIS FIXTURE, AND ONLY ONE. A second row naming the
-    # same two teams makes the mapping AMBIGUOUS and the loop refuses every
-    # candidate -- correctly -- so the cycle reports `evaluated: 0` and the
-    # test reads as "the lane did nothing". That happened: a row left behind
-    # by an unrelated probe. The seed now owns the fixture.
-    await conn.execute(
-        "UPDATE markets SET closed = TRUE WHERE condition_id <> $1 "
-        "AND sport = 'MLB' AND NOT closed "
-        "AND event_title ILIKE '%Arizona%' AND event_title ILIKE '%Colorado%'",
-        CONDITION)
+    # THIS FIXTURE'S TEAMS ARE ITS OWN. An earlier version closed any other
+    # MLB market naming the same two clubs, to keep the mapping
+    # unambiguous -- and that silently closed the ACCEPTANCE suite's
+    # market, breaking thirty of its tests whenever the two ran together.
+    # A teardown that reaches outside its own fixture is a worse fault than
+    # the ambiguity it was treating, so the pair below is one no other test
+    # uses and nothing is closed.
     await conn.execute(
         "INSERT INTO markets (condition_id, title, event_title, slug, "
         "sport, closed, resolved) VALUES ($1,$2,$3,$4,'MLB',false,false) "
         "ON CONFLICT (condition_id) DO UPDATE SET sport = 'MLB', "
         "closed = FALSE, resolved = FALSE, updated_at = now()",
-        CONDITION, "Will Arizona Diamondbacks beat Colorado Rockies?",
-        "Arizona Diamondbacks vs. Colorado Rockies", SLUG)
+        CONDITION, "Will Seattle Mariners beat Houston Astros?",
+        "Seattle Mariners vs. Houston Astros", SLUG)
     # THE AUTHORITATIVE SCOPE AND EVENT STATE, persisted exactly as the
     # acquisition route writes it. Without this row the scope gate refuses
     # and no settlement comparison can read COMPATIBLE.
@@ -153,7 +150,7 @@ async def _seed(conn):
         "start_evidence, game_pk, official_date, home_team, away_team, "
         "source, source_url, retrieved_at, reader_version) "
         "VALUES ($1,$2,$3,9,false,'Pre-Game',$4,824298,'2026-09-24',"
-        "'Colorado Rockies','Arizona Diamondbacks','MLB_STATS_API',"
+        "'Houston Astros','Seattle Mariners','MLB_STATS_API',"
         "'https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=2026-09-24',"
         "now(),'test') "
         "ON CONFLICT (condition_id) DO UPDATE SET phase = EXCLUDED.phase, "
@@ -170,10 +167,18 @@ async def _seed(conn):
         "outcome_index) VALUES ($1,$2,$3,$4),($5,$2,$6,$7) "
         "ON CONFLICT (token_id) DO UPDATE SET outcome = EXCLUDED.outcome, "
         "outcome_index = EXCLUDED.outcome_index",
-        "tok-col", CONDITION, "Colorado Rockies", 0,
-        "tok-ari", "Arizona Diamondbacks", 1)
+        "tok-hou", CONDITION, "Houston Astros", 0,
+        "tok-sea", "Seattle Mariners", 1)
     await conn.execute("DELETE FROM external_valuations "
                        "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+    # OUTCOMES FIRST: `rn1x_outcomes` references the position, and the
+    # lifecycle test leaves one behind. A settlement row is meant to
+    # outlive the decision that preceded it, which is why the foreign key
+    # is there -- so the teardown removes it explicitly rather than the
+    # schema being loosened to make cleanup easy.
+    await conn.execute(
+        "DELETE FROM rn1x_outcomes WHERE position_id IN (SELECT position_id "
+        "FROM rn1x_positions WHERE policy = $1)", inv.POLICY)
     await conn.execute(
         "DELETE FROM rn1x_fills WHERE order_id IN (SELECT order_id FROM "
         "rn1x_orders WHERE position_id IN (SELECT position_id FROM "
@@ -188,6 +193,44 @@ async def _seed(conn):
                        inv.POLICY)
     await conn.execute("DELETE FROM external_source_calibration "
                        "WHERE source_version = $1", devig.VERSION)
+
+
+async def _cleanup(conn):
+    """Remove everything this module created.
+
+    ITS ROWS ARE ITS OWN. An open MLB market left in `markets` becomes a
+    CANDIDATE for every other suite's pool query, and an outcome row left
+    in `rn1x_outcomes` makes another suite's teardown fail on a foreign
+    key. Both happened, and together they turned thirty-four unrelated
+    tests red. Deleting the market cascades to its tokens.
+    """
+    for sql, args in (
+            ("DELETE FROM rn1x_outcomes WHERE position_id IN (SELECT "
+             "position_id FROM rn1x_positions WHERE policy = $1)",
+             (inv.POLICY,)),
+            ("DELETE FROM rn1x_fills WHERE order_id IN (SELECT order_id "
+             "FROM rn1x_orders WHERE position_id IN (SELECT position_id "
+             "FROM rn1x_positions WHERE policy = $1))", (inv.POLICY,)),
+            ("DELETE FROM rn1x_orders WHERE position_id IN (SELECT "
+             "position_id FROM rn1x_positions WHERE policy = $1)",
+             (inv.POLICY,)),
+            ("DELETE FROM rn1x_decisions WHERE position_id IN (SELECT "
+             "position_id FROM rn1x_positions WHERE policy = $1)",
+             (inv.POLICY,)),
+            ("DELETE FROM rn1x_positions WHERE policy = $1",
+             (inv.POLICY,)),
+            ("DELETE FROM external_valuations WHERE condition_id = $1",
+             (CONDITION,)),
+            ("DELETE FROM fixture_metadata WHERE condition_id = $1",
+             (CONDITION,)),
+            ("DELETE FROM markets WHERE condition_id = $1", (CONDITION,)),
+            ("DELETE FROM external_source_calibration WHERE measured_by = $1",
+             ("CONTROLLED_INTEGRATION_TEST",)),
+    ):
+        try:
+            await conn.execute(sql, *args)
+        except Exception:                                      # noqa: BLE001
+            pass
 
 
 async def _calibrate(conn):
@@ -303,6 +346,7 @@ async def test_without_a_calibration_row_the_entry_is_refused_by_name(
         assert row["decision"] == "NO_TRADE"
         assert row["admissible"] is False
     finally:
+        await _cleanup(conn)
         await conn.close()
 
 
@@ -433,6 +477,7 @@ async def test_an_admitted_entry_becomes_a_position_order_fill_and_basis(
         assert sc["fixture_retrieved_at"]
         assert sc["venue_rules_read"] is True
     finally:
+        await _cleanup(conn)
         await conn.close()
 
 
@@ -463,6 +508,7 @@ async def test_a_second_cycle_does_not_create_a_second_position(monkeypatch):
         # The second cycle's own report says which it was.
         assert second["evaluated"] >= 0
     finally:
+        await _cleanup(conn)
         await conn.close()
 
 
@@ -490,6 +536,7 @@ async def test_an_incompatible_settlement_rule_refuses_the_entry(monkeypatch):
             inv.POLICY)
         assert held == 0, "an incompatible payout rule creates no inventory"
     finally:
+        await _cleanup(conn)
         await conn.close()
 
 
@@ -509,6 +556,7 @@ async def test_an_unreadable_ladder_refuses_by_its_own_name(monkeypatch):
         assert out["refusals"].get(entryx.R_NO_LADDER), out["refusals"]
         assert "ADMITTED" not in out["refusals"]
     finally:
+        await _cleanup(conn)
         await conn.close()
 
 
@@ -532,6 +580,7 @@ async def test_a_ladder_priced_beyond_break_even_is_not_an_unknown(
             out["refusals"]
         assert entryx.R_NO_LADDER not in out["refusals"]
     finally:
+        await _cleanup(conn)
         await conn.close()
 
 
@@ -595,6 +644,7 @@ async def test_the_entry_lanes_inventory_is_actually_re_evaluated(monkeypatch):
         assert "_ext.EXPERIMENT_ID" in helper, (
             "the helper must manage the entry lane's experiment too")
     finally:
+        await _cleanup(conn)
         await conn.close()
 
 
@@ -699,6 +749,7 @@ async def test_a_later_cycle_on_a_held_exposure_adds_no_executions(
         assert inv.ADD_SUPPORTED is False
 
     finally:
+        await _cleanup(conn)
         await conn.close()
 
 
@@ -717,7 +768,7 @@ async def test_an_exact_replay_is_named_a_replay_and_writes_nothing(
         # different case from the one this test is about.
         rec = {"admissible": True, "experiment_id": ext.EXPERIMENT_ID,
                "observed_at": 1000.0, "received_at": 1000.0,
-               "payout_event": "Colorado Rockies",
+               "payout_event": "Houston Astros",
                "contract": {"condition_id": CONDITION,
                             "us_market_slug": US_SLUG,
                             "buy_intent": "ORDER_INTENT_BUY_LONG",
@@ -748,6 +799,7 @@ async def test_an_exact_replay_is_named_a_replay_and_writes_nothing(
             w1["position_id"])
         assert n2 == n1, "a replay writes nothing"
     finally:
+        await _cleanup(conn)
         await conn.close()
 
 
@@ -810,7 +862,7 @@ async def test_the_writer_itself_refuses_a_second_observation_as_an_add():
         def _rec(observed_at, vwap):
             return {"admissible": True, "experiment_id": ext.EXPERIMENT_ID,
                     "observed_at": observed_at, "received_at": observed_at,
-                    "payout_event": "Colorado Rockies",
+                    "payout_event": "Houston Astros",
                     "contract": {"condition_id": CONDITION,
                                  "us_market_slug": US_SLUG,
                                  "buy_intent": "ORDER_INTENT_BUY_LONG",
@@ -850,4 +902,168 @@ async def test_the_writer_itself_refuses_a_second_observation_as_an_add():
         assert after == before, ("a second observation must change nothing: "
                                  "%r vs %r" % (after, before))
     finally:
+        await _cleanup(conn)
+        await conn.close()
+
+
+# ── ITEM 1: THE WHOLE LIFECYCLE ON AN ENTRY-CREATED POSITION ─────────
+
+@pg
+@pytest.mark.asyncio
+async def test_an_entry_created_position_runs_the_whole_lifecycle(
+        monkeypatch):
+    """ENTRY -> TWO SCHEDULED MANAGEMENT CYCLES -> RESTART -> SETTLEMENT.
+
+    Not the acceptance harness's seeded position: one this lane created
+    itself, with source_trade_id NULL and provenance
+    AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW. The manager and the store
+    must carry it as it is -- no fabricated RN1 trade, no replacement
+    position, and the same position_id throughout.
+
+    Management is driven through `rn1x_shadow.run_continuing_management`,
+    which is what the scheduled cycle calls on BOTH paths, including the
+    one where the cohort produced no new candidate.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    from sportsassets import bettor_rn1x_store as store
+    from sportsassets.workers import rn1x_shadow as RS
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _seed(conn)
+        await _calibrate(conn)
+        _stub(monkeypatch)
+        made = await loop.cycle(conn)
+        assert made["refusals"].get("ENTRY_INVENTORY_WRITTEN") == 1, \
+            made["refusals"]
+        pid = made["entries"][0]["position_id"]
+
+        # ── THE POSITION AS THE LANE CREATED IT ──────────────────────
+        pos = await conn.fetchrow(
+            "SELECT source_trade_id, source_account, provenance, policy, "
+            "seed_qty::float8 AS q FROM rn1x_positions WHERE position_id=$1",
+            pid)
+        assert pos["source_trade_id"] is None, (
+            "an autonomous entry has no source trade and one must not be "
+            "invented for it")
+        assert pos["provenance"] == inv.PROVENANCE
+        assert pos["policy"] == inv.POLICY
+
+        # ── THE STORE CARRIES A NULL source_trade_id ─────────────────
+        open_rows = await store.open_positions(
+            conn, experiment_id=ext.EXPERIMENT_ID, limit=10)
+        mine = [r for r in open_rows if r["position_id"] == pid]
+        assert mine, "the store must return it as an ordinary open position"
+        assert mine[0]["source_trade_id"] is None
+
+        async def decisions():
+            return await conn.fetchval(
+                "SELECT count(*) FROM rn1x_decisions WHERE position_id=$1",
+                pid)
+
+        d0 = await decisions()
+        assert d0 >= 1, "the entry itself recorded a decision"
+
+        # ── TWO SCHEDULED MANAGEMENT CYCLES ──────────────────────────
+        # Through the same entry point the scheduler uses. It must not
+        # raise on a NULL source trade, and it must find THIS experiment.
+        seen = []
+        managed_results = []
+        for _ in range(2):
+            got = await RS.run_continuing_management(
+                conn, experiment_id=RS.CHALLENGER_EXPERIMENT_ID)
+            assert got["entry_lane"] is not None
+            el = got["entry_lane"]
+            assert "error" not in el, el.get("error")
+            assert ext.EXPERIMENT_ID in got["experiments"]
+            seen.append(el.get("examined"))
+            managed_results.append(el)
+        assert all(n and n >= 1 for n in seen), (
+            "both cycles must have examined the entry lane's position: %r"
+            % (seen,))
+        # AND NOT MERELY EXAMINED: each cycle must have reached a recorded
+        # outcome for it -- either a written management decision or a named
+        # refusal. "examined, and nothing happened" is the state that hid
+        # the TypeError through three cycles.
+        for got in (seen_full := managed_results):
+            res = [r for r in (got.get("results") or [])
+                   if r.get("position_id") == pid]
+            assert res, "the position must appear in the results"
+            r = res[0]
+            assert r.get("written") or r.get("error") or r.get("refused_at") \
+                or r.get("no_inputs") or r.get("first_failing_link"), r
+            assert not r.get("error"), r["error"]
+
+        # THE SAME POSITION, NOT A REPLACEMENT.
+        assert await conn.fetchval(
+            "SELECT count(*) FROM rn1x_positions WHERE policy=$1",
+            inv.POLICY) == 1
+        assert await conn.fetchval(
+            "SELECT count(*) FROM rn1x_positions WHERE position_id=$1",
+            pid) == 1
+
+        # ── RESTART RECOVERY ────────────────────────────────────────
+        # A new connection is a new process for these purposes: nothing is
+        # carried in memory, and the position is rebuilt from the ledger.
+        await conn.close()
+        conn = await asyncpg.connect(DSN)
+        again = await RS.run_continuing_management(
+            conn, experiment_id=RS.CHALLENGER_EXPERIMENT_ID)
+        el = again["entry_lane"]
+        assert "error" not in el, el.get("error")
+        assert el.get("examined") >= 1, (
+            "after a restart the position must still be found and managed")
+        loaded = await store.load_position(conn, pid)
+        assert loaded["orders"], "its order survived the restart"
+        assert loaded["fills"], "and its fills"
+
+        # ── SETTLEMENT ──────────────────────────────────────────────
+        # Recorded in `rn1x_outcomes`, which is a SEPARATE table on
+        # purpose: an outcome lands after the fact and never rewrites the
+        # decision that preceded it.
+        acct = made["entries"][0]["accounting"]
+        await conn.execute(
+            "INSERT INTO rn1x_outcomes (position_id, settled_at, "
+            "payout_per_leg, realized_cash_usd, fees_usd, residual_qty, "
+            "unpaired_qty, net_usd, outcome_basis) VALUES "
+            "($1, now(), '{\"YES\": 1}'::jsonb, $2, $3, 0, 0, $4, "
+            "'OBSERVED_PAYOUT_SCORING_ONLY') "
+            "ON CONFLICT (position_id) DO NOTHING",
+            pid, acct["filled_qty"], acct["fees_usd"],
+            acct["filled_qty"] - acct["cost_basis_usd"])
+        settled = await conn.fetchrow(
+            "SELECT realized_cash_usd::float8 AS cash, net_usd::float8 AS "
+            "net, residual_qty::float8 AS resid FROM rn1x_outcomes "
+            "WHERE position_id = $1", pid)
+        assert settled is not None
+        assert settled["resid"] == 0.0, "settlement closes the residual"
+        # THE ACCOUNTING RECONCILES: a contract that pays 1 returns the
+        # quantity in cash, and the net is that less what it cost.
+        assert settled["cash"] == pytest.approx(acct["filled_qty"])
+        assert settled["net"] == pytest.approx(
+            acct["filled_qty"] - acct["cost_basis_usd"])
+        # AND THE DECISION THAT PRECEDED IT IS UNTOUCHED.
+        assert await decisions() >= d0
+        ev = await conn.fetchrow(
+            "SELECT ev_at_decision_usd, ev_basis FROM rn1x_decisions "
+            "WHERE position_id = $1 ORDER BY decision_ts LIMIT 1", pid)
+        assert "EXTERNAL_BOOKMAKER_VALUATION" in ev["ev_basis"]
+
+        # ── AND IT IS NO LONGER OPEN ─────────────────────────────────
+        # The exposure rails must stop counting a settled position, which
+        # is what lets the lane enter again.
+        rows = await loop.open_shadow_book(conn, ext.EXPERIMENT_ID)
+        exp = entryx.exposure_from_rows(
+            rows, condition_id="other", event_key="other",
+            proposed_cost_usd=10.0, proposed_qty=10.0, now=time.time())
+        assert exp["settled_positions_excluded_from_exposure"] >= 1
+        assert exp["observed"]["MAX_CAPITAL_DEPLOYED"] == pytest.approx(10.0)
+    finally:
+        # THIS TEST'S OUTCOME ROW IS ITS OWN TO REMOVE. `rn1x_outcomes`
+        # references the position, so a row left here made an unrelated
+        # suite's teardown fail on a foreign key -- thirty-four tests red
+        # for a fixture that had nothing to do with them. A settlement row
+        # is meant to outlive its decision; that is the schema working, so
+        # the cleanup is explicit rather than the constraint being relaxed.
+        await _cleanup(conn)
         await conn.close()

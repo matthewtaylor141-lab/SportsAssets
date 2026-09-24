@@ -2386,7 +2386,12 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
             wrote = await store.persist_run(
                 conn, rec, experiment_id=experiment_id,
                 source_account=str(pos.get("source_account") or ""),
-                decision_offset=rows["decisions_so_far"])
+                decision_offset=rows["decisions_so_far"],
+                # THE POSITION WE LOADED, NOT ONE RE-DERIVED. Continuing
+                # management is about an id that already exists; deriving
+                # it again from a source trade the position may not have
+                # produces a different id and a second row.
+                position_id_override=pid)
             d = rec["all_decisions"][0]
             out["managed"] += 1
             out["acted"] += 1 if d.get("acted") else 0

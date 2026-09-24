@@ -330,8 +330,17 @@ def test_the_management_phase_exists_and_is_driven_every_cycle():
 
     assert hasattr(W, "manage_open_positions")
     src = inspect.getsource(W.cycle)
-    assert "manage_open_positions(" in src
+    # DRIVEN ON BOTH PATHS. The call moved into
+    # `run_continuing_management`, and the point of that move is that the
+    # no-candidates path calls it too: `cycle` used to return
+    # IDLE_NO_CANDIDATES before reaching management, so on every cycle
+    # where the cohort produced no new fill nothing open was re-evaluated.
+    assert src.count("run_continuing_management(") == 2, src.count(
+        "run_continuing_management(")
     assert '"management": managed' in src
+    assert '"management": idle_managed' in src
+    helper = inspect.getsource(W.run_continuing_management)
+    assert "manage_open_positions(" in helper
 
 
 def test_the_continuing_record_carries_the_positions_own_policy():

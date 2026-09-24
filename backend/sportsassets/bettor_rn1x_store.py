@@ -198,7 +198,8 @@ async def load_position(conn, position_id: str) -> dict:
 
 
 async def persist_run(conn, out: dict, *, experiment_id: str,
-                      source_account: str, decision_offset: int = 0) -> dict:
+                      source_account: str, decision_offset: int = 0,
+                      position_id_override: str | None = None) -> dict:
     """Write ONE completed run. Returns what was written, or why not.
 
     A run that failed a step is recorded as a REFUSAL, not skipped: the
@@ -218,7 +219,22 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
                 "note": "no source fill: there is no position to key a row on"}
 
     trade_id = src.get("trade_id")
-    pid = position_id(experiment_id, policy, trade_id)
+    # THE CALLER'S OWN ID WINS WHEN IT HAS ONE, AND IT MUST.
+    #
+    # THE DEFECT: this always derived `experiment:policy:trade_id`. For a
+    # position the caller LOADED -- continuing management -- that is only
+    # the right answer when the position was seeded from a trade. An
+    # AUTONOMOUS ENTRY has no trade, so the derivation produced
+    # `experiment:policy:None` -- a different id for the same exposure --
+    # and management tried to write a SECOND position row under it. The
+    # partial unique index from migration 116 refused the insert, correctly,
+    # and management failed on every cycle.
+    #
+    # Deriving it is still right for the seeding path, where the caller has
+    # no id yet and the trade is the key. Overriding it is right for the
+    # managing path, where the id already exists and must be preserved
+    # rather than re-derived from a field the position does not have.
+    pid = position_id_override or position_id(experiment_id, policy, trade_id)
 
     # THE REFUSALS ARE ROWS TOO -- when they have a seed to hang on.
     # A CLASSIFY or SEED refusal still names a real source trade, a real
@@ -263,7 +279,22 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
             "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,"
             "$15,$16,$17,$18,$19,$20,$21) "
             "ON CONFLICT (position_id) DO NOTHING",
-            pid, experiment_id, policy, int(trade_id), source_account,
+            # A NULL SOURCE TRADE IS A LEGITIMATE POSITION, NOT AN ERROR.
+            #
+            # `int(trade_id)` raised TypeError on every management cycle for
+            # an AUTONOMOUS ENTRY -- a position this system created itself
+            # rather than seeding from an observed cohort fill. The column
+            # is nullable precisely so that case can be recorded, and the
+            # alternative to passing None here would be inventing a trade
+            # id, which would claim the position came from a fill that
+            # never happened and make it collide with the seeded lane's
+            # uniqueness key.
+            #
+            # Found by running the manager against an entry-created
+            # position: it was examined on every cycle and failed on every
+            # cycle, so the inventory existed and was never managed.
+            pid, experiment_id, policy,
+            (None if trade_id is None else int(trade_id)), source_account,
             out.get("condition_id") or "", int(src["outcome_index"]),
             seed.get("entry_kind") or cls.get("kind") or "UNKNOWN",
             (cls.get("why") or cls.get("reason") or seed.get("label") or ""),
