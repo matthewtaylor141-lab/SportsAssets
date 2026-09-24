@@ -1023,3 +1023,132 @@ not inputs to it, the gap records are, and those were identical in both
 readings (17 rows, 745.8382 s). **Neither value should be cited as a
 window-total for reconnections until the field's semantics are read from
 the writer.**
+
+---
+
+# ITEM 6 — THE OBSERVATION DELIVERABLE, FINISHED
+
+## 6.1 Shutdown verified across the ENTIRE probe, not one boot
+
+The earlier static check compared two reads five minutes apart and covered
+boot `d61606169a1f410c` only. Re-read **seven hours after the stop**:
+
+| read at | LADDER frames | gap records |
+|---|---|---|
+| 2026-09-24T04:06:13Z | 37,537 | 17 |
+| **2026-09-24T11:03:13Z** | **37,537** | **17** |
+
+All three boots reconcile against the whole table:
+
+```
+7435b23a98d049f3       43 rows   10:28:29Z -> 10:28:59Z
+8702807518fe44b4   29,243 rows   10:31:14Z -> 22:58:35Z
+d61606169a1f410c    8,304 rows   22:58:58Z -> 04:00:00Z
+                   ------------
+                   37,590 rows = LADDER 37,537 + EPOCH 10 + GAP 33
+                                 + PROGRAM_VERSION 5 + RUN_OPEN 3
+                                 + RUN_CLOSE 2
+```
+
+Boots 1 and 2 stopped writing at 10:28:59Z and 22:58:35Z, hours before the
+window closed, and neither has grown since. **Nothing is still writing
+anywhere in the probe.**
+
+## 6.2 Coverage reconciled per market, with no double subtraction
+
+The 17 gap records were checked for overlap before being summed: **0.0000 s
+of overlap, 17 disjoint intervals**, union 745.8390 s by from/to arithmetic
+(the per-record `duration_s` column sums to 745.8382 s; the 0.8 ms
+difference is the provider's own rounding, and the from/to arithmetic is
+taken as authoritative). So the earlier figure was not inflated — now
+verified rather than assumed.
+
+Per market, the interval is that market's own first-to-last frame and the
+gap deduction is the union **intersected with that interval**:
+
+| market (`ccpc-bilbrd-1album-any2026-…`) | span h | gaps s | observed h | unobserved tail s | % of 24 h |
+|---|---|---|---|---|---|
+| `alewar` | 17.5200 | 745.75 | 17.3128 | 19 | 72.1% |
+| `benboo` | 17.5225 | 745.75 | 17.3153 | 10 | 72.1% |
+| `beyonc` | 17.5181 | 745.75 | 17.3109 | 26 | 72.1% |
+| `bileil` | 17.4858 | 745.75 | 17.2787 | 142 | 72.0% |
+| `charoa` | 17.5161 | 745.75 | 17.3090 | 33 | 72.1% |
+| `chaxcx` | 17.5178 | 745.75 | 17.3106 | 27 | 72.1% |
+| `coldpl` | 17.5208 | 745.75 | 17.3137 | 16 | 72.1% |
+| `doechi` | 17.5044 | 745.75 | 17.2973 | 75 | 72.1% |
+| `dualip` | 17.5225 | 745.75 | 17.3153 | 10 | 72.1% |
+| `eminem` | 17.5242 | 745.75 | 17.3170 | 4 | 72.2% |
+| `fraoce` | 17.5039 | 745.75 | 17.2967 | 77 | 72.1% |
+| `jusbie` | 17.4839 | 745.75 | 17.2767 | 149 | 72.0% |
+
+**Per-market coverage: 72.0% to 72.2% of the 24-hour window**, mean 17.3045
+h. Every market shares the same first frame (10:28:29Z) and the same gap
+union, because **the gaps are stream-level** — the socket dropped, not one
+market's feed. The only per-market difference is the tail between its last
+frame and the window's close, 4 s to 149 s.
+
+The whole-probe figure stands: **17.3170 h observed, 72.2% of the window**,
+with 6.4747 h unobservable before the collector could start.
+
+## 6.3 The reconnect counter: a scope defect in the writer, read from the code
+
+`run_reconnects` read 4 at 03:51Z and 2 at 04:08Z. The writer explains it,
+and it is neither a scope question nor an overwrite question — it is both:
+
+* `bettor_incentive_state.note_socket` does
+  `row["reconnects"] = max(0, int(reconnects))` — an **overwrite**, not an
+  accumulation;
+* the field is declared as a whole-run total. The `fresh` row's own comment
+  says *"SOCKET TOTALS FOR THE WHOLE RUN, not for one process"*;
+* but every caller passes a **per-boot** value:
+  `workers/bettor_incentive_observe` sends
+  `getattr(stream, "socket_connect_attempts", 0)` at each epoch transition
+  and `final_bounds["connect_attempts_this_boot"]` at close — the second is
+  named "this boot" in the key itself.
+
+**So a field documented as a run total is written with a per-boot value that
+replaces the previous boot's.** Boot 3's own count overwrote the
+accumulated figure at close, and 4 became 2. That is a defect in the
+writer, not a reporting artefact and not corruption.
+
+**Not patched, deliberately.** The fix belongs in the collector's own state
+writer, the collector is protected, the window is closed, and changing it
+now would require a worker deploy to alter a field no measurement depends
+on. Remedy for whoever takes it: keep per-boot totals in a map keyed by
+`boot_id` and sum them, or rename the field to
+`reconnects_this_boot` so the contract matches the value.
+
+**Raw evidence preserved.** Nothing was reset. The journal's own `EPOCH`
+records (10) and per-boot row counts remain, so a whole-run reconnect
+figure can be recomputed from the journal rather than trusted from this
+field. **Neither value should be quoted as a window total.**
+
+## 6.4 The opportunity analysis, on the programme's OWN ladders
+
+The script had only ever scored ladders from markets carrying **no**
+incentive programme — boxing and college football from a captured tape,
+labelled a scenario in its own output. That is now closed:
+
+* the manifest's frozen markets are **exactly** the twelve
+  `ccpc-bilbrd-1album-any2026-*` markets the collector observed — checked,
+  not assumed, and a test fails if they ever diverge;
+* `bettor_incentive_observed_share` reads the persisted ladders for those
+  markets and scores them through the **same** `bettor_incentive_score`
+  engine, against the **captured** terms (`culture_low_20260921`, pool $50,
+  DF 0.25, target 500) — no second scorer, and it refuses with
+  `SCORER_NOT_IN_IMAGE` rather than re-deriving the reward formula;
+* `/api/command/incentive/observed-share` publishes it behind the command
+  session.
+
+**Hypothetical share and earned rewards are separate fields.**
+`reward_gross_usd` is what the captured terms would have paid for a modelled
+clip inserted into a book we observed; `earned_rewards_usd` is **0.0** and
+has always been 0.0. No order was placed in any of these markets. The
+engine's own counterfactual note travels with every row: inserting a clip
+changes the denominator and not other people's behaviour, so the share is
+an upper reading at the observed depth.
+
+**Twelve markets are ONE programme and ONE event.** The per-market rows
+must not be averaged into a portfolio claim, and uptime is measured over
+the snapshots we hold — the first 6.47 h of the window were never
+observable, so "100% uptime" means "in every snapshot we have".
