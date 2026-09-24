@@ -489,15 +489,49 @@ def test_the_venue_error_text_is_kept_bounded_and_deduplicated():
     """Run 22 named the refusal `VENUE_BOOK_READ_RETURNED_ERROR 2`. The
     counter is right and still not an answer: an entitlement, a closed
     market and a rate limit need different actions from different people,
-    and only the message distinguishes them. So the message is kept --
-    capped, deduplicated, and tagged with the contract it came from."""
+    and only the response distinguishes them. So the loop keeps a
+    structured diagnostic -- contract, slug, endpoint, stage, code, HTTP
+    status when the client gives one -- capped and deduplicated."""
     import inspect
 
     src = inspect.getsource(loop.cycle)
     assert "venue_errors" in src
     assert "MAX_VENUE_ERRORS" in src
-    assert "note not in venue_errors" in src, "duplicates must not fill it"
+    assert "seen_venue_errors" in src, "duplicates must not fill the cap"
     assert loop.MAX_VENUE_ERRORS <= 10, "a heartbeat is not a log"
-    # and it reaches the tile, not just the local variable
     hb = inspect.getsource(loop._heartbeat)
-    assert '"venue_errors"' in hb
+    assert '"venue_errors"' in hb, "it must reach the tile, not just a local"
+
+
+def test_the_diagnostic_names_the_request_not_just_the_exception():
+    class _Httpish(Exception):
+        status_code = 403
+
+    d = loop._venue_diagnostic("nba-lal-bos-2026", _Httpish("Forbidden"),
+                               stage="BOOK_READ")
+    assert d["slug"] == "nba-lal-bos-2026"
+    assert d["endpoint"] == "markets.book"
+    assert d["stage"] == "BOOK_READ"
+    assert d["status"] == 403, "an HTTP status is the actionable part"
+    assert d["exception"] == "_Httpish"
+
+    named = loop._venue_diagnostic("s", None, stage="BOOK_READ",
+                                   code="NO_MARKET_DATA_IN_PAYLOAD",
+                                   feed="book")
+    assert named["code"] == "NO_MARKET_DATA_IN_PAYLOAD"
+    assert named["exception"] is None
+
+
+def test_a_diagnostic_cannot_carry_a_credential():
+    """A diagnostic is worthless if it cannot be shown to anyone. An
+    exception from an HTTP client can carry a signed URL, so every
+    free-text field is sanitized before it is stored."""
+    raw = ("GET https://venue.example/v1/markets/abc/book"
+           "?signature=ZmFrZXNpZ25hdHVyZXZhbHVlMTIzNDU2Nzg5 -> 401; "
+           "secret_key=ABCDEFGHIJKLMNOPQRSTUVWXYZ012345")
+    out = loop._sanitize(raw)
+    assert "ZmFrZXNpZ25hdHVyZXZhbHVl" not in out
+    assert "ABCDEFGHIJKLMNOPQRSTUVWXYZ012345" not in out
+    assert "<query-removed>" in out or "<redacted>" in out
+    assert "401" in out, "the status must survive the redaction"
+    assert len(out) <= 240

@@ -41,6 +41,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import re
 import time
 
 from .. import bettor_external_shadow as ext
@@ -307,6 +308,49 @@ MARKETS_SQL = """
 """
 
 
+#: Anything token-shaped is redacted before a venue message is stored. A
+#: diagnostic is worth nothing if it cannot be shown, and an exception
+#: string from an HTTP client can carry a signed URL.
+_TOKENISH = re.compile(r"[A-Za-z0-9_\-]{20,}")
+_SECRETISH = re.compile(r"(?i)(key|secret|token|signature|sig|auth)"
+                        r"\s*[=:]\s*\S+")
+
+
+def _sanitize(text: str, *, limit: int = 240) -> str:
+    """Strip query strings, secrets and token-shaped runs from a message."""
+    s = str(text or "")
+    s = re.sub(r"\?[^\s'\"]+", "?<query-removed>", s)
+    s = _SECRETISH.sub(r"\1=<redacted>", s)
+    s = _TOKENISH.sub("<redacted>", s)
+    return s[:limit]
+
+
+def _venue_diagnostic(slug, exc, *, stage, code=None, feed=None) -> dict:
+    """What a person needs to act on a venue refusal.
+
+    The contract identifier, the stage, the venue's own code, and an HTTP
+    status when the client exposes one -- `type(exc).__name__` alone was
+    the reason `VENUE_BOOK_READ_RETURNED_ERROR 2` could not be acted on.
+    Everything free-text goes through `_sanitize` first.
+    """
+    out = {"slug": slug, "stage": stage, "endpoint": "markets.book",
+           "code": code, "feed": feed, "status": None, "detail": None,
+           "exception": type(exc).__name__ if exc is not None else None}
+    if exc is not None:
+        for attr in ("status", "status_code", "code"):
+            val = getattr(exc, attr, None)
+            if isinstance(val, int):
+                out["status"] = val
+                break
+        else:
+            resp = getattr(exc, "response", None)
+            val = getattr(resp, "status_code", None)
+            if isinstance(val, int):
+                out["status"] = val
+        out["detail"] = _sanitize(exc)
+    return out
+
+
 def _read_book_blocking(slug: str) -> dict:
     """One PACED public book read, off the event loop. Never raises.
 
@@ -327,11 +371,23 @@ def _read_book_blocking(slug: str) -> dict:
     try:
         client = pmus._get_client()
     except Exception as exc:                                    # noqa: BLE001
-        return {"marketData": None, "error": type(exc).__name__}
+        return {"marketData": None, "error": type(exc).__name__,
+                "diagnostic": _venue_diagnostic(
+                    slug, exc, stage="CLIENT_CONSTRUCTION")}
     try:
-        return pmus.book_read(client, slug)
+        out = pmus.book_read(client, slug)
     except Exception as exc:                                    # noqa: BLE001
-        return {"marketData": None, "error": type(exc).__name__}
+        return {"marketData": None, "error": type(exc).__name__,
+                "diagnostic": _venue_diagnostic(
+                    slug, exc, stage="BOOK_READ")}
+    if out.get("error"):
+        # book_read never raises: it NAMES the failure. Carry the name plus
+        # the request context, because "the venue returned an error" is not
+        # actionable and "this slug, this feed, this code" is.
+        out["diagnostic"] = _venue_diagnostic(
+            slug, None, stage="BOOK_READ", code=out.get("error"),
+            feed=out.get("feed"))
+    return out
 
 
 async def venue_quote(conn, *, condition_id, outcome_index, now):
@@ -360,11 +416,15 @@ async def venue_quote(conn, *, condition_id, outcome_index, now):
     except Exception as exc:                                   # noqa: BLE001
         return {"ok": False, "refusal": R_VENUE_READ_FAILED,
                 "why": "book read failed: %s" % type(exc).__name__,
-                "exception": type(exc).__name__}
+                "exception": type(exc).__name__,
+                "diagnostic": _venue_diagnostic(slug, exc,
+                                                stage="BOOK_READ_AWAIT")}
     if book.get("error"):
+        diag = book.get("diagnostic") or {}
         return {"ok": False, "refusal": R_VENUE_READ_ERROR,
                 "why": "venue read error: %s" % book["error"],
-                "venue_error": str(book["error"])[:200]}
+                "venue_error": _sanitize(book["error"], limit=80),
+                "diagnostic": diag}
 
     read_at = time.time()
     snap = bs.snapshot(book.get("marketData"), symbol=slug,
@@ -459,6 +519,7 @@ async def cycle(conn) -> dict:
     # a closed market or a rate limit -- and those need different actions
     # from different people.
     venue_errors: list = []
+    seen_venue_errors: set = set()
     labels = sorted({lbl for _, fam in SPORTS
                      for lbl in VENUE_SPORT_LABELS.get(fam, ())})
     markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels)]
@@ -513,12 +574,17 @@ async def cycle(conn) -> dict:
                 # whether anyone can act on it, and the message says which.
                 # Bounded, deduplicated, and slug-tagged so it identifies a
                 # contract without becoming a log dump.
-                why = vq.get("venue_error") or vq.get("why")
-                if why:
-                    note = "%s: %s" % (mapped["condition_id"][:12], why)
-                    if (note not in venue_errors
-                            and len(venue_errors) < MAX_VENUE_ERRORS):
-                        venue_errors.append(note)
+                diag = dict(vq.get("diagnostic") or {})
+                diag["condition_id"] = mapped["condition_id"]
+                diag["refusal"] = code
+                diag.setdefault("why", _sanitize(vq.get("why") or "",
+                                                 limit=120))
+                key = (diag.get("slug"), diag.get("code"),
+                       diag.get("status"), diag.get("exception"))
+                if (key not in seen_venue_errors
+                        and len(venue_errors) < MAX_VENUE_ERRORS):
+                    seen_venue_errors.add(key)
+                    venue_errors.append(diag)
                 continue
 
             # THE SETTLEMENT RULE, AND WHY THIS USUALLY STOPS HERE.
@@ -617,6 +683,31 @@ async def cycle(conn) -> dict:
 HEARTBEAT_KEY = "ext_pinnacle_last_cycle"
 
 
+def _code_identity() -> dict:
+    """WHAT CODE THE ACTIVE WRITER IS RUNNING, from the writer itself.
+
+    A deploy id says what the service was asked to run. This says what the
+    process that wrote this heartbeat is actually executing: a digest of
+    this module's own source, plus the build marker when the platform sets
+    one. Verifying a fix by reading the deploy id assumes the restart
+    happened and the import succeeded; this does not.
+    """
+    import hashlib
+    import inspect
+    import os
+    import sys
+
+    try:
+        src = inspect.getsource(sys.modules[__name__]).encode()
+        digest = hashlib.sha256(src).hexdigest()[:12]
+    except Exception:                                          # noqa: BLE001
+        digest = None
+    return {"module": __name__, "source_sha256_12": digest,
+            "build": (os.getenv("RENDER_GIT_COMMIT")
+                      or os.getenv("GIT_COMMIT") or None),
+            "pid": os.getpid()}
+
+
 async def _heartbeat(conn, out: dict) -> None:
     """PERSIST THE CYCLE SUMMARY, because most refusals never reach a row.
 
@@ -647,6 +738,7 @@ async def _heartbeat(conn, out: dict) -> None:
             "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
             HEARTBEAT_KEY, json.dumps({
                 "at": time.time(),
+                "writer": _code_identity(),
                 "state": out.get("state"),
                 "evaluated": out.get("evaluated"),
                 "written": out.get("written"),

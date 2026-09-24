@@ -213,3 +213,34 @@ def test_the_lock_is_released_when_the_holder_disconnects():
             await b.close()
 
     asyncio.run(main())
+
+
+# ── the writer declares its own code identity ────────────────────────
+
+def test_each_writer_reports_what_code_it_is_running():
+    """A deploy id says what the service was ASKED to run. Verifying a fix
+    by reading it assumes the restart happened and the import succeeded.
+    The writer's own digest does not assume either."""
+    for m in (EXT, MOD):
+        ident = m._code_identity()
+        assert ident["module"].endswith(m.__name__.split(".")[-1])
+        assert isinstance(ident["source_sha256_12"], str)
+        assert len(ident["source_sha256_12"]) == 12
+        assert isinstance(ident["pid"], int)
+    # two different modules cannot share a digest
+    assert (EXT._code_identity()["source_sha256_12"]
+            != MOD._code_identity()["source_sha256_12"])
+
+
+def test_the_digest_changes_when_the_source_changes(monkeypatch):
+    """Otherwise it is decoration: a fingerprint that does not move cannot
+    tell a deployed fix from an un-deployed one."""
+    before = EXT._code_identity()["source_sha256_12"]
+    import inspect as _i
+
+    real = _i.getsource
+    monkeypatch.setattr(
+        _i, "getsource",
+        lambda obj: real(obj) + "\n# a change\n")
+    after = EXT._code_identity()["source_sha256_12"]
+    assert after != before

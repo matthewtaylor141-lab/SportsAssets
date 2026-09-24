@@ -644,15 +644,11 @@ jobs:
                         "elapsed_s\t"  + ((.elapsed_s // 0)|tostring),
                         (.refusals // {} | to_entries[]
                            | "  \(.key)\t\(.value)"),
-                        # THE VENUE'S OWN WORDS. Run 22 named the refusal
-                        # VENUE_BOOK_READ_RETURNED_ERROR 2 -- the right
-                        # counter, and still not an answer. An entitlement,
-                        # a closed market and a rate limit need different
-                        # actions, and only the message says which.
                         ((.venue_errors // [])
                            | if length == 0
-                             then "  (no venue error text this cycle)"
-                             else (.[] | "  venue_error\t" + .) end)
+                             then "  (no venue diagnostic this cycle)"
+                             else (.[] | "  venue_error\t" + tostring)
+                             end)
                    end' /tmp/st2.json 2>/dev/null \
             | tee -a "$GITHUB_STEP_SUMMARY" || true
 
@@ -673,6 +669,69 @@ jobs:
                    (.held // {} | to_entries[]
                       | "  \(.key)\t\(.value)")' \
             /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # THE VENUE READ, ON DEMAND -- the refusal run 22 could not
+          # explain, asked directly instead of waiting for a cycle.
+          echo "-- venue read probe (the loop's own reader) --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.venue_read_probe
+                 | "attempted\t" + ((.attempted // 0)|tostring),
+                   "ok\t"        + ((.ok // 0)|tostring),
+                   "verdict\t"   + ((.verdict // "?")|tostring),
+                   ((.results // [])[]
+                      | "  " + ((.condition_id // "?")[0:14])
+                        + "\t" + ((.ok)|tostring)
+                        + "\t" + ((.refusal // "-")|tostring)
+                        + "\t" + (((.diagnostic // {}) | "stage=" +
+                            ((.stage // "-")|tostring) + " code=" +
+                            ((.code // "-")|tostring) + " status=" +
+                            ((.status // "-")|tostring) + " exc=" +
+                            ((.exception // "-")|tostring) + " detail=" +
+                            ((.detail // "-")|tostring)))
+                        + "\t" + ("ask=" + ((.ask // "-")|tostring)
+                                  + " depth=" + ((.depth // "-")|tostring)))' \
+            /tmp/pr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+          # THE PROSPECTIVE LANE, split: a running loop is not evidence.
+          echo "-- prospective lane: process vs evidence --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.statuses.prospective_rn1_management
+                 | "badge\t"            + ((.badge // "?")|tostring),
+                   "positions\t"        + ((.positions // 0)|tostring),
+                   "runtime_decision\t" + ((.with_observed_runtime_decision // 0)|tostring),
+                   "legacy_backdated\t" + ((.legacy_backdated_and_reclassified // 0)|tostring),
+                   "newest_decision\t"  + ((.newest_decision_ts // "none")|tostring),
+                   "by_basis\t"         + ((.by_decision_basis // {})|tostring),
+                   "last_cycle\t"       + ((.last_cycle_prospective // {})|tostring)' \
+            /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+          # PREDICTION MATURITY -- whether 0 joined is waiting or a defect.
+          echo "-- prediction maturity --" | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.statuses.model_fitting.maturity
+                 | "earliest_prediction\t" + ((.earliest_prediction_at // "none")|tostring),
+                   "earliest_maturity\t"   + ((.earliest_maturity_at // "none")|tostring),
+                   "next_maturity\t"       + ((.next_maturity_at // "none")|tostring),
+                   "matured_not_joined\t"  + ((.matured_but_not_joined // 0)|tostring),
+                   "eval_floor\t"          + ((.evaluation_floor // "?")|tostring)' \
+            /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+          # WHAT CODE THE ACTIVE WRITERS ARE RUNNING, from the writers.
+          echo "-- active writer code identity --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '"external\t" + ((.statuses.external_valuation.last_cycle.writer // "none")|tostring),
+                 "model\t"    + ((.statuses.model_fitting.last_cycle.writer // "none")|tostring)' \
+            /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+          # THE PROGRESS PROVIDER: connected, or the named reason not.
+          echo "-- progress provider integration --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.second_half_exit.provider_integration
+                 | "provider\t"  + ((.provider // "none")|tostring),
+                   "connected\t" + ((.connected)|tostring),
+                   "refusal\t"   + ((.refusal // "-")|tostring),
+                   "adapters\t"  + ((.adapters_available // [])|tostring),
+                   "unblocks\t"  + ((.would_unblock // [])|tostring)' \
+            /tmp/pr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+
           echo "-- the second-half blocker, measured --" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           jq -r '.progress_probe

@@ -161,11 +161,8 @@ async def statuses(pool) -> dict:
             shadow_on, hist > 0, what="the HISTORICAL lane: resolved "
             "markets, scored against the observed payout",
             why="replays the record; its cursor walks from the start"),
-        "prospective_rn1_management": _live(
-            shadow_on, prosp > 0, what="the PROSPECTIVE lane: UNRESOLVED "
-            "markets, live ingestion lanes only",
-            why=("decisions recorded before resolution; NOT scored and "
-                 "never summed with a scored result")),
+        "prospective_rn1_management": await _prospective_status(
+            pool, shadow_on=shadow_on, positions=prosp),
         "independent_ev_entries": {
             "badge": "BLOCKED", "live": False, "producing": False,
             "what": "independently selected EV entries",
@@ -227,6 +224,85 @@ async def statuses(pool) -> dict:
         # read: which of the four writer locks is actually held.
         "writer_ownership": await _writer_ownership_status(pool),
     }
+
+
+async def _prospective_status(pool, *, shadow_on: bool,
+                              positions: int) -> dict:
+    """The PROSPECTIVE lane, with the distinction the old badge hid.
+
+    This tile read LIVE whenever the lane held any position, so four
+    positions written before migration 104 -- every one of them backdated
+    and reclassified -- made it look as though prospective evidence
+    existed. A running process and prospective evidence are different
+    claims, and the process badge must not stand in for the evidence.
+
+    So it reports both, and separately: positions created SINCE the clock
+    fix that carry an OBSERVED runtime decision instant, and the legacy
+    rows that cannot. Zero of the former is CHECK, however live the loop.
+    """
+    import json as _json
+
+    from ..bettor_rn1x_run import BASIS_RUNTIME
+    from ..workers import rn1x_shadow as SH
+    from ..workers import rn1x_shadow as W
+
+    out = {"what": ("the PROSPECTIVE lane: UNRESOLVED markets, live "
+                    "ingestion lanes only"),
+           "positions": int(positions),
+           "process_is_running": bool(shadow_on),
+           "a_running_process_is_not_prospective_evidence": True}
+    try:
+        rows = await pool.fetch(
+            "SELECT coalesce(decision_basis, 'UNLABELLED') AS basis, "
+            "       count(*) AS n, max(decision_ts) AS newest "
+            "  FROM rn1x_positions WHERE experiment_id = $1 "
+            " GROUP BY 1 ORDER BY 1", W.PROSPECTIVE_EXPERIMENT_ID)
+    except Exception as exc:                                   # noqa: BLE001
+        out.update(badge="UNAVAILABLE",
+                   why="rn1x_positions unreadable: %s" % type(exc).__name__)
+        return out
+    by_basis = {r["basis"]: int(r["n"]) for r in rows}
+    runtime_n = by_basis.get(BASIS_RUNTIME, 0)
+    out["by_decision_basis"] = by_basis
+    out["with_observed_runtime_decision"] = runtime_n
+    out["legacy_backdated_and_reclassified"] = sum(
+        n for b, n in by_basis.items() if b != BASIS_RUNTIME)
+    newest = [r["newest"] for r in rows if r["newest"] is not None]
+    out["newest_decision_ts"] = (max(newest).isoformat()
+                                 if newest else None)
+    # WHY THE LANE WROTE NOTHING, from its own last cycle rather than
+    # inferred from the absence of rows.
+    try:
+        raw = await pool.fetchval(
+            "SELECT detail::text FROM service_heartbeats WHERE service = $1",
+            SH.SERVICE)
+        beat = _json.loads(raw) if raw else {}
+        lane = (beat.get("lanes") or {}).get("P") or {}
+        out["last_cycle_prospective"] = {
+            "state": lane.get("state"), "examined": lane.get("examined"),
+            "written": lane.get("written"),
+            "cursor_moved": lane.get("moved"),
+            "refusals": lane.get("refusals") or {}}
+    except Exception as exc:                                   # noqa: BLE001
+        out["last_cycle_prospective"] = {"unreadable": type(exc).__name__}
+    if not shadow_on:
+        out.update(badge="STOPPED", live=False, producing=False,
+                   why="the rn1x_shadow control row is not true")
+    elif runtime_n == 0:
+        out.update(
+            badge="CHECK", live=True, producing=False,
+            why=("the loop RUNS and no position in this lane carries an "
+                 "OBSERVED runtime decision instant, so there is NO "
+                 "prospective evidence yet. The %d position(s) here "
+                 "predate migration 104 and are labelled backdated. See "
+                 "last_cycle_prospective for what the lane did on its "
+                 "most recent pass" % int(positions)))
+    else:
+        out.update(badge="LIVE", live=True, producing=True,
+                   why=("%d position(s) carry an OBSERVED runtime decision "
+                        "instant (%s); NOT scored and never summed with a "
+                        "scored result" % (runtime_n, BASIS_RUNTIME)))
+    return out
 
 
 #: THE FOUR WRITER LOCKS, by the module that takes them. Each loop holds a
@@ -487,6 +563,38 @@ async def _model_fitting_status(pool) -> dict:
         "SELECT count(*) FROM rn1x_model_predictions WHERE target = $1 "
         "AND outcome_known = TRUE", ML.TARGET) or 0
     out.update(predictions=int(n), joined_outcomes=int(joined))
+    # MATURITY, so "0 joined" can be read. A prediction cannot be joined
+    # before its horizon closes, and 0 joined means something different
+    # before the first maturity than after it: the first is waiting, the
+    # second is a defect. This says which.
+    try:
+        mat = await pool.fetchrow(
+            "SELECT min(predicted_at + (horizon_s || ' seconds')::interval) "
+            "         AS earliest_maturity, "
+            "       min(predicted_at) AS earliest_prediction, "
+            "       count(*) FILTER (WHERE outcome_known = FALSE AND "
+            "         predicted_at + (horizon_s || ' seconds')::interval "
+            "         <= now()) AS matured_not_joined, "
+            "       min(predicted_at + (horizon_s || ' seconds')::interval) "
+            "         FILTER (WHERE predicted_at + "
+            "         (horizon_s || ' seconds')::interval > now()) "
+            "         AS next_maturity "
+            "  FROM rn1x_model_predictions WHERE target = $1", ML.TARGET)
+        def _iso(v):
+            return v.isoformat() if v is not None else None
+        out["maturity"] = {
+            "earliest_prediction_at": _iso(mat["earliest_prediction"]),
+            "earliest_maturity_at": _iso(mat["earliest_maturity"]),
+            "next_maturity_at": _iso(mat["next_maturity"]),
+            "matured_but_not_joined": int(mat["matured_not_joined"] or 0),
+            "horizon_s": ML.HORIZON_S,
+            "join_runs": "once per fitting cycle (%ss)" % int(ML.CYCLE_S),
+            "censoring": ("a horizon that has NOT closed is left unjoined. "
+                          "A closed horizon with no complement fill is a "
+                          "genuine 0, not a missing observation"),
+            "evaluation_floor": ML.MIN_EVAL_ROWS}
+    except Exception as exc:                                   # noqa: BLE001
+        out["maturity"] = {"unreadable": type(exc).__name__}
     try:
         import json as _json
 

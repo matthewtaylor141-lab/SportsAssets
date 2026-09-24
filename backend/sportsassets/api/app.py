@@ -1901,7 +1901,69 @@ async def command_rn1x_external_probe(response: Response) -> dict:
         "sports_with_a_connected_feed": sorted(_pol.PROGRESS_FEED_CONNECTED),
         "missing_capability": _pol.MAPPING_REQUIREMENTS[0],
     }
+    # THE INTEGRATION, PREPARED. Which provider is connected, or the named
+    # reason none is, plus the exact capability required -- so the blocker
+    # is a purchase decision rather than an engineering unknown.
+    try:
+        from .. import bettor_progress_providers as _pp
+
+        out["second_half_exit"]["provider_integration"] = _pp.configured()
+        out["second_half_exit"]["searched_and_unavailable"] = \
+            _pp.describe()["searched_and_unavailable"]
+    except Exception as exc:                                   # noqa: BLE001
+        out["second_half_exit"]["provider_integration"] = {
+            "unreadable": type(exc).__name__}
+
+    # THE VENUE READ, ON DEMAND. Run 22 refused two mapped contracts with
+    # VENUE_BOOK_READ_RETURNED_ERROR, and finding out why should not cost a
+    # 15-minute cycle: this asks the same reader the loop uses, for the
+    # first few open markets in the supported sports, and reports the
+    # sanitized diagnostic. Read-only, paced by the same venue_pace the
+    # collector shares, and bounded to three slugs so it cannot become a
+    # second consumer of the venue budget.
+    out["venue_read_probe"] = await _venue_read_probe(EXT, limit=3)
     return out
+
+
+async def _venue_read_probe(EXT, *, limit: int = 3) -> dict:
+    """Attempt the loop's own venue read against a few open markets.
+
+    Same function, same pacing, same refusal codes as the cycle -- a probe
+    that used a different reader would answer a different question.
+    """
+    from ..db import get_pool
+
+    probe = {"reader": "workers.ext_pinnacle_loop.venue_quote",
+             "endpoint": "markets.book", "attempted": 0, "ok": 0,
+             "results": []}
+    try:
+        labels = sorted({lbl for _, fam in EXT.SPORTS
+                         for lbl in EXT.VENUE_SPORT_LABELS.get(fam, ())})
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(EXT.MARKETS_SQL, labels)
+            for r in list(rows)[:max(1, int(limit))]:
+                probe["attempted"] += 1
+                vq = await EXT.venue_quote(
+                    conn, condition_id=r["condition_id"],
+                    outcome_index=0, now=time.time())
+                item = {"condition_id": r["condition_id"],
+                        "ok": bool(vq.get("ok")),
+                        "refusal": vq.get("refusal"),
+                        "diagnostic": vq.get("diagnostic")}
+                if vq.get("ok"):
+                    probe["ok"] += 1
+                    item.update(ask=vq.get("ask"), depth=vq.get("depth"),
+                                age_s=vq.get("age_s"),
+                                age_basis=vq.get("age_basis"))
+                probe["results"].append(item)
+    except Exception as exc:                                   # noqa: BLE001
+        probe["error"] = type(exc).__name__
+    probe["verdict"] = (
+        "the venue read works from this process" if probe["ok"] else
+        "no open market in the supported sports returned a usable book; "
+        "the per-slug diagnostic above names the stage and the code")
+    return probe
 
 
 @app.get("/api/command/rn1x/external/census",

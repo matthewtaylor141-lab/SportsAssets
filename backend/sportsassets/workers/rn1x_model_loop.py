@@ -482,13 +482,39 @@ async def cycle(conn, *, now=None) -> dict:
     return out
 
 
+def _code_identity() -> dict:
+    """WHAT CODE THE ACTIVE WRITER IS RUNNING, from the writer itself.
+
+    A deploy id says what the service was asked to run. This says what the
+    process that wrote this heartbeat is actually executing: a digest of
+    this module's own source, plus the build marker when the platform sets
+    one. Verifying a fix by reading the deploy id assumes the restart
+    happened and the import succeeded; this does not.
+    """
+    import hashlib
+    import inspect
+    import os
+    import sys
+
+    try:
+        src = inspect.getsource(sys.modules[__name__]).encode()
+        digest = hashlib.sha256(src).hexdigest()[:12]
+    except Exception:                                          # noqa: BLE001
+        digest = None
+    return {"module": __name__, "source_sha256_12": digest,
+            "build": (os.getenv("RENDER_GIT_COMMIT")
+                      or os.getenv("GIT_COMMIT") or None),
+            "pid": os.getpid()}
+
+
 async def _heartbeat(conn, out: dict) -> None:
     try:
         await conn.execute(
             "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
             HEARTBEAT_KEY, json.dumps({
-                "at": time.time(), "state": out.get("state"),
+                "at": time.time(),
+                "writer": _code_identity(), "state": out.get("state"),
                 "target": out.get("target"),
                 "model_key": out.get("model_key"),
                 "model_version": out.get("model_version"),
