@@ -250,13 +250,17 @@ jobs:
       # explains reduced capacity and does NOT by itself establish what
       # saturated the other six.
       #
-      # /healthz already publishes db.pool_stats() as `.pool`. Its own
-      # docstring gives the reading: size == max with idle == 0 is a
-      # saturated pool; idle > 0 beside db_ok false is the database being
-      # slow. So: sample it, drive ordinary authenticated command traffic
-      # while the loops are running, sample it again, and check the
-      # writer's heartbeat actually advanced across the window with the
-      # standby recorded separately.
+      # /healthz already publishes db.pool_stats() as `.pool`. TWO SAMPLES
+      # ARE OBSERVATIONS, NOT A DIAGNOSIS. `size == max` with `idle == 0`
+      # is consistent with saturation and does not prove it caused any
+      # particular failure; correlating that needs acquisition WAIT times,
+      # query errors and request durations, which is why every call below
+      # records its own duration and why the service log is read alongside
+      # this step rather than in place of it. In particular `idle > 0`
+      # beside `db_ok false` does NOT by itself establish a slow database:
+      # idle connections can coexist with a failure on a different leg,
+      # and an inference from those two fields alone is exactly the kind
+      # of unsupported attribution this run is meant to stop making.
       - name: Service health under ordinary command load
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
@@ -285,34 +289,81 @@ jobs:
           # ORDINARY COMMAND-CENTRE REQUESTS, not a synthetic hammer: the
           # same authenticated reads the console makes, twelve of them, two
           # at a time, while every loop is cycling.
+          # 200 AND A VALID PAYLOAD, NOTHING ELSE.
+          #
+          # The first version of this accepted 200|401|403, which is a
+          # check that cannot fail on authentication: a token that stopped
+          # working would have read as "healthy". These are AUTHENTICATED
+          # management reads, so 401 or 403 is a FAILURE of authenticated
+          # access. That unauthenticated callers are rejected is a
+          # different property and is already tested separately, in "The
+          # shadow API is behind the COMMAND session", where 401 is the
+          # pass.
+          #
+          # A 200 carrying HTML or a parse error is also a failure -- that
+          # is precisely how the SPA fallback masqueraded as a ledger -- so
+          # the body must parse as JSON and be non-empty. Request duration
+          # is recorded per call, because a pool snapshot on its own cannot
+          # correlate a failure with how long acquisition actually waited.
           FAIL=0
           for i in 1 2 3 4; do
             for r in shadow/summary shadow/positions rn1x/statuses; do
-              c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 45 \
-                  -H "$H" "$API/api/command/$r" || echo 000)
-              printf 'load%-2s %-18s %s\n' "$i" "$r" "$c" \
+              out=$(curl -s -o /tmp/lb.json \
+                    -w '%{http_code} %{time_total}' --max-time 45 \
+                    -H "$H" "$API/api/command/$r" || echo "000 0")
+              c=${out%% *}; t=${out##* }
+              kind=$(jq -r 'if type=="object" then "object"
+                            elif type=="array" then "array"
+                            else "scalar" end' /tmp/lb.json 2>/dev/null \
+                     || echo "unparseable")
+              bytes=$(wc -c < /tmp/lb.json 2>/dev/null || echo 0)
+              printf 'load%-2s %-18s http=%s  %ss  payload=%s %sB\n' \
+                "$i" "$r" "$c" "$t" "$kind" "$bytes" \
                 | tee -a "$GITHUB_STEP_SUMMARY"
-              case "$c" in
-                200|401|403) : ;;
-                *) echo "NOT-OK $r -> $c"; FAIL=1 ;;
-              esac
+              if [ "$c" != "200" ]; then
+                echo "AUTHENTICATED READ FAILED: $r -> $c" \
+                  | tee -a "$GITHUB_STEP_SUMMARY"; FAIL=1
+              elif [ "$kind" = "unparseable" ] || [ "${bytes:-0}" -lt 2 ]; then
+                echo "200 WITH NO VALID PAYLOAD: $r ($kind, ${bytes}B)" \
+                  | tee -a "$GITHUB_STEP_SUMMARY"; FAIL=1
+              fi
             done
           done
           say "pool AFTER   $(pool)"
 
-          # THE HEARTBEAT MUST ADVANCE. A stale tile is the symptom the
-          # repair targets, so this is the check that it actually persists
-          # now rather than timing out.
-          sleep 45
-          after=$(curl -s --max-time 45 -H "$H" \
-                  "$API/api/command/rn1x/statuses" \
-                  | jq -r '(.statuses.prospective_rn1_management.heartbeat.at
-                            // "none")|tostring' 2>/dev/null || echo none)
-          say "writer heartbeat AFTER   $after"
+          # HEARTBEAT ADVANCE, JUDGED AGAINST ITS ACTUAL CADENCE.
+          #
+          # rn1x_shadow sleeps TICK_S=20 s after a cycle that did work and
+          # IDLE_S=120 s after one that did not. A 45 s window is therefore
+          # SHORTER than the idle cadence, and "no change in 45 s" is a
+          # perfectly correct idle loop -- reading it as stale telemetry
+          # would manufacture a failure. The window is 150 s, past one full
+          # idle period.
+          #
+          # Three things are reported SEPARATELY because they are three
+          # different facts: which PROCESS wrote the record (writer
+          # identity + build), WHEN it reported (beat_at), and WHICH CYCLE
+          # it is reporting (state and the lane's own counters). A record
+          # can be fresh and describe a cycle that did nothing, and it can
+          # be stale while the loop is still working.
+          sleep 150
+          curl -s --max-time 45 -H "$H" "$API/api/command/rn1x/statuses" \
+            > /tmp/hb2.json || true
+          after=$(jq -r '(.statuses.prospective_rn1_management.heartbeat.at
+                          // "none")|tostring' /tmp/hb2.json 2>/dev/null \
+                  || echo none)
+          say "writer heartbeat AFTER   $after   (window 150 s; TICK_S=20, IDLE_S=120)"
+          jq -r '"hb_process\t"   + ((.statuses.external_valuation.last_cycle.writer // "none")|tostring),
+                 "hb_reported_at\t"+ ((.statuses.external_valuation.last_cycle.at // "none")|tostring),
+                 "hb_cycle_state\t"+ ((.statuses.external_valuation.last_cycle.state // "none")|tostring),
+                 "hb_cycle_markets\t" + ((.statuses.external_valuation.last_cycle.markets_considered // "none")|tostring)' \
+            /tmp/hb2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
           if [ "$before" = "$after" ]; then
-            say "HEARTBEAT DID NOT ADVANCE in 45 s -- stale telemetry"
+            say "heartbeat UNCHANGED across 150 s -- inspect hb_* above: a"
+            say "  fresh record describing an idle cycle and a stale record"
+            say "  are different findings and this line does not decide"
           else
-            say "heartbeat advanced: the beat is persisting"
+            say "heartbeat advanced across 150 s: the beat is persisting"
           fi
 
           # The standby must be its own record, never the writer's row.
