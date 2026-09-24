@@ -633,6 +633,104 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit $FAIL
 
+      # ── THE SHADOW POSITION MANAGER, ON THE DEPLOYED BUILD ────────
+      #
+      # Two arms now manage the same assigned inventory: the FROZEN
+      # $0.91/second-half-16% benchmark and SHADOW_CHALLENGER_HOLD_RANKED_V1,
+      # which ranks every action INCLUDING hold from a labelled external
+      # probability. This step reads them APART, because summing them
+      # would count one position twice and attribute one arm's outcome to
+      # the other.
+      #
+      # AND IT COUNTS THE BLIND CYCLES SEPARATELY. A decision with no
+      # inputs leaves the position unchanged exactly as a deliberate hold
+      # does, and reporting them together is the single most flattering
+      # error available here.
+      - name: RN1X — the two arms, and what each one actually decided
+        if: ${{ !cancelled() }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -u
+          API="${{ inputs.api }}"; FAIL=0
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          echo "### Arms: champion vs challenger" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "SKIPPED: no ADMIN_TOKEN, the authenticated read is not available here" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          code=$(curl -s -o /tmp/ov.json -w '%{http_code}' --max-time 60 \
+                 -H "$H" "$API/api/command/rn1x/overview" || echo 000)
+          echo "overview HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+          # AN AUTHENTICATED READ MUST RETURN ITS EXPECTED STATUS AND A
+          # VALID PAYLOAD. A 401/403 is a FAILURE of authenticated access,
+          # not a pass; unauthorized-rejection is a separate check above.
+          [ "$code" = "200" ] || { echo "::error::authenticated overview answered $code"; FAIL=1; }
+          jq -e '.arms' /tmp/ov.json >/dev/null 2>&1 \
+            || { echo "::error::the overview carries no arms panel: the deployed build predates it"
+                 FAIL=1; }
+          jq -r '"champion\t"   + (.arms.champion.policy_id   // "?"),
+                 "challenger\t" + (.arms.challenger.policy_id // "?"),
+                 (.arms.rows // [])[]
+                   | if type == "object" then
+                       "arm\t" + (.policy // "?")
+                       + "  pos=" + ((.positions // 0) | tostring)
+                       + "  dec=" + ((.decisions // 0) | tostring)
+                       + "  selected=" + ((.selected // 0) | tostring)
+                       + "  held_by_choice=" + ((.held_by_choice // 0) | tostring)
+                       + "  BLIND=" + ((.blind // 0) | tostring)
+                       + "  with_inputs=" + ((.with_inputs // 0) | tostring)
+                       + "  unreconciled=" + ((.unreconciled // 0) | tostring)
+                     else . end' \
+            /tmp/ov.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          jq -r '"operating_states:", ((.operating_states // [])[]
+                   | "  " + (.state // "?") + "\t" + ((.n // 0) | tostring))' \
+            /tmp/ov.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo "-- the challenger lane's own state --" | tee -a "$GITHUB_STEP_SUMMARY"
+          curl -s --max-time 45 -H "$H" "$API/api/command/rn1x/statuses" \
+            | jq -r '(.rn1x_shadow // .shadow // {}) as $s
+                     | "lane_C\t" + (($s.detail.lanes.C // {}) | tostring
+                                      | .[0:400])' \
+            2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # ONE CHALLENGER POSITION, TRACED. The whole decision is on the
+          # row from migration 109, so this prints the fields the
+          # directive asks to be visible rather than only the selection.
+          PID=$(curl -s --max-time 45 -H "$H" "$API/api/command/rn1x/positions" \
+                | jq -r '[(.positions // . // [])[]
+                          | select((.policy // "") | test("CHALLENGER"))]
+                         | .[0].position_id // empty' 2>/dev/null)
+          if [ -z "$PID" ]; then
+            echo "no challenger position yet -- the lane has produced none" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            code=$(curl -s -o /tmp/ctr.json -w '%{http_code}' --max-time 60 \
+                   -H "$H" "$API/api/command/rn1x/trace/$PID" || echo 000)
+            echo "challenger trace $PID HTTP $code" | tee -a "$GITHUB_STEP_SUMMARY"
+            [ "$code" = "200" ] || { echo "::error::challenger trace answered $code"; FAIL=1; }
+            jq -r '(.decisions // [])[0] // {} as $d
+                   | "policy_version\t"  + ($d.policy_version  // "?")
+                   , "governing_rule\t"  + ($d.governing_rule  // "?")
+                   , "operating_state\t" + ($d.operating_state // "?")
+                   , "selected\t"        + (($d.selected_action // "NULL") | tostring)
+                                          + " x " + (($d.selected_qty // "-") | tostring)
+                   , "deliberate_hold\t" + (($d.is_a_deliberate_hold // "?") | tostring)
+                   , "input_available\t" + (($d.input_available // "?") | tostring)
+                   , "hold_value_usd\t"  + (($d.hold_value_usd // "-") | tostring)
+                   , "hold_basis\t"      + ($d.hold_value_basis // "?")
+                   , "reconciles\t"      + (($d.accounting_reconciles // "?") | tostring)
+                   , "reason\t"          + (($d.selection_reason // "") | .[0:200])' \
+              /tmp/ctr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+            jq -r '"hold_states:", ((.decision_semantics.by_operating_state // {})
+                                    | to_entries[] | "  " + .key + "\t" + (.value|tostring)),
+                   "blind\t" + ((.decision_semantics.decisions_taken_blind // 0) | tostring)' \
+              /tmp/ctr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
       - name: Mobile viewport is declared
         run: |
           grep -q 'name="viewport"' /tmp/index
