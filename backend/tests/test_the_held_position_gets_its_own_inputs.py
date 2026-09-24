@@ -986,3 +986,41 @@ def test_the_code_satisfies_the_shipped_acceptance_gate():
         "the code wrote a decision the SHIPPED gate rejects: %s" % incomplete)
     assert len({v["ts"] for v in verdicts}) == 2, (
         "two distinct runtime instants, not one decision counted twice")
+
+
+@pg
+def test_the_feeds_own_lag_is_measured_across_the_payload():
+    """If the provider's lag alone exceeds the odds rule, no cadence of
+    ours can fix it. One fixture cannot tell "this event is quiet" from
+    "this feed is late", so the census covers every event carrying a
+    Pinnacle h2h -- and it is a measurement, never a reason to widen."""
+    import asyncpg
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            evs = [_event(observed_at=_T0 - 10),
+                   _event(home="Houston Astros", away="Oakland Athletics",
+                          observed_at=_T0 - 48, event_id="ev-2"),
+                   _event(home="Chicago White Sox", away="Kansas City Royals",
+                          observed_at=_T0 - 70, event_id="ev-3")]
+            return await _chain(c, odds=_odds(evs, received_at=_T0, at=_T0),
+                                now=_T0, resolve_identity=_resolver_ok)
+        finally:
+            await c.close()
+
+    ci = asyncio.run(run())
+    ages = ci["provider_quote_ages_s"]
+    assert ages["n"] == 3
+    assert ages["min"] == pytest.approx(10.0)
+    assert ages["max"] == pytest.approx(70.0)
+    assert ages["median"] == pytest.approx(48.0)
+    assert ages["over_the_odds_rule"] == 2, (
+        "two of the three are past 30 s before any latency of ours")
+    assert ages["odds_rule_s"] == 30.0
+    # AND THE RULE IS STILL 30 s: measuring a slow feed does not relax it
+    assert ci["probability_row"]["probability"] is not None, (
+        "our own fixture was 10 s old and is priced")
+    fr = next(x for x in ci["chain"] if x["link"] == "4_PROBABILITY")
+    assert fr["max_age_s"] == 30.0

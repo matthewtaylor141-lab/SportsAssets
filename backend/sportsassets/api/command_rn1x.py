@@ -1332,4 +1332,9 @@ async def input_chain(pool, position_id: str) -> dict:
     out["held_intent"] = ci.get("held_intent")
     out["payout_event"] = ci.get("payout_event")
     out["odds_request"] = ci.get("odds_request")
+    out["clocks"] = ci.get("clocks")
+    # THE FEED'S OWN LAG, MEASURED ACROSS THE WHOLE PAYLOAD. If it exceeds
+    # the odds rule the remedy is a faster feed, not a wider rule, and
+    # this is the number that decides which.
+    out["provider_quote_ages_s"] = ci.get("provider_quote_ages_s")
     return out

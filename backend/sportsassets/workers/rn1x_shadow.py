@@ -1138,6 +1138,33 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
              market_title=m.get("title"),
              provider_refusals=got.get("refusals"))
         return out
+    # THE WHOLE PAYLOAD'S OBSERVATION AGES, not just our fixture's.
+    #
+    # If the provider's own lag exceeds the odds rule, no cadence on our
+    # side can fix it and the honest answer is the measurement, not a
+    # wider threshold. One fixture cannot distinguish "this event is
+    # quiet" from "this feed is late", so the census is taken across
+    # every event that carries a Pinnacle h2h.
+    ages = []
+    for payload in got.get("payloads") or []:
+        rcv = payload.get("received_at") or now
+        for event in payload.get("events") or []:
+            q = EXT.pinnacle_h2h(event, received_at=rcv)
+            if q is None:
+                continue
+            obs = devig._epoch(q.get("observed_at"))
+            if obs is not None:
+                ages.append(round(float(rcv) - float(obs), 1))
+    ages.sort()
+    out["provider_quote_ages_s"] = (
+        None if not ages else
+        {"n": len(ages), "min": ages[0], "max": ages[-1],
+         "median": ages[len(ages) // 2],
+         "over_the_odds_rule": sum(1 for a in ages if a > _DEVIG_MAX_AGE_S),
+         "odds_rule_s": _DEVIG_MAX_AGE_S,
+         "measured_from": ("the BOOKMAKER's own last_update to OUR receipt "
+                           "-- the provider's lag, before any latency of "
+                           "ours is added")})
     clocks["provider_observed_at"] = devig._epoch(quote.get("observed_at"))
     clocks["provider_received_at"] = (
         None if quote.get("received_at") is None
