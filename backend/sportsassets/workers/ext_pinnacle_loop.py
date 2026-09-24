@@ -596,10 +596,14 @@ HEARTBEAT_KEY = "ext_pinnacle_last_cycle"
 async def _heartbeat(conn, out: dict) -> None:
     """PERSIST THE CYCLE SUMMARY, because most refusals never reach a row.
 
-    Six of this loop's eight refusal counters fire BEFORE anything is
-    evaluated -- no Pinnacle on the event, no venue contract, an ambiguous
-    mapping, a closed market, a segment contract, no contemporaneous
-    quote. Those candidates never reach `ext.evaluate`, so they never
+    MOST of this loop's refusal counters fire BEFORE anything is
+    evaluated -- no candidate markets at all, no Pinnacle on the event, no
+    venue contract, an ambiguous mapping, a closed market, a segment
+    contract, no slug on the market row, a failed venue read, a venue
+    error, no ask depth, a stale venue quote. (A count was written here
+    instead and went stale the moment one counter was split into three;
+    the list is the claim, not the number.) Those candidates never reach
+    `ext.evaluate`, so they never
     produce an `external_valuations` row, so the refusal census cannot see
     them. The first live run showed exactly that: `evaluated 0` with an
     empty refusal list, which reads as "nothing happened" when in fact

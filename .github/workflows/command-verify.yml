@@ -628,11 +628,11 @@ jobs:
                    "last_cycle\t"    + ((.last_cycle // "none")|tostring)' \
             /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
           # 5a · THE EXTERNAL LOOP'S OWN CYCLE TALLY. The census above
-          # counts only candidates that were SCORED; six of this loop's
-          # eight refusal counters fire before scoring, so a cycle can
-          # refuse everything and leave the census empty. The last run did
-          # exactly that -- `evaluated 0` with no refusals listed -- and
-          # this is the read that says why.
+          # counts only candidates that were SCORED, and most of this
+          # loop's refusals fire before scoring, so a cycle can refuse
+          # everything and leave the census empty. Run 21 did exactly that
+          # -- `evaluated 0` with four named refusals accounting for all 46
+          # events -- and this is the read that says why.
           echo "-- external: last cycle, ALL refusals --" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           jq -r '.statuses.external_valuation.last_cycle
