@@ -426,9 +426,10 @@ jobs:
           jq -r '.statuses | to_entries[]
                  | "\(.key)\t\(.value.badge)\t\(.value.what // "NO WHAT")"' \
             /tmp/st.json | tee -a "$GITHUB_STEP_SUMMARY"
-          for k in historical_replay prospective_rn1_management \
-                   independent_ev_entries pairing second_half_loss_exit \
-                   accounting_health learning_evaluation; do
+          # EVERY key the service returns, not a hand-copied seven. A tile
+          # added without a badge or without a `what` is exactly the defect
+          # this check exists for, and a fixed list cannot see a new one.
+          for k in $(jq -r '.statuses | keys[]' /tmp/st.json); do
             # THE VOCABULARY, READ OUT OF command_rn1x.py RATHER THAN
             # ASSUMED. I got this wrong twice: first asking for `state`
             # (the key is `badge`), then allowing only LIVE/ARMED/STOPPED.
@@ -650,6 +651,18 @@ jobs:
           jq -r '"orders_total\t"  + ((.statuses.order_book_state.orders_total // 0)|tostring),
                  "settled_total\t" + ((.statuses.shadow_pnl.settled_total // 0)|tostring),
                  "unrealised\t"    + ((.statuses.shadow_pnl.unrealised // "?")|tostring)' \
+            /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # SINGLE-WRITER OWNERSHIP, read from the server rather than
+          # claimed in a comment. Two of the four loops did not hold the
+          # lock the checklist credited them with.
+          echo "-- writer ownership (pg_locks) --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.statuses.writer_ownership
+                 | "badge\t"   + ((.badge // "?")|tostring),
+                   "holding\t" + ((.loops_holding_their_lock // 0)|tostring),
+                   "doubled\t" + ((.more_than_one_holder // [])|tostring),
+                   (.held // {} | to_entries[]
+                      | "  \(.key)\t\(.value)")' \
             /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
           echo "-- the second-half blocker, measured --" \
             | tee -a "$GITHUB_STEP_SUMMARY"
