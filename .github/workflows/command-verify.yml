@@ -94,6 +94,13 @@ on:
         description: "condition_id of the acceptance fixture to acquire scope for"
         required: false
         default: ""
+      entry_run:
+        description: >-
+          Set to DO to run the AUTONOMOUS ENTRY lane against current
+          production markets and print every input behind each candidate.
+          It creates no order at any venue.
+        required: false
+        default: ""
 
 jobs:
   verify:
@@ -2200,4 +2207,141 @@ jobs:
                  + "  away=" + ((.teams.away.team.name // "-")|tostring)
                  + "  home=" + ((.teams.home.team.name // "-")|tostring)' \
             /tmp/mlb.json 2>/dev/null | head -40 | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  entry-run:
+    # ITS OWN JOB, gated on its own input. Appended to
+    # `capture-terms` it inherited that job's `if`, so a dispatch
+    # asking for an entry run and not a terms capture would have
+    # skipped it silently -- which reads exactly like a cycle that
+    # found nothing.
+    if: inputs.entry_run == 'DO'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Autonomous entry — run the scheduled lane and print every input
+        if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
+        run: |
+          set -u
+          # THE ADMIN ROUTES LIVE ON THE API ORIGIN, not on the proxied
+          # host: netlify.toml proxies only /api/command/*. Addressing the
+          # proxy returned 404 on every admin POST in run 39, and the tell
+          # was that the /api/command reads in the same step returned 200.
+          [ -n "${ADMIN_TOKEN:-}" ] || { echo "::error::ADMIN_TOKEN unset"; exit 1; }
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo "### AUTONOMOUS ENTRY LANE, AGAINST PRODUCTION MARKETS" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          # 1 · WHICH BUILD IS ANSWERING. Every conclusion below is about
+          # the deployed identity, so it is read first and printed.
+          C=$(curl -s -o /tmp/hz.json -w '%{http_code}' --max-time 45 \
+              "$API/api/health" || echo 000)
+          say "health HTTP $C"
+          jq -r '"commit\t" + ((.commit // .sha // .version // "?")|tostring)' \
+            /tmp/hz.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 200 /tmp/hz.json
+
+          # 2 · ARM the control row and let one cycle run.
+          C=$(curl -s -o /tmp/ar.json -w '%{http_code}' --max-time 45 \
+              -X POST -H "$H" "$API/api/admin/ext-pinnacle-shadow/on" \
+              || echo 000)
+          say "arm HTTP $C"
+          jq -c . /tmp/ar.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 200 /tmp/ar.json
+          [ "$C" = "200" ] || say "ARM WAS REFUSED -- nothing below is a cycle"
+          sleep 180
+
+          # 3 · EVERY INPUT BEHIND EVERY CANDIDATE. Written to a file and
+          # run as a program: an interpolated one-liner failed once and
+          # fell through to a raw dump of the page header.
+          C=$(curl -s -o /tmp/ee.json -w '%{http_code}' --max-time 90 \
+              -H "$H" "$API/api/command/rn1x/external/entry-evidence?hours=6&limit=25" \
+              || echo 000)
+          say "entry-evidence HTTP $C"
+          if [ "$C" != "200" ]; then
+            say "THE READ DID NOT RETURN 200 -- no conclusion follows"
+            head -c 400 /tmp/ee.json | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          cat > /tmp/ee.jq <<'JQ'
+          def n(x): if x == null then "-" else (x|tostring) end;
+          "experiment\t" + n(.experiment_id),
+          "policy\t" + n(.policy),
+          "candidates\t" + n(.candidates|length),
+          "inventory_rows\t" + n(.inventory|length),
+          "calibration_measured\t" + n(.source_calibration.measured),
+          "calibration_why\t" + n(.source_calibration.why // .source_calibration.metric),
+          "limits_sha\t" + n(.risk_declaration.limitsSha),
+          "",
+          "== CANDIDATES ==",
+          (.candidates[] |
+            "-- " + n(.condition_id) + "  " + n(.us_market_slug),
+            "   selection\t"    + n(.contract_selection) + "  pays_on " + n(.payout_event),
+            "   probability\t"  + n(.probability) + "  age_s " + n(.age_s)
+                                 + "  books " + n(.outcome_books),
+            "   price\t"        + n(.executable_price) + "  cost/contract " + n(.cost_per_contract)
+                                 + "  edge/contract " + n(.estimated_edge_per_contract),
+            "   size\t"         + n(.proposed_size) + "  decision " + n(.decision)
+                                 + "  admissible " + n(.admissible),
+            "   p_fill\t"       + n(.execution_estimate.p_fill)
+                                 + "  basis " + n(.execution_estimate.basis)
+                                 + "  forecast " + n(.execution_estimate.is_forecast),
+            "   walk\t"         + "levels " + n(.execution_estimate.levels_consumed)
+                                 + "  vwap " + n(.execution_estimate.vwap)
+                                 + "  best " + n(.execution_estimate.best_acquisition_price)
+                                 + "  break_even " + n(.execution_estimate.break_even_limit),
+            "   notional\t"     + "intended " + n(.execution_estimate.sizing.intendedNotionalUsd)
+                                 + "  executed " + n(.execution_estimate.sizing.executedEntryNotionalUsd)
+                                 + "  unfilled " + n(.execution_estimate.sizing.unfilledNotionalUsd)
+                                 + "  " + n(.execution_estimate.sizing.status),
+            "   settlement\t"   + n(.settlement_comparison.compatibility)
+                                 + "  ctx " + n(.settlement_comparison.quote_context)
+                                 + "  phase " + n(.settlement_comparison.scope_phase)
+                                 + "  fmt " + n(.settlement_comparison.scope_game_format)
+                                 + "  rules_read " + n(.settlement_comparison.venue_rules_read),
+            "   fixture\t"      + n(.settlement_comparison.fixture_source)
+                                 + "  gamePk " + n(.settlement_comparison.fixture_game_pk)
+                                 + "  at " + n(.settlement_comparison.fixture_retrieved_at),
+            "   risk\t"         + "permitted " + n(.risk_verdict.permitted)
+                                 + "  rails_failed " + n(.risk_verdict.railsNotPassed)
+                                 + "  gates_failed " + n(.risk_verdict.gatesNotPassed),
+            "   exposure\t"     + n(.exposure_observed.observed),
+            "   REFUSALS\t"     + ((.refusals // []) | join(", ")),
+            ""),
+          "== INVENTORY THIS LANE HOLDS ==",
+          (if (.inventory|length) == 0 then "  none" else
+            (.inventory[] |
+              "  " + n(.position_id),
+              "    qty " + n(.qty) + " @ " + n(.price)
+                + "  basis " + n(.cost_basis_usd) + "  fees " + n(.fees_usd)
+                + "  filled " + n(.filled_qty),
+              "    decisions " + n(.decisions) + "  orders " + n(.orders)
+                + "  outcomes " + n(.outcomes)
+                + "  provenance " + n(.provenance)) end)
+          JQ
+          sed -i 's/^          //' /tmp/ee.jq
+          jq -r -f /tmp/ee.jq /tmp/ee.json 2>/tmp/ee.err \
+            | tee -a "$GITHUB_STEP_SUMMARY" \
+            || { say "THE REPORT FAILED TO RENDER -- this is a reporting"
+                 say "fault, not a finding. jq said:"
+                 head -c 300 /tmp/ee.err | tee -a "$GITHUB_STEP_SUMMARY"; }
+
+          # 4 · THE CENSUS BESIDE IT, so a cycle in which nothing was even
+          # a candidate is distinguishable from one in which everything
+          # refused.
+          C=$(curl -s -o /tmp/cx.json -w '%{http_code}' --max-time 60 \
+              -H "$H" "$API/api/command/rn1x/external/census?hours=6" || echo 000)
+          say ""
+          say "census HTTP $C"
+          jq -r '"evaluated\t"  + ((.summary.evaluated  // 0)|tostring),
+                 "admissible\t" + ((.summary.admissible // 0)|tostring),
+                 "refused\t"    + ((.summary.refused    // 0)|tostring),
+                 "-- refusals --",
+                 (.refusals // {} | to_entries[] | "  \(.key)\t\(.value)")' \
+            /tmp/cx.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 300 /tmp/cx.json
           echo '```' >> "$GITHUB_STEP_SUMMARY"
