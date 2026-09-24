@@ -1475,3 +1475,99 @@ def test_a_pool_with_no_mapped_market_says_so_by_name():
     assert got["pool_blocker"] == \
         "NO_COVERED_MARKET_HAS_A_KNOWN_VENUE_NATIVE_CONTRACT"
     assert got["budget_s"] == W.ACCEPTANCE_BUDGET_S
+
+
+# ── THE GATE READS THE API, SO TEST THE API'S OWN SHAPE ──────────────
+#
+# Run 38's acceptance step reported three items missing on decisions that
+# had every one of them: the deployed challenger loop made seven ranked
+# decisions on the acceptance position, each with a probability 1-12 s old
+# against its 30 s bound and a priced DIRECT_EXIT it beat, and the gate
+# still said HELD_EXPOSURE_MAPPING, VENUE_CONTRACT_AND_INTENT and
+# EXIT_LADDER_AND_DEPTH were absent.
+#
+# They were not absent. `command_rn1x.trace` did not SELECT `input_chain`,
+# so the three items the gate reads off the chain were invisible THROUGH
+# THE READ. The earlier coupling test built its own SELECT and therefore
+# could not catch it.
+#
+# This one runs the shipped gate over the PRODUCTION READ's own output.
+
+@pg
+def test_the_trace_read_carries_what_the_shipped_gate_requires():
+    import json
+    import pathlib
+    import re
+    import shutil
+    import subprocess
+
+    import asyncpg
+
+    from sportsassets.api import command_rn1x as CR
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed here")
+    wf = (pathlib.Path(__file__).resolve().parents[2]
+          / ".github" / "workflows" / "command-verify.yml")
+    if not wf.exists():
+        pytest.skip("the workflow is not in this checkout")
+    prog = re.search(r"ACC='(.*?)'\n", wf.read_text(), re.S).group(1)
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        orig_resolve, orig_book = (EXT.resolve_venue_identity,
+                                   EXT._read_book_blocking)
+        EXT.resolve_venue_identity = _resolver_ok
+        EXT._read_book_blocking = lambda slug: {"marketData": _BOOK}
+        try:
+            await _fixture(c)
+            pid = await _position(c)
+            for k, at in ((0, _T0 + 10), (1, _T0 + 130)):
+                await W.manage_open_positions(
+                    c, experiment_id=_EXP, now=at,
+                    odds=_odds([_event(observed_at=at - 10)],
+                               received_at=at - 9, at=at))
+            # THE PRODUCTION READ ITSELF -- asyncpg's Connection exposes the
+            # same fetch/fetchrow/fetchval the route hands a pool.
+            return await CR.trace(c, pid)
+        finally:
+            EXT.resolve_venue_identity = orig_resolve
+            EXT._read_book_blocking = orig_book
+            await c.close()
+
+    got = asyncio.run(run())
+    assert got.get("found") is True, got
+
+    def j(v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except Exception:                                  # noqa: BLE001
+                return {}
+        return v or {}
+
+    # normalised EXACTLY as command-verify normalises it
+    rows = [{"id": d["decision_id"], "ts": str(d["decision_ts"]),
+             "action": d.get("selected_action") or "NULL",
+             "qty": d.get("selected_qty"),
+             "hold": d.get("hold_value_usd"),
+             "reason": d.get("selection_reason") or "",
+             "reconciles": d.get("accounting_reconciles"),
+             "pays": j(d.get("payout_identity")).get("row_payout_event"),
+             "chain": j(d.get("input_chain")),
+             "alt": j(d.get("alternatives")),
+             "inv": j(d.get("resulting_inventory")),
+             "fr": j(d.get("input_freshness"))}
+            for d in got["decisions"]]
+    assert len(rows) >= 2, rows
+    out = subprocess.run(["jq", "-c", prog], input=json.dumps(
+        {"decisions": rows}, default=float), capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    verdict = json.loads(out.stdout)
+    missing = {m for v in verdict for m in v["missing"]}
+    assert not missing, (
+        "the PRODUCTION READ does not carry what the shipped gate needs: %s"
+        % sorted(missing))
+    assert len([v for v in verdict if not v["missing"]]) >= 2
+    assert len({v["ts"] for v in verdict if not v["missing"]}) >= 2

@@ -995,7 +995,18 @@ async def trace(pool, position_id: str) -> dict:
         # presented as sound. Migration 110 holds every challenger
         # decision taken under the broken input builder; a trace that
         # omitted the column would read them as ordinary results.
-        "accounting_reconciles, eligibility, ineligible_reason "
+        "accounting_reconciles, eligibility, ineligible_reason, "
+        # THE CHAIN THE DECISION RECORDED. Migration 112 put it on the row
+        # and persist_run writes it, but this projection did not select it,
+        # so every reader saw `input_chain: null` on decisions that had one.
+        # Run 38 is the cost: seven ranked decisions on the acceptance
+        # position, each with a fresh probability inside its own bound and a
+        # priced exit it beat, and the acceptance gate could still only
+        # report HELD_EXPOSURE_MAPPING, VENUE_CONTRACT_AND_INTENT and
+        # EXIT_LADDER_AND_DEPTH as missing -- because the three items it
+        # reads off the chain were invisible to the read, not absent from
+        # the row.
+        "input_chain "
         "FROM rn1x_decisions "
         "WHERE position_id = $1 ORDER BY decision_ts, decision_id",
         position_id)
