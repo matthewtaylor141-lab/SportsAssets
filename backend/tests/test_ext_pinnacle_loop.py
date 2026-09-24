@@ -535,3 +535,54 @@ def test_a_diagnostic_cannot_carry_a_credential():
     assert "<query-removed>" in out or "<redacted>" in out
     assert "401" in out, "the status must survive the redaction"
     assert len(out) <= 240
+
+
+def test_a_line_market_is_never_matched_to_a_moneyline():
+    """Run 23 mapped a Pinnacle h2h fixture to an over/under 9.5 runs
+    contract, because the title names both clubs and nothing tested for a
+    line. Had the book read succeeded, p(home win) would have been
+    compared against the ask on 'over 9.5 runs' and the difference called
+    an edge. That is a category error with a number on it."""
+    markets = [{"condition_id": "0xTOTAL", "closed": False, "resolved": False,
+                "title": "Chicago Cubs vs Miami Marlins",
+                "event_title": "Chicago Cubs vs Miami Marlins",
+                "slug": "mlb-chc-mia-2026-09-05-total-9pt5"}]
+    out = vmap.map_event(home="Chicago Cubs", away="Miami Marlins",
+                         markets=markets)
+    assert out["mapped"] is False
+    assert vmap.R_LINE in out["refusals"]
+    assert out["blocked_line"] == 1
+
+
+def test_the_line_test_reads_the_slug_and_the_title():
+    assert vmap.is_line_market("Cubs vs Marlins Over 9.5") is True
+    assert vmap.is_line_market("Cubs vs Marlins", "mlb-chc-mia-total-9pt5")
+    assert vmap.is_line_market("Cubs vs Marlins", "mlb-chc-mia-spread-neg-1pt5")
+    # and a plain moneyline is NOT refused -- the rule must not eat the
+    # only market this experiment can price
+    assert vmap.is_line_market("Will the Chicago Cubs beat the Miami Marlins?",
+                               "mlb-chc-mia-2026-09-24") is False
+
+
+def test_a_moneyline_still_maps_after_the_line_rule():
+    markets = [{"condition_id": "0xML", "closed": False, "resolved": False,
+                "title": "Will the Chicago Cubs beat the Miami Marlins?",
+                "event_title": "Chicago Cubs vs Miami Marlins",
+                "slug": "mlb-chc-mia-2026-09-24"}]
+    out = vmap.map_event(home="Chicago Cubs", away="Miami Marlins",
+                         markets=markets)
+    assert out["mapped"] is True, out
+    assert out["condition_id"] == "0xML"
+
+
+def test_the_candidate_set_is_bounded_by_recency():
+    """`closed` and `resolved` are OUR flags. Run 23 read three markets the
+    venue answered NotFoundError for, one of them 19 days past, all still
+    flagged open here. A stale row cannot answer, and spending a venue read
+    on it is a read the collector could have had."""
+    assert "updated_at >= now()" in loop.MARKETS_SQL
+    assert "ORDER BY updated_at DESC" in loop.MARKETS_SQL
+    assert loop.MARKET_STALE_AFTER_S <= 7 * 24 * 3600
+    # and it narrows rather than widens: the cap is unchanged
+    assert "LIMIT 4000" in loop.MARKETS_SQL
+    assert loop.MAX_PER_CYCLE <= 40

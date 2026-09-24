@@ -54,6 +54,7 @@ R_SEGMENT = "VENUE_CONTRACT_IS_A_SEGMENT_NOT_FULL_GAME"
 R_NO_TEAMS = "EVENT_DOES_NOT_NAME_TWO_TEAMS"
 
 REFUSALS = (R_NO_CONTRACT, R_AMBIGUOUS, R_CLOSED, R_COLLIDE, R_SEGMENT,
+             "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE",
             R_NO_TEAMS)
 
 #: Tokens that mark a venue title as covering only PART of a game. The
@@ -67,6 +68,46 @@ SEGMENT_MARKERS = (
     "first period", "1st inning", "first inning", "1st 5 innings",
     "first 5 innings", "f5", "1h", "2h", "q1", "p1",
 )
+
+
+#: A LINE MARKET IS NOT A MONEYLINE, and this is a correctness rule rather
+#: than a preference. Run 23 mapped a Pinnacle h2h fixture to
+#: `mlb-chc-mia-2026-09-05-total-9pt5` -- an over/under 9.5 runs contract --
+#: because the title names both clubs and "total" was in neither the
+#: segment list nor anything else. Had the book read succeeded, p(home win)
+#: would have been compared against the ask on "over 9.5 runs" and the
+#: resulting "edge" would have been a category error with a number on it.
+#:
+#: Checked against the TITLE and the SLUG, because the slug is where the
+#: line usually lives (`...-total-9pt5`, `...-spread-neg-1pt5`) and the
+#: title can read as a plain fixture name.
+LINE_MARKERS = (
+    "total", "totals", "over", "under", "spread", "spreads", "handicap",
+    "handicaps", "run line", "puck line", "alternate", "alt", "margin",
+    "asian", "btts", "both teams to score", "draw no bet",
+)
+#: A venue line token: `9pt5`, `neg-1pt5`, `o2pt5`. The slug form the venue
+#: uses for a half-point line, which no moneyline slug carries.
+_LINE_TOKEN = re.compile(r"(?:^|[-_])(?:o|u|pos|neg)?\d+pt\d(?:$|[-_])")
+
+R_LINE = "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE"
+
+
+def is_line_market(title: str, slug: str = "") -> bool:
+    """True when the contract prices a line, not the winner.
+
+    Refuses on either channel: a moneyline never carries a half-point
+    token, and a totals market whose title happens to read like a fixture
+    name is exactly the case that got through.
+    """
+    t = " %s " % norm_name(title)
+    if any((" %s " % m) in t for m in LINE_MARKERS):
+        return True
+    sl = str(slug or "").lower()
+    if _LINE_TOKEN.search(sl):
+        return True
+    return any(("-%s-" % m.replace(" ", "-")) in "-%s-" % sl
+               for m in LINE_MARKERS)
 
 
 def norm_name(name: str) -> str:
@@ -118,6 +159,7 @@ def map_event(*, home, away, markets):
         return out
 
     hits, blocked_closed, blocked_segment = [], 0, 0
+    blocked_line = 0
     for m in markets:
         title = "%s %s" % (m.get("title") or "", m.get("event_title") or "")
         toks = _tokens(title)
@@ -131,11 +173,15 @@ def map_event(*, home, away, markets):
         if is_segment(title):
             blocked_segment += 1
             continue
+        if is_line_market(title, m.get("slug") or ""):
+            blocked_line += 1
+            continue
         hits.append(m)
 
     out["candidates"] = len(hits)
     out["candidate_ids"] = [m.get("condition_id") for m in hits][:8]
     out["blocked_closed"] = blocked_closed
+    out["blocked_line"] = blocked_line
     out["blocked_segment"] = blocked_segment
 
     if len(hits) == 1:
@@ -152,7 +198,9 @@ def map_event(*, home, away, markets):
             out["refusals"].append(R_CLOSED)
         if blocked_segment:
             out["refusals"].append(R_SEGMENT)
-        if not blocked_closed and not blocked_segment:
+        if blocked_line:
+            out["refusals"].append(R_LINE)
+        if not blocked_closed and not blocked_segment and not blocked_line:
             out["refusals"].append(R_NO_CONTRACT)
         return out
 

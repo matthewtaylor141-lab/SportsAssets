@@ -1941,7 +1941,8 @@ async def _venue_read_probe(EXT, *, limit: int = 3) -> dict:
                          for lbl in EXT.VENUE_SPORT_LABELS.get(fam, ())})
         pool = await get_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch(EXT.MARKETS_SQL, labels)
+            rows = await conn.fetch(EXT.MARKETS_SQL, labels,
+                                    EXT.MARKET_STALE_AFTER_S)
             for r in list(rows)[:max(1, int(limit))]:
                 probe["attempted"] += 1
                 vq = await EXT.venue_quote(

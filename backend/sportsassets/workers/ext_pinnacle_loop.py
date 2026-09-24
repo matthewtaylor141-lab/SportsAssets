@@ -299,11 +299,26 @@ def pinnacle_h2h(event: dict, *, received_at: float) -> dict | None:
 
 # ── the venue side, read in the same cycle ──────────────────────────
 
+#: A market our table still calls open, that the venue has forgotten. Run
+#: 23's three probe reads all returned NotFoundError, on slugs like
+#: `mlb-chc-mia-2026-09-05-total-9pt5` -- a fixture 19 days past. `closed`
+#: and `resolved` are OUR flags, written by the refresher; a row it stopped
+#: updating weeks ago is stale whatever those flags say. `updated_at` is
+#: the honest recency signal, so the candidate set is bounded by it.
+#:
+#: This NARROWS the candidate set. It does not weaken any refusal and it
+#: does not raise the request budget: the same LIMIT, the same
+#: MAX_PER_CYCLE, fewer reads wasted on markets that cannot answer.
+MARKET_STALE_AFTER_S = 2 * 24 * 3600
+
 MARKETS_SQL = """
-    SELECT condition_id, title, event_title, slug, closed, resolved
+    SELECT condition_id, title, event_title, slug, closed, resolved,
+           updated_at
       FROM markets
      WHERE NOT closed AND NOT resolved
        AND sport = ANY($1::text[])
+       AND updated_at >= now() - make_interval(secs => $2::float8)
+     ORDER BY updated_at DESC
      LIMIT 4000
 """
 
@@ -522,7 +537,7 @@ async def cycle(conn) -> dict:
     seen_venue_errors: set = set()
     labels = sorted({lbl for _, fam in SPORTS
                      for lbl in VENUE_SPORT_LABELS.get(fam, ())})
-    markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels)]
+    markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels, MARKET_STALE_AFTER_S)]
     if not markets:
         # SAY SO BY NAME rather than letting 44 mapping refusals imply the
         # mapper is at fault.
