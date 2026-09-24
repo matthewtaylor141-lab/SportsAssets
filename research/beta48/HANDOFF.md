@@ -312,3 +312,116 @@ second-half probe is unchanged: `progress_fields []`,
 **Still not established:** no valuation has been scored, so no
 probability, cost, edge or decision exists in production; no calibration;
 no net return. Nothing here is a profitability claim.
+
+## 10 · The six-item follow-up, and what each is resting on
+
+### 10.1 The venue read (item 1)
+
+The refusal is now answerable in one authenticated GET rather than a
+15-minute cycle: `/external/probe` runs **the loop's own reader** against
+three open markets and returns, per slug, the stage, the venue's own code,
+an HTTP status when the client exposes one, and a sanitized detail. Every
+free-text field passes a redactor that removes query strings, `key=`/
+`secret=`/`signature=` pairs and token-shaped runs, because a diagnostic
+nobody is allowed to show is not a diagnostic.
+
+**A correction to my own claim.** I said the book error was "the one thing
+standing between this pipeline and its first scored valuation". That was
+wrong in an important way. The venue read is the next refusal; it is not
+the last one. Downstream of a successful read, in order:
+
+| # | requirement | state today |
+|---|---|---|
+| 1 | contemporaneous venue ask **and displayed depth** | blocked at the read |
+| 2 | venue settlement rule agrees on draw / overtime / void | **NOT established.** `bettor_venue_settlement.ATTESTED` is empty; soccer leaves 3 unmet, baseball 2. These are handed to the engine as caller refusals and **veto admission** |
+| 3 | per-outcome book count ≥ `MIN_OUTCOME_BOOKS` | unknown until a cycle gets there |
+| 4 | fee from the production schedule, never defaulted | wired |
+| 5 | net edge ≥ `MIN_NET_EDGE_PER_CONTRACT` (0.01) | unknown until 1–4 pass |
+| 6 | `bettor_entry_gate.admit` | its own refusal list |
+
+So the **first complete record will decide NO_TRADE**, and it will do so
+on the settlement rules. That is still the deliverable item 1 asks for —
+odds, mapping, contemporaneous price and depth, fees, and a decision — but
+a BUY is not reachable until the venue's own market rules are attested.
+Nothing here will be relaxed to produce one.
+
+### 10.2 The prospective lane (item 2)
+
+The tile badged LIVE whenever the lane held any position. Four positions
+written before migration 104 — every one backdated and reclassified — made
+that read as prospective evidence. It now separates them:
+
+- `with_observed_runtime_decision` — positions whose `decision_basis` is
+  `RUNTIME_WALL_CLOCK`, the only basis that supports a prospective claim;
+- `legacy_backdated_and_reclassified` — everything else;
+- `last_cycle_prospective` — the lane's own state, examined/written counts
+  and refusals from its most recent pass, so "wrote nothing" carries a
+  reason instead of being inferred from an absence of rows.
+
+**Zero of the first is `CHECK`, however live the loop.** A running process
+and prospective evidence are different claims and the badge no longer
+stands in for the evidence.
+
+### 10.3 Outcome joining (item 3)
+
+The join has always been correct about censoring: `JOINABLE` selects only
+predictions whose `predicted_at + horizon_s` has passed, and a closed
+horizon with no complement fill is a genuine 0 — a missing observation is
+never turned into a negative label. What was missing was the ability to
+read "0 joined". The tile now reports earliest prediction, earliest
+maturity, next maturity and **matured-but-not-joined**, which is the number
+that separates waiting from a defect. Horizon is 3,600 s and the join runs
+once per fitting cycle.
+
+### 10.4 Event progress (item 4)
+
+**No accessible source exists**, and this is now recorded as a search
+rather than an assertion: the odds provider's scores endpoint answered 200
+twice with no period field; the venue's `marketData` carries quotes,
+ladders and `sharesTraded` and no event-state object; `game_start_time` is
+a scheduled start and is refused by source name. `bettor_progress_providers`
+states the exact capability required — fixture identity, an **observed**
+period, the provider's own timestamp, a status separating in-play from
+break/suspended/abandoned/final, and a refresh at least every 60 s —
+registers two adapters against the response shapes that actually occur, and
+refuses by name until one is configured. Connecting a provider that meets
+that list is configuration, not development.
+
+**The pairing-only experiment is not the management policy.** The policy
+has two halves; one is running and one is unavailable for want of an
+observation, and the command centre says so in both places.
+
+### 10.5 Regression attribution (item 5)
+
+Collected identities, same invocation, same machine:
+
+| | collected | failed | passed | skipped |
+|---|---|---|---|---|
+| baseline `fa544da` | 11,876 | 449 | 11,241 | 183 |
+| HEAD, quiet run | — | **449** | 11,293 | 196 |
+| HEAD, collected now | 11,954 | | | |
+
+**The quiet HEAD run included the new tests.** Its 11,941 total reconciles
+exactly against the 11,954 collected now, minus the 13 tests written after
+that run started (9 in `test_single_writer_ownership.py`, 4 added to
+`test_ext_pinnacle_loop.py`). The +78 collection difference is exactly the
+six new files. Two ids differ between the two collections only by a
+timestamp embedded in a parametrisation, i.e. the same two tests.
+
+So this is **not** an excluded-tests result: 69 of the new tests ran inside
+that suite and the failure identities were unchanged — 0 new, 0 fixed. The
+earlier 545 reading came from a run sharing the container with a local
+Postgres and repeated production polls, and 24 of its 96 extra failures are
+allocator and memory-census diagnostics that measure the host.
+
+### 10.6 Deployment churn (item 6)
+
+This release is one deploy carrying all six items. Before it: the touched
+modules' tests (137 passing, the only failures being the two pre-existing
+`render-ops.yml` size guards), and the three new SQL statements executed
+against a real Postgres rather than assumed. After it, the verification
+reads the **writer's own code identity** — a digest of the loop module's
+source, the build marker and the pid, taken from the process that wrote the
+heartbeat — because a deploy id only says what the service was asked to
+run. The collector is untouched and the 2026-09-24T04:00:00Z stop is
+unmoved.
