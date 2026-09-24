@@ -144,8 +144,25 @@ def test_a_second_process_becomes_a_standby_and_writes_nothing():
             got = await holder.fetchval(
                 "SELECT pg_try_advisory_lock($1)", EXT.LOCK_KEY)
             assert got is True, "the holder must own the lock first"
+            # BOTH ROWS, because the point of the fix this now covers is
+            # that they are different rows. A writer's cycle record must
+            # survive a standby beat; run 26 read the standby's empty
+            # cycle out of the writer's key and reported it as the lane
+            # having looked at nothing.
             await pool.execute("DELETE FROM ingestion_state WHERE key = $1",
                                EXT.HEARTBEAT_KEY)
+            await pool.execute("DELETE FROM ingestion_state WHERE key = $1",
+                               EXT.STANDBY_KEY)
+            # A WRITER'S CYCLE, PUT THERE FIRST. If the standby writes the
+            # writer's key, this record is gone by the end of the test --
+            # which is exactly the production defect.
+            await pool.execute(
+                "INSERT INTO ingestion_state (key, value) "
+                "VALUES ($1, $2::jsonb)",
+                EXT.HEARTBEAT_KEY,
+                json.dumps({"state": "RAN", "evaluated": 7,
+                            "markets_considered": 162,
+                            "refusals": {"A_REAL_REFUSAL": 5}}))
 
             cycles = []
 
@@ -164,13 +181,28 @@ def test_a_second_process_becomes_a_standby_and_writes_nothing():
             assert not cycles, (
                 "the standby ran a cycle: it would have spent provider "
                 "credits and written the holder's observations")
+            # 1 · THE STANDBY SAYS SO -- in its own row.
             raw = await pool.fetchval(
                 "SELECT value::text FROM ingestion_state WHERE key = $1",
-                EXT.HEARTBEAT_KEY)
+                EXT.STANDBY_KEY)
             assert raw, "a standby must say so rather than going quiet"
             beat = json.loads(raw)
             assert beat["state"] == "STANDBY_NOT_THE_WRITER"
             assert "ANOTHER_PROCESS_HOLDS_THE_WRITER_LOCK" in beat["refusals"]
+
+            # 2 · AND THE WRITER'S CYCLE IS STILL THERE. This is the
+            # assertion whose absence let the defect ship: the standby
+            # behaved correctly in every respect the old test checked
+            # while erasing the only record of what the writer did.
+            wraw = await pool.fetchval(
+                "SELECT value::text FROM ingestion_state WHERE key = $1",
+                EXT.HEARTBEAT_KEY)
+            assert wraw, "the standby erased the writer's heartbeat row"
+            wbeat = json.loads(wraw)
+            assert wbeat["state"] == "RAN", wbeat
+            assert wbeat["evaluated"] == 7, wbeat
+            assert wbeat["markets_considered"] == 162, wbeat
+            assert wbeat["refusals"] == {"A_REAL_REFUSAL": 5}, wbeat
         finally:
             await holder.execute("SELECT pg_advisory_unlock($1)",
                                  EXT.LOCK_KEY)
