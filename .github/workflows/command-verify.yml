@@ -1785,7 +1785,14 @@ jobs:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: |
           set -uo pipefail
-          API="https://${{ inputs.host || 'command.bettortoken.com' }}"
+          # THE API ORIGIN, NOT THE PROXIED HOST. netlify.toml proxies ONLY
+          # /api/command/*, so an /api/admin/* call sent to the COMMAND host
+          # falls through to the SPA catch-all and returns the site's
+          # page-not-found HTML as a 404. Every other step here uses
+          # inputs.api for exactly that reason; these two did not, which is
+          # why the acquisition POST 404'd while the /api/command reads in the
+          # same step succeeded.
+          API="${{ inputs.api }}"
           say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           if [ -z "${ADMIN_TOKEN:-}" ]; then
@@ -1912,7 +1919,14 @@ jobs:
           FDATE: ${{ inputs.fixture_date }}
         run: |
           set -uo pipefail
-          API="https://${{ inputs.host || 'command.bettortoken.com' }}"
+          # THE API ORIGIN, NOT THE PROXIED HOST. netlify.toml proxies ONLY
+          # /api/command/*, so an /api/admin/* call sent to the COMMAND host
+          # falls through to the SPA catch-all and returns the site's
+          # page-not-found HTML as a 404. Every other step here uses
+          # inputs.api for exactly that reason; these two did not, which is
+          # why the acquisition POST 404'd while the /api/command reads in the
+          # same step succeeded.
+          API="${{ inputs.api }}"
           say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           if [ -z "${ADMIN_TOKEN:-}" ]; then
