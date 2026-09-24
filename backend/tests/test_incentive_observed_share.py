@@ -99,6 +99,16 @@ def test_it_scores_the_programme_ladders_and_earns_nothing():
         assert r["earned"] == 0.0
         # the engine's own counterfactual disclaimer travels with each row
         assert "not a forecast of earnings" in r["counterfactual"]
+        # THE ADAPTER ACTUALLY PARSED THE BOOK. Run 26 returned
+        # `uptime 0.0` on all 12 programme markets, and this assertion
+        # was the one missing: a status string and a zero reward are
+        # equally consistent with a two-sided book that never qualified
+        # and with `_levels` silently returning [] for every payload. A
+        # well-formed book must produce NO side-snapshots without a book,
+        # so a key mismatch fails here instead of being reported as a
+        # finding about the programme.
+        assert r["side_snapshots_with_no_book"] == 0, (
+            "the adapter did not parse the ladder it was given")
 
 
 def test_the_captured_terms_are_reported_not_assumed():

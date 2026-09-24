@@ -72,6 +72,9 @@ from ..db import get_pool, heartbeat
 log = logging.getLogger(__name__)
 
 SERVICE = "rn1x_shadow"
+#: The standby's own service row. A process that holds no writer lock
+#: produces no cycle, so it has nothing to say about one.
+STANDBY_SERVICE = "rn1x_shadow_standby"
 CONTROL_KEY = "rn1x_shadow"
 CURSOR_KEY = "rn1x_source_cursor"
 
@@ -715,7 +718,13 @@ async def run(pool_factory=None) -> None:
                 "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
             log.info("rn1x shadow STANDBY: another process holds the "
                      "writer lock; retrying in %ss", IDLE_S)
-            await heartbeat(SERVICE, "idle",
+            # STANDBY_SERVICE, NOT SERVICE. Writing the writer's own row
+            # here replaced its cycle -- flow counts, refusals and all --
+            # with an empty standby record every IDLE_S. Run 26 read
+            # `flow {}` and `accounted null` for exactly that reason, and
+            # the flow accounting it was meant to show had been deployed
+            # for an hour.
+            await heartbeat(STANDBY_SERVICE, "idle",
                             {"state": "STANDBY_NOT_THE_WRITER",
                              "why": ("another process holds the rn1x "
                                      "writer lock. This process writes "

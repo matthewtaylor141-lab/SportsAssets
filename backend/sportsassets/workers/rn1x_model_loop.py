@@ -59,6 +59,9 @@ log = logging.getLogger(__name__)
 CONTROL_KEY = "rn1x_model_fit"
 ENV_FLAG = "RN1X_MODEL_FIT"
 HEARTBEAT_KEY = "rn1x_model_last_cycle"
+#: A process holding no lock has no cycle to report. It still says it is
+#: up -- in its OWN row, never the writer's.
+STANDBY_KEY = "rn1x_model_last_cycle_standby"
 
 #: The target this loop fits. Declared here so a reader does not have to
 #: infer it, and checked against the inventory so it cannot drift.
@@ -668,12 +671,18 @@ def _code_identity() -> dict:
             "pid": os.getpid()}
 
 
-async def _heartbeat(conn, out: dict) -> None:
+async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
+    """`key` KEEPS A STANDBY OUT OF THE WRITER'S ROW.
+
+    Run 26 read this loop's `last_cycle` as `STANDBY_NOT_THE_WRITER` with
+    every field null, because the standby in the API process rewrote
+    HEARTBEAT_KEY every 60 s over whatever the real writer had put there.
+    """
     try:
         await conn.execute(
             "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-            HEARTBEAT_KEY, json.dumps({
+            key or HEARTBEAT_KEY, json.dumps({
                 "at": time.time(),
                 "writer": _code_identity(), "state": out.get("state"),
                 "target": out.get("target"),
@@ -717,7 +726,8 @@ async def run(get_pool) -> None:
                 "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
             log.info("rn1x_model STANDBY: another process holds the writer "
                      "lock; writing nothing, retrying in %ss", IDLE_POLL_S)
-            await _heartbeat(conn, {"state": "STANDBY_NOT_THE_WRITER"})
+            await _heartbeat(conn, {"state": "STANDBY_NOT_THE_WRITER"},
+                             key=STANDBY_KEY)
             await asyncio.sleep(IDLE_POLL_S)
         log.info("rn1x_model: writer lock held (key %s)", LOCK_KEY)
         while True:

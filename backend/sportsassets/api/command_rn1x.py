@@ -636,6 +636,10 @@ async def _model_fitting_status(pool) -> dict:
             "SELECT value::text FROM ingestion_state WHERE key = $1",
             ML.HEARTBEAT_KEY)
         out["last_cycle"] = _json.loads(raw) if raw else None
+        sraw = await pool.fetchval(
+            "SELECT value::text FROM ingestion_state WHERE key = $1",
+            ML.STANDBY_KEY)
+        out["standby"] = _json.loads(sraw) if sraw else None
     except Exception as exc:                                   # noqa: BLE001
         out["last_cycle"] = {"unreadable": type(exc).__name__}
     if not armed:
@@ -703,6 +707,14 @@ async def _external_status(pool) -> dict:
             "SELECT value::text FROM ingestion_state WHERE key = $1",
             _EXT.HEARTBEAT_KEY)
         out["last_cycle"] = _json.loads(raw) if raw else None
+        # THE STANDBY, SEPARATELY. It used to be written into the line
+        # above and every read returned its empty cycle instead of the
+        # writer's. Reported so "a second process is up and waiting" is
+        # still visible, and can never be mistaken for a cycle.
+        sraw = await pool.fetchval(
+            "SELECT value::text FROM ingestion_state WHERE key = $1",
+            _EXT.STANDBY_KEY)
+        out["standby"] = _json.loads(sraw) if sraw else None
     except Exception as exc:                                   # noqa: BLE001
         out["last_cycle"] = {"unreadable": type(exc).__name__}
     out["why_two_refusal_sources"] = (

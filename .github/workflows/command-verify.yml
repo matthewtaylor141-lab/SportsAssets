@@ -780,7 +780,18 @@ jobs:
                       + "\tsnaps=" + ((.snapshots // 0)|tostring)
                       + "\tuptime=" + ((.qualifying_uptime // 0)|tostring)
                       + "\tshare=" + ((.mean_share // 0)|tostring)
-                      + "\thypoth$=" + ((.reward_gross_usd // 0)|tostring))
+                      + "\thypoth$=" + ((.reward_gross_usd // 0)|tostring)
+                      # WHY A ZERO IS ZERO. Run 26 returned uptime 0.0 on
+                      # all 12 programme markets with 400 snapshots each,
+                      # and the printed fields could not tell "no levels
+                      # were parsed out of the payload" (an adapter
+                      # defect) from "the book never qualified even with
+                      # our clip inserted" (a finding). These three
+                      # separate them, and they were in the response all
+                      # along.
+                      + "\tno_book=" + ((.side_snapshots_with_no_book // 0)|tostring)
+                      + "\tbid_q=" + ((.bid_qualifying // 0)|tostring)
+                      + "\task_q=" + ((.ask_qualifying // 0)|tostring))
                  end' /tmp/os.json 2>/dev/null \
             | tee -a "$GITHUB_STEP_SUMMARY" || head -c 300 /tmp/os.json
 

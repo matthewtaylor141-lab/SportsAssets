@@ -952,6 +952,13 @@ async def cycle(conn) -> dict:
 
 HEARTBEAT_KEY = "ext_pinnacle_last_cycle"
 
+#: THE STANDBY'S OWN KEY. A process that holds no lock writes no
+#: valuations, so it has no cycle to report -- but it must still be
+#: visible, because "a second process is up and waiting" is worth knowing.
+#: It gets its own row. Sharing HEARTBEAT_KEY made the standby's empty
+#: cycle the thing every read returned.
+STANDBY_KEY = "ext_pinnacle_last_cycle_standby"
+
 
 def _code_identity() -> dict:
     """WHAT CODE THE ACTIVE WRITER IS RUNNING, from the writer itself.
@@ -978,8 +985,17 @@ def _code_identity() -> dict:
             "pid": os.getpid()}
 
 
-async def _heartbeat(conn, out: dict) -> None:
+async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
     """PERSIST THE CYCLE SUMMARY, because most refusals never reach a row.
+
+    `key` EXISTS SO A STANDBY CANNOT ERASE THE WRITER'S CYCLE. Run 26 read
+    `markets 0, evaluated 0, venue_errors []` and
+    `ANOTHER_PROCESS_HOLDS_THE_WRITER_LOCK 1` from this row -- not because
+    the writer refused everything, but because the STANDBY in the API
+    process rewrote this key every 60 s with an empty cycle while the real
+    writer (a different pid) cycled more slowly. The measurement was of the
+    process that does nothing. Standbys now write STANDBY_KEY and the
+    writer's row is left alone.
 
     MOST of this loop's refusal counters fire BEFORE anything is
     evaluated -- no candidate markets at all, no Pinnacle on the event, no
@@ -1006,7 +1022,7 @@ async def _heartbeat(conn, out: dict) -> None:
         await conn.execute(
             "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
             "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
-            HEARTBEAT_KEY, json.dumps({
+            key or HEARTBEAT_KEY, json.dumps({
                 "at": time.time(),
                 "writer": _code_identity(),
                 "state": out.get("state"),
@@ -1067,9 +1083,12 @@ async def run(get_pool) -> None:
             log.info("ext_pinnacle STANDBY: another process holds the "
                      "writer lock; writing nothing, retrying in %ss",
                      IDLE_POLL_S)
+            # ITS OWN KEY. This process writes no valuations, so it has no
+            # cycle; writing HEARTBEAT_KEY here erased the real writer's.
             await _heartbeat(conn, {
                 "state": "STANDBY_NOT_THE_WRITER",
-                "refusals": {"ANOTHER_PROCESS_HOLDS_THE_WRITER_LOCK": 1}})
+                "refusals": {"ANOTHER_PROCESS_HOLDS_THE_WRITER_LOCK": 1}},
+                key=STANDBY_KEY)
             await asyncio.sleep(IDLE_POLL_S)
         log.info("ext_pinnacle: writer lock held (key %s)", LOCK_KEY)
         while True:
