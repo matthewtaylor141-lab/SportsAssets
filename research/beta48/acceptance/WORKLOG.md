@@ -710,3 +710,123 @@ no remedial action was taken.
 
 **CHECK 5 armed for ~03:50Z, same four readbacks.** The stop at
 2026-09-24T04:00:00Z (`trig_01RKm5XcVvaUXCqLgbAnV2T6`) has not been moved.
+
+---
+
+## CHECK 5 — 2026-09-24T03:51Z — THE FINAL CHECK BEFORE THE STOP
+
+Four readbacks, dispatched at `ref=claude/command-center`, psql output read
+from each job log. `render-ops.yml` measured first: 511,578 bytes, unchanged.
+
+### 1 · obs-incentive (run 1518, job 107485843603)
+
+```
+control true   manifest_used 0   recheck_used 2   retry_used 0   http_total 2
+general_max_distinct 0   sock_connects 7   sock_subs 14
+deadline_at 2026-09-24T04:35:48+00:00   boots 3   reconnects 4   resubscribes 8
+```
+
+Identical to check 4 on every field. Allowance inside 8/20/40 and sockets
+inside 7/14. **`boots` has NOT moved past 3.** Deadline unmoved.
+
+### 2 · obs-live (run 1519, job 107485866224)
+
+`armed_probe_id d5e9ae3d-257f-4948-a808-90d1bd3c5e48` — **unchanged**, so no
+stop-and-report condition. `observation_control true`.
+`bettor_live_journal` still 14 rows, newest 2026-09-22 14:16:33Z, boot
+`3ddd79c916e54190`, 0 rows in the last 60 s: the GENERAL loop, idle by
+design, as check 5's own instruction states.
+
+### 3 · obs-incentive-journal (run 1520, job 107485870524)
+
+```
+LADDER  37196 rows   newest 2026-09-24 03:51:23Z     (check 4: 34007 / 01:46:54Z)
+EPOCH      10        GAP 33        PROGRAM_VERSION 5 rows, last 22:58:58Z
+boots 3   runs 1
+7435b23a98d049f3     43 rows   10:28:29Z -> 10:28:59Z
+8702807518fe44b4  29243 rows   10:31:14Z -> 22:58:35Z
+d61606169a1f410c   7964 rows   22:58:58Z -> 03:51:25Z
+```
+
+LADDER exceeds 34,007 and the newest `at` exceeds 01:46:54Z, both as
+required. **No fourth boot_id: still three, and the third is still
+`d61606169a1f410c`.** PROGRAM_VERSION has **not** moved past 5 rows /
+22:58:58Z.
+
+**EIGHT NEW GAPS, all `GAP_LIVENESS_UNDETERMINED`, totalling 581.4008 s**
+(check 4 had 9 rows with a `from` totalling 164.4374 s; there are now 17):
+
+| from (epoch) | duration s |
+|---|---|
+| 1790217768.38 | 160.5482 |
+| 1790217470.90 | 222.2661 |
+| 1790216963.05 | 35.1308 |
+| 1790216784.99 | 4.1018 |
+| 1790216646.75 | 50.6760 |
+| 1790216105.40 | 90.0667 |
+| 1790215920.28 | 6.0284 |
+| 1790215612.84 | 12.5828 |
+
+Those epochs fall between roughly **02:40Z and 03:19Z**, which overlaps the
+two API deploys I made in that window (02:51Z `a9304db`, 03:08Z `e2f9999`)
+and the database reads they triggered. **What can be established:**
+
+- **no new `PROCESS_REPLACED`.** The only two remain the 135.191 s and the
+  22.665 s already on the record, both hours old. The collector process was
+  **not** replaced;
+- the boot id did not change and `boots` is still 3, so it did not restart;
+- collection did not stop: LADDER frames continue to 03:51:23Z and all
+  twelve markets have frames inside the last four minutes.
+
+**What is NOT established: the cause.** `GAP_LIVENESS_UNDETERMINED` says the
+run could not determine whether its stream was live, which database
+contention, a quiet venue or something else could each produce. The
+coincidence in time with my deploys is recorded because it is suspicious,
+**not** because it is demonstrated — and it must not be written up as
+demonstrated later on the strength of this note. No remedial action was
+taken and no counter was reset.
+
+### 4 · obs-incentive-markets (run 1521, job 107485893307)
+
+```
+markets_receiving 12   markets_with_depth 12
+frames_total 37201   frames_in_window 37201   frames_before_window 0
+per-market newest: 03:48:24Z -> 03:51:31Z   (check 4: 01:46:07Z -> 01:47:55Z)
+```
+
+**No market has gone quiet.** All twelve carry depth; every frame is inside
+the window and none precedes it.
+
+### Coverage, recomputed with the unobserved head in the denominator
+
+```
+window opened            2026-09-23T04:00:00Z
+first frame              2026-09-23T10:28:29Z
+unobservable head        6.4747 h
+newest frame             2026-09-24T03:51:31Z
+span first->newest       17.3839 h
+gap total                   745.8382 s = 0.207177 h
+OBSERVED                 17.1767 h
+elapsed since open       23.8586 h
+```
+
+**72.0% of elapsed, 71.6% of the full 24 h.** (Check 4: 70.1% / 63.7%.)
+
+**This is NOT a complete-day observation and must never be reported as
+one.** 6.47 h at the head were never observable because collection began at
+10:28:29Z, and 745.8 s were lost to gaps — of which 581.4 s arrived in the
+last hour, from a gap kind whose cause is not established.
+
+### Verdict
+
+Collection is running, continuous since 22:58:58Z under boot
+`d61606169a1f410c`, with control true, the probe id unchanged, the allowance
+barely touched and the deadline unmoved. No diagnosis was required under the
+stop conditions — nothing disarmed, no budget exhausted, no run error — and
+no remedial action was taken.
+
+**THIS IS THE FINAL CHECK. No check 6 is armed.** The stop at
+2026-09-24T04:00:00Z (`trig_01RKm5XcVvaUXCqLgbAnV2T6`) has not been moved.
+After it fires the window is closed and the figure above — **17.1767 h
+observed, 72.0% of elapsed, 71.6% of the calendar day** — stands as the
+record.
