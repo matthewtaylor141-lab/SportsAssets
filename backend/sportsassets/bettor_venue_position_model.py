@@ -193,7 +193,19 @@ def translate(action, *, venue, held_qty, us_market_slug=None,
     out = {"version": VERSION, "action": act, "venue_model": vm,
            "intent_selects": INTENT_SELECTS}
     if not vm["ok"]:
-        out.update(ok=False, refusal=vm["refusal"], why=vm["why"])
+        # THE CAPITAL FIELDS ARE PRESENT EVEN ON A REFUSAL. A missing key
+        # reads as None to a caller, and None beside "capital_release" is
+        # ambiguous between "nothing is released" and "we do not know".
+        # It is the second, and it says so.
+        out.update(ok=False, refusal=vm["refusal"], why=vm["why"],
+                   capital_release=NOT_IDENTIFIED,
+                   capital_release_why=(
+                       "the venue's position model is not established, so "
+                       "whether any matched capital exists to release "
+                       "cannot be stated. No release is claimed"),
+                   creates_second_leg=NOT_IDENTIFIED,
+                   matched_pair_created=NOT_IDENTIFIED,
+                   net_effect=NOT_IDENTIFIED)
         return out
     if act not in TRANSLATABLE:
         out.update(ok=False, refusal=R_ACTION_NOT_TRANSLATABLE,
