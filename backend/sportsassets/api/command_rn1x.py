@@ -1225,6 +1225,122 @@ EXTERNAL_TRACE = """
 """
 
 
+ENTRY_EVIDENCE = """
+    SELECT id, condition_id, us_market_slug, contract_selection,
+           payout_event, buy_intent, sport_family, probability,
+           executable_price, cost_per_contract,
+           estimated_edge_per_contract, proposed_size, decision,
+           admissible, refusals, decided_at, age_s, outcome_books,
+           execution_estimate, risk_verdict, exposure_observed,
+           settlement_comparison
+      FROM external_valuations
+     WHERE experiment_id = $1
+       AND decided_at >= now() - ($2 || ' hours')::interval
+     ORDER BY decided_at DESC LIMIT $3
+"""
+
+ENTRY_INVENTORY = """
+    SELECT p.position_id, p.condition_id, p.outcome_index, p.provenance,
+           p.seed_qty::float8      AS qty,
+           p.seed_price::float8    AS price,
+           p.seed_basis_usd::float8 AS cost_basis_usd,
+           p.decision_ts, p.decision_basis,
+           (SELECT count(*) FROM rn1x_decisions d
+             WHERE d.position_id = p.position_id) AS decisions,
+           (SELECT count(*) FROM rn1x_orders o
+             WHERE o.position_id = p.position_id) AS orders,
+           (SELECT coalesce(sum(f.fee_usd), 0)::float8 FROM rn1x_fills f
+             JOIN rn1x_orders o2 ON o2.order_id = f.order_id
+            WHERE o2.position_id = p.position_id) AS fees_usd,
+           (SELECT coalesce(sum(f.qty), 0)::float8 FROM rn1x_fills f
+             JOIN rn1x_orders o2 ON o2.order_id = f.order_id
+            WHERE o2.position_id = p.position_id) AS filled_qty,
+           (SELECT count(*) FROM rn1x_outcomes x
+             WHERE x.position_id = p.position_id) AS outcomes
+      FROM rn1x_positions p
+     WHERE p.policy = $1
+     ORDER BY p.decision_ts DESC LIMIT $2
+"""
+
+
+async def entry_evidence(conn, *, hours: int = 24, limit: int = 20) -> dict:
+    """THE ENTRY LANE'S OWN DECISIONS, with every input behind them.
+
+    The census counts refusals; this shows what each candidate was
+    actually looking at -- the probability, the price and the depth, the
+    cost, the size the frozen policy chose, the marketable fill estimate
+    and its basis, every risk rail with its limit and its measurement, and
+    the settlement comparison with the fixture evidence that scoped it.
+    A refused candidate is included, because the refusal is the result.
+
+    It also returns the inventory the lane HOLDS, if any. An admitted
+    decision that created no position would be a valuation wearing the
+    word "entry", and this read is where that shows.
+    """
+    from .. import bettor_entry_execution as entryx
+    from .. import bettor_entry_inventory as inv
+    from .. import bettor_external_shadow as ext
+    from .. import bettor_pinnacle_devig as devig
+
+    rows = await conn.fetch(ENTRY_EVIDENCE, ext.EXPERIMENT_ID,
+                            str(max(1, min(720, int(hours)))),
+                            max(1, min(200, int(limit))))
+    held = await conn.fetch(ENTRY_INVENTORY, inv.POLICY,
+                            max(1, min(200, int(limit))))
+    try:
+        cal = await conn.fetchrow(
+            "SELECT source_version, sample_size, metric, score, tolerance, "
+            "within_tolerance, measured_by, measured_at "
+            "FROM external_source_calibration WHERE source_version = $1 "
+            "ORDER BY measured_at DESC LIMIT 1", devig.VERSION)
+        # `measured` IS SET EXPLICITLY, not inferred from the row's
+        # presence by whoever reads this. A row that came back without it
+        # printed `measured: null`, which reads like a third state that
+        # does not exist.
+        calibration = (dict(cal, measured=True) if cal is not None
+                       else {"measured": False,
+                             "source_version": devig.VERSION,
+                             "why": ("no calibration has been measured for "
+                                     "this source, so MODEL_TRUST_DRIFT is "
+                                     "NOT_EVALUABLE and blocks every "
+                                     "entry")})
+    except Exception as exc:                                   # noqa: BLE001
+        # A FAILED READ IS NOT AN ABSENT MEASUREMENT, and the two must not
+        # print the same.
+        calibration = {"measured": False, "read_failed": type(exc).__name__}
+
+    return {
+        "experiment_id": ext.EXPERIMENT_ID,
+        "policy": inv.POLICY,
+        "candidates": [dict(r) for r in rows],
+        "inventory": [dict(r) for r in held],
+        "source_calibration": calibration,
+        "risk_declaration": entryx.declaration(),
+        "reading": {
+            "execution_estimate": (
+                "p_fill is %s -- the fraction of the intended notional the "
+                "arrival ladder actually showed at or inside the break-even "
+                "limit. It is an OBSERVATION, not a forecast, and it is not "
+                "a resting order's fill probability"
+                % entryx.MARKETABLE_BASIS),
+            "risk_verdict": ("every rail with the limit THIS LANE "
+                             "predeclared, the exposure measured against "
+                             "it and the verdict. An unevaluable rail is "
+                             "not a pass"),
+            "settlement_comparison": ("the condition-to-payout verdict, "
+                                      "plus the fixture row that "
+                                      "established the phase and the "
+                                      "game format it was read under"),
+            "inventory": ("what the lane HOLDS. Modelled fills against "
+                          "observed depth: no order was submitted to any "
+                          "venue and no capital is at risk"),
+            "source_calibration": ("the MODEL_TRUST_DRIFT gate's evidence. "
+                                   "Absent, the gate is NOT_EVALUABLE and "
+                                   "no entry can create inventory"),
+        },
+    }
+
+
 async def external_trace(conn, row_id: int) -> dict:
     """ONE external valuation, with every field management inspects."""
     row = await conn.fetchrow(EXTERNAL_TRACE, int(row_id))

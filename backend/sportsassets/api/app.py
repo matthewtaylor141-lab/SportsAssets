@@ -2310,6 +2310,30 @@ async def command_rn1x_external_census(response: Response,
         return await ext.census(conn, hours=max(1, min(720, int(hours))))
 
 
+@app.get("/api/command/rn1x/external/entry-evidence",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_entry_evidence(response: Response, hours: int = 24,
+                                      limit: int = 20) -> dict:
+    """WHAT THE ENTRY LANE DECIDED, AND WHAT IT HOLDS.
+
+    The census counts refusals. This returns, per candidate, the
+    probability, the executable price, the cost, the size the frozen
+    policy chose, the marketable fill estimate with its basis, every risk
+    rail with its predeclared limit and its measurement, the settlement
+    comparison with the fixture evidence behind it, and the exact
+    refusals -- plus the positions, orders, fills and fees the lane
+    actually created, so an admitted decision that produced no inventory
+    is visible as exactly that.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await CR.entry_evidence(conn, hours=hours, limit=limit)
+
+
 @app.get("/api/command/rn1x/external/trace/{row_id}",
          dependencies=[Depends(require_command)])
 async def command_rn1x_external_trace(row_id: int,

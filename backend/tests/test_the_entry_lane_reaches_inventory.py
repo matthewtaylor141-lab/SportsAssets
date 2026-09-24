@@ -364,6 +364,33 @@ async def test_an_admitted_entry_becomes_a_position_order_fill_and_basis(
         assert '"probability_validated": false' in dec["lbl"]
         assert entryx.MARKETABLE_BASIS in dec["cond"]
         assert '"execution_secured": false' in dec["cond"]
+
+        # AND THE VALUATION ROW CARRIES THE WHOLE DECISION, so production
+        # can be asked what the fill estimate was, what size the policy
+        # chose, which rail passed and what the settlement comparison
+        # found -- none of which was readable before migration 116.
+        val = await conn.fetchrow(
+            "SELECT execution_estimate, risk_verdict, exposure_observed, "
+            "settlement_comparison FROM external_valuations "
+            "WHERE experiment_id = $1 AND condition_id = $2",
+            ext.EXPERIMENT_ID, CONDITION)
+        import json as _json
+        ee = _json.loads(val["execution_estimate"])
+        assert ee["basis"] == entryx.MARKETABLE_BASIS
+        assert 0 < ee["p_fill"] <= 1
+        assert ee["sizing"]["sizingPolicyVersion"]
+        rv = _json.loads(val["risk_verdict"])
+        assert rv["permitted"] is True
+        assert rv["limitsSha"] == entryx.LIMITS_SHA
+        assert rv["railsNotPassed"] == []
+        ex = _json.loads(val["exposure_observed"])
+        assert ex["observed"]["MAX_CAPITAL_DEPLOYED"] > 0
+        sc = _json.loads(val["settlement_comparison"])
+        assert sc["compatibility"] == "COMPATIBLE"
+        assert sc["scope_phase"] == ST.PHASE_REGULAR
+        assert sc["fixture_source"] == "MLB_STATS_API"
+        assert sc["fixture_retrieved_at"]
+        assert sc["venue_rules_read"] is True
     finally:
         await conn.close()
 

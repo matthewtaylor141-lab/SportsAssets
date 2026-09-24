@@ -121,3 +121,37 @@ ALTER TABLE rn1x_positions
         'ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY',
         'AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW'
     ])) NOT VALID;
+
+
+-- ── THE ENTRY DECISION'S OWN INPUTS, ON ITS OWN ROW ──────────────────
+--
+-- `external_valuations` records the probability, the price, the cost, the
+-- edge and the refusals. That was enough while every candidate refused
+-- for want of an execution estimate. It is not enough now: the lane
+-- computes a marketable fill, a size from the frozen policy, an exposure
+-- measurement and a risk verdict per rail, and NONE of that was readable
+-- back from production.
+--
+-- A directive asking for "probabilities, prices and depth, costs, sizes,
+-- risk verdicts and exact refusals" cannot be answered from columns that
+-- do not exist, so these four carry the rest of the decision:
+--
+--   execution_estimate    p_fill and its BASIS, the budget walk, the
+--                         VWAP, the frozen policy's three notional
+--                         figures, the observation age
+--   risk_verdict          every rail with its limit, its measurement and
+--                         its verdict, every state gate, and the sha of
+--                         the limit set that governed
+--   exposure_observed     what each rail was measured AGAINST, including
+--                         the proposed position
+--   settlement_comparison the condition-to-payout verdict and the
+--                         fixture evidence that scoped it
+--
+-- They are nullable: rows written before this migration did not have
+-- these inputs and must not be made to look as though they did.
+
+ALTER TABLE external_valuations
+    ADD COLUMN IF NOT EXISTS execution_estimate    jsonb,
+    ADD COLUMN IF NOT EXISTS risk_verdict          jsonb,
+    ADD COLUMN IF NOT EXISTS exposure_observed     jsonb,
+    ADD COLUMN IF NOT EXISTS settlement_comparison jsonb;

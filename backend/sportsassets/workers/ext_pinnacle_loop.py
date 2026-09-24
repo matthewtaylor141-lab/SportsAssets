@@ -1597,6 +1597,23 @@ async def cycle(conn) -> dict:
             rec["venue_quote"] = vq
             rec["mapping"] = mapped
             rec["settlement"] = srule
+            # THE COMPARISON AND WHAT SCOPED IT, on the row. A verdict
+            # without the fixture evidence behind it cannot be rechecked:
+            # the same prose reads differently under a different phase or
+            # game format, and the provenance says which one applied.
+            rec["settlement_comparison"] = dict(
+                _settlement_compatibility(srule),
+                quote_context=(ctx_ev or {}).get("context"),
+                quote_context_why=(ctx_ev or {}).get("why"),
+                scope_phase=fmeta.get("phase"),
+                scope_game_format=fmeta.get("game_format"),
+                fixture_source=fmeta.get("source"),
+                fixture_source_url=fmeta.get("source_url"),
+                fixture_retrieved_at=fmeta.get("retrieved_at"),
+                fixture_game_pk=fmeta.get("game_pk"),
+                fixture_read=fmeta.get("read"),
+                venue_rules_read=bool((vevid or {}).get("rules_text")),
+                venue_rules_source=(vevid or {}).get("rules_source"))
             try:
                 row_id = await ext.persist(conn, rec)
                 if row_id is None:

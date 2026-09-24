@@ -342,7 +342,13 @@ INSERT = """
          decision, admissible, refusals, why, proposed_size,
          payout_event, payout_event_basis, probability_event,
          payout_is_complement, buy_intent, matched_side_norm,
-         resolver_asked_for, ladder_side)
+         resolver_asked_for, ladder_side,
+         -- THE REST OF THE DECISION. See migration 116: without these the
+         -- production row could not answer what the fill estimate was,
+         -- what size the policy chose, which rail passed or what the
+         -- settlement comparison found.
+         execution_estimate, risk_verdict, exposure_observed,
+         settlement_comparison)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
             $18::jsonb,$19,$20,$21,
             CASE WHEN $22::double precision IS NULL THEN NULL
@@ -350,7 +356,8 @@ INSERT = """
             CASE WHEN $23::double precision IS NULL THEN NULL
                  ELSE to_timestamp($23) END,
             $24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,
-            $37,$38,$39,$40,$41,$42,$43,$44)
+            $37,$38,$39,$40,$41,$42,$43,$44,
+            $45::jsonb,$46::jsonb,$47::jsonb,$48::jsonb)
     -- BARE `DO NOTHING`, deliberately. Migration 105's uniqueness is an
     -- EXPRESSION index (coalesce over the nullable key columns), and
     -- `ON CONFLICT ON CONSTRAINT` cannot name an index, while inferring
@@ -372,6 +379,20 @@ JOIN_OUTCOME = """
            outcome_at = to_timestamp($3), realised_net_usd = $4
      WHERE id = $1 AND outcome_known = FALSE
 """
+
+
+def _plan_json(rec: dict, section: str):
+    """One section of the entry plan as JSON, or None if it was not built.
+
+    None and `{}` mean different things here: the first says the lane
+    never got far enough to compute this, the second would say it computed
+    an empty answer. A row that cannot tell them apart cannot be used to
+    find out where a cycle stopped.
+    """
+    import json as _json
+
+    got = (rec.get("execution_plan") or {}).get(section)
+    return None if got is None else _json.dumps(got, default=str)
 
 
 async def persist(conn, rec: dict) -> int | None:
@@ -449,7 +470,16 @@ async def persist(conn, rec: dict) -> int | None:
         c.get("buy_intent"),
         c.get("matched_side_norm"),
         c.get("resolver_asked_for") or c.get("selection"),
-        c.get("ladder_side"))
+        c.get("ladder_side"),
+        # ── THE ENTRY PLAN, AS IT WAS COMPUTED ───────────────────────
+        # `_plan_json` returns None rather than {} when a section was
+        # never built, so an absent estimate is visibly absent instead of
+        # reading as an empty one.
+        _plan_json(rec, "execution"),
+        _plan_json(rec, "risk"),
+        _plan_json(rec, "exposure"),
+        (None if rec.get("settlement_comparison") is None
+         else json.dumps(rec["settlement_comparison"], default=str)))
 
 
 REFUSAL_CENSUS = """
