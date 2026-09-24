@@ -127,7 +127,7 @@ EXTERNAL_SOURCE_CLASSES = ("EXTERNAL_BOOKMAKER_VALUATION",)
 
 def admit(*, action_table=None, model=None, fair_value=None,
           execution_estimate=None, size=None, risk=None,
-          market_state=None, fee_fn=None,
+          market_state=None, fee_fn=None, fee_per_contract=None,
           min_net_edge_per_contract=0.0,
           external_source=None, external_enabled=False) -> dict:
     """Return an admissible entry, or every reason there is not one.
@@ -252,7 +252,19 @@ def admit(*, action_table=None, model=None, fair_value=None,
             # A FEE FUNCTION IS REQUIRED, NOT DEFAULTED. This project has
             # already shipped a lane that booked every fill free because a
             # zero-fee lambda was the fallback.
-            fee_per = abs(float(fee_fn(qty=1.0, price=ask)))
+            #
+            # THE REALISED FEE WINS WHEN THE CALLER HAS ONE. Re-deriving it
+            # at one price assumes the whole quantity traded there. A
+            # marketable order that walked .62/.64/.66 paid three different
+            # fees, and the caller that walked the ladder knows their sum;
+            # this function does not and must not guess it from an average.
+            fee_per = (abs(float(fee_per_contract))
+                       if fee_per_contract is not None
+                       else abs(float(fee_fn(qty=1.0, price=ask))))
+            detail["fee_per_contract_basis"] = (
+                "REALISED_PER_LEVEL_SUPPLIED_BY_THE_CALLER"
+                if fee_per_contract is not None
+                else "RE_DERIVED_AT_THE_SUPPLIED_PRICE")
             edge = fv_value - ask - fee_per
             best = {"action": ENTRY_ACTION, "leg": ms.get("leg") or "YES",
                     "status": "IDENTIFIED_BY_ENTRY_GATE",

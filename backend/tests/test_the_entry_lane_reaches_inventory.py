@@ -463,11 +463,57 @@ async def test_an_admitted_entry_becomes_a_position_order_fill_and_basis(
         # found -- none of which was readable before migration 116.
         val = await conn.fetchrow(
             "SELECT execution_estimate, risk_verdict, exposure_observed, "
-            "settlement_comparison FROM external_valuations "
+            "settlement_comparison, probability::float8 AS pr, "
+            "executable_price::float8 AS px, "
+            "cost_per_contract::float8 AS cpc, "
+            "estimated_edge_per_contract::float8 AS edge "
+            "FROM external_valuations "
             "WHERE experiment_id = $1 AND condition_id = $2",
             ext.EXPERIMENT_ID, CONDITION)
         import json as _json
         ee = _json.loads(val["execution_estimate"])
+
+        # ── THE THREE PRICES REACH THREE DIFFERENT CONSUMERS ─────────
+        # This is the regression that made 159 of run 48's refusals
+        # arithmetic rather than market fact. `_entry_plan` handed the
+        # gate `limit_price`, which by construction IS
+        # fair_value - fee, so the edge the gate computed was zero less
+        # rounding and every candidate refused with
+        # NO_ACTION_HAS_POSITIVE_NET_EDGE.
+        #
+        #   executable_price      what the walked quantity costs
+        #   orders.limit_price    what the order was submitted at
+        #   the reservation       the worst case, at the limit
+        #
+        # They are three DIFFERENT numbers here, and each is asserted
+        # against its own consumer.
+        assert val["px"] == pytest.approx(
+            ee["acquisition_cost_per_contract"]), (
+                "the economic comparison must use the walked cost")
+        assert val["px"] == pytest.approx(ee["vwap"])
+        assert ee["submitted_limit"] == pytest.approx(order["lp"]), (
+            "the ORDER goes out at the break-even limit")
+        assert ee["worst_case_cost_per_contract"] == pytest.approx(
+            ee["submitted_limit"])
+        assert val["px"] < ee["submitted_limit"], (
+            "a walk strictly inside the limit is the whole point of the "
+            "ladder being cheaper than break-even")
+        # THE FEE IS THE ONE ACTUALLY WALKED, summed per level and
+        # divided by the quantity filled -- not re-derived at one price.
+        assert val["cpc"] == pytest.approx(
+            ee["fee_per_contract_realised"], abs=1e-8)
+        # AND THE EDGE IS THAT SUBTRACTION, POSITIVE, and equal to the
+        # probability less what is paid less what it costs.
+        assert val["edge"] == pytest.approx(
+            val["pr"] - val["px"] - val["cpc"], abs=1e-9)
+        assert val["edge"] > 0, val["edge"]
+        # THE RESERVATION IS THE WORST CASE, deliberately, and is bigger
+        # than the modelled cost of the same quantity.
+        exp_detail = _json.loads(val["exposure_observed"])
+        assert exp_detail["proposed_cost_basis"] == \
+            "SIZE_TIMES_WORST_CASE_COST_PER_CONTRACT", exp_detail
+        assert exp_detail["proposed_cost_usd"] > \
+            ee["size"] * val["px"]
         assert ee["basis"] == entryx.MARKETABLE_BASIS
         assert 0 < ee["p_fill"] <= 1
         assert ee["sizing"]["sizingPolicyVersion"]
@@ -1024,31 +1070,104 @@ async def test_an_entry_created_position_runs_the_whole_lifecycle(
         assert loaded["orders"], "its order survived the restart"
         assert loaded["fills"], "and its fills"
 
-        # ── SETTLEMENT ──────────────────────────────────────────────
-        # Recorded in `rn1x_outcomes`, which is a SEPARATE table on
-        # purpose: an outcome lands after the fact and never rewrites the
-        # decision that preceded it.
+        # ── SETTLEMENT, BY PRODUCTION CODE ──────────────────────────
+        # THE DEFECT THIS REPLACES, AND IT WAS MINE. This block used to
+        # INSERT its own row into `rn1x_outcomes` and then assert that the
+        # row it had just written said what it wanted -- a test that
+        # Postgres stores what you put in it. Nothing in production
+        # created an outcome for an entry-lane position.
+        #
+        # Now the ONLY thing supplied is the venue's response at the
+        # transport boundary -- `client.markets.settlement(slug)`, the
+        # authoritative endpoint, in the shape the SDK documents. Reading
+        # it, mapping it through the verified venue-side identity,
+        # computing the payout, closing the residual and writing the row
+        # are all production code.
         acct = made["entries"][0]["accounting"]
-        await conn.execute(
-            "INSERT INTO rn1x_outcomes (position_id, settled_at, "
-            "payout_per_leg, realized_cash_usd, fees_usd, residual_qty, "
-            "unpaired_qty, net_usd, outcome_basis) VALUES "
-            "($1, now(), '{\"YES\": 1}'::jsonb, $2, $3, 0, 0, $4, "
-            "'OBSERVED_PAYOUT_SCORING_ONLY') "
-            "ON CONFLICT (position_id) DO NOTHING",
-            pid, acct["filled_qty"], acct["fees_usd"],
-            acct["filled_qty"] - acct["cost_basis_usd"])
+        from sportsassets import bettor_entry_settlement as SETTLE
+
+        _venue_calls = []
+
+        class _Settlement:
+            @staticmethod
+            def settlement(slug):
+                _venue_calls.append(slug)
+                return {"marketSlug": slug,
+                        "settlementPrice": {"value": "1",
+                                            "currency": "USD"},
+                        "settledAt": "2026-09-24T23:14:07Z"}
+
+        class _Client:
+            markets = _Settlement()
+
+        from sportsassets import pmus as _pmus
+
+        monkeypatch.setattr(_pmus, "_get_client", lambda: _Client())
+        # NO FRESH BOOKMAKER ODDS. The odds fetch is made to fail outright:
+        # a finished contract's value is the venue's settlement price, and
+        # needing a live quote to settle a market that is over is the
+        # defect that left a settled fixture carried as open inventory.
+        async def _no_odds(*a, **k):
+            raise AssertionError("settlement must not need fresh odds")
+
+        monkeypatch.setattr(loop, "fetch_odds", _no_odds)
+
+        done = await RS.run_continuing_management(
+            conn, experiment_id=RS.CHALLENGER_EXPERIMENT_ID)
+        s = done["settlement"]
+        assert s["ran"] is True, s
+        assert s["settled"] == 1, s
+        assert _venue_calls == [US_SLUG], (
+            "the venue's own settlement endpoint, asked once, for the "
+            "contract this position holds: %r" % (_venue_calls,))
+        res = [r for r in s["results"] if r["position_id"] == pid][0]
+        assert res["status"] == SETTLE.S_SETTLED
+        assert res["written"] is True
+        assert res["side_map"] == loop.SIDE_LONG
+        assert res["needed_fresh_odds"] is False
+        assert res["settlement_read"] == "1"
+
         settled = await conn.fetchrow(
             "SELECT realized_cash_usd::float8 AS cash, net_usd::float8 AS "
-            "net, residual_qty::float8 AS resid FROM rn1x_outcomes "
-            "WHERE position_id = $1", pid)
-        assert settled is not None
+            "net, residual_qty::float8 AS resid, fees_usd::float8 AS fees, "
+            "outcome_basis, settled_at, payout_per_leg::text AS pay "
+            "FROM rn1x_outcomes WHERE position_id = $1", pid)
+        assert settled is not None, "production code created the outcome"
         assert settled["resid"] == 0.0, "settlement closes the residual"
+        assert settled["outcome_basis"] == SETTLE.BASIS_SETTLED
+        # THE VENUE'S OWN INSTANT, not ours.
+        assert settled["settled_at"].isoformat().startswith("2026-09-24T23:14")
         # THE ACCOUNTING RECONCILES: a contract that pays 1 returns the
         # quantity in cash, and the net is that less what it cost.
         assert settled["cash"] == pytest.approx(acct["filled_qty"])
+        assert settled["fees"] == pytest.approx(acct["fees_usd"], rel=1e-6)
         assert settled["net"] == pytest.approx(
-            acct["filled_qty"] - acct["cost_basis_usd"])
+            acct["filled_qty"] - acct["cost_basis_usd"], rel=1e-6)
+        assert '"payout_per_contract": 1.0' in settled["pay"]
+
+        # ── EXACTLY ONCE, ACROSS A RESTART ──────────────────────────
+        # A second cycle -- and a new connection, which is a new process
+        # for these purposes -- must not settle it again, must not rewrite
+        # what it wrote, and must say so rather than silently no-op.
+        written_at = await conn.fetchval(
+            "SELECT written_at FROM rn1x_outcomes WHERE position_id=$1", pid)
+        await conn.close()
+        conn = await asyncpg.connect(DSN)
+        twice = await SETTLE.settle_open_positions(
+            conn, experiment_id=ext.EXPERIMENT_ID, policy=inv.POLICY,
+            now=time.time(),
+            read_resolution=lambda slug: pytest.fail(
+                "a settled position must not be re-read"))
+        assert twice["examined"] == 0, (
+            "a settled position is no longer open, so the venue is not "
+            "asked about it again at all")
+        assert await conn.fetchval(
+            "SELECT count(*) FROM rn1x_outcomes WHERE position_id=$1",
+            pid) == 1
+        assert await conn.fetchval(
+            "SELECT written_at FROM rn1x_outcomes WHERE position_id=$1",
+            pid) == written_at
+
         # AND THE DECISION THAT PRECEDED IT IS UNTOUCHED.
         assert await decisions() >= d0
         ev = await conn.fetchrow(

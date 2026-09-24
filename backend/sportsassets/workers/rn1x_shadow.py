@@ -2592,13 +2592,55 @@ async def run_continuing_management(conn, *, experiment_id) -> dict:
     it, and the two have no reason to share a trigger. This is called on
     both paths.
 
+    ── AND SETTLEMENT IS PART OF CARRYING INVENTORY ──
+
+    `manage_open_position` can return SETTLE, and it returns it with
+    `settled=None`: the challenger's settlement input is the ranking
+    pipeline's observed-payout dict, which is never populated for the
+    entry lane. So a position whose fixture had finished stayed open
+    forever while a management decision said to settle it.
+
+    `bettor_entry_settlement` is the consumer that closes it, and it runs
+    HERE rather than inside `ext_pinnacle_loop.cycle` for one specific
+    reason: cycle needs a fresh odds fetch, and a finished contract's
+    value is the venue's settlement price. Requiring a live bookmaker
+    quote to settle a market that is already over is exactly the defect
+    that left a settled fixture carried as open inventory.
+
     A failure in one experiment never costs the other its result.
     """
+    import time as _time
+
+    from .. import bettor_entry_inventory as _inv
+    from .. import bettor_entry_settlement as _settle
     from .. import bettor_external_shadow as _ext
 
-    out = {"challenger": None, "entry_lane": None,
+    out = {"challenger": None, "entry_lane": None, "settlement": None,
            "experiments": [experiment_id, _ext.EXPERIMENT_ID],
-           "runs_without_new_candidates": True}
+           "runs_without_new_candidates": True,
+           "settlement_needs_fresh_odds": False}
+    # SETTLEMENT FIRST. A position the venue has already settled should be
+    # closed before it is valued again: valuing a finished contract off a
+    # bookmaker's book is a measurement of nothing.
+    try:
+        out["settlement"] = await _settle.settle_open_positions(
+            conn,
+            # BOTH LANES THAT HOLD SHADOW INVENTORY. The entry lane's
+            # positions and the ACCEPTANCE position are settled by the
+            # same venue read: an MLB feed reporting "Final" establishes
+            # that a game ended, not that this venue settled this
+            # contract, so the venue is what is asked in both cases.
+            #
+            # NOTHING IS RESEEDED. A settlement writes an outcome row
+            # BESIDE the position; the acceptance position's synthetic,
+            # modelled, unfunded provenance is never read or rewritten
+            # here, and closing it does not create inventory.
+            experiment_id=[_ext.EXPERIMENT_ID, experiment_id],
+            policy=[_inv.POLICY, ACCEPTANCE_POLICY],
+            now=_time.time())
+    except Exception as exc:                                   # noqa: BLE001
+        out["settlement"] = {"ran": False,
+                             "error": "%s: %s" % (type(exc).__name__, exc)}
     for key, exp in (("challenger", experiment_id),
                      ("entry_lane", _ext.EXPERIMENT_ID)):
         try:

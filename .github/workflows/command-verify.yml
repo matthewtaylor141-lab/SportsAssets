@@ -2382,14 +2382,23 @@ jobs:
           "verdict\t"          + n(.verdict),
           "gate_opens\t"       + n(.gate_opens),
           "-- the declaration, fixed before any data was read --",
+          "  evaluator\t"      + n(.measurement.version)
+                                + "  supersedes " + n(.measurement.supersedes),
           "  metric\t"         + n(.acceptance.metric)
-                                + "  ceiling " + n(.acceptance.ceiling)
-                                + "  no_skill " + n(.acceptance.reference_no_skill_brier),
-          "  min_events\t"     + n(.acceptance.min_resolved_events),
+                                + "  ceiling " + n(.acceptance.conditions.brier_at_or_below_ceiling)
+                                + "  ceiling_is " + n(.acceptance.the_ceiling_is),
+          "  reference\t"      + n(.acceptance.reference_only.constant_half_brier)
+                                + " = " + n(.acceptance.reference_only.what_it_is),
+          "  min_fixtures\t"   + n(.acceptance.conditions.min_independent_fixtures),
+          "  calib_bound\t"    + n(.acceptance.conditions.calibration_error_at_or_below),
+          "  baseline\t"       + n(.acceptance.baseline.fitted_on)
+                                + "  uses_eval_outcomes "
+                                + n(.acceptance.baseline.fitted_using_evaluation_outcomes),
           "  scope\t"          + n(.scope.source_version) + " / "
                                 + n(.scope.source_method) + " / "
                                 + n(.scope.market) + " / "
-                                + n(.scope.families),
+                                + n(.scope.families)
+                                + "  unit " + n(.scope.independent_unit),
           "-- the outcome join --",
           "  examined\t"       + n(.outcome_join.examined)
                                 + "  resolved " + n(.outcome_join.resolved)
@@ -2397,17 +2406,44 @@ jobs:
                                 + "  pending " + n(.outcome_join.pending)
                                 + "  unreadable " + n(.outcome_join.unreadable)
                                 + "  unmatched " + n(.outcome_join.unmatched),
+          "  not_settled\t"    + "named_winner " + n(.outcome_join.named_winner)
+                                + "  inferred " + n(.outcome_join.inferred)
+                                + "  unparseable " + n(.outcome_join.unparseable)
+                                + "  side_unknown " + n(.outcome_join.side_unknown),
           "  by_status\t"      + n(.outcome_join.by_status),
+          "  by_class\t"       + n(.outcome_join.by_class),
           "-- the measurement --",
           "  rows_in_scope\t"  + n(.measurement.rows_in_scope)
                                 + "  out_of_scope " + n(.measurement.rows_out_of_scope),
-          "  unique_events\t"  + n(.measurement.unique_events)
+          "  fixtures\t"       + n(.measurement.unique_fixtures)
+                                + "  payout_statements " + n(.measurement.payout_statements_in_scope)
                                 + "  collapsed " + n(.measurement.observations_collapsed),
           "  counts\t"         + n(.measurement.outcome_counts),
+          "  resolved_fix\t"   + n(.measurement.resolved_fixtures),
+          "  split\t"          + "fit " + n(.measurement.baseline_split.fit_fixtures)
+                                + "  eval " + n(.measurement.baseline_split.evaluation_fixtures)
+                                + "  total_required "
+                                + n(.measurement.baseline_split.total_resolved_fixtures_required),
+          "  baseline_p\t"     + n(.measurement.baseline.probability)
+                                + "  baseline_brier "
+                                + n(.measurement.baseline_comparison.baseline_brier)
+                                + "  improvement "
+                                + n(.measurement.baseline_comparison.paired_mean_improvement)
+                                + "  ci [" + n(.measurement.baseline_comparison.ci_low)
+                                + ", " + n(.measurement.baseline_comparison.ci_high) + "]",
           "  scored\t"         + n(.measurement.scored_events),
           "  score\t"          + n(.measurement.score)
+                                + "  se " + n(.measurement.uncertainty.brier_standard_error)
                                 + "  provisional " + n(.measurement.score_is_provisional),
-          "  shortfall\t"      + n(.measurement.shortfall_events),
+          "  calibration\t"    + "ece " + n(.measurement.calibration.expected_calibration_error)
+                                + "  worst_bin " + n(.measurement.calibration.worst_bin_gap),
+          "  decomposition\t"  + n(.measurement.predictive_score.decomposition),
+          "  profitability\t"  + "measured_here "
+                                + n(.measurement.trading_profitability.measured_here),
+          "  checks_failed\t"  + n(.measurement.conditions_failed),
+          "  shortfall\t"      + n(.measurement.shortfall_events)
+                                + "  total_fixtures "
+                                + n(.measurement.shortfall_resolved_fixtures_total),
           "  written\t"        + n(.measurement.written),
           "  inputs_sha\t"     + n(.measurement.inputs_sha),
           "  why\t"            + n(.measurement.why)

@@ -402,6 +402,12 @@ def read_resolution(client, market_slug: str) -> dict:
                 "status": RESOLVED, "outcome": st["settlement_price_raw"],
                 "outcome_field": "settlementPrice",
                 "settlement_price": st["settlement_price"],
+                # THE VENUE'S OWN STRING, carried under its own name as
+                # well as under `outcome`. A consumer that wants to record
+                # what the venue said -- rather than our float reading of
+                # it -- should not have to know that `outcome` happens to
+                # hold the raw value on this branch and a label on another.
+                "settlement_price_raw": st["settlement_price_raw"],
                 "units_status": st["units_status"],
                 "settled_at": st["settled_at"], "closed": None,
                 "error": None, "keys_seen": [],

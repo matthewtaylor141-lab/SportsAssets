@@ -316,6 +316,42 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
         "vwap": round(vwap, 6),
         "vwap_is": "THE_REALISED_COST_OF_THE_WALK_NOT_A_LIMIT",
         "levels_taken": walk.get("levels_taken") or [],
+        # ── WHICH NUMBER THE ECONOMICS USE, NAMED HERE ───────────────
+        #
+        # THE REGRESSION THIS EXISTS TO STOP. Separating the submitted
+        # limit from the VWAP fixed the ORDER record and broke the
+        # COMPARISON: the caller went on reading `limit_price`, which now
+        # meant the break-even, so the gate compared the valuation against
+        # the very price derived from it and found an edge of exactly
+        # zero. In production that printed as
+        # NO_ACTION_HAS_POSITIVE_NET_EDGE on 159 candidates -- a number
+        # that looked like a market fact and was arithmetic.
+        #
+        # So the two uses are now named, not left to a field name:
+        #
+        #   acquisition_cost_per_contract  the MODELLED cost -- the
+        #       volume-weighted price the walk actually paid. This is what
+        #       the economic comparison uses, with the fees the walk
+        #       actually incurred.
+        #   worst_case_cost_per_contract   the submitted limit. Nothing
+        #       fills above it, so it is the RESERVATION: the most this
+        #       position could cost. Exposure is measured on it.
+        #
+        # They are different questions. Pricing the edge on the worst case
+        # understates it; reserving exposure on the modelled cost
+        # understates that. Each gets its own number.
+        "acquisition_cost_per_contract": round(vwap, 6),
+        "acquisition_cost_is": "MODELLED_VOLUME_WEIGHTED_COST_OF_THE_WALK",
+        "fee_per_contract_realised": round(
+            (sum(abs(float(fee_fn(qty=lv["qty"], price=lv["price"])))
+                 for lv in (walk.get("levels_taken") or []))
+             / filled) if filled else 0.0, 8),
+        "fee_basis": "SUM_OF_PER_LEVEL_FEES_DIVIDED_BY_FILLED_QTY",
+        "worst_case_cost_per_contract": round(limit, 6),
+        "worst_case_cost_is": (
+            "THE_SUBMITTED_LIMIT_NOTHING_FILLS_ABOVE_IT"),
+        "economics_use": "acquisition_cost_per_contract",
+        "reservation_uses": "worst_case_cost_per_contract",
         "best_acquisition_price": best,
         "slippage_vs_best": fill.get("slippage"),
         "spread_cost": fill.get("spreadCost"),
@@ -495,12 +531,18 @@ def _accrued(cost, opened_at, now):
 
 
 def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
-                       proposed_qty, now=None) -> dict:
+                       proposed_qty, now=None,
+                       proposed_cost_basis=None) -> dict:
     """Measured exposure per rail, including the proposed position.
 
     `rows` is the OPEN shadow book: dicts carrying `condition_id`,
     `event_key`, `cost_usd`, `qty`, `opened_at` (epoch seconds) and
     optionally `marked_value_usd` and `realized_net_usd`.
+
+    `proposed_cost_basis` NAMES WHICH PRICE THE RESERVATION USED. A rail
+    reserved at the worst-case limit and one reserved at the modelled
+    walk are different decisions, and a row that does not say which it
+    was cannot be audited later.
     """
     out = {"observed": {}, "rows_read": None, "refusals": [],
            "capitalHoursIsAccruedNotForecast":
@@ -574,7 +616,12 @@ def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
     out["settled_positions_excluded_from_exposure"] = settled
     out["proposed"] = {"cost_usd": round(cost, 6), "qty": round(qty, 6),
                        "condition_id": condition_id,
-                       "event_key": event_key}
+                       "event_key": event_key,
+                       "cost_basis": (str(proposed_cost_basis)
+                                      if proposed_cost_basis
+                                      else "COST_BASIS_NOT_STATED")}
+    out["proposed_cost_basis"] = out["proposed"]["cost_basis"]
+    out["proposed_cost_usd"] = out["proposed"]["cost_usd"]
     if now is None:
         # An accrued figure needs an instant to accrue to. Reporting 0
         # without one would be a measurement that was never taken.

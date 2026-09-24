@@ -218,6 +218,7 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
     # is recorded as a refusal rather than allowed to abort the record --
     # the row, with its odds and its costs, is the deliverable.
     market_state = dict(market_state or {})
+    plan_fee_per = None
     if execution_plan is not None:
         if _p_pay is None:
             rec["execution_plan"] = {
@@ -252,17 +253,45 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
                 # THE PRICE OF THE QUANTITY ACTUALLY CLAIMED. Pricing a
                 # multi-level size off level one understates the cost and
                 # turns depth into edge.
+                #
+                # WHICH price this is, is the plan's to say, not ours. The
+                # acquisition cost of the walked quantity, the limit that
+                # would be submitted, and any worst-case reservation are
+                # three different numbers, and a hard-coded label here
+                # once asserted the first while the loop handed in the
+                # second -- the economic comparison then measured the
+                # break-even price against itself and found no edge.
                 market_state["ask"] = plan["ask"]
-                market_state["ask_basis"] = "VWAP_OF_THE_SIZED_WALK"
+                market_state["ask_basis"] = str(
+                    plan.get("ask_basis")
+                    or "ACQUISITION_PRICE_BASIS_NOT_STATED_BY_THE_PLAN")
+            if plan.get("fee_per_contract") is not None:
+                plan_fee_per = abs(float(plan["fee_per_contract"]))
+            # THE OTHER TWO PRICES, kept and never compared. Recording
+            # them beside the acquisition cost is what makes a later
+            # reader able to tell that the order went out at one price
+            # and the economics were measured at another.
+            for _k in ("submitted_limit", "worst_case_cost_per_contract"):
+                if plan.get(_k) is not None:
+                    rec[_k] = float(plan[_k])
 
     ask = (market_state or {}).get("ask")
     fee_per = None
-    if ask is not None and fee_fn is not None:
+    if plan_fee_per is not None:
+        # PER-LEVEL FEES AS ACTUALLY WALKED. A fee re-derived at one
+        # price is the right number only for a single-level fill; a
+        # multi-level walk pays a different fee at each level.
+        fee_per = plan_fee_per
+        rec["cost_per_contract_basis"] = ("SUM_OF_PER_LEVEL_FEES_OVER_THE"
+                                          "_WALKED_QUANTITY")
+    elif ask is not None and fee_fn is not None:
         try:
             fee_per = abs(float(fee_fn(qty=1.0, price=float(ask))))
+            rec["cost_per_contract_basis"] = "RE_DERIVED_AT_THE_ASK"
         except Exception:                                      # noqa: BLE001
             fee_per = None
     rec["executable_price"] = None if ask is None else float(ask)
+    rec["executable_price_basis"] = (market_state or {}).get("ask_basis")
     rec["cost_per_contract"] = fee_per
     if _p_pay is not None and ask is not None \
             and fee_per is not None:
@@ -283,6 +312,10 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
                     if _p_pay is not None else None),
         execution_estimate=execution_estimate,
         size=size, risk=risk, market_state=market_state, fee_fn=fee_fn,
+        # SAME FEE ON BOTH SIDES. Without this the gate re-derives the
+        # fee at the acquisition price while this module used the walked
+        # per-level fees, and the two edges disagree by the difference.
+        fee_per_contract=fee_per,
         min_net_edge_per_contract=min_net_edge_per_contract,
         external_source=val if _p_pay is not None else None,
         external_enabled=True)

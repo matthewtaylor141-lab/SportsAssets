@@ -976,25 +976,82 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
 # construction. `JOIN_OUTCOME` has existed since migration 103 and had no
 # caller.
 #
-# THE VENUE'S SETTLEMENT PRICE IS ABOUT ITS OWN YES SIDE, NOT ABOUT OUR
-# LEG. A contract acquired as BUY_SHORT pays on the COMPLEMENT of the
-# priced outcome, so its truth is 1 - the settlement price. Getting this
-# backwards would score every short leg against the wrong answer and
-# produce a calibration that is exactly wrong on half the sample, so the
-# flag is read off the row rather than assumed.
+# ── TWO CONVERSIONS, AND THEY ARE NOT THE SAME CONVERSION ───────────
 #
-# A PRICE THAT IS NEITHER 0 NOR 1 IS A VOID, not a fractional outcome: the
-# market returned stakes instead of paying a side, and a voided event has
-# no 0/1 truth for a probability to be scored against.
+# THE DEFECT THIS REPLACES, AND IT WAS MINE. This join mapped the venue's
+# settlement price to our outcome through `payout_is_complement`. That
+# flag answers a question about the PROBABILITY: is the de-vig's source
+# event the complement of the event the contract pays on? On this lane it
+# is always FALSE, because `resolve_venue_identity` asks the resolver for
+# a specific outcome and the resolver returns the side that BUYS it -- so
+# the probability and the payout describe the same event, INCLUDING when
+# that side is the venue's SHORT side.
+#
+# The settlement price is about the venue's OWN LONG (YES) side. A
+# fixture whose YES settles at 1, held SHORT, pays 0. With the flag FALSE
+# the old code recorded 1. That is not an approximation, it is the exact
+# opposite answer, on every short leg.
+#
+# So the two conversions are now stated apart and applied once each:
+#
+#   PROBABILITY CONVERSION  payout_is_complement, applied inside
+#                           `bettor_external_shadow.evaluate` at decision
+#                           time. By the time a row is written, the
+#                           `probability` column already describes the
+#                           payout event. This join must not touch it.
+#   SETTLEMENT CONVERSION   buy_intent / ladder_side, applied HERE. It
+#                           says whether the exposure we hold is the
+#                           venue's LONG side (pays the settlement price)
+#                           or its SHORT side (pays one minus it).
+#
+# `buy_intent` and `ladder_side` are the VERIFIED venue-side identity:
+# both are written by `resolve_venue_identity` from the resolver's own
+# answer, and they agree by construction (BUY_SHORT <-> BID). The mapper
+# below requires them to agree and refuses rather than guessing when they
+# do not, because a disagreement means the identity is not established.
+#
+# ── FOUR OUTCOMES OF A READ, KEPT APART ─────────────────────────────
+#
+# A single `None` return once meant all four of these, and the caller
+# recorded all four as VOID -- permanently, since a joined row is never
+# re-read:
+#
+#   CONFIRMED_VOID   the venue settled at neither 0 nor 1: stakes back.
+#   NAMED_WINNER     a label, e.g. "Houston Astros". `float()` raises,
+#                    which is how a resolved fixture became a void.
+#   INFERRED         RESOLVED_DERIVED: closed with prices converged. The
+#                    venue reported no winner; this is our inference from
+#                    a price and is not settlement evidence.
+#   UNPARSEABLE      a value present that is neither.
+#
+# VOID IS NEVER INFERRED FROM A NONBINARY VALUE ALONE. "Stakes returned"
+# is a claim about what the venue did, and a number that is not 0 or 1 is
+# consistent with a void, with a partially-settled market, with a
+# different unit convention and with a payload we have misread. Only the
+# venue's own settlement endpoint, returning a parseable price that is
+# neither side, is taken as a void; anything else is reported by its own
+# name and left unjoined for a later read.
 
+# `outcome_basis IS NULL` is the queue condition, and it is the SAME
+# condition the calibration scope uses. A row leaves this queue exactly
+# when a basis is recorded for it -- a settled 0/1 or a confirmed void --
+# and rows reopened by migration 118's audit re-enter it, because the
+# audit cleared their basis along with their outcome.
+#
+# ORDERED BY WHEN THE VENUE WAS LAST ASKED, never-asked first. A fixture
+# the venue reports only as a named winner is never written, so ordering
+# by `decided_at` alone would let a handful of unresolvable rows occupy
+# the whole per-run budget forever and starve every later fixture.
 UNJOINED_SQL = """
-    SELECT id, us_market_slug, payout_is_complement
+    SELECT id, us_market_slug, buy_intent, ladder_side,
+           payout_is_complement
       FROM external_valuations
      WHERE experiment_id = $1
        AND outcome_known = FALSE
+       AND outcome_basis IS NULL
        AND us_market_slug IS NOT NULL
        AND decided_at < now() - interval '2 hours'
-     ORDER BY decided_at
+     ORDER BY settlement_read_at ASC NULLS FIRST, decided_at ASC
      LIMIT $2
 """
 
@@ -1005,35 +1062,176 @@ MAX_JOINS_PER_RUN = 60
 #: A settlement price this far from 0 or 1 is not a side paying out.
 _SETTLED_EPS = 1e-6
 
+#: How a stored outcome was established. NULL in the column means "not
+#: established by this mapper", which is what keeps a row out of scope.
+B_SETTLEMENT_PRICE = "VENUE_SETTLEMENT_PRICE"
+B_REPORTED_OUTCOME = "VENUE_REPORTED_OUTCOME"
+B_CONFIRMED_VOID = "CONFIRMED_VOID"
 
-def outcome_for_leg(settlement_price, *, payout_is_complement):
-    """Did the event THIS CONTRACT PAYS ON occur? 1, 0, or None for void."""
+#: Classes that are NOT an outcome, each its own answer.
+C_NAMED_WINNER = "VENUE_NAMED_A_WINNER_NOT_A_PRICE"
+C_INFERRED = "INFERRED_FROM_CONVERGED_PRICES_NOT_VENUE_SETTLEMENT"
+C_UNPARSEABLE = "SETTLEMENT_VALUE_UNPARSEABLE"
+C_SIDE_UNKNOWN = "VENUE_SIDE_IDENTITY_NOT_ESTABLISHED"
+
+#: The two venue sides, and which settlement value each of them pays.
+SIDE_LONG = "VENUE_LONG_PAYS_THE_SETTLEMENT_PRICE"
+SIDE_SHORT = "VENUE_SHORT_PAYS_ONE_MINUS_THE_SETTLEMENT_PRICE"
+
+
+def venue_side_of_our_exposure(*, buy_intent, ladder_side):
+    """Which side of the venue's market the held exposure IS.
+
+    Returns `SIDE_LONG`, `SIDE_SHORT`, or None when the two independent
+    statements of the identity do not agree -- which is a refusal, not a
+    tie to be broken. Both fields are written together by
+    `resolve_venue_identity` from one resolver answer, so disagreement
+    means a row was written by something else or the writer changed.
+    """
+    intent = str(buy_intent or "")
+    side = str(ladder_side or "").upper()
+    if intent == "ORDER_INTENT_BUY_LONG" and side in ("ASK", ""):
+        return SIDE_LONG
+    if intent == "ORDER_INTENT_BUY_SHORT" and side in ("BID", ""):
+        return SIDE_SHORT
+    return None
+
+
+def outcome_from_settlement(resolution, *, buy_intent, ladder_side):
+    """The held exposure's 0/1 truth, or the exact reason there is none.
+
+    `resolution` is a `bettor_live_read.read_resolution` result. Returns
+    a dict -- never a bare value -- because the CALLER has to be able to
+    tell a void from a label from an unreadable payload, and a single
+    `None` cannot.
+
+        {"outcome": 0|1|None, "basis": str|None, "side_map": str|None,
+         "settlement_read": str|None, "class": str}
+    """
+    out = {"outcome": None, "basis": None, "side_map": None,
+           "settlement_read": None, "class": None,
+           "status": str((resolution or {}).get("status") or "")}
+    side = venue_side_of_our_exposure(buy_intent=buy_intent,
+                                     ladder_side=ladder_side)
+    out["side_map"] = side
+    if side is None:
+        out["class"] = C_SIDE_UNKNOWN
+        return out
+
+    from .. import bettor_live_read as lr
+
+    st = out["status"]
+    # AN INFERENCE IS NOT A SETTLEMENT. RESOLVED_DERIVED means the market
+    # closed and its prices converged; the venue named nothing. Scoring a
+    # probability against our own inference would make the calibration
+    # partly a measurement of our inference.
+    if st == getattr(lr, "RESOLVED_DERIVED", "RESOLVED_DERIVED"):
+        out["class"] = C_INFERRED
+        out["settlement_read"] = (
+            None if resolution.get("outcome") is None
+            else str(resolution["outcome"]))
+        return out
+    if st != lr.RESOLVED:
+        out["class"] = "NOT_RESOLVED:%s" % (st or "UNKNOWN")
+        return out
+
+    # A RESOLVED READ CARRIES EITHER A PRICE OR A NAME. The settlement
+    # endpoint gives a price; the listing's reported-outcome field, if it
+    # ever appears, gives whatever the venue put there.
+    raw = resolution.get("settlement_price")
+    if raw is None:
+        raw = resolution.get("outcome")
+    # THE VENUE'S OWN STRING, UNPARSED, when it gave one. `settlement_price`
+    # is our float reading of it; recording the reading instead of the
+    # value would lose the unit convention the raw string carries and make
+    # a later recheck check our arithmetic rather than the venue's answer.
+    shown = resolution.get("settlement_price_raw")
+    out["settlement_read"] = (str(shown) if shown is not None
+                              else (None if raw is None else str(raw)))
     try:
-        sp = float(settlement_price)
+        sp = float(raw)
     except (TypeError, ValueError):
-        return None
+        # A NAME IS NOT A NUMBER, and it is not a void either. Mapping a
+        # label to a side needs the venue's own outcome labels beside the
+        # side we hold, which this reader does not carry -- so it is
+        # reported and left for a reader that does.
+        out["class"] = (C_NAMED_WINNER
+                        if isinstance(raw, str) and raw.strip()
+                        else C_UNPARSEABLE)
+        return out
+
     if abs(sp - 1.0) <= _SETTLED_EPS:
         yes = 1
     elif abs(sp) <= _SETTLED_EPS:
         yes = 0
     else:
-        return None
-    return (1 - yes) if payout_is_complement else yes
+        # THE VENUE'S OWN SETTLEMENT ENDPOINT, returning a parseable price
+        # that paid neither side. That -- and only that -- is a void.
+        out["class"] = B_CONFIRMED_VOID
+        out["basis"] = B_CONFIRMED_VOID
+        return out
+
+    out["outcome"] = (1 - yes) if side == SIDE_SHORT else yes
+    out["basis"] = (B_SETTLEMENT_PRICE
+                    if resolution.get("settlement_price") is not None
+                    else B_REPORTED_OUTCOME)
+    out["class"] = out["basis"]
+    return out
+
+
+#: A settled 0/1, with the provenance that makes it scorable.
+JOIN_RESOLVED_SQL = """
+    UPDATE external_valuations
+       SET outcome_known = TRUE, outcome = $2,
+           outcome_at = to_timestamp($3),
+           outcome_basis = $4, outcome_side_map = $5,
+           settlement_read = $6, settlement_read_at = to_timestamp($3)
+     WHERE id = $1 AND outcome_known = FALSE
+"""
+
+#: A CONFIRMED void. `outcome_known` stays FALSE -- migration 103 is right
+#: that a known outcome must be 0 or 1 -- and the BASIS is what takes the
+#: row out of the unjoined queue and tells the evaluator to class it VOID.
+JOIN_VOID_SQL = """
+    UPDATE external_valuations
+       SET outcome_basis = $2, outcome_side_map = $3,
+           settlement_read = $4, settlement_read_at = to_timestamp($5)
+     WHERE id = $1 AND outcome_known = FALSE AND outcome_basis IS NULL
+"""
+
+#: A READ THAT ESTABLISHED NOTHING. It records that the venue was asked
+#: and what came back, and deliberately leaves `outcome_basis` NULL so the
+#: row is neither scorable nor forgotten.
+JOIN_ATTEMPT_SQL = """
+    UPDATE external_valuations
+       SET outcome_side_map = $2, settlement_read = $3,
+           settlement_read_at = to_timestamp($4)
+     WHERE id = $1 AND outcome_known = FALSE AND outcome_basis IS NULL
+"""
 
 
 async def join_outcomes(conn, *, limit=MAX_JOINS_PER_RUN) -> dict:
     """Read back what happened, for valuations that do not know yet.
 
     Never raises. Reports every class separately -- resolved, void, still
-    pending, unreadable, unmatched -- because a calibration that could not
-    say how much of its record it failed to resolve would be reporting a
-    sample it had not characterised.
+    pending, unreadable, unmatched, named-winner, inferred -- because a
+    calibration that could not say how much of its record it failed to
+    resolve would be reporting a sample it had not characterised, and
+    because three of those classes were previously all recorded as VOID.
+
+    ONLY TWO CLASSES ARE WRITTEN: a settled 0/1 and a confirmed void.
+    Everything else is LEFT UNJOINED on purpose -- a named winner and an
+    inferred resolution are readable later by a reader that carries the
+    venue's outcome labels, and permanently stamping them now is exactly
+    the mistake migration 118 had to reopen rows to undo.
     """
     from .. import bettor_live_read as lr
 
     out = {"ran": True, "examined": 0, "resolved": 0, "void": 0,
            "pending": 0, "unreadable": 0, "unmatched": 0, "errors": 0,
-           "limit": int(limit), "by_status": {}}
+           "named_winner": 0, "inferred": 0, "side_unknown": 0,
+           "unparseable": 0,
+           "limit": int(limit), "by_status": {}, "by_class": {}}
     try:
         rows = await conn.fetch(UNJOINED_SQL, ext.EXPERIMENT_ID, int(limit))
     except Exception as exc:                                   # noqa: BLE001
@@ -1051,32 +1249,55 @@ async def join_outcomes(conn, *, limit=MAX_JOINS_PER_RUN) -> dict:
             continue
         st = str(res.get("status") or "")
         out["by_status"][st] = out["by_status"].get(st, 0) + 1
-        if st not in (lr.RESOLVED, getattr(lr, "RESOLVED_DERIVED",
-                                           "RESOLVED_DERIVED")):
-            if st == lr.PENDING:
-                out["pending"] += 1
-            elif st == lr.UNMATCHED:
-                out["unmatched"] += 1
-            else:
-                out["unreadable"] += 1
-            continue
-        o = outcome_for_leg(res.get("settlement_price",
-                                    res.get("outcome")),
-                            payout_is_complement=bool(
-                                r["payout_is_complement"]))
-        settled_at = time.time()
-        try:
-            # A VOID IS RECORDED AS KNOWN-WITH-NO-OUTCOME, which is what
-            # the evaluator classifies as VOID. Leaving it unknown would
-            # make the join re-read it every run forever.
-            await conn.execute(ext.JOIN_OUTCOME, r["id"], o, settled_at,
-                               None)
-            if o is None:
-                out["void"] += 1
-            else:
+
+        got = outcome_from_settlement(res, buy_intent=r["buy_intent"],
+                                      ladder_side=r["ladder_side"])
+        cls = str(got.get("class") or "UNCLASSIFIED")
+        out["by_class"][cls] = out["by_class"].get(cls, 0) + 1
+        at = time.time()
+
+        if got["outcome"] is not None:
+            try:
+                await conn.execute(JOIN_RESOLVED_SQL, r["id"],
+                                   int(got["outcome"]), at, got["basis"],
+                                   got["side_map"], got["settlement_read"])
                 out["resolved"] += 1
+            except Exception:                                  # noqa: BLE001
+                out["errors"] += 1
+            continue
+        if cls == B_CONFIRMED_VOID:
+            try:
+                await conn.execute(JOIN_VOID_SQL, r["id"], B_CONFIRMED_VOID,
+                                   got["side_map"], got["settlement_read"],
+                                   at)
+                out["void"] += 1
+            except Exception:                                  # noqa: BLE001
+                out["errors"] += 1
+            continue
+
+        # NO BASIS IS WRITTEN FOR THE REST -- so they stay in scope for a
+        # later read and out of scope for calibration -- but the ATTEMPT is
+        # stamped, which is what stops a handful of unresolvable fixtures
+        # from consuming the whole per-run budget every run.
+        try:
+            await conn.execute(JOIN_ATTEMPT_SQL, r["id"], got["side_map"],
+                               got["settlement_read"], at)
         except Exception:                                      # noqa: BLE001
             out["errors"] += 1
+        if cls == C_NAMED_WINNER:
+            out["named_winner"] += 1
+        elif cls == C_INFERRED:
+            out["inferred"] += 1
+        elif cls == C_SIDE_UNKNOWN:
+            out["side_unknown"] += 1
+        elif cls == C_UNPARSEABLE:
+            out["unparseable"] += 1
+        elif st == lr.PENDING:
+            out["pending"] += 1
+        elif st == lr.UNMATCHED:
+            out["unmatched"] += 1
+        else:
+            out["unreadable"] += 1
     return out
 
 
@@ -1431,10 +1652,18 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
                              "reason": "NO_SIZED_POSITION_TO_ASSESS"},
                     "detail": detail}
 
-        cost = float(est["size"]) * float(est["limit_price"])
+        # THE RESERVATION IS DELIBERATELY THE WORST CASE. Nothing fills
+        # above the submitted limit, so sizing the exposure at the limit
+        # reserves the most the order could possibly consume -- which is
+        # the conservative thing to do against a rail. It is NOT the
+        # expected acquisition cost, and the two must not be swapped:
+        # reserving at the modelled walk would under-reserve, and
+        # comparing edge at the limit destroys the edge (see below).
+        cost = float(est["size"]) * float(est["worst_case_cost_per_contract"])
         exposure = entryx.exposure_from_rows(
             open_book, condition_id=condition_id, event_key=event_key,
-            proposed_cost_usd=cost, proposed_qty=est["size"], now=now)
+            proposed_cost_usd=cost, proposed_qty=est["size"], now=now,
+            proposed_cost_basis="SIZE_TIMES_WORST_CASE_COST_PER_CONTRACT")
         gates = entryx.state_from_evidence(
             freshness=freshness,
             settlement=_settlement_compatibility(settlement),
@@ -1449,11 +1678,32 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
                                  state=gates["state"])
         detail.update({"exposure": exposure, "gates": gates,
                        "risk": verdict, "proposed_cost_usd": round(cost, 6),
+                       "proposed_cost_basis":
+                           "SIZE_TIMES_WORST_CASE_COST_PER_CONTRACT",
                        "risk_action": action})
         refusals.extend(exposure.get("refusals") or [])
+        # ── THE THREE PRICES, EACH TO ITS OWN CONSUMER ───────────────
+        # `acquisition_cost_per_contract` is what the quantity is
+        # modelled to actually cost across the levels walked: that is
+        # the number the economic comparison must use, because the edge
+        # is (probability - what we pay - fees).
+        #
+        # `submitted_limit` is the break-even price the belief implies.
+        # It is the ORDER's price, and it is by construction equal to
+        # fair_value - fee, so an edge computed against it is zero minus
+        # rounding, always. Handing it to the gate as the "ask" is the
+        # defect that produced 159 NO_ACTION_HAS_POSITIVE_NET_EDGE
+        # refusals in run 48: arithmetic, not a market fact.
+        #
+        # `worst_case_cost_per_contract` is the reservation price above.
         return {"execution_estimate": est,
                 "size": est["size"],
-                "ask": est["limit_price"],
+                "ask": est["acquisition_cost_per_contract"],
+                "ask_basis": est["acquisition_cost_is"],
+                "fee_per_contract": est["fee_per_contract_realised"],
+                "submitted_limit": est["submitted_limit"],
+                "worst_case_cost_per_contract":
+                    est["worst_case_cost_per_contract"],
                 "risk": verdict,
                 "refusals": refusals,
                 "detail": detail}
