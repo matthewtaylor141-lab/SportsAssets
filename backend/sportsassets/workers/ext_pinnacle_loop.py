@@ -562,20 +562,70 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
                       "names no side this reader can consume"
                       % (got.get("intent"),))
         return out
-    # WHICH EVENT THE CONTRACT PAYS ON, carried explicitly so the caller
-    # cannot invert the probability twice. A SHORT leg pays on the
-    # COMPLEMENT of the priced outcome -- and for a three-way market the
-    # complement of "home win" is "away win OR draw", which is NOT the
-    # same event as "away win".
-    short = intent == "ORDER_INTENT_BUY_SHORT"
-    out["pays_on_priced_outcome"] = not short
-    out["payout_event"] = ("NOT(%s)" % priced_outcome if short
-                           else str(priced_outcome))
+    # ── THREE SEPARATE RELATIONSHIPS, NOT ONE INFERENCE ──────────────
+    #
+    # THE DEFECT THIS REPLACES, and it was mine. This wrapper did:
+    #
+    #     short = intent == "ORDER_INTENT_BUY_SHORT"
+    #     pays_on_priced_outcome = not short
+    #     payout_event = "NOT(%s)" % priced_outcome if short else ...
+    #
+    # which reads the payout event off the INTENT. That is wrong, and it
+    # fabricates a positive edge. `premap.resolve` is asked for a specific
+    # OUTCOME and returns the row matching it together with the intent
+    # that BUYS it. A BUY_SHORT result for "Chicago Cubs" means Cubs is
+    # the venue's SHORT side; the contract still PAYS ON CUBS. It does not
+    # become NOT(Cubs).
+    #
+    # With p(Cubs)=0.30 and an acquisition cost of 0.40 the true edge is
+    # -0.10. The old inference complemented a probability that already
+    # described the selected exposure and produced +0.30.
+    #
+    # So the three relationships are now stated apart:
+    #
+    #   1 INTENT -> WHICH LADDER pays for it (short consumes the bids at
+    #     1 - bid). That is all the intent decides.
+    #   2 REQUESTED OUTCOME + MATCHED VENUE SIDE + settlement terms ->
+    #     WHICH EVENT PAYS. The resolver matched a side FOR the requested
+    #     outcome, so the payout event is that outcome.
+    #   3 The probability is complemented ONLY when its source event is
+    #     demonstrably the complement of the payout event.
+    #
+    # The resolver's own evidence is PRESERVED rather than discarded and
+    # reconstructed: side_norm, identifier, matched_by and question travel
+    # onto the row, so a reader can audit which venue side was chosen.
+    out["matched_side_norm"] = got.get("side_norm")
+    out["matched_identifier"] = got.get("identifier")
+    out["matched_by"] = got.get("matched_by")
+    out["matched_question"] = got.get("question")
+    out["resolver_asked_for"] = str(priced_outcome)
+    out["ladder_side"] = ("BID" if intent == "ORDER_INTENT_BUY_SHORT"
+                          else "ASK")
+    out["intent_selects"] = (
+        "the ladder that supplies acquisition cost, and nothing else. It "
+        "does NOT name the payout event")
+
+    # THE PAYOUT EVENT. The resolver was asked for `priced_outcome` and
+    # returned the side that buys it, so that outcome is what pays.
+    out["payout_event"] = str(priced_outcome)
+    out["payout_event_basis"] = (
+        "RESOLVER_MATCHED_A_SIDE_FOR_THE_REQUESTED_OUTCOME")
+    # THE PROBABILITY'S SOURCE EVENT is the same outcome the de-vig
+    # prices, so no complement is involved and none is applied. The flag
+    # stays in the vocabulary -- a genuinely complementary payout is a
+    # real case -- but it is only ever set when the two events are
+    # demonstrably complementary, which this path never asserts from the
+    # intent.
+    out["probability_event"] = str(priced_outcome)
+    out["payout_is_complement"] = False
     out["complement_note"] = (
-        "the complement of one outcome is EVERY other outcome of the "
-        "market, so on a three-way book NOT(home) covers away AND draw. "
-        "Use 1 - p(priced) from a de-vig normalised over all outcomes; "
-        "never substitute p(the other team)")
+        "payout_is_complement is false here because the resolver matched "
+        "a side FOR the requested outcome: the probability's event and "
+        "the payout event are the SAME event. A short intent means the "
+        "cost comes off the bid ladder, not that the payout inverted. "
+        "Where a complement IS involved, remember it is every other "
+        "outcome together -- on a three-way book NOT(home) covers away "
+        "AND draw, and is not p(the other team)")
     out["ok"] = True
     return out
 
@@ -951,8 +1001,18 @@ async def cycle(conn) -> dict:
                 "selection": quote["home"],
                 # WHAT THIS CONTRACT PAYS ON, carried onto the row so a
                 # reader never has to infer it from the intent.
+                # THE IDENTITY EVIDENCE, PRESERVED. Requested outcome,
+                # the venue side actually matched, the intent, the ladder
+                # it selects and the event that pays -- all on the row, so
+                # payout identity is never reconstructed from the intent.
                 "payout_event": ident["payout_event"],
-                "pays_on_priced_outcome": ident["pays_on_priced_outcome"],
+                "payout_event_basis": ident["payout_event_basis"],
+                "probability_event": ident["probability_event"],
+                "resolver_asked_for": ident["resolver_asked_for"],
+                "matched_side_norm": ident.get("matched_side_norm"),
+                "matched_identifier": ident.get("matched_identifier"),
+                "matched_by": ident.get("matched_by"),
+                "ladder_side": ident["ladder_side"],
                 "sport_family": family,
                 "market": "h2h",
                 "period": "FULL_GAME",
@@ -1003,7 +1063,7 @@ async def cycle(conn) -> dict:
                 # pre-invert the probability; it states which event the
                 # contract pays on and lets the one place that owns the
                 # comparison do the arithmetic.
-                payout_is_complement=not ident["pays_on_priced_outcome"],
+                payout_is_complement=bool(ident["payout_is_complement"]),
                 extra_refusals=extra)
             evaluated += 1
             rec["venue_quote"] = vq

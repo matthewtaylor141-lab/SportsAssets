@@ -154,6 +154,8 @@ def test_the_caller_must_not_pre_invert():
 
     src = "\n".join(l.split("#", 1)[0]
                     for l in inspect.getsource(L.cycle).splitlines())
-    assert "payout_is_complement=not ident[" in src
+    assert 'payout_is_complement=bool(ident["payout_is_complement"])' in src, (
+        "the loop must pass the resolver's EXPLICIT flag, never derive it "
+        "from the intent -- deriving it is what fabricated a +0.30 edge")
     assert "1.0 - " not in src and "1 - val" not in src, (
         "the loop is inverting a probability itself")

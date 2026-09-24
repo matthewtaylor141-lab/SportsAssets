@@ -58,8 +58,14 @@ def test_a_short_intent_is_a_VALID_resolved_exposure():
     market carry the SAME identifier -- equal to the slug -- and the side
     is carried only by the INTENT, so BUY_SHORT is the resolver correctly
     saying "the exposure to this outcome is the short leg". The reader now
-    consumes the ladder the intent names and `evaluate` prices the
-    complement, so the exposure resolves instead of being refused.
+    consumes the ladder the intent names, so the exposure resolves instead
+    of being refused.
+
+    AND THE PAYOUT DOES NOT INVERT. An earlier version of this test said
+    the payout event became NOT(Chicago Cubs). That was the defect: the
+    resolver was asked for Cubs and returned the side that BUYS Cubs, so
+    the contract PAYS ON CUBS. The intent selects the ladder and nothing
+    else.
 
     The protection did not go away: it moved to where it belongs. The
     contract must declare which event it pays on, and the refusal now
@@ -71,8 +77,14 @@ def test_a_short_intent_is_a_VALID_resolved_exposure():
     import asyncio
 
     async def _fake_resolve(conn, title, event_title, outcome, slug, **kw):
-        return {"market_slug": "aec-mlb-chc-mia-2026-09-24-marlins",
-                "intent": "ORDER_INTENT_BUY_SHORT"}
+        # WHAT premap.resolve ACTUALLY RETURNS. It matched a row FOR the
+        # requested outcome, and `side_norm` is that row's own side -- the
+        # evidence the wrapper must preserve rather than reconstruct.
+        return {"market_slug": "aec-mlb-chc-mia-2026-09-24-cubs",
+                "intent": "ORDER_INTENT_BUY_SHORT",
+                "side_norm": "cubs",
+                "identifier": "aec-mlb-chc-mia-2026-09-24-cubs",
+                "matched_by": "keys", "question": "Will the Cubs win?"}
 
     from sportsassets.workers import premap as _pm
 
@@ -89,11 +101,21 @@ def test_a_short_intent_is_a_VALID_resolved_exposure():
         _pm.resolve = orig
     assert out["ok"] is True, out
     assert out["intent"] == "ORDER_INTENT_BUY_SHORT"
-    assert out["us_market_slug"] == "aec-mlb-chc-mia-2026-09-24-marlins"
-    # THE PAYOUT EVENT IS EXPLICIT, so nothing downstream has to infer it
-    assert out["pays_on_priced_outcome"] is False
-    assert out["payout_event"] == "NOT(Chicago Cubs)"
-    assert "never substitute p(the other team)" in out["complement_note"]
+    assert out["us_market_slug"] == "aec-mlb-chc-mia-2026-09-24-cubs"
+    # THE PAYOUT EVENT IS THE REQUESTED OUTCOME.
+    #
+    # CORRECTED. This assertion previously required
+    # payout_event == "NOT(Chicago Cubs)", which ENCODED THE DEFECT: it
+    # read the payout event off the intent. premap.resolve was asked for
+    # Cubs and returned the side that BUYS Cubs, so a BUY_SHORT result
+    # means Cubs is the venue's short side and the contract still PAYS ON
+    # CUBS. The intent selects the ladder; it does not invert the payout.
+    assert out["payout_event"] == "Chicago Cubs"
+    assert out["probability_event"] == "Chicago Cubs"
+    assert out["payout_is_complement"] is False
+    assert out["ladder_side"] == "BID", "a short buys off the bid ladder"
+    assert out["matched_side_norm"] is not None, (
+        "the resolver's own side evidence must be preserved")
 
 
 def test_an_unconsumable_intent_still_refuses_by_name():
@@ -146,8 +168,9 @@ def test_a_long_intent_pays_on_the_priced_outcome():
     finally:
         _pm.resolve = orig
     assert out["ok"] is True
-    assert out["pays_on_priced_outcome"] is True
+    assert out["ladder_side"] == "ASK"
     assert out["payout_event"] == "Chicago Cubs"
+    assert out["payout_is_complement"] is False
 
 
 def test_no_premap_row_refuses_before_any_venue_read():
