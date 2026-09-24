@@ -37,11 +37,23 @@ def test_coverage_below_one_is_measured_not_assumed():
     assert est["ok"] is True, est
     assert 0.0 < est["p_fill"] < 1.0, est["p_fill"]
     assert est["size"] == pytest.approx(700.0)
-    # THE PRICE IS THE VWAP OF THE WALK, not the best level. Pricing a
-    # two-level size off level one understates the cost.
-    assert 0.62 < est["limit_price"] < 0.64
+    # THREE PRICES, AND THEY ARE NOT ONE PRICE. The submitted limit is the
+    # break-even the belief implies; the vwap is what the walk actually
+    # cost; the best level is where it started. An order does not fill
+    # above its own limit, so every level taken is at or inside it.
+    assert est["submitted_limit"] == est["limit_price"] == pytest.approx(
+        0.72 - 0.016)
+    assert 0.62 < est["vwap"] < 0.64, est["vwap"]
     assert est["best_acquisition_price"] == 0.62
-    assert est["price_is_vwap_of_the_walk"] is True
+    assert est["levels_taken"] == [
+        {"price": 0.62, "qty": 400.0, "cost": 248.0,
+         "level_qty_displayed": 400.0},
+        {"price": 0.64, "qty": 300.0, "cost": 192.0,
+         "level_qty_displayed": 300.0}]
+    assert all(lv["price"] <= est["submitted_limit"]
+               for lv in est["levels_taken"])
+    assert est["vwap_is"].startswith("THE_REALISED_COST")
+    assert est["limit_price_is"] == "THE_SUBMITTED_BREAK_EVEN_LIMIT"
     # THE SHORTFALL IS IN DOLLARS, because the intent is in dollars: the
     # ladder inside break-even held $440 of the $1,000 intended.
     assert est["unfilled_notional_usd"] > 0

@@ -27,6 +27,7 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
+from sportsassets import bettor_entry_execution as EX
 from sportsassets import bettor_entry_execution as entryx
 from sportsassets import bettor_entry_inventory as inv
 from sportsassets import bettor_external_shadow as ext
@@ -67,19 +68,21 @@ def _fresh_iso(age_s=2.0):
             - timedelta(seconds=age_s)).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _event():
+def _event(price=1.36, stamp_age_s=2.0, at=None):
     """An MLB h2h event priced so the de-vig beats the venue's ask.
 
     Two-way, which is what a complete MLB h2h set is: a three-outcome
     payload would be refused by the de-vig, correctly.
     """
-    stamp = _fresh_iso()
+    stamp = (_fresh_iso(stamp_age_s) if at is None else
+             datetime.fromtimestamp(at - stamp_age_s, tz=timezone.utc)
+             .strftime("%Y-%m-%dT%H:%M:%SZ"))
     # THE CONTRACT'S SELECTION IS THE HOME TEAM -- `pinnacle_h2h` names it
     # and `resolve_venue_identity` prices that side -- so the home side is
     # the favourite here. Getting this backwards priced p(underdog) 0.28
     # against an ask of 0.62 and refused with NO_OBSERVED_DEPTH_INSIDE_THE
     # _BREAK_EVEN_LIMIT, which was the engine being right.
-    prices = [{"name": "Colorado Rockies", "price": 1.36},
+    prices = [{"name": "Colorado Rockies", "price": price},
               {"name": "Arizona Diamondbacks", "price": 3.55}]
     return {"id": EVENT_KEY, "home_team": "Colorado Rockies",
             "away_team": "Arizona Diamondbacks",
@@ -157,6 +160,18 @@ async def _seed(conn):
         "game_format = EXCLUDED.game_format, play_has_begun = FALSE, "
         "retrieved_at = now()",
         CONDITION, ST.PHASE_REGULAR, ST.FMT_NINE, ST.SE_ACTUAL_REPORTED)
+    # THE GLOBAL CATALOGUE'S OUTCOMES AND THEIR INDICES. The payout event
+    # is bound by matching its name against these, never derived from the
+    # venue's order intent -- so they have to exist for an entry to be
+    # held at all. Index 0 is the home side here, which is the selection
+    # a BUY_LONG acquires, so the cross-check agrees.
+    await conn.execute(
+        "INSERT INTO market_tokens (token_id, condition_id, outcome, "
+        "outcome_index) VALUES ($1,$2,$3,$4),($5,$2,$6,$7) "
+        "ON CONFLICT (token_id) DO UPDATE SET outcome = EXCLUDED.outcome, "
+        "outcome_index = EXCLUDED.outcome_index",
+        "tok-col", CONDITION, "Colorado Rockies", 0,
+        "tok-ari", "Arizona Diamondbacks", 1)
     await conn.execute("DELETE FROM external_valuations "
                        "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
     await conn.execute(
@@ -193,15 +208,16 @@ async def _calibrate(conn):
         devig.VERSION)
 
 
-def _stub(monkeypatch, *, ladder=LADDER, prose=VENUE_PROSE):
+def _stub(monkeypatch, *, ladder=LADDER, prose=VENUE_PROSE,
+          price=1.36, stamp_age_s=2.0, at=None):
     monkeypatch.setenv("EDGE_ODDS_API_KEY", "x" * 32)
 
     async def fake_fetch(sport_key, *, api_key, timeout=20.0):
         if sport_key != "baseball_mlb":
             return {"ok": True, "events": [], "received_at": time.time(),
                     "credits_used": "1", "credits_remaining": "9"}
-        return {"ok": True, "events": [_event()],
-                "received_at": time.time(),
+        return {"ok": True, "events": [_event(price, stamp_age_s, at)],
+                "received_at": (at if at is not None else time.time()),
                 "credits_used": "1", "credits_remaining": "9"}
 
     monkeypatch.setattr(loop, "fetch_odds", fake_fetch)
@@ -227,11 +243,15 @@ def _stub(monkeypatch, *, ladder=LADDER, prose=VENUE_PROSE):
 
     # THE VENUE'S PUBLISHED PROSE, at the transport boundary the loop
     # actually crosses. The comparison itself is production code.
-    def fake_rules(slug):
+    def fake_rules(slug, *, now=None):
         return {"ok": True, "rules_text": prose, "slug": slug,
+                "read_at": now, "from_cache": False,
                 "source": "pmus:/markets?slug=<slug>:rules_text"}
 
-    monkeypatch.setattr(loop, "_read_rules_blocking", fake_rules)
+    monkeypatch.setattr(loop, "_read_venue_rules_blocking", fake_rules)
+    # THE CACHE IS PER-PROCESS AND SURVIVES BETWEEN TESTS. A stub set in
+    # one test would otherwise be shadowed by a cached answer from another.
+    loop.rules_cache_reset()
 
 
 # ── the production state: the calibration gate blocks ────────────────
@@ -357,9 +377,13 @@ async def test_an_admitted_entry_becomes_a_position_order_fill_and_basis(
 
         # ACCOUNTING: basis includes fees, residual is the whole position.
         acct = ent["accounting"]
+        # THE EXACT INVARIANT IS OVER THE LEVELS. The vwap identity is
+        # checked separately, to a tolerance that scales with the quantity
+        # the average was divided by.
         assert acct["invariant_ok"] is True
+        assert acct["vwap_identity_ok"] is True, acct["vwap_identity_residual"]
         assert acct["cost_basis_usd"] == pytest.approx(
-            acct["filled_qty"] * acct["vwap"] + acct["fees_usd"], rel=1e-6)
+            acct["levels_cost_usd"] + acct["fees_usd"], abs=1e-9)
         assert pos["b"] == pytest.approx(acct["cost_basis_usd"], rel=1e-6)
         assert acct["residual_qty"] == pytest.approx(acct["filled_qty"])
         assert acct["realized_pnl_usd"] == 0.0
@@ -561,10 +585,269 @@ async def test_the_entry_lanes_inventory_is_actually_re_evaluated(monkeypatch):
         import inspect
 
         src = inspect.getsource(RS.cycle)
-        assert "manage_open_positions" in src
-        assert src.count("manage_open_positions") >= 2, (
-            "the cycle must manage the entry lane's experiment as well as "
-            "the challenger's")
-        assert "_ext.EXPERIMENT_ID" in src
+        # TWO CALL SITES: the normal path and the no-candidates path.
+        # Management must not depend on the cohort having produced a new
+        # fill, because "no new candidates" is the ordinary state.
+        assert src.count("run_continuing_management") == 2, src.count(
+            "run_continuing_management")
+        helper = inspect.getsource(RS.run_continuing_management)
+        assert helper.count("manage_open_positions") >= 1
+        assert "_ext.EXPERIMENT_ID" in helper, (
+            "the helper must manage the entry lane's experiment too")
+    finally:
+        await conn.close()
+
+
+# ── ITEM 2: THREE CASES, AND ONLY ONE OF THEM WRITES ─────────────────
+
+@pg
+@pytest.mark.asyncio
+async def test_a_later_cycle_on_a_held_exposure_adds_no_executions(
+        monkeypatch):
+    """THE DUPLICATE-FILL DEFECT, REPRODUCED AND THEN REFUSED.
+
+    The ids used to hang off `int(now)`, so a cycle a minute later minted a
+    new order id and a new fill id -- both inserted -- while the position
+    row hit ON CONFLICT DO NOTHING and kept its original seed_qty and
+    basis. Executions accumulated against inventory that never grew.
+
+    This is NOT two immediate calls: the second cycle carries a NEW
+    PROVIDER OBSERVATION (a fresh `last_update`, a different price) and a
+    decision instant a full cycle later, so neither timestamp collision
+    nor the valuation table's own per-observation uniqueness can be what
+    makes it pass.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _seed(conn)
+        await _calibrate(conn)
+        _stub(monkeypatch)
+        first = await loop.cycle(conn)
+        assert first["refusals"].get("ENTRY_INVENTORY_WRITTEN") == 1, \
+            first["refusals"]
+        ent = first["entries"][0]
+        pid = ent["position_id"]
+
+        async def counts():
+            return dict(await conn.fetchrow(
+                "SELECT (SELECT count(*) FROM rn1x_orders WHERE "
+                "  position_id = $1) AS orders,"
+                " (SELECT count(*) FROM rn1x_fills f JOIN rn1x_orders o"
+                "   ON o.order_id = f.order_id WHERE o.position_id = $1)"
+                "   AS fills,"
+                " (SELECT coalesce(sum(f.qty),0)::float8 FROM rn1x_fills f"
+                "   JOIN rn1x_orders o ON o.order_id = f.order_id"
+                "  WHERE o.position_id = $1) AS filled_qty,"
+                " (SELECT coalesce(sum(f.fee_usd),0)::float8 FROM rn1x_fills f"
+                "   JOIN rn1x_orders o ON o.order_id = f.order_id"
+                "  WHERE o.position_id = $1) AS fees,"
+                " (SELECT seed_qty::float8 FROM rn1x_positions WHERE"
+                "   position_id = $1) AS seed_qty,"
+                " (SELECT seed_basis_usd::float8 FROM rn1x_positions WHERE"
+                "   position_id = $1) AS basis", pid))
+
+        before = await counts()
+        # EVERY QUANTITY TOGETHER, not one at a time: the defect was
+        # precisely that fills moved while the position did not.
+        assert before["filled_qty"] == pytest.approx(before["seed_qty"])
+        assert before["fees"] > 0
+        assert before["basis"] == pytest.approx(
+            ent["accounting"]["cost_basis_usd"])
+
+        # ── A NEW OBSERVATION, A CYCLE LATER ─────────────────────────
+        #
+        # THE WHOLE CLOCK MOVES, not just the decision instant. A cycle is
+        # 900 s and a quote goes stale at 30, so a second cycle genuinely
+        # carries a NEW provider observation -- and the fixture evidence
+        # has to be re-acquired at that instant too, exactly as production
+        # re-acquires it. Shifting only `now` would have refused on
+        # QUOTE_STALE and proved nothing about duplicate fills.
+        later = time.time() + loop.CYCLE_S
+        await conn.execute(
+            "UPDATE fixture_metadata SET retrieved_at = to_timestamp($2), "
+            "play_has_begun = FALSE WHERE condition_id = $1",
+            CONDITION, later)
+        _stub(monkeypatch, price=1.34, stamp_age_s=1.0, at=later)
+        monkeypatch.setattr(loop.time, "time", lambda: later)
+        second = await loop.cycle(conn)
+        # THE SECOND CYCLE DID REACH A DECISION -- otherwise the assertions
+        # below would pass for want of a candidate rather than because the
+        # write was refused.
+        assert second["evaluated"] == 1, second["refusals"]
+
+        after = await counts()
+        assert after["orders"] == before["orders"], (
+            "a new quote on a held exposure must not add an order")
+        assert after["fills"] == before["fills"], (
+            "nor a fill: that is the defect")
+        assert after["filled_qty"] == pytest.approx(before["filled_qty"])
+        assert after["fees"] == pytest.approx(before["fees"])
+        assert after["seed_qty"] == pytest.approx(before["seed_qty"])
+        assert after["basis"] == pytest.approx(before["basis"])
+        # AND IT IS REFUSED BY NAME. Which name is itself informative:
+        # with the first position now RESERVED in the book, the exposure
+        # rails see the combined size and refuse at the risk gate before
+        # the writer is reached. Either refusal is legitimate and both are
+        # named; what must never happen is a write.
+        from sportsassets import bettor_entry_gate as _gate
+
+        named = set(second["refusals"]) & {inv.R_ALREADY_HELD,
+                                           _gate.R_RISK_BLOCKED}
+        assert named, second["refusals"]
+        assert not [e for e in second["entries"] if e.get("written")]
+        assert inv.ADD_SUPPORTED is False
+
+    finally:
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_an_exact_replay_is_named_a_replay_and_writes_nothing(
+        monkeypatch):
+    """The same observation twice is idempotent AND reported as a replay --
+    not as a write that happened to change nothing."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _seed(conn)
+        # NO CYCLE HERE. Running one would create the position first, and
+        # the write below would then be correctly refused as an ADD -- a
+        # different case from the one this test is about.
+        rec = {"admissible": True, "experiment_id": ext.EXPERIMENT_ID,
+               "observed_at": 1000.0, "received_at": 1000.0,
+               "payout_event": "Colorado Rockies",
+               "contract": {"condition_id": CONDITION,
+                            "us_market_slug": US_SLUG,
+                            "buy_intent": "ORDER_INTENT_BUY_LONG",
+                            "event_key": EVENT_KEY},
+               "execution_plan": {"execution": {
+                   "size": 100.0, "vwap": 0.62, "submitted_limit": 0.70,
+                   "intended_notional_usd": 1000.0,
+                   "unfilled_notional_usd": 938.0,
+                   "levels_taken": [{"price": 0.62, "qty": 100.0,
+                                     "cost": 62.0}]}}}
+        fee = (lambda qty, price, maker=False: 0.016 * float(qty))
+        plan = inv.plan_entry(rec, now=2000.0, outcome_index=0, fee_fn=fee)
+        assert plan["ok"], plan
+        w1 = await inv.persist_entry(conn, plan)
+        assert w1["written"] is True and w1["case"] == inv.CASE_NEW, w1
+        n1 = await conn.fetchval(
+            "SELECT count(*) FROM rn1x_fills f JOIN rn1x_orders o "
+            "ON o.order_id = f.order_id WHERE o.position_id = $1",
+            w1["position_id"])
+        # SAME observation, later decision instant: still a replay.
+        plan2 = inv.plan_entry(rec, now=9000.0, outcome_index=0, fee_fn=fee)
+        w2 = await inv.persist_entry(conn, plan2)
+        assert w2["written"] is False
+        assert w2["case"] == inv.CASE_REPLAY, w2
+        n2 = await conn.fetchval(
+            "SELECT count(*) FROM rn1x_fills f JOIN rn1x_orders o "
+            "ON o.order_id = f.order_id WHERE o.position_id = $1",
+            w1["position_id"])
+        assert n2 == n1, "a replay writes nothing"
+    finally:
+        await conn.close()
+
+
+# ── ITEM 3: THE RESERVATION COUNTEREXAMPLE ───────────────────────────
+
+def test_two_individually_admissible_entries_cannot_both_clear_the_cap():
+    """THE COUNTEREXAMPLE THE REVIEW ASKED FOR, pinned.
+
+    Two $600 proposals are each admissible against an empty book. The
+    combined-exposure rail is $1,000. Measured against a book that was
+    read once per cycle, the second proposal never saw the first and both
+    cleared. Reserved after the first creation, the second is refused.
+    """
+    first = EX.exposure_from_rows(
+        [], condition_id="c1", event_key="e1",
+        proposed_cost_usd=600.0, proposed_qty=1000.0, now=0.0)
+    v1 = EX.verdict("TAKE_YES", observed=first["observed"],
+                    state={k: True for k in risk_gates()})
+    assert v1["permitted"] is True, v1["railsNotPassed"]
+
+    # WITHOUT the reservation: the stale book is still empty.
+    stale = EX.exposure_from_rows(
+        [], condition_id="c2", event_key="e2",
+        proposed_cost_usd=600.0, proposed_qty=1000.0, now=0.0)
+    v_stale = EX.verdict("TAKE_YES", observed=stale["observed"],
+                         state={k: True for k in risk_gates()})
+    assert v_stale["permitted"] is True, (
+        "this is the defect: measured against a book read before the first "
+        "entry, the second one clears")
+
+    # WITH it: the first position is in the book the second is measured on.
+    reserved = EX.exposure_from_rows(
+        [{"condition_id": "c1", "event_key": "e1", "cost_usd": 600.0,
+          "qty": 1000.0, "opened_at": 0.0, "reserved_in_this_cycle": True}],
+        condition_id="c2", event_key="e2",
+        proposed_cost_usd=600.0, proposed_qty=1000.0, now=0.0)
+    assert reserved["observed"]["MAX_CORRELATED_EXPOSURE"] == 1200.0
+    v2 = EX.verdict("TAKE_YES", observed=reserved["observed"],
+                    state={k: True for k in risk_gates()})
+    assert v2["permitted"] is False
+    assert "MAX_CORRELATED_EXPOSURE" in v2["railsNotPassed"]
+
+
+def risk_gates():
+    from sportsassets import bettor_risk_engine as risk
+    return list(risk.STATE_GATES)
+
+@pg
+@pytest.mark.asyncio
+async def test_the_writer_itself_refuses_a_second_observation_as_an_add():
+    """The same discrimination at the WRITER's own level, with the risk
+    gate out of the picture: a different provider observation on a held
+    exposure is CASE_NEW_QUOTE and writes nothing."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _seed(conn)
+        fee = (lambda qty, price, maker=False: 0.016 * float(qty))
+
+        def _rec(observed_at, vwap):
+            return {"admissible": True, "experiment_id": ext.EXPERIMENT_ID,
+                    "observed_at": observed_at, "received_at": observed_at,
+                    "payout_event": "Colorado Rockies",
+                    "contract": {"condition_id": CONDITION,
+                                 "us_market_slug": US_SLUG,
+                                 "buy_intent": "ORDER_INTENT_BUY_LONG",
+                                 "event_key": EVENT_KEY},
+                    "execution_plan": {"execution": {
+                        "size": 100.0, "vwap": vwap,
+                        "submitted_limit": 0.70,
+                        "intended_notional_usd": 1000.0,
+                        "unfilled_notional_usd": 900.0,
+                        "levels_taken": [{"price": vwap, "qty": 100.0,
+                                          "cost": 100.0 * vwap}]}}}
+
+        w1 = await inv.persist_entry(conn, inv.plan_entry(
+            _rec(5000.0, 0.62), now=5001.0, outcome_index=0, fee_fn=fee))
+        assert w1["written"] is True and w1["case"] == inv.CASE_NEW
+
+        async def snap():
+            return dict(await conn.fetchrow(
+                "SELECT (SELECT count(*) FROM rn1x_orders WHERE"
+                "  position_id=$1) AS orders,"
+                " (SELECT count(*) FROM rn1x_fills f JOIN rn1x_orders o"
+                "  ON o.order_id=f.order_id WHERE o.position_id=$1) AS fills,"
+                " (SELECT seed_qty::float8 FROM rn1x_positions"
+                "  WHERE position_id=$1) AS qty,"
+                " (SELECT seed_basis_usd::float8 FROM rn1x_positions"
+                "  WHERE position_id=$1) AS basis", w1["position_id"]))
+
+        before = await snap()
+        # A DIFFERENT OBSERVATION, an hour later, at a different price.
+        w2 = await inv.persist_entry(conn, inv.plan_entry(
+            _rec(8600.0, 0.64), now=8601.0, outcome_index=0, fee_fn=fee))
+        assert w2["written"] is False
+        assert w2["case"] == inv.CASE_NEW_QUOTE, w2
+        assert w2["refusals"] == [inv.R_ALREADY_HELD]
+        assert w2["existing_qty"] == pytest.approx(before["qty"])
+        after = await snap()
+        assert after == before, ("a second observation must change nothing: "
+                                 "%r vs %r" % (after, before))
     finally:
         await conn.close()

@@ -124,6 +124,57 @@ def position_id(*, experiment_id, condition_id, outcome_index) -> str:
                             int(outcome_index))
 
 
+def observation_key(rec) -> str:
+    """The PROVIDER OBSERVATION this decision was made on.
+
+    ── WHY THE IDS HANG OFF THIS AND NOT OFF THE WALL CLOCK ──────────
+    They used to be `...:O:<int(now)>`. So a later cycle re-deciding the
+    SAME exposure minted a new order id and a new fill id, both inserted,
+    while the position row hit ON CONFLICT DO NOTHING and kept its
+    original seed_qty and basis. Executions accumulated against inventory
+    that never grew: the fills said 1,800 contracts and the position said
+    900, and nothing in the schema objected.
+
+    Keyed on the observation instead, an exact replay of the same
+    observation produces the same ids and writes nothing new -- which is
+    what a replay should do -- and a DIFFERENT observation produces
+    different ids and is therefore visible as a second entry rather than
+    absorbed as a duplicate. The three cases are then separable, which is
+    what `classify_write` does.
+    """
+    at = (rec or {}).get("observed_at")
+    if at is None:
+        return "NO_OBSERVATION_TIME"
+    try:
+        return "%d" % round(float(at) * 1000.0)
+    except (TypeError, ValueError):
+        return str(at)
+
+
+# ── THE THREE CASES, AND ONLY ONE OF THEM WRITES ─────────────────────
+CASE_NEW = "NEW_EXPOSURE"
+CASE_REPLAY = "EXACT_REPLAY_OF_A_RECORDED_OBSERVATION"
+CASE_NEW_QUOTE = "NEW_QUOTE_ON_AN_ALREADY_HELD_EXPOSURE"
+CASE_ADD = "ADD_TO_AN_EXISTING_POSITION"
+
+#: ADDING TO A HELD POSITION IS NOT SUPPORTED, and it is off rather than
+#: absent so the refusal has a name a reader can look up. An add is a
+#: different decision: it changes the average cost, it re-opens the
+#: market-exposure rail against the COMBINED size, and it needs its own
+#: accounting for the second tranche. None of that is built, so a second
+#: quote on a held exposure is refused instead of being written as though
+#: it were the first.
+ADD_SUPPORTED = False
+
+WHY_ADD_IS_REFUSED = (
+    "a second entry into an exposure this lane already holds is an ADD. "
+    "It changes the position's average cost and its size, so the "
+    "market-exposure rail must be re-evaluated against the combined "
+    "position and the second tranche needs its own basis. That is not "
+    "built. Writing it as a fresh entry would add executions to inventory "
+    "that never grew, which is the defect this branch exists to refuse")
+
+
 def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
     """The four rows an admitted decision implies, or why there are none.
 
@@ -139,7 +190,13 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
 
     est = ((rec.get("execution_plan") or {}).get("execution")) or {}
     qty = est.get("size")
-    price = est.get("limit_price")
+    # THE REALISED PRICE AND THE SUBMITTED LIMIT ARE READ SEPARATELY, and
+    # this is the reason the estimate now names them separately. This line
+    # used to read `limit_price` and use it for the fill price, the
+    # position's seed price AND the order's limit at once -- three
+    # different quantities from one field, which is what let a walk over
+    # .62/.64/.66 be recorded as an order limited at its own average.
+    price = est.get("vwap")
     if not qty or price is None:
         out["refusals"].append(R_NO_FILL)
         out["why"] = ("the decision was admitted without a sized "
@@ -149,19 +206,55 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
 
     qty = float(qty)
     price = float(price)
-    fee = abs(float(fee_fn(qty=qty, price=price)))
+    submitted_limit = float(est.get("submitted_limit") or price)
+    if submitted_limit + 1e-9 < price:
+        # A LIMIT BELOW THE PRICE PAID IS NOT POSSIBLE, and if the two
+        # ever disagree that way the estimate is inconsistent with its own
+        # walk. Refuse rather than record an unreconcilable fill.
+        out["refusals"].append(R_NO_FILL)
+        out["why"] = ("the submitted limit %.6f is below the realised vwap "
+                      "%.6f, so these two numbers did not come from the "
+                      "same walk" % (submitted_limit, price))
+        return out
+
+    # ── ONE FILL PER LEVEL CONSUMED, PRICED AT THAT LEVEL ────────────
+    #
+    # A single fill at the VWAP is not what happened, and the fee is
+    # charged per fill at the price traded -- so a fee computed once at the
+    # average is only coincidentally the fee actually owed. The levels come
+    # from the walk itself; when it did not report them the whole quantity
+    # is recorded as one fill at the VWAP and `levels_evidence` says so
+    # rather than implying a breakdown that was never observed.
+    levels = list(est.get("levels_taken") or [])
+    if not levels:
+        levels = [{"price": price, "qty": qty, "cost": qty * price}]
+        levels_evidence = "VWAP_ONLY_THE_WALK_REPORTED_NO_LEVELS"
+    else:
+        levels_evidence = "PER_LEVEL_FROM_THE_OBSERVED_LADDER_WALK"
+    fills = []
+    fee = 0.0
+    cost = 0.0
+    for k, lv in enumerate(levels):
+        lq = float(lv["qty"])
+        lp = float(lv["price"])
+        lf = abs(float(fee_fn(qty=lq, price=lp)))
+        fee += lf
+        cost += lq * lp
+        fills.append({"k": k, "qty": round(lq, 6), "price": round(lp, 6),
+                      "fee_usd": round(lf, 6)})
     # THE COST BASIS INCLUDES THE FEE, matching the managed position's
     # own convention: 10 contracts at 0.64 with 0.16 of fees is a basis
     # of 6.56, not 6.40. A basis that excluded fees would make every
     # return look better than it was by exactly the cost of trading.
-    basis = qty * price + fee
+    basis = cost + fee
 
     contract = rec.get("contract") or {}
     pid = position_id(experiment_id=rec["experiment_id"],
                       condition_id=contract.get("condition_id"),
                       outcome_index=outcome_index)
-    did = "%s:D:%d" % (pid, int(float(now)))
-    oid = "%s:O:%d" % (pid, int(float(now)))
+    obs = observation_key(rec)
+    did = "%s:D:%s" % (pid, obs)
+    oid = "%s:O:%s" % (pid, obs)
 
     # THE THREE CLOCKS, AND THE ORDER THE DATABASE CHECKS. source is the
     # bookmaker's own observation instant, detected is when the payload
@@ -272,7 +365,13 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
             "side": "BUY",
             "intent": str(contract.get("buy_intent") or "UNKNOWN_INTENT"),
             "liquidity": LIQUIDITY,
-            "limit_price": round(price, 6),
+            # THE SUBMITTED LIMIT, NOT THE VWAP. An order does not fill
+            # above its own limit; recording the VWAP here made the .62 /
+            # .64 / .66 walk read as an order limited at .635556 that
+            # filled twice above it, which no venue could reconcile.
+            "limit_price": round(submitted_limit, 6),
+            "limit_basis": "BREAK_EVEN_IMPLIED_BY_THE_VALUATION",
+            "realised_vwap": round(price, 6),
             "qty": round(qty, 6),
             "filled_qty": round(qty, 6),
             "state": order_state,
@@ -280,25 +379,29 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
             "fill_basis": FILL_BASIS,
             "created_at_basis": "RUNTIME_WALL_CLOCK",
         },
-        "fill": {
-            "fill_id": "%s:F000" % oid,
+        # ONE FILL PER LEVEL. The order was limited at `submitted_limit`
+        # and each of these prices is at or inside it, so the ledger can
+        # be reconciled against the book that produced it.
+        "fills": [{
+            "fill_id": "%s:F%03d" % (oid, f["k"]),
             "order_id": oid,
             "at": decision_ts,
-            "qty": round(qty, 6),
-            "price": round(price, 6),
-            "fee_usd": round(fee, 6),
+            "qty": f["qty"],
+            "price": f["price"],
+            "fee_usd": f["fee_usd"],
             # WHICH OBSERVATION LICENSED THIS MODELLED FILL: the venue
             # book read, named by slug and read instant. Without it the
             # fill is an assertion.
             "evidence_id": "venue_book:%s@%s" % (
                 contract.get("us_market_slug"),
                 (rec.get("venue_quote") or {}).get("read_at")),
-            "evidence_qty": est.get("size"),
+            "evidence_qty": f["qty"],
             # A CROSSING ORDER JOINS NO QUEUE. 0 is not a queue-share
             # estimate; `fill_basis` says which kind of fill this was.
             "queue_share": 0.0,
             "fill_basis": FILL_BASIS,
-        },
+        } for f in fills],
+        "levels_evidence": levels_evidence,
         "accounting": {
             "filled_qty": round(qty, 6),
             "intended_notional_usd": round(intended_notional, 6),
@@ -318,8 +421,24 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
             "realized_why": ("nothing has been realised at entry. Any "
                              "number other than zero here would be a "
                              "mark, and a mark is not a realisation"),
-            "invariant": "cost_basis == qty * vwap + fees",
-            "invariant_ok": abs(basis - (qty * price + fee)) < 1e-6,
+            # THE EXACT INVARIANT IS OVER THE LEVELS, NOT OVER THE VWAP.
+            # `qty * vwap + fees` looks like the same thing and is not: the
+            # vwap is rounded to six places, so on 900 contracts that
+            # identity is off by ~5e-4 and an exact check on it fails for
+            # a reason that has nothing to do with the accounting. The
+            # basis is the sum of what each level actually cost plus the
+            # fee actually charged at each level, and that is checked
+            # exactly. The vwap identity is checked too, to a tolerance
+            # that scales with the quantity it was divided by, and
+            # reported rather than asserted away.
+            "invariant": ("cost_basis == SUM(level qty x level price) + "
+                          "SUM(level fee), exactly"),
+            "invariant_ok": abs(basis - (cost + fee)) < 1e-9,
+            "levels_cost_usd": round(cost, 6),
+            "vwap_identity": "vwap x qty == SUM(level cost), to rounding",
+            "vwap_identity_residual": round(abs(qty * price - cost), 9),
+            "vwap_identity_ok": abs(qty * price - cost) <= max(
+                1e-6, abs(qty) * 5e-7),
         },
         "sizing": est.get("sizing"),
     })
@@ -337,12 +456,64 @@ EXPERIMENT_SQL = """
 """
 
 EXISTING_SQL = """
-    SELECT position_id, seed_qty::float8 AS seed_qty,
-           seed_basis_usd::float8 AS seed_basis_usd
-      FROM rn1x_positions
-     WHERE experiment_id = $1 AND policy = $2
-       AND condition_id = $3 AND outcome_index = $4
+    SELECT p.position_id, p.seed_qty::float8 AS seed_qty,
+           p.seed_basis_usd::float8 AS seed_basis_usd,
+           -- HAS THIS EXACT OBSERVATION ALREADY BEEN RECORDED? The
+           -- order id carries the observation key, so its presence is
+           -- what separates a replay from a second entry.
+           EXISTS (SELECT 1 FROM rn1x_orders o
+                    WHERE o.order_id = $5) AS this_observation_recorded,
+           (SELECT count(*) FROM rn1x_orders o2
+                    WHERE o2.position_id = p.position_id) AS orders
+      FROM rn1x_positions p
+     WHERE p.experiment_id = $1 AND p.policy = $2
+       AND p.condition_id = $3 AND p.outcome_index = $4
 """
+
+
+def classify_write(existing, *, position_id_, order_id) -> dict:
+    """Which of the three cases this write is, before anything is written.
+
+    NEW_EXPOSURE          nothing held here. Write.
+    EXACT_REPLAY          the same exposure AND the same provider
+                          observation. The ids are derived from that
+                          observation, so every insert would be a
+                          no-op; report it as a replay rather than
+                          letting "0 rows changed" read as a write.
+    NEW_QUOTE_ON_HELD     the same exposure, a DIFFERENT observation.
+                          This is the case that used to write a second
+                          order and a second fill against a position
+                          whose size never changed. Refused.
+    ADD                   the same, but explicitly requested and
+                          supported. It is not supported.
+    """
+    if existing is None:
+        return {"case": CASE_NEW, "write": True,
+                "why": "this lane holds nothing in this exposure"}
+    if str(existing["position_id"]) != str(position_id_):
+        # A DIFFERENT POSITION ON THE SAME EXPOSURE. The derived id should
+        # make this impossible, so it means something else wrote here.
+        return {"case": CASE_NEW_QUOTE, "write": False,
+                "existing_position_id": existing["position_id"],
+                "refusal": R_ALREADY_HELD,
+                "why": ("a different position already holds this exposure. "
+                        "%s" % ONE_POSITION_WHY)}
+    if existing["this_observation_recorded"]:
+        return {"case": CASE_REPLAY, "write": False,
+                "existing_position_id": existing["position_id"],
+                "order_id": order_id,
+                "why": ("this exact provider observation is already "
+                        "recorded on this position: same exposure, same "
+                        "observation, same derived ids. Nothing to write")}
+    return {"case": (CASE_ADD if ADD_SUPPORTED else CASE_NEW_QUOTE),
+            "write": False,
+            "existing_position_id": existing["position_id"],
+            "existing_qty": existing["seed_qty"],
+            "existing_basis_usd": existing["seed_basis_usd"],
+            "existing_orders": existing["orders"],
+            "refusal": R_ALREADY_HELD,
+            "add_supported": ADD_SUPPORTED,
+            "why": WHY_ADD_IS_REFUSED}
 
 POSITION_SQL = """
     INSERT INTO rn1x_positions (position_id, experiment_id, policy,
@@ -413,17 +584,21 @@ async def persist_entry(conn, plan) -> dict:
     try:
         existing = await conn.fetchrow(
             EXISTING_SQL, pos["experiment_id"], POLICY, pos["condition_id"],
-            pos["outcome_index"])
+            pos["outcome_index"], plan["order"]["order_id"])
     except Exception as exc:                                   # noqa: BLE001
         return {"written": False, "refusals": [R_EXISTING_LOOKUP_FAILED],
                 "error": type(exc).__name__,
                 "why": ("the existing-position lookup failed, so whether "
                         "this exposure is already held is unknown. That "
                         "is not evidence that it is not")}
-    if existing is not None and existing["position_id"] != pos["position_id"]:
-        return {"written": False, "refusals": [R_ALREADY_HELD],
-                "existing_position_id": existing["position_id"],
-                "why": ONE_POSITION_WHY}
+    case = classify_write(existing, position_id_=pos["position_id"],
+                          order_id=plan["order"]["order_id"])
+    if not case["write"]:
+        return {"written": False, "case": case["case"],
+                "refusals": ([case["refusal"]] if case.get("refusal")
+                             else []),
+                **{k: v for k, v in case.items()
+                   if k not in ("write", "case", "refusal")}}
 
     async with conn.transaction():
         await ensure_experiment(conn, pos["experiment_id"])
@@ -454,17 +629,19 @@ async def persist_entry(conn, plan) -> dict:
             o["liquidity"], o["limit_price"], o["qty"], o["filled_qty"],
             o["state"], _ts(o["placed_at"]), o["fill_basis"],
             o["created_at_basis"])
-        f = plan["fill"]
-        await conn.execute(
-            FILL_SQL, f["fill_id"], f["order_id"], _ts(f["at"]), f["qty"],
-            f["price"], f["fee_usd"], f["evidence_id"], f["evidence_qty"],
-            f["queue_share"], f["fill_basis"])
+        for f in plan["fills"]:
+            await conn.execute(
+                FILL_SQL, f["fill_id"], f["order_id"], _ts(f["at"]),
+                f["qty"], f["price"], f["fee_usd"], f["evidence_id"],
+                f["evidence_qty"], f["queue_share"], f["fill_basis"])
 
     return {"written": True,
+            "case": case["case"],
             "position_id": pos["position_id"],
             "decision_id": plan["decision"]["decision_id"],
             "order_id": plan["order"]["order_id"],
-            "fill_id": plan["fill"]["fill_id"],
+            "fill_ids": [f["fill_id"] for f in plan["fills"]],
+            "levels_evidence": plan["levels_evidence"],
             # WAS THIS A NEW POSITION OR THE SAME CYCLE AGAIN. Derived ids
             # make a re-run idempotent, and management still wants to know
             # which of the two happened.

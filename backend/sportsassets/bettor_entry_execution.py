@@ -292,16 +292,38 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
         "p_fill": round(coverage, 6),
         "p_fill_is": "EXECUTED_NOTIONAL_OVER_INTENDED_NOTIONAL",
         "size": round(filled, 6),
-        "limit_price": round(vwap, 6),
-        "price_is_vwap_of_the_walk": True,
+        # ── THREE PRICES, AND THEY ARE NOT ONE PRICE ────────────────
+        #
+        # THE DEFECT THIS FIXES. `limit_price` carried the VWAP, and the
+        # inventory writer used it as the ORDER'S LIMIT -- so a walk over
+        # .62/.64/.66 was recorded as an order limited at .635556 that
+        # filled at .64 and .66. An order does not fill above its own
+        # limit, and a ledger that says it did cannot be reconciled
+        # against any venue.
+        #
+        #   submitted_limit  what the order would be sent with: the
+        #                    break-even price the belief implies. Nothing
+        #                    is taken above it.
+        #   vwap             what the quantity actually cost, volume
+        #                    weighted. An OUTCOME of the walk, never a
+        #                    limit.
+        #   levels_taken     the per-level evidence: price, quantity and
+        #                    cost at each level consumed, so the two
+        #                    numbers above can be checked against the book.
+        "submitted_limit": round(limit, 6),
+        "limit_price": round(limit, 6),
+        "limit_price_is": "THE_SUBMITTED_BREAK_EVEN_LIMIT",
         "vwap": round(vwap, 6),
+        "vwap_is": "THE_REALISED_COST_OF_THE_WALK_NOT_A_LIMIT",
+        "levels_taken": walk.get("levels_taken") or [],
         "best_acquisition_price": best,
         "slippage_vs_best": fill.get("slippage"),
         "spread_cost": fill.get("spreadCost"),
         "cost_usd": round(float(walk.get("cost") or 0.0), 6),
         "unfilled_notional_usd": sized.get("unfilledNotionalUsd"),
         "levels_consumed": walk.get("levels_used"),
-        "levels_consumed_price_range": [best, round(vwap, 6)],
+        "levels_consumed_price_range": [
+            best, (walk.get("levels_taken") or [{}])[-1].get("price", best)],
         "sizing": sized,
         "executable_notional_basis": "DISPLAYED_LADDER_AT_READ_TIME",
         "executable_notional_is_not_latency_adjusted": True,

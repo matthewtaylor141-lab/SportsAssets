@@ -2560,6 +2560,51 @@ async def _replay_one(conn, *, trade_id, whale_id, condition_id,
     return out
 
 
+async def run_continuing_management(conn, *, experiment_id) -> dict:
+    """Manage the challenger's inventory AND the entry lane's, every cycle.
+
+    ── WHY THIS IS A FUNCTION AND WHY IT IS CALLED TWICE IN `cycle` ──
+
+    TWO EXPERIMENTS SHARE THE LEDGER AND NEITHER MANAGES THE OTHER.
+    `store.open_positions` filters on experiment_id alone -- there is no
+    policy clause, so the entry lane's rows are ordinary rows -- but
+    `manage_open_positions` is invoked PER EXPERIMENT, and the entry lane
+    carries its own id. Calling it once with the challenger's id left
+    entry-created inventory in the shared ledger and re-evaluated by
+    nothing.
+
+    A SECOND CALL, NOT A WIDER QUERY. Dropping the experiment filter would
+    make one budget, one batch and one report cover both, and the frozen
+    benchmark's reported management would start depending on how much
+    entry inventory happened to exist.
+
+    ── AND MANAGEMENT MUST NOT DEPEND ON NEW RN1 CANDIDATES ──
+
+    `cycle` returns IDLE_NO_CANDIDATES before it reaches the management
+    step, so on every cycle where the cohort produced no new fill, NOTHING
+    OPEN WAS RE-EVALUATED -- including positions whose exit condition had
+    arrived. Entry is what creates inventory; management is what carries
+    it, and the two have no reason to share a trigger. This is called on
+    both paths.
+
+    A failure in one experiment never costs the other its result.
+    """
+    from .. import bettor_external_shadow as _ext
+
+    out = {"challenger": None, "entry_lane": None,
+           "experiments": [experiment_id, _ext.EXPERIMENT_ID],
+           "runs_without_new_candidates": True}
+    for key, exp in (("challenger", experiment_id),
+                     ("entry_lane", _ext.EXPERIMENT_ID)):
+        try:
+            out[key] = await manage_open_positions(conn, experiment_id=exp)
+        except Exception as exc:                               # noqa: BLE001
+            out[key] = {"phase": "CONTINUING_MANAGEMENT",
+                        "experiment_id": exp,
+                        "error": "%s: %s" % (type(exc).__name__, exc)}
+    return out
+
+
 async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
     """One cycle on ONE lane. Never raises.
 
@@ -2655,8 +2700,18 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
         # what absence already means), so it never moves the cursor
         # backwards and never past unexamined evidence.
         await _save_cursor(conn, start, cursor_key)
+        # MANAGEMENT RUNS ANYWAY. Returning here without it meant that on
+        # every cycle where the cohort produced no new fill, nothing open
+        # was re-evaluated -- and "no new candidates" is the normal state,
+        # not an exception. Entry creates inventory; management carries it.
+        idle_managed = None
+        if challenger:
+            idle_managed = await run_continuing_management(
+                conn, experiment_id=experiment_id)
         return {"ran": True, "state": "IDLE_NO_CANDIDATES", "lane": lane,
                 "cursor": start, "cursor_persisted": True,
+                "management": idle_managed,
+                "management_ran_without_candidates": bool(idle_managed),
                 "lane_census": census}
 
     seen_conditions: set[str] = set()
@@ -2747,39 +2802,9 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
     # lane: the frozen benchmark's entry-and-walk shape is what it was
     # specified as and is not being changed here.
     managed = None
-    managed_entry = None
     if challenger:
-        managed = await manage_open_positions(
+        managed = await run_continuing_management(
             conn, experiment_id=experiment_id)
-        # THE ENTRY LANE'S OWN INVENTORY, MANAGED TOO -- AND THIS WAS A
-        # GAP I HAD CLAIMED WAS CLOSED.
-        #
-        # The autonomous-entry lane writes into the SAME four tables, and
-        # `store.open_positions` filters on experiment_id ALONE with no
-        # policy clause, so the shape was right. But this function is
-        # invoked PER EXPERIMENT, with the challenger's id, and the entry
-        # lane's positions carry a different one. They were therefore
-        # written into the shared ledger and then never re-evaluated by
-        # anything -- inventory with no management, which is the Ferrari
-        # failure's shape.
-        #
-        # A SECOND CALL, NOT A WIDER QUERY. Dropping the experiment filter
-        # would make one budget, one batch and one report cover two
-        # experiments, and the frozen benchmark's numbers would start
-        # depending on how much entry inventory happened to exist. Two
-        # calls keep two budgets and two reports that cannot be conflated.
-        try:
-            from .. import bettor_external_shadow as _ext
-
-            managed_entry = await manage_open_positions(
-                conn, experiment_id=_ext.EXPERIMENT_ID)
-        except Exception as exc:                               # noqa: BLE001
-            # The challenger's own management has already completed and
-            # must not be lost to a failure in a different experiment.
-            managed_entry = {"phase": "CONTINUING_MANAGEMENT",
-                             "experiment": "ENTRY_LANE",
-                             "error": "%s: %s" % (type(exc).__name__, exc)}
-
     await _save_cursor(conn, safe_id, cursor_key)
     # THE REFUSAL DISTRIBUTION, not just the count of writes. "400
     # examined, 0 written" is the same line whether every candidate was
@@ -2817,12 +2842,10 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
         "misread as 'processed'")
     return {"ran": True, "state": "REPLAYED", "lane": lane,
             "cursor": safe_id, "examined": len(cands), "flow": flow,
+            # BOTH EXPERIMENTS, UNDER ONE KEY BUT NEVER MERGED: the
+            # challenger's numbers and the entry lane's stay in their own
+            # sub-objects so neither can be read as the other's.
             "management": managed,
-            # REPORTED SEPARATELY, on purpose. Two experiments, two
-            # budgets, two batches: folding the entry lane's numbers into
-            # `management` would make the frozen benchmark's reported
-            # management depend on how much entry inventory exists.
-            "entry_lane_management": managed_entry,
             "results": results,
             "stopped_at_error": stopped_at_error,
             "refusals": tally,

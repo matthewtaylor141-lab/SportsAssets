@@ -667,6 +667,11 @@ def fill_to_notional(ladder: dict, budget_usd, max_price=None) -> dict:
 
     filled = cost = total = 0.0
     used = 0
+    # THE LEVELS ACTUALLY CONSUMED, PRICE BY PRICE. A walk that reports
+    # only a VWAP cannot be checked against the book it walked, and the
+    # ledger needs the per-level prices: an order filled across .62/.64/.66
+    # did not fill three times at the average.
+    taken = []
     for lv in ladder["levels"]:
         px = float(lv["acquisition_price"])
         if cap is not None and px > cap:
@@ -685,6 +690,10 @@ def fill_to_notional(ladder: dict, budget_usd, max_price=None) -> dict:
         filled += take
         cost += take * px
         used += 1
+        taken.append({"price": round(px, 6), "qty": round(take, 6),
+                      "cost": round(take * px, 6),
+                      "level_qty_displayed": round(qty, 6)})
+    out["levels_taken"] = taken
 
     out.update(filled=round(filled, 6), cost=round(cost, 6),
                levels_used=used, total_inside_limit=round(total, 6),

@@ -809,34 +809,17 @@ async def venue_settlement_evidence(conn, us_market_slug: str) -> dict:
     # and it never raises: a failed read leaves the prose absent and the
     # comparison UNKNOWN, which is the same conservative answer as before
     # -- it just now says which of the two happened.
-    rules = await asyncio.to_thread(_read_rules_blocking, us_market_slug)
+    # THE READER THAT ALREADY EXISTED. I had added a second, uncached one
+    # beside it -- a parallel implementation of the same venue call that
+    # would spend a paced request per candidate per cycle on a string that
+    # does not change. `_read_venue_rules_blocking` caches for an hour,
+    # keyed by slug, and reports a named failure rather than raising.
+    rules = await asyncio.to_thread(_read_venue_rules_blocking,
+                                    us_market_slug)
     out["rules_text"] = rules.get("rules_text")
     out["rules_source"] = rules.get("source")
     out["rules_read"] = rules
     return out
-
-
-def _read_rules_blocking(slug: str) -> dict:
-    """The venue's published rules prose for one contract. Never raises."""
-    from .. import bettor_live_read as blr
-    from .. import pmus
-    from ..venue_pace import pace
-
-    pace()
-    try:
-        client = pmus._get_client()
-    except Exception as exc:                                   # noqa: BLE001
-        return {"ok": False, "rules_text": None,
-                "error": type(exc).__name__,
-                "source": "pmus:/markets?slug=<slug>:rules_text",
-                "stage": "CLIENT_CONSTRUCTION"}
-    try:
-        return blr.read_rules_text(client, slug)
-    except Exception as exc:                                   # noqa: BLE001
-        return {"ok": False, "rules_text": None,
-                "error": type(exc).__name__,
-                "source": "pmus:/markets?slug=<slug>:rules_text",
-                "stage": "RULES_READ"}
 
 
 async def venue_quote(conn, *, us_slug, intent, now, size=None):
@@ -1054,18 +1037,96 @@ def _quote_epoch(quote):
         return None
 
 
-def _outcome_index(intent) -> int:
-    """Which leg of the binary contract this entry holds.
+TOKENS_SQL = """
+    SELECT token_id, outcome, outcome_index
+      FROM market_tokens WHERE condition_id = $1
+     ORDER BY outcome_index
+"""
 
-    DECLARED, NOT DEFAULTED. `markets` carries no outcome index for this
-    lane and `or 0` would have silently filed every SHORT leg under the
-    LONG one -- so a long and a short on the same market would have
-    collided on the one-position-per-exposure index and the second would
-    have read as a duplicate of the first. The venue holds one signed net
-    position per market; 0 is the priced selection and 1 is its
-    complement, which is exactly the side a BUY_SHORT acquires.
+R_OUTCOME_NOT_BOUND = "PAYOUT_OUTCOME_INDEX_NOT_BOUND_TO_A_TOKEN"
+R_OUTCOME_DISAGREES = "PAYOUT_OUTCOME_DISAGREES_WITH_THE_VENUE_INTENT"
+
+
+async def bind_payout_outcome(conn, *, condition_id, payout_event, intent):
+    """Which GLOBAL token and index the held payout event actually is.
+
+    ── WHY THIS IS NOT DERIVED FROM THE INTENT ──────────────────────
+    It was: `1 if intent == BUY_SHORT else 0`. That treats the US venue's
+    order intent as though it determined the GLOBAL catalogue's outcome
+    ordering, and those are two different systems. `market_tokens` lists
+    the outcomes with their indices as the global market defines them,
+    and nothing guarantees index 0 is the side a BUY_LONG acquires --
+    the ordering is the catalogue's, not the venue's.
+
+    Under the old rule a market whose token order happened to be reversed
+    would file the position under the opposite leg: the one-position index
+    would collide with the other side, the settlement payout would be read
+    off the wrong outcome, and every number downstream would be about a
+    contract we do not hold.
+
+    So the binding is READ, by matching the payout event's name against
+    the token outcomes, and then CROSS-CHECKED against the intent: the two
+    are expected to agree, and a disagreement is reported rather than
+    resolved in favour of either. An unbindable outcome refuses the entry
+    -- there is no default.
     """
-    return 1 if str(intent) == "ORDER_INTENT_BUY_SHORT" else 0
+    try:
+        rows = await conn.fetch(TOKENS_SQL, str(condition_id))
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "refusal": R_OUTCOME_NOT_BOUND,
+                "error": type(exc).__name__,
+                "why": ("the token read failed, so which outcome this "
+                        "contract pays on is unknown")}
+    toks = [dict(r) for r in rows]
+    if not toks:
+        return {"ok": False, "refusal": R_OUTCOME_NOT_BOUND, "tokens": [],
+                "why": ("the global catalogue lists no tokens for this "
+                        "condition, so the payout outcome cannot be bound "
+                        "to an index. It is NOT assumed to be 0")}
+
+    want = _norm_outcome(payout_event)
+    hits = [t for t in toks if _norm_outcome(t["outcome"]) == want]
+    if len(hits) != 1:
+        return {"ok": False, "refusal": R_OUTCOME_NOT_BOUND,
+                "tokens": [t["outcome"] for t in toks],
+                "payout_event": payout_event,
+                "matches": len(hits),
+                "why": ("the payout event matches %d of %d listed outcomes. "
+                        "One and only one is a binding" % (len(hits),
+                                                           len(toks)))}
+    tok = hits[0]
+    idx = int(tok["outcome_index"])
+    # THE CROSS-CHECK. The intent implies a side under the venue's own
+    # two-leg convention; if that disagrees with the catalogue's index the
+    # two systems are not describing the same leg and the entry stops.
+    implied = 1 if str(intent) == "ORDER_INTENT_BUY_SHORT" else 0
+    out = {"ok": True, "outcome_index": idx, "token_id": tok["token_id"],
+           "outcome": tok["outcome"], "outcomes_listed": len(toks),
+           "intent": intent, "intent_implied_index": implied,
+           "basis": "MATCHED_THE_PAYOUT_EVENT_AGAINST_market_tokens",
+           "cross_check": ("AGREES" if idx == implied else "DISAGREES")}
+    if idx != implied and len(toks) == 2:
+        # ON A BINARY MARKET the two conventions should coincide. When they
+        # do not, one of them is wrong about which leg is held, and picking
+        # either would be a guess about where the money is.
+        out.update(ok=False, refusal=R_OUTCOME_DISAGREES,
+                   why=("the catalogue puts %r at index %d while the venue "
+                        "intent %s implies index %d. On a two-outcome "
+                        "market these must agree; they do not, so which "
+                        "leg is held is unestablished"
+                        % (tok["outcome"], idx, intent, implied)))
+    return out
+
+
+def _norm_outcome(name) -> str:
+    """Compare outcome names without punctuation or case.
+
+    Deliberately NOT the team-name normaliser: that one strips words like
+    "city" and "united" as noise, which is right for matching a fixture
+    and wrong here, where "Manchester City" and "Manchester United" are
+    two outcomes of two different markets and must never collapse.
+    """
+    return "".join(ch for ch in str(name or "").lower() if ch.isalnum())
 
 
 #: The odds source's own hard rule, restated where the gate can see it.
@@ -1395,11 +1456,19 @@ async def cycle(conn) -> dict:
                         "why": _sanitize(ident.get("why") or "", limit=200)})
                 continue
 
-            now = time.time()
+            # THE READ CLOCK, WHICH IS NOT THE DECISION CLOCK. This
+            # instant ages the book at the moment it was read. The
+            # DECISION instant is taken after the venue read, the rules
+            # read and the fixture-metadata read have all completed, and
+            # both inputs are re-aged against THAT -- because a decision
+            # stamped before several network reads claims a freshness it
+            # did not have, which is the defect already repaired once in
+            # the management lane.
+            read_at = time.time()
             # THE INTENT IS THE SIDE. Passing it is what makes this read
             # the ladder the contract actually trades on.
             vq = await venue_quote(conn, us_slug=ident["us_market_slug"],
-                                   intent=ident["intent"], now=now)
+                                   intent=ident["intent"], now=read_at)
             if not vq.get("ok"):
                 code = vq.get("refusal") or R_NO_VENUE_QUOTE
                 tally[code] = tally.get(code, 0) + 1
@@ -1474,6 +1543,15 @@ async def cycle(conn) -> dict:
             srule["book_rule"] = vset.BOOK_SETTLEMENT.get(family)
             srule["fixture_metadata"] = fmeta
             srule["quote_context_evidence"] = ctx_ev
+
+            # ── THE DECISION INSTANT, TAKEN HERE ────────────────────
+            # After the venue book read, the venue rules read and the
+            # fixture-metadata read. Both clocks are re-aged against it
+            # below, so a decision cannot be stamped fresher than the work
+            # that produced it. `decision_lag_s` is the gap those reads
+            # actually took, reported rather than absorbed.
+            now = time.time()
+            decision_lag_s = round(now - read_at, 3)
             # THE SPECIFIC UNMET RULES, not one blanket unknown. "The
             # settlement rules do not match" is four questions -- draw,
             # overtime, push, void -- and a census that collapses them
@@ -1640,9 +1718,28 @@ async def cycle(conn) -> dict:
                 # the existing management cycle picks this up as an
                 # ordinary open position on its next pass.
                 try:
+                    # THE OUTCOME INDEX IS READ AND CROSS-CHECKED, never
+                    # derived from the venue intent. An unbindable or
+                    # disagreeing outcome refuses the inventory write: the
+                    # valuation row stands, but nothing is held under an
+                    # index nobody established.
+                    bound = await bind_payout_outcome(
+                        conn, condition_id=mapped["condition_id"],
+                        payout_event=rec.get("payout_event"),
+                        intent=ident["intent"])
+                    rec["payout_binding"] = bound
+                    if not bound.get("ok"):
+                        code = bound.get("refusal") or R_OUTCOME_NOT_BOUND
+                        tally[code] = tally.get(code, 0) + 1
+                        entries.append({"written": False,
+                                        "refusals": [code],
+                                        "condition_id":
+                                            mapped["condition_id"],
+                                        "payout_binding": bound})
+                        continue
                     plan = inv.plan_entry(
                         rec, now=now,
-                        outcome_index=_outcome_index(ident["intent"]),
+                        outcome_index=bound["outcome_index"],
                         fee_fn=fee_fn)
                     wrote = await inv.persist_entry(conn, plan)
                     rec["inventory"] = wrote
@@ -1656,6 +1753,36 @@ async def cycle(conn) -> dict:
                     if wrote.get("written"):
                         tally["ENTRY_INVENTORY_WRITTEN"] = \
                             tally.get("ENTRY_INVENTORY_WRITTEN", 0) + 1
+                        # ── THE BOOK IS RESERVED AGAINST, IMMEDIATELY ──
+                        #
+                        # THE DEFECT THIS CLOSES. `open_book` is read once
+                        # per cycle, so every candidate after the first
+                        # measured its exposure against a book that did
+                        # not contain the positions this cycle had just
+                        # created. Two $600 entries, each admissible alone
+                        # against an empty book, both cleared a $1,000
+                        # combined-exposure rail -- and the rail is the
+                        # one thing standing between a capped pilot and an
+                        # uncapped one.
+                        #
+                        # A RESERVATION, NOT A RE-READ. The row was
+                        # written inside a transaction that has committed,
+                        # so appending it here is the same fact the next
+                        # read would return, without a second round trip
+                        # per candidate. It carries the COST BASIS
+                        # (including fees) and the filled quantity, which
+                        # are exactly what the rails are measured in.
+                        acct = wrote.get("accounting") or {}
+                        if open_book is not None:
+                            open_book.append({
+                                "condition_id": mapped["condition_id"],
+                                "event_key": quote["event_id"],
+                                "cost_usd": acct.get("cost_basis_usd"),
+                                "qty": acct.get("filled_qty"),
+                                "opened_at": now,
+                                "reserved_in_this_cycle": True})
+                            tally["EXPOSURE_RESERVED"] = \
+                                tally.get("EXPOSURE_RESERVED", 0) + 1
                     else:
                         for code in wrote.get("refusals") or []:
                             tally[code] = tally.get(code, 0) + 1
