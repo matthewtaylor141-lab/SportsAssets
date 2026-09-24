@@ -48,6 +48,99 @@ BOOK_SETTLEMENT = {
     "baseball": "FULL_GAME_INCLUDING_EXTRA_INNINGS",
 }
 
+# ── the four rules, separately, because only one is even answerable ──
+#
+# "Settlement rules match" is four questions, not one. Collapsing them
+# would let three unknowns hide behind the one that happens to be
+# checkable.
+
+R_DRAW_ASYMMETRIC = "DRAW_HANDLING_NOT_RECONCILED"
+R_OVERTIME_UNKNOWN = "OVERTIME_RULE_NOT_ESTABLISHED"
+R_VOID_UNKNOWN = "VOID_ABANDONMENT_RULE_NOT_ESTABLISHED"
+R_PUSH_OUT_OF_SCOPE = "PUSH_NOT_APPLICABLE_TO_H2H"
+
+#: How many outcomes the BOOK prices, per sport family. Soccer h2h is
+#: three-way; MLB is two-way.
+BOOK_OUTCOMES = {"soccer": 3, "baseball": 2}
+
+#: THE DRAW ASYMMETRY, which is the one that would quietly cost money.
+#:
+#: A 3-way de-vig over {home, draw, away} yields p(home WINS). The venue
+#: contract is binary -- "will X beat Y" -- and a draw resolves it NO. So
+#: the probability and the contract actually agree on soccer: both are
+#: "home wins outright". That is the good case.
+#:
+#: What is NOT established is whether every venue soccer contract is that
+#: shape. `markets` carries a title and nothing about resolution, so a
+#: "double chance" or "X or draw" contract would read as a plain fixture
+#: title and take the same 3-way probability against a materially
+#: different payout. There is no field to tell them apart, so the pairing
+#: is refused rather than assumed.
+DRAW_NOTE = (
+    "a 3-way de-vig gives p(home wins outright), which is what a binary "
+    "'will X beat Y' contract pays on -- but nothing in `markets` "
+    "distinguishes that contract from a double-chance one carrying the "
+    "same fixture title, so the shape is not established per contract")
+
+VOID_NOTE = (
+    "an abandoned or postponed fixture voids at the book. Whether the "
+    "venue contract voids, resolves NO, or stays open is not in our data, "
+    "and the three differ by the whole stake")
+
+OVERTIME_NOTE = (
+    "soccer full-time excludes extra time and the MLB moneyline includes "
+    "extra innings, so the rule is per sport on the book side and unknown "
+    "on the venue side")
+
+
+def rules_status(*, sport_family, market="h2h") -> dict:
+    """Each settlement rule separately, with what is known about it.
+
+    Returns a dict per rule carrying `established` (bool) and a refusal
+    code where it is not. `overall_established` is True only when every
+    applicable rule is established -- an unknown is never a match.
+    """
+    fam = str(sport_family)
+    book = BOOK_SETTLEMENT.get(fam)
+    venue = rule_for(sport_family=fam, market=market)
+    n = BOOK_OUTCOMES.get(fam)
+
+    rules = {
+        "draw": {
+            "applicable": n == 3,
+            "established": False if n == 3 else True,
+            "refusal": (R_DRAW_ASYMMETRIC if n == 3 else None),
+            "note": (DRAW_NOTE if n == 3
+                     else "this sport prices no draw, so nothing to reconcile"),
+            "book_outcomes": n,
+        },
+        "overtime": {
+            "applicable": True,
+            "established": bool(book is not None and venue is not None),
+            "refusal": (None if (book and venue) else R_OVERTIME_UNKNOWN),
+            "book_rule": book, "venue_rule": venue, "note": OVERTIME_NOTE,
+        },
+        "push": {
+            "applicable": str(market) != "h2h",
+            "established": True,
+            "refusal": None,
+            "note": ("h2h has no line, so there is no tie-at-the-line to "
+                     "push. Spreads and totals are not priced here"),
+        },
+        "void": {
+            "applicable": True,
+            "established": bool(venue is not None),
+            "refusal": (None if venue is not None else R_VOID_UNKNOWN),
+            "note": VOID_NOTE,
+        },
+    }
+    unmet = sorted({r["refusal"] for r in rules.values()
+                    if r["applicable"] and not r["established"]
+                    and r["refusal"]})
+    return {"sport_family": fam, "market": str(market),
+            "rules": rules, "unmet": unmet,
+            "overall_established": not unmet}
+
 #: The venue's side. DELIBERATELY EMPTY. Each entry, when it exists, must
 #: name the evidence that established it -- not a belief about how the
 #: venue probably behaves.
@@ -87,12 +180,17 @@ def agrees(*, sport_family, market="h2h"):
         return {"agrees": None, "refusal": R_NOT_ESTABLISHED,
                 "book_rule": None, "venue_rule": venue,
                 "why": "this sport family has no declared book rule"}
-    if venue is None:
+    status = rules_status(sport_family=sport_family, market=market)
+    if venue is None or not status["overall_established"]:
         return {"agrees": None, "refusal": R_NOT_ESTABLISHED,
-                "book_rule": book, "venue_rule": None,
-                "why": WHY_EMPTY, "how_to_establish": HOW_TO_ESTABLISH}
+                "book_rule": book, "venue_rule": venue,
+                "why": WHY_EMPTY, "how_to_establish": HOW_TO_ESTABLISH,
+                # ALL FOUR RULES, so the refusal names which are missing
+                # rather than implying one blanket unknown.
+                "rules": status["rules"], "unmet": status["unmet"]}
     return {"agrees": bool(book == venue), "refusal": None,
             "book_rule": book, "venue_rule": venue,
+            "rules": status["rules"], "unmet": [],
             "evidence": ATTESTED[(str(sport_family), str(market))][1]}
 
 
@@ -107,4 +205,7 @@ def describe() -> dict:
         "why_empty": WHY_EMPTY,
         "how_to_establish": HOW_TO_ESTABLISH,
         "an_unknown_is_not_a_match": True,
+        "rules_checked_separately": ["draw", "overtime", "push", "void"],
+        "soccer": rules_status(sport_family="soccer"),
+        "baseball": rules_status(sport_family="baseball"),
     }

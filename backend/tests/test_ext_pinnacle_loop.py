@@ -284,7 +284,11 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
         assert out["evaluated"] == 1, out
         assert out["written"] == 1, out
         assert out["order_submitted"] is False
-        assert vset.R_NOT_ESTABLISHED in out["refusals"], out["refusals"]
+        # The SPECIFIC unmet rules, not one blanket unknown. Soccer h2h
+        # leaves three unestablished and the census must name each.
+        for code in (vset.R_DRAW_ASYMMETRIC, vset.R_OVERTIME_UNKNOWN,
+                     vset.R_VOID_UNKNOWN):
+            assert code in out["refusals"], (code, out["refusals"])
 
         row = await conn.fetchrow(
             "SELECT probability, executable_price, cost_per_contract, "
@@ -301,7 +305,9 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
         assert row["estimated_edge_per_contract"] is not None
         assert row["decision"] == "NO_TRADE"
         assert row["admissible"] is False
-        assert vset.R_NOT_ESTABLISHED in list(row["refusals"])
+        assert vset.R_DRAW_ASYMMETRIC in list(row["refusals"]), \
+            list(row["refusals"])
+        assert vset.R_OVERTIME_UNKNOWN in list(row["refusals"])
         assert row["condition_id"] == "c-lfc-mci"
         assert row["event_key"] == "evt-1"
         assert row["observed_at"] is not None

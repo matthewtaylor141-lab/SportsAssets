@@ -1856,6 +1856,25 @@ async def command_rn1x_external_probe(response: Response) -> dict:
     if not got.get("ok"):
         out["why"] = ("the provider refused the request. The body is not "
                       "included because it can echo the query string")
+
+    # THE SECOND-HALF BLOCKER, measured rather than asserted. The exit is
+    # unavailable because no timestamped progress observation exists; this
+    # asks the provider's scores endpoint whether it carries one.
+    try:
+        out["progress_probe"] = await EXT.fetch_scores(
+            sport_key, api_key=os.environ["EDGE_ODDS_API_KEY"])
+    except Exception as exc:                                   # noqa: BLE001
+        out["progress_probe"] = {"ok": False,
+                                 "error": type(exc).__name__}
+    from .. import bettor_rn1x_policy as _pol
+
+    out["second_half_exit"] = {
+        "available": bool(_pol.SECOND_HALF_MAPPING),
+        "sports_with_a_written_rule": sorted(
+            k for k, v in _pol.DOCUMENTED_MAPPINGS.items() if v is not None),
+        "sports_with_a_connected_feed": sorted(_pol.PROGRESS_FEED_CONNECTED),
+        "missing_capability": _pol.MAPPING_REQUIREMENTS[0],
+    }
     return out
 
 

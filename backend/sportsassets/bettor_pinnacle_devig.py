@@ -97,9 +97,40 @@ SUPPORTED: dict = {
     ("baseball", "h2h"): 2,    # no draw in MLB
 }
 
-#: Sports Pinnacle was measured NOT to quote. Named so a refusal can say
-#: "the book does not price this" rather than "no data".
-PINNACLE_ABSENT = ("basketball", "icehockey")
+#: Sports in which Pinnacle was ABSENT FROM THE RESPONSES WE HAVE SEEN.
+#:
+#: THIS IS AN OBSERVATION WITH A TIMESTAMP, NOT A PROPERTY OF THE BOOK.
+#: The earlier name for the refusal was
+#: PINNACLE_DOES_NOT_QUOTE_THIS_SPORT, which is a permanent claim built
+#: from a single query per sport at 2026-09-23T23:28:5xZ -- one bulk
+#: request each, NBA 0/41 and NHL 0/33. A book that was not in that
+#: response may be in the next one: coverage varies with the market's
+#: state, the region set and the time before kickoff.
+#:
+#: So the refusal now says what was actually established -- absent from
+#: the responses observed -- and carries the observation with it. Coverage
+#: is scoped to the ACTUAL RESPONSE at valuation time by
+#: R_BOOK_MISSING, which is the check that decides anything; this tuple
+#: only steers which sports the loop spends credits asking about.
+ABSENT_IN_OBSERVED_RESPONSES = {
+    "basketball": {"observed_at": "2026-09-23T23:28:56Z",
+                   "events": 41, "with_pinnacle": 0,
+                   "requests": 1, "sport_key": "basketball_nba"},
+    "icehockey": {"observed_at": "2026-09-23T23:28:58Z",
+                  "events": 33, "with_pinnacle": 0,
+                  "requests": 1, "sport_key": "icehockey_nhl"},
+}
+
+#: Kept as a name so existing callers do not break, but it is now a view
+#: over the observations above rather than a standalone assertion.
+PINNACLE_ABSENT = tuple(sorted(ABSENT_IN_OBSERVED_RESPONSES))
+
+COVERAGE_IS_PER_RESPONSE = (
+    "Bookmaker coverage is decided per response by PINNACLE_NOT_IN_THIS_"
+    "PAYLOAD at valuation time. ABSENT_IN_OBSERVED_RESPONSES records what "
+    "one probe per sport saw and is used only to steer where credits are "
+    "spent -- it is not evidence that the book never quotes those sports, "
+    "and a later response carrying Pinnacle would be priced normally.")
 
 #: How old a quote may be. The engine's own hard rule is 30 s and it is
 #: adopted unchanged: "no order without a quote fresher than max_age_s".
@@ -107,7 +138,7 @@ MAX_QUOTE_AGE_S = 30.0
 
 # ── refusals, one per way this can fail ─────────────────────────────
 R_UNSUPPORTED_MARKET = "MARKET_NOT_IN_SUPPORTED_SET"
-R_PINNACLE_ABSENT = "PINNACLE_DOES_NOT_QUOTE_THIS_SPORT"
+R_PINNACLE_ABSENT = "PINNACLE_ABSENT_IN_OBSERVED_RESPONSES"
 R_BOOK_MISSING = "PINNACLE_NOT_IN_THIS_PAYLOAD"
 R_INCOMPLETE_OUTCOMES = "OUTCOME_SET_INCOMPLETE"
 R_STALE = "QUOTE_STALE"
@@ -329,10 +360,14 @@ def valuation(*, contract: dict, quote: dict, now: float,
     if expected is None:
         refusals.append(R_UNSUPPORTED_MARKET)
         if sport in PINNACLE_ABSENT:
-            # A DIFFERENT FACT with a different remedy: the market is not
-            # unsupported because we have not got round to it, it is
-            # unsupported because the book does not price it.
+            # A DIFFERENT FACT with a different remedy: we have seen this
+            # sport's responses carry no Pinnacle at all, so the remedy is
+            # not "add support" but "check whether the book has started
+            # quoting it". Stated as an observation, with its date.
             refusals.append(R_PINNACLE_ABSENT)
+            out["absence_observation"] = dict(
+                ABSENT_IN_OBSERVED_RESPONSES[sport])
+            out["absence_is_not_permanent"] = COVERAGE_IS_PER_RESPONSE
         out["supported"] = sorted("%s/%s" % k for k in SUPPORTED)
         out["why"] = ("%s/%s is not in the measured supported set %s"
                       % (sport, market, out["supported"]))

@@ -162,6 +162,69 @@ async def fetch_odds(sport_key: str, *, api_key: str, timeout=20.0) -> dict:
                 "received_at": time.time()}
 
 
+async def fetch_scores(sport_key: str, *, api_key: str, timeout=20.0) -> dict:
+    """DOES THIS PROVIDER GIVE OBSERVED EVENT PROGRESS?
+
+    The second-half loss exit is blocked on exactly one missing
+    capability: a timestamped progress observation (period / quarter /
+    inning / clock) that is NOT derived from a scheduled start time.
+    `bettor_rn1x_policy.PROGRESS_FEED_CONNECTED` is empty by construction
+    and that is what keeps the exit unavailable.
+
+    This asks the provider's own scores endpoint what it actually returns,
+    so the answer is measured rather than assumed. It reports the KEYS
+    present on a live event, because the question is not "is there a
+    score" but "is there a PERIOD", and those are different fields with
+    different consequences: a score with no period cannot locate the
+    halfway point, and substituting elapsed wall-clock time for it is
+    precisely what the policy forbids.
+
+    `daysFrom=1` is required for the endpoint to include completed and
+    in-play events. It costs credits like any other request.
+    """
+    import httpx
+
+    url = "https://api.the-odds-api.com/v4/sports/%s/scores/" % sport_key
+    params = {"apiKey": api_key, "daysFrom": "1"}
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.get(url, params=params)
+        out = {"status": r.status_code, "sport": sport_key,
+               "credits_used": r.headers.get("x-requests-used"),
+               "credits_remaining": r.headers.get("x-requests-remaining")}
+        if r.status_code != 200:
+            out["ok"] = False
+            return out
+        events = r.json() or []
+        live = [e for e in events
+                if not e.get("completed") and e.get("scores")]
+        # THE KEY SETS, which is the whole point. Named, not summarised.
+        keys = sorted({k for e in events for k in e})
+        score_keys = sorted({k for e in events
+                             for s in (e.get("scores") or []) for k in s})
+        progress_fields = sorted(
+            k for k in keys
+            if k.lower() in ("period", "quarter", "inning", "half", "clock",
+                             "time_remaining", "game_clock", "status",
+                             "progress", "elapsed"))
+        out.update({
+            "ok": True, "events": len(events),
+            "in_play_with_scores": len(live),
+            "event_keys": keys, "score_keys": score_keys,
+            "progress_fields_present": progress_fields,
+            "carries_observed_period": bool(progress_fields),
+            "verdict": (
+                "a progress field is present -- inspect it before "
+                "connecting" if progress_fields else
+                "NO period/quarter/inning/clock field. Scores alone cannot "
+                "locate the halfway point, and elapsed wall-clock time is "
+                "forbidden as a substitute, so this endpoint does NOT "
+                "close the second-half exit blocker"),
+            "sample": (dict(live[0]) if live else
+                       (dict(events[0]) if events else None)),
+        })
+        return out
+
+
 def pinnacle_h2h(event: dict, *, received_at: float) -> dict | None:
     """Pinnacle's COMPLETE h2h outcome set for one event, or None.
 
@@ -400,8 +463,13 @@ async def cycle(conn) -> dict:
             # this refuses by name. An unknown is not a match, and
             # asserting one would make every edge below unfalsifiable.
             srule = vset.agrees(sport_family=family, market="h2h")
+            # THE SPECIFIC UNMET RULES, not one blanket unknown. "The
+            # settlement rules do not match" is four questions -- draw,
+            # overtime, push, void -- and a census that collapses them
+            # cannot tell management which one to go and establish.
             extra = ([] if srule["agrees"] is True
-                     else [srule.get("refusal") or R_VENUE_RULE_UNKNOWN])
+                     else (list(srule.get("unmet") or [])
+                           or [srule.get("refusal") or R_VENUE_RULE_UNKNOWN]))
 
             contract = {
                 "venue": "PMUS",
