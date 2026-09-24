@@ -955,7 +955,7 @@ def anchored_clock(now=None, clock=None):
 async def managed_inputs_for(conn, *, condition_id, outcome_index,
                              odds=None, now=None, read_book=None,
                              resolve_identity=None, clock=None,
-                             read_rules=None):
+                             read_rules=None, phase=None, game_format=None):
     """The six links for ONE held position, with the first failure named.
 
     Returns the same input keys `challenger_inputs_for` returns when the
@@ -1373,7 +1373,19 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
     srule = vset.attest(
         sport_family=family, market="h2h", venue_evidence=vevid,
         observed_at=val.get("observed_at"),
-        game_start=(out.get("fixture") or {}).get("game_start"),
+        # A SCHEDULED START, LABELLED AS ONE. `market_starts.game_start` is
+        # written from the CLOB catalogue's `game_start_time`, which is the
+        # SCHEDULED first pitch -- `bettor_progress_providers` already refuses
+        # to derive a period from it for exactly this reason. Passing the
+        # evidence CLASS beside the stamp is what stops the scheduled time
+        # passing from being read as play having begun.
+        start_at=(out.get("fixture") or {}).get("game_start"),
+        start_evidence=vset._ST.SE_SCHEDULED_CATALOGUE,
+        # NEITHER THE PHASE NOR THE FORMAT IS CARRIED ON `markets`, so both
+        # are unestablished and the captured rules are NOT admitted. That is
+        # the scope gate doing its job, not a missing feature: the capture
+        # covers regular-season nine-inning games only.
+        phase=phase, game_format=game_format,
         book_evidence={"outcome_names": list(quote["prices"].keys()),
                        "source": "theoddsapi:h2h:%s" % devig.BOOK})
     _unmet = list(srule.get("unmet") or [])
@@ -1776,7 +1788,8 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
                                    qty=ACCEPTANCE_QTY,
                                    candidates=ACCEPTANCE_CANDIDATES,
                                    resolve_identity=None, read_book=None,
-                                   fee_fn=None):
+                                   fee_fn=None, phase=None,
+                                   game_format=None):
     """Create ONE acceptance position on a covered exposure, or say why not.
 
     Returns the position and its provenance, or `created: False` with the
@@ -1836,7 +1849,8 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
             t_started=t_started, odds=odds, read_rules=read_rules,
             qty=qty, candidates=candidates, now=now, clock=clock,
             resolve_identity=resolve_identity, read_book=read_book,
-            fee_fn=fee_fn, bs=bs, EXT=EXT)
+            fee_fn=fee_fn, bs=bs, EXT=EXT, phase=phase,
+            game_format=game_format)
     finally:
         try:
             await conn.execute("SELECT pg_advisory_unlock($1)", lock_key)
@@ -1869,7 +1883,8 @@ R_EXISTING_LOOKUP_FAILED = "ACCEPTANCE_EXISTING_POSITION_LOOKUP_FAILED"
 async def _seed_acceptance_locked(conn, *, out, experiment_id, tick,
                                   t_started, odds, read_rules, qty,
                                   candidates, resolve_identity, read_book,
-                                  fee_fn, bs, EXT, now=None, clock=None):
+                                  fee_fn, bs, EXT, now=None, clock=None,
+                                  phase=None, game_format=None):
     """The body, under the advisory lock. See `seed_acceptance_position`."""
     import time as _t
 
@@ -2053,7 +2068,7 @@ async def _seed_acceptance_locked(conn, *, out, experiment_id, tick,
             outcome_index=int(picked["outcome_index"]),
             odds=odds, now=tick(), clock=clock,
             read_book=reader, resolve_identity=_resolve,
-            read_rules=read_rules)
+            read_rules=read_rules, phase=phase, game_format=game_format)
         ffl = ci.get("first_failing_link") or {}
         if not (ci.get("available") and ci.get("book_available")):
             code = ffl.get("refusal") or "INPUT_CHAIN_INCOMPLETE"
@@ -2173,7 +2188,8 @@ _NEW_PRINTS_SQL = """
 
 async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
                                 now=None, odds=None, clock=None,
-                                read_rules=None) -> dict:
+                                read_rules=None, phase=None,
+                                game_format=None) -> dict:
     """Re-evaluate positions that are already open. Never raises."""
     import time as _t
 
@@ -2223,7 +2239,8 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
                 conn, condition_id=pos["condition_id"],
                 outcome_index=int(pos["outcome_index"]),
                 odds=odds, now=tick(), clock=clock,
-                read_rules=read_rules)
+                read_rules=read_rules, phase=phase,
+                game_format=game_format)
             ci["seed_qty"] = float(pos["seed_qty"])
             ci["seed_price"] = float(pos["seed_price"])
             # THE DECISION'S OWN INSTANT, READ AFTER THE INPUTS ARRIVED.

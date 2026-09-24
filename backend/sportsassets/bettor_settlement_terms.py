@@ -48,21 +48,42 @@ VERSION = "BETTOR_SETTLEMENT_TERMS_V1"
 # rule for cannot be compared.
 C_FULL = "COMPLETED_IN_REGULATION"
 C_OVERTIME = "DECIDED_AFTER_REGULATION"
-C_SHORTENED_OFFICIAL = "STOPPED_AFTER_THE_MINIMUM_AND_MADE_OFFICIAL"
+#: CALLED AND GRADED, never resumed, past the minimum. Distinguished from a
+#: SUSPENSION on purpose: the published rules treat them differently, and
+#: the grading formula for a called game carries an exception that a
+#: suspended one does not.
+C_CALLED_FINAL = "CALLED_AND_GRADED_WITHOUT_RESUMPTION_AFTER_THE_MINIMUM"
 C_STOPPED_EARLY = "STOPPED_BEFORE_THE_MINIMUM"
+#: SUSPENDED AND RESUMED inside the published window: the fixture completes,
+#: so the bet grades on the completed game.
+C_SUSPENDED_RESUMED = "SUSPENDED_AND_RESUMED_WITHIN_THE_PUBLISHED_WINDOW"
+#: SUSPENDED TO RESUME BEYOND the published window. This is the condition
+#: the two contexts disagree on most sharply, and it is NOT the same
+#: condition as a called game -- the grading text differs.
+C_SUSPENDED_BEYOND = "SUSPENDED_TO_RESUME_BEYOND_THE_PUBLISHED_WINDOW"
 C_NOT_PLAYED = "POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED"
 
-CONDITIONS = (C_FULL, C_OVERTIME, C_SHORTENED_OFFICIAL,
-              C_STOPPED_EARLY, C_NOT_PLAYED)
+CONDITIONS = (C_FULL, C_OVERTIME, C_CALLED_FINAL, C_STOPPED_EARLY,
+              C_SUSPENDED_RESUMED, C_SUSPENDED_BEYOND, C_NOT_PLAYED)
 
 # ── the payouts, declared, from the point of view of OUR side ────────
 PAY_ON_FINAL = "PAYS_THE_WINNER_ON_THE_FINAL_SCORE"
 PAY_ON_PARTIAL = "PAYS_THE_WINNER_ON_THE_LAST_COMPLETED_PERIOD"
+#: THE SCORING EXCEPTION, ENCODED RATHER THAN DESCRIBED. For a CALLED game
+#: the published formula is the last completed inning EXCEPT where the game
+#: was called in the bottom half and the Home side had taken the lead, in
+#: which case the ACTUAL score grades it. That exception decides the bet in
+#: exactly the walk-off case, so it is its own payout class and is NEVER
+#: equivalent to the plain last-completed-period rule.
+PAY_ON_PARTIAL_WALKOFF = (
+    "PAYS_THE_LAST_COMPLETED_PERIOD_EXCEPT_ON_A_BOTTOM_HALF_HOME_LEAD_"
+    "WHERE_THE_ACTUAL_SCORE_GRADES_IT")
 PAY_STAKE_BACK = "RETURNS_THE_STAKE_OR_BASIS_IN_FULL"
 PAY_NO = "RESOLVES_NO_FOR_THE_HELD_SIDE"
 PAY_LATER = "STAYS_OPEN_UNTIL_THE_FIXTURE_IS_COMPLETED"
 
-PAYOUTS = (PAY_ON_FINAL, PAY_ON_PARTIAL, PAY_STAKE_BACK, PAY_NO, PAY_LATER)
+PAYOUTS = (PAY_ON_FINAL, PAY_ON_PARTIAL, PAY_ON_PARTIAL_WALKOFF,
+           PAY_STAKE_BACK, PAY_NO, PAY_LATER)
 
 #: WHERE TWO PAYOUT NAMES DESCRIBE THE SAME CASH, PER CONDITION.
 #:
@@ -72,10 +93,24 @@ PAYOUTS = (PAY_ON_FINAL, PAY_ON_PARTIAL, PAY_STAKE_BACK, PAY_NO, PAY_LATER)
 #: `C_STOPPED_EARLY`, where one side pays a leader and the other has no
 #: official result. Equivalence is therefore declared per condition and
 #: never globally.
+#: EQUIVALENCE ONLY WHERE THE FIXTURE FINISHED. "the final score" and "the
+#: last completed period" are the same number for a game that reached its
+#: end -- in regulation, after extra innings, or on resumption inside the
+#: window. They are NOT the same for a game that stopped:
+#:
+#:   * under C_CALLED_FINAL the published formula carries the bottom-half
+#:     home-lead exception, so PAY_ON_PARTIAL_WALKOFF and PAY_ON_PARTIAL
+#:     differ in the walk-off case and neither equals PAY_ON_FINAL;
+#:   * under C_SUSPENDED_BEYOND the grading text states the last completed
+#:     inning with NO such exception, which is a different formula again.
+#:
+#: The previous version declared PAY_ON_FINAL equivalent to PAY_ON_PARTIAL
+#: under the stopped-game condition, which erased exactly the distinction
+#: the two sides could disagree on.
 SAME_PAYOUT_UNDER = {
     C_FULL: ({PAY_ON_FINAL, PAY_ON_PARTIAL},),
     C_OVERTIME: ({PAY_ON_FINAL, PAY_ON_PARTIAL},),
-    C_SHORTENED_OFFICIAL: ({PAY_ON_FINAL, PAY_ON_PARTIAL},),
+    C_SUSPENDED_RESUMED: ({PAY_ON_FINAL, PAY_ON_PARTIAL},),
 }
 
 #: WHICH CONDITIONS APPLY, PER MARKET TYPE. A condition that cannot arise
@@ -88,7 +123,8 @@ SAME_PAYOUT_UNDER = {
 #: is completed or it is not.
 APPLICABLE_CONDITIONS = {
     ("baseball", "h2h"): CONDITIONS,
-    ("soccer", "h2h"): (C_FULL, C_OVERTIME, C_NOT_PLAYED),
+    ("soccer", "h2h"): (C_FULL, C_OVERTIME, C_SUSPENDED_RESUMED,
+                        C_SUSPENDED_BEYOND, C_NOT_PLAYED),
 }
 
 R_NO_APPLICABLE_SET = "NO_APPLICABLE_CONDITION_SET_DECLARED"
@@ -141,22 +177,43 @@ CONDITION_PROSE = {
              r"\b90\s+minutes\b"),
     C_OVERTIME: (r"\bextra\s+innings\b", r"\bextra\s+time\b",
                  r"\bovertime\b", r"\bpenalt(?:y|ies)\s+shoot"),
-    C_SHORTENED_OFFICIAL: (r"\bofficial\s+game\b",
-                           r"\bshortened\b",
-                           r"\bcalled\s+(?:game|early)\b",
-                           r"\bat\s+least\s+(?:five|5|4\.5|four\s+and\s+a\s+half)"
-                           r"\s+innings\b",
-                           r"\blast\s+completed\s+inning\b"),
+    C_CALLED_FINAL: (r"\bofficial\s+game\b",
+                     r"\bshortened\b",
+                     r"\bcalled\s+(?:game|early)\b",
+                     r"\bcalled\s+\(ended\)",
+                     r"\bat\s+least\s+(?:five|5|4\.5|four\s+and\s+a\s+half)"
+                     r"\s+innings\b"),
+                    # NOTE: "last completed inning" is deliberately NOT a
+                    # condition marker. It is a PAYOUT phrase, and using it
+                    # to identify a condition made every sentence that
+                    # described the payout also claim to be about a called
+                    # game -- including the suspension sentences.
+    C_SUSPENDED_RESUMED: (r"\bsuspend\w*\b[^.;]*\bresumed?\b",
+                          r"\bresumed?\b[^.;]*\bwithin\b",
+                          r"\bresumption\b"),
+    C_SUSPENDED_BEYOND: (r"\bsuspend\w*\b[^.;]*\bmore\s+than\b",
+                         r"\bnot\s+resumed\b",
+                         r"\bbeyond\b[^.;]*\bhours?\b"),
     C_STOPPED_EARLY: (r"\bfewer\s+than\s+(?:five|5)\s+innings\b",
                       r"\bless\s+than\s+(?:five|5)\s+innings\b",
                       r"\bbefore\s+(?:five|5)\s+innings\b",
                       r"\bnot\s+an\s+official\s+game\b"),
-    C_NOT_PLAYED: (r"\babandon\w*", r"\bpostpon\w*", r"\bsuspend\w*",
+    # SUSPENSION IS NOT LISTED HERE. It has its own two conditions, and
+    # leaving it here made one sentence about a suspension also a sentence
+    # about a fixture that was never completed -- which gave that condition
+    # two payouts and reported the venue as self-contradictory.
+    C_NOT_PLAYED: (r"\babandon\w*", r"\bpostpon\w*",
                    r"\bcancel\w*", r"\bnot\s+(?:be\s+)?(?:played|completed)\b",
                    r"\bnever\s+completed\b", r"\brescheduled\b"),
 }
 
 PAYOUT_PROSE = {
+    # THE EXCEPTION FIRST, because a sentence stating it also states the
+    # plain rule, and the exception is the narrower reading.
+    PAY_ON_PARTIAL_WALKOFF: (
+        r"\bbottom\s+half\b[^.;]*\b(?:lead|led|taken\s+the\s+lead)\b",
+        r"\bactual\s+score\b",
+        r"\bwalk-?off\b"),
     PAY_STAKE_BACK: (r"\bvoid\w*", r"\brefund\w*",
                      r"\bstakes?\s+(?:are\s+|will\s+be\s+)?return\w*",
                      r"\bno\s+action\b", r"\bmoney\s+back\b"),
@@ -199,6 +256,14 @@ def read_terms(prose: str) -> dict:
                  if any(re.search(p, sent) for p in pats)]
         pays = [p for p, pats in PAYOUT_PROSE.items()
                 if any(re.search(pp, sent) for pp in pats)]
+        # DECLARED SUBSUMPTION. A sentence that states the exception
+        # necessarily states the plain rule it is an exception to -- "the last
+        # completed inning, UNLESS ... the actual score" contains both. The
+        # narrower reading is the rule, so the broader one is dropped rather
+        # than counted as a second payout, which would have made an
+        # exception-carrying sentence state no rule at all.
+        if PAY_ON_PARTIAL_WALKOFF in pays and PAY_ON_PARTIAL in pays:
+            pays = [x for x in pays if x != PAY_ON_PARTIAL]
         if len(pays) != 1 or not conds:
             for c in conds:
                 evidence.setdefault(c, []).append(
@@ -234,7 +299,7 @@ CAPTURE_REQUEST = {
              "market type we price -- the GAME-PERIOD MONEY LINE on MLB -- "
              "stating, for each condition in CONDITIONS, what happens to "
              "a bet on it"),
-    "which_conditions_matter_most": [C_SHORTENED_OFFICIAL, C_STOPPED_EARLY,
+    "which_conditions_matter_most": [C_CALLED_FINAL, C_STOPPED_EARLY, C_SUSPENDED_BEYOND,
                                      C_NOT_PLAYED],
     "why_those": ("regulation and extra innings are not in dispute: the "
                   "money line is the full game on the book side and the "
@@ -310,31 +375,177 @@ CTX_PRE_GAME = "PRE_GAME"
 CTX_LIVE = "IN_PLAY"
 
 R_CONTEXT_UNKNOWN = "QUOTE_CONTEXT_NOT_ESTABLISHED"
+R_SCHEDULED_ONLY = "ONLY_A_SCHEDULED_START_IS_HELD_SO_IN_PLAY_IS_UNPROVEN"
+
+# ── WHAT KIND OF START STAMP WE HOLD ─────────────────────────────────
+#
+# `market_starts.game_start` IS A SCHEDULED START. Its writer reads the CLOB
+# catalogue's `game_start_time`, and `bettor_progress_providers` already says
+# so in as many words: "`game_start_time`, which we do hold, is a SCHEDULED
+# start. Deriving a period from it is refused by source name in
+# `bettor_progress_feed`, and that refusal is the point." The first version
+# of this function reintroduced exactly that refused derivation.
+#
+# THE ASYMMETRY IS THE WHOLE FIX. A scheduled start bounds the first pitch
+# from BELOW -- a fixture is not brought forward -- so a quote observed
+# BEFORE the scheduled time is before the first pitch and PRE_GAME is
+# established. It bounds nothing from above: a rain delay, a a late start or
+# a postponement all leave the scheduled time in the past while play has not
+# begun. So the scheduled time passing establishes NOTHING, and IN_PLAY needs
+# evidence that play actually started.
+SE_SCHEDULED_CATALOGUE = "SCHEDULED_START_FROM_VENUE_CATALOGUE"
+SE_ACTUAL_REPORTED = "ACTUAL_START_REPORTED_BY_A_PROGRESS_SOURCE"
+SE_QUOTE_MARKET_CONTEXT = "QUOTE_LABELLED_BY_THE_PROVIDER_AS_IN_PLAY"
+
+#: Only these establish that play has BEGUN. A scheduled start cannot.
+ESTABLISHES_IN_PLAY = (SE_ACTUAL_REPORTED, SE_QUOTE_MARKET_CONTEXT)
+
+SCHEDULED_START_DIRECTION = (
+    "a scheduled start bounds the first pitch from BELOW only. Observed "
+    "before it: play had not begun, so PRE_GAME is established. Observed "
+    "after it: the fixture may be delayed, so nothing is established")
 
 
-def book_context_for(*, observed_at=None, game_start=None) -> dict:
+def book_context_for(*, observed_at=None, start_at=None,
+                     start_evidence=SE_SCHEDULED_CATALOGUE,
+                     quote_is_in_play=None) -> dict:
     """PRE_GAME or IN_PLAY for one quote, or a named refusal.
 
-    Both stamps are required. Treating a missing `game_start` as pre-game
-    would silently apply the rule that pays a winner to a quote taken mid
-    game, where the published rule refunds instead.
+    `start_at` is whatever start stamp is held and `start_evidence` says
+    WHAT KIND it is. `quote_is_in_play`, when the provider states it, is
+    authoritative on its own and needs no start stamp at all.
     """
-    if observed_at is None or game_start is None:
-        return {"context": None, "refusal": R_CONTEXT_UNKNOWN,
-                "observed_at": observed_at, "game_start": game_start,
-                "why": ("the quote's observation stamp and the fixture's "
-                        "first pitch are both needed to say which published "
-                        "rule governs it, and one of them is missing. It is "
-                        "not defaulted to pre-game: the two rules pay "
-                        "differently on a called game")}
-    ctx = CTX_PRE_GAME if float(observed_at) < float(game_start) else CTX_LIVE
-    return {"context": ctx, "refusal": None,
-            "observed_at": float(observed_at),
-            "game_start": float(game_start),
-            "seconds_from_first_pitch": float(observed_at) - float(game_start),
-            "why": ("the quote was observed %s the first pitch, so the %s "
-                    "rule governs it"
-                    % ("before" if ctx == CTX_PRE_GAME else "after", ctx))}
+    out = {"context": None, "refusal": None,
+           "observed_at": (None if observed_at is None else float(observed_at)),
+           "start_at": (None if start_at is None else float(start_at)),
+           "start_evidence": str(start_evidence),
+           "quote_is_in_play": quote_is_in_play,
+           "scheduled_start_direction": SCHEDULED_START_DIRECTION}
+
+    # THE PROVIDER'S OWN LABEL, when it exists, is the authoritative context:
+    # it is a statement about the market the price came from.
+    if quote_is_in_play is True:
+        out.update(context=CTX_LIVE, start_evidence=SE_QUOTE_MARKET_CONTEXT,
+                   why=("the provider labelled this quote's market IN PLAY, "
+                        "which is a statement about the market the price "
+                        "came from rather than an inference from a clock"))
+        return out
+    if quote_is_in_play is False:
+        out.update(context=CTX_PRE_GAME,
+                   start_evidence=SE_QUOTE_MARKET_CONTEXT,
+                   why="the provider labelled this quote's market PRE-MATCH")
+        return out
+
+    if observed_at is None or start_at is None:
+        out.update(refusal=R_CONTEXT_UNKNOWN,
+                   why=("no start stamp and no provider label, so which "
+                        "published rule governs this quote is unknown. It is "
+                        "NOT defaulted to pre-game: the two rules pay "
+                        "differently on a called game"))
+        return out
+
+    if float(observed_at) < float(start_at):
+        out.update(context=CTX_PRE_GAME,
+                   seconds_before_start=float(start_at) - float(observed_at),
+                   why=("the quote was observed BEFORE the start stamp, and "
+                        "a fixture is not brought forward, so play had not "
+                        "begun whatever kind of stamp this is"))
+        return out
+
+    # Observed at or after the stamp. Only ACTUAL-start evidence gets to
+    # call that IN_PLAY.
+    if str(start_evidence) in ESTABLISHES_IN_PLAY:
+        out.update(context=CTX_LIVE,
+                   seconds_after_start=float(observed_at) - float(start_at),
+                   why=("the quote was observed after an ACTUAL reported "
+                        "start, so play had begun"))
+        return out
+    out.update(refusal=R_SCHEDULED_ONLY,
+               seconds_after_scheduled=float(observed_at) - float(start_at),
+               why=("the quote was observed %.0f s after a SCHEDULED start "
+                    "and no actual-start evidence is held. A delayed or "
+                    "postponed fixture leaves the scheduled time in the past "
+                    "while play has not begun, so this does NOT establish "
+                    "IN_PLAY -- and calling it IN_PLAY would apply the rule "
+                    "that VOIDS a called game to a bet the pre-game rule "
+                    "would have PAID"
+                    % (float(observed_at) - float(start_at),)))
+    return out
+
+
+# ── THE CAPTURED RULES HAVE A SCOPE, AND IT IS A GATE ────────────────
+#
+# CAPTURE_LIMITS is prose for a reader. It cannot stop a comparison, and a
+# comparison that silently applies regular-season nine-inning rules to a
+# playoff game or a seven-inning doubleheader is exactly the overreach the
+# limits describe. So the scope is ENFORCED here: terms are admitted only
+# for a competition phase and game format the capture covers, and an
+# UNESTABLISHED phase or format admits nothing.
+PHASE_REGULAR = "REGULAR_SEASON"
+PHASE_PLAYOFF = "PLAYOFF_OR_PLAY_IN"
+FMT_NINE = "STANDARD_NINE_INNING"
+FMT_SEVEN = "SEVEN_INNING_DOUBLEHEADER"
+
+#: What the retrieved page's baseball rules actually cover.
+CAPTURED_SCOPE = {
+    ("baseball", "h2h"): {"phases": (PHASE_REGULAR,),
+                          "formats": (FMT_NINE,)},
+}
+
+R_PHASE_UNKNOWN = "COMPETITION_PHASE_NOT_ESTABLISHED"
+R_PHASE_EXCLUDED = "COMPETITION_PHASE_OUTSIDE_THE_CAPTURED_RULES"
+R_FORMAT_UNKNOWN = "GAME_FORMAT_NOT_ESTABLISHED"
+R_FORMAT_EXCLUDED = "GAME_FORMAT_OUTSIDE_THE_CAPTURED_RULES"
+R_SCOPE_UNDECLARED = "NO_CAPTURED_SCOPE_FOR_THIS_MARKET"
+
+SCOPE_NOTE = {
+    PHASE_PLAYOFF: ("MLB Playoff and Play-In games have action whenever the "
+                    "game is completed, so the suspension timings below do "
+                    "not describe them"),
+    FMT_SEVEN: ("a seven-inning doubleheader restates rules 3, 7 and 8 "
+                "against a 7-inning threshold, so the thresholds below are "
+                "the wrong numbers for it"),
+}
+
+
+def admit_scope(*, sport_family, market="h2h", phase=None,
+                game_format=None) -> dict:
+    """May the captured terms be applied to this fixture at all?"""
+    cap = CAPTURED_SCOPE.get((str(sport_family), str(market)))
+    if cap is None:
+        return {"ok": False, "refusals": [R_SCOPE_UNDECLARED],
+                "phase": phase, "game_format": game_format,
+                "why": ("no capture covers %s/%s, so there are no terms to "
+                        "admit" % (sport_family, market))}
+    refusals, why = [], []
+    if phase is None:
+        refusals.append(R_PHASE_UNKNOWN)
+        why.append("the competition phase is not established for this "
+                   "fixture, and the captured rules cover %s only"
+                   % (cap["phases"],))
+    elif str(phase) not in cap["phases"]:
+        refusals.append(R_PHASE_EXCLUDED)
+        why.append(SCOPE_NOTE.get(str(phase),
+                                  "phase %r is outside the capture" % (phase,)))
+    if game_format is None:
+        refusals.append(R_FORMAT_UNKNOWN)
+        why.append("the game format is not established for this fixture, "
+                   "and the captured rules cover %s only" % (cap["formats"],))
+    elif str(game_format) not in cap["formats"]:
+        refusals.append(R_FORMAT_EXCLUDED)
+        why.append(SCOPE_NOTE.get(str(game_format),
+                                  "format %r is outside the capture"
+                                  % (game_format,)))
+    return {"ok": not refusals, "refusals": refusals,
+            "phase": phase, "game_format": game_format,
+            "covers": {"phases": list(cap["phases"]),
+                       "formats": list(cap["formats"])},
+            "why": "; ".join(why) or "the fixture is inside the capture",
+            "how_to_establish": (
+                "the phase and the format are properties of the fixture. "
+                "Neither is carried on `markets`, so both need a source -- "
+                "the league schedule, or the venue listing's own market type "
+                "-- captured per fixture like any other evidence")}
 
 
 # ── THE CAPTURE ──────────────────────────────────────────────────────
@@ -445,13 +656,22 @@ BOOK_TERMS: dict = {
         C_FULL: {"payout": PAY_ON_FINAL, "cite": _cite(_Q_RULE3, "rule 3")},
         C_OVERTIME: {"payout": PAY_ON_FINAL,
                      "cite": _cite(_Q_RULE3, "rule 3")},
-        # Called past the minimum, and suspended-past-the-minimum too: both
-        # grade on the last completed inning for the Money Line.
-        C_SHORTENED_OFFICIAL: {"payout": PAY_ON_PARTIAL,
-                               "cite": _cite(_Q_RULE3 + " " + _Q_RULE7,
-                                             "rules 3 and 7")},
+        # CALLED AND GRADED: the last completed inning, EXCEPT on a
+        # bottom-half home lead, where the ACTUAL score grades it. The
+        # exception is in the payout class, not in a comment.
+        C_CALLED_FINAL: {"payout": PAY_ON_PARTIAL_WALKOFF,
+                         "cite": _cite(_Q_RULE3, "rule 3")},
         C_STOPPED_EARLY: {"payout": PAY_STAKE_BACK,
                           "cite": _cite(_Q_RULE3, "rule 3")},
+        # RESUMED INSIDE THE WINDOW: the fixture completes, so the bet
+        # grades on the completed game.
+        C_SUSPENDED_RESUMED: {"payout": PAY_ON_FINAL,
+                              "cite": _cite(_Q_RULE7, "rule 7")},
+        # BEYOND THE WINDOW: the Money Line exception grades the last
+        # completed inning, and it states NO bottom-half exception -- a
+        # different formula from the called-game case above.
+        C_SUSPENDED_BEYOND: {"payout": PAY_ON_PARTIAL,
+                             "cite": _cite(_Q_RULE7, "rule 7")},
         C_NOT_PLAYED: {"payout": PAY_STAKE_BACK,
                        "cite": _cite(_Q_GENERAL_NOT_STARTED + " " + _Q_RULE7,
                                      "general rule and rule 7")},
@@ -462,13 +682,26 @@ BOOK_TERMS: dict = {
                      "cite": _cite(_Q_RULE4, "rule 4")},
         # THE DIVERGENCE. In play, a game not played to completion has NO
         # ACTION -- the stake comes back instead of grading a leader.
-        C_SHORTENED_OFFICIAL: {"payout": PAY_STAKE_BACK,
-                               "cite": _cite(_Q_RULE4, "rule 4")},
+        C_CALLED_FINAL: {"payout": PAY_STAKE_BACK,
+                         "cite": _cite(_Q_RULE4, "rule 4")},
         C_STOPPED_EARLY: {"payout": PAY_STAKE_BACK,
                           "cite": _cite(_Q_RULE4, "rule 4")},
+        C_SUSPENDED_RESUMED: {"payout": PAY_ON_FINAL,
+                              "cite": _cite(_Q_RULE8, "rule 8")},
+        C_SUSPENDED_BEYOND: {"payout": PAY_STAKE_BACK,
+                             "cite": _cite(_Q_RULE8, "rule 8")},
         C_NOT_PLAYED: {"payout": PAY_STAKE_BACK,
                        "cite": _cite(_Q_RULE8, "rule 8")},
     },
+}
+
+#: THE RESUMPTION WINDOWS, per context, quoted. They are what separates
+#: C_SUSPENDED_RESUMED from C_SUSPENDED_BEYOND, and they DIFFER by context --
+#: 12 hours for a pre-game bet, 30 hours for a live one -- so the same
+#: suspension can be inside the window for one and beyond it for the other.
+RESUMPTION_WINDOW_S = {
+    CTX_PRE_GAME: {"window_s": 12 * 3600, "cite": _cite(_Q_RULE7, "rule 7")},
+    CTX_LIVE: {"window_s": 30 * 3600, "cite": _cite(_Q_RULE8, "rule 8")},
 }
 
 #: What the capture does NOT establish, recorded so its scope is not
@@ -525,15 +758,21 @@ CAPTURE_ATTEMPTS = (
 )
 
 
-def book_terms(*, sport_family, market="h2h", context=None) -> dict:
-    """The captured terms for this market IN THIS CONTEXT.
+def book_terms(*, sport_family, market="h2h", context=None, phase=None,
+               game_format=None) -> dict:
+    """The captured terms for this market IN THIS CONTEXT AND SCOPE.
 
-    An unknown context returns NOTHING. There is no "general" entry to fall
-    back on, deliberately: the pre-game and in-play rules disagree on a
-    called game, so a fallback would be a guess about which side of the
-    first pitch the quote came from.
+    Returns NOTHING unless all three are established. There is no "general"
+    entry to fall back on, deliberately: the pre-game and in-play rules
+    disagree on a called game, so a fallback would be a guess about which
+    side of the first pitch the quote came from -- and the captured rules
+    cover one competition phase and one game format, so applying them
+    outside that is the overreach CAPTURE_LIMITS describes.
     """
     if context is None:
+        return {}
+    if not admit_scope(sport_family=sport_family, market=market,
+                       phase=phase, game_format=game_format)["ok"]:
         return {}
     return dict(BOOK_TERMS.get(
         (str(sport_family), str(market), str(context))) or {})
@@ -594,8 +833,10 @@ def compare(*, book: dict, venue: dict, conditions=None) -> dict:
 
 
 def compare_prose(*, sport_family, market="h2h", venue_prose="",
-                  extra_book_terms=None, observed_at=None, game_start=None,
-                  context=None) -> dict:
+                  extra_book_terms=None, observed_at=None, start_at=None,
+                  start_evidence=SE_SCHEDULED_CATALOGUE,
+                  quote_is_in_play=None, context=None,
+                  phase=None, game_format=None) -> dict:
     """The whole comparison from one side's prose and the held book terms.
 
     `extra_book_terms` is the LEGACY single-class hook: callers that still
@@ -610,9 +851,14 @@ def compare_prose(*, sport_family, market="h2h", venue_prose="",
     ctx = ({"context": str(context), "refusal": None,
             "why": "the context was supplied by the caller"}
            if context is not None else
-           book_context_for(observed_at=observed_at, game_start=game_start))
+           book_context_for(observed_at=observed_at, start_at=start_at,
+                            start_evidence=start_evidence,
+                            quote_is_in_play=quote_is_in_play))
+    scope = admit_scope(sport_family=sport_family, market=market,
+                        phase=phase, game_format=game_format)
     bk = dict(book_terms(sport_family=sport_family, market=market,
-                         context=ctx.get("context")))
+                         context=ctx.get("context"), phase=phase,
+                         game_format=game_format))
     for k, val in dict(extra_book_terms or {}).items():
         bk.setdefault(str(k), val)
     conds = applicable_conditions(sport_family=sport_family, market=market)
@@ -628,12 +874,22 @@ def compare_prose(*, sport_family, market="h2h", venue_prose="",
     cmp_.update(venue_read=read, book_terms_held=bool(bk),
                 applicable_conditions=list(conds),
                 quote_context=ctx,
+                scope=scope,
                 book_capture=(dict(CAPTURE_RUN) if bk else None),
                 book_capture_limits=(list(CAPTURE_LIMITS) if bk else None),
                 rule_hierarchy=(dict(RULE_HIERARCHY) if bk else None),
                 book_capture_request=(None if bk else CAPTURE_REQUEST))
-    if not bk and ctx.get("refusal"):
-        cmp_["why_book_side_absent"] = ctx["why"]
+    if not bk:
+        # WHY the book side is absent, named. A reader must be able to tell
+        # "the rule is unknown" from "the quote's context is unproven" from
+        # "this fixture is outside the captured rules".
+        cmp_["why_book_side_absent"] = (
+            ctx.get("why") if ctx.get("refusal")
+            else (scope.get("why") if not scope["ok"] else
+                  "no capture covers this market"))
+        cmp_["book_side_absent_refusals"] = (
+            ([ctx["refusal"]] if ctx.get("refusal") else [])
+            + list(scope.get("refusals") or []))
     if read["contradicted"]:
         # The venue's own text giving one condition two payouts is a
         # conflict in the SOURCE, and it is louder than silence.

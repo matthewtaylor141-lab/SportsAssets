@@ -1784,13 +1784,25 @@ jobs:
             say "SKIPPED: no ADMIN_TOKEN"
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
           fi
-          H="Authorization: Bearer $ADMIN_TOKEN"
+          H="X-Admin-Token: $ADMIN_TOKEN"
           PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
 
+          # A NON-200 IS AN UNAVAILABLE READ, NOT A FINDING. The first
+          # version of this step printed "THAT EXACT ID IS NOT PRESENT" off
+          # the body of a 401, which is the very error the step exists to
+          # correct. Every conclusion below is now gated on the status.
+          ok200() { [ "$1" = "200" ]; }
           say "-- every position under the ACCEPTANCE policy, unfiltered by CHALLENGER --"
-          curl -s --max-time 60 -H "$H" \
+          PC=$(curl -s --max-time 60 -H "$H" \
             "$API/api/command/rn1x/positions?policy=ACCEPTANCE&limit=200" \
-            -o /tmp/apos.json -w 'http=%{http_code}\n' | tee -a "$GITHUB_STEP_SUMMARY"
+            -o /tmp/apos.json -w '%{http_code}')
+          say "http\t$PC"
+          if ! ok200 "$PC"; then
+            say "UNAVAILABLE: the positions read returned $PC, so it says"
+            say "NOTHING about whether an acceptance position exists."
+            head -c 200 /tmp/apos.json | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
           jq -r '"policy_filter\t" + ((.policy_filter // "-")|tostring),
                  "rows\t" + ((.positions // [] | length)|tostring),
                  ((.positions // [])[] | "  " + (.position_id // "?")
@@ -1815,10 +1827,16 @@ jobs:
           say ""
           say "-- the PREVIOUSLY REPORTED position, read by id --"
           say "id\t$PID"
-          curl -s --max-time 60 -H "$H" \
-            --get --data-urlencode "x=1" \
+          TC=$(curl -s --max-time 60 -H "$H" \
             "$API/api/command/rn1x/trace/$PID" \
-            -o /tmp/atr.json -w 'http=%{http_code}\n' | tee -a "$GITHUB_STEP_SUMMARY"
+            -o /tmp/atr.json -w '%{http_code}')
+          say "http\t$TC"
+          if ! ok200 "$TC"; then
+            say "UNAVAILABLE: the trace read returned $TC. That is NOT"
+            say "evidence that the id is absent."
+            head -c 200 /tmp/atr.json | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
           jq -r '"found\t" + ((.found // false)|tostring),
                  "position\t" + ((.position // {} | tojson)[0:600]),
                  "decisions\t" + ((.decisions // [] | length)|tostring),
@@ -1831,7 +1849,8 @@ jobs:
             /tmp/atr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
             || head -c 800 /tmp/atr.json
           if ! jq -e '.found == true' /tmp/atr.json >/dev/null 2>&1; then
-            say "THAT EXACT ID IS NOT PRESENT. This is a DIRECT read of the id"
+            say "THAT EXACT ID IS NOT PRESENT ON A 200 RESPONSE. This is a"
+            say "DIRECT read of the id"
             say "and is therefore evidence about it, unlike an empty"
             say "CHALLENGER-filtered list. Reconcile against the run that"
             say "reported it before concluding anything was lost."
@@ -1839,8 +1858,9 @@ jobs:
 
           say ""
           say "-- the DATABASE-LEVEL uniqueness backstop --"
-          curl -s --max-time 60 -H "$H" "$API/api/command/rn1x/overview" \
-            -o /tmp/aov.json -w 'http=%{http_code}\n' | tee -a "$GITHUB_STEP_SUMMARY"
+          OC=$(curl -s --max-time 60 -H "$H" \
+            "$API/api/command/rn1x/overview" -o /tmp/aov.json -w '%{http_code}')
+          say "http\t$OC"
           jq -r '(.schema_guards // {}) | "index\t" + ((.acceptance_unique_index // "-")|tostring),
                  "present\t" + ((.present // false)|tostring),
                  "read\t" + ((.read // false)|tostring),
@@ -1849,7 +1869,14 @@ jobs:
                  "error\t" + ((.error // "-")|tostring)' \
             /tmp/aov.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
             || head -c 400 /tmp/aov.json
-          if jq -e '(.schema_guards.present // false) != true' /tmp/aov.json >/dev/null 2>&1; then
+          if ! ok200 "$OC"; then
+            say "UNAVAILABLE: the overview read returned $OC, so the index's"
+            say "presence is UNKNOWN -- not absent."
+          elif ! jq -e 'has("schema_guards")' /tmp/aov.json >/dev/null 2>&1; then
+            say "THE DEPLOYED API DOES NOT REPORT schema_guards YET, so the"
+            say "index's presence is UNKNOWN from here -- not absent. It is"
+            say "reported once this release is live."
+          elif jq -e '(.schema_guards.present // false) != true' /tmp/aov.json >/dev/null 2>&1; then
             say "THE INDEX IS NOT PRESENT. Migration 114 skips it when"
             say "duplicate groups already exist, so an absent index is either"
             say "a data problem named above or a migration that has not run."

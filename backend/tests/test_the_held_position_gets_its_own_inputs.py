@@ -202,16 +202,29 @@ def test_no_credential_is_its_own_refusal():
 _RULES_AGREEING = (
     "This market settles on the final result of the game, including any "
     "extra innings. A game completed in regulation settles on the final "
-    "score. If the game is stopped after at least five innings and made an "
-    "official game, the market settles on the score at the end of the last "
-    "completed inning. If the game is stopped before five innings, the "
-    "market is void and stakes are returned. If the game is abandoned or "
-    "postponed and never completed, the market is void and stakes are "
-    "returned.")
+    "score. If the game is called (ended) after at least five innings, the "
+    "market settles on the score at the end of the last completed inning, "
+    "unless it is called in the bottom half and the home team has taken the "
+    "lead, in which case the actual score is used. If the game is stopped "
+    "before five innings, the market is void and stakes are returned. If the "
+    "game is suspended and resumed within the published window, the market "
+    "settles on the final score. If the game is suspended more than the "
+    "published window, the market settles on the score at the end of the "
+    "last completed inning. If the game is abandoned or postponed and never "
+    "completed, the market is void and stakes are returned.")
 _RULES_CONFLICTING = ("This market settles after nine innings only; extra "
                       "innings are excluded. If the game is abandoned the "
                       "market is void and stakes are returned.")
 _VOID_REFUND = "STAKE_REFUNDED_MARKET_VOID"
+
+#: THE CAPTURED RULES' SCOPE, DECLARED FOR THE TEST. Production establishes
+#: neither the competition phase nor the game format -- neither is carried on
+#: `markets` -- so there the scope gate withholds the book terms and the
+#: comparison stays UNKNOWN. A test injects them to exercise the admitted
+#: path, which is the only way to show the gate is satisfiable rather than
+#: unreachable.
+_PHASE = "REGULAR_SEASON"
+_FMT = "STANDARD_NINE_INNING"
 _RULES_SILENT = ("This market settles on the outcome of the listed event. "
                  "See the venue rulebook for further terms.")
 
@@ -273,11 +286,18 @@ def _book_terms_full():
                     "cite": _cite("settles on the final score")},
         ST.C_OVERTIME: {"payout": ST.PAY_ON_FINAL,
                         "cite": _cite("extra innings included")},
-        ST.C_SHORTENED_OFFICIAL: {
-            "payout": ST.PAY_ON_PARTIAL,
-            "cite": _cite("action on the last completed inning")},
+        ST.C_CALLED_FINAL: {
+            "payout": ST.PAY_ON_PARTIAL_WALKOFF,
+            "cite": _cite("last completed inning, except on a bottom-half "
+                          "home lead where the actual score grades it")},
         ST.C_STOPPED_EARLY: {"payout": ST.PAY_STAKE_BACK,
                              "cite": _cite("fewer than five innings: void")},
+        ST.C_SUSPENDED_RESUMED: {
+            "payout": ST.PAY_ON_FINAL,
+            "cite": _cite("resumed inside the window: action on completion")},
+        ST.C_SUSPENDED_BEYOND: {
+            "payout": ST.PAY_ON_PARTIAL,
+            "cite": _cite("beyond the window: the last completed inning")},
         ST.C_NOT_PLAYED: {"payout": ST.PAY_STAKE_BACK,
                           "cite": _cite("not completed: stake returned")},
     }
@@ -1088,11 +1108,11 @@ def test_the_code_satisfies_the_shipped_acceptance_gate():
             await _fixture(c)
             pid = await _position(c)
             await W.manage_open_positions(
-                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0 + 10,
+                c, read_rules=_rules(_RULES_AGREEING), phase=_PHASE, game_format=_FMT, experiment_id=_EXP, now=_T0 + 10,
                 odds=_odds([_event(observed_at=_T0)], received_at=_T0 + 1,
                            at=_T0 + 10))
             await W.manage_open_positions(
-                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0 + 130,
+                c, read_rules=_rules(_RULES_AGREEING), phase=_PHASE, game_format=_FMT, experiment_id=_EXP, now=_T0 + 130,
                 odds=_odds([_event(observed_at=_T0 + 120, cubs=1.45)],
                            received_at=_T0 + 121, at=_T0 + 130))
             # normalised exactly as the workflow normalises the trace
@@ -1633,7 +1653,7 @@ def test_the_acceptance_position_is_managed_by_the_production_lifecycle():
         try:
             await _fixture(c)
             seeded = await W.seed_acceptance_position(
-                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0,
+                c, read_rules=_rules(_RULES_AGREEING), phase=_PHASE, game_format=_FMT, experiment_id=_EXP, now=_T0,
                 odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
                 resolve_identity=_resolver_ok,
                 read_book=lambda slug: {"marketData": _BOOK})
@@ -1642,11 +1662,11 @@ def test_the_acceptance_position_is_managed_by_the_production_lifecycle():
             # TWO CYCLES, 120 s apart, each pulling its own quote -- the
             # same lifecycle the challenger lane runs, not a special path.
             c1 = await W.manage_open_positions(
-                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0 + 60,
+                c, read_rules=_rules(_RULES_AGREEING), phase=_PHASE, game_format=_FMT, experiment_id=_EXP, now=_T0 + 60,
                 odds=_odds([_event(observed_at=_T0 + 50)],
                            received_at=_T0 + 51, at=_T0 + 60))
             c2 = await W.manage_open_positions(
-                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0 + 180,
+                c, read_rules=_rules(_RULES_AGREEING), phase=_PHASE, game_format=_FMT, experiment_id=_EXP, now=_T0 + 180,
                 odds=_odds([_event(observed_at=_T0 + 170, cubs=1.45)],
                            received_at=_T0 + 171, at=_T0 + 180))
             rows = [dict(r) for r in await c.fetch(
@@ -1867,7 +1887,7 @@ def test_the_trace_read_carries_what_the_shipped_gate_requires():
             pid = await _position(c)
             for k, at in ((0, _T0 + 10), (1, _T0 + 130)):
                 await W.manage_open_positions(
-                    c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=at,
+                    c, read_rules=_rules(_RULES_AGREEING), phase=_PHASE, game_format=_FMT, experiment_id=_EXP, now=at,
                     odds=_odds([_event(observed_at=at - 10)],
                                received_at=at - 9, at=at))
             # THE PRODUCTION READ ITSELF -- asyncpg's Connection exposes the
@@ -1998,7 +2018,8 @@ def _two_cycles_with(prose, *, captured):
             pid = await _position(c)
             for at in (_T0 + 10, _T0 + 130):
                 await W.manage_open_positions(
-                    c, read_rules=_rules(prose), experiment_id=_EXP, now=at,
+                    c, read_rules=_rules(prose), phase=_PHASE,
+                    game_format=_FMT, experiment_id=_EXP, now=at,
                     odds=_odds([_event(observed_at=at - 10)],
                                received_at=at - 9, at=at))
             return await CR.trace(c, pid)
@@ -2163,7 +2184,7 @@ def test_reseeding_across_a_process_restart_adopts_the_same_position():
         try:
             await _fixture(c)
             got = await W.seed_acceptance_position(
-                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP,
+                c, read_rules=_rules(_RULES_AGREEING), phase=_PHASE, game_format=_FMT, experiment_id=_EXP,
                 now=_T0, odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
                 resolve_identity=_resolver_ok,
                 read_book=lambda slug: {"marketData": _BOOK})

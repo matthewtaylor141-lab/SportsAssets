@@ -62,10 +62,20 @@ def test_two_names_for_the_same_cash_match_only_where_they_coincide():
     """"final score" and "last completed period" are the same number for a
     game that finished, and different numbers for one that did not."""
     assert ST.same_payout(ST.C_FULL, ST.PAY_ON_FINAL, ST.PAY_ON_PARTIAL)
-    assert ST.same_payout(ST.C_SHORTENED_OFFICIAL,
+    assert ST.same_payout(ST.C_SUSPENDED_RESUMED,
                           ST.PAY_ON_FINAL, ST.PAY_ON_PARTIAL)
+    # AND NOT where the game STOPPED. The blanket equivalence under the
+    # stopped-game condition erased the one distinction the two sides could
+    # disagree on, so it is gone.
+    assert not ST.same_payout(ST.C_CALLED_FINAL,
+                              ST.PAY_ON_FINAL, ST.PAY_ON_PARTIAL)
+    assert not ST.same_payout(ST.C_SUSPENDED_BEYOND,
+                              ST.PAY_ON_FINAL, ST.PAY_ON_PARTIAL)
     assert not ST.same_payout(ST.C_STOPPED_EARLY,
                               ST.PAY_ON_FINAL, ST.PAY_ON_PARTIAL)
+    # the SCORING EXCEPTION is never equal to the plain rule
+    assert not ST.same_payout(ST.C_CALLED_FINAL,
+                              ST.PAY_ON_PARTIAL_WALKOFF, ST.PAY_ON_PARTIAL)
 
 
 def test_a_payout_word_outside_any_condition_sentence_establishes_nothing():
@@ -139,27 +149,24 @@ def test_the_capture_records_its_own_provenance_and_its_limits():
 def test_the_applicable_rule_comes_from_the_quotes_timing_not_the_market_name():
     """PRE-GAME AND IN-PLAY DISAGREE ON A CALLED GAME, so "h2h" cannot pick
     the rule. Pre-game grades the last completed inning; In-Play voids."""
-    pre = ST.book_terms(sport_family="baseball", market="h2h",
-                        context=ST.CTX_PRE_GAME)
-    live = ST.book_terms(sport_family="baseball", market="h2h",
-                         context=ST.CTX_LIVE)
-    assert pre[ST.C_SHORTENED_OFFICIAL]["payout"] == ST.PAY_ON_PARTIAL
-    assert live[ST.C_SHORTENED_OFFICIAL]["payout"] == ST.PAY_STAKE_BACK
-    assert pre[ST.C_SHORTENED_OFFICIAL]["payout"] != \
-        live[ST.C_SHORTENED_OFFICIAL]["payout"], (
+    kw = dict(sport_family="baseball", market="h2h",
+              phase=ST.PHASE_REGULAR, game_format=ST.FMT_NINE)
+    pre = ST.book_terms(context=ST.CTX_PRE_GAME, **kw)
+    live = ST.book_terms(context=ST.CTX_LIVE, **kw)
+    assert pre[ST.C_CALLED_FINAL]["payout"] == ST.PAY_ON_PARTIAL_WALKOFF
+    assert live[ST.C_CALLED_FINAL]["payout"] == ST.PAY_STAKE_BACK
+    assert pre[ST.C_CALLED_FINAL]["payout"] != \
+        live[ST.C_CALLED_FINAL]["payout"], (
         "if these were equal the distinction would not matter and the "
         "context could be dropped")
     # the context itself is established from the two stamps
     assert ST.book_context_for(observed_at=10.0,
-                               game_start=100.0)["context"] == ST.CTX_PRE_GAME
-    assert ST.book_context_for(observed_at=200.0,
-                              game_start=100.0)["context"] == ST.CTX_LIVE
-    # AND AN UNKNOWN FIRST PITCH IS NOT DEFAULTED TO PRE-GAME
-    none = ST.book_context_for(observed_at=10.0, game_start=None)
+                               start_at=100.0)["context"] == ST.CTX_PRE_GAME
+    # AND AN UNKNOWN START IS NOT DEFAULTED TO PRE-GAME
+    none = ST.book_context_for(observed_at=10.0, start_at=None)
     assert none["context"] is None
     assert none["refusal"] == ST.R_CONTEXT_UNKNOWN
-    assert ST.book_terms(sport_family="baseball", market="h2h",
-                         context=None) == {}
+    assert ST.book_terms(context=None, **kw) == {}
 
 
 def test_an_unknown_quote_context_withholds_the_book_side_entirely():
@@ -167,11 +174,13 @@ def test_an_unknown_quote_context_withholds_the_book_side_entirely():
                            venue_prose="If the game is abandoned and never "
                                        "completed the market is void and "
                                        "stakes are returned.",
-                           observed_at=10.0, game_start=None)
+                           observed_at=10.0, start_at=None,
+                           phase=ST.PHASE_REGULAR,
+                           game_format=ST.FMT_NINE)
     assert got["book_terms_held"] is False
     assert got["verdict"] == ST.UNKNOWN
     assert got["quote_context"]["refusal"] == ST.R_CONTEXT_UNKNOWN
-    assert "not defaulted to pre-game" in got["why_book_side_absent"]
+    assert "NOT defaulted to pre-game" in got["why_book_side_absent"]
 
 
 def test_an_undeclared_market_type_is_unknown_not_compatible():
@@ -307,3 +316,134 @@ def test_no_transformation_is_established_so_none_can_excuse_a_conflict():
     assert HV.SETTLEMENT_TRANSFORMS == {}
     assert HV.settlement_transform(
         _settlement(mismatched=[ST.C_NOT_PLAYED])) is None
+
+
+# ── 3 · the three repairs: start provenance, the exception, the scope ──
+
+def test_a_scheduled_start_passing_does_not_make_a_quote_in_play():
+    """THE DELAYED-START REGRESSION.
+
+    `market_starts.game_start` is written from the CLOB catalogue's
+    `game_start_time` -- a SCHEDULED first pitch.
+    `bettor_progress_providers` already refuses to derive a period from it,
+    and the first version of `book_context_for` reintroduced exactly that
+    derivation. A rain delay leaves the scheduled time an hour in the past
+    with no pitch thrown, and calling that IN_PLAY would apply rule 4, which
+    VOIDS a called game, to a bet rule 3 would have PAID.
+    """
+    got = ST.book_context_for(observed_at=100.0 + 3600.0, start_at=100.0,
+                              start_evidence=ST.SE_SCHEDULED_CATALOGUE)
+    assert got["context"] != ST.CTX_LIVE, got
+    assert got["context"] is None
+    assert got["refusal"] == ST.R_SCHEDULED_ONLY
+    assert "delayed or postponed" in got["why"]
+    # AND THE BOOK SIDE IS THEREFORE WITHHELD, not guessed
+    cmp_ = ST.compare_prose(
+        sport_family="baseball", market="h2h",
+        venue_prose="If the game is abandoned the market is void.",
+        observed_at=100.0 + 3600.0, start_at=100.0,
+        start_evidence=ST.SE_SCHEDULED_CATALOGUE,
+        phase=ST.PHASE_REGULAR, game_format=ST.FMT_NINE)
+    assert cmp_["book_terms_held"] is False
+    assert cmp_["verdict"] != ST.COMPATIBLE
+    assert ST.R_SCHEDULED_ONLY in cmp_["book_side_absent_refusals"]
+
+
+def test_only_actual_start_evidence_or_a_provider_label_gives_in_play():
+    after = dict(observed_at=200.0, start_at=100.0)
+    assert ST.book_context_for(
+        start_evidence=ST.SE_ACTUAL_REPORTED, **after)["context"] == ST.CTX_LIVE
+    assert ST.book_context_for(
+        quote_is_in_play=True, observed_at=None,
+        start_at=None)["context"] == ST.CTX_LIVE
+    assert ST.book_context_for(
+        quote_is_in_play=False, observed_at=None,
+        start_at=None)["context"] == ST.CTX_PRE_GAME
+    # the one direction a SCHEDULED stamp does support
+    assert ST.book_context_for(
+        observed_at=50.0, start_at=100.0,
+        start_evidence=ST.SE_SCHEDULED_CATALOGUE)["context"] == ST.CTX_PRE_GAME
+
+
+def test_a_called_game_and_a_suspended_one_are_not_the_same_condition():
+    """Rules 3, 7 and 8 give three different answers, and collapsing them
+    would hide the one the two sides can disagree on."""
+    kw = dict(sport_family="baseball", market="h2h",
+              phase=ST.PHASE_REGULAR, game_format=ST.FMT_NINE)
+    pre = ST.book_terms(context=ST.CTX_PRE_GAME, **kw)
+    live = ST.book_terms(context=ST.CTX_LIVE, **kw)
+    # PRE-GAME: called -> the exception formula; suspended-beyond -> the
+    # plain last-completed-inning formula; resumed -> the final score.
+    assert pre[ST.C_CALLED_FINAL]["payout"] == ST.PAY_ON_PARTIAL_WALKOFF
+    assert pre[ST.C_SUSPENDED_BEYOND]["payout"] == ST.PAY_ON_PARTIAL
+    assert pre[ST.C_SUSPENDED_RESUMED]["payout"] == ST.PAY_ON_FINAL
+    assert pre[ST.C_CALLED_FINAL]["payout"] != pre[ST.C_SUSPENDED_BEYOND][
+        "payout"], "the called and suspended formulas differ"
+    # IN-PLAY: resumption inside the window keeps action; beyond it voids.
+    assert live[ST.C_SUSPENDED_RESUMED]["payout"] == ST.PAY_ON_FINAL
+    assert live[ST.C_SUSPENDED_BEYOND]["payout"] == ST.PAY_STAKE_BACK
+    # THE WINDOWS DIFFER BY CONTEXT, so one suspension can be inside the
+    # window for a pre-game bet and beyond it for a live one.
+    assert ST.RESUMPTION_WINDOW_S[ST.CTX_PRE_GAME]["window_s"] == 12 * 3600
+    assert ST.RESUMPTION_WINDOW_S[ST.CTX_LIVE]["window_s"] == 30 * 3600
+    for w in ST.RESUMPTION_WINDOW_S.values():
+        assert ST.check_citation(w["cite"]) == []
+
+
+def test_two_sides_differing_only_on_the_scoring_exception_are_incompatible():
+    """A venue that grades a called game on the last completed inning with NO
+    walk-off exception pays differently from the book in exactly one case, and
+    that is a MISMATCH rather than a rounding detail."""
+    got = ST.compare(book={ST.C_CALLED_FINAL: ST.PAY_ON_PARTIAL_WALKOFF},
+                     venue={ST.C_CALLED_FINAL: ST.PAY_ON_PARTIAL},
+                     conditions=(ST.C_CALLED_FINAL,))
+    assert got["verdict"] == ST.INCOMPATIBLE, got
+    assert got["mismatched_conditions"] == [ST.C_CALLED_FINAL]
+
+
+def test_an_unestablished_phase_or_format_admits_no_terms():
+    """CAPTURE_LIMITS is prose for a reader; this is the gate."""
+    base = dict(sport_family="baseball", market="h2h",
+                context=ST.CTX_PRE_GAME)
+    assert ST.book_terms(**base) == {}, "no phase, no format, no terms"
+    assert ST.book_terms(phase=ST.PHASE_REGULAR, **base) == {}, "format missing"
+    assert ST.book_terms(game_format=ST.FMT_NINE, **base) == {}, "phase missing"
+    assert ST.book_terms(phase=ST.PHASE_REGULAR,
+                         game_format=ST.FMT_NINE, **base)
+    # AND AN EXCLUDED SCOPE IS REFUSED BY NAME, not merely unknown
+    pl = ST.admit_scope(sport_family="baseball", phase=ST.PHASE_PLAYOFF,
+                        game_format=ST.FMT_NINE)
+    assert pl["ok"] is False and ST.R_PHASE_EXCLUDED in pl["refusals"]
+    assert "whenever the game is completed" in pl["why"]
+    dh = ST.admit_scope(sport_family="baseball", phase=ST.PHASE_REGULAR,
+                        game_format=ST.FMT_SEVEN)
+    assert dh["ok"] is False and ST.R_FORMAT_EXCLUDED in dh["refusals"]
+    assert "7-inning threshold" in dh["why"]
+    assert ST.book_terms(phase=ST.PHASE_PLAYOFF,
+                         game_format=ST.FMT_SEVEN, **base) == {}
+
+
+def test_an_excluded_scope_can_never_read_as_compatible():
+    """The strongest form: prose that would otherwise agree on every
+    condition still cannot produce COMPATIBLE outside the captured scope."""
+    prose = ("This market settles on the final result of the game, including "
+             "any extra innings. A game completed in regulation settles on "
+             "the final score. If the game is called (ended) after at least "
+             "five innings the market settles on the score at the end of the "
+             "last completed inning, unless it is called in the bottom half "
+             "and the home team has taken the lead, in which case the actual "
+             "score is used. If the game is stopped before five innings the "
+             "market is void and stakes are returned. If the game is "
+             "suspended and resumed within the window it settles on the "
+             "final score. If the game is suspended more than the window it "
+             "settles on the score at the end of the last completed inning. "
+             "If the game is abandoned or postponed and never completed the "
+             "market is void and stakes are returned.")
+    for phase, fmt in ((ST.PHASE_PLAYOFF, ST.FMT_NINE),
+                       (ST.PHASE_REGULAR, ST.FMT_SEVEN),
+                       (None, None)):
+        got = ST.compare_prose(sport_family="baseball", market="h2h",
+                               venue_prose=prose, observed_at=50.0,
+                               start_at=100.0, phase=phase, game_format=fmt)
+        assert got["verdict"] != ST.COMPATIBLE, (phase, fmt, got["verdict"])
+        assert got["book_terms_held"] is False, (phase, fmt)
