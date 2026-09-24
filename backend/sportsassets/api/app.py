@@ -2013,6 +2013,31 @@ async def command_rn1x_external_trace(row_id: int,
         return await CR.external_trace(conn, int(row_id))
 
 
+@app.get("/api/command/incentive/observed-share",
+         dependencies=[Depends(require_command)])
+async def command_incentive_observed_share(response: Response,
+                                           clip: float = 100.0) -> dict:
+    """THE CAPTURED TERMS AGAINST THE LADDERS WE ACTUALLY OBSERVED.
+
+    The opportunity script has only run on markets carrying no incentive
+    programme. This runs the same engine on the programme's own markets,
+    using the ladders the collector persisted, and keeps the hypothetical
+    share separate from earned rewards -- which are zero.
+    """
+    from .. import bettor_incentive_observed_share as OS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            return await OS.observed_share(
+                conn, clip=max(1.0, min(5000.0, float(clip))))
+        except Exception as exc:                               # noqa: BLE001
+            return {"ok": False, "error": type(exc).__name__,
+                    "why": "the observed-share read failed"}
+
+
 @app.get("/api/command/rn1x/model-evaluation",
          dependencies=[Depends(require_command)])
 async def command_rn1x_model_evaluation(response: Response,
