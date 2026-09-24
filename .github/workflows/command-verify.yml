@@ -874,17 +874,29 @@ jobs:
                 # under overtime, void and draw is a condition on the
                 # number that was ranked -- not a HOLD_TO_SETTLEMENT-only
                 # concern. First: was the evidence RECORDED at all.
+                # The per-condition CONDITION -> PAYOUT table has to be
+                # there too: a verdict without it is a conclusion with no
+                # working, and a shared word like void is not a payout.
                 (if (($l4b.link // null) != null)
                     and (($l4b.book_rule // null) != null)
                     and (($tr.asked // false) == true)
                     and (($tr.book_rule // null) != null)
+                    and (($l4b.compatibility // null) != null)
+                    and ((($l4b.terms_verdict // null) != null)
+                         or (($l4b.unstated_conditions // null) != null))
                  then empty else "SETTLEMENT_EVIDENCE_RECORDED" end),
                 # Second: is compatibility ESTABLISHED. Unresolved or
                 # CONFLICTING terminal rules cannot pass as a complete,
                 # verified HOLD-versus-exit comparison; the value stays
                 # computed and is reported as CONDITIONAL instead.
+                # INCOMPATIBLE is not a weaker UNKNOWN: it also removes
+                # the probability from the selector, so such a row loses
+                # PRICED_HOLD above as well and cannot read as a complete
+                # comparison with one footnote.
                 (if ($l4b.ok == true) and ($tr.established == true)
                     and (($tr.conflicts // false) == false)
+                    and (($l4b.disqualifies_selection // false) == false)
+                    and ((($tr.mismatched_conditions // []) | length) == 0)
                     and ((($tr.unmet // []) | length) == 0)
                  then empty
                  else "SETTLEMENT_COMPATIBILITY_ESTABLISHED" end)
@@ -1301,7 +1313,17 @@ jobs:
             head -c 400 /tmp/mgn.json | tee -a "$GITHUB_STEP_SUMMARY"
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
           fi
-          jq -r '.[] | "  " + (.id[-22:]) + "  " + (.ts[0:19]) + (if (.missing | length) == 0 then "  COMPLETE" else "  INCOMPLETE " + ((.missing)|tostring) end)' /tmp/acc.json | tee -a "$GITHUB_STEP_SUMMARY"
+          # THE DUMP IS CAPPED, and the cap is stated. A position that has
+          # been re-decided 120 times printed 120 identical INCOMPLETE
+          # lines, which pushed every EARLIER step out of any readable
+          # window -- so the one part of the log a reader needs most, the
+          # acceptance step above, became unreadable because this step was
+          # verbose. Every COMPLETE row is always printed; the INCOMPLETE
+          # ones are summarised by their missing-set and only the most
+          # recent few are shown in full.
+          jq -r '[.[] | select((.missing | length) == 0)] | .[] | "  " + (.id[-22:]) + "  " + (.ts[0:19]) + "  COMPLETE"' /tmp/acc.json | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '[.[] | select((.missing | length) > 0)] | group_by(.missing|tostring) | .[] | "  INCOMPLETE x" + ((length)|tostring) + "  " + (.[0].missing|tostring) + "  (first " + (.[0].ts[0:19]) + ", last " + (.[-1].ts[0:19]) + ")"' /tmp/acc.json | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '[.[] | select((.missing | length) > 0)] | .[-3:] | .[] | "  " + (.id[-22:]) + "  " + (.ts[0:19]) + "  INCOMPLETE " + ((.missing)|tostring)' /tmp/acc.json | tee -a "$GITHUB_STEP_SUMMARY"
           COMPLETE=$(jq '[.[] | select((.missing | length) == 0)] | length' /tmp/acc.json)
           DISTINCT=$(jq '[.[] | select((.missing | length) == 0) | .ts] | unique | length' /tmp/acc.json)
           IDS=$(jq -r '[.[] | select((.missing | length) == 0) | .id] | join("  ")' /tmp/acc.json)

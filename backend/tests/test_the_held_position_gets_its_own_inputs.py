@@ -191,10 +191,23 @@ def test_no_credential_is_its_own_refusal():
 # the SHAPE of a listing description, not a transcription of one: what is
 # under test is that prose which states the terminal case establishes the
 # overtime rule, and that prose which contradicts the book rule refuses.
-_RULES_AGREEING = ("This market settles on the final result of the game, "
-                   "including any extra innings. If the game is abandoned "
-                   "or postponed and not completed, the market is void and "
-                   "stakes are returned.")
+#: PROSE THAT ANSWERS EVERY APPLICABLE TERMINAL CONDITION, one payout each.
+#:
+#: It is longer than it was for a reason the previous version got wrong. A
+#: money line's action turns on a MINIMUM NUMBER OF INNINGS, so "settles on
+#: the final result, and an abandoned game is void" leaves the two cases
+#: that actually differ -- stopped-and-made-official, and stopped-early --
+#: unanswered. A text that does not address them cannot establish
+#: compatibility, and the comparison now says so.
+_RULES_AGREEING = (
+    "This market settles on the final result of the game, including any "
+    "extra innings. A game completed in regulation settles on the final "
+    "score. If the game is stopped after at least five innings and made an "
+    "official game, the market settles on the score at the end of the last "
+    "completed inning. If the game is stopped before five innings, the "
+    "market is void and stakes are returned. If the game is abandoned or "
+    "postponed and never completed, the market is void and stakes are "
+    "returned.")
 _RULES_CONFLICTING = ("This market settles after nine innings only; extra "
                       "innings are excluded. If the game is abandoned the "
                       "market is void and stakes are returned.")
@@ -235,6 +248,62 @@ def _book_void_rule(cls):
     finally:
         VS.BOOK_VOID_RULE.clear()
         VS.BOOK_VOID_RULE.update(before)
+
+
+def _cite(what):
+    """A citation shaped like the real thing, marked as a TEST fixture.
+
+    It is not a transcription of anybody's rules page. What is under test is
+    that a term without a complete citation is REFUSED and a term with one
+    is admitted -- not what any particular publisher says.
+    """
+    return {"source": "TEST FIXTURE, not a real publisher",
+            "source_url": "test://book-rules/mlb-money-line",
+            "retrieved_at": "2026-09-24T00:00:00Z",
+            "quote": what}
+
+
+#: THE BOOKMAKER'S SIDE, answering every applicable condition, as a capture
+#: would. Each term carries a citation because `admit_book_terms` refuses
+#: one that does not.
+def _book_terms_full():
+    from sportsassets import bettor_settlement_terms as ST
+    return {
+        ST.C_FULL: {"payout": ST.PAY_ON_FINAL,
+                    "cite": _cite("settles on the final score")},
+        ST.C_OVERTIME: {"payout": ST.PAY_ON_FINAL,
+                        "cite": _cite("extra innings included")},
+        ST.C_SHORTENED_OFFICIAL: {
+            "payout": ST.PAY_ON_PARTIAL,
+            "cite": _cite("action on the last completed inning")},
+        ST.C_STOPPED_EARLY: {"payout": ST.PAY_STAKE_BACK,
+                             "cite": _cite("fewer than five innings: void")},
+        ST.C_NOT_PLAYED: {"payout": ST.PAY_STAKE_BACK,
+                          "cite": _cite("not completed: stake returned")},
+    }
+
+
+@contextlib.contextmanager
+def _captured_book_terms(terms=None):
+    """Hold a CAPTURED bookmaker term set for the duration of a test.
+
+    `BOOK_TERMS` ships EMPTY, and `admit_book_terms` is the gate: a term
+    without source, URL, retrieval time and verbatim quote is rejected. This
+    installs an admitted set so the compatible path is reachable in a test,
+    which is what makes the production gate a real requirement rather than
+    an unsatisfiable one.
+    """
+    from sportsassets import bettor_settlement_terms as ST
+    key = ("baseball", "h2h")
+    before = dict(ST.BOOK_TERMS)
+    adm = ST.admit_book_terms(terms if terms is not None else _book_terms_full())
+    assert adm["ok"], adm["rejected"]
+    try:
+        ST.BOOK_TERMS[key] = adm["admitted"]
+        yield ST
+    finally:
+        ST.BOOK_TERMS.clear()
+        ST.BOOK_TERMS.update(before)
 
 async def _fixture(c, *, sport="MLB", title="Chicago Cubs vs Miami Marlins",
                    closed=False):
@@ -1029,7 +1098,7 @@ def test_the_code_satisfies_the_shipped_acceptance_gate():
             EXT._read_book_blocking = orig_book
             await c.close()
 
-    with _book_void_rule(_VOID_REFUND):
+    with _captured_book_terms():
         rows = asyncio.run(run())
     assert len(rows) == 2, rows
 
@@ -1303,6 +1372,131 @@ def test_seeding_the_same_market_twice_is_idempotent():
 
 
 @pg
+def test_an_unreadable_existing_lookup_stops_the_seed_and_writes_nothing():
+    """A FAILED LOOKUP IS NOT AN ABSENCE.
+
+    The previous version caught the exception, set the result to None,
+    recorded the error and carried on to seed -- so a connection blip or a
+    lock timeout would have been read as "no acceptance position exists"
+    and a SECOND position written beside one already under management. The
+    duplication the adoption path exists to prevent, reached through the
+    error handler.
+    """
+    import asyncpg
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            kw = dict(experiment_id=_EXP, now=_T0,
+                      resolve_identity=_resolver_ok,
+                      read_book=lambda slug: {"marketData": _BOOK})
+            # the LEGACY position, created before the lookup breaks
+            first = await W.seed_acceptance_position(
+                c, odds=_odds([_event(observed_at=_T0 - 5)], at=_T0), **kw)
+            W.odds_gate_reset()
+            before = await c.fetch(
+                "SELECT position_id, seed_qty::float8 q,"
+                " seed_basis_usd::float8 b FROM rn1x_positions"
+                " WHERE policy = $1 ORDER BY position_id",
+                W.ACCEPTANCE_POLICY)
+            # now BREAK the lookup, exactly where the route reads it
+            good = W.EXISTING_ACCEPTANCE_SQL
+            W.EXISTING_ACCEPTANCE_SQL = (
+                "SELECT this_column_does_not_exist FROM rn1x_positions "
+                "WHERE experiment_id = $1 AND policy = $2")
+            try:
+                broken = await W.seed_acceptance_position(
+                    c, odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
+                    **kw)
+            finally:
+                W.EXISTING_ACCEPTANCE_SQL = good
+            after = await c.fetch(
+                "SELECT position_id, seed_qty::float8 q,"
+                " seed_basis_usd::float8 b FROM rn1x_positions"
+                " WHERE policy = $1 ORDER BY position_id",
+                W.ACCEPTANCE_POLICY)
+            return first, broken, [dict(r) for r in before], \
+                [dict(r) for r in after]
+        finally:
+            await c.close()
+
+    first, broken, before, after = asyncio.run(run())
+    assert first["created"] is True
+    # IT STOPS, and it says why in a name rather than only in a log line
+    assert broken["created"] is False and broken["adopted"] is False
+    assert broken["refusal"] == W.R_EXISTING_LOOKUP_FAILED
+    assert "this_column_does_not_exist" in broken["existing_lookup_error"]
+    assert "not evidence of absence" in broken["why"]
+    # NOTHING WAS WRITTEN and the legacy position is untouched
+    assert after == before, (
+        "a failed lookup must not change the inventory: %s -> %s"
+        % (before, after))
+    assert len(after) == 1
+
+
+@pg
+def test_concurrent_seed_requests_cannot_add_duplicate_inventory():
+    """Two callers racing on their OWN CONNECTIONS -- which is what two API
+    workers are -- must end with one position, not two.
+
+    `ON CONFLICT (position_id)` never protected this: two requests that
+    pick different markets derive different identifiers and do not collide
+    at all. The guard has to be around the LOOKUP AND THE INSERT together.
+
+    MEASURED WITH THE LOCK REMOVED: both callers return `created: True`.
+    Here they both happen to choose the same market, so the identifier
+    collides and only one row survives -- which is precisely why the row
+    count alone is a weak check and the created/adopted split is asserted.
+    Two callers choosing DIFFERENT markets would collide on nothing.
+    """
+    import asyncpg
+
+    async def run():
+        setup = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(setup)
+        finally:
+            await setup.close()
+
+        async def one(tag):
+            c = await asyncpg.connect(DSN, timeout=20)
+            try:
+                return await W.seed_acceptance_position(
+                    c, experiment_id=_EXP, now=_T0,
+                    resolve_identity=_resolver_ok,
+                    read_book=lambda slug: {"marketData": _BOOK},
+                    odds=_odds([_event(observed_at=_T0 - 5)], at=_T0))
+            finally:
+                await c.close()
+
+        a, b = await asyncio.gather(one("a"), one("b"))
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            rows = [dict(r) for r in await c.fetch(
+                "SELECT position_id, seed_qty::float8 q FROM rn1x_positions"
+                " WHERE policy = $1", W.ACCEPTANCE_POLICY)]
+        finally:
+            await c.close()
+        return a, b, rows
+
+    W.odds_gate_reset()
+    a, b, rows = asyncio.run(run())
+    assert len(rows) == 1, (
+        "two concurrent seeds added inventory: %s" % (rows,))
+    # exactly one created, exactly one adopted -- and both name the SAME row
+    assert sorted([bool(a["created"]), bool(b["created"])]) == [False, True]
+    assert sorted([bool(a["adopted"]), bool(b["adopted"])]) == [False, True]
+    assert a.get("position_id") == b.get("position_id") == \
+        rows[0]["position_id"]
+    assert rows[0]["q"] == W.ACCEPTANCE_QTY, (
+        "the surviving position carries ONE seed quantity, not two summed")
+    # and the serialisation is stated on the result rather than implied
+    assert a["serialised_on"]["scope"] == "SESSION"
+    assert a["serialised_on"]["lock_key"] == b["serialised_on"]["lock_key"]
+
+
+@pg
 def test_an_uncoverable_candidate_is_refused_with_its_reason():
     """A tennis market cannot supply a complete entry, and the seeder says
     so per candidate rather than writing a position it cannot manage."""
@@ -1389,7 +1583,7 @@ def test_the_acceptance_position_is_managed_by_the_production_lifecycle():
             EXT._read_book_blocking = orig_book
             await c.close()
 
-    with _book_void_rule(_VOID_REFUND):
+    with _captured_book_terms():
         seeded, c1, c2, rows = asyncio.run(run())
 
     assert c1["managed"] == 1 and c2["managed"] == 1
@@ -1605,7 +1799,7 @@ def test_the_trace_read_carries_what_the_shipped_gate_requires():
             EXT._read_book_blocking = orig_book
             await c.close()
 
-    with _book_void_rule(_VOID_REFUND):
+    with _captured_book_terms():
         got = asyncio.run(run())
     assert got.get("found") is True, got
 
@@ -1627,6 +1821,7 @@ def test_the_trace_read_carries_what_the_shipped_gate_requires():
              "pays": j(d.get("payout_identity")).get("row_payout_event"),
              "chain": j(d.get("input_chain")),
              "alt": j(d.get("alternatives")),
+             "refused": j(d.get("refused")) or [],
              "inv": j(d.get("resulting_inventory")),
              "fr": j(d.get("input_freshness"))}
             for d in got["decisions"]]
@@ -1700,12 +1895,13 @@ def _normalised_trace(conn_rows):
              "pays": j(d.get("payout_identity")).get("row_payout_event"),
              "chain": j(d.get("input_chain")),
              "alt": j(d.get("alternatives")),
+             "refused": j(d.get("refused")) or [],
              "inv": j(d.get("resulting_inventory")),
              "fr": j(d.get("input_freshness"))}
             for d in conn_rows]
 
 
-def _two_cycles_with(prose, *, book_void):
+def _two_cycles_with(prose, *, captured):
     """Two management cycles under one settlement-evidence condition."""
     import asyncpg
 
@@ -1732,7 +1928,8 @@ def _two_cycles_with(prose, *, book_void):
             EXT._read_book_blocking = orig_book
             await c.close()
 
-    with _book_void_rule(book_void):
+    with (_captured_book_terms() if captured
+          else contextlib.nullcontext()):
         got = asyncio.run(run())
     assert got.get("found") is True, got
     return _normalised_trace(got["decisions"])
@@ -1742,7 +1939,7 @@ def _two_cycles_with(prose, *, book_void):
 def test_settlement_unresolved_blocks_a_complete_comparison():
     """Prose that says NOTHING about the terminal case: every other item is
     present and the row is CONDITIONAL, never complete."""
-    rows = _two_cycles_with(_RULES_SILENT, book_void=None)
+    rows = _two_cycles_with(_RULES_SILENT, captured=False)
     verdict = _gate_missing(rows)
     assert len(verdict) >= 2, verdict
     for v in verdict:
@@ -1767,14 +1964,54 @@ def test_settlement_unresolved_blocks_a_complete_comparison():
 def test_settlement_conflicting_blocks_a_complete_comparison():
     """Prose that CONTRADICTS the book rule is louder than unknown, and it
     cannot pass either."""
-    rows = _two_cycles_with(_RULES_CONFLICTING, book_void=_VOID_REFUND)
+    rows = _two_cycles_with(_RULES_CONFLICTING, captured=True)
     verdict = _gate_missing(rows)
     assert len(verdict) >= 2, verdict
     for v in verdict:
-        assert v["missing"] == ["SETTLEMENT_COMPATIBILITY_ESTABLISHED"], v
+        # TWO items missing, not one, and the second is the POINT. A
+        # conflict does not merely fail the compatibility item beside an
+        # otherwise unchanged priced comparison: the probability is
+        # DISQUALIFIED, so there is no priced hold either.
+        assert v["missing"] == ["PRICED_HOLD",
+                               "SETTLEMENT_COMPATIBILITY_ESTABLISHED"], v
     tr = rows[0]["alt"]["hold_input"]["terminal_rule"]
     assert tr["established"] is False and tr["conflicts"] is True
+    assert tr["compatibility"] == "INCOMPATIBLE", tr
+    assert tr["disqualifies_selection"] is True, tr
+    assert tr["transform_available"] is False, (
+        "no transformation between the two terminal rules is established, "
+        "so the incompatibility is not excusable")
     assert "OVERTIME_RULE_CONFLICTS_WITH_BOOK_RULE" in tr["unmet"], tr
+
+    # ── THE CONSEQUENCE IS AT ACTION SELECTION, NOT IN A LABEL ───────
+    hi = rows[0]["alt"]["hold_input"]
+    assert hi["excluded_from_selection"] is True, hi
+    assert hi["settlement_compatibility"] == "INCOMPATIBLE", hi
+    assert hi["exclusion_refusal"] == \
+        "EV_HOLD_DISQUALIFIED_SETTLEMENT_INCOMPATIBLE", hi
+    assert hi["available"] is False, (
+        "a disqualified probability is not an available hold input")
+    # NOT ZERO, AND NOT A SALE. The shadow figure survives for the reader
+    # and the position is held by the declared fallback.
+    assert hi["ev_hold_usd_shadow_only"] is not None, hi
+    assert hi["ev_hold_usd_shadow_only"] != 0.0, hi
+    assert rows[0]["action"] == "HOLD", (
+        "an incompatible settlement rule must NOT liquidate: %r"
+        % (rows[0]["action"],))
+    assert rows[0]["qty"] == 100.0, rows[0]
+    assert "FALLBACK" in (rows[0]["reason"] or ""), rows[0]["reason"]
+    assert "EV_HOLD_DISQUALIFIED_SETTLEMENT_INCOMPATIBLE" in \
+        (rows[0]["reason"] or ""), rows[0]["reason"]
+    hold_ranked = [c for c in rows[0]["alt"]["ranked"]
+                   if c["action"] == "HOLD"]
+    assert not hold_ranked, (
+        "a disqualified HOLD must not appear as a ranked candidate: %s"
+        % (hold_ranked,))
+    # and the chain link says the same thing on the decision's own inputs
+    l4b_ = next(x for x in rows[0]["chain"]["chain"]
+                if x["link"] == "4b_SETTLEMENT_COMPATIBILITY")
+    assert l4b_["compatibility"] == "INCOMPATIBLE", l4b_
+    assert l4b_["disqualifies_selection"] is True, l4b_
     # the chain records it too, on the decision's own stored evidence
     l4b = next(x for x in rows[0]["chain"]["chain"]
                if x["link"] == "4b_SETTLEMENT_COMPATIBILITY")
@@ -1787,7 +2024,7 @@ def test_settlement_established_from_the_venues_own_prose_passes():
     """When the venue publishes prose that agrees with the book rule AND the
     bookmaker rule is held, the row is COMPLETE -- so the requirement is a
     real gate and not an unreachable one."""
-    rows = _two_cycles_with(_RULES_AGREEING, book_void=_VOID_REFUND)
+    rows = _two_cycles_with(_RULES_AGREEING, captured=True)
     verdict = _gate_missing(rows)
     assert len([v for v in verdict if not v["missing"]]) >= 2, verdict
     assert len({v["ts"] for v in verdict if not v["missing"]}) >= 2

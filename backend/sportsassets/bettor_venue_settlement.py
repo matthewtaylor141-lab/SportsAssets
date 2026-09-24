@@ -40,6 +40,8 @@ from __future__ import annotations
 
 import re
 
+from . import bettor_settlement_terms as _ST
+
 VERSION = "BETTOR_VENUE_SETTLEMENT_V1"
 
 R_NOT_ESTABLISHED = "VENUE_SETTLEMENT_RULE_NOT_ESTABLISHED"
@@ -132,13 +134,48 @@ VOID_PROSE = (
 
 
 def _void_class(text: str):
-    """Which abandonment class this prose states, or None. First match wins
-    in declared order, and TWO classes matching is not one rule."""
+    """Which abandonment class this prose states, or None.
+
+    SUPERSEDED as the compatibility test. It answers "which word does this
+    document use", and the words are not the rule: the same phrase can
+    attach to a different CONDITION on each side. `attest` now compares
+    `bettor_settlement_terms` condition -> payout pairs instead. Kept
+    because the class names remain the legacy vocabulary of
+    `BOOK_VOID_RULE`, which is translated into a term below.
+    """
     hits = [cls for cls, pats in VOID_PROSE
             if any(re.search(pp, text) for pp in pats)]
     if len(hits) != 1:
         return (None, hits)
     return (hits[0], hits)
+
+
+#: The legacy single-class vocabulary, mapped onto declared payouts.
+LEGACY_CLASS_TO_PAYOUT = {
+    VOID_REFUND: _ST.PAY_STAKE_BACK,
+    VOID_RESOLVES_NO: _ST.PAY_NO,
+    VOID_STAYS_OPEN: _ST.PAY_LATER,
+}
+
+
+def _legacy_book_terms(fam) -> dict:
+    """`BOOK_VOID_RULE` as a term set. It speaks to ONE condition.
+
+    A single "the book voids an abandoned fixture" class says nothing about
+    a game STOPPED EARLY or one MADE OFFICIAL SHORT, and those are exactly
+    the conditions on which a money line's action turns. So holding the
+    legacy class can contribute a match at
+    `POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED` and can never by itself
+    make the comparison COMPATIBLE. That is a correction, not a
+    regression: the old code called it established.
+    """
+    pay = LEGACY_CLASS_TO_PAYOUT.get(BOOK_VOID_RULE.get(fam))
+    if pay is None:
+        return {}
+    return {_ST.C_NOT_PLAYED: {
+        "payout": pay,
+        "cite": {"source": "BOOK_VOID_RULE (legacy single-class hook)",
+                 "source_url": "", "retrieved_at": "", "quote": ""}}}
 
 
 VOID_BOOK_NOTE = (
@@ -411,6 +448,16 @@ def attest(*, sport_family, market="h2h", venue_evidence=None,
     prose = str(ve.get("rules_text") or "")
     pats = OVERTIME_PROSE.get(fam) or {}
     low = " ".join(prose.lower().split())
+    # THE CONDITION -> PAYOUT COMPARISON, COMPUTED ONCE and consulted by
+    # both the overtime and the void branch. The overtime rule is one
+    # terminal condition among several, so a payout mismatch found there
+    # has to reach the overtime verdict too rather than being reported
+    # only under "void".
+    cmp_ = _ST.compare_prose(sport_family=fam, market=mkt,
+                             venue_prose=prose,
+                             extra_book_terms=_legacy_book_terms(fam))
+    _ot_cmp = ((cmp_.get("per_condition") or {}).get(_ST.C_OVERTIME) or {})
+    _ot_mismatch = _ot_cmp.get("verdict") == _ST.V_MISMATCH
     hits_inc = [p for p in (pats.get("includes") or ())
                 if re.search(p, low)]
     hits_exc = [p for p in (pats.get("excludes") or ())
@@ -419,8 +466,19 @@ def attest(*, sport_family, market="h2h", venue_evidence=None,
           "venue_rules_text_read": bool(prose),
           "venue_rules_field": ve.get("rules_field"),
           "venue_rules_source": ve.get("rules_source"),
-          "matched_includes": hits_inc, "matched_excludes": hits_exc}
-    if hits_inc and hits_exc:
+          "matched_includes": hits_inc, "matched_excludes": hits_exc,
+          "payout_comparison": _ot_cmp}
+    if _ot_mismatch:
+        ot.update(established=False, evidence_class=EV_NONE,
+                  refusal=R_OVERTIME_CONFLICTS,
+                  source=ve.get("rules_source") or "venue rules text",
+                  detail=("under %s the book pays %r and the venue pays "
+                          "%r. The disagreement is in the PAYOUT, not in "
+                          "the wording, so no reading of the prose "
+                          "reconciles it"
+                          % (_ST.C_OVERTIME, _ot_cmp.get("book_payout"),
+                             _ot_cmp.get("venue_payout"))))
+    elif hits_inc and hits_exc:
         ot.update(established=False, evidence_class=EV_NONE,
                   refusal=R_OVERTIME_CONFLICTS,
                   source=ve.get("rules_source") or "venue rules text",
@@ -483,48 +541,75 @@ def attest(*, sport_family, market="h2h", venue_evidence=None,
     # the bookmaker's side, which is not in this repository and is not
     # asserted here from memory. Distinguishing the two is the difference
     # between "nobody publishes this" and "we have not captured one side".
-    void_words = ("abandon", "postpon", "suspend", "cancel",
-                  "void", "rescheduled", "not completed")
-    venue_void = [w for w in void_words if w in low]
-    v_class, v_hits = _void_class(low) if venue_void else (None, [])
-    book_void = BOOK_VOID_RULE.get(fam)
+    # MATCHED ON CONDITION -> PAYOUT, NOT ON SHARED WORDS. The previous
+    # version classified each side's prose into one of three "void
+    # classes" and called the rule established when the classes were
+    # equal. Two documents can both say "void" and "stakes returned" and
+    # still pay differently, because the phrase attaches to a DIFFERENT
+    # CONDITION on each side -- the book conditions its money-line action
+    # on a MINIMUM NUMBER OF INNINGS and the venue need not. So the
+    # comparison is now per terminal condition, and a payout stated for
+    # one condition is no evidence about another.
+    venue_terms = dict((cmp_.get("venue_read") or {}).get("terms") or {})
     vd = {"applicable": True,
           "venue_rules_text_read": bool(prose),
-          "venue_states_a_rule": bool(venue_void),
-          "venue_terms_matched": venue_void,
-          "venue_rule_class": v_class,
-          "venue_classes_matched": v_hits,
-          "book_rule_held": bool(book_void),
-          "book_rule_class": book_void}
-    if v_class and book_void and v_class == book_void:
-        vd.update(established=True, evidence_class=EV_BOTH_SIDES,
-                  refusal=None,
-                  source="%s + BOOK_VOID_RULE[%s]"
-                         % (ve.get("rules_source") or "venue rules text", fam),
-                  detail=("both sides state the SAME abandonment class %r: "
-                          "the venue in its own published prose and the "
-                          "bookmaker in the rule held here" % (v_class,)))
-    elif v_class and book_void:
+          "venue_states_a_rule": bool(venue_terms),
+          "venue_terms": venue_terms,
+          "book_rule_held": bool(cmp_.get("book_terms_held")),
+          "compared_on": "CONDITION_TO_PAYOUT",
+          "terms_comparison": cmp_,
+          "applicable_conditions": cmp_.get("applicable_conditions"),
+          "mismatched_conditions": cmp_.get("mismatched_conditions"),
+          "unstated_conditions": cmp_.get("unstated_conditions")}
+    verdict = cmp_.get("verdict")
+    if verdict == _ST.INCOMPATIBLE:
         vd.update(established=False, evidence_class=EV_NONE,
                   refusal=R_VOID_CONFLICTS,
                   source=ve.get("rules_source") or "venue rules text",
-                  detail=("the venue states %r and the held book rule is "
-                          "%r. An abandoned fixture would settle "
-                          "differently on the two sides, and the whole "
-                          "stake is the difference"
-                          % (v_class, book_void)))
-    elif venue_void:
-        vd.update(established=False, evidence_class=EV_NONE,
-                  refusal=R_VOID_BOOK_RULE_NOT_HELD,
-                  source=("the venue published prose addresses abandonment; "
-                          "the bookmaker rule is not held here"),
-                  detail=VOID_BOOK_NOTE)
-    else:
+                  detail=("the two sides state DIFFERENT PAYOUTS for the "
+                          "same terminal condition(s) %s. An affected "
+                          "fixture settles differently on each side and "
+                          "the whole stake is the difference, so a "
+                          "probability of the book's event cannot price "
+                          "this contract"
+                          % (cmp_.get("mismatched_conditions"),)))
+    elif verdict == _ST.COMPATIBLE:
+        vd.update(established=True, evidence_class=EV_BOTH_SIDES,
+                  refusal=None,
+                  source="%s + captured bookmaker terms"
+                         % (ve.get("rules_source") or "venue rules text",),
+                  detail=("every applicable terminal condition is stated on "
+                          "BOTH sides and the payouts agree condition by "
+                          "condition: %s"
+                          % (sorted(cmp_.get("per_condition") or {}),)))
+    elif not venue_terms:
+        # NEITHER SIDE. Distinguished from "we have not captured one side":
+        # the venue published no rule for any terminal condition either, so
+        # naming only our gap would overstate what exists to be captured.
         vd.update(established=False, evidence_class=EV_NONE,
                   refusal=R_VOID_UNKNOWN,
                   source="neither side publishes an abandonment rule we hold",
                   detail=VOID_NOTE)
+    elif not cmp_.get("book_terms_held") or any(
+            (r.get("verdict") == _ST.V_BOOK_SILENT
+             or r.get("verdict") == _ST.V_BOTH_SILENT)
+            for r in (cmp_.get("per_condition") or {}).values()):
+        vd.update(established=False, evidence_class=EV_NONE,
+                  refusal=R_VOID_BOOK_RULE_NOT_HELD,
+                  source=("the bookmaker's terms for this market type are "
+                          "not captured in this repository"),
+                  detail=VOID_BOOK_NOTE,
+                  capture_request=cmp_.get("book_capture_request"))
+    else:
+        vd.update(established=False, evidence_class=EV_NONE,
+                  refusal=R_VOID_UNKNOWN,
+                  source=ve.get("rules_source") or "venue rules text",
+                  detail=("the bookmaker's terms are held but the venue's "
+                          "prose states no rule for %s, so the payouts "
+                          "cannot be compared there"
+                          % (cmp_.get("unstated_conditions"),)))
     out["rules"]["void"] = vd
+    out["terms_comparison"] = cmp_
 
     out["unmet"] = sorted({r["refusal"] for r in out["rules"].values()
                            if r.get("applicable") and not r["established"]

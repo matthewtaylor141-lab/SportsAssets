@@ -1369,7 +1369,35 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
         book_evidence={"outcome_names": list(quote["prices"].keys()),
                        "source": "theoddsapi:h2h:%s" % devig.BOOK})
     _unmet = list(srule.get("unmet") or [])
+    _terms = dict(srule.get("terms_comparison") or {})
+    _mismatched = [str(c) for c in (_terms.get("mismatched_conditions") or ())]
     out["settlement"] = {
+        # THE TRANSFORM LOOKUP NEEDS THESE, so the valuation can ask whether
+        # an established mapping exists for THIS incompatibility rather than
+        # for incompatibility in general.
+        "sport_family": family,
+        "market": "h2h",
+        # THE THREE-WAY STATUS, carried onto the persisted inputs.
+        "compatibility": ("ESTABLISHED" if srule.get("overall_established")
+                          else ("INCOMPATIBLE" if (_mismatched or any(
+                              "CONFLICT" in str(u).upper() for u in _unmet))
+                                else "UNKNOWN")),
+        "mismatched_conditions": _mismatched,
+        # THE CONDITION -> PAYOUT TABLE ITSELF, per terminal condition, so a
+        # reader sees WHICH case the two sides disagree or are silent on
+        # instead of one blanket verdict. This is the evidence the
+        # acceptance checker requires.
+        "terms_verdict": _terms.get("verdict"),
+        "terms_per_condition": _terms.get("per_condition"),
+        "terms_unstated": _terms.get("unstated_conditions"),
+        "terms_applicable_conditions": _terms.get("applicable_conditions"),
+        "book_terms_held": bool(_terms.get("book_terms_held")),
+        "book_capture_request": _terms.get("book_capture_request"),
+        "compared_on": "CONDITION_TO_PAYOUT",
+        "not_compared_on": ("shared vocabulary. Both sides can say 'void' "
+                            "and 'refund' and still pay differently, because "
+                            "the phrase attaches to a different terminal "
+                            "condition on each side"),
         "book_rule": vset.BOOK_SETTLEMENT.get(family),
         "overall_established": bool(srule.get("overall_established")),
         "attested": srule.get("attested"),
@@ -1427,7 +1455,22 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
                      "condition on the number the ranking uses -- not a "
                      "HOLD_TO_SETTLEMENT-only concern, which is where it "
                      "was recorded and where it hid"),
-         does_not_block="pricing the hold, or an exit at an observed price")
+         # UNKNOWN AND INCOMPATIBLE HAVE DIFFERENT CONSEQUENCES, and the
+         # link records which one applies. UNKNOWN keeps a labelled
+         # conditional value in the ranking; INCOMPATIBLE disqualifies the
+         # probability from the selector altogether and the position falls
+         # to the declared missing-input fallback.
+         compatibility=out["settlement"]["compatibility"],
+         terms_verdict=_terms.get("verdict"),
+         mismatched_conditions=_mismatched,
+         unstated_conditions=_terms.get("unstated_conditions"),
+         book_terms_held=bool(_terms.get("book_terms_held")),
+         disqualifies_selection=(
+             out["settlement"]["compatibility"] == "INCOMPATIBLE"),
+         does_not_block=("pricing the hold, or an exit at an observed price, "
+                         "WHERE THE STATUS IS UNKNOWN. An established "
+                         "INCOMPATIBILITY does block the hold from the "
+                         "selector"))
 
     # ── 5 · THE EXECUTABLE EXIT, off the ladder a close consumes ─────
     #
@@ -1749,12 +1792,94 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
     # lookup is by (experiment, policy) and is indifferent to the
     # identifier, so a row created under the old unstable scheme is still
     # found and kept. Nothing is written on this path.
+    # TWO REQUESTS MUST NOT BOTH DECIDE THAT NO POSITION EXISTS. The lookup
+    # and the insert are one decision, so they are serialised on a lock
+    # keyed to (experiment, policy): a concurrent second request waits, then
+    # runs the lookup AFTER the first has committed and adopts its row.
+    # Without this, two requests that pick DIFFERENT markets get different
+    # position_ids and `ON CONFLICT (position_id)` does not collide -- so
+    # the idempotence guard protects only the case that was never the risk.
+    # THE LOCK IS SESSION-SCOPED, NOT TRANSACTION-SCOPED, ON PURPOSE. The
+    # body walks the input chain per candidate and tolerates a failure by
+    # refusing that candidate and trying the next; inside one transaction
+    # the first caught database error would abort it and every later
+    # statement would fail with InFailedSQLTransactionError. So the lock is
+    # taken and released explicitly and the body keeps its own error
+    # behaviour.
+    lock_key = _acceptance_lock_key(experiment_id)
+    out["serialised_on"] = {"lock_key": lock_key,
+                            "scope": "SESSION",
+                            "why": ("the lookup and the insert are one "
+                                    "decision; a concurrent caller waits "
+                                    "and then adopts")}
+    await conn.execute("SELECT pg_advisory_lock($1)", lock_key)
+    try:
+        return await _seed_acceptance_locked(
+            conn, out=out, experiment_id=experiment_id, tick=tick,
+            t_started=t_started, odds=odds, read_rules=read_rules,
+            qty=qty, candidates=candidates, now=now, clock=clock,
+            resolve_identity=resolve_identity, read_book=read_book,
+            fee_fn=fee_fn, bs=bs, EXT=EXT)
+    finally:
+        try:
+            await conn.execute("SELECT pg_advisory_unlock($1)", lock_key)
+        except Exception:                                      # noqa: BLE001
+            # A connection that cannot unlock is a connection that is about
+            # to be discarded, and Postgres releases session locks when it
+            # closes. Failing the route over the release would turn a
+            # completed seed into an error.
+            pass
+
+
+def _acceptance_lock_key(experiment_id) -> int:
+    """A stable 64-bit advisory-lock key for one experiment's acceptance seed.
+
+    Derived the same way as the sentinel and for the same reason: `hash()`
+    would give a different lock per process, which is no lock at all.
+    """
+    import hashlib
+
+    h = hashlib.blake2b(("%s|ACCEPTANCE_SEED|%s"
+                         % (ACCEPTANCE_SENTINEL_NAMESPACE,
+                            str(experiment_id))).encode("utf-8"),
+                        digest_size=8).digest()
+    return int.from_bytes(h, "big", signed=True)
+
+
+R_EXISTING_LOOKUP_FAILED = "ACCEPTANCE_EXISTING_POSITION_LOOKUP_FAILED"
+
+
+async def _seed_acceptance_locked(conn, *, out, experiment_id, tick,
+                                  t_started, odds, read_rules, qty,
+                                  candidates, resolve_identity, read_book,
+                                  fee_fn, bs, EXT, now=None, clock=None):
+    """The body, under the advisory lock. See `seed_acceptance_position`."""
+    import time as _t
+
+    # ── THE EXISTING POSITION FIRST, AND A FAILED READ IS NOT AN ABSENCE ──
+    #
+    # THE DEFECT THIS CLOSES. The previous version caught the exception,
+    # set `have = None`, recorded the error and CARRIED ON to seed. A
+    # connection blip, a lock timeout or a missing column would therefore
+    # have been read as "no acceptance position exists" and a SECOND
+    # position written beside the one already under management -- the exact
+    # duplication the adoption path exists to prevent, reached through the
+    # error handler. An unreadable lookup establishes nothing about what
+    # exists, so it STOPS the seed.
     try:
         have = await conn.fetchrow(EXISTING_ACCEPTANCE_SQL,
                                    experiment_id, ACCEPTANCE_POLICY)
     except Exception as exc:                                   # noqa: BLE001
-        have = None
-        out["existing_lookup_error"] = "%s: %s" % (type(exc).__name__, exc)
+        out.update(
+            created=False, adopted=False,
+            refusal=R_EXISTING_LOOKUP_FAILED,
+            existing_lookup_error="%s: %s" % (type(exc).__name__, exc),
+            why=("the lookup for an existing acceptance position FAILED, so "
+                 "nothing is known about what already exists. That is not "
+                 "evidence of absence: seeding now could write a second "
+                 "position beside one already under management. Nothing was "
+                 "written and the legacy position, if any, is untouched"))
+        return out
     if have is not None:
         row = dict(have)
         out.update(

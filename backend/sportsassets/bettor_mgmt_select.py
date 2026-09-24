@@ -701,7 +701,26 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
     basis = basis_per * q
 
     hv = dict(ev_hold or {})
-    hold_priced = hv.get("status") == "IDENTIFIED"
+    # ── THE TERMINAL RULE IS A GATE ON THIS SELECTOR ─────────────────
+    #
+    # THE DEFECT THIS CLOSES. Before this change an established
+    # INCOMPATIBILITY between the two sides' settlement payouts set
+    # `value_is_conditional` and nothing else: the HOLD candidate was still
+    # ranked on the same number and the SAME ACTION was selected, with a
+    # warning beside it. A warning is not a gate. If the venue pays on a
+    # different event from the one the probability prices, the two are not
+    # comparable at all and the comparison must not be made.
+    #
+    # UNKNOWN IS TREATED DIFFERENTLY FROM INCOMPATIBLE, deliberately. An
+    # unstated rule leaves the probability the best available estimate, so
+    # the value is retained, labelled conditional, and ranked. Only an
+    # established payout conflict disqualifies it -- and then HOLD is not
+    # zero and not a sale: it takes the declared missing-input fallback,
+    # which answers WHETHER to close without a forecast.
+    _term = dict(hv.get("terminal_rule") or {})
+    hold_disqualified = bool(hv.get("selection_eligible") is False
+                             or _term.get("disqualifies_selection"))
+    hold_priced = hv.get("status") == "IDENTIFIED" and not hold_disqualified
     # THE HURDLE IS THE VALUE OF HOLDING *ONE CONTRACT*, AND IT IS THE
     # SETTLEMENT VALUE, NOT THE P&L. Comparing a sale's proceeds against
     # (p - basis) would subtract the basis twice: the sale releases it
@@ -736,6 +755,14 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
     # immune to it.
     hold_total = (None if hold_per is None
                   else float(hold_per) * q - basis)
+    # THE DISQUALIFIED VALUE IS KEPT AS A SHADOW FIGURE, separately named
+    # so no reader and no downstream query can mistake it for a number the
+    # selector used. It is reported because withholding it would leave the
+    # row saying only "unpriced", which is a different and less useful
+    # fact than "priced, and refused for a stated reason".
+    _shadow_p = hv.get("probability") if hold_disqualified else None
+    shadow_total = (None if _shadow_p is None
+                    else float(_shadow_p) * q - basis)
     _supplied = hv.get("ev_hold_usd")
     _on_qty = hv.get("qty")
     _mismatch = None
@@ -785,6 +812,20 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
             "terminal_rule": hv.get("terminal_rule"),
             "value_is_conditional": hv.get("value_is_conditional"),
             "conditional_on": hv.get("conditional_on"),
+            # THE THREE-WAY SETTLEMENT STATUS AND ITS CONSEQUENCE, on the
+            # persisted row: ESTABLISHED / UNKNOWN / INCOMPATIBLE, and
+            # whether this selector was allowed to use the number.
+            "settlement_compatibility": _term.get("compatibility"),
+            "excluded_from_selection": bool(hold_disqualified),
+            "exclusion_refusal": (hv.get("selection_refusal")
+                                  or _term.get("disqualification_refusal")),
+            "exclusion_why": hv.get("selection_refusal_why"),
+            "ev_hold_usd_shadow_only": shadow_total,
+            "shadow_value_is_not": (
+                None if not hold_disqualified else
+                ("a comparison input. It is reported so the row shows a "
+                 "priced-and-refused hold rather than an unpriced one, and "
+                 "it is NOT zero")),
         },
         "candidates": [], "not_rankable": [], "venue_translation": {},
     }
@@ -849,10 +890,18 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
         })
     else:
         out["not_rankable"].append({
-            "action": "HOLD", "blocker": hv.get("refusal") or R_HOLD_NOT_PRICED,
-            "why": (hv.get("why") or
-                    "no probability source priced this hold"),
+            "action": "HOLD",
+            "blocker": (hv.get("selection_refusal")
+                        or _term.get("disqualification_refusal")
+                        or hv.get("refusal") or R_HOLD_NOT_PRICED),
+            "why": (hv.get("selection_refusal_why") if hold_disqualified
+                    else (hv.get("why") or
+                          "no probability source priced this hold")),
             "value_usd": None,
+            "settlement_compatibility": _term.get("compatibility"),
+            "mismatched_conditions": _term.get("mismatched_conditions"),
+            "transform_available": _term.get("transform_available"),
+            "shadow_value_usd": shadow_total,
             "is_not_zero": ("NOT_IDENTIFIED. Zero would assert the "
                             "position is worthless, which is the "
                             "assertion most likely to force an exit")})
@@ -861,10 +910,14 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
     #
     # A DIFFERENT ACTION FROM HOLD, and the difference is a commitment:
     # HOLD is re-decided next cycle, HOLD_TO_SETTLEMENT gives that up.
-    # Its terminal value depends on the venue's settlement terms, and
-    # this venue's prose is CONFLICTING_VENUE_PROSE, so even a priced
-    # probability does not price it.
-    sem = settlement_semantics or "CONFLICTING_VENUE_PROSE"
+    # Its terminal value depends on the venue's settlement terms.
+    #
+    # THE DEFAULT IS NOT A READING OF ANY DOCUMENT. It used to be described
+    # as "this venue's prose is CONFLICTING_VENUE_PROSE", which asserted a
+    # conflict in text nobody had fetched. It is simply the absence of a
+    # supplied semantics, and the caller now supplies the real
+    # condition-by-condition comparison.
+    sem = settlement_semantics or "SETTLEMENT_SEMANTICS_NOT_SUPPLIED"
     if sem == "RESOLVED":
         out["candidates"].append({
             "action": "HOLD_TO_SETTLEMENT", "qty": q,

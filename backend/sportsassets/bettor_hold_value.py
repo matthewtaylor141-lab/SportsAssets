@@ -538,6 +538,24 @@ def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
     out.update(terminal_rule=_terminal_rule(settlement))
     out["value_is_conditional"] = not out["terminal_rule"]["established"]
     out["conditional_on"] = list(out["terminal_rule"]["unmet"] or [])
+    # THE VALUE IS STILL COMPUTED AND STILL REPORTED. What changes on an
+    # established INCOMPATIBILITY is that it may not enter the selector:
+    # `selection_eligible` is the flag `rank_with_hold` acts on, so the
+    # consequence is a DIFFERENT SELECTED ACTION and not a warning printed
+    # beside an unchanged one.
+    _tr = out["terminal_rule"]
+    out["selection_eligible"] = not _tr["disqualifies_selection"]
+    out["selection_refusal"] = _tr["disqualification_refusal"]
+    out["selection_refusal_why"] = (
+        None if out["selection_eligible"] else
+        ("the two sides state different payouts for %s, so this probability "
+         "is a probability of a different event from the one the contract "
+         "pays on. It is DISQUALIFIED from the HOLD-versus-exit comparison "
+         "until a transformation between the two terminal rules is "
+         "established. The value below is retained as a SHADOW figure and "
+         "is NOT zero: zero would assert the position is worthless, which "
+         "is the assertion most likely to force an exit"
+         % (_tr["mismatched_conditions"] or _tr["unmet"],)))
     return out
 
 
@@ -550,17 +568,70 @@ TERMINAL_RULE_GOVERNS = (
     "conditional on rules that are not established")
 
 
+#: UNKNOWN AND CONFLICTING ARE NOT THE SAME DEFECT, and until this change
+#: they were handled as one: anything not established made the value
+#: "conditional" and the ranking went ahead unchanged.
+#:
+#:   UNKNOWN       nobody has stated the rule. The probability may still be
+#:                 the best available estimate of the contract's payout, so
+#:                 a CLEARLY LABELLED conditional shadow value is retained
+#:                 and ranked.
+#:   INCOMPATIBLE  both sides have stated a rule and the PAYOUTS DIFFER.
+#:                 The probability is then a probability of a different
+#:                 event from the one the contract pays on, and no label
+#:                 makes it comparable with an exit price. It is
+#:                 DISQUALIFIED from selection.
+#:
+#: A disqualified hold is NOT zero and NOT a reason to sell: it routes to
+#: the declared missing-input fallback, exactly as an absent probability
+#: does.
+R_SETTLEMENT_INCOMPATIBLE = "EV_HOLD_DISQUALIFIED_SETTLEMENT_INCOMPATIBLE"
+
+#: TRANSFORMATIONS that would make an incompatible probability usable --
+#: DELIBERATELY EMPTY. A transformation here is a claim that p under the
+#: book's terminal rules can be mapped to p under the venue's, and it needs
+#: its own derivation and evidence. None has been established, so an
+#: incompatibility always disqualifies.
+#:
+#:   SETTLEMENT_TRANSFORMS[(sport_family, market, frozenset(conditions))]
+#:       = {"name": ..., "evidence": ..., "apply": callable}
+SETTLEMENT_TRANSFORMS: dict = {}
+
+
+def settlement_transform(settlement):
+    """An established transformation for this incompatibility, or None."""
+    st = dict(settlement or {})
+    key = (str(st.get("sport_family")), str(st.get("market") or "h2h"),
+           frozenset(str(c) for c in (st.get("mismatched_conditions") or ())))
+    return SETTLEMENT_TRANSFORMS.get(key)
+
+
 def _terminal_rule(settlement) -> dict:
     """The attestation, normalised onto the value. Absent is NOT established."""
     st = dict(settlement or {})
     unmet = list(st.get("unmet") or [])
     est = bool(st.get("overall_established")) and not unmet
+    conflicts = any("CONFLICT" in str(u).upper() for u in unmet)
+    mismatched = [str(c) for c in (st.get("mismatched_conditions") or ())]
+    transform = settlement_transform(st) if (conflicts or mismatched) else None
+    disq = bool(conflicts or mismatched) and transform is None
     return {"established": est,
             "asked": bool(settlement),
             "book_rule": st.get("book_rule"),
             "attested": list(st.get("attested") or []),
             "unmet": unmet,
-            "conflicts": any("CONFLICT" in str(u).upper() for u in unmet),
+            "conflicts": conflicts,
+            # THE THREE-WAY STATUS, which is what the selector acts on.
+            "compatibility": ("ESTABLISHED" if est else
+                              ("INCOMPATIBLE" if (conflicts or mismatched)
+                               else "UNKNOWN")),
+            "mismatched_conditions": mismatched,
+            "transform_available": bool(transform),
+            "transform": (transform or {}).get("name"),
+            "disqualifies_selection": disq,
+            "disqualification_refusal": (R_SETTLEMENT_INCOMPATIBLE
+                                         if disq else None),
+            "unknown_is_retained_as_conditional": not (conflicts or mismatched),
             "venue_rules_text_read": st.get("venue_rules_text_read"),
             "venue_rules_field": st.get("venue_rules_field"),
             "governs": TERMINAL_RULE_GOVERNS,
