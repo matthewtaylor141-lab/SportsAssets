@@ -177,8 +177,10 @@ INSERT_PREDICTION = """
         (experiment_id, target, model_key, model_version, dataset_sha,
          feature_sha, condition_id, source_trade_id, account,
          predicted_at, horizon_s, p_hat, features_present, features_missing,
+         baseline_p, baseline_basis,
          outcome_known, outcome, outcome_at)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,to_timestamp($10),$11,$12,$13,$14,
+            $15,$16,
             FALSE, NULL, NULL)
     ON CONFLICT (experiment_id, target, model_key, model_version,
                  source_trade_id) DO NOTHING
@@ -214,7 +216,8 @@ def feature_sha(features: dict) -> str:
 async def record_prediction(conn, *, target, model_key, model_version,
                             dataset_sha, condition_id, source_trade_id,
                             account, predicted_at, horizon_s, p_hat,
-                            availability) -> dict:
+                            availability, baseline_p=None,
+                            baseline_basis=None) -> dict:
     """Write a prediction BEFORE its outcome exists.
 
     Refuses a p_hat outside [0, 1] and refuses to record against the
@@ -248,7 +251,13 @@ async def record_prediction(conn, *, target, model_key, model_version,
         condition_id, int(source_trade_id), str(account),
         float(predicted_at), float(horizon_s), p,
         list(availability.get("present") or []),
-        list(availability.get("missing") or []))
+        list(availability.get("missing") or []),
+        # THE PRIOR, FIXED NOW. Scored against later, so it cannot be the
+        # base rate of the labels it will be compared on. NULL when the
+        # caller has none, and never filled in afterwards.
+        (None if baseline_p is None else float(baseline_p)),
+        (None if baseline_p is None
+         else str(baseline_basis or "BASELINE_BASIS_NOT_DECLARED")))
     if row_id is None:
         # ALREADY RECORDED for this (target, model, version, trade). Not an
         # error and not a write.

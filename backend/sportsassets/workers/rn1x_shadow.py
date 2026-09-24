@@ -547,6 +547,18 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
 
     seen_conditions: set[str] = set()
     results = []
+    # EVERY CANDIDATE ACCOUNTED FOR. The old pair of numbers was "examined
+    # 400, refusals 3", and both were true and neither was the whole story:
+    # `examined` counted the SCAN, not the processing, and three branches
+    # below skip a row with `continue` and no counter at all. A reader
+    # comparing 400 to 3 could only conclude that 397 rows vanished.
+    #
+    # MAX_SEEDS_PER_CYCLE is 3, so three processed rows is the CAP being
+    # reached, not a sample of the 400. These counters say so.
+    flow = {"fetched": len(cands), "processed": 0,
+            "duplicate_condition_in_batch": 0, "already_replayed": 0,
+            "deferred_cap": 0, "refused": 0, "failed": 0, "written": 0,
+            "not_reached_after_error": 0}
     # THE CURSOR IS THE HIGHEST ROW WHOSE PROCESSING FINISHED, and
     # nothing beyond it. `safe_id` only ever takes the id of a row that
     # was written, refused for a stated reason, or deliberately skipped.
@@ -561,12 +573,19 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
     # and the loss is not recoverable.
     safe_id = start
     stopped_at_error = None
-    for r in cands:
+    for i, r in enumerate(cands):
         rid = int(r["id"])
         if len(results) >= MAX_SEEDS_PER_CYCLE:
             # Stop BEFORE consuming this row: it has not been examined.
+            # Everything from here to the end of the batch is DEFERRED to
+            # a later cycle, not refused and not lost -- the cursor stays
+            # below it.
+            flow["deferred_cap"] = len(cands) - i
             break
         if r["condition_id"] in seen_conditions:
+            # One condition, one seed per cycle: a second fill on the same
+            # market is the same candidate, not a new one.
+            flow["duplicate_condition_in_batch"] += 1
             safe_id = rid
             continue
         seen_conditions.add(r["condition_id"])
@@ -576,6 +595,9 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
         pid = store.position_id(experiment_id, pol.POLICY_ID, rid)
         if await conn.fetchval(
                 "SELECT 1 FROM rn1x_positions WHERE position_id = $1", pid):
+            # Idempotence, not a refusal: this trade already has its
+            # position under this experiment and policy.
+            flow["already_replayed"] += 1
             safe_id = rid
             continue
         try:
@@ -593,9 +615,17 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
             # save a cursor above this one, which is how the failed row
             # would be skipped.
             stopped_at_error = rid
+            flow["failed"] += 1
+            flow["processed"] += 1
+            flow["not_reached_after_error"] = len(cands) - i - 1
             break
         results.append({"trade_id": rid,
                         "condition_id": r["condition_id"], **wrote})
+        flow["processed"] += 1
+        if wrote.get("written"):
+            flow["written"] += 1
+        else:
+            flow["refused"] += 1
         safe_id = rid
 
     await _save_cursor(conn, safe_id, cursor_key)
@@ -615,8 +645,27 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
             if x.get("unknown_reason"):
                 key += "/" + str(x["unknown_reason"])
         tally[key] = tally.get(key, 0) + 1
+    # THE IDENTITY, CHECKED. Every fetched row is in exactly one bucket.
+    # If this ever fails the census is lying, and a boolean in the payload
+    # is how a reader finds that out without re-deriving it by hand.
+    flow["accounted"] = (
+        flow["fetched"] == (flow["processed"]
+                            + flow["duplicate_condition_in_batch"]
+                            + flow["already_replayed"]
+                            + flow["deferred_cap"]
+                            + flow["not_reached_after_error"]))
+    flow["cap_per_cycle"] = MAX_SEEDS_PER_CYCLE
+    flow["scan_batch"] = SCAN_BATCH
+    flow["reading"] = (
+        "fetched = rows the scan returned; processed = rows that reached a "
+        "replay, capped at cap_per_cycle; the rest are duplicates of a "
+        "condition already seeded this batch, positions already written, "
+        "or rows deferred to a later cycle. `examined` is kept as an alias "
+        "of `fetched` for the older readers and is the number that was "
+        "misread as 'processed'")
     return {"ran": True, "state": "REPLAYED", "lane": lane,
-            "cursor": safe_id, "examined": len(cands), "results": results,
+            "cursor": safe_id, "examined": len(cands), "flow": flow,
+            "results": results,
             "stopped_at_error": stopped_at_error,
             "refusals": tally,
             "cursor_moved": safe_id != start,
@@ -695,6 +744,11 @@ async def run(pool_factory=None) -> None:
                 # there readable without widening the query.
                 def _sum(r):
                     return {"state": r.get("state"),
+                            # EVERY CANDIDATE ACCOUNTED FOR, in the summary
+                            # the command centre reads. Without it the tile
+                            # showed "examined 400, refusals 3" and a
+                            # reader had to guess at the other 397.
+                            "flow": r.get("flow") or {},
                             "cursor": r.get("cursor"),
                             "examined": r.get("examined", 0),
                             "written": r.get("written", 0),

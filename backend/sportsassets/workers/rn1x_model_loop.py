@@ -317,7 +317,18 @@ async def predict(conn, fitted: dict, open_rows, *, dataset_sha,
             # prediction to the same non-existent account.
             account=str(r["_whale_id"]),
             predicted_at=at, horizon_s=HORIZON_S, p_hat=p,
-            availability=avail)
+            availability=avail,
+            # THE BASELINE, FIXED HERE AND NOW. The training base rate of
+            # the fit that produced this model: known before the outcome
+            # exists and independent of every label it will be scored on.
+            # `evaluate` used to compare against the base rate OF THE
+            # EVALUATION LABELS, which is an oracle rather than a
+            # baseline -- it cannot be beaten by luck and cannot be
+            # compared to fairly.
+            baseline_p=fitted.get("base_rate"),
+            baseline_basis=("TRAINING_BASE_RATE_UNCENSORED_AT_FIT"
+                            if fitted.get("base_rate") is not None
+                            else None))
         if not got.get("ok"):
             code = got.get("refusal") or "UNKNOWN"
             refused[code] = refused.get(code, 0) + 1
@@ -380,21 +391,64 @@ async def join_outcomes(conn, *, now=None) -> dict:
 # ── 5 · EVALUATE, on joined predictions only ────────────────────────
 
 EVAL_SQL = """
-    SELECT p_hat::float8 p, outcome, model_version, dataset_sha
+    SELECT p_hat::float8 p, outcome, model_version, dataset_sha,
+           condition_id, source_trade_id, account,
+           extract(epoch FROM predicted_at)::float8 AS predicted_at_s,
+           predicted_at, outcome_at, horizon_s::float8 AS horizon_s,
+           baseline_p::float8 AS baseline_p, baseline_basis,
+           features_present, features_missing
       FROM rn1x_model_predictions
      WHERE target = $1 AND outcome_known = TRUE
      ORDER BY predicted_at
 """
 
+#: THE LABEL'S OWN EVIDENCE, read back per prediction. The stored
+#: `is_out_of_sample` flag is an assertion; this is the check. The label is
+#: "did the cohort buy the complement within the horizon", so its evidence
+#: is a fill in (predicted_at, predicted_at + horizon]. If any such fill
+#: predates the prediction, the label was knowable when the prediction was
+#: made and the row is not out of sample.
+LABEL_EVIDENCE_SQL = """
+    SELECT min(extract(epoch FROM ts))::float8 AS first_evidence_s,
+           count(*) AS n_evidence
+      FROM trades
+     WHERE condition_id = $1 AND whale_id = $2 AND side = 'BUY'
+       AND outcome_index <> $3
+       AND ts > to_timestamp($4) AND ts <= to_timestamp($5)
+"""
 
-async def evaluate(conn) -> dict:
-    """Calibration and skill, on genuinely future evidence.
 
-    These predictions were recorded before their outcomes existed, which
-    the ledger's trigger enforced at insert time. So this is the one number
-    in the whole module that is entitled to be called performance.
+async def evaluate(conn, *, verify_sample=40) -> dict:
+    """Skill and calibration on genuinely future evidence -- and the
+    honest version of "genuinely".
+
+    FOUR THINGS THIS DOES THAT THE PREVIOUS VERSION DID NOT.
+
+    1 · THE BASELINE IS NOT AN ORACLE. It used to compare the model
+        against `sum(y)/len(y)`, the base rate OF THE EVALUATION LABELS.
+        That number is computed from the outcomes being scored, so it
+        cannot be beaten by chance and is not a baseline. The comparison
+        now uses `baseline_p`, the training base rate stored ON EACH
+        PREDICTION at prediction time (migration 107). Rows without one --
+        every row written before that migration -- are reported as
+        uncovered and are NOT given the evaluation base rate instead.
+
+    2 · CLUSTERING IS REPORTED, NOT IGNORED. Several predictions can share
+        a condition and an account, and those are not independent
+        observations. The row count, the unique-condition count and the
+        largest cluster are all reported so nobody reads n as a sample
+        size.
+
+    3 · OUT-OF-SAMPLE IS CHECKED, NOT ASSERTED. For a bounded sample the
+        label's own evidence is read back from `trades`: the earliest
+        complement fill inside the horizon must postdate the prediction.
+        A stored flag establishes nothing by itself.
+
+    4 · IT NAMES ITS TARGET. This is cohort behaviour -- whether the
+        cohort bought the complement within the horizon. It is not a
+        settlement forecast, not our fill probability, and not profit.
     """
-    rows = await conn.fetch(EVAL_SQL, TARGET)
+    rows = [dict(r) for r in await conn.fetch(EVAL_SQL, TARGET)]
     p = [float(r["p"]) for r in rows]
     y = [float(r["outcome"]) for r in rows]
     if len(p) < MIN_EVAL_ROWS:
@@ -402,15 +456,122 @@ async def evaluate(conn) -> dict:
                 "floor": MIN_EVAL_ROWS,
                 "why": ("%d joined predictions is not a null result, it is "
                         "not yet a measurement" % len(p))}
-    base = (sum(y) / len(y)) if y else None
-    rep = M.report(p, y, baseline_rate=base)
+
+    # ── the prior, where one was stored ─────────────────────────────
+    with_prior = [r for r in rows if r.get("baseline_p") is not None]
+    prior_bases = sorted({str(r["baseline_basis"]) for r in with_prior})
+    baseline = {
+        "rows_with_a_stored_prior": len(with_prior),
+        "rows_without": len(rows) - len(with_prior),
+        "bases": prior_bases,
+        "note": ("the prior is the TRAINING base rate stored when the "
+                 "prediction was written. Rows without one predate "
+                 "migration 107 and are NOT scored against the evaluation "
+                 "base rate, which would be an oracle"),
+    }
+    if with_prior:
+        bp = [float(r["baseline_p"]) for r in with_prior]
+        by = [float(r["outcome"]) for r in with_prior]
+        bmp = [float(r["p"]) for r in with_prior]
+        baseline.update(
+            baseline_log_loss=M.log_loss(bp, by),
+            baseline_brier=M.brier(bp, by),
+            model_log_loss_same_rows=M.log_loss(bmp, by),
+            model_brier_same_rows=M.brier(bmp, by),
+            mean_prior=sum(bp) / len(bp))
+        baseline["delta_log_loss_model_minus_baseline"] = (
+            baseline["model_log_loss_same_rows"]
+            - baseline["baseline_log_loss"])
+    else:
+        baseline["status"] = "NO_ROW_CARRIES_A_PRIOR_FIXED_BEFORE_ITS_OUTCOME"
+
+    # ── clustering ──────────────────────────────────────────────────
+    conds: dict = {}
+    for r in rows:
+        conds.setdefault(str(r.get("condition_id")), 0)
+        conds[str(r.get("condition_id"))] += 1
+    clusters = sorted(conds.values(), reverse=True)
+    clustering = {
+        "rows": len(rows),
+        "unique_conditions": len(conds),
+        "largest_cluster": (clusters[0] if clusters else 0),
+        "rows_in_multi_row_conditions": sum(c for c in clusters if c > 1),
+        "unique_accounts": len({str(r.get("account")) for r in rows}),
+        "note": ("rows sharing a condition are NOT independent evidence. "
+                 "Treat unique_conditions, not rows, as the sample size "
+                 "for any claim about the model"),
+    }
+
+    # ── out-of-sample, verified from the label's own evidence ───────
+    sample = rows[:max(0, int(verify_sample))]
+    verified, violations, unverifiable = 0, [], 0
+    for r in sample:
+        oi = await conn.fetchval(
+            "SELECT outcome_index FROM trades WHERE id = $1",
+            r.get("source_trade_id"))
+        if oi is None:
+            unverifiable += 1
+            continue
+        ev = await conn.fetchrow(
+            LABEL_EVIDENCE_SQL, r.get("condition_id"),
+            int(r.get("account") or 0), int(oi),
+            float(r["predicted_at_s"]),
+            float(r["predicted_at_s"]) + float(r["horizon_s"]))
+        first = None if ev is None else ev["first_evidence_s"]
+        if first is None:
+            # No complement fill in the window: the label is a genuine 0
+            # and there is no evidence that could have predated anything.
+            verified += 1
+            continue
+        if float(first) > float(r["predicted_at_s"]):
+            verified += 1
+        else:
+            violations.append({"condition_id": r.get("condition_id"),
+                               "predicted_at_s": r["predicted_at_s"],
+                               "first_evidence_s": float(first)})
+
     return {"ok": True, "refusal": None, "n": len(p),
-            "base_rate": base, "report": rep,
+            "target": TARGET,
+            "target_is": ("whether the cohort bought the complement within "
+                          "the horizon. NOT settlement, NOT our fill "
+                          "probability, NOT profit"),
+            "model_key": MODEL_KEY,
+            "model_versions": sorted({str(r["model_version"]) for r in rows}),
+            "dataset_shas": sorted({str(r["dataset_sha"]) for r in rows}),
+            "predicted_at_first": min(r["predicted_at"] for r in rows),
+            "predicted_at_last": max(r["predicted_at"] for r in rows),
+            "outcome_at_last": max(
+                (r["outcome_at"] for r in rows if r["outcome_at"]),
+                default=None),
+            "horizon_s": HORIZON_S,
+            "log_loss": M.log_loss(p, y),
+            "brier": M.brier(p, y),
             "calibration": M.calibration(p, y, bins=10),
-            "is_out_of_sample": True,
+            "observed_outcome_rate": (sum(y) / len(y)),
+            "observed_outcome_rate_is_not_the_baseline": (
+                "this is a description of the evaluation set. Using it as "
+                "the baseline is what made the old comparison an oracle"),
+            "baseline": baseline,
+            "clustering": clustering,
+            "out_of_sample_check": {
+                "sampled": len(sample),
+                "verified_label_evidence_postdates_prediction": verified,
+                "violations": violations[:5],
+                "n_violations": len(violations),
+                "unverifiable_no_source_trade": unverifiable,
+                "note": ("the stored is_out_of_sample flag is an assertion. "
+                         "This reads the label's own evidence out of "
+                         "`trades` and checks it postdates the prediction"),
+            },
+            "is_out_of_sample": (not violations),
             "why_trustworthy": ("every row was recorded before its outcome "
-                                "existed; migration 102's trigger refuses "
-                                "an insert that carries its own label")}
+                                "existed -- enforced at insert by migration "
+                                "102's trigger AND checked here against the "
+                                "label's own evidence"),
+            "not_a_profit_claim": (
+                "a well-calibrated cohort-behaviour model is not a trading "
+                "edge: nothing here prices execution, fees or adverse "
+                "selection")}
 
 
 # ── the cycle ───────────────────────────────────────────────────────

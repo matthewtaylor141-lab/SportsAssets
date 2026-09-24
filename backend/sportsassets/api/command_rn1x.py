@@ -278,11 +278,45 @@ async def _prospective_status(pool, *, shadow_on: bool,
             SH.SERVICE)
         beat = _json.loads(raw) if raw else {}
         lane = (beat.get("lanes") or {}).get("P") or {}
+        flow = lane.get("flow") or {}
         out["last_cycle_prospective"] = {
-            "state": lane.get("state"), "examined": lane.get("examined"),
+            "state": lane.get("state"),
+            # THE FULL ACCOUNTING, so 400 and 3 stop contradicting. The
+            # scan fetches SCAN_BATCH rows and the lane replays at most
+            # cap_per_cycle conditions; the rest are duplicates of a
+            # condition already seeded, positions already written, or rows
+            # deferred to a later cycle.
+            "flow": flow,
+            "fetched": flow.get("fetched", lane.get("examined")),
+            "processed": flow.get("processed"),
+            "cap_per_cycle": flow.get("cap_per_cycle"),
+            "every_candidate_accounted": flow.get("accounted"),
             "written": lane.get("written"),
             "cursor_moved": lane.get("moved"),
             "refusals": lane.get("refusals") or {}}
+        # WHY ZERO QUALIFY, from the lane's own numbers rather than a
+        # guess. Three readings, and they need different responses.
+        if flow:
+            if flow.get("processed", 0) == 0:
+                out["why_none_qualify"] = (
+                    "no candidate reached a replay this cycle: %d fetched, "
+                    "%d duplicate conditions, %d positions already written"
+                    % (flow.get("fetched", 0),
+                       flow.get("duplicate_condition_in_batch", 0),
+                       flow.get("already_replayed", 0)))
+            elif flow.get("written", 0) == 0:
+                out["why_none_qualify"] = (
+                    "%d of %d fetched rows reached a replay (the cap is %s) "
+                    "and every one refused. The refusal codes beside this "
+                    "say which rule stopped each"
+                    % (flow.get("processed", 0), flow.get("fetched", 0),
+                       flow.get("cap_per_cycle")))
+            else:
+                out["why_none_qualify"] = (
+                    "%d position(s) were written this cycle; a zero here "
+                    "refers to the OBSERVED-runtime-decision count above, "
+                    "which is a different question"
+                    % flow.get("written", 0))
     except Exception as exc:                                   # noqa: BLE001
         out["last_cycle_prospective"] = {"unreadable": type(exc).__name__}
     if not shadow_on:

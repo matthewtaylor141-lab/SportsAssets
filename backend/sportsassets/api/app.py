@@ -2001,6 +2001,35 @@ async def command_rn1x_external_trace(row_id: int,
         return await CR.external_trace(conn, int(row_id))
 
 
+@app.get("/api/command/rn1x/model-evaluation",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_model_evaluation(response: Response,
+                                        verify: int = 40) -> dict:
+    """WHAT THE LEARNING EVALUATION ACTUALLY FOUND, in full.
+
+    The tile reports counts. This reports the measurement: the target, the
+    model versions, when the predictions were recorded, how many distinct
+    conditions they cover, log loss, Brier, calibration, and the comparison
+    against a prior that was FIXED BEFORE the outcomes existed rather than
+    computed from them.
+
+    It also re-checks the out-of-sample claim against the label's own
+    evidence, because a stored flag is an assertion and not a check.
+    """
+    from ..db import get_pool
+    from ..workers import rn1x_model_loop as ML
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            return await ML.evaluate(
+                conn, verify_sample=max(0, min(200, int(verify))))
+        except Exception as exc:                               # noqa: BLE001
+            return {"ok": False, "error": type(exc).__name__,
+                    "why": "the evaluation read failed"}
+
+
 @app.get("/api/command/rn1x/clock-audit",
          dependencies=[Depends(require_command)])
 async def command_rn1x_clock_audit(response: Response) -> dict:
