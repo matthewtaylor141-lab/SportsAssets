@@ -121,6 +121,55 @@ this lane, so a lane that declares nothing is still refused.
 
 ---
 
+## 4b · Connection defects found by review, and repaired
+
+A review of `a95a749` found five. All were real; each is listed with what
+it would have done if left.
+
+| # | defect | what it would have done |
+|---|---|---|
+| 1 | `cycle` returned `IDLE_NO_CANDIDATES` **before** the management step | on every cycle where the cohort produced no new fill — the ordinary state — nothing open was re-evaluated, including positions whose exit condition had arrived |
+| 1b | the manager runs per experiment, with the challenger's id | entry-created inventory sat in the shared ledger and was re-evaluated by nothing: the Ferrari failure's shape |
+| 2 | order and fill ids hung off `int(now)` | a later cycle minted new ones, both inserted, while the position row hit `ON CONFLICT DO NOTHING` — executions accumulating against inventory that never grew |
+| 3 | `open_book` read once per cycle | two $600 entries, each admissible against an empty book, both clear a $1,000 combined rail |
+| 4a | `limit_price` carried the VWAP and the writer used it as the order's limit | a walk over .62/.64/.66 recorded as an order limited at .635556 that filled twice above it — unreconcilable against any venue |
+| 4b | the outcome index was inferred from the US order intent | a catalogue whose token order differs files the position under the opposite leg and reads settlement off the wrong outcome |
+| 4c | the decision instant was taken **before** the venue, rules and metadata reads | a decision claiming a freshness it did not have — the same defect already repaired in management |
+
+And two more that only running the lifecycle could find:
+
+| # | defect | what it did |
+|---|---|---|
+| 5 | `store.persist_run` did `int(trade_id)` | raised `TypeError` on every management cycle for a position with no source trade: examined every cycle, failed every cycle |
+| 6 | it re-derived the position id as `experiment:policy:None` | management tried to write a **second** position row; migration 116's index refused it. The index was right; the re-derivation was the fault |
+
+Plus one of mine: a second, uncached venue-rules reader added beside the
+cached one that already existed — a parallel implementation spending a
+paced request per candidate per cycle on a string that does not change.
+Deleted.
+
+### The three prices, kept apart
+
+| | what it is |
+|---|---|
+| `submitted_limit` | what the order would be sent with: the break-even the belief implies. Nothing is taken above it. |
+| `vwap` | what the quantity actually cost, volume weighted. An **outcome** of the walk, never a limit. |
+| `levels_taken` | per-level price, quantity and cost, so the two above can be checked against the book. One fill row per level, each with the fee charged at that price. |
+
+The writer refuses outright if the submitted limit is below the VWAP: the
+two did not then come from the same walk.
+
+### The three write cases
+
+| case | what happens |
+|---|---|
+| `NEW_EXPOSURE` | written |
+| `EXACT_REPLAY_OF_A_RECORDED_OBSERVATION` | nothing written, reported as a replay rather than as a write that changed nothing |
+| `NEW_QUOTE_ON_AN_ALREADY_HELD_EXPOSURE` | refused. It is an ADD: it changes average cost and size, re-opens the market-exposure rail against the combined position, and needs its own basis for the second tranche |
+| `ADD_TO_AN_EXISTING_POSITION` | `ADD_SUPPORTED = False` — off rather than absent, so the refusal has a name to look up |
+
+---
+
 ## 5 · The standing blocker
 
 `MODEL_TRUST_DRIFT` is NOT_EVALUABLE and it **blocks the creation of
@@ -137,10 +186,34 @@ price, the costs and the verdict on every supported market every cycle.
 Those records, paired with settled outcomes, are the calibration evidence
 the gate is waiting for. The lane accumulates its own key.
 
-**The smallest action that clears it:** measure PINNACLE_DEVIG_V1 against
-resolved outcomes over a stated window and write one row carrying the
-window, the sample size, the metric, the score, the tolerance and who
-measured it. A `sample_size` of 0 is refused by a CHECK.
+**The measurement now exists and runs.** `bettor_source_calibration`
+declares, before any data is read:
+
+| | |
+|---|---|
+| scope | source version, de-vig method, sport families, market |
+| point in time | the probability **recorded** at decision time, and per unique event the **first** one — never the last, the best, or an average, which would be choosing among a source's own revisions after seeing which way the event went |
+| unique event | one observation per (event, payout event). A source quoted every fifteen minutes for six hours produces twenty-four rows about one coin flip |
+| resolved / void / unresolved | only resolved events are scored; void and unresolved are excluded **and counted**, because a measurement that dropped them silently would hide how much of the record it could not use |
+| metric | BRIER — proper, so it cannot be improved by shading a probability away from the honest one |
+| acceptance | Brier ≤ 0.24 **and** ≥ 300 resolved unique events, both required, with the 0.25 no-skill benchmark stated beside the ceiling |
+| reproducible | the result carries its inputs' hash |
+
+**The input did not exist before this release.** `JOIN_OUTCOME` had been in
+migration 103 since the beginning with no caller, so `outcome_known` was
+false on every row ever written and the measurement had an empty input by
+construction. `join_outcomes` now runs every cycle, bounded, through the
+venue resolution reader. A short leg is scored against the **complement**
+— the venue's settlement price is about its own YES side, and scoring the
+raw price would be exactly wrong on half the sample. A price that is
+neither 0 nor 1 is a **void**, not a fractional outcome.
+
+**A shortfall is a result and is not written.** `to_row` refuses to produce
+a row from anything that is not a completed verdict, so an insufficient
+sample returns the number of events still needed and the gate stays exactly
+as shut as before. A provisional score is reported so collection can be
+watched, and named provisional so nothing treats it as a verdict. A FAILED
+verdict **is** written — it is a measurement — and does not open the gate.
 
 It cannot be cleared by editing a boolean in a worker, and it must not be.
 
