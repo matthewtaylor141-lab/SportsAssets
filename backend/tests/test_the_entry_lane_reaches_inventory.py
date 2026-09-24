@@ -117,6 +117,16 @@ async def _seed(conn):
     await conn.execute(
         "INSERT INTO ingestion_state (key, value) VALUES ($1,'true') "
         "ON CONFLICT (key) DO UPDATE SET value = 'true'", loop.CONTROL_KEY)
+    # ONE MARKET FOR THIS FIXTURE, AND ONLY ONE. A second row naming the
+    # same two teams makes the mapping AMBIGUOUS and the loop refuses every
+    # candidate -- correctly -- so the cycle reports `evaluated: 0` and the
+    # test reads as "the lane did nothing". That happened: a row left behind
+    # by an unrelated probe. The seed now owns the fixture.
+    await conn.execute(
+        "UPDATE markets SET closed = TRUE WHERE condition_id <> $1 "
+        "AND sport = 'MLB' AND NOT closed "
+        "AND event_title ILIKE '%Arizona%' AND event_title ILIKE '%Colorado%'",
+        CONDITION)
     await conn.execute(
         "INSERT INTO markets (condition_id, title, event_title, slug, "
         "sport, closed, resolved) VALUES ($1,$2,$3,$4,'MLB',false,false) "

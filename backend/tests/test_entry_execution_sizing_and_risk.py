@@ -306,3 +306,24 @@ def test_a_lane_supplied_limit_is_marked_as_the_lanes_own():
     assert row["limitSource"] == "LANE_PREDECLARED"
     assert row["verdict"] == risk.PASS
     assert v["limitsSha"] == EX.LIMITS_SHA
+
+
+def test_a_settled_position_stops_occupying_capital_but_keeps_its_loss():
+    """Counting a settled position as open exposure is not conservatism, it
+    is a wrong measurement: the basis came back. Left in the sums it would
+    accumulate forever and refuse every entry on a book that is flat."""
+    rows = [{"condition_id": "old", "event_key": "old-evt",
+             "cost_usd": 900.0, "qty": 1000.0, "opened_at": 0.0,
+             "realized_net_usd": -40.0}]
+    ex = EX.exposure_from_rows(rows, condition_id="c", event_key="e",
+                               proposed_cost_usd=250.0, proposed_qty=400.0,
+                               now=3600.0)
+    assert ex["settled_positions_excluded_from_exposure"] == 1
+    # Exposure is the proposed position alone.
+    assert ex["observed"]["MAX_CAPITAL_DEPLOYED"] == 250.0
+    assert ex["observed"]["MAX_CORRELATED_EXPOSURE"] == 250.0
+    assert ex["observed"]["MAX_RESIDUAL_INVENTORY"] == 400.0
+    # THE LOSS STILL COUNTS, on the rail that governs realised damage,
+    # and so do the capital-hours it actually consumed while it was open.
+    assert ex["observed"]["MAX_DRAWDOWN"] == pytest.approx(40.0 + 250.0)
+    assert ex["observed"]["MAX_CAPITAL_HOURS"] == pytest.approx(900.0)

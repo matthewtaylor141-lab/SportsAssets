@@ -465,6 +465,13 @@ DRAWDOWN_IS_WORST_CASE = (
     "not a position that is fine")
 
 
+def _accrued(cost, opened_at, now):
+    """Capital-hours this position has already accrued, or 0 if unmeasurable."""
+    if opened_at is None or now is None:
+        return 0.0
+    return float(cost) * max(0.0, (float(now) - float(opened_at)) / 3600.0)
+
+
 def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
                        proposed_qty, now=None) -> dict:
     """Measured exposure per rail, including the proposed position.
@@ -498,8 +505,21 @@ def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
     capital_hours = 0.0
     drawdown = 0.0
     unmarked = 0
+    settled = 0
     for r in rows:
         c = float(r.get("cost_usd") or 0.0)
+        realized = r.get("realized_net_usd")
+        # A SETTLED POSITION NO LONGER OCCUPIES CAPITAL, and counting it as
+        # though it did is not conservatism, it is a wrong measurement: the
+        # basis came back at settlement. Left in the exposure sums it
+        # would accumulate forever and eventually refuse every entry on a
+        # book that is actually flat. Its LOSS still counts, on the
+        # drawdown rail, which is the rail that governs realised damage.
+        if realized is not None:
+            settled += 1
+            drawdown += max(0.0, -float(realized))
+            capital_hours += _accrued(c, r.get("opened_at"), now)
+            continue
         total += c
         residual += float(r.get("qty") or 0.0)
         if str(r.get("condition_id") or "") == str(condition_id or ""):
@@ -507,14 +527,8 @@ def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
         if (r.get("event_key") is not None
                 and str(r.get("event_key")) == str(event_key or "")):
             event += c
-        opened = r.get("opened_at")
-        if opened is not None and now is not None:
-            held_h = max(0.0, (float(now) - float(opened)) / 3600.0)
-            capital_hours += c * held_h
-        realized = r.get("realized_net_usd")
-        if realized is not None:
-            drawdown += max(0.0, -float(realized))
-        elif r.get("marked_value_usd") is not None:
+        capital_hours += _accrued(c, r.get("opened_at"), now)
+        if r.get("marked_value_usd") is not None:
             drawdown += max(0.0, c - float(r["marked_value_usd"]))
         else:
             # UNMARKED AND UNSETTLED: the whole basis is at risk.
@@ -535,6 +549,7 @@ def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
         "MAX_DRAWDOWN": round(drawdown, 6),
     }
     out["positions_counted_as_total_loss"] = unmarked
+    out["settled_positions_excluded_from_exposure"] = settled
     out["proposed"] = {"cost_usd": round(cost, 6), "qty": round(qty, 6),
                        "condition_id": condition_id,
                        "event_key": event_key}
