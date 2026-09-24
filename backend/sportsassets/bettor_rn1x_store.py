@@ -341,11 +341,17 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
                 "operating_state, is_a_deliberate_hold, input_available, "
                 "input_freshness, payout_identity, hold_value_usd, "
                 "hold_value_basis, venue_translation, order_state, "
-                "resulting_inventory, accounting_reconciles) "
+                "resulting_inventory, accounting_reconciles, "
+                # THE CAUSE, STORED. A decision that could not be priced
+                # now carries the CHAIN that failed -- which link, on
+                # which identifiers, at which timestamps -- instead of
+                # leaving a reader with EV_HOLD_NOT_IDENTIFIED and no way
+                # to tell a missing fixture from a stale quote.
+                "input_chain) "
                 "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,"
                 "$11::jsonb,$12::jsonb,$13,$14,$15,$16,$17,$18,"
                 "$19::jsonb,$20::jsonb,$21,$22,$23::jsonb,$24::jsonb,"
-                "$25::jsonb,$26) "
+                "$25::jsonb,$26,$27::jsonb) "
                 "ON CONFLICT (decision_id) DO NOTHING",
                 did, pid, _ts(d.get("at")), _ts(d.get("at")),
                 d.get("evidence_id"),
@@ -395,7 +401,9 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
                     "order_id": d.get("order_id"),
                     "cancelled_orders": d.get("cancelled_orders")}),
                 _j(d.get("resulting_inventory") or {}),
-                ((d.get("resulting_inventory") or {}).get("invariant_ok")))
+                ((d.get("resulting_inventory") or {}).get("invariant_ok")),
+                (None if d.get("input_chain") is None
+                 else _j(d.get("input_chain"))))
             wrote["decisions"] += 1
 
         # ── orders and their fills ───────────────────────────────────

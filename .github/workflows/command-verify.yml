@@ -795,6 +795,8 @@ jobs:
                     hold: (.hold_value_usd // null),
                     state: (.operating_state // "?"),
                     eligibility: (.eligibility // "?"),
+                    reason: (.selection_reason // ""),
+                    reconciles: (.accounting_reconciles),
                     alt: (.alternatives | j), inv: (.resulting_inventory | j),
                     fr: (.input_freshness | j)}]}' \
             /tmp/mg.json > /tmp/mgn.json 2>/dev/null || echo '{}' > /tmp/mgn.json
@@ -862,9 +864,79 @@ jobs:
             say "INVARIANT HOLDS on $PRICED priced decision(s): HOLD valued on"
             say "the residual, no candidate sized above it, no mismatch"
           fi
-          if [ "$NDEC" -lt 2 ]; then
-            say "ONE DECISION ONLY -- successive-cycle management is NOT yet"
-            say "demonstrated in production on this position"
+          # ── THE INPUT CHAIN, LINK BY LINK ──────────────────────────
+          #
+          # A blind decision records EV_HOLD_NOT_IDENTIFIED, which is a
+          # symptom. This asks the deployed build to walk the same chain a
+          # management decision walks and report the FIRST failing link
+          # with its identifiers and timestamps, so a missing fixture, an
+          # uncovered sport, a stale quote and an unreadable book are
+          # never again the same line.
+          say "-- the input chain for this position --"
+          code=$(curl -s -o /tmp/ch.json -w '%{http_code}' --max-time 90 \
+                 -H "$H" "$API/api/command/rn1x/input-chain/$PID" || echo 000)
+          say "input-chain HTTP $code"
+          if [ "$code" != "200" ]; then
+            echo "::error::the input-chain read answered $code"; FAIL=1
+          fi
+          jq -r '"inputs_complete\t" + ((.inputs_complete // false)|tostring),
+                 "residual\t"        + ((.inventory.residual_qty // "-")|tostring),
+                 "payout_event\t"    + ((.payout_event // "-")|tostring),
+                 "us_market_slug\t"  + ((.us_market_slug // "-")|tostring),
+                 "held_intent\t"     + ((.held_intent // "-")|tostring),
+                 "probability\t"     + ((.probability // "-")|tostring),
+                 "exit_price\t"      + ((.exit_price // "-")|tostring)
+                                      + " x " + ((.exit_size // "-")|tostring),
+                 "odds_request\t"    + ((.odds_request // {})|tostring),
+                 ((.chain // [])[]
+                   | "  " + (.link)
+                     + (if .ok then "  OK    " else "  FAILED " end)
+                     + ((. | del(.link, .ok) | tostring)[0:400])),
+                 "first_failing_link\t"
+                   + (((.first_failing_link // {}).link) // "none")
+                   + "  " + (((.first_failing_link // {}).refusal) // "")' \
+            /tmp/ch.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 400 /tmp/ch.json
+          # ── ACCEPTANCE ────────────────────────────────────────────
+          #
+          # A PRICED HOLD IS THE BAR. Repeated missing-input holds are the
+          # operational blocker, so a run where the lane decided but never
+          # priced anything FAILS here rather than passing with a note. A
+          # properly priced HOLD satisfies this; nothing is exited to
+          # produce an example.
+          if [ "$PRICED" -lt 2 ]; then
+            echo "::error::$PRICED of $NDEC decisions on this position carry a priced hold. Acceptance needs the SAME position priced across at least two management cycles; the input chain above names the link that stopped it."
+            say "ACCEPTANCE NOT MET: priced_holds=$PRICED (need 2)"
+            FAIL=1
+          else
+            # THE FIVE THINGS EACH PRICED DECISION MUST CARRY.
+            jq -r '[(.decisions // [])[] | select(.hold != null)
+                    | {id: .id,
+                       age: (.fr.age_from_observation_s),
+                       bound: (.fr.bound_s),
+                       action: .action, qty: .qty,
+                       resid: (.inv.residual_qty),
+                       recon: .reconciles}]
+                   | .[] | select((.age == null) or (.bound == null)
+                                  or (.age > .bound) or (.action == null)
+                                  or (.qty == null) or (.resid == null)
+                                  or (.recon != true))
+                   | "INCOMPLETE\t" + .id + "\tage=" + ((.age // "null")|tostring)
+                     + " bound=" + ((.bound // "null")|tostring)
+                     + " action=" + ((.action // "null")|tostring)
+                     + " qty=" + ((.qty // "null")|tostring)
+                     + " residual=" + ((.resid // "null")|tostring)
+                     + " reconciles=" + ((.recon // "null")|tostring)' \
+              /tmp/mgn.json > /tmp/inc.txt 2>/dev/null || true
+            if [ -s /tmp/inc.txt ]; then
+              cat /tmp/inc.txt | tee -a "$GITHUB_STEP_SUMMARY"
+              echo "::error::a priced decision is missing a required input or consequence"
+              FAIL=1
+            else
+              say "ACCEPTANCE MET: $PRICED priced decisions, each with a"
+              say "fresh probability inside its bound, a selected action and"
+              say "quantity, the current residual and reconciled accounting"
+            fi
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit $FAIL

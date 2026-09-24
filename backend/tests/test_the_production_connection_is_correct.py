@@ -460,6 +460,38 @@ _B_RALLY = {"bids": [{"px": {"value": "0.8500"}, "qty": "40"},
                      {"px": {"value": "0.8000"}, "qty": "600"}],
             "offers": [{"px": {"value": "0.8800"}, "qty": "900"}]}
 
+# ── THE MANAGED PULL'S INPUTS, INJECTED ──────────────────────────────
+#
+# The management phase no longer reads `external_valuations`: that table
+# is written by the ENTRY lane every 900 s and the odds rule is 30 s, so a
+# priced management decision could only ever happen by coincidence. It
+# PULLS instead. These tests therefore supply the provider payload and the
+# venue catalogue the pull asks, rather than a valuation row.
+#
+# THE ODDS ARE SOLVED, NOT GUESSED: 1.40 / 3.1135938239247523 is the pair
+# whose power de-vig returns EXACTLY 0.70 for the home side, so the
+# reported case's 13.00-vs-10.40 arithmetic survives the change of input
+# source instead of being quietly restated at some other probability.
+_ODDS_P70 = (1.40, 3.1135938239247523)
+
+
+def _pull(observed_at, *, odds=_ODDS_P70, received_at=None, calls=3):
+    from tests.test_the_held_position_gets_its_own_inputs import (
+        _event, _odds)
+
+    ev = _event(observed_at=observed_at, cubs=odds[0], fish=odds[1])
+    return _odds([ev], received_at=(received_at if received_at is not None
+                                   else observed_at), calls=calls)
+
+
+async def _resolver(conn, *, market_row, priced_outcome):
+    from tests.test_the_held_position_gets_its_own_inputs import (
+        _resolver_ok)
+
+    return await _resolver_ok(conn, market_row=market_row,
+                              priced_outcome=priced_outcome)
+
+
 _VAL_SQL = """INSERT INTO external_valuations(experiment_id,version,
  source_class,provider,book,devig_method,venue,condition_id,us_market_slug,
  contract_selection,sport_family,market,raw_odds,outcomes_priced,
@@ -493,8 +525,15 @@ async def _fixture(c, cond):
                 "DELETE FROM trades WHERE condition_id = $1",
                 "DELETE FROM markets WHERE condition_id = $1"):
         await c.execute(sql, cond)
-    await c.execute("INSERT INTO markets(condition_id,slug,resolved) "
-                    "VALUES($1,'s',false)", cond)
+    # A REAL FIXTURE ROW. `bettor_venue_mapping.map_event` matches the
+    # provider's teams against title + event_title, and
+    # `family_for_label` reads `sport`, so a placeholder row would fail
+    # link 3 for the wrong reason.
+    await c.execute(
+        "INSERT INTO markets(condition_id,slug,sport,title,event_title,"
+        "resolved,closed,updated_at) VALUES($1,$2,'MLB',$3,$3,false,false,"
+        "now())", cond, "mlb-chc-mia-2026-09-24",
+        "Chicago Cubs vs Miami Marlins")
     # `trades.whale_id` is a foreign key. A fixture that inserts a print
     # needs the whale to exist first.
     await c.execute("INSERT INTO whales(id,address) VALUES(9,'0xwhale9') "
@@ -587,6 +626,7 @@ def test_a_valuation_for_the_opposing_exposure_is_refused():
     async def run():
         c = await asyncpg.connect(DSN, timeout=10)
         orig = EXT._read_book_blocking
+        orig_res = EXT.resolve_venue_identity
         EXT._read_book_blocking = lambda slug: {"marketData": _B_TIGHT}
         try:
             await _fixture(c, cond)
@@ -596,11 +636,22 @@ def test_a_valuation_for_the_opposing_exposure_is_refused():
             ci = await W.challenger_inputs_for(
                 c, condition_id=cond, outcome_index=0,
                 seed_qty=100.0, seed_price=0.57)
-            mg = await W.manage_open_positions(c, experiment_id=_EXP,
-                                               now=_T0 + 60)
+            # THE SAME QUESTION ON THE MANAGEMENT PATH, which no longer
+            # reads that row at all. Its identity comes from the tokens
+            # and the venue catalogue, so the way an opposing identity can
+            # reach it is a RESOLVER that names the other side -- and that
+            # is refused the same way, by comparing two independent
+            # sources rather than adopting either.
+            from tests.test_the_held_position_gets_its_own_inputs import (
+                _resolver_other_side)
+            EXT.resolve_venue_identity = _resolver_other_side
+            mg = await W.manage_open_positions(
+                c, experiment_id=_EXP, now=_T0 + 60,
+                odds=_pull(_T0 + 50))
             return ci, mg
         finally:
             EXT._read_book_blocking = orig
+            EXT.resolve_venue_identity = orig_res
             await c.close()
 
     ci, mg = asyncio.run(run())
@@ -610,10 +661,15 @@ def test_a_valuation_for_the_opposing_exposure_is_refused():
     assert ci["reason"] == W.R_VALUATION_IS_THE_OTHER_SIDE
     assert ci["probability_row"] is None, (
         "a probability for the event we LOSE on is worse than none")
-    # the cycle still ran and recorded the blindness by name
+    # the cycle still ran and recorded the blindness by name -- and on the
+    # management path the name is the LINK that refused, with the two
+    # disagreeing events in its `why`
     r = [x for x in mg["results"] if x.get("input_reason")]
     assert r and r[0]["input_available"] is False
-    assert r[0]["input_reason"] == W.R_VALUATION_IS_THE_OTHER_SIDE
+    assert r[0]["input_reason"] == W.R_RESOLVER_DISAGREES
+    assert r[0]["first_failing_link"] == "2_VENUE_CONTRACT"
+    assert mg["priced_holds"] == 0, (
+        "an opposing identity must not produce a priced hold")
 
 
 @pg
@@ -633,22 +689,24 @@ def test_one_position_is_managed_across_two_cycles_with_no_new_entry():
     async def run():
         c = await asyncpg.connect(DSN, timeout=10)
         orig = EXT._read_book_blocking
+        orig_res = EXT.resolve_venue_identity
         EXT._read_book_blocking = lambda slug: {"marketData": book["md"]}
+        EXT.resolve_venue_identity = _resolver
         try:
             await _fixture(c, cond)
             pid = await _add_position(c, cond, 990301)
-            await c.execute(_VAL_SQL, cond, _SLUG, "Chicago Cubs", 0.70,
-                            _T0)
-            # CYCLE 1 -- bid .60 is below the .70 hold value
-            c1 = await W.manage_open_positions(c, experiment_id=_EXP,
-                                               now=_T0 + 30)
-            # the market rallies; the probability is refreshed so it stays
-            # inside the 120 s bound
+            # NO VALUATION ROW IS WRITTEN. Each cycle pulls its own quote,
+            # observed 10 s before the decision it prices.
+            # CYCLE 1 -- exit .60 is below the .70 hold value
+            c1 = await W.manage_open_positions(
+                c, experiment_id=_EXP, now=_T0 + 30,
+                odds=_pull(_T0 + 20))
+            # the market rallies, and the second cycle's probability is
+            # its own -- not the first cycle's, re-aged
             book["md"] = _B_RALLY
-            await c.execute(_VAL_SQL, cond, _SLUG, "Chicago Cubs", 0.70,
-                            _T0 + 50)
-            c2 = await W.manage_open_positions(c, experiment_id=_EXP,
-                                               now=_T0 + 60)
+            c2 = await W.manage_open_positions(
+                c, experiment_id=_EXP, now=_T0 + 60,
+                odds=_pull(_T0 + 50))
             rows = [dict(r) for r in await c.fetch(
                 "SELECT decision_id, extract(epoch FROM decision_ts)::float8"
                 " ts, selected_action, selected_qty::float8 q,"
@@ -666,6 +724,7 @@ def test_one_position_is_managed_across_two_cycles_with_no_new_entry():
             return c1, c2, rows, npos, pr, led
         finally:
             EXT._read_book_blocking = orig
+            EXT.resolve_venue_identity = orig_res
             await c.close()
 
     c1, c2, rows, npos, pr, led = asyncio.run(run())
@@ -826,15 +885,19 @@ def test_the_residual_hold_case_through_the_continuing_worker():
     async def run():
         c = await asyncpg.connect(DSN, timeout=10)
         orig = EXT._read_book_blocking
+        orig_res = EXT.resolve_venue_identity
         EXT._read_book_blocking = lambda slug: {"marketData": cur["md"]}
+        EXT.resolve_venue_identity = _resolver
         try:
             await _fixture(c, cond)
             pid = await _add_position(c, cond, 991001)
-            # a quote fresh at each decision instant
-            await c.execute(_VAL_SQL, cond, _SLUG, "Chicago Cubs", 0.70,
-                            _T0 + 20)
-            c1 = await W.manage_open_positions(c, experiment_id=_EXP,
-                                               now=_T0 + 30)
+            # EACH CYCLE PULLS ITS OWN QUOTE, observed 10 s before the
+            # decision it prices. The odds pair de-vigs to EXACTLY .70, so
+            # the reported case's 13.00-vs-10.40 arithmetic is the same
+            # arithmetic after the change of input source.
+            c1 = await W.manage_open_positions(
+                c, experiment_id=_EXP, now=_T0 + 30,
+                odds=_pull(_T0 + 20))
             # a print crosses the resting sell and fills 20
             await c.execute(
                 "INSERT INTO trades(id,tx_hash,asset,whale_id,condition_id,"
@@ -843,12 +906,12 @@ def test_the_residual_hold_case_through_the_continuing_worker():
                 "$1,0,'BUY',80,0.91,72.8,'baseball',to_timestamp($2),"
                 "to_timestamp($2),'chain','dk-991500')",
                 cond, _T0 + 45, cond + "-t0")
-            # cycle 2: the book now pays .72 on 80, and the quote is fresh
+            # cycle 2: the book now pays .72 on 80, and the quote is its
+            # own
             cur["md"] = book
-            await c.execute(_VAL_SQL, cond, _SLUG, "Chicago Cubs", 0.70,
-                            _T0 + 50)
-            c2 = await W.manage_open_positions(c, experiment_id=_EXP,
-                                               now=_T0 + 60)
+            c2 = await W.manage_open_positions(
+                c, experiment_id=_EXP, now=_T0 + 60,
+                odds=_pull(_T0 + 50))
             rows = [dict(r) for r in await c.fetch(
                 "SELECT decision_id, selected_action,"
                 " selected_qty::float8 q, hold_value_usd,"
@@ -866,6 +929,7 @@ def test_the_residual_hold_case_through_the_continuing_worker():
             return c1, c2, rows, pr, led
         finally:
             EXT._read_book_blocking = orig
+            EXT.resolve_venue_identity = orig_res
             await c.close()
 
     c1, c2, rows, pr, led = asyncio.run(run())

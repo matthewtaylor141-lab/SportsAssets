@@ -1198,3 +1198,81 @@ async def external_trace(conn, row_id: int) -> dict:
                                         "independently, never derived"),
         },
     }
+
+
+async def input_chain(pool, position_id: str) -> dict:
+    """WHY this held position has no priced hold -- the FIRST failing link.
+
+    Repeated blind decisions are the operational blocker, and
+    `EV_HOLD_NOT_IDENTIFIED` names the symptom rather than the cause. This
+    walks the same chain the management phase walks, in the same order,
+    with the same adapters, and returns every link with its identifiers,
+    timestamps and refusal.
+
+    IT IS A READ, and it makes the same outbound calls the decision makes:
+    at most two odds requests (one per sport key of the held family) and
+    one venue book read. It writes nothing -- no valuation row, no
+    decision, no order -- so it can be run against production without
+    changing what production decides.
+    """
+    import os
+
+    from .. import bettor_mgmt_lifecycle as lc
+    from .. import bettor_rn1x_store as store
+    from ..workers import rn1x_shadow as W
+
+    pos = await pool.fetchrow(
+        "SELECT position_id, policy, condition_id, outcome_index, "
+        "seed_qty::float8 AS seed_qty, seed_price::float8 AS seed_price, "
+        "extract(epoch FROM decision_ts)::float8 AS decision_ts "
+        "FROM rn1x_positions WHERE position_id = $1", position_id)
+    if pos is None:
+        return {"found": False, "position_id": position_id}
+    p = dict(pos)
+    out = {"found": True, "scope": SCOPE, "position": p,
+           "reading": {
+               "purpose": ("the first failing link in the input chain a "
+                           "management decision needs, with the "
+                           "identifiers and timestamps behind it"),
+               "writes": "NOTHING. No valuation row, decision or order",
+               "cost": ("at most two odds requests for the held sport "
+                        "family and one venue book read"),
+               "freshness_rule": ("the probability is aged against "
+                                  "bettor_pinnacle_devig.MAX_QUOTE_AGE_S "
+                                  "= 30 s, from the bookmaker's own "
+                                  "observed_at. This read does not widen "
+                                  "it"),
+           }}
+    async with pool.acquire() as conn:
+        # RESIDUAL FIRST: a chain for a position that is already flat
+        # would be a question about nothing.
+        led = await store.load_position(conn, position_id)
+        try:
+            m = lc.reload_managed(position=p, orders=led["orders"],
+                                  fills=led["fills"])
+            out["inventory"] = {"residual_qty": m.residual(),
+                                "realized_pnl_usd":
+                                    m.pf.to_dict()["realized_pnl_usd"],
+                                "invariant_ok": m.pf.invariant()["ok"],
+                                "decisions_so_far":
+                                    led["decisions_so_far"]}
+        except Exception as exc:                               # noqa: BLE001
+            out["inventory"] = {"error": "%s: %s"
+                                        % (type(exc).__name__, exc)}
+        ci = await W.managed_inputs_for(
+            conn, condition_id=p["condition_id"],
+            outcome_index=int(p["outcome_index"]),
+            odds=W.ManagedOdds(api_key=os.environ.get("EDGE_ODDS_API_KEY"),
+                               calls=2))
+    out["chain"] = ci.get("chain")
+    out["first_failing_link"] = ci.get("first_failing_link")
+    out["inputs_complete"] = bool(ci.get("available")
+                                  and ci.get("book_available"))
+    out["probability"] = (ci.get("probability_row") or {}).get("probability")
+    out["exit_price"] = ci.get("bid")
+    out["exit_size"] = ci.get("bid_size")
+    out["us_market_slug"] = ci.get("us_market_slug")
+    out["held_intent"] = ci.get("held_intent")
+    out["payout_event"] = ci.get("payout_event")
+    out["odds_request"] = ci.get("odds_request")
+    return out

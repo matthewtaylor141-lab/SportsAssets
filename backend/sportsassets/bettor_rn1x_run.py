@@ -617,7 +617,8 @@ MANAGE_VERSION = "BETTOR_RN1X_MANAGE_V1"
 
 def manage_open_position(*, position, orders=(), fills=(), prints=(),
                          inputs=None, unavailable=None, now, fee_fn=None,
-                         queue_share=0.25, decisions_so_far=0):
+                         queue_share=0.25, decisions_so_far=0,
+                         input_chain=None):
     """One management cycle on an EXISTING position. Returns a run record.
 
     `inputs` is the refreshed `challenger_inputs_for` snapshot, or None
@@ -667,6 +668,13 @@ def manage_open_position(*, position, orders=(), fills=(), prints=(),
     if (unavailable or {}).get("reason"):
         labels["input_refusal"] = unavailable["reason"]
         labels["input_refusal_why"] = unavailable.get("why")
+    # THE FIRST FAILING LINK, BY NAME, ON THE LABELS TOO. The full chain
+    # goes on its own column; this is so the shortest read of the row
+    # still says WHICH link broke rather than only that something did.
+    _ffl = (input_chain or {}).get("first_failing_link") or {}
+    if _ffl:
+        labels["first_failing_link"] = _ffl.get("link")
+        labels["first_failing_refusal"] = _ffl.get("refusal")
     d = m.decide_challenger(
         at=float(now),
         decision_id="mgmt:%s:%d" % (position["position_id"], int(now)),
@@ -689,6 +697,8 @@ def manage_open_position(*, position, orders=(), fills=(), prints=(),
         last_price=ci.get("last_price"),
         seconds_open=float(now) - float(position["decision_ts"]),
         inputs=labels)
+    if input_chain is not None:
+        d["input_chain"] = input_chain
 
     final = m.state()
     # SHAPED LIKE A RUN RECORD, so the existing store writes it. The SEED

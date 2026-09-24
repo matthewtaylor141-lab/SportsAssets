@@ -670,6 +670,446 @@ async def challenger_inputs_for(conn, *, condition_id, outcome_index,
     return out
 
 
+# ── THE HELD POSITION'S OWN INPUTS, PULLED FOR THE DECISION ─────────
+#
+# WHY A PULL AND NOT A READ. `challenger_inputs_for` reads the freshest
+# ELIGIBLE row in `external_valuations`. That table is written by the
+# ENTRY lane on `ext_pinnacle_loop.CYCLE_S = 900 s`, and the applicable
+# odds rule is `bettor_pinnacle_devig.MAX_QUOTE_AGE_S = 30 s`. A
+# management decision that reads that table is therefore refused as stale
+# unless it happens to run inside a 30 s window of a 900 s cadence -- a
+# ~3% chance per cycle, and only for a position whose market was in that
+# cycle's candidate set at all. That is not a freshness policy; it is a
+# coincidence, and every blind hold on the production position is what it
+# looks like from the outside.
+#
+# So the managed inputs are OBTAINED for the decision: the same
+# adapters, asked at the moment the decision is taken.
+#
+#   1 HELD_EXPOSURE          market_tokens          -> token, payout event
+#   2 VENUE_CONTRACT         workers.premap.resolve -> slug + intent
+#   3 PROVIDER_FIXTURE       fetch_odds + map_event -> the event, the quote
+#   4 PROBABILITY            bettor_pinnacle_devig  -> p, aged at 30 s
+#   5 EXIT_LADDER            pmus book + exit_ladder-> executable exit
+#   6 RANKED_DECISION        the caller's ranking
+#
+# Each link records what it established and, when it cannot, the refusal
+# WITH the identifiers and timestamps behind it. The first failing link
+# is named on the record, so `EV_HOLD_NOT_IDENTIFIED` never again stands
+# in for a cause.
+MANAGED_INPUT_VERSION = "BETTOR_MANAGED_INPUT_PULL_V1"
+
+#: THE BUDGET IS THE CADENCE. One provider request covers every event of
+#: one sport key, so a managed pull costs nothing per position -- only per
+#: FAMILY, and only for families that actually hold inventory. At most
+#: this many requests per management cycle, and never twice for the same
+#: key inside the interval.
+MANAGED_ODDS_CALLS_PER_CYCLE = 3
+MANAGED_ODDS_MIN_INTERVAL_S = 45.0
+
+R_MANAGED_NO_MARKET_ROW = "MARKET_ROW_NOT_FOUND_FOR_THE_HELD_CONDITION"
+R_MANAGED_MARKET_GONE = "THE_HELD_MARKET_IS_CLOSED_OR_RESOLVED"
+R_MANAGED_FAMILY = "THE_HELD_SPORT_IS_NOT_IN_THE_PROVIDER_SET"
+R_MANAGED_NO_CREDENTIAL = "ODDS_CREDENTIAL_ABSENT"
+R_MANAGED_PROVIDER = "THE_ODDS_PROVIDER_REFUSED_THE_REQUEST"
+R_MANAGED_FIXTURE = "THE_HELD_FIXTURE_IS_NOT_IN_THE_PROVIDER_PAYLOAD"
+R_MANAGED_NO_PINNACLE = "NO_PINNACLE_H2H_ON_THE_HELD_FIXTURE"
+R_MANAGED_BUDGET = "MANAGED_ODDS_BUDGET_SPENT_THIS_CYCLE"
+R_RESOLVER_DISAGREES = "RESOLVER_AND_TOKENS_DISAGREE_ON_THE_PAYOUT_EVENT"
+
+MANAGED_MARKET_SQL = """
+    SELECT condition_id, title, event_title, slug, sport, closed, resolved,
+           extract(epoch FROM updated_at)::float8 AS updated_at
+      FROM markets WHERE condition_id = $1
+"""
+
+
+def family_for_label(label) -> str | None:
+    """`markets.sport` speaks leagues; the valuation source speaks families.
+
+    Inverted from `ext_pinnacle_loop.VENUE_SPORT_LABELS` rather than
+    written again: two tables that disagree about which league is
+    baseball is how the entry lane once reported 44 mapping refusals for
+    an empty candidate set.
+    """
+    from .ext_pinnacle_loop import VENUE_SPORT_LABELS
+
+    want = str(label or "").strip().lower()
+    for fam, labels in VENUE_SPORT_LABELS.items():
+        if want in {str(x).strip().lower() for x in labels}:
+            return fam
+    return None
+
+
+class ManagedOdds:
+    """The provider, asked at most a few times per cycle and shared.
+
+    One request returns every event of one sport key, so N positions in
+    one family cost ONE request. `calls` is the whole budget and it is
+    reported on the cycle: a pull that could not be made says so by name
+    rather than looking like a fixture the provider does not carry.
+    """
+
+    def __init__(self, *, api_key=None, calls=MANAGED_ODDS_CALLS_PER_CYCLE,
+                 fetch=None, now=None):
+        self.api_key = api_key
+        self.calls_left = int(calls)
+        self.calls_made = 0
+        self._fetch = fetch
+        self._cache: dict = {}
+        self._now = now
+        self.spent: list = []
+
+    @property
+    def credential_present(self) -> bool:
+        return bool(self.api_key) or self._fetch is not None
+
+    async def for_family(self, family: str) -> dict:
+        """Every payload this family's sport keys returned, newest first."""
+        from .ext_pinnacle_loop import SPORTS, fetch_odds
+
+        keys = [k for k, fam in SPORTS if fam == family]
+        out = {"family": family, "sport_keys": keys, "payloads": [],
+               "refusals": [], "calls_made": 0}
+        if not keys:
+            out["refusals"].append(R_MANAGED_FAMILY)
+            return out
+        if not self.credential_present:
+            out["refusals"].append(R_MANAGED_NO_CREDENTIAL)
+            return out
+        for key in keys:
+            hit = self._cache.get(key)
+            if hit is not None:
+                out["payloads"].append(hit)
+                continue
+            if self.calls_left <= 0:
+                out["refusals"].append(R_MANAGED_BUDGET)
+                break
+            self.calls_left -= 1
+            self.calls_made += 1
+            out["calls_made"] += 1
+            try:
+                got = (await self._fetch(key) if self._fetch is not None
+                       else await fetch_odds(key, api_key=self.api_key))
+            except Exception as exc:                           # noqa: BLE001
+                got = {"ok": False,
+                       "error": "%s: %s" % (type(exc).__name__, exc)}
+            self.spent.append({"sport_key": key, "ok": bool(got.get("ok")),
+                               "events": len(got.get("events") or []),
+                               "credits_remaining":
+                                   got.get("credits_remaining")})
+            if not got.get("ok"):
+                out["refusals"].append(R_MANAGED_PROVIDER)
+                out["provider_status"] = got.get("status")
+                continue
+            self._cache[key] = got
+            out["payloads"].append(got)
+        return out
+
+
+async def managed_inputs_for(conn, *, condition_id, outcome_index,
+                             odds=None, now=None, read_book=None,
+                             resolve_identity=None):
+    """The six links for ONE held position, with the first failure named.
+
+    Returns the same input keys `challenger_inputs_for` returns when the
+    chain completes, so the decision path is unchanged -- plus `chain`,
+    which says what each link established, and `first_failing_link`.
+    """
+    import time as _t
+
+    from sportsassets import bettor_book_snapshot as bs
+    from sportsassets import bettor_pinnacle_devig as devig
+    from sportsassets import bettor_venue_mapping as vmap
+    from sportsassets import bettor_venue_settlement as vset
+
+    from . import ext_pinnacle_loop as EXT
+
+    now = float(now if now is not None else _t.time())
+    out = {"available": False, "version": MANAGED_INPUT_VERSION,
+           "read_at": now, "condition_id": condition_id,
+           "outcome_index": int(outcome_index), "chain": [],
+           "first_failing_link": None, "input_source": "PULLED_FOR_THIS_DECISION"}
+
+    def link(name, ok, **facts):
+        rec = {"link": name, "ok": bool(ok), **facts}
+        out["chain"].append(rec)
+        if not ok and out["first_failing_link"] is None:
+            out["first_failing_link"] = rec
+            out["reason"] = facts.get("refusal")
+            out["why"] = facts.get("why")
+        return rec
+
+    # ── 1 · THE HELD EXPOSURE, from the tokens ───────────────────────
+    ident = await position_identity(conn, condition_id=condition_id,
+                                    outcome_index=outcome_index)
+    link("1_HELD_EXPOSURE", ident["ok"],
+         token_id=ident.get("token_id"), outcome=ident.get("outcome"),
+         payout_event=ident.get("payout_event"), basis=ident.get("basis"),
+         refusal=ident.get("refusal"), why=ident.get("why"))
+    if not ident["ok"]:
+        return out
+    payout_event_held = ident["payout_event"]
+    out["position_identity"] = ident
+    out["payout_event"] = payout_event_held
+
+    # ── 2 · THE VENUE CONTRACT AND THE INTENT, from the catalogue ────
+    #
+    # NOT from a valuation row. The row carried the slug and the intent,
+    # so a position with no row had no venue identity either -- which is
+    # why the production decisions record `venue null` and
+    # VENUE_POSITION_MODEL_NOT_ESTABLISHED alongside the missing hold
+    # value. Two failures, one cause.
+    mrow = await conn.fetchrow(MANAGED_MARKET_SQL, condition_id)
+    if mrow is None:
+        link("2_VENUE_CONTRACT", False, refusal=R_MANAGED_NO_MARKET_ROW,
+             why=("no `markets` row carries this condition, so neither "
+                  "the fixture nor the venue contract can be resolved"))
+        return out
+    m = dict(mrow)
+    out["market_row"] = {k: m.get(k) for k in
+                         ("condition_id", "slug", "sport", "title",
+                          "event_title", "closed", "resolved",
+                          "updated_at")}
+    # THE RESOLVER IS INJECTABLE FOR TESTS AND IS `premap.resolve` IN
+    # PRODUCTION. It is not reimplemented here: a sixth resolver with its
+    # own idea of side matching is how a wrong-side trade happens, and
+    # `us_premap` is not reproducible in a fixture without becoming a
+    # second copy of the real table's key logic. What the tests below
+    # cover is this chain's ORDER and its refusal reporting; the
+    # resolver's own matching has its own tests.
+    _resolve = resolve_identity or EXT.resolve_venue_identity
+    vid = await _resolve(conn, market_row=m,
+                         priced_outcome=payout_event_held)
+    if not vid.get("ok"):
+        link("2_VENUE_CONTRACT", False, refusal=vid.get("refusal"),
+             why=vid.get("why"), global_slug=m.get("slug"),
+             resolver=vid.get("resolver"),
+             asked_for=payout_event_held)
+        return out
+    # TWO INDEPENDENT SOURCES FOR ONE FACT, and they must agree. The
+    # tokens say what this outcome is; the venue's catalogue says what the
+    # contract pays on. A disagreement is refused, never reconciled.
+    if _norm_outcome(vid.get("payout_event")) != _norm_outcome(payout_event_held):
+        link("2_VENUE_CONTRACT", False, refusal=R_RESOLVER_DISAGREES,
+             why=("the venue catalogue says this contract pays on %r and "
+                  "the market tokens say this position holds %r"
+                  % (vid.get("payout_event"), payout_event_held)),
+             us_market_slug=vid.get("us_market_slug"),
+             intent=vid.get("intent"))
+        return out
+    intent = vid["intent"]
+    link("2_VENUE_CONTRACT", True, us_market_slug=vid["us_market_slug"],
+         intent=intent, ladder_side=vid.get("ladder_side"),
+         matched_side_norm=vid.get("matched_side_norm"),
+         payout_event_basis=vid.get("payout_event_basis"),
+         resolver=vid.get("resolver"),
+         agrees_with_tokens=True)
+    out["us_market_slug"] = vid["us_market_slug"]
+    out["held_intent"] = intent
+    out["venue"] = "PMUS"
+
+    # ── 3 · THE PROVIDER'S FIXTURE, matched by the same mapper ───────
+    family = family_for_label(m.get("sport"))
+    if family is None:
+        link("3_PROVIDER_FIXTURE", False, refusal=R_MANAGED_FAMILY,
+             why=("`markets.sport` is %r, which is not in the provider "
+                  "set %s. THIS EXPOSURE HAS NO PROVIDER COVERAGE -- it "
+                  "is not a mapping failure and no probability exists "
+                  "for it at any freshness"
+                  % (m.get("sport"),
+                     sorted({f for _, f in EXT.SPORTS}))),
+             sport_label=m.get("sport"),
+             provider_families=sorted({f for _, f in EXT.SPORTS}))
+        return out
+    out["sport_family"] = family
+    odds = odds if odds is not None else ManagedOdds(
+        api_key=os.environ.get("EDGE_ODDS_API_KEY"))
+    got = await odds.for_family(family)
+    out["odds_request"] = {"family": family,
+                           "sport_keys": got.get("sport_keys"),
+                           "calls_made": got.get("calls_made"),
+                           "refusals": got.get("refusals")}
+    quote = None
+    ev = None
+    considered = 0
+    for payload in got.get("payloads") or []:
+        received_at = payload.get("received_at") or now
+        for event in payload.get("events") or []:
+            considered += 1
+            mapped = vmap.map_event(home=event.get("home_team"),
+                                    away=event.get("away_team"),
+                                    markets=[m])
+            if not mapped.get("mapped"):
+                continue
+            q = EXT.pinnacle_h2h(event, received_at=received_at)
+            if q is None:
+                link("3_PROVIDER_FIXTURE", False,
+                     refusal=R_MANAGED_NO_PINNACLE,
+                     why=("the provider carries this fixture and no "
+                          "Pinnacle h2h on it. The source is named for "
+                          "Pinnacle and must not substitute another book"),
+                     provider_event_id=event.get("id"),
+                     home=event.get("home_team"),
+                     away=event.get("away_team"),
+                     events_considered=considered)
+                return out
+            quote, ev = q, event
+            break
+        if quote is not None:
+            break
+    if quote is None:
+        link("3_PROVIDER_FIXTURE", False,
+             refusal=(got.get("refusals") or [R_MANAGED_FIXTURE])[0],
+             why=("no event in the provider's %s payload maps to this "
+                  "fixture (%s events examined by "
+                  "bettor_venue_mapping.map_event). Provider refusals: %s"
+                  % (family, considered, got.get("refusals") or "none")),
+             events_considered=considered,
+             market_title=m.get("title"),
+             provider_refusals=got.get("refusals"))
+        return out
+    link("3_PROVIDER_FIXTURE", True, provider_event_id=quote["event_id"],
+         home=quote.get("home"), away=quote.get("away"),
+         commence_time=quote.get("commence_time"),
+         observed_at=quote.get("observed_at"),
+         outcomes_priced=len(quote.get("prices") or {}),
+         events_considered=considered,
+         sharp_books_on_our_outcome=(quote.get("depth") or {}).get(
+             str(payout_event_held)))
+
+    # ── 4 · THE PROBABILITY, aged by the odds engine's own rule ──────
+    book_rule = vset.BOOK_SETTLEMENT.get(family)
+    contract = {"sport_family": family, "market": "h2h",
+                "selection": payout_event_held,
+                "event_key": quote["event_id"], "period": "FULL_GAME",
+                "line": None, "settlement_rule": book_rule}
+    val = devig.valuation(
+        contract=contract,
+        quote={"book": devig.BOOK, "outcomes": quote["prices"],
+               "observed_at": quote["observed_at"],
+               "received_at": quote["received_at"],
+               "event_key": quote["event_id"], "period": "FULL_GAME",
+               "line": None, "settlement_rule": book_rule},
+        now=now)
+    if val.get("probability") is None:
+        link("4_PROBABILITY", False,
+             refusal=(val.get("refusals") or ["DEVIG_REFUSED"])[0],
+             why=val.get("why"), all_refusals=val.get("refusals"),
+             age_s=val.get("age_s"), max_age_s=val.get("max_age_s"),
+             observed_at=val.get("observed_at"),
+             asked_for=payout_event_held,
+             outcomes_priced=val.get("outcomes_priced"),
+             expected_outcomes=val.get("expected_outcomes"))
+        return out
+    link("4_PROBABILITY", True, probability=val["probability"],
+         probability_event=val.get("mapped_outcome"),
+         mapping_match=val.get("mapping_match"),
+         devig_method=val.get("devig_method"),
+         overround=val.get("overround"), age_s=val.get("age_s"),
+         max_age_s=val.get("max_age_s"),
+         observed_at=val.get("observed_at"),
+         aged_against="THE BOOKMAKER'S OWN observed_at")
+    # THE ROW SHAPE `bettor_hold_value` ALREADY CHECKS, built from this
+    # pull rather than read from the entry lane's table. Eligibility is
+    # ELIGIBLE by construction and the identity fields come from the two
+    # independent sources link 2 reconciled -- there is no third opinion
+    # here to adopt.
+    out["probability_row"] = {
+        "id": None, "pulled": True,
+        "provider": devig.PROVIDER, "book": devig.BOOK,
+        "devig_method": val.get("devig_method"), "version": devig.VERSION,
+        "experiment_id": MANAGED_INPUT_VERSION,
+        "us_market_slug": vid["us_market_slug"],
+        "mapping_match": val.get("mapping_match"),
+        "mapped_outcome": val.get("mapped_outcome"),
+        "overround": val.get("overround"),
+        "outcomes_priced": val.get("outcomes_priced"),
+        "expected_outcomes": val.get("expected_outcomes"),
+        "outcome_books": (quote.get("depth") or {}).get(
+            str(val.get("mapped_outcome"))),
+        "eligibility": "ELIGIBLE",
+        "payout_event": payout_event_held,
+        "probability_event": val.get("mapped_outcome"),
+        "payout_is_complement": False,
+        "buy_intent": intent,
+        "matched_side_norm": vid.get("matched_side_norm"),
+        "resolver_asked_for": payout_event_held,
+        "ladder_side": vid.get("ladder_side"),
+        "probability": val["probability"],
+        "observed_at": val.get("observed_at"),
+        "received_at": val.get("received_at"),
+        "settlement_rule": book_rule,
+        "event_key": quote["event_id"],
+    }
+    out["identity_matched_independently"] = True
+
+    # ── 5 · THE EXECUTABLE EXIT, off the ladder a close consumes ─────
+    reader = read_book
+    if reader is None:
+        from .ext_pinnacle_loop import _read_book_blocking as reader
+    try:
+        book = await asyncio.to_thread(reader, vid["us_market_slug"])
+    except Exception as exc:                                   # noqa: BLE001
+        link("5_EXIT_LADDER", False, refusal="VENUE_BOOK_READ_RAISED",
+             why="%s: %s" % (type(exc).__name__, exc),
+             us_market_slug=vid["us_market_slug"])
+        out["book_available"] = False
+        out["available"] = True          # HOLD is still priced
+        return out
+    md = (book or {}).get("marketData")
+    if md is None:
+        link("5_EXIT_LADDER", False, refusal="VENUE_BOOK_UNREADABLE",
+             why=("the venue read returned no marketData: %s"
+                  % (book or {}).get("error")),
+             diagnostic=(book or {}).get("diagnostic"),
+             us_market_slug=vid["us_market_slug"])
+        out["book_available"] = False
+        out["available"] = True
+        return out
+    xl = bs.exit_ladder(md, held_intent=intent)
+    if not xl.get("ok"):
+        link("5_EXIT_LADDER", False,
+             refusal=xl.get("refusal") or bs.R_NO_EXIT_SIDE,
+             why=xl.get("why"), us_market_slug=vid["us_market_slug"])
+        out["book_available"] = False
+        out["available"] = True
+        return out
+    link("5_EXIT_LADDER", True, exit_price=xl["best_exit_price"],
+         complement_price=xl["best_complement_price"],
+         size_at_best=xl["size_at_best"],
+         side_consumed=xl.get("side_consumed"),
+         levels=len(xl.get("levels") or []))
+    out["exit_ladder"] = xl
+    out.update(
+        available=True, book_available=True,
+        held_is_long=not bs.is_short_intent(intent),
+        bid=xl["best_exit_price"], bid_size=xl["size_at_best"],
+        last_price=xl["best_exit_price"],
+        complement_ask=xl["best_complement_price"],
+        complement_ask_size=xl["size_at_best"],
+        sale_ladder=bs.as_sale_ladder(xl),
+        settlement_semantics=book_rule,
+        price_denomination={
+            "bid": "EXIT PROCEEDS per contract for the held exposure",
+            "complement_ask": "COST per contract to neutralise it",
+            "relation": bs.EXIT_RELATION,
+            "side_consumed": xl.get("side_consumed")},
+        input_labels={
+            "ev_hold": "EXTERNAL_LABELLED_PROBABILITY (%s/%s), PULLED "
+                       "FOR THIS DECISION" % (devig.PROVIDER,
+                                              val.get("devig_method")),
+            "bid": "OBSERVED venue ladder, exit proceeds",
+            "complement_ask": "OBSERVED venue ladder, neutralising cost",
+            "payout_event": "%s + %s, cross-checked"
+                            % (ident["basis"], vid.get("resolver")),
+            "book_read_at": now,
+            "probability_pulled_at": now,
+            "probability_age_s": val.get("age_s"),
+        })
+    return out
+
+
 # THE HOLD VALUE IS NOT BUILT HERE ANY MORE, AND THAT IS THE FIX.
 #
 # `_ev_at(snapshot, at)` used to live at this spot. It valued holding
@@ -726,7 +1166,7 @@ _NEW_PRINTS_SQL = """
 
 
 async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
-                                now=None) -> dict:
+                                now=None, odds=None) -> dict:
     """Re-evaluate positions that are already open. Never raises."""
     import time as _t
 
@@ -734,8 +1174,17 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
     started = _t.monotonic()
     out = {"phase": "CONTINUING_MANAGEMENT", "at": wall,
            "examined": 0, "managed": 0, "acted": 0, "failed": 0,
-           "no_inputs": 0, "deferred_budget": 0,
-           "budget_s": MANAGE_BUDGET_S, "results": []}
+           "no_inputs": 0, "deferred_budget": 0, "priced_holds": 0,
+           "budget_s": MANAGE_BUDGET_S, "results": [],
+           "input_source": MANAGED_INPUT_VERSION,
+           "first_failing_links": {}}
+    # ONE ODDS BUDGET FOR THE WHOLE BATCH. A provider request returns
+    # every event of a sport key, so positions in one family share it and
+    # the cost is per FAMILY, not per position. The ceiling is on the
+    # payload so a pull that was not made cannot be read as a fixture the
+    # provider does not carry.
+    odds = odds if odds is not None else ManagedOdds(
+        api_key=os.environ.get("EDGE_ODDS_API_KEY"), now=wall)
     try:
         open_pos = await store.open_positions(
             conn, experiment_id=experiment_id, limit=limit)
@@ -758,13 +1207,20 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
         pid = pos["position_id"]
         try:
             rows = await store.load_position(conn, pid)
-            ci = await challenger_inputs_for(
+            # THE HELD POSITION'S OWN INPUTS, OBTAINED FOR THIS DECISION.
+            # Reading the entry lane's table made a priced decision depend
+            # on a 900 s writer coinciding with a 30 s freshness rule; the
+            # pull asks the same adapters at the decision's own instant.
+            ci = await managed_inputs_for(
                 conn, condition_id=pos["condition_id"],
                 outcome_index=int(pos["outcome_index"]),
-                seed_qty=float(pos["seed_qty"]),
-                seed_price=float(pos["seed_price"]))
+                odds=odds, now=wall)
             ci["seed_qty"] = float(pos["seed_qty"])
             ci["seed_price"] = float(pos["seed_price"])
+            if ci.get("first_failing_link"):
+                _k = str((ci["first_failing_link"] or {}).get("link"))
+                out["first_failing_links"][_k] = \
+                    out["first_failing_links"].get(_k, 0) + 1
             # NO PRE-COMPUTED HOLD VALUE. `manage_open_position`
             # reloads the portfolio and applies newly admitted fills
             # BEFORE any decision, and `decide_challenger` values HOLD
@@ -787,6 +1243,19 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
                 unavailable=(None if usable else
                              {"reason": ci.get("reason"),
                               "why": ci.get("why")}),
+                # THE CAUSE, NOT THE SUMMARY. Whatever the outcome, the
+                # chain that produced it -- every link, its identifiers
+                # and its timestamps -- is persisted with the decision,
+                # so `EV_HOLD_NOT_IDENTIFIED` is never the whole story a
+                # reader gets.
+                input_chain={"version": ci.get("version"),
+                             "source": ci.get("input_source"),
+                             "read_at": ci.get("read_at"),
+                             "chain": ci.get("chain"),
+                             "first_failing_link":
+                                 ci.get("first_failing_link"),
+                             "odds_request": ci.get("odds_request"),
+                             "market_row": ci.get("market_row")},
                 decisions_so_far=rows["decisions_so_far"])
             wrote = await store.persist_run(
                 conn, rec, experiment_id=experiment_id,
@@ -795,6 +1264,17 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
             d = rec["all_decisions"][0]
             out["managed"] += 1
             out["acted"] += 1 if d.get("acted") else 0
+            # A PRICED HOLD IS THE THING THIS PHASE EXISTS FOR, so it is
+            # counted apart from a decision that merely happened. Read
+            # from the RANKED alternatives, which is where the store reads
+            # `hold_value_usd` from too -- counting a different number
+            # here than the one persisted is how a census starts
+            # disagreeing with the rows it describes.
+            _hold = None
+            for _c in (d.get("alternatives") or ()):
+                if _c.get("action") == "HOLD":
+                    _hold = _c.get("value_usd")
+            out["priced_holds"] += 1 if _hold is not None else 0
             out["results"].append({
                 "position_id": pid,
                 "decision_no": rows["decisions_so_far"] + 1,
@@ -803,6 +1283,11 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
                 "state": d.get("operating_state"),
                 "input_available": bool(usable),
                 "input_reason": ci.get("reason"),
+                "first_failing_link": (ci.get("first_failing_link") or
+                                       {}).get("link"),
+                "probability": (ci.get("probability_row") or {}).get(
+                    "probability"),
+                "hold_value_usd": _hold,
                 "bid": ci.get("bid"),
                 "complement_ask": ci.get("complement_ask"),
                 "prints_applied": rec["steps"]["MANAGE"]["prints_applied"],
@@ -818,6 +1303,8 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
                                    "error": "%s: %s"
                                             % (type(exc).__name__, exc)})
     out["elapsed_s"] = round(_t.monotonic() - started, 3)
+    out["odds_calls_made"] = getattr(odds, "calls_made", None)
+    out["odds_spent"] = getattr(odds, "spent", None)
     # EVERY OPEN POSITION ACCOUNTED FOR, so a reader cannot mistake a
     # budget deferral for a position that went unmanaged.
     out["accounted"] = (out["examined"] ==

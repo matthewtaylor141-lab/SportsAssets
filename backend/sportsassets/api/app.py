@@ -1817,6 +1817,28 @@ async def command_rn1x_trace(position_id: str, response: Response) -> dict:
     return await CR.trace(await get_pool(), position_id)
 
 
+@app.get("/api/command/rn1x/input-chain/{position_id:path}",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_input_chain(position_id: str,
+                                   response: Response) -> dict:
+    """WHY a held position has no priced hold: the FIRST failing link.
+
+    Repeated blind holds are an operational blocker, and the stored
+    `EV_HOLD_NOT_IDENTIFIED` is a summary rather than a cause. This walks
+    the management phase's own input chain -- held exposure, venue
+    contract and intent, provider fixture, probability, exit ladder -- and
+    returns each link with its identifiers, timestamps and refusal.
+
+    It writes nothing. It does make the same outbound calls the decision
+    makes: at most two odds requests and one venue book read.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    return await CR.input_chain(await get_pool(), position_id)
+
+
 @app.get("/api/command/rn1x/external/probe",
          dependencies=[Depends(require_command)])
 async def command_rn1x_external_probe(response: Response) -> dict:
