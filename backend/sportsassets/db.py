@@ -178,9 +178,49 @@ async def close_pool() -> None:
         _pool = None
 
 
-async def heartbeat(service: str, status: str = "ok", detail: dict | None = None) -> None:
-    """Record a service heartbeat (used by health checks and admin dashboard)."""
+async def heartbeat(service: str, status: str = "ok", detail: dict | None = None,
+                    con=None) -> None:
+    """Record a service heartbeat (used by health checks and admin dashboard).
+
+    `con` LETS A CALLER THAT ALREADY HOLDS A CONNECTION SKIP THE ACQUIRE.
+
+    THE FAILURE THIS IS FOR (2026-09-24, acceptance run 27). The four rn1x
+    loops each hold ONE session-scoped connection for their whole life --
+    they must, because the advisory lock that makes them the single writer
+    dies with the session -- out of a pool whose max_size is 10. Six slots
+    are left for request traffic AND for this function. Under a desk sweep
+    the pool saturates, this acquire hits HEARTBEAT_TIMEOUT_S, and the
+    cycle summary is lost:
+
+        rn1x_shadow.py:783 in run -> heartbeat(SERVICE, ...)
+        db.py:191 in heartbeat -> pool.acquire(timeout=HEARTBEAT_TIMEOUT_S)
+        TimeoutError
+
+    Seven of those in three hours, six of them BEFORE the release that
+    exposed it, so this is chronic and not new. The cost is not only a
+    missing heartbeat: `flow` -- the fetched/deferred/refused/written
+    reconciliation -- travels in that record, so a starved pool erases the
+    accounting and the lane reads as though it examined nothing.
+
+    `ext_pinnacle_loop` and `rn1x_model_loop` already write their
+    heartbeats on the connection they hold. This gives the shared helper
+    the same option, so the loop that has a connection does not queue for
+    a second one.
+    """
     import json
+
+    if con is not None:
+        await con.execute(
+            """
+            INSERT INTO service_heartbeats (service, status, detail, beat_at)
+            VALUES ($1, $2, $3::jsonb, now())
+            ON CONFLICT (service) DO UPDATE
+                SET status = EXCLUDED.status, detail = EXCLUDED.detail,
+                    beat_at = now()
+            """,
+            service, status, json.dumps(detail or {}),
+            timeout=HEARTBEAT_TIMEOUT_S)
+        return
 
     pool = await get_pool()
     # bounded on both legs (see HEARTBEAT_TIMEOUT_S): the acquire, so a

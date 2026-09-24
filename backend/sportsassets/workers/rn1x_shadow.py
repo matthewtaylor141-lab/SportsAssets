@@ -724,11 +724,15 @@ async def run(pool_factory=None) -> None:
             # `flow {}` and `accounted null` for exactly that reason, and
             # the flow accounting it was meant to show had been deployed
             # for an hour.
+            # `con=conn` for the same reason as the cycle beat below: this
+            # loop is already holding a connection, and asking the shared
+            # pool for a second one is what starves request traffic.
             await heartbeat(STANDBY_SERVICE, "idle",
                             {"state": "STANDBY_NOT_THE_WRITER",
                              "why": ("another process holds the rn1x "
                                      "writer lock. This process writes "
-                                     "nothing and retries")})
+                                     "nothing and retries")},
+                            con=conn)
             await asyncio.sleep(IDLE_S)
         log.info("rn1x shadow: writer lock held")
         while True:
@@ -780,7 +784,12 @@ async def run(pool_factory=None) -> None:
                 idle = res["state"] in ("STOPPED", "BLOCKED",
                                         "IDLE_NO_CANDIDATES")
                 delay = IDLE_S if idle else TICK_S
-                await heartbeat(SERVICE, "idle" if idle else "ok", res)
+                # ON THE CONNECTION THIS LOOP ALREADY HOLDS. Acquiring a
+                # second one from the shared pool is what lost this
+                # record -- and with it `flow` -- seven times in three
+                # hours, including during acceptance run 27.
+                await heartbeat(SERVICE, "idle" if idle else "ok", res,
+                                con=conn)
             except asyncio.CancelledError:
                 raise
             except Exception as exc:                           # noqa: BLE001
@@ -789,9 +798,18 @@ async def run(pool_factory=None) -> None:
                 try:
                     await heartbeat(SERVICE, "error",
                                     {"error": "%s: %s"
-                                     % (type(exc).__name__, exc)})
+                                     % (type(exc).__name__, exc)},
+                                    con=conn)
                 except Exception:                              # noqa: BLE001
-                    pass
+                    # The held connection may be the casualty. Fall back
+                    # to the pool so an error heartbeat is still attempted
+                    # rather than silently dropped.
+                    try:
+                        await heartbeat(SERVICE, "error",
+                                        {"error": "%s: %s"
+                                         % (type(exc).__name__, exc)})
+                    except Exception:                          # noqa: BLE001
+                        pass
             await asyncio.sleep(delay)
 
 
