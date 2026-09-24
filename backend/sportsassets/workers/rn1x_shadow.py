@@ -695,13 +695,74 @@ async def challenger_inputs_for(conn, *, condition_id, outcome_index,
 # in for a cause.
 MANAGED_INPUT_VERSION = "BETTOR_MANAGED_INPUT_PULL_V1"
 
+#: THE ODDS RULE, IMPORTED. Restating 30.0 here is how two numbers drift.
+from .. import bettor_pinnacle_devig as _devig_rule        # noqa: E402
+_DEVIG_MAX_AGE_S = _devig_rule.MAX_QUOTE_AGE_S
+
 #: THE BUDGET IS THE CADENCE. One provider request covers every event of
 #: one sport key, so a managed pull costs nothing per position -- only per
 #: FAMILY, and only for families that actually hold inventory. At most
-#: this many requests per management cycle, and never twice for the same
-#: key inside the interval.
+#: this many requests per management cycle.
 MANAGED_ODDS_CALLS_PER_CYCLE = 3
+
+#: AND THIS ONE BINDS ACROSS CYCLES, which is the part a per-batch cache
+#: cannot do. It was declared and unused: every cycle built a fresh
+#: `ManagedOdds`, so the interval was enforced only WITHIN a batch and two
+#: cycles 10 s apart -- or a cycle and a diagnostic read -- each spent
+#: their own request. The gate below is process-wide and every caller goes
+#: through it, the read-only diagnostic included, because provider quota
+#: does not care which of our code paths spent it.
 MANAGED_ODDS_MIN_INTERVAL_S = 45.0
+
+#: A payload already in hand is reused instead of re-requested, but ONLY
+#: while it can still satisfy the odds rule. The ceiling is the odds bound
+#: itself, not the request interval: a cached payload older than the
+#: freshness rule is of no use to a decision, and reusing one for longer
+#: would be widening the threshold by the back door. The de-vig still ages
+#: the quote independently, so a reuse inside this window can still be
+#: refused -- which is the correct order of authority.
+MANAGED_ODDS_CACHE_TTL_S = float(_DEVIG_MAX_AGE_S)
+
+#: PROCESS-WIDE, shared by the management cycles and the diagnostic read.
+_ODDS_LAST_AT: dict = {}
+_ODDS_CACHE: dict = {}
+R_MANAGED_PACED = "MANAGED_ODDS_PACED_DEFERRED_BY_THE_DECLARED_INTERVAL"
+
+
+def odds_gate(sport_key, *, now, min_interval_s=None) -> dict:
+    """May this caller spend a provider request for `sport_key` now?
+
+    Non-blocking ON PURPOSE. A management phase with a 45 s wall-clock
+    budget must not sleep 45 s inside it to wait for a quota slot: it
+    defers, says so by name, and the next cycle finds the position first.
+    """
+    gap = float(MANAGED_ODDS_MIN_INTERVAL_S if min_interval_s is None
+                else min_interval_s)
+    last = _ODDS_LAST_AT.get(str(sport_key))
+    # A CLOCK THAT WENT BACKWARDS MUST NOT LOCK THE LANE OUT. An NTP step
+    # or a restored snapshot can leave a future stamp behind, and a gate
+    # that then refuses forever would starve every decision of inputs
+    # until someone noticed. Allowing the request costs ONE request and
+    # re-anchors the interval.
+    if last is not None and float(now) < float(last):
+        return {"ok": True, "last_at": float(last), "min_interval_s": gap,
+                "clock_went_backwards": True}
+    if last is None or float(now) - float(last) >= gap:
+        return {"ok": True, "last_at": last, "min_interval_s": gap}
+    return {"ok": False, "refusal": R_MANAGED_PACED, "last_at": float(last),
+            "min_interval_s": gap,
+            "next_allowed_in_s": round(gap - (float(now) - float(last)), 3),
+            "why": ("a provider request for %s was spent %.1f s ago and the "
+                    "declared interval is %.0f s. Deferring costs this "
+                    "cycle its probability; spending it would breach a "
+                    "budget that is the whole reason the cadence is "
+                    "declared" % (sport_key, float(now) - float(last), gap))}
+
+
+def odds_gate_reset():
+    """Tests only: forget the process-wide pacing and cache state."""
+    _ODDS_LAST_AT.clear()
+    _ODDS_CACHE.clear()
 
 R_MANAGED_NO_MARKET_ROW = "MARKET_ROW_NOT_FOUND_FOR_THE_HELD_CONDITION"
 R_MANAGED_MARKET_GONE = "THE_HELD_MARKET_IS_CLOSED_OR_RESOLVED"
@@ -747,14 +808,23 @@ class ManagedOdds:
     """
 
     def __init__(self, *, api_key=None, calls=MANAGED_ODDS_CALLS_PER_CYCLE,
-                 fetch=None, now=None):
+                 fetch=None, now=None, clock=None,
+                 min_interval_s=None):
+        import time as _tt
+
         self.api_key = api_key
         self.calls_left = int(calls)
         self.calls_made = 0
         self._fetch = fetch
         self._cache: dict = {}
-        self._now = now
+        # THE CLOCK IS THE CALLER'S, so the pacing a test asserts is the
+        # pacing production performs.
+        self._now = (clock if clock is not None
+                     else (lambda: float(now)) if now is not None
+                     else _tt.time)
+        self.min_interval_s = min_interval_s
         self.spent: list = []
+        self.credits_remaining = None
 
     @property
     def credential_present(self) -> bool:
@@ -777,10 +847,40 @@ class ManagedOdds:
             hit = self._cache.get(key)
             if hit is not None:
                 out["payloads"].append(hit)
+                out.setdefault("reused", []).append(
+                    {"sport_key": key, "from": "THIS_BATCH"})
                 continue
+            # A PAYLOAD THIS PROCESS ALREADY HOLDS, while it can still
+            # satisfy the odds rule. Cheaper than a request and no wider
+            # than the rule: the de-vig ages the quote regardless.
+            shared = _ODDS_CACHE.get(key)
+            if shared is not None:
+                age = self._now() - float(shared[0])
+                if age <= MANAGED_ODDS_CACHE_TTL_S:
+                    self._cache[key] = shared[1]
+                    out["payloads"].append(shared[1])
+                    out.setdefault("reused", []).append(
+                        {"sport_key": key, "from": "PROCESS_CACHE",
+                         "cache_age_s": round(age, 3)})
+                    continue
             if self.calls_left <= 0:
                 out["refusals"].append(R_MANAGED_BUDGET)
                 break
+            # THE DECLARED CROSS-CYCLE INTERVAL, enforced here and only
+            # here, so every caller obeys the same one.
+            gate = odds_gate(key, now=self._now(),
+                             min_interval_s=self.min_interval_s)
+            if not gate["ok"]:
+                out["refusals"].append(gate["refusal"])
+                out.setdefault("paced", []).append(
+                    {"sport_key": key,
+                     "next_allowed_in_s": gate["next_allowed_in_s"],
+                     "min_interval_s": gate["min_interval_s"],
+                     "why": gate["why"]})
+                continue
+            # CLAIMED BEFORE THE AWAIT, so two concurrent callers cannot
+            # both pass the gate on the same slot.
+            _ODDS_LAST_AT[key] = self._now()
             self.calls_left -= 1
             self.calls_made += 1
             out["calls_made"] += 1
@@ -792,20 +892,48 @@ class ManagedOdds:
                        "error": "%s: %s" % (type(exc).__name__, exc)}
             self.spent.append({"sport_key": key, "ok": bool(got.get("ok")),
                                "events": len(got.get("events") or []),
+                               "at": self._now(),
+                               "credits_used": got.get("credits_used"),
                                "credits_remaining":
                                    got.get("credits_remaining")})
+            if got.get("credits_remaining") is not None:
+                self.credits_remaining = got.get("credits_remaining")
             if not got.get("ok"):
                 out["refusals"].append(R_MANAGED_PROVIDER)
                 out["provider_status"] = got.get("status")
                 continue
             self._cache[key] = got
+            _ODDS_CACHE[key] = (self._now(), got)
             out["payloads"].append(got)
+        out["credits_remaining"] = self.credits_remaining
         return out
+
+
+def anchored_clock(now=None, clock=None):
+    """A clock that starts at `now` and advances with REAL elapsed time.
+
+    The chain needs four instants that genuinely differ, and the tests
+    need to control how far apart they are. Freezing everything at the
+    caller's `now` would make a delayed provider look instantaneous --
+    which is the defect this exists to expose -- and ignoring `now`
+    entirely would break every fixture that works in a declared epoch.
+    So `now` anchors the timeline and the real clock supplies the deltas.
+    """
+    import time as _tt
+
+    src = clock or _tt.time
+    base = src()
+    start = float(now) if now is not None else base
+
+    def tick():
+        return start + (src() - base)
+
+    return tick
 
 
 async def managed_inputs_for(conn, *, condition_id, outcome_index,
                              odds=None, now=None, read_book=None,
-                             resolve_identity=None):
+                             resolve_identity=None, clock=None):
     """The six links for ONE held position, with the first failure named.
 
     Returns the same input keys `challenger_inputs_for` returns when the
@@ -821,10 +949,32 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
 
     from . import ext_pinnacle_loop as EXT
 
-    now = float(now if now is not None else _t.time())
+    tick = anchored_clock(now, clock)
+    started = tick()
+    # FOUR CLOCKS, NEVER COLLAPSED INTO ONE.
+    #
+    #   provider_observed_at  the BOOKMAKER's own stamp on the quote
+    #   provider_received_at  when the payload reached THIS process
+    #   book_read_at          when the VENUE's book reply reached us
+    #   inputs_ready_at       when the last required input had arrived
+    #
+    # The caller then takes its decision at its OWN instant, later than
+    # all of these, and ages the probability against that. Reusing one
+    # batch timestamp for all of them is how a quote that went stale
+    # between the fetch and the decision would be priced as fresh -- a
+    # pull is NOT "fresh by construction".
+    clocks = {"pull_started_at": started, "provider_observed_at": None,
+              "provider_received_at": None, "book_read_at": None,
+              "inputs_ready_at": None,
+              "reading": ("each stamp is the instant that input actually "
+                          "arrived. Freshness is measured from "
+                          "provider_observed_at to the DECISION's clock, "
+                          "not to any of these")}
+    now = started
     out = {"available": False, "version": MANAGED_INPUT_VERSION,
-           "read_at": now, "condition_id": condition_id,
+           "read_at": started, "condition_id": condition_id,
            "outcome_index": int(outcome_index), "chain": [],
+           "clocks": clocks,
            "first_failing_link": None, "input_source": "PULLED_FOR_THIS_DECISION"}
 
     def link(name, ok, **facts):
@@ -943,6 +1093,11 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
     out["odds_request"] = {"family": family,
                            "sport_keys": got.get("sport_keys"),
                            "calls_made": got.get("calls_made"),
+                           "reused": got.get("reused"),
+                           "paced": got.get("paced"),
+                           "credits_remaining": got.get("credits_remaining"),
+                           "min_interval_s": MANAGED_ODDS_MIN_INTERVAL_S,
+                           "cache_ttl_s": MANAGED_ODDS_CACHE_TTL_S,
                            "refusals": got.get("refusals")}
     quote = None
     ev = None
@@ -983,6 +1138,17 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
              market_title=m.get("title"),
              provider_refusals=got.get("refusals"))
         return out
+    clocks["provider_observed_at"] = devig._epoch(quote.get("observed_at"))
+    clocks["provider_received_at"] = (
+        None if quote.get("received_at") is None
+        else float(quote["received_at"]))
+    if (clocks["provider_observed_at"] is not None
+            and clocks["provider_received_at"] is not None):
+        # THE PROVIDER'S OWN LAG, MEASURED. It is spent out of the same
+        # 30 s budget as our latency, and a provider whose lag alone
+        # exceeds the bound cannot serve this rule at any cadence.
+        clocks["provider_lag_s"] = round(
+            clocks["provider_received_at"] - clocks["provider_observed_at"], 3)
     link("3_PROVIDER_FIXTURE", True, provider_event_id=quote["event_id"],
          home=quote.get("home"), away=quote.get("away"),
          commence_time=quote.get("commence_time"),
@@ -998,6 +1164,8 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
                 "selection": payout_event_held,
                 "event_key": quote["event_id"], "period": "FULL_GAME",
                 "line": None, "settlement_rule": book_rule}
+    asked_at = tick()
+    clocks["probability_asked_at"] = asked_at
     val = devig.valuation(
         contract=contract,
         quote={"book": devig.BOOK, "outcomes": quote["prices"],
@@ -1005,7 +1173,7 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
                "received_at": quote["received_at"],
                "event_key": quote["event_id"], "period": "FULL_GAME",
                "line": None, "settlement_rule": book_rule},
-        now=now)
+        now=asked_at)
     if val.get("probability") is None:
         link("4_PROBABILITY", False,
              refusal=(val.get("refusals") or ["DEVIG_REFUSED"])[0],
@@ -1077,6 +1245,7 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
         from .ext_pinnacle_loop import _read_book_blocking as reader
     try:
         book = await asyncio.to_thread(reader, vid["us_market_slug"])
+        clocks["book_read_at"] = tick()
     except Exception as exc:                                   # noqa: BLE001
         link("5_EXIT_LADDER", False, refusal="VENUE_BOOK_READ_RAISED",
              why="%s: %s" % (type(exc).__name__, exc),
@@ -1127,10 +1296,13 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
             "complement_ask": "OBSERVED venue ladder, neutralising cost",
             "payout_event": "%s + %s, cross-checked"
                             % (ident["basis"], vid.get("resolver")),
-            "book_read_at": now,
-            "probability_pulled_at": now,
-            "probability_age_s": val.get("age_s"),
+            "clocks": dict(clocks),
+            "probability_age_s_at_pull": val.get("age_s"),
+            "freshness_is_rechecked_at": ("the DECISION's own clock. This "
+                                          "age is the age at the PULL"),
         })
+    clocks["inputs_ready_at"] = tick()
+    out["inputs_ready_at"] = clocks["inputs_ready_at"]
     return out
 
 
@@ -1190,11 +1362,12 @@ _NEW_PRINTS_SQL = """
 
 
 async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
-                                now=None, odds=None) -> dict:
+                                now=None, odds=None, clock=None) -> dict:
     """Re-evaluate positions that are already open. Never raises."""
     import time as _t
 
-    wall = float(now if now is not None else _t.time())
+    tick = anchored_clock(now, clock)
+    wall = tick()
     started = _t.monotonic()
     out = {"phase": "CONTINUING_MANAGEMENT", "at": wall,
            "examined": 0, "managed": 0, "acted": 0, "failed": 0,
@@ -1238,9 +1411,20 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
             ci = await managed_inputs_for(
                 conn, condition_id=pos["condition_id"],
                 outcome_index=int(pos["outcome_index"]),
-                odds=odds, now=wall)
+                odds=odds, now=tick(), clock=clock)
             ci["seed_qty"] = float(pos["seed_qty"])
             ci["seed_price"] = float(pos["seed_price"])
+            # THE DECISION'S OWN INSTANT, READ AFTER THE INPUTS ARRIVED.
+            #
+            # `wall` is when this batch STARTED. Using it as the decision
+            # clock dated every decision to before its own inputs and
+            # aged the probability against the wrong instant -- so a quote
+            # that was fresh when the fetch began and stale by the time the
+            # decision was taken would have been priced as fresh. The
+            # decision is stamped here, and `decide_challenger` re-ages the
+            # probability against THIS clock.
+            at = tick()
+            input_latency_s = round(at - wall, 3)
             if ci.get("first_failing_link"):
                 _k = str((ci["first_failing_link"] or {}).get("link"))
                 out["first_failing_links"][_k] = \
@@ -1256,6 +1440,9 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
             # PRINTS SINCE THE LAST DECISION, not since entry: the
             # earlier ones were already offered to the orders that
             # existed then, and `Consumption` has them keyed.
+            # THE PRINT WINDOW IS THE POSITION'S OWN HISTORY, not this
+            # batch's clock: prints since the LAST decision on this
+            # position, whenever that was.
             since = float(pos.get("last_decision_at")
                           or pos["decision_ts"])
             prints = [dict(r) for r in
@@ -1263,7 +1450,7 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
                                        pos["condition_id"], since)]
             rec = runner.manage_open_position(
                 position=pos, orders=rows["orders"], fills=rows["fills"],
-                prints=prints, inputs=usable, now=wall,
+                prints=prints, inputs=usable, now=at,
                 unavailable=(None if usable else
                              {"reason": ci.get("reason"),
                               "why": ci.get("why")}),
@@ -1275,6 +1462,11 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
                 input_chain={"version": ci.get("version"),
                              "source": ci.get("input_source"),
                              "read_at": ci.get("read_at"),
+                             # EVERY CLOCK, SEPARATELY, ON THE ROW.
+                             "clocks": ci.get("clocks"),
+                             "inputs_ready_at": ci.get("inputs_ready_at"),
+                             "decided_at": at,
+                             "input_latency_s": input_latency_s,
                              "chain": ci.get("chain"),
                              "first_failing_link":
                                  ci.get("first_failing_link"),
@@ -1314,6 +1506,8 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
                 "hold_value_usd": _hold,
                 "bid": ci.get("bid"),
                 "complement_ask": ci.get("complement_ask"),
+                "decided_at": at,
+                "input_latency_s": input_latency_s,
                 "prints_applied": rec["steps"]["MANAGE"]["prints_applied"],
                 "residual_after": rec["inventory_after"]["residual"],
                 "reconciles": rec["accounting"]["reconciles"],
@@ -1329,6 +1523,9 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
     out["elapsed_s"] = round(_t.monotonic() - started, 3)
     out["odds_calls_made"] = getattr(odds, "calls_made", None)
     out["odds_spent"] = getattr(odds, "spent", None)
+    out["odds_credits_remaining"] = getattr(odds, "credits_remaining", None)
+    out["odds_min_interval_s"] = MANAGED_ODDS_MIN_INTERVAL_S
+    out["odds_cache_ttl_s"] = MANAGED_ODDS_CACHE_TTL_S
     # EVERY OPEN POSITION ACCOUNTED FOR, so a reader cannot mistake a
     # budget deferral for a position that went unmanaged.
     out["accounted"] = (out["examined"] ==

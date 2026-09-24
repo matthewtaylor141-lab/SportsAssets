@@ -75,12 +75,19 @@ def _payload(events, *, received_at):
             "received_at": received_at, "credits_remaining": 6_000_000}
 
 
-def _odds(events, *, received_at=_T0, calls=3):
+def _odds(events, *, received_at=_T0, calls=3, at=None):
     """A ManagedOdds whose provider is this payload, counted like the real
-    one so the budget assertions are about the real budget."""
+    one so the budget assertions are about the real budget.
+
+    `at` anchors its clock to the caller's timeline. Without it the
+    process-wide cache and the pacing gate would be judged against the real
+    wall clock while the decisions run in a declared epoch, and a cached
+    payload would look 9.7 million seconds old (or new).
+    """
     async def fetch(sport_key):
         return _payload(events, received_at=received_at)
-    return W.ManagedOdds(fetch=fetch, calls=calls)
+    return W.ManagedOdds(fetch=fetch, calls=calls,
+                         clock=(None if at is None else (lambda: float(at))))
 
 
 async def _resolver_ok(conn, *, market_row, priced_outcome):
@@ -458,12 +465,14 @@ def test_two_management_cycles_on_one_position_both_price_the_hold():
             c1 = await W.manage_open_positions(
                 c, experiment_id=_EXP, now=_T0 + 10,
                 odds=_odds([_event(observed_at=_T0 + 5)],
-                           received_at=_T0 + 6))
-            # A SECOND CYCLE, its own quote, its own clock.
+                           received_at=_T0 + 6, at=_T0 + 10))
+            # A SECOND CYCLE, its own quote, its own clock. 120 s later,
+            # which is the lane's real cadence and past the declared 45 s
+            # request interval.
             c2 = await W.manage_open_positions(
                 c, experiment_id=_EXP, now=_T0 + 130,
                 odds=_odds([_event(observed_at=_T0 + 125, cubs=1.40)],
-                           received_at=_T0 + 126))
+                           received_at=_T0 + 126, at=_T0 + 130))
             rows = [dict(r) for r in await c.fetch(
                 "SELECT decision_id, selected_action, selected_qty::float8 q,"
                 " hold_value_usd, ev_basis, input_available, operating_state,"
@@ -540,7 +549,7 @@ def test_a_blind_cycle_records_which_link_failed():
             got = await W.manage_open_positions(
                 c, experiment_id=_EXP, now=_T0 + 10,
                 # 400 s old: the odds rule refuses it
-                odds=_odds([_event(observed_at=_T0 - 390)]))
+                odds=_odds([_event(observed_at=_T0 - 390)], at=_T0 + 10))
             row = dict(await c.fetchrow(
                 "SELECT ev_basis, input_available, hold_value_usd,"
                 " input_labels->>'first_failing_link' link,"
@@ -602,3 +611,378 @@ def test_no_venue_contract_still_prices_the_hold_and_refuses_the_exits():
     assert ci.get("bid") is None and ci.get("sale_ladder") is None
     # the FIRST failing link is still the one that failed first
     assert ci["first_failing_link"]["link"] == "2_VENUE_CONTRACT"
+
+
+# ── A PULL IS NOT "FRESH BY CONSTRUCTION" ────────────────────────────
+#
+# The quote can be inside the bound when the fetch STARTS and outside it by
+# the time the decision is taken. There are two distinct ways for that to
+# happen and they are refused in two different places, so both are tested:
+#
+#   a SLOW PROVIDER   the response itself arrives late, so the quote is
+#                     already past the bound when the de-vig asks ->
+#                     refused at link 4 of the PULL;
+#   SLOW LOCAL WORK   the quote is fine at the pull and the remaining work
+#                     (here the venue book read) pushes the DECISION past
+#                     the bound -> the pull succeeds and the DECISION
+#                     refuses.
+#
+# Collapsing either case into one batch timestamp would price a stale
+# quote as fresh.
+
+def _cycle(c, *, base, quote_age, provider_delay=0.0, book_delay=0.0):
+    """One management cycle on a clock we advance inside the provider call
+    and inside the venue read, exactly as real latency would."""
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+
+    moment = {"t": base}
+
+    async def fetch(sport_key):
+        moment["t"] += provider_delay
+        return _payload([_event(observed_at=base - quote_age)],
+                        received_at=moment["t"])
+
+    def read(slug):
+        moment["t"] += book_delay
+        return {"marketData": _BOOK}
+
+    EXT._read_book_blocking = read
+    return W.manage_open_positions(
+        c, experiment_id=_EXP, now=base, clock=lambda: moment["t"],
+        odds=W.ManagedOdds(fetch=fetch, calls=3,
+                           clock=lambda: moment["t"]))
+
+
+@pg
+def test_a_slow_provider_response_is_refused_at_the_pull():
+    """20 s old at the fetch, a 15 s response: 35 s old when the de-vig
+    asks, so link 4 refuses and no probability is adopted."""
+    import asyncpg
+
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        orig_resolve, orig_book = (EXT.resolve_venue_identity,
+                                   EXT._read_book_blocking)
+        EXT.resolve_venue_identity = _resolver_ok
+        try:
+            await _fixture(c)
+            pid = await _position(c)
+            got = await _cycle(c, base=_T0, quote_age=20.0,
+                               provider_delay=15.0)
+            row = dict(await c.fetchrow(
+                "SELECT hold_value_usd, input_available, ev_basis,"
+                " input_labels->>'first_failing_link' link,"
+                " input_labels->>'first_failing_refusal' refusal,"
+                " input_chain->'first_failing_link' ffl"
+                " FROM rn1x_decisions WHERE position_id = $1", pid))
+            return got, row
+        finally:
+            EXT.resolve_venue_identity = orig_resolve
+            EXT._read_book_blocking = orig_book
+            await c.close()
+
+    got, row = asyncio.run(run())
+    assert got["priced_holds"] == 0
+    assert got["first_failing_links"] == {"4_PROBABILITY": 1}, got
+    assert row["hold_value_usd"] is None
+    assert row["input_available"] is False
+    assert row["link"] == "4_PROBABILITY"
+    assert row["refusal"] == "QUOTE_STALE"
+    ffl = row["ffl"]
+    if isinstance(ffl, str):
+        import json
+        ffl = json.loads(ffl)
+    assert ffl["age_s"] == pytest.approx(35.0, abs=0.01)
+    assert ffl["max_age_s"] == 30.0
+
+
+@pg
+def test_local_latency_after_a_fresh_pull_is_refused_at_the_decision():
+    """THE CASE THAT NEEDS THE SEPARATE CLOCKS. The quote is 20 s old when
+    the de-vig asks -- inside the rule, so the pull succeeds and hands over
+    a probability -- and the venue read then costs 12 s. At the decision
+    the quote is 32 s old and the DECISION refuses it."""
+    import asyncpg
+
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        orig_resolve, orig_book = (EXT.resolve_venue_identity,
+                                   EXT._read_book_blocking)
+        EXT.resolve_venue_identity = _resolver_ok
+        try:
+            await _fixture(c)
+            pid = await _position(c)
+            # fast first, to prove the same inputs DO price when prompt
+            quick = await _cycle(c, base=_T0, quote_age=20.0,
+                                 provider_delay=0.0, book_delay=1.0)
+            slow = await _cycle(c, base=_T0 + 300, quote_age=20.0,
+                                provider_delay=0.0, book_delay=12.0)
+            rows = [dict(r) for r in await c.fetch(
+                "SELECT decision_id, hold_value_usd, ev_basis,"
+                " input_available,"
+                " input_freshness->>'age_from_observation_s' age,"
+                " input_freshness->>'bound_s' bound,"
+                " input_chain->'clocks' clocks,"
+                " input_chain->>'input_latency_s' latency,"
+                " input_chain->>'decided_at' decided_at,"
+                " input_chain->'first_failing_link' ffl"
+                " FROM rn1x_decisions WHERE position_id = $1"
+                " ORDER BY decision_ts, decision_id", pid)]
+            return quick, slow, rows
+        finally:
+            EXT.resolve_venue_identity = orig_resolve
+            EXT._read_book_blocking = orig_book
+            await c.close()
+
+    quick, slow, rows = asyncio.run(run())
+
+    assert quick["priced_holds"] == 1, "21 s at the decision is inside 30 s"
+    assert slow["priced_holds"] == 0, (
+        "32 s at the decision is outside it, and the pull cannot know that "
+        "because the pull happened 12 s earlier")
+    assert slow["no_inputs"] == 0, (
+        "the PULL succeeded and the DECISION refused -- different findings, "
+        "and the census must not merge them")
+    assert slow["first_failing_links"] == {}, (
+        "no link failed: the chain completed and then time passed")
+    assert len(rows) == 2, rows
+    ok, refused = rows
+
+    assert ok["hold_value_usd"] is not None
+    assert float(ok["age"]) == pytest.approx(21.0, abs=0.01)
+    assert refused["hold_value_usd"] is None
+    assert refused["input_available"] is False
+    assert "STALE" in (refused["ev_basis"] or ""), refused
+    assert float(refused["age"]) == pytest.approx(32.0, abs=0.01)
+    assert float(refused["bound"]) == 30.0
+    # jsonb null, not SQL NULL: the column carries the chain and the chain
+    # records no failure
+    assert refused["ffl"] in (None, "null"), "the chain itself did not fail"
+    assert float(refused["latency"]) == pytest.approx(12.0, abs=0.01)
+
+    # FOUR CLOCKS, SEPARATE, AND THEY DISAGREE.
+    cl = refused["clocks"]
+    if isinstance(cl, str):
+        import json
+        cl = json.loads(cl)
+    base = _T0 + 300
+    assert cl["pull_started_at"] == pytest.approx(base)
+    assert cl["provider_observed_at"] == pytest.approx(base - 20)
+    assert cl["provider_received_at"] == pytest.approx(base)
+    assert cl["book_read_at"] == pytest.approx(base + 12)
+    assert cl["inputs_ready_at"] >= cl["book_read_at"]
+    assert float(refused["decided_at"]) >= cl["inputs_ready_at"], (
+        "a decision cannot predate the inputs it used")
+    assert len({cl["provider_observed_at"], cl["provider_received_at"],
+                cl["book_read_at"]}) == 3, (
+        "three distinct instants, not one stamp copied three times")
+
+
+# ── THE DECLARED INTERVAL BINDS ACROSS CYCLES ────────────────────────
+#
+# MANAGED_ODDS_MIN_INTERVAL_S was declared and unused: every cycle built a
+# fresh ManagedOdds, so the interval bound only WITHIN a batch. Two cycles
+# 10 s apart -- or a cycle and the diagnostic read -- each spent their own
+# request against a quota that does not care which code path spent it.
+
+@pytest.fixture(autouse=True)
+def _forget_the_process_pacing():
+    W.odds_gate_reset()
+    yield
+    W.odds_gate_reset()
+
+
+def test_the_gate_is_process_wide_and_not_per_instance():
+    calls = []
+
+    async def fetch(key):
+        calls.append(key)
+        return _payload([], received_at=1000.0)
+
+    async def go():
+        # two SEPARATE ManagedOdds, as two cycles build
+        a = W.ManagedOdds(fetch=fetch, calls=3, clock=lambda: 1000.0)
+        b = W.ManagedOdds(fetch=fetch, calls=3, clock=lambda: 1010.0)
+        first = await a.for_family("baseball")
+        second = await b.for_family("baseball")
+        return first, second
+
+    first, second = asyncio.run(go())
+    assert first["calls_made"] == 1, "the first cycle spends its request"
+    assert second["calls_made"] == 0, (
+        "10 s later is inside the declared 45 s interval, and a NEW "
+        "instance must not reset it")
+    assert calls == ["baseball_mlb"], calls
+    # 10 s later the payload is still inside the odds bound, so the second
+    # caller is SERVED from the process cache rather than refused -- the
+    # quota is preserved either way, and being served is better.
+    assert second["reused"][0]["from"] == "PROCESS_CACHE"
+
+
+def test_past_the_interval_the_next_request_is_allowed():
+    calls = []
+
+    async def fetch(key):
+        calls.append(key)
+        return _payload([], received_at=1000.0)
+
+    async def go():
+        a = W.ManagedOdds(fetch=fetch, calls=3, clock=lambda: 1000.0)
+        b = W.ManagedOdds(fetch=fetch, calls=3, clock=lambda: 1046.0)
+        await a.for_family("baseball")
+        return await b.for_family("baseball")
+
+    second = asyncio.run(go())
+    assert second["calls_made"] == 1, "46 s later is past the 45 s interval"
+    assert calls == ["baseball_mlb", "baseball_mlb"]
+
+
+def test_a_payload_in_hand_is_reused_instead_of_paced_out():
+    """Inside the odds bound the process reuses what it already has, so a
+    paced caller is not blinded -- and the reuse is NOT wider than the
+    rule: the ceiling is the 30 s odds bound, and the de-vig still ages
+    the quote on top of it."""
+    calls = []
+
+    async def fetch(key):
+        calls.append(key)
+        return _payload([_event(observed_at=995.0)], received_at=1000.0)
+
+    async def go():
+        a = W.ManagedOdds(fetch=fetch, calls=3, clock=lambda: 1000.0)
+        await a.for_family("baseball")
+        # 20 s later: paced out of a NEW request, and served from cache
+        b = W.ManagedOdds(fetch=fetch, calls=3, clock=lambda: 1020.0)
+        warm = await b.for_family("baseball")
+        # 40 s later: past the cache TTL, and still inside the interval
+        d = W.ManagedOdds(fetch=fetch, calls=3, clock=lambda: 1040.0)
+        cold = await d.for_family("baseball")
+        return warm, cold
+
+    warm, cold = asyncio.run(go())
+    assert calls == ["baseball_mlb"], "one request served all three callers"
+    assert warm["calls_made"] == 0 and warm["payloads"]
+    assert warm["reused"][0]["from"] == "PROCESS_CACHE"
+    assert warm["reused"][0]["cache_age_s"] == pytest.approx(20.0, abs=0.01)
+    assert W.MANAGED_ODDS_CACHE_TTL_S == 30.0, (
+        "the reuse ceiling is the odds rule, not the request interval")
+    assert cold["calls_made"] == 0 and not cold["payloads"], (
+        "past the TTL the cache is not used, and the interval still "
+        "forbids a new request -- so this caller is blind and says so")
+    assert W.R_MANAGED_PACED in cold["refusals"]
+
+
+def test_the_diagnostic_read_spends_the_same_quota_as_a_cycle():
+    """The read-only chain endpoint goes through the same gate. Provider
+    quota does not care which of our code paths spent it."""
+    calls = []
+
+    async def fetch(key):
+        calls.append(key)
+        return _payload([], received_at=1000.0)
+
+    async def go():
+        cycle = W.ManagedOdds(fetch=fetch, calls=3, clock=lambda: 1000.0)
+        await cycle.for_family("baseball")
+        # the diagnostic read, 5 s later, as a verify step would call it
+        diag = W.ManagedOdds(fetch=fetch, calls=2, clock=lambda: 1005.0)
+        return await diag.for_family("baseball")
+
+    diag = asyncio.run(go())
+    assert calls == ["baseball_mlb"], "the diagnostic did NOT spend a second"
+    assert diag["calls_made"] == 0
+    assert diag["reused"][0]["from"] == "PROCESS_CACHE"
+
+
+# ── THE SHIPPED ACCEPTANCE GATE, RUN AGAINST WHAT THE CODE WRITES ────
+#
+# The gate lives in command-verify.yml. A gate exercised only against
+# hand-built fixtures proves the gate, not the code: the code could omit a
+# field the gate requires and nobody would find out until a production run
+# failed. So this test extracts the ACTUAL program from the workflow and
+# runs it over the rows two real management cycles persisted.
+
+@pg
+def test_the_code_satisfies_the_shipped_acceptance_gate():
+    import json
+    import pathlib
+    import re
+    import shutil
+    import subprocess
+
+    import asyncpg
+
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed here")
+    wf = (pathlib.Path(__file__).resolve().parents[2]
+          / ".github" / "workflows" / "command-verify.yml")
+    if not wf.exists():
+        pytest.skip("the workflow is not in this checkout")
+    m = re.search(r"ACC='(.*?)'\n", wf.read_text(), re.S)
+    assert m, "the acceptance program is not where this test looks for it"
+    prog = m.group(1)
+
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        orig_resolve, orig_book = (EXT.resolve_venue_identity,
+                                   EXT._read_book_blocking)
+        EXT.resolve_venue_identity = _resolver_ok
+        EXT._read_book_blocking = lambda slug: {"marketData": _BOOK}
+        try:
+            await _fixture(c)
+            pid = await _position(c)
+            await W.manage_open_positions(
+                c, experiment_id=_EXP, now=_T0 + 10,
+                odds=_odds([_event(observed_at=_T0)], received_at=_T0 + 1,
+                           at=_T0 + 10))
+            await W.manage_open_positions(
+                c, experiment_id=_EXP, now=_T0 + 130,
+                odds=_odds([_event(observed_at=_T0 + 120, cubs=1.45)],
+                           received_at=_T0 + 121, at=_T0 + 130))
+            # normalised exactly as the workflow normalises the trace
+            rows = await c.fetch(
+                "SELECT decision_id, decision_ts, selected_action,"
+                " selected_qty::float8 q, hold_value_usd, selection_reason,"
+                " accounting_reconciles, payout_identity, input_chain,"
+                " alternatives, resulting_inventory, input_freshness"
+                " FROM rn1x_decisions WHERE position_id = $1"
+                " ORDER BY decision_ts, decision_id", pid)
+            return [dict(r) for r in rows]
+        finally:
+            EXT.resolve_venue_identity = orig_resolve
+            EXT._read_book_blocking = orig_book
+            await c.close()
+
+    rows = asyncio.run(run())
+    assert len(rows) == 2, rows
+
+    def j(v):
+        if isinstance(v, str):
+            return json.loads(v)
+        return v or {}
+
+    doc = {"decisions": [
+        {"id": r["decision_id"], "ts": r["decision_ts"].isoformat(),
+         "action": r["selected_action"], "qty": r["q"],
+         "hold": r["hold_value_usd"], "reason": r["selection_reason"] or "",
+         "reconciles": r["accounting_reconciles"],
+         "pays": j(r["payout_identity"]).get("row_payout_event"),
+         "chain": j(r["input_chain"]), "alt": j(r["alternatives"]),
+         "inv": j(r["resulting_inventory"]),
+         "fr": j(r["input_freshness"])}
+        for r in rows]}
+    got = subprocess.run(["jq", "-e", prog], input=json.dumps(doc),
+                         capture_output=True, text=True)
+    assert got.returncode in (0, 1), got.stderr[:400]
+    verdicts = json.loads(got.stdout)
+    incomplete = [(v["id"], v["missing"]) for v in verdicts if v["missing"]]
+    assert not incomplete, (
+        "the code wrote a decision the SHIPPED gate rejects: %s" % incomplete)
+    assert len({v["ts"] for v in verdicts}) == 2, (
+        "two distinct runtime instants, not one decision counted twice")

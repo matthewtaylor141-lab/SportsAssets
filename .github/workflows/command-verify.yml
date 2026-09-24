@@ -797,6 +797,8 @@ jobs:
                     eligibility: (.eligibility // "?"),
                     reason: (.selection_reason // ""),
                     reconciles: (.accounting_reconciles),
+                    pays: ((.payout_identity | j).row_payout_event),
+                    chain: (.input_chain | j),
                     alt: (.alternatives | j), inv: (.resulting_inventory | j),
                     fr: (.input_freshness | j)}]}' \
             /tmp/mg.json > /tmp/mgn.json 2>/dev/null || echo '{}' > /tmp/mgn.json
@@ -912,46 +914,81 @@ jobs:
                    + "  " + (((.first_failing_link // {}).refusal) // "")' \
             /tmp/ch.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
             || head -c 400 /tmp/ch.json
-          # ── ACCEPTANCE ────────────────────────────────────────────
+          # ── ACCEPTANCE, FROM THE DECISION'S OWN STORED EVIDENCE ───
           #
-          # A PRICED HOLD IS THE BAR. Repeated missing-input holds are the
-          # operational blocker, so a run where the lane decided but never
-          # priced anything FAILS here rather than passing with a note. A
-          # properly priced HOLD satisfies this; nothing is exited to
-          # produce an example.
-          if [ "$PRICED" -lt 2 ]; then
-            echo "::error::$PRICED of $NDEC decisions on this position carry a priced hold. Acceptance needs the SAME position priced across at least two management cycles; the input chain above names the link that stopped it."
-            say "ACCEPTANCE NOT MET: priced_holds=$PRICED (need 2)"
-            FAIL=1
+          # Two priced HOLDs are NOT sufficient. A diagnostic pull taken after
+          # the fact cannot establish what a decision knew, so every requirement
+          # below is read off the DECISION ROW: the chain it recorded, the
+          # freshness it measured, the ladder it saw, the inventory it ranked,
+          # the alternatives it scored, and whether its accounting reconciled.
+          #
+          # A MISSING-BOOK HOLD DOES NOT SATISFY THIS. It is a legitimate
+          # decision and it is not a demonstration of the manager.
+          ACC='[(.decisions // [])[] | . as $d
+           | (($d.chain // {}).chain // []) as $ch
+           | (($ch | map(select(.link == "1_HELD_EXPOSURE")) | first) // {}) as $l1
+           | (($ch | map(select(.link == "2_VENUE_CONTRACT")) | first) // {}) as $l2
+           | (($ch | map(select(.link == "5_EXIT_LADDER")) | first) // {}) as $l5
+           | (($d.alt.ranked // []) | map(select(.action == "DIRECT_EXIT"))
+              | first // {}) as $ex
+           | {id: $d.id, ts: $d.ts, action: $d.action, qty: $d.qty, hold: $d.hold,
+              missing: ([
+                (if ($l1.ok == true) and (($d.pays // null) != null)
+                    and (($l1.basis // null) != null)
+                 then empty else "HELD_EXPOSURE_MAPPING" end),
+                (if ($l2.ok == true) and ($l2.agrees_with_tokens == true)
+                    and (($l2.us_market_slug // null) != null)
+                    and (($l2.intent // null) != null)
+                 then empty else "VENUE_CONTRACT_AND_INTENT" end),
+                (if (($d.fr.age_from_observation_s // null) != null)
+                    and (($d.fr.bound_s // null) != null)
+                    and (($d.fr.age_from_observation_s) <= ($d.fr.bound_s))
+                 then empty else "FRESH_PROBABILITY" end),
+                (if ($l5.ok == true) and (($l5.exit_price // 0) > 0)
+                    and (($l5.size_at_best // 0) > 0)
+                 then empty else "EXIT_LADDER_AND_DEPTH" end),
+                (if (($ex.qty // 0) > 0) and (($ex.value_usd // null) != null)
+                 then empty else "PRICED_EXECUTABLE_EXIT_ALTERNATIVE" end),
+                (if (($d.inv.residual_qty // null) != null)
+                    and (($d.inv.residual_qty) > 0)
+                    and (($d.alt.hold_input.qty_valued // null) != null)
+                    and ((($d.inv.residual_qty) - ($d.alt.hold_input.qty_valued))
+                         | fabs < 0.000001)
+                 then empty else "RESIDUAL_INVENTORY_AGREES" end),
+                (if (($d.alt.ranked // []) | length) > 0
+                    and (($d.action // "NULL") != "NULL")
+                    and (($d.qty // null) != null)
+                    and ((($d.reason // "") | length) > 0)
+                 then empty else "RANKED_ALTERNATIVES_AND_SELECTION" end),
+                (if $d.reconciles == true then empty
+                 else "RECONCILED_ACCOUNTING" end),
+                (if ($d.hold // null) != null then empty else "PRICED_HOLD" end)
+              ])}]'
+          if ! jq -e "$ACC" /tmp/mgn.json > /tmp/acc.json; then
+            # MALFORMED ACCEPTANCE DATA IS A FAILURE, never a skip: a trace this
+            # checker cannot read is a trace nobody can accept.
+            echo "::error::the acceptance checker could not read the trace"
+            say "ACCEPTANCE DATA MALFORMED -- it could not be evaluated"
+            head -c 400 /tmp/mgn.json | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          jq -r '.[] | "  " + (.id[-22:]) + "  " + (.ts[0:19]) + (if (.missing | length) == 0 then "  COMPLETE" else "  INCOMPLETE " + ((.missing)|tostring) end)' /tmp/acc.json | tee -a "$GITHUB_STEP_SUMMARY"
+          COMPLETE=$(jq '[.[] | select((.missing | length) == 0)] | length' /tmp/acc.json)
+          DISTINCT=$(jq '[.[] | select((.missing | length) == 0) | .ts] | unique | length' /tmp/acc.json)
+          IDS=$(jq -r '[.[] | select((.missing | length) == 0) | .id] | join("  ")' /tmp/acc.json)
+          say "priced_holds\t$PRICED of $NDEC decisions"
+          say "complete\t$COMPLETE   distinct_instants\t$DISTINCT"
+          if [ "$COMPLETE" -ge 2 ] && [ "$DISTINCT" -ge 2 ]; then
+            say "ACCEPTANCE MET on the SAME position:"
+            say "  $IDS"
+            say "each with a verified held-exposure mapping, a probability inside"
+            say "its own bound, a usable exit ladder with depth, the current"
+            say "residual, ranked alternatives with a selected action and"
+            say "quantity, and reconciled accounting"
           else
-            # THE FIVE THINGS EACH PRICED DECISION MUST CARRY.
-            jq -r '[(.decisions // [])[] | select(.hold != null)
-                    | {id: .id,
-                       age: (.fr.age_from_observation_s),
-                       bound: (.fr.bound_s),
-                       action: .action, qty: .qty,
-                       resid: (.inv.residual_qty),
-                       recon: .reconciles}]
-                   | .[] | select((.age == null) or (.bound == null)
-                                  or (.age > .bound) or (.action == null)
-                                  or (.qty == null) or (.resid == null)
-                                  or (.recon != true))
-                   | "INCOMPLETE\t" + .id + "\tage=" + ((.age // "null")|tostring)
-                     + " bound=" + ((.bound // "null")|tostring)
-                     + " action=" + ((.action // "null")|tostring)
-                     + " qty=" + ((.qty // "null")|tostring)
-                     + " residual=" + ((.resid // "null")|tostring)
-                     + " reconciles=" + ((.recon // "null")|tostring)' \
-              /tmp/mgn.json > /tmp/inc.txt 2>/dev/null || true
-            if [ -s /tmp/inc.txt ]; then
-              cat /tmp/inc.txt | tee -a "$GITHUB_STEP_SUMMARY"
-              echo "::error::a priced decision is missing a required input or consequence"
-              FAIL=1
-            else
-              say "ACCEPTANCE MET: $PRICED priced decisions, each with a"
-              say "fresh probability inside its bound, a selected action and"
-              say "quantity, the current residual and reconciled accounting"
-            fi
+            echo "::error::acceptance NOT met: $COMPLETE complete decisions at $DISTINCT distinct instants (need 2 and 2); priced_holds=$PRICED of $NDEC. The INCOMPLETE lines above name what each one lacks and the input chain names the link that stopped it."
+            say "ACCEPTANCE NOT MET -- NOT_DEMONSTRATED"
+            FAIL=1
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit $FAIL

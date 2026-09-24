@@ -374,6 +374,15 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
                     # never evaluated must not read later as one that
                     # was evaluated and rejected.
                     "ranked": d.get("alternatives"),
+                    # THE QUANTITY AND BASIS HOLD WAS VALUED ON, stored.
+                    # Without it the row shows a hold value and no way to
+                    # check WHICH inventory produced it -- which is the
+                    # seed-sized defect all over again, one level down:
+                    # unverifiable rather than wrong. Found by running the
+                    # acceptance gate against what the code actually
+                    # writes instead of against a fixture.
+                    "hold_input": d.get("hold_input"),
+                    "hold_valued_on": d.get("hold_valued_on"),
                     "refused": d.get("refused"),
                     "fallback_trigger": d.get("fallback_trigger"),
                     "resting_order_decision":

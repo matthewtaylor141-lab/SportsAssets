@@ -405,6 +405,20 @@ DSN = os.environ.get("RN1X_TEST_DSN")
 pg = pytest.mark.skipif(not DSN, reason="RN1X_TEST_DSN is not set")
 
 
+@pytest.fixture(autouse=True)
+def _forget_the_process_pacing():
+    """The provider gate is PROCESS-WIDE by design, so it outlives a test.
+    These fixtures run in a declared epoch and in no particular order, so
+    one test's stamp can sit in another's future -- which is a fact about
+    the fixtures, not about the gate.
+    """
+    from sportsassets.workers import rn1x_shadow as _W
+
+    _W.odds_gate_reset()
+    yield
+    _W.odds_gate_reset()
+
+
 @pytest.fixture(autouse=True, scope="module")
 def _leave_no_residue():
     """CLEAN UP AFTER MYSELF, AT THE END AS WELL AS THE START.
@@ -475,13 +489,15 @@ _B_RALLY = {"bids": [{"px": {"value": "0.8500"}, "qty": "40"},
 _ODDS_P70 = (1.40, 3.1135938239247523)
 
 
-def _pull(observed_at, *, odds=_ODDS_P70, received_at=None, calls=3):
+def _pull(observed_at, *, odds=_ODDS_P70, received_at=None, calls=3,
+          at=None):
     from tests.test_the_held_position_gets_its_own_inputs import (
         _event, _odds)
 
     ev = _event(observed_at=observed_at, cubs=odds[0], fish=odds[1])
     return _odds([ev], received_at=(received_at if received_at is not None
-                                   else observed_at), calls=calls)
+                                   else observed_at), calls=calls,
+                 at=(at if at is not None else observed_at))
 
 
 async def _resolver(conn, *, market_row, priced_outcome):
@@ -700,13 +716,16 @@ def test_one_position_is_managed_across_two_cycles_with_no_new_entry():
             # CYCLE 1 -- exit .60 is below the .70 hold value
             c1 = await W.manage_open_positions(
                 c, experiment_id=_EXP, now=_T0 + 30,
-                odds=_pull(_T0 + 20))
+                odds=_pull(_T0 + 20, at=_T0 + 30))
             # the market rallies, and the second cycle's probability is
             # its own -- not the first cycle's, re-aged
             book["md"] = _B_RALLY
+            # +120 s, the lane's real cadence: past the declared 45 s
+            # provider interval, so this cycle asks for its own quote
+            # instead of being served a cached one it would have to refuse.
             c2 = await W.manage_open_positions(
-                c, experiment_id=_EXP, now=_T0 + 60,
-                odds=_pull(_T0 + 50))
+                c, experiment_id=_EXP, now=_T0 + 150,
+                odds=_pull(_T0 + 140, at=_T0 + 150))
             rows = [dict(r) for r in await c.fetch(
                 "SELECT decision_id, extract(epoch FROM decision_ts)::float8"
                 " ts, selected_action, selected_qty::float8 q,"
@@ -897,7 +916,7 @@ def test_the_residual_hold_case_through_the_continuing_worker():
             # arithmetic after the change of input source.
             c1 = await W.manage_open_positions(
                 c, experiment_id=_EXP, now=_T0 + 30,
-                odds=_pull(_T0 + 20))
+                odds=_pull(_T0 + 20, at=_T0 + 30))
             # a print crosses the resting sell and fills 20
             await c.execute(
                 "INSERT INTO trades(id,tx_hash,asset,whale_id,condition_id,"
@@ -905,13 +924,16 @@ def test_the_residual_hold_case_through_the_continuing_worker():
                 "detected_at,source,dedupe_key) VALUES(991500,'0xtx',$3,9,"
                 "$1,0,'BUY',80,0.91,72.8,'baseball',to_timestamp($2),"
                 "to_timestamp($2),'chain','dk-991500')",
-                cond, _T0 + 45, cond + "-t0")
+                cond, _T0 + 100, cond + "-t0")
             # cycle 2: the book now pays .72 on 80, and the quote is its
             # own
             cur["md"] = book
+            # +120 s, the lane's real cadence: past the declared 45 s
+            # provider interval, so this cycle asks for its own quote
+            # instead of being served a cached one it would have to refuse.
             c2 = await W.manage_open_positions(
-                c, experiment_id=_EXP, now=_T0 + 60,
-                odds=_pull(_T0 + 50))
+                c, experiment_id=_EXP, now=_T0 + 150,
+                odds=_pull(_T0 + 140, at=_T0 + 150))
             rows = [dict(r) for r in await c.fetch(
                 "SELECT decision_id, selected_action,"
                 " selected_qty::float8 q, hold_value_usd,"
