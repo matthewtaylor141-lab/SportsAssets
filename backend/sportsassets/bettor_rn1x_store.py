@@ -117,8 +117,88 @@ def position_id(experiment_id: str, policy: str, trade_id) -> str:
     return "%s:%s:%s" % (experiment_id, policy, trade_id)
 
 
+# ── READING A POSITION BACK, FOR CONTINUING MANAGEMENT ───────────────
+#
+# The challenger lane could only ever decide a position ONCE, because
+# `cycle` skipped any seed already written and nothing reloaded it. These
+# reads are what let a later cycle pick the same position up again.
+#
+# "OPEN" IS DERIVED, NEVER STORED. `rn1x_positions` has no status column
+# and must not grow one: a stored conclusion on an append-only row is the
+# defect `shadow_position_lifecycle` exists to avoid. A position is open
+# when its seeded quantity has not been fully released by its fills.
+OPEN_POSITIONS_SQL = '''
+    SELECT p.position_id, p.experiment_id, p.policy, p.condition_id,
+           p.outcome_index, p.source_trade_id, p.source_account,
+           p.seed_qty::float8    AS seed_qty,
+           p.seed_price::float8  AS seed_price,
+           extract(epoch FROM p.decision_ts)::float8 AS decision_ts,
+           extract(epoch FROM p.source_ts)::float8   AS source_ts,
+           extract(epoch FROM p.detected_ts)::float8 AS detected_ts,
+           extract(epoch FROM p.available_at)::float8 AS available_at,
+           p.entry_kind, p.decision_basis,
+           COALESCE(f.released, 0)::float8 AS released_qty,
+           COALESCE(d.n, 0)                AS decisions_so_far,
+           extract(epoch FROM d.last_at)::float8 AS last_decision_at
+      FROM rn1x_positions p
+      LEFT JOIN (
+            SELECT o.position_id,
+                   sum(CASE WHEN o.side = 'SELL' THEN fl.qty ELSE 0 END)
+                       AS released
+              FROM rn1x_orders o
+              JOIN rn1x_fills  fl ON fl.order_id = o.order_id
+             GROUP BY o.position_id) f ON f.position_id = p.position_id
+      LEFT JOIN (
+            SELECT position_id, count(*) n, max(decision_ts) last_at
+              FROM rn1x_decisions GROUP BY position_id) d
+            ON d.position_id = p.position_id
+     WHERE p.experiment_id = $1
+       AND COALESCE(f.released, 0) < p.seed_qty
+     ORDER BY d.last_at NULLS FIRST, p.decision_ts
+     LIMIT $2
+'''
+
+POSITION_ORDERS_SQL = '''
+    SELECT order_id, decision_id, condition_id, outcome_index, side,
+           intent, limit_price::float8 AS limit_price,
+           qty::float8 AS qty, filled_qty::float8 AS filled_qty, state,
+           extract(epoch FROM placed_at)::float8  AS placed_at,
+           extract(epoch FROM updated_at)::float8 AS updated_at,
+           fill_basis
+      FROM rn1x_orders WHERE position_id = $1 ORDER BY placed_at
+'''
+
+POSITION_FILLS_SQL = '''
+    SELECT f.fill_id, f.order_id, extract(epoch FROM f.at)::float8 AS at,
+           f.qty::float8 AS qty, f.price::float8 AS price,
+           f.fee_usd::float8 AS fee_usd, f.evidence_id, f.fill_basis
+      FROM rn1x_fills f
+      JOIN rn1x_orders o ON o.order_id = f.order_id
+     WHERE o.position_id = $1 ORDER BY f.at
+'''
+
+
+async def open_positions(conn, *, experiment_id: str, limit: int = 10) -> list:
+    """Positions of this experiment that still hold unreleased quantity."""
+    return [dict(r) for r in
+            await conn.fetch(OPEN_POSITIONS_SQL, experiment_id, int(limit))]
+
+
+async def load_position(conn, position_id: str) -> dict:
+    """The rows a rebuild needs: the position, its orders and its fills."""
+    orders = [dict(r) for r in
+              await conn.fetch(POSITION_ORDERS_SQL, position_id)]
+    fills = [dict(r) for r in
+             await conn.fetch(POSITION_FILLS_SQL, position_id)]
+    n = await conn.fetchval(
+        "SELECT count(*) FROM rn1x_decisions WHERE position_id = $1",
+        position_id)
+    return {"orders": orders, "fills": fills,
+            "decisions_so_far": int(n or 0)}
+
+
 async def persist_run(conn, out: dict, *, experiment_id: str,
-                      source_account: str) -> dict:
+                      source_account: str, decision_offset: int = 0) -> dict:
     """Write ONE completed run. Returns what was written, or why not.
 
     A run that failed a step is recorded as a REFUSAL, not skipped: the
@@ -217,7 +297,11 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
             decisions = [e["decision"] for e in (manage.get("events") or [])
                          if isinstance(e.get("decision"), dict)]
         for i, d in enumerate(decisions):
-            did = "%s:D%04d" % (pid, i)
+            # THE ORDINAL CONTINUES FROM WHAT IS ALREADY STORED. Without
+            # the offset a second management cycle would write D0000
+            # again, hit ON CONFLICT DO NOTHING and silently drop every
+            # new decision -- the position would look unmanaged forever.
+            did = "%s:D%04d" % (pid, i + int(decision_offset))
             hi = d.get("hold_input") or {}
             challenger = bool(d.get("arm") == "CHALLENGER"
                               or d.get("ranking"))
@@ -333,22 +417,39 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
                 "ON CONFLICT (order_id) DO UPDATE SET "
                 "filled_qty = EXCLUDED.filled_qty, "
                 "state = EXCLUDED.state, updated_at = EXCLUDED.updated_at",
-                "%s:%s" % (pid, o["order_id"]), pid,
+                # PREFIXING IS IDEMPOTENT, and it has to be. On a
+                # CONTINUING cycle the order was reloaded from the ledger
+                # and already carries the position prefix; prefixing it
+                # again minted a SECOND order row, so the position showed
+                # two open orders and the one-active-order discipline was
+                # broken in the store rather than in the engine. Caught
+                # on the first two-cycle run.
+                (o["order_id"] if str(o["order_id"]).startswith(pid + ":")
+                 else "%s:%s" % (pid, o["order_id"])), pid,
                 o["condition_id"], int(o["outcome_index"]), o["side"],
                 o["intent"], liquidity, float(o["limit_price"]),
                 float(o["qty"]), float(o["filled_qty"]), o["state"],
                 _ts(o["placed_at"]),
                 _ts(o.get("terminal_at") or o["placed_at"]),
                 out.get("fill_basis") or "PRINT_THROUGH_WITH_QUEUE_SHARE_V1",
-                # On a RUNTIME basis every order this position created came
-                # into existence at or after the run's own creation floor,
-                # so that floor is the honest lower bound. On a replay it
-                # is left NULL: the order never existed in wall-clock time
-                # at all, and inventing an instant for it would be the
-                # defect migration 104 exists to remove.
-                (_ts(out["order_created_ts"])
+                # EACH ORDER'S OWN INSTANT, NOT THE RUN'S.
+                #
+                # This was a single run-level floor, and on a CONTINUING
+                # management cycle that is wrong: an order created in an
+                # earlier cycle would be stamped with THIS cycle's clock,
+                # and migration 104's trigger then -- correctly -- refused
+                # its already-recorded fills as preceding their own order.
+                # Caught on the first two-cycle run against real Postgres.
+                #
+                # `placed_at` is when the order came into existence, which
+                # on a RUNTIME basis is wall-clock time. It is never
+                # weaker than the old floor: on the entry path every
+                # order is placed at or after the run's decision instant.
+                # On a replay basis it stays NULL, because the order never
+                # existed in wall-clock time at all.
+                (_ts(o["placed_at"])
                  if out.get("decision_basis") == "RUNTIME_WALL_CLOCK"
-                 and out.get("order_created_ts") is not None else None),
+                 else None),
                 (out.get("decision_basis") or "UNSET"))
             wrote["orders"] += 1
             for k, f in enumerate(o.get("fills") or []):

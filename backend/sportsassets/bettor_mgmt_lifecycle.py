@@ -671,3 +671,134 @@ class Managed:
                         "and separately from realised P&L, never marked"),
             },
         }
+
+
+# ── RELOADING A POSITION THAT IS ALREADY OPEN ────────────────────────
+#
+# THE DEFECT THIS EXISTS FOR, found by independent inspection of
+# deployed 5b19bc5. The challenger lane decided each position EXACTLY
+# ONCE, ever: `cycle` skipped any seed whose `position_id` was already
+# written (`already_replayed`), and `Managed` lived only inside that one
+# call. So a position opened at 12:00 was never looked at again -- no
+# refreshed book, no re-decision, no later fills, no cancellation
+# follow-through. A one-time replay is not position management.
+#
+# WHAT REBUILDING MUST REPRODUCE, or the one-active-order discipline
+# silently breaks: not just the inventory, but the WORKING ORDER. A cycle
+# that reloaded the portfolio and forgot the resting order would place a
+# second one without cancelling the first, which is precisely the
+# over-management `SIMULTANEOUS_NOTE` refuses.
+#
+# THE RECONSTRUCTION IS A REPLAY, WHICH IS ALSO THE RESTART RECOVERY.
+# Nothing is read from a stored conclusion: the seed is re-bought, every
+# persisted fill is re-applied through the same `Portfolio.buy/sell`, and
+# each order is rebuilt and advanced to its persisted state. Two
+# independent rebuilds from the same rows are therefore identical, and a
+# process that died mid-cycle resumes from the ledger rather than from
+# memory.
+
+RELOAD_VERSION = "BETTOR_MGMT_RELOAD_V1"
+
+
+def reload_managed(*, position, orders=(), fills=(), fee_fn,
+                   queue_share=0.25, expiry_s=900.0) -> "Managed":
+    """Rebuild a `Managed` from persisted rows. A replay, not a restore.
+
+    `position` needs condition_id, outcome_index, seed_qty, seed_price,
+    decision_ts (epoch seconds). `orders` are the persisted order rows;
+    `fills` the persisted fills, each naming its order.
+    """
+    m = Managed(condition_id=position["condition_id"],
+                outcome_index=int(position["outcome_index"]),
+                seed_qty=float(position["seed_qty"]),
+                seed_price=float(position["seed_price"]),
+                at=float(position["decision_ts"]), fee_fn=fee_fn,
+                queue_share=float(queue_share), expiry_s=float(expiry_s),
+                account=str(position.get("account") or "rn1x"))
+    prefix = "%s:" % position["position_id"]
+
+    def _bare(oid) -> str:
+        o = str(oid)
+        return o[len(prefix):] if o.startswith(prefix) else o
+
+    # THE FILLS ARE KEYED ON THE BARE ID TOO. Stripping the prefix from
+    # the ORDER but not from its fills made every lookup miss, so a
+    # rebuild replayed the order and silently dropped its executions --
+    # residual came back 100 with a fill of 20 in the ledger. The two
+    # keys have to be normalised together.
+    by_order = {}
+    for f in fills:
+        by_order.setdefault(_bare(f["order_id"]), []).append(dict(f))
+
+    for o in sorted(orders, key=lambda r: float(r["placed_at"])):
+        # THE BARE ID, as `place()` would have generated it. The store
+        # keys order rows by "<position_id>:<order_id>", so a reloaded
+        # order carries the prefix; keeping it here and letting the store
+        # prefix again produced a duplicate row and a second "open"
+        # order. Stripped on the way in so the in-memory object is
+        # exactly what the engine itself would hold.
+        oid = _bare(o["order_id"])
+        order = dk.Order(oid, condition_id=o["condition_id"],
+                         outcome_index=int(o["outcome_index"]),
+                         side=o["side"], intent=o["intent"],
+                         limit_price=float(o["limit_price"]),
+                         qty=float(o["qty"]),
+                         placed_at=float(o["placed_at"]),
+                         expires_at=float(o.get("expires_at")
+                                          or float(o["placed_at"])
+                                          + float(expiry_s)),
+                         decision_id=o.get("decision_id"))
+        order.transition(dk.RESTING, float(o["placed_at"]),
+                         "rebuilt from the ledger")
+        # THE FILLS MOVE THE BOOK, exactly as they did the first time,
+        # through the same Portfolio calls. A rebuilt position whose
+        # inventory came from a stored number could disagree with its own
+        # fills; this one cannot.
+        for f in sorted(by_order.get(oid, ()),
+                        key=lambda r: float(r["at"])):
+            q, px = float(f["qty"]), float(f["price"])
+            fee = float(f.get("fee_usd") or 0.0)
+            at = float(f["at"])
+            if order.side == "BUY":
+                m.pf.buy(m.condition_id, order.outcome_index, q, px, fee, at)
+            else:
+                m.pf.sell(m.condition_id, order.outcome_index, q, px, fee, at)
+            order.filled_qty += q
+            order.fees += fee
+            order.fills.append({"at": at, "qty": round(q, 6), "price": px,
+                                "fee_usd": round(fee, 6),
+                                "evidence_id": f.get("evidence_id"),
+                                "replayed_from_ledger": True,
+                                "exec_model": f.get("fill_basis")
+                                or dk.FILL_MODEL})
+            # THE PRINT IS MARKED CONSUMED so a re-read of the same tape
+            # cannot double-fill it. `Consumption` is keyed on the
+            # evidence id, which is what makes the replay idempotent.
+            eid = f.get("evidence_id")
+            if eid:
+                m.cons.offer(eid, q)
+                m.cons.take(eid, q)
+        # The persisted state is applied LAST, so a terminal order does
+        # not look open and an open one keeps its remaining quantity.
+        st = str(o.get("state") or dk.RESTING)
+        if st != order.state:
+            order.transition(st, float(o.get("updated_at")
+                                       or o["placed_at"]),
+                             "persisted state reapplied")
+        m.orders[oid] = order
+        # Keep the id generator above any id already used, so a new
+        # order in this cycle cannot collide with a reloaded one.
+        m._n = max(m._n, 1)
+    m.reloaded = {
+        "version": RELOAD_VERSION,
+        "orders_replayed": len(list(orders)),
+        "fills_replayed": sum(len(v) for v in by_order.values()),
+        "open_orders_after_reload": [o.order_id for o in m.open_orders()],
+        "residual_after_reload": m.residual(),
+        "basis": "REPLAY_OF_THE_PERSISTED_LEDGER",
+        "why": ("nothing is restored from a stored conclusion. The seed "
+                "is re-bought and every fill re-applied through the same "
+                "Portfolio, so the rebuild cannot disagree with its own "
+                "evidence and two rebuilds are identical"),
+    }
+    return m

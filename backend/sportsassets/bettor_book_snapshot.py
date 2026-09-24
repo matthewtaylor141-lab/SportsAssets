@@ -634,3 +634,142 @@ def fill_across_levels(ladder: dict, size: float) -> dict:
         out["why"] = ("the displayed ladder shows %.6f of the %.6f "
                       "requested" % (filled, want))
     return out
+
+
+# ── EXITING IS NOT ACQUIRING, AND THE TWO PRICES ARE NOT THE SAME ────
+#
+# THE DEFECT THIS EXISTS FOR, found by independent inspection of
+# deployed commit 5b19bc5 and reproduced exactly.
+#
+# `challenger_inputs_for` needed an exit price for a held position. It
+# asked `acquisition_ladder` for the OPPOSITE intent and passed that
+# ladder's `acquisition_price` straight through as `bid`. On a book of
+# YES bid .60 / ask .63 that supplied:
+#
+#     held LONG   bid .4000   complement_ask .6300
+#     held SHORT  bid .6300   complement_ask .4000
+#
+# Both numbers are wrong in both cases. .40 is what it COSTS to acquire
+# the short leg; it is not what we RECEIVE for selling the long leg,
+# which is the raw bid .60. And .63 is the cost of acquiring MORE long
+# exposure -- adding to the position -- not the cost of the complement.
+#
+# THE CORRECT PAIR, and the relation that generates both:
+#
+#     exit_proceeds        = 1 - acquisition_price(OPPOSITE intent)
+#     complement_cost      =     acquisition_price(OPPOSITE intent)
+#
+#     held LONG   exit .6000 (the raw bid)      complement .4000
+#     held SHORT  exit .3700 (= 1 - the ask)    complement .6300
+#
+# BOTH COME OFF THE SAME LADDER, and that is not a coincidence: on a
+# venue holding ONE signed netPosition, selling our side and buying the
+# other side are the SAME ORDER consuming the SAME side of the book.
+# Their economics therefore agree exactly -- receiving q is the same as
+# paying (1 - q) to neutralise -- and any builder that hands the ranking
+# two different prices for them has invented a spread that does not
+# exist and will pick a winner on it.
+#
+# QUANTITY COMES FROM THE SIDE THAT PAYS. A held long exits into the
+# BIDS, so the size is bid size. `acquisition_ladder(SHORT)` already
+# reads the bids and preserves their quantity, which is exactly why the
+# opposite-intent ladder is the right source for both numbers.
+
+EXIT_VERSION = "BETTOR_EXIT_LADDER_V1"
+
+R_NO_EXIT_SIDE = "NO_EXIT_SIDE_PUBLISHED"
+
+EXIT_RELATION = (
+    "exit_proceeds = 1 - acquisition_price(opposite intent); "
+    "complement_cost = acquisition_price(opposite intent). Both read off "
+    "the OPPOSITE side's ladder, because on a one-signed-net venue "
+    "selling our side and buying the other side are the same order")
+
+
+def opposite_intent(intent) -> str:
+    """The intent that CLOSES the exposure `intent` opened."""
+    return ("ORDER_INTENT_BUY_LONG" if is_short_intent(intent)
+            else "ORDER_INTENT_BUY_SHORT")
+
+
+def exit_ladder(market_data, *, held_intent, limit=None) -> dict:
+    """What CLOSING a position held under `held_intent` actually pays.
+
+    Returns levels carrying BOTH prices for the same executable size:
+
+        exit_price       what we receive per contract for closing
+        complement_price what it costs per contract to neutralise
+                         (they sum to 1.00 by construction)
+
+    Levels are ordered BEST EXIT FIRST -- the highest proceeds -- which
+    is the reverse of the acquisition ladder's cheapest-first order, and
+    is what a sizing walk against a hold hurdle needs.
+    """
+    opp = opposite_intent(held_intent)
+    acq = acquisition_ladder(market_data, intent=opp, limit=limit)
+    out = {
+        "version": EXIT_VERSION,
+        "held_intent": str(held_intent),
+        "closing_intent": opp,
+        "relation": EXIT_RELATION,
+        "side_consumed": acq.get("side_consumed"),
+        "levels_published": acq.get("levels_published"),
+        "levels_read": acq.get("levels_read"),
+        "truncated": acq.get("truncated"),
+        "parse_status": acq.get("parse_status"),
+        "reasons": acq.get("reasons"),
+        "acquisition_ladder_used": opp,
+    }
+    if not acq.get("ok"):
+        return {**out, "ok": False,
+                "refusal": acq.get("refusal") or R_NO_EXIT_SIDE,
+                "book_was": acq.get("book_was"),
+                "why": acq.get("why") or (
+                    "the side a close would consume publishes no "
+                    "executable level")}
+    levels = []
+    for lv in acq["levels"]:
+        comp = float(lv["acquisition_price"])
+        levels.append({
+            "level": lv["level"],
+            "api_price": lv["api_price"],
+            # THE TWO NUMBERS, KEPT APART BY NAME so a caller cannot
+            # reach for the wrong one the way the builder did.
+            "exit_price": round(1.0 - comp, 6),
+            "complement_price": round(comp, 6),
+            "qty": lv["qty"],
+        })
+    # Best exit first. `acquisition_ladder` sorts cheapest-acquisition
+    # first, and cheapest complement IS best exit, so this is already the
+    # right order -- sorted explicitly rather than relied upon.
+    levels.sort(key=lambda r: -r["exit_price"])
+    out.update(
+        ok=True, levels=levels,
+        best_exit_price=levels[0]["exit_price"],
+        best_complement_price=levels[0]["complement_price"],
+        best_api_price=levels[0]["api_price"],
+        size_at_best=levels[0]["qty"],
+        displayed_depth=round(sum(r["qty"] for r in levels), 6),
+        sums_to_one=True,
+        note=("exit_price + complement_price = 1.00 at every level: "
+              "receiving q and paying (1 - q) to neutralise are the same "
+              "trade on this venue"))
+    return out
+
+
+def as_sale_ladder(exit_lad: dict) -> dict:
+    """An exit ladder shaped for `marginal_sale_size`.
+
+    That walker compares `acquisition_price` against a per-contract hold
+    value, and what it must compare is the EXIT PROCEEDS. Handing it an
+    acquisition ladder compares the wrong number; this adapts without
+    teaching the walker a second field name.
+    """
+    if not (exit_lad or {}).get("ok"):
+        return {"levels": [], "refusal": (exit_lad or {}).get("refusal")}
+    return {"levels": [{"level": lv["level"],
+                        "acquisition_price": lv["exit_price"],
+                        "exit_price": lv["exit_price"],
+                        "qty": lv["qty"]} for lv in exit_lad["levels"]],
+            "price_space": "EXIT_PROCEEDS_PER_CONTRACT",
+            "why": EXIT_RELATION}

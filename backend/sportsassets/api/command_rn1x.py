@@ -820,6 +820,9 @@ ARMS_SQL = """
            count(*) FILTER (WHERE d.input_available)           AS with_inputs,
            count(*) FILTER (WHERE d.accounting_reconciles IS FALSE)
                                                               AS unreconciled,
+           count(*) FILTER (WHERE d.eligibility IS NOT NULL
+                              AND d.eligibility <> 'ELIGIBLE')
+                                                              AS held,
            max(d.decision_ts)                                 AS last_decision
       FROM rn1x_positions p
       LEFT JOIN rn1x_decisions d ON d.position_id = p.position_id
@@ -860,6 +863,12 @@ async def _arms(pool) -> dict:
             "different decisions. Adding their results would count one "
             "position twice and would attribute the benchmark's outcome "
             "to the challenger"),
+        "held_decisions": (
+            "`held` counts decisions excluded by a containment migration. "
+            "They are kept and readable and must not be counted as "
+            "results: migration 110 holds every challenger decision "
+            "taken under the input builder that supplied the opposite "
+            "side's acquisition cost as the exit price"),
         "blind_is_not_held": (
             "`blind` counts decisions with no inputs at all. They are "
             "excluded from `held_by_choice` because a policy that could "
@@ -970,7 +979,12 @@ async def trace(pool, position_id: str) -> dict:
         "is_a_deliberate_hold, input_available, input_freshness, "
         "payout_identity, hold_value_usd, hold_value_basis, "
         "venue_translation, order_state, resulting_inventory, "
-        "accounting_reconciles FROM rn1x_decisions "
+        # HELD DECISIONS ARE SHOWN AND LABELLED, never hidden and never
+        # presented as sound. Migration 110 holds every challenger
+        # decision taken under the broken input builder; a trace that
+        # omitted the column would read them as ordinary results.
+        "accounting_reconciles, eligibility, ineligible_reason "
+        "FROM rn1x_decisions "
         "WHERE position_id = $1 ORDER BY decision_ts, decision_id",
         position_id)
     orders = await pool.fetch(

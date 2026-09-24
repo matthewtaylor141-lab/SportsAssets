@@ -67,12 +67,94 @@ VERSION = "BETTOR_HOLD_VALUE_V1"
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 
-#: Beyond this the probability is not current enough to price a live hold.
-#: DECLARED, not fitted. The valuation loop's own admissibility bound is
-#: 120 s for an in-play progress read; a pre-match moneyline moves far
-#: more slowly, and 30 minutes is the interval over which Pinnacle's own
-#: line is materially stable pre-match. It is a stated choice.
-MAX_PROBABILITY_AGE_S = 1800.0
+# ── FRESHNESS IS BOUNDED BY THE EVENT'S STATE, NOT BY A COMMENT ──────
+#
+# THE DEFECT THIS REPLACES, found by independent inspection of deployed
+# 5b19bc5. A single `MAX_PROBABILITY_AGE_S = 1800.0` was justified in its
+# own comment by PRE-MATCH line stability -- and the function enforced no
+# pre-match restriction whatsoever. A 29-minute-old moneyline was
+# therefore admissible during play, when a goal can move the true
+# probability by tens of points inside a minute. A comment about pre-match
+# stability cannot authorise a 30-minute-old probability in play.
+#
+# THE BOUNDS ARE NOW THE REPOSITORY'S OWN, keyed to a DECLARED event
+# state, and the absence of a state is not permission:
+#
+#   IN_PLAY            120 s -- bettor_progress_feed.MAX_AGE_S, the bound
+#                      this stack already applies to every in-play
+#                      observation before it may license an exit
+#   PRE_MATCH          1800 s, and ONLY when the caller supplies evidence
+#                      that the event has not started
+#   BREAK / SUSPENDED  120 s. Play is stopped but the market is not: the
+#                      next restart reprices it, so this is not pre-match
+#   UNKNOWN            120 s. FAIL-CLOSED. An event whose state nobody
+#                      established is treated as the strictest case,
+#                      because the alternative is the defect above
+#   FINAL / ABANDONED  refused outright -- a settled or void event is not
+#                      a hold to value from a bookmaker's line
+EVENT_IN_PLAY = "IN_PLAY"
+EVENT_PRE_MATCH = "PRE_MATCH"
+EVENT_BREAK = "BREAK"
+EVENT_SUSPENDED = "SUSPENDED"
+EVENT_FINAL = "FINAL"
+EVENT_ABANDONED = "ABANDONED"
+EVENT_UNKNOWN = "UNKNOWN"
+
+#: The strict bound, and the default. Equal to
+#: `bettor_progress_feed.MAX_AGE_S` and `bettor_rn1x_policy
+#: .PROGRESS_MAX_AGE_S`, deliberately: this is the same question those
+#: two already answer for an in-play observation, and a probability is
+#: not allowed to be staler than the progress reading beside it.
+MAX_PROBABILITY_AGE_S = 120.0
+
+#: Available ONLY on a declared, evidenced PRE_MATCH state.
+PRE_MATCH_MAX_AGE_S = 1800.0
+
+AGE_BOUND_BY_STATE = {
+    EVENT_IN_PLAY: MAX_PROBABILITY_AGE_S,
+    EVENT_BREAK: MAX_PROBABILITY_AGE_S,
+    EVENT_SUSPENDED: MAX_PROBABILITY_AGE_S,
+    EVENT_UNKNOWN: MAX_PROBABILITY_AGE_S,
+    EVENT_PRE_MATCH: PRE_MATCH_MAX_AGE_S,
+}
+
+REFUSED_STATES = (EVENT_FINAL, EVENT_ABANDONED)
+
+R_EVENT_SETTLED = "EVENT_IS_FINAL_OR_ABANDONED"
+
+FRESHNESS_CONTRACT = {
+    "default_bound_s": MAX_PROBABILITY_AGE_S,
+    "pre_match_bound_s": PRE_MATCH_MAX_AGE_S,
+    "by_state": dict(AGE_BOUND_BY_STATE),
+    "refused_states": list(REFUSED_STATES),
+    "unknown_is_strict": (
+        "an event whose state nobody established gets the IN_PLAY bound. "
+        "Absence of evidence is not evidence of pre-match"),
+    "pre_match_needs_evidence": (
+        "the longer bound applies only when the caller DECLARES "
+        "PRE_MATCH. It is never inferred from a comment, a kickoff "
+        "estimate or the quote's own age"),
+    "aged_against": "the BOOKMAKER'S observation stamp, never our receipt",
+    "rechecked": "on EVERY decision, against that decision's own clock",
+}
+
+
+def bound_for(event_state=None) -> dict:
+    """The freshness bound this event state permits, or a refusal."""
+    st = str(event_state or EVENT_UNKNOWN).strip().upper() or EVENT_UNKNOWN
+    if st in REFUSED_STATES:
+        return {"ok": False, "state": st, "refusal": R_EVENT_SETTLED,
+                "bound_s": None,
+                "why": ("the event is %s. A bookmaker's pre-settlement "
+                        "line does not value a hold on a decided or void "
+                        "event" % st)}
+    if st not in AGE_BOUND_BY_STATE:
+        st = EVENT_UNKNOWN
+    return {"ok": True, "state": st, "bound_s": AGE_BOUND_BY_STATE[st],
+            "is_the_strict_bound": AGE_BOUND_BY_STATE[st] ==
+                                   MAX_PROBABILITY_AGE_S,
+            "why": ("%s permits %.0f s" % (st, AGE_BOUND_BY_STATE[st]))}
+
 
 #: A probability this close to certainty is reported with the bound
 #: named, because de-vig error is largest at the tails and an EV built on
@@ -179,7 +261,7 @@ def _epoch(v):
 
 
 def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
-            payout_event_held, max_age_s=MAX_PROBABILITY_AGE_S) -> dict:
+            payout_event_held, event_state=None, max_age_s=None) -> dict:
     """The value of holding `qty` to settlement, or why it is unknown.
 
     `payout_event_held` is the event OUR position pays on, established
@@ -188,13 +270,26 @@ def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
     with it, and a disagreement is a refusal rather than a silent
     complement.
     """
+    # THE BOUND COMES FROM THE EVENT STATE, and an explicit `max_age_s`
+    # may only make it STRICTER. A caller cannot widen the window by
+    # passing a bigger number: that is how 1800 s reached a live market.
+    bnd = bound_for(event_state)
+    limit = bnd.get("bound_s")
+    if max_age_s is not None and limit is not None:
+        limit = min(float(limit), float(max_age_s))
     out = {"version": VERSION, "provenance": PROVENANCE,
            "status": NOT_IDENTIFIED, "ev_hold_usd": None,
            "probability": None, "probability_event": None,
            "payout_event_held": payout_event_held,
            "input_available": False,
            "is_a_deliberate_hold": False,
+           "freshness_contract": FRESHNESS_CONTRACT,
+           "event_state": bnd.get("state"),
+           "age_bound_s": limit,
            "asked_at": float(now)}
+    if not bnd["ok"]:
+        out.update(refusal=bnd["refusal"], why=bnd["why"])
+        return out
 
     if qty is None or basis_per_contract is None:
         out.update(refusal=R_NO_POSITION,
@@ -280,7 +375,9 @@ def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
         "observed_at": obs, "received_at": rec,
         "age_from_observation_s": age_obs,
         "age_from_receipt_s": age_rec,
-        "bound_s": float(max_age_s),
+        "bound_s": float(limit),
+        "bound_from_event_state": bnd.get("state"),
+        "bound_is_the_strict_one": bool(bnd.get("is_the_strict_bound")),
         "aged_against": "OBSERVATION",
         "why": ("ageing against receipt makes a stale quote look fresh "
                 "the moment we happen to fetch it. The bound is applied "
@@ -293,13 +390,13 @@ def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
                         "age cannot be established. An unknown age is "
                         "not a fresh one"))
         return out
-    if age_obs > float(max_age_s):
+    if age_obs > float(limit):
         out.update(refusal=R_STALE,
                    why=("the probability was observed %.0f s ago, past "
-                        "the declared %.0f s bound. A hold valued on a "
-                        "stale line is a decision made about a market "
-                        "that has moved"
-                        % (age_obs, float(max_age_s))))
+                        "the %.0f s bound this event state (%s) permits. "
+                        "A hold valued on a stale line is a decision "
+                        "made about a market that has moved"
+                        % (age_obs, float(limit), bnd.get("state"))))
         return out
     if age_obs < 0:
         out.update(refusal=R_STALE,
@@ -370,7 +467,7 @@ def describe() -> dict:
         "supplies": "EV_HOLD, the value the exit engine says ranking needs",
         "source": "external_valuations, ELIGIBLE rows only",
         "provenance": PROVENANCE,
-        "max_probability_age_s": MAX_PROBABILITY_AGE_S,
+        "freshness_contract": FRESHNESS_CONTRACT,
         "refusals": [R_NO_SOURCE, R_INELIGIBLE, R_STALE, R_NO_PROBABILITY,
                      R_IDENTITY_UNSTATED, R_PAYOUT_MISMATCH, R_NO_POSITION],
         "never": ("defaults an unknown probability to zero, invents a "
