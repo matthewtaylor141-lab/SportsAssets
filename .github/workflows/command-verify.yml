@@ -86,6 +86,10 @@ on:
         description: "an additional rules URL to retrieve verbatim"
         required: false
         default: ""
+      fixture_date:
+        description: "YYYY-MM-DD for the fixture-metadata shape probe"
+        required: false
+        default: ""
 
 jobs:
   verify:
@@ -1999,4 +2003,51 @@ jobs:
           done
           say ""
           say "END OF CAPTURE -- nothing was written, no service was touched"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # ── AUTHORITATIVE FIXTURE METADATA, SHAPE FIRST ─────────────────
+      #
+      # The scope guard needs the COMPETITION PHASE and the GAME FORMAT per
+      # fixture. Neither is on `markets`, and both are published per game by
+      # the league's own Stats API. This step retrieves one date and prints
+      # the FIELD NAMES and one whole game object, so the parser is written
+      # against the served payload rather than from recollection -- and so
+      # the access dependency is demonstrated rather than asserted.
+      #
+      # Read-only, no credential, nothing written.
+      - name: Authoritative fixture metadata — the served shape
+        if: always()
+        env:
+          DATE: ${{ inputs.fixture_date }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          D="${DATE:-2026-09-24}"
+          U="https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=$D"
+          say "retrieved_at\t$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          say "source\t$U"
+          CODE=$(curl -sS -L --max-time 60 -o /tmp/mlb.json -w '%{http_code}' "$U" || echo 000)
+          say "http\t$CODE  bytes\t$(wc -c < /tmp/mlb.json 2>/dev/null || echo 0)"
+          if [ "$CODE" != "200" ]; then
+            say "RETRIEVAL FAILED -- the access dependency is this host"
+            head -c 300 /tmp/mlb.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          say "totalGames\t$(jq -r '.totalGames // "-"' /tmp/mlb.json)"
+          say "-- the field names on one game, as served --"
+          jq -r '[.dates[0].games[0] | paths(scalars) | join(".")] | unique | .[]' \
+            /tmp/mlb.json 2>/dev/null | head -60 | tee -a "$GITHUB_STEP_SUMMARY"
+          say "-- the fields the scope guard needs, for every game that day --"
+          jq -r '.dates[].games[] | "  gamePk=" + (.gamePk|tostring)
+                 + "  gameType=" + ((.gameType // "-")|tostring)
+                 + "  scheduledInnings=" + ((.scheduledInnings // "-")|tostring)
+                 + "  doubleHeader=" + ((.doubleHeader // "-")|tostring)
+                 + "  gameNumber=" + ((.gameNumber // "-")|tostring)
+                 + "  officialDate=" + ((.officialDate // "-")|tostring)
+                 + "  gameDate=" + ((.gameDate // "-")|tostring)
+                 + "  status=" + ((.status.detailedState // "-")|tostring)
+                 + "  away=" + ((.teams.away.team.name // "-")|tostring)
+                 + "  home=" + ((.teams.home.team.name // "-")|tostring)' \
+            /tmp/mlb.json 2>/dev/null | head -40 | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

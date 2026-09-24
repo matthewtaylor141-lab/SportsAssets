@@ -375,7 +375,7 @@ CTX_PRE_GAME = "PRE_GAME"
 CTX_LIVE = "IN_PLAY"
 
 R_CONTEXT_UNKNOWN = "QUOTE_CONTEXT_NOT_ESTABLISHED"
-R_SCHEDULED_ONLY = "ONLY_A_SCHEDULED_START_IS_HELD_SO_IN_PLAY_IS_UNPROVEN"
+R_SCHEDULED_ONLY = "ONLY_A_SCHEDULED_START_IS_HELD_SO_CONTEXT_IS_UNPROVEN"
 
 # ── WHAT KIND OF START STAMP WE HOLD ─────────────────────────────────
 #
@@ -386,13 +386,21 @@ R_SCHEDULED_ONLY = "ONLY_A_SCHEDULED_START_IS_HELD_SO_IN_PLAY_IS_UNPROVEN"
 # `bettor_progress_feed`, and that refusal is the point." The first version
 # of this function reintroduced exactly that refused derivation.
 #
-# THE ASYMMETRY IS THE WHOLE FIX. A scheduled start bounds the first pitch
-# from BELOW -- a fixture is not brought forward -- so a quote observed
-# BEFORE the scheduled time is before the first pitch and PRE_GAME is
-# established. It bounds nothing from above: a rain delay, a a late start or
-# a postponement all leave the scheduled time in the past while play has not
-# begun. So the scheduled time passing establishes NOTHING, and IN_PLAY needs
-# evidence that play actually started.
+# A SCHEDULED START ESTABLISHES NOTHING IN EITHER DIRECTION.
+#
+# The first repair kept one inference: that a quote observed BEFORE the
+# catalogue's start time must be pre-game, because a fixture is not brought
+# forward. That is not sound either. The catalogue row is a SNAPSHOT of a
+# schedule as it stood when it was fetched, and a schedule can be ADVANCED --
+# a doubleheader resequenced, a start pulled forward for weather or
+# television -- after that snapshot was taken. A stale row then says 19:00
+# while the first pitch was at 18:30, and a quote at 18:50 reads as pre-game
+# while the game is in its second inning. The bound is only as good as the
+# freshness of the row, which nothing here establishes.
+#
+# So the scheduled start is recorded and NEVER used to classify. Context
+# comes from the provider's own market label, or from actual event-state
+# evidence carrying its own observation time. Everything else is UNKNOWN.
 SE_SCHEDULED_CATALOGUE = "SCHEDULED_START_FROM_VENUE_CATALOGUE"
 SE_ACTUAL_REPORTED = "ACTUAL_START_REPORTED_BY_A_PROGRESS_SOURCE"
 SE_QUOTE_MARKET_CONTEXT = "QUOTE_LABELLED_BY_THE_PROVIDER_AS_IN_PLAY"
@@ -401,9 +409,10 @@ SE_QUOTE_MARKET_CONTEXT = "QUOTE_LABELLED_BY_THE_PROVIDER_AS_IN_PLAY"
 ESTABLISHES_IN_PLAY = (SE_ACTUAL_REPORTED, SE_QUOTE_MARKET_CONTEXT)
 
 SCHEDULED_START_DIRECTION = (
-    "a scheduled start bounds the first pitch from BELOW only. Observed "
-    "before it: play had not begun, so PRE_GAME is established. Observed "
-    "after it: the fixture may be delayed, so nothing is established")
+    "a scheduled start classifies NOTHING. Past it a delay means play may "
+    "not have begun; before it a schedule advanced after the snapshot means "
+    "play may already have begun. Only the provider's market label or actual "
+    "event-state evidence with its own observation time establishes context")
 
 
 def book_context_for(*, observed_at=None, start_at=None,
@@ -444,32 +453,33 @@ def book_context_for(*, observed_at=None, start_at=None,
                         "differently on a called game"))
         return out
 
-    if float(observed_at) < float(start_at):
-        out.update(context=CTX_PRE_GAME,
-                   seconds_before_start=float(start_at) - float(observed_at),
-                   why=("the quote was observed BEFORE the start stamp, and "
-                        "a fixture is not brought forward, so play had not "
-                        "begun whatever kind of stamp this is"))
+    # ONLY ACTUAL EVENT-STATE EVIDENCE CLASSIFIES, and it must carry its own
+    # observation time so the comparison is between two stamps of known
+    # provenance rather than between a quote and a schedule.
+    if str(start_evidence) in ESTABLISHES_IN_PLAY:
+        if float(observed_at) >= float(start_at):
+            out.update(context=CTX_LIVE,
+                       seconds_after_start=(float(observed_at)
+                                            - float(start_at)),
+                       why=("the quote was observed after an ACTUAL reported "
+                            "start, so play had begun"))
+        else:
+            out.update(context=CTX_PRE_GAME,
+                       seconds_before_start=(float(start_at)
+                                             - float(observed_at)),
+                       why=("the quote was observed before an ACTUAL reported "
+                            "start, so play had not begun"))
         return out
 
-    # Observed at or after the stamp. Only ACTUAL-start evidence gets to
-    # call that IN_PLAY.
-    if str(start_evidence) in ESTABLISHES_IN_PLAY:
-        out.update(context=CTX_LIVE,
-                   seconds_after_start=float(observed_at) - float(start_at),
-                   why=("the quote was observed after an ACTUAL reported "
-                        "start, so play had begun"))
-        return out
     out.update(refusal=R_SCHEDULED_ONLY,
-               seconds_after_scheduled=float(observed_at) - float(start_at),
-               why=("the quote was observed %.0f s after a SCHEDULED start "
-                    "and no actual-start evidence is held. A delayed or "
-                    "postponed fixture leaves the scheduled time in the past "
-                    "while play has not begun, so this does NOT establish "
-                    "IN_PLAY -- and calling it IN_PLAY would apply the rule "
-                    "that VOIDS a called game to a bet the pre-game rule "
-                    "would have PAID"
-                    % (float(observed_at) - float(start_at),)))
+               seconds_from_scheduled=float(observed_at) - float(start_at),
+               why=("the only start stamp held is a SCHEDULED one from a "
+                    "catalogue snapshot, and it classifies NOTHING. Past it, "
+                    "a delay means play may not have begun; before it, a "
+                    "schedule advanced after the snapshot means play may "
+                    "ALREADY have begun. Either error picks the wrong "
+                    "published rule -- one pays a called game, the other "
+                    "voids it -- so the context stays UNKNOWN"))
     return out
 
 
