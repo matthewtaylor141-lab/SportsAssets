@@ -830,3 +830,172 @@ no remedial action was taken.
 After it fires the window is closed and the figure above — **17.1767 h
 observed, 72.0% of elapsed, 71.6% of the calendar day** — stands as the
 record.
+
+---
+
+# WINDOW CLOSED — 2026-09-24T04:00:00Z
+
+The stop is the fixed window end. No extension, no replacement run, no
+second window. Everything below is read from psql output in job logs.
+
+## The stop, and who actually performed it
+
+| | |
+|---|---|
+| stop write | run 1522, job 107487809007, **04:01:02Z** — `INSERT 0 1`, `bettor_live_observation = false` |
+| independent re-read | run 1523, job 107488210009, **04:02:52Z** — `false` |
+| **the run had already closed itself** | `RUN_CLOSE` rows went from 1 to **2**, the second stamped **2026-09-24 04:00:00+00** |
+
+So the honest sequence is: **the collector observed its own window end and
+closed at 04:00:00Z, 62 seconds before my write.** My stop was
+belt-and-braces, not the cause. Recording this the other way round — a
+control write that "stopped" a run which had already stopped — would credit
+the wrong mechanism.
+
+**The journal has stopped growing,** which is the test that matters. Two
+readings of the same query, five minutes apart:
+
+| read at | boot `d61606169a1f410c` rows | last row | gap rows |
+|---|---|---|---|
+| 04:02:58Z | 8,304 | 2026-09-24 04:00:00+00 | 17 |
+| 04:08:07Z | **8,304** | **2026-09-24 04:00:00+00** | **17** |
+
+A control flag reading false while rows keep arriving is not a stop. This
+is a stop.
+
+## Identities and the actual frame boundaries
+
+| | |
+|---|---|
+| probe_id | `d5e9ae3d-257f-4948-a808-90d1bd3c5e48` — unchanged all window |
+| boot_ids | **three**, never four |
+| | `7435b23a98d049f3` 43 rows, 10:28:29Z → 10:28:59Z |
+| | `8702807518fe44b4` 29,243 rows, 10:31:14Z → 22:58:35Z |
+| | `d61606169a1f410c` 8,304 rows, 22:58:58Z → 04:00:00Z |
+| FIRST persisted frame | **2026-09-23T10:28:29Z** |
+| LAST persisted frame | **2026-09-24T03:59:56Z** (LADDER max `at`) |
+| LADDER frames | **37,537**, all inside the window, **0** before it |
+
+## Coverage against the FULL 24 h denominator
+
+Denominator is the whole window `[2026-09-23T04:00:00Z,
+2026-09-24T04:00:00Z)` with the pre-start gap counted **inside** it.
+
+```
+window                        24.0000 h
+pre-start unobserved           6.4747 h   collector could not start until
+                                          BETTOR_INCENTIVE_MANIFEST was set
+                                          (~10:15Z); first frame 10:28:29Z
+observed span first->last     17.5242 h
+gaps inside the span           0.2072 h   (745.8382 s, 17 records)
+tail after last frame          0.0011 h   (03:59:56Z -> 04:00:00Z)
+-----------------------------------------
+OBSERVED                      17.3170 h
+UNOBSERVED                     6.6830 h
+```
+
+**72.2% of the 24-hour window. This is NOT a full-day observation and must
+never be reported as one:** 6.4747 h of it were unobservable before the
+collector could start, which is 27% of the window gone before the first
+frame existed.
+
+## Every gap, with from, to and reason
+
+| reason | from (epoch) | to (epoch) | s |
+|---|---|---|---|
+| GAP_LIVENESS_UNDETERMINED | 1790217768.3829548 | 1790217928.9311712 | 160.5482 |
+| GAP_LIVENESS_UNDETERMINED | 1790217470.9000216 | 1790217693.1660917 | 222.2661 |
+| GAP_LIVENESS_UNDETERMINED | 1790216963.0491900 | 1790216998.1799746 | 35.1308 |
+| GAP_LIVENESS_UNDETERMINED | 1790216784.9895895 | 1790216789.0914016 | 4.1018 |
+| GAP_LIVENESS_UNDETERMINED | 1790216646.7474644 | 1790216697.4234276 | 50.6760 |
+| GAP_LIVENESS_UNDETERMINED | 1790216105.3956854 | 1790216195.4624064 | 90.0667 |
+| GAP_LIVENESS_UNDETERMINED | 1790215920.2842133 | 1790215926.3125865 | 6.0284 |
+| GAP_LIVENESS_UNDETERMINED | 1790215612.8354895 | 1790215625.4182756 | 12.5828 |
+| GAP_DISCONNECTED | 1790213690.2994990 | 1790213691.3002260 | 1.0007 |
+| GAP_DISCONNECTED | 1790208626.4943056 | 1790208628.0049922 | 1.5107 |
+| GAP_DISCONNECTED | 1790208179.2323046 | 1790208180.2508035 | 1.0185 |
+| GAP_DISCONNECTED | 1790204337.5266368 | 1790204338.0454910 | 0.5189 |
+| **PROCESS_REPLACED** | 1790204314.8349680 | 1790204337.5004090 | 22.6650 |
+| GAP_DISCONNECTED | 1790173110.1466610 | 1790173111.6521392 | 1.5055 |
+| GAP_DISCONNECTED | 1790159474.2896466 | 1790159474.7899637 | 0.5003 |
+| **PROCESS_REPLACED** | 1790159339.0727410 | 1790159474.2642093 | 135.1910 |
+| GAP_DISCONNECTED | 1790159308.9122818 | 1790159309.4390497 | 0.5268 |
+
+**745.8382 s total.** Eight of the seventeen are
+`GAP_LIVENESS_UNDETERMINED` between roughly 02:40Z and 03:19Z, totalling
+581.4008 s — the last hour of the window, and overlapping two API deploys I
+made at 02:51Z and 03:08Z. **Cause not established.** No new
+`PROCESS_REPLACED` accompanied them, the boot id did not change and frames
+kept arriving, so the collector was neither replaced nor restarted; beyond
+that the coincidence is recorded as a coincidence and nothing more.
+
+## Markets: receiving vs FULL DEPTH persisted
+
+**12 receiving, 12 with depth persisted** — every market carries at least
+one ladder side. Per-market depth *levels* reached, from the final read:
+
+| market | frames | with_depth | max bid levels | max ask levels |
+|---|---|---|---|---|
+| ccpc-bilbrd-1album-any2026-alewar | 1,120 | 1,120 | 5 | 10 |
+| ccpc-bilbrd-1album-any2026-benboo | 7,948 | 7,948 | 3 | 17 |
+| ccpc-bilbrd-1album-any2026-beyonc | 1,344 | 1,344 | 7 | 8 |
+| ccpc-bilbrd-1album-any2026-bileil | 3,525 | 3,525 | 4 | 22 |
+| ccpc-bilbrd-1album-any2026-charoa | 1,261 | 1,261 | 4 | 9 |
+| ccpc-bilbrd-1album-any2026-chaxcx | 846 | 846 | 2 | 7 |
+| ccpc-bilbrd-1album-any2026-coldpl | 6,018 | 6,018 | 3 | 20 |
+| ccpc-bilbrd-1album-any2026-doechi | 1,941 | 1,941 | 5 | 19 |
+| ccpc-bilbrd-1album-any2026-dualip | 2,374 | 2,374 | 5 | 17 |
+| ccpc-bilbrd-1album-any2026-eminem | 5,716 | 5,716 | 9 | 18 |
+| ccpc-bilbrd-1album-any2026-fraoce | 3,603 | 3,603 | 5 | 23 |
+| ccpc-bilbrd-1album-any2026-jusbie | 1,515 | 1,515 | 2 | 19 |
+
+(Counts from the 04:06:13Z read; they total 37,537.) **These twelve markets
+are ONE programme and ONE event, not twelve independent observations.**
+Whether a ladder was ever *complete* — every level the venue held, not
+merely a non-empty side — is **UNKNOWN**: the journal records the levels we
+received and cannot say what was withheld. Reported as unknown, not as
+full.
+
+## Allowance consumed, against its ceilings
+
+| resource | used | ceiling |
+|---|---|---|
+| HTTP (manifest 0 + recheck 2 + retry 0) | **2** | 8 |
+| socket connects | **7** | 20 |
+| socket subscribes | **14** | 40 |
+| `general_max_distinct` | **0** | — untouched, as required |
+| boots | 3 | — |
+| deadline_at | 2026-09-24T04:35:48+00:00 | never moved |
+
+Final control read: **`false`**.
+
+## The opportunity script
+
+`python research/beta48/bettor_incentive_opportunity.py` requires a mode;
+both were run.
+
+- `--self-test` → `self-test OK -- terms from the captured manifest, 12
+  markets, pool $50, DF 0.25, target 500`.
+- `--scenario` → wrote
+  `research/beta48/acceptance/incentive_opportunity.json`. Terms as
+  captured: `culture_low_20260921`, pool $50, DF 0.25, target 500.
+
+**The scenario's own header states the limit and it is repeated here: the
+ladders it runs on come from markets carrying NO incentive programme, so
+its `gross$` column is NOT a measurement of what they would have paid —
+there was no pool on them.** The figures show the pipeline computes on real
+depth. Nothing has been earned; no money has moved; measured competing
+depth is not reward share, and a scenario is not a measurement.
+
+## What this window is, and is not
+
+It **is** 17.3170 h of persisted order-book depth across twelve markets of
+one programme and one event, with every gap enumerated, the allowance
+barely touched and the stop verified from durable evidence.
+
+It is **not** a full day, **not** twelve independent observations, **not**
+evidence about trading performance, and **not** earned money. No orders
+were placed, no trading control was changed, no credential moved, nothing
+was re-armed and no counter was reset.
+
+**The window is closed. This figure stands as the record.**
