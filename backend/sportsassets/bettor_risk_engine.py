@@ -54,6 +54,38 @@ is missing). Collapsing the third into PASS is how risk systems fail
 quietly, so NOT_EVALUABLE blocks exposure increases exactly as BLOCK
 does, while saying something different about why.
 
+────────────────────────────────────────────────────────────────────
+AN UNRECOGNISED ACTION IS NOT A HARMLESS ONE (found 2026-09-24).
+
+`EXPOSURE_EFFECT` is keyed by the EV action vocabulary -- MAKE_YES,
+TAKE_YES, DIRECT_EXIT and so on. `exposure_effect()` answers
+NOT_IDENTIFIED for anything else, and the verdict below used to read
+only "is this INCREASE?". So an action spelled any other way -- the
+entry gate's own `BUY`, a typo, a new verb added upstream -- fell past
+the increasing branch into the reducing/neutral one and came back
+**permitted: True, direction EXPOSURE_NEUTRAL**, with every rail
+NOT_EVALUABLE and nothing blocking it.
+
+That is the exact failure this module's own first principle forbids,
+one level up: not an unevaluable rail treated as a pass, but an
+unevaluable ACTION treated as harmless. Wiring the external-valuation
+entry lane into this engine is what surfaced it, because that lane's
+action name is `BUY`.
+
+An action whose exposure effect is not identified is now REFUSED, and
+by name. Widening the vocabulary is a deliberate edit to
+`bettor_ev_actions`, not something a caller does by choosing a string.
+────────────────────────────────────────────────────────────────────
+
+LIMITS MAY BE SUPPLIED BY A LANE, AND THE DEFAULT STAYS EMPTY. The
+module-level rails carry no numbers and never will: a limit written
+here would govern every lane at once without anyone choosing it for
+any of them. `evaluate(..., limits=...)` lets a lane pass its OWN
+predeclared set, so the numbers live with the mandate that declared
+them and a lane that declares nothing is still refused. An unknown
+rail name in a supplied set is refused rather than ignored, because a
+misspelled limit is an ungoverned rail wearing a governed name.
+
 NOTHING HERE PLACES, SIZES OR FUNDS AN ORDER.
 """
 
@@ -184,18 +216,32 @@ def exposure_effect(action: str) -> dict:
     }
 
 
-def evaluate_rail(name: str, observed=None) -> dict:
-    """One rail. A missing limit or a missing measurement is not a pass."""
+R_ACTION_UNKNOWN = "ACTION_EXPOSURE_EFFECT_NOT_IDENTIFIED"
+R_LIMIT_NAME_UNKNOWN = "PREDECLARED_LIMIT_NAMES_AN_UNKNOWN_RAIL"
+
+
+def evaluate_rail(name: str, observed=None, limit_override=None) -> dict:
+    """One rail. A missing limit or a missing measurement is not a pass.
+
+    `limit_override` is a number a LANE predeclared for this rail. It is
+    used only when supplied; there is no fallback number anywhere.
+    """
     spec = RAILS.get(name)
     if spec is None:
         return {"rail": name, "verdict": NOT_EVALUABLE,
                 "why": "unknown rail"}
-    limit = _d(spec["limit"])
+    limit = _d(spec["limit"] if limit_override is None else limit_override)
     value = _d(observed)
     row = {
         "rail": name,
         "axis": spec["axis"],
-        "limit": spec["limit"],
+        "limit": (spec["limit"] if limit_override is None
+                  else str(limit_override)),
+        # WHOSE NUMBER THIS IS. A reader must be able to tell a lane's
+        # predeclared limit from a module default, because only one of
+        # them was chosen by anybody.
+        "limitSource": ("MODULE_DEFAULT" if limit_override is None
+                        else "LANE_PREDECLARED"),
         "observed": (str(value) if value is not None else NOT_IDENTIFIED),
         "measures": spec["measures"],
     }
@@ -218,17 +264,27 @@ def evaluate_rail(name: str, observed=None) -> dict:
     return row
 
 
-def evaluate(action: str, *, observed=None, state=None) -> dict:
+def evaluate(action: str, *, observed=None, state=None, limits=None) -> dict:
     """May this action proceed on risk grounds?
 
     `observed` maps rail name -> measured value.
     `state` maps state-gate name -> True when the condition is CLEAR.
+    `limits` maps rail name -> the limit A LANE predeclared. Omitted, the
+    module's own rails apply and none of them carries a number.
     """
     effect = exposure_effect(action)
     observed = observed or {}
     state = state or {}
+    limits = dict(limits or {})
 
-    rails = [evaluate_rail(name, observed.get(name)) for name in RAILS]
+    # A LIMIT FOR A RAIL THAT DOES NOT EXIST IS REFUSED, NOT DROPPED.
+    # Silently ignoring `MAX_MARKET_EXPOSURES` would leave
+    # MAX_MARKET_EXPOSURE ungoverned while the caller's declaration
+    # showed a number for it.
+    unknown_limits = sorted(n for n in limits if n not in RAILS)
+
+    rails = [evaluate_rail(name, observed.get(name), limits.get(name))
+             for name in RAILS]
     gates = []
     for name, why in STATE_GATES.items():
         clear = state.get(name)
@@ -252,7 +308,43 @@ def evaluate(action: str, *, observed=None, state=None) -> dict:
         "gatesNotPassed": failing_gates,
         "notEvaluableIsNotPass": NOT_EVALUABLE_IS_NOT_PASS,
         "verdicts": list(VERDICTS),
+        "limitsSupplied": sorted(limits),
+        "limitsNamingUnknownRails": unknown_limits,
     }
+
+    if unknown_limits:
+        out.update({
+            "direction": NOT_IDENTIFIED,
+            "permitted": False,
+            "refusal": R_LIMIT_NAME_UNKNOWN,
+            "why": ("the supplied limits name rail(s) this engine does "
+                    "not declare: %s. A misspelled limit leaves the real "
+                    "rail ungoverned while the declaration appears to "
+                    "cover it, so the whole set is refused"
+                    % ", ".join(unknown_limits)),
+        })
+        return out
+
+    # AN UNRECOGNISED ACTION FAILS CLOSED, BEFORE EITHER DIRECTION.
+    # See the module header: this branch used to be absent, and an
+    # action outside the EV vocabulary came back EXPOSURE_NEUTRAL and
+    # permitted while no rail had been evaluated at all.
+    if effect["grossExposure"] == NOT_IDENTIFIED:
+        out.update({
+            "direction": NOT_IDENTIFIED,
+            "permitted": False,
+            "refusal": R_ACTION_UNKNOWN,
+            "why": ("%r is not in the declared action vocabulary, so "
+                    "neither its gross nor its directional exposure "
+                    "effect is known. An action whose effect on the "
+                    "book is unidentified cannot be shown not to "
+                    "increase exposure, and is refused on the same "
+                    "principle that refuses an unevaluable rail. Add it "
+                    "to bettor_ev_actions deliberately; do not reach "
+                    "this branch by choosing a spelling" % (action,)),
+            "declaredActions": sorted(EXPOSURE_EFFECT),
+        })
+        return out
 
     # THE ASYMMETRY, WHICH IS THE WHOLE DESIGN. An unmeasurable risk
     # state blocks making the problem bigger. It does not block making

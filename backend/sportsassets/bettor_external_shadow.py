@@ -99,11 +99,35 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
              risk, fee_fn, now, method=devig.DEFAULT_METHOD,
              outcome_books=None, armed=False,
              min_net_edge_per_contract=MIN_NET_EDGE_PER_CONTRACT,
-             extra_refusals=None, payout_is_complement=False) -> dict:
+             extra_refusals=None, payout_is_complement=False,
+             execution_plan=None) -> dict:
     """One contract, end to end, through the REAL gate.
 
     Returns a record that is persisted whether or not it clears, because
     the refusals are the deliverable when nothing clears.
+
+    ── `execution_plan`, AND WHY THE ORDER MATTERS ──────────────────
+    The execution estimate, the size and the price all depend on the
+    VALUATION: a marketable order's limit is the break-even price the
+    belief implies, and the size is the frozen notional at that limit.
+    But the valuation is computed HERE, once, including the single
+    complement inversion. A caller that wanted to size properly had two
+    bad options: recompute the de-vig itself (two valuations that can
+    drift), or pass placeholders (which is what the scheduled loop did
+    -- `size=1.0` and a hand-written `risk={"permitted": True}`).
+
+    So a caller may instead hand in a CALLABLE, invoked with the fair
+    value this function computed, returning the estimate, the size, the
+    risk verdict and the price to evaluate at:
+
+        execution_plan(fair_value=float, contract=dict) -> {
+            "execution_estimate": {...}, "size": float|None,
+            "risk": {...}, "ask": float|None, "detail": {...}}
+
+    One valuation, one inversion, and the sizing still happens outside
+    this module. A plan that cannot answer returns None for `size` or
+    `ask` and the gate refuses by name -- it is never a reason to fall
+    back to the placeholder it replaced.
     """
     val = devig.valuation(contract=contract, quote=quote, now=now,
                           method=method)
@@ -187,6 +211,50 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
             books is None or books < MIN_OUTCOME_BOOKS):
         rec["refusals"].append(R_THIN_OUTCOME)
 
+    # THE PLAN, BUILT ON THE VALUATION THIS FUNCTION JUST COMPUTED.
+    # Invoked after the complement inversion and before anything reads a
+    # price, so the sizing, the limit and the risk verdict all describe
+    # the same payout event as the probability does. A plan that raises
+    # is recorded as a refusal rather than allowed to abort the record --
+    # the row, with its odds and its costs, is the deliverable.
+    market_state = dict(market_state or {})
+    if execution_plan is not None:
+        if _p_pay is None:
+            rec["execution_plan"] = {
+                "built": False,
+                "why": ("no probability, so there is no break-even limit "
+                        "to size against and no plan was attempted")}
+        else:
+            try:
+                plan = execution_plan(fair_value=float(_p_pay),
+                                      contract=dict(contract)) or {}
+            except Exception as exc:                           # noqa: BLE001
+                plan = {}
+                rec["refusals"].append("EXECUTION_PLAN_FAILED:%s"
+                                       % type(exc).__name__)
+            rec["execution_plan"] = plan.get("detail") or {
+                "built": bool(plan)}
+            # THE PLAN'S OWN NAMED REASONS, kept. The gate can only say
+            # EXECUTION_ESTIMATE_NOT_IDENTIFIED; it cannot say whether
+            # the ladder was unreadable or was simply priced beyond
+            # break-even, and those are different problems for whoever
+            # reads the cycle report.
+            rec["plan_refusals"] = [str(c)
+                                    for c in (plan.get("refusals") or [])]
+            for code in rec["plan_refusals"]:
+                if code not in rec["refusals"]:
+                    rec["refusals"].append(code)
+            execution_estimate = plan.get("execution_estimate",
+                                          execution_estimate)
+            size = plan.get("size", size)
+            risk = plan.get("risk", risk)
+            if plan.get("ask") is not None:
+                # THE PRICE OF THE QUANTITY ACTUALLY CLAIMED. Pricing a
+                # multi-level size off level one understates the cost and
+                # turns depth into edge.
+                market_state["ask"] = plan["ask"]
+                market_state["ask_basis"] = "VWAP_OF_THE_SIZED_WALK"
+
     ask = (market_state or {}).get("ask")
     fee_per = None
     if ask is not None and fee_fn is not None:
@@ -229,7 +297,8 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
     # and is still admissible would make the refusal decorative.
     rec["admissible"] = bool(admitted.get("admissible")) and \
         R_THIN_OUTCOME not in rec["refusals"] and \
-        not rec["caller_refusals"]
+        not rec["caller_refusals"] and \
+        not rec.get("plan_refusals")
     rec["decision"] = "BUY" if rec["admissible"] else "NO_TRADE"
     rec["proposed_size"] = size if rec["admissible"] else None
     rec["why"] = (("external probability %.4f on %s vs acquisition "

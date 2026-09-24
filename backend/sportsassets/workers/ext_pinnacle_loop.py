@@ -44,7 +44,9 @@ import os
 import re
 import time
 
+from .. import bettor_entry_execution as entryx
 from .. import bettor_external_shadow as ext
+from .. import bettor_fixture_metadata as fmeta_mod
 from .. import bettor_pinnacle_devig as devig
 from .. import bettor_venue_mapping as vmap
 from .. import bettor_venue_settlement as vset
@@ -920,6 +922,12 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
             "levels_published": lad.get("levels_published"),
             "levels_read": lad.get("levels_read"),
             "sized": sized,
+            # THE WHOLE LADDER, so a caller can walk it rather than
+            # guess from the best level. The entry lane's marketable
+            # execution estimate needs every level's price and quantity;
+            # returning only `depth` forced the loop to treat the book as
+            # one price with a number beside it.
+            "acquisition_ladder": lad,
             "age_s": age, "age_basis": age_basis,
             "read_at": read_at, "slug": slug,
             "displayed_depth_is_not_a_queue": True,
@@ -927,6 +935,210 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
             # crosses the ladder this intent must cross; a resting price
             # would invent a queue position we never held.
             "bid": None}
+
+
+# ── THE ENTRY LANE'S EXECUTION, SIZING AND RISK ─────────────────────
+#
+# Everything below composes existing engines and computes no economics of
+# its own. The arithmetic lives in `bettor_entry_execution`; these are the
+# adapters that fetch what it needs from this loop's own data.
+
+FIXTURE_META_SQL = """
+    SELECT phase, phase_uncovered, game_format, scheduled_innings,
+           play_has_begun, event_state_raw, abstract_state, start_evidence,
+           terminal_hint, game_pk, home_team, away_team, source, source_url,
+           reader_version,
+           official_date::text AS official_date,
+           extract(epoch FROM actual_start_at)::float8 AS actual_start_at,
+           to_char(retrieved_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+               AS retrieved_at
+      FROM fixture_metadata WHERE condition_id = $1
+"""
+
+
+async def fixture_metadata_for(conn, condition_id) -> dict:
+    """The persisted authoritative fixture row, or why there is none.
+
+    A FAILED READ IS NOT AN ABSENT ROW, and the two are reported
+    separately: an absent row is an acquisition task, a failed read is a
+    database problem, and treating the second as the first would let an
+    outage look like missing evidence.
+    """
+    try:
+        row = await conn.fetchrow(FIXTURE_META_SQL, str(condition_id))
+    except Exception as exc:                                   # noqa: BLE001
+        return {"read": False, "error": "%s" % type(exc).__name__,
+                "why": ("the fixture metadata read failed, which is not "
+                        "evidence that no row exists")}
+    if row is None:
+        return {"read": False, "error": None,
+                "why": ("no authoritative fixture metadata is persisted "
+                        "for this condition, so the competition phase, "
+                        "the game format and the actual event state are "
+                        "unestablished. The acquisition route populates "
+                        "it")}
+    return dict(row, read=True)
+
+
+def _risk_action(intent) -> str:
+    """The EV action vocabulary's name for acquiring this leg.
+
+    Not the ladder side: `BID`/`ASK` names a side of someone else's book,
+    and the risk engine asks what WE are doing. Both are marketable --
+    this lane crosses -- so both are TAKE_*, never MAKE_*.
+    """
+    return ("TAKE_NO" if str(intent) == "ORDER_INTENT_BUY_SHORT"
+            else "TAKE_YES")
+
+
+#: The odds source's own hard rule, restated where the gate can see it.
+#: `bettor_pinnacle_devig` refuses a quote older than this; the entry
+#: lane's freshness gate must not be laxer than the valuation's.
+PINNACLE_MAX_AGE_S = 30.0
+
+
+def _entry_freshness(quote, vq, now) -> dict:
+    """Both clocks, and the STALEST one governs.
+
+    An edge computed from a 3-second Pinnacle price and a five-minute-old
+    venue ask is an artefact of the gap between them. Either age being
+    unmeasurable leaves the verdict UNKNOWN, which blocks -- in
+    particular when the venue supplies no `transactTime`, because then
+    our read time is the only clock and using it would make every quote
+    look fresh by construction.
+    """
+    p_age = None
+    try:
+        if quote.get("observed_at") is not None:
+            p_age = float(now) - float(quote["observed_at"])
+    except (TypeError, ValueError):
+        p_age = None
+    v_age = vq.get("age_s")
+    out = {"pinnacle_age_s": (None if p_age is None else round(p_age, 3)),
+           "pinnacle_limit_s": PINNACLE_MAX_AGE_S,
+           "venue_age_s": (None if v_age is None else round(float(v_age), 3)),
+           "venue_limit_s": MAX_VENUE_QUOTE_AGE_S,
+           "venue_age_basis": vq.get("age_basis"),
+           "stalest_governs": True}
+    if p_age is None or v_age is None:
+        out["fresh"] = None
+        out["why"] = ("one of the two clocks is not measured (%s), so "
+                      "whether this pair is contemporaneous is unknown"
+                      % ("pinnacle" if p_age is None
+                         else vq.get("age_basis") or "venue"))
+        return out
+    ok = p_age <= PINNACLE_MAX_AGE_S and float(v_age) <= MAX_VENUE_QUOTE_AGE_S
+    out["fresh"] = bool(ok)
+    out["why"] = ("pinnacle %.2fs/%.0fs and venue %.2fs/%.0fs"
+                  % (p_age, PINNACLE_MAX_AGE_S, float(v_age),
+                     MAX_VENUE_QUOTE_AGE_S))
+    return out
+
+
+OPEN_BOOK_SQL = """
+    SELECT p.condition_id,
+           p.seed_basis_usd::float8 AS cost_usd,
+           p.seed_qty::float8       AS qty,
+           extract(epoch FROM p.decision_ts)::float8 AS opened_at,
+           o.net_usd::float8        AS realized_net_usd
+      FROM rn1x_positions p
+      LEFT JOIN rn1x_outcomes o ON o.position_id = p.position_id
+     WHERE p.experiment_id = $1
+"""
+
+
+async def open_shadow_book(conn, experiment_id) -> list | None:
+    """The lane's own open inventory, or None when it could not be read.
+
+    None IS NOT AN EMPTY BOOK. An unread book leaves every rail
+    NOT_EVALUABLE and blocks the entry; an empty book is a measurement
+    that happens to be zero. Collapsing the two would permit a trade
+    because the database was down.
+    """
+    try:
+        rows = await conn.fetch(OPEN_BOOK_SQL, str(experiment_id))
+    except Exception:                                          # noqa: BLE001
+        return None
+    return [dict(r) for r in rows]
+
+
+def _settlement_compatibility(srule) -> dict:
+    """The per-condition comparison verdict, from where `attest` puts it.
+
+    The condition-to-payout comparison lives under the `void` rule --
+    that is the rule whose prose the captured terms speak to -- and the
+    engine's verdict is COMPATIBLE, INCOMPATIBLE or UNKNOWN. Anything
+    else, including a rule dict that predates the comparison, reads as
+    NOT_ESTABLISHED, which leaves the gate NOT_EVALUABLE rather than
+    quietly clear.
+    """
+    void = ((srule or {}).get("rules") or {}).get("void") or {}
+    cmp_ = void.get("terms_comparison") or {}
+    return {"compatibility": cmp_.get("verdict"),
+            "mismatched_conditions": cmp_.get("mismatched_conditions"),
+            "applicable_conditions": cmp_.get("applicable_conditions"),
+            "unstated_conditions": cmp_.get("unstated_conditions"),
+            "compared_on": void.get("compared_on")}
+
+
+def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
+                event_key, open_book, settlement, freshness, now):
+    """A callable `bettor_external_shadow.evaluate` invokes once.
+
+    It receives the fair value that function computed -- so there is
+    exactly one valuation and exactly one complement inversion -- and
+    returns the size, the marketable execution estimate, the price of the
+    quantity actually claimed, and the risk verdict.
+    """
+    def plan(*, fair_value, contract):
+        est = entryx.estimate(ladder=ladder, fair_value=fair_value,
+                              fee_fn=fee_fn,
+                              observation_age_s=observation_age_s)
+        detail = {"execution": est}
+        refusals = list(est.get("refusals") or [])
+        if not est.get("ok"):
+            # NO SIZE MEANS NO RISK QUESTION. Evaluating rails against a
+            # position that was never sized would produce a verdict about
+            # nothing, and a `permitted: True` from it would be the
+            # placeholder returning by another door.
+            detail["risk"] = {"evaluated": False,
+                              "why": ("no execution estimate, so there is "
+                                      "no proposed position to measure "
+                                      "exposure for")}
+            return {"execution_estimate": None, "size": None,
+                    "ask": None, "refusals": refusals,
+                    "risk": {"permitted": False,
+                             "reason": "NO_SIZED_POSITION_TO_ASSESS"},
+                    "detail": detail}
+
+        cost = float(est["size"]) * float(est["limit_price"])
+        exposure = entryx.exposure_from_rows(
+            open_book, condition_id=condition_id, event_key=event_key,
+            proposed_cost_usd=cost, proposed_qty=est["size"], now=now)
+        gates = entryx.state_from_evidence(
+            freshness=freshness,
+            settlement=_settlement_compatibility(settlement),
+            probability=fair_value,
+            # NO CALIBRATION RECORD IS SUPPLIED, and that is a fact about
+            # the source rather than an omission here. Passing one would
+            # assert that PINNACLE_DEVIG_V1's accuracy has been measured
+            # against outcomes. It has not: the de-vig module's own note
+            # on its default method is "validate in shadow". The gate
+            # therefore stays NOT_EVALUABLE and blocks inventory.
+            calibration=None)
+        verdict = entryx.verdict(action, observed=exposure["observed"],
+                                 state=gates["state"])
+        detail.update({"exposure": exposure, "gates": gates,
+                       "risk": verdict, "proposed_cost_usd": round(cost, 6),
+                       "risk_action": action})
+        refusals.extend(exposure.get("refusals") or [])
+        return {"execution_estimate": est,
+                "size": est["size"],
+                "ask": est["limit_price"],
+                "risk": verdict,
+                "refusals": refusals,
+                "detail": detail}
+    return plan
 
 
 # ── one cycle ───────────────────────────────────────────────────────
@@ -988,6 +1200,15 @@ async def cycle(conn) -> dict:
     written = 0
     evaluated = 0
     credits = {"used": None, "remaining": None}
+
+    # THE OPEN BOOK, READ ONCE PER CYCLE. The risk rails are measured
+    # against it plus the position being proposed, so it has to be read
+    # before any candidate is evaluated. None means the read FAILED, and
+    # None blocks every entry this cycle rather than reading as a flat
+    # book -- a database outage must not look like available headroom.
+    open_book = await open_shadow_book(conn, ext.EXPERIMENT_ID)
+    if open_book is None:
+        tally[entryx.R_BOOK_NOT_READ] = 1
 
     for sport_key, family in SPORTS:
         if evaluated >= MAX_PER_CYCLE:
@@ -1085,12 +1306,43 @@ async def cycle(conn) -> dict:
             # recorded and does not unblock.
             vevid = await venue_settlement_evidence(
                 conn, ident["us_market_slug"])
+            # THE SAME AUTHORITATIVE EVIDENCE MANAGEMENT ALREADY USES.
+            #
+            # The entry lane used to attest settlement with no context,
+            # no scope and no event state, which means the comparison ran
+            # against whichever rule set happened to be keyed by
+            # ("baseball", "h2h") alone. Management does not do that: it
+            # reads the persisted `fixture_metadata` row, takes the
+            # competition phase and the game format from it, and derives
+            # the quote's PRE_GAME/LIVE context from the ACTUAL reported
+            # event state rather than a catalogue start time.
+            #
+            # Entry now reads the same row, through the same parser, for
+            # the same reasons -- Pinnacle grades a called game one way
+            # before the first pitch and the opposite way in play, and an
+            # entry priced under the wrong one of those is priced against
+            # a contract that does not exist. The provenance travels with
+            # it: source, URL, fixture binding and retrieval time.
+            fmeta = await fixture_metadata_for(conn, mapped["condition_id"])
+            ctx_ev = None
+            if fmeta.get("read") and fmeta.get("play_has_begun") is not None:
+                ctx_ev = fmeta_mod.context_for(
+                    {"play_has_begun": fmeta.get("play_has_begun"),
+                     "actual_start_at": fmeta.get("actual_start_at"),
+                     "retrieved_at": fmeta.get("retrieved_at")},
+                    observed_at=quote.get("observed_at"))
             srule = vset.attest(
                 sport_family=family, market="h2h",
                 venue_evidence=vevid,
                 book_evidence={"outcome_names": list(quote["prices"].keys()),
-                               "source": "theoddsapi:h2h:%s" % devig.BOOK})
+                               "source": "theoddsapi:h2h:%s" % devig.BOOK},
+                observed_at=quote.get("observed_at"),
+                book_context=(ctx_ev or {}).get("context"),
+                phase=fmeta.get("phase"),
+                game_format=fmeta.get("game_format"))
             srule["book_rule"] = vset.BOOK_SETTLEMENT.get(family)
+            srule["fixture_metadata"] = fmeta
+            srule["quote_context_evidence"] = ctx_ev
             # THE SPECIFIC UNMET RULES, not one blanket unknown. "The
             # settlement rules do not match" is four questions -- draw,
             # overtime, push, void -- and a census that collapses them
@@ -1164,11 +1416,41 @@ async def cycle(conn) -> dict:
                               "side_consumed": vq["side_consumed"],
                               "depth": vq["depth"],
                               "readable": True},
+                # THE THREE PLACEHOLDERS ARE GONE. What stood here was
+                #
+                #     execution_estimate p_fill None  -> refused, honestly
+                #     size               1.0          -> chosen by nobody
+                #     risk               permitted    -> the risk layer
+                #                                       told its answer
+                #
+                # and the second and third are the ones that mattered: a
+                # BUY admitted on them would have been sized by a literal
+                # and cleared by an assertion. All three now come from
+                # `bettor_entry_execution`, which composes the frozen
+                # sizing policy, the marketable-fill reconstructor and the
+                # risk engine with this lane's predeclared limits. The
+                # plan runs INSIDE evaluate, after the one valuation, so
+                # the limit, the size and the price all describe the same
+                # payout event as the probability.
+                execution_plan=_entry_plan(
+                    ladder=vq.get("acquisition_ladder"),
+                    fee_fn=fee_fn,
+                    observation_age_s=vq.get("age_s"),
+                    action=_risk_action(ident["intent"]),
+                    condition_id=mapped["condition_id"],
+                    event_key=quote["event_id"],
+                    open_book=open_book,
+                    settlement=srule,
+                    freshness=_entry_freshness(quote, vq, now),
+                    now=now),
+                # Still passed, and still what the gate sees if no plan
+                # is built: a missing estimate refuses by name.
                 execution_estimate={"p_fill": None,
                                     "basis": "P_FILL_NOT_IDENTIFIED",
                                     "crossing": True},
-                size=1.0,
-                risk={"permitted": True, "reason": "shadow, no capital"},
+                size=None,
+                risk={"permitted": False,
+                      "reason": "NO_EXECUTION_PLAN_WAS_BUILT"},
                 fee_fn=fee_fn,
                 now=now,
                 outcome_books=quote["depth"].get(str(quote["home"])),
