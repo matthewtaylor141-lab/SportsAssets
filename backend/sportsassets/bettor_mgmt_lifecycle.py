@@ -69,6 +69,10 @@ INTENT_FOR = {
     "REDUCE": "REDUCE",
 }
 
+#: The challenger's policy version, carried on every decision it makes
+#: so a row can never be mistaken for the frozen benchmark's.
+CHALLENGER_VERSION = "BETTOR_MGMT_LIFECYCLE_CHALLENGER_V1"
+
 SUPPORTS_SIMULTANEOUS = False
 SIMULTANEOUS_NOTE = (
     "ONE active management order per residual leg. Two open orders can "
@@ -313,6 +317,197 @@ class Managed:
                    why=rank["selection_reason"])
         self.decisions.append(rec)
         return rec
+
+    # ── THE CHALLENGER, WITH HOLD IN THE COMPARISON ──────────────────
+    #
+    # `decide_and_act` above runs the frozen two-question shape: a
+    # declared trigger decides WHETHER, then the priced subset decides
+    # HOW. It is correct and it stays. Its limitation is structural --
+    # HOLD carries no number, so "whether" can only be a rule about
+    # price moves and elapsed time, never a comparison.
+    #
+    # `decide_challenger` is the same lifecycle driven by a ranking that
+    # HAS a hold value, supplied by the caller from
+    # `bettor_hold_value.ev_hold`. One question instead of two: what is
+    # the most valuable thing to do with this position, including
+    # nothing. It writes through the SAME `place()`, the SAME
+    # `bettor_desk.Order` state machine and the SAME Portfolio, so the
+    # one-active-order discipline, the inventory cap, the cancel/fill
+    # race and the accounting are not reimplemented and cannot diverge.
+    #
+    # NO DATABASE ACCESS HERE. `ev_hold` arrives as a value, exactly as
+    # `progress` does for the frozen policy, so this module stays pure
+    # and testable and the loop owns the reads.
+    def decide_challenger(self, *, at, ev_hold=None, bid=None,
+                          bid_size=None, complement_ask=None,
+                          complement_ask_size=None, sale_ladder=None,
+                          venue=None, us_market_slug=None,
+                          held_is_long=True, settlement_semantics=None,
+                          decision_id=None, inputs=None,
+                          last_price=None, seconds_open=None) -> dict:
+        """Rank every available action INCLUDING hold, then act or hold.
+
+        Returns the whole decision -- inputs and their freshness, the
+        alternatives, the selected action AND size, the governing rule,
+        the order state it produced and the inventory that resulted --
+        because a decision that cannot be inspected cannot be audited.
+        """
+        q = self.residual()
+        working = [o for o in self.open_orders()]
+        rest = ({"order_id": working[0].order_id, "side": working[0].side,
+                 "limit_price": working[0].limit_price,
+                 "remaining": working[0].remaining,
+                 "state": working[0].state} if working else None)
+
+        rec = {"at": at, "policy_id": CHALLENGER_VERSION,
+               "arm": "CHALLENGER", "is_champion_policy": False,
+               "residual_qty": q, "acted": False,
+               "execution_secured": False,
+               "decision_id": decision_id,
+               "held_qty": self.held(self.leg),
+               "matched_qty": self.matched(),
+               "inputs": dict(inputs or {})}
+
+        if q <= 1e-9:
+            rec.update(operating_state="NO_RESIDUAL",
+                       selected_action=None,
+                       selection_reason=("no unpaired exposure on the "
+                                         "seeded leg"),
+                       is_a_deliberate_hold=False)
+            self.decisions.append(rec)
+            return rec
+
+        basis_per = (self.pf._leg(self.condition_id, self.leg)["cost"]
+                     / max(self.held(self.leg), 1e-12))
+        rec["basis_per_contract"] = basis_per
+
+        # THE FALLBACK IS COMPUTED, NOT TAKEN ON TRUST. It is only
+        # consulted when EV_HOLD is NOT_IDENTIFIED, and it runs on
+        # observed inputs alone -- the last price on our leg, our basis
+        # and how long the exposure has been open. Computing it here
+        # rather than accepting one from the caller means the ranking
+        # cannot be handed a fired trigger that no observation supports.
+        fb = sel.exposure_trigger(basis_per_contract=basis_per,
+                                  last_price=last_price,
+                                  seconds_open=seconds_open)
+        rec["fallback_trigger"] = fb
+
+        ranked = sel.rank_with_hold(
+            q, basis_per, ev_hold=ev_hold, bid=bid, bid_size=bid_size,
+            fallback_trigger=fb,
+            complement_ask=complement_ask,
+            complement_ask_size=complement_ask_size, fee_fn=self.fee_fn,
+            venue=venue, us_market_slug=us_market_slug,
+            held_is_long=held_is_long, sale_ladder=sale_ladder,
+            resting_order=rest, settlement_semantics=settlement_semantics)
+        rec["ranking"] = ranked
+        rec.update(
+            selected_action=ranked.get("selected"),
+            selected_qty=ranked.get("selected_qty"),
+            selection_reason=ranked.get("selection_reason"),
+            governing_rule=ranked.get("governing_rule"),
+            operating_state=ranked.get("operating_state"),
+            is_a_deliberate_hold=bool(ranked.get("is_a_deliberate_hold")),
+            hold_input=ranked.get("hold_input"),
+            alternatives=ranked.get("ranked"),
+            refused=ranked.get("not_rankable"),
+            venue_translation=ranked.get("venue_translation"),
+            resting_order_decision=ranked.get("resting_order_decision"))
+
+        action = ranked.get("selected")
+
+        # ── HOLD, or nothing priced: the working order must not stay ──
+        #
+        # A resting order placed for an intent that is no longer selected
+        # is an order nobody decided to have. It is cancelled, and the
+        # acknowledgement is awaited exactly as it is for a replacement.
+        if action in (None, "HOLD", "HOLD_TO_SETTLEMENT"):
+            cancelled = []
+            for o in working:
+                if o.state != dk.CANCEL_PENDING:
+                    o.transition(dk.CANCEL_PENDING, at,
+                                 "superseded by %s" % (action or "NO_ACTION"))
+                cancelled.append(o.order_id)
+            rec.update(acted=False, cancelled_orders=cancelled)
+            if cancelled:
+                rec["resting_order_decision"] = {
+                    "has_working_order": True, "decision": "CANCEL",
+                    "order_ids": cancelled,
+                    "why": ("the selected action is %s, so the working "
+                            "order no longer expresses any decision. "
+                            "Cancellation is REQUESTED here and "
+                            "ACKNOWLEDGED separately -- the gap between "
+                            "them is where a fill can still land, and "
+                            "that fill is real and is booked"
+                            % (action or "NO_ACTION"))}
+            rec["resulting_inventory"] = self._inventory_view()
+            self.decisions.append(rec)
+            return rec
+
+        # ── an order action ──────────────────────────────────────────
+        px = (complement_ask if action == "TAKE_COMPLEMENT" else bid)
+        want = float(ranked.get("selected_qty") or 0.0)
+        side = "BUY" if action in ("TAKE_COMPLEMENT", "POST_COMPLEMENT") \
+            else "SELL"
+
+        # MAINTAIN an unchanged intent rather than cancel and repost.
+        # Reposting an identical order surrenders queue priority for
+        # nothing, and on a venue where our own fills are modelled from
+        # the tape that is a cost we would not see.
+        if (len(working) == 1 and working[0].state != dk.CANCEL_PENDING
+                and working[0].side == side
+                and px is not None
+                and abs(working[0].limit_price - float(px)) < 1e-12
+                and abs(working[0].remaining - want) < 1e-9):
+            rec.update(operating_state="ORDER_WORKING",
+                       order_id=working[0].order_id, acted=False)
+            rec["resting_order_decision"] = {
+                "has_working_order": True, "decision": "MAINTAIN",
+                "order_id": working[0].order_id,
+                "why": ("the working order already expresses the "
+                        "selected action at the selected price and "
+                        "size, so it is left alone and keeps its queue "
+                        "position")}
+            rec["resulting_inventory"] = self._inventory_view()
+            self.decisions.append(rec)
+            return rec
+
+        placed = self.place(action, at=at, price=px, qty=want,
+                            decision_id=decision_id or "c-%s" % int(at),
+                            liquidity="MAKER" if side == "BUY" else "TAKER")
+        rec.update(placement=placed,
+                   acted=placed.get("placed") is not None,
+                   operating_state=placed.get("refused") or "ORDER_WORKING")
+        if placed.get("cancelled"):
+            rec["resting_order_decision"] = {
+                "has_working_order": True, "decision": "CANCEL_THEN_REPLACE",
+                "order_ids": placed["cancelled"],
+                "why": ("the selected action differs from the working "
+                        "order, so the incumbent is cancelled and the "
+                        "replacement waits for the acknowledgement. Two "
+                        "live orders are never exposed at once"),
+                "one_active_order": True}
+        rec["resulting_inventory"] = self._inventory_view()
+        self.decisions.append(rec)
+        return rec
+
+    def _inventory_view(self) -> dict:
+        """What the position IS after this decision, not what it was."""
+        inv = self.pf.invariant()
+        return {
+            "held": {self.leg: self.held(self.leg),
+                     self.other_leg(): self.held(self.other_leg())},
+            "matched_qty": self.matched(),
+            "residual_qty": self.residual(),
+            "open_order_ids": [o.order_id for o in self.open_orders()],
+            "inventory_cost_usd": self.pf.inventory_cost(),
+            "realized_pnl_usd": self.pf.to_dict()["realized_pnl_usd"],
+            "fees_usd": self.pf.to_dict()["fees_usd"],
+            "inventory_discrepancy_qty": round(
+                sum(d["surplus_qty"] for d in self.discrepancies), 6),
+            "invariant_ok": bool(inv.get("ok")),
+            "invariant": inv,
+        }
 
     def acknowledge_cancels(self, at) -> list:
         """CANCEL_PENDING -> CANCELLED. Separate from requesting the

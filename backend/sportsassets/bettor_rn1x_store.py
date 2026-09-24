@@ -218,34 +218,100 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
                          if isinstance(e.get("decision"), dict)]
         for i, d in enumerate(decisions):
             did = "%s:D%04d" % (pid, i)
+            hi = d.get("hold_input") or {}
+            challenger = bool(d.get("arm") == "CHALLENGER"
+                              or d.get("ranking"))
+            # EV_BASIS IS NEVER BLANK AND NEVER BORROWED.
+            #
+            #   the CHAMPION does not compute an EV at all --
+            #   MANAGEMENT_PAIR_091_STOP_16_V1 is a cost-and-threshold
+            #   rule, and writing a number for it would invent an
+            #   objective the policy does not have;
+            #   the CHALLENGER does, and when it could not, the NAMED
+            #   REFUSAL is what goes in the column. An empty basis beside
+            #   a null number cannot be told from a number nobody tried
+            #   to compute.
+            # The hold value itself, read from the ranking the decision
+            # carried rather than recomputed here: a second computation
+            # could disagree with the one the decision was made on.
+            hold_usd = None
+            for c in (d.get("alternatives") or ()):
+                if c.get("action") == "HOLD":
+                    hold_usd = _f(c.get("value_usd"))
+            if not challenger:
+                ev_usd = None
+                ev_basis = "NOT_COMPUTED_POLICY_IS_NOT_EV_MAXIMISING"
+            elif hi.get("available"):
+                ev_usd = hold_usd
+                ev_basis = "EXTERNAL_LABELLED_PROBABILITY"
+            else:
+                ev_usd = None
+                ev_basis = "EV_HOLD_%s" % (hi.get("refusal")
+                                           or "NOT_IDENTIFIED")
             await conn.execute(
                 "INSERT INTO rn1x_decisions (decision_id, position_id, "
                 "decision_ts, evidence_ts, evidence_id, selected_action, "
                 "selection_reason, alternatives, ev_at_decision_usd, "
-                "ev_basis, conditional_on_our_fill, input_labels) "
+                "ev_basis, conditional_on_our_fill, input_labels, "
+                "selected_qty, policy_version, governing_rule, "
+                "operating_state, is_a_deliberate_hold, input_available, "
+                "input_freshness, payout_identity, hold_value_usd, "
+                "hold_value_basis, venue_translation, order_state, "
+                "resulting_inventory, accounting_reconciles) "
                 "VALUES ($1,$2,$3,$4,$5,$6,$7,$8::jsonb,$9,$10,"
-                "$11::jsonb,$12::jsonb) "
+                "$11::jsonb,$12::jsonb,$13,$14,$15,$16,$17,$18,"
+                "$19::jsonb,$20::jsonb,$21,$22,$23::jsonb,$24::jsonb,"
+                "$25::jsonb,$26) "
                 "ON CONFLICT (decision_id) DO NOTHING",
                 did, pid, _ts(d.get("at")), _ts(d.get("at")),
                 d.get("evidence_id"),
                 d.get("selected_action"),
-                d.get("operating_state") or d.get("why") or "",
+                # THE REASON, NOT THE STATE. `selection_reason` used to
+                # be filled with `operating_state` -- a label, not a
+                # reason -- so a HOLD row said "HOLD_NO_FEASIBLE_PAIR"
+                # and nothing about why. The reason comes first now and
+                # the state has its own column.
+                (d.get("selection_reason") or d.get("why")
+                 or d.get("operating_state") or ""),
                 _j({"pair_target": d.get("pair_target"),
                     "loss_trigger": d.get("loss_trigger"),
                     "phase": d.get("phase"),
                     "placement": d.get("placement"),
-                    "residual_qty": d.get("residual_qty")}),
-                None,
-                # EV IS NOT COMPUTED BY THIS POLICY AND THE COLUMN SAYS SO.
-                # MANAGEMENT_PAIR_091_STOP_16_V1 is a cost-and-threshold
-                # rule, not an expected-value maximiser. Writing a number
-                # here would invent an objective the policy does not have.
-                "NOT_COMPUTED_POLICY_IS_NOT_EV_MAXIMISING",
+                    "residual_qty": d.get("residual_qty"),
+                    # THE WHOLE COMPARISON, both arms. `ranked` is what
+                    # scored; `refused` is what could not be priced and
+                    # the named blocker for each. An action that was
+                    # never evaluated must not read later as one that
+                    # was evaluated and rejected.
+                    "ranked": d.get("alternatives"),
+                    "refused": d.get("refused"),
+                    "fallback_trigger": d.get("fallback_trigger"),
+                    "resting_order_decision":
+                        d.get("resting_order_decision")}),
+                ev_usd, ev_basis,
                 _j({"execution_secured": bool(d.get("execution_secured")),
                     "note": ("a computed pair cost is not a secured "
                              "execution until the complementary "
                              "quantity actually fills")}),
-                _j(d.get("input_labels") or {}))
+                _j(d.get("input_labels") or d.get("inputs") or {}),
+                _f(d.get("selected_qty")),
+                d.get("policy_id"),
+                d.get("governing_rule"),
+                d.get("operating_state"),
+                (bool(d.get("is_a_deliberate_hold"))
+                 if d.get("is_a_deliberate_hold") is not None else None),
+                (bool(hi.get("available")) if challenger else None),
+                _j(hi.get("freshness") or {}),
+                _j(hi.get("identity") or {}),
+                hold_usd,
+                (ev_basis if challenger else
+                 "NOT_APPLICABLE_CHAMPION_DOES_NOT_VALUE_HOLD"),
+                _j(d.get("venue_translation") or {}),
+                _j({"placement": d.get("placement"),
+                    "order_id": d.get("order_id"),
+                    "cancelled_orders": d.get("cancelled_orders")}),
+                _j(d.get("resulting_inventory") or {}),
+                ((d.get("resulting_inventory") or {}).get("invariant_ok")))
             wrote["decisions"] += 1
 
         # ── orders and their fills ───────────────────────────────────

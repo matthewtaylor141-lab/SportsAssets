@@ -767,8 +767,17 @@ async def overview(pool) -> dict:
     # THE OPERATING STATES, counted. A policy whose honest answer is
     # mostly HOLD should read as mostly HOLD on the screen; a panel that
     # showed only the orders would misrepresent it as busy.
+    #
+    # GROUPED ON `operating_state` NOW, NOT ON THE REASON. The reason is
+    # a sentence and often carries the prices it was computed from, so
+    # grouping by it produced one bucket per decision and a panel of
+    # twelve singletons. The state is the categorical field; migration
+    # 109 added it precisely so this read has something to group on.
+    # COALESCE keeps the pre-109 rows visible under their old reason
+    # rather than collapsing them all into one NULL bucket.
     states = await pool.fetch(
-        "SELECT selection_reason state, count(*) n FROM rn1x_decisions "
+        "SELECT COALESCE(operating_state, left(selection_reason, 60)) "
+        "AS state, count(*) n FROM rn1x_decisions "
         "GROUP BY 1 ORDER BY 2 DESC LIMIT 12")
 
     net = await pool.fetchrow(
@@ -795,6 +804,66 @@ async def overview(pool) -> dict:
                       "return and NOT same-venue historical fees")},
         "blockers": W.BLOCKERS,
         "statuses": await statuses(pool),
+        "arms": await _arms(pool),
+    }
+
+
+ARMS_SQL = """
+    SELECT p.experiment_id, p.policy,
+           count(DISTINCT p.position_id)                      AS positions,
+           count(d.decision_id)                               AS decisions,
+           count(*) FILTER (WHERE d.selected_action IS NOT NULL)
+                                                              AS selected,
+           count(*) FILTER (WHERE d.operating_state
+                                  = 'HOLD_FOR_MISSING_INPUT') AS blind,
+           count(*) FILTER (WHERE d.is_a_deliberate_hold)      AS held_by_choice,
+           count(*) FILTER (WHERE d.input_available)           AS with_inputs,
+           count(*) FILTER (WHERE d.accounting_reconciles IS FALSE)
+                                                              AS unreconciled,
+           max(d.decision_ts)                                 AS last_decision
+      FROM rn1x_positions p
+      LEFT JOIN rn1x_decisions d ON d.position_id = p.position_id
+     GROUP BY 1, 2
+     ORDER BY 1, 2
+"""
+
+
+async def _arms(pool) -> dict:
+    """The champion and the challenger, side by side and never summed.
+
+    §1: "Keep the current $0.91/second-half-16% experiment as a frozen
+    benchmark. Run the broader decision policy as a separately versioned
+    shadow challenger so we can measure what it changes." The measuring
+    needs the two visible in one place, with their identifiers, and with
+    the blind cycles counted apart from the deliberate holds.
+    """
+    from .. import bettor_mgmt_select as sel
+    from .. import bettor_rn1x_policy as pol
+
+    rows = await pool.fetch(ARMS_SQL)
+    return {
+        "rows": [dict(r) for r in rows],
+        "champion": {"policy_id": pol.POLICY_ID,
+                     "frozen_at": pol.FROZEN_AT,
+                     "what": ("pair at or below $0.91 combined, exit on "
+                              "a 16-point second-half loss trigger"),
+                     "untouched_by_the_challenger": True},
+        "challenger": {"policy_id": sel.CHALLENGER_ID,
+                       "policy_class": sel.CHALLENGER_CLASS,
+                       "what": ("ranks every available action INCLUDING "
+                                "hold, valued from a labelled external "
+                                "probability"),
+                       "fallback": sel.FALLBACK_RULE,
+                       "is_not": sel.CHALLENGER_OBJECTIVE["not_the_goal"]},
+        "never_summed": (
+            "the two arms manage the SAME assigned inventory under "
+            "different decisions. Adding their results would count one "
+            "position twice and would attribute the benchmark's outcome "
+            "to the challenger"),
+        "blind_is_not_held": (
+            "`blind` counts decisions with no inputs at all. They are "
+            "excluded from `held_by_choice` because a policy that could "
+            "not see did not choose to wait"),
     }
 
 
@@ -886,10 +955,22 @@ async def trace(pool, position_id: str) -> dict:
         "SELECT * FROM rn1x_positions WHERE position_id = $1", position_id)
     if pos is None:
         return {"found": False, "position_id": position_id}
+    # THE WHOLE DECISION, not the part that fits on one line. Migration
+    # 109 put the rest of §5's field list on the row -- selected size,
+    # policy version, governing rule, input availability and freshness,
+    # the payout identity, the venue translation, the resulting
+    # inventory and whether the accounting reconciled -- and a trace
+    # that still selected eight columns would leave all of it invisible.
     dec = await pool.fetch(
         "SELECT decision_id, decision_ts, evidence_id, selected_action, "
-        "selection_reason, alternatives, ev_basis, "
-        "conditional_on_our_fill FROM rn1x_decisions "
+        "selected_qty::float8 AS selected_qty, selection_reason, "
+        "alternatives, ev_at_decision_usd, ev_basis, "
+        "conditional_on_our_fill, input_labels, "
+        "policy_version, governing_rule, operating_state, "
+        "is_a_deliberate_hold, input_available, input_freshness, "
+        "payout_identity, hold_value_usd, hold_value_basis, "
+        "venue_translation, order_state, resulting_inventory, "
+        "accounting_reconciles FROM rn1x_decisions "
         "WHERE position_id = $1 ORDER BY decision_ts, decision_id",
         position_id)
     orders = await pool.fetch(
@@ -922,6 +1003,59 @@ async def trace(pool, position_id: str) -> dict:
         # identical timestamps read as a sub-second round trip, when on a
         # pre-104 row they are one instant copied twice.
         "clock_semantics": _clock_semantics(pos),
+        "decision_semantics": _decision_semantics(
+            [dict(r) for r in dec]),
+    }
+
+
+# WHAT A HOLD ON THIS TRACE MEANS, counted three ways.
+#
+# §5: "HOLD needs a reason too. A missing input must be distinguishable
+# from a deliberate decision to hold." All three states below leave the
+# position untouched. A page that printed one number for "held" would
+# make a policy that could not see look exactly like one that looked and
+# chose to wait, which is the single most flattering error available
+# here -- so the three are counted apart and never summed.
+HOLD_STATES = {
+    "HOLD_BY_DECISION": ("priced against every alternative and won. The "
+                         "hold value was available"),
+    "HOLD_BY_FALLBACK_RULE": ("EV_HOLD was not identified, so the "
+                              "declared exposure trigger answered "
+                              "WHETHER on observed inputs and did not "
+                              "fire. A decision, by a named rule, "
+                              "without a forecast"),
+    "HOLD_FOR_MISSING_INPUT": ("NOT a decision. Nothing was evaluated: "
+                               "the position is unchanged because the "
+                               "policy was blind at that instant"),
+    "HOLD_NO_FEASIBLE_PAIR": ("the FROZEN benchmark's own hold state -- "
+                              "no pair limit satisfied its target cost. "
+                              "It is not a valuation of holding"),
+}
+
+
+def _decision_semantics(decisions) -> dict:
+    counts: dict = {}
+    for d in decisions:
+        counts[d.get("operating_state") or "UNSET"] = \
+            counts.get(d.get("operating_state") or "UNSET", 0) + 1
+    blind = sum(v for k, v in counts.items()
+                if k == "HOLD_FOR_MISSING_INPUT")
+    decided_holds = sum(v for k, v in counts.items()
+                        if k in ("HOLD_BY_DECISION",
+                                 "HOLD_BY_FALLBACK_RULE"))
+    return {
+        "by_operating_state": counts,
+        "hold_states_explained": dict(HOLD_STATES),
+        "decisions_taken_blind": blind,
+        "holds_that_were_decisions": decided_holds,
+        "why_separate": (
+            "both leave the position unchanged and they are opposite "
+            "facts. Summing them would report a blind policy as a "
+            "patient one"),
+        "selected_is_never_permanently_empty": (
+            "a null selected_action is always accompanied by a named "
+            "refusal in selection_reason. An empty field with no reason "
+            "would not meet the requirement"),
     }
 
 

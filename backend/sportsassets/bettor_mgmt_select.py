@@ -504,3 +504,760 @@ def rank_priced_actions(qty, own_basis_per_contract, *, bid=None,
                margin_usd=(best["outcome_if_filled_usd"] - runner["outcome_if_filled_usd"]
                            if runner else None))
     return out
+
+
+# ════════════════════════════════════════════════════════════════════
+# THE CHALLENGER: THE SAME TABLE, WITH HOLD IN IT.
+#
+# Owner directive, "MAKE THE FULL EXIT POLICY OPERATIONAL" §1-§3:
+#
+#     "Keep the current $0.91/second-half-16% experiment as a frozen
+#      benchmark. Run the broader decision policy as a separately
+#      versioned shadow challenger so we can measure what it changes...
+#      Choose an action and quantity, with a recorded reason. An unranked
+#      action table or permanently empty selected field does not meet
+#      this requirement... Comparing sale and completion prices answers
+#      how to exit; it does not by itself establish that exiting beats
+#      holding."
+#
+# THAT LAST SENTENCE IS EXACTLY WHAT `rank_priced_actions` ABOVE DOES AND
+# ALL IT DOES. It answers HOW. It says so itself -- "HOLD is NOT
+# comparable" -- and it is RIGHT to say so, because at the time it was
+# written no probability source could price a hold. `PRICED_ACTION_
+# RANKING_V1` and `EXPOSURE_TRIGGER_RULE_V1` ARE NOT MODIFIED. They are
+# the frozen benchmark's ranking and they keep working unchanged when no
+# EV_HOLD is supplied.
+#
+# WHAT CHANGED IS THE INPUT, NOT THE PRINCIPLE. `bettor_hold_value`
+# supplies EV_HOLD from an external, labelled, correctly-mapped
+# probability -- possible only since migration 108 fixed the payout
+# identity. With that number present, HOLD enters the SAME comparison as
+# every other action instead of being excluded from it, and the decision
+# stops being "which exit" and becomes "act or not, and how much".
+#
+# THE QUANTITY IS DECIDED BY THE LADDER, NOT BY A FRACTION WE CHOSE.
+# Once HOLD has a per-contract value, "sell some" is a real marginal
+# question with a real answer: take the levels of the book that pay more
+# than holding, and stop at the first one that does not. That is where
+# a partial size comes from here. No 25/50/75% ladder is invented,
+# because a fraction nobody derived is an assumption wearing a decision's
+# clothes.
+#
+# WHAT IT IS STILL NOT. Not an EV optimisation. The probability is an
+# external bookmaker's de-vigged price with NO established calibration
+# interval on these markets, so this is a DECLARED RULE consuming a
+# LABELLED FORECAST. It may lose to holding, and it may lose to exiting.
+# ════════════════════════════════════════════════════════════════════
+
+CHALLENGER_ID = "SHADOW_CHALLENGER_HOLD_RANKED_V1"
+CHALLENGER_CLASS = "DECLARED_RULE_OVER_A_LABELLED_EXTERNAL_FORECAST"
+
+#: A change must be worth more than this per contract before the book is
+#: churned for it. DECLARED: half a venue tick. It exists because two
+#: actions within a rounding error of each other are not distinguishable
+#: by this evidence, and paying fees to swap between them is a cost with
+#: no measured benefit. It was not fitted and not tuned on any result.
+MIN_IMPROVEMENT_USD_PER_CONTRACT = 0.005
+
+#: Tie-breaking, in order, declared so it can be argued with.
+TIE_BREAK_ORDER = (
+    "HOLD -- doing nothing is preferred when the alternatives do not "
+    "beat it by the declared margin, because acting costs fees and "
+    "queue position and a tie is not evidence",
+    "the action that realises CASH NOW over one that realises it at "
+    "settlement, because capital returned is capital that can be "
+    "measured and redeployed",
+    "DIRECT_EXIT before TAKE_COMPLEMENT at equal value, because it "
+    "rests on fewer venue assumptions -- one fill in one book",
+    "the LARGER executable quantity, because a decision that is right "
+    "is right for more of the position",
+)
+
+CHALLENGER_OBJECTIVE = {
+    "id": CHALLENGER_ID,
+    "class": CHALLENGER_CLASS,
+    "goal": ("maximise economic value per contract over the actions that "
+             "can be priced AT ALL -- which now includes HOLD, valued "
+             "from a labelled external probability -- net of the fees "
+             "and depth each action actually faces"),
+    "not_the_goal": (
+        "expected-value optimality. No calibration interval is "
+        "established for the probability source on these markets, so "
+        "this maximises a number whose error is unmeasured. It is a "
+        "declared rule and must never be reported as validated EV "
+        "optimisation"),
+    "constraints": [
+        "an order may never exceed remaining inventory",
+        "a reduction may never become a reversal -- capped at held qty",
+        "ONE active management order per residual leg "
+        "(bettor_mgmt_lifecycle.SUPPORTS_SIMULTANEOUS is False)",
+        "the venue's own position model decides what a filled action "
+        "does to inventory (bettor_venue_position_model)",
+        "no action is ranked on a price without executable depth behind it",
+        "no passive fill probability is invented, so resting actions are "
+        "never ranked against taker ones",
+    ],
+    "tie_breaking": list(TIE_BREAK_ORDER),
+    "min_improvement_usd_per_contract": MIN_IMPROVEMENT_USD_PER_CONTRACT,
+    "hold_is_priced_by": "bettor_hold_value.ev_hold",
+    "frozen_benchmark_untouched": (
+        "PRICED_ACTION_RANKING_V1 and EXPOSURE_TRIGGER_RULE_V1 are "
+        "unchanged and still run the $0.91/second-half-16% experiment"),
+}
+
+R_HOLD_NOT_PRICED = "EV_HOLD_NOT_IDENTIFIED"
+
+
+def marginal_sale_size(ladder, *, hold_value_per_contract, qty,
+                       fee_fn=None) -> dict:
+    """How much of the position the BOOK pays more for than holding.
+
+    Walks an acquisition ladder in cost space and takes each level while
+    its proceeds per contract, after fees, exceed the per-contract value
+    of holding. Stops at the first level that does not.
+
+    THIS IS WHERE "SELL SOME" COMES FROM. Not a fraction we chose: the
+    quantity is whatever the book actually pays a premium for. A single
+    price level makes it all-or-nothing, which is correct -- there is
+    nothing to split. A stepped book makes it genuinely partial.
+    """
+    levels = list((ladder or {}).get("levels") or ())
+    out = {"levels_considered": len(levels), "taken": [], "skipped": [],
+           "qty": 0.0, "proceeds_usd": 0.0, "fees_usd": 0.0,
+           "hurdle_per_contract": hold_value_per_contract,
+           "why": ("a level is taken only while its per-contract "
+                   "proceeds after fees exceed the value of holding the "
+                   "same contract")}
+    if hold_value_per_contract is None:
+        out["refusal"] = R_HOLD_NOT_PRICED
+        out["why"] = ("without a per-contract hold value there is no "
+                      "hurdle, so there is no marginal quantity to find "
+                      "-- and taking every level instead would be "
+                      "selling because a price exists")
+        return out
+    remaining = float(qty)
+    hurdle = float(hold_value_per_contract)
+    for lv in levels:
+        if remaining <= 1e-9:
+            break
+        px = float(lv.get("acquisition_price"))
+        avail = min(remaining, float(lv.get("qty") or 0.0))
+        if avail <= 1e-9:
+            continue
+        fee = (0.0 if fee_fn is None
+               else abs(float(fee_fn(qty=avail, price=px))))
+        net_per = px - (fee / avail if avail else 0.0)
+        if net_per <= hurdle + 1e-12:
+            out["skipped"].append({
+                "level": lv.get("level"), "price": px, "qty": avail,
+                "net_per_contract": net_per,
+                "why": ("%.6f after fees does not beat holding at %.6f"
+                        % (net_per, hurdle))})
+            break
+        out["taken"].append({"level": lv.get("level"), "price": px,
+                             "qty": avail, "net_per_contract": net_per,
+                             "fees_usd": fee})
+        out["qty"] += avail
+        out["proceeds_usd"] += px * avail
+        out["fees_usd"] += fee
+        remaining -= avail
+    out["covers_whole_position"] = out["qty"] >= float(qty) - 1e-9
+    out["vwap"] = (out["proceeds_usd"] / out["qty"]) if out["qty"] else None
+    return out
+
+
+def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
+                   bid=None, bid_size=None, complement_ask=None,
+                   complement_ask_size=None, fee_fn=None,
+                   venue=None, us_market_slug=None, held_is_long=True,
+                   sale_ladder=None, resting_order=None,
+                   settlement_semantics=None, fallback_trigger=None) -> dict:
+    """THE CHALLENGER'S FULL DECISION: what to do, and how much of it.
+
+    Every action §2 names is evaluated and the selected field is filled
+    or the reason it is empty is a REFUSAL WITH A NAME, never a
+    permanent blank. `ev_hold` is a `bettor_hold_value.ev_hold` record.
+    """
+    from . import bettor_venue_position_model as vpm
+
+    q = float(qty)
+    basis_per = float(own_basis_per_contract)
+    basis = basis_per * q
+
+    hv = dict(ev_hold or {})
+    hold_priced = hv.get("status") == "IDENTIFIED"
+    hold_total = hv.get("ev_hold_usd") if hold_priced else None
+    # THE HURDLE IS THE VALUE OF HOLDING *ONE CONTRACT*, AND IT IS THE
+    # SETTLEMENT VALUE, NOT THE P&L. Comparing a sale's proceeds against
+    # (p - basis) would subtract the basis twice: the sale releases it
+    # too. So the hurdle is p alone, and every candidate below is scored
+    # net of the same pro-rata basis release.
+    hold_per = hv.get("probability") if hold_priced else None
+
+    out = {
+        "rule": CHALLENGER_OBJECTIVE,
+        "policy_version": CHALLENGER_ID,
+        "qty_under_management": q,
+        "basis_per_contract": basis_per,
+        "basis_usd": basis,
+        "hold_input": {
+            "available": bool(hold_priced),
+            "status": hv.get("status") or NOT_IDENTIFIED,
+            "refusal": hv.get("refusal"),
+            "why": hv.get("why"),
+            "provenance": hv.get("provenance"),
+            "probability": hv.get("probability"),
+            "probability_event": hv.get("probability_event"),
+            "payout_event_held": hv.get("payout_event_held"),
+            "identity": hv.get("identity"),
+            "freshness": hv.get("freshness"),
+            "uncertainty": hv.get("uncertainty"),
+            "source_row_id": hv.get("source_row_id"),
+        },
+        "candidates": [], "not_rankable": [], "venue_translation": {},
+    }
+
+    def _fee(sz, px):
+        if fee_fn is None:
+            return None
+        return abs(float(fee_fn(qty=sz, price=px)))
+
+    def _translate(action, size):
+        t = vpm.translate(action, venue=venue, held_qty=q,
+                          us_market_slug=us_market_slug,
+                          requested_qty=size, held_is_long=held_is_long)
+        out["venue_translation"][action] = t
+        return t
+
+    def _untranslatable(action, t):
+        """An action the venue model cannot translate is NOT RANKED.
+
+        THE DEFECT THIS CLOSES, AND IT WAS MINE. The first version
+        computed the venue translation, recorded its refusal, and then
+        ranked and selected the action anyway -- so an unknown venue
+        produced a confidently selected DIRECT_EXIT whose effect on the
+        position nobody could state. An action we cannot say the
+        consequence of is not an action we may take.
+        """
+        if t.get("ok"):
+            return False
+        out["not_rankable"].append({
+            "action": action,
+            "blocker": t.get("refusal") or "VENUE_TRANSLATION_REFUSED",
+            "value_usd": None,
+            "why": ("%s. The economics may be computable but the "
+                    "INVENTORY CONSEQUENCE is not, and an action whose "
+                    "effect on the position cannot be stated is not "
+                    "available" % (t.get("why") or "venue model refused"))})
+        return True
+
+    # ── HOLD ─────────────────────────────────────────────────────────
+    t_hold = _translate("HOLD", 0.0)
+    if hold_priced:
+        out["candidates"].append({
+            "action": "HOLD", "qty": q,
+            "value_usd": float(hold_total),
+            "value_per_contract": float(hold_per),
+            "execution_secured": True,
+            "execution_note": ("HOLD is the only action that needs no "
+                               "fill: the position is already held"),
+            "cash_now_usd": 0.0,
+            "cash_at_settlement_usd": float(hold_per) * q,
+            "collateral_released_now": False,
+            "remaining_exposure_qty": q,
+            "fees_usd": 0.0,
+            "basis": "EXTERNAL_LABELLED_PROBABILITY",
+            "arithmetic": hv.get("arithmetic"),
+            "venue_effect": t_hold.get("net_effect"),
+        })
+    else:
+        out["not_rankable"].append({
+            "action": "HOLD", "blocker": hv.get("refusal") or R_HOLD_NOT_PRICED,
+            "why": (hv.get("why") or
+                    "no probability source priced this hold"),
+            "value_usd": None,
+            "is_not_zero": ("NOT_IDENTIFIED. Zero would assert the "
+                            "position is worthless, which is the "
+                            "assertion most likely to force an exit")})
+
+    # ── HOLD_TO_SETTLEMENT ───────────────────────────────────────────
+    #
+    # A DIFFERENT ACTION FROM HOLD, and the difference is a commitment:
+    # HOLD is re-decided next cycle, HOLD_TO_SETTLEMENT gives that up.
+    # Its terminal value depends on the venue's settlement terms, and
+    # this venue's prose is CONFLICTING_VENUE_PROSE, so even a priced
+    # probability does not price it.
+    sem = settlement_semantics or "CONFLICTING_VENUE_PROSE"
+    if sem == "RESOLVED":
+        out["candidates"].append({
+            "action": "HOLD_TO_SETTLEMENT", "qty": q,
+            "value_usd": (None if not hold_priced
+                          else float(hold_total)),
+            "value_per_contract": hold_per,
+            "execution_secured": True, "cash_now_usd": 0.0,
+            "cash_at_settlement_usd": (None if hold_per is None
+                                       else float(hold_per) * q),
+            "collateral_released_now": False,
+            "remaining_exposure_qty": q, "fees_usd": 0.0,
+            "gives_up": "the option to re-decide next cycle",
+        })
+    else:
+        out["not_rankable"].append({
+            "action": "HOLD_TO_SETTLEMENT",
+            "blocker": "SETTLEMENT_SEMANTICS_%s" % sem,
+            "why": ("the terminal value of carrying to settlement needs "
+                    "the venue's settlement terms and this venue's "
+                    "prose is %s. A priced probability does not settle "
+                    "what the contract pays on an overtime or a void" % sem),
+            "value_usd": None})
+
+    # ── DIRECT_EXIT, full size at the top of the book ────────────────
+    if bid is None:
+        out["not_rankable"].append({"action": "DIRECT_EXIT",
+                                    "blocker": "NO_BID", "value_usd": None})
+    elif not bid_size or float(bid_size) <= 0:
+        out["not_rankable"].append({"action": "DIRECT_EXIT",
+                                    "blocker": "NO_EXECUTABLE_DEPTH",
+                                    "value_usd": None})
+    else:
+        sz = min(q, float(bid_size))
+        f = _fee(sz, bid)
+        if f is None:
+            out["not_rankable"].append({
+                "action": "DIRECT_EXIT",
+                "blocker": "FEE_SCHEDULE_NOT_ESTABLISHED",
+                "value_usd": None})
+        elif _untranslatable("DIRECT_EXIT", _translate("DIRECT_EXIT", sz)):
+            pass
+        else:
+            t = out["venue_translation"]["DIRECT_EXIT"]
+            rel = basis * (sz / q)
+            # WHAT IS LEFT BEHIND IS PART OF THE ACTION'S VALUE. Selling
+            # a depth-capped slice leaves the remainder held, and the
+            # remainder is worth something -- so a partial exit is scored
+            # as (proceeds on the slice) + (hold value of the rest).
+            kept = q - sz
+            kept_val = (None if hold_per is None
+                        else float(hold_per) * kept - basis_per * kept)
+            total = float(bid) * sz - f - rel + (kept_val or 0.0)
+            out["candidates"].append({
+                "action": "DIRECT_EXIT", "qty": sz,
+                "value_usd": total,
+                "value_per_contract": (total / q) if q else None,
+                "slice_value_usd": float(bid) * sz - f - rel,
+                "retained_value_usd": kept_val,
+                "retained_value_status": ("IDENTIFIED" if kept_val is not None
+                                          else NOT_IDENTIFIED),
+                "execution_secured": False, "fees_usd": f,
+                "depth_limited": sz < q - 1e-12,
+                "cash_now_usd": float(bid) * sz - f,
+                "cash_at_settlement_usd": 0.0,
+                "collateral_released_now": True,
+                "remaining_exposure_qty": kept,
+                "venue_effect": t.get("net_effect"),
+                "creates_second_leg": t.get("creates_second_leg"),
+                "arithmetic": ("%.4f x %.4g - fees %.4f - basis %.4f"
+                               % (float(bid), sz, f, rel)),
+            })
+
+    # ── REDUCE: the marginal quantity the book pays a premium for ────
+    if sale_ladder and hold_per is not None:
+        marg = marginal_sale_size(sale_ladder, hold_value_per_contract=hold_per,
+                                  qty=q, fee_fn=fee_fn)
+        out["marginal_sale"] = marg
+        if (marg["qty"] > 1e-9 and not marg["covers_whole_position"]
+                and not _untranslatable("REDUCE",
+                                        _translate("REDUCE", marg["qty"]))):
+            t = out["venue_translation"]["REDUCE"]
+            sz = marg["qty"]
+            rel = basis * (sz / q)
+            kept = q - sz
+            kept_val = float(hold_per) * kept - basis_per * kept
+            total = marg["proceeds_usd"] - marg["fees_usd"] - rel + kept_val
+            out["candidates"].append({
+                "action": "REDUCE", "qty": sz,
+                "value_usd": total,
+                "value_per_contract": (total / q) if q else None,
+                "slice_value_usd": (marg["proceeds_usd"] - marg["fees_usd"]
+                                    - rel),
+                "retained_value_usd": kept_val,
+                "retained_value_status": "IDENTIFIED",
+                "execution_secured": False, "fees_usd": marg["fees_usd"],
+                "vwap": marg["vwap"],
+                "levels_taken": marg["taken"],
+                "level_that_stopped_it": (marg["skipped"][0]
+                                          if marg["skipped"] else None),
+                "cash_now_usd": marg["proceeds_usd"] - marg["fees_usd"],
+                "cash_at_settlement_usd": 0.0,
+                "collateral_released_now": True,
+                "remaining_exposure_qty": kept,
+                "venue_effect": t.get("net_effect"),
+                "why_this_size": ("the book pays more than holding for "
+                                  "%.4g contracts and not for the next "
+                                  "level" % sz),
+            })
+    elif sale_ladder:
+        out["not_rankable"].append({
+            "action": "REDUCE", "blocker": R_HOLD_NOT_PRICED,
+            "why": ("a partial size is the quantity the book pays more "
+                    "for than holding. With no hold value there is no "
+                    "hurdle and the quantity is undefined -- taking "
+                    "every level instead would be selling because a "
+                    "price exists"),
+            "value_usd": None})
+
+    # ── TAKE_COMPLEMENT, including loss-limiting completion ──────────
+    if complement_ask is None:
+        out["not_rankable"].append({
+            "action": "TAKE_COMPLEMENT",
+            "blocker": "COMPLEMENT_ASK_NOT_OBSERVED", "value_usd": None})
+    elif not complement_ask_size or float(complement_ask_size) <= 0:
+        out["not_rankable"].append({
+            "action": "TAKE_COMPLEMENT",
+            "blocker": "NO_EXECUTABLE_DEPTH", "value_usd": None})
+    else:
+        sz = min(q, float(complement_ask_size))
+        f = _fee(sz, complement_ask)
+        if f is None:
+            out["not_rankable"].append({
+                "action": "TAKE_COMPLEMENT",
+                "blocker": "FEE_SCHEDULE_NOT_ESTABLISHED",
+                "value_usd": None})
+        elif _untranslatable("TAKE_COMPLEMENT",
+                             _translate("TAKE_COMPLEMENT", sz)):
+            pass
+        else:
+            t = out["venue_translation"]["TAKE_COMPLEMENT"]
+            rel = basis * (sz / q)
+            kept = q - sz
+            kept_val = (None if hold_per is None
+                        else float(hold_per) * kept - basis_per * kept)
+            slice_val = 1.00 * sz - float(complement_ask) * sz - f - rel
+            total = slice_val + (kept_val or 0.0)
+            cand = {
+                "action": "TAKE_COMPLEMENT", "qty": sz,
+                "value_usd": total,
+                "value_per_contract": (total / q) if q else None,
+                "slice_value_usd": slice_val,
+                "retained_value_usd": kept_val,
+                "retained_value_status": ("IDENTIFIED" if kept_val is not None
+                                          else NOT_IDENTIFIED),
+                "execution_secured": False, "fees_usd": f,
+                "depth_limited": sz < q - 1e-12,
+                "locks_a_loss": slice_val < 0,
+                "remaining_exposure_qty": kept,
+                "venue_effect": t.get("net_effect"),
+                "creates_second_leg": t.get("creates_second_leg"),
+                "capital_release": t.get("capital_release"),
+                "capital_release_why": t.get("capital_release_why"),
+                "arithmetic": ("1.00 x %.4g - %.4f x %.4g - fees %.4f - "
+                               "basis %.4f"
+                               % (sz, float(complement_ask), sz, f, rel)),
+                "loss_limiting_permitted": (
+                    "completing above par locks a loss and is still "
+                    "ranked, because holding a leg that may settle at "
+                    "zero risks the whole basis"),
+            }
+            # ON A NETTING VENUE THIS IS THE SAME REDUCTION AS A SALE,
+            # reached through the other ladder. The economics are
+            # identical to selling at (1 - ask); what differs is which
+            # book pays, and that is the whole reason both are priced.
+            if t.get("ok") and not t.get("creates_second_leg"):
+                cand.update(
+                    cash_now_usd=1.00 * sz - float(complement_ask) * sz - f,
+                    cash_at_settlement_usd=0.0,
+                    collateral_released_now=True,
+                    equivalent_sale_price=1.0 - float(complement_ask),
+                    venue_note=t.get("mechanism"))
+            else:
+                cand.update(
+                    cash_now_usd=-(float(complement_ask) * sz + f),
+                    cash_at_settlement_usd=1.00 * sz,
+                    collateral_released_now=False,
+                    venue_note=t.get("mechanism"))
+            out["candidates"].append(cand)
+
+    # ── POST_COMPLEMENT / the resting order, never ranked ────────────
+    out["not_rankable"].append({
+        "action": "POST_COMPLEMENT",
+        "blocker": "P_FILL_NOT_IDENTIFIED",
+        "value_usd": None,
+        "why": ("a resting order's value is its fill probability times "
+                "what a fill is worth, and no BETTOR-native resting "
+                "evidence exists. Manufacturing a p_fill is explicitly "
+                "forbidden, so this action is AVAILABLE and NOT RANKED "
+                "-- the frozen benchmark posts one by declared rule, "
+                "which is a different basis from ranking it"),
+        "no_fill_leaves": ("full exposure on the leg we started with. A "
+                           "zero here would price a failed hedge as "
+                           "though the risk had been removed")})
+
+    # ── MERGE / capital release, per the venue's actual model ────────
+    t_merge = _translate("MERGE", 0.0)
+    out["not_rankable"].append({
+        "action": "MERGE",
+        "blocker": ("MERGE_%s" % (t_merge.get("capital_release")
+                                  or NOT_IDENTIFIED)),
+        "value_usd": None,
+        "capital_release": t_merge.get("capital_release") or NOT_IDENTIFIED,
+        "why": (t_merge.get("capital_release_why") or t_merge.get("why")
+                or ("the venue's position model is not established, so "
+                    "whether there is any matched capital to release "
+                    "cannot be stated. NOT_IDENTIFIED, and no release "
+                    "is claimed"))})
+
+    # ── the resting order already working ────────────────────────────
+    out["resting_order_decision"] = _resting_decision(resting_order, out)
+    out["fallback_trigger"] = fallback_trigger
+
+    return _choose(out, q, hold_priced=hold_priced,
+                   fallback_trigger=fallback_trigger)
+
+
+def _resting_decision(resting_order, out) -> dict:
+    """MAINTAIN, CANCEL or REPLACE the order already working.
+
+    §2 requires this as a decision in its own right. It needs no fill
+    probability: it compares the working order's own intent against the
+    one now selected, which is observed on both sides.
+    """
+    if not resting_order:
+        return {"has_working_order": False, "decision": "NONE",
+                "why": "no management order is working on this leg"}
+    return {"has_working_order": True,
+            "order_id": resting_order.get("order_id"),
+            "side": resting_order.get("side"),
+            "limit_price": resting_order.get("limit_price"),
+            "remaining": resting_order.get("remaining"),
+            "state": resting_order.get("state"),
+            "decision": "DECIDED_AT_PLACEMENT",
+            "rule": ("an unchanged intent at an unchanged price and size "
+                     "is MAINTAINED so queue priority survives; any "
+                     "change is a CANCEL then a REPLACE after the "
+                     "acknowledgement, never two live orders"),
+            "one_active_order": True}
+
+
+# THE FALLBACK, NAMED. §3: "Where evidence is insufficient, use an
+# explicitly named operating rule or fallback."
+#
+# THE FAILURE THIS EXISTS FOR, AND MY FIRST VERSION HAD IT. With HOLD
+# unpriced, ranking the remaining candidates selects an exit EVERY TIME
+# -- not because exiting is good, but because it is the only action
+# carrying a figure. `bettor_mgmt_select.select` names this precisely:
+# "that is an engine that liquidates the book for want of a settlement
+# model". A challenger that inherits the same defect is not an
+# improvement on the benchmark, it is the benchmark's guard removed.
+#
+# So when EV_HOLD is NOT_IDENTIFIED the WHETHER question is handed back
+# to the DECLARED rule that already answers it without a forecast --
+# EXPOSURE_TRIGGER_RULE_V1, tested and unchanged. The priced subset is
+# ranked ONLY once that rule has fired. Nothing is invented: the
+# fallback is the frozen benchmark's own guard, reused by name.
+FALLBACK_RULE = "EXPOSURE_TRIGGER_RULE_V1"
+
+FALLBACK_DECLARATION = {
+    "applies_when": "EV_HOLD is NOT_IDENTIFIED",
+    "rule": FALLBACK_RULE,
+    "what_it_does": ("answers WHETHER to close using only the last "
+                     "observed price, our basis and how long the "
+                     "exposure has been open -- no forecast"),
+    "why_not_rank_anyway": (
+        "with HOLD unpriced, ranking the rest selects an exit every "
+        "time, because it is the only action carrying a number. That is "
+        "liquidating the book for want of a settlement model"),
+    "if_the_fallback_is_absent": (
+        "nothing is selected and the state is HOLD_FOR_MISSING_INPUT, "
+        "which is NOT a decision to hold and is recorded as distinct "
+        "from one"),
+}
+
+
+def _choose(out, q, *, hold_priced=True, fallback_trigger=None) -> dict:
+    """Rank, apply the declared tie-breaks, and fill `selected`."""
+    # ── the fallback path, taken before anything is ranked ───────────
+    if not hold_priced:
+        out["fallback"] = dict(FALLBACK_DECLARATION)
+        blocker = next((r["blocker"] for r in out["not_rankable"]
+                        if r["action"] == "HOLD"), R_HOLD_NOT_PRICED)
+        # A TRIGGER THAT EVALUATED NOTHING DECIDED NOTHING. `fired=False`
+        # is returned both when the rule looked at the evidence and was
+        # not satisfied AND when it had no evidence to look at -- both
+        # conditions come back status=NOT_IDENTIFIED. Reading the second
+        # as a decision to hold is exactly the confusion §5 forbids:
+        # "A missing input must be distinguishable from a deliberate
+        # decision to hold."
+        _evaluated = [c for c in ((fallback_trigger or {}).get("conditions")
+                                  or ()) if c.get("status") == "EVALUATED"]
+        if fallback_trigger and not _evaluated:
+            out.update(
+                selected=None, selected_qty=None,
+                governing_rule="%s / FALLBACK_HAD_NO_INPUTS" % CHALLENGER_ID,
+                is_a_deliberate_hold=False,
+                operating_state="HOLD_FOR_MISSING_INPUT",
+                fallback_evaluated_conditions=0,
+                selection_reason=(
+                    "NOTHING SELECTED. EV_HOLD is %s, and the fallback "
+                    "%s evaluated NO condition -- neither the last "
+                    "price on our leg nor the time the exposure has "
+                    "been open was supplied, so both came back "
+                    "NOT_IDENTIFIED. A rule that looked at nothing did "
+                    "not decide to hold; the position is unchanged "
+                    "because the policy is blind here, and that is "
+                    "recorded as a different fact"
+                    % (blocker, FALLBACK_RULE)))
+            out["ranked"] = [{"action": c["action"], "qty": c.get("qty"),
+                              "value_usd": c["value_usd"]}
+                             for c in out["candidates"]
+                             if c.get("value_usd") is not None]
+            return out
+        if not fallback_trigger:
+            out.update(
+                selected=None, selected_qty=None,
+                governing_rule="%s / NO_FALLBACK" % CHALLENGER_ID,
+                is_a_deliberate_hold=False,
+                operating_state="HOLD_FOR_MISSING_INPUT",
+                selection_reason=(
+                    "NOTHING SELECTED. EV_HOLD is %s and no fallback "
+                    "rule was supplied, so the position is left exactly "
+                    "as it is WITHOUT a decision behind it. This is a "
+                    "MISSING INPUT, not a hold: ranking the priced "
+                    "actions alone would select an exit every time, "
+                    "because it is the only action carrying a number"
+                    % blocker))
+            out["ranked"] = [{"action": c["action"], "qty": c.get("qty"),
+                              "value_usd": c["value_usd"]}
+                             for c in out["candidates"]
+                             if c.get("value_usd") is not None]
+            return out
+        if not fallback_trigger.get("fired"):
+            out.update(
+                selected="HOLD", selected_qty=q,
+                governing_rule="%s / FALLBACK %s"
+                               % (CHALLENGER_ID, FALLBACK_RULE),
+                is_a_deliberate_hold=True,
+                hold_basis="FALLBACK_RULE_NOT_A_PRICED_COMPARISON",
+                operating_state="HOLD_BY_FALLBACK_RULE",
+                selection_reason=(
+                    "HOLD BY THE DECLARED FALLBACK. EV_HOLD is %s, so "
+                    "the priced subset cannot say whether acting beats "
+                    "holding. %s answered WHETHER without a forecast "
+                    "and did not fire: %s. This IS a decision -- taken "
+                    "by a named rule on observed inputs -- and it is "
+                    "recorded as distinct from a hold with no decision "
+                    "behind it"
+                    % (blocker, FALLBACK_RULE,
+                       fallback_trigger.get("reason") or "no reason given")))
+            out["ranked"] = [{"action": c["action"], "qty": c.get("qty"),
+                              "value_usd": c["value_usd"]}
+                             for c in out["candidates"]
+                             if c.get("value_usd") is not None]
+            return out
+        # The trigger fired: rank the priced subset, and say so.
+        out["fallback_fired"] = True
+
+    cands = [c for c in out["candidates"] if c.get("value_usd") is not None]
+    if not cands:
+        out.update(selected=None, selected_qty=None,
+                   governing_rule=CHALLENGER_ID,
+                   selection_reason=(
+                       "NO ACTION IS PRICED AT ALL. Every candidate is "
+                       "refused with a named blocker: %s. This is a "
+                       "REFUSAL, not an empty selection"
+                       % "; ".join("%s (%s)" % (r["action"], r["blocker"])
+                                   for r in out["not_rankable"])),
+                   is_a_deliberate_hold=False,
+                   operating_state="HOLD_FOR_MISSING_INPUT")
+        return out
+
+    cash_rank = {True: 0, False: 1}
+
+    def _key(c):
+        return (-float(c["value_usd"]),
+                0 if c["action"] == "HOLD" else 1,
+                cash_rank.get(bool(c.get("collateral_released_now")), 1),
+                0 if c["action"] == "DIRECT_EXIT" else 1,
+                -float(c.get("qty") or 0.0))
+
+    cands.sort(key=_key)
+    best = cands[0]
+    hold = next((c for c in cands if c["action"] == "HOLD"), None)
+
+    # THE MARGIN GATE. Beating HOLD by less than the declared minimum is
+    # not a reason to churn the book.
+    if hold is not None and best["action"] != "HOLD":
+        per = q if q else 1.0
+        gain = (best["value_usd"] - hold["value_usd"]) / per
+        out["improvement_over_hold_per_contract"] = gain
+        if gain < MIN_IMPROVEMENT_USD_PER_CONTRACT:
+            _age = (out["hold_input"].get("freshness") or {}).get(
+                "age_from_observation_s")
+            _when = ("observed %.0f s before the decision" % _age
+                     if _age is not None else "observed at an unstated time")
+            out.update(
+                selected="HOLD", selected_qty=q,
+                governing_rule="%s / MIN_IMPROVEMENT" % CHALLENGER_ID,
+                is_a_deliberate_hold=True,
+                operating_state="HOLD_BY_DECISION",
+                runner_up=best["action"],
+                selection_reason=(
+                    "HOLD SELECTED DELIBERATELY. %s scored %.4f against "
+                    "HOLD's %.4f, an improvement of %.6f per contract, "
+                    "below the declared %.4f minimum. Acting costs fees "
+                    "and queue position and a difference this small is "
+                    "not distinguishable by this evidence. This is a "
+                    "DECISION, not a missing input: the hold value came "
+                    "from %s, %s"
+                    % (best["action"], best["value_usd"],
+                       hold["value_usd"], gain,
+                       MIN_IMPROVEMENT_USD_PER_CONTRACT,
+                       (out["hold_input"].get("provenance") or {}).get(
+                           "class", "an external source"), _when)))
+            out["ranked"] = [{"action": c["action"], "qty": c.get("qty"),
+                              "value_usd": c["value_usd"]} for c in cands]
+            return out
+
+    runner = cands[1] if len(cands) > 1 else None
+    reason = ("%s over %.4g contracts scores %.4f"
+              % (best["action"], best.get("qty") or 0.0,
+                 best["value_usd"]))
+    if runner:
+        reason += (", ahead of %s at %.4f by %.4f"
+                   % (runner["action"], runner["value_usd"],
+                      best["value_usd"] - runner["value_usd"]))
+    if hold is not None:
+        reason += (". HOLD was IN the comparison at %.4f, priced from %s"
+                   % (hold["value_usd"],
+                      out["hold_input"].get("probability_event")))
+    else:
+        reason += (". HOLD was NOT comparable (%s), so this ranks the "
+                   "priced subset and does NOT establish that acting "
+                   "beats holding"
+                   % next((r["blocker"] for r in out["not_rankable"]
+                           if r["action"] == "HOLD"), R_HOLD_NOT_PRICED))
+    if best.get("locks_a_loss"):
+        reason += (". THIS LOCKS A LOSS and is selected anyway because "
+                   "every alternative scores worse")
+    if best["action"] != "HOLD":
+        reason += (". Not secured: the size is executable against "
+                   "displayed depth and may still fill partially or not "
+                   "at all")
+    if out.get("fallback_fired"):
+        reason += (". EV_HOLD was NOT_IDENTIFIED, so WHETHER to close "
+                   "was answered by the declared fallback %s, which "
+                   "fired; this ranking then chose only the METHOD and "
+                   "does NOT establish that acting beat holding"
+                   % FALLBACK_RULE)
+    out.update(
+        selected=best["action"], selected_qty=best.get("qty"),
+        governing_rule=("%s / FALLBACK %s" % (CHALLENGER_ID, FALLBACK_RULE)
+                        if out.get("fallback_fired") else CHALLENGER_ID),
+        selection_reason=reason,
+        is_a_deliberate_hold=best["action"] == "HOLD",
+        operating_state=("HOLD_BY_DECISION" if best["action"] == "HOLD"
+                         else "CLOSING"),
+        margin_usd=(best["value_usd"] - runner["value_usd"]
+                    if runner else None),
+        ranked=[{"action": c["action"], "qty": c.get("qty"),
+                 "value_usd": c["value_usd"]} for c in cands])
+    return out

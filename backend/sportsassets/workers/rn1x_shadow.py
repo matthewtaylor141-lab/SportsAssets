@@ -67,6 +67,7 @@ import os
 from .. import bettor_rn1x_policy as pol
 from .. import bettor_rn1x_run as runner
 from .. import bettor_rn1x_store as store
+from .. import bettor_mgmt_select as _sel
 from ..db import get_pool, heartbeat
 
 log = logging.getLogger(__name__)
@@ -116,6 +117,49 @@ EXPERIMENT_ID = HISTORICAL_EXPERIMENT_ID
 
 HISTORICAL_CURSOR_KEY = "rn1x_source_cursor"      # unchanged, preserved
 PROSPECTIVE_CURSOR_KEY = "rn1x_prospective_cursor"
+
+# ── THE CHALLENGER LANE ──────────────────────────────────────────────
+#
+# The same seeds, the same order lifecycle, the same accounting, and a
+# DIFFERENT DECISION POLICY. Its own experiment id and its own cursor,
+# because the frozen benchmark's totals must not move when a challenger
+# runs beside it, and `position_id` derives from (experiment, policy,
+# trade) so a shared id would collide the two arms onto one row.
+#
+# IT IS PROSPECTIVE AND READS NO PAYOUT, exactly as the prospective lane
+# does -- a policy scored against an outcome it was allowed to see is
+# not a policy being tested.
+CHALLENGER_EXPERIMENT_ID = "RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1"
+CHALLENGER_CURSOR_KEY = "rn1x_challenger_cursor"
+
+LANES = ("HISTORICAL", "PROSPECTIVE", "CHALLENGER")
+
+# The venue contract and the probability that prices a hold, joined to
+# the seed's GLOBAL condition id. `external_valuations` carries both
+# identifiers -- the global one it was asked about and the venue-native
+# slug the resolver matched -- which is the only reason this join is
+# possible without re-running the resolver here.
+#
+# ELIGIBLE ROWS ONLY. Migration 108 holds every row whose payout event
+# was read off the order intent, and a held row must not reach a
+# decision by being the only one present.
+_CHALLENGER_VALUATION = """
+    SELECT id, us_market_slug, venue, contract_selection,
+           probability, probability_event, payout_event,
+           payout_is_complement, buy_intent, matched_side_norm,
+           resolver_asked_for, ladder_side, executable_price,
+           provider, book, devig_method, version, experiment_id,
+           mapped_outcome, mapping_match, overround, outcomes_priced,
+           expected_outcomes, outcome_books, settlement_rule,
+           extract(epoch FROM observed_at)::float8  AS observed_at,
+           extract(epoch FROM received_at)::float8  AS received_at,
+           eligibility, ineligible_reason
+      FROM external_valuations
+     WHERE condition_id = $1
+       AND eligibility = 'ELIGIBLE'
+     ORDER BY observed_at DESC NULLS LAST, id DESC
+     LIMIT 1
+"""
 
 # THE LIVE LANES, BY NAME. Migration 033 is explicit that the shadow
 # instrument's evidence queries filter `source IN ('chain','poll')` so the
@@ -406,8 +450,128 @@ async def verify_initial_inventory(conn, *, whale_id, condition_id,
     }
 
 
+async def challenger_inputs_for(conn, *, condition_id, seed_qty,
+                                seed_price) -> dict:
+    """Everything the challenger needs at decision time, or why not.
+
+    READ ONCE PER POSITION, NOT PER INSTANT, AND THAT IS STATED ON THE
+    RECORD. A live venue book is a per-instant object and this lane's
+    walk replays a whole condition inside one cycle, so re-reading the
+    venue for every print would be both impossible (the past books are
+    gone) and dishonest (one snapshot pretending to be many). The
+    snapshot is taken once, its `read_at` travels with it, and every
+    decision that consumes it records how old it was. A decision made on
+    an input older than the bound refuses in `bettor_hold_value` rather
+    than being quietly accepted here.
+
+    Returns a dict with `available` false and a NAMED reason when the
+    chain cannot be completed. That is not a failure of the cycle -- it
+    is the finding, and it is what makes the remaining gaps countable.
+    """
+    import time as _t
+
+    from sportsassets import bettor_book_snapshot as bs
+    from sportsassets import bettor_hold_value as hv
+
+    now = _t.time()
+    out = {"available": False, "read_at": now, "condition_id": condition_id}
+
+    val = await conn.fetchrow(_CHALLENGER_VALUATION, condition_id)
+    if val is None:
+        held = await conn.fetchrow(
+            "SELECT id, eligibility, ineligible_reason FROM "
+            "external_valuations WHERE condition_id = $1 "
+            "ORDER BY id DESC LIMIT 1", condition_id)
+        out["reason"] = (hv.R_INELIGIBLE if held is not None
+                         else hv.R_NO_SOURCE)
+        out["why"] = (
+            ("the only external valuation for this condition is held: %s"
+             % (dict(held).get("ineligible_reason") or
+                dict(held).get("eligibility")))
+            if held is not None else
+            ("no external valuation row exists for this condition, so "
+             "no probability can price a hold. The valuation loop has "
+             "not reached this market"))
+        return out
+    v = dict(val)
+    out["valuation_row_id"] = v["id"]
+    out["us_market_slug"] = v.get("us_market_slug")
+    out["venue"] = v.get("venue")
+
+    # THE PAYOUT EVENT OUR POSITION PAYS ON comes from the row's own
+    # recorded identity, which since migration 108 is established from
+    # the requested outcome and the matched venue side -- never from the
+    # order intent. Reconstructing it here from the intent would
+    # reintroduce exactly the defect that migration holds rows for.
+    payout_event = v.get("payout_event")
+    ev = hv.ev_hold(qty=float(seed_qty),
+                    basis_per_contract=float(seed_price),
+                    probability_row=v, now=now,
+                    payout_event_held=payout_event)
+    out["ev_hold"] = ev
+    out["payout_event"] = payout_event
+
+    # ── the live venue book, through the side-aware reader ───────────
+    slug = v.get("us_market_slug")
+    intent = v.get("buy_intent")
+    if not slug or not intent:
+        out["reason"] = "VENUE_CONTRACT_NOT_IDENTIFIED"
+        out["why"] = ("the valuation row carries no venue slug or no "
+                      "resolved intent, so there is no ladder to read. "
+                      "EV_HOLD may still be present and is returned")
+        out["available"] = ev.get("status") == "IDENTIFIED"
+        return out
+    try:
+        from sportsassets import pmus
+        md = await asyncio.to_thread(pmus.book_read, slug)
+    except Exception as exc:                                   # noqa: BLE001
+        out["reason"] = "VENUE_BOOK_READ_FAILED"
+        out["why"] = "%s: %s" % (type(exc).__name__, exc)
+        out["available"] = ev.get("status") == "IDENTIFIED"
+        return out
+
+    # SELLING IS THE OPPOSITE LADDER FROM BUYING. We hold the side the
+    # valuation's intent acquired, so exiting consumes the other one:
+    # a long exits into the BID, a short exits into the ASK. The
+    # acquisition ladder is asked for the OPPOSITE intent, which is
+    # precisely what puts the exit proceeds in the right price space.
+    is_short = bs.is_short_intent(intent)
+    exit_intent = ("ORDER_INTENT_BUY_LONG" if is_short
+                   else "ORDER_INTENT_BUY_SHORT")
+    sale = bs.acquisition_ladder(md, intent=exit_intent)
+    comp = bs.acquisition_ladder(md, intent=intent)
+    out["sale_ladder"] = sale
+    out["complement_ladder"] = comp
+    best_sale = sale.get("best_acquisition_price")
+    lvls = list(sale.get("levels") or ())
+    out.update(
+        available=True,
+        held_is_long=not is_short,
+        bid=best_sale,
+        bid_size=(float(lvls[0]["qty"]) if lvls else None),
+        last_price=best_sale,
+        complement_ask=comp.get("best_acquisition_price"),
+        complement_ask_size=(float((comp.get("levels") or [{}])[0]
+                                   .get("qty") or 0.0) or None),
+        settlement_semantics=v.get("settlement_rule"),
+        input_labels={
+            "ev_hold": "EXTERNAL_LABELLED_PROBABILITY (%s/%s)"
+                       % (v.get("provider"), v.get("devig_method")),
+            "bid": "OBSERVED venue ladder, exit side",
+            "complement_ask": "OBSERVED venue ladder, acquisition side",
+            "book_read_at": now,
+            "book_is_one_snapshot": (
+                "read ONCE for this position. Every decision below "
+                "records its own age against it"),
+        })
+    return out
+
+
 async def _replay_one(conn, *, trade_id, whale_id, condition_id,
-                      prospective: bool = False) -> dict:
+                      prospective: bool = False,
+                      challenger: bool = False) -> dict:
+    lane_name = ("CHALLENGER" if challenger
+                 else "PROSPECTIVE" if prospective else "HISTORICAL")
     rows = await conn.fetch(_CONDITION_ROWS, condition_id,
                             MAX_ROWS_PER_CONDITION)
     inv = await verify_initial_inventory(
@@ -445,6 +609,26 @@ async def _replay_one(conn, *, trade_id, whale_id, condition_id,
     # was backdated to the instant its evidence arrived.
     import time as _time
 
+    # ── the challenger's inputs, read once, before any decision ─────
+    ci_fn = None
+    ci_snapshot = None
+    if challenger:
+        seed = next((dict(r) for r in rows
+                     if int(r["whale_id"]) == int(whale_id)
+                     and r["side"] == "BUY"), None)
+        if seed is not None:
+            ci_snapshot = await challenger_inputs_for(
+                conn, condition_id=condition_id,
+                seed_qty=float(seed["size"]), seed_price=float(seed["price"]))
+
+            def ci_fn(at, _s=ci_snapshot):                     # noqa: F811
+                # UNAVAILABLE MEANS UNAVAILABLE. Returning a partially
+                # filled dict here would let the ranking consume a book
+                # or a hold value that was not established, so the whole
+                # snapshot is withheld and the decision records a
+                # missing input by name.
+                return _s if _s.get("available") else None
+
     out = runner.run(
         rows=[dict(r) for r in rows],
         payouts=payouts, resolved_at=resolved_at,
@@ -452,11 +636,34 @@ async def _replay_one(conn, *, trade_id, whale_id, condition_id,
         initial_inventory_verified=inv["verified"],
         now=(_time.time() if prospective else None),
         decision_basis=(runner.BASIS_RUNTIME if prospective
-                        else runner.BASIS_REPLAY))
+                        else runner.BASIS_REPLAY),
+        decision_policy=(runner.CHALLENGER if challenger
+                         else runner.CHAMPION),
+        challenger_inputs=ci_fn)
+    if challenger:
+        # THE INPUT SNAPSHOT IS PART OF THE EVIDENCE, available or not.
+        # A cycle that decided nothing because no probability existed is
+        # a finding about the valuation pipeline, and it is only
+        # readable if the refusal is stored beside the run.
+        out["challenger_inputs"] = {
+            k: ci_snapshot.get(k) for k in
+            ("available", "reason", "why", "valuation_row_id",
+             "us_market_slug", "venue", "payout_event", "read_at",
+             "bid", "bid_size", "complement_ask", "complement_ask_size",
+             "input_labels")} if ci_snapshot else {
+            "available": False, "reason": "NO_SEED_ROW",
+            "why": "no BUY fill by the source account in this condition"}
+        if ci_snapshot and ci_snapshot.get("ev_hold"):
+            _e = ci_snapshot["ev_hold"]
+            out["challenger_inputs"]["ev_hold"] = {
+                k: _e.get(k) for k in
+                ("status", "refusal", "why", "probability",
+                 "probability_event", "payout_event_held", "ev_hold_usd",
+                 "freshness", "identity", "source_row_id")}
     out["initial_inventory_evidence"] = inv
     out["resolved_at"] = resolved_at
     out["blockers"] = sorted(BLOCKERS)
-    out["lane"] = "PROSPECTIVE" if prospective else "HISTORICAL"
+    out["lane"] = lane_name
     if prospective:
         out["prospective_notes"] = dict(PROSPECTIVE_NOTES)
         out["scored"] = False
@@ -474,9 +681,13 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
     second experiment that could drift from the frozen policy -- but they
     share no identifier, no cursor and no total.
     """
-    if lane not in ("HISTORICAL", "PROSPECTIVE"):
+    if lane not in LANES:
         raise ValueError("unknown lane %r" % (lane,))
-    prospective = lane == "PROSPECTIVE"
+    challenger = lane == "CHALLENGER"
+    # THE CHALLENGER LANE IS PROSPECTIVE. It reads no payout, for the
+    # same reason the prospective lane does not: a policy scored against
+    # an outcome it was allowed to see has not been tested.
+    prospective = lane in ("PROSPECTIVE", "CHALLENGER")
     running, why = await _running(conn)
     if not running:
         return {"ran": False, "state": "STOPPED", "why": why}
@@ -486,10 +697,17 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
         return {"ran": False, "state": "BLOCKED", "why": rdy["blocker"],
                 "missing_tables": rdy["missing"]}
 
-    experiment_id = (PROSPECTIVE_EXPERIMENT_ID if prospective
+    experiment_id = (CHALLENGER_EXPERIMENT_ID if challenger
+                     else PROSPECTIVE_EXPERIMENT_ID if prospective
                      else HISTORICAL_EXPERIMENT_ID)
-    cursor_key = (PROSPECTIVE_CURSOR_KEY if prospective
+    cursor_key = (CHALLENGER_CURSOR_KEY if challenger
+                  else PROSPECTIVE_CURSOR_KEY if prospective
                   else HISTORICAL_CURSOR_KEY)
+    # THE POLICY THAT KEYS THE POSITION ROW. `position_id` derives from
+    # (experiment, policy, trade), so using the champion's id on the
+    # challenger lane would key both arms' rows identically and the
+    # already-replayed check would make each arm skip the other's seeds.
+    lane_policy = (_sel.CHALLENGER_ID if challenger else pol.POLICY_ID)
     query = (_CANDIDATES_PROSPECTIVE if prospective
              else _CANDIDATES_HISTORICAL)
     sources = list(LIVE_SOURCES if prospective else SEEDABLE_SOURCES)
@@ -513,7 +731,12 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
                              if prospective else "0 (walks the record)"),
             "not_evidence_of": ("that we could have obtained this fill"),
         },
-        policy_register=pol.describe(),
+        policy_register=({"policy_id": _sel.CHALLENGER_ID,
+                          "policy_class": _sel.CHALLENGER_CLASS,
+                          "objective": _sel.CHALLENGER_OBJECTIVE,
+                          "fallback": _sel.FALLBACK_DECLARATION,
+                          "benchmark": pol.POLICY_ID}
+                         if challenger else pol.describe()),
         execution_basis=EXECUTION_BASIS,
         notes=(("PROSPECTIVE SHADOW. Decisions recorded before the market "
                 "resolved; NOT scored, and never summed with a scored "
@@ -595,7 +818,7 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
         # Already replayed under this experiment and policy? The store's
         # key is derived, so this is a cheap check rather than a second
         # write that would be a no-op anyway.
-        pid = store.position_id(experiment_id, pol.POLICY_ID, rid)
+        pid = store.position_id(experiment_id, lane_policy, rid)
         if await conn.fetchval(
                 "SELECT 1 FROM rn1x_positions WHERE position_id = $1", pid):
             # Idempotence, not a refusal: this trade already has its
@@ -606,7 +829,8 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
         try:
             out = await _replay_one(
                 conn, trade_id=rid, whale_id=int(r["whale_id"]),
-                condition_id=r["condition_id"], prospective=prospective)
+                condition_id=r["condition_id"], prospective=prospective,
+                challenger=challenger)
             wrote = await store.persist_run(
                 conn, out, experiment_id=experiment_id,
                 source_account=str(r["whale_id"]))
@@ -746,6 +970,15 @@ async def run(pool_factory=None) -> None:
                 # one blended one.
                 res_p = await cycle(conn, lane="PROSPECTIVE")
                 res_h = await cycle(conn, lane="HISTORICAL")
+                # THE CHALLENGER LAST, and gated by its own control key.
+                # It runs the SAME seeds through a different decision
+                # policy, so it must never delay the lane whose totals
+                # the frozen benchmark depends on, and it must be
+                # switchable off without touching either of them.
+                res_c = ({"ran": False, "state": "OFF",
+                          "why": "rn1x_challenger is off"}
+                         if _off("rn1x_challenger") else
+                         await cycle(conn, lane="CHALLENGER"))
                 # A COMPACT SUMMARY THAT SURVIVES TRUNCATION. The
                 # operational readback prints left(detail, 1400) and the
                 # historical lane's `results` array fills that on its own,
@@ -768,11 +1001,14 @@ async def run(pool_factory=None) -> None:
                             "moved": r.get("cursor_moved"),
                             "stopped": r.get("stopped_at_error"),
                             "refusals": r.get("refusals") or {}}
-                res = {"lanes": {"P": _sum(res_p), "H": _sum(res_h)},
+                res = {"lanes": {"P": _sum(res_p), "H": _sum(res_h),
+                                 "C": _sum(res_c)},
                        "prospective": res_p, "historical": res_h,
+                       "challenger": res_c,
                        "lane_census": (res_h.get("lane_census")
                                        or res_p.get("lane_census"))}
-                states = (res_p.get("state"), res_h.get("state"))
+                states = (res_p.get("state"), res_h.get("state"),
+                          res_c.get("state"))
                 if "STOPPED" in states:
                     res["state"] = "STOPPED"
                 elif "BLOCKED" in states:

@@ -90,11 +90,28 @@ def _fee_fn():
     return fee
 
 
+#: Which decision policy manages the position. The two are NOT variants
+#: of one policy and are never summed:
+#:
+#:   CHAMPION    MANAGEMENT_PAIR_091_STOP_16_V1 through
+#:               `Managed.manage_policy`. FROZEN at 2026-09-23. This is
+#:               the benchmark and nothing in this change touches it.
+#:   CHALLENGER  SHADOW_CHALLENGER_HOLD_RANKED_V1 through
+#:               `Managed.decide_challenger`. Ranks every available
+#:               action INCLUDING hold, which it can only do because
+#:               `bettor_hold_value` supplies EV_HOLD from a labelled
+#:               external probability whose payout identity migration
+#:               108 made checkable.
+CHAMPION = "CHAMPION"
+CHALLENGER = "CHALLENGER"
+
+
 def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         queue_share=0.25, condition_id=None, fee_fn=None,
         fee_basis="TRANSFERRED_PMUS_LATEST_SCENARIO",
         initial_inventory_verified=False, policy_params=None,
-        now=None, decision_basis=BASIS_REPLAY):
+        now=None, decision_basis=BASIS_REPLAY,
+        decision_policy=CHAMPION, challenger_inputs=None):
     """`rows` are the condition's fills, ours and others', in any order.
 
     Each row: id, whale_id, outcome_index, side, size, price, ts,
@@ -106,6 +123,16 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
     `time.time()`; a replay passes neither and gets the availability
     instant, labelled as a replay. The default is the replay basis
     because that is what an unlabelled caller is actually doing.
+
+    `decision_policy` selects the FROZEN benchmark or the CHALLENGER.
+    `challenger_inputs` is a callable `(at) -> dict | None` supplying the
+    contemporaneous inputs the challenger needs at that instant --
+    ev_hold, bid/ask and their depth, the sale ladder, the venue and the
+    slug. IT IS A CALLABLE, NOT A DICT, because the inputs are different
+    at every instant and a single snapshot reused across a walk would be
+    the same market state pretending to be several. Returning None means
+    NO INPUTS WERE AVAILABLE at that instant, which the challenger
+    records as a missing input rather than as a decision to hold.
     """
     fee = fee_fn or _fee_fn()
     qs = float(queue_share)
@@ -122,14 +149,48 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
     rows = sorted(unique.values(), key=lambda r: (float(r["detected_at"]), int(r["id"])))
     mine = [r for r in rows if int(r["whale_id"]) == int(source_whale_id)]
 
+    # WHICH POLICY THIS RUN IS, ON THE RUN. `bettor_rn1x_store` derives
+    # `rn1x_positions.policy` -- and through it the position_id -- from
+    # `out["policy"]["policy_id"]`. Leaving the champion's description
+    # here for a challenger run labelled every challenger row
+    # MANAGEMENT_PAIR_091_STOP_16_V1, so the two arms were
+    # indistinguishable in the one column that separates them and both
+    # arms collided on the same derived position_id. The benchmark's
+    # description is kept alongside, because a challenger result is only
+    # meaningful next to what it is challenging.
+    if decision_policy == CHALLENGER:
+        from . import bettor_mgmt_lifecycle as _lc
+        from . import bettor_mgmt_select as _sel
+        _policy = {
+            "policy_id": _sel.CHALLENGER_ID,
+            "policy_class": _sel.CHALLENGER_CLASS,
+            "lifecycle_version": _lc.CHALLENGER_VERSION,
+            "objective": _sel.CHALLENGER_OBJECTIVE,
+            "fallback_when_hold_unpriced": _sel.FALLBACK_DECLARATION,
+            "hold_value_from": "bettor_hold_value.ev_hold",
+            "is_not": ("an EV optimisation. The probability is an "
+                       "external bookmaker's de-vigged price with no "
+                       "established calibration interval on these "
+                       "markets"),
+        }
+    else:
+        _policy = pol.describe()
+
     out = {"version": VERSION, "mode": mode,
-           "policy": pol.describe(), "steps": {},
+           "policy": _policy,
+           "benchmark_policy": pol.describe(),
+           "steps": {},
            "condition_id": condition_id, "queue_share": qs,
            "fee_basis": fee_basis, "prospective": False,
            # None is the FROZEN champion. Anything else is a challenger
            # arm and is labelled as one on the run, not only per decision.
            "policy_params": dict(policy_params) if policy_params else None,
-           "arm": "CHAMPION" if not policy_params else "CHALLENGER"}
+           "decision_policy": decision_policy,
+           # THE ARM NOW HAS TWO REASONS TO BE A CHALLENGER: a varied
+           # PARAMETER on the frozen policy, or a DIFFERENT POLICY
+           # entirely. Both are challengers and neither is the champion.
+           "arm": (CHAMPION if (decision_policy == CHAMPION
+                                and not policy_params) else CHALLENGER)}
 
     # ── 1 SOURCE ────────────────────────────────────────────────────
     if not mine:
@@ -376,8 +437,41 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
     out["order_created_ts"] = order_created_ts
     events = []
     skipped_pre_creation = 0
-    m.manage_policy(at=decision_ts, decision_id="seed:%s" % seed_row["id"],
-                    policy_params=policy_params)
+    input_misses = 0
+
+    def _decide(at, decision_id):
+        """One decision, by whichever policy this run is exercising.
+
+        THE TWO POLICIES SHARE THE ORDER LIFECYCLE AND NOTHING ELSE.
+        Both write through the same `Managed`, the same
+        `bettor_desk.Order` state machine and the same Portfolio, so a
+        difference between their results is a difference in DECISIONS
+        and never in accounting.
+        """
+        nonlocal input_misses
+        if decision_policy != CHALLENGER:
+            return m.manage_policy(at=at, decision_id=decision_id,
+                                   policy_params=policy_params)
+        ci = challenger_inputs(at) if challenger_inputs else None
+        if not ci:
+            input_misses += 1
+            ci = {}
+        return m.decide_challenger(
+            at=at, decision_id=decision_id,
+            ev_hold=ci.get("ev_hold"),
+            bid=ci.get("bid"), bid_size=ci.get("bid_size"),
+            complement_ask=ci.get("complement_ask"),
+            complement_ask_size=ci.get("complement_ask_size"),
+            sale_ladder=ci.get("sale_ladder"),
+            venue=ci.get("venue"),
+            us_market_slug=ci.get("us_market_slug"),
+            held_is_long=bool(ci.get("held_is_long", True)),
+            settlement_semantics=ci.get("settlement_semantics"),
+            last_price=ci.get("last_price"),
+            seconds_open=(at - decision_ts),
+            inputs=ci.get("input_labels") or {})
+
+    _decide(decision_ts, "seed:%s" % seed_row["id"])
     for r in rows:
         at = float(r["detected_at"])
         if at <= decision_ts:
@@ -400,8 +494,7 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
                            size=float(r["size"]), evidence_id=eid)
         m.acknowledge_cancels(at)
         # Tape prints are not bids, asks, depth or event progress.
-        d = m.manage_policy(at=at, decision_id="rn1x-%s" % r["id"],
-                            policy_params=policy_params)
+        d = _decide(at, "rn1x-%s" % r["id"])
         if d.get("acted") or fills:
             events.append({"at": at, "evidence_id": eid,
                            "by_source_account":
@@ -412,6 +505,12 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         "acted": sum(1 for d in m.decisions if d.get("acted")),
         "events": events,
         "order_created_ts": order_created_ts,
+        "decision_policy": decision_policy,
+        # DECISIONS TAKEN BLIND, COUNTED SEPARATELY. A challenger cycle
+        # that had no contemporaneous inputs did not decide to hold; it
+        # could not see. Folding these into the HOLD count would make a
+        # blind policy look like a patient one.
+        "decisions_without_inputs": input_misses,
         "prints_skipped_before_order_creation": skipped_pre_creation,
         "why_skipped": ("prints we received after deciding but which "
                         "EXECUTED before our order existed. Modelling a "
