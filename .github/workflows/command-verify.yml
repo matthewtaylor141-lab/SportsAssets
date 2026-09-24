@@ -72,6 +72,20 @@ on:
         description: "Seconds to wait for the deploy to settle before probing"
         required: false
         default: "0"
+      capture_terms:
+        description: >-
+          on|blank. `on` runs the SEPARATE capture-terms job, which retrieves
+          the bookmaker's published settlement-rules pages and prints the
+          applicable sections VERBATIM. Read-only: no credential, no service,
+          no database. It is a separate JOB so its log can be read on its own
+          rather than competing with the acceptance step for a readable
+          window.
+        required: false
+        default: ""
+      terms_url:
+        description: "an additional rules URL to retrieve verbatim"
+        required: false
+        default: ""
 
 jobs:
   verify:
@@ -1739,4 +1753,223 @@ jobs:
           else
             say "no valuation rows yet -- the census above says why"
           fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # ── THE ACCEPTANCE POSITION, READ DIRECTLY AND UNFILTERED ────────
+      #
+      # THE DEFECT THIS EXISTS FOR, AND IT WAS A REPORTING DEFECT OF MINE.
+      # The continuing-management read asks for `policy=CHALLENGER` and the
+      # supported-alternatives query filters `policy LIKE '%CHALLENGER%'`.
+      # The acceptance position's POLICY is ACCEPTANCE_SHADOW_MANAGER_DEMO_V1
+      # -- the substring CHALLENGER appears only in its position_id's
+      # experiment prefix -- so BOTH reads exclude it by construction. An
+      # empty challenger list is therefore no evidence at all about whether
+      # the acceptance position exists, and reading it as "absent" is
+      # reading unavailable evidence as a finding.
+      #
+      # So this step asks the two questions directly: the exact position_id
+      # by name, and the acceptance POLICY on its own. It runs `always()`
+      # because the steps above can fail, and their failure is exactly when
+      # this answer matters most.
+      - name: RN1X — the ACCEPTANCE position, read by id and by its own policy
+        if: always()
+        env:
+          ADMIN_TOKEN: ${{ secrets.COMMAND_ADMIN_TOKEN }}
+        run: |
+          set -uo pipefail
+          API="https://${{ inputs.host || 'command.bettortoken.com' }}"
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            say "SKIPPED: no ADMIN_TOKEN"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          H="Authorization: Bearer $ADMIN_TOKEN"
+          PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
+
+          say "-- every position under the ACCEPTANCE policy, unfiltered by CHALLENGER --"
+          curl -s --max-time 60 -H "$H" \
+            "$API/api/command/rn1x/positions?policy=ACCEPTANCE&limit=200" \
+            -o /tmp/apos.json -w 'http=%{http_code}\n' | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '"policy_filter\t" + ((.policy_filter // "-")|tostring),
+                 "rows\t" + ((.positions // [] | length)|tostring),
+                 ((.positions // [])[] | "  " + (.position_id // "?")
+                   + "\n    policy        " + ((.policy // "-")|tostring)
+                   + "\n    provenance    " + ((.provenance // "-")|tostring)
+                   + "\n    entry_kind    " + ((.entry_kind // "-")|tostring)
+                   + "\n    source_account " + ((.source_account // "-")|tostring)
+                   + "\n    source_trade_id " + ((.source_trade_id // "-")|tostring)
+                   + "\n    condition      " + ((.condition_id // "-")|tostring)
+                   + "  outcome_index " + ((.outcome_index // "-")|tostring)
+                   + "\n    seed_qty      " + ((.seed_qty // "-")|tostring)
+                   + "  seed_price " + ((.seed_price // "-")|tostring)
+                   + "  basis_usd " + ((.seed_basis_usd // "-")|tostring)
+                   + "\n    residual_qty  " + ((.residual_qty // "OPEN_NO_OUTCOME_ROW")|tostring)
+                   + "  settled_at " + ((.settled_at // "-")|tostring)
+                   + "\n    decisions     " + ((.decisions // "-")|tostring)
+                   + "  orders " + ((.orders // "-")|tostring)
+                   + "  decision_ts " + ((.decision_ts // "-")|tostring))' \
+            /tmp/apos.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 500 /tmp/apos.json
+
+          say ""
+          say "-- the PREVIOUSLY REPORTED position, read by id --"
+          say "id\t$PID"
+          curl -s --max-time 60 -H "$H" \
+            --get --data-urlencode "x=1" \
+            "$API/api/command/rn1x/trace/$PID" \
+            -o /tmp/atr.json -w 'http=%{http_code}\n' | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '"found\t" + ((.found // false)|tostring),
+                 "position\t" + ((.position // {} | tojson)[0:600]),
+                 "decisions\t" + ((.decisions // [] | length)|tostring),
+                 ((.decisions // [])[] | "  " + (.decision_id // "?")
+                   + "  " + ((.decision_ts // "-")|tostring)[0:19]
+                   + "  " + ((.selected_action // "-")|tostring)
+                   + " x " + ((.selected_qty // "-")|tostring)
+                   + "  hold " + ((.hold_value_usd // "-")|tostring)
+                   + "  state " + ((.operating_state // "-")|tostring))' \
+            /tmp/atr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 800 /tmp/atr.json
+          if ! jq -e '.found == true' /tmp/atr.json >/dev/null 2>&1; then
+            say "THAT EXACT ID IS NOT PRESENT. This is a DIRECT read of the id"
+            say "and is therefore evidence about it, unlike an empty"
+            say "CHALLENGER-filtered list. Reconcile against the run that"
+            say "reported it before concluding anything was lost."
+          fi
+
+          say ""
+          say "-- the DATABASE-LEVEL uniqueness backstop --"
+          curl -s --max-time 60 -H "$H" "$API/api/command/rn1x/overview" \
+            -o /tmp/aov.json -w 'http=%{http_code}\n' | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '(.schema_guards // {}) | "index\t" + ((.acceptance_unique_index // "-")|tostring),
+                 "present\t" + ((.present // false)|tostring),
+                 "read\t" + ((.read // false)|tostring),
+                 "duplicate_groups\t" + ((.duplicate_groups // [] | length)|tostring),
+                 "blocked_by_duplicates\t" + ((.blocked_by_existing_duplicates // false)|tostring),
+                 "error\t" + ((.error // "-")|tostring)' \
+            /tmp/aov.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 400 /tmp/aov.json
+          if jq -e '(.schema_guards.present // false) != true' /tmp/aov.json >/dev/null 2>&1; then
+            say "THE INDEX IS NOT PRESENT. Migration 114 skips it when"
+            say "duplicate groups already exist, so an absent index is either"
+            say "a data problem named above or a migration that has not run."
+            say "The advisory lock in the seeder still serialises the write."
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ── THE BOOKMAKER'S PUBLISHED TERMS, RETRIEVED VERBATIM ────────────
+  #
+  # WHY IT IS A JOB AND NOT A STEP. Its log has to be readable on its own:
+  # the verify job prints a long acceptance trace, and a capture buried
+  # inside it competes for the same window -- which is exactly how run 39's
+  # acceptance step became unreadable. A separate job has a separate log.
+  #
+  # WHY IT EXISTS AT ALL. The development container's egress policy denies
+  # pinnacle.com, support.pinnacle.com and archive.org, so the terms could
+  # not be captured there, and `admit_book_terms` refuses a term that does
+  # not carry the publisher's own words, a URL and a retrieval time. A
+  # search-engine summary is not a citation.
+  #
+  # IT IS READ-ONLY. No credential, no deployment, no database write.
+  capture-terms:
+    if: inputs.capture_terms == 'on'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Retrieve and print the published terms
+        env:
+          EXTRA: ${{ inputs.terms_url }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          say "retrieved_at\t$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          say "reader\tgithub-actions runner, ubuntu-latest"
+          say "note\tthe text below is the PUBLISHER'S OWN WORDS as served to this runner. Nothing here is summarised."
+
+          URLS="https://www.pinnacle.com/en/future/betting-rules
+          https://support.pinnacle.com/hc/en-us/articles/47846444668177-How-bets-are-graded-at-Pinnacle"
+          if [ -n "${EXTRA:-}" ]; then URLS="$URLS
+          $EXTRA"; fi
+
+          i=0
+          printf '%s\n' "$URLS" | while read -r U; do
+            U=$(printf '%s' "$U" | tr -d '[:space:]')
+            [ -z "$U" ] && continue
+            i=$((i+1))
+            say ""
+            say "================================================================"
+            say "SOURCE $i\t$U"
+            CODE=$(curl -sS -L --max-time 90 \
+                     -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36" \
+                     -H "Accept: text/html,application/xhtml+xml" \
+                     -H "Accept-Language: en-US,en;q=0.9" \
+                     -o "/tmp/src$i.html" -w '%{http_code}' "$U" 2>/tmp/err$i || echo "000")
+            say "http\t$CODE  bytes\t$(wc -c < "/tmp/src$i.html" 2>/dev/null || echo 0)"
+            if [ "$CODE" != "200" ]; then
+              say "RETRIEVAL FAILED -- nothing is captured from this source"
+              head -c 300 "/tmp/err$i" 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            python3 - "/tmp/src$i.html" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import html
+          import re
+          import sys
+
+          raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+
+          # A SPA SHELL IS NOT THE RULES. If the served document carries no
+          # prose, say that instead of printing an empty section and calling
+          # it a capture.
+          body = re.sub(r"(?is)<(script|style|noscript|svg)\b.*?</\1>", " ", raw)
+          # Keep block boundaries so sentences do not run together.
+          body = re.sub(r"(?i)</(p|div|li|h[1-6]|tr|br|section)\s*>", "\n", body)
+          body = re.sub(r"(?i)<br\s*/?>", "\n", body)
+          text = html.unescape(re.sub(r"(?s)<[^>]+>", " ", body))
+          lines = [re.sub(r"[ \t\xa0]+", " ", ln).strip()
+                   for ln in text.splitlines()]
+          lines = [ln for ln in lines if len(ln) > 1]
+
+          print("TEXT_LINES\t%d" % len(lines))
+          words = sum(len(ln.split()) for ln in lines)
+          print("TEXT_WORDS\t%d" % words)
+          if words < 200:
+              print("LIKELY_CLIENT_RENDERED -- the served document carries "
+                    "almost no prose, so the rules are NOT in this response. "
+                    "Nothing is captured from it.")
+              for ln in lines[:40]:
+                  print("  | " + ln[:200])
+              raise SystemExit(0)
+
+          # THE BASEBALL SECTION, AND ITS NEIGHBOURS. The hierarchy and the
+          # general/void clauses matter as much as the sport section, so a
+          # window around every hit is printed rather than one keyword line.
+          KEYS = re.compile(
+              r"(?i)\b(baseball|innings?|money\s*line|moneyline|graded|"
+              r"grading|void|refund|no\s+action|suspend\w*|postpon\w*|"
+              r"abandon\w*|cancel\w*|official\s+game|rule\s+hierarchy|"
+              r"order\s+of\s+precedence|precedence|live\b|pre-?game|"
+              r"playoff|extra\s+innings|listed\s+pitcher|resumed?)\b")
+          hits = [n for n, ln in enumerate(lines) if KEYS.search(ln)]
+          keep = set()
+          for n in hits:
+              keep.update(range(max(0, n - 2), min(len(lines), n + 3)))
+          out, last = [], -10
+          for n in sorted(keep):
+              if n != last + 1:
+                  out.append("  ...")
+              out.append("  %5d | %s" % (n, lines[n]))
+              last = n
+          print("MATCHED_LINES\t%d of %d" % (len(keep), len(lines)))
+          # Bounded so one verbose page cannot bury the other source.
+          CAP = 700
+          for ln in out[:CAP]:
+              print(ln)
+          if len(out) > CAP:
+              print("  ... TRUNCATED at %d printed lines of %d matched. "
+                    "Re-run with a narrower source to see the rest."
+                    % (CAP, len(out)))
+          PY
+          done
+          say ""
+          say "END OF CAPTURE -- nothing was written, no service was touched"
           echo '```' >> "$GITHUB_STEP_SUMMARY"

@@ -805,6 +805,51 @@ async def overview(pool) -> dict:
         "blockers": W.BLOCKERS,
         "statuses": await statuses(pool),
         "arms": await _arms(pool),
+        # WHETHER THE DATABASE-LEVEL GUARD IS ACTUALLY THERE. Migration 114
+        # creates the unique index only if the existing rows already satisfy
+        # it, and WARNS instead of failing when they do not -- which is the
+        # right behaviour for a boot-time migration and the wrong thing to
+        # assume afterwards. A guard that "should" exist is not a guard, so
+        # the read reports its presence rather than its intent.
+        "schema_guards": await _schema_guards(pool),
+    }
+
+
+ACCEPTANCE_INDEX = "rn1x_one_acceptance_position"
+
+
+async def _schema_guards(pool) -> dict:
+    """Is the acceptance uniqueness backstop present, and why not."""
+    try:
+        present = bool(await pool.fetchval(
+            "SELECT 1 FROM pg_indexes WHERE schemaname = 'public' "
+            "AND indexname = $1", ACCEPTANCE_INDEX))
+        dupes = await pool.fetch(
+            "SELECT experiment_id, policy, condition_id, outcome_index,"
+            " count(*) n FROM rn1x_positions"
+            " WHERE policy LIKE 'ACCEPTANCE\\_%'"
+            " GROUP BY 1,2,3,4 HAVING count(*) > 1")
+    except Exception as exc:                                   # noqa: BLE001
+        return {"read": False,
+                "error": "%s: %s" % (type(exc).__name__, exc),
+                "why": ("the guard could not be read, which is not the same "
+                        "as the guard being absent")}
+    return {
+        "read": True,
+        "acceptance_unique_index": ACCEPTANCE_INDEX,
+        "present": present,
+        "duplicate_groups": [dict(r) for r in dupes],
+        "blocked_by_existing_duplicates": bool(dupes) and not present,
+        "why_it_might_be_absent": (
+            "migration 114 counts duplicate (experiment, policy, condition, "
+            "outcome) groups first and SKIPS the index with a warning if any "
+            "exist, so that a data problem is reported instead of failing API "
+            "boot. An absent index with no duplicate groups means the "
+            "migration has not run on this database yet"),
+        "enforced_in_code_regardless": (
+            "seed_acceptance_position serialises its lookup and insert on a "
+            "session advisory lock, so a concurrent caller adopts rather than "
+            "seeds even where this index is missing"),
     }
 
 

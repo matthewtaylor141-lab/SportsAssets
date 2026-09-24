@@ -1372,6 +1372,74 @@ def test_seeding_the_same_market_twice_is_idempotent():
 
 
 @pg
+def test_the_uniqueness_backstop_is_reported_rather_than_assumed():
+    """Migration 114 SKIPS the index when duplicates already exist, so its
+    having run is not the same as the guard being there. The read reports
+    presence, and a failed read is distinguished from an absence."""
+    import asyncpg
+
+    from sportsassets.api import command_rn1x as CR
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            return await CR._schema_guards(c)
+        finally:
+            await c.close()
+
+    got = asyncio.run(run())
+    assert got["read"] is True, got
+    assert got["acceptance_unique_index"] == "rn1x_one_acceptance_position"
+    assert got["present"] is True, (
+        "migration 114 has not been applied to the test database, so this "
+        "assertion is about the migration and not about the reader: %s" % got)
+    assert got["duplicate_groups"] == [], got
+    assert got["blocked_by_existing_duplicates"] is False
+    # and the index REALLY refuses a second row on the same exposure
+    async def dup():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            a = await W.seed_acceptance_position(
+                c, experiment_id=_EXP, now=_T0,
+                resolve_identity=_resolver_ok,
+                read_book=lambda slug: {"marketData": _BOOK},
+                odds=_odds([_event(observed_at=_T0 - 5)], at=_T0))
+            row = await c.fetchrow(
+                "SELECT * FROM rn1x_positions WHERE position_id = $1",
+                a["position_id"])
+            try:
+                await c.execute(
+                    "INSERT INTO rn1x_positions(position_id, experiment_id,"
+                    " policy, source_trade_id, source_account, condition_id,"
+                    " outcome_index, entry_kind, entry_kind_why, seed_qty,"
+                    " seed_price, seed_basis_usd, source_ts, detected_ts,"
+                    " decision_ts, available_at, decision_basis,"
+                    " decision_lag_s, provenance)"
+                    " VALUES($1,$2,$3,$4,$5,$6,$7,$8,"
+                    " 'A SECOND ROW ON THE SAME EXPOSURE, written by this"
+                    " test to prove the index refuses it',1,0.5,0.5,"
+                    " now(),now(),now(),now(),'RUNTIME_WALL_CLOCK',0,$9)",
+                    row["position_id"] + ":SECOND", row["experiment_id"],
+                    row["policy"], -999999, row["source_account"],
+                    row["condition_id"], row["outcome_index"],
+                    row["entry_kind"], row["provenance"])
+            except asyncpg.exceptions.UniqueViolationError as exc:
+                return ("REFUSED", str(exc))
+            return ("ACCEPTED", None)
+        finally:
+            await c.close()
+
+    W.odds_gate_reset()
+    verdict, detail = asyncio.run(dup())
+    assert verdict == "REFUSED", (
+        "a DIFFERENT position_id on the SAME exposure must still be refused "
+        "by the index, since that is the duplication that matters: %s"
+        % (detail,))
+    assert "rn1x_one_acceptance_position" in (detail or "")
+
+
+@pg
 def test_an_unreadable_existing_lookup_stops_the_seed_and_writes_nothing():
     """A FAILED LOOKUP IS NOT AN ABSENCE.
 
