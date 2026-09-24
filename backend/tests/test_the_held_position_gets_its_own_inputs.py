@@ -1024,3 +1024,98 @@ def test_the_feeds_own_lag_is_measured_across_the_payload():
         "our own fixture was 10 s old and is priced")
     fr = next(x for x in ci["chain"] if x["link"] == "4_PROBABILITY")
     assert fr["max_age_s"] == 30.0
+
+
+# ── UNCOVERED IS NOT THE SAME AS OVER, AND NEITHER IS OUR MAPPING ────
+
+@pg
+def test_an_uncovered_sport_reports_the_providers_catalogue_too():
+    """'Not in OUR set' is a decision we can revisit. 'Not in THEIR
+    catalogue' is not. The chain asks which, on a call that costs no
+    credits, so nobody has to argue about extending the set blind."""
+    import asyncpg
+
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        orig_cat = getattr(EXT, "fetch_sport_catalogue", None)
+        orig_key = os.environ.get("EDGE_ODDS_API_KEY")
+
+        async def cat(*, api_key, timeout=20.0):
+            return {"ok": True, "status": 200, "metered": False,
+                    "sports": [{"key": "tennis_atp_wimbledon",
+                                "group": "Tennis", "title": "ATP Wimbledon",
+                                "active": False},
+                               {"key": "baseball_mlb", "group": "Baseball",
+                                "title": "MLB", "active": True}]}
+
+        EXT.fetch_sport_catalogue = cat
+        os.environ["EDGE_ODDS_API_KEY"] = "test-key-not-a-real-one"
+        try:
+            await _fixture(c, sport="Tennis")
+            return await _chain(c, odds=_odds([], at=_T0), now=_T0,
+                                resolve_identity=_resolver_ok)
+        finally:
+            if orig_cat is not None:
+                EXT.fetch_sport_catalogue = orig_cat
+            if orig_key is None:
+                os.environ.pop("EDGE_ODDS_API_KEY", None)
+            else:
+                os.environ["EDGE_ODDS_API_KEY"] = orig_key
+            await c.close()
+
+    ci = asyncio.run(run())
+    f = ci["first_failing_link"]
+    assert f["link"] == "3_PROVIDER_FIXTURE"
+    assert f["refusal"] == W.R_MANAGED_FAMILY
+    assert f["sport_label"] == "Tennis"
+    cat = f["provider_catalogue"]
+    assert cat["asked"] is True and cat["ok"] is True
+    assert cat["metered"] is False, "the catalogue read costs no credits"
+    keys = [x["key"] for x in cat["keys_for_this_sport"]]
+    assert keys == ["tennis_atp_wimbledon"], keys
+    assert "no threshold is widened" in f["remedy"]
+
+
+@pg
+def test_the_fixtures_own_clock_is_reported_apart_from_our_flags():
+    """A market our refresher still calls open can be a fixture that
+    finished yesterday, and no provider or freshness policy can price a
+    hold on an event that is over. `closed`/`resolved` are OUR flags;
+    game_start is the fixture's."""
+    import asyncpg
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            await c.execute(
+                "INSERT INTO market_starts(condition_id, game_start) "
+                "VALUES($1, to_timestamp($2)) ON CONFLICT (condition_id) "
+                "DO UPDATE SET game_start = to_timestamp($2)",
+                _COND, _T0 - 86_400)
+            unknown = await c.execute(
+                "DELETE FROM market_starts WHERE condition_id = 'nope'")
+            ci = await _chain(c, odds=_odds([_event(observed_at=_T0 - 5)],
+                                           at=_T0),
+                              now=_T0, resolve_identity=_resolver_ok)
+            await c.execute("DELETE FROM market_starts WHERE condition_id = $1",
+                            _COND)
+            bare = await _chain(c, odds=_odds([_event(observed_at=_T0 - 5)],
+                                              at=_T0),
+                                now=_T0, resolve_identity=_resolver_ok)
+            return ci, bare
+        finally:
+            await c.close()
+
+    ci, bare = asyncio.run(run())
+    fx = ci["fixture"]
+    assert fx["game_start_known"] is True
+    assert fx["is_past_start"] is True
+    assert fx["seconds_since_start"] == pytest.approx(86_400.0, abs=1.0)
+    assert fx["market_flags"] == {"closed": False, "resolved": False}, (
+        "our flags still say open -- which is the point of reporting both")
+    # AND AN ABSENT START IS NOT A START OF ZERO
+    assert bare["fixture"]["game_start_known"] is False
+    assert bare["fixture"]["is_past_start"] is None

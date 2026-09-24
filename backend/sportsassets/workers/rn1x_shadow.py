@@ -775,9 +775,19 @@ R_MANAGED_BUDGET = "MANAGED_ODDS_BUDGET_SPENT_THIS_CYCLE"
 R_RESOLVER_DISAGREES = "RESOLVER_AND_TOKENS_DISAGREE_ON_THE_PAYOUT_EVENT"
 
 MANAGED_MARKET_SQL = """
-    SELECT condition_id, title, event_title, slug, sport, closed, resolved,
-           extract(epoch FROM updated_at)::float8 AS updated_at
-      FROM markets WHERE condition_id = $1
+    SELECT m.condition_id, m.title, m.event_title, m.slug, m.sport,
+           m.closed, m.resolved,
+           extract(epoch FROM m.updated_at)::float8 AS updated_at,
+           -- THE FIXTURE'S OWN CLOCK, not our bookkeeping flags. It lives
+           -- in `market_starts`, written by the lane that fetches it, and
+           -- is absent for a fixture nobody has asked about -- which is a
+           -- different fact from a fixture that has not started.
+           extract(epoch FROM s.game_start)::float8 AS game_start,
+           extract(epoch FROM s.fetched_at)::float8 AS game_start_fetched_at,
+           s.err AS game_start_err
+      FROM markets m
+ LEFT JOIN market_starts s ON s.condition_id = m.condition_id
+     WHERE m.condition_id = $1
 """
 
 
@@ -909,6 +919,17 @@ class ManagedOdds:
         return out
 
 
+def devig_epoch_or_none(value):
+    """A timestamp of whatever shape the driver returned, as an epoch."""
+    try:
+        return value.timestamp()
+    except AttributeError:
+        try:
+            return float(value)
+        except (TypeError, ValueError):
+            return None
+
+
 def anchored_clock(now=None, clock=None):
     """A clock that starts at `now` and advances with REAL elapsed time.
 
@@ -990,7 +1011,11 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
     ident = await position_identity(conn, condition_id=condition_id,
                                     outcome_index=outcome_index)
     link("1_HELD_EXPOSURE", ident["ok"],
-         token_id=ident.get("token_id"), outcome=ident.get("outcome"),
+         token_id=ident.get("token_id"),
+         # `position_identity` names the event; there is no separate
+         # `outcome` key on it, and printing one produced a null beside a
+         # link that had in fact succeeded.
+         outcome=ident.get("payout_event"),
          payout_event=ident.get("payout_event"), basis=ident.get("basis"),
          refusal=ident.get("refusal"), why=ident.get("why"))
     if not ident["ok"]:
@@ -1017,6 +1042,27 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
                          ("condition_id", "slug", "sport", "title",
                           "event_title", "closed", "resolved",
                           "updated_at")}
+    # THE FIXTURE'S OWN CLOCK. A market our refresher still calls open can
+    # be a fixture that finished yesterday, and no freshness policy or
+    # provider can price a hold on an event that is over. Reported
+    # separately from coverage: they are different facts with different
+    # remedies.
+    gs = m.get("game_start")
+    gs = None if gs is None else (gs if isinstance(gs, (int, float))
+                                 else devig_epoch_or_none(gs))
+    out["fixture"] = {
+        "game_start": gs,
+        "seconds_since_start": (None if gs is None else round(started - gs, 1)),
+        "starts_in_s": (None if gs is None else round(gs - started, 1)),
+        "is_past_start": (None if gs is None else bool(started > gs)),
+        "game_start_known": gs is not None,
+        "game_start_fetched_at": m.get("game_start_fetched_at"),
+        "game_start_err": m.get("game_start_err"),
+        "market_flags": {"closed": m.get("closed"),
+                         "resolved": m.get("resolved")},
+        "reading": ("`closed`/`resolved` are OUR flags, written by the "
+                    "refresher. game_start is the fixture's own clock and "
+                    "does not depend on our bookkeeping")}
     # THE RESOLVER IS INJECTABLE FOR TESTS AND IS `premap.resolve` IN
     # PRODUCTION. It is not reimplemented here: a sixth resolver with its
     # own idea of side matching is how a wrong-side trade happens, and
@@ -1076,6 +1122,25 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
     # ── 3 · THE PROVIDER'S FIXTURE, matched by the same mapper ───────
     family = family_for_label(m.get("sport"))
     if family is None:
+        # IS THIS OUR CHOICE OR THEIR CATALOGUE? `/v4/sports` is not
+        # metered, so the answer costs nothing and decides whether
+        # extending the set is even possible.
+        cat = {"asked": False}
+        key = os.environ.get("EDGE_ODDS_API_KEY")
+        if key:
+            try:
+                got_cat = await EXT.fetch_sport_catalogue(api_key=key)
+                want = str(m.get("sport") or "").strip().lower()
+                cat = {"asked": True, "ok": bool(got_cat.get("ok")),
+                       "metered": False,
+                       "keys_for_this_sport": [
+                           x for x in (got_cat.get("sports") or [])
+                           if want and (want in str(x.get("group") or "").lower()
+                                        or want in str(x.get("title") or "").lower()
+                                        or want in str(x.get("key") or "").lower())][:12]}
+            except Exception as exc:                           # noqa: BLE001
+                cat = {"asked": True, "ok": False,
+                       "error": "%s: %s" % (type(exc).__name__, exc)}
         link("3_PROVIDER_FIXTURE", False, refusal=R_MANAGED_FAMILY,
              why=("`markets.sport` is %r, which is not in the provider "
                   "set %s. THIS EXPOSURE HAS NO PROVIDER COVERAGE -- it "
@@ -1084,7 +1149,12 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
                   % (m.get("sport"),
                      sorted({f for _, f in EXT.SPORTS}))),
              sport_label=m.get("sport"),
-             provider_families=sorted({f for _, f in EXT.SPORTS}))
+             provider_families=sorted({f for _, f in EXT.SPORTS}),
+             provider_catalogue=cat,
+             remedy=("extending the provider set is only possible if the "
+                     "catalogue above carries this sport AND the book "
+                     "quotes it on our plan. Neither is assumed here, and "
+                     "no threshold is widened either way"))
         return out
     out["sport_family"] = family
     odds = odds if odds is not None else ManagedOdds(

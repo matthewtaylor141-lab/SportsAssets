@@ -196,6 +196,36 @@ async def fetch_odds(sport_key: str, *, api_key: str, timeout=20.0) -> dict:
                 "received_at": time.time()}
 
 
+async def fetch_sport_catalogue(*, api_key: str, timeout=20.0) -> dict:
+    """WHICH SPORTS THE PROVIDER OFFERS AT ALL. Costs no credits.
+
+    `/v4/sports` is not metered, and it is the difference between "this
+    sport is not in OUR set" (a decision of ours) and "the provider does
+    not carry it" (a fact about them). A held exposure in an uncovered
+    sport needs that distinction before anyone argues about extending the
+    set: the first is a choice we can revisit, the second is not.
+    """
+    import httpx
+
+    url = "https://api.the-odds-api.com/v4/sports/"
+    async with httpx.AsyncClient(timeout=timeout) as client:
+        r = await client.get(url, params={"apiKey": api_key, "all": "true"})
+        used = r.headers.get("x-requests-used")
+        remaining = r.headers.get("x-requests-remaining")
+        if r.status_code != 200:
+            return {"ok": False, "status": r.status_code,
+                    "refusal": R_PROVIDER_ERROR, "sports": [],
+                    "credits_used": used, "credits_remaining": remaining}
+        rows = r.json() or []
+        return {"ok": True, "status": 200,
+                "sports": [{"key": x.get("key"), "group": x.get("group"),
+                            "title": x.get("title"),
+                            "active": x.get("active")} for x in rows],
+                "metered": False,
+                "credits_used": used, "credits_remaining": remaining,
+                "received_at": time.time()}
+
+
 async def fetch_scores(sport_key: str, *, api_key: str, timeout=20.0) -> dict:
     """DOES THIS PROVIDER GIVE OBSERVED EVENT PROGRESS?
 
