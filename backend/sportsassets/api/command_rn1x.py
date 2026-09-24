@@ -246,6 +246,29 @@ async def _external_status(pool) -> dict:
     out["last_id"] = await pool.fetchval(
         "SELECT max(id) FROM external_valuations WHERE experiment_id = $1",
         EX.EXPERIMENT_ID)
+    # THE LAST CYCLE'S OWN TALLY. Most of this loop's refusals happen
+    # before a candidate is ever scored, so they never become a row and the
+    # table's census cannot show them. Without this, a cycle in which every
+    # candidate was refused for a nameable reason reads as "evaluated 0"
+    # with an empty refusal list -- indistinguishable from a cycle that did
+    # not run.
+    try:
+        import json as _json
+
+        from ..workers import ext_pinnacle_loop as _EXT
+
+        raw = await pool.fetchval(
+            "SELECT value::text FROM ingestion_state WHERE key = $1",
+            _EXT.HEARTBEAT_KEY)
+        out["last_cycle"] = _json.loads(raw) if raw else None
+    except Exception as exc:                                   # noqa: BLE001
+        out["last_cycle"] = {"unreadable": type(exc).__name__}
+    out["why_two_refusal_sources"] = (
+        "`refusals_24h` counts candidates that were SCORED and refused. "
+        "`last_cycle.refusals` counts every candidate the cycle looked at, "
+        "including the ones refused before scoring -- no venue contract, "
+        "an ambiguous mapping, no contemporaneous quote. A cycle can refuse "
+        "everything and still write no row at all")
     if not cred["present"]:
         out.update(badge="BLOCKED", live=False,
                    why=("the odds credential is not present on this "

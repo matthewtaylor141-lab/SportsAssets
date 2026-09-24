@@ -353,3 +353,68 @@ async def test_a_second_cycle_does_not_double_count(monkeypatch):
             % (before, after))
     finally:
         await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_refusals_before_scoring_are_still_counted(monkeypatch):
+    """THE GAP THE FIRST LIVE RUN EXPOSED.
+
+    The census showed `evaluated 0` with an empty refusal list while every
+    candidate had in fact been refused by name -- because six of the
+    loop's eight refusal counters fire before a candidate is ever scored,
+    so none of them produces a row. A cycle that refuses everything must
+    not be indistinguishable from a cycle that did nothing.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute(
+            "CREATE TABLE IF NOT EXISTS ingestion_state "
+            "(key TEXT PRIMARY KEY, value TEXT)")
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1,'true') "
+            "ON CONFLICT (key) DO UPDATE SET value = 'true'",
+            loop.CONTROL_KEY)
+        await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                           loop.HEARTBEAT_KEY)
+        monkeypatch.setenv("EDGE_ODDS_API_KEY", "x" * 32)
+
+        # An event whose teams match NO venue market: refused at mapping,
+        # which is before scoring.
+        unmapped = _event()
+        unmapped["home_team"] = "Real Madrid"
+        unmapped["away_team"] = "Barcelona"
+        unmapped["bookmakers"][0]["markets"][0]["outcomes"] = [
+            {"name": "Real Madrid", "price": 2.0},
+            {"name": "Barcelona", "price": 3.6},
+            {"name": "Draw", "price": 3.5}]
+
+        async def fake_fetch(sport_key, *, api_key, timeout=20.0):
+            if sport_key != "soccer_epl":
+                return {"ok": True, "events": [], "received_at": time.time()}
+            return {"ok": True, "events": [unmapped],
+                    "received_at": time.time()}
+
+        monkeypatch.setattr(loop, "fetch_odds", fake_fetch)
+        out = await loop.cycle(conn)
+        assert out["evaluated"] == 0, out
+        assert out["written"] == 0, out
+        # The cycle itself named the reason...
+        assert vmap.R_NO_CONTRACT in out["refusals"], out["refusals"]
+
+        # ...and the heartbeat PERSISTED it, which is the part that was
+        # missing. Without this the command centre cannot tell management
+        # why nothing was valued.
+        import json
+
+        raw = await conn.fetchval(
+            "SELECT value::text FROM ingestion_state WHERE key = $1",
+            loop.HEARTBEAT_KEY)
+        assert raw, "the cycle wrote no heartbeat"
+        hb = json.loads(raw)
+        assert hb["evaluated"] == 0
+        assert hb["refusals"].get(vmap.R_NO_CONTRACT) == 1, hb["refusals"]
+        assert hb["state"] == "LIVE"
+    finally:
+        await conn.close()

@@ -470,13 +470,58 @@ async def cycle(conn) -> dict:
                 for code in rec.get("refusals", []):
                     tally[code] = tally.get(code, 0) + 1
 
-    return {"ran": True, "state": "LIVE",
-            "experiment_id": ext.EXPERIMENT_ID,
-            "evaluated": evaluated, "written": written,
-            "refusals": tally, "credits": credits,
-            "markets_considered": len(markets),
-            "elapsed_s": round(time.time() - started, 2),
-            "order_submitted": False}
+    out = {"ran": True, "state": "LIVE",
+           "experiment_id": ext.EXPERIMENT_ID,
+           "evaluated": evaluated, "written": written,
+           "refusals": tally, "credits": credits,
+           "markets_considered": len(markets),
+           "elapsed_s": round(time.time() - started, 2),
+           "order_submitted": False}
+    await _heartbeat(conn, out)
+    return out
+
+
+HEARTBEAT_KEY = "ext_pinnacle_last_cycle"
+
+
+async def _heartbeat(conn, out: dict) -> None:
+    """PERSIST THE CYCLE SUMMARY, because most refusals never reach a row.
+
+    Six of this loop's eight refusal counters fire BEFORE anything is
+    evaluated -- no Pinnacle on the event, no venue contract, an ambiguous
+    mapping, a closed market, a segment contract, no contemporaneous
+    quote. Those candidates never reach `ext.evaluate`, so they never
+    produce an `external_valuations` row, so the refusal census cannot see
+    them. The first live run showed exactly that: `evaluated 0` with an
+    empty refusal list, which reads as "nothing happened" when in fact
+    every candidate was refused for a nameable reason.
+
+    "If no candidate qualifies, report the actual refusal counts" cannot be
+    satisfied by a table that only holds the candidates that got far
+    enough to be scored. So the whole tally goes here, into the same
+    `ingestion_state` table the other loops heartbeat into, and the
+    command-centre tile reads it.
+    """
+    import json
+
+    try:
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            HEARTBEAT_KEY, json.dumps({
+                "at": time.time(),
+                "state": out.get("state"),
+                "evaluated": out.get("evaluated"),
+                "written": out.get("written"),
+                "markets_considered": out.get("markets_considered"),
+                "elapsed_s": out.get("elapsed_s"),
+                "credits": out.get("credits"),
+                # THE POINT OF THE WHOLE FUNCTION.
+                "refusals": out.get("refusals") or {},
+            }, default=str))
+    except Exception:                                          # noqa: BLE001
+        # A heartbeat that cannot be written must not take the cycle down.
+        log.warning("ext_pinnacle: heartbeat failed", exc_info=True)
 
 
 #: How long to wait before looking at the control row again while the loop
