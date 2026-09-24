@@ -18,7 +18,7 @@ production observation and must not be read as one. A row is only complete
 when OBS is filled, or when the row records exactly why OBS is
 unreachable.
 
-Last updated 2026-09-24T01:3xZ. Deployed API commit: see §0.
+Last updated 2026-09-24T02:0xZ. Deployed API commit: see §0.
 
 ---
 
@@ -29,7 +29,7 @@ Last updated 2026-09-24T01:3xZ. Deployed API commit: see §0.
 | default branch | `claude/session-njaewf` | `git remote show origin` |
 | work branch | `claude/command-center` | 153 commits ahead of default, 6 behind |
 | API service | `sportsassets-api` (`srv-d9gcv6urnols73ce6er0`) | render-ops deploys |
-| API commit deployed | `d2b20e7` (dispatched 01:3xZ) | render-ops deploy-api-commit |
+| API commit deployed | `e0929fd` (dispatched 02:0xZ) | render-ops deploy-api-commit |
 | worker service | `sportsassets-workers`, **untouched** | deploys BEFORE == AFTER on every API deploy |
 | collector | untouched; no worker deploy in this session | same |
 | damaged account | `acct_fc2d773a2afa4851` paused, ACCOUNTING_UNCERTAIN | not read or written by anything added here |
@@ -42,7 +42,7 @@ Last updated 2026-09-24T01:3xZ. Deployed API commit: see §0.
 | 1.1 | credential on the required service | ✓ | ✓ | ✓ | ✓ | run 35941026587; PUT 200; names only |
 | 1.2 | running process can retrieve odds | ✓ | ✓ | ✓ | ✓ | probe 01:06:57Z: `retrieved true`, 20/20 EPL events with Pinnacle h2h, credits 8,071,071 |
 | 1.3 | complete-outcome de-vigging | ✓ | ✓ | ✓ | ✓ | 42 outcomes priced, run 35935500538; `OUTCOME_SET_INCOMPLETE` refuses subsets |
-| 1.4 | exact contract mapping | ✓ | ✓ | ✓ | ⏳ | `bettor_venue_mapping`; conservative normalisation; Manchester collision refused |
+| 1.4 | exact contract mapping | ✓ | ✓ | ✓ | ⏳ | the candidate query matched 0 markets until the sport-label fix; retesting |
 | 1.5 | executable same-venue price AND depth | ✓ | ✓ | ✓ | ⏳ | `pmus.book_read` + `bettor_book_snapshot` displayed depth |
 | 1.6 | applicable fees, never defaulted | ✓ | ✓ | ✓ | ⏳ | production `bettor_fee_schedule.LATEST` |
 | 1.7 | estimated edge = p − ask − fee | ✓ | ✓ | ✓ | ⏳ | asserted in test; no bid anywhere in the module |
@@ -51,7 +51,7 @@ Last updated 2026-09-24T01:3xZ. Deployed API commit: see §0.
 | 1.10 | coverage scoped to the actual response | ✓ | ✓ | ✓ | ✓ | **corrected**: `PINNACLE_ABSENT` no longer a permanent claim |
 | 1.11 | stale inputs rejected | ✓ | ✓ | ✓ | ✓ | 30 s rule; EPL measured 32.7 s → refused |
 | 1.12 | labelled, not a proprietary model | ✓ | ✓ | ✓ | ✓ | tile text read off production 00:00:49Z |
-| 1.13 | refusals persisted and inspectable | ✓ | ✓ | ✓ | ⏳ | scored refusals on the row; pre-scoring refusals in the cycle heartbeat |
+| 1.13 | refusals persisted and inspectable | ✓ | ✓ | ✓ | ✓ | heartbeat read at 01:55:56Z: `NO_PINNACLE_ON_EVENT 3`, `NO_VENUE_CONTRACT_FOR_EVENT 44`, `markets 0` |
 
 ## §2 · Position management (frozen baseline)
 
@@ -75,7 +75,7 @@ Last updated 2026-09-24T01:3xZ. Deployed API commit: see §0.
 |---|---|---|---|---|---|---|
 | 3.1 | source + receipt preserved unchanged | ✓ | ✓ | ✓ | ✓ | migration 104; `detected_ts` no longer max()'d |
 | 3.2 | availability stored separately | ✓ | ✓ | ✓ | ✓ | `available_at` |
-| 3.3 | runtime decision time recorded | ✓ | ✓ | ✓ | ⏳ | `BASIS_RUNTIME`; 0 rows carry it yet |
+| 3.3 | runtime decision time recorded | ✓ | ✓ | ✓ | ⏳ | `BASIS_RUNTIME` deployed; 0 prospective rows carry it yet (144 positions, 0 prospective-capable at 01:53:25Z) |
 | 3.4 | order-creation time recorded | ✓ | ✓ | ✓ | ⏳ | `rn1x_orders.created_at_runtime` |
 | 3.5 | no fill against pre-creation prints | ✓ | ✓ | ✓ | ✓ | run-loop floor + `rn1x_fills` trigger |
 | 3.6 | prospective RN1 records audited and reclassified | ✓ | ✓ | ✓ | ✓ | **131 positions: 0 prospective-capable, 130 backdated** (01:09:28Z) |
@@ -90,9 +90,9 @@ Last updated 2026-09-24T01:3xZ. Deployed API commit: see §0.
 |---|---|---|---|---|---|---|
 | 4.1 | targets explicitly named | ✓ | ✓ | ✓ | ✓ | `bettor_model_inventory`: T_COMPLETE / T_CLEARS / T_SETTLEMENT |
 | 4.2 | RN1-complement ≠ settlement ≠ p_fill | ✓ | ✓ | ✓ | ✓ | `ENTRY_REQUIRES = T_SETTLEMENT`; refuses on target before metrics |
-| 4.3 | scheduled preparation → fit → predict → join → evaluate | ✓ | ✓ | ✓ | ⏳ | `workers/rn1x_model_loop`, armed at startup; 9 tests |
+| 4.3 | scheduled preparation → fit → predict → join → evaluate | ✓ | ✓ | ✓ | ✓ | LIVE 01:47:12Z: 5,997 closed rows fitted, **293 predictions recorded**, 0 joined (horizons open) |
 | 4.4 | frozen baseline, challengers separate | ✓ | ✓ | ✓ | ✓ | no promotion path in the loop |
-| 4.5 | versions, sample sizes, assumptions recorded | ✓ | ✓ | ✓ | ⏳ | migration 102 ledger |
+| 4.5 | versions, sample sizes, assumptions recorded | ✓ | ✓ | ✓ | ✓ | `dataset_sha 3c8e5d79f2219113`, `model_version 1.3c8e5d79`, n=5,997, base rate 0.3198 |
 | 4.6 | comparisons are not called training | ✓ | — | — | ✓ | corrected in an earlier round |
 
 ## §5 · Command centre
@@ -103,11 +103,11 @@ Last updated 2026-09-24T01:3xZ. Deployed API commit: see §0.
 | 5.2 | three lanes visibly separate | ✓ | ✓ | ✓ | ✓ | distinct experiment ids and tiles |
 | 5.3 | odds → probability → price → cost → edge | ✓ | ✓ | ✓ | ⏳ | `external/trace/{id}` |
 | 5.4 | why bought / held / paired / exited / refused | ✓ | ✓ | ✓ | ⏳ | refusal lists + `last_cycle` heartbeat |
-| 5.5 | resting orders, partials, cancels, inventory | ✓ | ✓ | ✓ | ⏳ | `order_book_state` tile, BY LIFECYCLE STATE |
-| 5.6 | realised + unrealised P&L, fees, rebates | ✓ | ✓ | ✓ | ⏳ | `shadow_pnl`; unrealised NOT_IDENTIFIED with the reason |
+| 5.5 | resting orders, partials, cancels, inventory | ✓ | ✓ | ✓ | ✓ | LIVE 01:55:56Z: **381 modelled orders** across both lanes |
+| 5.6 | realised + unrealised P&L, fees, rebates | ✓ | ✓ | ✓ | ✓ | LIVE 01:55:56Z: **141 settled positions**; unrealised NOT_IDENTIFIED with the reason |
 | 5.7 | accounting health, decision timestamps, restart | ✓ | ✓ | ✓ | ✓ | `clock-audit` + `accounting_health` |
 | 5.8 | learning activity and blockers | ✓ | ✓ | ✓ | ✓ | `learning_evaluation` tile |
-| 5.9 | intermittent page failure investigated | ⏳ | | | | observed 22:34:18Z: `/app.js` + `/core.js` 503/0 bytes |
+| 5.9 | intermittent page failure investigated | ✓ | ✓ | ✓ | ⏳ | cause narrowed to a transient Netlify CDN fault on a forced rewrite (NOT size, NOT our origin, NOT the rule); the shell now names the failed file instead of rendering blank |
 
 ## §6 · Acceptance standards
 
@@ -121,7 +121,7 @@ Last updated 2026-09-24T01:3xZ. Deployed API commit: see §0.
 | 6.6 | controlled: cancellation race | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
 | 6.7 | controlled: settlement | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
 | 6.8 | controlled: restart recovery | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
-| 6.9 | production: fresh inputs + runtime decision + persisted + trace | ⏳ | |
+| 6.9 | production: fresh inputs + runtime decision + persisted + trace | **PARTIAL** | fresh inputs ✓ (odds retrieved, 20/20 Pinnacle), persisted ✓ (293 predictions, 381 orders, 141 settled), authenticated trace ✓ (11 tiles + clock audit). **No external valuation has cleared**, so no odds→edge→decision trace exists yet: the reasons are the freshness rule and the unattested settlement rule, both measured |
 | 6.10 | funded execution unavailable AT THE ADAPTER | ✓ | `tests/test_ext_shadow_cannot_fund.py`, AST-verified; gate authorizes first, denial raises |
 
 ---
