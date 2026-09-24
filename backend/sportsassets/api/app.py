@@ -10979,6 +10979,45 @@ async def api_s1_arm_override(action: str) -> dict:
     return {"ok": True, "s1_arm_override": action == "on"}
 
 
+@app.post("/api/admin/ext-pinnacle-shadow/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_ext_pinnacle_shadow(action: str) -> dict:
+    """Arm or stop the EXTERNAL-VALUATION SHADOW experiment's control row.
+
+    THE SECOND OF TWO INDEPENDENT STOPS, and the prompt one. Arming needs
+    BOTH `EXT_PINNACLE_SHADOW` in the environment (a deploy) and this row
+    reading true; stopping needs only this row, and takes effect within a
+    cycle without a deploy. Absence of the row is NOT permission.
+
+    WHY A ROUTE AND NOT render-ops. render-ops.yml is the only place that
+    can reach the database from CI, and it sits 422 bytes under GitHub's
+    512,000-byte workflow ceiling -- already below this repository's own
+    32 KiB headroom rule, which exists because an eight-line comment once
+    took that lever down and two dispatches failed before anyone noticed.
+    Adding a statement to it to arm a shadow experiment would spend the
+    last of that margin on the least important thing in the file. This
+    follows the same shape as the S1 arm override above instead.
+
+    IT ARMS NO TRADING. The experiment it gates submits no orders: its
+    only writer is `external_valuations`, whose order_submitted column
+    CHECKs FALSE, and the venue-boundary gate authorizes every submission
+    independently of anything here.
+    """
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=422, detail="action must be on|off")
+    from .. import bettor_external_shadow as ext
+
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        ext.CONTROL_KEY, json.dumps(action == "on"))
+    return {"ok": True, "control_key": ext.CONTROL_KEY,
+            "armed": action == "on",
+            "env_flag_also_required": "EXT_PINNACLE_SHADOW",
+            "submits_orders": False}
+
+
 @app.post("/api/admin/side-echo-reset",
           dependencies=[Depends(require_admin)])
 async def api_side_echo_reset() -> dict:
