@@ -1,0 +1,133 @@
+name: capture-settlement-terms
+
+# RETRIEVE THE BOOKMAKER'S PUBLISHED SETTLEMENT TERMS, VERBATIM.
+#
+# WHY A WORKFLOW AND NOT A FETCH FROM THE DEVELOPMENT CONTAINER. That
+# container's egress policy denies pinnacle.com, support.pinnacle.com and
+# archive.org, so the terms could not be captured there -- and
+# `bettor_settlement_terms.admit_book_terms` refuses a term that does not
+# carry the publisher's own words, a URL and a retrieval time. A
+# search-engine summary is not a citation and was not used.
+#
+# The runner is an authorized reader with ordinary outbound access. This
+# job retrieves the pages ONCE, prints the applicable sections VERBATIM
+# with the HTTP status, the byte count and the retrieval timestamp, and
+# writes nothing. The quoted text is what fills BOOK_TERMS, in a commit
+# that cites this run.
+#
+# IT IS READ-ONLY AND TOUCHES NO SERVICE. No credential is used, nothing
+# is deployed, and no database is written.
+
+on:
+  workflow_dispatch:
+    inputs:
+      extra_url:
+        description: "an additional rules URL to retrieve verbatim"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Retrieve and print the published terms
+        env:
+          EXTRA: ${{ inputs.extra_url }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          say "retrieved_at\t$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          say "reader\tgithub-actions runner, ubuntu-latest"
+          say "note\tthe text below is the PUBLISHER'S OWN WORDS as served to this runner. Nothing here is summarised."
+
+          URLS="https://www.pinnacle.com/en/future/betting-rules
+          https://support.pinnacle.com/hc/en-us/articles/47846444668177-How-bets-are-graded-at-Pinnacle"
+          if [ -n "${EXTRA:-}" ]; then URLS="$URLS
+          $EXTRA"; fi
+
+          i=0
+          printf '%s\n' "$URLS" | while read -r U; do
+            U=$(printf '%s' "$U" | tr -d '[:space:]')
+            [ -z "$U" ] && continue
+            i=$((i+1))
+            say ""
+            say "================================================================"
+            say "SOURCE $i\t$U"
+            CODE=$(curl -sS -L --max-time 90 \
+                     -A "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125 Safari/537.36" \
+                     -H "Accept: text/html,application/xhtml+xml" \
+                     -H "Accept-Language: en-US,en;q=0.9" \
+                     -o "/tmp/src$i.html" -w '%{http_code}' "$U" 2>/tmp/err$i || echo "000")
+            say "http\t$CODE  bytes\t$(wc -c < "/tmp/src$i.html" 2>/dev/null || echo 0)"
+            if [ "$CODE" != "200" ]; then
+              say "RETRIEVAL FAILED -- nothing is captured from this source"
+              head -c 300 "/tmp/err$i" 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY"
+              continue
+            fi
+            python3 - "/tmp/src$i.html" <<'PY' | tee -a "$GITHUB_STEP_SUMMARY"
+          import html
+          import re
+          import sys
+
+          raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
+
+          # A SPA SHELL IS NOT THE RULES. If the served document carries no
+          # prose, say that instead of printing an empty section and calling
+          # it a capture.
+          body = re.sub(r"(?is)<(script|style|noscript|svg)\b.*?</\1>", " ", raw)
+          # Keep block boundaries so sentences do not run together.
+          body = re.sub(r"(?i)</(p|div|li|h[1-6]|tr|br|section)\s*>", "\n", body)
+          body = re.sub(r"(?i)<br\s*/?>", "\n", body)
+          text = html.unescape(re.sub(r"(?s)<[^>]+>", " ", body))
+          lines = [re.sub(r"[ \t\xa0]+", " ", ln).strip()
+                   for ln in text.splitlines()]
+          lines = [ln for ln in lines if len(ln) > 1]
+
+          print("TEXT_LINES\t%d" % len(lines))
+          words = sum(len(ln.split()) for ln in lines)
+          print("TEXT_WORDS\t%d" % words)
+          if words < 200:
+              print("LIKELY_CLIENT_RENDERED -- the served document carries "
+                    "almost no prose, so the rules are NOT in this response. "
+                    "Nothing is captured from it.")
+              for ln in lines[:40]:
+                  print("  | " + ln[:200])
+              raise SystemExit(0)
+
+          # THE BASEBALL SECTION, AND ITS NEIGHBOURS. The hierarchy and the
+          # general/void clauses matter as much as the sport section, so a
+          # window around every hit is printed rather than one keyword line.
+          KEYS = re.compile(
+              r"(?i)\b(baseball|innings?|money\s*line|moneyline|graded|"
+              r"grading|void|refund|no\s+action|suspend\w*|postpon\w*|"
+              r"abandon\w*|cancel\w*|official\s+game|rule\s+hierarchy|"
+              r"order\s+of\s+precedence|precedence|live\b|pre-?game|"
+              r"playoff|extra\s+innings|listed\s+pitcher|resumed?)\b")
+          hits = [n for n, ln in enumerate(lines) if KEYS.search(ln)]
+          keep = set()
+          for n in hits:
+              keep.update(range(max(0, n - 2), min(len(lines), n + 3)))
+          out, last = [], -10
+          for n in sorted(keep):
+              if n != last + 1:
+                  out.append("  ...")
+              out.append("  %5d | %s" % (n, lines[n]))
+              last = n
+          print("MATCHED_LINES\t%d of %d" % (len(keep), len(lines)))
+          # Bounded so one verbose page cannot bury the other source.
+          CAP = 700
+          for ln in out[:CAP]:
+              print(ln)
+          if len(out) > CAP:
+              print("  ... TRUNCATED at %d printed lines of %d matched. "
+                    "Re-run with a narrower source to see the rest."
+                    % (CAP, len(out)))
+          PY
+          done
+          say ""
+          say "END OF CAPTURE -- nothing was written, no service was touched"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
