@@ -11063,6 +11063,38 @@ async def api_ext_pinnacle_shadow(action: str) -> dict:
             "submits_orders": False}
 
 
+@app.post("/api/admin/rn1x-model-fit/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_rn1x_model_fit(action: str) -> dict:
+    """Arm or stop the SCHEDULED MODEL-FITTING loop's control row.
+
+    Same two-independent-stops shape as everything else here: arming needs
+    RN1X_MODEL_FIT in the environment AND this row true; stopping needs
+    only this row and takes effect within a poll.
+
+    IT ARMS NO TRADING AND NO PROMOTION. The loop reads `trades`, writes
+    `rn1x_model_predictions`, and has no code path that changes the active
+    policy -- management's baseline is frozen whatever it finds. Its target
+    is a behavioural forecast about the cohort account's next action, which
+    the entry gate refuses for entry on the target alone.
+    """
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=422, detail="action must be on|off")
+    from ..workers import rn1x_model_loop as ML
+
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        ML.CONTROL_KEY, json.dumps(action == "on"))
+    return {"ok": True, "control_key": ML.CONTROL_KEY,
+            "armed": action == "on",
+            "env_flag_also_required": ML.ENV_FLAG,
+            "target": ML.TARGET,
+            "target_is_not_settlement": True,
+            "promotes_a_winner": False}
+
+
 @app.post("/api/admin/side-echo-reset",
           dependencies=[Depends(require_admin)])
 async def api_side_echo_reset() -> dict:
