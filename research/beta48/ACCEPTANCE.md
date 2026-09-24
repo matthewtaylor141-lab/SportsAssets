@@ -11,11 +11,14 @@ has previously overrun its evidence:
 | **DEPL** | it is running in the deployed image on the target service |
 | **OBS** | its behaviour has been observed on production data, with a timestamp |
 
-`—` means not applicable. `✗` means genuinely not done. A row is only
-complete when OBS is filled, or when the row records exactly why OBS is
+`—` means not applicable. `✗` means genuinely not done. **`✓*` in the OBS
+column means CONTROLLED observation** -- the behaviour was exercised through
+the deployed machinery with inputs this repository supplied. It is not
+production observation and must not be read as one. A row is only complete
+when OBS is filled, or when the row records exactly why OBS is
 unreachable.
 
-Last updated 2026-09-24T01:1xZ. Deployed API commit: see §0.
+Last updated 2026-09-24T01:3xZ. Deployed API commit: see §0.
 
 ---
 
@@ -26,7 +29,7 @@ Last updated 2026-09-24T01:1xZ. Deployed API commit: see §0.
 | default branch | `claude/session-njaewf` | `git remote show origin` |
 | work branch | `claude/command-center` | 153 commits ahead of default, 6 behind |
 | API service | `sportsassets-api` (`srv-d9gcv6urnols73ce6er0`) | render-ops deploys |
-| API commit deployed | `f3ba6a0` (dispatched 01:12:01Z, HTTP 201, `dep-…`) | render-ops deploy-api-commit |
+| API commit deployed | `d2b20e7` (dispatched 01:3xZ) | render-ops deploy-api-commit |
 | worker service | `sportsassets-workers`, **untouched** | deploys BEFORE == AFTER on every API deploy |
 | collector | untouched; no worker deploy in this session | same |
 | damaged account | `acct_fc2d773a2afa4851` paused, ACCOUNTING_UNCERTAIN | not read or written by anything added here |
@@ -44,7 +47,7 @@ Last updated 2026-09-24T01:1xZ. Deployed API commit: see §0.
 | 1.6 | applicable fees, never defaulted | ✓ | ✓ | ✓ | ⏳ | production `bettor_fee_schedule.LATEST` |
 | 1.7 | estimated edge = p − ask − fee | ✓ | ✓ | ✓ | ⏳ | asserted in test; no bid anywhere in the module |
 | 1.8 | period / line / settlement agreement | ✓ | ✓ | ✓ | ✓ | refuses; venue settlement rule NOT attested → counted |
-| 1.9 | overtime / draw / push / void rules | ✗ | — | — | — | **see §1a** |
+| 1.9 | overtime / draw / push / void rules | ✓ | ✓ | ✓ | ✓ | four rules reported SEPARATELY; soccer leaves 3 unmet, baseball 2 (draw n/a) |
 | 1.10 | coverage scoped to the actual response | ✓ | ✓ | ✓ | ✓ | **corrected**: `PINNACLE_ABSENT` no longer a permanent claim |
 | 1.11 | stale inputs rejected | ✓ | ✓ | ✓ | ✓ | 30 s rule; EPL measured 32.7 s → refused |
 | 1.12 | labelled, not a proprietary model | ✓ | ✓ | ✓ | ✓ | tile text read off production 00:00:49Z |
@@ -58,13 +61,13 @@ Last updated 2026-09-24T01:1xZ. Deployed API commit: see §0.
 | 2.2 | 16% loss exit, second half only | ✓ | ✓ | ✓ | ✗ | no progress feed → `second_half_loss_exit` reads UNAVAILABLE |
 | 2.3 | trigger reported separately from modelled loss | ✓ | ✓ | ✓ | ✓ | `realised_vs_trigger()` |
 | 2.4 | observed event progress, never wall clock | ✓ | ✗ | ✓ | ✗ | `bettor_progress_feed` refuses `wall_clock` BY SOURCE NAME; **no provider access** |
-| 2.5 | partial fills | ⏳ | | | | |
-| 2.6 | cancellation acknowledgement | ⏳ | | | | |
-| 2.7 | late fill during cancellation | ⏳ | | | | |
-| 2.8 | residual inventory | ⏳ | | | | |
+| 2.5 | partial fills | ✓ | ✓ | ✓ | ✓* | controlled: remainder stays working, PARTIALLY_FILLED |
+| 2.6 | cancellation acknowledgement | ✓ | ✓ | ✓ | ✓* | controlled: CANCEL_PENDING → CANCELLED |
+| 2.7 | late fill during cancellation | ✓ | ✓ | ✓ | ✓* | controlled: a CANCEL_PENDING order still fills |
+| 2.8 | residual inventory | ✓ | ✓ | ✓ | ✓* | `residual()`, capped at place AND fill time |
 | 2.9 | settlement | ✓ | ✓ | ✓ | ✓ | step 8, payout read nowhere earlier |
-| 2.10 | capital release only on the release mechanism | ⏳ | | | | |
-| 2.11 | order-concurrency policy preserved | ⏳ | | | | |
+| 2.10 | capital release only on the release mechanism | ✓ | ✓ | ✓ | ✓* | controlled: paired inventory is NOT cash until settle |
+| 2.11 | order-concurrency policy preserved | ✓ | ✓ | ✓ | ✓* | one order; cancel then WAIT_CANCEL_ACK |
 
 ## §3 · Timestamp integrity and accounting
 
@@ -76,10 +79,10 @@ Last updated 2026-09-24T01:1xZ. Deployed API commit: see §0.
 | 3.4 | order-creation time recorded | ✓ | ✓ | ✓ | ⏳ | `rn1x_orders.created_at_runtime` |
 | 3.5 | no fill against pre-creation prints | ✓ | ✓ | ✓ | ✓ | run-loop floor + `rn1x_fills` trigger |
 | 3.6 | prospective RN1 records audited and reclassified | ✓ | ✓ | ✓ | ✓ | **131 positions: 0 prospective-capable, 130 backdated** (01:09:28Z) |
-| 3.7 | atomic persistence | ✓ | ✓ | ✓ | ⏳ | one transaction in `bettor_rn1x_store` |
-| 3.8 | idempotency | ✓ | ✓ | ✓ | ⏳ | migration 105 one-row-per-observation |
-| 3.9 | single-writer ownership | ⏳ | | | | advisory lock per loop |
-| 3.10 | controlled restart recovery | ⏳ | | | | |
+| 3.7 | atomic persistence | ✓ | ✓ | ✓ | ✓* | controlled: a failed transaction leaves no position |
+| 3.8 | idempotency | ✓ | ✓ | ✓ | ✓* | migration 105; a replayed cycle duplicates nothing |
+| 3.9 | single-writer ownership | ✓ | ✓ | ✓ | ⏳ | advisory lock per loop; each loop has its own |
+| 3.10 | controlled restart recovery | ✓ | ✓ | ✓ | ✓* | controlled: fresh connection, identical state, no duplication |
 
 ## §4 · Continuous learning
 
@@ -87,7 +90,7 @@ Last updated 2026-09-24T01:1xZ. Deployed API commit: see §0.
 |---|---|---|---|---|---|---|
 | 4.1 | targets explicitly named | ✓ | ✓ | ✓ | ✓ | `bettor_model_inventory`: T_COMPLETE / T_CLEARS / T_SETTLEMENT |
 | 4.2 | RN1-complement ≠ settlement ≠ p_fill | ✓ | ✓ | ✓ | ✓ | `ENTRY_REQUIRES = T_SETTLEMENT`; refuses on target before metrics |
-| 4.3 | scheduled preparation → fit → predict → join → evaluate | ⏳ | | | | **the remaining gap** |
+| 4.3 | scheduled preparation → fit → predict → join → evaluate | ✓ | ✓ | ✓ | ⏳ | `workers/rn1x_model_loop`, armed at startup; 9 tests |
 | 4.4 | frozen baseline, challengers separate | ✓ | ✓ | ✓ | ✓ | no promotion path in the loop |
 | 4.5 | versions, sample sizes, assumptions recorded | ✓ | ✓ | ✓ | ⏳ | migration 102 ledger |
 | 4.6 | comparisons are not called training | ✓ | — | — | ✓ | corrected in an earlier round |
@@ -100,8 +103,8 @@ Last updated 2026-09-24T01:1xZ. Deployed API commit: see §0.
 | 5.2 | three lanes visibly separate | ✓ | ✓ | ✓ | ✓ | distinct experiment ids and tiles |
 | 5.3 | odds → probability → price → cost → edge | ✓ | ✓ | ✓ | ⏳ | `external/trace/{id}` |
 | 5.4 | why bought / held / paired / exited / refused | ✓ | ✓ | ✓ | ⏳ | refusal lists + `last_cycle` heartbeat |
-| 5.5 | resting orders, partials, cancels, inventory | ⏳ | | | | |
-| 5.6 | realised + unrealised P&L, fees, rebates | ⏳ | | | | |
+| 5.5 | resting orders, partials, cancels, inventory | ✓ | ✓ | ✓ | ⏳ | `order_book_state` tile, BY LIFECYCLE STATE |
+| 5.6 | realised + unrealised P&L, fees, rebates | ✓ | ✓ | ✓ | ⏳ | `shadow_pnl`; unrealised NOT_IDENTIFIED with the reason |
 | 5.7 | accounting health, decision timestamps, restart | ✓ | ✓ | ✓ | ✓ | `clock-audit` + `accounting_health` |
 | 5.8 | learning activity and blockers | ✓ | ✓ | ✓ | ✓ | `learning_evaluation` tile |
 | 5.9 | intermittent page failure investigated | ⏳ | | | | observed 22:34:18Z: `/app.js` + `/core.js` 503/0 bytes |
@@ -110,14 +113,14 @@ Last updated 2026-09-24T01:1xZ. Deployed API commit: see §0.
 
 | # | requirement | state | evidence |
 |---|---|---|---|
-| 6.1 | controlled: BUY | ⏳ | |
-| 6.2 | controlled: pairing | ⏳ | |
-| 6.3 | controlled: second-half loss exit | ⏳ | |
-| 6.4 | controlled: no fill | ⏳ | |
-| 6.5 | controlled: partial fill | ⏳ | |
-| 6.6 | controlled: cancellation race | ⏳ | |
-| 6.7 | controlled: settlement | ⏳ | |
-| 6.8 | controlled: restart recovery | ⏳ | |
+| 6.1 | controlled: BUY | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
+| 6.2 | controlled: pairing | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
+| 6.3 | controlled: second-half loss exit | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
+| 6.4 | controlled: no fill | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
+| 6.5 | controlled: partial fill | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
+| 6.6 | controlled: cancellation race | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
+| 6.7 | controlled: settlement | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
+| 6.8 | controlled: restart recovery | ✓ | `tests/test_controlled_acceptance.py`, 17 tests, all through the deployed machinery |
 | 6.9 | production: fresh inputs + runtime decision + persisted + trace | ⏳ | |
 | 6.10 | funded execution unavailable AT THE ADAPTER | ✓ | `tests/test_ext_shadow_cannot_fund.py`, AST-verified; gate authorizes first, denial raises |
 
