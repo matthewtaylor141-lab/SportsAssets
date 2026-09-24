@@ -270,14 +270,18 @@ INSERT = """
          mapped_outcome, mapping_match,
          probability, executable_price, cost_per_contract,
          estimated_edge_per_contract,
-         decision, admissible, refusals, why, proposed_size)
+         decision, admissible, refusals, why, proposed_size,
+         payout_event, payout_event_basis, probability_event,
+         payout_is_complement, buy_intent, matched_side_norm,
+         resolver_asked_for, ladder_side)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
             $18::jsonb,$19,$20,$21,
             CASE WHEN $22::double precision IS NULL THEN NULL
                  ELSE to_timestamp($22) END,
             CASE WHEN $23::double precision IS NULL THEN NULL
                  ELSE to_timestamp($23) END,
-            $24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
+            $24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36,
+            $37,$38,$39,$40,$41,$42,$43,$44)
     -- BARE `DO NOTHING`, deliberately. Migration 105's uniqueness is an
     -- EXPRESSION index (coalesce over the nullable key columns), and
     -- `ON CONFLICT ON CONSTRAINT` cannot name an index, while inferring
@@ -353,7 +357,30 @@ async def persist(conn, rec: dict) -> int | None:
         bool(rec.get("admissible")),
         list(rec.get("refusals") or []),
         str(rec.get("why") or "")[:2000],
-        rec.get("proposed_size"))
+        rec.get("proposed_size"),
+        # ── THE PAYOUT IDENTITY, ON THE ROW ──────────────────────────
+        #
+        # A row that records `contract_selection` and `probability` but
+        # not which EVENT the probability describes cannot be re-checked,
+        # which is why every row written before migration 108 is held
+        # rather than cleared. These columns end that: the event the
+        # contract pays on, the basis for saying so, the event the
+        # probability describes, and the venue side actually matched.
+        #
+        # `buy_intent` and `ladder_side` are stored too, and they are
+        # deliberately NOT the source of the payout event -- they are the
+        # evidence that the intent only ever chose a ladder.
+        rec.get("payout_event") or (c.get("payout_event")
+                                    or c.get("selection")),
+        (c.get("payout_event_basis")
+         or "RESOLVER_MATCHED_A_SIDE_FOR_THE_REQUESTED_OUTCOME"),
+        rec.get("probability_event") or (c.get("probability_event")
+                                         or c.get("selection")),
+        bool(rec.get("payout_is_complement")),
+        c.get("buy_intent"),
+        c.get("matched_side_norm"),
+        c.get("resolver_asked_for") or c.get("selection"),
+        c.get("ladder_side"))
 
 
 REFUSAL_CENSUS = """
