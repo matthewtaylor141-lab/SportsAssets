@@ -2015,8 +2015,19 @@ jobs:
           # printed the page header instead of the evidence. A REPORTING
           # fault must never be able to read as a finding, so a jq failure
           # below is announced as one.
-          DEC='def l4b: (.input_chain.chain // [])
-            | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | (.[0] // {});
+          # THE CHAIN MAY ARRIVE AS A JSON STRING, not an object. It did:
+          # jq exited 5 on `Cannot index string with "chain"` and the
+          # evidence print stopped after five lines, mid-decision --
+          # which reads like a finding about the decision rather than a
+          # type mismatch in the reader. Parsed if it is a string,
+          # treated as absent if it is neither.
+          DEC='def ic: if (.input_chain|type) == "object" then .input_chain
+            elif (.input_chain|type) == "string"
+            then (try (.input_chain|fromjson) catch {}) else {} end;
+          def l4b: (ic.chain // [])
+            | (if type == "array" then . else [] end)
+            | map(select((type == "object")
+                  and (.link == "4b_SETTLEMENT_COMPATIBILITY"))) | (.[0] // {});
           def s(x): (x // "-") | tostring;
           .decisions // [] | .[($B|tonumber):] | .[] |
             "  " + s(.decision_id),
@@ -2031,13 +2042,19 @@ jobs:
             "      book_held    " + s(l4b.book_terms_held),
             "      unstated     " + ((l4b.unstated_conditions // []) | length | tostring),
             "      mismatched   " + ((l4b.mismatched_conditions // []) | tostring),
-            "      first_fail   " + s((.input_chain.first_failing_link // {}).link),
+            "      first_fail   " + s(((ic.first_failing_link // {})
+                                       | if type == "object" then .link
+                                         else null end)),
             "      ranked       " + (((.alternatives.ranked // [])
                 | map(s(.action) + "=" + s(.value_usd)) | join("  ")) | tostring),
             "      reason       " + (s(.selection_reason) | .[0:200])'
           printf '%s\n' "$DEC" > /tmp/dec.jq
+          # `|| true`: a jq failure here is a REPORTING fault and it is
+          # announced as one below. Letting it become the step's exit code
+          # made the whole run fail and truncated the evidence after five
+          # lines, which reads like a finding about the decisions.
           jq -r --arg B "${BEFORE:-0}" -f /tmp/dec.jq /tmp/tr.json \
-            2>/tmp/jqerr | tee -a "$GITHUB_STEP_SUMMARY"
+            2>/tmp/jqerr | tee -a "$GITHUB_STEP_SUMMARY" || true
           if [ -s /tmp/jqerr ]; then
             say "THE EVIDENCE PRINT FAILED. That is a REPORTING fault, not a"
             say "finding about the decisions:"

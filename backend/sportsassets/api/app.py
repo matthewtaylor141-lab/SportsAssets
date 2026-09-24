@@ -1882,11 +1882,17 @@ async def admin_rn1x_fixture_metadata(response: Response,
         away = str(b.get("away") or "").strip()
         date = str(b.get("official_date") or mkt["sched_date"] or "").strip()
         if not (home and away):
-            title = str(mkt["title"] or mkt["event_title"] or "")
-            parts = [x.strip() for x in
-                     title.replace(" vs. ", " vs ").split(" vs ")]
-            if len(parts) == 2:
-                away, home = away or parts[0], home or parts[1]
+            # BOTH STRINGS ARE TRIED, in order. `title` on this venue is
+            # "Will A beat B?" -- which yields no pair -- while
+            # `event_title` is "A vs. B", which does. Taking only the
+            # first non-empty of the two refused the binding on exactly
+            # the markets this route exists for.
+            for text in (mkt["event_title"], mkt["title"]):
+                parts = [x.strip() for x in
+                         str(text or "").replace(" vs. ", " vs ").split(" vs ")]
+                if len(parts) == 2 and all(parts):
+                    away, home = away or parts[0], home or parts[1]
+                    break
         if not (home and away and date):
             return {"ok": False, "refusal": "FIXTURE_BINDING_INCOMPLETE",
                     "condition_id": cid, "home": home, "away": away,
@@ -1950,8 +1956,20 @@ async def admin_rn1x_fixture_metadata(response: Response,
                VALUES($1,$2,$3,$4,$5,$6,$7,$8,
                       CASE WHEN $9::float8 IS NULL THEN NULL
                            ELSE to_timestamp($9::float8) END,
-                      $10,$11,$12,$13::date,$14,$15,$16,$17,$18,$19,
-                      $20::timestamptz,$21,$22::jsonb,$23::jsonb)
+                      -- ::text::date, NOT ::date. asyncpg infers the
+                      -- PARAMETER's type from the cast and then encodes
+                      -- client-side, so `$13::date` demanded a
+                      -- datetime.date and raised DataError on the string
+                      -- the caller sends: "'str' object has no attribute
+                      -- 'toordinal'". That surfaced as a bare HTTP 500
+                      -- from the acquisition route, which then read as
+                      -- "the scope evidence cannot be acquired" when the
+                      -- payload was fine and the binding was right.
+                      -- Casting from text keeps the parameter a string
+                      -- and lets Postgres parse it, which is also the
+                      -- only place that knows the column's type.
+                      $10,$11,$12,$13::text::date,$14,$15,$16,$17,$18,$19,
+                      $20::text::timestamptz,$21,$22::jsonb,$23::jsonb)
                ON CONFLICT (condition_id) DO UPDATE SET
                  phase = EXCLUDED.phase,
                  phase_uncovered = EXCLUDED.phase_uncovered,
