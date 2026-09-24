@@ -196,6 +196,35 @@ async def fetch_odds(sport_key: str, *, api_key: str, timeout=20.0) -> dict:
                 "received_at": time.time()}
 
 
+def _read_resolution_blocking(slug: str) -> dict:
+    """THE VENUE'S OWN ANSWER about whether this market has resolved.
+
+    A slug dated yesterday and a start time in the past establish neither
+    completion nor settlement -- the fixture may have been postponed,
+    suspended, or simply not written back yet. `bettor_live_read` asks the
+    venue's settlement endpoint first and the listing second, and returns
+    five distinct statuses so PENDING, UNREADABLE and UNMATCHED can never
+    be read as resolution.
+
+    Paced like every other venue read, and never raises.
+    """
+    from .. import bettor_live_read as lr
+    from .. import pmus
+    from ..venue_pace import pace
+
+    pace()
+    try:
+        client = pmus._get_client()
+    except Exception as exc:                                    # noqa: BLE001
+        return {"status": lr.UNREADABLE, "error": type(exc).__name__,
+                "stage": "CLIENT_CONSTRUCTION", "market_slug": slug}
+    try:
+        return lr.read_resolution(client, slug)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"status": lr.UNREADABLE, "error": type(exc).__name__,
+                "stage": "RESOLUTION_READ", "market_slug": slug}
+
+
 async def fetch_sport_catalogue(*, api_key: str, timeout=20.0) -> dict:
     """WHICH SPORTS THE PROVIDER OFFERS AT ALL. Costs no credits.
 

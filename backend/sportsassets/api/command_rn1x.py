@@ -940,7 +940,8 @@ async def positions(pool, limit: int = 50) -> list:
     rows = await pool.fetch(
         "SELECT p.position_id, p.policy, p.source_trade_id, "
         "p.source_account, p.condition_id, p.outcome_index, "
-        "p.entry_kind, p.unknown_reason, p.seed_qty::float8 seed_qty, "
+        "p.entry_kind, p.unknown_reason, p.provenance, "
+        "p.seed_qty::float8 seed_qty, "
         "p.seed_price::float8 seed_price, "
         "p.seed_basis_usd::float8 seed_basis_usd, "
         "p.source_ts, p.detected_ts, p.decision_ts, "
@@ -1224,6 +1225,7 @@ async def input_chain(pool, position_id: str) -> dict:
 
     pos = await pool.fetchrow(
         "SELECT position_id, policy, condition_id, outcome_index, "
+        "provenance, entry_kind, source_account, "
         "seed_qty::float8 AS seed_qty, seed_price::float8 AS seed_price, "
         "extract(epoch FROM decision_ts)::float8 AS decision_ts "
         "FROM rn1x_positions WHERE position_id = $1", position_id)
@@ -1337,4 +1339,34 @@ async def input_chain(pool, position_id: str) -> dict:
     # the odds rule the remedy is a faster feed, not a wider rule, and
     # this is the number that decides which.
     out["provider_quote_ages_s"] = ci.get("provider_quote_ages_s")
+    out["settlement"] = ci.get("settlement")
+    out["fixture"] = ci.get("fixture")
+
+    # ── THE VENUE'S OWN ANSWER ON WHETHER THIS HAS RESOLVED ──────────
+    #
+    # A slug dated yesterday and a start time in the past establish
+    # NEITHER completion NOR settlement. This asks the venue: its
+    # settlement endpoint first, its listing second, five distinct
+    # statuses so PENDING, UNREADABLE and UNMATCHED cannot be read as
+    # resolution -- and RESOLVED_DERIVED (prices converged) is never
+    # counted as the venue reporting an outcome.
+    slug = ci.get("us_market_slug")
+    if slug:
+        import asyncio as _aio
+
+        from ..workers.ext_pinnacle_loop import _read_resolution_blocking
+        try:
+            out["venue_resolution"] = await _aio.to_thread(
+                _read_resolution_blocking, slug)
+        except Exception as exc:                               # noqa: BLE001
+            out["venue_resolution"] = {"status": "UNREADABLE",
+                                       "error": "%s: %s"
+                                       % (type(exc).__name__, exc)}
+        out["venue_resolution_reading"] = (
+            "RESOLVED means the venue's settlement endpoint answered. "
+            "RESOLVED_DERIVED is an inference from converged prices and is "
+            "NOT the venue reporting an outcome. PENDING means listed and "
+            "unresolved. UNMATCHED means the venue does not list this "
+            "slug. UNREADABLE means the read failed -- which is not a "
+            "statement about the market at all")
     return out

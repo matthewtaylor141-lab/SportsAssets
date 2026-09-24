@@ -1817,6 +1817,39 @@ async def command_rn1x_trace(position_id: str, response: Response) -> dict:
     return await CR.trace(await get_pool(), position_id)
 
 
+@app.post("/api/admin/rn1x-acceptance-position",
+          dependencies=[Depends(require_admin)])
+async def admin_rn1x_acceptance_position(response: Response) -> dict:
+    """Create ONE acceptance position on a COVERED exposure, or say why not.
+
+    THE MANAGER CANNOT BE DEMONSTRATED ON INVENTORY WHOSE INPUTS DO NOT
+    EXIST. The live challenger position is an ATP tennis fixture and tennis
+    is not in the provider set, so its chain stops at the provider link --
+    a coverage fact. This creates a position the manager CAN price: a
+    covered sport, a venue contract that resolves, a readable book with
+    depth, and a fixture the provider carries, entered at the
+    CONTEMPORANEOUS executable price with its fee stated.
+
+    IT IS NOT an RN1 signal, NOT an executed order and NOT funded. Nothing
+    is submitted to any venue by this route: it writes one
+    `rn1x_positions` row, stamped `provenance =
+    ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY`, under a policy id that differs
+    from both the frozen benchmark's and the challenger's so no benchmark
+    aggregation can fold it in.
+    """
+    from ..db import get_pool
+    from ..workers import rn1x_shadow as W
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        got = await W.seed_acceptance_position(
+            conn, experiment_id=W.CHALLENGER_EXPERIMENT_ID)
+    got["submits_orders"] = False
+    got["funded"] = False
+    return got
+
+
 @app.get("/api/command/rn1x/input-chain/{position_id:path}",
          dependencies=[Depends(require_command)])
 async def command_rn1x_input_chain(position_id: str,

@@ -9,14 +9,20 @@
 # guessing. This runner can reach both, so the verification happens
 # here and its output is the evidence.
 #
-# IT READS ONLY, WITH ONE OPT-IN EXCEPTION. Every request below is a GET
-# of a public asset or a probe of an API route -- except the
-# `arm_external` step, which is off by default and, when explicitly set
-# to on/off, POSTs the external-valuation shadow's control row. That is
-# a shadow experiment's arm/stop and places no order; it is called out
-# here rather than left to be discovered, because a header comment that
-# says "nothing is posted" while something posts is worse than no
-# comment at all.
+# IT READS ONLY, WITH TWO OPT-IN EXCEPTIONS. Every request below is a GET
+# of a public asset or a probe of an API route -- except two steps, both
+# off by default:
+#   * `arm_external`, which when explicitly set to on/off POSTs the
+#     external-valuation shadow's control row -- a shadow experiment's
+#     arm/stop, which places no order;
+#   * `seed_acceptance`, which when set to `on` POSTs the
+#     acceptance-position route and writes ONE rn1x_positions row on a
+#     covered market, labelled ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY, so the
+#     position manager can be demonstrated on inventory whose inputs
+#     exist. It submits no order and moves no capital.
+# Both are called out here rather than left to be discovered, because a
+# header comment that says "nothing is posted" while something posts is
+# worse than no comment at all.
 #
 # A 401 FROM THE API IS A PASS, NOT A FAILURE. It is the proof that the
 # shadow routes are behind the COMMAND session rather than open to the
@@ -51,6 +57,15 @@ on:
           read the odds probe, the refusal census, the clock audit and one
           valuation trace. Blank does nothing. Shadow only: the experiment
           it gates submits no orders.
+        required: false
+        default: ""
+      seed_acceptance:
+        description: >-
+          on|blank. `on` POSTs the acceptance-position route, which writes
+          ONE rn1x_positions row on a covered market -- separately labelled,
+          shadow only, provenance ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY -- so
+          the position manager can be demonstrated on inventory whose inputs
+          exist. It submits NO order and moves no capital.
         required: false
         default: ""
       wait_s:
@@ -731,6 +746,274 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit $FAIL
 
+      # ── THE SUPPORTED-SPORT DEMONSTRATION, ON A LABELLED POSITION ──
+      #
+      # WHY IT EXISTS. The only open challenger position is an ATP tennis
+      # fixture, and tennis is not in the provider set: its chain stops at
+      # the provider link, which the step below reports as the coverage fact
+      # it is. Repeated blind decisions on that position are NOT the exit
+      # policy operating, and waiting for an RN1 fill to land on a covered
+      # fixture is waiting on a coincidence.
+      #
+      # WHAT THIS DOES. Asks the DEPLOYED build to seed ONE separately
+      # labelled position on a CURRENT covered venue contract at the
+      # CONTEMPORANEOUS executable price with its fee stated, then waits for
+      # the SAME production management lifecycle -- the deployed challenger
+      # loop, not this runner -- to decide it across two distinct cycles, and
+      # accepts it only on those decisions' OWN stored evidence.
+      #
+      # WHAT IT IS NOT: not RN1-derived, not an executed order, not funded,
+      # and not part of any benchmark result. Its policy, provenance,
+      # entry_kind and source_account say so ON THE ROW and are printed
+      # below rather than asserted in prose, and the arms table -- grouped by
+      # policy -- shows it as its own line. THE ROUTE SUBMITS NO ORDER.
+      #
+      # IT IS THE SECOND OF THE TWO WRITES THIS WORKFLOW CAN MAKE, opt-in
+      # through `seed_acceptance: on` and named in the header.
+      #
+      # IT ALSO OWNS THE TWO SHARED JQ PROGRAMS -- the trace normaliser and
+      # the acceptance checker -- which it writes to files that the step
+      # below reads, so the two steps cannot drift apart.
+      - name: RN1X — the ACCEPTANCE position, managed by the production lifecycle
+        if: ${{ !cancelled() }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -u
+          API="${{ inputs.api }}"; WANT="${{ inputs.seed_acceptance }}"; FAIL=0
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          say () { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          {
+            echo "### The acceptance position, driven by the production lifecycle"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # ── THE TRACE NORMALISER. The jsonb columns can arrive as strings
+          # depending on the driver's codec, and a jq path into a string
+          # silently yields null -- which would make every check vacuous.
+          NORM='def j: if type == "string" then (fromjson? // {})
+                     else (. // {}) end;
+              {seed_qty: (.position.seed_qty // null),
+               seed_price: (.position.seed_price // null),
+               policy: (.position.policy // "?"),
+               outcome_index: (.position.outcome_index // null),
+               decisions: [(.decisions // [])[]
+                 | {id: .decision_id, ts: (.decision_ts | tostring),
+                    action: (.selected_action // "NULL"),
+                    qty: (.selected_qty // null),
+                    hold: (.hold_value_usd // null),
+                    state: (.operating_state // "?"),
+                    eligibility: (.eligibility // "?"),
+                    reason: (.selection_reason // ""),
+                    reconciles: (.accounting_reconciles),
+                    pays: ((.payout_identity | j).row_payout_event),
+                    chain: (.input_chain | j),
+                    alt: (.alternatives | j), inv: (.resulting_inventory | j),
+                    fr: (.input_freshness | j)}]}'
+          printf '%s' "$NORM" > /tmp/norm.jq
+          # ── ACCEPTANCE, FROM THE DECISION'S OWN STORED EVIDENCE ───
+          #
+          # Two priced HOLDs are NOT sufficient. A diagnostic pull taken after
+          # the fact cannot establish what a decision knew, so every requirement
+          # below is read off the DECISION ROW: the chain it recorded, the
+          # freshness it measured, the ladder it saw, the inventory it ranked,
+          # the alternatives it scored, and whether its accounting reconciled.
+          #
+          # A MISSING-BOOK HOLD DOES NOT SATISFY THIS. It is a legitimate
+          # decision and it is not a demonstration of the manager.
+          ACC='[(.decisions // [])[] | . as $d
+           | (($d.chain // {}).chain // []) as $ch
+           | (($ch | map(select(.link == "1_HELD_EXPOSURE")) | first) // {}) as $l1
+           | (($ch | map(select(.link == "2_VENUE_CONTRACT")) | first) // {}) as $l2
+           | (($ch | map(select(.link == "5_EXIT_LADDER")) | first) // {}) as $l5
+           | (($d.alt.ranked // []) | map(select(.action == "DIRECT_EXIT"))
+              | first // {}) as $ex
+           | {id: $d.id, ts: $d.ts, action: $d.action, qty: $d.qty, hold: $d.hold,
+              missing: ([
+                (if ($l1.ok == true) and (($d.pays // null) != null)
+                    and (($l1.basis // null) != null)
+                 then empty else "HELD_EXPOSURE_MAPPING" end),
+                (if ($l2.ok == true) and ($l2.agrees_with_tokens == true)
+                    and (($l2.us_market_slug // null) != null)
+                    and (($l2.intent // null) != null)
+                 then empty else "VENUE_CONTRACT_AND_INTENT" end),
+                (if (($d.fr.age_from_observation_s // null) != null)
+                    and (($d.fr.bound_s // null) != null)
+                    and (($d.fr.age_from_observation_s) <= ($d.fr.bound_s))
+                 then empty else "FRESH_PROBABILITY" end),
+                (if ($l5.ok == true) and (($l5.exit_price // 0) > 0)
+                    and (($l5.size_at_best // 0) > 0)
+                 then empty else "EXIT_LADDER_AND_DEPTH" end),
+                (if (($ex.qty // 0) > 0) and (($ex.value_usd // null) != null)
+                 then empty else "PRICED_EXECUTABLE_EXIT_ALTERNATIVE" end),
+                (if (($d.inv.residual_qty // null) != null)
+                    and (($d.inv.residual_qty) > 0)
+                    and (($d.alt.hold_input.qty_valued // null) != null)
+                    and ((($d.inv.residual_qty) - ($d.alt.hold_input.qty_valued))
+                         | fabs < 0.000001)
+                 then empty else "RESIDUAL_INVENTORY_AGREES" end),
+                (if (($d.alt.ranked // []) | length) > 0
+                    and (($d.action // "NULL") != "NULL")
+                    and (($d.qty // null) != null)
+                    and ((($d.reason // "") | length) > 0)
+                 then empty else "RANKED_ALTERNATIVES_AND_SELECTION" end),
+                (if $d.reconciles == true then empty
+                 else "RECONCILED_ACCOUNTING" end),
+                (if ($d.hold // null) != null then empty else "PRICED_HOLD" end)
+              ])}]'
+          printf '%s' "$ACC" > /tmp/acc.jq
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            say "SKIPPED: no ADMIN_TOKEN, the authenticated route is not available here"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          if [ "$WANT" != "on" ]; then
+            say "NOT REQUESTED: seed_acceptance is '${WANT:-}', so nothing was"
+            say "written and no demonstration was attempted. Dispatch with"
+            say "seed_acceptance=on to run it."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          say "-- seeding ONE acceptance position on a covered exposure --"
+          code=$(curl -s -o /tmp/seed.json -w '%{http_code}' --max-time 180 \
+                 -X POST -H "$H" "$API/api/admin/rn1x-acceptance-position" || echo 000)
+          say "seed HTTP $code"
+          [ "$code" = "200" ] || { echo "::error::the acceptance seed route answered $code"; FAIL=1; }
+          jq -r '"created\t"        + ((.created // false)|tostring),
+                 "position_id\t"    + ((.position_id // "-")|tostring),
+                 "policy\t"         + ((.policy // "-")|tostring),
+                 "provenance\t"     + ((.provenance // "-")|tostring),
+                 "is_not\t"         + ((.is_not // [])|tostring),
+                 "submits_orders\t" + ((.submits_orders)|tostring)
+                                     + "   funded=" + ((.funded)|tostring),
+                 "sport\t"          + ((.sport // "-")|tostring) + "  "
+                                     + ((.title // "")[0:60]),
+                 "venue_contract\t" + ((.us_market_slug // "-")|tostring)
+                                     + "  " + ((.intent // "-")|tostring),
+                 "payout_event\t"   + ((.payout_event // "-")|tostring),
+                 "entry\t"          + ((.entry // {})|tostring),
+                 "inputs_at_entry\t" + ((.inputs_at_entry // {})|tostring),
+                 "source_trade_id\t" + ((.source_trade_id // "-")|tostring)
+                                     + "  " + ((.source_trade_id_is // "")|tostring),
+                 "covered_labels\t" + ((.covered_sport_labels // [])|tostring),
+                 "refusals\t"       + ((.refusals // {})|tostring),
+                 ((.considered // [])[]
+                   | "  considered " + ((.slug // "?")|tostring) + "  "
+                     + ((. | del(.slug) | tostring)[0:300]))' \
+            /tmp/seed.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 600 /tmp/seed.json
+          APID=$(jq -r '.position_id // empty' /tmp/seed.json 2>/dev/null)
+          if [ -z "$APID" ]; then
+            echo "::error::no acceptance position exists: no covered market could supply a complete entry. The refusals above name the link that stopped each candidate -- repair that link rather than widening a limit."
+            say "NOT DEMONSTRATED -- no covered exposure could be entered"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          # ── WAIT FOR THE DEPLOYED LOOP, NOT FOR THIS RUNNER ────────
+          #
+          # Nothing here decides anything. It polls the PERSISTED trace until
+          # the deployed challenger loop has produced two complete decisions
+          # at two distinct instants, or the poll budget runs out -- and a
+          # budget that runs out is a failure, not a pass.
+          TRIES=26; NAP=30; COMPLETE=0; DISTINCT=0; NDEC=0; i=0
+          while [ "$i" -lt "$TRIES" ]; do
+            i=$((i+1))
+            code=$(curl -s -o /tmp/amg.json -w '%{http_code}' --max-time 60 \
+                   -H "$H" "$API/api/command/rn1x/trace/$APID" || echo 000)
+            if [ "$code" = "200" ]; then
+              jq -f /tmp/norm.jq /tmp/amg.json > /tmp/amgn.json 2>/dev/null \
+                || echo '{}' > /tmp/amgn.json
+              if jq -f /tmp/acc.jq /tmp/amgn.json > /tmp/aacc.json 2>/dev/null; then
+                COMPLETE=$(jq '[.[] | select((.missing | length) == 0)] | length' /tmp/aacc.json)
+                DISTINCT=$(jq '[.[] | select((.missing | length) == 0) | .ts] | unique | length' /tmp/aacc.json)
+                NDEC=$(jq '(.decisions // []) | length' /tmp/amgn.json)
+                say "poll $i/$TRIES  decisions=$NDEC  complete=$COMPLETE  distinct_instants=$DISTINCT"
+              else
+                say "poll $i/$TRIES  the trace could not be evaluated yet"
+              fi
+            else
+              say "poll $i/$TRIES  trace HTTP $code"
+            fi
+            if [ "$COMPLETE" -ge 2 ] && [ "$DISTINCT" -ge 2 ]; then break; fi
+            if [ "$i" -lt "$TRIES" ]; then sleep "$NAP"; fi
+          done
+          # ── THE PROVENANCE, OFF THE ROW THE MANAGER DECIDED ───────
+          say "-- provenance, read back off the persisted position --"
+          jq -r '"position_id\t" + ((.position.position_id // "-")|tostring),
+                 "policy\t"      + ((.position.policy // "-")|tostring),
+                 "provenance\t"  + ((.position.provenance // "NULL")|tostring),
+                 "entry_kind\t"  + ((.position.entry_kind // "-")|tostring),
+                 "source_account\t" + ((.position.source_account // "-")|tostring),
+                 "source_trade_id\t" + ((.position.source_trade_id // "-")|tostring),
+                 "entry\t"       + ((.position.seed_qty // "-")|tostring) + " @ "
+                                  + ((.position.seed_price // "-")|tostring)
+                                  + "  basis " + ((.position.seed_basis_usd // "-")|tostring),
+                 "entry_kind_why\t" + ((.position.entry_kind_why // "-")|tostring)' \
+            /tmp/amg.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # ── EVERY DECISION THE PRODUCTION LIFECYCLE TOOK ON IT ────
+          jq -r '"decisions\t" + ((.decisions | length)|tostring)
+                   + "  distinct_ts=" + (([.decisions[].ts] | unique | length)|tostring),
+                 (.decisions[] | . as $d
+                   | "  " + .id[-22:] + "  " + .ts[0:19]
+                     + "  " + .action + " x " + ((.qty // "-")|tostring)
+                     + "  hold=" + ((.hold // "-")|tostring)
+                     + "  resid=" + ((.inv.residual_qty // "-")|tostring)
+                     + "  " + .state,
+                     "      freshness age=" + ((.fr.age_from_observation_s // "-")|tostring)
+                     + " bound=" + ((.fr.bound_s // "-")|tostring)
+                     + " from=" + ((.fr.bound_source // "-")|tostring),
+                     "      payout_event=" + ((.pays // "-")|tostring)
+                     + "  reconciles=" + ((.reconciles // "-")|tostring)
+                     + "  eligibility=" + (.eligibility),
+                     ((($d.chain.chain // [])[])
+                       | "      link " + (.link) + (if .ok then "  OK" else "  FAILED" end)
+                         + "  " + ((. | del(.link, .ok) | tostring)[0:240])),
+                     (if ((.alt.ranked // []) | length) == 0
+                      then "      ranked: NONE -- every action refused"
+                      else ((.alt.ranked // [])[]
+                            | "      ranked " + (.action // "?")
+                              + " x " + ((.qty // "-")|tostring)
+                              + " = " + ((.value_usd // "-")|tostring))
+                      end),
+                     "      selected " + .action + " because " + ((.reason // "")[0:160]))' \
+            /tmp/amgn.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          jq -r '.[] | "  " + (.id[-22:]) + "  " + (.ts[0:19])
+                 + (if (.missing | length) == 0 then "  COMPLETE"
+                    else "  INCOMPLETE " + ((.missing)|tostring) end)' \
+            /tmp/aacc.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # ── AND THAT IT IS NOT IN THE BENCHMARK'S NUMBERS ─────────
+          #
+          # The arms read groups by (experiment, policy), so the acceptance
+          # policy is its OWN line and no benchmark total can absorb it. This
+          # prints the lines rather than claiming the separation.
+          say "-- the arms table, grouped by policy --"
+          curl -s --max-time 60 -H "$H" "$API/api/command/rn1x/overview" \
+            | jq -r '((.arms.rows // [])[]
+                      | "  " + (.policy // "?") + "\tpositions="
+                        + ((.positions // 0)|tostring) + " decisions="
+                        + ((.decisions // 0)|tostring) + " blind="
+                        + ((.blind // 0)|tostring) + " with_inputs="
+                        + ((.with_inputs // 0)|tostring))' \
+            2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          IDS=$(jq -r '[.[] | select((.missing | length) == 0) | .id] | join("  ")' \
+                /tmp/aacc.json 2>/dev/null || echo "")
+          say "complete\t$COMPLETE   distinct_instants\t$DISTINCT   of $NDEC decisions"
+          if [ "$COMPLETE" -ge 2 ] && [ "$DISTINCT" -ge 2 ]; then
+            say "ACCEPTANCE MET on the acceptance position $APID:"
+            say "  $IDS"
+            say "each decision carrying its own verified held-exposure mapping,"
+            say "a probability inside its own 30 s bound, a matching payout"
+            say "identity, a usable exit ladder with depth, the current"
+            say "residual, ranked alternatives with a selected action and"
+            say "quantity, and reconciled accounting -- taken by the deployed"
+            say "challenger loop, on a position labelled"
+            say "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY: not RN1-derived, not"
+            say "filled, not funded, and not in any benchmark result"
+          else
+            echo "::error::the acceptance position was NOT driven to two complete decisions: $COMPLETE complete at $DISTINCT distinct instants (need 2 and 2) of $NDEC decisions. The INCOMPLETE lines name what each one lacked and the per-link lines name where its chain stopped."
+            say "NOT DEMONSTRATED on the acceptance position"
+            FAIL=1
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
       # ── THE SAME POSITION, MANAGED ACROSS SUCCESSIVE CYCLES ────────
       #
       # The directive asks for an authenticated production trace of ONE
@@ -782,25 +1065,7 @@ jobs:
           # NORMALISE. The jsonb columns can arrive as strings depending on
           # the driver's codec, and a jq path into a string silently
           # yields null -- which would make every check below vacuous.
-          jq 'def j: if type == "string" then (fromjson? // {})
-                     else (. // {}) end;
-              {seed_qty: (.position.seed_qty // null),
-               seed_price: (.position.seed_price // null),
-               policy: (.position.policy // "?"),
-               outcome_index: (.position.outcome_index // null),
-               decisions: [(.decisions // [])[]
-                 | {id: .decision_id, ts: (.decision_ts | tostring),
-                    action: (.selected_action // "NULL"),
-                    qty: (.selected_qty // null),
-                    hold: (.hold_value_usd // null),
-                    state: (.operating_state // "?"),
-                    eligibility: (.eligibility // "?"),
-                    reason: (.selection_reason // ""),
-                    reconciles: (.accounting_reconciles),
-                    pays: ((.payout_identity | j).row_payout_event),
-                    chain: (.input_chain | j),
-                    alt: (.alternatives | j), inv: (.resulting_inventory | j),
-                    fr: (.input_freshness | j)}]}' \
+          jq -f /tmp/norm.jq \
             /tmp/mg.json > /tmp/mgn.json 2>/dev/null || echo '{}' > /tmp/mgn.json
           jq -r '"position\t" + (.policy) + "  outcome_index="
                    + ((.outcome_index // "?")|tostring)
@@ -912,6 +1177,8 @@ jobs:
                  "odds_request\t"    + ((.odds_request // {})|tostring),
                  "provider_ages\t"   + ((.provider_quote_ages_s // "none")|tostring),
                  "fixture\t"         + ((.fixture // "unknown")|tostring),
+                 "venue_resolution\t" + ((.venue_resolution // "not_read")|tostring),
+                 "settlement\t"      + ((.settlement // "not_reached")|tostring),
                  "clocks\t"          + ((.clocks // {})|tostring),
                  ((.chain // [])[]
                    | "  " + (.link)
@@ -932,46 +1199,15 @@ jobs:
           #
           # A MISSING-BOOK HOLD DOES NOT SATISFY THIS. It is a legitimate
           # decision and it is not a demonstration of the manager.
-          ACC='[(.decisions // [])[] | . as $d
-           | (($d.chain // {}).chain // []) as $ch
-           | (($ch | map(select(.link == "1_HELD_EXPOSURE")) | first) // {}) as $l1
-           | (($ch | map(select(.link == "2_VENUE_CONTRACT")) | first) // {}) as $l2
-           | (($ch | map(select(.link == "5_EXIT_LADDER")) | first) // {}) as $l5
-           | (($d.alt.ranked // []) | map(select(.action == "DIRECT_EXIT"))
-              | first // {}) as $ex
-           | {id: $d.id, ts: $d.ts, action: $d.action, qty: $d.qty, hold: $d.hold,
-              missing: ([
-                (if ($l1.ok == true) and (($d.pays // null) != null)
-                    and (($l1.basis // null) != null)
-                 then empty else "HELD_EXPOSURE_MAPPING" end),
-                (if ($l2.ok == true) and ($l2.agrees_with_tokens == true)
-                    and (($l2.us_market_slug // null) != null)
-                    and (($l2.intent // null) != null)
-                 then empty else "VENUE_CONTRACT_AND_INTENT" end),
-                (if (($d.fr.age_from_observation_s // null) != null)
-                    and (($d.fr.bound_s // null) != null)
-                    and (($d.fr.age_from_observation_s) <= ($d.fr.bound_s))
-                 then empty else "FRESH_PROBABILITY" end),
-                (if ($l5.ok == true) and (($l5.exit_price // 0) > 0)
-                    and (($l5.size_at_best // 0) > 0)
-                 then empty else "EXIT_LADDER_AND_DEPTH" end),
-                (if (($ex.qty // 0) > 0) and (($ex.value_usd // null) != null)
-                 then empty else "PRICED_EXECUTABLE_EXIT_ALTERNATIVE" end),
-                (if (($d.inv.residual_qty // null) != null)
-                    and (($d.inv.residual_qty) > 0)
-                    and (($d.alt.hold_input.qty_valued // null) != null)
-                    and ((($d.inv.residual_qty) - ($d.alt.hold_input.qty_valued))
-                         | fabs < 0.000001)
-                 then empty else "RESIDUAL_INVENTORY_AGREES" end),
-                (if (($d.alt.ranked // []) | length) > 0
-                    and (($d.action // "NULL") != "NULL")
-                    and (($d.qty // null) != null)
-                    and ((($d.reason // "") | length) > 0)
-                 then empty else "RANKED_ALTERNATIVES_AND_SELECTION" end),
-                (if $d.reconciles == true then empty
-                 else "RECONCILED_ACCOUNTING" end),
-                (if ($d.hold // null) != null then empty else "PRICED_HOLD" end)
-              ])}]'
+          # THE SHARED ACCEPTANCE PROGRAM, written by the step above.
+          # One definition, two steps: a second copy here is a second
+          # thing to forget to update.
+          ACC=$(cat /tmp/acc.jq 2>/dev/null || true)
+          if [ -z "$ACC" ]; then
+            echo "::error::the shared acceptance program was not written"
+            say "ACCEPTANCE PROGRAM MISSING -- not evaluated"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
           if ! jq -e "$ACC" /tmp/mgn.json > /tmp/acc.json; then
             # MALFORMED ACCEPTANCE DATA IS A FAILURE, never a skip: a trace this
             # checker cannot read is a trace nobody can accept.

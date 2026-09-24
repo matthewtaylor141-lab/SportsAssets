@@ -998,10 +998,16 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
            "clocks": clocks,
            "first_failing_link": None, "input_source": "PULLED_FOR_THIS_DECISION"}
 
-    def link(name, ok, **facts):
-        rec = {"link": name, "ok": bool(ok), **facts}
+    def link(name, ok, *, blocks_chain=True, **facts):
+        """Record a link. `blocks_chain=False` marks one that can be
+        unsatisfied WITHOUT stopping the decision -- settlement
+        compatibility blocks HOLD_TO_SETTLEMENT and nothing else, and
+        letting it claim `first_failing_link` would report a working
+        chain as broken."""
+        rec = {"link": name, "ok": bool(ok),
+               "blocks_chain": bool(blocks_chain), **facts}
         out["chain"].append(rec)
-        if not ok and out["first_failing_link"] is None:
+        if not ok and blocks_chain and out["first_failing_link"] is None:
             out["first_failing_link"] = rec
             out["reason"] = facts.get("refusal")
             out["why"] = facts.get("why")
@@ -1323,6 +1329,50 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
     }
     out["identity_matched_independently"] = True
 
+    # ── 4b · SETTLEMENT COMPATIBILITY, ATTESTED PER FIXTURE ─────────
+    #
+    # The probability prices an event; the contract pays on one. Whether
+    # those are the SAME event under every terminal case -- draw,
+    # overtime, push, void -- is a settlement question, and it is asked
+    # here per fixture from both catalogues rather than assumed. A rule
+    # that is not established stays NOT_ESTABLISHED: HOLD_TO_SETTLEMENT is
+    # refused for exactly that reason and nothing here manufactures the
+    # compatibility to get a passing result.
+    try:
+        vevid = await EXT.venue_settlement_evidence(
+            conn, vid["us_market_slug"]) if vid is not None else {}
+    except Exception as exc:                                   # noqa: BLE001
+        vevid = {"error": "%s: %s" % (type(exc).__name__, exc)}
+    srule = vset.attest(
+        sport_family=family, market="h2h", venue_evidence=vevid,
+        book_evidence={"outcome_names": list(quote["prices"].keys()),
+                       "source": "theoddsapi:h2h:%s" % devig.BOOK})
+    out["settlement"] = {
+        "book_rule": vset.BOOK_SETTLEMENT.get(family),
+        "overall_established": bool(srule.get("overall_established")),
+        "attested": srule.get("attested"),
+        "unmet": srule.get("unmet"),
+        "refusal": srule.get("refusal"),
+        "venue_evidence_readable": bool(vevid.get("readable")),
+        "draw_contract_present": vevid.get("draw_contract_present"),
+        "why_it_matters": ("an unestablished terminal rule is why "
+                           "HOLD_TO_SETTLEMENT is refused. It does not "
+                           "stop a probability pricing the hold, and it "
+                           "is never assumed in order to"),
+    }
+    link("4b_SETTLEMENT_COMPATIBILITY",
+         bool(srule.get("overall_established")), blocks_chain=False,
+         book_rule=vset.BOOK_SETTLEMENT.get(family),
+         attested=srule.get("attested"), unmet=srule.get("unmet"),
+         refusal=(None if srule.get("overall_established")
+                  else (srule.get("refusal") or "SETTLEMENT_NOT_ESTABLISHED")),
+         why=("every terminal rule attested from both catalogues"
+              if srule.get("overall_established") else
+              "these terminal rules are not established: %s"
+              % (srule.get("unmet") or "unspecified")),
+         blocks_only="HOLD_TO_SETTLEMENT",
+         does_not_block="pricing the hold, or an exit at an observed price")
+
     # ── 5 · THE EXECUTABLE EXIT, off the ladder a close consumes ─────
     #
     # THE PROBABILITY IS IN HAND, so from here a failure costs the EXITS
@@ -1423,6 +1473,259 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
 # that knows the residual and the basis at the decision instant, so it
 # is where the valuation belongs; the snapshot carries the probability
 # ROW and nothing derived from it.
+
+
+# ── AN ACCEPTANCE POSITION ON A COVERED EXPOSURE ────────────────────
+#
+# The manager cannot be demonstrated on inventory whose inputs do not
+# exist. The live challenger position is ATP tennis, which the provider
+# set does not cover, and waiting for an RN1 seed to appear in a covered
+# sport is waiting on a coincidence.
+#
+# So this creates a position the manager CAN price: a covered sport, a
+# venue contract that resolves, a readable book, and a fixture the
+# provider carries. Its entry is a MODELLED acquisition at the
+# contemporaneous executable price with explicit fees.
+#
+# WHAT IT IS NOT, stated here and stamped on the row:
+#   * NOT derived from an RN1 signal -- no whale, no trade id, no cohort;
+#   * NOT an executed order -- nothing was submitted to any venue;
+#   * NOT funded -- no capital moved and the execution flag stays off;
+#   * NOT part of any benchmark result -- its policy id differs from both
+#     the frozen benchmark's and the challenger's, and `provenance` marks
+#     it for every read that reports performance.
+ACCEPTANCE_POLICY = "ACCEPTANCE_SHADOW_MANAGER_DEMO_V1"
+ACCEPTANCE_PROVENANCE = "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY"
+ACCEPTANCE_ENTRY_KIND = "ACCEPTANCE_MODELLED_ENTRY"
+ACCEPTANCE_ACCOUNT = "ACCEPTANCE_HARNESS_NOT_AN_OBSERVED_ACCOUNT"
+
+#: Small on purpose. The point is a decision, not a size.
+ACCEPTANCE_QTY = 10.0
+
+#: How many covered markets to try before giving up this call.
+ACCEPTANCE_CANDIDATES = 8
+
+R_NO_COVERED_CANDIDATE = "NO_COVERED_MARKET_COULD_SUPPLY_A_COMPLETE_ENTRY"
+
+COVERED_CANDIDATES_SQL = """
+    SELECT m.condition_id, m.title, m.event_title, m.slug, m.sport,
+           m.closed, m.resolved,
+           extract(epoch FROM m.updated_at)::float8 AS updated_at,
+           extract(epoch FROM s.game_start)::float8 AS game_start
+      FROM markets m
+ LEFT JOIN market_starts s ON s.condition_id = m.condition_id
+     WHERE NOT m.closed AND NOT m.resolved
+       AND m.sport = ANY($1::text[])
+       AND m.updated_at >= now() - make_interval(secs => $2::float8)
+       -- BOTH TOKENS PRESENT, or the payout identity cannot be
+       -- established from the tokens at all.
+       AND (SELECT count(*) FROM market_tokens t
+             WHERE t.condition_id = m.condition_id) >= 2
+     ORDER BY m.updated_at DESC
+     LIMIT $3
+"""
+
+
+async def seed_acceptance_position(conn, *, experiment_id, now=None,
+                                   odds=None, clock=None,
+                                   qty=ACCEPTANCE_QTY,
+                                   candidates=ACCEPTANCE_CANDIDATES,
+                                   resolve_identity=None, read_book=None,
+                                   fee_fn=None):
+    """Create ONE acceptance position on a covered exposure, or say why not.
+
+    Returns the position and its provenance, or `created: False` with the
+    per-candidate refusals. Writes NOTHING except the position row: no
+    order, no fill, no valuation.
+    """
+    import time as _t
+
+    from sportsassets import bettor_book_snapshot as bs
+
+    from . import ext_pinnacle_loop as EXT
+
+    tick = anchored_clock(now, clock)
+    started = tick()
+    out = {"created": False, "at": started, "experiment_id": experiment_id,
+           "policy": ACCEPTANCE_POLICY,
+           "provenance": ACCEPTANCE_PROVENANCE,
+           "is_not": ["AN_RN1_SIGNAL", "AN_EXECUTED_ORDER", "FUNDED",
+                      "PART_OF_ANY_BENCHMARK_RESULT"],
+           "considered": [], "refusals": {}}
+    labels = sorted({lbl for fam in {f for _, f in EXT.SPORTS}
+                     for lbl in EXT.VENUE_SPORT_LABELS.get(fam, ())})
+    out["covered_sport_labels"] = labels
+    rows = [dict(r) for r in await conn.fetch(
+        COVERED_CANDIDATES_SQL, labels, EXT.MARKET_STALE_AFTER_S,
+        int(candidates))]
+    out["candidates_examined"] = len(rows)
+    if not rows:
+        out["refusal"] = R_NO_COVERED_CANDIDATE
+        out["why"] = ("no open market in a covered sport (%s) was updated "
+                      "recently enough to try" % labels)
+        return out
+
+    odds = odds if odds is not None else ManagedOdds(
+        api_key=os.environ.get("EDGE_ODDS_API_KEY"), clock=clock, now=now)
+    fee = fee_fn or runner._fee_fn()
+    _resolve = resolve_identity or EXT.resolve_venue_identity
+    reader = read_book
+    if reader is None:
+        from .ext_pinnacle_loop import _read_book_blocking as reader
+
+    for m in rows:
+        note = {"condition_id": m["condition_id"], "sport": m.get("sport"),
+                "title": (m.get("title") or "")[:60]}
+        # THE PAYOUT IDENTITY FIRST, from the tokens, for BOTH sides -- the
+        # entry has to name which one it takes.
+        toks = [dict(r) for r in await conn.fetch(
+            "SELECT outcome, outcome_index FROM market_tokens "
+            "WHERE condition_id = $1 ORDER BY outcome_index",
+            m["condition_id"])]
+        if len(toks) < 2:
+            note["refusal"] = "MARKET_TOKENS_INCOMPLETE"
+            out["considered"].append(note)
+            out["refusals"]["MARKET_TOKENS_INCOMPLETE"] = \
+                out["refusals"].get("MARKET_TOKENS_INCOMPLETE", 0) + 1
+            continue
+        picked = toks[0]
+        note["outcome"] = picked.get("outcome")
+        note["outcome_index"] = picked.get("outcome_index")
+
+        vid = await _resolve(conn, market_row=m,
+                            priced_outcome=picked.get("outcome"))
+        if not vid.get("ok"):
+            code = vid.get("refusal") or "VENUE_CONTRACT_UNRESOLVED"
+            note["refusal"] = code
+            out["considered"].append(note)
+            out["refusals"][code] = out["refusals"].get(code, 0) + 1
+            continue
+        note["us_market_slug"] = vid.get("us_market_slug")
+        note["intent"] = vid.get("intent")
+
+        # THE CONTEMPORANEOUS EXECUTABLE ENTRY PRICE, off the ladder the
+        # intent names. This is the ACQUISITION side, and it is read now --
+        # not modelled, not averaged, not taken from a valuation row.
+        try:
+            book = await asyncio.to_thread(reader, vid["us_market_slug"])
+        except Exception as exc:                               # noqa: BLE001
+            note["refusal"] = "VENUE_BOOK_READ_RAISED"
+            note["detail"] = type(exc).__name__
+            out["considered"].append(note)
+            out["refusals"]["VENUE_BOOK_READ_RAISED"] = \
+                out["refusals"].get("VENUE_BOOK_READ_RAISED", 0) + 1
+            continue
+        md = (book or {}).get("marketData")
+        if md is None:
+            note["refusal"] = "VENUE_BOOK_UNREADABLE"
+            out["considered"].append(note)
+            out["refusals"]["VENUE_BOOK_UNREADABLE"] = \
+                out["refusals"].get("VENUE_BOOK_UNREADABLE", 0) + 1
+            continue
+        lad = bs.acquisition_ladder(md, intent=vid["intent"])
+        if not lad.get("ok") or not (lad.get("levels") or []):
+            code = lad.get("refusal") or "NO_ACQUISITION_DEPTH"
+            note["refusal"] = code
+            out["considered"].append(note)
+            out["refusals"][code] = out["refusals"].get(code, 0) + 1
+            continue
+        best = lad["levels"][0]
+        px = float(best["acquisition_price"])
+        depth = float(best.get("qty") or 0.0)
+        note["entry_price"] = px
+        note["depth_at_price"] = depth
+        if depth < float(qty):
+            note["refusal"] = "INSUFFICIENT_DISPLAYED_DEPTH_FOR_THE_ENTRY"
+            out["considered"].append(note)
+            out["refusals"]["INSUFFICIENT_DISPLAYED_DEPTH_FOR_THE_ENTRY"] = \
+                out["refusals"].get(
+                    "INSUFFICIENT_DISPLAYED_DEPTH_FOR_THE_ENTRY", 0) + 1
+            continue
+
+        # AND THE INPUTS THE MANAGER WILL NEED. A position whose chain
+        # cannot complete would demonstrate nothing, so the chain is walked
+        # BEFORE the row is written and the candidate is refused if it
+        # cannot be priced.
+        ci = await managed_inputs_for(
+            conn, condition_id=m["condition_id"],
+            outcome_index=int(picked["outcome_index"]),
+            odds=odds, now=tick(), clock=clock,
+            read_book=reader, resolve_identity=_resolve)
+        ffl = ci.get("first_failing_link") or {}
+        if not (ci.get("available") and ci.get("book_available")):
+            code = ffl.get("refusal") or "INPUT_CHAIN_INCOMPLETE"
+            note["refusal"] = code
+            note["first_failing_link"] = ffl.get("link")
+            out["considered"].append(note)
+            out["refusals"][code] = out["refusals"].get(code, 0) + 1
+            continue
+        note["chain"] = "COMPLETE"
+        note["probability"] = (ci.get("probability_row") or {}).get(
+            "probability")
+
+        # ── THE ENTRY, WITH ITS FEE STATED ──────────────────────────
+        entry_fee = float(fee(qty=float(qty), price=px, maker=False))
+        basis = float(qty) * px + entry_fee
+        at = tick()
+        # A DETERMINISTIC SENTINEL, not a trade id. `source_trade_id` is
+        # part of the position's unique key, and a NULL there would let the
+        # same market be seeded twice; a hash of the venue slug makes a
+        # repeat call idempotent instead. It is NEGATIVE so it can never be
+        # mistaken for a real `trades.id`.
+        sentinel = -(abs(hash(("ACCEPTANCE", vid["us_market_slug"])))
+                     % 2_000_000_000)
+        pid = store.position_id(experiment_id, ACCEPTANCE_POLICY, sentinel)
+        await conn.execute(
+            """INSERT INTO rn1x_positions(position_id, experiment_id, policy,
+            source_trade_id, source_account, condition_id, outcome_index,
+            entry_kind, entry_kind_why, seed_qty, seed_price, seed_basis_usd,
+            source_ts, detected_ts, decision_ts, available_at,
+            decision_basis, decision_lag_s, provenance)
+            VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::numeric,$11::numeric,
+                   $12::numeric,to_timestamp($13),to_timestamp($13),
+                   to_timestamp($13),to_timestamp($13),
+                   'RUNTIME_WALL_CLOCK',0,$14)
+            ON CONFLICT (position_id) DO NOTHING""",
+            pid, experiment_id, ACCEPTANCE_POLICY, sentinel,
+            ACCEPTANCE_ACCOUNT, m["condition_id"],
+            int(picked["outcome_index"]), ACCEPTANCE_ENTRY_KIND,
+            ("MODELLED acquisition of %.0f contracts at the "
+             "contemporaneous executable price %.4f on %s (%s), fee %.4f "
+             "by the published schedule. NOT an RN1 signal, NOT an "
+             "executed order, NOT funded. Created to demonstrate the "
+             "management lifecycle on a covered exposure."
+             % (float(qty), px, vid["us_market_slug"], vid["intent"],
+                entry_fee)),
+            float(qty), px, basis, at, ACCEPTANCE_PROVENANCE)
+        out.update(
+            created=True, position_id=pid, condition_id=m["condition_id"],
+            outcome_index=int(picked["outcome_index"]),
+            payout_event=picked.get("outcome"),
+            us_market_slug=vid["us_market_slug"], intent=vid["intent"],
+            sport=m.get("sport"), title=m.get("title"),
+            entry={"qty": float(qty), "price": px, "fee_usd": entry_fee,
+                   "basis_usd": basis, "depth_at_price": depth,
+                   "price_is": ("the CONTEMPORANEOUS executable acquisition "
+                                "price off the ladder the intent names, "
+                                "read at this instant"),
+                   "fee_basis": "bettor_fee_schedule.LATEST.fill_fee",
+                   "execution": ("MODELLED. No order was submitted and no "
+                                 "capital moved")},
+            inputs_at_entry={"probability": note.get("probability"),
+                             "exit_price": ci.get("bid"),
+                             "exit_size": ci.get("bid_size"),
+                             "settlement": ci.get("settlement")},
+            source_trade_id=sentinel,
+            source_trade_id_is=("a NEGATIVE deterministic sentinel derived "
+                                "from the venue slug, so a repeat call is "
+                                "idempotent and it can never be mistaken "
+                                "for a trades.id"))
+        out["considered"].append(note)
+        return out
+
+    out["refusal"] = R_NO_COVERED_CANDIDATE
+    out["why"] = ("every covered candidate refused: %s" % out["refusals"])
+    return out
 
 
 # ── THE CONTINUING MANAGEMENT PHASE ──────────────────────────────────

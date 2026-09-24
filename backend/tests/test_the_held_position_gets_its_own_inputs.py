@@ -44,6 +44,7 @@ pg = pytest.mark.skipif(not DSN, reason="RN1X_TEST_DSN is not set")
 
 _EXP = "RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1"
 _POL = "SHADOW_CHALLENGER_HOLD_RANKED_V1"
+_BENCH = "MANAGEMENT_PAIR_091_STOP_16_V1"   # the frozen benchmark
 _COND = "0xtest_pull"
 _SLUG = "aec-mlb-chc-mia-2026-09-24-cubs"
 _T0 = 1_800_000_000.0
@@ -260,7 +261,15 @@ def test_the_whole_chain_completes_with_no_valuation_row_at_all():
     names = [x["link"] for x in ci["chain"]]
     assert names == ["1_HELD_EXPOSURE", "2_VENUE_CONTRACT",
                      "3_PROVIDER_FIXTURE", "4_PROBABILITY",
+                     "4b_SETTLEMENT_COMPATIBILITY",
                      "5_EXIT_LADDER"], names
+    # settlement compatibility is recorded and does NOT stop the chain: it
+    # blocks HOLD_TO_SETTLEMENT and nothing else
+    sc = next(x for x in ci["chain"]
+              if x["link"] == "4b_SETTLEMENT_COMPATIBILITY")
+    assert sc["blocks_chain"] is False
+    assert sc["blocks_only"] == "HOLD_TO_SETTLEMENT"
+    assert ci["settlement"]["book_rule"] is not None
     # link 1 · the held exposure, from the tokens
     assert ci["payout_event"] == "Chicago Cubs"
     # link 2 · the venue contract and the intent, NOT from a valuation row
@@ -1119,3 +1128,229 @@ def test_the_fixtures_own_clock_is_reported_apart_from_our_flags():
     # AND AN ABSENT START IS NOT A START OF ZERO
     assert bare["fixture"]["game_start_known"] is False
     assert bare["fixture"]["is_past_start"] is None
+
+
+# ── THE ACCEPTANCE POSITION, AND WHAT IT MAY NEVER CLAIM ─────────────
+#
+# The live challenger position is ATP tennis, which the provider set does
+# not cover, so the manager cannot be demonstrated on it at all. Waiting
+# for an RN1 seed in a covered sport is waiting on a coincidence. An
+# acceptance position is created instead -- and every one of these tests
+# is about it being unmistakable for the real thing.
+
+def _covered(c, *, sport="MLB"):
+    return _fixture(c, sport=sport)
+
+
+@pg
+def test_the_acceptance_position_is_entered_at_the_executable_price():
+    import asyncpg
+
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            got = await W.seed_acceptance_position(
+                c, experiment_id=_EXP, now=_T0,
+                odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
+                resolve_identity=_resolver_ok,
+                read_book=lambda slug: {"marketData": _BOOK},
+                fee_fn=lambda qty, price, maker=False: 0.02 * qty * price)
+            row = None
+            if got.get("created"):
+                row = dict(await c.fetchrow(
+                    "SELECT policy, provenance, entry_kind, entry_kind_why,"
+                    " source_trade_id, source_account,"
+                    " seed_qty::float8 q, seed_price::float8 p,"
+                    " seed_basis_usd::float8 basis, decision_basis"
+                    " FROM rn1x_positions WHERE position_id = $1",
+                    got["position_id"]))
+            return got, row
+        finally:
+            await c.close()
+
+    got, row = asyncio.run(run())
+    assert got["created"] is True, got
+    # THE ENTRY IS THE LADDER'S OWN PRICE, READ NOW. The book's offers are
+    # .74, which is the acquisition side for a held LONG.
+    assert got["entry"]["price"] == pytest.approx(0.74)
+    assert got["entry"]["qty"] == pytest.approx(10.0)
+    assert got["entry"]["fee_usd"] == pytest.approx(0.02 * 10 * 0.74)
+    assert got["entry"]["basis_usd"] == pytest.approx(
+        10 * 0.74 + 0.02 * 10 * 0.74)
+    assert got["entry"]["depth_at_price"] >= 10.0
+    # AND THE INPUTS THE MANAGER WILL NEED WERE CHECKED BEFORE WRITING
+    assert got["inputs_at_entry"]["probability"] is not None
+    assert got["inputs_at_entry"]["exit_price"] == pytest.approx(0.72)
+    # ── WHAT THE ROW MAY NEVER CLAIM ────────────────────────────────
+    assert row["policy"] == "ACCEPTANCE_SHADOW_MANAGER_DEMO_V1"
+    assert row["policy"] != _POL, "not the challenger's policy"
+    assert row["policy"] != _BENCH, "not the benchmark's policy"
+    assert row["provenance"] == "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY"
+    assert row["entry_kind"] == "ACCEPTANCE_MODELLED_ENTRY"
+    assert row["source_account"] == \
+        "ACCEPTANCE_HARNESS_NOT_AN_OBSERVED_ACCOUNT"
+    assert row["source_trade_id"] < 0, (
+        "a NEGATIVE sentinel, so it can never be read as a trades.id")
+    assert row["decision_basis"] == "RUNTIME_WALL_CLOCK"
+    why = row["entry_kind_why"]
+    for phrase in ("MODELLED", "NOT an RN1 signal",
+                   "NOT an executed order", "NOT funded"):
+        assert phrase in why, (phrase, why)
+    assert "AN_RN1_SIGNAL" in got["is_not"]
+    assert "FUNDED" in got["is_not"]
+
+
+@pg
+def test_seeding_the_same_market_twice_is_idempotent():
+    """The sentinel is derived from the venue slug, so a repeat call does
+    not mint a second position on the same exposure."""
+    import asyncpg
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            kw = dict(experiment_id=_EXP, now=_T0,
+                      resolve_identity=_resolver_ok,
+                      read_book=lambda slug: {"marketData": _BOOK})
+            a = await W.seed_acceptance_position(
+                c, odds=_odds([_event(observed_at=_T0 - 5)], at=_T0), **kw)
+            W.odds_gate_reset()
+            b = await W.seed_acceptance_position(
+                c, odds=_odds([_event(observed_at=_T0 - 5)], at=_T0), **kw)
+            n = await c.fetchval(
+                "SELECT count(*) FROM rn1x_positions WHERE policy = $1",
+                "ACCEPTANCE_SHADOW_MANAGER_DEMO_V1")
+            return a, b, n
+        finally:
+            await c.close()
+
+    a, b, n = asyncio.run(run())
+    assert a["created"] and b["created"]
+    assert a["position_id"] == b["position_id"]
+    assert n == 1, "one position on one exposure, however often it is asked"
+
+
+@pg
+def test_an_uncoverable_candidate_is_refused_with_its_reason():
+    """A tennis market cannot supply a complete entry, and the seeder says
+    so per candidate rather than writing a position it cannot manage."""
+    import asyncpg
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c, sport="Tennis")
+            return await W.seed_acceptance_position(
+                c, experiment_id=_EXP, now=_T0,
+                odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
+                resolve_identity=_resolver_ok,
+                read_book=lambda slug: {"marketData": _BOOK})
+        finally:
+            await c.close()
+
+    got = asyncio.run(run())
+    assert got["created"] is False
+    assert got["refusal"] == W.R_NO_COVERED_CANDIDATE
+    assert got["candidates_examined"] == 0, (
+        "a tennis market is not a covered candidate in the first place")
+    assert "MLB" in got["covered_sport_labels"]
+
+
+@pg
+def test_the_acceptance_position_is_managed_by_the_production_lifecycle():
+    """THE DEMONSTRATION. The same position, two distinct cycles, through
+    the same `manage_open_positions` the challenger lane runs -- and every
+    field the shipped acceptance gate requires, present on both rows."""
+    import json
+    import pathlib
+    import re
+    import shutil
+    import subprocess
+
+    import asyncpg
+
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed here")
+    wf = (pathlib.Path(__file__).resolve().parents[2]
+          / ".github" / "workflows" / "command-verify.yml")
+    if not wf.exists():
+        pytest.skip("the workflow is not in this checkout")
+    prog = re.search(r"ACC='(.*?)'\n", wf.read_text(), re.S).group(1)
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        orig_resolve, orig_book = (EXT.resolve_venue_identity,
+                                   EXT._read_book_blocking)
+        EXT.resolve_venue_identity = _resolver_ok
+        EXT._read_book_blocking = lambda slug: {"marketData": _BOOK}
+        try:
+            await _fixture(c)
+            seeded = await W.seed_acceptance_position(
+                c, experiment_id=_EXP, now=_T0,
+                odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
+                resolve_identity=_resolver_ok,
+                read_book=lambda slug: {"marketData": _BOOK})
+            assert seeded["created"], seeded
+            pid = seeded["position_id"]
+            # TWO CYCLES, 120 s apart, each pulling its own quote -- the
+            # same lifecycle the challenger lane runs, not a special path.
+            c1 = await W.manage_open_positions(
+                c, experiment_id=_EXP, now=_T0 + 60,
+                odds=_odds([_event(observed_at=_T0 + 50)],
+                           received_at=_T0 + 51, at=_T0 + 60))
+            c2 = await W.manage_open_positions(
+                c, experiment_id=_EXP, now=_T0 + 180,
+                odds=_odds([_event(observed_at=_T0 + 170, cubs=1.45)],
+                           received_at=_T0 + 171, at=_T0 + 180))
+            rows = [dict(r) for r in await c.fetch(
+                "SELECT decision_id, decision_ts, selected_action,"
+                " selected_qty::float8 q, hold_value_usd, selection_reason,"
+                " accounting_reconciles, payout_identity, input_chain,"
+                " alternatives, resulting_inventory, input_freshness"
+                " FROM rn1x_decisions WHERE position_id = $1"
+                " ORDER BY decision_ts, decision_id", pid)]
+            return seeded, c1, c2, rows
+        finally:
+            EXT.resolve_venue_identity = orig_resolve
+            EXT._read_book_blocking = orig_book
+            await c.close()
+
+    seeded, c1, c2, rows = asyncio.run(run())
+
+    assert c1["managed"] == 1 and c2["managed"] == 1
+    assert c1["priced_holds"] == 1 and c2["priced_holds"] == 1
+    assert len(rows) == 2, rows
+
+    def j(v):
+        return json.loads(v) if isinstance(v, str) else (v or {})
+
+    doc = {"decisions": [
+        {"id": r["decision_id"], "ts": r["decision_ts"].isoformat(),
+         "action": r["selected_action"], "qty": r["q"],
+         "hold": r["hold_value_usd"], "reason": r["selection_reason"] or "",
+         "reconciles": r["accounting_reconciles"],
+         "pays": j(r["payout_identity"]).get("row_payout_event"),
+         "chain": j(r["input_chain"]), "alt": j(r["alternatives"]),
+         "inv": j(r["resulting_inventory"]),
+         "fr": j(r["input_freshness"])} for r in rows]}
+    got = subprocess.run(["jq", "-e", prog], input=json.dumps(doc),
+                         capture_output=True, text=True)
+    assert got.returncode in (0, 1), got.stderr[:400]
+    verdicts = json.loads(got.stdout)
+    incomplete = [(v["id"], v["missing"]) for v in verdicts if v["missing"]]
+    assert not incomplete, (
+        "the SHIPPED acceptance gate rejects the demonstration: %s"
+        % incomplete)
+    assert len({v["ts"] for v in verdicts}) == 2, "two distinct instants"
+    # SETTLEMENT COMPATIBILITY IS ON THE ROW, whatever it says
+    ch = j(rows[0]["input_chain"])
+    sc = [x for x in (ch.get("chain") or [])
+          if x["link"] == "4b_SETTLEMENT_COMPATIBILITY"]
+    assert sc and sc[0]["blocks_chain"] is False
+    assert "book_rule" in sc[0]
