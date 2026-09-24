@@ -592,3 +592,36 @@ source cannot be smuggled through with a real period and a real timestamp.
 side, in the same tile set. The frozen policy has two halves; one operates
 and one waits on an observation nobody has bought yet. Neither the
 dashboard nor this document describes the operating half as the policy.
+
+## 14 · A BUY is unreachable on this path, and that is by construction
+
+Worth stating plainly before any acceptance table, because it bounds what
+item 2 can ever deliver. Two **independent** refusals stand between a
+complete valuation and a BUY:
+
+1. **The venue's settlement rules.** After the draw attestation (§12 of the
+   acceptance checklist) soccer has two unmet rules left — overtime and
+   void — and any unmet rule is handed to the engine as a caller refusal
+   which vetoes admission.
+2. **`p_fill` is NOT_IDENTIFIED.** `bettor_entry_gate` refuses with
+   `EXECUTION_ESTIMATE_NOT_IDENTIFIED` whenever `p_fill` is None or outside
+   (0, 1]. The external loop supplies `None` **deliberately** — the depth it
+   reads is *displayed* depth, which is an observation and not a queue
+   position, and a test (`test_p_fill_is_never_defaulted_into_certainty`)
+   exists to stop anyone substituting a number.
+
+So even with every settlement rule attested, this path would still refuse.
+**The reachable outcome is a complete record carrying a NO_TRADE decision**,
+which is what the directive accepts as evidence that the path operates, and
+it is the only outcome that can be honestly produced without inventing a
+fill probability.
+
+Verified end to end against a real Postgres before deployment: Pinnacle
+1.90/2.00 → de-vigged p = 0.5133 → US contract identity → ask 0.47, depth
+900 → fee 0.01 → edge +0.0333 → **NO_TRADE** with both refusals named →
+persisted, with the second identical persist correctly skipped as a
+duplicate.
+
+A positive estimated edge with a refusal beside it is the honest shape of
+this result. Reporting the +0.0333 without the two refusals would be the
+overstatement this delivery has spent the night removing.
