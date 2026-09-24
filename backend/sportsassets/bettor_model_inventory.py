@@ -182,6 +182,7 @@ INSERT_PREDICTION = """
             FALSE, NULL, NULL)
     ON CONFLICT (experiment_id, target, model_key, model_version,
                  source_trade_id) DO NOTHING
+    RETURNING id
 """
 
 JOIN_OUTCOME = """
@@ -232,7 +233,15 @@ async def record_prediction(conn, *, target, model_key, model_version,
     if not 0.0 <= p <= 1.0:
         return {"ok": False, "refusal": "P_HAT_OUT_OF_RANGE",
                 "target": target, "p_hat": p}
-    await conn.execute(
+    # `fetchval`, NOT `execute`, AND THE INSERT RETURNS ITS id.
+    #
+    # WHY THIS MATTERS. With DO NOTHING and `execute`, a conflicting insert
+    # is indistinguishable from a successful one, so this returned ok for
+    # rows it never wrote. A production cycle reported `recorded 293` while
+    # the table held 159 -- the caller was counting validated ATTEMPTS and
+    # calling them writes. A ledger whose own write count is wrong cannot
+    # be the basis for a calibration claim.
+    row_id = await conn.fetchval(
         INSERT_PREDICTION, LEDGER_EXPERIMENT, target, model_key,
         str(model_version), str(dataset_sha),
         feature_sha(availability.get("features") or {}),
@@ -240,8 +249,17 @@ async def record_prediction(conn, *, target, model_key, model_version,
         float(predicted_at), float(horizon_s), p,
         list(availability.get("present") or []),
         list(availability.get("missing") or []))
-    return {"ok": True, "refusal": None, "target": target, "p_hat": p,
-            "experiment_id": LEDGER_EXPERIMENT}
+    if row_id is None:
+        # ALREADY RECORDED for this (target, model, version, trade). Not an
+        # error and not a write.
+        return {"ok": True, "written": False, "id": None,
+                "refusal": None, "duplicate": True, "target": target,
+                "p_hat": p, "experiment_id": LEDGER_EXPERIMENT,
+                "why": ("a prediction for this trade already exists under "
+                        "this model version; the ledger keeps the first")}
+    return {"ok": True, "written": True, "id": int(row_id),
+            "refusal": None, "duplicate": False, "target": target,
+            "p_hat": p, "experiment_id": LEDGER_EXPERIMENT}
 
 
 def describe() -> dict:

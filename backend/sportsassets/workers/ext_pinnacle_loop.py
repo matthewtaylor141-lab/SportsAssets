@@ -89,6 +89,14 @@ PINNACLE_SETTLEMENT = {
     "baseball": "FULL_GAME_INCLUDING_EXTRA_INNINGS",
 }
 
+#: family -> the labels `markets.sport` actually carries. Read out of
+#: `sports._RULES`, not guessed: that table is the writer's vocabulary.
+VENUE_SPORT_LABELS = {
+    "soccer": ("Soccer",),
+    "baseball": ("MLB",),
+}
+
+R_NO_CANDIDATE_MARKETS = "NO_OPEN_VENUE_MARKETS_IN_SUPPORTED_SPORTS"
 R_NO_TABLE = "EXTERNAL_VALUATIONS_TABLE_ABSENT"
 R_VENUE_RULE_UNKNOWN = "VENUE_SETTLEMENT_RULE_NOT_ESTABLISHED"
 R_NO_VENUE_QUOTE = "NO_CONTEMPORANEOUS_VENUE_QUOTE"
@@ -412,10 +420,31 @@ async def cycle(conn) -> dict:
             Decimal(str(round(float(qty), 6))),
             Decimal(str(round(float(price), 6))), maker=bool(maker)))
 
-    families = sorted({fam for _, fam in SPORTS})
-    markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, families)]
-
+    # TWO SPORT VOCABULARIES EXIST AND THEY DO NOT OVERLAP.
+    #
+    # `markets.sport` is written by `workers/metadata_refresher` via
+    # `sports.classify`, whose labels are capitalised leagues:
+    # 'Soccer', 'MLB', 'NBA', 'NHL', 'Tennis', ... . The family names this
+    # loop and `bettor_pinnacle_devig` use ('soccer', 'baseball') come from
+    # `bettor_sport_mapping`, which reads the venue's own market-type
+    # prefixes. Filtering the markets table on the SECOND vocabulary
+    # matched nothing at all.
+    #
+    # Measured, not deduced: the first armed cycle reported
+    # `markets 0` with `NO_VENUE_CONTRACT_FOR_EVENT 44` -- every event
+    # refused for want of a venue contract when the truth was that the
+    # candidate query returned an empty set. A mapping refusal and an empty
+    # candidate list are different facts, and only one of them is about
+    # the mapping.
     tally: dict = {}
+    labels = sorted({lbl for _, fam in SPORTS
+                     for lbl in VENUE_SPORT_LABELS.get(fam, ())})
+    markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels)]
+    if not markets:
+        # SAY SO BY NAME rather than letting 44 mapping refusals imply the
+        # mapper is at fault.
+        tally[R_NO_CANDIDATE_MARKETS] = 1
+
     written = 0
     evaluated = 0
     credits = {"used": None, "remaining": None}

@@ -301,7 +301,7 @@ async def predict(conn, fitted: dict, open_rows, *, dataset_sha,
     """Record a prediction for every row whose horizon is still OPEN."""
     at = float(now if now is not None else time.time())
     model = fitted["model"]
-    wrote, refused = 0, {}
+    wrote, dup, refused = 0, 0, {}
     for r in open_rows:
         f = r.get("features") or r
         x = {k: float(f.get(k) or 0.0) for k in FEATURES}
@@ -318,12 +318,18 @@ async def predict(conn, fitted: dict, open_rows, *, dataset_sha,
             account=str(r["_whale_id"]),
             predicted_at=at, horizon_s=HORIZON_S, p_hat=p,
             availability=avail)
-        if got.get("ok"):
-            wrote += 1
-        else:
+        if not got.get("ok"):
             code = got.get("refusal") or "UNKNOWN"
             refused[code] = refused.get(code, 0) + 1
-    return {"recorded": wrote, "refusals": refused,
+        elif got.get("written"):
+            wrote += 1
+        else:
+            # ALREADY IN THE LEDGER under this model version. Counted
+            # separately, because reporting it as a write is what made
+            # `recorded 293` disagree with a table holding 159.
+            dup += 1
+    return {"recorded": wrote, "already_present": dup,
+            "attempted": len(open_rows), "refusals": refused,
             "predicted_at": at, "n_open": len(open_rows)}
 
 

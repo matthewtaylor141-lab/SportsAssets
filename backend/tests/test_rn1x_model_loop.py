@@ -281,3 +281,88 @@ def test_the_fills_query_takes_the_NEWEST_rows():
     # on it. Without this the features would look at the wrong history.
     assert q.rstrip().endswith("ORDER BY detected_at, id"), q
     assert q.index("DESC") < q.index("ORDER BY detected_at, id")
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_duplicate_prediction_is_not_counted_as_a_write():
+    """THE DEFECT A PRODUCTION CYCLE EXPOSED. With `DO NOTHING` and
+    `execute`, a conflicting insert looked exactly like a successful one,
+    so the loop reported `recorded 293` while the table held 159. A ledger
+    whose own write count is wrong cannot support a calibration claim."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute(
+            open("migrations/102_rn1x_model_predictions.sql").read())
+        await conn.execute(
+            "DELETE FROM rn1x_model_predictions WHERE condition_id = $1",
+            "0xdup")
+        # L.MODEL_KEY, not a made-up one: the unique key includes
+        # model_key, so a different key is a DIFFERENT prediction and would
+        # not conflict at all. My first version used "k" here and the loop
+        # correctly wrote a new row.
+        kw = dict(target=L.TARGET, model_key=L.MODEL_KEY,
+                  model_version="v1",
+                  dataset_sha="d", condition_id="0xdup",
+                  source_trade_id=777, account="A1",
+                  predicted_at=NOW - 10.0, horizon_s=60.0, p_hat=0.4,
+                  availability={"features": {}, "present": [],
+                                "missing": []})
+        first = await inv.record_prediction(conn, **kw)
+        assert first["ok"] is True and first["written"] is True, first
+        assert first["id"] is not None
+
+        second = await inv.record_prediction(conn, **kw)
+        assert second["ok"] is True, second
+        assert second["written"] is False, "a conflict is not a write"
+        assert second["duplicate"] is True
+        assert second["id"] is None
+
+        # And the table really does hold one row, not two.
+        assert await conn.fetchval(
+            "SELECT count(*) FROM rn1x_model_predictions WHERE "
+            "condition_id = $1", "0xdup") == 1
+
+        # The loop's own tally separates them.
+        got = await L.predict(
+            conn, {"model": _ConstModel(0.4)},
+            [{"features": {f: 0.0 for f in L.FEATURES},
+              "_trade_id": 777, "_whale_id": 1, "condition_id": "0xdup"}],
+            dataset_sha="d", model_version="v1", now=NOW)
+        assert got["recorded"] == 0, got
+        assert got["already_present"] == 1, got
+        assert got["attempted"] == 1, got
+    finally:
+        await conn.execute(
+            "DELETE FROM rn1x_model_predictions WHERE condition_id = $1",
+            "0xdup")
+        await conn.close()
+
+
+class _ConstModel:
+    def __init__(self, p): self.p = p
+    def predict(self, row): return self.p
+
+
+def test_the_market_labels_match_the_writers_vocabulary():
+    """TWO SPORT VOCABULARIES EXIST. `markets.sport` is written by
+    `sports.classify` ('Soccer', 'MLB', ...); the family names this loop
+    shares with the devig module come from `bettor_sport_mapping`
+    ('soccer', 'baseball'). Querying the table with the second set matched
+    nothing, and the first armed cycle reported `markets 0` with 44
+    mapping refusals that were not the mapper's fault."""
+    from sportsassets import sports
+    from sportsassets.workers import ext_pinnacle_loop as EX
+
+    emitted = {r[0] for r in sports._RULES}
+    queried = {lbl for _, fam in EX.SPORTS
+               for lbl in EX.VENUE_SPORT_LABELS.get(fam, ())}
+    assert queried, "no labels would be queried at all"
+    missing = queried - emitted
+    assert not missing, (
+        "labels the classifier never writes: %r" % sorted(missing))
+    # And an empty candidate set is named, not left to look like a mapping
+    # failure.
+    assert EX.R_NO_CANDIDATE_MARKETS == \
+        "NO_OPEN_VENUE_MARKETS_IN_SUPPORTED_SPORTS"

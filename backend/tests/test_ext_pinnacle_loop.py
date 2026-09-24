@@ -252,9 +252,17 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
         await conn.execute(
             "INSERT INTO markets (condition_id, title, event_title, slug, "
             "sport, closed, resolved) VALUES "
+            # 'Soccer', the label `sports.classify` actually writes --
+            # not the lowercase family name. Seeding the family name made
+            # the candidate query return nothing, which is precisely the
+            # production defect this vocabulary split caused.
             "('c-lfc-mci','Will Liverpool beat Manchester City?',"
-            "'Liverpool vs. Manchester City','lfc-mci','soccer',false,false)"
-            " ON CONFLICT (condition_id) DO NOTHING")
+            "'Liverpool vs. Manchester City','lfc-mci','Soccer',false,false)"
+            # DO UPDATE, not DO NOTHING: a row left over from an earlier
+            # run would keep its old sport label and the fixture would
+            # silently test the wrong thing.
+            " ON CONFLICT (condition_id) DO UPDATE SET "
+            "sport = EXCLUDED.sport, closed = FALSE, resolved = FALSE")
 
         monkeypatch.setenv("EDGE_ODDS_API_KEY", "x" * 32)
 
