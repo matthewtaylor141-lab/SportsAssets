@@ -425,3 +425,100 @@ source, the build marker and the pid, taken from the process that wrote the
 heartbeat — because a deploy id only says what the service was asked to
 run. The collector is untouched and the 2026-09-24T04:00:00Z stop is
 unmoved.
+
+## 11 · Run 24 — the venue refusal, traced to its root cause
+
+Run 24, job 107478481165, 03:16–03:21Z, against API deploy `e2f9999`
+**confirmed by the writer's own identity**, not by the deploy id:
+
+```
+external {"pid":1,"build":"e2f9999c43ec...","module":"...ext_pinnacle_loop",
+          "source_sha256_12":"7568e6b96021"}
+model    {"pid":1,"build":"e2f9999c43ec...","module":"...rn1x_model_loop",
+          "source_sha256_12":"4b1400d6a22d"}
+writer_ownership  OK   4 of 4 loops hold their own lock, one pid each
+```
+
+**Both fixes took effect, and neither was the cause.**
+
+- The line-market refusal fired on live data:
+  `VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE 1`. A totals contract
+  can no longer be priced off a moneyline probability.
+- The recency bound worked: every slug in the census is now a **current**
+  fixture — `mlb-ari-col-2026-09-23`, `mlb-laa-oak-2026-09-23`,
+  `mlb-hou-sea-2026-09-23`, `mlb-stl-pit-2026-09-24`,
+  `mex-caz-tol-2026-09-26`. No more 19-day-old rows.
+
+**And all six still answered `NotFoundError`.** So the cause is neither
+staleness nor market type. It is this:
+
+> **I am asking the US venue for identifiers from the global catalogue.**
+> `pmus.book_read` takes a **US market slug**. The working readers get
+> theirs from **`us_premap.market_slug`** (`workers/bettor_state.PREMAP_SQL`
+> selects `identifier, market_slug, event_slug, side_norm, kind,
+> sports_type, team_league, game_start`). My loop takes `markets.slug`,
+> which is the global catalogue's slug for the same fixture. The venue has
+> never heard of it, which is exactly what `NotFoundError` means, and it
+> would have said so on the first cycle if the counter had carried the
+> slug — which is what run 23's split made possible.
+
+**Why this is a design correction and not a patch.** `us_premap` has no
+`condition_id` column; it is keyed by the venue's own `identifier` and
+`market_slug`. So driving candidates from it — which is the right answer,
+because it is the venue's tradeable catalogue with `team_league` and
+`game_start` already on it — changes **which identifier the valuation
+persists**. `external_valuations.condition_id`, the census grouping and the
+trace read all key off the global condition id today. That is a schema and
+contract change across four call sites.
+
+**I am not starting it inside this window.** It is 03:26Z, the observation
+stop is 04:00Z and fixed, and the honest options were a rushed half-release
+or a precise handover. The work, in order:
+
+1. add the US contract identity to `external_valuations` (a migration:
+   `us_market_slug text`, kept alongside `condition_id`, not replacing it);
+2. drive candidates from `us_premap` bounded by `game_start`, mapping
+   Pinnacle fixtures onto `team_league` + `game_start` rather than title
+   tokens — strictly more information than the title match has;
+3. refuse `NO_US_VENUE_CONTRACT_IN_PREMAP` **before** spending a venue read,
+   so a fixture the venue does not list costs nothing;
+4. keep the global `condition_id` on the row when one is known, so the
+   existing census and trace keep working.
+
+Nothing about this weakens a refusal or raises a budget: step 3 *reduces*
+venue reads, which is the collector's budget being spent on questions with
+no answer.
+
+## 12 · Acceptance, against production records only
+
+Read 03:16–03:21Z unless stated. `✓*` is a controlled observation.
+
+| # | requirement | state | production evidence |
+|---|---|---|---|
+| 1.1 | odds credential usable by the running process | ✓ | 20/20 EPL events with Pinnacle h2h, age 28.8 s, `key_value_returned false` |
+| 1.2 | exact contract mapping | ✓ | 4,000 markets considered; 37 `NO_VENUE_CONTRACT_FOR_EVENT`, 1 ambiguous, **1 line market refused** |
+| 1.3 | line market never priced off a moneyline | ✓ | `VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE 1`, live |
+| 1.4 | candidate set bounded to live markets | ✓ | every census slug a current fixture; no row older than 2 days |
+| 1.5 | contemporaneous venue price + depth | **✗ BLOCKED** | 6 × `NotFoundError`. Root cause §11: global slug against a US endpoint |
+| 1.6 | venue refusal is diagnosable | ✓ | per-slug stage, endpoint, code, status, sanitized detail, on demand |
+| 1.7 | settlement rules attested | **✗** | `ATTESTED` empty; soccer 3 unmet, baseball 2. Vetoes admission, so the first complete record decides NO_TRADE |
+| 1.8 | one persisted valuation with probability → cost → edge → decision | **✗ NOT ACHIEVED** | 0 rows. Blocked at 1.5, and 1.7 would make it NO_TRADE |
+| 2.1 | prospective lane: process ≠ evidence | ✓ | badge **CHECK**: 4 positions, **0 runtime-decision**, 4 legacy backdated |
+| 2.2 | each prospective refusal named | ~ | `REPLAYED, examined 400, written 0, refusals {CLASSIFY/UNKNOWN 2, SEED/INITIAL_ENTRY 1}` — accounts for 3 of 400. The rest are scanned fills that never became candidates; the census does not yet say so per fill |
+| 3.1 | predictions mature and join | ✓ | run 23: **159 joined**; run 24: 191 matured, next maturity 03:23:59Z |
+| 3.2 | evaluation persisted when eligible | ✓ | run 23 stage 5: `n 159, ok true, base_rate 0.1069, is_out_of_sample true` |
+| 3.3 | censoring preserved | ✓ | open horizons unjoined; a closed horizon with no complement fill is a genuine 0 |
+| 4.1 | event-progress source identified | ✓ | none exists: scores endpoint `progress_fields []` (three reads), venue payload has no event state, `game_start` refused by source |
+| 4.2 | integration prepared | ✓ | `NO_PROGRESS_PROVIDER_CONFIGURED`, 2 adapters, capability stated, 11 tests |
+| 4.3 | pairing not presented as the whole policy | ✓ | `second_half_loss_exit UNAVAILABLE` beside `pairing LIVE` |
+| 5.1 | single-writer ownership | ✓ | 4 of 4, one pid each, `doubled []` |
+| 5.2 | standby writes nothing | ✓* | controlled, real Postgres, through `run()` |
+| 6.1 | writer code identity verified | ✓ | both writers report `build e2f9999…` with distinct source digests |
+| 6.2 | processing continues after deploy | ✓ | 423 orders, 160 settled, 1,177+ predictions, cycles at 03:21Z |
+| 6.3 | collector preserved, stop unmoved | ✓ | no worker deploy; 04:00:00Z stop untouched |
+| 7 | funded orders unavailable | ✓ | gate authorizes first at the adapter; AST-verified |
+| 8 | no test regressions | ✓ | 449 = 449, identical ids, new tests included |
+
+**Profitability is not claimed.** The only out-of-sample number here is a
+base rate on 159 joined predictions of a cohort-behaviour target that is
+explicitly not a settlement forecast and not our fill probability.
