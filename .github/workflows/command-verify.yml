@@ -241,6 +241,90 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit $FAIL
 
+      # POOL OCCUPANCY AND HEARTBEAT ADVANCE, UNDER ORDINARY LOAD.
+      #
+      # Acceptance run 27 failed on a heartbeat that timed out acquiring a
+      # pooled connection, and the one measurement that would have settled
+      # WHY was never taken: how full the pool was while it happened. The
+      # four rn1x loops hold four of ten connections permanently, which
+      # explains reduced capacity and does NOT by itself establish what
+      # saturated the other six.
+      #
+      # /healthz already publishes db.pool_stats() as `.pool`. Its own
+      # docstring gives the reading: size == max with idle == 0 is a
+      # saturated pool; idle > 0 beside db_ok false is the database being
+      # slow. So: sample it, drive ordinary authenticated command traffic
+      # while the loops are running, sample it again, and check the
+      # writer's heartbeat actually advanced across the window with the
+      # standby recorded separately.
+      - name: Service health under ordinary command load
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
+        run: |
+          set -u
+          H="X-Admin-Token: ${ADMIN_TOKEN:-}"
+          say () { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          { echo "### SERVICE HEALTH UNDER LOAD"; echo '```'; } \
+            >> "$GITHUB_STEP_SUMMARY"
+
+          pool () {
+            curl -s --max-time 30 "$API/healthz" \
+              | jq -c '{pool: .pool, db_ok: .db_ok}' 2>/dev/null \
+              || echo '{"pool":"unreadable"}'
+          }
+          say "pool BEFORE  $(pool)"
+
+          # The writer's heartbeat, and the standby's, before the load.
+          before=$(curl -s --max-time 45 -H "$H" \
+                   "$API/api/command/rn1x/statuses" \
+                   | jq -r '(.statuses.prospective_rn1_management.heartbeat.at
+                             // "none")|tostring' 2>/dev/null || echo none)
+          say "writer heartbeat BEFORE  $before"
+
+          # ORDINARY COMMAND-CENTRE REQUESTS, not a synthetic hammer: the
+          # same authenticated reads the console makes, twelve of them, two
+          # at a time, while every loop is cycling.
+          FAIL=0
+          for i in 1 2 3 4; do
+            for r in shadow/summary shadow/positions rn1x/statuses; do
+              c=$(curl -s -o /dev/null -w '%{http_code}' --max-time 45 \
+                  -H "$H" "$API/api/command/$r" || echo 000)
+              printf 'load%-2s %-18s %s\n' "$i" "$r" "$c" \
+                | tee -a "$GITHUB_STEP_SUMMARY"
+              case "$c" in
+                200|401|403) : ;;
+                *) echo "NOT-OK $r -> $c"; FAIL=1 ;;
+              esac
+            done
+          done
+          say "pool AFTER   $(pool)"
+
+          # THE HEARTBEAT MUST ADVANCE. A stale tile is the symptom the
+          # repair targets, so this is the check that it actually persists
+          # now rather than timing out.
+          sleep 45
+          after=$(curl -s --max-time 45 -H "$H" \
+                  "$API/api/command/rn1x/statuses" \
+                  | jq -r '(.statuses.prospective_rn1_management.heartbeat.at
+                            // "none")|tostring' 2>/dev/null || echo none)
+          say "writer heartbeat AFTER   $after"
+          if [ "$before" = "$after" ]; then
+            say "HEARTBEAT DID NOT ADVANCE in 45 s -- stale telemetry"
+          else
+            say "heartbeat advanced: the beat is persisting"
+          fi
+
+          # The standby must be its own record, never the writer's row.
+          curl -s --max-time 45 -H "$H" "$API/api/command/rn1x/statuses" \
+            | jq -r '"ext_last_cycle_state\t"
+                     + ((.statuses.external_valuation.last_cycle.state // "none")|tostring),
+                     "ext_standby_state\t"
+                     + ((.statuses.external_valuation.standby.state // "none")|tostring)' \
+            2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
       - name: The proxy does not serve HTML for an API path
         run: |
           # The netlify rule order is load-bearing: if /api/command/*
@@ -516,8 +600,15 @@ jobs:
       # process actually retrieving odds, the refusal census with counts,
       # the clock audit's split between rows that can and cannot support a
       # prospective claim, and one complete valuation trace.
+      # `!cancelled()` ON PURPOSE. Run 27 aborted at an earlier proxy check
+      # and skipped this step, so one bounded run produced a health failure
+      # and NO trading evidence at all -- and the next run had to spend the
+      # provider budget again to get it. Trading acceptance now attempts
+      # even when a preceding check failed, because the refusals it reports
+      # are exactly what the failure needs interpreting against. The job
+      # still fails: this does not turn a red run green.
       - name: External valuation — arm, cycle, and read production back
-        if: ${{ github.event.inputs.arm_external != '' }}
+        if: ${{ !cancelled() && github.event.inputs.arm_external != '' }}
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           API: ${{ github.event.inputs.api }}
