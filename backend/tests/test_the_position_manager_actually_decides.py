@@ -55,7 +55,7 @@ def _managed(qty=100.0, price=0.57):
                       seed_price=price, at=1000.0, fee_fn=_fee)
 
 
-def _row(p=0.70, observed_at=900.0, **kw):
+def _row(p=0.70, observed_at=990.0, **kw):
     base = {"id": 42, "provider": "PINNACLE", "book": "pinnacle",
             "devig_method": "power", "us_market_slug": SLUG,
             "probability": p, "probability_event": PAYS_ON,
@@ -115,9 +115,9 @@ def test_a_row_that_prices_a_different_event_is_refused_not_flipped():
 
 
 def test_staleness_is_measured_from_the_bookmakers_own_stamp():
-    fresh = _ev(now=1000.0, observed_at=900.0)
+    fresh = _ev(now=1000.0, observed_at=990.0)
     assert fresh["freshness"]["aged_against"] == "OBSERVATION"
-    assert fresh["freshness"]["age_from_observation_s"] == pytest.approx(100.0)
+    assert fresh["freshness"]["age_from_observation_s"] == pytest.approx(10.0)
     stale = _ev(now=1000.0, observed_at=1000.0 - HV.MAX_PROBABILITY_AGE_S - 1)
     assert stale["refusal"] == HV.R_STALE
 

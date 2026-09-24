@@ -686,13 +686,56 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
 
     hv = dict(ev_hold or {})
     hold_priced = hv.get("status") == "IDENTIFIED"
-    hold_total = hv.get("ev_hold_usd") if hold_priced else None
     # THE HURDLE IS THE VALUE OF HOLDING *ONE CONTRACT*, AND IT IS THE
     # SETTLEMENT VALUE, NOT THE P&L. Comparing a sale's proceeds against
     # (p - basis) would subtract the basis twice: the sale releases it
     # too. So the hurdle is p alone, and every candidate below is scored
     # net of the same pro-rata basis release.
     hold_per = hv.get("probability") if hold_priced else None
+
+    # HOLD'S TOTAL IS DERIVED FROM THE INVENTORY BEING RANKED, NEVER
+    # TAKEN FROM THE RECORD.
+    #
+    # THE DEFECT THIS CLOSES, found by independent inspection of
+    # 12260cb. The continuing worker computed EV_HOLD on the position's
+    # SEED quantity and price, then reloaded the portfolio, applied new
+    # fills, and ranked the actual RESIDUAL against that seed-sized
+    # number. After a partial exit the two disagree, and HOLD is
+    # overstated by exactly the value of the contracts already sold:
+    #
+    #     seed 100 @ .57, residual 80, p .70, exit .72 on all 80
+    #     supplied HOLD  13.00  (100 contracts)  -> HOLD wins
+    #     correct  HOLD  10.40  ( 80 contracts)  -> DIRECT_EXIT at 12.00
+    #
+    # Taking `ev_hold_usd` on trust is what made that possible, so this
+    # layer no longer does. `probability` is the only figure it needs
+    # from the record -- a per-contract settlement value, which does not
+    # depend on how much we hold -- and every total, HOLD's included, is
+    # computed from the `q` and `basis` this call was given. A caller
+    # cannot now size one alternative differently from the others.
+    #
+    # THE MISMATCH IS STILL REPORTED rather than quietly corrected: a
+    # record built on a different quantity means the caller's ordering is
+    # wrong, and that is worth seeing even though the ranking is now
+    # immune to it.
+    hold_total = (None if hold_per is None
+                  else float(hold_per) * q - basis)
+    _supplied = hv.get("ev_hold_usd")
+    _on_qty = hv.get("qty")
+    _mismatch = None
+    if hold_total is not None and _supplied is not None \
+            and abs(float(_supplied) - hold_total) > 1e-6:
+        _mismatch = {
+            "record_ev_hold_usd": float(_supplied),
+            "record_computed_on_qty": _on_qty,
+            "inventory_being_ranked_qty": q,
+            "derived_ev_hold_usd": hold_total,
+            "used": "the DERIVED value",
+            "why": ("the hold record was built on a different quantity "
+                    "from the inventory being ranked. Every alternative "
+                    "here is scored over %s contracts, so HOLD is too"
+                    % q),
+        }
 
     out = {
         "rule": CHALLENGER_OBJECTIVE,
@@ -713,6 +756,11 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
             "freshness": hv.get("freshness"),
             "uncertainty": hv.get("uncertainty"),
             "source_row_id": hv.get("source_row_id"),
+            "ev_hold_usd": hold_total,
+            "ev_hold_basis": "DERIVED_FROM_THE_INVENTORY_BEING_RANKED",
+            "qty_valued": q,
+            "basis_per_contract_valued": basis_per,
+            "quantity_mismatch": _mismatch,
         },
         "candidates": [], "not_rankable": [], "venue_translation": {},
     }

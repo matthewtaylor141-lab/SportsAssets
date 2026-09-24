@@ -670,27 +670,26 @@ async def challenger_inputs_for(conn, *, condition_id, outcome_index,
     return out
 
 
-def _ev_at(snapshot: dict, at: float) -> dict:
-    """The hold value for THIS instant, from the snapshot's own row.
-
-    The previous build computed `ev_hold` once per position and reused it
-    for every decision in the walk, so its freshness was measured against
-    the instant the BUILDER ran rather than the instant each decision was
-    taken. On a lane whose cycle can sit minutes behind the evidence that
-    is the difference between a fresh probability and a stale one.
-    """
-    from sportsassets import bettor_hold_value as hv
-
-    row = snapshot.get("probability_row")
-    if not row:
-        return {"status": hv.NOT_IDENTIFIED, "refusal": hv.R_NO_SOURCE,
-                "why": snapshot.get("why") or "no probability row",
-                "input_available": False}
-    return hv.ev_hold(qty=float(snapshot["seed_qty"]),
-                      basis_per_contract=float(snapshot["seed_price"]),
-                      probability_row=row, now=float(at),
-                      payout_event_held=snapshot.get("payout_event"),
-                      event_state=snapshot.get("event_state"))
+# THE HOLD VALUE IS NOT BUILT HERE ANY MORE, AND THAT IS THE FIX.
+#
+# `_ev_at(snapshot, at)` used to live at this spot. It valued holding
+# `snapshot["seed_qty"]` at `snapshot["seed_price"]` -- the position's
+# ORIGINAL size and entry price -- and the worker called it BEFORE
+# `manage_open_position` reloaded the portfolio and applied newly
+# admitted fills. The ranking then scored the actual residual against
+# that seed-sized number, so after a partial exit HOLD carried the value
+# of contracts we no longer held:
+#
+#     seed 100 @ .57, residual 80, p .70, exit .72 on all 80
+#     HOLD 13.00 (100 contracts) beat DIRECT_EXIT 12.00
+#     correct HOLD 10.40 (80 contracts) loses to it
+#
+# It is deleted rather than corrected in place. Any helper here would be
+# called before the reload by construction, because this module is what
+# runs before the reload. `Managed.decide_challenger` is the only place
+# that knows the residual and the basis at the decision instant, so it
+# is where the valuation belongs; the snapshot carries the probability
+# ROW and nothing derived from it.
 
 
 # ── THE CONTINUING MANAGEMENT PHASE ──────────────────────────────────
@@ -766,10 +765,13 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
                 seed_price=float(pos["seed_price"]))
             ci["seed_qty"] = float(pos["seed_qty"])
             ci["seed_price"] = float(pos["seed_price"])
+            # NO PRE-COMPUTED HOLD VALUE. `manage_open_position`
+            # reloads the portfolio and applies newly admitted fills
+            # BEFORE any decision, and `decide_challenger` values HOLD
+            # on the residual that results. Computing it here, on the
+            # seed, is the ordering defect 12260cb shipped.
             usable = dict(ci) if ci.get("available") else None
-            if usable is not None:
-                usable["ev_hold"] = _ev_at(usable, wall)
-            else:
+            if usable is None:
                 out["no_inputs"] += 1
             # PRINTS SINCE THE LAST DECISION, not since entry: the
             # earlier ones were already offered to the orders that
@@ -889,12 +891,13 @@ async def _replay_one(conn, *, trade_id, whale_id, condition_id,
                 # missing input by name.
                 if not _s.get("available"):
                     return None
-                # FRESHNESS IS RECHECKED AT EVERY DECISION, not once per
-                # position. The snapshot carries the probability ROW; the
-                # hold value is recomputed against THIS decision's clock,
-                # so a probability that has aged past its bound between
-                # two decisions refuses on the second one.
-                return {**_s, "ev_hold": _ev_at(_s, at)}
+                # THE SNAPSHOT CARRIES THE ROW, NOT A VALUE.
+                # `decide_challenger` values HOLD against the residual
+                # and basis it holds at that instant, and re-ages the
+                # probability against that instant's clock -- so both the
+                # QUANTITY and the AGE are the decision's own, not the
+                # builder's.
+                return dict(_s)
 
     out = runner.run(
         rows=[dict(r) for r in rows],

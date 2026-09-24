@@ -33,6 +33,7 @@ import pytest
 from sportsassets import bettor_book_snapshot as BS
 from sportsassets import bettor_hold_value as HV
 from sportsassets import bettor_mgmt_lifecycle as LC
+from sportsassets import bettor_mgmt_select as MS
 
 LONG = "ORDER_INTENT_BUY_LONG"
 SHORT = "ORDER_INTENT_BUY_SHORT"
@@ -107,7 +108,15 @@ def test_an_absent_exit_side_is_refused_by_name():
     assert x["refusal"]
 
 
-# ── 4 · FRESHNESS IS BOUNDED BY THE EVENT STATE ──────────────────────
+# ── 4 · FRESHNESS IS THE ODDS SOURCE'S OWN RULE ──────────────────────
+#
+# TWO CORRECTIONS, both mine. 1,800 s was justified by pre-match
+# stability with no pre-match restriction enforced. I then replaced it
+# with 120 s from `bettor_progress_feed.MAX_AGE_S` and argued that a
+# probability must not be staler than the progress reading beside it --
+# which is wrong, because those bounds measure DIFFERENT INPUTS: a
+# period index is a discrete state, a price moves continuously. The
+# applicable rule for THIS input already exists.
 
 def _row(age, now=10_000.0):
     return {"id": 1, "probability": 0.70, "probability_event": PAYS,
@@ -122,45 +131,73 @@ def _ev(age, state=None, **kw):
                       payout_event_held=PAYS, event_state=state, **kw)
 
 
-def test_the_strict_bound_is_the_repositorys_own_in_play_bound():
+def test_the_bound_is_the_odds_engines_own_thirty_seconds():
+    from sportsassets import bettor_pinnacle_devig as devig
+
+    assert HV.MAX_PROBABILITY_AGE_S == 30.0
+    assert HV.MAX_PROBABILITY_AGE_S == devig.MAX_QUOTE_AGE_S, (
+        "the valuation path already refuses to price a contract on a "
+        "quote older than this, and a hold valuation reading the same "
+        "quote may not be laxer than the entry decision reading it")
+    assert HV.FRESHNESS_SOURCE["from"] == \
+        "bettor_pinnacle_devig.MAX_QUOTE_AGE_S"
+
+
+def test_the_progress_feeds_bound_is_not_cited_for_odds():
+    """THE CLAIM I WITHDREW. 120 s bounds a period-or-clock observation,
+    not a price, and it establishes nothing about odds freshness."""
     from sportsassets import bettor_progress_feed as feed
-    from sportsassets import bettor_rn1x_policy as pol
 
-    assert HV.MAX_PROBABILITY_AGE_S == 120.0
-    assert HV.MAX_PROBABILITY_AGE_S == feed.MAX_AGE_S
-    assert HV.MAX_PROBABILITY_AGE_S == pol.PROGRESS_MAX_AGE_S, (
-        "a probability must not be allowed to be staler than the "
-        "progress reading beside it")
-
-
-def test_a_half_hour_old_probability_is_refused_in_play():
-    """THE DEFECT. 1800 s was justified by pre-match stability and
-    applied with no pre-match restriction."""
-    assert _ev(1700.0, "IN_PLAY")["refusal"] == HV.R_STALE
-    assert _ev(300.0, "IN_PLAY")["refusal"] == HV.R_STALE
-    assert _ev(60.0, "IN_PLAY")["status"] == "IDENTIFIED"
+    assert feed.MAX_AGE_S == 120.0
+    assert HV.MAX_PROBABILITY_AGE_S != feed.MAX_AGE_S
+    assert "PERIOD OR CLOCK OBSERVATION" in HV.FRESHNESS_SOURCE["not_from"]
+    assert "establishes nothing about odds freshness" in \
+        HV.FRESHNESS_SOURCE["not_from"]
 
 
-def test_an_unknown_event_state_gets_the_strict_bound():
-    """Absence of evidence is not evidence of pre-match."""
-    for state in (None, "", "UNKNOWN", "something-unrecognised"):
-        r = _ev(1700.0, state)
-        assert r["refusal"] == HV.R_STALE, state
-        assert r["age_bound_s"] == pytest.approx(120.0), state
+def test_every_admissible_state_gets_the_established_bound():
+    """No state is laxer by default -- not pre-match, not unknown."""
+    for state in (None, "", "UNKNOWN", "IN_PLAY", "BREAK", "SUSPENDED",
+                  "PRE_MATCH", "unrecognised"):
+        b = HV.bound_for(state)
+        assert b["bound_s"] == pytest.approx(30.0), state
+        assert b["relaxation_applied"] is None, state
+    assert _ev(60.0, "PRE_MATCH")["refusal"] == HV.R_STALE
+    assert _ev(60.0, "IN_PLAY")["refusal"] == HV.R_STALE
+    assert _ev(20.0, "IN_PLAY")["status"] == "IDENTIFIED"
 
 
-def test_a_break_is_not_pre_match():
-    """Play is stopped; the market is not. The restart reprices it."""
-    for state in ("BREAK", "SUSPENDED"):
-        assert _ev(1700.0, state)["refusal"] == HV.R_STALE
-        assert _ev(1700.0, state)["age_bound_s"] == pytest.approx(120.0)
+def test_the_relaxation_is_off_unless_named_by_id():
+    """A longer pre-match window is PLAUSIBLE and NOT MEASURED, so it is
+    a separately versioned experiment a caller must request."""
+    assert "EXPERIMENTAL" in HV.RELAXATION["status"]
+    assert HV.RELAXATION["bound_s"] == 1800.0
+    assert "not a measured one" in HV.RELAXATION["rationale"]
+    assert HV.RELAXATION["is_not_established_by"]
+
+    off = _ev(600.0, "PRE_MATCH")
+    assert off["refusal"] == HV.R_STALE, "off by default"
+
+    on = _ev(600.0, "PRE_MATCH", relaxation=HV.RELAXATION_ID)
+    assert on["status"] == "IDENTIFIED"
+    assert on["age_bound_s"] == pytest.approx(1800.0)
+    # AND THE DECISION SAYS SO
+    assert on["freshness_relaxation"] == HV.RELAXATION_ID
+    assert on["bound_is_the_established_one"] is False
 
 
-def test_pre_match_gets_the_longer_bound_only_when_declared():
-    r = _ev(1700.0, "PRE_MATCH")
-    assert r["status"] == "IDENTIFIED"
-    assert r["age_bound_s"] == pytest.approx(1800.0)
-    assert r["event_state"] == "PRE_MATCH"
+def test_the_relaxation_does_not_apply_in_play_or_under_a_wrong_id():
+    live = _ev(600.0, "IN_PLAY", relaxation=HV.RELAXATION_ID)
+    assert live["refusal"] == HV.R_STALE
+    assert live["age_bound_s"] == pytest.approx(30.0)
+    assert live["freshness_relaxation"] is None
+    assert "only to a DECLARED PRE_MATCH" in \
+        live["freshness_relaxation_refused"]
+
+    bogus = _ev(600.0, "PRE_MATCH", relaxation="just-let-me-through")
+    assert bogus["refusal"] == HV.R_STALE
+    assert "not a declared relaxation" in \
+        bogus["freshness_relaxation_refused"]
 
 
 def test_a_settled_or_void_event_is_refused_outright():
@@ -171,12 +208,12 @@ def test_a_settled_or_void_event_is_refused_outright():
 
 
 def test_a_caller_can_tighten_the_bound_but_never_widen_it():
-    wide = _ev(1700.0, "IN_PLAY", max_age_s=99_999.0)
+    wide = _ev(600.0, "IN_PLAY", max_age_s=99_999.0)
     assert wide["refusal"] == HV.R_STALE
-    assert wide["age_bound_s"] == pytest.approx(120.0)
-    tight = _ev(60.0, "PRE_MATCH", max_age_s=30.0)
+    assert wide["age_bound_s"] == pytest.approx(30.0)
+    tight = _ev(20.0, "IN_PLAY", max_age_s=5.0)
     assert tight["refusal"] == HV.R_STALE
-    assert tight["age_bound_s"] == pytest.approx(30.0)
+    assert tight["age_bound_s"] == pytest.approx(5.0)
 
 
 # ── 3 · RELOADING IS A REPLAY, AND TWO REBUILDS AGREE ────────────────
@@ -329,15 +366,29 @@ def test_the_decision_ordinal_appends_rather_than_colliding():
     assert 'did = "%s:D%04d" % (pid, i + int(decision_offset))' in src
 
 
-def test_freshness_is_recomputed_per_decision_not_once_per_position():
+def test_the_worker_no_longer_builds_a_hold_value_at_all():
+    """§: "reload inventory, apply newly admitted fills, establish the
+    current residual and basis, then calculate every alternative against
+    that same inventory at the actual decision time."
+
+    `_ev_at` valued holding the position's SEED quantity and price, and
+    the worker called it BEFORE the reload and the fills. It is deleted,
+    not corrected: anything in this module runs before the reload by
+    construction. The snapshot carries the ROW; `decide_challenger`
+    values holding what we actually hold, when the decision is taken.
+    """
     import inspect
 
     from sportsassets.workers import rn1x_shadow as W
 
-    assert hasattr(W, "_ev_at")
-    src = inspect.getsource(W._replay_one)
-    assert "_ev_at(_s, at)" in src, (
-        "the snapshot must carry the ROW and re-age it at each decision")
+    assert not hasattr(W, "_ev_at"), "the seed-sized helper is back"
+    mgmt = inspect.getsource(W.manage_open_positions)
+    assert "ev_hold" not in mgmt.replace("no pre-computed hold value", ""), \
+        "the phase must not build a hold value before the reload"
+    sig = inspect.signature(LC.Managed.decide_challenger)
+    for p in ("probability_row", "event_state", "payout_event_held",
+              "freshness_relaxation"):
+        assert p in sig.parameters, p
 
 
 # ── THE REAL PATH, AGAINST A REAL DATABASE ───────────────────────────
@@ -353,9 +404,54 @@ import os
 DSN = os.environ.get("RN1X_TEST_DSN")
 pg = pytest.mark.skipif(not DSN, reason="RN1X_TEST_DSN is not set")
 
+
+@pytest.fixture(autouse=True, scope="module")
+def _leave_no_residue():
+    """CLEAN UP AFTER MYSELF, AT THE END AS WELL AS THE START.
+
+    These fixtures insert `trades` rows; a cycle that sees them advances
+    the lane cursors in `ingestion_state`. `_fixture` clears those before
+    each test, but the LAST test still leaves them advanced -- and on a
+    reused DSN that residue made two unrelated persistence tests read
+    IDLE_NO_CANDIDATES on the NEXT run, which is exactly the mistake I
+    already made once by hand.
+    """
+    yield
+    if not DSN:
+        return
+    import asyncpg
+
+    async def clean():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await c.execute(
+                "DELETE FROM ingestion_state WHERE key LIKE 'rn1x%cursor'")
+            for cond in ("0xtest_exit", "0xtest_other", "0xtest_two",
+                         "0xtest_residual", "0xtest_contain"):
+                for sql in ("DELETE FROM rn1x_fills",
+                            "DELETE FROM rn1x_orders",
+                            "DELETE FROM rn1x_decisions",
+                            "DELETE FROM rn1x_positions",
+                            "DELETE FROM external_valuations "
+                            "WHERE condition_id = $1",
+                            "DELETE FROM trades WHERE condition_id = $1",
+                            "DELETE FROM market_tokens "
+                            "WHERE condition_id = $1",
+                            "DELETE FROM markets WHERE condition_id = $1"):
+                    if "$1" in sql:
+                        await c.execute(sql, cond)
+                    else:
+                        await c.execute(sql)
+        finally:
+            await c.close()
+
+    asyncio.run(clean())
+
+
 _SLUG = "aec-mlb-chc-mia-2026-09-24-cubs"
 _EXP = "RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1"
 _POL = "SHADOW_CHALLENGER_HOLD_RANKED_V1"
+_BENCH = "MANAGEMENT_PAIR_091_STOP_16_V1"        # the frozen benchmark
 _T0 = 1_800_000_000.0
 
 _B_TIGHT = {"bids": [{"px": {"value": "0.6000"}, "qty": "500"}],
@@ -399,6 +495,10 @@ async def _fixture(c, cond):
         await c.execute(sql, cond)
     await c.execute("INSERT INTO markets(condition_id,slug,resolved) "
                     "VALUES($1,'s',false)", cond)
+    # `trades.whale_id` is a foreign key. A fixture that inserts a print
+    # needs the whale to exist first.
+    await c.execute("INSERT INTO whales(id,address) VALUES(9,'0xwhale9') "
+                    "ON CONFLICT (id) DO NOTHING")
     for i, n, t in ((0, "Chicago Cubs", cond + "-t0"),
                     (1, "Miami Marlins", cond + "-t1")):
         await c.execute(
@@ -595,3 +695,320 @@ def test_one_position_is_managed_across_two_cycles_with_no_new_entry():
     assert a.state()["portfolio"] == b.state()["portfolio"]
     assert len(a.open_orders()) <= 1, "one active management order"
     assert a.pf.invariant()["ok"] is True
+
+
+# ── HOLD IS VALUED ON WHAT WE ACTUALLY HOLD ──────────────────────────
+#
+# THE DEFECT, found by independent inspection of 12260cb. The continuing
+# worker computed EV_HOLD from the position's SEED quantity and price,
+# then `manage_open_position` reloaded the portfolio and applied newly
+# admitted fills, and `decide_challenger` ranked the ACTUAL RESIDUAL
+# against that seed-sized number. After a partial exit HOLD carried the
+# value of contracts already sold.
+#
+# THE REPORTED CASE, before fees:
+#     seed 100 @ .57 · residual 80 · p .70 · exit .72 on all 80
+#     shipped HOLD 13.00 (100 contracts)  -> HOLD selected
+#     correct HOLD 10.40 ( 80 contracts)  -> DIRECT_EXIT at 12.00 wins
+
+def test_the_ranking_derives_holds_total_from_the_inventory_it_ranks():
+    """The structural half of the fix. Even handed a seed-sized record,
+    the ranking must size HOLD like every other alternative -- and say
+    that the record disagreed."""
+    seed_sized = HV.ev_hold(
+        qty=100.0, basis_per_contract=0.57, probability_row=_row(10.0),
+        now=10_000.0, payout_event_held=PAYS, event_state="IN_PLAY")
+    assert seed_sized["ev_hold_usd"] == pytest.approx(13.0)
+
+    r = MS.rank_with_hold(
+        80.0, 0.57, ev_hold=seed_sized, bid=0.72, bid_size=80.0,
+        fee_fn=lambda qty, price, maker=False: 0.0, venue="PMUS",
+        us_market_slug="aec-x", held_is_long=True)
+
+    hold = next(c for c in r["ranked"] if c["action"] == "HOLD")
+    exit_ = next(c for c in r["ranked"] if c["action"] == "DIRECT_EXIT")
+    assert hold["qty"] == pytest.approx(80.0)
+    assert hold["value_usd"] == pytest.approx(10.40), (
+        "HOLD must be valued on the 80 contracts being ranked")
+    assert exit_["value_usd"] == pytest.approx(12.00)
+    assert r["selected"] == "DIRECT_EXIT", (
+        "this is the selection the shipped ordering got wrong")
+
+    mm = r["hold_input"]["quantity_mismatch"]
+    assert mm is not None, "a record built on another quantity must be named"
+    assert mm["record_computed_on_qty"] == pytest.approx(100.0)
+    assert mm["inventory_being_ranked_qty"] == pytest.approx(80.0)
+    assert mm["derived_ev_hold_usd"] == pytest.approx(10.40)
+
+
+def test_decide_challenger_values_hold_after_the_fills():
+    """The ordering half. `decide_challenger` is handed the ROW and
+    values holding the residual it has at that instant."""
+    m = _managed_after_partial_exit()
+    assert m.residual() == pytest.approx(80.0)
+    d = m.decide_challenger(
+        at=10_000.0, probability_row=_row(10.0), event_state="IN_PLAY",
+        payout_event_held=PAYS, bid=0.72, bid_size=80.0, venue="PMUS",
+        us_market_slug="aec-x", last_price=0.72, seconds_open=600.0,
+        decision_id="d")
+    # the decision records WHAT it valued
+    assert d["hold_valued_on"]["qty"] == pytest.approx(80.0)
+    assert d["hold_valued_on"]["after"] == \
+        "RELOAD_AND_NEWLY_ADMITTED_FILLS"
+    hi = d["hold_input"]
+    assert hi["qty_valued"] == pytest.approx(80.0)
+    assert hi["ev_hold_usd"] == pytest.approx(10.40)
+    assert hi["ev_hold_basis"] == \
+        "DERIVED_FROM_THE_INVENTORY_BEING_RANKED"
+    assert hi["quantity_mismatch"] is None, (
+        "valued in the right place, so there is nothing to reconcile")
+    assert d["selected_action"] == "DIRECT_EXIT"
+    assert d["selected_qty"] == pytest.approx(80.0)
+
+
+def _managed_after_partial_exit():
+    """100 @ .57, then 20 sold at .90 through a real order and fill."""
+    m = LC.Managed(condition_id="0xc", outcome_index=0, seed_qty=100.0,
+                   seed_price=0.57, at=1000.0, fee_fn=lambda qty, price,
+                   maker=False: 0.0)
+    m.place("DIRECT_EXIT", at=1001.0, price=0.90, qty=20.0,
+            decision_id="x")
+    m.on_print(at=1002.0, outcome_index=0, price=0.91, size=80.0,
+               evidence_id="t1")
+    return m
+
+
+def test_realized_pnl_is_not_folded_into_any_alternative():
+    """§: "Carry realized P&L consistently; do not include exited
+    contracts in only one alternative." The 20 already sold are realized
+    and sunk; no candidate may carry them, and HOLD must not be the one
+    that does."""
+    m = _managed_after_partial_exit()
+    realized = m.pf.to_dict()["realized_pnl_usd"]
+    assert realized > 0, "the partial exit realized something"
+    d = m.decide_challenger(
+        at=10_000.0, probability_row=_row(10.0), event_state="IN_PLAY",
+        payout_event_held=PAYS, bid=0.72, bid_size=80.0, venue="PMUS",
+        us_market_slug="aec-x", last_price=0.72, seconds_open=600.0,
+        decision_id="d")
+    for c in d["alternatives"]:
+        assert c["qty"] <= 80.0 + 1e-9, c
+        # no candidate may be inflated by the realized amount
+        assert abs(c["value_usd"] - realized) > 1e-9 or c["value_usd"] == 0
+    # realized P&L is reported SEPARATELY, on the inventory view
+    assert d["resulting_inventory"]["realized_pnl_usd"] == \
+        pytest.approx(realized)
+    assert d["resulting_inventory"]["invariant_ok"] is True
+
+
+@pg
+def test_the_residual_hold_case_through_the_continuing_worker():
+    """THE WHOLE PATH: worker -> reload -> fills -> valuation -> ranking
+    -> persistence, on the reported numbers, then restart recovery of
+    that same position."""
+    import asyncpg
+
+    from sportsassets import bettor_mgmt_lifecycle as LCX
+    from sportsassets import bettor_rn1x_store as store
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+    from sportsassets.workers import rn1x_shadow as W
+
+    cond = "0xtest_residual"
+    # exit proceeds .72 for 80 -> the bid side must show .72 with size 80
+    book = {"bids": [{"px": {"value": "0.7200"}, "qty": "80"}],
+            "offers": [{"px": {"value": "0.7400"}, "qty": "900"}]}
+    # cycle 1's book pays .90, which exits 20 of the 100
+    book1 = {"bids": [{"px": {"value": "0.9000"}, "qty": "20"},
+                      {"px": {"value": "0.5000"}, "qty": "900"}],
+             "offers": [{"px": {"value": "0.9200"}, "qty": "900"}]}
+    cur = {"md": book1}
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        orig = EXT._read_book_blocking
+        EXT._read_book_blocking = lambda slug: {"marketData": cur["md"]}
+        try:
+            await _fixture(c, cond)
+            pid = await _add_position(c, cond, 991001)
+            # a quote fresh at each decision instant
+            await c.execute(_VAL_SQL, cond, _SLUG, "Chicago Cubs", 0.70,
+                            _T0 + 20)
+            c1 = await W.manage_open_positions(c, experiment_id=_EXP,
+                                               now=_T0 + 30)
+            # a print crosses the resting sell and fills 20
+            await c.execute(
+                "INSERT INTO trades(id,tx_hash,asset,whale_id,condition_id,"
+                "outcome_index,side,size,price,notional,sport,ts,"
+                "detected_at,source,dedupe_key) VALUES(991500,'0xtx',$3,9,"
+                "$1,0,'BUY',80,0.91,72.8,'baseball',to_timestamp($2),"
+                "to_timestamp($2),'chain','dk-991500')",
+                cond, _T0 + 45, cond + "-t0")
+            # cycle 2: the book now pays .72 on 80, and the quote is fresh
+            cur["md"] = book
+            await c.execute(_VAL_SQL, cond, _SLUG, "Chicago Cubs", 0.70,
+                            _T0 + 50)
+            c2 = await W.manage_open_positions(c, experiment_id=_EXP,
+                                               now=_T0 + 60)
+            rows = [dict(r) for r in await c.fetch(
+                "SELECT decision_id, selected_action,"
+                " selected_qty::float8 q, hold_value_usd,"
+                " operating_state, accounting_reconciles,"
+                " resulting_inventory->>'residual_qty' resid,"
+                " alternatives->'ranked' ranked"
+                " FROM rn1x_decisions WHERE position_id = $1"
+                " ORDER BY decision_ts, decision_id", pid)]
+            pr = dict(await c.fetchrow(
+                "SELECT position_id, condition_id, outcome_index, policy,"
+                " seed_qty::float8 seed_qty, seed_price::float8 seed_price,"
+                " extract(epoch FROM decision_ts)::float8 decision_ts"
+                " FROM rn1x_positions WHERE position_id = $1", pid))
+            led = await store.load_position(c, pid)
+            return c1, c2, rows, pr, led
+        finally:
+            EXT._read_book_blocking = orig
+            await c.close()
+
+    c1, c2, rows, pr, led = asyncio.run(run())
+
+    assert c1["managed"] == 1 and c2["managed"] == 1
+    assert len(rows) == 2, rows
+    # cycle 2 ran AFTER the fill, so the residual is 80
+    second = rows[1]
+    assert float(second["resid"]) == pytest.approx(80.0), (
+        "the decision must be taken on the post-fill inventory")
+    # HOLD'S PERSISTED TOTAL AGREES WITH THE POST-FILL PORTFOLIO
+    assert second["hold_value_usd"] == pytest.approx(10.40, abs=1e-6), (
+        "0.70 x 80 - 0.57 x 80 = 10.40, not the seed-sized 13.00")
+    # and every ranked alternative is sized to that same inventory
+    ranked = second["ranked"]
+    if isinstance(ranked, str):
+        import json
+        ranked = json.loads(ranked)
+    assert ranked, second
+    for cand in ranked:
+        assert float(cand["qty"]) <= 80.0 + 1e-9, cand
+
+    # RESTART RECOVERY OF THIS SAME CASE
+    a = LCX.reload_managed(position=pr, orders=led["orders"],
+                           fills=led["fills"], fee_fn=_fee)
+    b = LCX.reload_managed(position=pr, orders=led["orders"],
+                           fills=led["fills"], fee_fn=_fee)
+    assert a.state()["portfolio"] == b.state()["portfolio"]
+    assert a.pf.invariant()["ok"] is True
+    # the rebuilt residual is what the decision was taken on
+    assert a.residual() == pytest.approx(float(second["resid"]))
+    # and a hold valuation on the rebuild agrees with the persisted one
+    basis_per = (a.pf._leg(a.condition_id, a.leg)["cost"]
+                 / max(a.held(a.leg), 1e-12))
+    again = HV.ev_hold(qty=a.residual(), basis_per_contract=basis_per,
+                       probability_row=_row(10.0), now=10_000.0,
+                       payout_event_held=PAYS, event_state="IN_PLAY")
+    assert again["ev_hold_usd"] == pytest.approx(
+        second["hold_value_usd"], abs=1e-6)
+
+
+# ── CONTAINMENT: THE AFFECTED EVIDENCE STAYS DISTINGUISHABLE ─────────
+# §: "Keep affected evidence distinguishable." Migration 111 must hold
+# exactly the challenger rows the fifth defect could have changed, and
+# leave alone the ones it could not -- a containment that holds the whole
+# arm proves nothing, and one that holds nothing contains nothing.
+
+@pg
+def test_migration_111_holds_exactly_the_rows_the_defect_could_change():
+    import pathlib
+
+    import asyncpg
+
+    from sportsassets import bettor_rn1x_store as store
+    from sportsassets.scripts import migrate
+
+    sql = pathlib.Path(migrate.MIGRATIONS_DIR).joinpath(
+        "111_contain_the_seed_sized_hold_and_the_wrong_freshness_bound.sql"
+    ).read_text()
+    cond = "0xtest_contain"
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c, cond)
+            pid = await _add_position(c, cond, 992001)   # seed 100
+            # four rows, differing only in what the defect could reach
+            rows = (
+                # residual == seed: valued on the right quantity anyway
+                ("untouched", 100.0, 12.0),
+                # residual < seed: the seed-sized hold could differ
+                ("moved", 80.0, 13.0),
+                # no residual recorded: cannot be shown to be sound
+                ("silent", None, 13.0),
+            )
+            for did, resid, hv in rows:
+                inv = ("null" if resid is None
+                       else '{"residual_qty": %r}' % resid)
+                await c.execute(
+                    """INSERT INTO rn1x_decisions(decision_id,position_id,
+                    decision_ts,selection_reason,alternatives,ev_basis,
+                    hold_value_usd,resulting_inventory,input_freshness,
+                    eligibility) VALUES($1,$2,to_timestamp($3),'r',
+                    '{}'::jsonb,'b',$4,$5::jsonb,
+                    '{"age_from_observation_s": 10.0}'::jsonb,'ELIGIBLE')""",
+                    did, pid, _T0, hv, inv)
+            # a fourth: fresh enough for the progress feed, stale for odds
+            await c.execute(
+                """INSERT INTO rn1x_decisions(decision_id,position_id,
+                decision_ts,selection_reason,alternatives,ev_basis,
+                hold_value_usd,resulting_inventory,input_freshness,
+                eligibility) VALUES('stale',$1,to_timestamp($2),'r',
+                '{}'::jsonb,'b',12.0,'{"residual_qty": 100.0}'::jsonb,
+                '{"age_from_observation_s": 95.0}'::jsonb,'ELIGIBLE')""",
+                pid, _T0)
+            # THE FROZEN BENCHMARK, same table, other policy, residual
+            # moved: it has no hold value to mis-size and must be left be.
+            bpid = store.position_id(_EXP, _BENCH, 992002)
+            await c.execute(
+                """INSERT INTO rn1x_positions(position_id,experiment_id,
+                policy,source_trade_id,source_account,condition_id,
+                outcome_index,entry_kind,entry_kind_why,seed_qty,seed_price,
+                seed_basis_usd,source_ts,detected_ts,decision_ts,
+                available_at,decision_basis,decision_lag_s)
+                VALUES($1,$2,$3,992002,'RN1',$4,0,'NEW','seeded',100,0.57,
+                57.0,to_timestamp($5),to_timestamp($5),to_timestamp($5),
+                to_timestamp($5),'RUNTIME_WALL_CLOCK',0)""",
+                bpid, _EXP, _BENCH, cond, _T0)
+            await c.execute(
+                """INSERT INTO rn1x_decisions(decision_id,position_id,
+                decision_ts,selection_reason,alternatives,ev_basis,
+                hold_value_usd,resulting_inventory,input_freshness,
+                eligibility) VALUES('bench',$1,to_timestamp($2),'r',
+                '{}'::jsonb,'b',13.0,'{"residual_qty": 80.0}'::jsonb,
+                '{"age_from_observation_s": 95.0}'::jsonb,'ELIGIBLE')""",
+                bpid, _T0)
+            async with c.transaction():
+                await c.execute(sql)
+            bench = await c.fetchval(
+                "SELECT eligibility FROM rn1x_decisions "
+                "WHERE decision_id = 'bench'")
+            out = {r["decision_id"]: dict(r) for r in await c.fetch(
+                "SELECT decision_id, eligibility, ineligible_reason "
+                "FROM rn1x_decisions WHERE position_id = $1", pid)}
+            return out, bench
+        finally:
+            await c.close()
+
+    out, bench = asyncio.run(run())
+
+    assert bench == "ELIGIBLE", (
+        "the frozen benchmark never called bettor_hold_value and has no "
+        "hold value to mis-size; containing it would be over-reach")
+    assert out["untouched"]["eligibility"] == "ELIGIBLE", (
+        "a decision taken while the residual still equalled the seed was "
+        "valued on the right quantity; holding it would be over-reach")
+    assert out["moved"]["eligibility"] == \
+        "INELIGIBLE_HOLD_VALUED_ON_THE_SEED_NOT_THE_RESIDUAL"
+    assert out["silent"]["eligibility"] == \
+        "INELIGIBLE_HOLD_VALUED_ON_THE_SEED_NOT_THE_RESIDUAL"
+    assert out["stale"]["eligibility"] == \
+        "INELIGIBLE_PROBABILITY_STALE_UNDER_THE_ODDS_RULE"
+    for k in ("moved", "silent", "stale"):
+        assert out[k]["ineligible_reason"], k
+        # the record is HELD, not deleted: the row is still there to read
+        assert out[k]["eligibility"].startswith("INELIGIBLE_")

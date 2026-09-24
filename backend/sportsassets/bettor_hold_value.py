@@ -67,31 +67,58 @@ VERSION = "BETTOR_HOLD_VALUE_V1"
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 
-# ── FRESHNESS IS BOUNDED BY THE EVENT'S STATE, NOT BY A COMMENT ──────
+# ── FRESHNESS: THE ODDS SOURCE'S OWN RULE, NOT THE PROGRESS FEED'S ───
 #
-# THE DEFECT THIS REPLACES, found by independent inspection of deployed
-# 5b19bc5. A single `MAX_PROBABILITY_AGE_S = 1800.0` was justified in its
-# own comment by PRE-MATCH line stability -- and the function enforced no
-# pre-match restriction whatsoever. A 29-minute-old moneyline was
-# therefore admissible during play, when a goal can move the true
-# probability by tens of points inside a minute. A comment about pre-match
-# stability cannot authorise a 30-minute-old probability in play.
+# TWO CORRECTIONS, BOTH MINE.
 #
-# THE BOUNDS ARE NOW THE REPOSITORY'S OWN, keyed to a DECLARED event
-# state, and the absence of a state is not permission:
+# FIRST: a single `MAX_PROBABILITY_AGE_S = 1800.0` was justified in its
+# own comment by PRE-MATCH line stability while the function enforced no
+# pre-match restriction, so a half-hour-old moneyline was admissible
+# during play.
 #
-#   IN_PLAY            120 s -- bettor_progress_feed.MAX_AGE_S, the bound
-#                      this stack already applies to every in-play
-#                      observation before it may license an exit
-#   PRE_MATCH          1800 s, and ONLY when the caller supplies evidence
-#                      that the event has not started
-#   BREAK / SUSPENDED  120 s. Play is stopped but the market is not: the
-#                      next restart reprices it, so this is not pre-match
-#   UNKNOWN            120 s. FAIL-CLOSED. An event whose state nobody
-#                      established is treated as the strictest case,
-#                      because the alternative is the defect above
-#   FINAL / ABANDONED  refused outright -- a settled or void event is not
-#                      a hold to value from a bookmaker's line
+# SECOND, AND THE ONE THAT MATTERS MORE: I then replaced it with 120 s
+# taken from `bettor_progress_feed.MAX_AGE_S` and wrote that a
+# probability "must not be staler than the progress reading beside it".
+# That was wrong, and the reasoning was wrong. THOSE TWO BOUNDS MEASURE
+# DIFFERENT INPUTS. 120 s bounds a PERIOD-OR-CLOCK OBSERVATION -- a
+# discrete state that changes a handful of times per match. A PRICE is
+# not that: it moves continuously, and this repository already has a
+# hard rule for exactly this input:
+#
+#     bettor_pinnacle_devig.MAX_QUOTE_AGE_S = 30.0
+#     "The engine's own hard rule is 30 s and it is adopted unchanged:
+#      no order without a quote fresher than max_age_s."
+#
+# That is THE APPLICABLE PROBABILITY FRESHNESS REQUIREMENT, it is the
+# rule the valuation path already enforces before it will price a
+# contract at all, and a hold valuation reading the same quote may not
+# be laxer than the entry decision reading it. So it is adopted here
+# unchanged, and the progress feed's threshold is NOT cited as evidence
+# about odds freshness.
+from . import bettor_pinnacle_devig as _devig
+
+#: THE BOUND, imported rather than restated so the two cannot drift.
+MAX_PROBABILITY_AGE_S = _devig.MAX_QUOTE_AGE_S          # 30.0
+
+FRESHNESS_SOURCE = {
+    "value_s": MAX_PROBABILITY_AGE_S,
+    "from": "bettor_pinnacle_devig.MAX_QUOTE_AGE_S",
+    "measures": "an ODDS QUOTE, which moves continuously",
+    "adopted": "unchanged, as the valuation path already enforces it",
+    "not_from": ("bettor_progress_feed.MAX_AGE_S (120 s), which bounds a "
+                 "PERIOD OR CLOCK OBSERVATION. A discrete state that "
+                 "changes a few times a match and a continuously moving "
+                 "price are different inputs, and the progress "
+                 "threshold establishes nothing about odds freshness"),
+}
+
+# ── EVENT STATE: WHICH WAY IT MAY MOVE THE BOUND ─────────────────────
+#
+# Event state may make the bound STRICTER. It may not make it laxer
+# except under an explicitly versioned experiment, declared below and
+# OFF unless a caller names it -- because relaxing the odds rule is a
+# change to an established trading requirement, not a configuration
+# detail, and the last time it was relaxed it was relaxed by a comment.
 EVENT_IN_PLAY = "IN_PLAY"
 EVENT_PRE_MATCH = "PRE_MATCH"
 EVENT_BREAK = "BREAK"
@@ -100,60 +127,106 @@ EVENT_FINAL = "FINAL"
 EVENT_ABANDONED = "ABANDONED"
 EVENT_UNKNOWN = "UNKNOWN"
 
-#: The strict bound, and the default. Equal to
-#: `bettor_progress_feed.MAX_AGE_S` and `bettor_rn1x_policy
-#: .PROGRESS_MAX_AGE_S`, deliberately: this is the same question those
-#: two already answer for an in-play observation, and a probability is
-#: not allowed to be staler than the progress reading beside it.
-MAX_PROBABILITY_AGE_S = 120.0
-
-#: Available ONLY on a declared, evidenced PRE_MATCH state.
-PRE_MATCH_MAX_AGE_S = 1800.0
-
+#: Every admissible state gets the established bound. There is no state
+#: under which a staler quote is acceptable by default.
 AGE_BOUND_BY_STATE = {
     EVENT_IN_PLAY: MAX_PROBABILITY_AGE_S,
     EVENT_BREAK: MAX_PROBABILITY_AGE_S,
     EVENT_SUSPENDED: MAX_PROBABILITY_AGE_S,
     EVENT_UNKNOWN: MAX_PROBABILITY_AGE_S,
-    EVENT_PRE_MATCH: PRE_MATCH_MAX_AGE_S,
+    EVENT_PRE_MATCH: MAX_PROBABILITY_AGE_S,
 }
 
 REFUSED_STATES = (EVENT_FINAL, EVENT_ABANDONED)
 
 R_EVENT_SETTLED = "EVENT_IS_FINAL_OR_ABANDONED"
 
+# ── THE RELAXATION, SEPARATELY VERSIONED AND OFF BY DEFAULT ──────────
+#
+# A pre-match moneyline genuinely does move more slowly than an in-play
+# one, so a longer window MIGHT be defensible there. What is not
+# defensible is asserting it: no measurement in this repository
+# establishes how far a Pinnacle pre-match line drifts in thirty
+# minutes on the markets actually traded. So the relaxation exists as a
+# NAMED EXPERIMENT a caller must ask for by id, every decision taken
+# under it says so on the row, and it changes nothing unless asked.
+RELAXATION_ID = "PRE_MATCH_QUOTE_AGE_RELAXATION_V1_EXPERIMENTAL"
+RELAXATION_MAX_AGE_S = 1800.0
+
+RELAXATION = {
+    "id": RELAXATION_ID,
+    "status": "EXPERIMENTAL, OFF BY DEFAULT",
+    "applies_to": "a DECLARED PRE_MATCH event state only",
+    "bound_s": RELAXATION_MAX_AGE_S,
+    "replaces": "%s s from %s" % (MAX_PROBABILITY_AGE_S,
+                                 FRESHNESS_SOURCE["from"]),
+    "rationale": ("a pre-match line moves more slowly than an in-play "
+                  "one. That is a plausible claim about price dynamics, "
+                  "not a measured one"),
+    "is_not_established_by": (
+        "any measurement in this repository. No drift study exists for "
+        "Pinnacle pre-match lines on these markets, so this widens an "
+        "established trading rule on an argument alone"),
+    "what_would_establish_it": (
+        "observed pre-match quote drift over 30-minute windows on the "
+        "contracts actually traded, against the settlement outcomes"),
+    "every_decision_under_it_is_marked": True,
+}
+
 FRESHNESS_CONTRACT = {
-    "default_bound_s": MAX_PROBABILITY_AGE_S,
-    "pre_match_bound_s": PRE_MATCH_MAX_AGE_S,
+    "bound_s": MAX_PROBABILITY_AGE_S,
+    "source": FRESHNESS_SOURCE,
     "by_state": dict(AGE_BOUND_BY_STATE),
     "refused_states": list(REFUSED_STATES),
-    "unknown_is_strict": (
-        "an event whose state nobody established gets the IN_PLAY bound. "
-        "Absence of evidence is not evidence of pre-match"),
-    "pre_match_needs_evidence": (
-        "the longer bound applies only when the caller DECLARES "
-        "PRE_MATCH. It is never inferred from a comment, a kickoff "
-        "estimate or the quote's own age"),
+    "state_may_only_tighten": (
+        "event state never widens the bound. The one relaxation is a "
+        "named experiment a caller must request by id"),
+    "relaxation": RELAXATION,
     "aged_against": "the BOOKMAKER'S observation stamp, never our receipt",
     "rechecked": "on EVERY decision, against that decision's own clock",
 }
 
 
-def bound_for(event_state=None) -> dict:
-    """The freshness bound this event state permits, or a refusal."""
+def bound_for(event_state=None, *, relaxation=None) -> dict:
+    """The freshness bound this state permits, or a refusal.
+
+    `relaxation` must equal RELAXATION_ID to widen the bound, and only a
+    declared PRE_MATCH state accepts it. Anything else is ignored and
+    named, rather than silently honoured.
+    """
     st = str(event_state or EVENT_UNKNOWN).strip().upper() or EVENT_UNKNOWN
     if st in REFUSED_STATES:
         return {"ok": False, "state": st, "refusal": R_EVENT_SETTLED,
-                "bound_s": None,
+                "bound_s": None, "relaxation_applied": None,
                 "why": ("the event is %s. A bookmaker's pre-settlement "
                         "line does not value a hold on a decided or void "
                         "event" % st)}
     if st not in AGE_BOUND_BY_STATE:
         st = EVENT_UNKNOWN
-    return {"ok": True, "state": st, "bound_s": AGE_BOUND_BY_STATE[st],
-            "is_the_strict_bound": AGE_BOUND_BY_STATE[st] ==
-                                   MAX_PROBABILITY_AGE_S,
-            "why": ("%s permits %.0f s" % (st, AGE_BOUND_BY_STATE[st]))}
+    out = {"ok": True, "state": st,
+           "bound_s": AGE_BOUND_BY_STATE[st],
+           "bound_source": FRESHNESS_SOURCE["from"],
+           "relaxation_applied": None}
+    if relaxation:
+        if str(relaxation) != RELAXATION_ID:
+            out["relaxation_refused"] = (
+                "%r is not a declared relaxation. The only one is %s"
+                % (relaxation, RELAXATION_ID))
+        elif st != EVENT_PRE_MATCH:
+            out["relaxation_refused"] = (
+                "%s applies only to a DECLARED PRE_MATCH state, and this "
+                "event is %s" % (RELAXATION_ID, st))
+        else:
+            out["bound_s"] = RELAXATION_MAX_AGE_S
+            out["relaxation_applied"] = RELAXATION_ID
+            out["relaxation"] = RELAXATION
+    out["is_the_established_bound"] = (
+        out["bound_s"] == MAX_PROBABILITY_AGE_S)
+    out["why"] = ("%s permits %.0f s%s"
+                  % (st, out["bound_s"],
+                     "" if out["relaxation_applied"] is None
+                     else " under %s" % RELAXATION_ID))
+    return out
 
 
 #: A probability this close to certainty is reported with the bound
@@ -261,7 +334,8 @@ def _epoch(v):
 
 
 def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
-            payout_event_held, event_state=None, max_age_s=None) -> dict:
+            payout_event_held, event_state=None, max_age_s=None,
+            relaxation=None) -> dict:
     """The value of holding `qty` to settlement, or why it is unknown.
 
     `payout_event_held` is the event OUR position pays on, established
@@ -273,7 +347,7 @@ def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
     # THE BOUND COMES FROM THE EVENT STATE, and an explicit `max_age_s`
     # may only make it STRICTER. A caller cannot widen the window by
     # passing a bigger number: that is how 1800 s reached a live market.
-    bnd = bound_for(event_state)
+    bnd = bound_for(event_state, relaxation=relaxation)
     limit = bnd.get("bound_s")
     if max_age_s is not None and limit is not None:
         limit = min(float(limit), float(max_age_s))
@@ -286,6 +360,13 @@ def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
            "freshness_contract": FRESHNESS_CONTRACT,
            "event_state": bnd.get("state"),
            "age_bound_s": limit,
+           "age_bound_source": bnd.get("bound_source"),
+           # EVERY DECISION UNDER THE EXPERIMENT SAYS SO, on the record
+           # and therefore on the persisted row.
+           "freshness_relaxation": bnd.get("relaxation_applied"),
+           "freshness_relaxation_refused": bnd.get("relaxation_refused"),
+           "bound_is_the_established_one":
+               bool(bnd.get("is_the_established_bound")),
            "asked_at": float(now)}
     if not bnd["ok"]:
         out.update(refusal=bnd["refusal"], why=bnd["why"])
@@ -377,7 +458,10 @@ def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
         "age_from_receipt_s": age_rec,
         "bound_s": float(limit),
         "bound_from_event_state": bnd.get("state"),
-        "bound_is_the_strict_one": bool(bnd.get("is_the_strict_bound")),
+        "bound_source": bnd.get("bound_source"),
+        "bound_is_the_established_one":
+            bool(bnd.get("is_the_established_bound")),
+        "relaxation_applied": bnd.get("relaxation_applied"),
         "aged_against": "OBSERVATION",
         "why": ("ageing against receipt makes a stale quote look fresh "
                 "the moment we happen to fetch it. The bound is applied "

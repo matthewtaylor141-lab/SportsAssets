@@ -134,10 +134,70 @@ order, so their values must agree exactly. The shipped pair invented a
 spread between `DIRECT_EXIT` and `TAKE_COMPLEMENT` and the ranking picked
 winners on it.
 
-**Freshness** is now 120 s — `bettor_progress_feed.MAX_AGE_S`, the bound
-this stack already applies to in-play observations — for in-play, break,
-suspended **and unknown**; 1,800 s only on a declared `PRE_MATCH`;
-`FINAL`/`ABANDONED` refused outright; and a caller may only tighten it.
+### The fifth defect: HOLD valued on the seed, ranked against the residual
+
+Independent inspection of deployed `12260cb` found the four repairs sound
+and a **fifth** defect, in the **ordering**. `manage_open_positions`
+computed the hold value from `pos["seed_qty"]`/`pos["seed_price"]`
+*before* `manage_open_position` reloaded the portfolio and applied newly
+admitted fills; `decide_challenger` then ranked the actual residual
+against that seed-sized number. After a partial exit, HOLD carried the
+value of contracts already sold.
+
+The reported case, before fees — seed 100 @ .57, residual 80, p .70,
+executable exit .72 on all 80:
+
+```
+                        HOLD        DIRECT_EXIT     selected
+shipped 12260cb        13.00           12.00          HOLD      wrong
+corrected              10.40           12.00          DIRECT_EXIT
+```
+
+The selection itself was wrong, not merely the reported number. The
+earlier .85 example never exposed it because .85 beats both hold values.
+
+Fixed in two places, both required:
+
+- **the ordering** — the worker no longer builds a hold value at all
+  (`_ev_at` is deleted, not corrected). `decide_challenger` receives the
+  probability **row** and values holding *after* the reload and the newly
+  admitted fills, against the residual `q` and basis it is about to rank,
+  at that decision's own clock — so freshness is re-checked there too. The
+  decision records `hold_valued_on: {qty, basis_per_contract, at, after:
+  RELOAD_AND_NEWLY_ADMITTED_FILLS}`.
+- **the structure** — `rank_with_hold` now *derives* HOLD's total from the
+  inventory being ranked (`p × q − basis`) instead of reading
+  `ev_hold_usd` off the record, and when a supplied record disagrees it
+  reports `quantity_mismatch` naming both quantities. A record built on
+  another quantity can no longer decide anything, wherever it came from.
+
+Realized P&L stays out of every alternative: the 20 already sold are
+realized and sunk, reported separately on `resulting_inventory`
+(`realized_pnl_usd`, `invariant_ok`), and no candidate is sized above the
+residual.
+
+### Freshness: the odds source's own rule, not the progress feed's
+
+The 120 s in `12260cb` was taken from `bettor_progress_feed.MAX_AGE_S`,
+which bounds a **period or clock observation**. A probability is an
+**odds quote**, and the applicable rule is the odds engine's own
+`bettor_pinnacle_devig.MAX_QUOTE_AGE_S = 30 s` ("no order without a quote
+fresher than `max_age_s`", adopted unchanged). These measure different
+inputs; the progress feed's threshold establishes **nothing** about odds
+freshness, and describing it as if it did was wrong.
+
+So the bound is **30 s** in every admissible state — in-play, break,
+suspended and unknown, and pre-match too — aged from the bookmaker's own
+`observed_at`, never from our receipt. `FINAL`/`ABANDONED` are refused
+outright, and a caller may only tighten.
+
+The 1,800 s pre-match allowance survives only as a **separately versioned
+experiment**, `PRE_MATCH_QUOTE_AGE_RELAXATION_V1_EXPERIMENTAL`, **off
+unless named by id**, and applied only on a *declared* `PRE_MATCH`: named
+during play it is refused and recorded as `freshness_relaxation_refused`.
+It is a labelled experimental change to the established rule, not the
+rule. `FRESHNESS_SOURCE` in `bettor_hold_value` carries the citation and
+the `not_from` disclaimer in the code itself.
 
 **Three further bugs the real path exposed**, none reachable by a unit
 test on the selector: the continuing record carried no `policy`, so every
@@ -145,48 +205,73 @@ management decision landed on a fabricated second position row;
 `created_at_runtime` used one run-level floor, so a reloaded order was
 stamped with the current cycle's clock and migration 104 correctly refused
 its own fills; and order ids were double-prefixed on reload, minting a
-second order row and breaking one-active-order **in the store**. Migration
-110 holds every challenger decision taken under the broken connection,
-rows and refusals preserved; the frozen benchmark never used this builder
-and is untouched.
+second order row and breaking one-active-order **in the store**.
+
+**Containment, held not deleted.** Migration 110 holds every challenger
+decision taken under `5b19bc5`. Migration 111 holds, from the `12260cb` /
+`8272872` rows, exactly the two classes the fifth defect and the wrong
+bound could have changed: a decision whose residual differs from its seed
+(or records no residual), and a decision whose probability was older than
+30 s. A decision taken while the residual still equalled the seed was
+valued on the right quantity and stays eligible — containing it would be
+over-reach, and a test asserts that partition row by row. The frozen
+benchmark never called `bettor_hold_value`, never read the exit ladder and
+never ran through `manage_open_positions`; it is untouched, and that too
+is asserted.
 
 ## 4 · One traceable example
 
-Verified end to end against real Postgres (migrations 100→109), through
-the real writer and the real store:
+**The reported case itself**, verified end to end against real Postgres
+(migrations 100→111) through the real worker → reload → fills →
+valuation → ranking → store path. A quote observed 10 s before each
+decision, inside the 30 s odds bound:
 
 ```
 position  RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1
-          :SHADOW_CHALLENGER_HOLD_RANKED_V1:900001
+          :SHADOW_CHALLENGER_HOLD_RANKED_V1:993001
 seed      100 contracts @ 0.57  (ASSIGNED at RN1's own fill price)
+p         0.70 on "Chicago Cubs", the event this position pays on
 
-D0000  policy_version   BETTOR_MGMT_LIFECYCLE_CHALLENGER_V1
-       governing_rule   SHADOW_CHALLENGER_HOLD_RANKED_V1
-       hold_value_usd   13.00   basis EXTERNAL_LABELLED_PROBABILITY
-       payout_identity  row pays on "Chicago Cubs"; probability event
-                        "Chicago Cubs"; complement NOT applied
-       freshness        100 s from the bookmaker's own observation
-       alternatives     REDUCE 16.272 | DIRECT_EXIT 15.760 | HOLD 13.000
-                        + TAKE_COMPLEMENT
-       refused          HOLD_TO_SETTLEMENT (settlement prose),
-                        POST_COMPLEMENT (P_FILL), MERGE (not applicable)
-       SELECTED         REDUCE × 70      ← levels 1 and 2 beat holding at
-                        0.70; level 3 at 0.60 does not, and that is where
-                        the quantity stops
-       venue            net_effect REDUCE, creates_second_leg FALSE,
-                        merge NOT_APPLICABLE
-       operating_state  ORDER_WORKING
-       reconciles       TRUE
+cycle 1  t+30  book bid .90 × 20
+D0000  hold_value_usd   13.00  on qty 100      ← residual IS the seed here
+       freshness        age 10.0 s  bound 30.0 s
+                        bound_source bettor_pinnacle_devig.MAX_QUOTE_AGE_S
+       alternatives     DIRECT_EXIT 16.87 × 20 | REDUCE 16.87 × 20
+                        | TAKE_COMPLEMENT 16.87 × 20 | HOLD 13.00 × 100
+       SELECTED         DIRECT_EXIT × 20   ← .90 is available on 20 only
+       operating_state  ORDER_WORKING       reconciles TRUE
 
-fill   10 @ 0.80 (partial, queue share 0.25 of an observed print)
+print   80 @ 0.91 crosses the resting sell → fill 20 @ 0.91
+        (real trades row, evidence_id trade:993500)
 
-D0001  re-decided on the REMAINDER; the working order no longer matches
-       → CANCEL_THEN_REPLACE, operating_state WAIT_CANCEL_ACK
-       one active order throughout
+cycle 2  t+60  book bid .72 × 80          ← THE REPORTED CASE
+D0001  hold_value_usd   10.40  on qty 80       ← NOT the seed-sized 13.00
+       hold_input       qty_valued 80, basis_per_contract_valued 0.57,
+                        ev_hold_basis DERIVED_FROM_THE_INVENTORY_BEING_RANKED,
+                        quantity_mismatch None
+       hold_valued_on   after RELOAD_AND_NEWLY_ADMITTED_FILLS
+       alternatives     DIRECT_EXIT 10.88 × 80 | TAKE_COMPLEMENT 10.88 × 80
+                        | HOLD 10.40 × 80
+       SELECTED         DIRECT_EXIT × 80
+                        ← under the shipped seed-sized HOLD of 13.00 this
+                          same book selected HOLD. 10.40 is the value of
+                          the 80 actually held; 12.00 gross / 10.88 net is
+                          what exiting them is worth.
+       residual         80      realized 6.69      reconciles TRUE
 
-accounting  realized 2.22  residual 90  invariant OK
-persisted   1 position, 2 decisions, 1 order, 1 fill
+orders  O-...-001 SELL 20 @ .90 FILLED · O-...-002 SELL 80 @ .72 RESTING
+        one active order throughout; 1 position row, 2 decisions, 1 fill
+
+restart residual 80.0000  realized 6.6900  open [O-...-002]
+        two independent rebuilds identical · invariant OK
+        replayed 2 orders, 1 fill
 ```
+
+Every candidate in cycle 2 is sized to the 80 actually held; the 20 sold
+are realized (6.69) and reported on `resulting_inventory`, in no
+candidate's value. Candidate values are **portfolio** values net of fees —
+cycle 1's 16.87 is 20 sold at .90 *plus* the 80 kept valued at 0.70 —
+which is why they are comparable to HOLD at all.
 
 ## 4a · Production evidence, separated by what it establishes
 
@@ -252,7 +337,9 @@ restart recovery: two independent rebuilds from the ledger →
    exposure** — matching the condition is no longer sufficient, by
    design. Until both coincide the lane reports its state and writes
    nothing, and that refusal is stored. Every challenger decision taken
-   before this correction is **held** by migration 110.
+   before these corrections is **held** — migration 110 for the four
+   `5b19bc5` defects, migration 111 for the seed-sized HOLD and the
+   wrong freshness bound.
 2. **The venue book is not readable from every context.** When it is
    not, `EV_HOLD` may still be present — HOLD becomes the only priced
    action and every exit is refused `NO_BID`. `book_available` is carried
@@ -289,3 +376,20 @@ restart recovery: two independent rebuilds from the ledger →
    our order would have filled.
 10. **Open inventory is reported at cost, never marked.** No
     contemporaneous book is retained for those instants.
+11. **The 30 s odds bound is adopted, not derived.** It is the odds
+    engine's own declared rule, and nothing here establishes that 30 s
+    is the right bound for *pricing a hold* rather than for placing an
+    entry — only that the applicable established rule is now the one
+    being applied, and that the progress feed's 120 s is not evidence
+    about odds at all. The pre-match relaxation to 1,800 s is a
+    **separately versioned experiment**
+    (`PRE_MATCH_QUOTE_AGE_RELAXATION_V1_EXPERIMENTAL`), off unless named
+    by id, and it is not calibrated either; it is a labelled hypothesis
+    that a pre-match moneyline moves slowly enough, with no measurement
+    behind it yet.
+12. **Whether a stale-bounded decision changed anything is not
+    measured.** Migration 111 holds the rows the fifth defect *could*
+    have changed, on the exact criterion that its HOLD was valued on a
+    quantity other than the residual. It does not establish how many of
+    those selections would in fact have differed; that would need each
+    row's contemporaneous ladder, which is not retained.

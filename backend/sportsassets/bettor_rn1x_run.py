@@ -458,7 +458,16 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
             ci = {}
         return m.decide_challenger(
             at=at, decision_id=decision_id,
-            ev_hold=ci.get("ev_hold"),
+            # SAME REASON ON THE ENTRY WALK: fills land between
+            # decisions there too, so the residual moves and a hold
+            # value computed once for the whole walk would be stale in
+            # quantity as well as in age.
+            probability_row=ci.get("probability_row"),
+            event_state=ci.get("event_state"),
+            payout_event_held=ci.get("payout_event"),
+            freshness_relaxation=ci.get("freshness_relaxation"),
+            ev_hold=(None if ci.get("probability_row")
+                     else ci.get("ev_hold")),
             bid=ci.get("bid"), bid_size=ci.get("bid_size"),
             complement_ask=ci.get("complement_ask"),
             complement_ask_size=ci.get("complement_ask_size"),
@@ -661,7 +670,15 @@ def manage_open_position(*, position, orders=(), fills=(), prints=(),
     d = m.decide_challenger(
         at=float(now),
         decision_id="mgmt:%s:%d" % (position["position_id"], int(now)),
-        ev_hold=ci.get("ev_hold"),
+        # THE ROW, NOT A PRE-COMPUTED VALUE. The reload and the fills
+        # above have already moved the inventory; handing over a hold
+        # value computed before them is what overstated HOLD after a
+        # partial exit.
+        probability_row=ci.get("probability_row"),
+        event_state=ci.get("event_state"),
+        payout_event_held=ci.get("payout_event"),
+        freshness_relaxation=ci.get("freshness_relaxation"),
+        ev_hold=(None if ci.get("probability_row") else ci.get("ev_hold")),
         bid=ci.get("bid"), bid_size=ci.get("bid_size"),
         complement_ask=ci.get("complement_ask"),
         complement_ask_size=ci.get("complement_ask_size"),

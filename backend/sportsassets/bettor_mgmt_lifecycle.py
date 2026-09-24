@@ -344,7 +344,10 @@ class Managed:
                           venue=None, us_market_slug=None,
                           held_is_long=True, settlement_semantics=None,
                           decision_id=None, inputs=None,
-                          last_price=None, seconds_open=None) -> dict:
+                          last_price=None, seconds_open=None,
+                          probability_row=None, event_state=None,
+                          payout_event_held=None,
+                          freshness_relaxation=None) -> dict:
         """Rank every available action INCLUDING hold, then act or hold.
 
         Returns the whole decision -- inputs and their freshness, the
@@ -380,6 +383,38 @@ class Managed:
         basis_per = (self.pf._leg(self.condition_id, self.leg)["cost"]
                      / max(self.held(self.leg), 1e-12))
         rec["basis_per_contract"] = basis_per
+
+        # ── HOLD IS VALUED HERE, ON THE INVENTORY WE ACTUALLY HOLD ───
+        #
+        # THE ORDERING DEFECT THIS CLOSES (found in 12260cb). The
+        # continuing worker built EV_HOLD from the position's SEED
+        # quantity and price BEFORE reloading the portfolio and applying
+        # new fills, and the ranking then scored the actual residual
+        # against that seed-sized number. After a partial exit HOLD was
+        # overstated by the value of the contracts already sold.
+        #
+        # `decide_challenger` is the only place that knows the residual
+        # and the average-cost basis AT THIS DECISION, so it is the only
+        # correct place to value holding them. Callers now hand in the
+        # probability ROW; the valuation happens after the reload and
+        # after the fills, against `q` and `basis_per` above, at `at`.
+        # Freshness is therefore also re-checked against this decision's
+        # own clock.
+        if probability_row is not None:
+            from . import bettor_hold_value as _hv
+            ev_hold = _hv.ev_hold(
+                qty=q, basis_per_contract=basis_per,
+                probability_row=probability_row, now=float(at),
+                payout_event_held=payout_event_held,
+                event_state=event_state,
+                relaxation=freshness_relaxation)
+            rec["hold_valued_on"] = {
+                "qty": q, "basis_per_contract": basis_per,
+                "at": float(at),
+                "after": "RELOAD_AND_NEWLY_ADMITTED_FILLS",
+                "why": ("every alternative in this decision is scored "
+                        "over the same inventory, at the same instant"),
+            }
 
         # THE FALLBACK IS COMPUTED, NOT TAKEN ON TRUST. It is only
         # consulted when EV_HOLD is NOT_IDENTIFIED, and it runs on
