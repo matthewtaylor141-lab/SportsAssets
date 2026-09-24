@@ -828,7 +828,17 @@ def test_e23_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     mig = (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "cancel_fill" not in mig and "disagree_fill" not in mig
     files = sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))
-    assert files[-1] == "064_run833_stream_channels.sql"  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
+    # THIS LANE ADDS NO MIGRATION -- which is what the assertion here meant.
+    # It used to say `files[-1] == "064_run833_stream_channels.sql"`, pinning
+    # the GLOBALLY newest migration, and that became false the first time any
+    # unrelated lane added one: 065 onward have been present for a long time,
+    # so the pin was asserting something about other people's work and had
+    # been red since. The lane's own invariant is that NO migration mentions
+    # its concepts, and that is checked directly.
+    assert "064_run833_stream_channels.sql" in files
+    for f in (ROOT / "backend" / "migrations").glob("*.sql"):
+        body = f.read_text()
+        assert "cancel_fill" not in body and "disagree_fill" not in body, f.name
     # no knob, no rail of the lane's own: E22's wait alone
     rsrc = inspect.getsource(rules)
     assert "CANCEL_FILL" not in rsrc and "DISAGREE_FILL" not in rsrc and "E23" not in rsrc
