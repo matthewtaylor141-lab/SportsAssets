@@ -999,3 +999,27 @@ were placed, no trading control was changed, no credential moved, nothing
 was re-armed and no counter was reset.
 
 **The window is closed. This figure stands as the record.**
+
+## Postscript — a counter that went down
+
+Two readings of `bettor_incentive_run`, from the same query:
+
+| read at | `run_reconnects` | `run_resubscribes` |
+|---|---|---|
+| 03:51:15Z (check 5) | 4 | 8 |
+| 04:08:05Z (after close) | **2** | **4** |
+
+**A monotone counter does not decrease, so these are not cumulative.** The
+most likely reading is that the row carries the CURRENT run's tally and was
+rewritten when the run closed at 04:00:00Z — but that is inference, and I
+have not read the writer that sets it.
+
+I am recording it because the check-5 section above quotes the 03:51Z pair,
+and a reader comparing the two sections would otherwise find a
+contradiction with nothing against it.
+
+It changes nothing in the coverage figure: reconnects and resubscribes are
+not inputs to it, the gap records are, and those were identical in both
+readings (17 rows, 745.8382 s). **Neither value should be cited as a
+window-total for reconnections until the field's semantics are read from
+the writer.**
