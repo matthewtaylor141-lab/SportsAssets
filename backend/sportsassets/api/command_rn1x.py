@@ -266,6 +266,20 @@ async def _writer_ownership_status(pool) -> dict:
                "ownership among the four loops, not a guarantee about any "
                "other process"),
            "expected": {str(k): v for k, v in WRITER_LOCKS.items()}}
+    # THE COST OF HOLDING THE LOCK, stated where the lock is reported. A
+    # session advisory lock has to be held on a connection for the loop's
+    # life, so four loops occupy four of this pool's ten slots. That is a
+    # real consequence of this design and the place to notice it is here,
+    # next to the ownership it buys: `size == max` with `idle == 0` is a
+    # saturated pool, and a handler waiting on a slot looks like a slow
+    # database rather than like this.
+    try:
+        from .. import db as _db
+
+        out["pool"] = _db.pool_stats()
+        out["pool_slots_held_by_locks"] = len(WRITER_LOCKS)
+    except Exception:                                          # noqa: BLE001
+        out["pool"] = None
     try:
         rows = await pool.fetch(WRITER_LOCK_SQL)
     except Exception as exc:                                   # noqa: BLE001
