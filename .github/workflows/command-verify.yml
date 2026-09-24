@@ -880,6 +880,21 @@ jobs:
             echo "::error::the input-chain read answered $code"; FAIL=1
           fi
           jq -r '"inputs_complete\t" + ((.inputs_complete // false)|tostring),
+                 "market\t"          + ((.chain[0].outcome // "-")|tostring),
+                 "entry_lane_rows\t" + ((.entry_lane_valuations.rows // 0)|tostring)
+                                      + " priced=" + ((.entry_lane_valuations.priced // 0)|tostring)
+                                      + " eligible=" + ((.entry_lane_valuations.eligible // 0)|tostring)
+                                      + " newest_age_s=" + ((.entry_lane_valuations.newest_age_s // "-")|tostring),
+                 "cadence_vs_rule\t" + ((.entry_lane_cadence_s // "-")|tostring)
+                                      + " s writer vs " + ((.odds_rule_s // "-")|tostring) + " s rule",
+                 ((.decision_census // [])[]
+                   | "  census " + ((.n)|tostring) + " decisions  priced="
+                     + ((.priced)|tostring) + "  basis=" + ((.ev_basis // "-")|tostring)
+                     + "  first_failing_link=" + ((.first_failing_link // "-")|tostring)),
+                 "provider_labels\t" + ((.provider_sport_labels // [])|tostring),
+                 ((.supported_open_challenger_positions // [])[]
+                   | "  supported_alt " + (.position_id[-24:]) + "  " + ((.sport)|tostring)
+                     + "  " + ((.title // "")[0:40])),
                  "residual\t"        + ((.inventory.residual_qty // "-")|tostring),
                  "payout_event\t"    + ((.payout_event // "-")|tostring),
                  "us_market_slug\t"  + ((.us_market_slug // "-")|tostring),

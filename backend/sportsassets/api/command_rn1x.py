@@ -1220,6 +1220,7 @@ async def input_chain(pool, position_id: str) -> dict:
     from .. import bettor_mgmt_lifecycle as lc
     from .. import bettor_rn1x_store as store
     from ..workers import rn1x_shadow as W
+    from ..workers.ext_pinnacle_loop import VENUE_SPORT_LABELS as EXT_LABELS
 
     pos = await pool.fetchrow(
         "SELECT position_id, policy, condition_id, outcome_index, "
@@ -1248,8 +1249,13 @@ async def input_chain(pool, position_id: str) -> dict:
         # would be a question about nothing.
         led = await store.load_position(conn, position_id)
         try:
+            # THE SAME FEE FUNCTION THE DECISION USES. A residual read
+            # with a different cost model would report an inventory the
+            # manager does not have.
+            from .. import bettor_rn1x_run as runner
             m = lc.reload_managed(position=p, orders=led["orders"],
-                                  fills=led["fills"])
+                                  fills=led["fills"],
+                                  fee_fn=runner._fee_fn())
             out["inventory"] = {"residual_qty": m.residual(),
                                 "realized_pnl_usd":
                                     m.pf.to_dict()["realized_pnl_usd"],
@@ -1264,6 +1270,57 @@ async def input_chain(pool, position_id: str) -> dict:
             outcome_index=int(p["outcome_index"]),
             odds=W.ManagedOdds(api_key=os.environ.get("EDGE_ODDS_API_KEY"),
                                calls=2))
+    # ── WHAT THE ENTRY LANE EVER WROTE FOR THIS CONDITION ────────────
+    #
+    # The pull does not need this. It is here because the diagnosis does:
+    # "no row at all" and "a row 900 s old" are different findings, and
+    # the second one is the schedule, not a missing feature.
+    vh = await pool.fetchrow(
+        "SELECT count(*) AS rows, "
+        "count(*) FILTER (WHERE probability IS NOT NULL) AS priced, "
+        "count(*) FILTER (WHERE eligibility = 'ELIGIBLE') AS eligible, "
+        "max(observed_at) AS newest_observed, max(id) AS last_id, "
+        "extract(epoch FROM now() - max(observed_at))::float8 AS newest_age_s "
+        "FROM external_valuations WHERE condition_id = $1",
+        p["condition_id"])
+    out["entry_lane_valuations"] = dict(vh) if vh is not None else None
+    out["entry_lane_cadence_s"] = 900.0
+    out["odds_rule_s"] = 30.0
+    out["why_the_table_cannot_serve_management"] = (
+        "the entry lane writes on a %.0f s cycle and the applicable odds "
+        "rule is %.0f s, so a decision reading that table is stale unless "
+        "it lands inside a %.0f s window of a %.0f s cadence"
+        % (900.0, 30.0, 30.0, 900.0))
+
+    # ── THIS POSITION'S OWN DECISION CENSUS, by cause ────────────────
+    cen = await pool.fetch(
+        "SELECT ev_basis, "
+        "count(*) AS n, "
+        "count(*) FILTER (WHERE hold_value_usd IS NOT NULL) AS priced, "
+        "coalesce(input_labels->>'first_failing_link', "
+        "         input_chain->'first_failing_link'->>'link', "
+        "         'NOT_RECORDED') AS first_failing_link "
+        "FROM rn1x_decisions WHERE position_id = $1 "
+        "GROUP BY 1, 4 ORDER BY 2 DESC", position_id)
+    out["decision_census"] = [dict(r) for r in cen]
+
+    # ── A SUPPORTED POSITION TO DEMONSTRATE ON, IF THIS ONE IS NOT ───
+    #
+    # If the held exposure is outside provider coverage, the honest next
+    # step is to demonstrate the connected manager on a position that is
+    # inside it -- and that requires knowing whether one exists rather
+    # than assuming.
+    alt = await pool.fetch(
+        "SELECT q.position_id, q.condition_id, m.sport, m.title, "
+        "q.seed_qty::float8 AS seed_qty, q.decision_ts "
+        "FROM rn1x_positions q JOIN markets m ON m.condition_id = q.condition_id "
+        "WHERE q.policy LIKE '%CHALLENGER%' AND NOT m.closed AND NOT m.resolved "
+        "AND m.sport = ANY($1::text[]) ORDER BY q.decision_ts DESC LIMIT 5",
+        sorted({lbl for labels in EXT_LABELS.values() for lbl in labels}))
+    out["supported_open_challenger_positions"] = [dict(r) for r in alt]
+    out["provider_sport_labels"] = sorted(
+        {lbl for labels in EXT_LABELS.values() for lbl in labels})
+
     out["chain"] = ci.get("chain")
     out["first_failing_link"] = ci.get("first_failing_link")
     out["inputs_complete"] = bool(ci.get("available")
