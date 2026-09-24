@@ -1,0 +1,1183 @@
+{
+ "generated_at": 1790170413.9400976,
+ "kernel_version": "BETTOR_LEARN_KERNEL_V1",
+ "metrics_version": "BETTOR_LEARN_METRICS_V1",
+ "fee_schedule": {
+  "schedule_id": "PMUS_PUBLISHED_2026_09_17",
+  "effective_from": "2026-09-17",
+  "formula": "fee = theta x contracts x price x (1 - price)",
+  "theta_taker": "0.0695",
+  "theta_maker": "-0.0125",
+  "maker_is": "REBATE (negative theta)",
+  "status": "PUBLISHED",
+  "verified_applied": false,
+  "verified_applied_requires": "matching these terms against a settled statement for THIS account",
+  "volume_tier": "NOT_ESTABLISHED",
+  "volume_tier_note": "no tier eligibility has been established, so base theta is used; assuming a discount we have not earned is the same error as assuming a rebate we have not verified",
+  "rounding": {
+   "unit": "0.01",
+   "mode": "ROUND_HALF_EVEN",
+   "taker": "CUMULATIVE_PER_ORDER",
+   "maker": "PER_FILL_INDEPENDENT"
+  },
+  "source": "https://docs.polymarket.us/fees",
+  "cancelled_orders": "incur nothing; fees occur only on execution",
+  "rounding_disagreement": "the 2026-07-01 documentation records per-fill independent rounding on BOTH sides; these terms specify a cumulative taker adjustment. Both are recorded rather than one overwriting the other, and a settled statement decides which applied to a given fill"
+ },
+ "extract": {
+  "account": "ferrariChampions2026",
+  "address": "0xfe787d2da716d60e8acff57fb87eb13cd4d10319",
+  "sample": "1 in 3 RESOLVED conditions by hashtext, all legs of each",
+  "read_at": 1790169932.460373,
+  "n": 12195,
+  "conditions": 7749
+ },
+ "frozen_curve_sha": "64c5c15211e04802669bbf3944b9d6e83ae5dcec810175e2f62782b3d5eb6417",
+ "frozen_before": "any evaluation market was scored",
+ "eval_residuals": 3100,
+ "eval_markets": 3100,
+ "by_kind": {
+  "NEVER_PAIRED": 1369,
+  "PARTLY_PAIRED": 1731
+ },
+ "residual_cost_gross": 10770942.53,
+ "residual_payout_realised": 10810764.14,
+ "spreads_swept": [
+  0.0,
+  0.005,
+  0.01,
+  0.02,
+  0.05
+ ],
+ "fills_swept": [
+  0.25,
+  0.5,
+  1.0
+ ],
+ "why_swept": "we have no contemporaneous book for these markets and P_FILL is NOT_IDENTIFIED. Both are parameters rather than assumptions, and the verdict is read off the spread alone because a positive fill probability scales a difference and cannot flip its sign.",
+ "no_stop_loss": "no policy here exits because a position is down or because Ferrari lost money. HOLD is evaluated on the same footing as every other action.",
+ "counterfactual_warning": "every exit is a trade that did not happen, at a parameter price with a parameter fill. The only realised cash flows in this table are FERRARI_HOLD_ALL's.",
+ "grid": {
+  "s=0.000,f=0.25": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10717316.09,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -93448.05,
+    "mean_per_market_diff": -30.1445,
+    "ci95_per_market": [
+     -126.4111,
+     66.1221
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 10953152.42,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 142388.28,
+    "mean_per_market_diff": 45.9317,
+    "ci95_per_market": [
+     17.9731,
+     73.8903
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11021955.53,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 211191.39,
+    "mean_per_market_diff": 68.1263,
+    "ci95_per_market": [
+     16.3936,
+     119.8589
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 10965836.01,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 155071.87,
+    "mean_per_market_diff": 50.0232,
+    "ci95_per_market": [
+     -21.057,
+     121.1034
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11056071.0,
+    "exits": 1554,
+    "exit_share": 0.5013,
+    "vs_ferrari_hold_all": 245306.86,
+    "mean_per_market_diff": 79.1312,
+    "ci95_per_market": [
+     23.8772,
+     134.3853
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.000,f=0.50": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10623868.05,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -186896.09,
+    "mean_per_market_diff": -60.2891,
+    "ci95_per_market": [
+     -252.8223,
+     132.2442
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 11095540.69,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 284776.55,
+    "mean_per_market_diff": 91.8634,
+    "ci95_per_market": [
+     35.9462,
+     147.7806
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11233146.93,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 422382.79,
+    "mean_per_market_diff": 136.2525,
+    "ci95_per_market": [
+     32.7872,
+     239.7178
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 11120907.88,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 310143.74,
+    "mean_per_market_diff": 100.0464,
+    "ci95_per_market": [
+     -42.1141,
+     242.2068
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11301377.86,
+    "exits": 1554,
+    "exit_share": 0.5013,
+    "vs_ferrari_hold_all": 490613.72,
+    "mean_per_market_diff": 158.2625,
+    "ci95_per_market": [
+     47.7544,
+     268.7706
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.000,f=1.00": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10436971.96,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -373792.18,
+    "mean_per_market_diff": -120.5781,
+    "ci95_per_market": [
+     -505.6446,
+     264.4883
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 11380317.25,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 569553.11,
+    "mean_per_market_diff": 183.7268,
+    "ci95_per_market": [
+     71.8924,
+     295.5612
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11655529.71,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 844765.57,
+    "mean_per_market_diff": 272.505,
+    "ci95_per_market": [
+     65.5744,
+     479.4357
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 11431051.62,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 620287.48,
+    "mean_per_market_diff": 200.0927,
+    "ci95_per_market": [
+     -84.2281,
+     484.4136
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11791991.58,
+    "exits": 1554,
+    "exit_share": 0.5013,
+    "vs_ferrari_hold_all": 981227.44,
+    "mean_per_market_diff": 316.525,
+    "ci95_per_market": [
+     95.5088,
+     537.5412
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.005,f=0.25": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10688805.55,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -121958.59,
+    "mean_per_market_diff": -39.3415,
+    "ci95_per_market": [
+     -135.7002,
+     57.0172
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 10947348.24,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 136584.1,
+    "mean_per_market_diff": 44.0594,
+    "ci95_per_market": [
+     16.613,
+     71.5058
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11012496.93,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 201732.79,
+    "mean_per_market_diff": 65.0751,
+    "ci95_per_market": [
+     13.6781,
+     116.4721
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 10950604.22,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 139840.08,
+    "mean_per_market_diff": 45.1097,
+    "ci95_per_market": [
+     -25.8905,
+     116.1099
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11037540.2,
+    "exits": 1529,
+    "exit_share": 0.4932,
+    "vs_ferrari_hold_all": 226776.06,
+    "mean_per_market_diff": 73.1536,
+    "ci95_per_market": [
+     18.4175,
+     127.8896
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.005,f=0.50": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10566846.95,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -243917.19,
+    "mean_per_market_diff": -78.683,
+    "ci95_per_market": [
+     -271.4003,
+     114.0344
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 11083932.33,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 273168.19,
+    "mean_per_market_diff": 88.1188,
+    "ci95_per_market": [
+     33.226,
+     143.0115
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11214229.73,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 403465.59,
+    "mean_per_market_diff": 130.1502,
+    "ci95_per_market": [
+     27.3561,
+     232.9443
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 11090444.31,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 279680.17,
+    "mean_per_market_diff": 90.2194,
+    "ci95_per_market": [
+     -51.781,
+     232.2199
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11264316.26,
+    "exits": 1529,
+    "exit_share": 0.4932,
+    "vs_ferrari_hold_all": 453552.12,
+    "mean_per_market_diff": 146.3071,
+    "ci95_per_market": [
+     36.8351,
+     255.7792
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.005,f=1.00": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10322929.76,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -487834.38,
+    "mean_per_market_diff": -157.3659,
+    "ci95_per_market": [
+     -542.8006,
+     228.0688
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 11357100.53,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 546336.39,
+    "mean_per_market_diff": 176.2375,
+    "ci95_per_market": [
+     66.4521,
+     286.023
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11617695.31,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 806931.17,
+    "mean_per_market_diff": 260.3004,
+    "ci95_per_market": [
+     54.7122,
+     465.8885
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 11370124.47,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 559360.33,
+    "mean_per_market_diff": 180.4388,
+    "ci95_per_market": [
+     -103.5621,
+     464.4397
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11717868.38,
+    "exits": 1529,
+    "exit_share": 0.4932,
+    "vs_ferrari_hold_all": 907104.24,
+    "mean_per_market_diff": 292.6143,
+    "ci95_per_market": [
+     73.6702,
+     511.5583
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.010,f=0.25": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10660315.03,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -150449.11,
+    "mean_per_market_diff": -48.532,
+    "ci95_per_market": [
+     -144.9955,
+     47.9316
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 10941548.47,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 130784.33,
+    "mean_per_market_diff": 42.1885,
+    "ci95_per_market": [
+     15.2508,
+     69.1262
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11003045.3,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 192281.16,
+    "mean_per_market_diff": 62.0262,
+    "ci95_per_market": [
+     10.9555,
+     113.0968
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 10935383.45,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 124619.31,
+    "mean_per_market_diff": 40.1998,
+    "ci95_per_market": [
+     -30.7313,
+     111.1308
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11022344.62,
+    "exits": 1507,
+    "exit_share": 0.4861,
+    "vs_ferrari_hold_all": 211580.48,
+    "mean_per_market_diff": 68.2518,
+    "ci95_per_market": [
+     14.2032,
+     122.3004
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.010,f=0.50": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10509865.93,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -300898.21,
+    "mean_per_market_diff": -97.0639,
+    "ci95_per_market": [
+     -289.991,
+     95.8631
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 11072332.79,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 261568.65,
+    "mean_per_market_diff": 84.377,
+    "ci95_per_market": [
+     30.5016,
+     138.2524
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11195326.47,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 384562.33,
+    "mean_per_market_diff": 124.0524,
+    "ci95_per_market": [
+     21.9111,
+     226.1937
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 11060002.76,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 249238.62,
+    "mean_per_market_diff": 80.3996,
+    "ci95_per_market": [
+     -61.4625,
+     222.2617
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11233925.09,
+    "exits": 1507,
+    "exit_share": 0.4861,
+    "vs_ferrari_hold_all": 423160.95,
+    "mean_per_market_diff": 136.5035,
+    "ci95_per_market": [
+     28.4064,
+     244.6007
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.010,f=1.00": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10208967.72,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -601796.42,
+    "mean_per_market_diff": -194.1279,
+    "ci95_per_market": [
+     -579.982,
+     191.7262
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 11333901.45,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 523137.31,
+    "mean_per_market_diff": 168.754,
+    "ci95_per_market": [
+     61.0032,
+     276.5048
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11579888.8,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 769124.66,
+    "mean_per_market_diff": 248.1047,
+    "ci95_per_market": [
+     43.8221,
+     452.3873
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 11309241.38,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 498477.24,
+    "mean_per_market_diff": 160.7991,
+    "ci95_per_market": [
+     -122.9251,
+     444.5233
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11657086.04,
+    "exits": 1507,
+    "exit_share": 0.4861,
+    "vs_ferrari_hold_all": 846321.9,
+    "mean_per_market_diff": 273.0071,
+    "ci95_per_market": [
+     56.8127,
+     489.2014
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.020,f=0.25": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10603464.18,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -207299.96,
+    "mean_per_market_diff": -66.871,
+    "ci95_per_market": [
+     -163.5822,
+     29.8403
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 10930031.96,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 119267.82,
+    "mean_per_market_diff": 38.4735,
+    "ci95_per_market": [
+     12.542,
+     64.4049
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 10984232.93,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 173468.79,
+    "mean_per_market_diff": 55.9577,
+    "ci95_per_market": [
+     5.5116,
+     106.4037
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 10905044.89,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 94280.75,
+    "mean_per_market_diff": 30.4131,
+    "ci95_per_market": [
+     -40.4119,
+     101.2382
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 10994084.64,
+    "exits": 1401,
+    "exit_share": 0.4519,
+    "vs_ferrari_hold_all": 183320.5,
+    "mean_per_market_diff": 59.1356,
+    "ci95_per_market": [
+     6.7534,
+     111.5178
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.020,f=0.50": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10396164.22,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -414599.92,
+    "mean_per_market_diff": -133.7419,
+    "ci95_per_market": [
+     -327.1645,
+     59.6806
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 11049299.77,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 238535.63,
+    "mean_per_market_diff": 76.947,
+    "ci95_per_market": [
+     25.0841,
+     128.8099
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11157701.72,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 346937.58,
+    "mean_per_market_diff": 111.9153,
+    "ci95_per_market": [
+     11.0233,
+     212.8074
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 10999325.64,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 188561.5,
+    "mean_per_market_diff": 60.8263,
+    "ci95_per_market": [
+     -80.8238,
+     202.4764
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11177405.14,
+    "exits": 1401,
+    "exit_share": 0.4519,
+    "vs_ferrari_hold_all": 366641.0,
+    "mean_per_market_diff": 118.2713,
+    "ci95_per_market": [
+     13.5069,
+     223.0357
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.020,f=1.00": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 9981564.31,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -829199.83,
+    "mean_per_market_diff": -267.4838,
+    "ci95_per_market": [
+     -654.3289,
+     119.3613
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 11287835.4,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 477071.26,
+    "mean_per_market_diff": 153.894,
+    "ci95_per_market": [
+     50.1682,
+     257.6197
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11504639.3,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 693875.16,
+    "mean_per_market_diff": 223.8307,
+    "ci95_per_market": [
+     22.0466,
+     425.6148
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 11187887.15,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 377123.01,
+    "mean_per_market_diff": 121.6526,
+    "ci95_per_market": [
+     -161.6476,
+     404.9527
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11544046.15,
+    "exits": 1401,
+    "exit_share": 0.4519,
+    "vs_ferrari_hold_all": 733282.01,
+    "mean_per_market_diff": 236.5426,
+    "ci95_per_market": [
+     27.0138,
+     446.0714
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.050,f=0.25": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10434085.26,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -376678.88,
+    "mean_per_market_diff": -121.5093,
+    "ci95_per_market": [
+     -219.2628,
+     -23.7558
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 10896279.63,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 85515.49,
+    "mean_per_market_diff": 27.5856,
+    "ci95_per_market": [
+     4.5684,
+     50.6028
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 10928655.09,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 117890.95,
+    "mean_per_market_diff": 38.0293,
+    "ci95_per_market": [
+     -10.7792,
+     86.8379
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 10814985.42,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 4221.28,
+    "mean_per_market_diff": 1.3617,
+    "ci95_per_market": [
+     -69.404,
+     72.1274
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 10877397.08,
+    "exits": 771,
+    "exit_share": 0.2487,
+    "vs_ferrari_hold_all": 66632.94,
+    "mean_per_market_diff": 21.4945,
+    "ci95_per_market": [
+     0.4398,
+     42.5492
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.050,f=0.50": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 10057406.37,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -753357.77,
+    "mean_per_market_diff": -243.0186,
+    "ci95_per_market": [
+     -438.5256,
+     -47.5116
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 10981795.12,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 171030.98,
+    "mean_per_market_diff": 55.1713,
+    "ci95_per_market": [
+     9.1369,
+     101.2057
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11046546.03,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 235781.89,
+    "mean_per_market_diff": 76.0587,
+    "ci95_per_market": [
+     -21.5584,
+     173.6757
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 10819206.7,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 8442.56,
+    "mean_per_market_diff": 2.7234,
+    "ci95_per_market": [
+     -138.808,
+     144.2549
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 10944030.03,
+    "exits": 771,
+    "exit_share": 0.2487,
+    "vs_ferrari_hold_all": 133265.89,
+    "mean_per_market_diff": 42.989,
+    "ci95_per_market": [
+     0.8796,
+     85.0984
+    ],
+    "beats_holding": true
+   }
+  },
+  "s=0.050,f=1.00": {
+   "FERRARI_HOLD_ALL": {
+    "total_value": 10810764.14,
+    "exits": 0,
+    "exit_share": 0.0,
+    "vs_ferrari_hold_all": 0.0,
+    "mean_per_market_diff": 0.0,
+    "ci95_per_market": [
+     0.0,
+     0.0
+    ],
+    "beats_holding": false
+   },
+   "EXIT_ALL": {
+    "total_value": 9304048.6,
+    "exits": 3100,
+    "exit_share": 1.0,
+    "vs_ferrari_hold_all": -1506715.54,
+    "mean_per_market_diff": -486.0373,
+    "ci95_per_market": [
+     -877.0513,
+     -95.0232
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.30": {
+    "total_value": 11152826.09,
+    "exits": 1063,
+    "exit_share": 0.3429,
+    "vs_ferrari_hold_all": 342061.95,
+    "mean_per_market_diff": 110.3426,
+    "ci95_per_market": [
+     18.2737,
+     202.4114
+    ],
+    "beats_holding": true
+   },
+   "EXIT_IF_BELOW_0.40": {
+    "total_value": 11282327.92,
+    "exits": 1383,
+    "exit_share": 0.4461,
+    "vs_ferrari_hold_all": 471563.78,
+    "mean_per_market_diff": 152.1173,
+    "ci95_per_market": [
+     -43.1167,
+     347.3514
+    ],
+    "beats_holding": false
+   },
+   "EXIT_IF_BELOW_0.50": {
+    "total_value": 10827649.27,
+    "exits": 1914,
+    "exit_share": 0.6174,
+    "vs_ferrari_hold_all": 16885.13,
+    "mean_per_market_diff": 5.4468,
+    "ci95_per_market": [
+     -277.6161,
+     288.5097
+    ],
+    "beats_holding": false
+   },
+   "EXIT_WHEN_CURVE_SAYS_SO": {
+    "total_value": 11077295.91,
+    "exits": 771,
+    "exit_share": 0.2487,
+    "vs_ferrari_hold_all": 266531.77,
+    "mean_per_market_diff": 85.978,
+    "ci95_per_market": [
+     1.7593,
+     170.1967
+    ],
+    "beats_holding": true
+   }
+  }
+ },
+ "status": "EVALUATED",
+ "break_even_spread": {
+  "largest_spread_still_beating_hold": {
+   "EXIT_IF_BELOW_0.30": 0.05,
+   "EXIT_IF_BELOW_0.40": 0.02,
+   "EXIT_WHEN_CURVE_SAYS_SO": 0.05
+  },
+  "units": "dollars per share",
+  "absent_means": "a policy missing from this list did not beat holding at ANY swept spread, including zero",
+  "how_to_use": "this is the spread budget an exit has to come in under. Whether our order fills inside that budget is P_FILL, which is still NOT_IDENTIFIED, and is what a funded pilot would measure."
+ }
+}

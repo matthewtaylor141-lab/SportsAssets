@@ -1,0 +1,813 @@
+{
+ "generated_at": 1790167302.4939728,
+ "dataset_version": "BETTOR_LEARN_DATASET_V1",
+ "kernel_version": "BETTOR_LEARN_KERNEL_V1",
+ "metrics_version": "BETTOR_LEARN_METRICS_V1",
+ "extract": {
+  "account": "RN1",
+  "window_days": 10,
+  "sample": "1 in 20 conditions by hashtext",
+  "read_at": 1790167242.122939,
+  "n": 4860,
+  "conditions": 443,
+  "by_source": {
+   "s1": 50,
+   "poll": 704,
+   "chain": 4106
+  }
+ },
+ "dataset": {
+  "target": "COMPLEMENT_FILL_WITHIN_H",
+  "horizon_s": 3600.0,
+  "n_rows": 1186,
+  "n_positive": 655,
+  "n_censored": 0,
+  "base_rate_uncensored": 0.5522765598650927,
+  "skipped": {
+   "non_buy": 0,
+   "no_condition": 0,
+   "unknown_outcome": 0,
+   "in_excluded_window": 56,
+   "horizon_overlaps_gap": 25
+  },
+  "coverage_exclusions": [
+   [
+    1789924593.0,
+    1789930561.0
+   ]
+  ],
+  "lifecycle_observability": "FILLS_ONLY",
+  "clock_note": "AVAILABLE_AT = max(ts, detected_at) is a conservative cutoff, not an availability guarantee: it does not establish persistence, indexing, or that a consumer was running. detected_at - ts is NEVER used as a latency -- run 82 found 92.04% of chain-lane differences negative, and obs/clock.py records why that cannot be repaired.",
+  "what_is_not_reconstructed": "trades holds FILLS. Merges, redemptions, transfers, order submissions, cancellations and rejections are not in it. A position can leave our view by a mechanism this dataset cannot see, so no lifecycle is closed from fill data alone."
+ },
+ "split": {
+  "counts": {
+   "TRAIN": 710,
+   "CALIB": 362,
+   "EVAL": 114
+  },
+  "positives": {
+   "TRAIN": 433,
+   "CALIB": 139,
+   "EVAL": 83
+  },
+  "censored": {
+   "TRAIN": 0,
+   "CALIB": 0,
+   "EVAL": 0
+  },
+  "conditions": {
+   "TRAIN": 245,
+   "CALIB": 140,
+   "EVAL": 31
+  },
+  "dropped_for_group_overlap": 0,
+  "rule": "a condition appears in exactly one part; rows of a straddling condition outside its earliest part are DROPPED rather than reassigned"
+ },
+ "split_boundaries": {
+  "train_end": 1789818465.0,
+  "calib_end": 1789990204.0,
+  "first_decision": 1789303248.0,
+  "last_decision": 1790161943.0
+ },
+ "uncensored_counts": {
+  "TRAIN": 710,
+  "CALIB": 362,
+  "EVAL": 114
+ },
+ "status": "TRAINED",
+ "train_base_rate": 0.6098591549295774,
+ "eval_observed_rate": 0.7280701754385965,
+ "scores": {
+  "base_rate": {
+   "label": "base_rate",
+   "metrics_version": "BETTOR_LEARN_METRICS_V1",
+   "n": 114,
+   "log_loss": 0.6160037935790971,
+   "brier": 0.2119578404451912,
+   "baseline": {
+    "rate": 0.6098591549295774,
+    "log_loss": 0.6160037935790971,
+    "brier": 0.2119578404451912,
+    "source": "TRAINING base rate, not this set's"
+   },
+   "skill_vs_baseline": {
+    "skill": 0.0,
+    "status": "OK",
+    "verdict": "NO_BETTER_THAN_BASELINE",
+    "reads_as": "0.00% worse than the base rate"
+   },
+   "auc": {
+    "auc": 0.5,
+    "status": "OK",
+    "n_pos": 83,
+    "n_neg": 31
+   },
+   "calibration": {
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.1,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.1,
+      "hi": 0.2,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.3,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.3,
+      "hi": 0.4,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.5,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.5,
+      "hi": 0.6,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.7,
+      "n": 114,
+      "mean_p": 0.6098591549295788,
+      "observed": 0.7280701754385965,
+      "gap": -0.11821102050901777,
+      "status": "OK"
+     },
+     {
+      "lo": 0.7,
+      "hi": 0.8,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.8,
+      "hi": 0.9,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.9,
+      "hi": 1.0,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     }
+    ],
+    "ece": 0.11821102050901777,
+    "mce": 0.11821102050901777,
+    "n_bins_occupied": 1
+   },
+   "observed_rate_here": 0.7280701754385965,
+   "what_this_cannot_say": "These figures measure agreement between a prediction and an outcome. They say nothing about whether acting on the prediction would have made money: that needs our own fills, our own fees and our own committed capital."
+  },
+  "ridge": {
+   "label": "ridge",
+   "metrics_version": "BETTOR_LEARN_METRICS_V1",
+   "n": 114,
+   "log_loss": 0.5172388281752892,
+   "brier": 0.17473609747691782,
+   "baseline": {
+    "rate": 0.6098591549295774,
+    "log_loss": 0.6160037935790971,
+    "brier": 0.2119578404451912,
+    "source": "TRAINING base rate, not this set's"
+   },
+   "skill_vs_baseline": {
+    "skill": 0.16033174865687916,
+    "status": "OK",
+    "verdict": "BEATS_BASELINE",
+    "reads_as": "16.03% better than the base rate"
+   },
+   "auc": {
+    "auc": 0.7252234745433346,
+    "status": "OK",
+    "n_pos": 83,
+    "n_neg": 31
+   },
+   "calibration": {
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.1,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.1,
+      "hi": 0.2,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.3,
+      "n": 1,
+      "mean_p": 0.26301669704159547,
+      "observed": 0.0,
+      "gap": 0.26301669704159547,
+      "status": "OK"
+     },
+     {
+      "lo": 0.3,
+      "hi": 0.4,
+      "n": 4,
+      "mean_p": 0.34329742054597207,
+      "observed": 0.25,
+      "gap": 0.09329742054597207,
+      "status": "OK"
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.5,
+      "n": 17,
+      "mean_p": 0.4580412897584594,
+      "observed": 0.47058823529411764,
+      "gap": -0.012546945535658216,
+      "status": "OK"
+     },
+     {
+      "lo": 0.5,
+      "hi": 0.6,
+      "n": 19,
+      "mean_p": 0.5613506592156853,
+      "observed": 0.7894736842105263,
+      "gap": -0.22812302499484105,
+      "status": "OK"
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.7,
+      "n": 22,
+      "mean_p": 0.6407475946276737,
+      "observed": 0.7272727272727273,
+      "gap": -0.08652513264505357,
+      "status": "OK"
+     },
+     {
+      "lo": 0.7,
+      "hi": 0.8,
+      "n": 19,
+      "mean_p": 0.7434555743947096,
+      "observed": 0.6842105263157895,
+      "gap": 0.05924504807892006,
+      "status": "OK"
+     },
+     {
+      "lo": 0.8,
+      "hi": 0.9,
+      "n": 18,
+      "mean_p": 0.8525734705598838,
+      "observed": 0.8888888888888888,
+      "gap": -0.03631541832900509,
+      "status": "OK"
+     },
+     {
+      "lo": 0.9,
+      "hi": 1.0,
+      "n": 14,
+      "mean_p": 0.9528071161387617,
+      "observed": 1.0,
+      "gap": -0.04719288386123832,
+      "status": "OK"
+     }
+    ],
+    "ece": 0.08357393564827842,
+    "mce": 0.26301669704159547,
+    "n_bins_occupied": 8
+   },
+   "observed_rate_here": 0.7280701754385965,
+   "what_this_cannot_say": "These figures measure agreement between a prediction and an outcome. They say nothing about whether acting on the prediction would have made money: that needs our own fills, our own fees and our own committed capital."
+  },
+  "stumps": {
+   "label": "stumps",
+   "metrics_version": "BETTOR_LEARN_METRICS_V1",
+   "n": 114,
+   "log_loss": 0.5579042506585544,
+   "brier": 0.19139992712504297,
+   "baseline": {
+    "rate": 0.6098591549295774,
+    "log_loss": 0.6160037935790971,
+    "brier": 0.2119578404451912,
+    "source": "TRAINING base rate, not this set's"
+   },
+   "skill_vs_baseline": {
+    "skill": 0.09431685896441233,
+    "status": "OK",
+    "verdict": "BEATS_BASELINE",
+    "reads_as": "9.43% better than the base rate"
+   },
+   "auc": {
+    "auc": 0.6346677030703459,
+    "status": "OK",
+    "n_pos": 83,
+    "n_neg": 31
+   },
+   "calibration": {
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.1,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.1,
+      "hi": 0.2,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.3,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.3,
+      "hi": 0.4,
+      "n": 4,
+      "mean_p": 0.3745220367649937,
+      "observed": 0.75,
+      "gap": -0.3754779632350063,
+      "status": "OK"
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.5,
+      "n": 2,
+      "mean_p": 0.43663860542131183,
+      "observed": 0.0,
+      "gap": 0.43663860542131183,
+      "status": "OK"
+     },
+     {
+      "lo": 0.5,
+      "hi": 0.6,
+      "n": 25,
+      "mean_p": 0.5555600942657389,
+      "observed": 0.72,
+      "gap": -0.16443990573426104,
+      "status": "OK"
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.7,
+      "n": 45,
+      "mean_p": 0.6393700741387306,
+      "observed": 0.6888888888888889,
+      "gap": -0.04951881475015829,
+      "status": "OK"
+     },
+     {
+      "lo": 0.7,
+      "hi": 0.8,
+      "n": 21,
+      "mean_p": 0.7457613585623326,
+      "observed": 0.6666666666666666,
+      "gap": 0.07909469189566598,
+      "status": "OK"
+     },
+     {
+      "lo": 0.8,
+      "hi": 0.9,
+      "n": 2,
+      "mean_p": 0.845929063063775,
+      "observed": 1.0,
+      "gap": -0.15407093693622498,
+      "status": "OK"
+     },
+     {
+      "lo": 0.9,
+      "hi": 1.0,
+      "n": 15,
+      "mean_p": 0.9266456960205703,
+      "observed": 1.0,
+      "gap": -0.07335430397942966,
+      "status": "OK"
+     }
+    ],
+    "ece": 0.1033682310023612,
+    "mce": 0.43663860542131183,
+    "n_bins_occupied": 7
+   },
+   "observed_rate_here": 0.7280701754385965,
+   "what_this_cannot_say": "These figures measure agreement between a prediction and an outcome. They say nothing about whether acting on the prediction would have made money: that needs our own fills, our own fees and our own committed capital."
+  },
+  "ridge_calibrated": {
+   "label": "ridge_calibrated",
+   "metrics_version": "BETTOR_LEARN_METRICS_V1",
+   "n": 114,
+   "log_loss": 0.6116677902986524,
+   "brier": 0.22267858327336196,
+   "baseline": {
+    "rate": 0.6098591549295774,
+    "log_loss": 0.6160037935790971,
+    "brier": 0.2119578404451912,
+    "source": "TRAINING base rate, not this set's"
+   },
+   "skill_vs_baseline": {
+    "skill": 0.007038923015801113,
+    "status": "OK",
+    "verdict": "BEATS_BASELINE",
+    "reads_as": "0.70% better than the base rate"
+   },
+   "auc": {
+    "auc": 0.7026816945200155,
+    "status": "OK",
+    "n_pos": 83,
+    "n_neg": 31
+   },
+   "calibration": {
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.1,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.1,
+      "hi": 0.2,
+      "n": 5,
+      "mean_p": 0.10256410256410256,
+      "observed": 0.2,
+      "gap": -0.09743589743589745,
+      "status": "OK"
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.3,
+      "n": 9,
+      "mean_p": 0.215686274509804,
+      "observed": 0.5555555555555556,
+      "gap": -0.3398692810457516,
+      "status": "OK"
+     },
+     {
+      "lo": 0.3,
+      "hi": 0.4,
+      "n": 4,
+      "mean_p": 0.3333333333333333,
+      "observed": 0.25,
+      "gap": 0.08333333333333331,
+      "status": "OK"
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.5,
+      "n": 78,
+      "mean_p": 0.47420383673547234,
+      "observed": 0.7435897435897436,
+      "gap": -0.2693859068542713,
+      "status": "OK"
+     },
+     {
+      "lo": 0.5,
+      "hi": 0.6,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.7,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.7,
+      "hi": 0.8,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.8,
+      "hi": 0.9,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.9,
+      "hi": 1.0,
+      "n": 18,
+      "mean_p": 1.0,
+      "observed": 1.0,
+      "gap": 0.0,
+      "status": "OK"
+     }
+    ],
+    "ece": 0.21834593933822583,
+    "mce": 0.3398692810457516,
+    "n_bins_occupied": 5
+   },
+   "observed_rate_here": 0.7280701754385965,
+   "what_this_cannot_say": "These figures measure agreement between a prediction and an outcome. They say nothing about whether acting on the prediction would have made money: that needs our own fills, our own fees and our own committed capital."
+  }
+ },
+ "by_sport": {
+  "unknown": {
+   "label": "unknown",
+   "metrics_version": "BETTOR_LEARN_METRICS_V1",
+   "n": 114,
+   "log_loss": 0.5172388281752892,
+   "brier": 0.17473609747691782,
+   "baseline": {
+    "rate": 0.6098591549295774,
+    "log_loss": 0.6160037935790971,
+    "brier": 0.2119578404451912,
+    "source": "TRAINING base rate, not this set's"
+   },
+   "skill_vs_baseline": {
+    "skill": 0.16033174865687916,
+    "status": "OK",
+    "verdict": "BEATS_BASELINE",
+    "reads_as": "16.03% better than the base rate"
+   },
+   "auc": {
+    "auc": 0.7252234745433346,
+    "status": "OK",
+    "n_pos": 83,
+    "n_neg": 31
+   },
+   "calibration": {
+    "bins": [
+     {
+      "lo": 0.0,
+      "hi": 0.1,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.1,
+      "hi": 0.2,
+      "n": 0,
+      "mean_p": null,
+      "observed": null,
+      "gap": null,
+      "status": "EMPTY"
+     },
+     {
+      "lo": 0.2,
+      "hi": 0.3,
+      "n": 1,
+      "mean_p": 0.26301669704159547,
+      "observed": 0.0,
+      "gap": 0.26301669704159547,
+      "status": "OK"
+     },
+     {
+      "lo": 0.3,
+      "hi": 0.4,
+      "n": 4,
+      "mean_p": 0.34329742054597207,
+      "observed": 0.25,
+      "gap": 0.09329742054597207,
+      "status": "OK"
+     },
+     {
+      "lo": 0.4,
+      "hi": 0.5,
+      "n": 17,
+      "mean_p": 0.4580412897584594,
+      "observed": 0.47058823529411764,
+      "gap": -0.012546945535658216,
+      "status": "OK"
+     },
+     {
+      "lo": 0.5,
+      "hi": 0.6,
+      "n": 19,
+      "mean_p": 0.5613506592156853,
+      "observed": 0.7894736842105263,
+      "gap": -0.22812302499484105,
+      "status": "OK"
+     },
+     {
+      "lo": 0.6,
+      "hi": 0.7,
+      "n": 22,
+      "mean_p": 0.6407475946276737,
+      "observed": 0.7272727272727273,
+      "gap": -0.08652513264505357,
+      "status": "OK"
+     },
+     {
+      "lo": 0.7,
+      "hi": 0.8,
+      "n": 19,
+      "mean_p": 0.7434555743947096,
+      "observed": 0.6842105263157895,
+      "gap": 0.05924504807892006,
+      "status": "OK"
+     },
+     {
+      "lo": 0.8,
+      "hi": 0.9,
+      "n": 18,
+      "mean_p": 0.8525734705598838,
+      "observed": 0.8888888888888888,
+      "gap": -0.03631541832900509,
+      "status": "OK"
+     },
+     {
+      "lo": 0.9,
+      "hi": 1.0,
+      "n": 14,
+      "mean_p": 0.9528071161387617,
+      "observed": 1.0,
+      "gap": -0.04719288386123832,
+      "status": "OK"
+     }
+    ],
+    "ece": 0.08357393564827842,
+    "mce": 0.26301669704159547,
+    "n_bins_occupied": 8
+   },
+   "observed_rate_here": 0.7280701754385965,
+   "what_this_cannot_say": "These figures measure agreement between a prediction and an outcome. They say nothing about whether acting on the prediction would have made money: that needs our own fills, our own fees and our own committed capital.",
+   "status": "OK"
+  }
+ },
+ "ridge_weights_raw_scale": {
+  "entry_price": -0.3586098931128339,
+  "entry_price_dist_from_half": -1.3190325860515426,
+  "entry_size_log": -0.33609490430162786,
+  "entry_notional_log": 0.41317014459420187,
+  "is_outcome_one": -0.11884287478411035,
+  "prior_fills_this_market": 0.2897707835991369,
+  "prior_qty_same_leg_log": -0.20504233678941472,
+  "prior_cost_same_leg_log": 0.15666176865517875,
+  "seconds_since_prev_fill_this_market_log": 0.002612853792078101,
+  "seconds_since_first_fill_this_market_log": -0.06971837344914159,
+  "is_first_fill_in_market": -0.6119812219990326,
+  "complement_price_if_symmetric": 0.35860989311284275,
+  "hour_of_day_sin": 0.30620063355004024,
+  "hour_of_day_cos": 0.10028517851815817,
+  "__intercept__": 1.1257674088946454
+ },
+ "stumps_explain": [
+  {
+   "feature": "entry_price",
+   "threshold": 0.0115,
+   "below": -1.6041053575822941,
+   "above": 0.06832112666661559,
+   "rounds": 13,
+   "reads_as": "entry_price <= 0.0115 shifts the log-odds by -1.6041; above it by +0.0683"
+  },
+  {
+   "feature": "prior_fills_this_market",
+   "threshold": 7.5,
+   "below": -0.1007397511330687,
+   "above": 1.1699532020371295,
+   "rounds": 12,
+   "reads_as": "prior_fills_this_market <= 7.5 shifts the log-odds by -0.1007; above it by +1.1700"
+  },
+  {
+   "feature": "entry_price_dist_from_half",
+   "threshold": 0.43200000000000005,
+   "below": 0.058769958792391074,
+   "above": -0.2638248582267738,
+   "rounds": 3,
+   "reads_as": "entry_price_dist_from_half <= 0.432 shifts the log-odds by +0.0588; above it by -0.2638"
+  },
+  {
+   "feature": "entry_price_dist_from_half",
+   "threshold": 0.442,
+   "below": 0.04656893383873972,
+   "above": -0.2391341057534242,
+   "rounds": 2,
+   "reads_as": "entry_price_dist_from_half <= 0.442 shifts the log-odds by +0.0466; above it by -0.2391"
+  },
+  {
+   "feature": "prior_fills_this_market",
+   "threshold": 5.5,
+   "below": -0.038316836928875275,
+   "above": 0.20657089230180503,
+   "rounds": 2,
+   "reads_as": "prior_fills_this_market <= 5.5 shifts the log-odds by -0.0383; above it by +0.2066"
+  },
+  {
+   "feature": "hour_of_day_sin",
+   "threshold": -0.9724877196057002,
+   "below": -0.17272262983168604,
+   "above": 0.04183892399658529,
+   "rounds": 4,
+   "reads_as": "hour_of_day_sin <= -0.972488 shifts the log-odds by -0.1727; above it by +0.0418"
+  },
+  {
+   "feature": "prior_cost_same_leg_log",
+   "threshold": 5.466228186269516,
+   "below": -0.06641940003479288,
+   "above": 0.14000869763493184,
+   "rounds": 2,
+   "reads_as": "prior_cost_same_leg_log <= 5.46623 shifts the log-odds by -0.0664; above it by +0.1400"
+  },
+  {
+   "feature": "entry_notional_log",
+   "threshold": 7.628339672998013,
+   "below": 0.006694138226451259,
+   "above": -0.1832062091939307,
+   "rounds": 2,
+   "reads_as": "entry_notional_log <= 7.62834 shifts the log-odds by +0.0067; above it by -0.1832"
+  },
+  {
+   "feature": "prior_fills_this_market",
+   "threshold": 2.5,
+   "below": -0.05889271400056477,
+   "above": 0.12598430998008908,
+   "rounds": 3,
+   "reads_as": "prior_fills_this_market <= 2.5 shifts the log-odds by -0.0589; above it by +0.1260"
+  },
+  {
+   "feature": "hour_of_day_cos",
+   "threshold": 0.9501624429317229,
+   "below": 0.010590978683941505,
+   "above": -0.1320204281124208,
+   "rounds": 2,
+   "reads_as": "hour_of_day_cos <= 0.950162 shifts the log-odds by +0.0106; above it by -0.1320"
+  }
+ ],
+ "calibrated": true,
+ "dev_vs_prospective": {
+  "development_through": 1789990204.0,
+  "why": "every row at or before the CALIB boundary was inspected while this pipeline was built and is DEVELOPMENT data. The EVAL block below is held-out within this extract but was generated BEFORE this commit, so it is a held-out test, NOT a prospective one. A prospective claim needs predictions recorded before the action, which is what the prediction ledger is for.",
+  "eval_is_prospective": false
+ },
+ "dataset_sha": "b7fcdb3f6b89206f47af760096aabd5e81276fa97155353d7222383d5433963f",
+ "n_predictions_emitted": 114
+}

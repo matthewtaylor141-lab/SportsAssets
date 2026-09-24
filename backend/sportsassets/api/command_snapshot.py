@@ -328,9 +328,42 @@ def decision_row(r: dict) -> dict:
     candidate left under, with the numbers the tick actually read. EV is
     not manufactured to fill the column -- netEv, p10, p90 and pPositive
     stay null, and the contract accepts null for exactly that reason.
+
+    ────────────────────────────────────────────────────────────────
+    `target` IS SIGNED, AND THAT IS WHAT TOOK COMMAND DOWN.
+
+    A refusal's `target` is the copy engine's TARGET POSITION for the
+    candidate, and a short target is negative -- `mirror_live.py:1585`
+    records one verbatim: "BUY_SHORT, target -2,460 on his -24,600.6".
+    It is the same signed quantity as `mirror_books.ledger_net`, which
+    `position_row` above has always normalised: magnitude into
+    `quantity`, direction into `leg`, "because the contract refuses a
+    negative quantity and a short rendered as -412 shares would simply
+    be dropped from the table".
+
+    THIS BUILDER SKIPPED THAT NORMALISATION and shipped the raw signed
+    value. The client contract validates `quantity` on positions,
+    orders AND decisions, so one short candidate refused the ENTIRE
+    snapshot -- every position, every order, the whole portfolio -- and
+    the page read "Negative quantity refused. No portfolio data loaded."
+
+    Measured on 2026-09-23 (run 35868626142): 279 refusal rows carry a
+    negative target lifetime, and exactly ONE sits inside the 200-row
+    window the snapshot reads -- id 42451, target -25, refusal
+    `side_band`. `mirror_orders.qty` and `.filled` have none. So the
+    record is valid and the PROJECTION was wrong.
+
+    THE SIGN IS NOT DISCARDED. It moves to `leg`, the field that is
+    supposed to carry it, and the signed value is also kept verbatim in
+    `targetSigned`. Nothing is clamped, nothing is dropped, and the
+    validator is not weakened -- a short target still reads as a short.
     """
     slug = _s(r.get("us_slug"), "")
     sport, family = _sport_family(slug)
+    target = _f(r.get("target"))
+    qty = None if target is None else abs(target)
+    leg = UNIDENTIFIED if target is None else (
+        "LONG" if target >= 0 else "SHORT")
     return {
         "id": "refusal-%s" % _s(r.get("id"), "?"),
         "eventId": _s(r.get("condition_id"), slug),
@@ -344,7 +377,12 @@ def decision_row(r: dict) -> dict:
         "state": "REFUSED",
         "price": _p01(r.get("his_px")),
         "mark": _p01(r.get("mark")),
-        "quantity": _f(r.get("target")),
+        "quantity": qty,
+        # The direction the magnitude above came from, in the same
+        # vocabulary `position_row` uses, plus the untouched signed
+        # value so no reader has to reconstruct it.
+        "leg": leg,
+        "targetSigned": target,
         "netEv": None, "p10": None, "p90": None, "pPositive": None,
         "fillProbability": None,
         "gate": "BLOCKED",
@@ -498,6 +536,12 @@ def assemble(positions: list, orders: list, decisions: list,
         "positions": positions,
         "orders": orders,
         "decisions": decisions,
+        # BUILDER DEFECTS, NAMED. Empty in normal operation. When it is
+        # not empty the route refuses with these entries as the reason,
+        # so the page can say WHICH row from WHICH builder is wrong
+        # instead of repeating the client's generic refusal.
+        "contractViolations": contract_violations(positions, orders,
+                                                  decisions),
         "history": history,
         "activity": activity,
         "services": services,
@@ -665,6 +709,52 @@ def lane_of(book: dict, registered_keys: set) -> str:
     return LANE_UNATTRIBUTED
 
 
+def contract_violations(positions, orders, decisions) -> list:
+    """Rows this payload must never contain, named precisely.
+
+    WHY THE SERVER CHECKS WHAT THE CLIENT ALREADY CHECKS. The client's
+    refusal is correct and stays. What it cannot do is say WHICH
+    producer is wrong -- the browser sees a value, not the builder that
+    made it -- so a real defect reached management as an unattributable
+    "Negative quantity refused" and an empty page.
+
+    Every entry names the row kind, the field, the record id and the
+    offending value, so the next one of these is a one-line diagnosis.
+    This is a builder-bug detector, not a data filter: it never drops,
+    clamps or rewrites a row.
+    """
+    out = []
+    for kind, rows in (("position", positions), ("order", orders),
+                       ("decision", decisions)):
+        for r in rows:
+            rid = r.get("id")
+            q = r.get("quantity")
+            if isinstance(q, (int, float)) and q < 0:
+                out.append({"kind": kind, "field": "quantity", "id": rid,
+                            "value": q,
+                            "why": "the contract carries direction in a "
+                                   "side field and magnitude here"})
+            f = r.get("filled")
+            if isinstance(f, (int, float)) and f < 0:
+                out.append({"kind": kind, "field": "filled", "id": rid,
+                            "value": f, "why": "a fill cannot be negative"})
+            if (isinstance(f, (int, float)) and isinstance(q, (int, float))
+                    and f > q):
+                out.append({"kind": kind, "field": "filled", "id": rid,
+                            "value": f,
+                            "why": "filled exceeds quantity; an overfill is "
+                                   "a reconciliation event and must be "
+                                   "named in the reason, not shipped raw"})
+            for k in ("price", "entry", "mark", "pPositive"):
+                v = r.get(k)
+                if isinstance(v, (int, float)) and not (0.0 <= v <= 1.0):
+                    out.append({"kind": kind, "field": k, "id": rid,
+                                "value": v,
+                                "why": "probabilities and prices are in "
+                                       "[0,1] on this venue"})
+    return out
+
+
 def build(records: dict, account: dict | None, session: dict | None,
           mirror_live: bool | None = None, now: float | None = None,
           account_error: str | None = None,
@@ -690,6 +780,34 @@ def build(records: dict, account: dict | None, session: dict | None,
               for o in records.get("orders", ())]
     decisions = [decision_row(r) for r in records.get("refusals", ())]
     services = [service_row(h, now) for h in records.get("beats", ())]
+
+    # THE SAME RULE THE CLIENT ENFORCES, ENFORCED WHERE THE BUG LIVES.
+    #
+    # The contract is all-or-nothing by design: a snapshot is one
+    # consistent view and a page that silently drops the rows it cannot
+    # parse is worse than one that refuses. The cost is that a single
+    # malformed row takes the whole portfolio down, and when it did, the
+    # browser could only say "Negative quantity refused" -- which names
+    # the symptom and not the producer.
+    #
+    # So the rule is checked HERE, against the rows this function just
+    # built. A violation is a bug in one of the three builders above,
+    # and it now arrives as a named server-side failure identifying the
+    # kind, the field and the record, instead of a 200 whose body the
+    # client has to reject on management's screen.
+    contract = contract_violations(positions, orders, decisions)
+    if contract:
+        # The client would refuse this payload anyway, and refuse it
+        # anonymously. Failing here turns an unattributable
+        # "Negative quantity refused" on management's screen into a 503
+        # that names the builder, the field and the record -- and the
+        # page's UNAVAILABLE state then has a specific failure to show
+        # instead of a generic one.
+        raise RetrievalIncomplete(
+            "SNAPSHOT_CONTRACT_VIOLATION",
+            "; ".join("%s.%s=%s on %s (%s)"
+                      % (v["kind"], v["field"], v["value"], v["id"], v["why"])
+                      for v in contract[:5]))
 
     if account_error:
         services.append({

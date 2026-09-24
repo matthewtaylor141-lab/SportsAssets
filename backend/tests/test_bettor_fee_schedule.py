@@ -130,6 +130,26 @@ def test_for_date_requires_a_date_and_has_no_default():
             fs.for_date(bad)
 
 
+def test_a_long_but_malformed_date_is_refused_not_ranked():
+    """THE GAP THE CASES ABOVE LEFT OPEN.
+
+    All four of them fail on type or length and never reach the
+    comparison. A string of ten or more characters did reach it, and
+    the comparison is LEXICOGRAPHIC -- "not-a-date" sorts above every
+    effective_from, so it silently selected the NEWEST schedule. That
+    is the "apply 0.0695 to a July fill" failure arriving through a
+    malformed date rather than a missing one.
+    """
+    for bad in ("not-a-date", "9999-99-99", "yyyy-mm-dd",
+                "2026-13-01", "2026-02-30"):
+        with pytest.raises(ValueError):
+            fs.for_date(bad)
+    # CONTROL: a real date must still resolve, or the guard above would
+    # be indistinguishable from a function that refuses everything.
+    assert fs.for_date("2026-09-20") is not None
+    assert fs.for_date("2026-09-23T14:40:00+00:00") is not None
+
+
 def test_an_august_fill_is_charged_the_july_theta():
     """The concrete consequence of the date being part of the schedule."""
     aug = fs.for_date("2026-08-15").taker_fee(1000, D("0.5"))

@@ -210,3 +210,203 @@ NAME and says which value to pass. Pinned by a test.
 Scope: three services, one variable, one observation day. Preflight
 allowance EXHAUSTED (6/6). Socket allowances separate. Rollback is
 stop-and-verify first.
+
+### 2026-09-23 MANIFEST CAPTURED — allowance raised, not reset
+Run 35793974775, dispatched at cf29391 (a branch taken from DEPLOYED
+d630d3d, so 67d7a93 and every other release-branch change stayed out).
+SUCCESS. 441 programme rows, 4 pages, zero errors, unauthenticated.
+
+  allowance   cap 10, spent 10, remaining 0
+              the four new units went one per page, exactly as sized
+  freeze OK   12 markets / 1 programme / 1 event
+  programme   culture_low_20260921, pool $50, DF 0.25, target 500
+
+THE PROGRAMME IS THE SAME ROW AS YESTERDAY, and that settles F2's
+ambiguity in the direction the venue docs already stated. start is
+still 2026-09-22T00:00:00Z and end is still null on today's capture --
+an unchanged, continuing programme record, NOT a per-day period row. So
+`start` is the programme ACTIVATION instant, not a daily scoring
+boundary, and the daily period is the venue's documented
+midnight-to-midnight ET. The window [2026-09-23T04:00Z,
+2026-09-24T04:00Z) is correct. API start/end preserved verbatim; no
+widened window.
+
+### DEPLOYED 7f76fd9 — and [skip render] nearly hid it
+d630d3d..7f76fd9 is exactly two data files: incentive_manifest.json and
+preflight_allowance.json. Fast-forward from the deployed SHA. 67d7a93
+verified absent.
+
+THE CAPTURE COMMIT CARRIES `[skip render]`, which the capture workflow
+adds on purpose so evidence commits do not auto-deploy. Pushing it to
+the auto-deploy branch therefore did NOT deploy it: workers still read
+d630d3d from 22:21Z a minute after the push. Caught by reading the
+deploy list instead of assuming the push was the deployment. Resolved
+with an explicit render-ops `deploy` dispatch on both services.
+
+### ARM SCHEDULED, not executed early
+obs-arm-incentive sets deadline = now + 26h. Arming now (22:53Z) would
+give a deadline of 00:53Z on 09-24, which does NOT cover the window end
+at 04:00Z on 09-24. The valid arm window is therefore
+[2026-09-23T02:00Z, 04:00Z].
+
+Separately, the worker has NO gate on the window START -- `start_epoch`
+appears once, in the mid-run recheck timing, and the loop only breaks
+on `now >= end_epoch`. Armed early it would connect and collect hours
+before 04:00Z, spending socket allowance outside the window. Adding a
+start gate would be an unrelated code change, so the arm is TIMED
+instead: scheduled for 03:50Z, trig_012jP2v4wuEhiVatwybx6MAc.
+
+### 2026-09-23T01:12Z — PRE-START VERIFICATION, and the deadline blocker
+Verified before touching anything:
+
+  deployed       7f76fd9 live on sportsassets-api and sportsassets-workers
+  control        false  -- NOT observing
+  http_total     0 of 8
+  socket         null / null  (row has no socket fields -- see below)
+  general cap    max_distinct 40   <- GENERAL-loop shape, not the arm shape
+  deadline_at    2026-09-22T14:35:09Z  -- STALE, expired ~10.6h ago
+  journal table  absent -- no run has started
+  preflight      10/10 spent, 0 remaining
+
+VERDICT: UNARMED. The probe row is a leftover from a prior session, with
+the general-loop cap of 40 rather than the incentive arm's zero, and an
+expired deadline. So this is the "arm exactly once" case.
+
+THE DEADLINE BLOCKER, stated precisely.
+`render-ops` action=sql accepts ONLY named statements from a fixed bash
+`case` list -- there is no parameter and no arbitrary-SQL path. The
+`obs-arm-incentive` statement hardcodes
+
+    'deadline_at', to_char((now() + interval '26 hours') ...)
+
+so an EXPLICIT deadline of 2026-09-24T04:00:00Z cannot be set through
+the existing mechanism. Arming at 01:12Z would have produced
+2026-09-24T03:12:00Z -- 48 MINUTES SHORT of the required window end,
+truncating the measurement window at its tail.
+
+THE RESOLUTION, which needs no code change and no deployment:
+now+26h >= the window end exactly when now >= 2026-09-23T02:00:00Z.
+
+    arm 01:12Z -> 2026-09-24T03:12Z   SHORT by 48 min
+    arm 02:00Z -> 2026-09-24T04:00Z   covers, zero margin
+    arm 02:10Z -> 2026-09-24T04:10Z   covers, +10 min  <- CHOSEN
+
+So the arm waits 58 minutes rather than being forced through a mechanism
+change. The cost is 58 minutes of EARLY collection, not any of the
+measurement window. Early collection is [02:10Z, 04:00Z), ~1.83h, and it
+is operational evidence only -- excluded from the economic window's
+coverage and reward calculations.
+
+Both pending triggers DISABLED so neither can duplicate or reset this
+run: trig_012jP2v4wuEhiVatwybx6MAc (03:50Z arm) and
+trig_01CiGjRDEb9mTjihzYPJqZov (04:00Z start). Replaced by a single
+trig_0156xerpzsYKoJLkDvvv2PxT at 02:10Z that arms once and starts, with
+an idempotency guard that refuses to re-arm a row already in the armed
+shape with a sufficient deadline.
+
+## 2026-09-23 19:36Z — RN1X integration deployed and verified from persisted rows
+
+Authorization: "complete the integration and deploy the functioning
+shadow systems… Report completion only from persisted end-to-end
+evidence and the published interface."
+
+### The migration question, settled from the catalog
+
+`100_rn1_seeded_experiment.sql` applied **19:02:46Z**. My earlier readback
+reported `rn1x_tables = 0` at 19:02:19Z — twenty-seven seconds before the
+`6c9a9fb` deploy finished at 19:02:51Z. The tables were absent because the
+build had not landed, not because the migration failed. I had been about
+to diagnose a migration failure that never happened.
+
+### Persisted evidence
+
+| At (UTC) | positions | decisions | orders | fills | outcomes | cursor |
+|---|---|---|---|---|---|---|
+| 19:23:28 | 0 | 0 | 0 | 0 | 0 | — (control row absent) |
+| 19:28:47 | 19 | 1,158 | 40 | 4 | 19 | 41 |
+| 19:35:58 | — | 1,706 | — | — | — | 145 |
+
+Decisions by operating state at 19:35:58Z:
+`ORDER_WORKING 1300`, `NO_RESIDUAL 271`, `HOLD_NO_FEASIBLE_PAIR 135`.
+
+`reconciles = true` on the written positions. Both writer locks held
+(`desk_lock_free = f`, `rn1x_lock_free = f`) — the rn1x loop is the single
+writer on its own key, not a standby of the desk's.
+
+### The fail-closed sequence, observed rather than asserted
+
+- 19:21:31Z heartbeat: `{"ran": false, "why": "CONTROL_ROW_ABSENT",
+  "state": "STOPPED"}` — deployed, holding its lock, writing nothing.
+- 19:24:36Z `rn1x-on` → `rn1x_shadow = true`.
+- 19:28:26Z heartbeat: `REPLAYED`, wrote a position AND refused another
+  for `initial flat inventory/history completeness not verified`.
+
+Registration did not start it; a database write did.
+
+### Containment, unchanged throughout
+
+`acct_fc2d773a2afa4851` still `paused = t`, `ACCOUNTING_UNCERTAIN`, and
+the last desk decision is still **16:37:30Z**. Nothing in this work reads
+or writes the desk's tables.
+
+### Blockers, still named and still not worked around
+
+- `SECOND_HALF_UNDEFINED` — no event-progress feed, so the loss exit is
+  unavailable on every position and only the PAIRING half of the policy
+  is under test. Missing dependency: a per-sport event clock with observed
+  period boundaries, joined point-in-time.
+- `NO_CONTEMPORANEOUS_BOOK` — no archived bid/ask/depth for these
+  instants. Tape prints are executions by others, not a standing book.
+- `FEED_POSTDATES_SETTLEMENT` — 15.07 h detection lag on the measured
+  seed, postdating settlement by 11.22 h. No forward lane can be seeded
+  from this feed, so the experiment is HISTORICAL_REPLAY by necessity.
+
+### Deployment constraint recorded, not routed around
+
+Both `sportsassets-api` and `sportsassets-workers` track the same
+auto-deploy branch, so registering the loop in `workers/all.py` would need
+a push that restarts the observation collector mid-window. Both loops are
+hosted in the API lifespan instead and released by commit id; the frontend
+went to the Netlify branch with `[skip render]`.
+
+### 19:51Z — the writer-lock handover, verified on a real deploy
+
+`d71cfc1` live 19:45:47Z. The new API instance reported
+`STANDBY_NOT_THE_EVALUATOR` at 19:45:45Z (the outgoing instance still held
+the evaluator lock), then acquired it on retry and wrote learning
+versions 5–8 at 19:51:13Z on 598 decided orders.
+
+This is the audit's defect 7 shown working in production rather than in a
+test: the old standby slept forever and could never take over, which is
+the containment incident at 16:41 I had attributed to a deploy.
+
+Learning verdicts unchanged in kind across both evaluations — three
+RETAIN, one ELIGIBLE (PAIR_092). The 598-decided dataset CONTAINS the
+420-decided one, so this is one result at two sample sizes, not an
+independent replication.
+
+Experiment at 19:51:13Z: cursor 294; `ORDER_WORKING 1808`,
+`NO_RESIDUAL 425`, `HOLD_NO_FEASIBLE_PAIR 136`. Containment unchanged.
+
+### 19:57Z — end state, and one fix not yet the active writer
+
+THE REGISTER POLLUTION, CAUGHT IN THE ACT. Versions 9–12 were written at
+**598 decided orders — the same count and the same four verdicts as
+versions 5–8**. Same dataset, same conclusions, four more rows. That is
+direct production evidence of the defect: `_next_version` always returns
+`max + 1`, so the `ON CONFLICT (model_key, version)` clause could never
+fire.
+
+CURRENT STATE, STATED PRECISELY. `5d9493e` (dataset digest +
+`MIN_NEW_POSITIONS` + hourly cadence) is deployed, but at 19:57:32Z the new
+instance reports `STANDBY_NOT_THE_WRITER` — the outgoing instance still
+holds both locks and is still the one writing (`ORDER_WORKING` 1853).
+
+So the pollution has **not** been observed to stop yet, and I am not
+claiming it has. The register may take one more redundant set before the
+gates become active. What is verified is that the fix is live as code and
+that the handover mechanism works — demonstrated earlier at 19:51:13Z, when
+a standby acquired the lock and resumed evaluating.
+
+Experiment at 19:57:41Z: `ORDER_WORKING 1853`, `NO_RESIDUAL 425`,
+`HOLD_NO_FEASIBLE_PAIR 136`. Both locks held. Containment unchanged.

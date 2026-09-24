@@ -266,11 +266,149 @@ async def lifespan(_: FastAPI):
     trim_task = asyncio.get_running_loop().create_task(_trim_loop())
 
     asyncio.get_running_loop().create_task(_rescore_once())
-    yield
-    trim_task.cancel()
-    if poller_task is not None:
-        poller_task.cancel()
-    await close_pool()
+
+    # ── THE SHADOW DESK LOOP (2026-09-23) ───────────────────────────
+    #
+    # NOT an unguarded background task. The loop's FIRST act is to take
+    # a Postgres session advisory lock; an instance that does not get it
+    # reports STANDBY and writes nothing, so the several API instances
+    # that exist during a deploy cannot run duplicate desks. It is also
+    # off unless BETTOR_DESK_LOOP is set, so this deploy changes nothing
+    # until the flag is turned on deliberately.
+    #
+    # It makes NO venue requests -- its only input is evidence already
+    # in our own database -- so the observation collector's allowance is
+    # untouched by it.
+    from .. import bettor_desk_loop as _DESKLOOP
+    desk_task = None
+    if _DESKLOOP.enabled():
+        from ..db import get_pool as _desk_pool
+        desk_task = asyncio.get_running_loop().create_task(
+            _DESKLOOP.run(_desk_pool))
+        log.info("shadow desk loop armed (contends for the writer lock)")
+
+    # ── THE RN1-SEEDED MANAGEMENT EXPERIMENT (2026-09-23) ───────────
+    #
+    # The audit's row for this path read: no worker caller, no
+    # persistence caller, no published trace route. This is the caller.
+    #
+    # HOSTED HERE RATHER THAN IN THE WORKER SERVICE because both
+    # services track the same auto-deploy branch, so a push that
+    # registers a loop there restarts the observation collector
+    # mid-window. The API is released by commit id with no push. Same
+    # reason the desk loop above lives here.
+    #
+    # TWO INDEPENDENT STOPS, and neither is this deploy. RN1X_SHADOW
+    # must be on (an env change, which Render applies on redeploy) AND
+    # the `rn1x_shadow` control row must read true (a database write,
+    # which takes effect within a cycle). With either absent the loop
+    # takes its lock, reads one column and sleeps. Absence is not
+    # permission.
+    #
+    # NO VENUE REQUESTS: its only input is evidence already in our own
+    # database, so the collector's allowance is untouched. NO ORDER
+    # PATH: every order it writes is modelled and migration 100 CHECKs
+    # is_modelled true. It never reads or writes the desk's tables or
+    # the paused ACCOUNTING_UNCERTAIN account.
+    from ..workers import rn1x_shadow as _RN1X
+    rn1x_task = None
+    if _RN1X.enabled():
+        from ..db import get_pool as _rn1x_pool
+        rn1x_task = asyncio.get_running_loop().create_task(
+            _RN1X.run(_rn1x_pool))
+        log.info("rn1x shadow loop armed (contends for its own writer lock)")
+
+    # ── THE CONTINUOUS EVALUATION CYCLE ─────────────────────────────
+    #
+    # Separate loop, separate lock, separate control row and separate env
+    # flag from the experiment above. They are separate because they fail
+    # for different reasons and one must be stoppable without the other:
+    # an evaluation that is wrong should not take the collection of
+    # evidence down with it, and evidence that has stopped arriving is not
+    # a reason to stop scoring what already arrived.
+    #
+    # IT HAS NO PROMOTION PATH. The champion is management-defined and
+    # frozen; a cleared challenger is recorded ELIGIBLE in the EXISTING
+    # `bettor_learn_model` register and a human decides. This process
+    # cannot change the active policy and holds no code that would.
+    from ..workers import rn1x_learn_loop as _RN1XL
+    rn1x_learn_task = None
+    if _RN1XL.enabled():
+        from ..db import get_pool as _rn1xl_pool
+        rn1x_learn_task = asyncio.get_running_loop().create_task(
+            _RN1XL.run(_rn1xl_pool))
+        log.info("rn1x learning loop armed (contends for its own lock)")
+
+    # ── THE EXTERNAL-VALUATION SHADOW ───────────────────────────────
+    #
+    # THE RUNTIME CALLER that did not exist. `bettor_external_shadow` was
+    # reached only by a test and a research script, so the entry inputs it
+    # forwards into the gate were supplied only by fixtures. This is the
+    # caller that supplies them from real reads.
+    #
+    # ITS OWN EVERYTHING, again: own env flag, own control row, own
+    # experiment id, own table. It does not read the RN1X cursors, the
+    # frozen pairing policy or the second-half trigger.
+    #
+    # IT DOES MAKE OUTBOUND REQUESTS, unlike the two loops above, and both
+    # budgets are respected: the provider's by the cycle cadence (three
+    # bulk requests every 15 minutes, ~60 credits), and the venue's by
+    # `venue_pace.pace`, which is the same process-wide pacer the
+    # collector claims against.
+    #
+    # NO ORDER PATH. It reaches `pmus.book_read` and nothing else on that
+    # module; `pmus.submit_fok` authorizes at the venue boundary before it
+    # constructs a client, and denial raises. The table's
+    # order_submitted CHECK is a backstop for a lying writer, not the
+    # control.
+    from ..workers import ext_pinnacle_loop as _EXT
+    ext_task = None
+    if str(os.environ.get(_EXT.ENV_FLAG, "")).strip().lower() in (
+            "on", "1", "true"):
+        from ..db import get_pool as _ext_pool
+        ext_task = asyncio.get_running_loop().create_task(
+            _EXT.run(_ext_pool))
+        log.info("external valuation shadow armed (control row still gates "
+                 "every cycle)")
+
+    # ── ACTUAL MODEL FITTING, on a schedule ─────────────────────────
+    #
+    # SEPARATE FROM THE POLICY COMPARATOR ABOVE, and the distinction is
+    # the point: `rn1x_learn_loop` re-runs policies over the same seeds
+    # and fits nothing. This one prepares a point-in-time dataset, fits
+    # the pure-Python kernel on rows whose horizon has CLOSED, records
+    # predictions BEFORE their outcomes exist, joins those outcomes when
+    # the horizon closes, and evaluates on the joined rows only.
+    #
+    # ITS TARGET IS NAMED AND IS NOT THE ENTRY TARGET. It forecasts
+    # whether the cohort account makes a complementary BUY within the
+    # horizon -- somebody else's next action. Not settlement, and not our
+    # fill probability. The prediction ledger refuses the settlement
+    # target outright because nothing is fitted for it.
+    #
+    # NO PROMOTION PATH. It can recommend; it cannot change the active
+    # policy, and management's baseline stays frozen whatever it finds.
+    from ..workers import rn1x_model_loop as _RN1XM
+    rn1x_model_task = None
+    if _RN1XM.enabled():
+        from ..db import get_pool as _rn1xm_pool
+        rn1x_model_task = asyncio.get_running_loop().create_task(
+            _RN1XM.run(_rn1xm_pool))
+        log.info("rn1x model fitting armed (control row gates every cycle)")
+
+    try:
+        yield
+    finally:
+        tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
+                             ext_task, rn1x_model_task, trim_task,
+                             poller_task)
+                 if t is not None]
+        for task in tasks:
+            task.cancel()
+        # The desk owns a pooled connection and a session advisory lock.
+        # Release it before waiting for pool.close(), including on deploy.
+        await asyncio.gather(*tasks, return_exceptions=True)
+        await close_pool()
 
 
 app = FastAPI(title="SportsAssets Hub API", lifespan=lifespan)
@@ -936,6 +1074,519 @@ async def command_investor_snapshot_route(response: Response) -> dict:
             "reason": inc.reason, "detail": inc.detail}) from inc
 
 
+@app.get("/api/command/desk/live",
+         dependencies=[Depends(require_command)])
+async def command_desk_live(response: Response) -> dict:
+    """The LIVE lane's operating state. Separate from the replay.
+
+    Returns what the loop is actually doing -- including DISABLED and
+    STANDBY, which are real states and not errors. A page that showed
+    only RUNNING would be unable to tell "off" from "broken".
+    """
+    from .. import bettor_desk as DK
+    from .. import bettor_desk_loop as DL
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    st = DL.status()
+    return {
+        "mode": CD.MODE_LIVE,
+        "lane": DL.LANE,
+        "separate_from_production": (
+            "the production engine's refusals are untouched. This is a "
+            "separate, explicitly labelled experimental lane with its "
+            "own execution model and its own tables."),
+        "loop": st,
+        "enabled": DL.enabled(),
+        "enable_env": DL.ENABLE_ENV,
+        "single_writer": "postgres session advisory lock %d" % DL.LOCK_KEY,
+        "makes_venue_requests": False,
+        "funded_order_path": "ABSENT_FROM_THE_IMPORT_GRAPH",
+        "p_fill": CD.NOT_IDENTIFIED,
+        "NOT_REPLAY": ("this is the LIVE lane. Its totals are never "
+                       "combined with the replay's."),
+        # ── WHAT THIS LANE ACTUALLY SIMULATES ────────────────────────
+        #
+        # This block travels with the performance figures rather than
+        # sitting in a document beside them, because the single most
+        # misleading thing this screen could do is show a P&L next to
+        # the word "live" without saying what produced it.
+        "simulates": {
+            "input_source": "the `trades` table in our own database. No "
+                            "venue request is made by this lane.",
+            "event_class": DK.EVENT_CLASS,
+            "event_class_means": (
+                "`trades` is keyed on whale_id and every row is ONE "
+                "TRACKED ACCOUNT'S OWN EXECUTION. It is NOT a "
+                "market-wide tape and it carries no order book. A "
+                "cohort account filling at a price is evidence that "
+                "THEIR order filled, not that ours would have."),
+            "source_venue": DK.SOURCE_VENUE,
+            "source_venue_evidence": (
+                "the ingest listener uses polygon_ws_url, "
+                "polygon_http_url and PM_EXCHANGE_V3_ADDRESSES, and "
+                "stamps ts_provenance=polygon_block_timestamp"),
+            "fee_schedule_venue": DK.FEE_SCHEDULE_VENUE,
+            "venue_basis": DK.VENUE_TRANSFER,
+            "venue_basis_means": (
+                "the fee schedule and position mechanics applied here "
+                "are PMUS; the observations driving them are Polymarket "
+                "global. That is a TRANSFERRED SCENARIO, not same-venue "
+                "execution evidence."),
+            "market_universe": (
+                "every condition appearing in the tracked cohort's "
+                "flow, not a curated list and not Ferrari alone"),
+            "fill_model": DK.FILL_MODEL,
+            "queue_share_ASSUMED": DL.QUEUE_SHARE_DEFAULT,
+            "order_book": CD.NOT_IDENTIFIED,
+            "market_impact": CD.NOT_IDENTIFIED,
+        },
+        # ── THE FOUR QUANTITIES, KEPT APART ──────────────────────────
+        #
+        # Observed evidence, simulated fills, realised simulated P&L
+        # and unvalued inventory are different kinds of number. The
+        # route returns them under separate keys so a caller cannot
+        # add them together by accident.
+        "separated": {
+            "observed_events": st.get("events_seen"),
+            "simulated_orders": st.get("orders"),
+            "simulated_decisions": st.get("decisions"),
+            "note": "counts only. The money figures live under "
+                    "`accounting` and are never summed with these.",
+        },
+        "risk_limits": DK.Limits().to_dict(),
+        "capital": {
+            "starting_cash_usd": DK.Limits().starting_cash,
+            "note": "remaining simulated capital, committed notional and "
+                    "unvalued inventory are read from the ledger by "
+                    "/api/command/desk/accounting, which is the one "
+                    "place they are computed.",
+        },
+        "epoch_id": DL.EPOCH_ID,
+        "book_continuity": (
+            "the book is restored from Postgres on start. Ledger rows "
+            "written BEFORE this release carry no epoch_id and are not "
+            "continuous across restarts -- see the correction record."),
+    }
+
+
+# ── COMMAND DESK: the shadow desk's read surface (2026-09-23) ────────
+#
+# The chain audit found shadow_executions and shadow_positions empty
+# because record_execution() and record_position() had no callers. The
+# desk engine is what calls them; these routes are what management
+# reads. Every payload carries its MODE, and no route returns a
+# combined live+replay total -- there is no such number.
+
+
+def _desk_unavailable(exc) -> HTTPException:
+    return HTTPException(status_code=503, detail={
+        "reason": "DESK_REPLAY_UNAVAILABLE", "detail": str(exc),
+        "note": "artifact unread -- COMMAND shows unavailable, not zero",
+    })
+
+
+@app.get("/api/command/desk/overview",
+         dependencies=[Depends(require_command)])
+async def command_desk_overview(response: Response) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.overview()
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
+@app.get("/api/command/desk/attribution",
+         dependencies=[Depends(require_command)])
+async def command_desk_attribution(response: Response) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.attribution()
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
+@app.get("/api/command/desk/lifecycles",
+         dependencies=[Depends(require_command)])
+async def command_desk_lifecycles(response: Response,
+                                  limit: int = 20) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.lifecycles(limit=min(max(int(limit), 1), 50))
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
+@app.get("/api/command/desk/lifecycle/{condition_id}",
+         dependencies=[Depends(require_command)])
+async def command_desk_lifecycle(condition_id: str,
+                                 response: Response) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.lifecycle(condition_id)
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
+@app.get("/api/command/desk/scenarios",
+         dependencies=[Depends(require_command)])
+async def command_desk_scenarios(response: Response) -> dict:
+    from . import command_desk as CD
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CD.scenarios()
+    except CD.ReplayUnavailable as exc:
+        raise _desk_unavailable(exc) from exc
+
+
+# ── THE POLICY-IMPROVEMENT LOOP, displayed ───────────────────────────
+#
+# READ-ONLY, and structurally incapable of promoting anything. These
+# three routes import a module with no INSERT, no UPDATE and no venue
+# client in its graph. Promotion is a reviewed commit; there is no
+# route through which a displayed result can change what the live desk
+# is running.
+#
+# A FAILED READ IS 503, NEVER AN EMPTY PAGE. "The loop has run no
+# experiments" and "I could not find out" are different facts, and the
+# screenshot blocker was exactly what happens when they render the
+# same. `LearningUnavailable` carries its own reason so the panel can
+# print WHY rather than a blank.
+
+def _learning_unavailable(exc) -> HTTPException:
+    return HTTPException(status_code=503, detail={
+        "reason": "LEARNING_ARTIFACT_UNAVAILABLE", "detail": str(exc),
+        "note": "artifact unread -- COMMAND shows unavailable, not "
+                "'no experiments have run'",
+    })
+
+
+@app.get("/api/command/desk/live/book",
+         dependencies=[Depends(require_command)])
+async def command_desk_live_book(response: Response,
+                                 limit: int = 60) -> dict:
+    """THE LIVE BLOTTER: decisions, orders, positions, accounting.
+
+    FOUR KINDS OF NUMBER, RETURNED UNDER FOUR KEYS. Observed evidence,
+    simulated orders, realised simulated P&L and unvalued inventory are
+    different things; they are never added here and the route offers no
+    total that would combine them.
+
+    A FAILED READ IS 503 WITH ITS REASON. The original management
+    screenshot showed "FEED UNAVAILABLE" beside "No shadow position
+    yet" -- a failed read rendered as an empty portfolio. Every query
+    below is inside one try, and an empty result is returned as an
+    explicit zero with `read_ok: true` beside it.
+    """
+    from ..db import get_pool
+    from .. import bettor_desk as DK
+    from .. import bettor_desk_accounts as ACC
+
+    response.headers["Cache-Control"] = "no-store"
+    lim = min(max(int(limit), 1), 200)
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            # THE ACTIVE ACCOUNT SCOPES EVERY READ BELOW. Without it the
+            # blotter would show the closed, unattributable period mixed
+            # into the new book -- which is the exact confusion the
+            # account id exists to end.
+            # THE PAUSE AND ACCOUNTING COLUMNS COME FROM THE ROW, not
+            # from the loop's in-memory status. A halt held only in a
+            # process's memory disappears when that process restarts,
+            # and an older build that never learned to report it would
+            # render the desk as healthy. The row is the durable truth
+            # and it is what the page must show.
+            acct = await conn.fetchrow(
+                """
+                SELECT account_id, opening_balance::float8 AS opening_balance,
+                       opened_at, note, paused, pause_reason, paused_at,
+                       accounting_status, last_verified_at,
+                       -- the one field the page renders, pulled out so
+                       -- the client is not parsing a jsonb blob it got
+                       -- as a string
+                       accounting_detail->>'performance_qualification'
+                           AS performance_qualification
+                  FROM bettor_desk_accounts
+                 WHERE desk_id = 'live1' AND status = $1
+                """, ACC.ACTIVE)
+            aid = acct["account_id"] if acct else None
+            decisions = await conn.fetch(
+                """
+                SELECT desk_decision_id, decided_at, condition_id,
+                       outcome_index, action, reason, proposed_price,
+                       proposed_qty, risk, ev
+                  FROM bettor_desk_decisions
+                 WHERE desk_id = 'live1' AND account_id = $2
+                 ORDER BY decided_at DESC LIMIT $1
+                """, lim, aid)
+            orders = await conn.fetch(
+                """
+                SELECT order_id, condition_id, outcome_index, side,
+                       intent, limit_price::float8 AS limit_price,
+                       qty::float8 AS qty,
+                       filled_qty::float8 AS filled_qty,
+                       avg_fill_price::float8 AS avg_fill_price,
+                       fees_usd::float8 AS fees_usd, state,
+                       state_reason, placed_at, expires_at, terminal_at
+                  FROM bettor_desk_orders
+                 WHERE desk_id = 'live1' AND account_id = $2
+                 ORDER BY updated_at DESC LIMIT $1
+                """, lim, aid)
+            states = await conn.fetch(
+                """
+                SELECT state, count(*) AS n FROM bettor_desk_orders
+                 WHERE desk_id = 'live1' AND account_id = $1
+                 GROUP BY 1 ORDER BY 1
+                """, aid)
+            # POSITIONS WITH THEIR NEXT INTENDED ACTION. The intent is
+            # the desk's most recent decision on that leg, joined here
+            # rather than guessed by the page.
+            positions = await conn.fetch(
+                """
+                SELECT p.condition_id, p.outcome_index,
+                       p.qty::float8 AS qty,
+                       p.cost_basis_usd::float8 AS cost_basis_usd,
+                       p.realized_pnl_usd::float8 AS realized_pnl_usd,
+                       p.fees_usd::float8 AS fees_usd,
+                       p.opened_at, p.settled,
+                       p.settled_payout::float8 AS settled_payout,
+                       d.action AS next_intended_action,
+                       d.reason AS next_intended_reason,
+                       d.decided_at AS intent_decided_at
+                  FROM bettor_desk_positions p
+                  LEFT JOIN LATERAL (
+                       SELECT action, reason, decided_at
+                         FROM bettor_desk_decisions dd
+                        WHERE dd.desk_id = p.desk_id
+                          AND dd.condition_id = p.condition_id
+                          AND dd.outcome_index = p.outcome_index
+                        ORDER BY decided_at DESC LIMIT 1) d ON TRUE
+                 WHERE p.desk_id = 'live1' AND p.account_id = $2
+                   AND p.qty > 0
+                 ORDER BY p.cost_basis_usd DESC LIMIT $1
+                """, lim, aid)
+            led = await conn.fetchrow(
+                """
+                SELECT at, cash_usd::float8 AS cash_usd,
+                       committed_usd::float8 AS committed_usd,
+                       inventory_cost::float8 AS inventory_cost,
+                       realized_pnl_usd::float8 AS realized_pnl_usd,
+                       fees_usd::float8 AS fees_usd, open_orders,
+                       open_positions, invariant_ok, invariant_detail,
+                       epoch_id
+                  FROM bettor_desk_ledger
+                 WHERE desk_id = 'live1' AND account_id = $1
+                 ORDER BY at DESC LIMIT 1
+                """, aid)
+    except Exception as exc:                                # noqa: BLE001
+        raise HTTPException(status_code=503, detail={
+            "reason": "DESK_LIVE_BOOK_UNREADABLE",
+            "detail": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+            "note": "a failed read. NOT an empty book, and not a "
+                    "reading of zero.",
+        }) from exc
+
+    lim_obj = DK.Limits()
+    a = dict(led) if led else None
+    return {
+        "mode": "LIVE_SHADOW",
+        "read_ok": True,
+        # THE ACCOUNT, NAMED. Everything below belongs to this book and
+        # to no other; the closed period is a separate read.
+        "account": dict(acct) if acct else None,
+        "account_missing_because": (
+            None if acct else
+            "no ACTIVE shadow account exists yet. The loop creates it "
+            "once, on its next start."),
+        "incident_record": "/api/command/desk/correction",
+        "never_combined": (
+            "this account's performance is never added to the closed "
+            "account's, and the closed account's P&L is marked "
+            "UNRELIABLE_DO_NOT_QUOTE."),
+        "decisions": [dict(r) for r in decisions],
+        "orders": [dict(r) for r in orders],
+        "order_states": {r["state"]: r["n"] for r in states},
+        "positions": [dict(r) for r in positions],
+        "accounting": a,
+        "accounting_is_null_because": (
+            None if a else
+            "the ledger has no row for this desk yet. That is an "
+            "explicit zero, not a failed read -- read_ok is true."),
+        "exposure": {
+            "inventory_cost_usd": a["inventory_cost"] if a else 0.0,
+            "inventory_mark_usd": "NOT_IDENTIFIED",
+            "executable_liquidation_usd": "NOT_IDENTIFIED",
+            "why": "no contemporaneous book is retained for these "
+                   "instants, so neither a mark nor a liquidation "
+                   "estimate can be produced. Cost basis is not a mark.",
+        },
+        "capital": {
+            "starting_cash_usd": lim_obj.starting_cash,
+            "cash_usd": a["cash_usd"] if a else None,
+            "committed_usd": a["committed_usd"] if a else None,
+            "remaining_headroom_usd": (
+                round(lim_obj.max_committed_usd - a["committed_usd"], 2)
+                if a else None),
+        },
+        "risk_limits": lim_obj.to_dict(),
+        "corrected_accounting": "/api/command/desk/correction",
+        "no_combined_total": (
+            "this lane's figures are never added to the replay's. The "
+            "two are produced under different execution assumptions."),
+    }
+
+
+@app.get("/api/command/desk/correction",
+         dependencies=[Depends(require_command)])
+async def command_desk_correction(response: Response) -> dict:
+    """THE CORRECTION RECORD. Originals beside corrected, never instead.
+
+    A failed read is 503 with its reason. An empty correction table is
+    a real answer ("no correction has been applied") and is returned as
+    one -- the two must not render alike.
+    """
+    from ..db import get_pool
+    from .. import bettor_desk_correction as CORR
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            run = await conn.fetchrow(
+                """
+                SELECT * FROM bettor_desk_correction_runs
+                 WHERE desk_id = 'live1'
+                 ORDER BY started_at DESC LIMIT 1
+                """)
+            rows = await conn.fetch(
+                """
+                SELECT status, count(*) AS n,
+                       sum(delta_realized_lower_usd)::float8 AS lo,
+                       sum(delta_realized_upper_usd)::float8 AS hi
+                  FROM bettor_desk_corrections
+                 WHERE desk_id = 'live1'
+                 GROUP BY status ORDER BY 1
+                """)
+            epochs = await conn.fetch(
+                """
+                SELECT epoch_id, started_at, ended_at, restored,
+                       starting_cash::float8 AS starting_cash,
+                       cursor_at_start
+                  FROM bettor_desk_epochs WHERE desk_id = 'live1'
+                 ORDER BY started_at DESC LIMIT 20
+                """)
+            incident = await conn.fetchrow(
+                """
+                SELECT * FROM bettor_desk_incidents
+                 WHERE desk_id = 'live1'
+                 ORDER BY occurred_at DESC LIMIT 1
+                """)
+            accounts = await conn.fetch(
+                """
+                SELECT account_id, status,
+                       opening_balance::float8 AS opening_balance,
+                       opened_at, closed_at, note
+                  FROM bettor_desk_accounts WHERE desk_id = 'live1'
+                 ORDER BY opened_at DESC
+                """)
+    except Exception as exc:                                # noqa: BLE001
+        raise HTTPException(status_code=503, detail={
+            "reason": "CORRECTION_UNREADABLE",
+            "detail": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+            "note": "a failed read, NOT an absence of corrections",
+        }) from exc
+
+    return {
+        "version": CORR.VERSION,
+        "applied": run is not None,
+        # ── THE INCIDENT, kept as a record rather than a footnote ────
+        "incident": dict(incident) if incident else None,
+        "accounts": [dict(r) for r in accounts],
+        "closed_period": (
+            "Records written before shadow accounts existed carry "
+            "account_id IS NULL. They are PRESERVED and excluded from "
+            "every live read by that fact alone. Their reported P&L is "
+            "UNRELIABLE_DO_NOT_QUOTE, and their inventory is "
+            "UNATTRIBUTABLE -- not closed, not zero, not valued."),
+        "never_combined": (
+            "the closed account's figures are never added to the new "
+            "account's. They are different books and one of them does "
+            "not reconcile."),
+        "nothing_deleted": (
+            "no record was removed and no compensating cash entry was "
+            "posted. The $2,367.73 discrepancy is recorded, not "
+            "absorbed."),
+        "run": dict(run) if run else None,
+        "by_status": [dict(r) for r in rows],
+        "epochs": [dict(e) for e in epochs],
+        "originals_preserved": (
+            "bettor_desk_ledger, _orders and _positions are NOT altered. "
+            "The correction is written beside them so the change itself "
+            "remains visible."),
+        "why_an_interval": (
+            "bettor_desk_fills was never written by the loop, and PMUS "
+            "rounds PER FILL, so a fee recomputed from an order's "
+            "average price is not the sum of its fills' fees. The lower "
+            "bound assumes every fill's amount rounded to zero; the "
+            "upper bound is the concavity bound from the average. The "
+            "true figure lies between them."),
+        "duplicate_prevention": (
+            "UNIQUE (desk_id, version) on the run, and "
+            "correction_id = version:kind:subject on each row"),
+        "historical_labels": (
+            "ledger rows written before the fee basis existed carry no "
+            "fee_basis key. They are read as FEE_BASIS_NOT_RECORDED and "
+            "are NOT relabelled net-of-fees because the current process "
+            "has a schedule."),
+    }
+
+
+@app.get("/api/command/learning/overview",
+         dependencies=[Depends(require_command)])
+async def command_learning_overview(response: Response) -> dict:
+    from . import command_learning as CL
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CL.overview()
+    except CL.LearningUnavailable as exc:
+        raise _learning_unavailable(exc) from exc
+
+
+@app.get("/api/command/learning/cycles",
+         dependencies=[Depends(require_command)])
+async def command_learning_cycles(response: Response) -> dict:
+    from . import command_learning as CL
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CL.cycles()
+    except CL.LearningUnavailable as exc:
+        raise _learning_unavailable(exc) from exc
+
+
+@app.get("/api/command/learning/results",
+         dependencies=[Depends(require_command)])
+async def command_learning_results(response: Response) -> dict:
+    from . import command_learning as CL
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CL.results()
+    except CL.LearningUnavailable as exc:
+        raise _learning_unavailable(exc) from exc
+
+
 # ── COMMAND SHADOW: the read-only shadow data contract (2026-09-19) ──
 #
 # Owner directive: COMMAND IS P0. These routes serve the REAL
@@ -1089,6 +1740,352 @@ async def command_shadow_accounting_all(response: Response) -> dict:
         raise _shadow_unavailable(inc) from inc
 
 
+# ── THE RN1-SEEDED MANAGEMENT EXPERIMENT ────────────────────────────
+#
+# The published trace the audit recorded as absent. Read-only: these
+# three routes select from the rn1x_* tables and nothing else. They do
+# not start, stop or seed the experiment -- the control row does that.
+@app.get("/api/command/rn1x/overview",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_overview(response: Response) -> dict:
+    """Operation, decisions-by-state, settled totals and blockers.
+
+    Every count is scoped to one experiment id, which the payload says
+    on the row rather than in a footnote.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    return await CR.overview(await get_pool())
+
+
+@app.get("/api/command/rn1x/statuses",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_statuses(response: Response) -> dict:
+    """Seven independent statuses, each naming what is LIVE and why.
+
+    Historical replay, prospective RN1 management, independent EV entries,
+    pairing, the second-half loss exit, accounting health and learning
+    evaluation fail independently, so they are reported independently
+    rather than behind one blended badge.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    return {"scope": CR.SCOPE, "label": CR.LABEL,
+            "statuses": await CR.statuses(await get_pool())}
+
+
+@app.get("/api/command/rn1x/learning",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_learning(response: Response) -> dict:
+    """Learning-cycle status and the LATEST RESULT, rejection included.
+
+    A rejection is a result. The gate's eligibility floor is 50 decided
+    orders and this experiment will sit under it for a while, so the
+    panel reports INELIGIBLE rather than going blank.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    return await CR.learning(await get_pool())
+
+
+@app.get("/api/command/rn1x/positions",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_positions(response: Response,
+                                 limit: int = 50) -> dict:
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    rows = await CR.positions(await get_pool(), limit=max(1, min(200, limit)))
+    return {"scope": CR.SCOPE, "label": CR.LABEL, "positions": rows}
+
+
+@app.get("/api/command/rn1x/trace/{position_id:path}",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_trace(position_id: str, response: Response) -> dict:
+    """ONE position end to end: every decision, order, fill and outcome."""
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    return await CR.trace(await get_pool(), position_id)
+
+
+@app.get("/api/command/rn1x/external/probe",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_external_probe(response: Response) -> dict:
+    """CAN THIS PROCESS ACTUALLY RETRIEVE ODDS? One real request.
+
+    Provisioning a credential is not the same as the running process being
+    able to use it, and "the env var is set" is not evidence: the wrong
+    value, a revoked key or an egress rule all look identical from the
+    outside. So this performs ONE bulk request from inside the API and
+    reports what came back.
+
+    THE KEY IS NEVER RETURNED, LOGGED OR ECHOED. Only its presence, the
+    HTTP status, the event count, the provider's quota headers and how
+    much Pinnacle coverage the payload carried. The provider's error
+    bodies can echo the query string, so no body is included either.
+
+    IT COSTS CREDITS -- about 18-21 for one sport -- so it asks for one
+    sport only, and it is behind the command session like every other
+    route here.
+    """
+    import os
+
+    from .. import bettor_external_shadow as ext
+    from ..workers import ext_pinnacle_loop as EXT
+
+    response.headers["Cache-Control"] = "no-store"
+    cred = ext.credential_present()
+    out = {"scope": ext.EXPERIMENT_ID, "label": ext.LABEL,
+           "credential": cred, "retrieved": False}
+    if not cred["present"]:
+        out["why"] = cred["refusal"]
+        return out
+
+    sport_key, family = EXT.SPORTS[0]
+    got = await EXT.fetch_odds(sport_key, api_key=os.environ[
+        "EDGE_ODDS_API_KEY"])
+    events = got.get("events") or []
+    with_pin = 0
+    ages = []
+    now = time.time()
+    for ev in events:
+        q = EXT.pinnacle_h2h(ev, received_at=now)
+        if q is None:
+            continue
+        with_pin += 1
+        try:
+            from .. import bettor_pinnacle_devig as _dv
+            ages.append(round(now - _dv._epoch(q["observed_at"]), 1))
+        except Exception:                                      # noqa: BLE001
+            pass
+    out.update({
+        "retrieved": bool(got.get("ok")),
+        "http_status": got.get("status"),
+        "sport": sport_key, "sport_family": family,
+        "events": len(events),
+        "events_with_pinnacle_h2h": with_pin,
+        "quote_age_s": {"min": min(ages), "max": max(ages),
+                        "n": len(ages)} if ages else None,
+        "credits_used_total": got.get("credits_used"),
+        "credits_remaining": got.get("credits_remaining"),
+        "key_value_returned": False,
+    })
+    if not got.get("ok"):
+        out["why"] = ("the provider refused the request. The body is not "
+                      "included because it can echo the query string")
+
+    # THE SECOND-HALF BLOCKER, measured rather than asserted. The exit is
+    # unavailable because no timestamped progress observation exists; this
+    # asks the provider's scores endpoint whether it carries one.
+    try:
+        out["progress_probe"] = await EXT.fetch_scores(
+            sport_key, api_key=os.environ["EDGE_ODDS_API_KEY"])
+    except Exception as exc:                                   # noqa: BLE001
+        out["progress_probe"] = {"ok": False,
+                                 "error": type(exc).__name__}
+    from .. import bettor_rn1x_policy as _pol
+
+    out["second_half_exit"] = {
+        "available": bool(_pol.SECOND_HALF_MAPPING),
+        "sports_with_a_written_rule": sorted(
+            k for k, v in _pol.DOCUMENTED_MAPPINGS.items() if v is not None),
+        "sports_with_a_connected_feed": sorted(_pol.PROGRESS_FEED_CONNECTED),
+        "missing_capability": _pol.MAPPING_REQUIREMENTS[0],
+    }
+    # THE VENUE'S OWN EVENT PAYLOAD, measured rather than inspected. "No
+    # code reads a period field" is an inspection; this asks the payload.
+    # It is the read that separates "our integrations lack the field" from
+    # "no accessible source exists".
+    try:
+        out["second_half_exit"]["venue_event_probe"] = await asyncio.wait_for(
+            asyncio.to_thread(EXT.venue_event_progress_probe, 1),
+            timeout=EXT.VENUE_TIMEOUT_S)
+    except Exception as exc:                                   # noqa: BLE001
+        out["second_half_exit"]["venue_event_probe"] = {
+            "error": type(exc).__name__}
+
+    # THE INTEGRATION, PREPARED. Which provider is connected, or the named
+    # reason none is, plus the exact capability required -- so the blocker
+    # is a purchase decision rather than an engineering unknown.
+    try:
+        from .. import bettor_progress_providers as _pp
+
+        out["second_half_exit"]["provider_integration"] = _pp.configured()
+        out["second_half_exit"]["searched_and_unavailable"] = \
+            _pp.describe()["searched_and_unavailable"]
+    except Exception as exc:                                   # noqa: BLE001
+        out["second_half_exit"]["provider_integration"] = {
+            "unreadable": type(exc).__name__}
+
+    # THE VENUE READ, ON DEMAND. Run 22 refused two mapped contracts with
+    # VENUE_BOOK_READ_RETURNED_ERROR, and finding out why should not cost a
+    # 15-minute cycle: this asks the same reader the loop uses, for the
+    # first few open markets in the supported sports, and reports the
+    # sanitized diagnostic. Read-only, paced by the same venue_pace the
+    # collector shares, and bounded to three slugs so it cannot become a
+    # second consumer of the venue budget.
+    out["venue_read_probe"] = await _venue_read_probe(EXT, limit=3)
+    return out
+
+
+async def _venue_read_probe(EXT, *, limit: int = 3) -> dict:
+    """Attempt the loop's own venue read against a few open markets.
+
+    Same function, same pacing, same refusal codes as the cycle -- a probe
+    that used a different reader would answer a different question.
+    """
+    from ..db import get_pool
+
+    probe = {"reader": "workers.ext_pinnacle_loop.venue_quote",
+             "endpoint": "markets.book", "attempted": 0, "ok": 0,
+             "results": []}
+    try:
+        labels = sorted({lbl for _, fam in EXT.SPORTS
+                         for lbl in EXT.VENUE_SPORT_LABELS.get(fam, ())})
+        pool = await get_pool()
+        async with pool.acquire() as conn:
+            rows = await conn.fetch(EXT.MARKETS_SQL, labels,
+                                    EXT.MARKET_STALE_AFTER_S)
+            for r in list(rows)[:max(1, int(limit))]:
+                probe["attempted"] += 1
+                vq = await EXT.venue_quote(
+                    conn, condition_id=r["condition_id"],
+                    outcome_index=0, now=time.time())
+                item = {"condition_id": r["condition_id"],
+                        "ok": bool(vq.get("ok")),
+                        "refusal": vq.get("refusal"),
+                        "diagnostic": vq.get("diagnostic")}
+                if vq.get("ok"):
+                    probe["ok"] += 1
+                    item.update(ask=vq.get("ask"), depth=vq.get("depth"),
+                                age_s=vq.get("age_s"),
+                                age_basis=vq.get("age_basis"))
+                probe["results"].append(item)
+    except Exception as exc:                                   # noqa: BLE001
+        probe["error"] = type(exc).__name__
+    probe["verdict"] = (
+        "the venue read works from this process" if probe["ok"] else
+        "no open market in the supported sports returned a usable book; "
+        "the per-slug diagnostic above names the stage and the code")
+    return probe
+
+
+@app.get("/api/command/rn1x/external/census",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_external_census(response: Response,
+                                       hours: int = 24) -> dict:
+    """What the engine decided and, mostly, why it refused."""
+    from .. import bettor_external_shadow as ext
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await ext.census(conn, hours=max(1, min(720, int(hours))))
+
+
+@app.get("/api/command/rn1x/external/trace/{row_id}",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_external_trace(row_id: int,
+                                      response: Response) -> dict:
+    """ONE valuation end to end, as management inspects it.
+
+    Everything the directive asks to be inspectable, on one row: the raw
+    odds, both timestamps, the mapping, the de-vig method, the
+    probability, the executable price, the costs, the estimated edge, the
+    decision and the outcome if one has been joined yet.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await CR.external_trace(conn, int(row_id))
+
+
+@app.get("/api/command/incentive/observed-share",
+         dependencies=[Depends(require_command)])
+async def command_incentive_observed_share(response: Response,
+                                           clip: float = 100.0) -> dict:
+    """THE CAPTURED TERMS AGAINST THE LADDERS WE ACTUALLY OBSERVED.
+
+    The opportunity script has only run on markets carrying no incentive
+    programme. This runs the same engine on the programme's own markets,
+    using the ladders the collector persisted, and keeps the hypothetical
+    share separate from earned rewards -- which are zero.
+    """
+    from .. import bettor_incentive_observed_share as OS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            return await OS.observed_share(
+                conn, clip=max(1.0, min(5000.0, float(clip))))
+        except Exception as exc:                               # noqa: BLE001
+            return {"ok": False, "error": type(exc).__name__,
+                    "why": "the observed-share read failed"}
+
+
+@app.get("/api/command/rn1x/model-evaluation",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_model_evaluation(response: Response,
+                                        verify: int = 40) -> dict:
+    """WHAT THE LEARNING EVALUATION ACTUALLY FOUND, in full.
+
+    The tile reports counts. This reports the measurement: the target, the
+    model versions, when the predictions were recorded, how many distinct
+    conditions they cover, log loss, Brier, calibration, and the comparison
+    against a prior that was FIXED BEFORE the outcomes existed rather than
+    computed from them.
+
+    It also re-checks the out-of-sample claim against the label's own
+    evidence, because a stored flag is an assertion and not a check.
+    """
+    from ..db import get_pool
+    from ..workers import rn1x_model_loop as ML
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        try:
+            return await ML.evaluate(
+                conn, verify_sample=max(0, min(200, int(verify))))
+        except Exception as exc:                               # noqa: BLE001
+            return {"ok": False, "error": type(exc).__name__,
+                    "why": "the evaluation read failed"}
+
+
+@app.get("/api/command/rn1x/clock-audit",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_clock_audit(response: Response) -> dict:
+    """WHICH POSITIONS CAN SUPPORT A PROSPECTIVE CLAIM, and which cannot.
+
+    Migration 104 labelled every row written before it, because those
+    rows' decision timestamps were set equal to an availability instant
+    rather than read from the clock the policy ran on. This is the read
+    that shows the split, so the label is visible rather than filed.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await CR.clock_audit(conn)
+
+
 @app.get("/api/command/shadow/comparison",
          dependencies=[Depends(require_command)])
 async def command_shadow_comparison(response: Response) -> dict:
@@ -1113,6 +2110,46 @@ async def command_shadow_health(response: Response) -> dict:
         return await CS.health(await get_pool())
     except CS.RetrievalIncomplete as inc:
         raise _shadow_unavailable(inc) from inc
+
+
+# ── THE BETTOR COMMAND CENTRE (2026-09-23) ──────────────────────────
+#
+# FIVE VIEWS OVER ONE READ: live operation, test and release evidence,
+# economic evidence, capability traceability and a management overview.
+# It is a GET behind `require_command` like everything else here, and
+# the module it calls holds no mutating statement and no venue client.
+#
+# CACHE-CONTROL: NO-STORE, AND THAT IS LOAD-BEARING. This page reports
+# whether a collection run is alive. A cached answer served as the
+# current one is the specific failure it exists to prevent, so the
+# response is never storable and every figure carries its own `as_of`.
+
+
+@app.get("/api/command/center/snapshot",
+         dependencies=[Depends(require_command)])
+async def command_center_snapshot(response: Response) -> dict:
+    from . import command_center as CCTR
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    try:
+        return await CCTR.snapshot()
+    except CCTR.RetrievalIncomplete as inc:
+        raise HTTPException(status_code=503, detail={
+            "reason": inc.reason, "detail": inc.detail,
+            "note": "evidence unread -- the command centre shows "
+                    "UNAVAILABLE, never a page of zeros",
+        }) from inc
+
+
+@app.get("/api/command/center/describe",
+         dependencies=[Depends(require_command)])
+async def command_center_describe(response: Response) -> dict:
+    """The read model's own contract: its states, buckets and refusals."""
+    from .. import bettor_command_center as CC
+
+    response.headers["Cache-Control"] = "no-store"
+    return CC.describe()
 
 
 # ── BETTOR_EXPERIMENTAL_SHADOW (2026-09-19 §13) ─────────────────────
@@ -10114,6 +11151,77 @@ async def api_s1_arm_override(action: str) -> dict:
         "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
         "s1_arm_override", json.dumps(action == "on"))
     return {"ok": True, "s1_arm_override": action == "on"}
+
+
+@app.post("/api/admin/ext-pinnacle-shadow/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_ext_pinnacle_shadow(action: str) -> dict:
+    """Arm or stop the EXTERNAL-VALUATION SHADOW experiment's control row.
+
+    THE SECOND OF TWO INDEPENDENT STOPS, and the prompt one. Arming needs
+    BOTH `EXT_PINNACLE_SHADOW` in the environment (a deploy) and this row
+    reading true; stopping needs only this row, and takes effect within a
+    cycle without a deploy. Absence of the row is NOT permission.
+
+    WHY A ROUTE AND NOT render-ops. render-ops.yml is the only place that
+    can reach the database from CI, and it sits 422 bytes under GitHub's
+    512,000-byte workflow ceiling -- already below this repository's own
+    32 KiB headroom rule, which exists because an eight-line comment once
+    took that lever down and two dispatches failed before anyone noticed.
+    Adding a statement to it to arm a shadow experiment would spend the
+    last of that margin on the least important thing in the file. This
+    follows the same shape as the S1 arm override above instead.
+
+    IT ARMS NO TRADING. The experiment it gates submits no orders: its
+    only writer is `external_valuations`, whose order_submitted column
+    CHECKs FALSE, and the venue-boundary gate authorizes every submission
+    independently of anything here.
+    """
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=422, detail="action must be on|off")
+    from .. import bettor_external_shadow as ext
+
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        ext.CONTROL_KEY, json.dumps(action == "on"))
+    return {"ok": True, "control_key": ext.CONTROL_KEY,
+            "armed": action == "on",
+            "env_flag_also_required": "EXT_PINNACLE_SHADOW",
+            "submits_orders": False}
+
+
+@app.post("/api/admin/rn1x-model-fit/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_rn1x_model_fit(action: str) -> dict:
+    """Arm or stop the SCHEDULED MODEL-FITTING loop's control row.
+
+    Same two-independent-stops shape as everything else here: arming needs
+    RN1X_MODEL_FIT in the environment AND this row true; stopping needs
+    only this row and takes effect within a poll.
+
+    IT ARMS NO TRADING AND NO PROMOTION. The loop reads `trades`, writes
+    `rn1x_model_predictions`, and has no code path that changes the active
+    policy -- management's baseline is frozen whatever it finds. Its target
+    is a behavioural forecast about the cohort account's next action, which
+    the entry gate refuses for entry on the target alone.
+    """
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=422, detail="action must be on|off")
+    from ..workers import rn1x_model_loop as ML
+
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        ML.CONTROL_KEY, json.dumps(action == "on"))
+    return {"ok": True, "control_key": ML.CONTROL_KEY,
+            "armed": action == "on",
+            "env_flag_also_required": ML.ENV_FLAG,
+            "target": ML.TARGET,
+            "target_is_not_settlement": True,
+            "promotes_a_winner": False}
 
 
 @app.post("/api/admin/side-echo-reset",

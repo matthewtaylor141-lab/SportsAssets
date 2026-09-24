@@ -237,3 +237,181 @@ def test_the_shadow_module_is_loaded_before_app_js():
 
 def test_the_shadow_view_stops_polling_when_it_is_left():
     assert "window.BTShadow?.stop()" in APP_JS
+
+
+# ── THE RN1-SEEDED MANAGEMENT TAB ───────────────────────────────────
+#
+# The audit recorded "no published trace route" for this experiment, and
+# the brief asked for a view showing "actual operation, decisions,
+# results and remaining blockers". These check the four routes exist and
+# that the page draws all four sections -- in particular that the
+# BLOCKERS panel is not conditional on the experiment being empty.
+
+RN1X_ROUTES = ("/api/command/rn1x/overview", "/api/command/rn1x/positions",
+               "/api/command/rn1x/learning")
+
+
+def test_the_rn1x_routes_are_registered():
+    paths = {getattr(r, "path", "") for r in APP.app.routes}
+    for route in RN1X_ROUTES:
+        assert route in paths, route
+    assert any(p.startswith("/api/command/rn1x/trace/") for p in paths), paths
+
+
+def test_the_rn1x_routes_require_a_command_session(client):
+    for route in RN1X_ROUTES:
+        res = client.get(route)
+        assert res.status_code in (401, 403), (route, res.status_code)
+
+
+def test_rn1x_is_a_tab_and_has_a_renderer():
+    assert "['rn1x', 'RN1 seeded management']" in SHADOW_JS
+    assert "rn1x: rn1xTab," in SHADOW_JS
+    assert "function rn1xTab()" in SHADOW_JS
+
+
+def test_the_rn1x_cache_key_is_namespaced():
+    """Three namespaces now serve a route called `overview`.
+
+    An unkeyed cache would paint the desk's replay numbers under the
+    rn1x heading -- one mode's figures beneath another mode's title,
+    which is the exact error the mode separation exists to prevent.
+    """
+    assert "pullRn1x" in SHADOW_JS
+    assert "return pull(path, 'rn1x', 'rn1x/' + path);" in SHADOW_JS
+    for key in ("'rn1x/overview'", "'rn1x/learning'", "'rn1x/positions'"):
+        assert key in SHADOW_JS, key
+
+
+def test_the_rn1x_blockers_panel_is_not_conditional():
+    """A screen that hides its blockers once rows arrive is how "the loss
+    exit has never been available" stops being visible.
+
+    The blockers section is built unconditionally and concatenated into
+    every return, so it renders while the experiment is running and
+    writing. This asserts over the source because that is where the
+    property lives.
+    """
+    body = SHADOW_JS[SHADOW_JS.index("function rn1xTab()"):]
+    body = body[:body.index("\n  const VIEW = {")]
+    # built with no guard around it
+    assert "const blockers = `<section" in body
+    # and present in the full-render return
+    tail = body[body.rindex("return "):]
+    assert "blockers" in tail, tail
+    # the empty-state branch must not be the ONLY place it appears
+    assert body.count("blockers") >= 3, body.count("blockers")
+
+
+def test_the_rn1x_tab_draws_all_four_required_sections():
+    body = SHADOW_JS[SHADOW_JS.index("function rn1xTab()"):]
+    body = body[:body.index("\n  const VIEW = {")]
+    for needed in ("Is it operating?", "What is persisted",
+                   "Decisions by operating state", "Remaining blockers",
+                   "Learning cycle", "Seeded positions"):
+        assert needed in body, needed
+
+
+def test_the_rn1x_tab_never_prints_a_bare_zero_for_an_unknown():
+    """`zeroOk` prints a real 0 and NOT IDENTIFIED for absent.
+
+    The counts on this tab are genuinely zero for a long while, so they
+    must use the formatter that can tell 0 from unknown rather than a
+    raw interpolation that would render `undefined`.
+    """
+    body = SHADOW_JS[SHADOW_JS.index("function rn1xTab()"):]
+    body = body[:body.index("\n  const VIEW = {")]
+    for field in ("c.positions", "c.decisions", "c.orders", "c.fills",
+                  "c.outcomes"):
+        assert "zeroOk(%s)" % field in body, field
+
+
+# ── ITEM 5: SEPARATED STATUSES, LIVE BADGE, CLICK PATH ──────────────
+
+def test_the_statuses_route_is_registered_and_guarded(client):
+    paths = {getattr(r, "path", "") for r in APP.app.routes}
+    assert "/api/command/rn1x/statuses" in paths
+    assert client.get("/api/command/rn1x/statuses").status_code in (401, 403)
+
+
+def test_all_eight_statuses_are_declared_separately():
+    """Seven, plus the EXTERNAL source as its own eighth.
+
+    `independent_ev_entries` is the INTERNAL settlement-model path, which
+    refuses for want of a qualified model. `external_valuation` is a
+    bookmaker's de-vigged price -- a different source class, blocked for a
+    different reason (its credential is not on this service). One badge
+    over both would hide which of the two moved, which is the exact defect
+    the separated statuses exist to prevent.
+    """
+    from sportsassets.api import command_rn1x as CR
+
+    assert CR.STATUS_KEYS == (
+        "historical_replay", "prospective_rn1_management",
+        "independent_ev_entries", "pairing", "second_half_loss_exit",
+        "accounting_health", "learning_evaluation", "external_valuation",
+        # ORDER BOOK and P&L as their own tiles: resting size, partial
+        # fills, cancellations and remaining inventory were reachable only
+        # by clicking into one position's trace.
+        "order_book_state", "shadow_pnl",
+        # FITTING, separate from the COMPARATOR. `learning_evaluation`
+        # re-runs policies and fits nothing; `model_fitting` is the
+        # prepare/fit/predict/join/evaluate pipeline. One tile over both
+        # would let a policy comparison read as model training.
+        "model_fitting",
+        # SINGLE-WRITER OWNERSHIP as a read rather than a comment. Two of
+        # the four loops did not take the lock the checklist claimed for
+        # them; this tile is where that is now visible.
+        "writer_ownership")
+    # and the two belief paths are NOT the same key
+    assert "independent_ev_entries" != "external_valuation"
+    # nor are the two learning paths
+    assert "learning_evaluation" != "model_fitting"
+
+
+def test_the_live_badge_distinguishes_live_armed_and_stopped():
+    """A LIVE badge must identify what is live.
+
+    Three states, not two: "running and producing", "running and
+    producing nothing yet" and "not running" are different claims.
+    """
+    from sportsassets.api import command_rn1x as CR
+
+    live = CR._live(True, True, what="x", why="y")
+    armed = CR._live(True, False, what="x", why="y")
+    stopped = CR._live(False, False, what="x", why="y")
+    assert live["badge"] == "LIVE" and live["live"] is True
+    assert armed["badge"] == "ARMED" and armed["producing"] is False
+    assert stopped["badge"] == "STOPPED" and stopped["live"] is False
+    # every badge names its subject
+    for b in (live, armed, stopped):
+        assert b["what"] and b["why"]
+
+
+def test_the_ui_renders_every_status_tile_and_the_click_path():
+    body = SHADOW_JS[SHADOW_JS.index("function rn1xTab()"):]
+    body = body[:body.index("\n  const VIEW = {")]
+    for key in ("historical_replay", "prospective_rn1_management",
+                "independent_ev_entries", "pairing",
+                "second_half_loss_exit", "accounting_health",
+                "learning_evaluation"):
+        assert key in body, key
+    # the click path's six stages
+    for stage in ("Source event", "The three clocks", "Decisions",
+                  "Orders", "Modelled fills", "Inventory and outcome"):
+        assert stage in body, stage
+    # and the row is clickable, with a handler that reads it
+    assert "data-rn1x-pos" in SHADOW_JS
+    assert "state.rn1xPosition" in SHADOW_JS
+    assert "closest('[data-rn1x-pos]')" in SHADOW_JS
+
+
+def test_the_learning_tile_cannot_describe_itself_as_fitting():
+    """The screen renders the module's own words, so it cannot be
+    more generous than the module."""
+    from sportsassets import bettor_rn1x_learn as L
+
+    assert L.DESCRIPTION["what_it_is"] == "A POLICY COMPARATOR"
+    assert L.DESCRIPTION["fits"] == []
+    assert L.DESCRIPTION["changes"] == []
+    assert "NOTHING IS FITTED" in L.DESCRIPTION["fits_note"]

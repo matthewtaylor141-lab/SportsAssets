@@ -424,6 +424,22 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     #
     # Deregistering is this one line, commented out.
     ("bettor_live", bettor_live_loop.main),
+    # THE RN1-SEEDED MANAGEMENT EXPERIMENT IS DELIBERATELY NOT HERE.
+    #
+    # `workers/rn1x_shadow.py` exists and is imported (a test asserts it
+    # holds no order path), but it is registered in the API's lifespan
+    # instead -- see api/app.py. THIS IS A DEPLOYMENT CONSTRAINT, not a
+    # preference: sportsassets-api and sportsassets-workers both track
+    # the same auto-deploy branch with autoDeploy=yes, so the push that
+    # would register a loop here also RESTARTS THE OBSERVATION COLLECTOR
+    # mid-window and writes a PROCESS_REPLACED gap. That has already
+    # happened once in this run. The API can be released by commit id
+    # with no push at all, which is why the shadow desk loop is hosted
+    # there too.
+    #
+    # The loop takes its own session advisory lock, so if the worker
+    # service is ever given its own branch and this line is added, there
+    # would still be exactly one writer.
     ("memory", memory_watch),
 ]
 

@@ -450,3 +450,124 @@ class TestAccessIsEnforcedServerSide:
 class _FakeSettings:
     desk_password = "letmein"
     admin_token = "admin-token-for-tests"
+
+
+class TestTheShortTargetThatTookTheWholePortfolioDown:
+    """THE 2026-09-23 MANAGEMENT FAILURE, pinned at its source.
+
+    The screen read "FEED UNAVAILABLE -- Negative quantity refused. No
+    portfolio data loaded." One refusal row did that. `target` is the
+    copy engine's SIGNED target position and a short target is negative
+    (`mirror_live.py:1585`: "BUY_SHORT, target -2,460 on his
+    -24,600.6"). `position_row` has always normalised the identical
+    signed `ledger_net` into magnitude + `leg`; `decision_row` shipped
+    the raw value, and the contract validates `quantity` on decisions
+    too, so ONE short candidate refused every position and every order
+    in the payload.
+
+    The shape below is the real record measured in production: run
+    35868626142 found id 42451, refusal `side_band`, target -25, mark
+    0.5, his_px 0.34848 -- the only negative target inside the 200-row
+    window the snapshot reads. The market identifier is replaced with a
+    synthetic one; nothing about the failure depends on it.
+    """
+
+    SHORT = dict(id=42451, refusal="side_band", target=-25, mark=0.5,
+                 his_px=0.34848)
+
+    def test_the_sign_moves_to_leg_and_is_not_thrown_away(self):
+        row = CS.decision_row(refusal(**self.SHORT))
+        assert row["quantity"] == 25          # magnitude
+        assert row["leg"] == "SHORT"          # direction, not discarded
+        assert row["targetSigned"] == -25     # and the original, verbatim
+
+    def test_a_long_target_still_reads_long(self):
+        row = CS.decision_row(refusal(target=120))
+        assert row["quantity"] == 120
+        assert row["leg"] == "LONG"
+        assert row["targetSigned"] == 120
+
+    def test_an_absent_target_is_not_a_zero_position(self):
+        row = CS.decision_row(refusal(target=None))
+        assert row["quantity"] is None
+        assert row["targetSigned"] is None
+        assert row["leg"] == CS.UNIDENTIFIED
+
+    def test_the_contract_check_catches_it_if_a_builder_regresses(self):
+        """The guard is what makes the next one of these diagnosable."""
+        bad = dict(CS.decision_row(refusal(**self.SHORT)))
+        bad["quantity"] = -25                 # simulate the old builder
+        found = CS.contract_violations([], [], [bad])
+        assert len(found) == 1
+        assert found[0]["kind"] == "decision"
+        assert found[0]["field"] == "quantity"
+        assert found[0]["value"] == -25
+        assert found[0]["id"] == bad["id"]
+
+    def test_a_clean_payload_reports_no_violations(self):
+        pos = CS.position_row(book())
+        ords = CS.order_row(order())
+        dec = CS.decision_row(refusal(**self.SHORT))
+        assert CS.contract_violations([pos], [ords], [dec]) == []
+
+    def test_a_short_book_and_a_short_candidate_agree_on_vocabulary(self):
+        """One word for one concept: `position_row` and `decision_row`
+        must not describe the same direction two different ways."""
+        short_book = CS.position_row(book(ledger_net=-412))
+        short_cand = CS.decision_row(refusal(**self.SHORT))
+        assert short_book["leg"] == short_cand["leg"] == "SHORT"
+        assert short_book["quantity"] == 412
+
+    def test_the_offending_row_no_longer_refuses_the_snapshot(self):
+        """The whole point: a short candidate must not remove the
+        portfolio. Built end to end, the payload carries the position
+        AND the short decision, with no violations."""
+        snap = CS.build(
+            {"books": [book()], "orders": [order()],
+             "refusals": [refusal(**self.SHORT)], "beats": [],
+             "registered": [], "mirrorLive": False},
+            account=None, session=None, now=NOW)
+        assert snap["contractViolations"] == []
+        assert len(snap["positions"]) == 1
+        assert len(snap["decisions"]) == 1
+        assert snap["decisions"][0]["quantity"] == 25
+        assert snap["decisions"][0]["leg"] == "SHORT"
+
+    def test_a_violating_payload_fails_by_name_not_anonymously(self):
+        """If a builder ever regresses, the server says which one.
+        Management's screen showed the client's generic refusal because
+        the server had shipped a 200 it could not describe."""
+        import unittest.mock as mock
+        broken = dict(CS.decision_row(refusal(**self.SHORT)))
+        broken["quantity"] = -25
+        with mock.patch.object(CS, "decision_row", return_value=broken):
+            with pytest.raises(CS.RetrievalIncomplete) as exc:
+                CS.build({"books": [book()], "orders": [], "beats": [],
+                          "refusals": [refusal(**self.SHORT)],
+                          "registered": [], "mirrorLive": False},
+                         account=None, session=None, now=NOW)
+        assert exc.value.reason == "SNAPSHOT_CONTRACT_VIOLATION"
+        assert "decision.quantity=-25" in exc.value.detail
+
+    # ── the end-to-end proof, in the browser's own validator ─────────
+
+    def test_the_deployed_validator_accepts_the_repaired_payload(self):
+        """THE ACTUAL ACCEPTANCE. Not a Python re-implementation of the
+        rule -- `core.js`, the file the deployed page runs, validating a
+        payload built from the record that broke it."""
+        snap = built(records={**records(),
+                             "refusals": [refusal(**self.SHORT)]})
+        v = _node_validate(snap)
+        assert v["ok"] is True, v["errors"]
+
+    def test_and_the_old_shape_really_was_refused_by_it(self):
+        """A control. A pass above means nothing unless the validator
+        genuinely rejects the pre-fix payload, so the old shape is
+        reconstructed and fed to the same validator."""
+        snap = built(records={**records(),
+                             "refusals": [refusal(**self.SHORT)]})
+        snap["decisions"][0]["quantity"] = -25        # the shipped value
+        v = _node_validate(snap)
+        assert v["ok"] is False
+        assert any("Negative quantity refused" in e for e in v["errors"]), \
+            v["errors"]

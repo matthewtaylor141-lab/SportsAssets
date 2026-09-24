@@ -1,0 +1,1236 @@
+"""REAL POSTGRES, not the fake store. The audit named this gap.
+
+Its verification section said, exactly: "DB recovery tests use the
+repository's fake transaction store; they are not a real-Postgres or
+production restart acceptance." This module is a real-Postgres
+acceptance for the RN1X persistence path.
+
+It SKIPS rather than fails when no database is offered, because a test
+that silently passes without a database would be a check that cannot
+fail -- the defect pattern this project has been caught on repeatedly.
+The skip names what is missing.
+
+Point it at a throwaway database:
+
+    RN1X_TEST_DSN=postgresql://postgres@/rn1x?host=/tmp/pgsock \\
+        python -m pytest -q tests/test_rn1x_persistence_pg.py
+
+WHAT IT PROVES, each against rows read back out of Postgres:
+
+  1. `store.ready()` reads the LIVE CATALOG -- it reports the tables
+     missing on a database that has none, and ok on one that has them.
+  2. The worker FAILS CLOSED on the control row: absent, false and
+     malformed all leave the tables empty.
+  3. A real seed replays end to end and PERSISTS: position, decisions,
+     orders, outcome, with the three clocks ordered by the schema's own
+     CHECK rather than by our promise.
+  4. RE-RUNNING IS IDEMPOTENT. A second cycle over the same evidence
+     does not create a second position or double the decisions -- the
+     restart case.
+  5. A FAILED WRITE LEAVES NOTHING HALF-DONE. An error injected inside
+     the position transaction rolls the whole position back, and the
+     cursor does not advance past evidence that was never stored.
+  6. EVERY DECISION IS PERSISTED, not only the ones that acted.
+"""
+
+from __future__ import annotations
+
+import os
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
+asyncpg = pytest.importorskip("asyncpg")
+
+DSN = os.environ.get("RN1X_TEST_DSN")
+
+pytestmark = pytest.mark.skipif(
+    not DSN,
+    reason=("RN1X_TEST_DSN is not set. This is a REAL-POSTGRES "
+            "acceptance and refuses to pass without one; the fake "
+            "transaction store cannot demonstrate a rollback or a "
+            "schema CHECK."))
+
+T0 = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _recent(seconds_ago: float = 20.0) -> datetime:
+    """A fill from moments ago.
+
+    THE PROSPECTIVE FIXTURES CANNOT USE T0. The lane now refuses a
+    prospective decision whose evidence became available more than
+    MAX_PROSPECTIVE_DECISION_LAG_S ago, because an order created long
+    after the fact did not exist while the prints in between happened.
+    T0 is a fixed date, so these fixtures aged past that limit as the
+    calendar moved and the lane correctly refused them -- which is the
+    behaviour being added, not a break. A genuinely prospective candidate
+    IS a recent fill, so the fixture is now one.
+
+    T0 is left alone for the historical lane, whose entire purpose is
+    replaying evidence from months ago.
+    """
+    return datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
+COND = "0xcondition_rn1x_test"
+WHALE = 424242
+
+
+async def _reset(conn):
+    await conn.execute(
+        "TRUNCATE rn1x_fills, rn1x_orders, rn1x_decisions, rn1x_outcomes, "
+        "rn1x_positions, rn1x_experiments CASCADE")
+    await conn.execute("DELETE FROM trades WHERE condition_id = $1", COND)
+    await conn.execute("DELETE FROM markets WHERE condition_id = $1", COND)
+    await conn.execute(
+        "DELETE FROM ingestion_state WHERE key IN "
+        "('rn1x_shadow', 'rn1x_source_cursor', 'rn1x_learn', "
+        "'rn1x_prospective_cursor')")
+
+
+async def _seed_evidence(conn):
+    """One real-shaped seed: a 100-contract BUY at .60 on outcome 0, then
+    a later .30 print on outcome 1 that a resting completion can consume.
+
+    The payout resolves outcome 0 to 1.0. The pair, if completed, cost
+    .90 all-in before fees -- inside management's .91 ceiling -- which is
+    the case the policy exists for.
+    """
+    await conn.execute(
+        "INSERT INTO whales (id, address, username) VALUES ($1, $2, $3) "
+        "ON CONFLICT (id) DO NOTHING",
+        WHALE, "0xrn1xtest", "rn1x-test")
+    await conn.execute(
+        "INSERT INTO markets (condition_id, title, resolved, "
+        "resolved_prices, resolved_at) VALUES ($1, $2, TRUE, "
+        "'[1, 0]'::jsonb, $3) ON CONFLICT (condition_id) DO UPDATE SET "
+        "resolved = TRUE, resolved_prices = '[1, 0]'::jsonb, "
+        "resolved_at = EXCLUDED.resolved_at",
+        COND, "rn1x test market", T0 + timedelta(hours=6))
+    rows = [
+        # (whale, outcome, side, size, price, ts_offset_s, det_offset_s)
+        (WHALE, 0, "BUY", 100.0, 0.60, 0, 5),
+        (999999, 1, "BUY", 400.0, 0.30, 600, 605),
+        (999999, 0, "BUY", 50.0, 0.62, 1200, 1205),
+    ]
+    await conn.execute(
+        "INSERT INTO whales (id, address, username) VALUES (999999, "
+        "'0xother', 'other') ON CONFLICT (id) DO NOTHING")
+    ids = []
+    for i, (w, oi, side, size, price, off, det) in enumerate(rows):
+        rid = await conn.fetchval(
+            "INSERT INTO trades (whale_id, tx_hash, asset, condition_id, "
+            "side, outcome_index, size, price, notional, ts, source, "
+            "detected_at, dedupe_key) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,"
+            "$10,'chain',$11,$12) RETURNING id",
+            w, "0xtx%d" % i, "asset%d" % oi, COND, side, oi, size, price,
+            size * price, T0 + timedelta(seconds=off),
+            T0 + timedelta(seconds=det), "rn1x-test-%d" % i)
+        ids.append(int(rid))
+    return ids
+
+
+async def _match_production_constraints(c):
+    """Bring the throwaway cluster's `trades.source` CHECK up to migration
+    033, which admits 's1'.
+
+    WITHOUT THIS the s1-exclusion test cannot even insert its fixture and
+    fails with a CheckViolation that looks like a bug in the test rather
+    than a stale local schema. Applied here rather than by hand so the
+    suite is reproducible: the local migration run stops at 031, which
+    fails on an unrelated table (`us_premap`).
+    """
+    await c.execute(
+        "ALTER TABLE trades DROP CONSTRAINT IF EXISTS trades_source_check; "
+        "ALTER TABLE trades ADD CONSTRAINT trades_source_check "
+        "CHECK (source IN ('chain','poll','backfill','s1'))")
+
+
+@pytest.fixture
+async def conn():
+    c = await asyncpg.connect(DSN)
+    await _match_production_constraints(c)
+    await _reset(c)
+    try:
+        yield c
+    finally:
+        await _reset(c)
+        await c.close()
+
+
+# ── 1. ready() reads the live catalog ───────────────────────────────
+async def test_ready_reads_the_live_catalog(conn):
+    from sportsassets import bettor_rn1x_store as store
+
+    r = await store.ready(conn)
+    assert r["ok"] is True, r
+    assert r["missing"] == []
+    assert set(r["present"]) == set(store.TABLES)
+
+
+async def test_ready_names_missing_tables_rather_than_raising(conn):
+    """The blocker is REPORTED, not raised once per cycle.
+
+    Migration 100 sat committed at HEAD while production had none of its
+    tables. A loop that raised UndefinedTableError every twenty seconds
+    would have buried that; a named blocker surfaces it.
+    """
+    from sportsassets import bettor_rn1x_store as store
+
+    await conn.execute("CREATE SCHEMA IF NOT EXISTS rn1x_probe")
+    # A schema with none of the tables: search_path is not consulted --
+    # ready() asks information_schema for table_schema = 'public'
+    # explicitly -- so this proves the query, not the session.
+    r = await store.ready(conn)
+    assert r["ok"] is True
+    # and now the negative: rename one away and it is reported by name
+    await conn.execute("ALTER TABLE rn1x_fills SET SCHEMA rn1x_probe")
+    try:
+        r2 = await store.ready(conn)
+        assert r2["ok"] is False
+        assert r2["missing"] == ["rn1x_fills"]
+        assert r2["blocker"] == store.NOT_READY
+    finally:
+        await conn.execute("ALTER TABLE rn1x_probe.rn1x_fills SET SCHEMA public")
+
+
+# ── 2. fail-closed control ──────────────────────────────────────────
+@pytest.mark.parametrize("value,expected", [
+    (None, "CONTROL_ROW_ABSENT"),
+    ("false", "CONTROL_ROW_NOT_TRUE"),
+    ('"yes please"', "CONTROL_ROW_NOT_TRUE"),
+    ("0", "CONTROL_ROW_NOT_TRUE"),
+])
+async def test_control_row_fails_closed(conn, value, expected):
+    from sportsassets.workers import rn1x_shadow as W
+
+    await _seed_evidence(conn)
+    if value is not None:
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES "
+            "('rn1x_shadow', $1::jsonb)", value)
+    res = await W.cycle(conn)
+    assert res["ran"] is False
+    assert res["state"] == "STOPPED"
+    assert res["why"] == expected
+    # AND NOTHING WAS WRITTEN. The state string alone is not the point.
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_positions") == 0
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_experiments") == 0
+
+
+# ── 3. a real seed, persisted ───────────────────────────────────────
+async def _arm(conn):
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_shadow', 'true'::jsonb) ON CONFLICT (key) DO UPDATE "
+        "SET value = 'true'::jsonb")
+
+
+async def test_seed_replays_and_persists(conn):
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    await _arm(conn)
+    # start the cursor just below the seed so the scan finds it
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_source_cursor', $1::jsonb)", str(ids[0] - 1))
+
+    res = await W.cycle(conn)
+    assert res["ran"] is True, res
+    assert res["state"] == "REPLAYED", res
+
+    pos = await conn.fetch("SELECT * FROM rn1x_positions")
+    assert len(pos) == 1, [dict(p) for p in pos]
+    p = pos[0]
+    assert int(p["source_trade_id"]) == ids[0]
+    assert float(p["seed_qty"]) == 100.0
+    assert float(p["seed_price"]) == 0.60
+    # THE THREE CLOCKS, ordered by the schema's CHECK, not by our word.
+    assert p["source_ts"] <= p["detected_ts"] <= p["decision_ts"]
+
+    # the experiment row carries the FROZEN policy register
+    exp = await conn.fetchrow("SELECT * FROM rn1x_experiments")
+    assert exp["execution_basis"] == W.EXECUTION_BASIS
+    assert exp["is_modelled"] is True
+
+    dec = await conn.fetch(
+        "SELECT selection_reason, selected_action, ev_at_decision_usd, "
+        "ev_basis, conditional_on_our_fill FROM rn1x_decisions "
+        "WHERE position_id = $1", p["position_id"])
+    assert dec, "no decisions persisted"
+    # EV IS NOT CLAIMED. This policy is a cost-and-threshold rule, not an
+    # expected-value maximiser, and a number in that column would invent
+    # an objective it does not have.
+    assert all(d["ev_at_decision_usd"] is None for d in dec)
+    assert all(d["ev_basis"] == "NOT_COMPUTED_POLICY_IS_NOT_EV_MAXIMISING"
+               for d in dec)
+    # AND NO DECISION CLAIMS ITS EXECUTION IS SECURED.
+    import json as _json
+    for d in dec:
+        c = d["conditional_on_our_fill"]
+        c = _json.loads(c) if isinstance(c, str) else c
+        assert c.get("execution_secured") is False, c
+
+
+async def test_every_decision_is_persisted_not_only_the_acting_ones(conn):
+    """The acted-on subset is the activity-looking subset.
+
+    For this policy the most common true state is HOLD_NO_FEASIBLE_PAIR,
+    and a table built from `steps.MANAGE.events` alone would omit exactly
+    those rows -- showing the experiment as busier than it is.
+    """
+    from sportsassets import bettor_rn1x_run as runner
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_source_cursor', $1::jsonb)", str(ids[0] - 1))
+
+    out = await W._replay_one(conn, trade_id=ids[0], whale_id=WHALE,
+                              condition_id=COND)
+    assert out["mode"] == runner.HISTORICAL
+    assert out["prospective"] is False
+    all_d = out["all_decisions"]
+    acted = [d for d in all_d if d.get("acted")]
+    assert len(all_d) > len(acted), (
+        "this fixture must contain at least one non-acting decision, "
+        "or the test cannot distinguish the two lists")
+
+    await W.cycle(conn)
+    n = await conn.fetchval("SELECT count(*) FROM rn1x_decisions")
+    assert n == len(all_d), (
+        "persisted %d decisions but the run made %d" % (n, len(all_d)))
+
+
+# ── 4. idempotence across a restart ─────────────────────────────────
+async def test_second_cycle_does_not_duplicate(conn):
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_source_cursor', $1::jsonb)", str(ids[0] - 1))
+    await W.cycle(conn)
+    before = (
+        await conn.fetchval("SELECT count(*) FROM rn1x_positions"),
+        await conn.fetchval("SELECT count(*) FROM rn1x_decisions"),
+        await conn.fetchval("SELECT count(*) FROM rn1x_orders"),
+    )
+    assert before[0] == 1
+
+    # THE RESTART: rewind the cursor exactly as a lost cursor would, and
+    # run again over the same evidence.
+    await conn.execute(
+        "UPDATE ingestion_state SET value = $1::jsonb "
+        "WHERE key = 'rn1x_source_cursor'", str(ids[0] - 1))
+    await W.cycle(conn)
+    after = (
+        await conn.fetchval("SELECT count(*) FROM rn1x_positions"),
+        await conn.fetchval("SELECT count(*) FROM rn1x_decisions"),
+        await conn.fetchval("SELECT count(*) FROM rn1x_orders"),
+    )
+    assert after == before, ("a replay of the same evidence changed the "
+                            "record: %r -> %r" % (before, after))
+
+
+# ── 5. a failed write leaves nothing half-done ──────────────────────
+async def test_failed_write_rolls_the_whole_position_back(conn, monkeypatch):
+    """Orders with no position is the shape that made the desk uncertain.
+
+    The injected failure lands AFTER the position insert and DURING the
+    same transaction, which is the only interesting case: a failure
+    before it writes nothing anyway.
+    """
+    from sportsassets import bettor_rn1x_store as store
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_source_cursor', $1::jsonb)", str(ids[0] - 1))
+
+    calls = {"n": 0}
+
+    class Failing:
+        """A proxy, because asyncpg's Connection.execute is read-only.
+
+        Everything else -- including `transaction()` -- goes straight to
+        the real connection, so the rollback under test is Postgres's
+        own, not a simulation of one.
+        """
+
+        def __init__(self, inner):
+            self._inner = inner
+
+        def __getattr__(self, name):
+            return getattr(self._inner, name)
+
+        async def execute(self, query, *args, **kw):
+            if "INSERT INTO rn1x_decisions" in query:
+                calls["n"] += 1
+                raise RuntimeError("injected write failure")
+            return await self._inner.execute(query, *args, **kw)
+
+    res = await W.cycle(Failing(conn))
+
+    assert calls["n"] >= 1, "the failure was never injected"
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_positions") == 0, (
+        "a position survived a transaction that failed midway")
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_orders") == 0
+    assert any("error" in r for r in res.get("results", [])), res
+
+    # THE CURSOR DID NOT MOVE PAST THE ROW THAT WAS NEVER STORED. This
+    # is asserted, not described: a cursor saved above a failed write is
+    # how the evidence would be lost permanently, and only reading the
+    # saved value back can tell the two apart.
+    saved = await conn.fetchval(
+        "SELECT value::text FROM ingestion_state "
+        "WHERE key = 'rn1x_source_cursor'")
+    assert int(saved.strip('"')) < ids[0], (
+        "the cursor advanced to %s, at or past the failed seed %s: the "
+        "next cycle would never see it again" % (saved, ids[0]))
+    assert res["stopped_at_error"] == ids[0], res
+
+    # AND THE NEXT CYCLE PICKS IT UP WITHOUT ANY REWIND. Nothing here
+    # resets the cursor -- if the previous assertion is the only thing
+    # keeping this seed reachable, this is what proves it.
+    res2 = await W.cycle(conn)
+    assert res2["written"] >= 1, res2
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_positions") == 1
+
+
+# ── 6. the initial-inventory verification is computed, not asserted ──
+async def test_initial_inventory_refuses_without_coverage(conn):
+    """A flag is not proof, which the audit said explicitly.
+
+    Here the account's first RECORDED fill postdates the condition's
+    first recorded trade, so a position held before we were watching
+    cannot be ruled out -- and the verification says so instead of
+    assigning inventory.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    # Give the OTHER account an earlier trade on a different condition so
+    # the condition's first recorded trade precedes ours.
+    await conn.execute(
+        "UPDATE trades SET ts = $1, detected_at = $1 WHERE id = $2",
+        T0 - timedelta(hours=2), ids[1])
+
+    inv = await W.verify_initial_inventory(
+        conn, whale_id=WHALE, condition_id=COND, trade_id=ids[0])
+    assert inv["verified"] is False
+    assert inv["coverage_precedes_condition"] is False
+    assert "before we were watching" in inv["why_not"]
+
+    out = await W._replay_one(conn, trade_id=ids[0], whale_id=WHALE,
+                              condition_id=COND)
+    assert out["failed_step"] == "CLASSIFY"
+    assert out["steps"]["CLASSIFY"]["ok"] is False
+
+
+async def test_refusal_is_reported_not_written_as_a_position(conn):
+    from sportsassets import bettor_rn1x_store as store
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    await conn.execute(
+        "UPDATE trades SET ts = $1, detected_at = $1 WHERE id = $2",
+        T0 - timedelta(hours=2), ids[1])
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_source_cursor', $1::jsonb)", str(ids[0] - 1))
+
+    res = await W.cycle(conn)
+    assert res["written"] == 0, res
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_positions") == 0
+    got = [r for r in res["results"] if r.get("refused_at")]
+    assert got and got[0]["refused_at"] == "CLASSIFY", res
+
+
+# ── 7. THE LEARNING CYCLE, against real rows ────────────────────────
+#
+# The audit's list of missing learning connections included "evaluation
+# on new data" and "promotion/rejection receipts". These assert both, and
+# assert the thing that matters most about this loop: that it CANNOT
+# promote anything.
+
+_LEARN_REGISTRY = """
+CREATE TABLE IF NOT EXISTS bettor_learn_model (
+    id BIGSERIAL PRIMARY KEY, model_key TEXT NOT NULL,
+    version INTEGER NOT NULL, kind TEXT NOT NULL, target TEXT NOT NULL,
+    horizon_s DOUBLE PRECISION NOT NULL, kernel TEXT NOT NULL,
+    dataset_sha TEXT NOT NULL, train_cutoff DOUBLE PRECISION NOT NULL,
+    calib_cutoff DOUBLE PRECISION NOT NULL, code_sha TEXT NOT NULL,
+    params JSONB NOT NULL, evaluation JSONB NOT NULL, status TEXT NOT NULL,
+    trained_at DOUBLE PRECISION NOT NULL, note TEXT, superseded_by BIGINT);
+CREATE UNIQUE INDEX IF NOT EXISTS bettor_learn_model_kv
+    ON bettor_learn_model (model_key, version);
+"""
+
+
+async def _armed_with_a_settled_position(conn):
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_source_cursor', $1::jsonb)", str(ids[0] - 1))
+    await W.cycle(conn)
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_outcomes") == 1
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES "
+        "('rn1x_learn', 'true'::jsonb) ON CONFLICT (key) DO UPDATE "
+        "SET value = 'true'::jsonb")
+    return ids
+
+
+async def test_learning_is_blocked_by_name_when_the_registry_is_absent(conn):
+    """It uses the EXISTING register and says so when it is not there.
+
+    The alternative -- creating its own table on the fly -- is the
+    competing research stack the brief forbids, and it would be invisible
+    until someone noticed two registers.
+    """
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+    res = await WL.cycle(conn)
+    assert res["state"] == "BLOCKED"
+    assert res["why"] == "LEARN_REGISTRY_ABSENT"
+    assert "does not create a competing register" in res["detail"]
+
+
+async def test_learning_fails_closed_on_its_own_control_row(conn):
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute("DELETE FROM ingestion_state WHERE key = 'rn1x_learn'")
+    res = await WL.cycle(conn)
+    assert res == {"ran": False, "state": "STOPPED",
+                   "why": "CONTROL_ROW_ABSENT"}, res
+
+
+async def test_learning_writes_a_receipt_for_every_challenger(conn):
+    """A REJECTION IS A RESULT and is written exactly like an acceptance.
+
+    On one position the gate's 50-decided floor cannot be met, so the
+    expected verdict is RETAIN_CHAMPION with INELIGIBLE among the
+    reasons. A loop that wrote nothing until it agreed with itself would
+    leave the panel blank and look like it had not run.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        res = await WL.cycle(conn)
+        assert res["state"] == "EVALUATED", res
+        assert res["positions"] == 1
+        # TWO SEPARATE FACTS, because the old single field conflated them.
+        # The champion cannot be replaced by this loop at all -- that is a
+        # constant, not an outcome. Whether every verdict came back RETAIN
+        # is the outcome, and on one position (below the gate's 50-decided
+        # floor) it must, with nothing left pending for management.
+        assert res["champion_unchanged"] is True
+        assert res["champion"] == L.MODEL_KEY
+        assert res["all_verdicts_retain"] is True
+        assert res["eligible_pending_management"] == []
+        assert "champion_retained" not in res, (
+            "the conflated field is gone; a reader must not be able to "
+            "read `false` as the champion having been replaced")
+
+        rows = await conn.fetch(
+            "SELECT version, params, status, evaluation FROM "
+            "bettor_learn_model WHERE model_key = $1 ORDER BY version",
+            L.MODEL_KEY)
+        assert len(rows) == len(L.CHALLENGERS), (
+            "%d receipts for %d challengers" % (len(rows), len(L.CHALLENGERS)))
+        import json as _json
+        seen = set()
+        for r in rows:
+            params = r["params"]
+            params = _json.loads(params) if isinstance(params, str) else params
+            seen.add(params["challenger"])
+            # THE ONLY TWO LEGAL VERDICTS. A third would mean a promotion
+            # path had been added.
+            assert r["status"] in (L.RETAIN, L.ELIGIBLE), r["status"]
+        assert seen == set(L.challenger_names()), seen
+
+        # the gate's own reason must be preserved verbatim, not summarised
+        ev = rows[0]["evaluation"]
+        ev = _json.loads(ev) if isinstance(ev, str) else ev
+        assert "INELIGIBLE" in ev["recommendation"]["why"], ev[
+            "recommendation"]["why"]
+        assert ev["scenarios"] == [0.10, 0.25, 0.50]
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+async def test_learning_has_no_promotion_path_in_its_source():
+    """Asserted over the source, because this is the claim that matters.
+
+    A loop that could swap out a MANAGEMENT-DEFINED frozen policy would
+    be an agent rewriting management policy. There must be no UPDATE
+    against the champion and no write to the experiment's policy.
+    """
+    import pathlib
+
+    src = (pathlib.Path(__file__).resolve().parents[1] / "sportsassets"
+           / "workers" / "rn1x_learn_loop.py").read_text()
+    lowered = src.lower()
+    for forbidden in ("update rn1x_experiments", "update bettor_learn_model",
+                      "policy_register =", "pair_target_cost =",
+                      "loss_trigger_fraction ="):
+        assert forbidden not in lowered, forbidden
+    from sportsassets import bettor_rn1x_learn as L
+    # exactly two verdicts, and neither is a promotion
+    assert {L.RETAIN, L.ELIGIBLE} == {"RETAIN_CHAMPION",
+                                      "CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT"}
+
+
+# ── 8. THE COMPARISON MUST BE APPLES TO APPLES ──────────────────────
+#
+# `learn_gate.gate_v2` zips the champion's scenario rows against the
+# challenger's BY INDEX. Two lists of equal length whose queue_shares
+# differ would be compared across two different execution assumptions and
+# the verdict reported as like-for-like. A length check does not catch it.
+#
+# This matters concretely: a challenger has already reached
+# CHALLENGER_ELIGIBLE_PENDING_MANAGEMENT on production data, so the
+# comparison behind that verdict has to be verifiably aligned.
+
+_GATE_ROW = dict(realized_pnl_usd=0.0, turnover_usd=1.0,
+                 unresolved_cost_usd=0.0, terminal_upper_usd=0.0,
+                 terminal_lower_usd=0.0, terminal_lower_vs_start=0.0,
+                 max_drawdown_usd=0.0, peak_committed_usd=0.0,
+                 invariant_ok=True)
+
+
+def test_a_reordered_scenario_comparison_refuses():
+    from sportsassets import bettor_rn1x_learn as L
+
+    ev = {"arms": {"CHAMPION": [dict(_GATE_ROW, queue_share=0.10)],
+                   "PAIR_092": [dict(_GATE_ROW, queue_share=0.50,
+                                     realized_pnl_usd=99.0)]},
+          "decided": 999}
+    rec = L.recommend(ev, "PAIR_092")
+    assert rec["verdict"] == L.RETAIN, rec
+    assert "do not line up" in rec["why"], rec["why"]
+    assert rec["gate"] is None
+
+
+def test_an_empty_scenario_is_not_a_zero():
+    """An arm not evaluated under a scenario has not passed it.
+
+    The gate requires EVERY declared scenario because P_FILL is
+    NOT_IDENTIFIED. Treating a missing row as a zero would let a
+    challenger win a scenario it never ran.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+
+    ev = {"arms": {"CHAMPION": [{"queue_share": 0.10, "empty": True}],
+                   "PAIR_092": [{"queue_share": 0.10, "empty": True}]},
+          "decided": 999}
+    rec = L.recommend(ev, "PAIR_092")
+    assert rec["verdict"] == L.RETAIN
+    assert "requires EVERY declared scenario" in rec["why"]
+
+
+def test_the_alignment_guards_do_not_make_the_gate_unpassable():
+    """The guards must refuse mismatches, not refuse everything.
+
+    Without this, the two checks above could be satisfied by a gate that
+    never returns ELIGIBLE at all -- which would look like rigour and be
+    a check that cannot fail in the other direction.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+
+    ev = {"arms": {"CHAMPION": [dict(_GATE_ROW, queue_share=0.10)],
+                   "PAIR_092": [dict(_GATE_ROW, queue_share=0.10,
+                                     realized_pnl_usd=99.0)]},
+          "decided": 999}
+    rec = L.recommend(ev, "PAIR_092")
+    assert rec["verdict"] == L.ELIGIBLE, rec
+    assert rec["gate"]["accepted"] is True
+
+
+async def test_evaluate_keeps_a_hole_rather_than_renumbering(conn):
+    """`evaluate` must not drop an empty scenario row.
+
+    Dropping it renumbers every later scenario, which is precisely what
+    makes the index-zip unsafe.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+
+    ids = await _seed_evidence(conn)
+    seed = {"rows": [], "payouts": {0: 1.0, 1: 0.0}, "resolved_at": None,
+            "source_whale_id": WHALE, "condition_id": COND,
+            "initial_inventory_verified": True}
+    ev = L.evaluate([seed])
+    for name, rows in ev["arms"].items():
+        assert len(rows) == len(ev["scenarios"]), (name, len(rows))
+        for row, qs in zip(rows, ev["scenarios"]):
+            assert row["queue_share"] == qs, (name, row, qs)
+    assert ids
+
+
+# ── 9. THE REGISTER MUST NOT GROW ON AN UNCHANGED RE-EVALUATION ─────
+#
+# `bettor_learn_model` is the EXISTING shared register that
+# `render-ops sql learn-inventory` reads. The loop re-evaluates every
+# CYCLE_S, and before this was fixed every cycle appended four more rows
+# -- roughly 384 a day -- because `_next_version` always returns max+1 so
+# the ON CONFLICT clause could never fire. That filled a production table
+# with duplicates and made `version` useless as a comparison ledger.
+
+async def test_an_unchanged_re_evaluation_writes_no_new_rows(conn,
+                                                            monkeypatch):
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    # THE TWO GATES ARE LAYERED AND THIS TEST ISOLATES THE SECOND.
+    # MIN_NEW_POSITIONS would refuse the re-run before the dataset digest
+    # was ever consulted, so it is lowered here to reach the digest --
+    # which is the backstop for the case where enough new positions HAVE
+    # arrived but the evidence actually fed to the arms is identical
+    # (the seed list is capped at MAX_POSITIONS, and a restart re-runs
+    # the same set). Its own gate is tested separately below.
+    monkeypatch.setattr(WL, "MIN_NEW_POSITIONS", 0)
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        first = await WL.cycle(conn)
+        assert first["state"] == "EVALUATED", first
+        n1 = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        assert n1 == len(L.CHALLENGERS), n1
+        assert first["new_rows"] == len(L.CHALLENGERS), first
+
+        # SAME DATA, SAME VERDICTS -> no new rows, and the receipts say so
+        second = await WL.cycle(conn)
+        assert second["state"] == "EVALUATED", second
+        assert second["new_rows"] == 0, second
+        n2 = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        assert n2 == n1, (
+            "the register grew from %d to %d on an unchanged "
+            "re-evaluation" % (n1, n2))
+        assert all(r["written"] is False for r in second["receipts"]), second
+        assert all("unchanged from version" in r["why"]
+                   for r in second["receipts"]), second
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+async def test_a_changed_verdict_still_gets_a_new_version(conn, monkeypatch):
+    """The dedup must not suppress a real change.
+
+    Without this, the test above could be satisfied by a loop that stopped
+    writing altogether -- which would look like tidiness and be a worse
+    defect than the duplicates.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    # THE TWO GATES ARE LAYERED AND THIS TEST ISOLATES THE SECOND.
+    # MIN_NEW_POSITIONS would refuse the re-run before the dataset digest
+    # was ever consulted, so it is lowered here to reach the digest --
+    # which is the backstop for the case where enough new positions HAVE
+    # arrived but the evidence actually fed to the arms is identical
+    # (the seed list is capped at MAX_POSITIONS, and a restart re-runs
+    # the same set). Its own gate is tested separately below.
+    monkeypatch.setattr(WL, "MIN_NEW_POSITIONS", 0)
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        await WL.cycle(conn)
+        n1 = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        # Rewrite one challenger's stored verdict so the next cycle's
+        # conclusion differs from what the register holds.
+        await conn.execute(
+            "UPDATE bettor_learn_model SET status = $1 "
+            "WHERE model_key = $2 AND params->>'challenger' = $3",
+            L.ELIGIBLE, L.MODEL_KEY, "PAIR_090")
+        res = await WL.cycle(conn)
+        assert res["new_rows"] == 1, res
+        n2 = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        assert n2 == n1 + 1, (n1, n2)
+        wrote = [r for r in res["receipts"] if r.get("written")]
+        assert len(wrote) == 1 and wrote[0]["challenger"] == "PAIR_090", res
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+async def test_a_trivial_increase_in_evidence_skips_the_evaluation(conn):
+    """One more settled position is not a new result.
+
+    Without this the loop re-runs every cycle throughout the backfill and
+    writes four LEGITIMATE rows each time -- real evaluations on marginally
+    more data, which is worse than duplicates because nothing flags them.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        first = await WL.cycle(conn)
+        assert first["state"] == "EVALUATED", first
+        # the receipt must record how many positions the verdict rests on,
+        # or the gate below has nothing to compare against
+        stored = await conn.fetchval(
+            "SELECT (evaluation->>'positions')::int FROM bettor_learn_model "
+            "WHERE model_key = $1 ORDER BY version DESC LIMIT 1",
+            L.MODEL_KEY)
+        assert stored == 1, stored
+
+        res = await WL.cycle(conn)
+        assert res["state"] == "TOO_FEW_NEW_POSITIONS", res
+        assert res["min_new_positions"] == WL.MIN_NEW_POSITIONS
+        assert "would say nothing" in res["why"]
+        n = await conn.fetchval(
+            "SELECT count(*) FROM bettor_learn_model WHERE model_key = $1",
+            L.MODEL_KEY)
+        assert n == len(L.CHALLENGERS), n
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+async def test_the_skip_gate_does_not_block_the_first_evaluation(conn):
+    """With no prior row there is nothing to compare against.
+
+    A gate that also blocked the FIRST evaluation would leave the register
+    permanently empty and the panel permanently blank -- rigour that
+    produces no evidence at all.
+    """
+    from sportsassets import bettor_rn1x_learn as L
+    from sportsassets.workers import rn1x_learn_loop as WL
+
+    await _armed_with_a_settled_position(conn)
+    await conn.execute(_LEARN_REGISTRY)
+    try:
+        res = await WL.cycle(conn)
+        assert res["state"] == "EVALUATED", res
+        assert res["new_rows"] == len(L.CHALLENGERS), res
+    finally:
+        await conn.execute("DROP TABLE IF EXISTS bettor_learn_model")
+
+
+# ══ ITEM 1: HISTORICAL vs PROSPECTIVE, AND LANE PROVENANCE ══════════
+#
+# I had reported that no forward lane was possible from this feed. It was
+# possible; the experiment was historical because my own candidate query
+# required `m.resolved`. These assert the separation that replaces that.
+
+async def _unresolved_evidence(conn, *, source="chain"):
+    """A live-lane BUY on a market that has NOT resolved."""
+    cond = COND + "_unres"
+    await conn.execute(
+        "INSERT INTO whales (id, address, username) VALUES (777001, "
+        "'0xprosp', 'prosp') ON CONFLICT (id) DO NOTHING")
+    await conn.execute(
+        "INSERT INTO markets (condition_id, title, resolved) "
+        "VALUES ($1, 'unresolved', FALSE) "
+        "ON CONFLICT (condition_id) DO UPDATE SET resolved = FALSE, "
+        "resolved_prices = NULL", cond)
+    rid = await conn.fetchval(
+        "INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, "
+        "outcome_index, size, price, notional, ts, source, detected_at, "
+        "dedupe_key) VALUES (777001,'0xp1','a0',$1,'BUY',0,50,0.55,27.5,"
+        "$2,$3,$2,$4) RETURNING id",
+        cond, T0, source, "prosp-%s" % source)
+    return int(rid), cond
+
+
+async def test_the_historical_lane_never_seeds_from_an_unresolved_market(conn):
+    from sportsassets.workers import rn1x_shadow as W
+
+    rid, cond = await _unresolved_evidence(conn)
+    try:
+        await _arm(conn)
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            W.HISTORICAL_CURSOR_KEY, str(rid - 1))
+        res = await W.cycle(conn, lane="HISTORICAL")
+        got = [r["trade_id"] for r in res.get("results", [])]
+        assert rid not in got, res
+    finally:
+        await conn.execute("DELETE FROM trades WHERE condition_id = $1", cond)
+        await conn.execute("DELETE FROM markets WHERE condition_id = $1", cond)
+
+
+async def test_an_s1_emitter_row_can_never_seed_either_lane(conn):
+    """Migration 033's rule, which my query had not honoured.
+
+    "the shadow instrument (whose evidence queries filter source IN
+    ('chain','poll')) can never see the emitter's own rows as venue
+    coverage". My `_CANDIDATES` had no source filter at all.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    rid, cond = await _unresolved_evidence(conn, source="s1")
+    try:
+        await _arm(conn)
+        for lane, key in (("PROSPECTIVE", W.PROSPECTIVE_CURSOR_KEY),
+                          ("HISTORICAL", W.HISTORICAL_CURSOR_KEY)):
+            await conn.execute(
+                "INSERT INTO ingestion_state (key, value) VALUES "
+                "($1, $2::jsonb) ON CONFLICT (key) DO UPDATE "
+                "SET value = $2::jsonb", key, str(rid - 1))
+            res = await W.cycle(conn, lane=lane)
+            got = [r["trade_id"] for r in res.get("results", [])]
+            assert rid not in got, (lane, res)
+        assert "s1" not in [
+            r["source"] for r in await conn.fetch(W._SEEDED_BY_SOURCE)]
+    finally:
+        await conn.execute("DELETE FROM trades WHERE condition_id = $1", cond)
+        await conn.execute("DELETE FROM markets WHERE condition_id = $1", cond)
+
+
+async def test_a_prospective_run_reads_no_payout_even_if_one_exists(conn):
+    """Look-ahead must not arrive by a race.
+
+    If a market resolves between the candidate query and the payout read,
+    a prospective decision would otherwise be handed its own outcome. The
+    LANE refuses the payout, not the absence of one.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)          # this market IS resolved
+    out = await W._replay_one(conn, trade_id=ids[0], whale_id=WHALE,
+                              condition_id=COND, prospective=True)
+    assert out["lane"] == "PROSPECTIVE"
+    assert out["scored"] is False
+    assert out["resolved_at"] is None
+    # THE FIXTURE IS OLD EVIDENCE ON PURPOSE (it is the historical seed),
+    # so the prospective lane now refuses it on decision lag -- correctly,
+    # because an order created today could not have traded weeks ago. What
+    # this test exists to prove survives either way: no payout reaches a
+    # prospective run, and `resolved_at` above is None in both branches.
+    if "SETTLE" in out["steps"]:
+        assert out["steps"]["SETTLE"]["settled"] is None, \
+            out["steps"]["SETTLE"]
+    else:
+        assert out["failed_step"] == "SEED", out["steps"]
+        assert out["steps"]["SEED"]["refusal"] == \
+            "PROSPECTIVE_DECISION_LAG_EXCEEDED", out["steps"]["SEED"]
+        assert "payouts" not in out, "no payout may appear on a refusal"
+
+    scored = await W._replay_one(conn, trade_id=ids[0], whale_id=WHALE,
+                                 condition_id=COND, prospective=False)
+    assert scored["scored"] is True, (
+        "the historical lane must still read the payout, or this test "
+        "would pass against a build that never scores anything")
+
+
+async def test_the_two_lanes_persist_under_different_experiment_ids(conn):
+    from sportsassets.workers import rn1x_shadow as W
+
+    assert W.PROSPECTIVE_EXPERIMENT_ID != W.HISTORICAL_EXPERIMENT_ID
+    assert W.PROSPECTIVE_CURSOR_KEY != W.HISTORICAL_CURSOR_KEY
+    # and the legacy alias still means the historical one, so existing rows
+    # and readbacks keep their meaning
+    assert W.EXPERIMENT_ID == W.HISTORICAL_EXPERIMENT_ID
+
+
+async def test_a_prospective_cycle_does_not_move_the_historical_cursor(conn):
+    """The historical evidence must not be disturbed by the new lane."""
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        W.HISTORICAL_CURSOR_KEY, str(ids[0] - 1))
+    before = await conn.fetchval(
+        "SELECT value::text FROM ingestion_state WHERE key = $1",
+        W.HISTORICAL_CURSOR_KEY)
+    await W.cycle(conn, lane="PROSPECTIVE")
+    after = await conn.fetchval(
+        "SELECT value::text FROM ingestion_state WHERE key = $1",
+        W.HISTORICAL_CURSOR_KEY)
+    assert before == after, (before, after)
+
+
+async def test_the_prospective_cursor_starts_at_the_feed_head(conn):
+    """Seeded at 0 it would replay five months while claiming to be new."""
+    from sportsassets.workers import rn1x_shadow as W
+
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.PROSPECTIVE_CURSOR_KEY)
+    head = int(await conn.fetchval(
+        "SELECT coalesce(max(id), 0) FROM trades") or 0)
+    got = await W._cursor(conn, W.PROSPECTIVE_CURSOR_KEY, seed_at_head=True)
+    assert got == head, (got, head)
+    # the HISTORICAL cursor must still default to 0, not the head
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.HISTORICAL_CURSOR_KEY)
+    assert await W._cursor(conn, W.HISTORICAL_CURSOR_KEY) == 0
+
+
+async def test_an_idle_prospective_cycle_PERSISTS_its_seed(conn):
+    """THE LANE COULD NEVER HAVE PRODUCED A POSITION, and the old test
+    could not see it because it checked the READ and never the WRITE.
+
+    `cycle` returned IDLE_NO_CANDIDATES *before* `_save_cursor`. So the
+    seed evaporated: the next cycle found no stored row, re-seeded at the
+    NEW head, and everything that had arrived in between was skipped
+    permanently. The only candidate the lane could ever see was one
+    inserted between `max(id)` and the query microseconds later -- a race,
+    not a design.
+
+    Production said exactly this and I read past it four times:
+    `rn1x_prospective_cursor` was ABSENT from `ingestion_state` while the
+    lane reported IDLE_NO_CANDIDATES every cycle, with 9,444 eligible live
+    BUYs a day going by.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    await _arm(conn)
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.PROSPECTIVE_CURSOR_KEY)
+    head = int(await conn.fetchval(
+        "SELECT coalesce(max(id), 0) FROM trades") or 0)
+
+    first = await W.cycle(conn, lane="PROSPECTIVE")
+    assert first["state"] == "IDLE_NO_CANDIDATES", first
+    assert first["cursor"] == head, (first["cursor"], head)
+
+    # THE POINT: the seed is on disk, not only in that return value.
+    stored = await conn.fetchval(
+        "SELECT value::text FROM ingestion_state WHERE key = $1",
+        W.PROSPECTIVE_CURSOR_KEY)
+    assert stored is not None, (
+        "an idle prospective cycle left no cursor row, so the next cycle "
+        "re-seeds at the new head and skips every row that arrived")
+    assert int(str(stored).strip().strip('"')) == head, stored
+
+
+async def test_a_row_arriving_between_cycles_is_NOT_skipped(conn):
+    """The consequence, stated as behaviour rather than as a stored value.
+
+    This is what the lane is FOR. A cohort BUY that lands after the lane
+    started must be examined by the next cycle. Under the old code it was
+    not: the re-seeded head had already moved past it.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    await _arm(conn)
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.PROSPECTIVE_CURSOR_KEY)
+    await W.cycle(conn, lane="PROSPECTIVE")          # seeds and stores
+
+    # An UNRESOLVED market and one live-lane cohort BUY on it, arriving
+    # after the lane began -- the exact shape the lane exists to catch.
+    cond = "0xcondition_rn1x_prospective_arrival"
+    await conn.execute("DELETE FROM trades WHERE condition_id = $1", cond)
+    await conn.execute("DELETE FROM markets WHERE condition_id = $1", cond)
+    await conn.execute(
+        "INSERT INTO markets (condition_id, title, resolved) "
+        "VALUES ($1, $2, FALSE) ON CONFLICT (condition_id) DO UPDATE "
+        "SET resolved = FALSE, resolved_prices = NULL", cond, "arriving")
+    newid = await conn.fetchval(
+        "INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, "
+        "outcome_index, size, price, notional, ts, source, detected_at, "
+        "dedupe_key) VALUES ($1,$2,$3,$4,'BUY',0,100,0.60,60,$5,'chain',"
+        "$6,$7) RETURNING id",
+        WHALE, "0xtx_arriving", "asset0", cond,
+        _recent(20.0), _recent(13.0),
+        "rn1x-arriving")
+
+    second = await W.cycle(conn, lane="PROSPECTIVE")
+    assert second["state"] == "REPLAYED", second
+    examined = [r["trade_id"] for r in second["results"]]
+    assert int(newid) in examined, (
+        "the newly arrived BUY was never examined: %r (cursor %r)"
+        % (second["results"], second["cursor"]))
+    # and it is PROSPECTIVE evidence: the right experiment, the three
+    # clocks ordered source -> receipt -> decision, and NO settled payout.
+    row = await conn.fetchrow(
+        "SELECT p.experiment_id, p.source_ts, p.detected_ts, p.decision_ts, "
+        "       o.settled_at, o.outcome_basis "
+        "  FROM rn1x_positions p LEFT JOIN rn1x_outcomes o "
+        "    ON o.position_id = p.position_id "
+        " WHERE p.source_trade_id = $1 AND p.experiment_id = $2",
+        int(newid), W.PROSPECTIVE_EXPERIMENT_ID)
+    # NOT `if row is not None` -- that guard would make every assertion
+    # below skippable, which is the check-that-cannot-fail shape.
+    assert row is not None, (
+        "the arriving BUY was examined but no prospective position row "
+        "exists for it; results were %r" % (second["results"],))
+    assert row["source_ts"] <= row["detected_ts"] <= row["decision_ts"], (
+        dict(row))
+    assert row["settled_at"] is None, (
+        "a prospective position must not carry a settlement: %r" % dict(row))
+
+
+async def test_a_chain_row_whose_ts_LEADS_detected_at_still_persists(conn):
+    """THE PROSPECTIVE LANE'S ACTUAL PRODUCTION FAILURE, reproduced.
+
+    Observed 22:56:30Z: the lane examined 400 candidates, wrote 0, and its
+    cursor did not move -- `refusals: {"ERROR:CheckViolationError": 1}`,
+    `stopped: 221561719`. The constraint is `rn1x_clocks_ordered`
+    (detected_ts >= source_ts), and the chain lane violates it routinely:
+    RN1's median chain lag over 7 days is **-0.6 s** across 77,712 fills
+    (p95 +0.3, min -1.3). The venue's clock runs slightly ahead of ours.
+
+    The historical lane never hit this because backfill rows postdate
+    their fills by hours. The prospective lane reads the freshest rows,
+    which is exactly where it shows.
+
+    The fix is this repository's own convention -- max(ts, detected_at),
+    as `learn/dataset.available_at` already does citing Run 82 -- and
+    taking the LATER of the two can only delay when a fill is treated as
+    known, never advance it, so it cannot grant look-ahead.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    await _arm(conn)
+    await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                       W.PROSPECTIVE_CURSOR_KEY)
+    await W.cycle(conn, lane="PROSPECTIVE")          # seed and store
+
+    cond = "0xcondition_rn1x_clock_skew"
+    await conn.execute("DELETE FROM trades WHERE condition_id = $1", cond)
+    await conn.execute("DELETE FROM markets WHERE condition_id = $1", cond)
+    await conn.execute(
+        "INSERT INTO markets (condition_id, title, resolved) "
+        "VALUES ($1, $2, FALSE) ON CONFLICT (condition_id) DO UPDATE "
+        "SET resolved = FALSE, resolved_prices = NULL", cond, "skewed")
+    # ts is 0.6 s AFTER detected_at -- the production median, not an edge.
+    base = _recent(20.0)
+    newid = await conn.fetchval(
+        "INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, "
+        "outcome_index, size, price, notional, ts, source, detected_at, "
+        "dedupe_key) VALUES ($1,$2,$3,$4,'BUY',0,100,0.60,60,$5,'chain',"
+        "$6,$7) RETURNING id",
+        WHALE, "0xtx_skew", "asset0", cond,
+        base + timedelta(milliseconds=600), base, "rn1x-skew")
+
+    res = await W.cycle(conn, lane="PROSPECTIVE")
+    assert res["state"] == "REPLAYED", res
+    assert res["stopped_at_error"] is None, (
+        "the clock skew still raises: %r" % (res["results"],))
+    assert res["cursor_moved"] is True, res
+    assert int(newid) in [r["trade_id"] for r in res["results"]], res
+
+    row = await conn.fetchrow(
+        "SELECT source_ts, detected_ts, decision_ts, available_at, "
+        "decision_basis FROM rn1x_positions "
+        "WHERE source_trade_id = $1 AND experiment_id = $2",
+        int(newid), W.PROSPECTIVE_EXPERIMENT_ID)
+    assert row is not None, (
+        "no position was written for the skewed row: %r" % (res["results"],))
+    # THE SKEW IS PRESERVED, NOT ERASED. This test used to assert
+    # `detected_ts == source_ts`, i.e. that the receipt instant had been
+    # OVERWRITTEN with max(ts, detected_at). That is the defect migration
+    # 104 removes: the column named after an observation must hold the
+    # observation, including when the venue's clock leads ours.
+    assert row["detected_ts"] < row["source_ts"], (
+        "the chain lane's receipt instant must survive as observed: %r"
+        % dict(row))
+    # The conservative value lives in its own column now.
+    assert row["available_at"] == row["source_ts"], dict(row)
+    assert row["available_at"] >= row["detected_ts"], dict(row)
+    # And the decision is an OBSERVATION of the runtime clock, so it
+    # follows availability without being equal to a detection stamp.
+    assert row["decision_ts"] >= row["available_at"], dict(row)
+    assert row["decision_basis"] == "RUNTIME_WALL_CLOCK", dict(row)
+
+
+async def test_a_wildly_future_timestamp_is_REFUSED_not_repaired(conn):
+    """A second of skew and a broken timestamp are different facts.
+
+    max(ts, detected_at) must not become a licence to accept any ts at
+    all: a fill stamped an hour after we saw it is not clock skew, and
+    silently repairing it would date a decision before its event.
+    """
+    from sportsassets import bettor_rn1x_run as R
+
+    assert R.CLOCK_SKEW_TOLERANCE_S == 120.0
+    src = 1_790_000_000.0
+    out = R.run(
+        rows=[{"id": 1, "whale_id": WHALE, "condition_id": COND,
+               "outcome_index": 0, "side": "BUY", "size": 100.0,
+               "price": 0.60, "ts": src,
+               "detected_at": src - 3600.0}],
+        source_whale_id=WHALE, condition_id=COND,
+        initial_inventory_verified=True)
+    assert out["failed_step"] == "SOURCE", out
+    assert out["steps"]["SOURCE"]["refusal"] == "SOURCE_POSTDATES_DETECTION"
+    assert out["steps"]["SOURCE"]["skew_s"] == pytest.approx(3600.0)
+
+
+async def test_the_lane_census_measures_latency_on_live_lanes_only(conn):
+    """A backfill row's detected_at - ts is the age of the backfill.
+
+    This is the measurement that replaces the one seed I generalised into
+    a feed blocker.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    cen = await W.lane_census(conn)
+    assert cen["live_sources"] == list(W.LIVE_SOURCES)
+    assert "backfill" not in cen["live_sources"]
+    for key in ("live_24h", "backfill_24h", "s1_24h",
+                "live_unresolved_buys_24h"):
+        assert key in cen, key
+    assert "age of the backfill" in cen["latency_note"]
+
+
+async def test_a_market_settled_before_detection_refuses_and_the_lane_advances(conn):
+    """THE WEDGE THIS FIXES, observed in production.
+
+    `run` raised ValueError("settlement must have an observed time after
+    the seed"). The cursor rightly refuses to advance past a failed row,
+    so ONE such condition blocked every later one: trade 295 held the lane
+    at cursor 294, examining 400 candidates a cycle and writing nothing.
+
+    It is a real data shape -- a backfill row's detected_at can postdate
+    the market's resolution -- so it must be a named refusal, and the
+    cursor must move past it.
+    """
+    from sportsassets.workers import rn1x_shadow as W
+
+    ids = await _seed_evidence(conn)
+    # resolve the market BEFORE the seed was detected
+    await conn.execute(
+        "UPDATE markets SET resolved_at = $1 WHERE condition_id = $2",
+        T0 - timedelta(hours=3), COND)
+    await _arm(conn)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        W.HISTORICAL_CURSOR_KEY, str(ids[0] - 1))
+
+    res = await W.cycle(conn, lane="HISTORICAL")
+    # NO EXCEPTION, and the lane did not stop at an error
+    assert res["state"] == "REPLAYED", res
+    assert res.get("stopped_at_error") is None, res
+    refused = [r for r in res["results"]
+               if r.get("refused_at") == "SEED"]
+    assert refused, res
+    # NOTHING was half-written: no position, so no orphan orders either
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_positions") == 0
+    assert await conn.fetchval("SELECT count(*) FROM rn1x_orders") == 0
+    # AND THE CURSOR MOVED PAST IT, which is the whole point
+    saved = await conn.fetchval(
+        "SELECT value::text FROM ingestion_state WHERE key = $1",
+        W.HISTORICAL_CURSOR_KEY)
+    assert int(saved.strip('"')) >= ids[0], (saved, ids[0])

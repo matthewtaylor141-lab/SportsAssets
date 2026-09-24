@@ -65,6 +65,25 @@ COPY research/beta48/*.json ./research/beta48/
 COPY research/beta48/acceptance/incentive_manifest.json \
      ./research/beta48/acceptance/
 
+# THE INCENTIVE SCORER, for the same reason and with the same narrowness.
+#
+# The manifest above is the programme's TERMS. Scoring an observed ladder
+# against those terms needs `bettor_incentive_score`, which sits beside it
+# at research/beta48 -- and the *.json glob above does not bring code.
+#
+# WHY THIS IS SHIPPED RATHER THAN REIMPLEMENTED. The command centre has to
+# run the opportunity analysis on the ladders the collector actually
+# observed, and the only alternative to shipping this file is writing a
+# second scorer inside `sportsassets/`. Two scorers disagreeing about a
+# reward share is worse than one file in an image, and the repository's own
+# rule -- reuse the engine, never build a parallel one -- says which to
+# choose. The driver is NOT copied: it is a CLI, and the endpoint calls
+# `measure` directly.
+COPY research/beta48/bettor_incentive_score.py \
+     ./research/beta48/
+COPY research/beta48/bettor_incentive_opportunity.py \
+     ./research/beta48/
+
 # The bridge resolves this FIRST, before any parent-directory guess.
 # Source-tree parent arithmetic has no reason to hold inside an image
 # whose layout a Dockerfile chose.

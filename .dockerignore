@@ -54,4 +54,23 @@ research/beta48/*
 !research/beta48/acceptance
 research/beta48/acceptance/*
 !research/beta48/acceptance/incentive_manifest.json
+
+# THE INCENTIVE SCORER, re-admitted for the same reason and by the same
+# rule -- and I walked straight into the trap documented above.
+#
+# `research/beta48/*` excludes CODE as well as directories, and only
+# `shadow/` and `*.json` were re-admitted. Adding
+# `COPY research/beta48/bettor_incentive_score.py` to the Dockerfile
+# therefore failed the build in 24 seconds with "not found", exactly as
+# the manifest paragraph predicts: the file was committed, present in the
+# working tree, and absent from the CONTEXT. Render reported
+# `build_failed 29b25a5` and the previous image kept serving, so the
+# production read that followed measured the OLD build -- which is how
+# the two new endpoints answered 404 while their tests passed locally.
+#
+# Two files, named literally, because the command centre scores the
+# programme's observed ladders through this engine rather than carrying a
+# second copy of the reward formula.
+!research/beta48/bettor_incentive_score.py
+!research/beta48/bettor_incentive_opportunity.py
 research/beta48/shadow/**/__pycache__

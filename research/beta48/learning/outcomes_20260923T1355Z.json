@@ -1,0 +1,252 @@
+{
+ "generated_at": 1790171798.2909443,
+ "read_at": 1790171735.0,
+ "model_key": "rn1_complement_1h",
+ "model_version": 1,
+ "dataset_version": "BETTOR_LEARN_DATASET_V1",
+ "n": 5,
+ "validity_all": "INVALID_AS_ENTRY_TIME",
+ "why_validity": "recorded at 1790167457, which is after every entry, so as an entry-time forecast of the whole following hour these are invalid. Scoring a target does not repair the claim they were recorded under.",
+ "provisional": false,
+ "why_provisional": "no lane was stale and every row matured at least ten minutes before the read",
+ "fills_read": 22,
+ "complement_rule": "a BUY of the other outcome of the same condition whose AVAILABLE_AT = max(ts, detected_at) falls in (decision, maturity]. Imported from learn/dataset.py, not restated.",
+ "what_this_cannot_establish": "five outcomes demonstrate the join mechanism only. They cannot establish predictive skill, calibration or profitability, and must not be described as doing so.",
+ "rows": [
+  {
+   "condition_id": "0xede48dace75e0823cacd1f23d5aa358dd7001a49e0b7c5fccdc6979ac9472932",
+   "outcome_index": 1,
+   "entry_at": 1790166154.0,
+   "decision_at": 1790166154.0,
+   "matures_at": 1790169754.0,
+   "p": 0.49598834058380953,
+   "baseline_p": 0.6098591549295774,
+   "input_sha": "93369a3440d58e749e846daab94063834d4e370633e69d0cd14b7d2ec1e17ad3",
+   "matured_for_s": 1981.0,
+   "validity": "INVALID_AS_ENTRY_TIME",
+   "unconditional": {
+    "window": [
+     1790166154.0,
+     1790169754.0
+    ],
+    "outcome": 0,
+    "outcome_at": null,
+    "outcome_source": null,
+    "fill_id": null,
+    "time_to_event_s": null
+   },
+   "conditional": {
+    "elapsed_s": 1117.0,
+    "window": [
+     1790167271.0,
+     1790169754.0
+    ],
+    "status": "IN_RISK_SET",
+    "outcome": 0,
+    "outcome_at": null,
+    "outcome_source": null,
+    "fill_id": null
+   },
+   "gap_sensitivity": [
+    {
+     "from": 1789776000.0,
+     "to": 1789862400.0,
+     "horizon_overlaps_gap": false,
+     "the_hit_is_inside_the_gap": false,
+     "label_under_EXCLUSION": 0,
+     "label_under_INCLUSION": 0,
+     "changes_the_label": false
+    }
+   ]
+  },
+  {
+   "condition_id": "0xede48dace75e0823cacd1f23d5aa358dd7001a49e0b7c5fccdc6979ac9472932",
+   "outcome_index": 1,
+   "entry_at": 1790166244.477,
+   "decision_at": 1790166244.477,
+   "matures_at": 1790169844.477,
+   "p": 0.6039760843157506,
+   "baseline_p": 0.6098591549295774,
+   "input_sha": "ea1580eb75b818cf5a57be477b9fdacf79e6870bb54d449d4037c2104f345e8c",
+   "matured_for_s": 1890.5,
+   "validity": "INVALID_AS_ENTRY_TIME",
+   "unconditional": {
+    "window": [
+     1790166244.477,
+     1790169844.477
+    ],
+    "outcome": 0,
+    "outcome_at": null,
+    "outcome_source": null,
+    "fill_id": null,
+    "time_to_event_s": null
+   },
+   "conditional": {
+    "elapsed_s": 1117.0,
+    "window": [
+     1790167361.477,
+     1790169844.477
+    ],
+    "status": "IN_RISK_SET",
+    "outcome": 0,
+    "outcome_at": null,
+    "outcome_source": null,
+    "fill_id": null
+   },
+   "gap_sensitivity": [
+    {
+     "from": 1789776000.0,
+     "to": 1789862400.0,
+     "horizon_overlaps_gap": false,
+     "the_hit_is_inside_the_gap": false,
+     "label_under_EXCLUSION": 0,
+     "label_under_INCLUSION": 0,
+     "changes_the_label": false
+    }
+   ]
+  },
+  {
+   "condition_id": "0x653ede1ddb92097f8942eb71e3cf86683424147574a9f4fe860e01bbf114ce0b",
+   "outcome_index": 1,
+   "entry_at": 1790166325.0,
+   "decision_at": 1790166325.0,
+   "matures_at": 1790169925.0,
+   "p": 0.5165545548520737,
+   "baseline_p": 0.6098591549295774,
+   "input_sha": "5f123762538963f1fb027623f469ca98c8ac49fa7965359e7b4c627a714f822b",
+   "matured_for_s": 1810.0,
+   "validity": "INVALID_AS_ENTRY_TIME",
+   "unconditional": {
+    "window": [
+     1790166325.0,
+     1790169925.0
+    ],
+    "outcome": 1,
+    "outcome_at": 1790169188.0,
+    "outcome_source": "chain",
+    "fill_id": "221431927",
+    "time_to_event_s": 2863.0
+   },
+   "conditional": {
+    "elapsed_s": 1117.0,
+    "window": [
+     1790167442.0,
+     1790169925.0
+    ],
+    "status": "IN_RISK_SET",
+    "outcome": 1,
+    "outcome_at": 1790169188.0,
+    "outcome_source": "chain",
+    "fill_id": "221431927"
+   },
+   "gap_sensitivity": [
+    {
+     "from": 1789776000.0,
+     "to": 1789862400.0,
+     "horizon_overlaps_gap": false,
+     "the_hit_is_inside_the_gap": false,
+     "label_under_EXCLUSION": 1,
+     "label_under_INCLUSION": 1,
+     "changes_the_label": false
+    }
+   ]
+  },
+  {
+   "condition_id": "0x653ede1ddb92097f8942eb71e3cf86683424147574a9f4fe860e01bbf114ce0b",
+   "outcome_index": 1,
+   "entry_at": 1790166546.709,
+   "decision_at": 1790166546.709,
+   "matures_at": 1790170146.709,
+   "p": 0.5590113105101555,
+   "baseline_p": 0.6098591549295774,
+   "input_sha": "d0ace7a1a5c657d8280d3af60beff4ccb8dbac1b43ba80ad12acd1a16072d72f",
+   "matured_for_s": 1588.3,
+   "validity": "INVALID_AS_ENTRY_TIME",
+   "unconditional": {
+    "window": [
+     1790166546.709,
+     1790170146.709
+    ],
+    "outcome": 1,
+    "outcome_at": 1790169188.0,
+    "outcome_source": "chain",
+    "fill_id": "221431927",
+    "time_to_event_s": 2641.290999889374
+   },
+   "conditional": {
+    "elapsed_s": 1117.0,
+    "window": [
+     1790167663.709,
+     1790170146.709
+    ],
+    "status": "IN_RISK_SET",
+    "outcome": 1,
+    "outcome_at": 1790169188.0,
+    "outcome_source": "chain",
+    "fill_id": "221431927"
+   },
+   "gap_sensitivity": [
+    {
+     "from": 1789776000.0,
+     "to": 1789862400.0,
+     "horizon_overlaps_gap": false,
+     "the_hit_is_inside_the_gap": false,
+     "label_under_EXCLUSION": 1,
+     "label_under_INCLUSION": 1,
+     "changes_the_label": false
+    }
+   ]
+  },
+  {
+   "condition_id": "0xede48dace75e0823cacd1f23d5aa358dd7001a49e0b7c5fccdc6979ac9472932",
+   "outcome_index": 1,
+   "entry_at": 1790166719.0,
+   "decision_at": 1790166719.0,
+   "matures_at": 1790170319.0,
+   "p": 0.5702125612207987,
+   "baseline_p": 0.6098591549295774,
+   "input_sha": "0bb314f03a16ae5f1e7ddca884d36ca327246387190c7ea84d63c9051ecce729",
+   "matured_for_s": 1416.0,
+   "validity": "INVALID_AS_ENTRY_TIME",
+   "unconditional": {
+    "window": [
+     1790166719.0,
+     1790170319.0
+    ],
+    "outcome": 1,
+    "outcome_at": 1790169979.0,
+    "outcome_source": "chain",
+    "fill_id": "221432634",
+    "time_to_event_s": 3260.0
+   },
+   "conditional": {
+    "elapsed_s": 1117.0,
+    "window": [
+     1790167836.0,
+     1790170319.0
+    ],
+    "status": "IN_RISK_SET",
+    "outcome": 1,
+    "outcome_at": 1790169979.0,
+    "outcome_source": "chain",
+    "fill_id": "221432634"
+   },
+   "gap_sensitivity": [
+    {
+     "from": 1789776000.0,
+     "to": 1789862400.0,
+     "horizon_overlaps_gap": false,
+     "the_hit_is_inside_the_gap": false,
+     "label_under_EXCLUSION": 1,
+     "label_under_INCLUSION": 1,
+     "changes_the_label": false
+    }
+   ]
+  }
+ ],
+ "summary": {
+  "unconditional_positives": 3,
+  "conditional_in_risk_set": 5,
+  "conditional_positives": 3
+ }
+}
