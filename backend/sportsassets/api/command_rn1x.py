@@ -82,7 +82,15 @@ STATUS_KEYS = ("historical_replay", "prospective_rn1_management",
                # entries` is the internal settlement-model path; this is a
                # bookmaker's price. Different source class, different
                # reason to be blocked, so a separate badge.
-               "external_valuation")
+               "external_valuation",
+               # ORDER BOOK STATE and SHADOW P&L, as their own tiles. They
+               # were only reachable by clicking into one position's trace,
+               # so a manager could not see how much is resting or what the
+               # book has actually earned without knowing where to look.
+               "order_book_state",
+               "shadow_pnl",
+               # ACTUAL MODEL FITTING, separate from the policy comparator.
+               "model_fitting")
 
 
 def _live(running: bool, has_rows: bool, *, what: str, why: str) -> dict:
@@ -206,7 +214,204 @@ async def statuses(pool) -> dict:
         # different source class with a different reason to be blocked, and
         # one badge over both would hide which of the two moved.
         "external_valuation": await _external_status(pool),
+        "order_book_state": await _order_book_status(pool),
+        "shadow_pnl": await _pnl_status(pool),
+        "model_fitting": await _model_fitting_status(pool),
     }
+
+
+ORDER_BOOK_SQL = """
+    SELECT o.state,
+           count(*) AS n,
+           sum(o.qty)::float8 AS qty,
+           sum(o.filled_qty)::float8 AS filled,
+           sum(o.qty - o.filled_qty)::float8 AS remaining
+      FROM rn1x_orders o
+      JOIN rn1x_positions p ON p.position_id = o.position_id
+     WHERE p.experiment_id = $1
+     GROUP BY o.state ORDER BY 1
+"""
+
+
+async def _order_book_status(pool) -> dict:
+    """RESTING ORDERS, PARTIAL FILLS, CANCELLATIONS AND REMAINING SIZE.
+
+    By ORDER STATE, because the states are the answer: RESTING is working,
+    PARTIALLY_FILLED has a known executed quantity behind an untouched
+    remainder, CANCEL_PENDING is still executable, and CANCELLED is not.
+    Collapsing them into "open orders" loses the one distinction that
+    matters during a cancel race.
+    """
+    from ..workers import rn1x_shadow as W
+
+    out = {"what": ("modelled order state by lifecycle state, with "
+                    "remaining size. Every order here is MODELLED"),
+           "lanes": {}}
+    have = await pool.fetchval(
+        "SELECT to_regclass('public.rn1x_orders') IS NOT NULL")
+    if not have:
+        out.update(badge="UNAVAILABLE", why="rn1x_orders is not present")
+        return out
+    total = 0
+    for eid, lane in ((W.HISTORICAL_EXPERIMENT_ID, "historical"),
+                      (W.PROSPECTIVE_EXPERIMENT_ID, "prospective")):
+        rows = [dict(r) for r in await pool.fetch(ORDER_BOOK_SQL, eid)]
+        out["lanes"][lane] = {
+            "by_state": rows,
+            "orders": sum(int(r["n"]) for r in rows),
+            "remaining_qty": sum(float(r["remaining"] or 0) for r in rows),
+            "partially_filled": sum(
+                int(r["n"]) for r in rows
+                if str(r["state"]).upper() == "PARTIALLY_FILLED"),
+            "cancel_pending_still_executable": sum(
+                int(r["n"]) for r in rows
+                if str(r["state"]).upper() == "CANCEL_PENDING"),
+        }
+        total += out["lanes"][lane]["orders"]
+    out.update(badge=("LIVE" if total else "EMPTY"), orders_total=total,
+               why=("%d modelled orders across both lanes" % total)
+                   if total else "no modelled order has been written yet")
+    return out
+
+
+#: ACCOUNTING LIVES IN `rn1x_outcomes`, one row per settled position.
+#: There is no rn1x_accounting table -- I wrote a query against one and
+#: the schema check caught it. The columns below are the real ones.
+PNL_SQL = """
+    SELECT count(*) AS settled_positions,
+           sum(o.realized_cash_usd)::float8 AS realized_cash_usd,
+           sum(o.fees_usd)::float8        AS fees_usd,
+           sum(o.net_usd)::float8         AS net_usd,
+           sum(o.residual_qty)::float8    AS residual_qty,
+           sum(o.residual_settled_usd)::float8 AS residual_settled_usd,
+           sum(o.unpaired_qty)::float8    AS unpaired_qty,
+           sum(o.turnover_usd)::float8    AS turnover_usd,
+           max(o.committed_peak_usd)::float8 AS committed_peak_usd,
+           min(o.settled_at)              AS first_settled_at,
+           max(o.settled_at)              AS last_settled_at
+      FROM rn1x_outcomes o
+      JOIN rn1x_positions p ON p.position_id = o.position_id
+     WHERE p.experiment_id = $1
+"""
+
+OPEN_POSITIONS_SQL = """
+    SELECT count(*) AS open_positions,
+           sum(p.seed_basis_usd)::float8 AS open_inventory_at_cost_usd
+      FROM rn1x_positions p
+      LEFT JOIN rn1x_outcomes o ON o.position_id = p.position_id
+     WHERE p.experiment_id = $1 AND o.position_id IS NULL
+"""
+
+
+async def _pnl_status(pool) -> dict:
+    """REALISED SHADOW P&L, FEES, AND WHAT IS NOT MARKED.
+
+    Unrealised P&L is reported as NOT_IDENTIFIED rather than as a number,
+    and that is not an omission: marking open inventory needs a price we
+    are entitled to use, and the venue mid is not one -- nobody transacted
+    there. Open inventory is therefore carried AT COST with the mark named
+    as absent, which is the same convention the desk's own accounting uses.
+    """
+    from ..workers import rn1x_shadow as W
+
+    out = {"what": ("realised shadow P&L and fees per lane. Every figure "
+                    "is MODELLED: no capital moved"),
+           "lanes": {},
+           "unrealised": "NOT_IDENTIFIED",
+           "why_unrealised_is_absent": (
+               "marking open inventory requires a price we may use. A "
+               "midpoint is where nobody transacted, so open inventory is "
+               "carried at cost and the mark is named as missing"),
+           "rebates": {
+               "value": "NOT_APPLICABLE_TO_THESE_ORDERS",
+               "why": ("the fee schedule's maker side is what would pay a "
+                       "rebate; every fill modelled here is priced through "
+                       "the taker side of the same production schedule"),
+           }}
+    have = await pool.fetchval(
+        "SELECT to_regclass('public.rn1x_outcomes') IS NOT NULL")
+    if not have:
+        out.update(badge="UNAVAILABLE", why="rn1x_outcomes is not present")
+        return out
+    tot = 0
+    for eid, lane in ((W.HISTORICAL_EXPERIMENT_ID, "historical"),
+                      (W.PROSPECTIVE_EXPERIMENT_ID, "prospective")):
+        r = await pool.fetchrow(PNL_SQL, eid)
+        d = dict(r) if r else {}
+        o = await pool.fetchrow(OPEN_POSITIONS_SQL, eid)
+        d.update(dict(o) if o else {})
+        n = int(d.get("settled_positions") or 0)
+        out["lanes"][lane] = d
+        tot += n
+    out.update(badge=("LIVE" if tot else "EMPTY"), settled_total=tot,
+               why=("%d settled positions with accounting rows" % tot)
+                    if tot else
+                    "no position has settled, so no realised figure exists")
+    return out
+
+
+async def _model_fitting_status(pool) -> dict:
+    """ACTUAL FITTING, separate from the policy comparator.
+
+    `learning_evaluation` is the comparator: it re-runs policies over the
+    same seeds and fits nothing. This tile is the fitted-model pipeline,
+    and it names its target, because the target is what stops a
+    behavioural forecast being read as a settlement probability.
+    """
+    from .. import bettor_model_inventory as MI
+    from ..workers import rn1x_model_loop as ML
+
+    out = {"what": ("SCHEDULED MODEL FITTING: prepare, fit, predict before "
+                    "the outcome exists, join, evaluate"),
+           "target": ML.TARGET,
+           "target_predicts": MI.TARGETS[ML.TARGET]["predicts"],
+           "target_is_not_usable_for": MI.TARGETS[ML.TARGET]["not_usable_for"],
+           "entry_target_required_by_the_gate": MI.ENTRY_REQUIRES,
+           "this_is_not_a_settlement_forecast": True,
+           "this_is_not_our_fill_probability": True,
+           "promotes_a_winner": False,
+           "assumptions": list(ML.ASSUMPTIONS)}
+    try:
+        raw = await pool.fetchval(
+            "SELECT value::text FROM ingestion_state WHERE key = $1",
+            ML.CONTROL_KEY)
+        armed = bool(raw and raw.strip().lower() == "true")
+    except Exception:                                          # noqa: BLE001
+        armed = False
+    out["armed"] = armed
+    have = await pool.fetchval(
+        "SELECT to_regclass('public.rn1x_model_predictions') IS NOT NULL")
+    if not have:
+        out.update(badge="UNAVAILABLE",
+                   why="migration 102 has not been applied here")
+        return out
+    n = await pool.fetchval(
+        "SELECT count(*) FROM rn1x_model_predictions WHERE target = $1",
+        ML.TARGET) or 0
+    joined = await pool.fetchval(
+        "SELECT count(*) FROM rn1x_model_predictions WHERE target = $1 "
+        "AND outcome_known = TRUE", ML.TARGET) or 0
+    out.update(predictions=int(n), joined_outcomes=int(joined))
+    try:
+        import json as _json
+
+        raw = await pool.fetchval(
+            "SELECT value::text FROM ingestion_state WHERE key = $1",
+            ML.HEARTBEAT_KEY)
+        out["last_cycle"] = _json.loads(raw) if raw else None
+    except Exception as exc:                                   # noqa: BLE001
+        out["last_cycle"] = {"unreadable": type(exc).__name__}
+    if not armed:
+        out.update(badge="STOPPED",
+                   why="the %s control row is not true" % ML.CONTROL_KEY)
+    elif n == 0:
+        out.update(badge="ARMED",
+                   why="armed; no prediction has been recorded yet")
+    else:
+        out.update(badge="LIVE",
+                   why=("%d predictions recorded, %d with outcomes joined"
+                        % (n, joined)))
+    return out
 
 
 async def _external_status(pool) -> dict:

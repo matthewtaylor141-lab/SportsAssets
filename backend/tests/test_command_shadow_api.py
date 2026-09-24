@@ -349,9 +349,20 @@ def test_all_eight_statuses_are_declared_separately():
     assert CR.STATUS_KEYS == (
         "historical_replay", "prospective_rn1_management",
         "independent_ev_entries", "pairing", "second_half_loss_exit",
-        "accounting_health", "learning_evaluation", "external_valuation")
+        "accounting_health", "learning_evaluation", "external_valuation",
+        # ORDER BOOK and P&L as their own tiles: resting size, partial
+        # fills, cancellations and remaining inventory were reachable only
+        # by clicking into one position's trace.
+        "order_book_state", "shadow_pnl",
+        # FITTING, separate from the COMPARATOR. `learning_evaluation`
+        # re-runs policies and fits nothing; `model_fitting` is the
+        # prepare/fit/predict/join/evaluate pipeline. One tile over both
+        # would let a policy comparison read as model training.
+        "model_fitting")
     # and the two belief paths are NOT the same key
     assert "independent_ev_entries" != "external_valuation"
+    # nor are the two learning paths
+    assert "learning_evaluation" != "model_fitting"
 
 
 def test_the_live_badge_distinguishes_live_armed_and_stopped():

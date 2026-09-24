@@ -371,11 +371,37 @@ async def lifespan(_: FastAPI):
         log.info("external valuation shadow armed (control row still gates "
                  "every cycle)")
 
+    # ── ACTUAL MODEL FITTING, on a schedule ─────────────────────────
+    #
+    # SEPARATE FROM THE POLICY COMPARATOR ABOVE, and the distinction is
+    # the point: `rn1x_learn_loop` re-runs policies over the same seeds
+    # and fits nothing. This one prepares a point-in-time dataset, fits
+    # the pure-Python kernel on rows whose horizon has CLOSED, records
+    # predictions BEFORE their outcomes exist, joins those outcomes when
+    # the horizon closes, and evaluates on the joined rows only.
+    #
+    # ITS TARGET IS NAMED AND IS NOT THE ENTRY TARGET. It forecasts
+    # whether the cohort account makes a complementary BUY within the
+    # horizon -- somebody else's next action. Not settlement, and not our
+    # fill probability. The prediction ledger refuses the settlement
+    # target outright because nothing is fitted for it.
+    #
+    # NO PROMOTION PATH. It can recommend; it cannot change the active
+    # policy, and management's baseline stays frozen whatever it finds.
+    from ..workers import rn1x_model_loop as _RN1XM
+    rn1x_model_task = None
+    if _RN1XM.enabled():
+        from ..db import get_pool as _rn1xm_pool
+        rn1x_model_task = asyncio.get_running_loop().create_task(
+            _RN1XM.run(_rn1xm_pool))
+        log.info("rn1x model fitting armed (control row gates every cycle)")
+
     try:
         yield
     finally:
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
-                             ext_task, trim_task, poller_task)
+                             ext_task, rn1x_model_task, trim_task,
+                             poller_task)
                  if t is not None]
         for task in tasks:
             task.cancel()
