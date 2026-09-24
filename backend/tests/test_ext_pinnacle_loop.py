@@ -195,7 +195,8 @@ def test_the_three_venue_read_failures_have_three_names():
 
     # 1 · no venue-native slug supplied at all
     out = _a.run(loop.venue_quote(_Conn(), us_slug=None,
-                                  outcome_index=0, now=0.0))
+                                  intent="ORDER_INTENT_BUY_LONG",
+                                  now=0.0))
     assert out["refusal"] == loop.R_NO_SLUG
     assert "global condition id is not a US market slug" in out["why"]
 
@@ -207,7 +208,8 @@ def test_the_three_venue_read_failures_have_three_names():
     loop._read_book_blocking = _boom
     try:
         out = _a.run(loop.venue_quote(_Conn(), us_slug="aec-mlb-x-y-2026-09-24",
-                                      outcome_index=0, now=0.0))
+                                      intent="ORDER_INTENT_BUY_LONG",
+                                      now=0.0))
     finally:
         loop._read_book_blocking = orig
     assert out["refusal"] == loop.R_VENUE_READ_FAILED
@@ -217,7 +219,8 @@ def test_the_three_venue_read_failures_have_three_names():
     loop._read_book_blocking = lambda _slug: {"error": "429 rate limited"}
     try:
         out = _a.run(loop.venue_quote(_Conn(), us_slug="aec-mlb-x-y-2026-09-24",
-                                      outcome_index=0, now=0.0))
+                                      intent="ORDER_INTENT_BUY_LONG",
+                                      now=0.0))
     finally:
         loop._read_book_blocking = orig
     assert out["refusal"] == loop.R_VENUE_READ_ERROR
@@ -342,13 +345,23 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
 
         monkeypatch.setattr(_pm, "resolve", fake_resolve)
 
-        async def fake_quote(conn_, *, us_slug, outcome_index, now):
+        async def fake_quote(conn_, *, us_slug, intent, now, size=None):
             assert us_slug.startswith("aec-"), (
                 "the read must get the VENUE's slug, not the global one")
-            return {"ok": True, "ask": 0.52, "depth": 800.0, "age_s": 3.0,
+            # THE INTENT IS THE SIDE. A reader that does not receive it
+            # cannot know which ladder to consume.
+            assert intent in ("ORDER_INTENT_BUY_LONG",
+                              "ORDER_INTENT_BUY_SHORT"), intent
+            short = intent.endswith("SHORT")
+            return {"ok": True, "ask": 0.52, "api_price": 0.52,
+                    "acquisition_price": 0.48 if short else 0.52,
+                    "side_consumed": "BID" if short else "ASK",
+                    "pays_on": ("THE_COMPLEMENT_OF_THE_PRICED_OUTCOME"
+                                if short else "THE_PRICED_OUTCOME"),
+                    "intent": intent, "levels_read": 3,
+                    "depth": 800.0, "age_s": 3.0, "sized": None,
                     "age_basis": "VENUE_TRANSACT_TIME", "bid": None,
-                    "read_at": now, "slug": "lfc-mci",
-                    "outcome_index": outcome_index}
+                    "read_at": now, "slug": "lfc-mci"}
 
         monkeypatch.setattr(loop, "venue_quote", fake_quote)
 
@@ -423,11 +436,14 @@ async def test_a_second_cycle_does_not_double_count(monkeypatch):
             return {"ok": True, "events": [_event()],
                         "received_at": time.time()}
 
-        async def fake_quote(conn_, *, condition_id, outcome_index, now):
-            return {"ok": True, "ask": 0.52, "depth": 800.0, "age_s": 3.0,
+        async def fake_quote(conn_, *, us_slug, intent, now, size=None):
+            return {"ok": True, "ask": 0.52, "api_price": 0.52,
+                    "acquisition_price": 0.52, "side_consumed": "ASK",
+                    "pays_on": "THE_PRICED_OUTCOME", "intent": intent,
+                    "levels_read": 3, "depth": 800.0, "age_s": 3.0,
+                    "sized": None,
                     "age_basis": "VENUE_TRANSACT_TIME", "bid": None,
-                    "read_at": now, "slug": "lfc-mci",
-                    "outcome_index": outcome_index}
+                    "read_at": now, "slug": "lfc-mci"}
 
         monkeypatch.setattr(loop, "fetch_odds", fake_fetch)
         monkeypatch.setattr(loop, "venue_quote", fake_quote)

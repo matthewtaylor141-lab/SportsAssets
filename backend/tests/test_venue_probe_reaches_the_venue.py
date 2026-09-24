@@ -61,12 +61,21 @@ def test_the_probes_call_binds_against_the_real_signature():
     """THE CHECK THAT WAS MISSING. A keyword the callee does not accept is
     a TypeError at runtime and nothing at all at import time."""
     sig = inspect.signature(EXT.venue_quote)
-    # exactly what the probe passes
+    # exactly what the probe passes now: the slug AND the intent, because
+    # the intent is what names the side on this venue.
     sig.bind(None, us_slug="aec-mlb-chc-mia-2026-09-24-cubs",
-             outcome_index=0, now=1.0)
-    # and the shape it used to pass must now be rejected
+             intent="ORDER_INTENT_BUY_LONG", now=1.0)
+    # the global-id shape must still be rejected
     with pytest.raises(TypeError):
-        sig.bind(None, condition_id="0xabc", outcome_index=0, now=1.0)
+        sig.bind(None, condition_id="0xabc", intent="X", now=1.0)
+    # AND SO MUST THE PARAMETER THAT USED TO DO NOTHING. `outcome_index`
+    # looked like it selected a side and was ignored, which is how a
+    # one-sided reader hid for three runs. It must not be accepted again.
+    with pytest.raises(TypeError):
+        sig.bind(None, us_slug="aec-x", outcome_index=0, now=1.0)
+    # the side is not optional either
+    with pytest.raises(TypeError):
+        sig.bind(None, us_slug="aec-x", now=1.0)
 
 
 def test_a_raise_is_attributed_to_the_row_not_the_probe():

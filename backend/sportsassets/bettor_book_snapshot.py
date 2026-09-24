@@ -432,3 +432,205 @@ def describe() -> dict:
             "depends on it and the mirror is frozen; this module reads "
             "the same payload separately and keeps everything"),
     }
+
+
+# ── THE SIDE THAT ACTUALLY PAYS ON OUR OUTCOME ───────────────────────
+#
+# THE DEFECT THIS REPLACES (acceptance run 28). `ext_pinnacle_loop.
+# venue_quote` took an `outcome_index` argument and NEVER USED IT: it
+# returned BEST_ASK for the market however the caller asked. On the
+# `aec-` family that is wrong for half of all candidates, because BOTH
+# sides of one of those markets carry the SAME identifier -- equal to
+# the slug -- and the side is carried only by the ORDER INTENT. Eleven
+# of run 28's forty-one candidates resolved to a real venue contract
+# whose intent was ORDER_INTENT_BUY_SHORT, and the loop refused every
+# one of them rather than price a short leg off the long book.
+#
+# The refusal was right. The reader was one-sided.
+#
+# THE CONVERSION IS NOT NEW AND IS NOT GUESSED. `pmus.slug_bid` settled
+# the quote shape against five live markets, exact to the cent on all
+# five (2026-08-31, run 33395797987):
+#
+#     long.price  == bestAsk          (5/5)
+#     short.price == 1 - bestBid      (5/5)
+#
+# and `live_executor.cost_per_share` is the one-line pure arithmetic
+# already used for money: (1 - px) for a short intent, px for a long.
+# This function is the LADDER form of exactly that, and it delegates the
+# per-share step to that same definition so the two can never drift.
+#
+#     LONG  entry -> consume the OFFER ladder, cost = px
+#     SHORT entry -> consume the BID  ladder, cost = 1 - px
+#
+# A short's quantity comes from the BID levels, not the offers. On a
+# book showing bid 0.60 / ask 0.63 the short acquisition cost is 0.40
+# taken against the BID's quantity -- never 0.37 (which is 1 - ask, a
+# price nobody is offering) and never the offer quantity.
+
+ACQ_VERSION = "BETTOR_ACQUISITION_LADDER_V1"
+
+#: Kept apart on purpose. `api_price` is the YES-denominated number the
+#: venue publishes and the one an order carries; `acquisition_price` is
+#: what a contract costs us. For a long they coincide; for a short they
+#: are different numbers in different spaces, and conflating them is the
+#: mis-denomination `live_executor.wire_limit` exists to prevent.
+PRICE_SPACES = (
+    "api_price is the venue's YES-denominated price for the level. "
+    "acquisition_price is our economic cost per contract. They are "
+    "equal for a LONG and complementary for a SHORT")
+
+R_SIDE_EMPTY = "REQUIRED_SIDE_HAS_NO_PUBLISHED_LEVEL"
+R_NOT_ENOUGH_DEPTH = "DISPLAYED_DEPTH_BELOW_REQUESTED_SIZE"
+R_INTENT_UNKNOWN = "ORDER_INTENT_NOT_RECOGNISED"
+
+
+def is_short_intent(intent) -> bool:
+    """True for the venue's SHORT intents.
+
+    EXTRACTED, NOT IMPORTED. The identical predicate and the per-share
+    conversion below live in `live_executor`, which also carries the
+    funded order path. `ext_pinnacle_loop` is guarded by a test asserting
+    that no order-submission module is even NAMEABLE from it, and that
+    guard is worth more than the import: a shadow loop should not be able
+    to reach a submit function transitively for the sake of one line of
+    arithmetic.
+
+    So the arithmetic is duplicated deliberately and
+    `test_acquisition_ladder_is_side_aware` pins it EQUAL to the
+    executor's own definition, so the two cannot drift silently.
+    """
+    return "SHORT" in (str(intent) or "").upper()
+
+
+def cost_per_share(px: float, intent) -> float:
+    """Our cost for ONE contract at venue price `px`, unrounded.
+
+    A short is a book-level SELL: `price` denominates the contract and a
+    short ties up (1 - price). Confirmed by the venue's own receipts
+    (ORDER_SIDE_SELL on 6 of 6) and by the quote shape measured across
+    five live markets, exact to the cent: short.price == 1 - bestBid.
+    """
+    v = float(px or 0)
+    return (1.0 - v) if is_short_intent(intent) else v
+
+
+def acquisition_ladder(market_data, *, intent, limit=None) -> dict:
+    """The executable ladder for ONE resolved intent, in cost space.
+
+    `intent` is the RESOLVED exposure from `premap.resolve` -- the thing
+    that actually names the side on this venue. It is required: there is
+    no default, because defaulting is what produced the one-sided read.
+
+    `limit` bounds how many levels are read. It defaults to ALL of them.
+    LADDER_LEVELS (5) is the snapshot's display truncation and must not
+    be inherited silently by a calculation that needs real depth.
+
+    Returns levels ordered best-first in ACQUISITION terms (cheapest
+    first), each carrying both prices so neither space is lost.
+    """
+    out = {"version": ACQ_VERSION, "intent": intent,
+           "price_spaces": PRICE_SPACES, "levels": [], "reasons": []}
+    if not intent or not isinstance(intent, str):
+        return {**out, "ok": False, "refusal": R_INTENT_UNKNOWN,
+                "parse_status": NOT_IDENTIFIED}
+    short = is_short_intent(intent)
+    out["side_consumed"] = SIDE_BID if short else SIDE_ASK
+    out["pays_on"] = ("THE_COMPLEMENT_OF_THE_PRICED_OUTCOME" if short
+                      else "THE_PRICED_OUTCOME")
+
+    if market_data is None:
+        return {**out, "ok": False, "parse_status": PARSE_NO_MARKET_DATA}
+    if not isinstance(market_data, dict):
+        return {**out, "ok": False,
+                "parse_status": PARSE_MARKET_DATA_NOT_OBJECT}
+
+    raw = market_data.get("bids") if short else market_data.get("offers")
+    if raw is None:
+        # THE SIDE IS ABSENT FROM THE PAYLOAD -- different from a side
+        # that is present and empty, which is a real, readable book with
+        # nobody on it.
+        return {**out, "ok": False, "parse_status": PARSE_NO_LEVELS,
+                "refusal": R_SIDE_EMPTY,
+                "why": "the payload publishes no %s array at all"
+                       % ("bids" if short else "offers")}
+    if not isinstance(raw, list):
+        return {**out, "ok": False,
+                "parse_status": PARSE_MARKET_DATA_NOT_OBJECT,
+                "why": "the side is present but is not a list"}
+
+    n = len(raw) if limit is None else min(len(raw), int(limit))
+    out["levels_published"] = len(raw)
+    out["levels_read"] = n
+    out["truncated"] = n < len(raw)
+    levels, reasons = [], []
+    for i in range(n):
+        px, qty, why = _level(raw[i])
+        for w in why:
+            if w not in reasons:
+                reasons.append(w)
+        if px is None or qty is None:
+            continue
+        if qty <= 0:
+            if R_NO_SIZE_AT_PRICE not in reasons:
+                reasons.append(R_NO_SIZE_AT_PRICE)
+            continue
+        acq = cost_per_share(float(px), intent)
+        levels.append({"level": i,
+                       "api_price": float(px),
+                       "acquisition_price": round(float(acq), 6),
+                       "qty": float(qty)})
+    # Cheapest acquisition first. For a long the offers already ascend;
+    # for a short the best bid gives the LOWEST cost, so sorting on the
+    # acquisition price is the one rule that is correct for both.
+    levels.sort(key=lambda r: r["acquisition_price"])
+    out["levels"] = levels
+    out["reasons"] = reasons
+    if not levels:
+        # A VALID EMPTY BOOK AND A MALFORMED ONE ARE DIFFERENT FACTS.
+        malformed = bool(reasons) and len(raw) > 0
+        return {**out, "ok": False,
+                "parse_status": (PARSE_OK if not malformed
+                                 else PARSE_NO_LEVELS),
+                "refusal": R_SIDE_EMPTY,
+                "book_was": ("MALFORMED_LEVELS" if malformed
+                             else "VALID_BUT_EMPTY")}
+    out.update(ok=True, parse_status=PARSE_OK,
+               best_acquisition_price=levels[0]["acquisition_price"],
+               best_api_price=levels[0]["api_price"],
+               displayed_depth=round(sum(r["qty"] for r in levels), 6))
+    return out
+
+
+def fill_across_levels(ladder: dict, size: float) -> dict:
+    """Walk `size` contracts down an acquisition ladder.
+
+    Returns the size actually available, the notional cost and the
+    volume-weighted acquisition price. A ladder that cannot cover `size`
+    is NOT silently partially filled into a confident number: the
+    shortfall is named and `covers_requested` is false.
+    """
+    want = float(size or 0)
+    out = {"requested": want, "filled": 0.0, "cost": 0.0,
+           "levels_used": 0, "covers_requested": False}
+    if not ladder.get("ok") or want <= 0:
+        return {**out, "refusal": ladder.get("refusal") or R_SIDE_EMPTY}
+    filled = cost = 0.0
+    used = 0
+    for lv in ladder["levels"]:
+        if filled >= want:
+            break
+        take = min(lv["qty"], want - filled)
+        filled += take
+        cost += take * lv["acquisition_price"]
+        used += 1
+    out.update(filled=round(filled, 6), cost=round(cost, 6),
+               levels_used=used,
+               covers_requested=filled + 1e-9 >= want)
+    if filled > 0:
+        out["vwap_acquisition_price"] = round(cost / filled, 6)
+    if not out["covers_requested"]:
+        out["refusal"] = R_NOT_ENOUGH_DEPTH
+        out["why"] = ("the displayed ladder shows %.6f of the %.6f "
+                      "requested" % (filled, want))
+    return out

@@ -46,10 +46,24 @@ def test_the_crossing_reuses_the_existing_resolver():
     assert 'market_row.get("slug")' in src
 
 
-def test_a_non_long_intent_refuses_by_name():
-    """A SHORT contract pays on the complement. p(home) against its ask is
-    a sign error, and a sign error with a plausible number attached is
-    worse than a refusal."""
+def test_a_short_intent_is_a_VALID_resolved_exposure():
+    """WHAT THIS TEST USED TO ASSERT, AND WHY IT WAS RIGHT THEN.
+
+    It required BUY_SHORT to be REFUSED, because `venue_quote` could only
+    read the offer ladder and p(home) against the long book's ask on a
+    short leg is a sign error. Run 28 refused eleven of forty-one
+    candidates on that rule, correctly.
+
+    The resolver was never wrong. On the `aec-` family both sides of a
+    market carry the SAME identifier -- equal to the slug -- and the side
+    is carried only by the INTENT, so BUY_SHORT is the resolver correctly
+    saying "the exposure to this outcome is the short leg". The reader now
+    consumes the ladder the intent names and `evaluate` prices the
+    complement, so the exposure resolves instead of being refused.
+
+    The protection did not go away: it moved to where it belongs. The
+    contract must declare which event it pays on, and the refusal now
+    fires only for an intent nothing can consume."""
 
     class _Conn:
         pass
@@ -73,9 +87,67 @@ def test_a_non_long_intent_refuses_by_name():
             priced_outcome="Chicago Cubs"))
     finally:
         _pm.resolve = orig
+    assert out["ok"] is True, out
+    assert out["intent"] == "ORDER_INTENT_BUY_SHORT"
+    assert out["us_market_slug"] == "aec-mlb-chc-mia-2026-09-24-marlins"
+    # THE PAYOUT EVENT IS EXPLICIT, so nothing downstream has to infer it
+    assert out["pays_on_priced_outcome"] is False
+    assert out["payout_event"] == "NOT(Chicago Cubs)"
+    assert "never substitute p(the other team)" in out["complement_note"]
+
+
+def test_an_unconsumable_intent_still_refuses_by_name():
+    """The narrowed refusal. An intent naming no side this reader can
+    consume must still stop, rather than defaulting to a ladder."""
+
+    class _Conn:
+        pass
+
+    import asyncio
+
+    async def _fake_resolve(conn, title, event_title, outcome, slug, **kw):
+        return {"market_slug": "aec-x", "intent": "ORDER_INTENT_WHATEVER"}
+
+    from sportsassets.workers import premap as _pm
+
+    orig = _pm.resolve
+    _pm.resolve = _fake_resolve
+    try:
+        out = asyncio.run(loop.resolve_venue_identity(
+            _Conn(), market_row={"slug": "s", "condition_id": "0x1",
+                                 "title": "t", "event_title": "e"},
+            priced_outcome="Chicago Cubs"))
+    finally:
+        _pm.resolve = orig
     assert out["ok"] is False
     assert out["refusal"] == loop.R_INTENT_NOT_LONG
-    assert "sign error" in out["why"]
+    assert "names no side this reader can consume" in out["why"]
+
+
+def test_a_long_intent_pays_on_the_priced_outcome():
+    class _Conn:
+        pass
+
+    import asyncio
+
+    async def _fake_resolve(conn, title, event_title, outcome, slug, **kw):
+        return {"market_slug": "aec-mlb-chc-mia-2026-09-24-cubs",
+                "intent": "ORDER_INTENT_BUY_LONG"}
+
+    from sportsassets.workers import premap as _pm
+
+    orig = _pm.resolve
+    _pm.resolve = _fake_resolve
+    try:
+        out = asyncio.run(loop.resolve_venue_identity(
+            _Conn(), market_row={"slug": "s", "condition_id": "0x1",
+                                 "title": "t", "event_title": "e"},
+            priced_outcome="Chicago Cubs"))
+    finally:
+        _pm.resolve = orig
+    assert out["ok"] is True
+    assert out["pays_on_priced_outcome"] is True
+    assert out["payout_event"] == "Chicago Cubs"
 
 
 def test_no_premap_row_refuses_before_any_venue_read():

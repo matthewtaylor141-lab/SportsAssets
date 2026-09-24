@@ -542,14 +542,40 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
                       "GLOBAL id and the venue does not accept it")
         return out
     out["us_market_slug"] = str(got["market_slug"])
+    intent = str(got.get("intent") or "")
     out["intent"] = got.get("intent")
-    if str(got.get("intent") or "") != "ORDER_INTENT_BUY_LONG":
+    # BOTH INTENTS ARE VALID RESOLVED EXPOSURES.
+    #
+    # This used to refuse anything that was not BUY_LONG, and the refusal
+    # was CORRECT while `venue_quote` could only read the offer ladder:
+    # pricing p(outcome) against the long book's ask on a short leg is a
+    # sign error. Run 28 refused eleven of forty-one candidates there.
+    #
+    # The resolver was never wrong. On the `aec-` family both sides carry
+    # the same identifier and the side is the INTENT, so BUY_SHORT is the
+    # resolver correctly saying "the exposure to this outcome is the short
+    # leg of that market". Now that the reader consumes the ladder the
+    # intent names, the refusal narrows to intents nothing can price.
+    if intent not in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
         out["refusal"] = R_INTENT_NOT_LONG
-        out["why"] = ("the resolved contract's buy intent is %r, so buying "
-                      "it is a position on the COMPLEMENT of the outcome "
-                      "priced. p(outcome) against its ask is a sign error"
+        out["why"] = ("the resolved contract's buy intent is %r, which "
+                      "names no side this reader can consume"
                       % (got.get("intent"),))
         return out
+    # WHICH EVENT THE CONTRACT PAYS ON, carried explicitly so the caller
+    # cannot invert the probability twice. A SHORT leg pays on the
+    # COMPLEMENT of the priced outcome -- and for a three-way market the
+    # complement of "home win" is "away win OR draw", which is NOT the
+    # same event as "away win".
+    short = intent == "ORDER_INTENT_BUY_SHORT"
+    out["pays_on_priced_outcome"] = not short
+    out["payout_event"] = ("NOT(%s)" % priced_outcome if short
+                           else str(priced_outcome))
+    out["complement_note"] = (
+        "the complement of one outcome is EVERY other outcome of the "
+        "market, so on a three-way book NOT(home) covers away AND draw. "
+        "Use 1 - p(priced) from a de-vig normalised over all outcomes; "
+        "never substitute p(the other team)")
     out["ok"] = True
     return out
 
@@ -605,8 +631,28 @@ async def venue_settlement_evidence(conn, us_market_slug: str) -> dict:
     return out
 
 
-async def venue_quote(conn, *, us_slug, outcome_index, now):
-    """Contemporaneous ask and DISPLAYED depth for one venue contract.
+async def venue_quote(conn, *, us_slug, intent, now, size=None):
+    """Contemporaneous ACQUISITION ladder for one venue contract.
+
+    `intent` IS THE SIDE, AND IT IS REQUIRED. This used to take an
+    `outcome_index` that it accepted and never read: it returned BEST_ASK
+    for the market however the caller asked. On the `aec-` family both
+    sides carry the SAME identifier -- equal to the slug -- and the side
+    is carried only by the order intent, so half of all candidates were
+    being priced off the wrong book. Run 28 refused eleven of forty-one
+    candidates for exactly that reason, correctly. A parameter that looks
+    like it selects a side and does not is how that hid, so it is gone
+    rather than kept and ignored.
+
+    LONG consumes the OFFER ladder at its published price. SHORT consumes
+    the BID ladder at (1 - bid), which is the conversion `pmus.slug_bid`
+    settled against five live markets exact to the cent. The per-share
+    arithmetic lives in `bettor_book_snapshot.cost_per_share`, extracted
+    rather than imported from the execution module on purpose: this loop
+    is guarded by a test asserting no order-submission path is even
+    nameable from it, and a shadow loop should not reach a submit
+    function transitively for one line of arithmetic. A test pins the two
+    definitions equal so they cannot drift.
 
     A quote older than MAX_VENUE_QUOTE_AGE_S is REFUSED rather than used:
     the comparison is only as fresh as its stalest side, and pairing a 3 s
@@ -683,14 +729,40 @@ async def venue_quote(conn, *, us_slug, outcome_index, now):
                 "age_s": age, "limit_s": MAX_VENUE_QUOTE_AGE_S,
                 "age_basis": age_basis}
 
-    return {"ok": True, "ask": float(ask), "depth": depth,
+    # THE SIDE THAT ACTUALLY PAYS ON OUR OUTCOME, in cost space.
+    lad = bs.acquisition_ladder(book.get("marketData"), intent=intent)
+    if not lad.get("ok"):
+        return {"ok": False,
+                "refusal": lad.get("refusal") or R_NO_DEPTH,
+                "why": ("the ladder this intent must consume is not "
+                        "readable: %s" % (lad.get("book_was")
+                                          or lad.get("parse_status"))),
+                "acquisition": lad, "slug": slug}
+    sized = (bs.fill_across_levels(lad, float(size))
+             if size else None)
+
+    return {"ok": True,
+            # `ask` is kept for every existing reader and is now
+            # explicitly the YES-denominated API price of the best level
+            # ON THE SIDE THIS INTENT CONSUMES.
+            "ask": lad["best_api_price"],
+            "acquisition_price": lad["best_acquisition_price"],
+            "api_price": lad["best_api_price"],
+            "price_spaces": bs.PRICE_SPACES,
+            "intent": intent,
+            "side_consumed": lad["side_consumed"],
+            "pays_on": lad["pays_on"],
+            "depth": lad["displayed_depth"],
+            "levels_published": lad.get("levels_published"),
+            "levels_read": lad.get("levels_read"),
+            "sized": sized,
             "age_s": age, "age_basis": age_basis,
             "read_at": read_at, "slug": slug,
             "displayed_depth_is_not_a_queue": True,
             # The bid is deliberately reported as None. The comparison
-            # crosses the ASK; a resting price would invent a queue
-            # position we never held.
-            "bid": None, "outcome_index": outcome_index}
+            # crosses the ladder this intent must cross; a resting price
+            # would invent a queue position we never held.
+            "bid": None}
 
 
 # ── one cycle ───────────────────────────────────────────────────────
@@ -808,8 +880,10 @@ async def cycle(conn) -> dict:
                 continue
 
             now = time.time()
+            # THE INTENT IS THE SIDE. Passing it is what makes this read
+            # the ladder the contract actually trades on.
             vq = await venue_quote(conn, us_slug=ident["us_market_slug"],
-                                   outcome_index=0, now=now)
+                                   intent=ident["intent"], now=now)
             if not vq.get("ok"):
                 code = vq.get("refusal") or R_NO_VENUE_QUOTE
                 tally[code] = tally.get(code, 0) + 1
@@ -875,6 +949,10 @@ async def cycle(conn) -> dict:
                 "identity_resolver": ident["resolver"],
                 "buy_intent": ident["intent"],
                 "selection": quote["home"],
+                # WHAT THIS CONTRACT PAYS ON, carried onto the row so a
+                # reader never has to infer it from the intent.
+                "payout_event": ident["payout_event"],
+                "pays_on_priced_outcome": ident["pays_on_priced_outcome"],
                 "sport_family": family,
                 "market": "h2h",
                 "period": "FULL_GAME",
@@ -900,7 +978,17 @@ async def cycle(conn) -> dict:
                        "period": "FULL_GAME",
                        "line": None,
                        "settlement_rule": srule["book_rule"]},
-                market_state={"ask": vq["ask"], "depth": vq["depth"],
+                # THE ACQUISITION PRICE, NOT THE API PRICE. For a LONG
+                # these are the same number; for a SHORT the API price is
+                # YES-denominated and the cost is its complement, and
+                # passing the wrong one here is the same
+                # mis-denomination the execution lane's wire-price
+                # conversion exists to prevent (that module is
+                # deliberately not nameable from this loop).
+                market_state={"ask": vq["acquisition_price"],
+                              "api_price": vq["api_price"],
+                              "side_consumed": vq["side_consumed"],
+                              "depth": vq["depth"],
                               "readable": True},
                 execution_estimate={"p_fill": None,
                                     "basis": "P_FILL_NOT_IDENTIFIED",
@@ -911,6 +999,11 @@ async def cycle(conn) -> dict:
                 now=now,
                 outcome_books=quote["depth"].get(str(quote["home"])),
                 armed=True,
+                # INVERTED ONCE, INSIDE evaluate. The loop does not
+                # pre-invert the probability; it states which event the
+                # contract pays on and lets the one place that owns the
+                # comparison do the arithmetic.
+                payout_is_complement=not ident["pays_on_priced_outcome"],
                 extra_refusals=extra)
             evaluated += 1
             rec["venue_quote"] = vq

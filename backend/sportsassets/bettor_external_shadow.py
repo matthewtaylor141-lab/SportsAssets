@@ -99,7 +99,7 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
              risk, fee_fn, now, method=devig.DEFAULT_METHOD,
              outcome_books=None, armed=False,
              min_net_edge_per_contract=MIN_NET_EDGE_PER_CONTRACT,
-             extra_refusals=None) -> dict:
+             extra_refusals=None, payout_is_complement=False) -> dict:
     """One contract, end to end, through the REAL gate.
 
     Returns a record that is persisted whether or not it clears, because
@@ -107,6 +107,27 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
     """
     val = devig.valuation(contract=contract, quote=quote, now=now,
                           method=method)
+    # THE EVENT THE CONTRACT ACTUALLY PAYS ON.
+    #
+    # The de-vig prices the SELECTION. On this venue a BUY_SHORT leg of
+    # the same market pays on the COMPLEMENT of that selection, so the
+    # probability to compare against its cost is 1 - p(selection).
+    #
+    # INVERTED EXACTLY ONCE, HERE. The caller supplies the flag and does
+    # not pre-invert; the acquisition price it passes is already in cost
+    # space (bettor_book_snapshot.acquisition_ladder). Inverting in both
+    # places would silently restore the original outcome and look like a
+    # working edge.
+    #
+    # The de-vig normalises over the COMPLETE outcome set and refuses a
+    # partial one, so on a three-way book 1 - p(home) is exactly
+    # p(away) + p(draw). It is NOT p(away): "NO home win" includes the
+    # draw, and substituting the other team's price would be a different
+    # event wearing the same number.
+    _p_sel = val.get("probability")
+    _p_pay = (None if _p_sel is None
+              else (1.0 - float(_p_sel)) if payout_is_complement
+              else float(_p_sel))
     rec: dict = {
         "experiment_id": EXPERIMENT_ID,
         "label": LABEL,
@@ -115,7 +136,18 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
         "devig_method": method,
         "contract": dict(contract),
         "valuation": val,
-        "probability": val.get("probability"),
+        "probability": _p_pay,
+        "probability_of_selection": _p_sel,
+        "payout_is_complement": bool(payout_is_complement),
+        "payout_event": (("NOT(%s)" % contract.get("selection"))
+                         if payout_is_complement
+                         else contract.get("selection")),
+        "complement_note": (
+            "probability is the probability of the event THIS CONTRACT "
+            "PAYS ON. probability_of_selection is the de-vig's number for "
+            "the selection itself. On a three-way book the complement of "
+            "one outcome is the other two together, never the opposing "
+            "team alone"),
         "raw_odds": val.get("raw_odds"),
         "observed_at": val.get("observed_at"),
         "received_at": val.get("received_at"),
@@ -151,7 +183,7 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
     # error; the feed module's own audit is cited in MIN_OUTCOME_BOOKS.
     books = outcome_books if outcome_books is None else int(outcome_books)
     rec["outcome_books"] = books
-    if val.get("probability") is not None and (
+    if _p_pay is not None and (
             books is None or books < MIN_OUTCOME_BOOKS):
         rec["refusals"].append(R_THIN_OUTCOME)
 
@@ -164,25 +196,27 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
             fee_per = None
     rec["executable_price"] = None if ask is None else float(ask)
     rec["cost_per_contract"] = fee_per
-    if val.get("probability") is not None and ask is not None \
+    if _p_pay is not None and ask is not None \
             and fee_per is not None:
-        # THE COMPARISON, stated once: an external probability against the
-        # same-venue executable price, after the cost of crossing.
+        # THE COMPARISON, stated once: the probability of the event this
+        # contract PAYS ON, against the ACQUISITION price of that same
+        # contract, after the cost of crossing. Both sides of this
+        # subtraction describe the same payout event.
         rec["estimated_edge_per_contract"] = (
-            float(val["probability"]) - float(ask) - fee_per)
+            float(_p_pay) - float(ask) - fee_per)
     else:
         rec["estimated_edge_per_contract"] = None
 
     admitted = gate.admit(
         action_table=None,
         model=None,
-        fair_value=({"value": val.get("probability"),
+        fair_value=({"value": _p_pay,
                      "kind": devig.SOURCE_CLASS}
-                    if val.get("probability") is not None else None),
+                    if _p_pay is not None else None),
         execution_estimate=execution_estimate,
         size=size, risk=risk, market_state=market_state, fee_fn=fee_fn,
         min_net_edge_per_contract=min_net_edge_per_contract,
-        external_source=val if val.get("probability") is not None else None,
+        external_source=val if _p_pay is not None else None,
         external_enabled=True)
     rec["gate"] = admitted
     for code in admitted.get("refusals", []):
@@ -198,8 +232,9 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
         not rec["caller_refusals"]
     rec["decision"] = "BUY" if rec["admissible"] else "NO_TRADE"
     rec["proposed_size"] = size if rec["admissible"] else None
-    rec["why"] = (("external probability %.4f vs ask %.4f less cost %.4f"
-                   % (val["probability"], float(ask), fee_per))
+    rec["why"] = (("external probability %.4f on %s vs acquisition "
+                   "%.4f less cost %.4f"
+                   % (_p_pay, rec["payout_event"], float(ask), fee_per))
                   if rec["admissible"] else
                   ("; ".join(rec["refusals"]) or "no reason recorded"))
     return rec

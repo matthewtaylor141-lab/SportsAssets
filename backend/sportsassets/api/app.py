@@ -1952,7 +1952,7 @@ async def command_rn1x_external_probe(response: Response) -> dict:
 #: refresher stopped updating days ago cannot answer a book read whatever
 #: our flags say.
 _PROBE_VENUE_SQL = """
-    SELECT market_slug, event_slug, side_norm, kind, sports_type,
+    SELECT market_slug, event_slug, side_norm, kind, sports_type, intent,
            team_league, game_start, updated_at
       FROM us_premap
      WHERE market_slug LIKE 'aec-%'
@@ -2017,15 +2017,28 @@ async def _venue_read_probe(EXT, *, limit: int = 3) -> dict:
                         "ok": False, "stage": "BOOK_READ"}
                 probe["attempted"] += 1
                 try:
+                    # THE INTENT THE VENUE ROW ITSELF CARRIES. The
+                    # probe used to pass outcome_index=0, which the
+                    # reader ignored, so it only ever exercised the
+                    # offer ladder.
                     vq = await EXT.venue_quote(
                         conn, us_slug=row["market_slug"],
-                        outcome_index=0, now=time.time())
+                        intent=(row.get("intent")
+                                or "ORDER_INTENT_BUY_LONG"),
+                        now=time.time())
                     item.update(ok=bool(vq.get("ok")),
                                 refusal=vq.get("refusal"),
                                 diagnostic=vq.get("diagnostic"))
                     if vq.get("ok"):
                         probe["ok"] += 1
-                        item.update(ask=vq.get("ask"), depth=vq.get("depth"),
+                        item.update(ask=vq.get("ask"),
+                                    api_price=vq.get("api_price"),
+                                    acquisition_price=vq.get(
+                                        "acquisition_price"),
+                                    side_consumed=vq.get("side_consumed"),
+                                    intent=vq.get("intent"),
+                                    levels_read=vq.get("levels_read"),
+                                    depth=vq.get("depth"),
                                     age_s=vq.get("age_s"),
                                     age_basis=vq.get("age_basis"))
                 except Exception as exc:                       # noqa: BLE001
