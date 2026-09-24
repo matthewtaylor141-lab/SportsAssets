@@ -360,6 +360,59 @@ restart recovery: two independent rebuilds from the ledger →
   residual 80.0000  realized 5.6300  one open order  invariant OK  identical
 ```
 
+## 4b · The acceptance position: what it is, and what it is not
+
+**Why it exists.** The only open challenger position is an ATP tennis
+fixture (`aec-atp-fraron-peddia-2026-09-23`, held SHORT on "Pedro
+Boscardin Dias", residual 45.0 at 0.34). Links 1 and 2 of the chain PASS
+on it — the tokens establish the payout event and `premap.resolve`
+returns the venue slug and the intent, agreeing with the tokens — and the
+chain then stops at `3_PROVIDER_FIXTURE` with
+`THE_HELD_SPORT_IS_NOT_IN_THE_PROVIDER_SET`. That is a coverage fact
+about tennis, not a defect in the connection, and **repeated blind
+decisions on it are not the exit policy operating.** Waiting for an RN1
+fill to land on a covered fixture is waiting on a coincidence, so the
+manager is demonstrated on a position whose inputs exist.
+
+**How it is created.** `seed_acceptance_position` walks the SAME input
+chain a management decision walks, before it writes anything, over the
+covered markets that are open, unresolved, recently updated and have both
+tokens present. A candidate that fails any link is refused BY NAME and
+the next one is tried; if none survives, nothing is written and the
+refusals are the answer. On success exactly one `rn1x_positions` row is
+written — no order, no fill, no valuation row — at the **contemporaneous
+executable acquisition price off the ladder the intent names**, with the
+fee taken from `bettor_fee_schedule.LATEST.fill_fee` and the basis stated
+as `qty × price + fee`.
+
+**What it is not**, stamped on the row rather than asserted here:
+
+| column | value | what it rules out |
+|---|---|---|
+| `policy` | `ACCEPTANCE_SHADOW_MANAGER_DEMO_V1` | neither the frozen benchmark's policy id nor the challenger's, so no arm total can absorb it |
+| `provenance` | `ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY` | it is not an observed acquisition |
+| `entry_kind` | `ACCEPTANCE_MODELLED_ENTRY` | it is not an executed order |
+| `source_account` | `ACCEPTANCE_HARNESS_NOT_AN_OBSERVED_ACCOUNT` | it is not RN1-derived: no whale, no cohort |
+| `source_trade_id` | a NEGATIVE deterministic sentinel from the venue slug | it can never be read as a `trades.id`, and a repeat call is idempotent |
+
+Migration 113 adds the column with a CHECK that only declared provenance
+values are storable, so a future writer cannot invent a third label
+silently.
+
+**Why it cannot reach a benchmark number.** `ARMS_SQL` groups by
+`(experiment_id, policy)`, so the acceptance policy is its own line
+beside the champion and the challenger and is never summed with either.
+The realised-P&L and open-inventory aggregations (`PNL_SQL`,
+`OPEN_POSITIONS_SQL`) are asked only of the HISTORICAL and PROSPECTIVE
+experiment ids; the acceptance position is in the challenger experiment,
+so it is outside both. This is a property of the existing queries, not a
+filter added for it, and the arms lines are printed in the acceptance
+step rather than described.
+
+**Nothing about it is funded.** The route returns `submits_orders: false`
+and `funded: false`, the execution flag is untouched, and the
+accounting-uncertain account remains paused.
+
 ## 5 · Exactly what is still limited
 
 1. **No PRICED challenger decision has occurred in production yet.**

@@ -935,8 +935,17 @@ async def learning(pool) -> dict:
     return out
 
 
-async def positions(pool, limit: int = 50) -> list:
-    """The positions themselves, newest first, with their outcome."""
+async def positions(pool, limit: int = 50, policy: str | None = None) -> list:
+    """The positions themselves, newest first, with their outcome.
+
+    `policy` MATTERS MORE THAN IT LOOKS. This read is newest-first across
+    every experiment, and the historical lane holds hundreds of rows, so
+    the one challenger position fell off the end of a 50-row page and a
+    caller reading that page concluded "no challenger position exists" --
+    which is what run 37 printed while the position was sitting in the
+    table. A substring filter, applied in SQL, is what lets a caller ask
+    for the arm it means.
+    """
     rows = await pool.fetch(
         "SELECT p.position_id, p.policy, p.source_trade_id, "
         "p.source_account, p.condition_id, p.outcome_index, "
@@ -955,7 +964,9 @@ async def positions(pool, limit: int = 50) -> list:
         "   WHERE r.position_id = p.position_id) orders "
         "FROM rn1x_positions p "
         "LEFT JOIN rn1x_outcomes o ON o.position_id = p.position_id "
-        "ORDER BY p.decision_ts DESC LIMIT $1", int(limit))
+        "WHERE ($2::text IS NULL OR p.policy ILIKE '%' || $2 || '%') "
+        "ORDER BY p.decision_ts DESC LIMIT $1",
+        int(limit), policy or None)
     return [dict(r) for r in rows]
 
 

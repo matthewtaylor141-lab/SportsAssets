@@ -1797,13 +1797,22 @@ async def command_rn1x_learning(response: Response) -> dict:
 @app.get("/api/command/rn1x/positions",
          dependencies=[Depends(require_command)])
 async def command_rn1x_positions(response: Response,
-                                 limit: int = 50) -> dict:
+                                 limit: int = 50,
+                                 policy: str | None = None) -> dict:
+    """The positions, newest first. `policy` is a substring filter.
+
+    Without it the page is newest-first across EVERY experiment, and the
+    historical lane's hundreds of rows push a single challenger position
+    off the end -- which a caller then reads as "it does not exist".
+    """
     from . import command_rn1x as CR
     from ..db import get_pool
 
     response.headers["Cache-Control"] = "no-store"
-    rows = await CR.positions(await get_pool(), limit=max(1, min(200, limit)))
-    return {"scope": CR.SCOPE, "label": CR.LABEL, "positions": rows}
+    rows = await CR.positions(await get_pool(),
+                              limit=max(1, min(200, limit)), policy=policy)
+    return {"scope": CR.SCOPE, "label": CR.LABEL, "positions": rows,
+            "policy_filter": policy}
 
 
 @app.get("/api/command/rn1x/trace/{position_id:path}",

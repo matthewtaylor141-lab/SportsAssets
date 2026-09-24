@@ -1354,3 +1354,124 @@ def test_the_acceptance_position_is_managed_by_the_production_lifecycle():
           if x["link"] == "4b_SETTLEMENT_COMPATIBILITY"]
     assert sc and sc[0]["blocks_chain"] is False
     assert "book_rule" in sc[0]
+
+
+# ── THE DEFECT RUN 37 MEASURED, AS A REGRESSION ──────────────────────
+#
+# Production examined eight candidates and refused all eight at link 2 with
+# NO_VENUE_NATIVE_CONTRACT_IN_PREMAP. The pool was "the eight most recently
+# updated rows in a covered sport", which in production meant markets
+# carrying sport = 'Soccer' whose titles are "GOP uses 'Nuclear Option' ..."
+# and Segunda Division fixtures dated 2025-11-30. Recency says nothing
+# about whether a venue-native contract exists.
+#
+# So the pool is now ordered by whether one is KNOWN to exist -- evidenced
+# by an external_valuations row carrying a us_market_slug -- and this test
+# builds exactly that situation: a decoy updated LATER with no such row,
+# and the real market with one. The decoy must not be chosen.
+
+@pg
+def test_the_pool_prefers_a_market_with_a_known_venue_contract():
+    import asyncpg
+
+    decoy = "0xdecoy_no_premap"
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            await c.execute("DELETE FROM market_tokens WHERE condition_id=$1",
+                            decoy)
+            await c.execute("DELETE FROM markets WHERE condition_id=$1", decoy)
+            # The real market is made STRICTLY OLDER, so recency alone would
+            # pick the decoy and the assertion below is discriminating.
+            await c.execute("UPDATE markets SET updated_at = now() - "
+                            "interval '5 minutes' WHERE condition_id = $1",
+                            _COND)
+            # THE DECOY: same covered sport, updated AFTER the real market,
+            # both tokens present -- and no venue contract has ever been
+            # resolved for it. Under the old ordering this is candidate #1.
+            await c.execute(
+                "INSERT INTO markets(condition_id,slug,sport,title,"
+                "event_title,closed,resolved,updated_at) "
+                "VALUES($1,$2,'MLB',$3,$3,false,false,now())",
+                decoy, "gop-nuclear-option",
+                "GOP uses 'Nuclear Option' to break filibuster")
+            for i, n in ((0, "Yes"), (1, "No")):
+                await c.execute(
+                    "INSERT INTO market_tokens(token_id,condition_id,outcome,"
+                    "outcome_index) VALUES($1,$2,$3,$4) "
+                    "ON CONFLICT (token_id) DO NOTHING",
+                    decoy + "-t%d" % i, decoy, n, i)
+            # THE EVIDENCE that the real market has a venue-native contract:
+            # a row the ENTRY lane wrote, carrying the slug. It is used to
+            # CHOOSE the market and never to price it.
+            await c.execute(
+                "INSERT INTO external_valuations(experiment_id,version,"
+                "source_class,provider,book,devig_method,venue,condition_id,"
+                "us_market_slug,contract_selection,sport_family,market,"
+                "raw_odds,outcomes_priced,expected_outcomes,probability,"
+                "observed_at,received_at,decision,admissible) "
+                "VALUES('EXT','PINNACLE_DEVIG_V1',"
+                "'EXTERNAL_BOOKMAKER_VALUATION','PINNACLE','pinnacle',"
+                "'power','PMUS',$1,$2,'Chicago Cubs','baseball','h2h',"
+                "'{}'::jsonb,2,2,0.7,now() - interval '3 hours',"
+                "now() - interval '3 hours','NO_TRADE',false)",
+                _COND, "aec-mlb-chc-mia-2026-09-24-cubs")
+            got = await W.seed_acceptance_position(
+                c, experiment_id=_EXP, now=_T0,
+                odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
+                resolve_identity=_resolver_ok,
+                read_book=lambda slug: {"marketData": _BOOK})
+            return got
+        finally:
+            await c.execute("DELETE FROM market_tokens WHERE condition_id=$1",
+                            decoy)
+            await c.execute("DELETE FROM markets WHERE condition_id=$1", decoy)
+            await c.close()
+
+    got = asyncio.run(run())
+    assert got["created"] is True, got
+    assert got["condition_id"] == _COND, (
+        "the market with a KNOWN venue contract must be tried first; the "
+        "decoy was updated later and has none")
+    # THE EVIDENCED ONE WAS FIRST, and the decoy was never examined at all.
+    assert got["considered"][0]["condition_id"] == _COND
+    assert got["considered"][0]["venue_slug_seen"] == \
+        "aec-mlb-chc-mia-2026-09-24-cubs"
+    assert got["candidates_with_a_known_venue_contract"] >= 1
+    assert got["pool_blocker"] is None
+    # AND THE CENSUS SAYS WHERE THE POOL NARROWED, per covered sport.
+    pool = {r["sport"]: r for r in got["pool"]}
+    assert pool["MLB"]["open_markets"] >= 2
+    assert pool["MLB"]["with_both_tokens"] >= 2
+    assert pool["MLB"]["with_venue_contract"] >= 1
+
+
+@pg
+def test_a_pool_with_no_mapped_market_says_so_by_name():
+    """No venue contract anywhere is a NAMED blocker, not a silent miss."""
+    import asyncpg
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            # no external_valuations row carries a slug for this condition
+            got = await W.seed_acceptance_position(
+                c, experiment_id=_EXP, now=_T0,
+                odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
+                resolve_identity=_resolver_ok,
+                read_book=lambda slug: {"marketData": _BOOK})
+            return got
+        finally:
+            await c.close()
+
+    got = asyncio.run(run())
+    # The market still premaps through the resolver, so it IS entered --
+    # the preference is not a filter. What must be true is that the absence
+    # of evidence is REPORTED.
+    assert got["candidates_with_a_known_venue_contract"] == 0
+    assert got["pool_blocker"] == \
+        "NO_COVERED_MARKET_HAS_A_KNOWN_VENUE_NATIVE_CONTRACT"
+    assert got["budget_s"] == W.ACCEPTANCE_BUDGET_S

@@ -1506,14 +1506,65 @@ ACCEPTANCE_QTY = 10.0
 ACCEPTANCE_CANDIDATES = 8
 
 R_NO_COVERED_CANDIDATE = "NO_COVERED_MARKET_COULD_SUPPLY_A_COMPLETE_ENTRY"
+R_NO_MAPPED_CANDIDATE = "NO_COVERED_MARKET_HAS_A_KNOWN_VENUE_NATIVE_CONTRACT"
 
+#: A wall-clock ceiling on this route. Each candidate costs a PACED venue
+#: book read and a chain walk that reads it again, so an unbounded loop
+#: would hold an HTTP request open for however long the venue takes.
+#: Candidates not reached are reported as deferred, never as refused.
+ACCEPTANCE_BUDGET_S = 90.0
+
+#: WHY THE CANDIDATE POOL IS JOINED TO A KNOWN VENUE CONTRACT.
+#:
+#: Run 37 measured this. Eight candidates were examined and all eight
+#: refused at link 2 with NO_VENUE_NATIVE_CONTRACT_IN_PREMAP, because the
+#: pool was "the eight most recently updated rows in a covered sport" --
+#: and in production those were markets carrying sport = 'Soccer' whose
+#: titles are "GOP uses 'Nuclear Option' ..." and "Will Bitcoin replace
+#: SHA-256 before 2027?", plus Segunda Division fixtures dated
+#: 2025-11-30. Recency of `updated_at` says nothing about whether a
+#: venue-native contract exists, so the pool was dominated by rows for
+#: which link 2 CANNOT succeed.
+#:
+#: The repair is at that link: ORDER THE POOL BY WHETHER A VENUE-NATIVE
+#: CONTRACT IS KNOWN TO EXIST, evidenced by an `external_valuations` row
+#: carrying a `us_market_slug` for that condition. That is the population
+#: where link 2 is known to resolve, established from a record rather than
+#: guessed, and it is tried first.
+#:
+#: IT IS A PREFERENCE, NOT A FILTER. A market the entry lane has not yet
+#: examined may still premap, so those rows are kept and tried after the
+#: evidenced ones; each candidate's note carries the slug that was already
+#: seen, or null, so a reader can tell which tier it came from. Making it
+#: a hard filter would turn "the entry lane has not reached this market"
+#: into "no covered exposure exists", which is a different claim.
+#:
+#: THIS DOES NOT REINTRODUCE THE 900-SECOND COINCIDENCE. The entry-lane
+#: row is used ONLY to choose WHICH market to enter. Nothing is priced
+#: from it: the entry price comes from a book read taken now, and the
+#: management probability comes from the managed pull aged against its own
+#: 30 s bound. A row from hours ago is perfectly good evidence that the
+#: contract exists and is no evidence at all about any price.
+#:
+#: The ordering prefers the fixture NEAREST in time, because a provider
+#: carries a fixture around its start and a book has depth then. An
+#: unknown start sorts last rather than being treated as now.
 COVERED_CANDIDATES_SQL = """
     SELECT m.condition_id, m.title, m.event_title, m.slug, m.sport,
            m.closed, m.resolved,
            extract(epoch FROM m.updated_at)::float8 AS updated_at,
-           extract(epoch FROM s.game_start)::float8 AS game_start
+           extract(epoch FROM s.game_start)::float8 AS game_start,
+           v.us_market_slug                         AS venue_slug_seen,
+           extract(epoch FROM v.observed_at)::float8 AS venue_slug_seen_at
       FROM markets m
  LEFT JOIN market_starts s ON s.condition_id = m.condition_id
+ LEFT JOIN LATERAL (
+            SELECT e.us_market_slug, e.observed_at
+              FROM external_valuations e
+             WHERE e.condition_id = m.condition_id
+               AND e.us_market_slug IS NOT NULL
+             ORDER BY e.observed_at DESC NULLS LAST, e.id DESC
+             LIMIT 1) v ON TRUE
      WHERE NOT m.closed AND NOT m.resolved
        AND m.sport = ANY($1::text[])
        AND m.updated_at >= now() - make_interval(secs => $2::float8)
@@ -1521,8 +1572,35 @@ COVERED_CANDIDATES_SQL = """
        -- established from the tokens at all.
        AND (SELECT count(*) FROM market_tokens t
              WHERE t.condition_id = m.condition_id) >= 2
-     ORDER BY m.updated_at DESC
+     ORDER BY (v.us_market_slug IS NULL),
+              (s.game_start IS NULL),
+              abs(extract(epoch FROM (s.game_start - now()))) ASC,
+              m.updated_at DESC
      LIMIT $3
+"""
+
+#: THE POOL, COUNTED AT EACH NARROWING. "No candidate" has three
+#: different causes -- no open market in a covered sport, none with both
+#: tokens, none with a known venue contract -- and they need different
+#: work. Counting them separately is what turns a dead end into a
+#: measurement.
+COVERED_POOL_SQL = """
+    SELECT m.sport,
+           count(*) AS open_markets,
+           count(*) FILTER (
+                 WHERE (SELECT count(*) FROM market_tokens t
+                         WHERE t.condition_id = m.condition_id) >= 2)
+                    AS with_both_tokens,
+           count(*) FILTER (
+                 WHERE EXISTS (SELECT 1 FROM external_valuations e
+                                WHERE e.condition_id = m.condition_id
+                                  AND e.us_market_slug IS NOT NULL))
+                    AS with_venue_contract
+      FROM markets m
+     WHERE NOT m.closed AND NOT m.resolved
+       AND m.sport = ANY($1::text[])
+       AND m.updated_at >= now() - make_interval(secs => $2::float8)
+     GROUP BY 1 ORDER BY 1
 """
 
 
@@ -1546,6 +1624,7 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
 
     tick = anchored_clock(now, clock)
     started = tick()
+    t_started = _t.monotonic()
     out = {"created": False, "at": started, "experiment_id": experiment_id,
            "policy": ACCEPTANCE_POLICY,
            "provenance": ACCEPTANCE_PROVENANCE,
@@ -1555,14 +1634,36 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
     labels = sorted({lbl for fam in {f for _, f in EXT.SPORTS}
                      for lbl in EXT.VENUE_SPORT_LABELS.get(fam, ())})
     out["covered_sport_labels"] = labels
+    # THE POOL FIRST, COUNTED AT EACH NARROWING, so an empty candidate list
+    # says WHICH stage emptied it instead of leaving a reader to guess.
+    out["pool"] = [dict(r) for r in await conn.fetch(
+        COVERED_POOL_SQL, labels, EXT.MARKET_STALE_AFTER_S)]
+    out["pool_reading"] = (
+        "open_markets = open, unresolved, recently updated rows in a "
+        "covered sport; with_both_tokens = of those, the ones whose payout "
+        "identity can be read off market_tokens; with_venue_contract = of "
+        "those, the ones the ENTRY lane has already mapped to a "
+        "venue-native contract. The candidates come from the last column, "
+        "which is used to CHOOSE the market and never to price it")
     rows = [dict(r) for r in await conn.fetch(
         COVERED_CANDIDATES_SQL, labels, EXT.MARKET_STALE_AFTER_S,
         int(candidates))]
     out["candidates_examined"] = len(rows)
+    out["candidate_cap"] = int(candidates)
+    out["candidates_with_a_known_venue_contract"] = sum(
+        1 for r in rows if r.get("venue_slug_seen"))
+    out["pool_blocker"] = (
+        None if out["candidates_with_a_known_venue_contract"]
+        else R_NO_MAPPED_CANDIDATE)
     if not rows:
+        mapped = sum(int(r.get("with_venue_contract") or 0)
+                     for r in out["pool"])
+        openn = sum(int(r.get("open_markets") or 0) for r in out["pool"])
         out["refusal"] = R_NO_COVERED_CANDIDATE
-        out["why"] = ("no open market in a covered sport (%s) was updated "
-                      "recently enough to try" % labels)
+        out["why"] = (
+            "%d open market(s) in a covered sport (%s), %d of them with a "
+            "known venue-native contract. The pool census above says which "
+            "narrowing emptied it" % (openn, labels, mapped))
         return out
 
     odds = odds if odds is not None else ManagedOdds(
@@ -1573,9 +1674,21 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
     if reader is None:
         from .ext_pinnacle_loop import _read_book_blocking as reader
 
-    for m in rows:
+    out["budget_s"] = ACCEPTANCE_BUDGET_S
+    for i, m in enumerate(rows):
+        if _t.monotonic() - t_started > ACCEPTANCE_BUDGET_S:
+            # STOP BEFORE consuming this candidate: it has not been
+            # examined, and a later call will find it again.
+            out["deferred_budget"] = len(rows) - i
+            out["why_deferred"] = (
+                "the route reached its %.0fs wall-clock budget. The "
+                "remaining candidates are DEFERRED, not refused"
+                % ACCEPTANCE_BUDGET_S)
+            break
         note = {"condition_id": m["condition_id"], "sport": m.get("sport"),
-                "title": (m.get("title") or "")[:60]}
+                "title": (m.get("title") or "")[:60],
+                "venue_slug_seen": m.get("venue_slug_seen"),
+                "game_start": m.get("game_start")}
         # THE PAYOUT IDENTITY FIRST, from the tokens, for BOTH sides -- the
         # entry has to name which one it takes.
         toks = [dict(r) for r in await conn.fetch(

@@ -713,7 +713,12 @@ jobs:
           # ONE CHALLENGER POSITION, TRACED. The whole decision is on the
           # row from migration 109, so this prints the fields the
           # directive asks to be visible rather than only the selection.
-          PID=$(curl -s --max-time 45 -H "$H" "$API/api/command/rn1x/positions" \
+          # THE FILTER IS SERVER-SIDE ON PURPOSE. Newest-first across every
+          # experiment, the historical lane's hundreds of rows push the one
+          # challenger position off a 50-row page -- which run 37 read as
+          # "no challenger position exists" while the row was in the table.
+          PID=$(curl -s --max-time 45 -H "$H" \
+                "$API/api/command/rn1x/positions?policy=CHALLENGER&limit=200" \
                 | jq -r '[(.positions // . // [])[]
                           | select((.policy // "") | test("CHALLENGER"))]
                          | .[0].position_id // empty' 2>/dev/null)
@@ -894,6 +899,17 @@ jobs:
                  "source_trade_id\t" + ((.source_trade_id // "-")|tostring)
                                      + "  " + ((.source_trade_id_is // "")|tostring),
                  "covered_labels\t" + ((.covered_sport_labels // [])|tostring),
+                 "candidates\t"     + ((.candidates_examined // 0)|tostring)
+                                     + " of cap " + ((.candidate_cap // "-")|tostring)
+                                     + ", with a known venue contract "
+                                     + ((.candidates_with_a_known_venue_contract // 0)|tostring)
+                                     + ", deferred " + ((.deferred_budget // 0)|tostring),
+                 "pool_blocker\t"   + ((.pool_blocker // "none")|tostring),
+                 ((.pool // [])[]
+                   | "  pool " + ((.sport)|tostring) + "  open="
+                     + ((.open_markets)|tostring) + "  both_tokens="
+                     + ((.with_both_tokens)|tostring) + "  venue_contract="
+                     + ((.with_venue_contract)|tostring)),
                  "refusals\t"       + ((.refusals // {})|tostring),
                  ((.considered // [])[]
                    | "  considered " + ((.slug // "?")|tostring) + "  "
@@ -1049,7 +1065,12 @@ jobs:
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
           fi
           H="X-Admin-Token: $ADMIN_TOKEN"
-          PID=$(curl -s --max-time 45 -H "$H" "$API/api/command/rn1x/positions" \
+          # THE FILTER IS SERVER-SIDE ON PURPOSE. Newest-first across every
+          # experiment, the historical lane's hundreds of rows push the one
+          # challenger position off a 50-row page -- which run 37 read as
+          # "no challenger position exists" while the row was in the table.
+          PID=$(curl -s --max-time 45 -H "$H" \
+                "$API/api/command/rn1x/positions?policy=CHALLENGER&limit=200" \
                 | jq -r '[(.positions // . // [])[]
                           | select((.policy // "") | test("CHALLENGER"))]
                          | .[0].position_id // empty' 2>/dev/null)
