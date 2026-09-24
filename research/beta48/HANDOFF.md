@@ -263,3 +263,53 @@ not. **I have not established the cause, and I am not claiming these are
 someone else's failures.** What is established: none of the 96 fails when
 exercised in isolation at this commit, and no failure was introduced into
 any file this work touches.
+
+## 9 · Run 22, 2026-09-24T02:28–02:33Z — the second production read
+
+Against API deploy `098e94c`. Authenticated, twelve tiles.
+
+**Single-writer ownership is now observed, not claimed:**
+
+```
+writer_ownership  OK   4 of 4 loops hold their own lock, one pid each
+  workers/rn1x_shadow       pid 3374926  granted
+  workers/rn1x_learn_loop   pid 3374928  granted
+  workers/ext_pinnacle_loop pid 3374929  granted
+  workers/rn1x_model_loop   pid 3374930  granted
+  more_than_one_holder      []
+```
+
+**The split counter answered its own question on the first cycle.** What
+was `NO_CONTEMPORANEOUS_VENUE_QUOTE 2` is now
+`VENUE_BOOK_READ_RETURNED_ERROR 2`: the two Pinnacle fixtures that mapped
+exactly to an open venue contract were refused because **the venue
+answered the book read with an error**. Not staleness, not missing depth,
+not a missing slug — each of those has its own counter and none fired. The
+loop now also keeps the venue's own message, so the next read says whether
+that is an entitlement, a closed market or a rate limit. That is the one
+thing standing between this pipeline and its first scored valuation.
+
+```
+markets 4000   elapsed_s 2.1   evaluated 0   written 0
+NO_VENUE_CONTRACT_FOR_EVENT     39
+NO_PINNACLE_ON_EVENT             2
+VENUE_BOOK_READ_RETURNED_ERROR   2
+VENUE_MAPPING_AMBIGUOUS          1
+```
+
+**The ledger grew without double-counting, again.** 316 predictions at
+02:08Z, **866 at 02:33Z**, 0 joined. The 02:33 cycle predicted 298 open
+rows, wrote 168 and recognised 130 as already present. Fit n=5,841, base
+rate 0.31827, in-sample log loss 0.5748 against 0.6256, `dataset_sha`
+`803dd81b94b7fa75`, `model_version` `5.803dd81b`. Stage 5 still refuses:
+`TOO_FEW_JOINED_PREDICTIONS_TO_EVALUATE`.
+
+Order book 414 modelled orders; 154 settled positions; unrealised
+`NOT_IDENTIFIED`. Clock audit: 158 positions, **0 able to support a
+prospective claim**, 130 backdated, 28 `REPLAY_AT_AVAILABILITY`. The
+second-half probe is unchanged: `progress_fields []`,
+`carries_observed_period false`.
+
+**Still not established:** no valuation has been scored, so no
+probability, cost, edge or decision exists in production; no calibration;
+no net return. Nothing here is a profitability claim.

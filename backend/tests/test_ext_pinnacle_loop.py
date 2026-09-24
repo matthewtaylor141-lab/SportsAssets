@@ -483,3 +483,21 @@ async def test_refusals_before_scoring_are_still_counted(monkeypatch):
         assert hb["state"] == "LIVE"
     finally:
         await conn.close()
+
+
+def test_the_venue_error_text_is_kept_bounded_and_deduplicated():
+    """Run 22 named the refusal `VENUE_BOOK_READ_RETURNED_ERROR 2`. The
+    counter is right and still not an answer: an entitlement, a closed
+    market and a rate limit need different actions from different people,
+    and only the message distinguishes them. So the message is kept --
+    capped, deduplicated, and tagged with the contract it came from."""
+    import inspect
+
+    src = inspect.getsource(loop.cycle)
+    assert "venue_errors" in src
+    assert "MAX_VENUE_ERRORS" in src
+    assert "note not in venue_errors" in src, "duplicates must not fill it"
+    assert loop.MAX_VENUE_ERRORS <= 10, "a heartbeat is not a log"
+    # and it reaches the tile, not just the local variable
+    hb = inspect.getsource(loop._heartbeat)
+    assert '"venue_errors"' in hb

@@ -643,7 +643,16 @@ jobs:
                         "markets\t"    + ((.markets_considered // 0)|tostring),
                         "elapsed_s\t"  + ((.elapsed_s // 0)|tostring),
                         (.refusals // {} | to_entries[]
-                           | "  \(.key)\t\(.value)")
+                           | "  \(.key)\t\(.value)"),
+                        # THE VENUE'S OWN WORDS. Run 22 named the refusal
+                        # VENUE_BOOK_READ_RETURNED_ERROR 2 -- the right
+                        # counter, and still not an answer. An entitlement,
+                        # a closed market and a rate limit need different
+                        # actions, and only the message says which.
+                        ((.venue_errors // [])
+                           | if length == 0
+                             then "  (no venue error text this cycle)"
+                             else (.[] | "  venue_error\t" + .) end)
                    end' /tmp/st2.json 2>/dev/null \
             | tee -a "$GITHUB_STEP_SUMMARY" || true
 

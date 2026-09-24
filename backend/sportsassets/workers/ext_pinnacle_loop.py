@@ -110,6 +110,11 @@ R_PROVIDER_ERROR = "PROVIDER_REQUEST_FAILED"
 # the market row, a book read that raised, or a venue error response.
 # Depth and staleness already had their own names and did not fire, so
 # these three are the whole remainder.
+#: How many DISTINCT venue error messages one cycle keeps. Enough to tell
+#: "every contract says the same thing" from "they say different things",
+#: and few enough that a heartbeat stays a heartbeat.
+MAX_VENUE_ERRORS = 5
+
 R_NO_SLUG = "VENUE_MARKET_ROW_HAS_NO_SLUG"
 R_VENUE_READ_FAILED = "VENUE_BOOK_READ_FAILED"
 R_VENUE_READ_ERROR = "VENUE_BOOK_READ_RETURNED_ERROR"
@@ -449,6 +454,11 @@ async def cycle(conn) -> dict:
     # candidate list are different facts, and only one of them is about
     # the mapping.
     tally: dict = {}
+    # THE VENUE'S OWN ERROR TEXT, bounded. A counter says how often the
+    # venue refused; only the message says whether that is an entitlement,
+    # a closed market or a rate limit -- and those need different actions
+    # from different people.
+    venue_errors: list = []
     labels = sorted({lbl for _, fam in SPORTS
                      for lbl in VENUE_SPORT_LABELS.get(fam, ())})
     markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels)]
@@ -496,6 +506,19 @@ async def cycle(conn) -> dict:
             if not vq.get("ok"):
                 code = vq.get("refusal") or R_NO_VENUE_QUOTE
                 tally[code] = tally.get(code, 0) + 1
+                # THE VENUE'S OWN WORDS, kept. Run 22 named this refusal
+                # `VENUE_BOOK_READ_RETURNED_ERROR 2` -- which is the right
+                # counter and still not an answer: whether that is an
+                # entitlement, a closed market or a rate limit decides
+                # whether anyone can act on it, and the message says which.
+                # Bounded, deduplicated, and slug-tagged so it identifies a
+                # contract without becoming a log dump.
+                why = vq.get("venue_error") or vq.get("why")
+                if why:
+                    note = "%s: %s" % (mapped["condition_id"][:12], why)
+                    if (note not in venue_errors
+                            and len(venue_errors) < MAX_VENUE_ERRORS):
+                        venue_errors.append(note)
                 continue
 
             # THE SETTLEMENT RULE, AND WHY THIS USUALLY STOPS HERE.
@@ -583,6 +606,7 @@ async def cycle(conn) -> dict:
            "experiment_id": ext.EXPERIMENT_ID,
            "evaluated": evaluated, "written": written,
            "refusals": tally, "credits": credits,
+           "venue_errors": venue_errors,
            "markets_considered": len(markets),
            "elapsed_s": round(time.time() - started, 2),
            "order_submitted": False}
@@ -631,6 +655,8 @@ async def _heartbeat(conn, out: dict) -> None:
                 "credits": out.get("credits"),
                 # THE POINT OF THE WHOLE FUNCTION.
                 "refusals": out.get("refusals") or {},
+                # and, for the refusals that have a message, the message.
+                "venue_errors": out.get("venue_errors") or [],
             }, default=str))
     except Exception:                                          # noqa: BLE001
         # A heartbeat that cannot be written must not take the cycle down.
