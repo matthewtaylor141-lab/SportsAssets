@@ -466,6 +466,66 @@ def read_resolution(client, market_slug: str) -> dict:
     return out
 
 
+#: The fields the venue's own market listing publishes its RULES in. The
+#: 2026-09-24 payload carries both `description` and `assetPriceTerms`;
+#: names are tried in order and the first present one is used, so a rename
+#: costs a NOT_PUBLISHED rather than a silent empty string.
+RULES_TEXT_FIELDS = ("description", "assetPriceTerms", "rules",
+                     "resolutionSource", "resolutionCriteria")
+
+R_RULES_NOT_LISTED = "VENUE_DOES_NOT_LIST_THIS_SLUG"
+R_RULES_NOT_PUBLISHED = "VENUE_PUBLISHES_NO_RULES_TEXT_FOR_THIS_CONTRACT"
+
+
+def read_rules_text(client, market_slug: str) -> dict:
+    """The VENUE'S OWN published rules prose for one contract.
+
+    WHY THIS EXISTS. `bettor_venue_settlement.attest` reported
+    OVERTIME_RULE_NOT_ESTABLISHED and VOID_ABANDONMENT_RULE_NOT_ESTABLISHED
+    with the detail "no rules text exists on either side" -- and that was
+    true of what we HELD, not of what the venue publishes. The listing
+    payload carries `description` and `assetPriceTerms`; nobody read them.
+    A terminal rule cannot be established from evidence nobody fetched.
+
+    It reads and returns the text. It does NOT interpret it: matching prose
+    to a bookmaker rule is `attest`'s job and is done against declared
+    patterns, so the interpretation is reviewable separately from the
+    fetch.
+    """
+    from . import pmus
+
+    out = {"reader": READER_VERSION, "slug": market_slug, "ok": False,
+           "rules_text": None, "rules_field": None, "fields_present": [],
+           "market_type": None, "sports_market_type": None,
+           "keys_seen": [], "error": None,
+           "source": "pmus:/markets?slug=<slug>:rules_text"}
+    try:
+        resp = _markets(client, pmus).list({"slug": [market_slug]})
+        markets = list((resp or {}).get("markets") or [])
+    except Exception as exc:  # noqa: BLE001
+        out["error"] = type(exc).__name__
+        return out
+    if not markets:
+        out["error"] = R_RULES_NOT_LISTED
+        return out
+    m = markets[0]
+    out["keys_seen"] = sorted(k for k in m if isinstance(k, str))
+    out["market_type"] = (str(m.get("marketType"))
+                          if m.get("marketType") is not None else None)
+    out["sports_market_type"] = (
+        str(m.get("sportsMarketTypeV2") or m.get("sportsMarketType"))
+        if (m.get("sportsMarketTypeV2") or m.get("sportsMarketType"))
+        is not None else None)
+    out["fields_present"] = [f for f in RULES_TEXT_FIELDS
+                             if str(m.get(f) or "").strip()]
+    field, value = _first(m, RULES_TEXT_FIELDS)
+    if field is None or not str(value or "").strip():
+        out["error"] = R_RULES_NOT_PUBLISHED
+        return out
+    out.update(ok=True, rules_field=field, rules_text=str(value).strip())
+    return out
+
+
 def _converged_winner(labels, prices):
     """The label priced at exactly 1 when every other is exactly 0.
 

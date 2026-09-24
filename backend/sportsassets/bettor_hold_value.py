@@ -335,7 +335,7 @@ def _epoch(v):
 
 def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
             payout_event_held, event_state=None, max_age_s=None,
-            relaxation=None) -> dict:
+            relaxation=None, settlement=None) -> dict:
     """The value of holding `qty` to settlement, or why it is unknown.
 
     `payout_event_held` is the event OUR position pays on, established
@@ -343,6 +343,17 @@ def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
     never from the order intent. The row's own `payout_event` must agree
     with it, and a disagreement is a refusal rather than a silent
     complement.
+
+    `settlement` IS THE TERMINAL RULE, AND IT GOVERNS THIS NUMBER. The
+    value below is `p * qty - basis`, and the `p * qty` arrives AT
+    SETTLEMENT and only if the payout event occurs -- so whether the
+    probability's event and the contract's payout coincide under overtime,
+    a void and a draw is a condition on THIS value, not only on
+    HOLD_TO_SETTLEMENT. Recording it as "blocks HOLD_TO_SETTLEMENT only"
+    left ordinary HOLD resting on the same unestablished dependency under
+    a different action name. The value is still computed -- refusing to
+    compute it would assert the position is worthless -- but it is
+    labelled CONDITIONAL and every reader of the row can see on what.
     """
     # THE BOUND COMES FROM THE EVENT STATE, and an explicit `max_age_s`
     # may only make it STRICTER. A caller cannot widen the window by
@@ -524,7 +535,40 @@ def ev_hold(*, qty, basis_per_contract, probability_row=None, now,
                 "bookmaker's de-vigged price, labelled, used by a "
                 "DECLARED RULE. A rule that acts on it is not thereby an "
                 "EV optimiser"))
+    out.update(terminal_rule=_terminal_rule(settlement))
+    out["value_is_conditional"] = not out["terminal_rule"]["established"]
+    out["conditional_on"] = list(out["terminal_rule"]["unmet"] or [])
     return out
+
+
+#: What a HOLD value is conditional on when the terminal rules are not
+#: established. Named so the condition travels WITH the number.
+TERMINAL_RULE_GOVERNS = (
+    "ORDINARY HOLD TOO, not only HOLD_TO_SETTLEMENT. p x qty is realised "
+    "AT SETTLEMENT, so if the probability's event and the contract's "
+    "payout event do not coincide under every terminal case the value is "
+    "conditional on rules that are not established")
+
+
+def _terminal_rule(settlement) -> dict:
+    """The attestation, normalised onto the value. Absent is NOT established."""
+    st = dict(settlement or {})
+    unmet = list(st.get("unmet") or [])
+    est = bool(st.get("overall_established")) and not unmet
+    return {"established": est,
+            "asked": bool(settlement),
+            "book_rule": st.get("book_rule"),
+            "attested": list(st.get("attested") or []),
+            "unmet": unmet,
+            "conflicts": any("CONFLICT" in str(u).upper() for u in unmet),
+            "venue_rules_text_read": st.get("venue_rules_text_read"),
+            "venue_rules_field": st.get("venue_rules_field"),
+            "governs": TERMINAL_RULE_GOVERNS,
+            "why_not": (None if est else
+                        ("no settlement attestation was supplied to the "
+                         "valuation" if not settlement else
+                         "these terminal rules are not established: %s"
+                         % (unmet or "unspecified")))}
 
 
 def deliberate_hold(reason, *, ev=None) -> dict:

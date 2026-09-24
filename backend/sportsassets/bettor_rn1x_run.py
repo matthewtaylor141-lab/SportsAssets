@@ -476,6 +476,7 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
             us_market_slug=ci.get("us_market_slug"),
             held_is_long=bool(ci.get("held_is_long", True)),
             settlement_semantics=ci.get("settlement_semantics"),
+            settlement_attestation=ci.get("settlement"),
             last_price=ci.get("last_price"),
             seconds_open=(at - decision_ts),
             inputs=ci.get("input_labels") or {})
@@ -694,6 +695,10 @@ def manage_open_position(*, position, orders=(), fills=(), prints=(),
         venue=ci.get("venue"), us_market_slug=ci.get("us_market_slug"),
         held_is_long=bool(ci.get("held_is_long", True)),
         settlement_semantics=ci.get("settlement_semantics"),
+        # THE ATTESTATION, INTO THE VALUATION. `settlement_semantics` only
+        # ever gated HOLD_TO_SETTLEMENT; the per-fixture attestation now
+        # also conditions the ordinary HOLD value that the ranking uses.
+        settlement_attestation=ci.get("settlement"),
         last_price=ci.get("last_price"),
         seconds_open=float(now) - float(position["decision_ts"]),
         inputs=labels)

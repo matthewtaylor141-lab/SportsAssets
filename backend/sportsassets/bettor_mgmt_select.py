@@ -666,6 +666,22 @@ def marginal_sale_size(ladder, *, hold_value_per_contract, qty,
     return out
 
 
+def _ranked_row(c) -> dict:
+    """The persisted projection of ONE ranked candidate.
+
+    `value_is_conditional` is carried here and not only in `hold_input`: a
+    reader of `alternatives.ranked` is reading the comparison itself, and a
+    value conditional on terminal rules nobody has established must not
+    appear in it as an unqualified number.
+    """
+    row = {"action": c["action"], "qty": c.get("qty"),
+           "value_usd": c["value_usd"]}
+    if c.get("value_is_conditional") is not None:
+        row["value_is_conditional"] = bool(c.get("value_is_conditional"))
+        row["conditional_on"] = list(c.get("conditional_on") or [])
+    return row
+
+
 def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
                    bid=None, bid_size=None, complement_ask=None,
                    complement_ask_size=None, fee_fn=None,
@@ -761,6 +777,14 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
             "qty_valued": q,
             "basis_per_contract_valued": basis_per,
             "quantity_mismatch": _mismatch,
+            # THE TERMINAL RULE TRAVELS WITH THE NUMBER, on the persisted
+            # row. An ordinary HOLD is worth p x qty AT SETTLEMENT, so an
+            # unestablished overtime or void rule is a condition on THIS
+            # value -- not only on HOLD_TO_SETTLEMENT, which is where it
+            # used to be recorded and where it hid.
+            "terminal_rule": hv.get("terminal_rule"),
+            "value_is_conditional": hv.get("value_is_conditional"),
+            "conditional_on": hv.get("conditional_on"),
         },
         "candidates": [], "not_rankable": [], "venue_translation": {},
     }
@@ -817,6 +841,11 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
             "basis": "EXTERNAL_LABELLED_PROBABILITY",
             "arithmetic": hv.get("arithmetic"),
             "venue_effect": t_hold.get("net_effect"),
+            # SO A READER OF THE RANKING SEES IT, not only a reader of
+            # hold_input: this candidate's value is conditional whenever
+            # the terminal rules are not established.
+            "value_is_conditional": bool(hv.get("value_is_conditional")),
+            "conditional_on": list(hv.get("conditional_on") or []),
         })
     else:
         out["not_rankable"].append({
@@ -1154,9 +1183,7 @@ def _choose(out, q, *, hold_priced=True, fallback_trigger=None) -> dict:
                     "because the policy is blind here, and that is "
                     "recorded as a different fact"
                     % (blocker, FALLBACK_RULE)))
-            out["ranked"] = [{"action": c["action"], "qty": c.get("qty"),
-                              "value_usd": c["value_usd"]}
-                             for c in out["candidates"]
+            out["ranked"] = [_ranked_row(c) for c in out["candidates"]
                              if c.get("value_usd") is not None]
             return out
         if not fallback_trigger:
@@ -1173,9 +1200,7 @@ def _choose(out, q, *, hold_priced=True, fallback_trigger=None) -> dict:
                     "actions alone would select an exit every time, "
                     "because it is the only action carrying a number"
                     % blocker))
-            out["ranked"] = [{"action": c["action"], "qty": c.get("qty"),
-                              "value_usd": c["value_usd"]}
-                             for c in out["candidates"]
+            out["ranked"] = [_ranked_row(c) for c in out["candidates"]
                              if c.get("value_usd") is not None]
             return out
         if not fallback_trigger.get("fired"):
@@ -1196,9 +1221,7 @@ def _choose(out, q, *, hold_priced=True, fallback_trigger=None) -> dict:
                     "behind it"
                     % (blocker, FALLBACK_RULE,
                        fallback_trigger.get("reason") or "no reason given")))
-            out["ranked"] = [{"action": c["action"], "qty": c.get("qty"),
-                              "value_usd": c["value_usd"]}
-                             for c in out["candidates"]
+            out["ranked"] = [_ranked_row(c) for c in out["candidates"]
                              if c.get("value_usd") is not None]
             return out
         # The trigger fired: rank the priced subset, and say so.
@@ -1261,8 +1284,7 @@ def _choose(out, q, *, hold_priced=True, fallback_trigger=None) -> dict:
                        MIN_IMPROVEMENT_USD_PER_CONTRACT,
                        (out["hold_input"].get("provenance") or {}).get(
                            "class", "an external source"), _when)))
-            out["ranked"] = [{"action": c["action"], "qty": c.get("qty"),
-                              "value_usd": c["value_usd"]} for c in cands]
+            out["ranked"] = [_ranked_row(c) for c in cands]
             return out
 
     runner = cands[1] if len(cands) > 1 else None
@@ -1306,6 +1328,5 @@ def _choose(out, q, *, hold_priced=True, fallback_trigger=None) -> dict:
                          else "CLOSING"),
         margin_usd=(best["value_usd"] - runner["value_usd"]
                     if runner else None),
-        ranked=[{"action": c["action"], "qty": c.get("qty"),
-                 "value_usd": c["value_usd"]} for c in cands])
+        ranked=[_ranked_row(c) for c in cands])
     return out

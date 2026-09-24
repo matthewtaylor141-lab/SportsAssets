@@ -38,6 +38,8 @@ empty and says so.
 
 from __future__ import annotations
 
+import re
+
 VERSION = "BETTOR_VENUE_SETTLEMENT_V1"
 
 R_NOT_ESTABLISHED = "VENUE_SETTLEMENT_RULE_NOT_ESTABLISHED"
@@ -58,6 +60,94 @@ R_DRAW_ASYMMETRIC = "DRAW_HANDLING_NOT_RECONCILED"
 R_OVERTIME_UNKNOWN = "OVERTIME_RULE_NOT_ESTABLISHED"
 R_VOID_UNKNOWN = "VOID_ABANDONMENT_RULE_NOT_ESTABLISHED"
 R_PUSH_OUT_OF_SCOPE = "PUSH_NOT_APPLICABLE_TO_H2H"
+
+#: A terminal rule that the venue's own prose CONTRADICTS. This is louder
+#: than "not established": the two sides settle differently and a
+#: probability from one cannot price a contract on the other.
+R_OVERTIME_CONFLICTS = "OVERTIME_RULE_CONFLICTS_WITH_BOOK_RULE"
+R_VOID_BOOK_RULE_NOT_HELD = "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD"
+
+#: DECLARED PROSE PATTERNS, per sport family, for the one terminal rule a
+#: venue contract's own text can settle. They are deliberately narrow:
+#: only an EXPLICIT statement about extra innings / extra time attests.
+#: A phrase like "final result" is left to the inference branch, because
+#: reading it as "extra innings included" is a fact about the sport, not
+#: about the contract.
+#:
+#: `includes` must AGREE with the book rule for the family; `excludes`
+#: contradicts it. A text matching both is a CONFLICT, never a pass.
+OVERTIME_PROSE = {
+    "baseball": {
+        "book_rule_includes_overtime": True,
+        "includes": (r"includ\w*\s+(?:any\s+)?extra\s+innings",
+                     r"extra\s+innings\s+(?:are|will\s+be|shall\s+be)"
+                     r"\s+includ",
+                     r"includ\w*\s+extra\s+time"),
+        "excludes": (r"exclud\w*\s+(?:any\s+)?extra\s+innings",
+                     r"(?:only|first)\s+nine\s+innings",
+                     r"after\s+nine\s+innings\s+only",
+                     r"regulation\s+(?:nine\s+)?innings\s+only"),
+    },
+    "soccer": {
+        "book_rule_includes_overtime": False,
+        "includes": (r"(?:90|ninety)\s+minutes",
+                     r"regulation\s+time\s+only",
+                     r"exclud\w*\s+extra\s+time",
+                     r"(?:does\s+)?not\s+includ\w*\s+extra\s+time"),
+        "excludes": (r"includ\w*\s+extra\s+time",
+                     r"penalt(?:y|ies)\s+shoot",
+                     r"including\s+any\s+extra\s+time"),
+    },
+}
+
+#: THE BOOKMAKER'S ABANDONMENT RULE, PER FAMILY -- DELIBERATELY EMPTY.
+#:
+#: A value here is a claim about a third party's published terms. It may be
+#: added ONLY from the bookmaker's own rules page, with the citation in the
+#: commit that adds it, and never from recollection. While it is empty the
+#: void rule cannot be established for any fixture and every hold value is
+#: reported CONDITIONAL on it -- which is the truthful state, not a bug.
+#:
+#: Values are the term CLASSES below, so the two sides are compared on what
+#: happens rather than on wording.
+BOOK_VOID_RULE: dict = {}
+
+#: What an abandonment term can say. Compared class-to-class.
+VOID_REFUND = "STAKE_REFUNDED_MARKET_VOID"
+VOID_RESOLVES_NO = "RESOLVES_NO_FOR_THE_HELD_SIDE"
+VOID_STAYS_OPEN = "REMAINS_OPEN_UNTIL_REPLAYED"
+
+R_VOID_CONFLICTS = "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE"
+
+#: Declared prose patterns for each class, venue side.
+VOID_PROSE = (
+    (VOID_REFUND, (r"\bvoid", r"refund", r"\bcancel\w*\s+and\s+refund",
+                   r"stakes?\s+(?:are\s+)?return")),
+    (VOID_RESOLVES_NO, (r"resolve[sd]?\s+(?:to\s+)?no\b",
+                        r"settle[sd]?\s+(?:as\s+)?no\b")),
+    (VOID_STAYS_OPEN, (r"remain\w*\s+open", r"until\s+(?:it\s+is\s+)?"
+                       r"(?:replayed|completed|resumed)",
+                       r"market\s+stays\s+open")),
+)
+
+
+def _void_class(text: str):
+    """Which abandonment class this prose states, or None. First match wins
+    in declared order, and TWO classes matching is not one rule."""
+    hits = [cls for cls, pats in VOID_PROSE
+            if any(re.search(pp, text) for pp in pats)]
+    if len(hits) != 1:
+        return (None, hits)
+    return (hits[0], hits)
+
+
+VOID_BOOK_NOTE = (
+    "the BOOKMAKER's abandonment rule is not recorded in this repository. "
+    "The venue's own prose can now be read, so when it states a rule the "
+    "remaining gap is OUR record of the book's side -- which must be "
+    "captured from the bookmaker's published terms, not asserted here. "
+    "Until then this rule is NOT ESTABLISHED and the hold value is "
+    "conditional on it")
 
 #: How many outcomes the BOOK prices, per sport family. Soccer h2h is
 #: three-way; MLB is two-way.
@@ -237,11 +327,15 @@ def describe() -> dict:
 EV_VENUE_CATALOGUE = "ATTESTED_FROM_VENUE_CATALOGUE"
 EV_BOOK_PAYLOAD = "ATTESTED_FROM_BOOKMAKER_PAYLOAD"
 EV_BOTH_SIDES = "ATTESTED_BOTH_SIDES_INDEPENDENTLY"
+#: The venue's OWN published contract prose, fetched from its listing.
+#: An attesting class: it is the venue stating its own settlement rule.
+EV_VENUE_RULES_TEXT = "ATTESTED_FROM_VENUE_PUBLISHED_RULES_TEXT"
 EV_INFERRED = "INFERRED_NOT_ATTESTED"
 EV_NONE = "NOT_ESTABLISHED"
 
 #: Only these count. An inference is recorded and does not unblock.
-ATTESTING_CLASSES = (EV_VENUE_CATALOGUE, EV_BOOK_PAYLOAD, EV_BOTH_SIDES)
+ATTESTING_CLASSES = (EV_VENUE_CATALOGUE, EV_BOOK_PAYLOAD,
+                     EV_BOTH_SIDES, EV_VENUE_RULES_TEXT)
 
 
 def attest(*, sport_family, market="h2h", venue_evidence=None,
@@ -302,21 +396,79 @@ def attest(*, sport_family, market="h2h", venue_evidence=None,
             "detail": missing}
 
     # ── overtime ─────────────────────────────────────────────────────
+    #
+    # THE VENUE'S OWN PROSE IS NOW READ. Until this change the detail said
+    # "no rules text exists on either side", which was true of what we
+    # HELD and false of what the venue publishes: its listing carries
+    # `description` and `assetPriceTerms`. `bettor_live_read.read_rules_text`
+    # fetches them; the caller passes the result in as `rules_text`, and
+    # this matches it against DECLARED patterns for the family.
+    #
+    # Three outcomes, never two: the prose AGREES with the book rule
+    # (established), CONTRADICTS it (a conflict, which is louder than
+    # unknown), or says nothing about the terminal case (unchanged).
     league = ve.get("team_league")
-    out["rules"]["overtime"] = {
-        "applicable": True, "established": False,
-        "evidence_class": (EV_INFERRED if league else EV_NONE),
-        "refusal": R_OVERTIME_UNKNOWN,
-        "source": ve.get("source") or "us_premap",
-        "book_rule": BOOK_SETTLEMENT.get(fam),
-        "detail": ("the fixture's competition is %r, and a league fixture "
-                   "has no extra time -- so regulation and full-time "
-                   "coincide HERE. That is a fact about the competition, "
-                   "not about the contract's rule, and a knockout tie "
-                   "would break it. Recorded as an inference; it does NOT "
-                   "establish the rule" % (league,)) if league else
-                  ("no competition is recorded for this fixture and no "
-                   "rules text exists on either side")}
+    prose = str(ve.get("rules_text") or "")
+    pats = OVERTIME_PROSE.get(fam) or {}
+    low = " ".join(prose.lower().split())
+    hits_inc = [p for p in (pats.get("includes") or ())
+                if re.search(p, low)]
+    hits_exc = [p for p in (pats.get("excludes") or ())
+                if re.search(p, low)]
+    ot = {"applicable": True, "book_rule": BOOK_SETTLEMENT.get(fam),
+          "venue_rules_text_read": bool(prose),
+          "venue_rules_field": ve.get("rules_field"),
+          "venue_rules_source": ve.get("rules_source"),
+          "matched_includes": hits_inc, "matched_excludes": hits_exc}
+    if hits_inc and hits_exc:
+        ot.update(established=False, evidence_class=EV_NONE,
+                  refusal=R_OVERTIME_CONFLICTS,
+                  source=ve.get("rules_source") or "venue rules text",
+                  detail=("the venue's own prose matches BOTH an including "
+                          "and an excluding pattern for the terminal case, "
+                          "so it does not state one rule. Two readings of "
+                          "the same text cannot establish compatibility"))
+    elif hits_exc:
+        ot.update(established=False, evidence_class=EV_NONE,
+                  refusal=R_OVERTIME_CONFLICTS,
+                  source=ve.get("rules_source") or "venue rules text",
+                  detail=("the venue's prose states a terminal rule that "
+                          "CONTRADICTS the book rule %r for this family. "
+                          "The probability prices one event and the "
+                          "contract pays on another"
+                          % (BOOK_SETTLEMENT.get(fam),)))
+    elif hits_inc:
+        ot.update(established=True, evidence_class=EV_VENUE_RULES_TEXT,
+                  refusal=None,
+                  source=ve.get("rules_source") or "venue rules text",
+                  detail=("the venue's OWN published prose states the "
+                          "terminal case the same way the book rule %r "
+                          "does, matched on %d declared pattern(s)"
+                          % (BOOK_SETTLEMENT.get(fam), len(hits_inc))))
+    elif prose:
+        ot.update(established=False, evidence_class=EV_NONE,
+                  refusal=R_OVERTIME_UNKNOWN,
+                  source=ve.get("rules_source") or "venue rules text",
+                  detail=("the venue publishes rules prose for this "
+                          "contract and it says nothing about the terminal "
+                          "case, so the rule is still not established. The "
+                          "text was READ, which is why this is now a fact "
+                          "about the prose rather than about our records"))
+    else:
+        ot.update(established=False,
+                  evidence_class=(EV_INFERRED if league else EV_NONE),
+                  refusal=R_OVERTIME_UNKNOWN,
+                  source=ve.get("source") or "us_premap",
+                  detail=("the fixture's competition is %r, and a league "
+                          "fixture has no extra time -- so regulation and "
+                          "full-time coincide HERE. That is a fact about "
+                          "the competition, not about the contract's rule, "
+                          "and a knockout tie would break it. Recorded as "
+                          "an inference; it does NOT establish the rule"
+                          % (league,)) if league else
+                         ("no competition is recorded for this fixture and "
+                          "no venue rules text was read"))
+    out["rules"]["overtime"] = ot
 
     # ── push ─────────────────────────────────────────────────────────
     out["rules"]["push"] = {
@@ -325,11 +477,54 @@ def attest(*, sport_family, market="h2h", venue_evidence=None,
         "detail": "h2h carries no line, so there is no tie-at-the-line"}
 
     # ── void ─────────────────────────────────────────────────────────
-    out["rules"]["void"] = {
-        "applicable": True, "established": False,
-        "evidence_class": EV_NONE, "refusal": R_VOID_UNKNOWN,
-        "source": "neither side publishes an abandonment rule we hold",
-        "detail": VOID_NOTE}
+    #
+    # NEVER ESTABLISHED TODAY, and now for a NAMED reason. If the venue's
+    # prose states an abandonment rule, the remaining gap is OUR record of
+    # the bookmaker's side, which is not in this repository and is not
+    # asserted here from memory. Distinguishing the two is the difference
+    # between "nobody publishes this" and "we have not captured one side".
+    void_words = ("abandon", "postpon", "suspend", "cancel",
+                  "void", "rescheduled", "not completed")
+    venue_void = [w for w in void_words if w in low]
+    v_class, v_hits = _void_class(low) if venue_void else (None, [])
+    book_void = BOOK_VOID_RULE.get(fam)
+    vd = {"applicable": True,
+          "venue_rules_text_read": bool(prose),
+          "venue_states_a_rule": bool(venue_void),
+          "venue_terms_matched": venue_void,
+          "venue_rule_class": v_class,
+          "venue_classes_matched": v_hits,
+          "book_rule_held": bool(book_void),
+          "book_rule_class": book_void}
+    if v_class and book_void and v_class == book_void:
+        vd.update(established=True, evidence_class=EV_BOTH_SIDES,
+                  refusal=None,
+                  source="%s + BOOK_VOID_RULE[%s]"
+                         % (ve.get("rules_source") or "venue rules text", fam),
+                  detail=("both sides state the SAME abandonment class %r: "
+                          "the venue in its own published prose and the "
+                          "bookmaker in the rule held here" % (v_class,)))
+    elif v_class and book_void:
+        vd.update(established=False, evidence_class=EV_NONE,
+                  refusal=R_VOID_CONFLICTS,
+                  source=ve.get("rules_source") or "venue rules text",
+                  detail=("the venue states %r and the held book rule is "
+                          "%r. An abandoned fixture would settle "
+                          "differently on the two sides, and the whole "
+                          "stake is the difference"
+                          % (v_class, book_void)))
+    elif venue_void:
+        vd.update(established=False, evidence_class=EV_NONE,
+                  refusal=R_VOID_BOOK_RULE_NOT_HELD,
+                  source=("the venue published prose addresses abandonment; "
+                          "the bookmaker rule is not held here"),
+                  detail=VOID_BOOK_NOTE)
+    else:
+        vd.update(established=False, evidence_class=EV_NONE,
+                  refusal=R_VOID_UNKNOWN,
+                  source="neither side publishes an abandonment rule we hold",
+                  detail=VOID_NOTE)
+    out["rules"]["void"] = vd
 
     out["unmet"] = sorted({r["refusal"] for r in out["rules"].values()
                            if r.get("applicable") and not r["established"]

@@ -225,6 +225,61 @@ def _read_resolution_blocking(slug: str) -> dict:
                 "stage": "RESOLUTION_READ", "market_slug": slug}
 
 
+#: THE VENUE'S OWN RULES PROSE, CACHED. A contract's settlement text does
+#: not change minute to minute, and re-reading it every management cycle
+#: would spend a paced venue call on a static string. Keyed by slug.
+_RULES_CACHE: dict = {}
+RULES_CACHE_TTL_S = 3600.0
+
+
+def rules_cache_reset() -> None:
+    """Forget the cached prose. For tests; never called in the loop."""
+    _RULES_CACHE.clear()
+
+
+def _read_venue_rules_blocking(slug: str, *, now=None) -> dict:
+    """THE VENUE'S PUBLISHED SETTLEMENT PROSE for one contract.
+
+    `bettor_venue_settlement.attest` could not establish the overtime rule
+    and said so with the detail "no rules text exists on either side".
+    That was true of what we HELD: the venue's listing carries
+    `description` and `assetPriceTerms` and nobody read them. This reads
+    them, paced like every other venue call and cached for an hour, and
+    never raises -- an unreadable prose is a named error, not an exception
+    on the decision path.
+    """
+    import time as _t
+
+    from .. import bettor_live_read as lr
+    from .. import pmus
+    from ..venue_pace import pace
+
+    at = float(now if now is not None else _t.time())
+    hit = _RULES_CACHE.get(slug)
+    if hit is not None and (at - float(hit.get("read_at") or 0.0)
+                            ) <= RULES_CACHE_TTL_S:
+        return dict(hit, from_cache=True)
+    try:
+        pace()
+        client = pmus._get_client()
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "slug": slug, "error": type(exc).__name__,
+                "stage": "CLIENT_CONSTRUCTION", "read_at": at,
+                "from_cache": False}
+    try:
+        got = lr.read_rules_text(client, slug)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "slug": slug, "error": type(exc).__name__,
+                "stage": "RULES_TEXT_READ", "read_at": at,
+                "from_cache": False}
+    got["read_at"] = at
+    got["from_cache"] = False
+    # Cache the ANSWER, including a named failure: a contract that
+    # publishes no prose should not be re-asked every cycle either.
+    _RULES_CACHE[slug] = dict(got)
+    return got
+
+
 async def fetch_sport_catalogue(*, api_key: str, timeout=20.0) -> dict:
     """WHICH SPORTS THE PROVIDER OFFERS AT ALL. Costs no credits.
 

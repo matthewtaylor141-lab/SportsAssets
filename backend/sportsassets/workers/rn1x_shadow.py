@@ -954,7 +954,8 @@ def anchored_clock(now=None, clock=None):
 
 async def managed_inputs_for(conn, *, condition_id, outcome_index,
                              odds=None, now=None, read_book=None,
-                             resolve_identity=None, clock=None):
+                             resolve_identity=None, clock=None,
+                             read_rules=None):
     """The six links for ONE held position, with the first failure named.
 
     Returns the same input keys `challenger_inputs_for` returns when the
@@ -1343,22 +1344,67 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
             conn, vid["us_market_slug"]) if vid is not None else {}
     except Exception as exc:                                   # noqa: BLE001
         vevid = {"error": "%s: %s" % (type(exc).__name__, exc)}
+    # THE VENUE'S OWN PROSE, READ. The attestation used to report the
+    # overtime rule unestablished with the detail "no rules text exists on
+    # either side" -- true of our records, false of the venue, whose
+    # listing publishes `description` and `assetPriceTerms`. Reading it is
+    # what turns "we hold nothing" into a fact about the contract. Paced
+    # and cached for an hour, because settlement prose is static.
+    rules = {}
+    if vid is not None:
+        rdr = read_rules
+        if rdr is None:
+            from .ext_pinnacle_loop import _read_venue_rules_blocking as rdr
+        try:
+            rules = await asyncio.to_thread(rdr, vid["us_market_slug"])
+        except Exception as exc:                               # noqa: BLE001
+            rules = {"ok": False, "error": "%s: %s"
+                     % (type(exc).__name__, exc)}
+    if rules.get("ok"):
+        vevid = dict(vevid, rules_text=rules.get("rules_text"),
+                     rules_field=rules.get("rules_field"),
+                     rules_source=rules.get("source"))
     srule = vset.attest(
         sport_family=family, market="h2h", venue_evidence=vevid,
         book_evidence={"outcome_names": list(quote["prices"].keys()),
                        "source": "theoddsapi:h2h:%s" % devig.BOOK})
+    _unmet = list(srule.get("unmet") or [])
     out["settlement"] = {
         "book_rule": vset.BOOK_SETTLEMENT.get(family),
         "overall_established": bool(srule.get("overall_established")),
         "attested": srule.get("attested"),
-        "unmet": srule.get("unmet"),
+        "unmet": _unmet,
+        "conflicts": any("CONFLICT" in str(u).upper() for u in _unmet),
         "refusal": srule.get("refusal"),
         "venue_evidence_readable": bool(vevid.get("readable")),
         "draw_contract_present": vevid.get("draw_contract_present"),
-        "why_it_matters": ("an unestablished terminal rule is why "
-                           "HOLD_TO_SETTLEMENT is refused. It does not "
-                           "stop a probability pricing the hold, and it "
-                           "is never assumed in order to"),
+        # THE PROSE READ ITSELF, so a reader can tell "the venue says
+        # nothing about the terminal case" from "we never asked".
+        "venue_rules_text_read": bool(rules.get("ok")),
+        "venue_rules_field": rules.get("rules_field"),
+        "venue_rules_chars": (len(rules.get("rules_text") or "")
+                              if rules.get("ok") else 0),
+        "venue_rules_error": rules.get("error"),
+        "venue_rules_from_cache": rules.get("from_cache"),
+        "venue_rules_source": rules.get("source"),
+        "per_rule": {k: {"established": bool(v.get("established")),
+                         "evidence_class": v.get("evidence_class"),
+                         "refusal": v.get("refusal"),
+                         "source": v.get("source")}
+                     for k, v in (srule.get("rules") or {}).items()},
+        # WHAT IT GOVERNS, CORRECTED. Recording this as a HOLD_TO_SETTLEMENT
+        # blocker left the ordinary HOLD resting on the same dependency
+        # under a different action name: p x qty is realised AT SETTLEMENT
+        # either way. The value is still computed and labelled CONDITIONAL.
+        "governs": ("ORDINARY HOLD TOO, not only HOLD_TO_SETTLEMENT: the "
+                    "hold value is p x qty realised at settlement, so an "
+                    "unestablished terminal rule conditions it"),
+        "hold_value_is_conditional": not bool(
+            srule.get("overall_established")),
+        "why_it_matters": ("an unestablished terminal rule refuses "
+                           "HOLD_TO_SETTLEMENT outright and makes the "
+                           "ordinary HOLD value CONDITIONAL. It is never "
+                           "assumed in order to obtain a passing result"),
     }
     link("4b_SETTLEMENT_COMPATIBILITY",
          bool(srule.get("overall_established")), blocks_chain=False,
@@ -1370,7 +1416,17 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
               if srule.get("overall_established") else
               "these terminal rules are not established: %s"
               % (srule.get("unmet") or "unspecified")),
-         blocks_only="HOLD_TO_SETTLEMENT",
+         conflicts=any("CONFLICT" in str(u).upper()
+                       for u in (srule.get("unmet") or [])),
+         venue_rules_text_read=bool(rules.get("ok")),
+         venue_rules_field=rules.get("rules_field"),
+         venue_rules_error=rules.get("error"),
+         blocks_outright="HOLD_TO_SETTLEMENT",
+         conditions=("THE ORDINARY HOLD VALUE TOO. p x qty is realised at "
+                     "settlement, so an unestablished terminal rule is a "
+                     "condition on the number the ranking uses -- not a "
+                     "HOLD_TO_SETTLEMENT-only concern, which is where it "
+                     "was recorded and where it hid"),
          does_not_block="pricing the hold, or an exit at an observed price")
 
     # ── 5 · THE EXECUTABLE EXIT, off the ladder a close consumes ─────
@@ -1505,6 +1561,57 @@ ACCEPTANCE_QTY = 10.0
 #: How many covered markets to try before giving up this call.
 ACCEPTANCE_CANDIDATES = 8
 
+#: The namespace the acceptance sentinel is derived under. Bumping it
+#: would deliberately produce different identifiers; nothing else may.
+ACCEPTANCE_SENTINEL_NAMESPACE = "BETTOR_ACCEPTANCE_SENTINEL_V1"
+
+
+def acceptance_sentinel(us_market_slug: str) -> int:
+    """A STABLE negative identifier for one acceptance position.
+
+    NOT `hash()`. Python salts `hash` for strings per interpreter, so the
+    previous derivation returned a different number after every restart --
+    which would have made a redeploy seed a SECOND position on the same
+    market while claiming to be idempotent. A digest is stable across
+    processes, machines and releases, which is the only property the
+    identity actually needs.
+    """
+    import hashlib
+
+    h = hashlib.blake2b(
+        ("%s|%s" % (ACCEPTANCE_SENTINEL_NAMESPACE,
+                    str(us_market_slug))).encode("utf-8"),
+        digest_size=8).digest()
+    return -(int.from_bytes(h, "big") % 2_000_000_000 or 1)
+
+
+#: An acceptance position that already exists, whatever identifier it was
+#: created under. THE REPAIR MUST NOT CREATE A REPLACEMENT: a row written
+#: under the old unstable sentinel is still the acceptance position, and
+#: the fix has to adopt it rather than add inventory beside it.
+EXISTING_ACCEPTANCE_SQL = """
+    SELECT p.position_id, p.condition_id, p.outcome_index,
+           p.source_trade_id, p.provenance, p.entry_kind,
+           p.seed_qty::float8    AS seed_qty,
+           p.seed_price::float8  AS seed_price,
+           p.seed_basis_usd::float8 AS seed_basis_usd,
+           extract(epoch FROM p.decision_ts)::float8 AS decision_ts,
+           COALESCE(f.released, 0)::float8 AS released_qty,
+           (SELECT count(*) FROM rn1x_decisions d
+             WHERE d.position_id = p.position_id) AS decisions
+      FROM rn1x_positions p
+ LEFT JOIN (SELECT o.position_id,
+                   sum(CASE WHEN o.side = 'SELL' THEN fl.qty ELSE 0 END)
+                       AS released
+              FROM rn1x_orders o
+              JOIN rn1x_fills fl ON fl.order_id = o.order_id
+             GROUP BY o.position_id) f ON f.position_id = p.position_id
+     WHERE p.experiment_id = $1 AND p.policy = $2
+       AND COALESCE(f.released, 0) < p.seed_qty
+     ORDER BY p.decision_ts DESC
+     LIMIT 1
+"""
+
 R_NO_COVERED_CANDIDATE = "NO_COVERED_MARKET_COULD_SUPPLY_A_COMPLETE_ENTRY"
 R_NO_MAPPED_CANDIDATE = "NO_COVERED_MARKET_HAS_A_KNOWN_VENUE_NATIVE_CONTRACT"
 
@@ -1605,7 +1712,7 @@ COVERED_POOL_SQL = """
 
 
 async def seed_acceptance_position(conn, *, experiment_id, now=None,
-                                   odds=None, clock=None,
+                                   odds=None, clock=None, read_rules=None,
                                    qty=ACCEPTANCE_QTY,
                                    candidates=ACCEPTANCE_CANDIDATES,
                                    resolve_identity=None, read_book=None,
@@ -1625,12 +1732,52 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
     tick = anchored_clock(now, clock)
     started = tick()
     t_started = _t.monotonic()
-    out = {"created": False, "at": started, "experiment_id": experiment_id,
+    out = {"created": False, "adopted": False,
+           "at": started, "experiment_id": experiment_id,
            "policy": ACCEPTANCE_POLICY,
+           "sentinel_scheme": ACCEPTANCE_SENTINEL_NAMESPACE,
            "provenance": ACCEPTANCE_PROVENANCE,
            "is_not": ["AN_RN1_SIGNAL", "AN_EXECUTED_ORDER", "FUNDED",
                       "PART_OF_ANY_BENCHMARK_RESULT"],
            "considered": [], "refusals": {}}
+    # ── THE EXISTING POSITION FIRST, ALWAYS ──────────────────────────
+    #
+    # ONE ACCEPTANCE POSITION, ADOPTED NOT REPLACED. The identifier used to
+    # come from Python's salted `hash()`, so a restarted process derived a
+    # different one and this route would have written a SECOND position on
+    # the same market -- adding inventory while reporting idempotence. The
+    # lookup is by (experiment, policy) and is indifferent to the
+    # identifier, so a row created under the old unstable scheme is still
+    # found and kept. Nothing is written on this path.
+    try:
+        have = await conn.fetchrow(EXISTING_ACCEPTANCE_SQL,
+                                   experiment_id, ACCEPTANCE_POLICY)
+    except Exception as exc:                                   # noqa: BLE001
+        have = None
+        out["existing_lookup_error"] = "%s: %s" % (type(exc).__name__, exc)
+    if have is not None:
+        row = dict(have)
+        out.update(
+            created=False, adopted=True,
+            position_id=row["position_id"],
+            condition_id=row["condition_id"],
+            outcome_index=row["outcome_index"],
+            source_trade_id=row["source_trade_id"],
+            provenance=row.get("provenance") or ACCEPTANCE_PROVENANCE,
+            entry_kind=row.get("entry_kind"),
+            entry={"qty": row["seed_qty"], "price": row["seed_price"],
+                   "basis_usd": row["seed_basis_usd"],
+                   "execution": ("MODELLED. No order was submitted and no "
+                                 "capital moved")},
+            decisions_so_far=int(row["decisions"] or 0),
+            released_qty=float(row["released_qty"] or 0.0),
+            sentinel_scheme=ACCEPTANCE_SENTINEL_NAMESPACE,
+            why=("an acceptance position already exists under this "
+                 "experiment and policy, so it was ADOPTED and returned "
+                 "unchanged. No row was written and no inventory was "
+                 "added: re-seeding is a lookup, not a second entry"))
+        return out
+
     labels = sorted({lbl for fam in {f for _, f in EXT.SPORTS}
                      for lbl in EXT.VENUE_SPORT_LABELS.get(fam, ())})
     out["covered_sport_labels"] = labels
@@ -1763,7 +1910,8 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
             conn, condition_id=m["condition_id"],
             outcome_index=int(picked["outcome_index"]),
             odds=odds, now=tick(), clock=clock,
-            read_book=reader, resolve_identity=_resolve)
+            read_book=reader, resolve_identity=_resolve,
+            read_rules=read_rules)
         ffl = ci.get("first_failing_link") or {}
         if not (ci.get("available") and ci.get("book_available")):
             code = ffl.get("refusal") or "INPUT_CHAIN_INCOMPLETE"
@@ -1780,13 +1928,20 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
         entry_fee = float(fee(qty=float(qty), price=px, maker=False))
         basis = float(qty) * px + entry_fee
         at = tick()
-        # A DETERMINISTIC SENTINEL, not a trade id. `source_trade_id` is
-        # part of the position's unique key, and a NULL there would let the
-        # same market be seeded twice; a hash of the venue slug makes a
-        # repeat call idempotent instead. It is NEGATIVE so it can never be
-        # mistaken for a real `trades.id`.
-        sentinel = -(abs(hash(("ACCEPTANCE", vid["us_market_slug"])))
-                     % 2_000_000_000)
+        # A STABLE SENTINEL, not a trade id, and NOT Python's hash().
+        #
+        # THE DEFECT THIS CLOSES. `hash(("ACCEPTANCE", slug))` is salted per
+        # interpreter for str inputs (PYTHONHASHSEED is random by default),
+        # so the "idempotent" identifier changed at every process restart:
+        # a redeploy would have seeded a SECOND position on the same
+        # market, and the repair would have created a replacement rather
+        # than finding the original. blake2b is stable across processes,
+        # machines and releases.
+        #
+        # It is NEGATIVE so it can never be mistaken for a real `trades.id`,
+        # and the digest is taken over a VERSIONED namespace so a future
+        # change of scheme is visible rather than silently colliding.
+        sentinel = acceptance_sentinel(vid["us_market_slug"])
         pid = store.position_id(experiment_id, ACCEPTANCE_POLICY, sentinel)
         await conn.execute(
             """INSERT INTO rn1x_positions(position_id, experiment_id, policy,
@@ -1875,7 +2030,8 @@ _NEW_PRINTS_SQL = """
 
 
 async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
-                                now=None, odds=None, clock=None) -> dict:
+                                now=None, odds=None, clock=None,
+                                read_rules=None) -> dict:
     """Re-evaluate positions that are already open. Never raises."""
     import time as _t
 
@@ -1924,7 +2080,8 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
             ci = await managed_inputs_for(
                 conn, condition_id=pos["condition_id"],
                 outcome_index=int(pos["outcome_index"]),
-                odds=odds, now=tick(), clock=clock)
+                odds=odds, now=tick(), clock=clock,
+                read_rules=read_rules)
             ci["seed_qty"] = float(pos["seed_qty"])
             ci["seed_price"] = float(pos["seed_price"])
             # THE DECISION'S OWN INSTANT, READ AFTER THE INPUTS ARRIVED.

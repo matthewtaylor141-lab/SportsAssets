@@ -343,6 +343,7 @@ class Managed:
                           complement_ask_size=None, sale_ladder=None,
                           venue=None, us_market_slug=None,
                           held_is_long=True, settlement_semantics=None,
+                          settlement_attestation=None,
                           decision_id=None, inputs=None,
                           last_price=None, seconds_open=None,
                           probability_row=None, event_state=None,
@@ -407,7 +408,12 @@ class Managed:
                 probability_row=probability_row, now=float(at),
                 payout_event_held=payout_event_held,
                 event_state=event_state,
-                relaxation=freshness_relaxation)
+                relaxation=freshness_relaxation,
+                # THE TERMINAL RULE GOVERNS THIS NUMBER. It reaches the
+                # valuation rather than only the HOLD_TO_SETTLEMENT branch,
+                # so an unestablished rule labels the value it actually
+                # conditions.
+                settlement=settlement_attestation)
             rec["hold_valued_on"] = {
                 "qty": q, "basis_per_contract": basis_per,
                 "at": float(at),

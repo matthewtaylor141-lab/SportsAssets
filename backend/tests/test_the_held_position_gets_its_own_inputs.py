@@ -33,7 +33,9 @@ is NOT injected: the fixture-to-event match is the real matcher.
 """
 
 import asyncio
+import contextlib
 import os
+import pathlib
 
 import pytest
 
@@ -182,6 +184,58 @@ def test_no_credential_is_its_own_refusal():
 
 # ── the chain, link by link ─────────────────────────────────────────
 
+
+# ── THE VENUE'S OWN SETTLEMENT PROSE, AS THE VENUE PUBLISHES IT ──────
+#
+# `read_rules` is injected exactly like the book reader. The text below is
+# the SHAPE of a listing description, not a transcription of one: what is
+# under test is that prose which states the terminal case establishes the
+# overtime rule, and that prose which contradicts the book rule refuses.
+_RULES_AGREEING = ("This market settles on the final result of the game, "
+                   "including any extra innings. If the game is abandoned "
+                   "or postponed and not completed, the market is void and "
+                   "stakes are returned.")
+_RULES_CONFLICTING = ("This market settles after nine innings only; extra "
+                      "innings are excluded. If the game is abandoned the "
+                      "market is void and stakes are returned.")
+_VOID_REFUND = "STAKE_REFUNDED_MARKET_VOID"
+_RULES_SILENT = ("This market settles on the outcome of the listed event. "
+                 "See the venue rulebook for further terms.")
+
+
+def _rules(text):
+    """A venue rules reader returning `text`, or a named absence for None."""
+    def read(slug, now=None):
+        if text is None:
+            return {"ok": False, "slug": slug, "read_at": 0.0,
+                    "error": "VENUE_PUBLISHES_NO_RULES_TEXT_FOR_THIS_CONTRACT"}
+        return {"ok": True, "slug": slug, "rules_text": text,
+                "rules_field": "description", "read_at": 0.0,
+                "source": "pmus:/markets?slug=<slug>:rules_text"}
+    return read
+
+
+@contextlib.contextmanager
+def _book_void_rule(cls):
+    """Hold the BOOKMAKER's abandonment rule for the duration of a test.
+
+    `BOOK_VOID_RULE` ships EMPTY on purpose: a value in it is a claim about
+    a third party's published terms and may only be added with a citation.
+    A test may hold one to exercise the established path; production
+    reports VOID_ABANDONMENT_BOOK_RULE_NOT_HELD until one is captured.
+    """
+    from sportsassets import bettor_venue_settlement as VS
+    before = dict(VS.BOOK_VOID_RULE)
+    try:
+        if cls is None:
+            VS.BOOK_VOID_RULE.pop("baseball", None)
+        else:
+            VS.BOOK_VOID_RULE["baseball"] = cls
+        yield VS
+    finally:
+        VS.BOOK_VOID_RULE.clear()
+        VS.BOOK_VOID_RULE.update(before)
+
 async def _fixture(c, *, sport="MLB", title="Chicago Cubs vs Miami Marlins",
                    closed=False):
     for sql in ("DELETE FROM rn1x_fills", "DELETE FROM rn1x_orders",
@@ -263,13 +317,20 @@ def test_the_whole_chain_completes_with_no_valuation_row_at_all():
                      "3_PROVIDER_FIXTURE", "4_PROBABILITY",
                      "4b_SETTLEMENT_COMPATIBILITY",
                      "5_EXIT_LADDER"], names
-    # settlement compatibility is recorded and does NOT stop the chain: it
-    # blocks HOLD_TO_SETTLEMENT and nothing else
+    # SETTLEMENT COMPATIBILITY IS RECORDED AND CONDITIONS THE HOLD VALUE.
+    # It does not stop the chain -- refusing to price would assert the
+    # position is worthless -- and it is NOT a HOLD_TO_SETTLEMENT-only
+    # concern: p x qty is realised at settlement either way, so an
+    # unestablished terminal rule conditions the number the ranking uses.
     sc = next(x for x in ci["chain"]
               if x["link"] == "4b_SETTLEMENT_COMPATIBILITY")
     assert sc["blocks_chain"] is False
-    assert sc["blocks_only"] == "HOLD_TO_SETTLEMENT"
+    assert sc["blocks_outright"] == "HOLD_TO_SETTLEMENT"
+    assert "ORDINARY HOLD VALUE TOO" in sc["conditions"]
     assert ci["settlement"]["book_rule"] is not None
+    assert "ORDINARY HOLD TOO" in ci["settlement"]["governs"]
+    assert ci["settlement"]["hold_value_is_conditional"] is (
+        not ci["settlement"]["overall_established"])
     # link 1 · the held exposure, from the tokens
     assert ci["payout_event"] == "Chicago Cubs"
     # link 2 · the venue contract and the intent, NOT from a valuation row
@@ -947,11 +1008,11 @@ def test_the_code_satisfies_the_shipped_acceptance_gate():
             await _fixture(c)
             pid = await _position(c)
             await W.manage_open_positions(
-                c, experiment_id=_EXP, now=_T0 + 10,
+                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0 + 10,
                 odds=_odds([_event(observed_at=_T0)], received_at=_T0 + 1,
                            at=_T0 + 10))
             await W.manage_open_positions(
-                c, experiment_id=_EXP, now=_T0 + 130,
+                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0 + 130,
                 odds=_odds([_event(observed_at=_T0 + 120, cubs=1.45)],
                            received_at=_T0 + 121, at=_T0 + 130))
             # normalised exactly as the workflow normalises the trace
@@ -968,7 +1029,8 @@ def test_the_code_satisfies_the_shipped_acceptance_gate():
             EXT._read_book_blocking = orig_book
             await c.close()
 
-    rows = asyncio.run(run())
+    with _book_void_rule(_VOID_REFUND):
+        rows = asyncio.run(run())
     assert len(rows) == 2, rows
 
     def j(v):
@@ -1205,8 +1267,8 @@ def test_the_acceptance_position_is_entered_at_the_executable_price():
 
 @pg
 def test_seeding_the_same_market_twice_is_idempotent():
-    """The sentinel is derived from the venue slug, so a repeat call does
-    not mint a second position on the same exposure."""
+    """A repeat call ADOPTS the existing position instead of minting a
+    second one on the same exposure."""
     import asyncpg
 
     async def run():
@@ -1229,8 +1291,14 @@ def test_seeding_the_same_market_twice_is_idempotent():
             await c.close()
 
     a, b, n = asyncio.run(run())
-    assert a["created"] and b["created"]
+    # THE SECOND CALL ADOPTS, it does not create. Both return the SAME
+    # position and no second row is written -- and the second call says
+    # which of the two happened rather than reporting a create it did not
+    # perform.
+    assert a["created"] is True and a["adopted"] is False
+    assert b["created"] is False and b["adopted"] is True
     assert a["position_id"] == b["position_id"]
+    assert b["decisions_so_far"] == 0 and b["released_qty"] == 0.0
     assert n == 1, "one position on one exposure, however often it is asked"
 
 
@@ -1292,7 +1360,7 @@ def test_the_acceptance_position_is_managed_by_the_production_lifecycle():
         try:
             await _fixture(c)
             seeded = await W.seed_acceptance_position(
-                c, experiment_id=_EXP, now=_T0,
+                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0,
                 odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
                 resolve_identity=_resolver_ok,
                 read_book=lambda slug: {"marketData": _BOOK})
@@ -1301,11 +1369,11 @@ def test_the_acceptance_position_is_managed_by_the_production_lifecycle():
             # TWO CYCLES, 120 s apart, each pulling its own quote -- the
             # same lifecycle the challenger lane runs, not a special path.
             c1 = await W.manage_open_positions(
-                c, experiment_id=_EXP, now=_T0 + 60,
+                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0 + 60,
                 odds=_odds([_event(observed_at=_T0 + 50)],
                            received_at=_T0 + 51, at=_T0 + 60))
             c2 = await W.manage_open_positions(
-                c, experiment_id=_EXP, now=_T0 + 180,
+                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=_T0 + 180,
                 odds=_odds([_event(observed_at=_T0 + 170, cubs=1.45)],
                            received_at=_T0 + 171, at=_T0 + 180))
             rows = [dict(r) for r in await c.fetch(
@@ -1321,7 +1389,8 @@ def test_the_acceptance_position_is_managed_by_the_production_lifecycle():
             EXT._read_book_blocking = orig_book
             await c.close()
 
-    seeded, c1, c2, rows = asyncio.run(run())
+    with _book_void_rule(_VOID_REFUND):
+        seeded, c1, c2, rows = asyncio.run(run())
 
     assert c1["managed"] == 1 and c2["managed"] == 1
     assert c1["priced_holds"] == 1 and c2["priced_holds"] == 1
@@ -1525,7 +1594,7 @@ def test_the_trace_read_carries_what_the_shipped_gate_requires():
             pid = await _position(c)
             for k, at in ((0, _T0 + 10), (1, _T0 + 130)):
                 await W.manage_open_positions(
-                    c, experiment_id=_EXP, now=at,
+                    c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP, now=at,
                     odds=_odds([_event(observed_at=at - 10)],
                                received_at=at - 9, at=at))
             # THE PRODUCTION READ ITSELF -- asyncpg's Connection exposes the
@@ -1536,7 +1605,8 @@ def test_the_trace_read_carries_what_the_shipped_gate_requires():
             EXT._read_book_blocking = orig_book
             await c.close()
 
-    got = asyncio.run(run())
+    with _book_void_rule(_VOID_REFUND):
+        got = asyncio.run(run())
     assert got.get("found") is True, got
 
     def j(v):
@@ -1571,3 +1641,264 @@ def test_the_trace_read_carries_what_the_shipped_gate_requires():
         % sorted(missing))
     assert len([v for v in verdict if not v["missing"]]) >= 2
     assert len({v["ts"] for v in verdict if not v["missing"]}) >= 2
+
+
+# ── UNRESOLVED OR CONFLICTING SETTLEMENT CANNOT PASS ─────────────────
+#
+# `4b_SETTLEMENT_COMPATIBILITY` was recorded as nonblocking with the note
+# that it blocks HOLD_TO_SETTLEMENT only -- while `ev_hold` valued the
+# ordinary HOLD at p x qty realised AT SETTLEMENT. The same dependency,
+# under a different action name.
+#
+# The value is still computed: refusing to compute it would assert the
+# position is worthless, which is the assertion most likely to force an
+# exit. What changes is that the condition travels with the number and the
+# acceptance gate will not call such a row a complete, verified
+# HOLD-versus-exit comparison.
+#
+# These rows are otherwise COMPLETE: same fixture, same fresh probability,
+# same ladder, same residual, same ranking, same reconciled accounting.
+# Only the settlement evidence differs.
+
+def _gate_missing(rows):
+    """The shipped gate's verdict over normalised decision rows."""
+    import json
+    import pathlib
+    import re
+    import shutil
+    import subprocess
+
+    if shutil.which("jq") is None:
+        pytest.skip("jq is not installed here")
+    wf = (pathlib.Path(__file__).resolve().parents[2]
+          / ".github" / "workflows" / "command-verify.yml")
+    if not wf.exists():
+        pytest.skip("the workflow is not in this checkout")
+    prog = re.search(r"ACC='(.*?)'\n", wf.read_text(), re.S).group(1)
+    out = subprocess.run(["jq", "-c", prog], input=json.dumps(
+        {"decisions": rows}, default=float), capture_output=True, text=True)
+    assert out.returncode == 0, out.stderr
+    return json.loads(out.stdout)
+
+
+def _normalised_trace(conn_rows):
+    import json
+
+    def j(v):
+        if isinstance(v, str):
+            try:
+                return json.loads(v)
+            except Exception:                                  # noqa: BLE001
+                return {}
+        return v or {}
+    return [{"id": d["decision_id"], "ts": str(d["decision_ts"]),
+             "action": d.get("selected_action") or "NULL",
+             "qty": d.get("selected_qty"),
+             "hold": d.get("hold_value_usd"),
+             "reason": d.get("selection_reason") or "",
+             "reconciles": d.get("accounting_reconciles"),
+             "pays": j(d.get("payout_identity")).get("row_payout_event"),
+             "chain": j(d.get("input_chain")),
+             "alt": j(d.get("alternatives")),
+             "inv": j(d.get("resulting_inventory")),
+             "fr": j(d.get("input_freshness"))}
+            for d in conn_rows]
+
+
+def _two_cycles_with(prose, *, book_void):
+    """Two management cycles under one settlement-evidence condition."""
+    import asyncpg
+
+    from sportsassets.api import command_rn1x as CR
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        orig_resolve, orig_book = (EXT.resolve_venue_identity,
+                                   EXT._read_book_blocking)
+        EXT.resolve_venue_identity = _resolver_ok
+        EXT._read_book_blocking = lambda slug: {"marketData": _BOOK}
+        try:
+            await _fixture(c)
+            pid = await _position(c)
+            for at in (_T0 + 10, _T0 + 130):
+                await W.manage_open_positions(
+                    c, read_rules=_rules(prose), experiment_id=_EXP, now=at,
+                    odds=_odds([_event(observed_at=at - 10)],
+                               received_at=at - 9, at=at))
+            return await CR.trace(c, pid)
+        finally:
+            EXT.resolve_venue_identity = orig_resolve
+            EXT._read_book_blocking = orig_book
+            await c.close()
+
+    with _book_void_rule(book_void):
+        got = asyncio.run(run())
+    assert got.get("found") is True, got
+    return _normalised_trace(got["decisions"])
+
+
+@pg
+def test_settlement_unresolved_blocks_a_complete_comparison():
+    """Prose that says NOTHING about the terminal case: every other item is
+    present and the row is CONDITIONAL, never complete."""
+    rows = _two_cycles_with(_RULES_SILENT, book_void=None)
+    verdict = _gate_missing(rows)
+    assert len(verdict) >= 2, verdict
+    for v in verdict:
+        assert v["missing"] == ["SETTLEMENT_COMPATIBILITY_ESTABLISHED"], v
+    assert not [v for v in verdict if not v["missing"]], (
+        "an unresolved terminal rule must not produce a COMPLETE row")
+    # and the condition is ON THE STORED VALUE, not merely in a comment
+    tr = rows[0]["alt"]["hold_input"]["terminal_rule"]
+    assert tr["asked"] is True and tr["established"] is False
+    assert tr["book_rule"] == "FULL_GAME_INCLUDING_EXTRA_INNINGS"
+    assert "ORDINARY HOLD TOO" in tr["governs"]
+    assert rows[0]["alt"]["hold_input"]["value_is_conditional"] is True
+    assert rows[0]["hold"] is not None, (
+        "the value is still COMPUTED -- refusing would assert the position "
+        "is worthless")
+    ex = [c for c in rows[0]["alt"]["ranked"] if c["action"] == "HOLD"]
+    assert ex and ex[0]["value_is_conditional"] is True
+    assert ex[0]["conditional_on"], ex[0]
+
+
+@pg
+def test_settlement_conflicting_blocks_a_complete_comparison():
+    """Prose that CONTRADICTS the book rule is louder than unknown, and it
+    cannot pass either."""
+    rows = _two_cycles_with(_RULES_CONFLICTING, book_void=_VOID_REFUND)
+    verdict = _gate_missing(rows)
+    assert len(verdict) >= 2, verdict
+    for v in verdict:
+        assert v["missing"] == ["SETTLEMENT_COMPATIBILITY_ESTABLISHED"], v
+    tr = rows[0]["alt"]["hold_input"]["terminal_rule"]
+    assert tr["established"] is False and tr["conflicts"] is True
+    assert "OVERTIME_RULE_CONFLICTS_WITH_BOOK_RULE" in tr["unmet"], tr
+    # the chain records it too, on the decision's own stored evidence
+    l4b = next(x for x in rows[0]["chain"]["chain"]
+               if x["link"] == "4b_SETTLEMENT_COMPATIBILITY")
+    assert l4b["ok"] is False and l4b["conflicts"] is True
+    assert l4b["venue_rules_text_read"] is True
+
+
+@pg
+def test_settlement_established_from_the_venues_own_prose_passes():
+    """When the venue publishes prose that agrees with the book rule AND the
+    bookmaker rule is held, the row is COMPLETE -- so the requirement is a
+    real gate and not an unreachable one."""
+    rows = _two_cycles_with(_RULES_AGREEING, book_void=_VOID_REFUND)
+    verdict = _gate_missing(rows)
+    assert len([v for v in verdict if not v["missing"]]) >= 2, verdict
+    assert len({v["ts"] for v in verdict if not v["missing"]}) >= 2
+    tr = rows[0]["alt"]["hold_input"]["terminal_rule"]
+    assert tr["established"] is True and tr["unmet"] == []
+    assert rows[0]["alt"]["hold_input"]["value_is_conditional"] is False
+    l4b = next(x for x in rows[0]["chain"]["chain"]
+               if x["link"] == "4b_SETTLEMENT_COMPATIBILITY")
+    assert l4b["ok"] is True
+    assert l4b["venue_rules_field"] == "description"
+
+
+# ── RESEEDING ACROSS A PROCESS RESTART ───────────────────────────────
+#
+# THE DEFECT. The sentinel came from `hash(("ACCEPTANCE", slug))`, and
+# Python salts `hash` for str per interpreter (PYTHONHASHSEED is random by
+# default). So the "idempotent" identifier changed at every restart: the
+# next deploy would have written a SECOND position on the same market while
+# the route reported idempotence, and this very repair would have created a
+# replacement instead of adopting the position already being managed.
+#
+# This runs the seeder in REAL separate interpreters, with two different
+# hash seeds, against the row created here.
+
+@pg
+def test_reseeding_across_a_process_restart_adopts_the_same_position():
+    import json
+    import os
+    import subprocess
+    import sys
+
+    import asyncpg
+
+    child = (
+        "import asyncio, json, sys\n"
+        "sys.path.insert(0, %r)\n"
+        "import asyncpg\n"
+        "from sportsassets.workers import rn1x_shadow as W\n"
+        "async def main():\n"
+        "    c = await asyncpg.connect(%r, timeout=10)\n"
+        "    try:\n"
+        "        got = await W.seed_acceptance_position(\n"
+        "            c, experiment_id=%r)\n"
+        "    finally:\n"
+        "        await c.close()\n"
+        "    print(json.dumps({k: got.get(k) for k in\n"
+        "        ('created', 'adopted', 'position_id', 'source_trade_id',\n"
+        "         'sentinel_scheme', 'decisions_so_far', 'released_qty')}))\n"
+        "    print(json.dumps({'stable': W.acceptance_sentinel(%r),\n"
+        "        'salted': -(abs(hash(('ACCEPTANCE', %r))) %% 2000000000)}))\n"
+        "asyncio.run(main())\n"
+        % (str(pathlib.Path(__file__).resolve().parents[1]), DSN, _EXP,
+           _SLUG, _SLUG))
+
+    async def setup():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            got = await W.seed_acceptance_position(
+                c, read_rules=_rules(_RULES_AGREEING), experiment_id=_EXP,
+                now=_T0, odds=_odds([_event(observed_at=_T0 - 5)], at=_T0),
+                resolve_identity=_resolver_ok,
+                read_book=lambda slug: {"marketData": _BOOK})
+            row = dict(await c.fetchrow(
+                "SELECT seed_qty::float8 q, seed_basis_usd::float8 b,"
+                " count(*) OVER () AS n FROM rn1x_positions"
+                " WHERE policy = $1", W.ACCEPTANCE_POLICY))
+            return got, row
+        finally:
+            await c.close()
+
+    first, before = asyncio.run(setup())
+    assert first["created"] is True, first
+
+    outs = []
+    for seed in ("0", "1"):
+        env = dict(os.environ, PYTHONHASHSEED=seed)
+        r = subprocess.run([sys.executable, "-c", child], env=env,
+                           capture_output=True, text=True, timeout=120)
+        assert r.returncode == 0, r.stderr[-2000:]
+        lines = [x for x in r.stdout.strip().splitlines() if x.startswith("{")]
+        outs.append((json.loads(lines[0]), json.loads(lines[1])))
+
+    async def after():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            return dict(await c.fetchrow(
+                "SELECT count(*) n, sum(seed_qty)::float8 q,"
+                " sum(seed_basis_usd)::float8 b FROM rn1x_positions"
+                " WHERE policy = $1", W.ACCEPTANCE_POLICY))
+        finally:
+            await c.close()
+
+    end = asyncio.run(after())
+
+    # ── the same position, from two fresh interpreters ────────────────
+    for got, sent in outs:
+        assert got["adopted"] is True, got
+        assert got["created"] is False, got
+        assert got["position_id"] == first["position_id"], got
+        assert got["sentinel_scheme"] == W.ACCEPTANCE_SENTINEL_NAMESPACE
+    # ── and NO inventory was added ───────────────────────────────────
+    assert end["n"] == 1, "a restart must not mint a second position"
+    assert end["q"] == pytest.approx(before["q"])
+    assert end["b"] == pytest.approx(before["b"])
+
+    # ── the identity is stable; the one it replaced was not ──────────
+    stable = {s["stable"] for _, s in outs}
+    salted = {s["salted"] for _, s in outs}
+    assert len(stable) == 1, "the sentinel must not vary across processes"
+    assert stable.pop() == W.acceptance_sentinel(_SLUG)
+    assert len(salted) == 2, (
+        "this test is only meaningful if hash() really does vary across "
+        "interpreters here; it did not, so the defect is not reproduced")

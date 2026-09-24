@@ -830,6 +830,9 @@ jobs:
            | (($ch | map(select(.link == "1_HELD_EXPOSURE")) | first) // {}) as $l1
            | (($ch | map(select(.link == "2_VENUE_CONTRACT")) | first) // {}) as $l2
            | (($ch | map(select(.link == "5_EXIT_LADDER")) | first) // {}) as $l5
+           | (($ch | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY"))
+               | first) // {}) as $l4b
+           | (($d.alt.hold_input.terminal_rule // {})) as $tr
            | (($d.alt.ranked // []) | map(select(.action == "DIRECT_EXIT"))
               | first // {}) as $ex
            | {id: $d.id, ts: $d.ts, action: $d.action, qty: $d.qty, hold: $d.hold,
@@ -863,7 +866,28 @@ jobs:
                  then empty else "RANKED_ALTERNATIVES_AND_SELECTION" end),
                 (if $d.reconciles == true then empty
                  else "RECONCILED_ACCOUNTING" end),
-                (if ($d.hold // null) != null then empty else "PRICED_HOLD" end)
+                (if ($d.hold // null) != null then empty else "PRICED_HOLD" end),
+                # ── SETTLEMENT EVIDENCE, FROM THE STORED INPUTS ──
+                #
+                # The hold value is p x qty realised AT SETTLEMENT, so
+                # whether the priced event and the paid event coincide
+                # under overtime, void and draw is a condition on the
+                # number that was ranked -- not a HOLD_TO_SETTLEMENT-only
+                # concern. First: was the evidence RECORDED at all.
+                (if (($l4b.link // null) != null)
+                    and (($l4b.book_rule // null) != null)
+                    and (($tr.asked // false) == true)
+                    and (($tr.book_rule // null) != null)
+                 then empty else "SETTLEMENT_EVIDENCE_RECORDED" end),
+                # Second: is compatibility ESTABLISHED. Unresolved or
+                # CONFLICTING terminal rules cannot pass as a complete,
+                # verified HOLD-versus-exit comparison; the value stays
+                # computed and is reported as CONDITIONAL instead.
+                (if ($l4b.ok == true) and ($tr.established == true)
+                    and (($tr.conflicts // false) == false)
+                    and ((($tr.unmet // []) | length) == 0)
+                 then empty
+                 else "SETTLEMENT_COMPATIBILITY_ESTABLISHED" end)
               ])}]'
           printf '%s' "$ACC" > /tmp/acc.jq
           if [ -z "${ADMIN_TOKEN:-}" ]; then
@@ -978,6 +1002,18 @@ jobs:
                      "      payout_event=" + ((.pays // "-")|tostring)
                      + "  reconciles=" + ((.reconciles // "-")|tostring)
                      + "  eligibility=" + (.eligibility),
+                     "      terminal_rule established="
+                     + (((.alt.hold_input.terminal_rule // {}).established // "-")|tostring)
+                     + " book_rule="
+                     + (((.alt.hold_input.terminal_rule // {}).book_rule // "-")|tostring)
+                     + " attested="
+                     + (((.alt.hold_input.terminal_rule // {}).attested // [])|tostring)
+                     + " unmet="
+                     + (((.alt.hold_input.terminal_rule // {}).unmet // [])|tostring)
+                     + " conflicts="
+                     + (((.alt.hold_input.terminal_rule // {}).conflicts // "-")|tostring)
+                     + "  hold_value_is_conditional="
+                     + ((.alt.hold_input.value_is_conditional // "-")|tostring),
                      ((($d.chain.chain // [])[])
                        | "      link " + (.link) + (if .ok then "  OK" else "  FAILED" end)
                          + "  " + ((. | del(.link, .ok) | tostring)[0:240])),
@@ -1010,7 +1046,35 @@ jobs:
             2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
           IDS=$(jq -r '[.[] | select((.missing | length) == 0) | .id] | join("  ")' \
                 /tmp/aacc.json 2>/dev/null || echo "")
+          # ── CONDITIONAL IS ITS OWN VERDICT, never folded into complete ──
+          #
+          # A row whose ONLY gap is settlement COMPATIBILITY has every other
+          # input: the exposure mapping, a fresh probability, a usable
+          # ladder, the residual, a priced exit it was compared against,
+          # reconciled accounting -- and a hold value that is conditional on
+          # terminal rules nobody has established. That is a CONDITIONAL
+          # comparison and it is reported as one. It is NOT a complete,
+          # verified HOLD-versus-exit comparison and it must not be counted
+          # as one.
+          COND=$(jq '[.[] | select(.missing == ["SETTLEMENT_COMPATIBILITY_ESTABLISHED"])] | length' /tmp/aacc.json 2>/dev/null || echo 0)
+          CONDD=$(jq '[.[] | select(.missing == ["SETTLEMENT_COMPATIBILITY_ESTABLISHED"]) | .ts] | unique | length' /tmp/aacc.json 2>/dev/null || echo 0)
+          CONDIDS=$(jq -r '[.[] | select(.missing == ["SETTLEMENT_COMPATIBILITY_ESTABLISHED"]) | .id] | join("  ")' /tmp/aacc.json 2>/dev/null || echo "")
           say "complete\t$COMPLETE   distinct_instants\t$DISTINCT   of $NDEC decisions"
+          say "conditional_on_settlement\t$COND at $CONDD distinct instants"
+          if [ "$COMPLETE" -lt 2 ] && [ "$COND" -ge 2 ] && [ "$CONDD" -ge 2 ]; then
+            say "COMPLETE EXCEPT SETTLEMENT COMPATIBILITY -- a CONDITIONAL"
+            say "comparison on the acceptance position $APID:"
+            say "  $CONDIDS"
+            say "each of these carries its own verified held-exposure"
+            say "mapping, a probability inside its own 30 s bound, a usable"
+            say "exit ladder with depth, the current residual, ranked"
+            say "alternatives with a selected action and quantity, and"
+            say "reconciled accounting. The HOLD value is p x qty realised"
+            say "AT SETTLEMENT and the terminal rules above are NOT"
+            say "established, so it is CONDITIONAL on them. This is NOT a"
+            say "complete, verified HOLD-versus-exit comparison and is not"
+            say "counted as one."
+          fi
           if [ "$COMPLETE" -ge 2 ] && [ "$DISTINCT" -ge 2 ]; then
             say "ACCEPTANCE MET on the acceptance position $APID:"
             say "  $IDS"
@@ -1023,8 +1087,8 @@ jobs:
             say "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY: not RN1-derived, not"
             say "filled, not funded, and not in any benchmark result"
           else
-            echo "::error::the acceptance position was NOT driven to two complete decisions: $COMPLETE complete at $DISTINCT distinct instants (need 2 and 2) of $NDEC decisions. The INCOMPLETE lines name what each one lacked and the per-link lines name where its chain stopped."
-            say "NOT DEMONSTRATED on the acceptance position"
+            echo "::error::the acceptance position was NOT driven to two COMPLETE decisions: $COMPLETE complete at $DISTINCT distinct instants (need 2 and 2), with $COND conditional on settlement compatibility, of $NDEC decisions. The INCOMPLETE lines name what each one lacked and the per-link lines name where its chain stopped. A conditional comparison is reported above and is NOT acceptance."
+            say "NOT DEMONSTRATED as a COMPLETE comparison on the acceptance position"
             FAIL=1
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
