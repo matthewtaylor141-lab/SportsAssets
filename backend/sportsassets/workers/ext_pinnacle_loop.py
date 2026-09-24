@@ -466,6 +466,57 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
     return out
 
 
+#: The venue's own catalogue, asked whether it lists a SEPARATE draw
+#: contract for this event. Queried by `event_slug` rather than parsed out
+#: of the slug's grammar: the grammar is premap's to own, and a data
+#: question with a data answer cannot be wrong about a naming convention.
+DRAW_SIBLING_SQL = """
+    SELECT p2.market_slug
+      FROM us_premap p1
+      JOIN us_premap p2 ON p2.event_slug = p1.event_slug
+     WHERE p1.market_slug = $1
+       AND p2.market_slug <> p1.market_slug
+       AND lower(p2.market_slug) LIKE '%-draw'
+     LIMIT 1
+"""
+
+EVENT_ROW_SQL = """
+    SELECT event_slug, team_league, sports_type, game_start, kind, side_norm
+      FROM us_premap WHERE market_slug = $1 LIMIT 1
+"""
+
+
+async def venue_settlement_evidence(conn, us_market_slug: str) -> dict:
+    """What the VENUE's catalogue shows about this event's settlement.
+
+    One fact does real work here: whether the venue lists a separate DRAW
+    contract. If it does, its "will A beat B" binary cannot be paying on a
+    draw, because the draw is a different contract -- which is the same
+    treatment the bookmaker's 3-outcome h2h gives it. That is an
+    attestation from two independent catalogues, not an assumption.
+    """
+    out = {"source": "us_premap", "market_slug": us_market_slug,
+           "draw_contract_present": False, "draw_slug": None,
+           "event_slug": None, "team_league": None, "sports_type": None,
+           "game_start": None, "kind": None, "side_norm": None,
+           "readable": False}
+    try:
+        row = await conn.fetchrow(EVENT_ROW_SQL, us_market_slug)
+        if row is not None:
+            out.update(readable=True, event_slug=row["event_slug"],
+                       team_league=row["team_league"],
+                       sports_type=row["sports_type"],
+                       kind=row["kind"], side_norm=row["side_norm"],
+                       game_start=(row["game_start"].isoformat()
+                                   if row["game_start"] is not None else None))
+        draw = await conn.fetchval(DRAW_SIBLING_SQL, us_market_slug)
+        if draw:
+            out.update(draw_contract_present=True, draw_slug=str(draw))
+    except Exception as exc:                                   # noqa: BLE001
+        out["error"] = type(exc).__name__
+    return out
+
+
 async def venue_quote(conn, *, us_slug, outcome_index, now):
     """Contemporaneous ask and DISPLAYED depth for one venue contract.
 
@@ -700,12 +751,25 @@ async def cycle(conn) -> dict:
             # rule is not in our data at all, so `agrees` returns None and
             # this refuses by name. An unknown is not a match, and
             # asserting one would make every edge below unfalsifiable.
-            srule = vset.agrees(sport_family=family, market="h2h")
+            # THE RULES, ATTESTED PER FIXTURE FROM EACH SIDE'S CATALOGUE.
+            # `agrees()` answers from the module-level ATTESTED table,
+            # which is empty and stays empty; `attest()` asks what THIS
+            # event's evidence shows and says which class established each
+            # rule. Only ATTESTING_CLASSES count -- an inference is
+            # recorded and does not unblock.
+            vevid = await venue_settlement_evidence(
+                conn, ident["us_market_slug"])
+            srule = vset.attest(
+                sport_family=family, market="h2h",
+                venue_evidence=vevid,
+                book_evidence={"outcome_names": list(quote["prices"].keys()),
+                               "source": "theoddsapi:h2h:%s" % devig.BOOK})
+            srule["book_rule"] = vset.BOOK_SETTLEMENT.get(family)
             # THE SPECIFIC UNMET RULES, not one blanket unknown. "The
             # settlement rules do not match" is four questions -- draw,
             # overtime, push, void -- and a census that collapses them
             # cannot tell management which one to go and establish.
-            extra = ([] if srule["agrees"] is True
+            extra = ([] if srule.get("overall_established")
                      else (list(srule.get("unmet") or [])
                            or [srule.get("refusal") or R_VENUE_RULE_UNKNOWN]))
 

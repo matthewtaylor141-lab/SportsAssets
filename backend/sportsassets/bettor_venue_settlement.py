@@ -209,3 +209,133 @@ def describe() -> dict:
         "soccer": rules_status(sport_family="soccer"),
         "baseball": rules_status(sport_family="baseball"),
     }
+
+# ── PER-FIXTURE ATTESTATION FROM EACH SIDE'S OWN CATALOGUE ───────────
+#
+# A third closure route, cheaper than the two above and available now.
+# The module header names two ways to establish the venue's rule: capture
+# its rules text, or measure the rule from resolved prices. There is a
+# third, and it closes exactly ONE of the four questions:
+#
+#   THE DRAW. The venue's own catalogue carries a SEPARATE DRAW CONTRACT
+#   for soccer fixtures -- `workers/premap` matches it by name
+#   (`_yn_draw_row`, slug tail `draw`, `pmus._YN_DRAW_Q_RE`). If the venue
+#   lists "will A beat B", "will B beat A" AND a draw contract for one
+#   event, then the binary cannot be paying on a draw: the draw is a
+#   different contract. Pinnacle's side is visible in the payload we
+#   already hold -- a 3-outcome h2h prices Draw as its own outcome. Both
+#   sides therefore treat a draw as a separately-settled third result,
+#   and that is an attestation from evidence rather than an assumption.
+#
+# WHAT THIS DOES NOT CLOSE. Overtime and void stay unestablished. For a
+# LEAGUE fixture there is no extra time, so regulation and full-time
+# coincide -- but that is a fact about the competition, not about the
+# contract's rule, and a knockout tie would break it. It is recorded as
+# an INFERENCE and does not count. Void/abandonment evidence does not
+# exist on either side.
+
+EV_VENUE_CATALOGUE = "ATTESTED_FROM_VENUE_CATALOGUE"
+EV_BOOK_PAYLOAD = "ATTESTED_FROM_BOOKMAKER_PAYLOAD"
+EV_BOTH_SIDES = "ATTESTED_BOTH_SIDES_INDEPENDENTLY"
+EV_INFERRED = "INFERRED_NOT_ATTESTED"
+EV_NONE = "NOT_ESTABLISHED"
+
+#: Only these count. An inference is recorded and does not unblock.
+ATTESTING_CLASSES = (EV_VENUE_CATALOGUE, EV_BOOK_PAYLOAD, EV_BOTH_SIDES)
+
+
+def attest(*, sport_family, market="h2h", venue_evidence=None,
+           book_evidence=None) -> dict:
+    """Per-rule status with its EVIDENCE CLASS and SOURCE, per fixture.
+
+    `venue_evidence`  what the venue's own catalogue shows for this event,
+                      e.g. {"draw_contract_present": True,
+                            "draw_slug": "...-draw", "source": "us_premap",
+                            "sides_present": [...]}
+    `book_evidence`   what the bookmaker's payload shows, e.g.
+                      {"outcome_names": ["Home","Away","Draw"],
+                       "source": "theoddsapi:h2h"}
+
+    Nothing here sets a boolean on a belief: every `established` True is
+    accompanied by the class and the source that established it, and an
+    absence of evidence is `NOT_ESTABLISHED`, never `True`.
+    """
+    fam, mkt = str(sport_family), str(market)
+    ve = dict(venue_evidence or {})
+    be = dict(book_evidence or {})
+    n_book = BOOK_OUTCOMES.get(fam)
+    names = [str(x).strip().lower() for x in (be.get("outcome_names") or [])]
+    book_prices_draw = any(n == "draw" for n in names) or n_book == 3
+    venue_has_draw = bool(ve.get("draw_contract_present"))
+
+    out = {"version": VERSION, "sport_family": fam, "market": mkt,
+           "rules": {}, "unmet": [], "attested": [],
+           "venue_evidence": ve, "book_evidence": be}
+
+    # ── draw ─────────────────────────────────────────────────────────
+    if n_book != 3:
+        out["rules"]["draw"] = {
+            "applicable": False, "established": True,
+            "evidence_class": EV_BOOK_PAYLOAD,
+            "source": be.get("source") or "BOOK_OUTCOMES",
+            "detail": "this sport prices no draw, so nothing to reconcile"}
+    elif venue_has_draw and book_prices_draw:
+        out["rules"]["draw"] = {
+            "applicable": True, "established": True,
+            "evidence_class": EV_BOTH_SIDES,
+            "source": "%s + %s" % (ve.get("source") or "us_premap",
+                                   be.get("source") or "h2h payload"),
+            "detail": ("the venue lists a SEPARATE draw contract (%s) for "
+                       "this event, so its binary does not pay on a draw; "
+                       "the bookmaker prices Draw as its own outcome. Both "
+                       "settle a draw as a third result"
+                       % (ve.get("draw_slug") or "slug not recorded")),
+            "venue_draw_slug": ve.get("draw_slug")}
+    else:
+        missing = ("the venue's catalogue shows no separate draw contract "
+                   "for this event" if not venue_has_draw else
+                   "the bookmaker payload does not price a draw outcome")
+        out["rules"]["draw"] = {
+            "applicable": True, "established": False,
+            "evidence_class": EV_NONE, "refusal": R_DRAW_ASYMMETRIC,
+            "source": ve.get("source") or "us_premap",
+            "detail": missing}
+
+    # ── overtime ─────────────────────────────────────────────────────
+    league = ve.get("team_league")
+    out["rules"]["overtime"] = {
+        "applicable": True, "established": False,
+        "evidence_class": (EV_INFERRED if league else EV_NONE),
+        "refusal": R_OVERTIME_UNKNOWN,
+        "source": ve.get("source") or "us_premap",
+        "book_rule": BOOK_SETTLEMENT.get(fam),
+        "detail": ("the fixture's competition is %r, and a league fixture "
+                   "has no extra time -- so regulation and full-time "
+                   "coincide HERE. That is a fact about the competition, "
+                   "not about the contract's rule, and a knockout tie "
+                   "would break it. Recorded as an inference; it does NOT "
+                   "establish the rule" % (league,)) if league else
+                  ("no competition is recorded for this fixture and no "
+                   "rules text exists on either side")}
+
+    # ── push ─────────────────────────────────────────────────────────
+    out["rules"]["push"] = {
+        "applicable": mkt != "h2h", "established": True,
+        "evidence_class": EV_BOOK_PAYLOAD, "source": "market type",
+        "detail": "h2h carries no line, so there is no tie-at-the-line"}
+
+    # ── void ─────────────────────────────────────────────────────────
+    out["rules"]["void"] = {
+        "applicable": True, "established": False,
+        "evidence_class": EV_NONE, "refusal": R_VOID_UNKNOWN,
+        "source": "neither side publishes an abandonment rule we hold",
+        "detail": VOID_NOTE}
+
+    out["unmet"] = sorted({r["refusal"] for r in out["rules"].values()
+                           if r.get("applicable") and not r["established"]
+                           and r.get("refusal")})
+    out["attested"] = sorted(k for k, r in out["rules"].items()
+                             if r["established"]
+                             and r.get("evidence_class") in ATTESTING_CLASSES)
+    out["overall_established"] = not out["unmet"]
+    return out
