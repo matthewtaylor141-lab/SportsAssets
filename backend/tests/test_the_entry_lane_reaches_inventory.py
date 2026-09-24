@@ -279,6 +279,13 @@ def _stub(monkeypatch, *, ladder=LADDER, prose=VENUE_PROSE,
                 "pays_on": "THE_PRICED_OUTCOME", "intent": intent,
                 "levels_read": 3, "depth": 900.0, "sized": None,
                 "acquisition_ladder": ladder,
+                # THE VENUE'S OWN INSTANT. The freshness gate re-ages the
+                # book at the DECISION instant rather than inheriting the
+                # age it had at read time, so a stub that reports only
+                # `age_s` leaves the venue clock unmeasured and the gate
+                # blocks -- which is the correct refusal and is why this
+                # has to be supplied.
+                "venue_ts": now - 3.0,
                 "age_s": 3.0, "age_basis": "VENUE_TRANSACT_TIME",
                 "bid": None, "read_at": now, "slug": us_slug}
 

@@ -1277,6 +1277,8 @@ async def entry_evidence(conn, *, hours: int = 24, limit: int = 20) -> dict:
     decision that created no position would be a valuation wearing the
     word "entry", and this read is where that shows.
     """
+    import json as _json
+
     from .. import bettor_entry_execution as entryx
     from .. import bettor_entry_inventory as inv
     from .. import bettor_external_shadow as ext
@@ -1309,10 +1311,43 @@ async def entry_evidence(conn, *, hours: int = 24, limit: int = 20) -> dict:
         # print the same.
         calibration = {"measured": False, "read_failed": type(exc).__name__}
 
+    # JSONB COMES BACK AS A STRING, AND THE API MUST NOT PASS THAT ON.
+    #
+    # asyncpg returns a jsonb column as the raw JSON TEXT unless a codec is
+    # registered, so `execution_estimate` and friends were serialised into
+    # the response as STRINGS containing JSON. Every reader then has to
+    # parse them, and the production report did not: jq stopped on "Cannot
+    # index string" after the first candidate, and because the failing
+    # command was upstream of a `tee` its exit status was discarded, so the
+    # error was never printed either. One candidate's evidence appeared out
+    # of twenty-five and nothing said why.
+    #
+    # My own local check had hand-parsed these fields before running the
+    # report against them -- mimicking a shape the API does not emit --
+    # which is why it looked verified. The endpoint's contract is JSON
+    # objects, so it parses them here.
+    def _obj(v):
+        if not isinstance(v, str):
+            return v
+        try:
+            return _json.loads(v)
+        except (ValueError, TypeError):
+            return {"unparsed": v[:400],
+                    "why": "this column did not contain readable JSON"}
+
+    cands = []
+    for r in rows:
+        d = dict(r)
+        for k in ("execution_estimate", "risk_verdict", "exposure_observed",
+                  "settlement_comparison"):
+            d[k] = _obj(d.get(k))
+        d["refusals"] = list(d.get("refusals") or [])
+        cands.append(d)
+
     return {
         "experiment_id": ext.EXPERIMENT_ID,
         "policy": inv.POLICY,
-        "candidates": [dict(r) for r in rows],
+        "candidates": cands,
         "inventory": [dict(r) for r in held],
         "source_calibration": calibration,
         "risk_declaration": entryx.declaration(),

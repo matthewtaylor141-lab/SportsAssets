@@ -2245,7 +2245,12 @@ jobs:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
           API: ${{ github.event.inputs.api }}
         run: |
-          set -u
+          set -uo pipefail
+          # `pipefail`, AND IT MATTERS HERE. `jq ... | tee -a` takes tee's
+          # exit status, so when jq stopped on a type error after the first
+          # candidate the `||` branch never fired and the error was never
+          # printed: ONE candidate's evidence appeared out of twenty-five
+          # and the report looked complete.
           # THE ADMIN ROUTES LIVE ON THE API ORIGIN, not on the proxied
           # host: netlify.toml proxies only /api/command/*. Addressing the
           # proxy returned 404 on every admin POST in run 39, and the tell
@@ -2357,9 +2362,17 @@ jobs:
           # happened; the evaluator scores the recorded point-in-time
           # probabilities. A shortfall is the expected first answer and is
           # NOT written -- the row is what the gate reads.
-          C=$(curl -s -o /tmp/cal.json -w '%{http_code}' --max-time 180 \
+          # THE JOIN IS PACED, SO THE CLIENT MUST WAIT FOR IT. Each
+          # unjoined valuation costs one paced venue read; at the default
+          # limit of sixty that can exceed any 180 s budget, and it did --
+          # curl gave up and the step printed `HTTP 000000` with no file to
+          # read. A smaller batch per run and a client timeout that matches
+          # what the work can take. Collection is incremental by design:
+          # the next cycle joins the next batch.
+          : > /tmp/cal.json
+          C=$(curl -s -o /tmp/cal.json -w '%{http_code}' --max-time 600 \
               -X POST -H "$H" -H 'Content-Type: application/json' \
-              --data '{"days": 90}' \
+              --data '{"days": 90, "join_limit": 12}' \
               "$API/api/admin/external-source-calibration" || echo 000)
           say ""
           say "calibration HTTP $C"

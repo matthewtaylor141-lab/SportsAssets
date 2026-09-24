@@ -339,3 +339,41 @@ def test_a_settled_position_stops_occupying_capital_but_keeps_its_loss():
     # and so do the capital-hours it actually consumed while it was open.
     assert ex["observed"]["MAX_DRAWDOWN"] == pytest.approx(40.0 + 250.0)
     assert ex["observed"]["MAX_CAPITAL_HOURS"] == pytest.approx(900.0)
+
+
+# ── the decision clock, and re-ageing at it ──────────────────────────
+
+def test_the_venue_book_is_reaged_at_the_decision_not_at_the_read():
+    """THE HALF-FIX THIS COMPLETES. Moving the decision instant after the
+    venue, rules and fixture reads is only half the repair: the book's age
+    was still the age it had when it was READ, so a decision taken forty
+    seconds later inherited "2 s fresh"."""
+    from sportsassets.workers import ext_pinnacle_loop as loop
+
+    # read at t=100 against a venue stamp of 98; decision at t=140.
+    got = loop._entry_freshness({"observed_at": 130.0},
+                                {"age_s": 2.0, "venue_ts": 98.0,
+                                 "age_basis": "VENUE_TRANSACT_TIME"},
+                                140.0)
+    assert got["venue_age_at_read_s"] == 2.0
+    assert got["venue_age_s"] == 42.0
+    assert got["venue_age_basis"] == (
+        "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION")
+    assert got["both_reaged_at_the_decision"] is True
+    # AND IT REFUSES: 42 s is beyond the venue's own 30 s bound, which the
+    # read-time age would have hidden.
+    assert got["fresh"] is False
+
+
+def test_without_the_venues_own_clock_freshness_stays_unmeasured():
+    """There is nothing to re-age from, and our read time is not a
+    substitute: using it would make every quote fresh by construction."""
+    from sportsassets.workers import ext_pinnacle_loop as loop
+
+    got = loop._entry_freshness({"observed_at": 130.0},
+                                {"age_s": 2.0, "venue_ts": None,
+                                 "age_basis": "VENUE_CLOCK_NOT_PROVIDED"},
+                                140.0)
+    assert got["venue_age_s"] is None
+    assert got["fresh"] is None
+    assert got["venue_age_basis"] == "VENUE_CLOCK_NOT_PROVIDED"

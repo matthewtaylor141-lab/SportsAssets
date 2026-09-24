@@ -906,7 +906,7 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
     # asked. Falling back to our read time would make every quote look
     # fresh by construction, so the fallback is NAMED.
     venue_ts = snap.get("TRANSACT_TIME")
-    age, age_basis = None, "VENUE_CLOCK_NOT_PROVIDED"
+    age, age_basis, vt = None, "VENUE_CLOCK_NOT_PROVIDED", None
     try:
         if venue_ts not in (None, bs.NOT_IDENTIFIED):
             vt = float(venue_ts)
@@ -914,7 +914,7 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
             age = float(now) - vt
             age_basis = "VENUE_TRANSACT_TIME"
     except (TypeError, ValueError):
-        age, age_basis = None, "VENUE_CLOCK_UNPARSEABLE"
+        age, age_basis, vt = None, "VENUE_CLOCK_UNPARSEABLE", None
     if age is not None and age > MAX_VENUE_QUOTE_AGE_S:
         return {"ok": False, "refusal": R_VENUE_QUOTE_STALE,
                 "age_s": age, "limit_s": MAX_VENUE_QUOTE_AGE_S,
@@ -954,6 +954,12 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
             # one price with a number beside it.
             "acquisition_ladder": lad,
             "age_s": age, "age_basis": age_basis,
+            # THE VENUE'S OWN INSTANT, CARRIED OUT. `age_s` is the age at
+            # READ time, and a decision taken after two more network reads
+            # is not that fresh. Returning the timestamp lets the freshness
+            # gate re-age the book against the DECISION instant instead of
+            # inheriting a number measured earlier.
+            "venue_ts": vt,
             "read_at": read_at, "slug": slug,
             "displayed_depth_is_not_a_queue": True,
             # The bid is deliberately reported as None. The comparison
@@ -1261,12 +1267,28 @@ def _entry_freshness(quote, vq, now) -> dict:
     at = _quote_epoch(quote)
     if at is not None:
         p_age = float(now) - at
-    v_age = vq.get("age_s")
+    # BOTH CLOCKS RE-AGED AT THE DECISION INSTANT. `vq["age_s"]` is the
+    # age the book had when it was READ, and the decision that follows is
+    # taken after the rules read and the fixture-metadata read as well --
+    # so inheriting that number would claim a freshness the decision never
+    # had. The venue's own transact time is carried out of the read for
+    # exactly this, and when it did not provide one there is nothing to
+    # re-age from, which stays unmeasured rather than falling back to our
+    # read clock.
+    vt = vq.get("venue_ts")
+    if vt is not None:
+        v_age = float(now) - float(vt)
+        v_basis = "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION"
+    else:
+        v_age = None
+        v_basis = vq.get("age_basis") or "VENUE_CLOCK_NOT_PROVIDED"
     out = {"pinnacle_age_s": (None if p_age is None else round(p_age, 3)),
            "pinnacle_limit_s": PINNACLE_MAX_AGE_S,
            "venue_age_s": (None if v_age is None else round(float(v_age), 3)),
+           "venue_age_at_read_s": vq.get("age_s"),
            "venue_limit_s": MAX_VENUE_QUOTE_AGE_S,
-           "venue_age_basis": vq.get("age_basis"),
+           "venue_age_basis": v_basis,
+           "both_reaged_at_the_decision": True,
            "stalest_governs": True}
     if p_age is None or v_age is None:
         out["fresh"] = None
