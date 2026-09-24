@@ -701,7 +701,10 @@ jobs:
                    "legacy_backdated\t" + ((.legacy_backdated_and_reclassified // 0)|tostring),
                    "newest_decision\t"  + ((.newest_decision_ts // "none")|tostring),
                    "by_basis\t"         + ((.by_decision_basis // {})|tostring),
-                   "last_cycle\t"       + ((.last_cycle_prospective // {})|tostring)' \
+                   "why_none\t"         + ((.why_none_qualify // "-")|tostring),
+                   "flow\t"             + ((.last_cycle_prospective.flow // {})|tostring),
+                   "accounted\t"        + ((.last_cycle_prospective.every_candidate_accounted)|tostring),
+                   "last_cycle\t"       + ((.last_cycle_prospective.refusals // {})|tostring)' \
             /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
 
           # PREDICTION MATURITY -- whether 0 joined is waiting or a defect.
@@ -722,6 +725,74 @@ jobs:
             /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
 
           # THE PROGRESS PROVIDER: connected, or the named reason not.
+          # THE LEARNING EVALUATION, IN FULL. The tile reports counts;
+          # this is the measurement, including a baseline that was fixed
+          # before the outcomes rather than computed from them.
+          echo "-- learning evaluation (the measurement) --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          code=$(curl -s -o /tmp/ev.json -w '%{http_code}' --max-time 90 \
+                 -H "$H" "$API/api/command/rn1x/model-evaluation" || echo 000)
+          say "model-evaluation HTTP $code"
+          jq -r 'if .ok != true then
+                   "refusal\t" + ((.refusal // .error // "?")|tostring)
+                   + "  n=" + ((.n // 0)|tostring)
+                   + "  floor=" + ((.floor // "?")|tostring)
+                 else
+                   "target\t"       + ((.target // "?")|tostring),
+                   "n_rows\t"       + ((.n // 0)|tostring),
+                   "unique_cond\t"  + ((.clustering.unique_conditions // 0)|tostring),
+                   "largest_clust\t"+ ((.clustering.largest_cluster // 0)|tostring),
+                   "versions\t"     + ((.model_versions // [])|tostring),
+                   "first_pred\t"   + ((.predicted_at_first // "?")|tostring),
+                   "last_pred\t"    + ((.predicted_at_last // "?")|tostring),
+                   "log_loss\t"     + ((.log_loss // "?")|tostring),
+                   "brier\t"        + ((.brier // "?")|tostring),
+                   "obs_rate\t"     + ((.observed_outcome_rate // "?")|tostring),
+                   "prior_rows\t"   + ((.baseline.rows_with_a_stored_prior // 0)|tostring),
+                   "prior_missing\t"+ ((.baseline.rows_without // 0)|tostring),
+                   "base_logloss\t" + ((.baseline.baseline_log_loss // "UNAVAILABLE")|tostring),
+                   "delta_ll\t"     + ((.baseline.delta_log_loss_model_minus_baseline // "UNAVAILABLE")|tostring),
+                   "oos_verified\t" + ((.out_of_sample_check.verified_label_evidence_postdates_prediction // 0)|tostring),
+                   "oos_violations\t"+ ((.out_of_sample_check.n_violations // 0)|tostring),
+                   "is_oos\t"       + ((.is_out_of_sample)|tostring)
+                 end' /tmp/ev.json 2>/dev/null \
+            | tee -a "$GITHUB_STEP_SUMMARY" || head -c 300 /tmp/ev.json
+
+          # THE OBSERVATION DELIVERABLE: the captured terms against the
+          # ladders the collector actually persisted, with the
+          # hypothetical share kept apart from earned rewards.
+          echo "-- incentive: observed programme ladders --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          code=$(curl -s -o /tmp/os.json -w '%{http_code}' --max-time 120 \
+                 -H "$H" "$API/api/command/incentive/observed-share" \
+                 || echo 000)
+          say "observed-share HTTP $code"
+          jq -r 'if .ok != true then
+                   "refusal\t" + ((.refusal // .error // "?")|tostring)
+                 else
+                   "programme_ids\t"  + ((.programme_ids // [])|tostring),
+                   "matched\t"        + ((.matched_markets // [])|length|tostring),
+                   "not_observed\t"   + ((.programme_markets_not_observed // [])|length|tostring),
+                   "outside_prog\t"   + ((.observed_markets_not_in_programme // [])|length|tostring),
+                   "earned_usd\t"     + ((.earned_rewards_usd)|tostring),
+                   ((.results // [])[] | "  " + ((.market // "?")[27:40])
+                      + "\toff=" + ((.offset_ticks // 0)|tostring)
+                      + "\tsnaps=" + ((.snapshots // 0)|tostring)
+                      + "\tuptime=" + ((.qualifying_uptime // 0)|tostring)
+                      + "\tshare=" + ((.mean_share // 0)|tostring)
+                      + "\thypoth$=" + ((.reward_gross_usd // 0)|tostring))
+                 end' /tmp/os.json 2>/dev/null \
+            | tee -a "$GITHUB_STEP_SUMMARY" || head -c 300 /tmp/os.json
+
+          echo "-- the venue's own event payload (progress?) --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.second_half_exit.venue_event_probe
+                 | "events\t"      + ((.events_seen // 0)|tostring),
+                   "carries_period\t" + ((.carries_observed_period)|tostring),
+                   "progress_keys\t"  + ((.progress_like_keys // [])|tostring),
+                   "verdict\t"     + ((.verdict // "?")|tostring)' \
+            /tmp/pr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+
           echo "-- progress provider integration --" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           jq -r '.second_half_exit.provider_integration
