@@ -49,7 +49,7 @@ the control row false. Neither requires a deploy.
 
 ## 3 · Management click paths
 
-All behind the COMMAND session. **Eleven statuses**, each naming what it is
+All behind the COMMAND session. **Twelve statuses**, each naming what it is
 and why, with the badge vocabulary
 `LIVE / ARMED / STOPPED / BLOCKED / UNAVAILABLE / OK / EMPTY / CHECK`:
 
@@ -64,6 +64,7 @@ and why, with the badge vocabulary
 | `statuses.order_book_state` | resting orders, partial fills, cancellations, remaining size — **by lifecycle state** |
 | `statuses.shadow_pnl` | realised cash, fees, residual and unpaired quantity per lane |
 | `statuses.model_fitting` | target, predictions recorded, outcomes joined, last cycle, and that it promotes nothing |
+| `statuses.writer_ownership` | which loops hold their writer lock, read from `pg_locks`, and that an advisory lock binds only the loops that ask |
 
 The three lanes stay visibly separate by experiment id:
 `RN1X_MGMT_PAIR091_STOP16_V1` (historical replay),

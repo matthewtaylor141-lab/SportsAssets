@@ -90,7 +90,12 @@ STATUS_KEYS = ("historical_replay", "prospective_rn1_management",
                "order_book_state",
                "shadow_pnl",
                # ACTUAL MODEL FITTING, separate from the policy comparator.
-               "model_fitting")
+               "model_fitting",
+               # SINGLE-WRITER OWNERSHIP, read from pg_locks. It was a
+               # claim about code with no production read behind it, and
+               # two of the four loops did not even take the lock the
+               # claim described.
+               "writer_ownership")
 
 
 def _live(running: bool, has_rows: bool, *, what: str, why: str) -> dict:
@@ -217,7 +222,83 @@ async def statuses(pool) -> dict:
         "order_book_state": await _order_book_status(pool),
         "shadow_pnl": await _pnl_status(pool),
         "model_fitting": await _model_fitting_status(pool),
+        # A TWELFTH STATUS, because "single-writer ownership" was a claim
+        # about code with nothing behind it in production. It is now a
+        # read: which of the four writer locks is actually held.
+        "writer_ownership": await _writer_ownership_status(pool),
     }
+
+
+#: THE FOUR WRITER LOCKS, by the module that takes them. Each loop holds a
+#: session-scoped advisory lock for its whole life so a second instance
+#: becomes a standby that writes nothing rather than a second writer.
+WRITER_LOCKS = {
+    7723901544120032: "workers/rn1x_shadow",
+    7723901544120033: "workers/rn1x_learn_loop",
+    7723901544120034: "workers/ext_pinnacle_loop",
+    7723901544120035: "workers/rn1x_model_loop",
+}
+
+#: pg_locks splits a bigint advisory key into (classid, objid). Reassemble
+#: it rather than comparing halves, and take `granted` from the row: a
+#: waiting entry is not ownership.
+WRITER_LOCK_SQL = """
+    SELECT ((classid::bigint << 32) | objid::bigint) AS lock_key,
+           pid, granted
+      FROM pg_locks
+     WHERE locktype = 'advisory'
+"""
+
+
+async def _writer_ownership_status(pool) -> dict:
+    """Which loops hold their writer lock, read from the server.
+
+    This does NOT prove that only one process could ever write -- the lock
+    is advisory, so a writer that never asks for it is not stopped by it.
+    What it establishes is that each loop that DOES ask is holding its own
+    key, one pid per key, which is the property a second instance would
+    break and which was previously only asserted in a comment.
+    """
+    out = {"what": "SINGLE-WRITER OWNERSHIP: one advisory lock per loop",
+           "advisory_is_not_mandatory": (
+               "an advisory lock stops the loops that ask for it. A writer "
+               "that never asks is not prevented by it, so this is "
+               "ownership among the four loops, not a guarantee about any "
+               "other process"),
+           "expected": {str(k): v for k, v in WRITER_LOCKS.items()}}
+    try:
+        rows = await pool.fetch(WRITER_LOCK_SQL)
+    except Exception as exc:                                   # noqa: BLE001
+        out.update(badge="UNAVAILABLE",
+                   why="pg_locks unreadable: %s" % type(exc).__name__)
+        return out
+    held: dict = {}
+    for r in rows:
+        key = int(r["lock_key"])
+        if key not in WRITER_LOCKS:
+            continue
+        held.setdefault(WRITER_LOCKS[key], []).append(
+            {"pid": int(r["pid"]), "granted": bool(r["granted"])})
+    out["held"] = held
+    out["loops_holding_their_lock"] = len(held)
+    doubled = sorted(n for n, v in held.items()
+                     if len([x for x in v if x["granted"]]) > 1)
+    out["more_than_one_holder"] = doubled
+    if doubled:
+        out.update(badge="CHECK",
+                   why=("more than one granted holder on: %s. That is two "
+                        "writers, which is the thing the lock exists to "
+                        "prevent" % ", ".join(doubled)))
+    elif not held:
+        out.update(badge="EMPTY",
+                   why=("no writer lock is held on this database right now. "
+                        "Either no loop is armed, or they run against a "
+                        "different database than this read"))
+    else:
+        out.update(badge="OK",
+                   why=("%d of %d loops hold their own lock, one pid each"
+                        % (len(held), len(WRITER_LOCKS))))
+    return out
 
 
 ORDER_BOOK_SQL = """

@@ -506,19 +506,43 @@ async def _heartbeat(conn, out: dict) -> None:
         log.warning("rn1x_model: heartbeat failed", exc_info=True)
 
 
+#: ONE WRITER, AND ITS OWN KEY. This loop writes the prediction ledger.
+#: Two instances predicting the same open rows in the same second would
+#: both be inside their own transaction, so the unique key decides the
+#: winner and the loser reports duplicates -- a ledger whose row count
+#: depends on how many instances happened to be running is not evidence of
+#: anything. rn1x_shadow holds ...032, rn1x_learn_loop ...033,
+#: ext_pinnacle_loop ...034.
+LOCK_KEY = 7723901544120035
+
+
 async def run(get_pool) -> None:
-    while True:
-        delay = IDLE_POLL_S
-        try:
-            pool = await get_pool()
-            async with pool.acquire() as conn:
+    """Contend for the writer lock on ONE connection, then cycle.
+
+    Session-scoped, held for the loop's life, re-asked every IDLE_POLL_S
+    while standby -- the same discipline as the other three loops, for the
+    same reason: a lock taken per cycle on a pooled connection is released
+    when that connection goes back to the pool.
+    """
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        while not await conn.fetchval(
+                "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
+            log.info("rn1x_model STANDBY: another process holds the writer "
+                     "lock; writing nothing, retrying in %ss", IDLE_POLL_S)
+            await _heartbeat(conn, {"state": "STANDBY_NOT_THE_WRITER"})
+            await asyncio.sleep(IDLE_POLL_S)
+        log.info("rn1x_model: writer lock held (key %s)", LOCK_KEY)
+        while True:
+            delay = IDLE_POLL_S
+            try:
                 out = await cycle(conn)
-            log.info("rn1x_model: %s", {k: v for k, v in out.items()
-                                        if k != "assumptions"})
-            if out.get("ran"):
-                delay = CYCLE_S
-        except asyncio.CancelledError:
-            raise
-        except Exception:                                      # noqa: BLE001
-            log.warning("rn1x_model: cycle failed", exc_info=True)
-        await asyncio.sleep(delay)
+                log.info("rn1x_model: %s", {k: v for k, v in out.items()
+                                            if k != "assumptions"})
+                if out.get("ran"):
+                    delay = CYCLE_S
+            except asyncio.CancelledError:
+                raise
+            except Exception:                                  # noqa: BLE001
+                log.warning("rn1x_model: cycle failed", exc_info=True)
+            await asyncio.sleep(delay)

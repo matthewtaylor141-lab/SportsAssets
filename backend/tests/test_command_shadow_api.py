@@ -358,7 +358,11 @@ def test_all_eight_statuses_are_declared_separately():
         # re-runs policies and fits nothing; `model_fitting` is the
         # prepare/fit/predict/join/evaluate pipeline. One tile over both
         # would let a policy comparison read as model training.
-        "model_fitting")
+        "model_fitting",
+        # SINGLE-WRITER OWNERSHIP as a read rather than a comment. Two of
+        # the four loops did not take the lock the checklist claimed for
+        # them; this tile is where that is now visible.
+        "writer_ownership")
     # and the two belief paths are NOT the same key
     assert "independent_ev_entries" != "external_valuation"
     # nor are the two learning paths

@@ -641,6 +641,18 @@ async def _heartbeat(conn, out: dict) -> None:
 IDLE_POLL_S = 60.0
 
 
+#: ONE WRITER, AND ITS OWN KEY. This loop writes `external_valuations`
+#: and its own heartbeat. Two instances -- two API instances, or an
+#: overlapping deploy -- would each spend provider credits and each write
+#: the same observation, and the one-per-observation index would turn the
+#: second one's work into silent DUPLICATE_OBSERVATION_SKIPPED rows rather
+#: than into an error anyone would see. The key is this loop's alone: a
+#: key shared with the shadow loop would make one of them a standby of the
+#: other, which is a different bug wearing the same lock.
+#: rn1x_shadow holds ...032 and rn1x_learn_loop ...033.
+LOCK_KEY = 7723901544120034
+
+
 async def run(get_pool) -> None:
     """The long-running task. Armed from the API's startup.
 
@@ -648,18 +660,35 @@ async def run(get_pool) -> None:
     anything waits CYCLE_S, because that interval IS the provider budget.
     A cycle that was stopped or blocked waits IDLE_POLL_S, because it
     consumed nothing and the control row is the thing it is waiting for.
+
+    THE WRITER LOCK IS SESSION-SCOPED, so it is held on ONE connection for
+    the loop's whole life. Acquiring it per cycle and returning that
+    connection to the pool would release it, which is a lock that reads as
+    present and enforces nothing. The contention is re-asked every
+    IDLE_POLL_S so a standby can actually take over -- a standby that
+    never asks again cannot.
     """
-    while True:
-        delay = IDLE_POLL_S
-        try:
-            pool = await get_pool()
-            async with pool.acquire() as conn:
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        while not await conn.fetchval(
+                "SELECT pg_try_advisory_lock($1)", LOCK_KEY):
+            log.info("ext_pinnacle STANDBY: another process holds the "
+                     "writer lock; writing nothing, retrying in %ss",
+                     IDLE_POLL_S)
+            await _heartbeat(conn, {
+                "state": "STANDBY_NOT_THE_WRITER",
+                "refusals": {"ANOTHER_PROCESS_HOLDS_THE_WRITER_LOCK": 1}})
+            await asyncio.sleep(IDLE_POLL_S)
+        log.info("ext_pinnacle: writer lock held (key %s)", LOCK_KEY)
+        while True:
+            delay = IDLE_POLL_S
+            try:
                 out = await cycle(conn)
-            log.info("ext_pinnacle: %s", out)
-            if out.get("ran"):
-                delay = CYCLE_S
-        except asyncio.CancelledError:
-            raise
-        except Exception:                                      # noqa: BLE001
-            log.warning("ext_pinnacle: cycle failed", exc_info=True)
-        await asyncio.sleep(delay)
+                log.info("ext_pinnacle: %s", out)
+                if out.get("ran"):
+                    delay = CYCLE_S
+            except asyncio.CancelledError:
+                raise
+            except Exception:                                  # noqa: BLE001
+                log.warning("ext_pinnacle: cycle failed", exc_info=True)
+            await asyncio.sleep(delay)

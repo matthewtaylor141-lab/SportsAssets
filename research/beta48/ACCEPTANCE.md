@@ -82,7 +82,7 @@ Last updated 2026-09-24T02:2xZ, against the run-21 production read
 | 3.6 | prospective RN1 records audited and reclassified | ✓ | ✓ | ✓ | ✓ | **147 positions at 02:05:46Z: 0 prospective-capable, 130 backdated** (126 historical + all 4 prospective), 17 `REPLAY_AT_AVAILABILITY`. Badge `CHECK` |
 | 3.7 | atomic persistence | ✓ | ✓ | ✓ | ✓* | controlled: a failed transaction leaves no position |
 | 3.8 | idempotency | ✓ | ✓ | ✓ | ✓* | migration 105; a replayed cycle duplicates nothing |
-| 3.9 | single-writer ownership | ✓ | ✓ | ✓ | ⏳ | advisory lock per loop; each loop has its own |
+| 3.9 | single-writer ownership | ✓ | ✓ | ✓ | ⏳ | **this row was wrong and is corrected.** It claimed an advisory lock per loop; `ext_pinnacle_loop` and `rn1x_model_loop` took **no lock at all** and acquired a pooled connection per cycle, which cannot hold a session-scoped lock. Both now contend for their own key (…034, …035) on one connection held for the loop's life, re-asking every 60 s so a standby can take over. A twelfth tile, `writer_ownership`, reads `pg_locks` and says which loops hold theirs; the key reassembly was verified against a real server. `tests/test_single_writer_ownership.py` pins all four keys distinct, the one-connection discipline and the retry. OBS awaits the next authenticated read |
 | 3.10 | controlled restart recovery | ✓ | ✓ | ✓ | ✓* | controlled: fresh connection, identical state, no duplication |
 
 ## §4 · Continuous learning
