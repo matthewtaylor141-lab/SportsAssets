@@ -673,14 +673,26 @@ jobs:
           # explain, asked directly instead of waiting for a cycle.
           echo "-- venue read probe (the loop's own reader) --" \
             | tee -a "$GITHUB_STEP_SUMMARY"
+          # `candidates`, `error` and the per-row `exception` are printed
+          # because run 26 printed NONE of them: the probe raised a
+          # TypeError in our own code, the handler put it in a field this
+          # read ignored, and `attempted 1 / ok 0 / results []` was taken
+          # as a venue refusal. A crash in the probe must be legible AS a
+          # crash in the probe.
           jq -r '.venue_read_probe
-                 | "attempted\t" + ((.attempted // 0)|tostring),
+                 | "candidates\t" + ((.candidates // 0)|tostring),
+                   "attempted\t" + ((.attempted // 0)|tostring),
                    "ok\t"        + ((.ok // 0)|tostring),
+                   "probe_error\t" + ((.error // "-")|tostring)
+                                  + " " + ((.error_detail // "")|tostring),
+                   "probe_refusal\t" + ((.refusal // "-")|tostring),
                    "verdict\t"   + ((.verdict // "?")|tostring),
                    ((.results // [])[]
-                      | "  " + ((.condition_id // "?")[0:14])
+                      | "  " + ((.us_market_slug // "?")|tostring)
                         + "\t" + ((.ok)|tostring)
                         + "\t" + ((.refusal // "-")|tostring)
+                        + "\t" + ("exc=" + ((.exception // "-")|tostring)
+                                  + " " + ((.detail // "")|tostring))
                         + "\t" + (((.diagnostic // {}) | "stage=" +
                             ((.stage // "-")|tostring) + " code=" +
                             ((.code // "-")|tostring) + " status=" +
@@ -721,7 +733,12 @@ jobs:
           echo "-- active writer code identity --" \
             | tee -a "$GITHUB_STEP_SUMMARY"
           jq -r '"external\t" + ((.statuses.external_valuation.last_cycle.writer // "none")|tostring),
-                 "model\t"    + ((.statuses.model_fitting.last_cycle.writer // "none")|tostring)' \
+                 "model\t"    + ((.statuses.model_fitting.last_cycle.writer // "none")|tostring),
+                 # THE STANDBY, AS ITS OWN LINE. It used to be written
+                 # into last_cycle above, so every read returned the
+                 # empty cycle of the process that writes nothing.
+                 "external_standby\t" + ((.statuses.external_valuation.standby.state // "none")|tostring),
+                 "model_standby\t"    + ((.statuses.model_fitting.standby.state // "none")|tostring)' \
             /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
 
           # THE PROGRESS PROVIDER: connected, or the named reason not.

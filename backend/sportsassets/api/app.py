@@ -1937,45 +1937,120 @@ async def command_rn1x_external_probe(response: Response) -> dict:
     return out
 
 
+#: PROBE CANDIDATES FROM THE VENUE'S OWN CATALOGUE.
+#:
+#: The question this probe exists to answer is "can this process read a
+#: book from the venue", and the venue only accepts ITS OWN slug. Starting
+#: from a `markets` row means the answer depends on the identity crossing
+#: succeeding first, so a crossing refusal would be reported as a venue
+#: failure -- which is exactly the confusion that has cost three runs.
+#:
+#: So: candidates come straight from `us_premap`, which IS the venue's
+#: catalogue. `aec-` is the winner/moneyline family (the one this
+#: experiment prices), the `-draw` sibling is excluded because it is a
+#: different contract, and the recency bound is the loop's own -- a row the
+#: refresher stopped updating days ago cannot answer a book read whatever
+#: our flags say.
+_PROBE_VENUE_SQL = """
+    SELECT market_slug, event_slug, side_norm, kind, sports_type,
+           team_league, game_start, updated_at
+      FROM us_premap
+     WHERE market_slug LIKE 'aec-%'
+       AND lower(market_slug) NOT LIKE '%-draw'
+       AND updated_at >= now() - make_interval(secs => $1::float8)
+     ORDER BY updated_at DESC
+     LIMIT 200
+"""
+
+
 async def _venue_read_probe(EXT, *, limit: int = 3) -> dict:
     """Attempt the loop's own venue read against a few open markets.
 
-    Same function, same pacing, same refusal codes as the cycle -- a probe
+    Same functions, same order, same refusal codes as the cycle -- a probe
     that used a different reader would answer a different question.
+
+    IT MUST CROSS THE IDENTITY NAMESPACE FIRST. `markets.slug` is the
+    GLOBAL catalogue id; `pmus.book_read` only accepts the VENUE's own
+    slug, which lives in `us_premap` and is reached through
+    `premap.resolve`. This probe used to hand the global id straight to
+    `venue_quote`, which is the same defect the cycle was fixed for.
+
+    THE FAILURE THIS REWRITE IS FOR. After `venue_quote` was corrected to
+    take `us_slug`, this call still passed `condition_id=`, so it raised
+    TypeError on the FIRST row. The outer handler swallowed it into
+    `probe["error"]` after `attempted` had already been incremented, and
+    the loop never ran again -- so run 26 reported
+
+        attempted 1   ok 0   results []   (no diagnostic printed)
+
+    which reads as "the venue refused" and actually meant "the probe
+    crashed before reaching the venue". `attempted` is now only counted
+    once a row has genuinely been attempted, and a raise is attributed to
+    the row it happened on instead of ending the probe silently.
     """
     from ..db import get_pool
 
     probe = {"reader": "workers.ext_pinnacle_loop.venue_quote",
+             "candidates_from": "us_premap (the venue's own catalogue)",
              "endpoint": "markets.book", "attempted": 0, "ok": 0,
-             "results": []}
+             "candidates": 0, "results": []}
     try:
-        labels = sorted({lbl for _, fam in EXT.SPORTS
-                         for lbl in EXT.VENUE_SPORT_LABELS.get(fam, ())})
         pool = await get_pool()
         async with pool.acquire() as conn:
-            rows = await conn.fetch(EXT.MARKETS_SQL, labels,
+            rows = await conn.fetch(_PROBE_VENUE_SQL,
                                     EXT.MARKET_STALE_AFTER_S)
+            probe["candidates"] = len(rows)
+            if not rows:
+                probe["refusal"] = "NO_FRESH_VENUE_CONTRACT_IN_PREMAP"
+                probe["why"] = (
+                    "the venue's catalogue carries no aec- contract updated "
+                    "inside the loop's recency bound, so there is nothing to "
+                    "read a book for. That is a catalogue-freshness fact, "
+                    "not a venue refusal")
             for r in list(rows)[:max(1, int(limit))]:
+                row = dict(r)
+                item = {"us_market_slug": row.get("market_slug"),
+                        "event_slug": row.get("event_slug"),
+                        "side_norm": row.get("side_norm"),
+                        "updated_at": (row["updated_at"].isoformat()
+                                       if row.get("updated_at") else None),
+                        "ok": False, "stage": "BOOK_READ"}
                 probe["attempted"] += 1
-                vq = await EXT.venue_quote(
-                    conn, condition_id=r["condition_id"],
-                    outcome_index=0, now=time.time())
-                item = {"condition_id": r["condition_id"],
-                        "ok": bool(vq.get("ok")),
-                        "refusal": vq.get("refusal"),
-                        "diagnostic": vq.get("diagnostic")}
-                if vq.get("ok"):
-                    probe["ok"] += 1
-                    item.update(ask=vq.get("ask"), depth=vq.get("depth"),
-                                age_s=vq.get("age_s"),
-                                age_basis=vq.get("age_basis"))
+                try:
+                    vq = await EXT.venue_quote(
+                        conn, us_slug=row["market_slug"],
+                        outcome_index=0, now=time.time())
+                    item.update(ok=bool(vq.get("ok")),
+                                refusal=vq.get("refusal"),
+                                diagnostic=vq.get("diagnostic"))
+                    if vq.get("ok"):
+                        probe["ok"] += 1
+                        item.update(ask=vq.get("ask"), depth=vq.get("depth"),
+                                    age_s=vq.get("age_s"),
+                                    age_basis=vq.get("age_basis"))
+                except Exception as exc:                       # noqa: BLE001
+                    # ATTRIBUTED TO THE ROW, not hidden at the top level.
+                    # The previous version let one raise end the probe and
+                    # report `attempted 1, results []`, which reads as a
+                    # venue refusal and was a TypeError in our own code.
+                    item.update(refusal="PROBE_RAISED",
+                                exception=type(exc).__name__,
+                                detail=str(exc)[:200])
                 probe["results"].append(item)
     except Exception as exc:                                   # noqa: BLE001
         probe["error"] = type(exc).__name__
+        probe["error_detail"] = str(exc)[:200]
     probe["verdict"] = (
-        "the venue read works from this process" if probe["ok"] else
-        "no open market in the supported sports returned a usable book; "
-        "the per-slug diagnostic above names the stage and the code")
+        "the venue-native book read WORKS from this process"
+        if probe["ok"] else
+        "no venue-native contract returned a usable book; the per-slug "
+        "diagnostic names the code, and `exception` means the probe itself "
+        "raised rather than the venue refusing")
+    probe["what_this_does_not_test"] = (
+        "the identity crossing. Candidates here are already venue-native, "
+        "so a pass means the BOOK READ works and any remaining failure is "
+        "in `resolve_venue_identity`. The cycle's own refusal tally is "
+        "where the crossing is measured")
     return probe
 
 
