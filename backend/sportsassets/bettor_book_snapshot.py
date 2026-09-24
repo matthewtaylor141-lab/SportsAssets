@@ -636,6 +636,72 @@ def fill_across_levels(ladder: dict, size: float) -> dict:
     return out
 
 
+def fill_to_notional(ladder: dict, budget_usd, max_price=None) -> dict:
+    """Walk an acquisition ladder to a DOLLAR budget, not a quantity.
+
+    WHY BOTH WALKS EXIST. `fill_across_levels` answers "we want N
+    contracts -- can the book supply them?". The frozen sizing policy asks
+    the other question: "we intend to spend $1,000 -- how many contracts
+    is that?" Deriving a quantity from the budget at one assumed price and
+    then walking it conflates the two, and it produced a real absurdity:
+    filling the whole intended quantity cheaply reported UNFILLED
+    NOTIONAL, because fewer dollars had been spent for exactly the
+    contracts asked for.
+
+    `max_price` is a limit in ACQUISITION (cost) space -- levels priced
+    above it are not taken at all, however much budget is left. The
+    entry lane's limit is its break-even price, so a level beyond it is
+    not worth buying rather than merely expensive.
+
+    `total_inside_limit` is what the whole ladder would support inside the
+    limit, which is the number the sizing policy needs to tell a budget
+    that was fully spent from a book that ran out.
+    """
+    want = float(budget_usd or 0)
+    cap = None if max_price is None else float(max_price)
+    out = {"budget_usd": want, "filled": 0.0, "cost": 0.0,
+           "levels_used": 0, "covers_budget": False,
+           "total_inside_limit": 0.0, "max_price": cap}
+    if not ladder.get("ok") or want <= 0:
+        return {**out, "refusal": ladder.get("refusal") or R_SIDE_EMPTY}
+
+    filled = cost = total = 0.0
+    used = 0
+    for lv in ladder["levels"]:
+        px = float(lv["acquisition_price"])
+        if cap is not None and px > cap:
+            break
+        qty = float(lv["qty"])
+        total += qty * px
+        if cost >= want:
+            continue
+        # PARTIAL LEVELS ARE ALLOWED, WHOLE CONTRACTS ARE NOT ASSUMED.
+        # Taking a fraction of a level is ordinary; rounding the quantity
+        # up to spend the last cent would invent liquidity.
+        afford = (want - cost) / px
+        take = min(qty, afford)
+        if take <= 0:
+            continue
+        filled += take
+        cost += take * px
+        used += 1
+
+    out.update(filled=round(filled, 6), cost=round(cost, 6),
+               levels_used=used, total_inside_limit=round(total, 6),
+               covers_budget=cost + 1e-9 >= want)
+    if filled > 0:
+        out["vwap_acquisition_price"] = round(cost / filled, 6)
+    else:
+        out["refusal"] = R_NOT_ENOUGH_DEPTH
+        out["why"] = ("no level is at or inside the limit %s"
+                      % ("none" if cap is None else "%.6f" % cap))
+        return out
+    if not out["covers_budget"]:
+        out["why"] = ("the ladder supports $%.2f of the $%.2f intended "
+                      "inside the limit" % (cost, want))
+    return out
+
+
 # ── EXITING IS NOT ACQUIRING, AND THE TWO PRICES ARE NOT THE SAME ────
 #
 # THE DEFECT THIS EXISTS FOR, found by independent inspection of

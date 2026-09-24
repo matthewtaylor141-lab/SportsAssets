@@ -45,6 +45,7 @@ import re
 import time
 
 from .. import bettor_entry_execution as entryx
+from .. import bettor_entry_inventory as inv
 from .. import bettor_external_shadow as ext
 from .. import bettor_fixture_metadata as fmeta_mod
 from .. import bettor_pinnacle_devig as devig
@@ -794,7 +795,48 @@ async def venue_settlement_evidence(conn, us_market_slug: str) -> dict:
             out.update(draw_contract_present=True, draw_slug=str(draw))
     except Exception as exc:                                   # noqa: BLE001
         out["error"] = type(exc).__name__
+
+    # THE VENUE'S OWN PUBLISHED PROSE, FETCHED RATHER THAN ASSUMED ABSENT.
+    #
+    # `attest` compares the bookmaker's captured terms against
+    # `rules_text`, condition by condition. This function never supplied
+    # it, so every entry candidate's settlement comparison was UNKNOWN
+    # for want of a read -- which is not the same as the venue publishing
+    # nothing, and `bettor_live_read.read_rules_text` exists precisely
+    # because that distinction was got wrong once already.
+    #
+    # One listing read per candidate, paced and bounded by MAX_PER_CYCLE,
+    # and it never raises: a failed read leaves the prose absent and the
+    # comparison UNKNOWN, which is the same conservative answer as before
+    # -- it just now says which of the two happened.
+    rules = await asyncio.to_thread(_read_rules_blocking, us_market_slug)
+    out["rules_text"] = rules.get("rules_text")
+    out["rules_source"] = rules.get("source")
+    out["rules_read"] = rules
     return out
+
+
+def _read_rules_blocking(slug: str) -> dict:
+    """The venue's published rules prose for one contract. Never raises."""
+    from .. import bettor_live_read as blr
+    from .. import pmus
+    from ..venue_pace import pace
+
+    pace()
+    try:
+        client = pmus._get_client()
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "rules_text": None,
+                "error": type(exc).__name__,
+                "source": "pmus:/markets?slug=<slug>:rules_text",
+                "stage": "CLIENT_CONSTRUCTION"}
+    try:
+        return blr.read_rules_text(client, slug)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "rules_text": None,
+                "error": type(exc).__name__,
+                "source": "pmus:/markets?slug=<slug>:rules_text",
+                "stage": "RULES_READ"}
 
 
 async def venue_quote(conn, *, us_slug, intent, now, size=None):
@@ -991,6 +1033,41 @@ def _risk_action(intent) -> str:
             else "TAKE_YES")
 
 
+def _quote_epoch(quote):
+    """The provider's `last_update` as epoch seconds, or None.
+
+    THE PROVIDER STATES ISO-8601. `quote["observed_at"]` is that string;
+    the de-vig parses it internally, so callers that read the field raw
+    got a string. `float()` on it made the freshness gate report "one of
+    the two clocks is not measured" for EVERY candidate -- a wrong refusal
+    that looked like a venue problem -- and made the quote-context rule
+    raise. Parsed once, here, through the odds source's own reader.
+    """
+    at = (quote or {}).get("observed_at")
+    if at is None:
+        return None
+    if isinstance(at, (int, float)):
+        return float(at)
+    try:
+        return float(devig._epoch(at))
+    except (TypeError, ValueError):
+        return None
+
+
+def _outcome_index(intent) -> int:
+    """Which leg of the binary contract this entry holds.
+
+    DECLARED, NOT DEFAULTED. `markets` carries no outcome index for this
+    lane and `or 0` would have silently filed every SHORT leg under the
+    LONG one -- so a long and a short on the same market would have
+    collided on the one-position-per-exposure index and the second would
+    have read as a duplicate of the first. The venue holds one signed net
+    position per market; 0 is the priced selection and 1 is its
+    complement, which is exactly the side a BUY_SHORT acquires.
+    """
+    return 1 if str(intent) == "ORDER_INTENT_BUY_SHORT" else 0
+
+
 #: The odds source's own hard rule, restated where the gate can see it.
 #: `bettor_pinnacle_devig` refuses a quote older than this; the entry
 #: lane's freshness gate must not be laxer than the valuation's.
@@ -1008,11 +1085,9 @@ def _entry_freshness(quote, vq, now) -> dict:
     look fresh by construction.
     """
     p_age = None
-    try:
-        if quote.get("observed_at") is not None:
-            p_age = float(now) - float(quote["observed_at"])
-    except (TypeError, ValueError):
-        p_age = None
+    at = _quote_epoch(quote)
+    if at is not None:
+        p_age = float(now) - at
     v_age = vq.get("age_s")
     out = {"pinnacle_age_s": (None if p_age is None else round(p_age, 3)),
            "pinnacle_limit_s": PINNACLE_MAX_AGE_S,
@@ -1033,6 +1108,55 @@ def _entry_freshness(quote, vq, now) -> dict:
                   % (p_age, PINNACLE_MAX_AGE_S, float(v_age),
                      MAX_VENUE_QUOTE_AGE_S))
     return out
+
+
+CALIBRATION_SQL = """
+    SELECT source_version, sample_size, metric, score, tolerance,
+           within_tolerance, measured_by,
+           to_char(measured_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS measured_at,
+           to_char(window_start, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
+               AS window_start,
+           to_char(window_end, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS window_end
+      FROM external_source_calibration
+     WHERE source_version = $1
+     ORDER BY measured_at DESC LIMIT 1
+"""
+
+
+async def source_calibration(conn, source_version) -> dict:
+    """The latest calibration MEASUREMENT for the external source.
+
+    `measured` is False when there is no row, when the table does not
+    exist, or when the read fails -- and in every one of those cases the
+    MODEL_TRUST_DRIFT gate stays NOT_EVALUABLE and blocks inventory. The
+    three cases are distinguished in `why` because they call for different
+    actions, but none of them is a pass.
+
+    THE GATE READS A ROW, NOT A CONSTANT, and that is the point: the
+    blocker is cleared by producing evidence about the source, not by
+    editing a boolean in a worker.
+    """
+    try:
+        row = await conn.fetchrow(CALIBRATION_SQL, str(source_version))
+    except Exception as exc:                                   # noqa: BLE001
+        return {"measured": False, "error": type(exc).__name__,
+                "source_version": source_version,
+                "why": ("the calibration read failed, which is not "
+                        "evidence that the source is calibrated")}
+    if row is None:
+        return {"measured": False, "error": None,
+                "source_version": source_version,
+                "why": ("no calibration has been measured for %s. Its own "
+                        "module says to validate it in shadow, and that "
+                        "measurement has not been made" % source_version)}
+    d = dict(row)
+    d["measured"] = True
+    d["why"] = ("%s = %.6f against a tolerance of %.6f over %d resolved "
+                "observations (%s to %s), measured by %s"
+                % (d["metric"], float(d["score"]), float(d["tolerance"]),
+                   int(d["sample_size"]), d["window_start"], d["window_end"],
+                   d["measured_by"]))
+    return d
 
 
 OPEN_BOOK_SQL = """
@@ -1082,7 +1206,8 @@ def _settlement_compatibility(srule) -> dict:
 
 
 def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
-                event_key, open_book, settlement, freshness, now):
+                event_key, open_book, settlement, freshness, calibration,
+                now):
     """A callable `bettor_external_shadow.evaluate` invokes once.
 
     It receives the fair value that function computed -- so there is
@@ -1119,13 +1244,12 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
             freshness=freshness,
             settlement=_settlement_compatibility(settlement),
             probability=fair_value,
-            # NO CALIBRATION RECORD IS SUPPLIED, and that is a fact about
-            # the source rather than an omission here. Passing one would
-            # assert that PINNACLE_DEVIG_V1's accuracy has been measured
-            # against outcomes. It has not: the de-vig module's own note
-            # on its default method is "validate in shadow". The gate
-            # therefore stays NOT_EVALUABLE and blocks inventory.
-            calibration=None)
+            # THE MEASUREMENT AS READ, not an assertion made here.
+            # Production finds no row -- PINNACLE_DEVIG_V1's own note on
+            # its default method is "validate in shadow" and that
+            # validation has not been done -- so the gate stays
+            # NOT_EVALUABLE and blocks inventory creation.
+            calibration=calibration)
         verdict = entryx.verdict(action, observed=exposure["observed"],
                                  state=gates["state"])
         detail.update({"exposure": exposure, "gates": gates,
@@ -1209,6 +1333,13 @@ async def cycle(conn) -> dict:
     open_book = await open_shadow_book(conn, ext.EXPERIMENT_ID)
     if open_book is None:
         tally[entryx.R_BOOK_NOT_READ] = 1
+    #: What this cycle actually created, reported per entry so a reader
+    #: never has to infer inventory from a refusal count.
+    entries: list = []
+    # THE CALIBRATION MEASUREMENT, read once per cycle. Absent, the
+    # MODEL_TRUST_DRIFT gate blocks every entry -- which is the current
+    # production state and is reported rather than worked around.
+    calibration = await source_calibration(conn, devig.VERSION)
 
     for sport_key, family in SPORTS:
         if evaluated >= MAX_PER_CYCLE:
@@ -1330,13 +1461,13 @@ async def cycle(conn) -> dict:
                     {"play_has_begun": fmeta.get("play_has_begun"),
                      "actual_start_at": fmeta.get("actual_start_at"),
                      "retrieved_at": fmeta.get("retrieved_at")},
-                    observed_at=quote.get("observed_at"))
+                    observed_at=_quote_epoch(quote))
             srule = vset.attest(
                 sport_family=family, market="h2h",
                 venue_evidence=vevid,
                 book_evidence={"outcome_names": list(quote["prices"].keys()),
                                "source": "theoddsapi:h2h:%s" % devig.BOOK},
-                observed_at=quote.get("observed_at"),
+                observed_at=_quote_epoch(quote),
                 book_context=(ctx_ev or {}).get("context"),
                 phase=fmeta.get("phase"),
                 game_format=fmeta.get("game_format"))
@@ -1442,6 +1573,7 @@ async def cycle(conn) -> dict:
                     open_book=open_book,
                     settlement=srule,
                     freshness=_entry_freshness(quote, vq, now),
+                    calibration=calibration,
                     now=now),
                 # Still passed, and still what the gate sees if no plan
                 # is built: a missing estimate refuses by name.
@@ -1483,6 +1615,41 @@ async def cycle(conn) -> dict:
             key = "ADMITTED" if rec.get("admissible") else None
             if key:
                 tally[key] = tally.get(key, 0) + 1
+                # AN ADMITTED DECISION BECOMES INVENTORY. Writing the
+                # valuation row alone is a decision record, not an entry:
+                # nothing would hold a position, owe a fee, carry
+                # residual quantity or have to reconcile. The rows land
+                # in the same four tables the managed position uses, so
+                # the existing management cycle picks this up as an
+                # ordinary open position on its next pass.
+                try:
+                    plan = inv.plan_entry(
+                        rec, now=now,
+                        outcome_index=_outcome_index(ident["intent"]),
+                        fee_fn=fee_fn)
+                    wrote = await inv.persist_entry(conn, plan)
+                    rec["inventory"] = wrote
+                    entries.append({
+                        "position_id": wrote.get("position_id"),
+                        "decision_id": wrote.get("decision_id"),
+                        "order_id": wrote.get("order_id"),
+                        "written": wrote.get("written"),
+                        "refusals": wrote.get("refusals"),
+                        "accounting": wrote.get("accounting")})
+                    if wrote.get("written"):
+                        tally["ENTRY_INVENTORY_WRITTEN"] = \
+                            tally.get("ENTRY_INVENTORY_WRITTEN", 0) + 1
+                    else:
+                        for code in wrote.get("refusals") or []:
+                            tally[code] = tally.get(code, 0) + 1
+                except Exception as exc:                       # noqa: BLE001
+                    # THE VALUATION ROW IS ALREADY DOWN. An inventory
+                    # write that fails must not erase the decision that
+                    # preceded it, so this is counted and named rather
+                    # than raised.
+                    tally["ENTRY_INVENTORY:" + type(exc).__name__] = \
+                        tally.get("ENTRY_INVENTORY:"
+                                  + type(exc).__name__, 0) + 1
             else:
                 for code in rec.get("refusals", []):
                     tally[code] = tally.get(code, 0) + 1
@@ -1493,6 +1660,9 @@ async def cycle(conn) -> dict:
            "refusals": tally, "credits": credits,
            "venue_errors": venue_errors,
            "markets_considered": len(markets),
+           "entries": entries,
+           "source_calibration": calibration,
+           "open_book_rows": (None if open_book is None else len(open_book)),
            "elapsed_s": round(time.time() - started, 2),
            "order_submitted": False}
     await _heartbeat(conn, out)

@@ -283,6 +283,21 @@ def context_for(evidence, *, observed_at) -> dict:
     also before the first pitch. Anything else stays UNKNOWN.
     """
     ev = dict(evidence or {})
+    # A STAMP THIS FUNCTION CANNOT READ IS A REFUSAL, NOT AN EXCEPTION.
+    # `observed_at` arrives from a caller, and one of them handed in the
+    # provider's ISO-8601 `last_update` string. `float()` on it raised
+    # ValueError out of a scheduled worker's candidate loop -- a crash
+    # where the module's whole contract is to answer UNKNOWN. Parsed here
+    # the same way every other timestamp in this module is, and an
+    # unreadable one leaves the context unestablished, which blocks.
+    if observed_at is not None and not isinstance(observed_at, (int, float)):
+        observed_at = _epoch(observed_at)
+        if observed_at is None:
+            return {"context": None, "refusal": ST.R_CONTEXT_UNKNOWN,
+                    "observed_at": None,
+                    "why": ("the quote's observation time could not be read "
+                            "as a time, so it cannot be placed before or "
+                            "after any reported event state")}
     begun = ev.get("play_has_begun")
     if begun is None:
         return ST.book_context_for(observed_at=observed_at, start_at=None)

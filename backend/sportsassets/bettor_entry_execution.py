@@ -226,33 +226,24 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
                       "be paid" % limit)
         return out
 
-    # THE INTENDED QUANTITY, FROM THE FROZEN NOTIONAL AND THE LIMIT.
-    # Book-independent on purpose: an intended size derived from the
-    # depth on offer cannot then measure whether the depth covered it.
+    # THE INTENT IS A DOLLAR AMOUNT, WHICH IS WHAT THE POLICY FROZE.
+    #
+    # An earlier version turned the budget into a quantity at the limit
+    # and walked THAT, which made the three sizing figures incoherent:
+    # buying every contract intended at a price well inside break-even
+    # reported UNFILLED NOTIONAL, because fewer dollars had been spent for
+    # exactly what was asked for. The budget is the intent; the quantity
+    # is whatever the budget buys inside the limit.
     intended_notional = float(
         intended_notional_usd
         if intended_notional_usd is not None
         else sizing.STANDARD_BETTOR_SHADOW_NOTIONAL_USD)
-    intended_qty = intended_notional / limit
+    walk = bs.fill_to_notional(ladder, intended_notional, max_price=limit)
     out.update({"intended_notional_usd": intended_notional,
-                "intended_qty": round(intended_qty, 6),
-                "intended_qty_basis": (
-                    "the frozen standard notional at the break-even "
-                    "limit, so it does not depend on the book it is "
-                    "about to be measured against"),
+                "budget_walk": walk,
                 "sizing_policy_version": sizing.SIZING_POLICY_VERSION,
                 "cohort": sizing.COHORT})
-
-    fill = shadow.marketable_fill(
-        shadow.BUY, intended_qty, limit,
-        ladder_as_arrival_book(ladder), decision_price=best)
-    out["marketable_fill"] = fill
-    out["execution_class"] = fill.get("executionClass")
-    if fill.get("status") == shadow.NOT_IDENTIFIED:
-        out["refusals"].append(R_FILL_NOT_IDENTIFIED)
-        out["why"] = fill.get("why")
-        return out
-    filled = fill.get("shadowFilledQty") or 0.0
+    filled = float(walk.get("filled") or 0.0)
     if filled <= 0:
         out["refusals"].append(R_NOTHING_INSIDE_LIMIT)
         out["why"] = ("the ladder's best acquisition price %.6f is "
@@ -260,22 +251,46 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
                       "worth taking" % (best, limit))
         return out
 
+    # THE SAME QUANTITY, RECONSTRUCTED AGAINST THE OBSERVED BOOK.
+    # The budget walk decides how much to ask for; this is the engine
+    # that says what the arrival book would actually have given, and it
+    # is the one that refuses rather than guessing. Two walks over one
+    # ladder must agree on the price, and a disagreement is a refusal
+    # rather than a choice between them.
+    fill = shadow.marketable_fill(
+        shadow.BUY, filled, limit,
+        ladder_as_arrival_book(ladder), decision_price=best)
+    out["marketable_fill"] = fill
+    out["execution_class"] = fill.get("executionClass")
+    if fill.get("status") == shadow.NOT_IDENTIFIED or not fill.get("vwap"):
+        out["refusals"].append(R_FILL_NOT_IDENTIFIED)
+        out["why"] = fill.get("why") or "the arrival book gave no fill"
+        return out
     vwap = float(fill["vwap"])
-    coverage = filled / intended_qty
-    # COVERAGE CANNOT EXCEED 1: `marketable_fill` never fills more than
-    # asked. Clamping is belt-and-braces against a float edge, not a
-    # correction of the engine.
-    coverage = min(1.0, coverage)
+    if abs(vwap - float(walk.get("vwap_acquisition_price") or 0.0)) > 1e-6:
+        out["refusals"].append(R_FILL_NOT_IDENTIFIED)
+        out["why"] = ("the budget walk and the arrival-book reconstruction "
+                      "disagree on the price of the same quantity (%.6f vs "
+                      "%.6f). One of them is reading the ladder wrongly and "
+                      "picking either would be guessing which"
+                      % (walk.get("vwap_acquisition_price"), vwap))
+        return out
 
-    # THE FROZEN SIZING POLICY'S OWN THREE FIGURES, recorded through the
-    # one function allowed to compute them. The executable notional is
-    # what the ladder showed inside the limit -- DISPLAYED depth at read
-    # time, which is NOT the latency-adjusted book the policy's
+    # THE FROZEN SIZING POLICY'S OWN THREE FIGURES, from the one function
+    # allowed to compute them. What it is given is the total the ladder
+    # supports INSIDE THE LIMIT -- so a budget fully spent is
+    # FULLY_SUPPORTED and a book that ran out is LIQUIDITY_LIMITED, and
+    # the two are no longer confused. That total is DISPLAYED depth at
+    # read time, which is not the latency-adjusted book the policy's
     # docstring describes, so the basis is named rather than implied.
-    sized = sizing.size(executable_notional_usd=filled * vwap)
+    sized = sizing.size(
+        executable_notional_usd=float(walk.get("total_inside_limit") or 0.0))
+    executed = float(sized.get("executedEntryNotionalUsd") or 0.0)
+    coverage = min(1.0, executed / intended_notional)
     out.update({
         "ok": True,
         "p_fill": round(coverage, 6),
+        "p_fill_is": "EXECUTED_NOTIONAL_OVER_INTENDED_NOTIONAL",
         "size": round(filled, 6),
         "limit_price": round(vwap, 6),
         "price_is_vwap_of_the_walk": True,
@@ -283,15 +298,17 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
         "best_acquisition_price": best,
         "slippage_vs_best": fill.get("slippage"),
         "spread_cost": fill.get("spreadCost"),
-        "unfilled_qty": fill.get("unfilledQty"),
+        "cost_usd": round(float(walk.get("cost") or 0.0), 6),
+        "unfilled_notional_usd": sized.get("unfilledNotionalUsd"),
+        "levels_consumed": walk.get("levels_used"),
         "levels_consumed_price_range": [best, round(vwap, 6)],
         "sizing": sized,
         "executable_notional_basis": "DISPLAYED_LADDER_AT_READ_TIME",
         "executable_notional_is_not_latency_adjusted": True,
-        "why": ("the arrival ladder showed %.6f of the %.6f contracts "
-                "intended at or inside break-even %.6f, at a "
+        "why": ("the ladder supported $%.2f of the $%.2f intended at or "
+                "inside break-even %.6f, which is %.6f contracts at a "
                 "volume-weighted %.6f"
-                % (filled, intended_qty, limit, vwap)),
+                % (executed, intended_notional, limit, filled, vwap)),
     })
     return out
 
