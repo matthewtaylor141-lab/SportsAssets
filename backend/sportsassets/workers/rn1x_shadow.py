@@ -541,12 +541,23 @@ async def challenger_inputs_for(conn, *, condition_id, seed_qty,
         return out
     md = (book or {}).get("marketData")
     if md is None:
+        # AVAILABLE MEANS "THE RANKING HAS SOMETHING TO RANK", NOT "ALL
+        # INPUTS ARRIVED". With EV_HOLD present and no book, HOLD is the
+        # only priced action and every exit is refused NO_BID -- which is
+        # a real decision on a real input, not a blind one, and the
+        # decision row shows exactly that. `book_available` is separate
+        # so a lane producing only HOLDs for want of a venue read cannot
+        # be mistaken for one that considered exits and declined them.
         out["reason"] = "VENUE_BOOK_UNREADABLE"
-        out["why"] = ("the venue read returned no marketData: %s"
-                      % (book or {}).get("error"))
+        out["why"] = ("the venue read returned no marketData: %s. EV_HOLD "
+                      "may still be present, in which case HOLD is the "
+                      "only priced action and every exit is refused for "
+                      "want of a book" % (book or {}).get("error"))
         out["diagnostic"] = (book or {}).get("diagnostic")
+        out["book_available"] = False
         out["available"] = ev.get("status") == "IDENTIFIED"
         return out
+    out["book_available"] = True
 
     # SELLING IS THE OPPOSITE LADDER FROM BUYING. We hold the side the
     # valuation's intent acquired, so exiting consumes the other one:
@@ -666,7 +677,7 @@ async def _replay_one(conn, *, trade_id, whale_id, condition_id,
         out["challenger_inputs"] = {
             k: ci_snapshot.get(k) for k in
             ("available", "reason", "why", "valuation_row_id",
-             "us_market_slug", "venue", "payout_event", "read_at",
+             "us_market_slug", "venue", "payout_event", "read_at", "book_available",
              "bid", "bid_size", "complement_ask", "complement_ask_size",
              "input_labels")} if ci_snapshot else {
             "available": False, "reason": "NO_SEED_ROW",
