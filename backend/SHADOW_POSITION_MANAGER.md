@@ -26,14 +26,22 @@ Migration 108 made that number obtainable by fixing the payout identity
 on the external probability. The connection is:
 
 ```
-external_valuations (ELIGIBLE only)
-   └─ bettor_hold_value.ev_hold            EV_HOLD + provenance + freshness
-        └─ bettor_mgmt_select.rank_with_hold   ranks HOLD *with* the rest
-             └─ bettor_venue_position_model.translate   what the venue does
-                  └─ bettor_mgmt_lifecycle.Managed.decide_challenger
-                       └─ bettor_desk.Order / Portfolio   (unchanged)
-                            └─ bettor_rn1x_store  →  rn1x_decisions
+external_valuations (ELIGIBLE only)  ── the probability ROW, nothing derived
+   └─ bettor_mgmt_lifecycle.Managed.decide_challenger
+        │   reload → apply newly admitted fills → residual q, basis_per
+        ├─ bettor_hold_value.ev_hold(qty=q, …, now=at)
+        │      EV_HOLD on THAT inventory, freshness re-checked at THAT clock
+        ├─ bettor_mgmt_select.rank_with_hold   ranks HOLD *with* the rest,
+        │      deriving HOLD's total from the inventory being ranked
+        ├─ bettor_venue_position_model.translate   what the venue does
+        └─ bettor_desk.Order / Portfolio   (unchanged)
+             └─ bettor_rn1x_store  →  rn1x_decisions
 ```
+
+The nesting is the fix, not a diagram convention: the valuation happens
+**inside** the decision, after the reload and the fills, so the quantity
+it is computed on and the clock its freshness is measured against are
+both the decision's own.
 
 No new engine, portfolio or accounting system. `decide_challenger` writes
 through the same `place()`, the same `Order` state machine and the same
@@ -277,37 +285,60 @@ which is why they are comparable to HOLD at all.
 
 | item | result |
 |---|---|
-| Required image gate, `backend-image-check` run 25 | **PASS** on `5b19bc5` — the SHA that was tested |
-| API-only release, `render-ops` run 1546 `deploy-api-commit` | **SUCCESS**, `5b19bc5` deployed to `sportsassets-api` |
-| `command-verify` run 31 on the deployed build | **SUCCESS** — 18 of 18 checks; step 19 correctly skipped (not armed on this run) |
-| ↳ `RN1X — the AUTHENTICATED read, against the persisted records` | **PASS** (a 401/403 would fail it) |
-| ↳ `RN1X — the two arms, and what each one actually decided` | **PASS** — the deployed build serves the `arms` panel and the extended trace |
-| ↳ `Service health under ordinary command load` | **PASS**, 2 min 48 s |
-| Focused regression, every test file referencing a changed module (30 files) | **1055 passed, 6 failed** |
-| ↳ those 6, on baseline `6aefc45` | **identical 6 failures** — pre-existing (`.github/workflows/calibration-evidence.yml` absent), **0 new** |
-| Full suite on HEAD | 11443 passed, **458 failed**, 198 skipped, 3 xfailed, 24 min |
-| ↳ full-suite baseline comparison | **INCOMPLETE** — still running; not reported as passing or failing |
+| Required image gate, `backend-image-check` run 29 | **PASS** on `33a205a` (the code fix) |
+| Required image gate, `backend-image-check` run 30 | **PASS** on `79ac406` (the released SHA) |
+| API-only release, `render-ops` run 1549 `deploy-api-commit` | **SUCCESS** — deploy `dep-daql2abtqb8s73b11ji0`; `sportsassets-api` **live on `79ac406`** at 16:35:59Z |
+| ↳ the worker was not touched | its live deploy is still `f5d1c05` from 11:43:58Z, read before and after the release |
+| Focused regression, 17 files referencing a changed module, with a DSN | **287 passed, 0 failed** |
+| Wider keyword sweep (`bettor|rn1x|mgmt|ladder|exit|hold|position|challenger`) on HEAD | 3425 passed, **22 failed** |
+| ↳ the same sweep on baseline `8272872`, in a separate worktree | 3421 passed, **22 failed** |
+| ↳ failure identities, diffed | **IDENTICAL SETS — 0 new, 0 fixed.** The 4 extra passes are the 4 new regressions |
+| Pre-existing, unrelated: `test_workflow_size_guard` | fails on **`render-ops.yml` at 511,578 bytes — 422 bytes of headroom**. `command-verify.yml` is 70,811 with 441,189 spare |
+| Production state read at 16:35Z (`render-ops` 1550, `sql rn1x-tables`) | `rn1x_shadow = true`; heartbeat `ok` 16:34:29Z; lane C `REPLAYED`, cursor moving |
+| ↳ the challenger's fallback-hold decisions | **5 at 16:11Z → 16 at 16:35Z.** The management phase IS re-deciding the same position in production — blind, with `EV_HOLD_NOT_IDENTIFIED` |
+| `command-verify` run 34 on the deployed `79ac406`, `arm_external=on` | see the trace below |
 
-**What the arms step's PASS does and does not establish.** It establishes
-that the deployed build answers an authenticated `rn1x/overview` with an
-`arms` panel and serves the extended trace. It does **not** establish
-that a prospective challenger position exists in production: the step
-treats "no challenger position yet" as an allowed branch, and the run
-log itself is not retrievable from this container (the egress proxy
-rejects `results-receiver.actions.githubusercontent.com`), so the
-printed counts were not read back.
+**The run logs ARE readable after all, and that changes what is
+established.** Earlier reports said the printed counts could not be read
+back because the egress proxy rejects
+`results-receiver.actions.githubusercontent.com`. That is true of a
+direct download from this container, but the GitHub MCP server returns
+job log content, so from run 33 onward the authenticated production
+output is quoted here rather than inferred from a green conclusion. Two
+claims in the earlier report were weaker than the evidence: a challenger
+position DOES exist in production, and its decisions ARE being retaken
+across cycles.
 
-**On the 458 full-suite failures.** `pytest -q` truncated the identity
-list to 24 lines, so I do not have all 458 identities and cannot yet
-separate new from existing across the whole suite. What is established:
-`test_workflow_size_guard` fails on **`render-ops.yml` at 511,578
-bytes** — a file this change does not touch; the workflow this change
-does edit, `command-verify.yml`, sits at 62,765 bytes with 449,235 of
-headroom. Of the 24 printed identities, one file
-(`test_prospective_flow_accounting.py`) references a changed module, and
-it **passes in isolation on both HEAD and baseline** and passed in the
-focused 30-file run — so that failure is order- or shared-database
-dependent, not a defect from this change.
+**What run 33's authenticated read actually printed** (16:11Z, on
+`8272872`):
+
+```
+arm  MANAGEMENT_PAIR_091_STOP_16_V1    pos=345  dec=5639  selected=656
+arm  MANAGEMENT_PAIR_091_STOP_16_V1    pos=4    dec=1067  selected=14
+arm  SHADOW_CHALLENGER_HOLD_RANKED_V1  pos=1    dec=5     selected=5
+                                       held_by_choice=5  BLIND=0
+challenger trace  ...:221817729  HTTP 200
+  D0000  HOLD x 45.0   HOLD_BY_FALLBACK_RULE   input_available false
+         ev_basis EV_HOLD_NOT_IDENTIFIED   hold_value_usd null
+         residual 45.0   inventory_cost 15.30   invariant_ok true
+         venue_translation  VENUE_POSITION_MODEL_NOT_ESTABLISHED (venue null)
+         eligibility INELIGIBLE_BROKEN_PRODUCTION_CONNECTION  ← migration 110
+```
+
+So in production, today: one challenger position, 45 contracts held at
+15.30, every decision on it a **blind** hold by the declared fallback
+rule, and every one of them already contained by migration 110. No
+priced hold has occurred in production yet, because no admissible
+Pinnacle valuation has matched that position's own exposure.
+
+**On the wider sweep's 22 failures.** They are byte-for-byte the same 22
+identities on HEAD and on baseline `8272872`, so this change introduces
+none of them. They are workflow-content and venue-parameter tests
+(`test_render_ops_*`, `test_pmus_post_only`, `test_e25/e28/e29/e5`),
+unrelated to the position manager; the earlier report's unresolved
+"458 full-suite failures" is superseded by this diff for every file that
+touches a changed module, and remains unexamined for the rest of the
+suite.
 
 ### Continuing management, demonstrated
 
@@ -331,15 +362,20 @@ restart recovery: two independent rebuilds from the ledger →
 
 ## 5 · Exactly what is still limited
 
-1. **No prospective challenger decision has occurred in production yet.**
-   The lane is deployed and armed; whether it produces a position depends
-   on a live RN1 seed *and* an eligible valuation **for the same
-   exposure** — matching the condition is no longer sufficient, by
-   design. Until both coincide the lane reports its state and writes
-   nothing, and that refusal is stored. Every challenger decision taken
-   before these corrections is **held** — migration 110 for the four
-   `5b19bc5` defects, migration 111 for the seed-sized HOLD and the
-   wrong freshness bound.
+1. **No PRICED challenger decision has occurred in production yet.**
+   Corrected from the earlier report, which said no challenger decision
+   had occurred at all: the authenticated read shows one challenger
+   position (45 contracts, cost 15.30) and its decisions being retaken
+   across cycles. Every one of them is **blind** —
+   `EV_HOLD_NOT_IDENTIFIED`, `input_available false`, HOLD by the
+   declared fallback rule — because no admissible Pinnacle valuation has
+   matched that position's own exposure, and the venue is unresolved on
+   that row (`VENUE_POSITION_MODEL_NOT_ESTABLISHED`). So the ranking has
+   never run on live inputs in production. A blind hold is a decision and
+   is recorded as one, but it is not evidence that the ranking works.
+   Every challenger decision taken before these corrections is **held** —
+   migration 110 for the four `5b19bc5` defects, migration 111 for the
+   seed-sized HOLD and the wrong freshness bound.
 2. **The venue book is not readable from every context.** When it is
    not, `EV_HOLD` may still be present — HOLD becomes the only priced
    action and every exit is refused `NO_BID`. `book_available` is carried
