@@ -585,3 +585,128 @@ leaked into the denominator.
 is 511,233 bytes. It is **511,578** as of `44a350c`, which added a
 non-2xx guard to `deploy-api-commit`. Still **422 bytes under** the
 512,000 ceiling, measured directly rather than taken from the note.
+
+---
+
+## CHECK 4 — 2026-09-24 01:46–01:48Z · all four readbacks, from the job logs
+
+Dispatched at `ref=claude/command-center`. `render-ops.yml` = **511,578 bytes**
+(unchanged; last touched by 44a350c), so no startup_failure risk. Every
+figure below is read out of the psql output in the job log, not from a
+workflow conclusion.
+
+### 1 · `obs-incentive` — run 35944359134
+
+| field | value | check |
+|---|---|---|
+| control | **true** | ✓ still observing |
+| general_max_distinct | **0** | ✓ general loop still not sampling |
+| manifest / recheck / retry | 0 / 2 / 0 → **2 total** | ✓ inside 8 / 20 / 40 |
+| sock_connects / sock_subs | 7 / 14 | within allowance |
+| deadline_at | **2026-09-24T04:35:48+00:00** | ✓ unmoved |
+| boots / reconnects / resubscribes | **3** / 4 / 8 | boots up from 2 — see §3 |
+
+### 2 · `obs-live` — run 35944387072
+
+**`armed_probe_id` = `d5e9ae3d-257f-4948-a808-90d1bd3c5e48` — UNCHANGED.**
+No STOP condition.
+
+`bettor_live_journal` is 14 rows, newest 2026-09-22 14:16:33Z, age 127,798 s,
+boot `3ddd79c916e54190`, 8 distinct markets, 14 OBSERVATION_ONLY / 0
+STRATEGY_ADMITTED. That is the GENERAL loop and it is idle by design while
+the arm runs, exactly as check 4's instructions state. Its age is not
+evidence about the incentive collector.
+
+### 3 · `obs-incentive-journal` — run 35944416187 · COLLECTION IS ALIVE
+
+| kind | rows | first | last |
+|---|---|---|---|
+| LADDER | **34,007** | 10:28:29Z | **2026-09-24 01:46:54Z** |
+| GAP | 17 | 10:28:29Z | 01:34:51Z |
+| EPOCH | 10 | 10:28:29Z | 01:34:51Z |
+| PROGRAM_VERSION | **5** | 10:28:29Z | 2026-09-23 22:58:58Z |
+| RUN_OPEN | 3 | 10:28:29Z | 22:58:58Z |
+| RUN_CLOSE | 1 | 10:28:59Z | 10:28:59Z |
+
+Both liveness floors cleared: LADDER **34,007 > 26,756**, newest `at`
+**01:46:54Z > 21:14:45Z**. A true control flag over a static journal would
+have been the failure; this is not that.
+
+**A THIRD boot_id, as check 3 anticipated:**
+
+| boot_id | rows | first | last |
+|---|---|---|---|
+| `7435b23a98d049f3` | 43 | 10:28:29Z | 10:28:59Z |
+| `8702807518fe44b4` | 29,243 | 10:31:14Z | **22:58:35Z** |
+| **`d61606169a1f410c`** | **4,757** | **22:58:58Z** | 01:46:54Z |
+
+So `8702807518fe44b4` is no longer unbroken — it ended at 22:58:35Z and a
+new boot took over 23 s later. PROGRAM_VERSION moved from 3 rows to 5, and
+past 16:00:00Z to 22:58:58Z.
+
+**NEW GAPS: 9 rows carry a `from` (was 4); 17 GAP rows total (was 8).**
+Five are new, and the total duration is now 164.4374 s (was 137.7236 s):
+
+| why | from (UTC) | duration_s | new? |
+|---|---|---|---|
+| PROCESS_REPLACED | 2026-09-23 22:58:34Z | **22.665** | **NEW** |
+| GAP_DISCONNECTED | 2026-09-23 22:58:57Z | 0.5189 | NEW |
+| GAP_DISCONNECTED | 2026-09-24 00:02:59Z | 1.0185 | NEW |
+| GAP_DISCONNECTED | 2026-09-24 00:10:26Z | 1.5107 | NEW |
+| GAP_DISCONNECTED | 2026-09-24 01:34:50Z | 1.0007 | NEW |
+| GAP_DISCONNECTED | 2026-09-23 14:18:30Z | 1.5055 | prior |
+| GAP_DISCONNECTED | 2026-09-23 10:31:14Z | 0.5003 | prior |
+| PROCESS_REPLACED | 2026-09-23 10:28:59Z | 135.191 | prior |
+| GAP_DISCONNECTED | 2026-09-23 10:28:28Z | 0.5268 | prior |
+
+**WHAT CAUSED THE 22.665 s PROCESS_REPLACED — and what did NOT.** It is
+NOT one of this session's deploys. Six API deploys went out after it
+(23:53:49, 01:03:48, 01:06:0x, 01:12:0x, 01:32:0x, 01:45:2x) and **none**
+produced a PROCESS_REPLACED, so the incentive collector does not run in
+`sportsassets-api`'s process. The worker service's live deploy is still
+`7f76fd9` from 2026-09-23T10:26:55Z and was read as unchanged before and
+after every one of those deploys. On this evidence it is a platform-side
+instance recycle at 22:58:34Z; the cause is not established from these
+four readbacks and is NOT attributed further. Nothing was re-armed and no
+counter was reset.
+
+### 4 · `obs-incentive-markets` — run 35944484582
+
+| | check 3 | check 4 |
+|---|---|---|
+| markets receiving | 12 of 12 | **12 of 12** |
+| markets with depth | 12 of 12 | **12 of 12** |
+| LADDER frames | 27,838 | **34,045** (+6,207) |
+| frames in window | all | **34,045, all** |
+| frames before window | 0 | **0** |
+
+Newest per-market spans **01:46:07Z → 01:47:55Z** — every one of the twelve
+is inside the last two minutes. **No market has gone quiet.** Depth ladders
+remain populated: max ask levels 6–23, max bid levels 2–9.
+
+### Coverage — the unobserved head stays in the denominator
+
+```
+window opened            2026-09-23T04:00:00Z
+first frame              2026-09-23T10:28:29Z
+unobservable head        6.4747 h
+newest frame             2026-09-24T01:47:55Z
+span first->newest      15.3239 h
+gap total                  164.4374 s = 0.045677 h
+OBSERVED                15.2782 h
+elapsed since open      21.7986 h
+```
+
+**70.1% of elapsed, 63.7% of the full 24 h.** (Check 3: 62.2% / 44.7%.)
+This is NOT a complete-day observation and must never be reported as one:
+6.47 h at the head were never observable, and 164 s were lost to gaps.
+
+### Verdict
+
+Collection is running and has been continuous since 22:58:58Z under boot
+`d61606169a1f410c`. Control true, probe id unchanged, allowance barely
+touched, deadline unmoved, no market silent. No diagnosis was required and
+no remedial action was taken.
+
+**CHECK 5 armed for ~03:50Z, same four readbacks.** The stop at
+2026-09-24T04:00:00Z (`trig_01RKm5XcVvaUXCqLgbAnV2T6`) has not been moved.
