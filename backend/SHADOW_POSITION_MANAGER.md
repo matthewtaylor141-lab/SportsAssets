@@ -144,6 +144,42 @@ accounting  realized 2.22  residual 90  invariant OK
 persisted   1 position, 2 decisions, 1 order, 1 fill
 ```
 
+## 4a · Production evidence, separated by what it establishes
+
+| item | result |
+|---|---|
+| Required image gate, `backend-image-check` run 25 | **PASS** on `5b19bc5` — the SHA that was tested |
+| API-only release, `render-ops` run 1546 `deploy-api-commit` | **SUCCESS**, `5b19bc5` deployed to `sportsassets-api` |
+| `command-verify` run 31 on the deployed build | **SUCCESS** — 18 of 18 checks; step 19 correctly skipped (not armed on this run) |
+| ↳ `RN1X — the AUTHENTICATED read, against the persisted records` | **PASS** (a 401/403 would fail it) |
+| ↳ `RN1X — the two arms, and what each one actually decided` | **PASS** — the deployed build serves the `arms` panel and the extended trace |
+| ↳ `Service health under ordinary command load` | **PASS**, 2 min 48 s |
+| Focused regression, every test file referencing a changed module (30 files) | **1055 passed, 6 failed** |
+| ↳ those 6, on baseline `6aefc45` | **identical 6 failures** — pre-existing (`.github/workflows/calibration-evidence.yml` absent), **0 new** |
+| Full suite on HEAD | 11443 passed, **458 failed**, 198 skipped, 3 xfailed, 24 min |
+| ↳ full-suite baseline comparison | **INCOMPLETE** — still running; not reported as passing or failing |
+
+**What the arms step's PASS does and does not establish.** It establishes
+that the deployed build answers an authenticated `rn1x/overview` with an
+`arms` panel and serves the extended trace. It does **not** establish
+that a prospective challenger position exists in production: the step
+treats "no challenger position yet" as an allowed branch, and the run
+log itself is not retrievable from this container (the egress proxy
+rejects `results-receiver.actions.githubusercontent.com`), so the
+printed counts were not read back.
+
+**On the 458 full-suite failures.** `pytest -q` truncated the identity
+list to 24 lines, so I do not have all 458 identities and cannot yet
+separate new from existing across the whole suite. What is established:
+`test_workflow_size_guard` fails on **`render-ops.yml` at 511,578
+bytes** — a file this change does not touch; the workflow this change
+does edit, `command-verify.yml`, sits at 62,765 bytes with 449,235 of
+headroom. Of the 24 printed identities, one file
+(`test_prospective_flow_accounting.py`) references a changed module, and
+it **passes in isolation on both HEAD and baseline** and passed in the
+focused 30-file run — so that failure is order- or shared-database
+dependent, not a defect from this change.
+
 ## 5 · Exactly what is still limited
 
 1. **No prospective challenger decision has occurred in production yet.**
