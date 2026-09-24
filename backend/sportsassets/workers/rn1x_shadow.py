@@ -703,6 +703,15 @@ def _ev_at(snapshot: dict, at: float) -> dict:
 # than a one-time replayer.
 MANAGE_BATCH = 5                 # positions re-evaluated per cycle
 
+#: A WALL-CLOCK CEILING ON THE PHASE, because each position costs a PACED
+#: venue book read and `venue_pace.pace` can sleep. Without a bound, five
+#: slow reads extend the writer's cycle by however long the venue takes,
+#: the heartbeat goes stale, and the operational read cannot tell a slow
+#: venue from a stopped loop. Positions not reached are DEFERRED to the
+#: next cycle -- they are still open and the phase runs every cycle, so
+#: deferring costs a tick and loses nothing.
+MANAGE_BUDGET_S = 45.0
+
 _NEW_PRINTS_SQL = """
     SELECT id, outcome_index, side, size::float8 AS size,
            price::float8 AS price,
@@ -723,9 +732,11 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
     import time as _t
 
     wall = float(now if now is not None else _t.time())
+    started = _t.monotonic()
     out = {"phase": "CONTINUING_MANAGEMENT", "at": wall,
            "examined": 0, "managed": 0, "acted": 0, "failed": 0,
-           "no_inputs": 0, "results": []}
+           "no_inputs": 0, "deferred_budget": 0,
+           "budget_s": MANAGE_BUDGET_S, "results": []}
     try:
         open_pos = await store.open_positions(
             conn, experiment_id=experiment_id, limit=limit)
@@ -733,7 +744,18 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
         out["error"] = "%s: %s" % (type(exc).__name__, exc)
         return out
     out["examined"] = len(open_pos)
-    for pos in open_pos:
+    for i, pos in enumerate(open_pos):
+        if _t.monotonic() - started > MANAGE_BUDGET_S:
+            # STOP BEFORE consuming this position: it has not been
+            # examined, it is still open, and the next cycle will find it
+            # first -- `open_positions` orders by least-recently-decided.
+            out["deferred_budget"] = len(open_pos) - i
+            out["why_deferred"] = (
+                "the phase reached its %.0fs wall-clock budget. The "
+                "remaining positions are DEFERRED, not skipped: they are "
+                "still open and this phase runs every cycle"
+                % MANAGE_BUDGET_S)
+            break
         pid = pos["position_id"]
         try:
             rows = await store.load_position(conn, pid)
@@ -793,6 +815,12 @@ async def manage_open_positions(conn, *, experiment_id, limit=MANAGE_BATCH,
             out["results"].append({"position_id": pid, "written": False,
                                    "error": "%s: %s"
                                             % (type(exc).__name__, exc)})
+    out["elapsed_s"] = round(_t.monotonic() - started, 3)
+    # EVERY OPEN POSITION ACCOUNTED FOR, so a reader cannot mistake a
+    # budget deferral for a position that went unmanaged.
+    out["accounted"] = (out["examined"] ==
+                        out["managed"] + out["failed"]
+                        + out["deferred_budget"])
     return out
 
 
