@@ -2353,7 +2353,64 @@ jobs:
                  say "fault, not a finding. jq said:"
                  head -c 300 /tmp/ee.err | tee -a "$GITHUB_STEP_SUMMARY"; }
 
-          # 4 · THE CENSUS BESIDE IT, so a cycle in which nothing was even
+          # 4 · THE CALIBRATION MEASUREMENT, RUN. The join reads back what
+          # happened; the evaluator scores the recorded point-in-time
+          # probabilities. A shortfall is the expected first answer and is
+          # NOT written -- the row is what the gate reads.
+          C=$(curl -s -o /tmp/cal.json -w '%{http_code}' --max-time 180 \
+              -X POST -H "$H" -H 'Content-Type: application/json' \
+              --data '{"days": 90}' \
+              "$API/api/admin/external-source-calibration" || echo 000)
+          say ""
+          say "calibration HTTP $C"
+          if [ "$C" = "200" ]; then
+            cat > /tmp/cal.jq <<'JQ'
+          def n(x): if x == null then "-" else (x|tostring) end;
+          "verdict\t"          + n(.verdict),
+          "gate_opens\t"       + n(.gate_opens),
+          "-- the declaration, fixed before any data was read --",
+          "  metric\t"         + n(.acceptance.metric)
+                                + "  ceiling " + n(.acceptance.ceiling)
+                                + "  no_skill " + n(.acceptance.reference_no_skill_brier),
+          "  min_events\t"     + n(.acceptance.min_resolved_events),
+          "  scope\t"          + n(.scope.source_version) + " / "
+                                + n(.scope.source_method) + " / "
+                                + n(.scope.market) + " / "
+                                + n(.scope.families),
+          "-- the outcome join --",
+          "  examined\t"       + n(.outcome_join.examined)
+                                + "  resolved " + n(.outcome_join.resolved)
+                                + "  void " + n(.outcome_join.void)
+                                + "  pending " + n(.outcome_join.pending)
+                                + "  unreadable " + n(.outcome_join.unreadable)
+                                + "  unmatched " + n(.outcome_join.unmatched),
+          "  by_status\t"      + n(.outcome_join.by_status),
+          "-- the measurement --",
+          "  rows_in_scope\t"  + n(.measurement.rows_in_scope)
+                                + "  out_of_scope " + n(.measurement.rows_out_of_scope),
+          "  unique_events\t"  + n(.measurement.unique_events)
+                                + "  collapsed " + n(.measurement.observations_collapsed),
+          "  counts\t"         + n(.measurement.outcome_counts),
+          "  scored\t"         + n(.measurement.scored_events),
+          "  score\t"          + n(.measurement.score)
+                                + "  provisional " + n(.measurement.score_is_provisional),
+          "  shortfall\t"      + n(.measurement.shortfall_events),
+          "  written\t"        + n(.measurement.written),
+          "  inputs_sha\t"     + n(.measurement.inputs_sha),
+          "  why\t"            + n(.measurement.why)
+          JQ
+            sed -i 's/^          //' /tmp/cal.jq
+            jq -r -f /tmp/cal.jq /tmp/cal.json 2>/tmp/cal.err \
+              | tee -a "$GITHUB_STEP_SUMMARY" \
+              || { say "THE CALIBRATION REPORT FAILED TO RENDER -- a"
+                   say "reporting fault, not a finding:"
+                   head -c 300 /tmp/cal.err | tee -a "$GITHUB_STEP_SUMMARY"; }
+          else
+            say "THE CALIBRATION RUN DID NOT RETURN 200 -- no conclusion"
+            head -c 300 /tmp/cal.json | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
+          # 5 · THE CENSUS BESIDE IT, so a cycle in which nothing was even
           # a candidate is distinguishable from one in which everything
           # refused.
           C=$(curl -s -o /tmp/cx.json -w '%{http_code}' --max-time 60 \
