@@ -2029,6 +2029,9 @@ jobs:
             | map(select((type == "object")
                   and (.link == "4b_SETTLEMENT_COMPATIBILITY"))) | (.[0] // {});
           def s(x): (x // "-") | tostring;
+          def obj(x): if (x|type) == "object" then x
+            elif (x|type) == "string" then (try (x|fromjson) catch {})
+            else {} end;
           .decisions // [] | .[($B|tonumber):] | .[] |
             "  " + s(.decision_id),
             "      ts           " + s(.decision_ts),
@@ -2045,7 +2048,8 @@ jobs:
             "      first_fail   " + s(((ic.first_failing_link // {})
                                        | if type == "object" then .link
                                          else null end)),
-            "      ranked       " + (((.alternatives.ranked // [])
+            "      ranked       " + ((((obj(.alternatives).ranked // [])
+                | if type == "array" then . else [] end)
                 | map(s(.action) + "=" + s(.value_usd)) | join("  ")) | tostring),
             "      reason       " + (s(.selection_reason) | .[0:200])'
           printf '%s\n' "$DEC" > /tmp/dec.jq
@@ -2258,9 +2262,11 @@ jobs:
           C=$(curl -s -o /tmp/hz.json -w '%{http_code}' --max-time 45 \
               "$API/api/health" || echo 000)
           say "health HTTP $C"
-          jq -r '"commit\t" + ((.commit // .sha // .version // "?")|tostring)' \
-            /tmp/hz.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
-            || head -c 200 /tmp/hz.json
+          # NO ROUTE PUBLISHES THE DEPLOYED COMMIT, so none is claimed here
+          # -- /api/health returned 404 and the old line printed
+          # "commit ?", which is honest but pointless. The deployed SHA is
+          # read from render-ops; what is image-derived and printed below
+          # is the lane's own limits sha and versions.
 
           # 2 · ARM the control row and let one cycle run.
           C=$(curl -s -o /tmp/ar.json -w '%{http_code}' --max-time 45 \

@@ -112,6 +112,13 @@ async def _seed(conn):
         "migrations/105_external_valuations_one_per_observation.sql").read())
     await conn.execute(open(
         "migrations/116_one_entry_position_per_exposure.sql").read())
+    # 117 CARRIES THE CALIBRATION TABLE AND THE EVIDENCE COLUMNS. They were
+    # appended to 116 after 116 had already been applied in production,
+    # where the runner keys on FILENAME and skips a name it has seen -- so
+    # they never ran there while a local replay of the whole file showed
+    # green. This test applies both, which is what production now does.
+    await conn.execute(open(
+        "migrations/117_entry_lane_evidence_and_calibration.sql").read())
     await conn.execute("CREATE TABLE IF NOT EXISTS ingestion_state "
                        "(key TEXT PRIMARY KEY, value TEXT)")
     await conn.execute(
@@ -500,5 +507,64 @@ async def test_a_ladder_priced_beyond_break_even_is_not_an_unknown(
         assert out["refusals"].get(entryx.R_NOTHING_INSIDE_LIMIT), \
             out["refusals"]
         assert entryx.R_NO_LADDER not in out["refusals"]
+    finally:
+        await conn.close()
+
+
+# ── the gap I had claimed was closed ─────────────────────────────────
+
+@pg
+@pytest.mark.asyncio
+async def test_the_entry_lanes_inventory_is_actually_re_evaluated(monkeypatch):
+    """INVENTORY WITH NO MANAGEMENT IS THE FERRARI FAILURE'S SHAPE.
+
+    The entry lane writes into the same four tables and
+    `store.open_positions` filters on experiment_id ALONE -- no policy
+    clause -- so the shape was right and I reported the gap as closed. It
+    was not: `manage_open_positions` is invoked PER EXPERIMENT, with the
+    challenger's id, and these positions carry a different one. They were
+    written into the shared ledger and then re-evaluated by nothing.
+
+    This test asks the question directly: does the store hand the entry
+    lane's open position back when asked for THAT experiment, and does the
+    challenger's cycle ask?
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _seed(conn)
+        await _calibrate(conn)
+        _stub(monkeypatch)
+        out = await loop.cycle(conn)
+        assert out["refusals"].get("ENTRY_INVENTORY_WRITTEN") == 1, \
+            out["refusals"]
+
+        from sportsassets import bettor_rn1x_store as store
+
+        # 1 · THE STORE RETURNS IT for the entry lane's own experiment.
+        mine = await store.open_positions(
+            conn, experiment_id=ext.EXPERIMENT_ID, limit=10)
+        assert [p for p in mine if p["policy"] == inv.POLICY], mine
+
+        # 2 · AND NOT for the challenger's, which is exactly why a second
+        # call is needed rather than a wider query.
+        from sportsassets.workers import rn1x_shadow as RS
+
+        theirs = await store.open_positions(
+            conn, experiment_id=RS.CHALLENGER_EXPERIMENT_ID, limit=50)
+        assert not [p for p in theirs if p["policy"] == inv.POLICY], \
+            "the challenger's experiment must not see the entry lane's rows"
+
+        # 3 · THE CYCLE ASKS FOR BOTH. Pinned on the source so a future
+        # edit that drops the second call fails here rather than in six
+        # weeks with unmanaged inventory.
+        import inspect
+
+        src = inspect.getsource(RS.cycle)
+        assert "manage_open_positions" in src
+        assert src.count("manage_open_positions") >= 2, (
+            "the cycle must manage the entry lane's experiment as well as "
+            "the challenger's")
+        assert "_ext.EXPERIMENT_ID" in src
     finally:
         await conn.close()

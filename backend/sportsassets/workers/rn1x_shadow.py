@@ -2747,9 +2747,38 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
     # lane: the frozen benchmark's entry-and-walk shape is what it was
     # specified as and is not being changed here.
     managed = None
+    managed_entry = None
     if challenger:
         managed = await manage_open_positions(
             conn, experiment_id=experiment_id)
+        # THE ENTRY LANE'S OWN INVENTORY, MANAGED TOO -- AND THIS WAS A
+        # GAP I HAD CLAIMED WAS CLOSED.
+        #
+        # The autonomous-entry lane writes into the SAME four tables, and
+        # `store.open_positions` filters on experiment_id ALONE with no
+        # policy clause, so the shape was right. But this function is
+        # invoked PER EXPERIMENT, with the challenger's id, and the entry
+        # lane's positions carry a different one. They were therefore
+        # written into the shared ledger and then never re-evaluated by
+        # anything -- inventory with no management, which is the Ferrari
+        # failure's shape.
+        #
+        # A SECOND CALL, NOT A WIDER QUERY. Dropping the experiment filter
+        # would make one budget, one batch and one report cover two
+        # experiments, and the frozen benchmark's numbers would start
+        # depending on how much entry inventory happened to exist. Two
+        # calls keep two budgets and two reports that cannot be conflated.
+        try:
+            from .. import bettor_external_shadow as _ext
+
+            managed_entry = await manage_open_positions(
+                conn, experiment_id=_ext.EXPERIMENT_ID)
+        except Exception as exc:                               # noqa: BLE001
+            # The challenger's own management has already completed and
+            # must not be lost to a failure in a different experiment.
+            managed_entry = {"phase": "CONTINUING_MANAGEMENT",
+                             "experiment": "ENTRY_LANE",
+                             "error": "%s: %s" % (type(exc).__name__, exc)}
 
     await _save_cursor(conn, safe_id, cursor_key)
     # THE REFUSAL DISTRIBUTION, not just the count of writes. "400
@@ -2789,6 +2818,11 @@ async def cycle(conn, *, lane: str = "HISTORICAL") -> dict:
     return {"ran": True, "state": "REPLAYED", "lane": lane,
             "cursor": safe_id, "examined": len(cands), "flow": flow,
             "management": managed,
+            # REPORTED SEPARATELY, on purpose. Two experiments, two
+            # budgets, two batches: folding the entry lane's numbers into
+            # `management` would make the frozen benchmark's reported
+            # management depend on how much entry inventory exists.
+            "entry_lane_management": managed_entry,
             "results": results,
             "stopped_at_error": stopped_at_error,
             "refusals": tally,
