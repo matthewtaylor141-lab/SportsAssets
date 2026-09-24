@@ -34,5 +34,95 @@
        -- the guard that refuses any host but this one. -->
   <script src="shadow.js"></script>
   <script src="app.js"></script>
+
+  <!-- A FAILED SCRIPT LOAD MUST NOT LOOK LIKE AN EMPTY PAGE.
+       ==================================================================
+       OBSERVED 2026-09-23T22:34:18Z: this host served /app.js and
+       /core.js as 503 with ZERO bytes while /, /index.html, /shadow.js
+       (122,070 B) and /shadow.css all answered 200. It had recovered by
+       22:40. So the two scripts the shell cannot start without were the
+       ones missing, and the page rendered blank with nothing said.
+
+       WHAT IT IS NOT. Not size: shadow.js is twice app.js and loaded
+       fine. Not the rewrite rule: every one of these files reaches the
+       CDN through the same forced `command.bettortoken.com/* ->
+       /command/:splat` rewrite, including the ones that succeeded. Not
+       our origin: a status-200 rewrite is served by Netlify's own CDN and
+       never touches the API. On the evidence it is a transient
+       per-asset fault inside that CDN, which is not something this
+       repository can fix and is NOT claimed as fixed.
+
+       WHAT THIS DOES, which is within our control: it turns a silent
+       blank page into a stated one, and retries ONCE. A manager who
+       opens COMMAND during such a window now sees which file failed and
+       that a reload is worth trying, instead of an empty screen that
+       looks like the system is down. -->
+  <script>
+  (function () {
+    var REQUIRED = ["core.js", "app.js"];
+    function present() {
+      // CHECK THE GLOBALS, NOT LOAD EVENTS. A script that arrived with
+      // zero bytes fires `load` and defines nothing, so a load handler
+      // would report success for exactly the fault seen at 22:34:18Z.
+      //
+      // The two names are read out of the files: core.js ends with
+      // `root.BTCore = api`, app.js sets `window.BettorCommand`. Testing
+      // a global that nothing defines would raise this overlay on every
+      // healthy load, which is worse than the fault it reports.
+      var missing = [];
+      if (!window.BTCore) { missing.push("core.js"); }
+      if (!window.BettorCommand) { missing.push("app.js"); }
+      return missing;
+    }
+    function complain(missing) {
+      try { console.error("COMMAND assets failed to load:", missing); }
+      catch (e) { /* console may be absent */ }
+      var d = document.createElement("div");
+      d.setAttribute("role", "alert");
+      d.style.cssText = "position:fixed;inset:0;display:flex;" +
+        "align-items:center;justify-content:center;padding:24px;" +
+        "font:14px/1.6 ui-sans-serif,system-ui,sans-serif;" +
+        "background:#0b0d10;color:#e6e8eb;z-index:99999;text-align:center";
+      d.innerHTML =
+        '<div style="max-width:34rem">' +
+        '<div style="font-size:1.1rem;margin-bottom:.75rem">' +
+        'COMMAND could not finish loading</div>' +
+        '<div style="opacity:.8">These files did not arrive: <code>' +
+        missing.join("</code>, <code>") + '</code>.</div>' +
+        '<div style="opacity:.8;margin-top:.75rem">This has been seen as ' +
+        'a brief content-delivery fault that clears on its own. A reload ' +
+        'usually works. No data has been lost and nothing was ' +
+        'submitted.</div>' +
+        '<button id="bt-reload" style="margin-top:1.25rem;padding:.5rem ' +
+        '1rem;border-radius:.375rem;border:1px solid #3a4048;' +
+        'background:#151a1f;color:inherit;cursor:pointer">Reload</button>' +
+        '</div>';
+      document.body.appendChild(d);
+      var b = document.getElementById("bt-reload");
+      if (b) { b.addEventListener("click", function () {
+        location.reload();
+      }); }
+    }
+    // One retry, then say so. A retry loop would hammer the CDN during
+    // exactly the window when it is already failing.
+    var tried = false;
+    function check() {
+      var missing = present();
+      if (!missing.length) { return; }
+      if (!tried) {
+        tried = true;
+        missing.forEach(function (f) {
+          var s = document.createElement("script");
+          s.src = f + "?retry=1";
+          document.body.appendChild(s);
+        });
+        setTimeout(check, 2500);
+        return;
+      }
+      complain(missing);
+    }
+    setTimeout(check, 1500);
+  }());
+  </script>
 </body>
 </html>

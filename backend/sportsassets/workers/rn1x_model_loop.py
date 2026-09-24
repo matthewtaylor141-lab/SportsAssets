@@ -126,17 +126,33 @@ def enabled() -> bool:
 
 # ── 1 · PREPARE ─────────────────────────────────────────────────────
 
+#: THE NEWEST ROWS, NOT THE OLDEST. This read `ORDER BY t.detected_at, t.id
+#: LIMIT 40000` ascending, and with ~6.1M trades the 30-day window holds
+#: far more than the limit -- so it returned the OLDEST 40,000 rows in the
+#: window, every one of which has a closed horizon.
+#:
+#: The first production cycle showed it exactly: 40,000 source rows,
+#: 7,805 built, **n_open = 0**. The fit worked and the PREDICT stage had
+#: nothing to predict on, because the rows whose horizon is still open are
+#: by definition the most recent ones and they had all been cut off.
+#:
+#: The inner query takes the newest rows descending; the outer one restores
+#: chronological order, because `learn.dataset.build` walks forward and its
+#: prior-fill features depend on that order.
 FILLS_SQL = """
-    SELECT t.id, t.whale_id, t.condition_id, t.outcome_index, t.side,
-           t.size::float8 AS size, t.price::float8 AS price,
-           extract(epoch FROM t.ts)::float8 AS ts,
-           extract(epoch FROM t.detected_at)::float8 AS detected_at,
-           t.source
-      FROM trades t
-     WHERE t.source = ANY($1::text[])
-       AND t.detected_at >= now() - ($2 || ' days')::interval
-     ORDER BY t.detected_at, t.id
-     LIMIT $3
+    SELECT * FROM (
+        SELECT t.id, t.whale_id, t.condition_id, t.outcome_index, t.side,
+               t.size::float8 AS size, t.price::float8 AS price,
+               extract(epoch FROM t.ts)::float8 AS ts,
+               extract(epoch FROM t.detected_at)::float8 AS detected_at,
+               t.source
+          FROM trades t
+         WHERE t.source = ANY($1::text[])
+           AND t.detected_at >= now() - ($2 || ' days')::interval
+         ORDER BY t.detected_at DESC, t.id DESC
+         LIMIT $3
+    ) newest
+    ORDER BY detected_at, id
 """
 
 LIVE_SOURCES = ("chain", "poll")

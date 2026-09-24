@@ -626,6 +626,26 @@ jobs:
                    "not_settlement\t"+ ((.this_is_not_a_settlement_forecast)|tostring),
                    "last_cycle\t"    + ((.last_cycle // "none")|tostring)' \
             /tmp/st2.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # 5a · THE EXTERNAL LOOP'S OWN CYCLE TALLY. The census above
+          # counts only candidates that were SCORED; six of this loop's
+          # eight refusal counters fire before scoring, so a cycle can
+          # refuse everything and leave the census empty. The last run did
+          # exactly that -- `evaluated 0` with no refusals listed -- and
+          # this is the read that says why.
+          echo "-- external: last cycle, ALL refusals --" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.statuses.external_valuation.last_cycle
+                 | if . == null then "no cycle heartbeat yet"
+                   else "state\t"      + ((.state // "?")|tostring),
+                        "evaluated\t"  + ((.evaluated // 0)|tostring),
+                        "written\t"    + ((.written // 0)|tostring),
+                        "markets\t"    + ((.markets_considered // 0)|tostring),
+                        "elapsed_s\t"  + ((.elapsed_s // 0)|tostring),
+                        (.refusals // {} | to_entries[]
+                           | "  \(.key)\t\(.value)")
+                   end' /tmp/st2.json 2>/dev/null \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
+
           echo "-- order book + P&L --" | tee -a "$GITHUB_STEP_SUMMARY"
           jq -r '"orders_total\t"  + ((.statuses.order_book_state.orders_total // 0)|tostring),
                  "settled_total\t" + ((.statuses.shadow_pnl.settled_total // 0)|tostring),

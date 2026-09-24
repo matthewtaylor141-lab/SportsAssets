@@ -260,3 +260,24 @@ def test_the_loop_has_no_promotion_path():
                 "activate_policy"):
         assert bad not in src, bad
     assert "has no promotion path" in src
+
+
+def test_the_fills_query_takes_the_NEWEST_rows():
+    """THE DEFECT THE FIRST PRODUCTION CYCLE EXPOSED.
+
+    The query was `ORDER BY detected_at, id LIMIT 40000` ascending. With
+    ~6.1M trades the 30-day window holds far more than the limit, so it
+    returned the OLDEST 40,000 rows -- every one with a closed horizon.
+    The cycle fitted on 7,805 rows and then had **n_open = 0**, so the
+    PREDICT stage had nothing to predict on and no prediction was ever
+    recorded. A pipeline that fits and never predicts is not a learning
+    system.
+    """
+    q = " ".join(L.FILLS_SQL.split())
+    # The inner select takes the newest...
+    assert "ORDER BY t.detected_at DESC, t.id DESC" in q, q
+    # ...and the outer one restores chronological order, because
+    # learn.dataset.build walks forward and its prior-fill features depend
+    # on it. Without this the features would look at the wrong history.
+    assert q.rstrip().endswith("ORDER BY detected_at, id"), q
+    assert q.index("DESC") < q.index("ORDER BY detected_at, id")
