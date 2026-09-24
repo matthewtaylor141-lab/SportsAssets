@@ -21,6 +21,9 @@ mostly claims that outran their evidence.
 """
 import ast
 import inspect
+import os
+
+import pytest
 
 from sportsassets.api import command_rn1x as CR
 from sportsassets.workers import ext_pinnacle_loop as EXT
@@ -112,3 +115,101 @@ def test_more_than_one_granted_holder_is_a_check_not_an_ok():
         if isinstance(node, ast.If) and "doubled" == ast.unparse(node.test):
             found = "CHECK" in ast.unparse(node.body)
     assert found, "a doubled holder must badge CHECK"
+
+
+# ── the standby, demonstrated rather than asserted ───────────────────
+
+DSN = os.environ.get("RN1X_TEST_DSN")
+pg = pytest.mark.skipif(not DSN, reason="RN1X_TEST_DSN is not set")
+
+
+@pg
+def test_a_second_process_becomes_a_standby_and_writes_nothing():
+    """CONTROLLED, through the loop's own run().
+
+    Another connection holds ...034 first. `ext_pinnacle_loop.run` must
+    then never reach a cycle: it must write the standby heartbeat and wait.
+    The AST checks above say the code is shaped right; this says it
+    behaves right, which is a different claim.
+    """
+    import asyncio
+    import json
+
+    import asyncpg
+
+    async def main():
+        holder = await asyncpg.connect(DSN, timeout=5)
+        pool = await asyncpg.create_pool(DSN, min_size=1, max_size=3)
+        try:
+            got = await holder.fetchval(
+                "SELECT pg_try_advisory_lock($1)", EXT.LOCK_KEY)
+            assert got is True, "the holder must own the lock first"
+            await pool.execute("DELETE FROM ingestion_state WHERE key = $1",
+                               EXT.HEARTBEAT_KEY)
+
+            cycles = []
+
+            async def _never(_conn):
+                cycles.append(1)
+                return {"ran": True, "state": "SHOULD_NOT_RUN"}
+
+            orig = EXT.cycle
+            EXT.cycle = _never
+            try:
+                with pytest.raises(asyncio.TimeoutError):
+                    await asyncio.wait_for(EXT.run(lambda: pool), timeout=2.0)
+            finally:
+                EXT.cycle = orig
+
+            assert not cycles, (
+                "the standby ran a cycle: it would have spent provider "
+                "credits and written the holder's observations")
+            raw = await pool.fetchval(
+                "SELECT value::text FROM ingestion_state WHERE key = $1",
+                EXT.HEARTBEAT_KEY)
+            assert raw, "a standby must say so rather than going quiet"
+            beat = json.loads(raw)
+            assert beat["state"] == "STANDBY_NOT_THE_WRITER"
+            assert "ANOTHER_PROCESS_HOLDS_THE_WRITER_LOCK" in beat["refusals"]
+        finally:
+            await holder.execute("SELECT pg_advisory_unlock($1)",
+                                 EXT.LOCK_KEY)
+            await holder.close()
+            await pool.close()
+
+    asyncio.run(main())
+
+
+@pg
+def test_the_lock_is_released_when_the_holder_disconnects():
+    """A standby that can never take over is not a standby.
+
+    pg_try_advisory_lock is session-scoped, so the holder's disconnect must
+    free the key -- which is what makes the retry loop above meaningful.
+    """
+    import asyncio
+
+    import asyncpg
+
+    async def main():
+        a = await asyncpg.connect(DSN, timeout=5)
+        assert await a.fetchval("SELECT pg_try_advisory_lock($1)",
+                                MOD.LOCK_KEY) is True
+        b = await asyncpg.connect(DSN, timeout=5)
+        try:
+            assert await b.fetchval("SELECT pg_try_advisory_lock($1)",
+                                    MOD.LOCK_KEY) is False
+            await a.close()
+            for _ in range(50):
+                if await b.fetchval("SELECT pg_try_advisory_lock($1)",
+                                    MOD.LOCK_KEY):
+                    break
+                await asyncio.sleep(0.05)
+            else:
+                raise AssertionError(
+                    "the key never freed: a standby could never take over")
+        finally:
+            await b.execute("SELECT pg_advisory_unlock_all()")
+            await b.close()
+
+    asyncio.run(main())
