@@ -97,17 +97,81 @@ def test_a_book_term_without_a_citation_is_refused():
     assert "missing source_url" in part["rejected"][0]["why"]
 
 
-def test_the_bookmakers_side_ships_empty_and_says_what_would_fill_it():
-    assert ST.BOOK_TERMS == {}, (
-        "a term here is a claim about a third party's published document "
-        "and may only be added with a citation")
+def test_every_captured_book_term_carries_a_complete_citation():
+    """The table is no longer empty -- the page was retrieved -- so the
+    discipline moves from "it ships empty" to "every entry is admissible".
+    A term without source, URL, retrieval time and verbatim quote must not be
+    in here, and `admit_book_terms` is the mechanism that keeps it out."""
+    assert ST.BOOK_TERMS, "the capture landed, so this should not be empty"
+    for key, terms in ST.BOOK_TERMS.items():
+        assert len(key) == 3, (
+            "a term set must be keyed by context too, since pre-game and "
+            "In-Play differ: %r" % (key,))
+        adm = ST.admit_book_terms(terms)
+        assert adm["ok"], (key, adm["rejected"])
+        for cond, rec in terms.items():
+            assert ST.check_citation(rec["cite"]) == [], (key, cond)
+            assert rec["cite"]["source_url"].startswith("https://"), rec
+            assert len(rec["cite"]["quote"].split()) >= 8, (
+                "a citation's quote must be the operative sentence, not a "
+                "fragment: %r" % (rec["cite"]["quote"],))
+
+
+def test_the_capture_records_its_own_provenance_and_its_limits():
     d = ST.describe()
-    assert d["book_terms_count"] == 0
-    assert d["capture_request"]["must_carry"] == list(ST.CITATION_FIELDS)
-    # the retrieval was ATTEMPTED and the attempts are recorded, so an
-    # empty table reads as a blocked task rather than an oversight
-    assert d["capture_attempts"], d
-    assert all(a["result"] for a in d["capture_attempts"])
+    assert d["capture_run"]["http"] == 200
+    assert d["capture_run"]["url"].startswith("https://www.pinnacle.com/")
+    assert d["capture_run"]["retrieved_at"]
+    assert d["capture_run"]["job"].startswith("https://github.com/")
+    # THE SECOND SOURCE WAS REFUSED, and that is recorded rather than
+    # quietly dropped -- nothing below depends on it.
+    assert d["capture_run"]["also_attempted"]["http"] == 403
+    assert d["capture_run"]["also_attempted"]["captured"] is False
+    # AND WHAT THE CAPTURE DOES NOT COVER, so its scope is not overread
+    lim = " ".join(d["capture_limits"])
+    assert "PLAYOFF" in lim and "SEVEN-INNING" in lim and "MARKET RULES" in lim
+    # the publisher's own precedence statement is recorded, because a market
+    # rule would outrank the sport rules these terms come from
+    assert "Market Rules take precedence over Sport Rules" in \
+        d["rule_hierarchy"]["quote"]
+
+
+def test_the_applicable_rule_comes_from_the_quotes_timing_not_the_market_name():
+    """PRE-GAME AND IN-PLAY DISAGREE ON A CALLED GAME, so "h2h" cannot pick
+    the rule. Pre-game grades the last completed inning; In-Play voids."""
+    pre = ST.book_terms(sport_family="baseball", market="h2h",
+                        context=ST.CTX_PRE_GAME)
+    live = ST.book_terms(sport_family="baseball", market="h2h",
+                         context=ST.CTX_LIVE)
+    assert pre[ST.C_SHORTENED_OFFICIAL]["payout"] == ST.PAY_ON_PARTIAL
+    assert live[ST.C_SHORTENED_OFFICIAL]["payout"] == ST.PAY_STAKE_BACK
+    assert pre[ST.C_SHORTENED_OFFICIAL]["payout"] != \
+        live[ST.C_SHORTENED_OFFICIAL]["payout"], (
+        "if these were equal the distinction would not matter and the "
+        "context could be dropped")
+    # the context itself is established from the two stamps
+    assert ST.book_context_for(observed_at=10.0,
+                               game_start=100.0)["context"] == ST.CTX_PRE_GAME
+    assert ST.book_context_for(observed_at=200.0,
+                              game_start=100.0)["context"] == ST.CTX_LIVE
+    # AND AN UNKNOWN FIRST PITCH IS NOT DEFAULTED TO PRE-GAME
+    none = ST.book_context_for(observed_at=10.0, game_start=None)
+    assert none["context"] is None
+    assert none["refusal"] == ST.R_CONTEXT_UNKNOWN
+    assert ST.book_terms(sport_family="baseball", market="h2h",
+                         context=None) == {}
+
+
+def test_an_unknown_quote_context_withholds_the_book_side_entirely():
+    got = ST.compare_prose(sport_family="baseball", market="h2h",
+                           venue_prose="If the game is abandoned and never "
+                                       "completed the market is void and "
+                                       "stakes are returned.",
+                           observed_at=10.0, game_start=None)
+    assert got["book_terms_held"] is False
+    assert got["verdict"] == ST.UNKNOWN
+    assert got["quote_context"]["refusal"] == ST.R_CONTEXT_UNKNOWN
+    assert "not defaulted to pre-game" in got["why_book_side_absent"]
 
 
 def test_an_undeclared_market_type_is_unknown_not_compatible():

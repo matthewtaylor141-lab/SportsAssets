@@ -1364,8 +1364,16 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
         vevid = dict(vevid, rules_text=rules.get("rules_text"),
                      rules_field=rules.get("rules_field"),
                      rules_source=rules.get("source"))
+    # WHICH PUBLISHED RULE GOVERNS THIS QUOTE. "h2h" does not say: the
+    # bookmaker's pre-game and In-Play Game-period Money Line rules disagree
+    # on a called game -- pre-game grades the last completed inning, In-Play
+    # voids for want of a completed game. So the context comes from the
+    # quote's OWN observation stamp against the fixture's first pitch, and an
+    # unknown first pitch leaves it UNESTABLISHED rather than assumed.
     srule = vset.attest(
         sport_family=family, market="h2h", venue_evidence=vevid,
+        observed_at=val.get("observed_at"),
+        game_start=(out.get("fixture") or {}).get("game_start"),
         book_evidence={"outcome_names": list(quote["prices"].keys()),
                        "source": "theoddsapi:h2h:%s" % devig.BOOK})
     _unmet = list(srule.get("unmet") or [])
@@ -1388,6 +1396,15 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
         # instead of one blanket verdict. This is the evidence the
         # acceptance checker requires.
         "terms_verdict": _terms.get("verdict"),
+        # WHICH RULE APPLIES, AND WHY -- established from the quote's own
+        # timing, never from the market name.
+        "quote_context": (_terms.get("quote_context") or {}).get("context"),
+        "quote_context_why": (_terms.get("quote_context") or {}).get("why"),
+        "quote_context_refusal": (
+            _terms.get("quote_context") or {}).get("refusal"),
+        "book_capture": _terms.get("book_capture"),
+        "book_capture_limits": _terms.get("book_capture_limits"),
+        "rule_hierarchy": _terms.get("rule_hierarchy"),
         "terms_per_condition": _terms.get("per_condition"),
         "terms_unstated": _terms.get("unstated_conditions"),
         "terms_applicable_conditions": _terms.get("applicable_conditions"),

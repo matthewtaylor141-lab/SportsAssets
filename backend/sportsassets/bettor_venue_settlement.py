@@ -376,7 +376,8 @@ ATTESTING_CLASSES = (EV_VENUE_CATALOGUE, EV_BOOK_PAYLOAD,
 
 
 def attest(*, sport_family, market="h2h", venue_evidence=None,
-           book_evidence=None) -> dict:
+           book_evidence=None, observed_at=None, game_start=None,
+           book_context=None) -> dict:
     """Per-rule status with its EVIDENCE CLASS and SOURCE, per fixture.
 
     `venue_evidence`  what the venue's own catalogue shows for this event,
@@ -455,7 +456,9 @@ def attest(*, sport_family, market="h2h", venue_evidence=None,
     # only under "void".
     cmp_ = _ST.compare_prose(sport_family=fam, market=mkt,
                              venue_prose=prose,
-                             extra_book_terms=_legacy_book_terms(fam))
+                             extra_book_terms=_legacy_book_terms(fam),
+                             observed_at=observed_at, game_start=game_start,
+                             context=book_context)
     _ot_cmp = ((cmp_.get("per_condition") or {}).get(_ST.C_OVERTIME) or {})
     _ot_mismatch = _ot_cmp.get("verdict") == _ST.V_MISMATCH
     hits_inc = [p for p in (pats.get("includes") or ())

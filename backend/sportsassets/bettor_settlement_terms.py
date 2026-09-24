@@ -289,21 +289,225 @@ def admit_book_terms(terms: dict) -> dict:
             "admitted": admitted, "rejected": rejected}
 
 
-#: THE BOOKMAKER'S TERMS, PER (sport_family, market). DELIBERATELY EMPTY.
+# ── THE QUOTE'S CONTEXT DECIDES WHICH RULE APPLIES ───────────────────
+#
+# "h2h" DOES NOT IDENTIFY THE RULE, and assuming it does is the error this
+# section exists to prevent. The bookmaker publishes two different terminal
+# treatments for the same Game-period Money Line, and they disagree on the
+# case that matters most:
+#
+#   PRE-GAME  a called game past the minimum grades on the last completed
+#             inning -- the bet PAYS A WINNER.
+#   IN-PLAY   the same game VOIDS, because an In-Play Game-period market
+#             requires the game to be played to completion.
+#
+# So the same market name, the same fixture and the same probability carry
+# different payouts depending only on whether the quote was taken before or
+# after the first pitch. The context is therefore established from the
+# quote's own observation stamp against the fixture's start, and when the
+# start is unknown the context is UNKNOWN -- never defaulted.
+CTX_PRE_GAME = "PRE_GAME"
+CTX_LIVE = "IN_PLAY"
+
+R_CONTEXT_UNKNOWN = "QUOTE_CONTEXT_NOT_ESTABLISHED"
+
+
+def book_context_for(*, observed_at=None, game_start=None) -> dict:
+    """PRE_GAME or IN_PLAY for one quote, or a named refusal.
+
+    Both stamps are required. Treating a missing `game_start` as pre-game
+    would silently apply the rule that pays a winner to a quote taken mid
+    game, where the published rule refunds instead.
+    """
+    if observed_at is None or game_start is None:
+        return {"context": None, "refusal": R_CONTEXT_UNKNOWN,
+                "observed_at": observed_at, "game_start": game_start,
+                "why": ("the quote's observation stamp and the fixture's "
+                        "first pitch are both needed to say which published "
+                        "rule governs it, and one of them is missing. It is "
+                        "not defaulted to pre-game: the two rules pay "
+                        "differently on a called game")}
+    ctx = CTX_PRE_GAME if float(observed_at) < float(game_start) else CTX_LIVE
+    return {"context": ctx, "refusal": None,
+            "observed_at": float(observed_at),
+            "game_start": float(game_start),
+            "seconds_from_first_pitch": float(observed_at) - float(game_start),
+            "why": ("the quote was observed %s the first pitch, so the %s "
+                    "rule governs it"
+                    % ("before" if ctx == CTX_PRE_GAME else "after", ctx))}
+
+
+# ── THE CAPTURE ──────────────────────────────────────────────────────
+#
+# RETRIEVED, NOT RECALLED. The development container's egress policy denies
+# pinnacle.com, so the page was fetched by the GitHub Actions runner -- an
+# authorized reader with ordinary outbound access -- and the operative
+# sentences below are its own words as served.
+
+_SRC = "Pinnacle betting rules (published rules page)"
+_URL = "https://www.pinnacle.com/en/future/betting-rules"
+_AT = "2026-09-24T20:30:22Z"
+
+#: The retrieval itself, so the citation can be audited rather than trusted.
+CAPTURE_RUN = {
+    "reader": "github-actions runner, ubuntu-latest",
+    "job": ("https://github.com/matthewtaylor141-lab/SportsAssets/actions/"
+            "runs/36055307702/job/107820650377"),
+    "url": _URL,
+    "retrieved_at": _AT,
+    "http": 200,
+    "text_lines": 629,
+    "text_words": 12787,
+    "also_attempted": {
+        "url": ("https://support.pinnacle.com/hc/en-us/articles/"
+                "47846444668177-How-bets-are-graded-at-Pinnacle"),
+        "http": 403,
+        "captured": False,
+        "why": ("the support host refused the runner. Nothing is taken from "
+                "it, and no term below depends on it"),
+    },
+}
+
+#: THE PUBLISHER'S STATED PRECEDENCE, quoted. It matters because a Market
+#: Rule could override the Sport Rule these terms come from, and a future
+#: capture of a market-specific rule must be read as outranking them.
+RULE_HIERARCHY = {
+    "quote": ("In case of any contradictions: Market Rules take precedence "
+              "over Sport Rules; which take precedence over General Rules."),
+    "source": _SRC, "source_url": _URL, "retrieved_at": _AT,
+    "consequence": ("the terms below are SPORT rules for baseball. A "
+                    "captured MARKET rule for a specific contract would "
+                    "outrank them and must be compared before they are"),
+}
+
+#: An exception that is NOT folded into the terms, because it changes them.
+PLAYOFF_EXCEPTION = {
+    "quote": ("MLB Playoff and Play-In games, which will have action "
+              "whenever the game is completed."),
+    "source": _SRC, "source_url": _URL, "retrieved_at": _AT,
+    "consequence": ("for a Playoff or Play-In fixture the suspension "
+                    "timings do not void the bet, so the terms below do not "
+                    "describe it. A fixture not established as regular "
+                    "season is therefore NOT covered by this capture"),
+}
+
+_Q_RULE3 = (
+    "Bets made before the start of the game on the Game-period Money Line "
+    "market have action as long as at least 5 innings (or 4.5 innings if the "
+    "Home team is winning) are completed. If a game is called (ended) before "
+    "9 innings (or 8.5 innings if the Home team wins) are complete, the score "
+    "at the end of the last completed inning will be considered final, unless "
+    "the game is called (ended) during the bottom half of one of these "
+    "innings and the Home team has taken the lead. In this specific case, the "
+    "actual score of the game will be used to grade the Game-period Money "
+    "Line for pre-game bets.")
+
+_Q_RULE4 = (
+    "All Game-period In-Play markets require that the game be played to "
+    "completion with 9 innings (or 8.5 if Home team wins) to have action. "
+    "Periods that have been played to completion will have action even if the "
+    "game is not played to completion.")
+
+_Q_RULE7 = (
+    "If a game is suspended in order to be resumed more than 12 hours from "
+    "the first pitch, all pre-game bets on the Game-period markets will be "
+    "deemed void and bets on completed periods will have action. With the "
+    "exceptions of: ... Game-period Money Line bets, which have action based "
+    "on the score at the end of the last completed inning as long as at least "
+    "5 innings (or 4.5 innings if the Home team is winning) are completed.")
+
+_Q_RULE8 = (
+    "If a game is suspended in order to be resumed more than 30 hours from "
+    "the first pitch, all Live bets on the Game-period markets will be deemed "
+    "void and bets on completed periods will have action. If a game is "
+    "suspended and resumed within 30 hours of the first pitch, all Live bets "
+    "will have action when their periods are completed.")
+
+_Q_GENERAL_NOT_STARTED = (
+    "If a fixture isn't started 12 hours after its scheduled starting time "
+    "all bets on that fixture will be voided.")
+
+
+def _cite(quote, rule):
+    return {"source": "%s -- %s" % (_SRC, rule),
+            "source_url": _URL, "retrieved_at": _AT, "quote": quote}
+
+
+#: THE BOOKMAKER'S TERMS, CAPTURED, keyed by (family, market, context).
 #:
-#: Filling it requires `CAPTURE_REQUEST` to be satisfied: the publisher's
-#: own page, retrieved, quoted, timestamped. Nothing else admits a term.
-#: While it is empty every comparison below returns UNKNOWN for every
-#: condition the book would have to speak to, and the hold value stays
-#: explicitly conditional.
-BOOK_TERMS: dict = {}
+#: PRE-GAME AND IN-PLAY DIFFER AT EXACTLY ONE CONDITION and it is the
+#: expensive one: a game stopped after the minimum but before completion
+#: PAYS A WINNER pre-game (rule 3, and rule 7's Money Line exception) and
+#: VOIDS in play (rule 4). Recording one set for both would have been the
+#: same error as reading the rule off the word "h2h".
+BOOK_TERMS: dict = {
+    ("baseball", "h2h", CTX_PRE_GAME): {
+        C_FULL: {"payout": PAY_ON_FINAL, "cite": _cite(_Q_RULE3, "rule 3")},
+        C_OVERTIME: {"payout": PAY_ON_FINAL,
+                     "cite": _cite(_Q_RULE3, "rule 3")},
+        # Called past the minimum, and suspended-past-the-minimum too: both
+        # grade on the last completed inning for the Money Line.
+        C_SHORTENED_OFFICIAL: {"payout": PAY_ON_PARTIAL,
+                               "cite": _cite(_Q_RULE3 + " " + _Q_RULE7,
+                                             "rules 3 and 7")},
+        C_STOPPED_EARLY: {"payout": PAY_STAKE_BACK,
+                          "cite": _cite(_Q_RULE3, "rule 3")},
+        C_NOT_PLAYED: {"payout": PAY_STAKE_BACK,
+                       "cite": _cite(_Q_GENERAL_NOT_STARTED + " " + _Q_RULE7,
+                                     "general rule and rule 7")},
+    },
+    ("baseball", "h2h", CTX_LIVE): {
+        C_FULL: {"payout": PAY_ON_FINAL, "cite": _cite(_Q_RULE4, "rule 4")},
+        C_OVERTIME: {"payout": PAY_ON_FINAL,
+                     "cite": _cite(_Q_RULE4, "rule 4")},
+        # THE DIVERGENCE. In play, a game not played to completion has NO
+        # ACTION -- the stake comes back instead of grading a leader.
+        C_SHORTENED_OFFICIAL: {"payout": PAY_STAKE_BACK,
+                               "cite": _cite(_Q_RULE4, "rule 4")},
+        C_STOPPED_EARLY: {"payout": PAY_STAKE_BACK,
+                          "cite": _cite(_Q_RULE4, "rule 4")},
+        C_NOT_PLAYED: {"payout": PAY_STAKE_BACK,
+                       "cite": _cite(_Q_RULE8, "rule 8")},
+    },
+}
+
+#: What the capture does NOT establish, recorded so its scope is not
+#: overread. Each of these would need its own retrieval.
+CAPTURE_LIMITS = (
+    "SEVEN-INNING DOUBLEHEADERS restate rules 3, 7 and 8 with a 7-inning "
+    "threshold, so a fixture not established as a standard nine-inning game "
+    "is outside these terms",
+    "MLB PLAYOFF AND PLAY-IN fixtures carry an explicit exception and are "
+    "outside these terms",
+    "MARKET RULES outrank sport rules by the publisher's own precedence "
+    "statement, and no market-specific rule for this contract was captured",
+    "the SUPPORT-CENTRE grading article returned 403 to the reader, so "
+    "nothing is taken from it",
+)
 
 #: Recorded attempts to satisfy `CAPTURE_REQUEST`, so a blocked retrieval
 #: is a fact in the repository rather than a memory of a failed command.
 #: Each entry: what was asked for, from where, when, and what answered.
 CAPTURE_ATTEMPTS = (
     {"target": "www.pinnacle.com/en/future/betting-rules",
+     "asked_at": "2026-09-24T20:30:22Z",
+     "reader": "github-actions runner (authorized, ordinary egress)",
+     "result": "RETRIEVED",
+     "detail": ("HTTP 200, 629 text lines, 12787 words. The baseball sport "
+                "rules, the general rules and the stated precedence were "
+                "read from it and are quoted in BOOK_TERMS and "
+                "RULE_HIERARCHY below. THIS is the capture the terms rest "
+                "on")},
+    {"target": ("support.pinnacle.com/hc/en-us/articles/"
+                "47846444668177-How-bets-are-graded-at-Pinnacle"),
+     "asked_at": "2026-09-24T20:30:23Z",
+     "reader": "github-actions runner (authorized, ordinary egress)",
+     "result": "HTTP_403",
+     "detail": ("the support host refused the runner. Nothing is taken from "
+                "it and no term depends on it")},
+    {"target": "www.pinnacle.com/en/future/betting-rules",
      "asked_at": "2026-09-24T19:56Z",
+     "reader": "development container (egress policy denies the host)",
      "result": "EGRESS_BLOCKED",
      "detail": ("the session's network policy denied the host. No content "
                 "was retrieved, so no term was captured and none was "
@@ -321,8 +525,18 @@ CAPTURE_ATTEMPTS = (
 )
 
 
-def book_terms(*, sport_family, market="h2h") -> dict:
-    return dict(BOOK_TERMS.get((str(sport_family), str(market))) or {})
+def book_terms(*, sport_family, market="h2h", context=None) -> dict:
+    """The captured terms for this market IN THIS CONTEXT.
+
+    An unknown context returns NOTHING. There is no "general" entry to fall
+    back on, deliberately: the pre-game and in-play rules disagree on a
+    called game, so a fallback would be a guess about which side of the
+    first pitch the quote came from.
+    """
+    if context is None:
+        return {}
+    return dict(BOOK_TERMS.get(
+        (str(sport_family), str(market), str(context))) or {})
 
 
 # ── the comparison ───────────────────────────────────────────────────
@@ -380,7 +594,8 @@ def compare(*, book: dict, venue: dict, conditions=None) -> dict:
 
 
 def compare_prose(*, sport_family, market="h2h", venue_prose="",
-                  extra_book_terms=None) -> dict:
+                  extra_book_terms=None, observed_at=None, game_start=None,
+                  context=None) -> dict:
     """The whole comparison from one side's prose and the held book terms.
 
     `extra_book_terms` is the LEGACY single-class hook: callers that still
@@ -390,7 +605,14 @@ def compare_prose(*, sport_family, market="h2h", venue_prose="",
     verdict UNKNOWN rather than COMPATIBLE for baseball.
     """
     read = read_terms(venue_prose)
-    bk = dict(book_terms(sport_family=sport_family, market=market))
+    # WHICH PUBLISHED RULE GOVERNS THIS QUOTE, established from its own
+    # timing rather than from the market name.
+    ctx = ({"context": str(context), "refusal": None,
+            "why": "the context was supplied by the caller"}
+           if context is not None else
+           book_context_for(observed_at=observed_at, game_start=game_start))
+    bk = dict(book_terms(sport_family=sport_family, market=market,
+                         context=ctx.get("context")))
     for k, val in dict(extra_book_terms or {}).items():
         bk.setdefault(str(k), val)
     conds = applicable_conditions(sport_family=sport_family, market=market)
@@ -405,7 +627,13 @@ def compare_prose(*, sport_family, market="h2h", venue_prose="",
     cmp_ = compare(book=bk, venue=read["terms"], conditions=conds)
     cmp_.update(venue_read=read, book_terms_held=bool(bk),
                 applicable_conditions=list(conds),
+                quote_context=ctx,
+                book_capture=(dict(CAPTURE_RUN) if bk else None),
+                book_capture_limits=(list(CAPTURE_LIMITS) if bk else None),
+                rule_hierarchy=(dict(RULE_HIERARCHY) if bk else None),
                 book_capture_request=(None if bk else CAPTURE_REQUEST))
+    if not bk and ctx.get("refusal"):
+        cmp_["why_book_side_absent"] = ctx["why"]
     if read["contradicted"]:
         # The venue's own text giving one condition two payouts is a
         # conflict in the SOURCE, and it is louder than silence.
@@ -421,9 +649,19 @@ def describe() -> dict:
         "version": VERSION,
         "conditions": list(CONDITIONS),
         "payouts": list(PAYOUTS),
-        "book_terms_held": {"%s/%s" % k: sorted(v) for k, v
+        "book_terms_held": {"%s/%s/%s" % k: sorted(v) for k, v
                             in BOOK_TERMS.items()},
         "book_terms_count": len(BOOK_TERMS),
+        "contexts": [CTX_PRE_GAME, CTX_LIVE],
+        "why_context_matters": (
+            "the pre-game and In-Play Game-period Money Line rules disagree "
+            "on a called game: pre-game grades the last completed inning, "
+            "In-Play voids for want of a completed game. The market name "
+            "'h2h' does not distinguish them"),
+        "capture_run": dict(CAPTURE_RUN),
+        "capture_limits": list(CAPTURE_LIMITS),
+        "rule_hierarchy": dict(RULE_HIERARCHY),
+        "playoff_exception": dict(PLAYOFF_EXCEPTION),
         "capture_request": CAPTURE_REQUEST,
         "capture_attempts": [dict(a) for a in CAPTURE_ATTEMPTS],
         "citation_required": list(CITATION_FIELDS),

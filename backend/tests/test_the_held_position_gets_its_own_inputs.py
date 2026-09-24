@@ -294,12 +294,14 @@ def _captured_book_terms(terms=None):
     an unsatisfiable one.
     """
     from sportsassets import bettor_settlement_terms as ST
-    key = ("baseball", "h2h")
     before = dict(ST.BOOK_TERMS)
     adm = ST.admit_book_terms(terms if terms is not None else _book_terms_full())
     assert adm["ok"], adm["rejected"]
     try:
-        ST.BOOK_TERMS[key] = adm["admitted"]
+        # BOTH CONTEXTS, so the test exercises the comparison rather than the
+        # pre-game/In-Play divergence, which has its own tests.
+        for ctx in (ST.CTX_PRE_GAME, ST.CTX_LIVE):
+            ST.BOOK_TERMS[("baseball", "h2h", ctx)] = adm["admitted"]
         yield ST
     finally:
         ST.BOOK_TERMS.clear()
@@ -320,6 +322,15 @@ async def _fixture(c, *, sport="MLB", title="Chicago Cubs vs Miami Marlins",
         "INSERT INTO markets(condition_id,slug,sport,title,event_title,"
         "closed,resolved,updated_at) VALUES($1,$2,$3,$4,$5,$6,false,now())",
         _COND, "mlb-chc-mia-2026-09-24", sport, title, title, closed)
+    # A FIRST PITCH, because the applicable published rule depends on which
+    # side of it the quote was observed -- pre-game and In-Play grade a
+    # called game differently. Without it the context is UNESTABLISHED and
+    # the book side is correctly withheld, which is a different test.
+    await c.execute(
+        "DELETE FROM market_starts WHERE condition_id = $1", _COND)
+    await c.execute(
+        "INSERT INTO market_starts(condition_id, game_start) "
+        "VALUES($1, to_timestamp($2))", _COND, _T0 + 3600.0)
     await c.execute("INSERT INTO whales(id,address) VALUES(9,'0xwhale9') "
                     "ON CONFLICT (id) DO NOTHING")
     for i, n, t in ((0, "Chicago Cubs", _COND + "-t0"),

@@ -1774,7 +1774,7 @@ jobs:
       - name: RN1X — the ACCEPTANCE position, read by id and by its own policy
         if: always()
         env:
-          ADMIN_TOKEN: ${{ secrets.COMMAND_ADMIN_TOKEN }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: |
           set -uo pipefail
           API="https://${{ inputs.host || 'command.bettortoken.com' }}"
