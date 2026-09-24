@@ -227,7 +227,8 @@ def describe() -> dict:
 INSERT = """
     INSERT INTO external_valuations
         (experiment_id, version, source_class, provider, book, devig_method,
-         venue, condition_id, contract_selection, sport_family, market,
+         venue, condition_id, us_market_slug, contract_identity_basis,
+         contract_selection, sport_family, market,
          period, line, settlement_rule, event_key,
          raw_odds, outcomes_priced, expected_outcomes, overround,
          observed_at, received_at, age_s, outcome_books,
@@ -235,13 +236,13 @@ INSERT = """
          probability, executable_price, cost_per_contract,
          estimated_edge_per_contract,
          decision, admissible, refusals, why, proposed_size)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,
-            $16::jsonb,$17,$18,$19,
-            CASE WHEN $20::double precision IS NULL THEN NULL
-                 ELSE to_timestamp($20) END,
-            CASE WHEN $21::double precision IS NULL THEN NULL
-                 ELSE to_timestamp($21) END,
-            $22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+            $18::jsonb,$19,$20,$21,
+            CASE WHEN $22::double precision IS NULL THEN NULL
+                 ELSE to_timestamp($22) END,
+            CASE WHEN $23::double precision IS NULL THEN NULL
+                 ELSE to_timestamp($23) END,
+            $24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34,$35,$36)
     -- BARE `DO NOTHING`, deliberately. Migration 105's uniqueness is an
     -- EXPRESSION index (coalesce over the nullable key columns), and
     -- `ON CONFLICT ON CONSTRAINT` cannot name an index, while inferring
@@ -284,6 +285,16 @@ async def persist(conn, rec: dict) -> int | None:
         devig.PROVIDER, devig.BOOK,
         rec.get("devig_method") or devig.DEFAULT_METHOD,
         str(c.get("venue") or ""), c.get("condition_id"),
+        # THE VENUE-NATIVE IDENTITY, beside the global one and never
+        # derived from it. A row that carries only the global id cannot be
+        # looked up at the venue, which is the defect this fixes.
+        c.get("us_market_slug"),
+        (c.get("contract_identity_basis")
+         or ("BOTH_PRESENT_AND_INDEPENDENTLY_SOURCED"
+             if c.get("condition_id") and c.get("us_market_slug")
+             else "VENUE_NATIVE_US_SLUG" if c.get("us_market_slug")
+             else "GLOBAL_CONDITION_ID" if c.get("condition_id")
+             else "NEITHER_IDENTITY_RECORDED")),
         str(c.get("selection") or ""), str(c.get("sport_family") or ""),
         str(c.get("market") or ""),
         (None if c.get("period") is None else str(c["period"])),
@@ -323,9 +334,30 @@ SUMMARY = """
            count(*) FILTER (WHERE NOT admissible) AS refused,
            count(*) FILTER (WHERE probability IS NOT NULL) AS priced,
            count(*) FILTER (WHERE outcome_known) AS settled,
-           min(decided_at) AS first_at, max(decided_at) AS last_at
+           min(decided_at) AS first_at, max(decided_at) AS last_at,
+           -- WHICH IDENTITY EACH ROW CARRIES. A count of valuations says
+           -- nothing about whether the contracts can be looked up at the
+           -- venue, and that distinction is the whole of run 24's finding.
+           count(*) FILTER (WHERE us_market_slug IS NOT NULL)
+               AS with_venue_native_identity,
+           count(*) FILTER (WHERE condition_id IS NOT NULL)
+               AS with_global_condition_id,
+           count(*) FILTER (WHERE us_market_slug IS NOT NULL
+                              AND condition_id IS NOT NULL)
+               AS with_both
       FROM external_valuations
      WHERE experiment_id = $1
+"""
+
+#: The identity split on its own, so the census can show it per basis.
+IDENTITY_CENSUS = """
+    SELECT coalesce(contract_identity_basis, 'UNLABELLED') AS basis,
+           count(*) AS n,
+           count(*) FILTER (WHERE admissible) AS admissible,
+           max(decided_at) AS last_at
+      FROM external_valuations
+     WHERE experiment_id = $1
+     GROUP BY 1 ORDER BY 1
 """
 
 
@@ -338,10 +370,21 @@ async def census(conn, *, hours: int = 24) -> dict:
     """
     rows = await conn.fetch(REFUSAL_CENSUS, EXPERIMENT_ID, str(int(hours)))
     summ = await conn.fetchrow(SUMMARY, EXPERIMENT_ID)
+    ident = await conn.fetch(IDENTITY_CENSUS, EXPERIMENT_ID)
     return {
         "experiment_id": EXPERIMENT_ID,
         "window_hours": int(hours),
         "refusals": {r["refusal"]: int(r["n"]) for r in rows},
         "summary": (dict(summ) if summ is not None else {}),
+        # THE TWO IDENTITIES, REPORTED APART. `us_market_slug` is what the
+        # venue accepts; `condition_id` is the global catalogue's id. A row
+        # carrying only the latter is a valuation of a contract no venue
+        # read can reach.
+        "contract_identity": [dict(r) for r in ident],
+        "identity_note": (
+            "VENUE_NATIVE_US_SLUG is us_premap.market_slug, which "
+            "pmus.book_read accepts. GLOBAL_CONDITION_ID is the global "
+            "catalogue's id, which it does not. BOTH means each was "
+            "sourced independently -- never one derived from the other"),
         "credential": credential_present(),
     }

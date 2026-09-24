@@ -187,17 +187,17 @@ def test_the_three_venue_read_failures_have_three_names():
              loop.R_VENUE_QUOTE_STALE, loop.R_NO_VENUE_QUOTE}
     assert len(codes) == 6, "each refusal must be distinguishable"
 
+    # THE READ TAKES THE VENUE'S OWN SLUG. It used to look up
+    # `markets.slug` -- the global id -- from the condition id, which is
+    # the defect runs 22-24 spent every read on.
     class _Conn:
-        def __init__(self, slug):
-            self._slug = slug
+        pass
 
-        async def fetchval(self, *_a, **_k):
-            return self._slug
-
-    # 1 · no slug on the market row
-    out = _a.run(loop.venue_quote(_Conn(None), condition_id="c",
+    # 1 · no venue-native slug supplied at all
+    out = _a.run(loop.venue_quote(_Conn(), us_slug=None,
                                   outcome_index=0, now=0.0))
     assert out["refusal"] == loop.R_NO_SLUG
+    assert "global condition id is not a US market slug" in out["why"]
 
     # 2 · the read raises
     def _boom(_slug):
@@ -206,7 +206,7 @@ def test_the_three_venue_read_failures_have_three_names():
     orig = loop._read_book_blocking
     loop._read_book_blocking = _boom
     try:
-        out = _a.run(loop.venue_quote(_Conn("slug-1"), condition_id="c",
+        out = _a.run(loop.venue_quote(_Conn(), us_slug="aec-mlb-x-y-2026-09-24",
                                       outcome_index=0, now=0.0))
     finally:
         loop._read_book_blocking = orig
@@ -216,7 +216,7 @@ def test_the_three_venue_read_failures_have_three_names():
     # 3 · the venue answers with an error
     loop._read_book_blocking = lambda _slug: {"error": "429 rate limited"}
     try:
-        out = _a.run(loop.venue_quote(_Conn("slug-1"), condition_id="c",
+        out = _a.run(loop.venue_quote(_Conn(), us_slug="aec-mlb-x-y-2026-09-24",
                                       outcome_index=0, now=0.0))
     finally:
         loop._read_book_blocking = orig
@@ -329,7 +329,22 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
 
         monkeypatch.setattr(loop, "fetch_odds", fake_fetch)
 
-        async def fake_quote(conn_, *, condition_id, outcome_index, now):
+        # THE CROSSING, STUBBED AT THE RESOLVER the loop actually calls.
+        # Stubbing venue_quote alone would let the cycle pass while the
+        # identity step was broken, which is how runs 22-24 stayed green.
+        from sportsassets.workers import premap as _pm
+
+        async def fake_resolve(conn_, title, event_title, outcome, slug,
+                               **kw):
+            assert slug, "the resolver must receive the GLOBAL slug"
+            return {"market_slug": "aec-soccer-mci-mun-2026-09-24-city",
+                    "intent": "ORDER_INTENT_BUY_LONG"}
+
+        monkeypatch.setattr(_pm, "resolve", fake_resolve)
+
+        async def fake_quote(conn_, *, us_slug, outcome_index, now):
+            assert us_slug.startswith("aec-"), (
+                "the read must get the VENUE's slug, not the global one")
             return {"ok": True, "ask": 0.52, "depth": 800.0, "age_s": 3.0,
                     "age_basis": "VENUE_TRANSACT_TIME", "bid": None,
                     "read_at": now, "slug": "lfc-mci",
@@ -352,11 +367,18 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
         row = await conn.fetchrow(
             "SELECT probability, executable_price, cost_per_contract, "
             "estimated_edge_per_contract, decision, admissible, refusals, "
-            "condition_id, event_key, observed_at, received_at, "
+            "condition_id, us_market_slug, contract_identity_basis, "
+            "event_key, observed_at, received_at, "
             "outcome_books, overround, order_submitted "
             "FROM external_valuations WHERE experiment_id = $1",
             ext.EXPERIMENT_ID)
         assert row is not None, "the refusal must be persisted, not dropped"
+        # THE VENUE-NATIVE IDENTITY REACHES THE ROW. Without this a
+        # valuation records a contract no venue read can reach, which is
+        # every row written before run 25.
+        assert row["us_market_slug"] == "aec-soccer-mci-mun-2026-09-24-city"
+        assert row["contract_identity_basis"] == (
+            "BOTH_PRESENT_AND_INDEPENDENTLY_SOURCED")
         # EVERY FIELD THE DIRECTIVE LISTS, on a refused row.
         assert row["probability"] is not None
         assert float(row["executable_price"]) == pytest.approx(0.52)

@@ -188,6 +188,12 @@ def map_event(*, home, away, markets):
         out["mapped"] = True
         out["condition_id"] = hits[0].get("condition_id")
         out["matched_title"] = hits[0].get("title")
+        # THE WHOLE ROW, because the caller's next step needs the fixture's
+        # own fields -- title, event_title, the global slug -- to cross to
+        # the venue's catalogue through `workers.premap.resolve`. Returning
+        # only the condition id sent the caller back to the database for
+        # the slug, and the slug it found was the GLOBAL one.
+        out["market_row"] = dict(hits[0])
         out["match"] = "BOTH_TEAM_NAMES_FULLY_CONTAINED_EXACTLY_ONE_MARKET"
         return out
 

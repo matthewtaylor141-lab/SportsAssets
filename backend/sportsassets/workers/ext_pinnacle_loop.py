@@ -116,6 +116,16 @@ R_PROVIDER_ERROR = "PROVIDER_REQUEST_FAILED"
 #: and few enough that a heartbeat stays a heartbeat.
 MAX_VENUE_ERRORS = 5
 
+#: THE CROSSING THIS LOOP WAS MISSING. `pmus.book_read` takes the VENUE's
+#: own market slug; `markets.slug` is the global catalogue's slug for the
+#: same fixture, and the venue answers NotFoundError for it -- which is
+#: what every read in runs 22-24 did. The repository already crosses that
+#: boundary in `workers/premap.resolve`: exact keys out of `us_premap`,
+#: date agreement, the venue's own side expansion, and named refusals. It
+#: is reused here rather than re-implemented, because a sixth resolver
+#: with its own idea of side matching is how a wrong-side trade happens.
+R_NO_PREMAP = "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP"
+R_INTENT_NOT_LONG = "VENUE_CONTRACT_IS_NOT_LONG_ON_THE_PRICED_OUTCOME"
 R_NO_SLUG = "VENUE_MARKET_ROW_HAS_NO_SLUG"
 R_VENUE_READ_FAILED = "VENUE_BOOK_READ_FAILED"
 R_VENUE_READ_ERROR = "VENUE_BOOK_READ_RETURNED_ERROR"
@@ -405,7 +415,58 @@ def _read_book_blocking(slug: str) -> dict:
     return out
 
 
-async def venue_quote(conn, *, condition_id, outcome_index, now):
+async def resolve_venue_identity(conn, *, market_row, priced_outcome):
+    """The GLOBAL fixture -> the VENUE's own contract, or a named refusal.
+
+    Reuses `workers/premap.resolve`, which is the lane the copy path
+    already trusts: deterministic keys out of `us_premap`, game agreement
+    on the date (including the venue's calendar-adjacent dating, which a
+    naive date equality gets wrong -- the C9 board has the bookmaker's
+    2026-09-10 against the venue's 2026-09-09 for one fixture), and the
+    venue's own side expansion so a side cannot be inferred.
+
+    TWO THINGS ARE CHECKED, NOT ONE. The slug, and the INTENT. `resolve`
+    returns the intent for buying that contract: LONG means it pays on the
+    outcome we priced, SHORT means it pays on the complement. Comparing
+    p(home win) against the ask on a SHORT contract is a sign error that
+    would look like a large edge, so a non-LONG intent refuses by name.
+    """
+    from . import premap as _premap
+
+    out = {"ok": False, "us_market_slug": None, "intent": None,
+           "refusal": None, "resolver": "workers.premap.resolve",
+           "global_slug": market_row.get("slug"),
+           "condition_id": market_row.get("condition_id"),
+           "priced_outcome": priced_outcome}
+    try:
+        got = await _premap.resolve(
+            conn, market_row.get("title"), market_row.get("event_title"),
+            priced_outcome, market_row.get("slug"),
+            condition_id=market_row.get("condition_id"))
+    except Exception as exc:                                   # noqa: BLE001
+        out["refusal"] = R_NO_PREMAP
+        out["why"] = "the resolver raised %s" % type(exc).__name__
+        return out
+    if not got or not got.get("market_slug"):
+        out["refusal"] = R_NO_PREMAP
+        out["why"] = ("the venue's own catalogue carries no contract for "
+                      "this fixture and outcome. `markets.slug` is the "
+                      "GLOBAL id and the venue does not accept it")
+        return out
+    out["us_market_slug"] = str(got["market_slug"])
+    out["intent"] = got.get("intent")
+    if str(got.get("intent") or "") != "ORDER_INTENT_BUY_LONG":
+        out["refusal"] = R_INTENT_NOT_LONG
+        out["why"] = ("the resolved contract's buy intent is %r, so buying "
+                      "it is a position on the COMPLEMENT of the outcome "
+                      "priced. p(outcome) against its ask is a sign error"
+                      % (got.get("intent"),))
+        return out
+    out["ok"] = True
+    return out
+
+
+async def venue_quote(conn, *, us_slug, outcome_index, now):
     """Contemporaneous ask and DISPLAYED depth for one venue contract.
 
     A quote older than MAX_VENUE_QUOTE_AGE_S is REFUSED rather than used:
@@ -419,11 +480,17 @@ async def venue_quote(conn, *, condition_id, outcome_index, now):
     """
     from .. import bettor_book_snapshot as bs
 
-    slug = await conn.fetchval(
-        "SELECT slug FROM markets WHERE condition_id = $1", condition_id)
+    # THE VENUE'S OWN SLUG, SUPPLIED BY THE CALLER. This used to read
+    # `markets.slug` -- the GLOBAL catalogue's id -- and hand it to a US
+    # endpoint, which is why every read answered NotFoundError. The
+    # crossing now happens once, in `resolve_venue_identity`, through the
+    # resolver the copy lane uses.
+    slug = str(us_slug or "")
     if not slug:
         return {"ok": False, "refusal": R_NO_SLUG,
-                "why": "the market row carries no slug to read a book for"}
+                "why": ("no venue-native slug was supplied. A global "
+                        "condition id is not a US market slug and must "
+                        "never be passed as one")}
     try:
         book = await asyncio.wait_for(
             asyncio.to_thread(_read_book_blocking, slug),
@@ -576,8 +643,33 @@ async def cycle(conn) -> dict:
                     tally[code] = tally.get(code, 0) + 1
                 continue
 
+            # ── the venue's OWN contract, before any venue read ─────
+            # Refusing here costs nothing: a fixture the venue's catalogue
+            # does not carry cannot answer a book read, and asking anyway
+            # spends a read the protected collector shares.
+            ident = await resolve_venue_identity(
+                conn, market_row=mapped["market_row"],
+                priced_outcome=quote["home"])
+            if not ident["ok"]:
+                code = ident["refusal"] or R_NO_PREMAP
+                tally[code] = tally.get(code, 0) + 1
+                key = (ident.get("global_slug"), code, ident.get("intent"))
+                if (key not in seen_venue_errors
+                        and len(venue_errors) < MAX_VENUE_ERRORS):
+                    seen_venue_errors.add(key)
+                    venue_errors.append({
+                        "stage": "IDENTITY_CROSSING",
+                        "resolver": ident["resolver"],
+                        "global_slug": ident.get("global_slug"),
+                        "condition_id": ident.get("condition_id"),
+                        "priced_outcome": ident.get("priced_outcome"),
+                        "intent": ident.get("intent"),
+                        "refusal": code,
+                        "why": _sanitize(ident.get("why") or "", limit=200)})
+                continue
+
             now = time.time()
-            vq = await venue_quote(conn, condition_id=mapped["condition_id"],
+            vq = await venue_quote(conn, us_slug=ident["us_market_slug"],
                                    outcome_index=0, now=now)
             if not vq.get("ok"):
                 code = vq.get("refusal") or R_NO_VENUE_QUOTE
@@ -591,6 +683,7 @@ async def cycle(conn) -> dict:
                 # contract without becoming a log dump.
                 diag = dict(vq.get("diagnostic") or {})
                 diag["condition_id"] = mapped["condition_id"]
+                diag["us_market_slug"] = ident["us_market_slug"]
                 diag["refusal"] = code
                 diag.setdefault("why", _sanitize(vq.get("why") or "",
                                                  limit=120))
@@ -618,7 +711,17 @@ async def cycle(conn) -> dict:
 
             contract = {
                 "venue": "PMUS",
+                # BOTH IDENTITIES, EACH FROM ITS OWN SOURCE. The global id
+                # comes from the `markets` row the fixture was found in;
+                # the venue-native slug comes from the venue's own
+                # catalogue via premap.resolve. Neither is derived from
+                # the other, which is why the basis can say BOTH.
                 "condition_id": mapped["condition_id"],
+                "us_market_slug": ident["us_market_slug"],
+                "contract_identity_basis":
+                    "BOTH_PRESENT_AND_INDEPENDENTLY_SOURCED",
+                "identity_resolver": ident["resolver"],
+                "buy_intent": ident["intent"],
                 "selection": quote["home"],
                 "sport_family": family,
                 "market": "h2h",

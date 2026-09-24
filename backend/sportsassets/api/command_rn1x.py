@@ -950,7 +950,8 @@ async def clock_audit(conn) -> dict:
 
 EXTERNAL_TRACE = """
     SELECT id, experiment_id, version, source_class, provider, book,
-           devig_method, venue, condition_id, contract_selection,
+           devig_method, venue, condition_id, us_market_slug,
+           contract_identity_basis, contract_selection,
            sport_family, market, period, line, settlement_rule, event_key,
            raw_odds, outcomes_priced, expected_outcomes, overround,
            observed_at, received_at, age_s, outcome_books, mapped_outcome,
@@ -988,5 +989,18 @@ async def external_trace(conn, row_id: int) -> dict:
                          "deliverable when nothing clears"),
             "order_submitted": ("always false. No submit path is reachable "
                                 "from the loop that wrote this row"),
+            # THE TWO IDENTIFIERS, NAMED SEPARATELY. Run 24's six
+            # NotFoundError reads were a global id handed to a US endpoint,
+            # and a trace that showed one opaque "contract" could not have
+            # shown that.
+            "us_market_slug": ("the VENUE's own market slug "
+                               "(us_premap.market_slug). This is what "
+                               "pmus.book_read accepts, and the only "
+                               "identifier a venue read can use"),
+            "condition_id": ("the GLOBAL catalogue's id for the same "
+                             "fixture. The venue does not accept it"),
+            "contract_identity_basis": ("which identifier is authoritative. "
+                                        "BOTH means each was sourced "
+                                        "independently, never derived"),
         },
     }
