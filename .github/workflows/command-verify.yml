@@ -1987,34 +1987,41 @@ jobs:
           done
 
           say "-- the NEW decisions, with their own stored evidence --"
-          jq -r --argjson b "${BEFORE:-0}" '
-            (.decisions // [])[$b:] | .[] |
-            "  " + (.decision_id[-6:]) + "  " + ((.decision_ts|tostring)[0:19])
-            + "  " + ((.selected_action // "NULL")|tostring)
-            + " x " + ((.selected_qty // "-")|tostring)
-            + "\n      state        " + ((.operating_state // "-")|tostring)
-            + "\n      hold_usd     " + ((.hold_value_usd // "-")|tostring)
-            + "\n      reconciles   " + ((.accounting_reconciles // "-")|tostring)
-            + "\n      compat       " + (((.input_chain.chain // [])
-                 | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | .[0]
-                 | (.compatibility // "-"))|tostring)
-            + "  ctx " + (((.input_chain.chain // [])
-                 | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | .[0]
-                 | (.quote_context // "-"))|tostring)
-            + "\n      terms        " + (((.input_chain.chain // [])
-                 | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | .[0]
-                 | (.terms_verdict // "-"))|tostring)
-            + "  unstated " + (((.input_chain.chain // [])
-                 | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | .[0]
-                 | (.unstated_conditions // [])|length|tostring)
-            + "\n      first_fail   " + (((.input_chain.first_failing_link // {})
-                 | (.link // "NONE"))|tostring)
-            + "\n      ranked       " + (((.alternatives.ranked // [])
-                 | map((.action|tostring) + "=" + ((.value_usd // "-")|tostring))
-                 | join("  "))|tostring)
-            + "\n      reason       " + ((.selection_reason // "-")|tostring)[0:200]' \
-            /tmp/tr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
-            || head -c 400 /tmp/tr.json
+          # ONE FIELD PER LINE, from a jq program in a single-quoted string
+          # written to a file -- the pattern the acceptance program here
+          # already uses. The previous version interpolated one long string
+          # inline, errored, and fell through to dumping raw JSON, which
+          # printed the page header instead of the evidence. A REPORTING
+          # fault must never be able to read as a finding, so a jq failure
+          # below is announced as one.
+          DEC='def l4b: (.input_chain.chain // [])
+            | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | (.[0] // {});
+          def s(x): (x // "-") | tostring;
+          .decisions // [] | .[($B|tonumber):] | .[] |
+            "  " + s(.decision_id),
+            "      ts           " + s(.decision_ts),
+            "      action       " + s(.selected_action) + " x " + s(.selected_qty),
+            "      state        " + s(.operating_state),
+            "      hold_usd     " + s(.hold_value_usd),
+            "      reconciles   " + s(.accounting_reconciles),
+            "      compat       " + s(l4b.compatibility),
+            "      quote_ctx    " + s(l4b.quote_context),
+            "      terms        " + s(l4b.terms_verdict),
+            "      book_held    " + s(l4b.book_terms_held),
+            "      unstated     " + ((l4b.unstated_conditions // []) | length | tostring),
+            "      mismatched   " + ((l4b.mismatched_conditions // []) | tostring),
+            "      first_fail   " + s((.input_chain.first_failing_link // {}).link),
+            "      ranked       " + (((.alternatives.ranked // [])
+                | map(s(.action) + "=" + s(.value_usd)) | join("  ")) | tostring),
+            "      reason       " + (s(.selection_reason) | .[0:200])'
+          printf '%s\n' "$DEC" > /tmp/dec.jq
+          jq -r --arg B "${BEFORE:-0}" -f /tmp/dec.jq /tmp/tr.json \
+            2>/tmp/jqerr | tee -a "$GITHUB_STEP_SUMMARY"
+          if [ -s /tmp/jqerr ]; then
+            say "THE EVIDENCE PRINT FAILED. That is a REPORTING fault, not a"
+            say "finding about the decisions:"
+            head -c 300 /tmp/jqerr | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   # ── THE BOOKMAKER'S PUBLISHED TERMS, RETRIEVED VERBATIM ────────────
