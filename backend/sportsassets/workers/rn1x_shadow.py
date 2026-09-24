@@ -589,7 +589,6 @@ async def challenger_inputs_for(conn, *, condition_id, outcome_index,
         out["why"] = ("the valuation row carries no venue slug or no "
                       "resolved intent, so there is no ladder to read")
         out["book_available"] = False
-        out["available"] = True
         return out
     out["held_intent"] = intent
     try:
@@ -599,7 +598,6 @@ async def challenger_inputs_for(conn, *, condition_id, outcome_index,
         out["reason"] = "VENUE_BOOK_READ_RAISED"
         out["why"] = "%s: %s" % (type(exc).__name__, exc)
         out["book_available"] = False
-        out["available"] = True
         return out
     md = (book or {}).get("marketData")
     if md is None:
@@ -610,7 +608,6 @@ async def challenger_inputs_for(conn, *, condition_id, outcome_index,
                       % (book or {}).get("error"))
         out["diagnostic"] = (book or {}).get("diagnostic")
         out["book_available"] = False
-        out["available"] = True
         return out
 
     # EXITING IS NOT ACQUIRING. `exit_ladder` reads the side a CLOSE
@@ -631,7 +628,6 @@ async def challenger_inputs_for(conn, *, condition_id, outcome_index,
         out["reason"] = xl.get("refusal") or bs.R_NO_EXIT_SIDE
         out["why"] = xl.get("why")
         out["book_available"] = False
-        out["available"] = True
         return out
     out.update(
         available=True, book_available=True,
@@ -882,32 +878,50 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
     vid = await _resolve(conn, market_row=m,
                          priced_outcome=payout_event_held)
     if not vid.get("ok"):
+        # NOT FATAL, AND THAT MATTERS. HOLDING needs the payout identity
+        # and a probability; it does not need a venue contract. The
+        # contract is what an EXIT needs. Returning here would forfeit a
+        # priced HOLD in exactly the case where HOLD is the only action
+        # available, which is the wrong way round.
         link("2_VENUE_CONTRACT", False, refusal=vid.get("refusal"),
              why=vid.get("why"), global_slug=m.get("slug"),
              resolver=vid.get("resolver"),
-             asked_for=payout_event_held)
-        return out
+             asked_for=payout_event_held,
+             consequence=("EXITS ARE UNAVAILABLE on this exposure -- no "
+                          "venue contract, so no ladder and no venue "
+                          "translation. HOLD is still priced below if a "
+                          "probability exists"))
+        vid = None
     # TWO INDEPENDENT SOURCES FOR ONE FACT, and they must agree. The
     # tokens say what this outcome is; the venue's catalogue says what the
-    # contract pays on. A disagreement is refused, never reconciled.
-    if _norm_outcome(vid.get("payout_event")) != _norm_outcome(payout_event_held):
-        link("2_VENUE_CONTRACT", False, refusal=R_RESOLVER_DISAGREES,
-             why=("the venue catalogue says this contract pays on %r and "
-                  "the market tokens say this position holds %r"
-                  % (vid.get("payout_event"), payout_event_held)),
-             us_market_slug=vid.get("us_market_slug"),
-             intent=vid.get("intent"))
-        return out
-    intent = vid["intent"]
-    link("2_VENUE_CONTRACT", True, us_market_slug=vid["us_market_slug"],
-         intent=intent, ladder_side=vid.get("ladder_side"),
-         matched_side_norm=vid.get("matched_side_norm"),
-         payout_event_basis=vid.get("payout_event_basis"),
-         resolver=vid.get("resolver"),
-         agrees_with_tokens=True)
-    out["us_market_slug"] = vid["us_market_slug"]
-    out["held_intent"] = intent
-    out["venue"] = "PMUS"
+    # contract pays on. A disagreement IS fatal and is never reconciled: a
+    # contract that pays on the other event would price and exit the wrong
+    # exposure.
+    intent = None
+    if vid is not None:
+        if _norm_outcome(vid.get("payout_event")) != \
+                _norm_outcome(payout_event_held):
+            link("2_VENUE_CONTRACT", False, refusal=R_RESOLVER_DISAGREES,
+                 why=("the venue catalogue says this contract pays on %r "
+                      "and the market tokens say this position holds %r"
+                      % (vid.get("payout_event"), payout_event_held)),
+                 us_market_slug=vid.get("us_market_slug"),
+                 intent=vid.get("intent"))
+            return out
+        intent = vid["intent"]
+        link("2_VENUE_CONTRACT", True,
+             us_market_slug=vid["us_market_slug"],
+             intent=intent, ladder_side=vid.get("ladder_side"),
+             matched_side_norm=vid.get("matched_side_norm"),
+             payout_event_basis=vid.get("payout_event_basis"),
+             resolver=vid.get("resolver"),
+             agrees_with_tokens=True)
+        out["us_market_slug"] = vid["us_market_slug"]
+        out["held_intent"] = intent
+        out["venue"] = "PMUS"
+    else:
+        out["book_available"] = False
+        out["identity_cross_check"] = "NOT_AVAILABLE_NO_VENUE_CONTRACT"
 
     # ── 3 · THE PROVIDER'S FIXTURE, matched by the same mapper ───────
     family = family_for_label(m.get("sport"))
@@ -1020,7 +1034,7 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
         "provider": devig.PROVIDER, "book": devig.BOOK,
         "devig_method": val.get("devig_method"), "version": devig.VERSION,
         "experiment_id": MANAGED_INPUT_VERSION,
-        "us_market_slug": vid["us_market_slug"],
+        "us_market_slug": (vid or {}).get("us_market_slug"),
         "mapping_match": val.get("mapping_match"),
         "mapped_outcome": val.get("mapped_outcome"),
         "overround": val.get("overround"),
@@ -1033,9 +1047,9 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
         "probability_event": val.get("mapped_outcome"),
         "payout_is_complement": False,
         "buy_intent": intent,
-        "matched_side_norm": vid.get("matched_side_norm"),
+        "matched_side_norm": (vid or {}).get("matched_side_norm"),
         "resolver_asked_for": payout_event_held,
-        "ladder_side": vid.get("ladder_side"),
+        "ladder_side": (vid or {}).get("ladder_side"),
         "probability": val["probability"],
         "observed_at": val.get("observed_at"),
         "received_at": val.get("received_at"),
@@ -1045,6 +1059,19 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
     out["identity_matched_independently"] = True
 
     # ── 5 · THE EXECUTABLE EXIT, off the ladder a close consumes ─────
+    #
+    # THE PROBABILITY IS IN HAND, so from here a failure costs the EXITS
+    # and not the hold value.
+    out["available"] = True
+    if vid is None:
+        link("5_EXIT_LADDER", False,
+             refusal="NO_VENUE_CONTRACT_SO_NO_LADDER",
+             why=("link 2 found no venue contract for this exposure, so "
+                  "there is no ladder to read and no exit to price. HOLD "
+                  "is priced; every exit is refused for want of a book"),
+             hold_is_priced_anyway=True)
+        out["book_available"] = False
+        return out
     reader = read_book
     if reader is None:
         from .ext_pinnacle_loop import _read_book_blocking as reader
@@ -1055,7 +1082,6 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
              why="%s: %s" % (type(exc).__name__, exc),
              us_market_slug=vid["us_market_slug"])
         out["book_available"] = False
-        out["available"] = True          # HOLD is still priced
         return out
     md = (book or {}).get("marketData")
     if md is None:
@@ -1065,7 +1091,6 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
              diagnostic=(book or {}).get("diagnostic"),
              us_market_slug=vid["us_market_slug"])
         out["book_available"] = False
-        out["available"] = True
         return out
     xl = bs.exit_ladder(md, held_intent=intent)
     if not xl.get("ok"):
@@ -1073,7 +1098,6 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
              refusal=xl.get("refusal") or bs.R_NO_EXIT_SIDE,
              why=xl.get("why"), us_market_slug=vid["us_market_slug"])
         out["book_available"] = False
-        out["available"] = True
         return out
     link("5_EXIT_LADDER", True, exit_price=xl["best_exit_price"],
          complement_price=xl["best_complement_price"],

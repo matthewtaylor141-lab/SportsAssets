@@ -369,9 +369,15 @@ def test_no_venue_contract_stops_at_link_two_with_the_global_slug():
     assert f["refusal"] == "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP"
     assert f["global_slug"] == "mlb-chc-mia-2026-09-24"
     assert f["asked_for"] == "Chicago Cubs"
-    # AND THE CHAIN STOPPED: no odds request was spent on a position that
-    # has no contract to exit into.
-    assert ci.get("odds_request") is None
+    assert "EXITS ARE UNAVAILABLE" in f["consequence"]
+    # THE CHAIN DOES NOT STOP. Holding needs the identity and a
+    # probability, not a contract, so the walk continues and the exits --
+    # only the exits -- are what the missing contract costs.
+    assert ci["identity_cross_check"] == "NOT_AVAILABLE_NO_VENUE_CONTRACT"
+    # this fixture's provider payload is empty, so the walk stops at link 3
+    # -- the point is that it got PAST link 2 at all
+    assert [x["link"] for x in ci["chain"]] == [
+        "1_HELD_EXPOSURE", "2_VENUE_CONTRACT", "3_PROVIDER_FIXTURE"]
 
 
 @pg
@@ -559,3 +565,40 @@ def test_a_blind_cycle_records_which_link_failed():
         import json
         ffl = json.loads(ffl)
     assert ffl["age_s"] > 30.0 and ffl["max_age_s"] == 30.0
+
+
+@pg
+def test_no_venue_contract_still_prices_the_hold_and_refuses_the_exits():
+    """A PRICED HOLD IS ACCEPTABLE; a missing-input hold is not. When the
+    venue catalogue carries no contract, exiting is impossible and holding
+    is the ONLY action -- which is precisely when the hold value matters
+    most. Refusing to price it there would be the wrong way round."""
+    import asyncpg
+
+    async def run():
+        c = await asyncpg.connect(DSN, timeout=10)
+        try:
+            await _fixture(c)
+            return await _chain(
+                c, odds=_odds([_event(observed_at=_T0 - 6)]), now=_T0,
+                resolve_identity=_resolver_no_contract)
+        finally:
+            await c.close()
+
+    ci = asyncio.run(run())
+    # the probability is there, from the tokens' identity alone
+    assert ci["available"] is True
+    assert ci["book_available"] is False
+    assert 0.55 < ci["probability_row"]["probability"] < 0.65
+    assert ci["probability_row"]["payout_event"] == "Chicago Cubs"
+    assert ci["probability_row"]["us_market_slug"] is None, (
+        "no contract, so no venue slug -- and the row says so rather than "
+        "carrying one from somewhere else")
+    # and the exits are refused BY NAME, not silently priced
+    last = ci["chain"][-1]
+    assert last["link"] == "5_EXIT_LADDER" and last["ok"] is False
+    assert last["refusal"] == "NO_VENUE_CONTRACT_SO_NO_LADDER"
+    assert last["hold_is_priced_anyway"] is True
+    assert ci.get("bid") is None and ci.get("sale_ladder") is None
+    # the FIRST failing link is still the one that failed first
+    assert ci["first_failing_link"]["link"] == "2_VENUE_CONTRACT"
