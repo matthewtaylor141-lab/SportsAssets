@@ -430,11 +430,26 @@ async def _replay_one(conn, *, trade_id, whale_id, condition_id,
             payouts = {int(k): float(v) for k, v in prices.items()}
         resolved_at = mkt["resolved_at"]
 
+    # THE CLOCK IS READ HERE, in the runtime caller, and only the
+    # prospective lane may use it. The historical lane is a counterfactual
+    # replay of a market that has already settled -- stamping it with
+    # today's wall clock would be a worse lie than the one being fixed --
+    # so it keeps the availability basis and is labelled a replay.
+    #
+    # This is the line that decides whether the word "prospective" on
+    # these rows means anything. Before it, the lane inherited
+    # decision_ts = detected_ts from the runner's default and every row
+    # was backdated to the instant its evidence arrived.
+    import time as _time
+
     out = runner.run(
         rows=[dict(r) for r in rows],
         payouts=payouts, resolved_at=resolved_at,
         source_whale_id=whale_id, condition_id=condition_id,
-        initial_inventory_verified=inv["verified"])
+        initial_inventory_verified=inv["verified"],
+        now=(_time.time() if prospective else None),
+        decision_basis=(runner.BASIS_RUNTIME if prospective
+                        else runner.BASIS_REPLAY))
     out["initial_inventory_evidence"] = inv
     out["resolved_at"] = resolved_at
     out["blockers"] = sorted(BLOCKERS)

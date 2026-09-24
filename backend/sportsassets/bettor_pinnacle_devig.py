@@ -121,6 +121,39 @@ R_PERIOD_MISMATCH = "PERIOD_DOES_NOT_MATCH"
 R_SETTLEMENT_MISMATCH = "SETTLEMENT_RULE_DOES_NOT_MATCH"
 R_UNKNOWN_METHOD = "DEVIG_METHOD_NOT_DECLARED"
 
+def _epoch(value):
+    """Seconds since the epoch, from a number or an ISO-8601 string.
+
+    The provider states quote times as ISO-8601 with a trailing Z
+    ("2026-09-24T00:00:00Z"); our own clocks are floats. Both reach this
+    module, so both are accepted HERE rather than each caller
+    reimplementing the parse and one of them getting it wrong. A value
+    that is neither raises, and the caller turns that into
+    QUOTE_HAS_NO_TIMESTAMP.
+    """
+    if isinstance(value, (int, float)):
+        return float(value)
+    from datetime import datetime, timezone
+
+    text = str(value).strip()
+    if not text:
+        raise ValueError("empty timestamp")
+    try:
+        return float(text)
+    except ValueError:
+        pass
+    # `fromisoformat` in 3.11 handles the offset forms but not a bare Z.
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    dt = datetime.fromisoformat(text)
+    if dt.tzinfo is None:
+        # NAMED, not assumed silently: a naive stamp from this provider is
+        # UTC, and reading it as local time would shift every age by the
+        # host's offset.
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp()
+
+
 REFUSALS = (R_UNSUPPORTED_MARKET, R_PINNACLE_ABSENT, R_BOOK_MISSING,
             R_INCOMPLETE_OUTCOMES, R_STALE, R_NO_TIMESTAMP, R_BAD_ODDS,
             R_AMBIGUOUS_MAPPING, R_NO_MAPPING, R_SELECTION_UNMATCHED,
@@ -344,10 +377,28 @@ def valuation(*, contract: dict, quote: dict, now: float,
                       "aged. The engine's own rule is no order without a "
                       "quote fresher than %.0f s" % max_age_s)
         return out
+    # A TIMESTAMP WE CANNOT READ IS A REFUSAL, NOT A CRASH. The provider
+    # states `last_update` as an ISO-8601 string; float() on it raised
+    # ValueError straight out of `valuation`, which a caller in a loop
+    # would see as an exception rather than as the named refusal this
+    # module exists to give. The parse is accepted here and the failure is
+    # named, because a quote that cannot be aged must be refused the same
+    # way a missing one is.
+    try:
+        observed_at = _epoch(observed_at)
+    except (TypeError, ValueError):
+        refusals.append(R_NO_TIMESTAMP)
+        out["why"] = ("observed_at %r cannot be read as a time, so the "
+                      "quote cannot be aged" % (observed_at,))
+        return out
+    try:
+        received = (None if quote.get("received_at") is None
+                    else _epoch(quote["received_at"]))
+    except (TypeError, ValueError):
+        received = None
     age = float(now) - float(observed_at)
     out["observed_at"] = float(observed_at)
-    out["received_at"] = (None if quote.get("received_at") is None
-                          else float(quote["received_at"]))
+    out["received_at"] = received
     out["age_s"] = age
     out["max_age_s"] = float(max_age_s)
     if age > float(max_age_s) or age < 0:

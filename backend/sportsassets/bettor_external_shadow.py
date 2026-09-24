@@ -98,7 +98,8 @@ def credential_present(env=None) -> dict:
 def evaluate(*, contract, quote, market_state, execution_estimate, size,
              risk, fee_fn, now, method=devig.DEFAULT_METHOD,
              outcome_books=None, armed=False,
-             min_net_edge_per_contract=MIN_NET_EDGE_PER_CONTRACT) -> dict:
+             min_net_edge_per_contract=MIN_NET_EDGE_PER_CONTRACT,
+             extra_refusals=None) -> dict:
     """One contract, end to end, through the REAL gate.
 
     Returns a record that is persisted whether or not it clears, because
@@ -124,6 +125,19 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
         "shadow_only": True,
         "refusals": list(val.get("refusals") or []),
     }
+
+    # REFUSALS THE CALLER ALREADY ESTABLISHED, carried in rather than
+    # short-circuited. The runtime loop can only learn some things --
+    # whether the venue's settlement rule is established, for instance --
+    # after it has done work this function would otherwise repeat. Handing
+    # them in keeps the RECORD complete: the row still carries the odds,
+    # the mapping, the venue quote, the probability and the costs, so
+    # management can see what the engine was looking at when it refused,
+    # instead of the row not existing at all.
+    for code in (extra_refusals or []):
+        if code not in rec["refusals"]:
+            rec["refusals"].append(str(code))
+    rec["caller_refusals"] = [str(c) for c in (extra_refusals or [])]
 
     if not armed:
         # Checked BEFORE anything else consumes budget or claims a
@@ -176,9 +190,12 @@ def evaluate(*, contract, quote, market_state, execution_estimate, size,
             rec["refusals"].append(code)
 
     # A thin outcome is a refusal of OURS, so it must veto admission even
-    # though the gate knows nothing about book depth.
+    # though the gate knows nothing about book depth. The same is true of
+    # every refusal the caller handed in: a record that carries a refusal
+    # and is still admissible would make the refusal decorative.
     rec["admissible"] = bool(admitted.get("admissible")) and \
-        R_THIN_OUTCOME not in rec["refusals"]
+        R_THIN_OUTCOME not in rec["refusals"] and \
+        not rec["caller_refusals"]
     rec["decision"] = "BUY" if rec["admissible"] else "NO_TRADE"
     rec["proposed_size"] = size if rec["admissible"] else None
     rec["why"] = (("external probability %.4f vs ask %.4f less cost %.4f"
@@ -225,6 +242,18 @@ INSERT = """
             CASE WHEN $21::double precision IS NULL THEN NULL
                  ELSE to_timestamp($21) END,
             $22,$23,$24,$25,$26,$27,$28,$29,$30,$31,$32,$33,$34)
+    -- BARE `DO NOTHING`, deliberately. Migration 105's uniqueness is an
+    -- EXPRESSION index (coalesce over the nullable key columns), and
+    -- `ON CONFLICT ON CONSTRAINT` cannot name an index, while inferring
+    -- it would mean repeating the whole coalesce list here and keeping
+    -- two copies in step. The only unique things on this table are the
+    -- serial primary key -- which this statement never supplies -- and
+    -- that index, so an untargeted DO NOTHING can only mean "this
+    -- observation is already recorded".
+    --
+    -- A skipped insert RETURNS NO ROW, so `persist` returns None and the
+    -- caller must not count it as written.
+    ON CONFLICT DO NOTHING
     RETURNING id
 """
 

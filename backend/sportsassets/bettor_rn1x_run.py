@@ -47,6 +47,36 @@ FORWARD = "FORWARD_SHADOW"
 #: and still refuses anything that is not a clock disagreement.
 CLOCK_SKEW_TOLERANCE_S = 120.0
 
+#: How the decision instant was obtained. This is recorded per position
+#: because the two are not interchangeable evidence.
+#:
+#:   REPLAY_AT_AVAILABILITY  a counterfactual replay. decision_ts is the
+#:                           instant the evidence became available. Valid
+#:                           for the HISTORICAL lane, where the whole
+#:                           point is to ask what the policy would have
+#:                           done; it is NOT a prospective decision.
+#:   RUNTIME_WALL_CLOCK      the clock was read at the moment the policy
+#:                           actually ran. This is the only basis that
+#:                           supports a prospective claim.
+BASIS_REPLAY = "REPLAY_AT_AVAILABILITY"
+BASIS_RUNTIME = "RUNTIME_WALL_CLOCK"
+
+#: Beyond this, a prospective decision is REFUSED rather than recorded.
+#:
+#: WHY A LIMIT EXISTS AT ALL. If the cycle that decides runs long after
+#: the evidence became available, the order it creates did not exist
+#: during the interval in between -- so every print in that window is a
+#: print it could not have consumed. Modelling those fills is look-ahead
+#: no matter how the timestamps are stored. The order-creation filter
+#: below removes them; this limit refuses the position outright once the
+#: gap is large enough that what remains is a different experiment from
+#: the one being claimed.
+MAX_PROSPECTIVE_DECISION_LAG_S = 300.0
+
+R_DECISION_PRECEDES_AVAILABILITY = "DECISION_PRECEDES_AVAILABILITY"
+R_PROSPECTIVE_LAG_EXCEEDED = "PROSPECTIVE_DECISION_LAG_EXCEEDED"
+R_RUNTIME_CLOCK_NOT_SUPPLIED = "RUNTIME_CLOCK_NOT_SUPPLIED"
+
 
 def _fee_fn():
     """The production schedule, taker side for our own executions."""
@@ -63,12 +93,19 @@ def _fee_fn():
 def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         queue_share=0.25, condition_id=None, fee_fn=None,
         fee_basis="TRANSFERRED_PMUS_LATEST_SCENARIO",
-        initial_inventory_verified=False, policy_params=None):
+        initial_inventory_verified=False, policy_params=None,
+        now=None, decision_basis=BASIS_REPLAY):
     """`rows` are the condition's fills, ours and others', in any order.
 
     Each row: id, whale_id, outcome_index, side, size, price, ts,
     detected_at. `payouts` maps outcome_index -> observed payout and is
     used at step 8 ONLY.
+
+    `now` is the caller's wall clock and `decision_basis` says what to do
+    with it. A prospective caller passes BASIS_RUNTIME and its own
+    `time.time()`; a replay passes neither and gets the availability
+    instant, labelled as a replay. The default is the replay basis
+    because that is what an unlabelled caller is actually doing.
     """
     fee = fee_fn or _fee_fn()
     qs = float(queue_share)
@@ -141,7 +178,16 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
                     "evidence would date the decision before the event"
                     % (skew, CLOCK_SKEW_TOLERANCE_S))}
         return out
-    detected_ts = max(src_ts, det_raw)
+    # THE TWO OBSERVED CLOCKS ARE KEPT AS OBSERVED. The previous version
+    # wrote `detected_ts = max(src_ts, det_raw)`, which put a DERIVED
+    # value in a column named after an observation and threw the real
+    # receipt instant away. The conservative availability timestamp is
+    # still computed -- it is needed, and it is this repository's own
+    # convention (`learn/dataset.available_at`, Run 82) -- but it is now
+    # a THIRD value stored separately, so nothing that was measured is
+    # overwritten by something that was inferred.
+    detected_ts = det_raw
+    available_at = max(src_ts, det_raw)
     out["steps"]["SOURCE"] = {
         "ok": True, "source_class": "OBSERVED_INPUT",
         "trade_id": seed_row["id"], "whale_id": seed_row["whale_id"],
@@ -150,14 +196,21 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         "price": float(seed_row["price"]),
         "source_ts": src_ts,
         "detected_ts": detected_ts,
-        "detected_at_raw": det_raw,
+        "available_at": available_at,
         "clock_skew_s": skew,
-        "detected_ts_basis": (
-            "max(ts, detected_at). The chain lane's detected_at can "
-            "precede the fill's own ts by up to a second or so of venue "
-            "clock skew; taking the later of the two can only delay when "
-            "we treat the fill as known, never advance it"
-            if skew > 0 else "detected_at, which already follows ts")}
+        "clocks": {
+            "source_ts": "OBSERVED: the venue's own instant for the fill",
+            "detected_ts": ("OBSERVED: when our pipeline recorded seeing "
+                            "it. Preserved verbatim, including when it "
+                            "precedes source_ts, which the chain lane's "
+                            "measured -0.6 s median makes ordinary"),
+            "available_at": ("DERIVED: max(source_ts, detected_ts). Taking "
+                             "the later of two observations can only delay "
+                             "when we treat the fill as known, never "
+                             "advance it, so it cannot grant look-ahead"),
+            "decision_ts": ("OBSERVED at step 3, from the clock the policy "
+                            "actually ran on -- never copied from a "
+                            "detection stamp to satisfy a constraint")}}
 
     # ── 2 CLASSIFY, over the account's OWN prior fills only ─────────
     hist = [ek.Fill(source_ts=float(r["ts"]),
@@ -195,10 +248,69 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         return out
 
     # ── 3 SEED ──────────────────────────────────────────────────────
-    # The SAME clock the SOURCE step settled on, not the raw column: the
-    # schema requires decision_ts >= detected_ts, and reading detected_at
-    # again here would reintroduce the violation the step above resolved.
-    decision_ts = detected_ts
+    #
+    # THE DECISION INSTANT IS NOW OBSERVED, NOT ASSIGNED. What stood here
+    # was `decision_ts = detected_ts`, with a comment saying it existed so
+    # the CHECK would pass. That is a constraint being satisfied by
+    # construction, and it backdated every prospective decision to the
+    # instant its evidence arrived -- so the traced prospective position
+    # showed three identical timestamps and looked like a sub-second
+    # round trip that never happened.
+    #
+    # Two bases, and which one applies is recorded on the row:
+    #
+    #   RUNTIME_WALL_CLOCK      `now` was read by the caller at the moment
+    #                           it ran this policy. The only basis that
+    #                           supports a prospective claim.
+    #   REPLAY_AT_AVAILABILITY  a counterfactual replay at the instant the
+    #                           evidence became available. Legitimate for
+    #                           the historical lane and labelled as a
+    #                           replay, not as a decision made in time.
+    if decision_basis == BASIS_RUNTIME:
+        if now is None:
+            out["failed_step"] = "SEED"
+            out["steps"]["SEED"] = {
+                "ok": False, "refusal": R_RUNTIME_CLOCK_NOT_SUPPLIED,
+                "why": ("a RUNTIME_WALL_CLOCK basis was asked for but no "
+                        "clock was supplied. Falling back to the "
+                        "availability instant is exactly the substitution "
+                        "this refusal exists to prevent")}
+            return out
+        decision_ts = float(now)
+    else:
+        decision_ts = available_at
+    decision_lag_s = decision_ts - available_at
+    out["decision_basis"] = decision_basis
+    out["decision_lag_s"] = decision_lag_s
+
+    if decision_ts < available_at:
+        # Only reachable on a RUNTIME basis with a clock behind the feed.
+        out["failed_step"] = "SEED"
+        out["steps"]["SEED"] = {
+            "ok": False, "refusal": R_DECISION_PRECEDES_AVAILABILITY,
+            "decision_ts": decision_ts, "available_at": available_at,
+            "lag_s": decision_lag_s,
+            "why": ("the runtime clock reads BEFORE the instant this "
+                    "evidence became available, so the decision would "
+                    "predate what it is based on")}
+        return out
+
+    if decision_basis == BASIS_RUNTIME and \
+            decision_lag_s > MAX_PROSPECTIVE_DECISION_LAG_S:
+        out["failed_step"] = "SEED"
+        out["steps"]["SEED"] = {
+            "ok": False, "refusal": R_PROSPECTIVE_LAG_EXCEEDED,
+            "decision_ts": decision_ts, "available_at": available_at,
+            "lag_s": decision_lag_s,
+            "limit_s": MAX_PROSPECTIVE_DECISION_LAG_S,
+            "why": ("the cycle reached this candidate %.0f s after its "
+                    "evidence became available, past the %.0f s limit. An "
+                    "order created now did not exist during that window, "
+                    "so the prints inside it are prints it could not have "
+                    "consumed. Recording this as a prospective entry "
+                    "would credit the policy with a window it never had"
+                    % (decision_lag_s, MAX_PROSPECTIVE_DECISION_LAG_S))}
+        return out
 
     # SETTLED BEFORE WE SAW THE ENTRY -- REFUSED HERE, BEFORE SEEDING.
     #
@@ -244,12 +356,37 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
                   "that we could have obtained this fill")}
 
     # ── 4-7, walking forward. Only rows after the decision instant. ──
+    #
+    # THE ORDER-CREATION FLOOR. An order cannot consume a print that
+    # happened before the order existed. Two instants matter and they are
+    # not the same:
+    #
+    #   `at`  = r["detected_at"], when WE received the print. Gates
+    #           whether the information had reached us.
+    #   ts    = r["ts"], the print's own instant. Gates whether our order
+    #           was alive when the execution occurred.
+    #
+    # The old code checked only the first, against a decision_ts that had
+    # been backdated to the availability instant -- so on a delayed cycle
+    # every print between the evidence arriving and the cycle running was
+    # treated as consumable by an order that did not yet exist. On the
+    # RUNTIME basis the floor is the real creation instant, so that window
+    # is excluded by the print's own clock as well as by ours.
+    order_created_ts = decision_ts
+    out["order_created_ts"] = order_created_ts
     events = []
+    skipped_pre_creation = 0
     m.manage_policy(at=decision_ts, decision_id="seed:%s" % seed_row["id"],
                     policy_params=policy_params)
     for r in rows:
         at = float(r["detected_at"])
         if at <= decision_ts:
+            continue
+        if float(r["ts"]) < order_created_ts:
+            # Received after we decided, but EXECUTED before our order
+            # existed. Late receipt does not create an execution
+            # opportunity, and counting it is the look-ahead.
+            skipped_pre_creation += 1
             continue
         if resolved_at and at > float(resolved_at):
             continue
@@ -274,6 +411,12 @@ def run(*, rows, payouts=None, resolved_at=None, source_whale_id,
         "ok": True, "decisions": len(m.decisions),
         "acted": sum(1 for d in m.decisions if d.get("acted")),
         "events": events,
+        "order_created_ts": order_created_ts,
+        "prints_skipped_before_order_creation": skipped_pre_creation,
+        "why_skipped": ("prints we received after deciding but which "
+                        "EXECUTED before our order existed. Modelling a "
+                        "fill against one of these would be filling "
+                        "against the past"),
         "source_class": {"trigger": pol.SOURCE_CLASS["loss_trigger_fraction"],
                          "method": pol.SOURCE_CLASS["pair_target_cost"],
                          "fills": pol.SOURCE_CLASS["our_fill"]}}

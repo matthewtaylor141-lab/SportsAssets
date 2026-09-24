@@ -41,6 +41,19 @@ on:
         default: "true"
         type: choice
         options: ["true", "false"]
+      provision_api_key:
+        description: >-
+          Provision EDGE_ODDS_API_KEY onto sportsassets-api from the
+          repository secret. The value moves secret-store to secret-store
+          and is never an input, a log line or a file. Requires confirm=DO.
+        required: false
+        default: "false"
+        type: choice
+        options: ["false", "true"]
+      confirm:
+        description: "Type DO to allow provisioning"
+        required: false
+        default: ""
 
 permissions:
   contents: read
@@ -192,6 +205,107 @@ jobs:
           echo "  per-event 422/404        -> not on this plan; an upgrade would be needed"
           echo "  COST is credits per EVENT — multiply by the slate to size the bill"
           echo "==========================================================="
+
+      # ── PROVISION THE ODDS KEY ONTO sportsassets-api ──────────────
+      #
+      # WHY THIS SHAPE. The value must reach the service without ever
+      # existing anywhere a human or a log can read it. So:
+      #
+      #   * it is NOT a workflow input. `workflow_dispatch` inputs are
+      #     stored verbatim in the run's event payload, which is readable
+      #     from the API -- `::add-mask::` hides a value from LOG OUTPUT
+      #     and does nothing about that. A key typed into a form is
+      #     already disclosed.
+      #   * it is read from `secrets.EDGE_ODDS_API_KEY`, which GitHub
+      #     masks in logs automatically, and written straight to Render's
+      #     env-var endpoint. Secret store to secret store.
+      #   * the request body is built by python from os.environ, never
+      #     from argv, so the value never appears in a process list.
+      #   * the verification prints KEY NAMES only.
+      #
+      # It is NOT the generic render-ops `env-set`, which takes KEY=VALUE
+      # as an input and would therefore put the key in the event payload.
+      #
+      # Hosted in THIS workflow because it is registered on the default
+      # branch (so it is dispatchable) and already holds the odds secret.
+      # A new workflow file would not be dispatchable from a feature
+      # branch at all.
+      - name: Provision EDGE_ODDS_API_KEY on sportsassets-api
+        if: ${{ github.event.inputs.provision_api_key == 'true' }}
+        env:
+          ODDS_KEY: ${{ secrets.EDGE_ODDS_API_KEY }}
+          RENDER_API_KEY: ${{ secrets.RENDER_API_KEY }}
+          CONFIRM: ${{ github.event.inputs.confirm }}
+        run: |
+          set -u -o pipefail
+          if [ "$CONFIRM" != "DO" ]; then
+            echo "::error::confirm must be DO to provision a credential"
+            exit 1
+          fi
+          for v in ODDS_KEY RENDER_API_KEY; do
+            eval "val=\${$v:-}"
+            if [ -z "$val" ]; then
+              echo "::error::$v is not set as a repository secret"; exit 1
+            fi
+          done
+          API=https://api.render.com/v1
+          SVC=$(curl -sS --max-time 45 \
+                 -H "Authorization: Bearer $RENDER_API_KEY" \
+                 -H "Accept: application/json" \
+                 "$API/services?name=sportsassets-api&limit=20" \
+                | jq -r '.[]?|select(.service.name=="sportsassets-api")|.service.id' \
+                | head -1)
+          if [ -z "$SVC" ]; then
+            echo "::error::could not resolve the sportsassets-api service id"
+            exit 1
+          fi
+          echo "service resolved"
+
+          echo "--- env var KEYS before (names only, never values) ---"
+          curl -sS --max-time 45 -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Accept: application/json" \
+            "$API/services/$SVC/env-vars?limit=100" \
+            | jq -r '[.[]?.envVar.key]|sort|.[]' | sed 's/^/  /'
+
+          # THE VALUE NEVER TOUCHES argv. python reads it from the
+          # environment and writes the JSON body to a file; curl sends the
+          # file. Nothing here can surface in a process list or a log.
+          python3 -c 'import json,os,sys; sys.stdout.write(json.dumps({"value": os.environ["ODDS_KEY"]}))' > /tmp/body.json
+          CODE=$(curl -sS --max-time 45 -o /tmp/put.json -w '%{http_code}' \
+                 -X PUT -H "Authorization: Bearer $RENDER_API_KEY" \
+                 -H "Accept: application/json" \
+                 -H "Content-Type: application/json" \
+                 --data @/tmp/body.json \
+                 "$API/services/$SVC/env-vars/EDGE_ODDS_API_KEY")
+          shred -u /tmp/body.json 2>/dev/null || rm -f /tmp/body.json
+          echo "PUT env-vars/EDGE_ODDS_API_KEY -> HTTP $CODE"
+          case "$CODE" in
+            2??) : ;;
+            *) echo "::error::Render refused the env-var write (HTTP $CODE)"
+               jq -r '.message // empty' /tmp/put.json 2>/dev/null
+               exit 1 ;;
+          esac
+
+          echo "--- env var KEYS after (names only) ---"
+          curl -sS --max-time 45 -H "Authorization: Bearer $RENDER_API_KEY" \
+            -H "Accept: application/json" \
+            "$API/services/$SVC/env-vars?limit=100" \
+            | jq -r '[.[]?.envVar.key]|sort|.[]' | sed 's/^/  /' \
+            | tee /tmp/keys.txt
+          if ! grep -qx '  EDGE_ODDS_API_KEY' /tmp/keys.txt; then
+            echo "::error::the key is still absent after a 2xx write"
+            exit 1
+          fi
+          {
+            echo "### EDGE_ODDS_API_KEY provisioned on sportsassets-api"
+            echo ""
+            echo "- Render PUT returned HTTP $CODE"
+            echo "- the key NAME is present in env-vars; no value was read,"
+            echo "  printed or written to disk beyond the request body,"
+            echo "  which was shredded"
+            echo "- a redeploy is still required for the running process to"
+            echo "  see it: render-ops deploy-api-commit"
+          } >> "$GITHUB_STEP_SUMMARY"
 
       # ── PINNACLE_DEVIG_V1 over the same slate ─────────────────────
       #

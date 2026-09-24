@@ -339,11 +339,43 @@ async def lifespan(_: FastAPI):
             _RN1XL.run(_rn1xl_pool))
         log.info("rn1x learning loop armed (contends for its own lock)")
 
+    # ── THE EXTERNAL-VALUATION SHADOW ───────────────────────────────
+    #
+    # THE RUNTIME CALLER that did not exist. `bettor_external_shadow` was
+    # reached only by a test and a research script, so the entry inputs it
+    # forwards into the gate were supplied only by fixtures. This is the
+    # caller that supplies them from real reads.
+    #
+    # ITS OWN EVERYTHING, again: own env flag, own control row, own
+    # experiment id, own table. It does not read the RN1X cursors, the
+    # frozen pairing policy or the second-half trigger.
+    #
+    # IT DOES MAKE OUTBOUND REQUESTS, unlike the two loops above, and both
+    # budgets are respected: the provider's by the cycle cadence (three
+    # bulk requests every 15 minutes, ~60 credits), and the venue's by
+    # `venue_pace.pace`, which is the same process-wide pacer the
+    # collector claims against.
+    #
+    # NO ORDER PATH. It reaches `pmus.book_read` and nothing else on that
+    # module; `pmus.submit_fok` authorizes at the venue boundary before it
+    # constructs a client, and denial raises. The table's
+    # order_submitted CHECK is a backstop for a lying writer, not the
+    # control.
+    from ..workers import ext_pinnacle_loop as _EXT
+    ext_task = None
+    if str(os.environ.get(_EXT.ENV_FLAG, "")).strip().lower() in (
+            "on", "1", "true"):
+        from ..db import get_pool as _ext_pool
+        ext_task = asyncio.get_running_loop().create_task(
+            _EXT.run(_ext_pool))
+        log.info("external valuation shadow armed (control row still gates "
+                 "every cycle)")
+
     try:
         yield
     finally:
         tasks = [t for t in (desk_task, rn1x_task, rn1x_learn_task,
-                             trim_task, poller_task)
+                             ext_task, trim_task, poller_task)
                  if t is not None]
         for task in tasks:
             task.cancel()
@@ -1757,6 +1789,127 @@ async def command_rn1x_trace(position_id: str, response: Response) -> dict:
 
     response.headers["Cache-Control"] = "no-store"
     return await CR.trace(await get_pool(), position_id)
+
+
+@app.get("/api/command/rn1x/external/probe",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_external_probe(response: Response) -> dict:
+    """CAN THIS PROCESS ACTUALLY RETRIEVE ODDS? One real request.
+
+    Provisioning a credential is not the same as the running process being
+    able to use it, and "the env var is set" is not evidence: the wrong
+    value, a revoked key or an egress rule all look identical from the
+    outside. So this performs ONE bulk request from inside the API and
+    reports what came back.
+
+    THE KEY IS NEVER RETURNED, LOGGED OR ECHOED. Only its presence, the
+    HTTP status, the event count, the provider's quota headers and how
+    much Pinnacle coverage the payload carried. The provider's error
+    bodies can echo the query string, so no body is included either.
+
+    IT COSTS CREDITS -- about 18-21 for one sport -- so it asks for one
+    sport only, and it is behind the command session like every other
+    route here.
+    """
+    import os
+
+    from .. import bettor_external_shadow as ext
+    from ..workers import ext_pinnacle_loop as EXT
+
+    response.headers["Cache-Control"] = "no-store"
+    cred = ext.credential_present()
+    out = {"scope": ext.EXPERIMENT_ID, "label": ext.LABEL,
+           "credential": cred, "retrieved": False}
+    if not cred["present"]:
+        out["why"] = cred["refusal"]
+        return out
+
+    sport_key, family = EXT.SPORTS[0]
+    got = await EXT.fetch_odds(sport_key, api_key=os.environ[
+        "EDGE_ODDS_API_KEY"])
+    events = got.get("events") or []
+    with_pin = 0
+    ages = []
+    now = time.time()
+    for ev in events:
+        q = EXT.pinnacle_h2h(ev, received_at=now)
+        if q is None:
+            continue
+        with_pin += 1
+        try:
+            from .. import bettor_pinnacle_devig as _dv
+            ages.append(round(now - _dv._epoch(q["observed_at"]), 1))
+        except Exception:                                      # noqa: BLE001
+            pass
+    out.update({
+        "retrieved": bool(got.get("ok")),
+        "http_status": got.get("status"),
+        "sport": sport_key, "sport_family": family,
+        "events": len(events),
+        "events_with_pinnacle_h2h": with_pin,
+        "quote_age_s": {"min": min(ages), "max": max(ages),
+                        "n": len(ages)} if ages else None,
+        "credits_used_total": got.get("credits_used"),
+        "credits_remaining": got.get("credits_remaining"),
+        "key_value_returned": False,
+    })
+    if not got.get("ok"):
+        out["why"] = ("the provider refused the request. The body is not "
+                      "included because it can echo the query string")
+    return out
+
+
+@app.get("/api/command/rn1x/external/census",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_external_census(response: Response,
+                                       hours: int = 24) -> dict:
+    """What the engine decided and, mostly, why it refused."""
+    from .. import bettor_external_shadow as ext
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await ext.census(conn, hours=max(1, min(720, int(hours))))
+
+
+@app.get("/api/command/rn1x/external/trace/{row_id}",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_external_trace(row_id: int,
+                                      response: Response) -> dict:
+    """ONE valuation end to end, as management inspects it.
+
+    Everything the directive asks to be inspectable, on one row: the raw
+    odds, both timestamps, the mapping, the de-vig method, the
+    probability, the executable price, the costs, the estimated edge, the
+    decision and the outcome if one has been joined yet.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await CR.external_trace(conn, int(row_id))
+
+
+@app.get("/api/command/rn1x/clock-audit",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_clock_audit(response: Response) -> dict:
+    """WHICH POSITIONS CAN SUPPORT A PROSPECTIVE CLAIM, and which cannot.
+
+    Migration 104 labelled every row written before it, because those
+    rows' decision timestamps were set equal to an availability instant
+    rather than read from the clock the policy ran on. This is the read
+    that shows the split, so the label is visible rather than filed.
+    """
+    from . import command_rn1x as CR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        return await CR.clock_audit(conn)
 
 
 @app.get("/api/command/shadow/comparison",

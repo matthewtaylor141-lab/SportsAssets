@@ -52,6 +52,24 @@ pytestmark = pytest.mark.skipif(
             "schema CHECK."))
 
 T0 = datetime(2026, 9, 1, 12, 0, 0, tzinfo=timezone.utc)
+
+
+def _recent(seconds_ago: float = 20.0) -> datetime:
+    """A fill from moments ago.
+
+    THE PROSPECTIVE FIXTURES CANNOT USE T0. The lane now refuses a
+    prospective decision whose evidence became available more than
+    MAX_PROSPECTIVE_DECISION_LAG_S ago, because an order created long
+    after the fact did not exist while the prints in between happened.
+    T0 is a fixed date, so these fixtures aged past that limit as the
+    calendar moved and the lane correctly refused them -- which is the
+    behaviour being added, not a break. A genuinely prospective candidate
+    IS a recent fill, so the fixture is now one.
+
+    T0 is left alone for the historical lane, whose entire purpose is
+    replaying evidence from months ago.
+    """
+    return datetime.now(timezone.utc) - timedelta(seconds=seconds_ago)
 COND = "0xcondition_rn1x_test"
 WHALE = 424242
 
@@ -899,7 +917,19 @@ async def test_a_prospective_run_reads_no_payout_even_if_one_exists(conn):
     assert out["lane"] == "PROSPECTIVE"
     assert out["scored"] is False
     assert out["resolved_at"] is None
-    assert out["steps"]["SETTLE"]["settled"] is None, out["steps"]["SETTLE"]
+    # THE FIXTURE IS OLD EVIDENCE ON PURPOSE (it is the historical seed),
+    # so the prospective lane now refuses it on decision lag -- correctly,
+    # because an order created today could not have traded weeks ago. What
+    # this test exists to prove survives either way: no payout reaches a
+    # prospective run, and `resolved_at` above is None in both branches.
+    if "SETTLE" in out["steps"]:
+        assert out["steps"]["SETTLE"]["settled"] is None, \
+            out["steps"]["SETTLE"]
+    else:
+        assert out["failed_step"] == "SEED", out["steps"]
+        assert out["steps"]["SEED"]["refusal"] == \
+            "PROSPECTIVE_DECISION_LAG_EXCEEDED", out["steps"]["SEED"]
+        assert "payouts" not in out, "no payout may appear on a refusal"
 
     scored = await W._replay_one(conn, trade_id=ids[0], whale_id=WHALE,
                                  condition_id=COND, prospective=False)
@@ -1021,7 +1051,7 @@ async def test_a_row_arriving_between_cycles_is_NOT_skipped(conn):
         "dedupe_key) VALUES ($1,$2,$3,$4,'BUY',0,100,0.60,60,$5,'chain',"
         "$6,$7) RETURNING id",
         WHALE, "0xtx_arriving", "asset0", cond,
-        T0 + timedelta(hours=9), T0 + timedelta(hours=9, seconds=7),
+        _recent(20.0), _recent(13.0),
         "rn1x-arriving")
 
     second = await W.cycle(conn, lane="PROSPECTIVE")
@@ -1084,7 +1114,7 @@ async def test_a_chain_row_whose_ts_LEADS_detected_at_still_persists(conn):
         "VALUES ($1, $2, FALSE) ON CONFLICT (condition_id) DO UPDATE "
         "SET resolved = FALSE, resolved_prices = NULL", cond, "skewed")
     # ts is 0.6 s AFTER detected_at -- the production median, not an edge.
-    base = T0 + timedelta(hours=11)
+    base = _recent(20.0)
     newid = await conn.fetchval(
         "INSERT INTO trades (whale_id, tx_hash, asset, condition_id, side, "
         "outcome_index, size, price, notional, ts, source, detected_at, "
@@ -1101,16 +1131,27 @@ async def test_a_chain_row_whose_ts_LEADS_detected_at_still_persists(conn):
     assert int(newid) in [r["trade_id"] for r in res["results"]], res
 
     row = await conn.fetchrow(
-        "SELECT source_ts, detected_ts, decision_ts FROM rn1x_positions "
+        "SELECT source_ts, detected_ts, decision_ts, available_at, "
+        "decision_basis FROM rn1x_positions "
         "WHERE source_trade_id = $1 AND experiment_id = $2",
         int(newid), W.PROSPECTIVE_EXPERIMENT_ID)
     assert row is not None, (
         "no position was written for the skewed row: %r" % (res["results"],))
-    # THE CLOCKS ARE ORDERED, and detected_ts is the LATER of the two --
-    # never the earlier, which would date our decision before the event.
-    assert row["source_ts"] <= row["detected_ts"] <= row["decision_ts"], dict(row)
-    assert row["detected_ts"] == row["source_ts"], (
-        "detected_ts should be max(ts, detected_at) = ts here: %r" % dict(row))
+    # THE SKEW IS PRESERVED, NOT ERASED. This test used to assert
+    # `detected_ts == source_ts`, i.e. that the receipt instant had been
+    # OVERWRITTEN with max(ts, detected_at). That is the defect migration
+    # 104 removes: the column named after an observation must hold the
+    # observation, including when the venue's clock leads ours.
+    assert row["detected_ts"] < row["source_ts"], (
+        "the chain lane's receipt instant must survive as observed: %r"
+        % dict(row))
+    # The conservative value lives in its own column now.
+    assert row["available_at"] == row["source_ts"], dict(row)
+    assert row["available_at"] >= row["detected_ts"], dict(row)
+    # And the decision is an OBSERVATION of the runtime clock, so it
+    # follows availability without being equal to a detection stamp.
+    assert row["decision_ts"] >= row["available_at"], dict(row)
+    assert row["decision_basis"] == "RUNTIME_WALL_CLOCK", dict(row)
 
 
 async def test_a_wildly_future_timestamp_is_REFUSED_not_repaired(conn):

@@ -172,9 +172,16 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
             "policy, source_trade_id, source_account, condition_id, "
             "outcome_index, entry_kind, entry_kind_why, unknown_reason, "
             "position_is_a_lower_bound, seed_qty, seed_price, "
-            "seed_basis_usd, source_ts, detected_ts, decision_ts) "
+            # available_at, decision_basis and decision_lag_s are written
+            # here because migration 104 stopped `detected_ts` from being
+            # the derived availability value. A row that omitted them
+            # would leave the basis NULL, which the clock audit reports as
+            # UNSET rather than silently treating as prospective.
+            "seed_basis_usd, source_ts, detected_ts, decision_ts, "
+            "available_at, decision_basis, decision_lag_s, "
+            "clock_integrity) "
             "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,"
-            "$15,$16,$17) "
+            "$15,$16,$17,$18,$19,$20,$21) "
             "ON CONFLICT (position_id) DO NOTHING",
             pid, experiment_id, policy, int(trade_id), source_account,
             out.get("condition_id") or "", int(src["outcome_index"]),
@@ -185,7 +192,15 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
             float(seed["qty"]), float(seed["price"]),
             float(seed["basis_usd"]),
             _ts(src["source_ts"]), _ts(src["detected_ts"]),
-            _ts(seed["decision_ts"]))
+            _ts(seed["decision_ts"]),
+            _ts(src.get("available_at") if src.get("available_at") is not None
+                else max(float(src["source_ts"]),
+                         float(src["detected_ts"]))),
+            out.get("decision_basis"),
+            out.get("decision_lag_s"),
+            # Written only when the run itself says something is off. A
+            # clean row carries NULL here rather than a reassuring string.
+            out.get("clock_integrity"))
 
         # ── decisions, keyed on the position and the instant ──────────
         #
@@ -239,9 +254,16 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
             await conn.execute(
                 "INSERT INTO rn1x_orders (order_id, position_id, "
                 "condition_id, outcome_index, side, intent, liquidity, "
+                # created_at_runtime is the instant the order ACTUALLY came
+                # into existence, which is what migration 104's trigger
+                # compares every fill against. `placed_at` stays the
+                # modelled instant the lifecycle arithmetic uses; the two
+                # coincide only on a replay.
                 "limit_price, qty, filled_qty, state, placed_at, "
-                "updated_at, fill_basis) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14) "
+                "updated_at, fill_basis, created_at_runtime, "
+                "created_at_basis) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,"
+                "$15,$16) "
                 "ON CONFLICT (order_id) DO UPDATE SET "
                 "filled_qty = EXCLUDED.filled_qty, "
                 "state = EXCLUDED.state, updated_at = EXCLUDED.updated_at",
@@ -251,7 +273,17 @@ async def persist_run(conn, out: dict, *, experiment_id: str,
                 float(o["qty"]), float(o["filled_qty"]), o["state"],
                 _ts(o["placed_at"]),
                 _ts(o.get("terminal_at") or o["placed_at"]),
-                out.get("fill_basis") or "PRINT_THROUGH_WITH_QUEUE_SHARE_V1")
+                out.get("fill_basis") or "PRINT_THROUGH_WITH_QUEUE_SHARE_V1",
+                # On a RUNTIME basis every order this position created came
+                # into existence at or after the run's own creation floor,
+                # so that floor is the honest lower bound. On a replay it
+                # is left NULL: the order never existed in wall-clock time
+                # at all, and inventing an instant for it would be the
+                # defect migration 104 exists to remove.
+                (_ts(out["order_created_ts"])
+                 if out.get("decision_basis") == "RUNTIME_WALL_CLOCK"
+                 and out.get("order_created_ts") is not None else None),
+                (out.get("decision_basis") or "UNSET"))
             wrote["orders"] += 1
             for k, f in enumerate(o.get("fills") or []):
                 await conn.execute(

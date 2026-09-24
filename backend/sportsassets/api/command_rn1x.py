@@ -436,4 +436,121 @@ async def trace(pool, position_id: str) -> dict:
             "print by someone else, allocated at a declared queue share. "
             "P_FILL remains NOT_IDENTIFIED: none of this is evidence that "
             "our order would have been filled."),
+        # WHICH CLOCKS ON THIS ROW ARE OBSERVATIONS. Without this, three
+        # identical timestamps read as a sub-second round trip, when on a
+        # pre-104 row they are one instant copied twice.
+        "clock_semantics": _clock_semantics(pos),
+    }
+
+
+def _clock_semantics(pos) -> dict:
+    """Say plainly what this position's timestamps are, and are not."""
+    basis = pos["decision_basis"] if "decision_basis" in pos.keys() else None
+    known = {
+        "RUNTIME_WALL_CLOCK": (
+            "decision_ts was read from the clock the policy actually ran "
+            "on, so this row CAN support a prospective claim"),
+        "REPLAY_AT_AVAILABILITY": (
+            "a counterfactual REPLAY. decision_ts is the instant the "
+            "evidence became available, not an instant at which anyone "
+            "decided anything. Valid as a replay, and not prospective"),
+        "BACKDATED_TO_AVAILABILITY_UNAUDITED": (
+            "decision_ts was written equal to max(source_ts, detected_at) "
+            "to satisfy a CHECK. It is NOT an observation. The raw receipt "
+            "instant was overwritten by that same max() and cannot be "
+            "recovered for this row. An unresolved outcome here does NOT "
+            "establish that the decision was made prospectively"),
+    }
+    return {
+        "decision_basis": basis or "UNSET",
+        "means": known.get(basis, (
+            "no basis is recorded, so this row's decision_ts cannot be "
+            "read as an observation")),
+        "supports_a_prospective_claim": basis == "RUNTIME_WALL_CLOCK",
+        "source_ts": "OBSERVED: the venue's own instant for the fill",
+        "detected_ts": ("OBSERVED from migration 104 onward; on earlier "
+                        "rows it holds the derived availability instant"),
+        "available_at": "DERIVED: max(source_ts, detected_ts)",
+    }
+
+
+CLOCK_AUDIT = """
+    SELECT experiment_id, decision_basis, positions,
+           first_decision_ts, last_decision_ts, decision_eq_available,
+           avg_decision_lag_s, max_decision_lag_s
+      FROM rn1x_clock_audit
+     ORDER BY experiment_id, decision_basis
+"""
+
+
+async def clock_audit(conn) -> dict:
+    """The split between rows that can and cannot be called prospective."""
+    try:
+        rows = [dict(r) for r in await conn.fetch(CLOCK_AUDIT)]
+    except Exception as exc:                                   # noqa: BLE001
+        return {"badge": "UNAVAILABLE",
+                "what": "the clock audit view is not present",
+                "why": type(exc).__name__, "rows": []}
+    total = sum(int(r["positions"] or 0) for r in rows)
+    prospective_ok = sum(int(r["positions"] or 0) for r in rows
+                         if r["decision_basis"] == "RUNTIME_WALL_CLOCK")
+    backdated = sum(int(r["positions"] or 0) for r in rows
+                    if r["decision_basis"]
+                    == "BACKDATED_TO_AVAILABILITY_UNAUDITED")
+    return {
+        "badge": ("CHECK" if backdated else ("OK" if total else "EMPTY")),
+        "what": ("which positions carry an OBSERVED decision instant and "
+                 "which were backdated to an availability instant"),
+        "positions_total": total,
+        "can_support_a_prospective_claim": prospective_ok,
+        "backdated_and_cannot": backdated,
+        "rows": rows,
+        "note": ("a backdated row is not deleted or rewritten. Its receipt "
+                 "instant was overwritten before migration 104 and cannot "
+                 "be recovered, so it is LABELLED and excluded from "
+                 "prospective claims instead of being repaired"),
+    }
+
+
+EXTERNAL_TRACE = """
+    SELECT id, experiment_id, version, source_class, provider, book,
+           devig_method, venue, condition_id, contract_selection,
+           sport_family, market, period, line, settlement_rule, event_key,
+           raw_odds, outcomes_priced, expected_outcomes, overround,
+           observed_at, received_at, age_s, outcome_books, mapped_outcome,
+           mapping_match, probability, executable_price, cost_per_contract,
+           estimated_edge_per_contract, decision, admissible, refusals,
+           why, proposed_size, decided_at, outcome_known, outcome,
+           outcome_at, realised_net_usd, order_submitted
+      FROM external_valuations WHERE id = $1
+"""
+
+
+async def external_trace(conn, row_id: int) -> dict:
+    """ONE external valuation, with every field management inspects."""
+    row = await conn.fetchrow(EXTERNAL_TRACE, int(row_id))
+    if row is None:
+        return {"found": False, "id": row_id}
+    d = dict(row)
+    return {
+        "found": True,
+        "label": ("EXTERNAL BOOKMAKER VALUATION. Pinnacle's own de-vigged "
+                  "price, not a trained model and not an internally "
+                  "qualified settlement model"),
+        "valuation": d,
+        "reading": {
+            "observed_at": "the BOOK's clock for this price",
+            "received_at": "when WE received it. Never used as its age",
+            "probability": ("de-vigged over the COMPLETE outcome set by "
+                            "the declared method, or null if refused"),
+            "executable_price": ("the same-venue ASK. Crossing, because a "
+                                 "resting price invents a queue position "
+                                 "we never held"),
+            "estimated_edge_per_contract":
+                "probability - ask - cost. Null if any input was missing",
+            "refusals": ("why the engine did not buy. This list is the "
+                         "deliverable when nothing clears"),
+            "order_submitted": ("always false. No submit path is reachable "
+                                "from the loop that wrote this row"),
+        },
     }
