@@ -217,7 +217,7 @@ and the venue read were.
 | 4 | no calibration or net return yet | time. Predictions must be recorded, then their horizons must close |
 | 5 | `render-ops.yml` has 422 bytes of headroom against a 512,000-byte ceiling, already below this repository's own 32 KiB rule | it is the lever that operates Render and holds the trading kill switch. It needs splitting. I did not add to it |
 | 6 | branch reconciliation | `claude/command-center` is ahead of the default branch. Everything is deployed by commit id, so nothing here depends on merging. Say the word and I will reconcile |
-| 7 | test debt, and a 96-test discrepancy I could not attribute to code — see §8 | nothing yet; §8 states what is measured and what is still open |
+| 7 | pre-existing test debt: 449 failures at the pre-session commit and the **same 449** at HEAD, identical node ids (§8) | nothing from you. This work adds none of them; the earlier 545 reading was a load artifact and did not reproduce |
 
 ## 8 · Defects found by arming, and one discrepancy still open
 
@@ -242,27 +242,26 @@ armed and read back.** None was visible in a passing test:
    and separate `written` / `duplicate` counters, which is also what now
    evidences idempotency across cycles (157 written, 142 already present).
 
-**One discrepancy I could not attribute, stated as measured.** The full
-suite, same command and same machine:
+**The discrepancy resolved: there are no test regressions.** The full
+suite, same command, same machine, three runs:
 
-| | failed | passed | skipped |
+| run | failed | passed | skipped |
 |---|---|---|---|
 | pre-session `fa544da` | 449 | 11,241 | 183 |
-| HEAD with this work | 545 | 11,174 | 190 |
+| HEAD, taken under concurrent load | 545 | 11,174 | 190 |
+| HEAD, quiet machine | **449** | 11,293 | 196 |
 
-96 node ids fail at HEAD that do not fail at the baseline, and none of the
-baseline's failures were fixed. **All 96 pass when re-run on their own at
-HEAD** (96 passed in 2.48 s), and they still pass when the 25 affected
-files are run together, and again when my five new test files are collected
-alongside them. So the 96 are order- or load-dependent, not a deterministic
-consequence of this code — 24 of them are allocator and memory-census
-diagnostics (`test_malloc_split`, `test_memory_census`), which measure the
-host. The HEAD suite was also taken while a local Postgres and repeated
-production polls were running on the same container, which the baseline was
-not. **I have not established the cause, and I am not claiming these are
-someone else's failures.** What is established: none of the 96 fails when
-exercised in isolation at this commit, and no failure was introduced into
-any file this work touches.
+The quiet HEAD run's failure set is **identical to the baseline's, node id
+for node id: 0 new, 0 fixed.** The 545 was not reproducible. All 96 of its
+extra failures pass when re-run on their own at HEAD, and 24 of them are
+allocator and memory-census diagnostics that measure the host. That first
+HEAD measurement was taken while a local Postgres cluster and repeated
+production polls ran in the same container; the baseline was not.
+
+I reported the 545 as a measured regression before re-running it, which
+was the wrong order: one run of a load-sensitive suite is a reading, not a
+finding. **The standing position is the one above — this work introduces
+no test failures, and the 449 are pre-existing.**
 
 ## 9 · Run 22, 2026-09-24T02:28–02:33Z — the second production read
 
