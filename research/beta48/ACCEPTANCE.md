@@ -30,7 +30,7 @@ Last updated 2026-09-24T02:2xZ, against the run-21 production read
 | default branch | `claude/session-njaewf` | `git remote show origin` |
 | work branch | `claude/command-center` | 153 commits ahead of default, 6 behind |
 | API service | `sportsassets-api` (`srv-d9gcv6urnols73ce6er0`) | render-ops deploys |
-| API commit deployed | `e0929fd` (dispatched 02:01:20Z; read back by run 21 at 02:03–02:08Z) | render-ops deploy-api-commit |
+| API commit deployed | `098e94c` (dispatched 02:23:57Z; read back by run 22). `e0929fd` was the commit run 21 read at 02:03–02:08Z. The two commits after `098e94c` change only a docstring, a workflow comment and tests, so nothing deployable is missing from the service | render-ops deploy-api-commit |
 | worker service | `sportsassets-workers`, **untouched** | deploys BEFORE == AFTER on every API deploy |
 | collector | untouched; no worker deploy in this session | same |
 | damaged account | `acct_fc2d773a2afa4851` paused, ACCOUNTING_UNCERTAIN | not read or written by anything added here |
