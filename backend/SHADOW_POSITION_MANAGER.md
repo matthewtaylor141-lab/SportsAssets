@@ -106,6 +106,50 @@ Three hold states, counted apart and never summed:
 | `HOLD_BY_FALLBACK_RULE` | `EV_HOLD` unknown; the trigger evaluated real inputs and did not fire |
 | `HOLD_FOR_MISSING_INPUT` | **not a decision** — nothing was evaluated; the policy was blind |
 
+## 3a · The production connection, corrected
+
+Independent inspection of deployed `5b19bc5` found four defects in the
+**connection** — upstream of a selector, venue model and accounting that
+were all working correctly. All four are fixed and demonstrated through
+the real builder → ranking → lifecycle → store path.
+
+| # | defect in `5b19bc5` | corrected |
+|---|---|---|
+| 1 | exit prices were the opposite side's **acquisition cost**, transposed | `exit_ladder`: exit = 1 − acquisition(opposite), complement = acquisition(opposite) |
+| 2 | `payout_event_held` read off the valuation row, so the identity check compared it against itself | `position_identity` resolves it from `market_tokens` on the seed's own outcome index |
+| 3 | a position was decided **once, ever** | `manage_open_positions` runs every challenger cycle over already-open positions |
+| 4 | 1,800 s admissible in play; hold value aged once per position | bound keyed to a **declared** event state, strict by default; re-aged at every decision |
+
+On YES bid **.60** / ask **.63**:
+
+```
+                shipped                 correct
+held LONG       bid .40  comp .63       exit .60   comp .40   qty from the BIDS
+held SHORT      bid .63  comp .40       exit .37   comp .63   qty from the ASKS
+```
+
+Both prices come off the **same** ladder, which is not a coincidence: on
+a one-signed-net venue selling our side and buying the other side are one
+order, so their values must agree exactly. The shipped pair invented a
+spread between `DIRECT_EXIT` and `TAKE_COMPLEMENT` and the ranking picked
+winners on it.
+
+**Freshness** is now 120 s — `bettor_progress_feed.MAX_AGE_S`, the bound
+this stack already applies to in-play observations — for in-play, break,
+suspended **and unknown**; 1,800 s only on a declared `PRE_MATCH`;
+`FINAL`/`ABANDONED` refused outright; and a caller may only tighten it.
+
+**Three further bugs the real path exposed**, none reachable by a unit
+test on the selector: the continuing record carried no `policy`, so every
+management decision landed on a fabricated second position row;
+`created_at_runtime` used one run-level floor, so a reloaded order was
+stamped with the current cycle's clock and migration 104 correctly refused
+its own fills; and order ids were double-prefixed on reload, minting a
+second order row and breaking one-active-order **in the store**. Migration
+110 holds every challenger decision taken under the broken connection,
+rows and refusals preserved; the frozen benchmark never used this builder
+and is untouched.
+
 ## 4 · One traceable example
 
 Verified end to end against real Postgres (migrations 100→109), through
@@ -180,13 +224,35 @@ it **passes in isolation on both HEAD and baseline** and passed in the
 focused 30-file run — so that failure is order- or shared-database
 dependent, not a defect from this change.
 
+### Continuing management, demonstrated
+
+One position, two cycles, the book moving between them, **no new RN1
+entry** — the thing the shipped lane could not do at all:
+
+```
+cycle 1  t+30   bid .60 (exit proceeds)   HOLD × 100        residual 100
+                                          hold .70 beats the book
+   ...   t+45   an observed print at .86 fills 20 of the resting sell
+cycle 2  t+60   bid .85 (exit proceeds)   DIRECT_EXIT × 40  residual  80
+                                          prints applied 1, cancel-then-replace
+
+ONE position row · ONE order row · 2 decisions at 2 real distinct
+timestamps · D0000 then D0001 (appending) · both reconcile
+freshness re-aged per decision: 30 s, then 10 s
+
+restart recovery: two independent rebuilds from the ledger →
+  residual 80.0000  realized 5.6300  one open order  invariant OK  identical
+```
+
 ## 5 · Exactly what is still limited
 
 1. **No prospective challenger decision has occurred in production yet.**
-   The lane is deployed and armed; whether it has produced a position
-   depends on a live RN1 seed *and* an eligible valuation for the same
-   condition. Until both coincide the lane reports its state and writes
-   nothing, and that refusal is stored.
+   The lane is deployed and armed; whether it produces a position depends
+   on a live RN1 seed *and* an eligible valuation **for the same
+   exposure** — matching the condition is no longer sufficient, by
+   design. Until both coincide the lane reports its state and writes
+   nothing, and that refusal is stored. Every challenger decision taken
+   before this correction is **held** by migration 110.
 2. **The venue book is not readable from every context.** When it is
    not, `EV_HOLD` may still be present — HOLD becomes the only priced
    action and every exit is refused `NO_BID`. `book_available` is carried
