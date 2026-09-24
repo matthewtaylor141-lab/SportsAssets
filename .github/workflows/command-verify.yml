@@ -90,6 +90,10 @@ on:
         description: "YYYY-MM-DD for the fixture-metadata shape probe"
         required: false
         default: ""
+      acceptance_condition:
+        description: "condition_id of the acceptance fixture to acquire scope for"
+        required: false
+        default: ""
 
 jobs:
   verify:
@@ -1886,6 +1890,131 @@ jobs:
             say "a data problem named above or a migration that has not run."
             say "The advisory lock in the seeder still serialises the write."
           fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # ── ACQUIRE THE SCOPE EVIDENCE, THEN READ TWO EVIDENCED CYCLES ────
+      #
+      # THE OPERATING PATH, not another refusal. The settlement scope guard
+      # needs the competition phase and the game format, and the quote-context
+      # rule needs an ACTUAL event state; the league publishes all three per
+      # game. The runner retrieves the schedule (its egress permits the host;
+      # the API service's may not), POSTs it to the acquisition route, and the
+      # route parses, binds it to the fixture and persists ONE row with its
+      # source and retrieval time. Then the DEPLOYED loop is left to decide,
+      # and its decisions are read back with their own stored evidence.
+      #
+      # It writes one fixture_metadata row. No order, no position, no capital.
+      - name: RN1X — acquire fixture scope evidence, then two evidenced cycles
+        if: always()
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          COND: ${{ inputs.acceptance_condition }}
+          FDATE: ${{ inputs.fixture_date }}
+        run: |
+          set -uo pipefail
+          API="https://${{ inputs.host || 'command.bettortoken.com' }}"
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            say "SKIPPED: no ADMIN_TOKEN"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          CID="${COND:-0x64a5ce26cf37db3c70c641d6cb68dda4f34d185f5faa2aaf0f0cb78105ce085f}"
+          D="${FDATE:-$(date -u +%Y-%m-%d)}"
+          PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
+          say "condition\t$CID"
+          say "fixture_date\t$D"
+
+          # 1 · retrieve the league schedule HERE, where egress permits it
+          U="https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=$D"
+          AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+          SC=$(curl -sS -L --max-time 60 -o /tmp/sched.json -w '%{http_code}' "$U" || echo 000)
+          say "schedule_http\t$SC  retrieved_at\t$AT  bytes\t$(wc -c < /tmp/sched.json 2>/dev/null || echo 0)"
+          if [ "$SC" != "200" ]; then
+            say "THE LEAGUE HOST IS UNREACHABLE FROM HERE TOO. That is the exact"
+            say "access dependency: nothing downstream can establish the phase"
+            say "or the format without it."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+
+          # 2 · hand it to the acquisition route, which parses and persists
+          jq -n --arg c "$CID" --arg u "$U" --arg at "$AT" --arg d "$D" \
+             --slurpfile p /tmp/sched.json \
+             '{condition_id:$c, source_url:$u, retrieved_at:$at,
+               official_date:$d, payload:$p[0]}' > /tmp/acq.json
+          AC=$(curl -sS --max-time 90 -X POST -H "$H" \
+                 -H 'Content-Type: application/json' \
+                 --data @/tmp/acq.json \
+                 "$API/api/admin/rn1x-fixture-metadata" \
+                 -o /tmp/acqr.json -w '%{http_code}')
+          say "acquire_http\t$AC"
+          jq -r '"ok\t" + ((.ok // false)|tostring),
+                 "refusal\t" + ((.refusal // "-")|tostring),
+                 "why\t" + ((.why // "-")|tostring)[0:240],
+                 "game_pk\t" + ((.game_pk // "-")|tostring),
+                 "phase\t" + ((.phase // "-")|tostring)
+                   + "  (" + ((.game_type_raw // "-")|tostring) + ")",
+                 "game_format\t" + ((.game_format // "-")|tostring)
+                   + "  innings " + ((.scheduled_innings // "-")|tostring),
+                 "play_has_begun\t" + ((.play_has_begun // "-")|tostring)
+                   + "  state " + ((.event_state_raw // "-")|tostring),
+                 "start_evidence\t" + ((.start_evidence // "-")|tostring),
+                 "binding\t" + ((.away // "-")|tostring) + " at "
+                   + ((.home // "-")|tostring) + " on "
+                   + ((.official_date // "-")|tostring),
+                 "source\t" + ((.source // "-")|tostring),
+                 "retrieved_at\t" + ((.retrieved_at // "-")|tostring),
+                 "refusals\t" + ((.refusals // [])|tostring)' \
+            /tmp/acqr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 400 /tmp/acqr.json
+          if ! jq -e '.ok == true' /tmp/acqr.json >/dev/null 2>&1; then
+            say "ACQUISITION DID NOT PERSIST. The refusal above is the blocker;"
+            say "the decisions below cannot carry scope evidence without it."
+          fi
+
+          # 3 · let the DEPLOYED loop decide, then read its evidence back
+          BEFORE=$(curl -s --max-time 60 -H "$H" \
+            "$API/api/command/rn1x/trace/$PID" | jq '(.decisions // []) | length')
+          say "decisions_before\t$BEFORE"
+          TRIES=22; NAP=30
+          for i in $(seq 1 $TRIES); do
+            sleep $NAP
+            curl -s --max-time 60 -H "$H" "$API/api/command/rn1x/trace/$PID" \
+              -o /tmp/tr.json -w '' || true
+            N=$(jq '(.decisions // []) | length' /tmp/tr.json 2>/dev/null || echo 0)
+            say "poll $i/$TRIES  decisions=$N"
+            [ "${N:-0}" -ge $((BEFORE + 2)) ] && break
+          done
+
+          say "-- the NEW decisions, with their own stored evidence --"
+          jq -r --argjson b "${BEFORE:-0}" '
+            (.decisions // [])[$b:] | .[] |
+            "  " + (.decision_id[-6:]) + "  " + ((.decision_ts|tostring)[0:19])
+            + "  " + ((.selected_action // "NULL")|tostring)
+            + " x " + ((.selected_qty // "-")|tostring)
+            + "\n      state        " + ((.operating_state // "-")|tostring)
+            + "\n      hold_usd     " + ((.hold_value_usd // "-")|tostring)
+            + "\n      reconciles   " + ((.accounting_reconciles // "-")|tostring)
+            + "\n      compat       " + (((.input_chain.chain // [])
+                 | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | .[0]
+                 | (.compatibility // "-"))|tostring)
+            + "  ctx " + (((.input_chain.chain // [])
+                 | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | .[0]
+                 | (.quote_context // "-"))|tostring)
+            + "\n      terms        " + (((.input_chain.chain // [])
+                 | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | .[0]
+                 | (.terms_verdict // "-"))|tostring)
+            + "  unstated " + (((.input_chain.chain // [])
+                 | map(select(.link == "4b_SETTLEMENT_COMPATIBILITY")) | .[0]
+                 | (.unstated_conditions // [])|length|tostring)
+            + "\n      first_fail   " + (((.input_chain.first_failing_link // {})
+                 | (.link // "NONE"))|tostring)
+            + "\n      ranked       " + (((.alternatives.ranked // [])
+                 | map((.action|tostring) + "=" + ((.value_usd // "-")|tostring))
+                 | join("  "))|tostring)
+            + "\n      reason       " + ((.selection_reason // "-")|tostring)[0:200]' \
+            /tmp/tr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 400 /tmp/tr.json
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   # ── THE BOOKMAKER'S PUBLISHED TERMS, RETRIEVED VERBATIM ────────────
