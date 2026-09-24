@@ -174,12 +174,60 @@ DOCUMENTED_MAPPINGS = {
 # exactly the inference section 3 refuses.
 PROGRESS_FEED_CONNECTED: dict = {}
 
+# THE WIRE THAT WAS NOT THERE. `bettor_progress_providers` is a complete
+# adapter layer -- registered adapters, a status vocabulary, the
+# capability contract, and a `configured()` that refuses by name when no
+# provider or no credential is present. `bettor_progress_feed` validates
+# an observation and enforces the 120 s bound. Both were built and
+# NEITHER WAS CONNECTED TO THIS REGISTRY: `PROGRESS_FEED_CONNECTED` was a
+# literal empty dict, so configuring a provider and supplying its
+# credential would have changed NOTHING. The rule would have stayed
+# PROGRESS_FEED_NOT_CONNECTED with a live feed behind it.
+#
+# `connected_sports()` reads the provider configuration AT CALL TIME.
+# Call time, not import time, because a service that gains its credential
+# on a restart must not need a code change to use it, and because a
+# decision must be able to state what was connected AT THAT INSTANT.
+#
+# IT IS STILL FAIL-CLOSED, AND THAT IS THE POINT. No provider or no
+# credential returns an empty set and the exit stays UNAVAILABLE. Nothing
+# here derives a period from a scheduled start -- the inference §3
+# refuses -- and an observation that arrives still has to pass
+# `bettor_progress_feed.validate` and the staleness bound before any sale.
+def connected_sports() -> dict:
+    """Sports with BOTH a written halfway rule and a live progress feed.
+
+    Empty when no provider is configured, which is the state this
+    service has been in and says so by name rather than by absence.
+    """
+    try:
+        from . import bettor_progress_providers as providers
+        cfg = providers.configured()
+    except Exception:                                          # noqa: BLE001
+        return {}
+    if not cfg.get("connected"):
+        return {}
+    return {s: DOCUMENTED_MAPPINGS[s]
+            for s in providers.SPORTS_THIS_WOULD_UNBLOCK
+            if DOCUMENTED_MAPPINGS.get(s) is not None}
+
+
 # The registry `event_phase` consults. A sport needs BOTH a written rule
-# and a connected feed, so this is the intersection.
+# and a connected feed, so this is the intersection. The static form is
+# kept for the readers that print it; `event_phase` uses the live view
+# below, because the static one is computed at import and a credential
+# that arrives later would never reach it.
 SECOND_HALF_MAPPING: dict = {
     sport: rule for sport, rule in DOCUMENTED_MAPPINGS.items()
     if rule is not None and sport in PROGRESS_FEED_CONNECTED
 }
+
+
+def second_half_mapping() -> dict:
+    """The LIVE registry: static admissions plus whatever is connected now."""
+    out = dict(SECOND_HALF_MAPPING)
+    out.update(connected_sports())
+    return out
 
 PROGRESS_FEED_ABSENT = "PROGRESS_FEED_NOT_CONNECTED"
 NO_RULE_WRITTEN = "NO_HALFWAY_RULE_FOR_THIS_SPORT"
@@ -336,13 +384,17 @@ def event_phase(*, progress=None, sport=None, now=None, max_age_s=None) -> dict:
     SECOND_HALF_UNDEFINED, which excludes the market from the loss-exit
     experiment rather than guessing.
     """
+    # THE LIVE REGISTRY, read at decision time. The import-time constant
+    # cannot see a credential that arrived after this process started.
+    mapping = second_half_mapping()
     out = {"source_class": SOURCE_CLASS["event_progress"],
-           "sport": sport, "mapping_requirements": list(MAPPING_REQUIREMENTS)}
+           "sport": sport, "mapping_requirements": list(MAPPING_REQUIREMENTS),
+           "feed_connected_sports": sorted(mapping)}
     # THREE DIFFERENT ABSENCES, NAMED SEPARATELY. "no rule exists for this
     # sport", "a rule exists but nothing feeds it" and "the feed exists but
     # went quiet" are different facts with different remedies, and
     # collapsing them into one UNDEFINED hides which one to fix.
-    if sport not in SECOND_HALF_MAPPING:
+    if sport not in mapping:
         rule = DOCUMENTED_MAPPINGS.get(sport)
         if rule is None:
             reason, phase = NO_RULE_WRITTEN, SECOND_HALF_UNDEFINED
@@ -360,7 +412,7 @@ def event_phase(*, progress=None, sport=None, now=None, max_age_s=None) -> dict:
                    admitted_to_experiment=False,
                    admitted_to_complete_policy=False,
                    absence=reason, rule_written=rule is not None,
-                   feed_connected=sport in PROGRESS_FEED_CONNECTED,
+                   feed_connected=sport in mapping,
                    why=why)
         return out
     if progress is None:
@@ -374,7 +426,7 @@ def event_phase(*, progress=None, sport=None, now=None, max_age_s=None) -> dict:
                         "UNAVAILABLE and the exposure is retained "
                         "visibly rather than exited on a guess"))
         return out
-    rule = SECOND_HALF_MAPPING[sport]
+    rule = mapping[sport]
     # FRESHNESS IS PART OF THE READING, not a caller's courtesy. A period
     # index from nine minutes ago is correctly typed and useless: play
     # moved. The caller may pass `now` and `max_age_s`; when it passes

@@ -442,3 +442,134 @@ def test_the_challenger_declares_what_it_is_not():
     assert obj["tie_breaking"]
     assert obj["min_improvement_usd_per_contract"] > 0
     assert "never" in HV.describe()
+
+
+# ── the calls the loop makes must BIND ───────────────────────────────
+
+def test_the_challenger_lanes_calls_bind_against_real_signatures():
+    """THE BUG THIS EXISTS FOR, AND IT IS THE SECOND TIME.
+
+    `pmus.book_read(client, us_slug)` takes a CLIENT first. The command
+    API's venue probe called `venue_quote(condition_id=...)` after that
+    signature changed, raised a TypeError, and reported it as a venue
+    refusal for three runs. My first version of the challenger lane made
+    the identical mistake -- `pmus.book_read(slug)` -- and it would have
+    surfaced as VENUE_BOOK_READ_FAILED on every candidate.
+
+    A keyword or positional the callee does not accept is a TypeError at
+    runtime and nothing at all at import time, so it is bound here.
+    """
+    import inspect
+
+    from sportsassets import pmus
+    from sportsassets.workers import ext_pinnacle_loop as EXT
+    from sportsassets.workers import rn1x_shadow as W
+
+    # the lane reuses the loop's paced reader rather than calling pmus.
+    # COMMENTS AND THE DOCSTRING ARE STRIPPED FIRST: the comment above
+    # the call deliberately quotes the broken form, so a search over raw
+    # source matches the description of the bug and never the bug. I
+    # made exactly that mistake once already in this session.
+    raw = inspect.getsource(W.challenger_inputs_for)
+    for line in (W.challenger_inputs_for.__doc__ or "").splitlines():
+        raw = raw.replace(line, "")
+    src = "\n".join(ln.split("#", 1)[0] for ln in raw.splitlines())
+    assert "_read_book_blocking" in src
+    assert "pmus.book_read" not in src, (
+        "calling pmus directly re-derives the client construction and "
+        "skips venue_pace, which shares the budget with the collector")
+    inspect.signature(EXT._read_book_blocking).bind("aec-x")
+    # and the real book_read still wants a client first, so a future
+    # direct call fails HERE rather than in production
+    with pytest.raises(TypeError):
+        inspect.signature(pmus.book_read).bind("aec-x")
+
+    # the lane's own decision call binds against Managed.decide_challenger
+    sig = inspect.signature(LC.Managed.decide_challenger)
+    sig.bind(None, at=1.0, ev_hold=None, bid=None, bid_size=None,
+             complement_ask=None, complement_ask_size=None,
+             sale_ladder=None, venue="PMUS", us_market_slug="aec-x",
+             held_is_long=True, settlement_semantics=None,
+             last_price=None, seconds_open=None, decision_id="d",
+             inputs={})
+
+
+def test_the_challenger_lane_is_separately_identified():
+    from sportsassets.workers import rn1x_shadow as W
+
+    assert "CHALLENGER" in W.LANES
+    assert W.CHALLENGER_EXPERIMENT_ID != W.PROSPECTIVE_EXPERIMENT_ID
+    assert W.CHALLENGER_EXPERIMENT_ID != W.HISTORICAL_EXPERIMENT_ID
+    assert W.CHALLENGER_CURSOR_KEY != W.PROSPECTIVE_CURSOR_KEY
+    # and it reads no payout: it is a prospective lane
+    src = __import__("inspect").getsource(W.cycle)
+    assert 'prospective = lane in ("PROSPECTIVE", "CHALLENGER")' in src
+    # the position key must not collide with the champion's
+    assert "lane_policy" in src
+
+
+# ── the event-progress source, wired at last ─────────────────────────
+
+def test_the_progress_registry_was_not_connected_to_the_provider():
+    """§4: "Connect the observed event-progress source needed by the
+    frozen second-half loss rule."
+
+    THE GAP, AND IT WAS A WIRE, NOT A FEATURE. `bettor_progress_providers`
+    is a complete adapter layer with a `configured()` that refuses by
+    name; `bettor_progress_feed` validates and ages observations. Neither
+    reached `bettor_rn1x_policy`, whose `PROGRESS_FEED_CONNECTED` was a
+    literal empty dict -- so setting PROGRESS_PROVIDER and its credential
+    would have changed nothing at all and the rule would have reported
+    PROGRESS_FEED_NOT_CONNECTED with a live feed behind it.
+    """
+    import os
+
+    from sportsassets import bettor_progress_providers as PP
+    from sportsassets import bettor_rn1x_policy as pol
+
+    # FAIL-CLOSED IS THE DEFAULT AND STAYS THE DEFAULT.
+    old = {k: os.environ.pop(k, None)
+           for k in (PP.ENV_PROVIDER, "PROGRESS_PROVIDER_KEY")}
+    try:
+        assert pol.connected_sports() == {}
+        ph = pol.event_phase(sport="soccer")
+        assert ph["loss_exit_available"] is False
+        assert ph["absence"] == pol.PROGRESS_FEED_ABSENT
+        assert ph["rule_written"] is True, (
+            "the halfway rule for soccer IS written; what is missing is "
+            "the feed, and the two absences are named separately")
+
+        # NOW CONFIGURE ONE. The sports with a written rule become
+        # admitted -- which before this change they could not.
+        os.environ[PP.ENV_PROVIDER] = "generic_scores_v1"
+        os.environ["PROGRESS_PROVIDER_KEY"] = "test-credential"
+        assert PP.configured()["connected"] is True
+        live = pol.connected_sports()
+        assert set(live) == {"soccer", "basketball", "football"}
+        assert "hockey" not in live, (
+            "hockey has 3 periods and no halfway rule is written, so a "
+            "connected feed must not admit it")
+
+        # the rule now READS, and still refuses a stale observation
+        ph = pol.event_phase(sport="soccer", progress=None)
+        assert ph["admitted_to_experiment"] is True
+        assert ph["absence"] == "PROGRESS_OBSERVATION_MISSING_NOW"
+
+        fresh = {"observed_at": 1000.0, "period": 2, "period_type": "HALF",
+                 "in_play": True, "status": "IN_PLAY", "total_periods": 2}
+        ph = pol.event_phase(sport="soccer", progress=fresh, now=1000.0)
+        assert ph["phase"] == pol.SECOND_HALF
+        assert ph["loss_exit_available"] is True
+
+        stale = dict(fresh, observed_at=1000.0 - pol.PROGRESS_MAX_AGE_S - 1)
+        ph = pol.event_phase(sport="soccer", progress=stale, now=1000.0)
+        assert ph["loss_exit_available"] is False
+        assert ph["phase"] == pol.PROGRESS_UNAVAILABLE
+    finally:
+        for k, v in old.items():
+            if v is None:
+                os.environ.pop(k, None)
+            else:
+                os.environ[k] = v
+    # and the default is restored: no credential, no exit
+    assert pol.connected_sports() == {}

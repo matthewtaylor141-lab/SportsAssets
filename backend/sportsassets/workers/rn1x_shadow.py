@@ -521,12 +521,30 @@ async def challenger_inputs_for(conn, *, condition_id, seed_qty,
                       "EV_HOLD may still be present and is returned")
         out["available"] = ev.get("status") == "IDENTIFIED"
         return out
+    # THE EXISTING PACED READER, NOT A SECOND CALL INTO `pmus`.
+    #
+    # `pmus.book_read(client, slug)` takes a CLIENT first, and my first
+    # version here called it `book_read(slug)` -- the identical mistake
+    # that made the command API's venue probe raise a TypeError and
+    # report it as a venue refusal for three runs. `_read_book_blocking`
+    # already constructs the client, calls `venue_pace.pace` so this
+    # lane cannot starve the collector out of the shared venue budget,
+    # and NAMES its failures instead of raising. Reusing it means this
+    # lane cannot drift from the reader the valuation loop uses.
     try:
-        from sportsassets import pmus
-        md = await asyncio.to_thread(pmus.book_read, slug)
+        from .ext_pinnacle_loop import _read_book_blocking
+        book = await asyncio.to_thread(_read_book_blocking, slug)
     except Exception as exc:                                   # noqa: BLE001
-        out["reason"] = "VENUE_BOOK_READ_FAILED"
+        out["reason"] = "VENUE_BOOK_READ_RAISED"
         out["why"] = "%s: %s" % (type(exc).__name__, exc)
+        out["available"] = ev.get("status") == "IDENTIFIED"
+        return out
+    md = (book or {}).get("marketData")
+    if md is None:
+        out["reason"] = "VENUE_BOOK_UNREADABLE"
+        out["why"] = ("the venue read returned no marketData: %s"
+                      % (book or {}).get("error"))
+        out["diagnostic"] = (book or {}).get("diagnostic")
         out["available"] = ev.get("status") == "IDENTIFIED"
         return out
 
