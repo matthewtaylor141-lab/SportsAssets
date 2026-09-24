@@ -962,6 +962,118 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
             "bid": None}
 
 
+# ── THE OUTCOME JOIN, WHICH IS WHAT MAKES CALIBRATION POSSIBLE ───────
+#
+# `external_valuations` records what the source SAID. Nothing was reading
+# back what then HAPPENED, so `outcome_known` was false on every row ever
+# written and the calibration measurement had an empty input by
+# construction. `JOIN_OUTCOME` has existed since migration 103 and had no
+# caller.
+#
+# THE VENUE'S SETTLEMENT PRICE IS ABOUT ITS OWN YES SIDE, NOT ABOUT OUR
+# LEG. A contract acquired as BUY_SHORT pays on the COMPLEMENT of the
+# priced outcome, so its truth is 1 - the settlement price. Getting this
+# backwards would score every short leg against the wrong answer and
+# produce a calibration that is exactly wrong on half the sample, so the
+# flag is read off the row rather than assumed.
+#
+# A PRICE THAT IS NEITHER 0 NOR 1 IS A VOID, not a fractional outcome: the
+# market returned stakes instead of paying a side, and a voided event has
+# no 0/1 truth for a probability to be scored against.
+
+UNJOINED_SQL = """
+    SELECT id, us_market_slug, payout_is_complement
+      FROM external_valuations
+     WHERE experiment_id = $1
+       AND outcome_known = FALSE
+       AND us_market_slug IS NOT NULL
+       AND decided_at < now() - interval '2 hours'
+     ORDER BY decided_at
+     LIMIT $2
+"""
+
+#: Bounded per run: each row costs one paced venue read, and the join
+#: shares the venue budget with the collector and the entry loop.
+MAX_JOINS_PER_RUN = 60
+
+#: A settlement price this far from 0 or 1 is not a side paying out.
+_SETTLED_EPS = 1e-6
+
+
+def outcome_for_leg(settlement_price, *, payout_is_complement):
+    """Did the event THIS CONTRACT PAYS ON occur? 1, 0, or None for void."""
+    try:
+        sp = float(settlement_price)
+    except (TypeError, ValueError):
+        return None
+    if abs(sp - 1.0) <= _SETTLED_EPS:
+        yes = 1
+    elif abs(sp) <= _SETTLED_EPS:
+        yes = 0
+    else:
+        return None
+    return (1 - yes) if payout_is_complement else yes
+
+
+async def join_outcomes(conn, *, limit=MAX_JOINS_PER_RUN) -> dict:
+    """Read back what happened, for valuations that do not know yet.
+
+    Never raises. Reports every class separately -- resolved, void, still
+    pending, unreadable, unmatched -- because a calibration that could not
+    say how much of its record it failed to resolve would be reporting a
+    sample it had not characterised.
+    """
+    from .. import bettor_live_read as lr
+
+    out = {"ran": True, "examined": 0, "resolved": 0, "void": 0,
+           "pending": 0, "unreadable": 0, "unmatched": 0, "errors": 0,
+           "limit": int(limit), "by_status": {}}
+    try:
+        rows = await conn.fetch(UNJOINED_SQL, ext.EXPERIMENT_ID, int(limit))
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ran": False, "error": "%s" % type(exc).__name__,
+                "why": "the unjoined-valuation read failed"}
+    out["examined"] = len(rows)
+    for r in rows:
+        try:
+            res = await asyncio.to_thread(_read_resolution_blocking,
+                                          r["us_market_slug"])
+        except Exception as exc:                               # noqa: BLE001
+            out["errors"] += 1
+            out["by_status"]["EXC:" + type(exc).__name__] = \
+                out["by_status"].get("EXC:" + type(exc).__name__, 0) + 1
+            continue
+        st = str(res.get("status") or "")
+        out["by_status"][st] = out["by_status"].get(st, 0) + 1
+        if st not in (lr.RESOLVED, getattr(lr, "RESOLVED_DERIVED",
+                                           "RESOLVED_DERIVED")):
+            if st == lr.PENDING:
+                out["pending"] += 1
+            elif st == lr.UNMATCHED:
+                out["unmatched"] += 1
+            else:
+                out["unreadable"] += 1
+            continue
+        o = outcome_for_leg(res.get("settlement_price",
+                                    res.get("outcome")),
+                            payout_is_complement=bool(
+                                r["payout_is_complement"]))
+        settled_at = time.time()
+        try:
+            # A VOID IS RECORDED AS KNOWN-WITH-NO-OUTCOME, which is what
+            # the evaluator classifies as VOID. Leaving it unknown would
+            # make the join re-read it every run forever.
+            await conn.execute(ext.JOIN_OUTCOME, r["id"], o, settled_at,
+                               None)
+            if o is None:
+                out["void"] += 1
+            else:
+                out["resolved"] += 1
+        except Exception:                                      # noqa: BLE001
+            out["errors"] += 1
+    return out
+
+
 # ── THE ENTRY LANE'S EXECUTION, SIZING AND RISK ─────────────────────
 #
 # Everything below composes existing engines and computes no economics of
@@ -1798,8 +1910,14 @@ async def cycle(conn) -> dict:
                 for code in rec.get("refusals", []):
                     tally[code] = tally.get(code, 0) + 1
 
+    # THE OUTCOME JOIN RUNS EVERY CYCLE, bounded. Collection has to
+    # progress on its own: a calibration that waits for someone to
+    # remember to run a backfill is a calibration that never happens.
+    joined = await join_outcomes(conn)
+
     out = {"ran": True, "state": "LIVE",
            "experiment_id": ext.EXPERIMENT_ID,
+           "outcome_join": joined,
            "evaluated": evaluated, "written": written,
            "refusals": tally, "credits": credits,
            "venue_errors": venue_errors,

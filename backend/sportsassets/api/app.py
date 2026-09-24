@@ -1826,6 +1826,65 @@ async def command_rn1x_trace(position_id: str, response: Response) -> dict:
     return await CR.trace(await get_pool(), position_id)
 
 
+@app.post("/api/admin/external-source-calibration",
+          dependencies=[Depends(require_admin)])
+async def admin_external_source_calibration(response: Response,
+                                            body: dict | None = None
+                                            ) -> dict:
+    """MEASURE the external source against outcomes. Do not assert it.
+
+    Two steps, both reported. First the OUTCOME JOIN reads back what
+    happened for valuations that do not know yet -- without it the
+    measurement has an empty input by construction, which is the state
+    every earlier run was in. Then the EVALUATOR scores the recorded
+    point-in-time probabilities against those outcomes under a scope,
+    metric and acceptance criterion declared in the module before any data
+    was read.
+
+    A SHORTFALL IS A RESULT AND IS NOT WRITTEN. The row this could write is
+    what the risk engine's MODEL_TRUST_DRIFT gate reads, so a row means
+    "this was measured and here is the verdict". An insufficient sample
+    returns the shortfall, writes nothing, and the gate stays shut.
+
+    `join: false` skips the venue reads and scores what is already known,
+    which is how the same measurement is repeated without spending the
+    venue budget again.
+    """
+    import time as _t
+
+    from .. import bettor_external_shadow as ext
+    from .. import bettor_source_calibration as CAL
+    from ..db import get_pool
+    from ..workers import ext_pinnacle_loop as EXT
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    now = _t.time()
+    pool = await get_pool()
+    out = {"ok": True, "at": now, "evaluator": CAL.VERSION,
+           "scope": CAL.SCOPE, "acceptance": CAL.ACCEPTANCE}
+    async with pool.acquire() as conn:
+        if b.get("join", True):
+            out["outcome_join"] = await EXT.join_outcomes(
+                conn, limit=int(b.get("join_limit")
+                                or EXT.MAX_JOINS_PER_RUN))
+        else:
+            out["outcome_join"] = {"ran": False,
+                                   "why": "the caller asked to skip it"}
+        out["measurement"] = await CAL.measure(
+            conn, experiment_id=ext.EXPERIMENT_ID,
+            days=int(b.get("days") or 90), now=now,
+            measured_by=str(b.get("measured_by")
+                            or "ADMIN_CALIBRATION_RUN"),
+            write=bool(b.get("write", True)))
+    m = out["measurement"]
+    out["verdict"] = m.get("status")
+    out["gate_opens"] = bool(m.get("written") and m.get("within_tolerance"))
+    out["writes"] = ("one external_source_calibration row, only for a "
+                     "completed verdict. No order, position or decision")
+    return out
+
+
 @app.post("/api/admin/rn1x-fixture-metadata",
           dependencies=[Depends(require_admin)])
 async def admin_rn1x_fixture_metadata(response: Response,
