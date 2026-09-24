@@ -482,20 +482,56 @@ accounting-uncertain account remains paused.
      unknown), or silent (unchanged). The earlier
      `CONFLICTING_VENUE_PROSE` reading was a statement about text nobody
      had fetched.
-   * `BOOK_VOID_RULE` ships **empty on purpose**. A value in it is a
-     claim about a third party's published terms and may be added only
-     with a citation, never from recollection. The measured consequence
-     is that production reports `VOID_ABANDONMENT_BOOK_RULE_NOT_HELD`,
-     `overall_established` is `false`, and **no decision can satisfy
-     `SETTLEMENT_COMPATIBILITY_ESTABLISHED`** — so `command-verify`
-     reports COMPLETE and CONDITIONAL as separate verdicts and a
-     conditional row is never counted as a complete, verified
-     HOLD-versus-exit comparison. Closing it is a **data-capture task**:
-     capture the bookmaker's abandonment/void terms from its published
-     rules with a citation. Until then the number is computed and
-     labelled, not withdrawn — refusing to compute would assert the
-     position is worthless, which is the assertion most likely to force
-     an exit.
+   * **Compatibility is compared on condition → payout, not on shared
+     words.** `bettor_settlement_terms` holds the declared terminal
+     conditions (completed in regulation, decided after regulation,
+     stopped after the minimum and made official, stopped before the
+     minimum, never completed) and the declared payouts, and checks the
+     two sides **per condition**. Two documents can both say "void" and
+     "stakes are returned" and still pay differently, because the phrase
+     attaches to a different condition on each side: a money line's
+     action turns on a minimum number of innings and a venue contract's
+     need not. The case between them — a game called in the sixth — is
+     where the whole stake is. Prose is read **sentence-scoped**: a
+     payout counts for a condition only where one sentence states both.
+   * **The bookmaker's side is not captured, and the retrieval is
+     blocked.** `BOOK_TERMS` ships empty and `admit_book_terms` refuses
+     any term lacking a source, a URL, a retrieval time and the verbatim
+     quote — so it cannot be filled from recollection. The attempt is
+     recorded in `CAPTURE_ATTEMPTS`: `www.pinnacle.com`,
+     `support.pinnacle.com` and `archive.org` were each denied by this
+     environment's network policy. Until the page is retrieved,
+     production reports `VOID_ABANDONMENT_BOOK_RULE_NOT_HELD`, no
+     decision satisfies `SETTLEMENT_COMPATIBILITY_ESTABLISHED`, and
+     `command-verify` reports COMPLETE and CONDITIONAL as separate
+     verdicts. A conditional row is never counted as a complete, verified
+     HOLD-versus-exit comparison.
+5a. **UNKNOWN and INCOMPATIBLE are different, and the difference is in
+   the selected action — not in a label.** Until this release an
+   established payout conflict set `value_is_conditional` and nothing
+   else: the HOLD candidate was still ranked on the same number and the
+   same action was selected, with a warning beside it.
+
+   | settlement status | what the selector does | HOLD value |
+   |---|---|---|
+   | ESTABLISHED | ranks HOLD against the exits normally | used |
+   | UNKNOWN | ranks HOLD, labelled `value_is_conditional` | used, conditional |
+   | INCOMPATIBLE | **refuses to rank HOLD at all** | `ev_hold_usd_shadow_only`, not an input |
+
+   On INCOMPATIBLE, `ev_hold` sets `selection_eligible: false` and
+   `rank_with_hold` routes to the declared missing-input fallback
+   (`EXPOSURE_TRIGGER_RULE_V1`), which answers *whether* to close using no
+   forecast. **A disqualified hold is not zero and not a sale**: with the
+   fallback supplied and unfired the position is HELD by a named rule;
+   with no fallback supplied the answer is NOTHING SELECTED, never an
+   exit. The computed figure survives under a separate name so nothing can
+   read it as an input the selector used. `SETTLEMENT_TRANSFORMS` ships
+   empty — a mapping between the two sides' terminal rules is a claim
+   needing its own derivation, so an incompatibility always disqualifies
+   until one is established. The paired regression is the proof:
+   identical quantity, basis, probability and bid; UNKNOWN selects
+   `DIRECT_EXIT`, INCOMPATIBLE selects `HOLD`.
+
 6. **`POST_COMPLEMENT` is never ranked.** There is no BETTOR-native
    resting evidence, so no `p_fill`. The frozen benchmark posts one by
    *declared rule*, which is a different basis from ranking it.
