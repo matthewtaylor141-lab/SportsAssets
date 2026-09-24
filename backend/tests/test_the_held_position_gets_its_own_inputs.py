@@ -351,6 +351,25 @@ async def _fixture(c, *, sport="MLB", title="Chicago Cubs vs Miami Marlins",
     await c.execute(
         "INSERT INTO market_starts(condition_id, game_start) "
         "VALUES($1, to_timestamp($2))", _COND, _T0 + 3600.0)
+    # AUTHORITATIVE FIXTURE METADATA, as the acquisition route would persist
+    # it. This is what makes the scope guard satisfiable and the quote context
+    # establishable from an ACTUAL reported state rather than a schedule.
+    await c.execute(
+        "DELETE FROM fixture_metadata WHERE condition_id = $1", _COND)
+    await c.execute(
+        "INSERT INTO fixture_metadata(condition_id, phase, game_format,"
+        " scheduled_innings, play_has_begun, event_state_raw,"
+        " abstract_state, actual_start_at, start_evidence, game_pk,"
+        " official_date, home_team, away_team, game_number, double_header,"
+        " source, source_url, retrieved_at, reader_version, refusals)"
+        " VALUES($1,$2,$3,9,false,'Pre-Game','Preview',to_timestamp($4),"
+        " $5,824298,'2026-09-24','Colorado Rockies','Arizona Diamondbacks',"
+        " 1,'N','MLB Stats API, schedule',"
+        " 'https://statsapi.mlb.com/api/v1/schedule?sportId=1"
+        "&date=2026-09-24',to_timestamp($4),'BETTOR_FIXTURE_METADATA_V1',"
+        " '[]'::jsonb)",
+        _COND, _PHASE, _FMT, _T0 + 3600.0,
+        "ACTUAL_START_REPORTED_BY_A_PROGRESS_SOURCE")
     await c.execute("INSERT INTO whales(id,address) VALUES(9,'0xwhale9') "
                     "ON CONFLICT (id) DO NOTHING")
     for i, n, t in ((0, "Chicago Cubs", _COND + "-t0"),

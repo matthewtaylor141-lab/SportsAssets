@@ -967,6 +967,7 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
     from sportsassets import bettor_book_snapshot as bs
     from sportsassets import bettor_pinnacle_devig as devig
     from sportsassets import bettor_venue_mapping as vmap
+    from sportsassets import bettor_fixture_metadata as fmeta_mod
     from sportsassets import bettor_venue_settlement as vset
 
     from . import ext_pinnacle_loop as EXT
@@ -1364,6 +1365,47 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
         vevid = dict(vevid, rules_text=rules.get("rules_text"),
                      rules_field=rules.get("rules_field"),
                      rules_source=rules.get("source"))
+    # ── THE FIXTURE'S OWN METADATA, AS EVIDENCE ─────────────────────
+    #
+    # The scope guard needs the competition phase and the game format; the
+    # context rule needs an ACTUAL state rather than a scheduled one. Both
+    # come from the persisted row, whose provenance travels with it. An
+    # UNREADABLE read is recorded and leaves the guards unsatisfied -- it is
+    # never read as "no restriction applies".
+    fmeta, fmeta_err = None, None
+    try:
+        _fm = await conn.fetchrow(FIXTURE_META_SQL, condition_id)
+        fmeta = dict(_fm) if _fm is not None else None
+    except Exception as exc:                                    # noqa: BLE001
+        fmeta_err = "%s: %s" % (type(exc).__name__, exc)
+    if fmeta is not None:
+        import json as _json
+
+        try:
+            fmeta["refusals"] = _json.loads(fmeta.get("refusals") or "[]")
+        except Exception:                                       # noqa: BLE001
+            fmeta["refusals"] = []
+    out["fixture_metadata"] = (
+        dict(fmeta, read=True) if fmeta else
+        {"read": False, "error": fmeta_err,
+         "why": ("no authoritative fixture metadata is persisted for this "
+                 "condition, so the competition phase, the game format and "
+                 "the actual event state are all unestablished. The "
+                 "acquisition route populates it")})
+    # AN INJECTED SCOPE STILL WINS, so a test can exercise the admitted path;
+    # production passes neither and takes the persisted evidence.
+    if phase is None and fmeta:
+        phase = fmeta.get("phase")
+    if game_format is None and fmeta:
+        game_format = fmeta.get("game_format")
+    _ctx_override = None
+    if fmeta and fmeta.get("play_has_begun") is not None:
+        _ctx_override = fmeta_mod.context_for(
+            {"play_has_begun": fmeta.get("play_has_begun"),
+             "actual_start_at": fmeta.get("actual_start_at"),
+             "retrieved_at": fmeta.get("retrieved_at")},
+            observed_at=val.get("observed_at"))
+
     # WHICH PUBLISHED RULE GOVERNS THIS QUOTE. "h2h" does not say: the
     # bookmaker's pre-game and In-Play Game-period Money Line rules disagree
     # on a called game -- pre-game grades the last completed inning, In-Play
@@ -1379,8 +1421,13 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
         # to derive a period from it for exactly this reason. Passing the
         # evidence CLASS beside the stamp is what stops the scheduled time
         # passing from being read as play having begun.
-        start_at=(out.get("fixture") or {}).get("game_start"),
-        start_evidence=vset._ST.SE_SCHEDULED_CATALOGUE,
+        start_at=((fmeta or {}).get("actual_start_at")
+                  if (fmeta or {}).get("actual_start_at") is not None
+                  else (out.get("fixture") or {}).get("game_start")),
+        start_evidence=((fmeta or {}).get("start_evidence")
+                        or vset._ST.SE_SCHEDULED_CATALOGUE),
+        book_context=((_ctx_override or {}).get("context")
+                      if (_ctx_override or {}).get("context") else None),
         # NEITHER THE PHASE NOR THE FORMAT IS CARRIED ON `markets`, so both
         # are unestablished and the captured rules are NOT admitted. That is
         # the scope gate doing its job, not a missing feature: the capture
@@ -1414,6 +1461,20 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
         "quote_context_why": (_terms.get("quote_context") or {}).get("why"),
         "quote_context_refusal": (
             _terms.get("quote_context") or {}).get("refusal"),
+        # WHERE THE SCOPE CAME FROM, so a COMPATIBLE verdict can be traced
+        # to a fixture row with a source and a retrieval time.
+        "scope": _terms.get("scope"),
+        "scope_evidence": ({"source": (fmeta or {}).get("source"),
+                            "source_url": (fmeta or {}).get("source_url"),
+                            "retrieved_at": (fmeta or {}).get("retrieved_at"),
+                            "game_pk": (fmeta or {}).get("game_pk"),
+                            "official_date": (fmeta or {}).get("official_date"),
+                            "home": (fmeta or {}).get("home_team"),
+                            "away": (fmeta or {}).get("away_team"),
+                            "reader": (fmeta or {}).get("reader_version"),
+                            "refusals": (fmeta or {}).get("refusals")}
+                           if fmeta else None),
+        "quote_context_evidence": _ctx_override,
         "book_capture": _terms.get("book_capture"),
         "book_capture_limits": _terms.get("book_capture_limits"),
         "rule_hierarchy": _terms.get("rule_hierarchy"),
@@ -1683,6 +1744,26 @@ EXISTING_ACCEPTANCE_SQL = """
      ORDER BY p.decision_ts DESC
      LIMIT 1
 """
+
+#: THE PERSISTED FIXTURE METADATA, read and never fetched from the decision
+#: path. It supplies the competition phase and the game format the settlement
+#: scope guard requires, and the ACTUAL event state the quote-context rule
+#: requires -- none of which is on `markets`. Acquisition is a separate,
+#: explicit action; a decision only reads what is already there.
+FIXTURE_META_SQL = """
+    SELECT phase, phase_uncovered, game_format, scheduled_innings,
+           play_has_begun, event_state_raw, abstract_state, start_evidence,
+           terminal_hint, game_pk, home_team, away_team, game_number,
+           double_header, source, source_url, reader_version,
+           refusals::text AS refusals,
+           official_date::text AS official_date,
+           extract(epoch FROM actual_start_at)::float8 AS actual_start_at,
+           extract(epoch FROM retrieved_at)::float8   AS retrieved_at_epoch,
+           to_char(retrieved_at, 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')
+               AS retrieved_at
+      FROM fixture_metadata WHERE condition_id = $1
+"""
+
 
 R_NO_COVERED_CANDIDATE = "NO_COVERED_MARKET_COULD_SUPPLY_A_COMPLETE_ENTRY"
 R_NO_MAPPED_CANDIDATE = "NO_COVERED_MARKET_HAS_A_KNOWN_VENUE_NATIVE_CONTRACT"

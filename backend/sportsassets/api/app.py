@@ -1826,6 +1826,171 @@ async def command_rn1x_trace(position_id: str, response: Response) -> dict:
     return await CR.trace(await get_pool(), position_id)
 
 
+@app.post("/api/admin/rn1x-fixture-metadata",
+          dependencies=[Depends(require_admin)])
+async def admin_rn1x_fixture_metadata(response: Response,
+                                      body: dict | None = None) -> dict:
+    """Acquire and PERSIST authoritative fixture metadata for one condition.
+
+    WHAT IT CLOSES. The settlement scope guard needs the COMPETITION PHASE
+    and the GAME FORMAT, and the quote-context rule needs an ACTUAL event
+    state rather than a scheduled start. The league publishes all three per
+    game; none is on `markets`. That gap was being reported as an
+    indefinite unknown, and it is an integration task.
+
+    TWO ACQUISITION MODES, because the access is the only open question:
+      * `payload` -- the caller supplies the schedule response it retrieved,
+        with the URL and the instant it retrieved it. Used when this service
+        has no outbound route to the league host; the retrieval happens
+        wherever it is permitted and only the parse and the write happen
+        here.
+      * `fetch: true` -- this service retrieves it itself. Works only where
+        its egress permits the host, and it says so plainly when it does not.
+
+    Either way the SAME reader parses it, the same fixture binding is
+    required, and the row carries its source, URL and retrieval time. It
+    writes ONE `fixture_metadata` row and nothing else; no order, no
+    position, no decision.
+    """
+    import json as _json
+
+    from .. import bettor_fixture_metadata as FM
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    cid = str(b.get("condition_id") or "").strip()
+    if not cid:
+        return {"ok": False, "refusal": "CONDITION_ID_REQUIRED"}
+
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        mkt = await conn.fetchrow(
+            "SELECT m.condition_id, m.title, m.event_title, m.sport,"
+            " to_char(s.game_start, 'YYYY-MM-DD') AS sched_date"
+            " FROM markets m LEFT JOIN market_starts s"
+            "   ON s.condition_id = m.condition_id"
+            " WHERE m.condition_id = $1", cid)
+        if mkt is None:
+            return {"ok": False, "refusal": "NO_SUCH_CONDITION",
+                    "condition_id": cid}
+
+        # THE FIXTURE'S OWN NAMES AND DATE, from the caller where it supplies
+        # them and from the market row otherwise. They are the BINDING the
+        # match is made on, so they are echoed back for checking.
+        home = str(b.get("home") or "").strip()
+        away = str(b.get("away") or "").strip()
+        date = str(b.get("official_date") or mkt["sched_date"] or "").strip()
+        if not (home and away):
+            title = str(mkt["title"] or mkt["event_title"] or "")
+            parts = [x.strip() for x in
+                     title.replace(" vs. ", " vs ").split(" vs ")]
+            if len(parts) == 2:
+                away, home = away or parts[0], home or parts[1]
+        if not (home and away and date):
+            return {"ok": False, "refusal": "FIXTURE_BINDING_INCOMPLETE",
+                    "condition_id": cid, "home": home, "away": away,
+                    "official_date": date,
+                    "why": ("the two team names and the official date are "
+                            "the binding the fixture is matched on. Supply "
+                            "them in the body where the market title does "
+                            "not yield them")}
+
+        url = str(b.get("source_url") or (FM.SOURCE_URL % date))
+        at = str(b.get("retrieved_at") or "")
+        payload = b.get("payload")
+        if payload is None and b.get("fetch"):
+            import datetime as _dt
+            import urllib.request as _ur
+
+            try:
+                req = _ur.Request(url, headers={"Accept": "application/json"})
+                with _ur.urlopen(req, timeout=20) as r:      # noqa: S310
+                    payload = _json.loads(r.read().decode("utf-8"))
+                at = at or _dt.datetime.now(
+                    _dt.timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            except Exception as exc:                         # noqa: BLE001
+                return {"ok": False, "refusal": "FETCH_FAILED",
+                        "source_url": url,
+                        "error": "%s: %s" % (type(exc).__name__, exc),
+                        "why": ("this service could not reach the league "
+                                "host. Retrieve it where that is permitted "
+                                "and POST the response as `payload`; the "
+                                "parse and the write happen here either way")}
+        if payload is None:
+            return {"ok": False, "refusal": "NO_PAYLOAD_AND_NO_FETCH",
+                    "why": "supply `payload`, or set `fetch: true`"}
+        if not at:
+            return {"ok": False, "refusal": "RETRIEVED_AT_REQUIRED",
+                    "why": ("a supplied payload must carry the instant it "
+                            "was retrieved -- the row is evidence and an "
+                            "undated observation is not")}
+
+        parsed = FM.parse_games(payload)
+        if not parsed["ok"]:
+            return {"ok": False, "refusal": parsed["refusal"],
+                    "why": parsed.get("why")}
+        m = FM.match_fixture(parsed["games"], home=home, away=away,
+                             official_date=date)
+        if not m["ok"]:
+            return {"ok": False, "refusal": m["refusal"], "why": m["why"],
+                    "condition_id": cid, "home": home, "away": away,
+                    "official_date": date,
+                    "games_considered": parsed["total"]}
+        ev = FM.evidence_from(m["game"], retrieved_at=at, source_url=url,
+                              condition_id=cid)
+        await conn.execute(
+            """INSERT INTO fixture_metadata(condition_id, phase,
+               phase_uncovered, game_format, scheduled_innings,
+               play_has_begun, event_state_raw, abstract_state,
+               actual_start_at, start_evidence, terminal_hint, game_pk,
+               official_date, home_team, away_team, game_number,
+               double_header, source, source_url, retrieved_at,
+               reader_version, refusals, raw)
+               VALUES($1,$2,$3,$4,$5,$6,$7,$8,
+                      CASE WHEN $9::float8 IS NULL THEN NULL
+                           ELSE to_timestamp($9::float8) END,
+                      $10,$11,$12,$13::date,$14,$15,$16,$17,$18,$19,
+                      $20::timestamptz,$21,$22::jsonb,$23::jsonb)
+               ON CONFLICT (condition_id) DO UPDATE SET
+                 phase = EXCLUDED.phase,
+                 phase_uncovered = EXCLUDED.phase_uncovered,
+                 game_format = EXCLUDED.game_format,
+                 scheduled_innings = EXCLUDED.scheduled_innings,
+                 play_has_begun = EXCLUDED.play_has_begun,
+                 event_state_raw = EXCLUDED.event_state_raw,
+                 abstract_state = EXCLUDED.abstract_state,
+                 actual_start_at = EXCLUDED.actual_start_at,
+                 start_evidence = EXCLUDED.start_evidence,
+                 terminal_hint = EXCLUDED.terminal_hint,
+                 game_pk = EXCLUDED.game_pk,
+                 official_date = EXCLUDED.official_date,
+                 home_team = EXCLUDED.home_team,
+                 away_team = EXCLUDED.away_team,
+                 game_number = EXCLUDED.game_number,
+                 double_header = EXCLUDED.double_header,
+                 source = EXCLUDED.source,
+                 source_url = EXCLUDED.source_url,
+                 retrieved_at = EXCLUDED.retrieved_at,
+                 reader_version = EXCLUDED.reader_version,
+                 refusals = EXCLUDED.refusals,
+                 raw = EXCLUDED.raw,
+                 written_at = now()""",
+            cid, ev["phase"], ev["phase_uncovered"], ev["game_format"],
+            ev["scheduled_innings"], ev["play_has_begun"],
+            ev["event_state_raw"], ev["abstract_state"],
+            ev["actual_start_at"], ev["start_evidence"],
+            ev["terminal_hint"], ev["game_pk"], ev["official_date"],
+            ev["home"], ev["away"], ev["game_number"],
+            ev["double_header"], ev["source"], ev["source_url"], at,
+            FM.VERSION, _json.dumps(ev["refusals"]),
+            _json.dumps(m["game"]))
+    ev["ok"] = True
+    ev["persisted"] = True
+    ev["writes"] = "ONE fixture_metadata row. No order, position or decision."
+    return ev
+
+
 @app.post("/api/admin/rn1x-acceptance-position",
           dependencies=[Depends(require_admin)])
 async def admin_rn1x_acceptance_position(response: Response) -> dict:

@@ -160,8 +160,13 @@ def test_the_applicable_rule_comes_from_the_quotes_timing_not_the_market_name():
         "if these were equal the distinction would not matter and the "
         "context could be dropped")
     # the context itself is established from the two stamps
+    # A SCHEDULED STAMP CLASSIFIES NOTHING, in either direction
     assert ST.book_context_for(observed_at=10.0,
-                               start_at=100.0)["context"] == ST.CTX_PRE_GAME
+                               start_at=100.0)["context"] is None
+    # only ACTUAL evidence does
+    assert ST.book_context_for(
+        observed_at=10.0, start_at=100.0,
+        start_evidence=ST.SE_ACTUAL_REPORTED)["context"] == ST.CTX_PRE_GAME
     # AND AN UNKNOWN START IS NOT DEFAULTED TO PRE-GAME
     none = ST.book_context_for(observed_at=10.0, start_at=None)
     assert none["context"] is None
@@ -336,7 +341,16 @@ def test_a_scheduled_start_passing_does_not_make_a_quote_in_play():
     assert got["context"] != ST.CTX_LIVE, got
     assert got["context"] is None
     assert got["refusal"] == ST.R_SCHEDULED_ONLY
-    assert "delayed or postponed" in got["why"]
+    assert "a delay means play may not have begun" in got["why"]
+    # AND THE STALE-SCHEDULE CASE, the other direction: a snapshot taken
+    # before the start was ADVANCED reads as pre-game while the game is
+    # already under way, so observing before the stamp establishes nothing
+    # either.
+    stale = ST.book_context_for(observed_at=100.0 - 600.0, start_at=100.0,
+                                start_evidence=ST.SE_SCHEDULED_CATALOGUE)
+    assert stale["context"] is None, stale
+    assert stale["refusal"] == ST.R_SCHEDULED_ONLY
+    assert "may ALREADY have begun" in stale["why"]
     # AND THE BOOK SIDE IS THEREFORE WITHHELD, not guessed
     cmp_ = ST.compare_prose(
         sport_family="baseball", market="h2h",
@@ -359,10 +373,11 @@ def test_only_actual_start_evidence_or_a_provider_label_gives_in_play():
     assert ST.book_context_for(
         quote_is_in_play=False, observed_at=None,
         start_at=None)["context"] == ST.CTX_PRE_GAME
-    # the one direction a SCHEDULED stamp does support
-    assert ST.book_context_for(
-        observed_at=50.0, start_at=100.0,
-        start_evidence=ST.SE_SCHEDULED_CATALOGUE)["context"] == ST.CTX_PRE_GAME
+    # and a SCHEDULED stamp supports NEITHER direction
+    for ob in (50.0, 200.0):
+        assert ST.book_context_for(
+            observed_at=ob, start_at=100.0,
+            start_evidence=ST.SE_SCHEDULED_CATALOGUE)["context"] is None
 
 
 def test_a_called_game_and_a_suspended_one_are_not_the_same_condition():
