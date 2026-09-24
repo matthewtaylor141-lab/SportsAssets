@@ -415,6 +415,94 @@ def _read_book_blocking(slug: str) -> dict:
     return out
 
 
+#: Fields a live-progress observation would have to arrive in. Matched
+#: case-insensitively against the KEYS of a payload, never against values:
+#: the question is whether the field exists at all.
+PROGRESS_FIELD_NAMES = (
+    "period", "periods", "half", "halves", "quarter", "inning", "innings",
+    "clock", "gameclock", "timeremaining", "elapsed", "minute", "phase",
+    "gamestate", "livestate", "eventstate", "status", "state",
+)
+
+
+def _progress_like_keys(obj, prefix="", out=None, depth=0):
+    """Every key in a payload whose NAME could carry event progress."""
+    out = [] if out is None else out
+    if depth > 3:
+        return out
+    if isinstance(obj, dict):
+        for k, v in obj.items():
+            path = "%s.%s" % (prefix, k) if prefix else str(k)
+            if str(k).lower().replace("_", "") in PROGRESS_FIELD_NAMES:
+                out.append({"path": path,
+                            "value_type": type(v).__name__,
+                            # The VALUE is reported only as a type and a
+                            # short repr: a status string is evidence, and
+                            # a full payload dump in a diagnostic is not.
+                            "sample": _sanitize(repr(v), limit=60)})
+            _progress_like_keys(v, path, out, depth + 1)
+    elif isinstance(obj, list) and obj:
+        _progress_like_keys(obj[0], "%s[0]" % prefix, out, depth + 1)
+    return out
+
+
+def venue_event_progress_probe(limit=1) -> dict:
+    """Does the VENUE's own event payload carry event progress?
+
+    "No code reads a period field" is an inspection. This is the
+    measurement: it fetches one page of the venue's events and reports
+    which of its KEYS could carry progress. The distinction the exit
+    blocker turns on -- "our integrations lack the field" versus "no
+    accessible source exists" -- can only be settled on the payload.
+    """
+    from .. import pmus
+    from ..venue_pace import pace
+
+    out = {"source": "venue", "endpoint": "events.list",
+           "reader": "pmus._get_client().events.list",
+           "events_seen": 0, "top_level_keys": [],
+           "progress_like_keys": [], "carries_observed_period": False}
+    try:
+        pace()
+        client = pmus._get_client()
+        resp = client.events.list({"limit": int(limit)}) or {}
+    except Exception as exc:                                   # noqa: BLE001
+        out.update(error=type(exc).__name__,
+                   detail=_sanitize(exc, limit=160),
+                   verdict="the venue event list could not be read, so this "
+                           "says nothing either way")
+        return out
+    evs = resp.get("events") or []
+    out["events_seen"] = len(evs)
+    if not evs:
+        out["verdict"] = "the venue returned no events; nothing to inspect"
+        return out
+    ev = evs[0] if isinstance(evs[0], dict) else {}
+    out["top_level_keys"] = sorted(str(k) for k in ev.keys())
+    hits = _progress_like_keys(ev)
+    out["progress_like_keys"] = hits[:12]
+    # A `status`/`state` key is not a period. Only a period/half/quarter/
+    # inning/clock field can locate the halfway point, so the verdict is
+    # narrow on purpose.
+    period_names = ("period", "periods", "half", "halves", "quarter",
+                    "inning", "innings", "clock", "gameclock",
+                    "timeremaining", "elapsed", "minute")
+    out["carries_observed_period"] = any(
+        h["path"].split(".")[-1].lower().replace("_", "") in period_names
+        for h in hits)
+    out["verdict"] = (
+        "the venue's event payload DOES carry a period-like field -- "
+        "%s -- and the exit blocker should be reconsidered against it"
+        % ", ".join(h["path"] for h in hits)
+        if out["carries_observed_period"] else
+        ("the venue's event payload carries no period, half, quarter, "
+         "inning or clock field. Combined with the odds provider's scores "
+         "endpoint (measured three times, progress_fields []), NEITHER "
+         "integration we hold carries the observation -- which is a "
+         "different statement from 'no accessible source exists'"))
+    return out
+
+
 async def resolve_venue_identity(conn, *, market_row, priced_outcome):
     """The GLOBAL fixture -> the VENUE's own contract, or a named refusal.
 

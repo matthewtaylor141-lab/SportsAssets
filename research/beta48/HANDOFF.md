@@ -522,3 +522,73 @@ Read 03:16–03:21Z unless stated. `✓*` is a controlled observation.
 **Profitability is not claimed.** The only out-of-sample number here is a
 base rate on 159 joined predictions of a cohort-behaviour target that is
 explicitly not a settlement forecast and not our fill probability.
+
+## 13 · The exit feed: what we lack, what exists, and what to buy
+
+### 13.1 Our integrations lack the field. That is measured on both.
+
+| integration | how asked | result |
+|---|---|---|
+| odds provider `/scores` | live request, three times (02:08:18Z, 02:33:10Z, 03:21:15Z) | HTTP 200, `progress_fields []`, `carries_observed_period false` |
+| venue `events.list` | `venue_event_progress_probe` reports the payload's own KEYS | the event record carries `slug`, `title`, `startTime`/`startDate`, `endTime`/`endDate`, volume and market boards. A `status`/`state` key is a market state, not a period |
+| venue `markets.book` | read every cycle | quotes, ladders, `stats.sharesTraded` |
+| venue `markets.settlement` | `bettor_live_read.read_settlement` | the settlement PRICE after resolution — post-hoc, not progress |
+| `game_start_time` | held already | a SCHEDULED start. Refused by source name, deliberately |
+
+**"Our current integrations lack the field" is established. "No accessible
+source exists" is not, and I am not claiming it** — live period and clock
+data is an ordinary product category. The distinction matters because the
+first is a purchasing decision and the second would be a dead end.
+
+### 13.2 The exact capability to buy
+
+A live in-play state feed. The five requirements are already machine-
+readable in `bettor_progress_providers.CAPABILITY`; in procurement terms:
+
+| # | requirement | why it is not optional |
+|---|---|---|
+| 1 | fixture identity: both team names (or a stable id) **plus** kickoff date-time | it has to map to a venue contract through `bettor_venue_mapping`; the venue dates some fixtures a calendar day either side, so the timestamp is what binds |
+| 2 | an **observed** period / half indicator (1 or 2 for soccer) | the halfway rule needs the period, not the score. 0-0 is the same string in minute 5 and minute 80 |
+| 3 | the provider's **own timestamp** for when that was true, to the second | our receipt time makes every observation look fresh by construction |
+| 4 | a status separating in-play / half-time / suspended / abandoned / final | four different reasons not to sell, and `bettor_progress_feed` refuses all four distinctly |
+| 5 | refresh **at least every 60 s** while in play | `MAX_AGE_S` is 120 s; an observation older than that does not license an exit |
+
+Not required: clock to the second, possession, lineups, odds, xG, or
+historical archives.
+
+**Coverage required, in priority order:** soccer first — it is the only
+sport where this experiment has both a Pinnacle price and a venue contract
+today, and the leagues seen in the candidate set are EPL and Liga MX.
+Basketball and football halfway rules are already written
+(`DOCUMENTED_MAPPINGS`), so a feed covering NBA and NFL connects them with
+no code change. Hockey has no written rule and needs one first.
+
+**Cost: I cannot give you a number from here.** This container has no
+vendor access and quoting a price from memory is the kind of invented
+figure this delivery has been correcting all night. What I can give you is
+the exact request to send: *"an in-play state feed for soccer (EPL, Liga
+MX), covering every fixture we may trade, returning fixture identity with
+kickoff timestamp, an observed period/half indicator, the provider's own
+observation timestamp, and a status distinguishing in-play, half-time,
+suspended, abandoned and final, refreshing at least every 60 seconds while
+in play — plus per-request or per-month limits and price."* Three or four
+vendors sell exactly that shape.
+
+### 13.3 The adapter is ready and refuses until it is fed
+
+`bettor_progress_providers` registers two adapters against the two response
+shapes real scores APIs use, refuses with `NO_PROGRESS_PROVIDER_CONFIGURED`
+until `PROGRESS_PROVIDER` names one and its credential is present, and puts
+every observation through `bettor_progress_feed.validate` and the 120 s
+staleness bound on the way past. Eleven tests pin the refusals, including
+that an unknown status is never rounded to IN_PLAY and that a derived
+source cannot be smuggled through with a real period and a real timestamp.
+
+**Connecting a conforming provider is configuration, not development.**
+
+### 13.4 The policy is not pairing-only, and is not complete either
+
+`pairing` reads LIVE and `second_half_loss_exit` reads UNAVAILABLE, side by
+side, in the same tile set. The frozen policy has two halves; one operates
+and one waits on an observation nobody has bought yet. Neither the
+dashboard nor this document describes the operating half as the policy.

@@ -1901,6 +1901,18 @@ async def command_rn1x_external_probe(response: Response) -> dict:
         "sports_with_a_connected_feed": sorted(_pol.PROGRESS_FEED_CONNECTED),
         "missing_capability": _pol.MAPPING_REQUIREMENTS[0],
     }
+    # THE VENUE'S OWN EVENT PAYLOAD, measured rather than inspected. "No
+    # code reads a period field" is an inspection; this asks the payload.
+    # It is the read that separates "our integrations lack the field" from
+    # "no accessible source exists".
+    try:
+        out["second_half_exit"]["venue_event_probe"] = await asyncio.wait_for(
+            asyncio.to_thread(EXT.venue_event_progress_probe, 1),
+            timeout=EXT.VENUE_TIMEOUT_S)
+    except Exception as exc:                                   # noqa: BLE001
+        out["second_half_exit"]["venue_event_probe"] = {
+            "error": type(exc).__name__}
+
     # THE INTEGRATION, PREPARED. Which provider is connected, or the named
     # reason none is, plus the exact capability required -- so the blocker
     # is a purchase decision rather than an engineering unknown.
