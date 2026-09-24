@@ -393,11 +393,30 @@ as `qty × price + fee`.
 | `provenance` | `ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY` | it is not an observed acquisition |
 | `entry_kind` | `ACCEPTANCE_MODELLED_ENTRY` | it is not an executed order |
 | `source_account` | `ACCEPTANCE_HARNESS_NOT_AN_OBSERVED_ACCOUNT` | it is not RN1-derived: no whale, no cohort |
-| `source_trade_id` | a NEGATIVE deterministic sentinel from the venue slug | it can never be read as a `trades.id`, and a repeat call is idempotent |
+| `source_trade_id` | a NEGATIVE sentinel, a blake2b digest of the venue slug under `BETTOR_ACCEPTANCE_SENTINEL_V1` | it can never be read as a `trades.id`, and it is the same number in every process |
 
 Migration 113 adds the column with a CHECK that only declared provenance
 values are storable, so a future writer cannot invent a third label
 silently.
+
+**The identity is stable, and a repair adopts rather than replaces.** The
+sentinel was originally `-(abs(hash(("ACCEPTANCE", slug))) % 2e9)`, and
+Python salts `hash` for `str` per interpreter: measured across four
+`PYTHONHASHSEED` values that derivation returned `-1646678549`,
+`-224103108`, `-539497139` and `-516966637` for one slug, so the
+"idempotent" repeat call would have written a SECOND position on the same
+market at the next restart while the route reported idempotence.
+`acceptance_sentinel` is now a blake2b digest over a versioned namespace
+and returns `-1968964254` for `aec-mlb-az-col-2026-09-24` at every one of
+those seeds. Independently of the identifier, `seed_acceptance_position`
+**looks up** an existing open acceptance position by
+`(experiment_id, policy)` first; when one is found it writes nothing and
+returns `adopted: true` with that row, so a row written under the old
+unstable scheme is adopted and no inventory is added. The regression runs
+the seeder in two real separate interpreters at two hash seeds and asserts
+the same `position_id`, an unchanged row count, quantity and basis — and
+that the salted hash really does differ, so the defect is reproduced
+rather than assumed.
 
 **Why it cannot reach a benchmark number.** `ARMS_SQL` groups by
 `(experiment_id, policy)`, so the acceptance policy is its own line
@@ -441,9 +460,42 @@ accounting-uncertain account remains paused.
    only after events resolve.
 4. **The de-vig method is an open question** (power vs multiplicative);
    which calibrates better is not established.
-5. **`HOLD_TO_SETTLEMENT` cannot be priced** — the venue's settlement
-   prose is `CONFLICTING_VENUE_PROSE`. Overtime and void compatibility
-   remain unresolved and are separate work.
+5. **Every HOLD value in production is CONDITIONAL, and the condition is
+   the bookmaker's abandonment rule that we do not hold.** This was
+   previously written as "`HOLD_TO_SETTLEMENT` cannot be priced", which
+   put the dependency under the wrong action name. The hold value is
+   `p × qty − basis` and `p × qty` is realised **at settlement**, so the
+   terminal rules govern the ordinary HOLD the ranking uses, not only the
+   explicit `HOLD_TO_SETTLEMENT` action. `ev_hold` now stamps
+   `terminal_rule` and `value_is_conditional` on the number it returns,
+   `rank_with_hold` carries both onto the HOLD candidate and into
+   `alternatives.ranked`, and link `4b` records
+   `conditions = "THE ORDINARY HOLD VALUE TOO"` beside its
+   `blocks_outright = HOLD_TO_SETTLEMENT`.
+   * The venue's own prose **is now read** — `read_rules_text` fetches
+     `description` / `assetPriceTerms` / `rules` /
+     `resolutionSource` / `resolutionCriteria` from the listing, paced and
+     cached for an hour, and `attest` matches it against declared
+     per-family patterns with three outcomes: AGREES (established,
+     evidence class `ATTESTED_FROM_VENUE_PUBLISHED_RULES_TEXT`),
+     CONTRADICTS (`OVERTIME_RULE_CONFLICTS_WITH_BOOK_RULE` — louder than
+     unknown), or silent (unchanged). The earlier
+     `CONFLICTING_VENUE_PROSE` reading was a statement about text nobody
+     had fetched.
+   * `BOOK_VOID_RULE` ships **empty on purpose**. A value in it is a
+     claim about a third party's published terms and may be added only
+     with a citation, never from recollection. The measured consequence
+     is that production reports `VOID_ABANDONMENT_BOOK_RULE_NOT_HELD`,
+     `overall_established` is `false`, and **no decision can satisfy
+     `SETTLEMENT_COMPATIBILITY_ESTABLISHED`** — so `command-verify`
+     reports COMPLETE and CONDITIONAL as separate verdicts and a
+     conditional row is never counted as a complete, verified
+     HOLD-versus-exit comparison. Closing it is a **data-capture task**:
+     capture the bookmaker's abandonment/void terms from its published
+     rules with a citation. Until then the number is computed and
+     labelled, not withdrawn — refusing to compute would assert the
+     position is worthless, which is the assertion most likely to force
+     an exit.
 6. **`POST_COMPLEMENT` is never ranked.** There is no BETTOR-native
    resting evidence, so no `p_fill`. The frozen benchmark posts one by
    *declared rule*, which is a different basis from ranking it.
