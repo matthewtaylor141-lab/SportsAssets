@@ -173,6 +173,57 @@ def test_the_loop_is_bounded():
     assert loop.VENUE_TIMEOUT_S <= 30
 
 
+def test_the_three_venue_read_failures_have_three_names():
+    """The 02:08:18Z production cycle mapped two events and then said
+    `NO_CONTEMPORANEOUS_VENUE_QUOTE 2`, which does not say which thing
+    was missing. Depth and staleness already had their own names, so the
+    remaining three branches get theirs: a market row with no slug, a
+    read that raised, and a venue error response.
+    """
+    import asyncio as _a
+
+    codes = {loop.R_NO_SLUG, loop.R_VENUE_READ_FAILED,
+             loop.R_VENUE_READ_ERROR, loop.R_NO_DEPTH,
+             loop.R_VENUE_QUOTE_STALE, loop.R_NO_VENUE_QUOTE}
+    assert len(codes) == 6, "each refusal must be distinguishable"
+
+    class _Conn:
+        def __init__(self, slug):
+            self._slug = slug
+
+        async def fetchval(self, *_a, **_k):
+            return self._slug
+
+    # 1 · no slug on the market row
+    out = _a.run(loop.venue_quote(_Conn(None), condition_id="c",
+                                  outcome_index=0, now=0.0))
+    assert out["refusal"] == loop.R_NO_SLUG
+
+    # 2 · the read raises
+    def _boom(_slug):
+        raise RuntimeError("no route to venue")
+
+    orig = loop._read_book_blocking
+    loop._read_book_blocking = _boom
+    try:
+        out = _a.run(loop.venue_quote(_Conn("slug-1"), condition_id="c",
+                                      outcome_index=0, now=0.0))
+    finally:
+        loop._read_book_blocking = orig
+    assert out["refusal"] == loop.R_VENUE_READ_FAILED
+    assert out["exception"] == "RuntimeError"
+
+    # 3 · the venue answers with an error
+    loop._read_book_blocking = lambda _slug: {"error": "429 rate limited"}
+    try:
+        out = _a.run(loop.venue_quote(_Conn("slug-1"), condition_id="c",
+                                      outcome_index=0, now=0.0))
+    finally:
+        loop._read_book_blocking = orig
+    assert out["refusal"] == loop.R_VENUE_READ_ERROR
+    assert "429" in out["venue_error"]
+
+
 def test_basketball_and_hockey_are_not_requested_at_all():
     """Measured: NBA 0/41 and NHL 0/33 carry no Pinnacle quote on this
     plan. Asking anyway spends credits to be refused."""

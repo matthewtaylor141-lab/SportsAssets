@@ -103,6 +103,16 @@ R_NO_VENUE_QUOTE = "NO_CONTEMPORANEOUS_VENUE_QUOTE"
 R_VENUE_QUOTE_STALE = "VENUE_QUOTE_STALE"
 R_NO_DEPTH = "VENUE_ASK_HAS_NO_DEPTH"
 R_PROVIDER_ERROR = "PROVIDER_REQUEST_FAILED"
+# THREE REASONS THAT WERE ONE COUNTER. The 02:08:18Z production cycle
+# mapped two events exactly and then reported
+# `NO_CONTEMPORANEOUS_VENUE_QUOTE 2` -- which told management the stage
+# refused but not which of three unrelated things was missing: a slug on
+# the market row, a book read that raised, or a venue error response.
+# Depth and staleness already had their own names and did not fire, so
+# these three are the whole remainder.
+R_NO_SLUG = "VENUE_MARKET_ROW_HAS_NO_SLUG"
+R_VENUE_READ_FAILED = "VENUE_BOOK_READ_FAILED"
+R_VENUE_READ_ERROR = "VENUE_BOOK_READ_RETURNED_ERROR"
 
 #: A venue quote older than this is not contemporaneous with a 30 s odds
 #: quote. Same order of magnitude as the feed's own freshness rule,
@@ -336,18 +346,20 @@ async def venue_quote(conn, *, condition_id, outcome_index, now):
     slug = await conn.fetchval(
         "SELECT slug FROM markets WHERE condition_id = $1", condition_id)
     if not slug:
-        return {"ok": False, "refusal": R_NO_VENUE_QUOTE,
+        return {"ok": False, "refusal": R_NO_SLUG,
                 "why": "the market row carries no slug to read a book for"}
     try:
         book = await asyncio.wait_for(
             asyncio.to_thread(_read_book_blocking, slug),
             timeout=VENUE_TIMEOUT_S)
     except Exception as exc:                                   # noqa: BLE001
-        return {"ok": False, "refusal": R_NO_VENUE_QUOTE,
-                "why": "book read failed: %s" % type(exc).__name__}
+        return {"ok": False, "refusal": R_VENUE_READ_FAILED,
+                "why": "book read failed: %s" % type(exc).__name__,
+                "exception": type(exc).__name__}
     if book.get("error"):
-        return {"ok": False, "refusal": R_NO_VENUE_QUOTE,
-                "why": "venue read error: %s" % book["error"]}
+        return {"ok": False, "refusal": R_VENUE_READ_ERROR,
+                "why": "venue read error: %s" % book["error"],
+                "venue_error": str(book["error"])[:200]}
 
     read_at = time.time()
     snap = bs.snapshot(book.get("marketData"), symbol=slug,

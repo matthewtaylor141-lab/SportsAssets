@@ -72,35 +72,63 @@ The three lanes stay visibly separate by experiment id:
 
 ## 4 · Observed evidence, with timestamps
 
-**Authenticated production read, run 19, 2026-09-24T01:32–01:37Z:**
+**Authenticated production read, run 21, job 107462533297,
+2026-09-24T02:03–02:08Z, against API deploy `e0929fd`:**
 
 ```
 historical_replay           LIVE          prospective_rn1_management  LIVE
 independent_ev_entries      BLOCKED       pairing                     LIVE
 second_half_loss_exit       UNAVAILABLE   accounting_health           OK
 learning_evaluation         LIVE          external_valuation          ARMED
-order_book_state            LIVE    370 modelled orders, both lanes
-shadow_pnl                  LIVE    134 settled positions
-model_fitting               ARMED   COHORT_COMPLEMENTARY_FILL_WITHIN_H
+order_book_state            LIVE    386 modelled orders, both lanes
+shadow_pnl                  LIVE    143 settled positions
+model_fitting               LIVE    316 predictions, 0 joined
 ```
 
-**The odds credential works in the running process** (01:32:20Z): HTTP 200,
-`retrieved true`, 20 of 20 EPL events carrying Pinnacle h2h, credits
-8,073,099 used / 6,926,901 remaining, `key_value_returned false`.
+**The odds credential works in the running process** (02:03:15Z): HTTP 200,
+`retrieved true`, 20 of 20 EPL events carrying Pinnacle h2h, quote age
+**28.8 s** on all 20, credits 8,075,605 used / 6,924,395 remaining,
+`key_value_returned false`.
 
-**The clock audit** (01:34:52Z): **136 positions, 0 able to support a
-prospective claim, 130 labelled `BACKDATED_TO_AVAILABILITY_UNAUDITED`,**
-6 `REPLAY_AT_AVAILABILITY`. All four pre-existing "prospective" positions
-are in the backdated set. They are preserved and reclassified, never
-rewritten — their receipt instants were overwritten before migration 104
-and cannot be recovered, so inventing one would be the original defect.
+**The external loop ran a real cycle** (02:08:18Z) — the first one to get
+past candidate selection, because the sport-label defect (§8) was fixed:
+`state LIVE`, **4,000 open venue markets considered**, `elapsed_s 3.67`,
+`evaluated 0`, `written 0`, and every one of the 46 events accounted for
+by name:
 
-**The model loop fitted on production data** (01:36:53Z): 40,000 source
-rows → 7,805 built, base rate 0.3523, 2,750 positives, `dataset_sha`
-`8c110c1b9bfc70cc`, `model_version` `1.8c110c1b`,
-`unmatched_to_source_fill 0`. In-sample log loss **0.5915** against a
-**0.6489** baseline — labelled `IS_IN_SAMPLE`, **a fit diagnostic and not
-performance**.
+```
+NO_VENUE_CONTRACT_FOR_EVENT       41
+NO_PINNACLE_ON_EVENT               2
+NO_CONTEMPORANEOUS_VENUE_QUOTE     2   <- reached only AFTER a successful mapping
+VENUE_MAPPING_AMBIGUOUS            1
+```
+
+That third line is the first observed production evidence that the
+conservative mapper **can** match a Pinnacle fixture to an open venue
+contract: two did, and then refused at the venue read. `VENUE_ASK_HAS_NO_DEPTH`
+and `VENUE_QUOTE_STALE` did not fire, so the cause is one of three — no
+slug on the market row, the book read raising, or a venue error response.
+Those three shared one counter; they are now three named counters.
+
+**The clock audit** (02:05:46Z): **147 positions, 0 able to support a
+prospective claim, 130 labelled `BACKDATED_TO_AVAILABILITY_UNAUDITED`**
+(126 historical + all 4 prospective), 17 `REPLAY_AT_AVAILABILITY`. The
+four pre-existing "prospective" positions are preserved and reclassified,
+never rewritten — their receipt instants were overwritten before migration
+104 and cannot be recovered, so inventing one would be the original defect.
+
+**The model loop fitted on production data** (02:08:18Z): 40,000 source
+rows → 6,265 built, 5,966 closed and fitted, base rate 0.31646, 1,888
+positives, `dataset_sha` `68ac9f00dc68c2d2`, `model_version` `2.68ac9f00`,
+`unmatched_to_source_fill 0`. In-sample log loss **0.5670** against a
+**0.6242** baseline — labelled `IS_IN_SAMPLE`, **a fit diagnostic and not
+performance**. Stage 5 refuses by name:
+`TOO_FEW_JOINED_PREDICTIONS_TO_EVALUATE`, floor 50, joined 0.
+
+**One cycle did not double-count the previous one** (02:08:18Z): of 299
+open rows, the cycle **wrote 157 and recognised 142 as already present**.
+That is the "subsequent cycle processing without duplicate accounting"
+demonstration, taken from production rather than a fixture.
 
 **Controlled acceptance**, `tests/test_controlled_acceptance.py`, 17 tests,
 all through the deployed machinery: BUY through the real gate; pairing at
@@ -123,21 +151,26 @@ missing capability: **a timestamped period/quarter/inning/clock
 observation, not derived from a scheduled start.** This needs a different
 provider — see §7.
 
-*The external valuation will rarely clear on the bulk endpoint.* Quote age
-measured **32.7 s** (01:06:57Z) and **36.2 s** (01:32:20Z), against the
-engine's own **30 s** freshness rule, with LigaMX at 29.8 s earlier. The
-limit was **not changed**: raising it would manufacture activity by
-loosening a risk parameter. Remedies are the per-event endpoint or an
-explicit management decision on the threshold.
+*The bulk endpoint's freshness straddles the 30 s rule — it is not a
+permanent blocker.* Quote age measured **32.7 s** (01:06:57Z, refused),
+**36.2 s** (01:32:20Z, refused), **28.8 s** (02:03:15Z, n=20, inside the
+rule), with LigaMX at 29.8 s earlier. The limit was **not changed**:
+raising it would manufacture activity by loosening a risk parameter. The
+02:08Z cycle shows odds freshness was not what stopped it — the mapping
+and the venue read were.
 
 **Not established, and not to be read as established:**
 
 - **No opportunity has been found, and none ruled out.** `external_valuation`
-  has evaluated 0. With the venue settlement rule unattested, every
-  evaluation refuses before admission on that ground alone.
+  has evaluated 0 — and as of 02:08Z the reason is measured rather than
+  assumed: of 46 events, 41 have no venue contract, 2 no Pinnacle quote, 1
+  is ambiguous, and 2 mapped and then failed the venue read. Nothing
+  reached scoring, so the settlement-rule refusal has not even been
+  exercised on live data yet.
 - **No calibration, no net shadow return, no execution sensitivity.** All
-  need outcomes joined to predictions recorded beforehand. The ledger had
-  0 joined at last read.
+  need outcomes joined to predictions recorded beforehand. At 02:08:18Z the
+  ledger held **316 predictions and 0 joined outcomes**, and the evaluation
+  stage refused by name rather than reporting a number.
 - **`P_FILL` remains `NOT_IDENTIFIED`.** Every fill anywhere is modelled,
   and the depth read is *displayed* depth, explicitly not a queue position.
 - **Unrealised P&L is `NOT_IDENTIFIED`** by choice: a midpoint is where
@@ -178,9 +211,54 @@ explicit management decision on the threshold.
 | # | limitation | smallest action from you |
 |---|---|---|
 | 1 | second-half loss exit is UNAVAILABLE | a feed carrying observed period/clock for soccer. The rule, the store, the staleness checks and the refusals are all built and exercised in controlled tests; only the observation is missing |
-| 2 | external valuation refuses on freshness | decide whether to try the per-event odds endpoint (more credits, fresher) or to revisit the 30 s rule deliberately. I will not move a risk parameter to create activity |
+| 2 | external valuation has never reached scoring. At 02:08Z the binding refusals were the venue slate (41 of 46 events have no open venue contract) and the venue read (2 of 46, after mapping succeeded) — **not** odds freshness | nothing from you for the slate: the venue simply does not list most EPL fixtures, and matching them loosely is the one thing the mapper exists to refuse. For the venue read, the three causes now have three separate counters and the next armed cycle will name which one; if it is a venue error response, that is an access question I will bring back with the exact message |
 | 3 | venue settlement rule unattested | capture the venue's per-market rules text, or measure the rule from `resolved_prices` on fixtures decided after 90 minutes |
 | 4 | no calibration or net return yet | time. Predictions must be recorded, then their horizons must close |
 | 5 | `render-ops.yml` has 422 bytes of headroom against a 512,000-byte ceiling, already below this repository's own 32 KiB rule | it is the lever that operates Render and holds the trading kill switch. It needs splitting. I did not add to it |
 | 6 | branch reconciliation | `claude/command-center` is ahead of the default branch. Everything is deployed by commit id, so nothing here depends on merging. Say the word and I will reconcile |
-| 7 | pre-existing test debt | 545 failures across 88 files in the full suite; on the eight worst files the pre-session commit and HEAD give **identical** failure sets (116 failed / 465 passed). A full-suite baseline is being measured |
+| 7 | test debt, and a 96-test discrepancy I could not attribute to code — see §8 | nothing yet; §8 states what is measured and what is still open |
+
+## 8 · Defects found by arming, and one discrepancy still open
+
+**Three production defects, all mine, all found only once the loops were
+armed and read back.** None was visible in a passing test:
+
+1. **Prediction ordering.** The fills query took `ORDER BY detected_at ASC
+   LIMIT 40000`, i.e. the *oldest* rows, so every row's horizon had closed,
+   `n_open` was 0 and the PREDICT stage recorded nothing while reporting
+   success. Fixed with a newest-first subquery re-sorted chronologically,
+   and pinned by a test. Production now shows `n_open 299`.
+2. **Two sport vocabularies.** The candidate-market query asked for
+   `sport IN ('soccer','baseball')` while `markets.sport` is written by
+   `sports.classify` as `'Soccer'` / `'MLB'`. It matched **zero** markets,
+   and the cycle reported 44 mapping refusals that were not the mapper's
+   fault. Fixed with an explicit label map plus a distinct refusal code for
+   "no candidate markets at all". Production now considers **4,000** markets
+   and produced the first successful mapping.
+3. **The ledger's write count.** `record_prediction` used `execute` against
+   `ON CONFLICT DO NOTHING`, so it reported attempts as writes — "recorded
+   293" beside a table holding 159. Fixed with `fetchval ... RETURNING id`
+   and separate `written` / `duplicate` counters, which is also what now
+   evidences idempotency across cycles (157 written, 142 already present).
+
+**One discrepancy I could not attribute, stated as measured.** The full
+suite, same command and same machine:
+
+| | failed | passed | skipped |
+|---|---|---|---|
+| pre-session `fa544da` | 449 | 11,241 | 183 |
+| HEAD with this work | 545 | 11,174 | 190 |
+
+96 node ids fail at HEAD that do not fail at the baseline, and none of the
+baseline's failures were fixed. **All 96 pass when re-run on their own at
+HEAD** (96 passed in 2.48 s), and they still pass when the 25 affected
+files are run together, and again when my five new test files are collected
+alongside them. So the 96 are order- or load-dependent, not a deterministic
+consequence of this code — 24 of them are allocator and memory-census
+diagnostics (`test_malloc_split`, `test_memory_census`), which measure the
+host. The HEAD suite was also taken while a local Postgres and repeated
+production polls were running on the same container, which the baseline was
+not. **I have not established the cause, and I am not claiming these are
+someone else's failures.** What is established: none of the 96 fails when
+exercised in isolation at this commit, and no failure was introduced into
+any file this work touches.
