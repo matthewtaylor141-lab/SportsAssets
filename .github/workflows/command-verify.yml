@@ -731,6 +731,144 @@ jobs:
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit $FAIL
 
+      # ── THE SAME POSITION, MANAGED ACROSS SUCCESSIVE CYCLES ────────
+      #
+      # The directive asks for an authenticated production trace of ONE
+      # position managed over more than one cycle, with the CURRENT
+      # inventory and CORRECTLY SIZED alternatives. Step 17 prints the
+      # first decision only, which cannot show either. This reads every
+      # decision on the row and then ASSERTS the structural invariant the
+      # fifth defect broke, against production data:
+      #
+      #   HOLD is valued on the inventory being ranked -- qty_valued ==
+      #   residual_qty -- no candidate is sized above the residual, and
+      #   no decision carries a quantity_mismatch.
+      #
+      # A deployed build with the seed-sized hold value FAILS this step
+      # the moment a position has taken a partial fill. It is deliberately
+      # an assertion and not a printout: a printed number nobody compares
+      # is how the defect survived a release.
+      - name: RN1X — the SAME position across successive cycles
+        if: ${{ !cancelled() }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -u
+          API="${{ inputs.api }}"; FAIL=0
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          say () { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          {
+            echo "### One position, successive cycles, sized alternatives"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            say "SKIPPED: no ADMIN_TOKEN, the authenticated read is not available here"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          PID=$(curl -s --max-time 45 -H "$H" "$API/api/command/rn1x/positions" \
+                | jq -r '[(.positions // . // [])[]
+                          | select((.policy // "") | test("CHALLENGER"))]
+                         | .[0].position_id // empty' 2>/dev/null)
+          if [ -z "$PID" ]; then
+            say "NO CHALLENGER POSITION EXISTS -- nothing to manage, and that"
+            say "is the honest state, not a pass for continuing management"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          code=$(curl -s -o /tmp/mg.json -w '%{http_code}' --max-time 60 \
+                 -H "$H" "$API/api/command/rn1x/trace/$PID" || echo 000)
+          say "trace $PID HTTP $code"
+          [ "$code" = "200" ] || { echo "::error::the trace answered $code"; FAIL=1; }
+          # NORMALISE. The jsonb columns can arrive as strings depending on
+          # the driver's codec, and a jq path into a string silently
+          # yields null -- which would make every check below vacuous.
+          jq 'def j: if type == "string" then (fromjson? // {})
+                     else (. // {}) end;
+              {seed_qty: (.position.seed_qty // null),
+               seed_price: (.position.seed_price // null),
+               policy: (.position.policy // "?"),
+               outcome_index: (.position.outcome_index // null),
+               decisions: [(.decisions // [])[]
+                 | {id: .decision_id, ts: (.decision_ts | tostring),
+                    action: (.selected_action // "NULL"),
+                    qty: (.selected_qty // null),
+                    hold: (.hold_value_usd // null),
+                    state: (.operating_state // "?"),
+                    eligibility: (.eligibility // "?"),
+                    alt: (.alternatives | j), inv: (.resulting_inventory | j),
+                    fr: (.input_freshness | j)}]}' \
+            /tmp/mg.json > /tmp/mgn.json 2>/dev/null || echo '{}' > /tmp/mgn.json
+          jq -r '"position\t" + (.policy) + "  outcome_index="
+                   + ((.outcome_index // "?")|tostring)
+                   + "  seed " + ((.seed_qty // "?")|tostring) + " @ "
+                   + ((.seed_price // "?")|tostring),
+                 "decisions\t" + ((.decisions | length)|tostring)
+                   + "  distinct_ts=" + (([.decisions[].ts] | unique | length)|tostring),
+                 (.decisions[] | . as $d
+                   | "  " + .id[-22:] + "  " + .ts[0:19]
+                     + "  " + .action + " x " + ((.qty // "-")|tostring)
+                     + "  hold=" + ((.hold // "-")|tostring)
+                     + "  resid=" + ((.inv.residual_qty // "-")|tostring)
+                     + "  realized=" + ((.inv.realized_pnl_usd // "-")|tostring)
+                     + "  " + .state,
+                     "      valued_on qty=" + ((.alt.hold_input.qty_valued // "-")|tostring)
+                     + " basis_per=" + ((.alt.hold_input.basis_per_contract_valued // "-")|tostring)
+                     + " ev_basis=" + ((.alt.hold_input.ev_hold_basis // "-")|tostring)
+                     + " mismatch=" + ((.alt.hold_input.quantity_mismatch // "none")|tostring),
+                     "      freshness age=" + ((.fr.age_from_observation_s // "-")|tostring)
+                     + " bound=" + ((.fr.bound_s // "-")|tostring)
+                     + " from=" + ((.fr.bound_source // "-")|tostring),
+                     "      eligibility=" + .eligibility,
+                     (if ((.alt.ranked // []) | length) == 0
+                      then "      ranked: NONE -- every action refused"
+                      else ((.alt.ranked // [])[]
+                            | "      ranked " + (.action // "?")
+                              + " x " + ((.qty // "-")|tostring)
+                              + " = " + ((.value_usd // "-")|tostring))
+                      end))' /tmp/mgn.json 2>/dev/null \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # THE ASSERTION. Only decisions that actually priced a hold can
+          # be checked; one that refused for a missing input has no
+          # quantity to disagree with, and is reported above as such.
+          jq -r '[(.decisions // [])[] | select(.hold != null) | . as $d
+                  | {id: .id,
+                     qv: (.alt.hold_input.qty_valued),
+                     resid: (.inv.residual_qty),
+                     mm: (.alt.hold_input.quantity_mismatch),
+                     over: [((.alt.ranked // [])[]
+                             | select((.qty // 0)
+                                      > (($d.inv.residual_qty) // 0) + 0.000001))]}]
+                 | .[] | select((.qv == null) or (.resid == null)
+                                or ((.qv - .resid) | fabs > 0.000001)
+                                or (.mm != null) or ((.over | length) > 0))
+                 | "VIOLATION\t" + .id + "\tqty_valued=" + ((.qv // "null")|tostring)
+                   + " residual=" + ((.resid // "null")|tostring)
+                   + " mismatch=" + ((.mm // "none")|tostring)
+                   + " oversized=" + ((.over | length)|tostring)' \
+            /tmp/mgn.json > /tmp/viol.txt 2>/dev/null || true
+          PRICED=$(jq '[(.decisions // [])[] | select(.hold != null)] | length' \
+                   /tmp/mgn.json 2>/dev/null || echo 0)
+          NDEC=$(jq '(.decisions // []) | length' /tmp/mgn.json 2>/dev/null || echo 0)
+          say "priced_holds\t$PRICED of $NDEC decisions"
+          if [ -s /tmp/viol.txt ]; then
+            cat /tmp/viol.txt | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "::error::a hold was valued on a quantity other than the inventory ranked"
+            FAIL=1
+          elif [ "$PRICED" = "0" ]; then
+            say "NO PRICED HOLD IN PRODUCTION YET -- the invariant is not"
+            say "contradicted, and it is also not demonstrated on live rows."
+            say "This is reported as unfinished, not as a pass."
+          else
+            say "INVARIANT HOLDS on $PRICED priced decision(s): HOLD valued on"
+            say "the residual, no candidate sized above it, no mismatch"
+          fi
+          if [ "$NDEC" -lt 2 ]; then
+            say "ONE DECISION ONLY -- successive-cycle management is NOT yet"
+            say "demonstrated in production on this position"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
       - name: Mobile viewport is declared
         run: |
           grep -q 'name="viewport"' /tmp/index
