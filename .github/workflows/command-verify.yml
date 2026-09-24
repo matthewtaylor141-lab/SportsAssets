@@ -9,11 +9,14 @@
 # guessing. This runner can reach both, so the verification happens
 # here and its output is the evidence.
 #
-# IT READS ONLY. Every request below is a GET of a public asset or an
-# UNAUTHENTICATED probe of an API route. No secret is used, no session
-# is minted, and nothing is posted: the point is to confirm what an
-# anonymous visitor and a signed-in manager would each get, not to
-# exercise the ledger.
+# IT READS ONLY, WITH ONE OPT-IN EXCEPTION. Every request below is a GET
+# of a public asset or a probe of an API route -- except the
+# `arm_external` step, which is off by default and, when explicitly set
+# to on/off, POSTs the external-valuation shadow's control row. That is
+# a shadow experiment's arm/stop and places no order; it is called out
+# here rather than left to be discovered, because a header comment that
+# says "nothing is posted" while something posts is worse than no
+# comment at all.
 #
 # A 401 FROM THE API IS A PASS, NOT A FAILURE. It is the proof that the
 # shadow routes are behind the COMMAND session rather than open to the
@@ -42,6 +45,14 @@ on:
         description: "API origin behind the proxy"
         required: false
         default: "https://sportsassets-api.onrender.com"
+      arm_external:
+        description: >-
+          POST the external-valuation shadow's control row (on|off), then
+          read the odds probe, the refusal census, the clock audit and one
+          valuation trace. Blank does nothing. Shadow only: the experiment
+          it gates submits no orders.
+        required: false
+        default: ""
       wait_s:
         description: "Seconds to wait for the deploy to settle before probing"
         required: false
@@ -491,3 +502,140 @@ jobs:
           grep -q 'name="viewport"' /tmp/index
           echo "viewport meta present (mobile layout served the same bundle)" \
             >> "$GITHUB_STEP_SUMMARY"
+
+      # ── THE EXTERNAL-VALUATION SHADOW: arm, run, and read it back ──
+      #
+      # THE ONE STEP HERE THAT WRITES. It flips a shadow experiment's
+      # control row and then reads production back. The experiment it
+      # gates places no order: its only writer is `external_valuations`,
+      # whose order_submitted column CHECKs FALSE, and every venue
+      # submission authorizes at the venue boundary independently.
+      #
+      # The evidence it collects is the whole of item 5: the running
+      # process actually retrieving odds, the refusal census with counts,
+      # the clock audit's split between rows that can and cannot support a
+      # prospective claim, and one complete valuation trace.
+      - name: External valuation — arm, cycle, and read production back
+        if: ${{ github.event.inputs.arm_external != '' }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
+          WANT: ${{ github.event.inputs.arm_external }}
+        run: |
+          set -u
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "::error::ADMIN_TOKEN is not set"; exit 1; fi
+          case "$WANT" in on|off) : ;;
+            *) echo "::error::arm_external must be on or off"; exit 1 ;; esac
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          say () { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          {
+            echo "### EXTERNAL VALUATION SHADOW ($WANT)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # 1 · CAN THE RUNNING PROCESS RETRIEVE ODDS? The credential was
+          # provisioned onto this service; that is not the same as the
+          # process being able to use it.
+          code=$(curl -s -o /tmp/pr.json -w '%{http_code}' --max-time 60 \
+                 -H "$H" "$API/api/command/rn1x/external/probe" || echo 000)
+          say "probe HTTP $code"
+          jq -r '"credential_present\t" + ((.credential.present)|tostring),
+                 "retrieved\t"         + ((.retrieved)|tostring),
+                 "http_status\t"       + ((.http_status // "?")|tostring),
+                 "sport\t"             + (.sport // "?"),
+                 "events\t"            + ((.events // 0)|tostring),
+                 "with_pinnacle_h2h\t" + ((.events_with_pinnacle_h2h // 0)|tostring),
+                 "quote_age_s\t"       + ((.quote_age_s // "none")|tostring),
+                 "credits_used\t"      + ((.credits_used_total // "?")|tostring),
+                 "credits_left\t"      + ((.credits_remaining // "?")|tostring),
+                 "key_value_returned\t"+ ((.key_value_returned)|tostring)' \
+            /tmp/pr.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || \
+            head -c 300 /tmp/pr.json
+
+          # 2 · ARM (or STOP) the control row.
+          code=$(curl -s -o /tmp/arm.json -w '%{http_code}' --max-time 45 \
+                 -X POST -H "$H" \
+                 "$API/api/admin/ext-pinnacle-shadow/$WANT" || echo 000)
+          say "arm($WANT) HTTP $code"
+          jq -c . /tmp/arm.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 200 /tmp/arm.json
+          [ "$code" = "200" ] || { echo "::error::the arm was refused"; }
+
+          # 3 · Let the loop notice. Its idle poll is 60 s, so two of
+          # those plus slack is enough for a cycle to have run.
+          [ "$WANT" = "on" ] && sleep 150
+
+          # 4 · THE REFUSAL CENSUS. When nothing clears, this IS the
+          # deliverable, so it is read with counts rather than asserted.
+          code=$(curl -s -o /tmp/cs.json -w '%{http_code}' --max-time 60 \
+                 -H "$H" "$API/api/command/rn1x/external/census" || echo 000)
+          say "census HTTP $code"
+          jq -r '"evaluated\t"  + ((.summary.evaluated  // 0)|tostring),
+                 "admissible\t" + ((.summary.admissible // 0)|tostring),
+                 "refused\t"    + ((.summary.refused    // 0)|tostring),
+                 "priced\t"     + ((.summary.priced     // 0)|tostring),
+                 "settled\t"    + ((.summary.settled    // 0)|tostring),
+                 "first_at\t"   + ((.summary.first_at   // "none")|tostring),
+                 "last_at\t"    + ((.summary.last_at    // "none")|tostring),
+                 "-- refusals --",
+                 (.refusals // {} | to_entries[]
+                    | "  \(.key)\t\(.value)")' \
+            /tmp/cs.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 400 /tmp/cs.json
+
+          # 5 · THE CLOCK AUDIT. Which positions can support a
+          # prospective claim, and which were backdated and cannot.
+          code=$(curl -s -o /tmp/ca.json -w '%{http_code}' --max-time 60 \
+                 -H "$H" "$API/api/command/rn1x/clock-audit" || echo 000)
+          say "clock-audit HTTP $code"
+          jq -r '"badge\t"      + (.badge // "?"),
+                 "positions\t"  + ((.positions_total // 0)|tostring),
+                 "prospective_ok\t" + ((.can_support_a_prospective_claim // 0)|tostring),
+                 "backdated\t"  + ((.backdated_and_cannot // 0)|tostring),
+                 "-- by basis --",
+                 (.rows // [] | .[]
+                    | "  \(.experiment_id)\t\(.decision_basis)\t\(.positions)")' \
+            /tmp/ca.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+            || head -c 400 /tmp/ca.json
+
+          # 6 · ONE COMPLETE VALUATION TRACE, if any row exists. Every
+          # field the directive lists, on one row, from production.
+          RID=$(jq -r '.summary.evaluated // 0' /tmp/cs.json 2>/dev/null)
+          if [ "${RID:-0}" != "0" ] && [ "${RID:-0}" != "null" ]; then
+            code=$(curl -s -o /tmp/lst.json -w '%{http_code}' --max-time 60 \
+                   -H "$H" "$API/api/command/rn1x/statuses" || echo 000)
+            ID=$(jq -r '.statuses.external_valuation.last_id // empty' \
+                 /tmp/lst.json 2>/dev/null)
+            if [ -z "$ID" ]; then ID=1; fi
+            code=$(curl -s -o /tmp/et.json -w '%{http_code}' --max-time 60 \
+                   -H "$H" "$API/api/command/rn1x/external/trace/$ID" \
+                   || echo 000)
+            say "external trace($ID) HTTP $code"
+            jq -r '.valuation
+                   | "condition_id\t"  + ((.condition_id // "?")|tostring),
+                     "selection\t"     + ((.contract_selection // "?")|tostring),
+                     "event_key\t"     + ((.event_key // "?")|tostring),
+                     "period\t"        + ((.period // "?")|tostring),
+                     "settlement\t"    + ((.settlement_rule // "?")|tostring),
+                     "devig_method\t"  + ((.devig_method // "?")|tostring),
+                     "raw_odds\t"      + ((.raw_odds // {})|tostring),
+                     "observed_at\t"   + ((.observed_at // "?")|tostring),
+                     "received_at\t"   + ((.received_at // "?")|tostring),
+                     "age_s\t"         + ((.age_s // "?")|tostring),
+                     "outcome_books\t" + ((.outcome_books // "?")|tostring),
+                     "probability\t"   + ((.probability // "null")|tostring),
+                     "exec_price\t"    + ((.executable_price // "null")|tostring),
+                     "cost\t"          + ((.cost_per_contract // "null")|tostring),
+                     "edge\t"          + ((.estimated_edge_per_contract // "null")|tostring),
+                     "decision\t"      + ((.decision // "?")|tostring),
+                     "admissible\t"    + ((.admissible)|tostring),
+                     "refusals\t"      + ((.refusals // [])|tostring),
+                     "outcome_known\t" + ((.outcome_known)|tostring),
+                     "order_submitted\t" + ((.order_submitted)|tostring)' \
+              /tmp/et.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
+              || head -c 500 /tmp/et.json
+          else
+            say "no valuation rows yet -- the census above says why"
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"

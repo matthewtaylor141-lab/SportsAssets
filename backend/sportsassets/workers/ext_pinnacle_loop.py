@@ -479,16 +479,33 @@ async def cycle(conn) -> dict:
             "order_submitted": False}
 
 
+#: How long to wait before looking at the control row again while the loop
+#: is NOT running. A stopped cycle spends no provider credits and no venue
+#: requests -- it reads one column -- so the full cadence would only mean
+#: that arming the experiment took up to CYCLE_S to be noticed, and that a
+#: STOP issued during a sleep would look like it had not worked.
+IDLE_POLL_S = 60.0
+
+
 async def run(get_pool) -> None:
-    """The long-running task. Armed from the API's startup."""
+    """The long-running task. Armed from the API's startup.
+
+    THE CADENCE DEPENDS ON WHETHER IT RAN. A cycle that actually valued
+    anything waits CYCLE_S, because that interval IS the provider budget.
+    A cycle that was stopped or blocked waits IDLE_POLL_S, because it
+    consumed nothing and the control row is the thing it is waiting for.
+    """
     while True:
+        delay = IDLE_POLL_S
         try:
             pool = await get_pool()
             async with pool.acquire() as conn:
                 out = await cycle(conn)
             log.info("ext_pinnacle: %s", out)
+            if out.get("ran"):
+                delay = CYCLE_S
         except asyncio.CancelledError:
             raise
         except Exception:                                      # noqa: BLE001
             log.warning("ext_pinnacle: cycle failed", exc_info=True)
-        await asyncio.sleep(CYCLE_S)
+        await asyncio.sleep(delay)

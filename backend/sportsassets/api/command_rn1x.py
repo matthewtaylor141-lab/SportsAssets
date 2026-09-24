@@ -241,6 +241,11 @@ async def _external_status(pool) -> dict:
     # question is not "did it buy" but "why did it not", and that answer is
     # a histogram rather than a sentence.
     out["refusals_24h"] = {r["refusal"]: int(r["n"]) for r in rows}
+    # The newest row's id, so a reader can follow the tile straight to one
+    # complete trace instead of guessing an id.
+    out["last_id"] = await pool.fetchval(
+        "SELECT max(id) FROM external_valuations WHERE experiment_id = $1",
+        EX.EXPERIMENT_ID)
     if not cred["present"]:
         out.update(badge="BLOCKED", live=False,
                    why=("the odds credential is not present on this "
