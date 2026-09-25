@@ -10,6 +10,11 @@
 -- So this asks for the CODES, and for the calibration row separately,
 -- because calibration blocks at stage 7 and no candidate has reached it.
 
+\echo '== 0 · AUTONOMOUS vs ACCEPTANCE-SEEDED, the distinction that matters =='
+SELECT coalesce(provenance, '(NULL)') AS provenance, count(*) AS n
+  FROM rn1x_positions GROUP BY 1 ORDER BY 2 DESC;
+
+\echo ''
 \echo '== 1 · refusal codes, 24h window, entry lane =='
 SELECT unnest(refusals) AS refusal, count(*) AS n
   FROM external_valuations
@@ -69,7 +74,7 @@ SELECT count(*) AS cleared_1_and_4
 \echo '== 6 · inventory: which positions exist, and were they autonomous? =='
 -- An acceptance-seeded position is NOT an autonomous entry. The two are
 -- separated here so a dashboard number can never conflate them.
-SELECT experiment_id, policy_version,
+SELECT coalesce(provenance, '(NULL)') AS provenance, policy,
        count(*) AS positions,
        min(decision_ts) AS first_at, max(decision_ts) AS last_at
   FROM rn1x_positions
@@ -77,7 +82,7 @@ SELECT experiment_id, policy_version,
 
 \echo ''
 \echo '== 7 · orders, fills and outcomes attached to those positions =='
-SELECT p.experiment_id, p.policy_version,
+SELECT coalesce(p.provenance, '(NULL)') AS provenance, p.policy,
        count(DISTINCT p.position_id) AS positions,
        count(DISTINCT o.order_id)    AS orders,
        count(DISTINCT f.fill_id)     AS fills,
