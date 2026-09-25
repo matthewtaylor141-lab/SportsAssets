@@ -1,6 +1,14 @@
-# Settlement scope: what is actually missing, and two retractions
+# Settlement scope: what the venue actually says, and what it costs us
 
-Measured 2026-09-25 against the real captured payload, not invented prose.
+Measured 2026-09-25 against the LIVE listing field, read through the same
+code production reads. Every earlier version of this document measured a
+test fixture; the retractions below say which claims that produced.
+
+**The outcome, first:** the supported market's payoff has a branch that
+settles to the contract's last traded price. The only connected probability
+source prices the other branch. That is a source/payoff dependency, not a
+threshold, and it blocks autonomous entry until one of three named
+capabilities exists (§2c).
 
 ---
 
@@ -67,54 +75,119 @@ The next entry run prints it for one settled and one open contract.
 
 ---
 
-## 2 · The actual per-condition state
+## 2 · What the venue actually says, read live
 
-> ⚠ **This table was computed against the 183-character TEST FIXTURE, not
-> the 380-character live payload.** See the retraction above. It stands here
-> as the record of what was claimed and how, not as evidence about the
-> venue. The live reading replaces it when the next entry run prints it.
+Three MLB money lines, read 2026-09-25T18:03:33Z through the same field
+production reads (`description`, via `bettor_live_read.read_rules_text`).
+All three carry the **same four-sentence template**:
 
-`aec-mlb-az-col-2026-09-24`, the **fixture's** `description` verbatim:
+> *"This market will settle to the winner of the Arizona Diamondbacks vs
+> Colorado Rockies MLB game scheduled for 2026-09-24 at 3:10PM ET. Extra
+> innings are included if played. If the game is delayed, postponed, or
+> suspended and not rescheduled to a date within two weeks of the
+> originally scheduled date, the market will settle to the **last fair
+> market price**. Outcome sourced from MLB."*
 
-> *"This market settles on the final result of the game, including any
-> extra innings. If the game is abandoned or postponed and never completed
-> the market is void and stakes are returned."*
+| slug | chars |
+|---|---|
+| `aec-mlb-az-col-2026-09-24` | 380 |
+| `aec-mlb-cle-kc-2026-09-25` | 381 |
+| `aec-mlb-pit-det-2026-09-25` | 376 |
 
-`assetPriceTerms: None`. Run through `compare_prose` with
-`phase=REGULAR_SEASON`, `game_format=STANDARD_NINE_INNING`:
+**This is not the fixture's text, and not a shortened version of it.** The
+fixture said *void, stakes returned*. The venue pays the contract's **last
+traded price**. Entered at 0.56 and last printing 0.20, that returns 0.20.
+A stake return is whole. Different cash, not different wording.
 
-| Condition | Verdict | Book | Venue |
+### The reader, before and after
+
+`read_terms` returned `{}` — zero of seven conditions — because
+`PAYOUT_PROSE` had no class for a price settlement. Added
+`PAY_LAST_FAIR_MARKET_PRICE`, never equivalent to a stake return under any
+condition. The measured result:
+
+| condition | book | venue | verdict |
 |---|---|---|---|
-| `DECIDED_AFTER_REGULATION` | **MATCH** | pays on final score | pays on final score |
-| `POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED` | **MATCH** | returns stake | returns stake |
-| `COMPLETED_IN_REGULATION` | venue silent | pays on final score | — |
-| `CALLED_AND_GRADED_WITHOUT_RESUMPTION_AFTER_THE_MINIMUM` | venue silent | last completed period, except a bottom-half home lead | — |
-| `STOPPED_BEFORE_THE_MINIMUM` | venue silent | returns stake | — |
-| `SUSPENDED_AND_RESUMED_WITHIN_THE_PUBLISHED_WINDOW` | venue silent | pays on final score | — |
-| `SUSPENDED_TO_RESUME_BEYOND_THE_PUBLISHED_WINDOW` | venue silent | pays on last completed period | — |
+| `POSTPONED_OR_ABANDONED_AND_NEVER_COMPLETED` | returns the stake | **last fair market price** | **MISMATCH** |
+| the other six | stated | — | venue silent |
 
-**`mismatched_conditions: []` — nothing conflicts.** Verdict is `UNKNOWN`
-purely from silence, and the book side is complete on all seven.
+Verdict: **INCOMPATIBLE** under both published quote contexts. Silence
+became a stated disagreement; nothing was admitted that was refused before.
 
-So the gap is **five conditions where the venue states no rule**, and they
-are not arbitrary: conditions 2–5 are all *"the game started and did not
-finish normally"* — exactly where a money line's action turns, and exactly
-what a short blurb of either length is least likely to address — a
-*likelihood*, and the live read is what settles it.
+### Two sentences still establish nothing, and why
 
-### One of the five is probably a reader gap, not a venue gap
+- *"This market will settle to the winner of the … MLB game"* — states a
+  payout, names **no condition** (no regulation, no innings count). The
+  payout phrase itself also misses, because the team names sit between
+  "winner of the" and "game".
+- *"Extra innings are included if played."* — names the condition
+  `DECIDED_AFTER_REGULATION`, states **no payout**.
 
-`COMPLETED_IN_REGULATION` reads venue-silent, yet the sentence *"settles on
-the final result of the game, including any extra innings"* plainly covers
-a game that finished in regulation. `read_terms` attributed that sentence
-to `DECIDED_AFTER_REGULATION` only, because "extra innings" is the phrase
-it matched.
+Reading them together means attributing one sentence's payout to another
+sentence's condition. That is the cross-sentence inference the module
+forbids by design, and it is **not applied**. It would also change nothing:
+the abandonment mismatch stands either way, so a generous reading still
+returns INCOMPATIBLE.
 
-**I have not changed the reader.** Attributing one sentence to two
-conditions is a widening of settlement compatibility, and that needs to be
-a reviewed decision rather than something I slip in while fixing something
-else. Recorded here as a candidate with its evidence; it would reduce the
-missing set from five to four and does not on its own change the verdict.
+---
+
+## 2b · The triggers are different variables. Checked before trusting the verdict.
+
+`CONDITIONS` are named for what happened to the fixture. **Neither side
+conditions its rule on that.** Both key on a clock, and not the same one:
+
+| side | trigger variable | window, as published |
+|---|---|---|
+| book | hours between scheduled start and actual start | *"If a fixture isn't started **12 hours** after its scheduled starting time all bets on that fixture will be voided."* |
+| venue | whether a make-up date exists inside a named window | *"…not rescheduled to a date **within two weeks** of the originally scheduled date…"* |
+
+Three regions follow, and only one of them is a clean conflict:
+
+| region | book pays | venue pays | status |
+|---|---|---|---|
+| not started within 12 h **and** no make-up inside two weeks — the ordinary rainout | stake returned | last fair market price | **conflict, established** |
+| not started within 12 h **but** a make-up inside two weeks — the common MLB case | stake returned (bet voided at the 12-hour mark) | *unstated in prose*; the contract survives to the make-up game | **not established** |
+| played normally | winner on the final score | winner (across two sentences) | agrees in substance, unread by the sentence rule |
+
+So `compare` now records, per condition, both sides' qualifiers, an
+alignment verdict, and — where they differ —
+`mismatch_scope: ESTABLISHED_ON_THE_NON_EMPTY_INTERSECTION_OF_TWO_DIFFERENT_TRIGGERS`
+plus what is *not* established. The INCOMPATIBLE verdict rests on region 1,
+which is non-empty and ordinary. It does **not** claim the two sides
+described the same set of games.
+
+---
+
+## 2c · The dependency that actually blocks, and it is not a threshold
+
+A de-vigged Pinnacle money line is **P(win | the bet has action)**. The
+book's own rule voids a lost fixture out of its sample, so the price carries
+no information about how often that happens or what it would be worth. The
+venue contract does not void — it pays a number its order book prints, at a
+time nobody can name in advance. So
+
+```
+V = P(A)·P(win | A)  +  P(¬A)·E[last fair market price | ¬A]
+```
+
+and `PINNACLE_DEVIG_V1` supplies **one of those four quantities**. Using it
+alone as V is arithmetically identical to asserting **P(¬A) = 0** — a claim
+about weather, scheduling and venue behaviour that nothing here has
+measured.
+
+| term | state |
+|---|---|
+| `P_win_given_action` | **HELD** — this source |
+| `P_the_price_settlement_branch_fires` | **MISSING** — no feed reports postponements or make-up scheduling; the book price cannot contain it |
+| `E_last_fair_market_price_given_that_branch` | **MISSING** — a function of the venue's book at an unknown instant, not a sports outcome |
+| `the_two_windows_are_the_same_variable` | **MISSING** — 12 hours vs two weeks |
+
+Three ways forward, each a capability rather than an adjustment:
+a supported model of the alternative outcomes; a reference source whose own
+rule matches the venue's; or a market with no price-settled branch. Declared
+in `bettor_pinnacle_devig.WAYS_FORWARD`, carried on every `describe()`, and
+a test greps the package for invented rate names so a "small postponement
+factor" cannot appear.
 
 ---
 
