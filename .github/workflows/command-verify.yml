@@ -2515,7 +2515,13 @@ jobs:
           "experiments\t"      + n(.settlement.experiments),
           "policies\t"         + n(.settlement.policies),
           "-- one line per open position --",
-          (.settlement.results // [])[]
+          # PARENTHESISED, AND THAT WAS THE WHOLE BUG. `|` binds LOOSER
+          # than `,` in jq, so without these parentheses the entire comma
+          # sequence above was piped into the formatter -- the literal
+          # string "needs_odds\t..." had `.position_id` applied to it, and
+          # jq reported the error against the last field it tried, `why`.
+          # Reproduced locally against the real payload before this edit.
+          ((.settlement.results // [])[]
             | "  " + n(.position_id)
               + "\n     slug " + n(.us_market_slug)
               + "  venue " + n(.venue_status) + "/" + n(.venue_class)
@@ -2526,7 +2532,7 @@ jobs:
               + "\n     net " + n(.accounting.net_usd)
               + "  cash " + n(.accounting.realized_cash_usd)
               + "  residual " + n(.accounting.residual_qty)
-              + "\n     why " + n(.why)
+              + "\n     why " + n(.why))
           JQ
             sed -i 's/^          //' /tmp/st.jq
             jq -r -f /tmp/st.jq /tmp/st.json 2>/tmp/st.err \
