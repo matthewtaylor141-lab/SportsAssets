@@ -2498,16 +2498,38 @@ jobs:
           if re.search(r"(?i)<(urlset|sitemapindex)\b", raw):
               locs = re.findall(r"(?is)<loc>\s*(.*?)\s*</loc>", raw)
               print("SITEMAP\tlocations %d" % len(locs))
-              PATHY = re.compile(
-                  r"(?i)(settle|resolut|resolv|rule|grade|grading|void|"
-                  r"refund|cancel|abandon|suspend|postpon|innings?|"
-                  r"baseball|mlb|sport|faq|terms|glossar|market|contract)")
-              hits = [u for u in locs if PATHY.search(u)]
-              print("CANDIDATE_PATHS\t%d of %d" % (len(hits), len(locs)))
-              for u in hits[:200]:
+              # TIGHT FIRST, BROAD ONLY AS A COUNT. My first filter included
+              # `market`, `contract` and `sport`, which matched 309 of 618
+              # paths -- the whole institutional API reference -- and the
+              # printed window was all `institutional/*` ops pages. A list
+              # that long is not a lead. So the SETTLEMENT vocabulary is
+              # matched on its own and printed in full, and the broad words
+              # are reported as a number.
+              TIGHT = re.compile(
+                  r"(?i)(settle|resolut|resolv|grade|grading|void|refund|"
+                  r"cancel|abandon|suspend|postpon|innings?|baseball|mlb|"
+                  r"\brules?\b|faqs?|terms|glossar)")
+              BROAD = re.compile(r"(?i)(market|contract|sport)")
+              hits = [u for u in locs if TIGHT.search(u)]
+              broad = [u for u in locs if BROAD.search(u)
+                       and not TIGHT.search(u)]
+              print("SETTLEMENT_VOCAB_PATHS\t%d of %d" % (len(hits),
+                                                          len(locs)))
+              for u in hits[:120]:
                   print("  | " + u[:200])
-              if len(hits) > 200:
-                  print("  ... %d more candidate paths" % (len(hits) - 200))
+              if len(hits) > 120:
+                  print("  ... %d more" % (len(hits) - 120))
+              print("BROAD_ONLY_PATHS\t%d (market/contract/sport, no "
+                    "settlement word -- counted, not printed)" % len(broad))
+              # WHERE THE 618 ACTUALLY LIVE, so an absent rules section is
+              # visible as an absence rather than inferred from a filter.
+              segs = {}
+              for u in locs:
+                  p = re.sub(r"^https?://[^/]+/?", "", u).split("/")
+                  segs[p[0] or "(root)"] = segs.get(p[0] or "(root)", 0) + 1
+              print("TOP_LEVEL_SECTIONS\t" + ", ".join(
+                  "%s=%d" % kv for kv in sorted(segs.items(),
+                                                key=lambda kv: -kv[1])))
               print("WHAT_THIS_ESTABLISHES\tthese pages EXIST. Not one word "
                     "of their content is read here, and no settlement "
                     "condition is answered by a URL.")
