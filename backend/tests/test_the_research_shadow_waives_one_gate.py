@@ -527,3 +527,20 @@ def test_what_containment_does_not_claim():
     for name in ("R_UNFUNDED", "R_CASH_UNKNOWN", "R_STALE_STATE",
                  "R_PER_TRADE", "R_CONCURRENCY"):
         assert hasattr(C, name), name
+
+
+def test_only_one_module_writes_the_funded_ledger_and_it_reads_no_research_row():
+    """THE WRITE SIDE OF CONTAINMENT, asked of the whole tree rather than of
+    the modules I remembered. A research decision could only become a funded
+    submission by first becoming a row in the funded ledger -- `guarded_submit`
+    takes no ticket parameter and re-reads everything from that row. So the
+    question is who can write it, and whether any of those writers can see a
+    research row."""
+    writers = sorted(p.name for p, src in _modules().items()
+                     if "INSERT INTO calibration_lifecycles" in src)
+    assert writers == ["calibration_store.py"], writers
+    src = {p.name: s for p, s in _modules().items()}["calibration_store.py"]
+    for t in RESEARCH_TABLES:
+        assert t not in src, t
+    assert rsh.PROVENANCE not in src
+    assert "bettor_research_shadow" not in src
