@@ -76,6 +76,17 @@ WHY_NOT_THE_HOLD_VALUE = (
 #: still means "the last time we looked".
 MAX_MARK_AGE_S = 1800.0
 
+#: THE BOOK OBSERVATION'S OWN AGE BOUND, separate from the decision's.
+#:
+#: A decision can be recent and still rest on a stale book: the manager
+#: decides at its cadence, the venue quote it used has its own instant, and
+#: the entry lane's freshness contract already bounds a contemporaneous
+#: quote at 30 s. A mark is only as current as the PRICE inside it, so the
+#: observation instant is required and bounded on its own. Loosened to two
+#: management cadences here for the same reason MAX_MARK_AGE_S is: a mark is
+#: a valuation, not an order.
+MAX_OBSERVATION_AGE_S = 1800.0
+
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 
 R_NO_DECISION = "NO_DECISION_HAS_PRICED_THIS_POSITION"
@@ -83,6 +94,9 @@ R_NO_EXIT_CANDIDATE = "NO_EXECUTABLE_EXIT_IN_THE_LATEST_DECISION"
 R_STALE = "MARK_OLDER_THAN_THE_MANAGEMENT_CADENCE"
 R_MALFORMED = "EXIT_CANDIDATE_CARRIES_NO_USABLE_NUMBER"
 R_NO_RANKED = "THE_DECISION_RANKED_NOTHING"
+R_RESIDUAL_UNKNOWN = "CURRENT_RESIDUAL_INVENTORY_NOT_ESTABLISHED"
+R_QTY_MISMATCH = "THE_EXIT_ESTIMATE_DOES_NOT_MATCH_CURRENT_RESIDUAL"
+R_NO_OBSERVATION_TIME = "THE_MARK_CARRIES_NO_OBSERVATION_INSTANT"
 
 #: WHERE THE RANKED LIST ACTUALLY LIVES, measured rather than assumed.
 #:
@@ -170,15 +184,36 @@ def exit_candidate(alternatives):
 
 
 def mark_one(*, position_id, alternatives, decided_at, now,
-             position_qty=None, max_age_s=MAX_MARK_AGE_S) -> dict:
+             position_qty=None, residual_qty=None, observed_at=None,
+             max_age_s=MAX_MARK_AGE_S,
+             max_observation_age_s=MAX_OBSERVATION_AGE_S) -> dict:
     """Mark ONE open position, or say by name why it is unmarked.
 
     `alternatives` is `rn1x_decisions.alternatives` for the position's
-    LATEST decision. `decided_at` and `now` are epoch seconds.
+    LATEST decision. `decided_at`, `observed_at` and `now` are epoch
+    seconds.
+
+    `residual_qty` is the position's CURRENT residual -- what is actually
+    still held -- and it is REQUIRED. `position_qty` is the seed, kept only
+    to report how much of the original has been worked off.
+
+    AN OLD DECISION'S EXIT ESTIMATE IS NOT AUTOMATICALLY A CURRENT MARK,
+    and three separate things are checked because they fail separately:
+
+      * the DECISION must be recent (`max_age_s`);
+      * the BOOK OBSERVATION the price came from must be recent
+        (`max_observation_age_s`) and must EXIST -- a mark with no
+        observation instant cannot be aged at all;
+      * the estimate's quantity must still match the CURRENT residual. An
+        exit priced for 10 contracts values nothing if 6 have since been
+        sold, and scaling it pro-rata would invent a price for a size the
+        book was never asked about.
     """
     out = {"position_id": str(position_id), "marked": False,
            "basis": MARK_BASIS, "unrealised_usd": None,
            "blocker": None, "mark_age_s": None,
+           "observation_age_s": None, "observed_at": None,
+           "residual_qty": None, "seed_qty": position_qty,
            "depth_limited": None, "marked_qty": None,
            "unmarked_residual_qty": None,
            "retained_value_usd": None,
@@ -221,10 +256,60 @@ def mark_one(*, position_id, alternatives, decided_at, now,
                       "not a mark" % (age, float(max_age_s)))
         return out
 
+    # ── THE BOOK OBSERVATION'S OWN INSTANT, REQUIRED ─────────────────
+    oa = _num(observed_at)
+    if oa is None:
+        out["blocker"] = R_NO_OBSERVATION_TIME
+        out["why"] = ("the decision carries no instant for the book the "
+                      "exit price came from, so how current this price is "
+                      "cannot be answered. An unanswerable age is not a "
+                      "fresh one")
+        return out
+    out["observed_at"] = oa
+    obs_age = at - oa
+    out["observation_age_s"] = round(obs_age, 1)
+    if obs_age > float(max_observation_age_s):
+        out["blocker"] = R_STALE
+        out["stale_side"] = "BOOK_OBSERVATION"
+        out["why"] = ("the exit price was observed %0.0f s ago, beyond the "
+                      "%0.0f s bound. A recent DECISION resting on a stale "
+                      "BOOK is still a stale mark"
+                      % (obs_age, float(max_observation_age_s)))
+        return out
+
+    # ── CURRENT RESIDUAL, REQUIRED AND COMPARED ──────────────────────
+    res = _num(residual_qty)
+    if res is None:
+        out["blocker"] = R_RESIDUAL_UNKNOWN
+        out["why"] = ("what is still held is not established, so there is "
+                      "nothing to mark. Marking the seed quantity would "
+                      "value inventory that may already be gone")
+        return out
+    out["residual_qty"] = res
+    if res <= 0:
+        out["blocker"] = R_RESIDUAL_UNKNOWN
+        out["why"] = ("the residual is %s: nothing is held, so this is not "
+                      "an open position to mark" % res)
+        return out
+
     slice_usd = _num(cand.get("slice_value_usd"))
     qty = _num(cand.get("qty"))
     if slice_usd is None or qty is None:
         out["blocker"] = R_MALFORMED
+        return out
+
+    # THE ESTIMATE MUST BE FOR WHAT IS ACTUALLY HELD. `qty` is what the bid
+    # could take of the quantity the decision was priced on; it may be less
+    # than the residual (depth) but it must never EXCEED it, and the
+    # quantity the decision valued must still be the residual.
+    priced_on = _num(cand.get("priced_on_qty"))
+    if qty - res > 1e-9 or (priced_on is not None
+                            and abs(priced_on - res) > 1e-9):
+        out["blocker"] = R_QTY_MISMATCH
+        out["why"] = ("the exit estimate covers %s of a position priced on "
+                      "%s, but %s is held now. A price obtained for a "
+                      "different size is not a mark for this one"
+                      % (qty, priced_on, res))
         return out
 
     out["marked"] = True
@@ -241,7 +326,7 @@ def mark_one(*, position_id, alternatives, decided_at, now,
     # candidate: the candidate carries the SELLABLE size, and dividing
     # `value_usd` by `value_per_contract` to recover the rest would put a
     # rounding error into an accounting figure.
-    total_q = _num(position_qty)
+    total_q = res
     if out["depth_limited"]:
         out["unmarked_residual_qty"] = (None if total_q is None
                                         else max(0.0, total_q - qty))
@@ -345,11 +430,17 @@ def describe() -> dict:
             "a depth-capped mark covers only the slice the book would take",
             "a total is only a total when every open position is marked",
             "a mark older than the management cadence is stale, not current",
+            "a recent decision resting on a stale book is still a stale mark",
+            "an estimate priced for a different size is not a mark for this "
+            "one",
+            "the mark is against CURRENT residual, never the seed quantity",
         ),
         # R_NO_RANKED belongs here and was missing: it is the blocker that
         # actually fires on production's current rows, so leaving it out of
         # the self-description would have hidden the common case.
         "blockers": (R_NO_DECISION, R_NO_RANKED, R_NO_EXIT_CANDIDATE,
-                     R_STALE, R_MALFORMED) + PASS_THROUGH_BLOCKERS,
+                     R_STALE, R_MALFORMED, R_RESIDUAL_UNKNOWN,
+                     R_QTY_MISMATCH,
+                     R_NO_OBSERVATION_TIME) + PASS_THROUGH_BLOCKERS,
         "everything_here_is_modelled": True,
     }

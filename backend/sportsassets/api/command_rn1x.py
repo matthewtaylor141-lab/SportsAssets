@@ -538,10 +538,20 @@ OPEN_WITH_LATEST_DECISION_SQL = """
            p.position_id,
            p.provenance,
            p.policy,
-           p.seed_qty::float8      AS qty,
+           p.seed_qty::float8       AS qty,
            p.seed_basis_usd::float8 AS cost_basis_usd,
            d.alternatives,
-           extract(epoch FROM d.decision_ts)::float8 AS decided_at
+           extract(epoch FROM d.decision_ts)::float8 AS decided_at,
+           -- THE BOOK OBSERVATION THE EXIT PRICE CAME FROM. A recent
+           -- decision resting on a stale quote is still a stale mark, so
+           -- the marker is given the instant and ages it separately.
+           extract(epoch FROM d.evidence_ts)::float8 AS observed_at,
+           -- WHAT IS ACTUALLY STILL HELD, after every exit this position
+           -- has already taken. `seed_qty` is the original and would value
+           -- inventory that may be gone.
+           (d.resulting_inventory ->> 'residual_qty')::float8
+               AS residual_qty,
+           d.input_freshness
       FROM rn1x_positions p
       LEFT JOIN rn1x_outcomes  o ON o.position_id = p.position_id
       LEFT JOIN rn1x_decisions d ON d.position_id = p.position_id
@@ -631,7 +641,9 @@ async def _pnl_status(pool) -> dict:
                 position_id=x["position_id"],
                 alternatives=_as_json(x.get("alternatives")),
                 decided_at=x.get("decided_at"), now=now,
-                position_qty=x.get("qty")) for x in rows]
+                observed_at=x.get("observed_at"),
+                position_qty=x.get("qty"),
+                residual_qty=x.get("residual_qty")) for x in rows]
             roll = MK.roll_up(
                 marks, realised_usd=d.get("net_usd"),
                 open_positions=int(d.get("open_positions") or 0))
@@ -639,10 +651,29 @@ async def _pnl_status(pool) -> dict:
             # THE AUTONOMOUS/SEEDED SPLIT, carried through. An acceptance
             # position is not evidence the engine entered anything.
             roll["by_provenance"] = {}
-            for x in rows:
+            by_prov_marks: dict = {}
+            for x, m in zip(rows, marks):
                 k = str(x.get("provenance") or "PROVENANCE_NOT_DECLARED")
                 roll["by_provenance"][k] = \
                     roll["by_provenance"].get(k, 0) + 1
+                by_prov_marks.setdefault(k, []).append(m)
+            # EACH ORIGIN ROLLED UP ON ITS OWN. An autonomous entry that
+            # cleared calibration, one created under the unfunded research
+            # waiver, and an acceptance-seeded position are three different
+            # claims; summing them into one unrealised figure is exactly
+            # the conflation the provenance column exists to prevent.
+            roll["per_provenance"] = {
+                k: MK.roll_up(v, realised_usd=None,
+                              open_positions=len(v))
+                for k, v in sorted(by_prov_marks.items())}
+            roll["why_split_by_provenance"] = (
+                "AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW cleared every "
+                "gate; UNCALIBRATED_RESEARCH_SHADOW was created under the "
+                "unfunded research waiver with the source calibration "
+                "EXPLICITLY NOT ESTABLISHED; "
+                "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY is the labelled "
+                "acceptance harness and is not an autonomous entry at all. "
+                "They are never summed as one")
             d["unrealised"] = roll
             d["total_pnl_usd"] = roll.get("total_pnl_usd")
             d["total_pnl_status"] = roll.get("total_pnl_status")

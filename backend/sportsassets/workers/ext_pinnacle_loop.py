@@ -46,6 +46,7 @@ import time
 
 from .. import bettor_entry_execution as entryx
 from .. import bettor_entry_inventory as inv
+from .. import bettor_research_shadow as rsh
 from .. import bettor_external_shadow as ext
 from .. import bettor_fixture_metadata as fmeta_mod
 from .. import bettor_pinnacle_devig as devig
@@ -1719,7 +1720,7 @@ def _settlement_compatibility(srule) -> dict:
 
 def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
                 event_key, open_book, settlement, freshness, calibration,
-                now):
+                now, research_authorised=False):
     """A callable `bettor_external_shadow.evaluate` invokes once.
 
     It receives the fair value that function computed -- so there is
@@ -1768,11 +1769,27 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
             # Production finds no row -- PINNACLE_DEVIG_V1's own note on
             # its default method is "validate in shadow" and that
             # validation has not been done -- so the gate stays
-            # NOT_EVALUABLE and blocks inventory creation.
+            # NOT_EVALUABLE.
             calibration=calibration)
+
+        # ── THE UNFUNDED RESEARCH WAIVER, APPLIED ABOVE THE GATE ─────
+        #
+        # `state_from_evidence` IS NOT TOUCHED and MODEL_TRUST_DRIFT still
+        # reads None in `gates["state"]`. The waiver returns a SEPARATE map
+        # for the risk engine, keeps the original under
+        # `gate_state_as_read`, and both are recorded -- so the row always
+        # shows what the gate said as well as what the engine was given.
+        #
+        # Unauthorised, it waives nothing and the engine sees the gate map
+        # unchanged, which is the production default.
+        waiver = rsh.waive(gates["state"],
+                           authorised_flag=research_authorised,
+                           calibration=calibration)
         verdict = entryx.verdict(action, observed=exposure["observed"],
-                                 state=gates["state"])
+                                 state=waiver["state"])
+        detail["research_waiver"] = waiver
         detail.update({"exposure": exposure, "gates": gates,
+                       "gates_seen_by_the_engine": waiver["state"],
                        "risk": verdict, "proposed_cost_usd": round(cost, 6),
                        "proposed_cost_basis":
                            "SIZE_TIMES_WORST_CASE_COST_PER_CONTRACT",
@@ -1881,6 +1898,10 @@ async def cycle(conn) -> dict:
     # MODEL_TRUST_DRIFT gate blocks every entry -- which is the current
     # production state and is reported rather than worked around.
     calibration = await source_calibration(conn, devig.VERSION)
+    # THE UNFUNDED RESEARCH LANE'S AUTHORISATION, read once per cycle from
+    # its own control row. Absent or unreadable is OFF. It waives exactly
+    # MODEL_TRUST_DRIFT and nothing else; see bettor_research_shadow.
+    research = await rsh.authorised(conn)
 
     for sport_key, family in SPORTS:
         if evaluated >= MAX_PER_CYCLE:
@@ -2132,6 +2153,7 @@ async def cycle(conn) -> dict:
                     settlement=srule,
                     freshness=_entry_freshness(quote, vq, now),
                     calibration=calibration,
+                    research_authorised=research.get("authorised") is True,
                     now=now),
                 # Still passed, and still what the gate sees if no plan
                 # is built: a missing estimate refuses by name.
@@ -2303,6 +2325,7 @@ async def cycle(conn) -> dict:
            "markets_considered": len(markets),
            "entries": entries,
            "source_calibration": calibration,
+           "research_shadow": research,
            "open_book_rows": (None if open_book is None else len(open_book)),
            "elapsed_s": round(time.time() - started, 2),
            "order_submitted": False}

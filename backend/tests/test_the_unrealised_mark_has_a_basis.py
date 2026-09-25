@@ -39,11 +39,27 @@ from sportsassets import bettor_shadow_marks as M
 
 NOW = 1790350000.0
 FRESH = NOW - 60.0
+OBSERVED = NOW - 90.0
+
+
+def _mark(**kw):
+    """mark_one with the REQUIRED current-state inputs supplied.
+
+    `residual_qty` and `observed_at` are required, so a helper that omitted
+    them would only ever exercise the refusal path. Defaults here match
+    `_exit()`: priced on 10, 10 still held, observed 90 s ago.
+    """
+    kw.setdefault("decided_at", FRESH)
+    kw.setdefault("now", NOW)
+    kw.setdefault("observed_at", OBSERVED)
+    kw.setdefault("position_qty", 10.0)
+    kw.setdefault("residual_qty", 10.0)
+    return M.mark_one(**kw)
 
 
 def _exit(**over):
     """A DIRECT_EXIT candidate in the ranker's own field vocabulary."""
-    row = {"action": "DIRECT_EXIT", "qty": 10.0,
+    row = {"action": "DIRECT_EXIT", "qty": 10.0, "priced_on_qty": 10.0,
            "value_usd": 1.40, "value_per_contract": 0.14,
            "slice_value_usd": 1.40, "retained_value_usd": None,
            "execution_secured": False, "fees_usd": 0.05,
@@ -68,8 +84,8 @@ def test_the_basis_is_named_and_is_not_a_midpoint():
 
 
 def test_a_position_is_marked_at_the_executable_exit():
-    got = M.mark_one(position_id="p1", alternatives=[_hold(), _exit()],
-                     decided_at=FRESH, now=NOW, position_qty=10.0)
+    got = _mark(position_id="p1", alternatives=[_hold(), _exit()],
+)
     assert got["marked"] is True, got
     assert got["unrealised_usd"] == 1.40
     assert got["basis"] == M.MARK_BASIS
@@ -82,8 +98,8 @@ def test_the_hold_value_is_never_used_as_the_mark():
     """A ranking with a HOLD but no executable exit is UNMARKED, even
     though HOLD carries a number. Using it would mark inventory at a price
     nobody is showing."""
-    got = M.mark_one(position_id="p1", alternatives=[_hold(99.0)],
-                     decided_at=FRESH, now=NOW, position_qty=10.0)
+    got = _mark(position_id="p1", alternatives=[_hold(99.0)],
+)
     assert got["marked"] is False
     assert got["unrealised_usd"] is None
     assert got["blocker"] == M.R_NO_EXIT_CANDIDATE
@@ -94,18 +110,18 @@ def test_the_hold_value_is_never_used_as_the_mark():
 def test_the_mapping_shape_production_uses_is_read():
     """`persist_run` writes `{"ranked": [...]}`; the column reads back as a
     JSON object. A reader expecting a list would find nothing."""
-    got = M.mark_one(position_id="p1",
+    got = _mark(position_id="p1",
                      alternatives={"ranked": [_hold(), _exit()],
                                    "refused": []},
-                     decided_at=FRESH, now=NOW, position_qty=10.0)
+)
     assert got["marked"] is True, got
     assert got["unrealised_usd"] == 1.40
 
 
 def test_an_action_keyed_mapping_is_also_read():
-    got = M.mark_one(position_id="p1",
+    got = _mark(position_id="p1",
                      alternatives={"DIRECT_EXIT": _exit(), "HOLD": _hold()},
-                     decided_at=FRESH, now=NOW, position_qty=10.0)
+)
     assert got["marked"] is True, got
 
 
@@ -113,8 +129,8 @@ def test_the_empty_object_production_returned_is_named_not_malformed():
     """THE MEASURED CASE. alt_type=object, alt_len=0 on the three newest
     rows. Nothing was priced -- not even a refused exit -- and that is what
     a finished fixture looks like, so it gets its own name."""
-    got = M.mark_one(position_id="p1", alternatives={},
-                     decided_at=FRESH, now=NOW, position_qty=10.0)
+    got = _mark(position_id="p1", alternatives={},
+)
     assert got["marked"] is False
     assert got["blocker"] == M.R_NO_RANKED
     assert "finished fixture" in got["why"]
@@ -130,11 +146,10 @@ def test_the_rankers_own_blocker_name_is_passed_through():
     the engine."""
     for name in ("NO_BID", "NO_EXECUTABLE_DEPTH",
                  "FEE_SCHEDULE_NOT_ESTABLISHED"):
-        got = M.mark_one(
-            position_id="p1",
+        got = _mark(position_id="p1",
             alternatives=[_hold(),
                           {"action": "DIRECT_EXIT", "blocker": name}],
-            decided_at=FRESH, now=NOW, position_qty=10.0)
+    )
         assert got["marked"] is False
         assert got["blocker"] == name, got
 
@@ -143,8 +158,8 @@ def test_a_stale_mark_is_stale_rather_than_missing():
     """A price from an hour ago is not one anybody is showing. It is also
     not the same problem as no price at all: one needs a cycle to run, the
     other needs a bid."""
-    got = M.mark_one(position_id="p1", alternatives=[_exit()],
-                     decided_at=NOW - 3600.0, now=NOW, position_qty=10.0)
+    got = _mark(position_id="p1", alternatives=[_exit()],
+decided_at=NOW - 3600.0)
     assert got["marked"] is False
     assert got["blocker"] == M.R_STALE
     assert got["mark_age_s"] == 3600.0
@@ -152,18 +167,18 @@ def test_a_stale_mark_is_stale_rather_than_missing():
 
 
 def test_a_candidate_with_no_number_is_malformed_not_zero():
-    got = M.mark_one(position_id="p1",
+    got = _mark(position_id="p1",
                      alternatives=[_exit(slice_value_usd=None)],
-                     decided_at=FRESH, now=NOW, position_qty=10.0)
+)
     assert got["marked"] is False
     assert got["blocker"] == M.R_MALFORMED
     assert got["unrealised_usd"] is None
 
 
 def test_a_nan_is_not_a_number():
-    got = M.mark_one(position_id="p1",
+    got = _mark(position_id="p1",
                      alternatives=[_exit(slice_value_usd=float("nan"))],
-                     decided_at=FRESH, now=NOW, position_qty=10.0)
+)
     assert got["marked"] is False
 
 
@@ -173,12 +188,11 @@ def test_a_depth_capped_mark_covers_only_the_sellable_slice():
     """The bid takes 4 of 10. The mark is the slice; the other 6 are
     UNMARKED RESIDUAL and their HOLD-derived value carries its own basis
     label so it can never be added into the executable figure."""
-    got = M.mark_one(
-        position_id="p1",
+    got = _mark(position_id="p1",
         alternatives=[_exit(qty=4.0, depth_limited=True,
                             slice_value_usd=0.56,
                             retained_value_usd=0.90)],
-        decided_at=FRESH, now=NOW, position_qty=10.0)
+)
     assert got["marked"] is True, got
     assert got["unrealised_usd"] == 0.56
     assert got["marked_qty"] == 4.0
@@ -191,26 +205,90 @@ def test_a_depth_capped_mark_covers_only_the_sellable_slice():
     assert got["unrealised_usd"] != 0.56 + 0.90
 
 
-def test_the_position_quantity_comes_from_the_position():
-    """Not from the candidate: the candidate carries the SELLABLE size.
-    Without the position's own qty the residual is unknown, and unknown is
-    reported rather than inferred."""
-    got = M.mark_one(
-        position_id="p1",
-        alternatives=[_exit(qty=4.0, depth_limited=True,
-                            slice_value_usd=0.56)],
-        decided_at=FRESH, now=NOW, position_qty=None)
-    assert got["marked"] is True
-    assert got["unmarked_residual_qty"] is None
+def test_an_unknown_residual_refuses_rather_than_marking_the_seed():
+    """THE REQUIREMENT THAT REPLACED AN EARLIER, WEAKER TEST. This used to
+    accept the mark and merely report the residual as unknown. It must
+    not: marking a position whose current holding is unestablished values
+    inventory that may already have been sold."""
+    got = _mark(position_id="p1", alternatives=[_exit()],
+                position_qty=None, residual_qty=None)
+    assert got["marked"] is False
+    assert got["blocker"] == M.R_RESIDUAL_UNKNOWN
+    assert "may already be gone" in got["why"]
+
+
+def test_a_fully_worked_off_position_is_not_an_open_one():
+    got = _mark(position_id="p1", alternatives=[_exit()], residual_qty=0.0)
+    assert got["marked"] is False
+    assert got["blocker"] == M.R_RESIDUAL_UNKNOWN
+    assert "nothing is held" in got["why"]
+
+
+def test_an_estimate_priced_on_a_different_size_is_not_a_mark():
+    """An exit priced for 10 values nothing once 6 have been sold, and
+    scaling it pro-rata would invent a price for a size the book was never
+    asked about."""
+    got = _mark(position_id="p1", alternatives=[_exit()], residual_qty=4.0)
+    assert got["marked"] is False
+    assert got["blocker"] == M.R_QTY_MISMATCH
+    assert "not a mark for this one" in got["why"]
+
+
+def test_a_depth_capped_estimate_below_the_residual_is_still_valid():
+    """The distinction the check must not lose: `qty` BELOW the residual is
+    ordinary depth capping; `qty` ABOVE it, or priced on a different
+    residual, is a mismatch."""
+    got = _mark(position_id="p1",
+                alternatives=[_exit(qty=4.0, depth_limited=True,
+                                    slice_value_usd=0.56,
+                                    priced_on_qty=10.0)],
+                residual_qty=10.0)
+    assert got["marked"] is True, got
+    assert got["marked_qty"] == 4.0
+    assert got["unmarked_residual_qty"] == 6.0
+
+
+# ── the mark is only as current as the price inside it ───────────────
+
+def test_a_mark_with_no_observation_instant_cannot_be_aged():
+    """An unanswerable age is not a fresh one."""
+    got = _mark(position_id="p1", alternatives=[_exit()], observed_at=None)
+    assert got["marked"] is False
+    assert got["blocker"] == M.R_NO_OBSERVATION_TIME
+    assert "unanswerable age" in got["why"]
+
+
+def test_a_recent_decision_on_a_stale_book_is_still_stale():
+    """THE CASE A DECISION-AGE CHECK ALONE WOULD MISS. The manager decides
+    at its cadence; the venue quote it used has its own instant. A mark is
+    only as current as the price inside it."""
+    got = _mark(position_id="p1", alternatives=[_exit()],
+                decided_at=NOW - 30.0, observed_at=NOW - 7200.0)
+    assert got["marked"] is False
+    assert got["blocker"] == M.R_STALE
+    assert got["stale_side"] == "BOOK_OBSERVATION"
+    assert got["mark_age_s"] == 30.0
+    assert got["observation_age_s"] == 7200.0
+    assert "resting on a stale BOOK" in got["why"]
+
+
+def test_both_ages_are_reported_on_a_good_mark():
+    got = _mark(position_id="p1", alternatives=[_exit()])
+    assert got["marked"] is True, got
+    assert got["mark_age_s"] == 60.0
+    assert got["observation_age_s"] == 90.0
+    assert got["observed_at"] == OBSERVED
+    assert got["residual_qty"] == 10.0
+    assert got["seed_qty"] == 10.0
 
 
 # ── the roll-up, and the total that refuses to be a total ────────────
 
 def test_a_total_is_only_a_total_when_everything_is_marked():
-    marks = [M.mark_one(position_id="a", alternatives=[_exit()],
-                        decided_at=FRESH, now=NOW, position_qty=10.0),
-             M.mark_one(position_id="b", alternatives={},
-                        decided_at=FRESH, now=NOW, position_qty=5.0)]
+    marks = [_mark(position_id="a", alternatives=[_exit()],
+   ),
+             _mark(position_id="b", alternatives={},
+residual_qty=5.0, position_qty=5.0)]
     got = M.roll_up(marks, realised_usd=12.0, open_positions=2)
     assert got["marked_positions"] == 1
     assert got["unmarked_positions"] == 1
@@ -223,8 +301,8 @@ def test_a_total_is_only_a_total_when_everything_is_marked():
 
 
 def test_a_complete_total_states_how_it_was_built_and_reconciles():
-    marks = [M.mark_one(position_id="a", alternatives=[_exit()],
-                        decided_at=FRESH, now=NOW, position_qty=10.0)]
+    marks = [_mark(position_id="a", alternatives=[_exit()],
+   )]
     got = M.roll_up(marks, realised_usd=12.0, open_positions=1)
     assert got["total_pnl_status"] == "COMPLETE"
     assert got["total_pnl_usd"] == 13.40
@@ -237,8 +315,8 @@ def test_an_open_position_with_no_decision_row_still_counts_against_us():
     """THE DENOMINATOR IS THE OPEN BOOK. A position with no decision
     produces no mark row at all, and a coverage figure computed over rows
     would report 100% while missing it entirely."""
-    marks = [M.mark_one(position_id="a", alternatives=[_exit()],
-                        decided_at=FRESH, now=NOW, position_qty=10.0)]
+    marks = [_mark(position_id="a", alternatives=[_exit()],
+   )]
     got = M.roll_up(marks, realised_usd=12.0, open_positions=3)
     assert got["open_positions"] == 3
     assert got["marked_positions"] == 1
@@ -248,8 +326,8 @@ def test_an_open_position_with_no_decision_row_still_counts_against_us():
 
 
 def test_no_open_position_marked_is_not_a_zero_unrealised():
-    got = M.roll_up([M.mark_one(position_id="a", alternatives={},
-                                decided_at=FRESH, now=NOW)],
+    got = M.roll_up([_mark(position_id="a", alternatives={},
+)],
                     realised_usd=12.0, open_positions=1)
     assert got["unrealised_usd"] is None
     assert got["total_pnl_usd"] is None
@@ -257,8 +335,8 @@ def test_no_open_position_marked_is_not_a_zero_unrealised():
 
 
 def test_an_unreadable_realised_figure_blocks_the_total():
-    marks = [M.mark_one(position_id="a", alternatives=[_exit()],
-                        decided_at=FRESH, now=NOW, position_qty=10.0)]
+    marks = [_mark(position_id="a", alternatives=[_exit()],
+   )]
     got = M.roll_up(marks, realised_usd=None, open_positions=1)
     assert got["total_pnl_status"] == "PARTIAL"
     assert "no realised figure" in got["why_total_is_partial"]

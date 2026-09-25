@@ -61,6 +61,7 @@ import json
 from datetime import datetime, timezone
 
 from . import bettor_entry_execution as entryx
+from . import bettor_research_shadow as _rsh
 from . import shadow
 
 #: The lane's own policy name in the shared ledger, so its rows are
@@ -84,10 +85,20 @@ ENTRY_KIND_WHY = (
 #: is better than borrowing an account that did not place it.
 NO_SOURCE_ACCOUNT = "NO_SOURCE_ACCOUNT_AUTONOMOUS_ENTRY"
 
-#: One of the three values `rn1x_provenance_declared` enumerates. The
-#: other two belong to the seeded lane and the acceptance harness and are
-#: untouched.
+#: One of the four values `rn1x_provenance_declared` enumerates. The other
+#: three belong to the seeded lane, the acceptance harness and the unfunded
+#: research lane, and are untouched.
 PROVENANCE = "AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW"
+
+#: WHAT A POSITION CREATED UNDER THE RESEARCH WAIVER CARRIES INSTEAD.
+#:
+#: An entry written while MODEL_TRUST_DRIFT is still NOT_EVALUABLE is not
+#: the same claim as one that cleared it, and storing both under
+#: PROVENANCE would make them indistinguishable in every later read --
+#: including any calibration evidence built from them, which is the one
+#: place the difference matters most. Read from the research module rather
+#: than copied, so the two cannot drift apart.
+RESEARCH_PROVENANCE = _rsh.PROVENANCE
 
 FILL_BASIS = shadow.MARKETABLE_RECONSTRUCTED
 LIQUIDITY = "TAKER"
@@ -173,6 +184,27 @@ WHY_ADD_IS_REFUSED = (
     "position and the second tranche needs its own basis. That is not "
     "built. Writing it as a fresh entry would add executions to inventory "
     "that never grew, which is the defect this branch exists to refuse")
+
+
+def _took_the_waiver(rec) -> bool:
+    """Did THIS record's risk verdict rest on the research waiver?
+
+    Read off the record's own `research_waiver.waived` list, not off a
+    global flag: the mode being authorised does not mean this particular
+    candidate needed the waiver. One that cleared calibration on its own
+    evidence is an ordinary autonomous entry and must be labelled as one.
+    """
+    w = ((rec or {}).get("execution_plan") or {}).get("research_waiver") or {}
+    if not w:
+        w = (rec or {}).get("research_waiver") or {}
+    return bool(w.get("authorised")) and bool(w.get("waived"))
+
+
+def _waiver_label(rec) -> dict | None:
+    """The waiver's own labels, or None when none applied."""
+    if not _took_the_waiver(rec):
+        return None
+    return _rsh.label(rec)
 
 
 def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
@@ -301,7 +333,14 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
             # group positions by how they came to exist. Migration 116
             # adds this third name; the prose belongs in the decision's
             # own labels, where it is.
-            "provenance": PROVENANCE,
+            # WHICH OF THE TWO AUTONOMOUS CLAIMS THIS IS. The record
+            # carries the waiver when one was applied, so the label is
+            # derived from the same fact rather than passed separately --
+            # a position that took the waiver and does not say so is
+            # exactly what makes a later read wrong.
+            "provenance": (RESEARCH_PROVENANCE if _took_the_waiver(rec)
+                           else PROVENANCE),
+            "research_waiver": _waiver_label(rec),
             # ── THE IDENTITY THIS POSITION WAS OPENED UNDER ──────────
             #
             # Recorded HERE, by the writer that knows it, because the
