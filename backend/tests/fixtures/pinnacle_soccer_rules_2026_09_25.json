@@ -1,0 +1,46 @@
+{
+  "_what_this_is": "Pinnacle's PUBLISHED soccer betting rules, verbatim, as served to a GitHub Actions runner. Captured because the terms extractor's keyword vocabulary was baseball-only, so this section had never been read and every soccer settlement comparison could only return UNKNOWN. UNKNOWN is not INCOMPATIBLE, and reporting it as such would have been a conclusion about a comparison that was never run.",
+  "_not_interpreted_here": "These are the publisher's words. Mapping them to payout classes is bettor_settlement_terms' job, against declared patterns, so the interpretation stays reviewable separately from the fetch.",
+  "source": "Pinnacle betting rules (published rules page) -- Soccer and Soccer Market Rules sections",
+  "source_url": "https://www.pinnacle.com/en/future/betting-rules",
+  "retrieved_at": "2026-09-25T20:47:35Z",
+  "reader": "github-actions runner, ubuntu-latest",
+  "http_status": 200,
+  "page_bytes": 119592,
+  "extracted_text_lines": 629,
+  "extracted_text_words": 12787,
+  "captured_in": {
+    "workflow": "command-verify",
+    "run": 67,
+    "run_id": 36187858957,
+    "job": "capture-terms",
+    "job_id": 108245569070,
+    "commit": "4b497b4625ee431f7a6fee46eac09df3a3f9aeab"
+  },
+  "soccer_section": {
+    "line_382": "All match markets are based on the result at the end of a scheduled 90 minutes of play unless otherwise stated. This includes any added injury or stoppage time, but does not include extra time, a penalty shootout or a golden goal.",
+    "line_383": "If a match is deemed void because it finished early or was abandoned, periods that were played to completion (such as the First Half) will have action. If a match starts and isn't completed within 12 hours of kickoff, then all bets on uncompleted periods will be voided.",
+    "line_384": "The exception to this rule is a referee ending a match after at least 85 minutes of play. In this case, all periods will have action.",
+    "line_385": "Own goals do not count towards markets with named competitors.",
+    "line_386": "If a soccer match is played at a neutral venue, whether it is indicated in the market or not, all bets will have action. We always try to list the home team first. However, we do not guarantee the accuracy of this information and unless there is an official venue change subsequent to markets being offered for the game, all bets will have action. If a match is played at the away team's venue but the home team listed is considered the home team by the official governing body of that fixture, all bets will have action.",
+    "line_387": "In-Play bets will be voided if a Video Assistant Referee (VAR) decision materially affects the odds of the bets. In the scenario that bets need to be voided, the time of the foul that led to the VAR review will be taken into consideration.",
+    "line_388": "Score, corner and red card information are considered to be part of the market for In-Play bets. If that information is incorrectly displayed on the market offering and/or Bet Slip, then bets placed while incorrect information is displayed will be deemed void.",
+    "line_389": "Unless a duration of time is specified for a bet, injury time is included.",
+    "line_390": "All bets on World Cup Fixtures have action as long as the Fixture is completed within 72 hours of when it was originally scheduled to play."
+  },
+  "soccer_market_rules_relevant_lines": {
+    "line_399": "Penalty Shootouts: Handicap markets include goals scored on all kicks taken. Total markets count only goals in the first 10 kicks taken.",
+    "line_403": "Anytime Goalscorer: Bets will be graded for events based on normal time, including injury/stoppage time. Extra time and penalty shoot-outs do not count. Own goals do not count.",
+    "line_406": "Tournament Player Markets: Events in regular time and extra time count; events in penalty shootouts do not count."
+  },
+  "general_rule_also_applicable": {
+    "note": "Already captured for baseball in bettor_settlement_terms.BOOK_TERMS, and it is a GENERAL rule, not a baseball one.",
+    "quote": "If a fixture isn't started 12 hours after its scheduled starting time all bets on that fixture will be voided."
+  },
+  "_why_this_is_not_yet_in_BOOK_TERMS": "Measured in the same run: soccer contributes ZERO candidates to the entry lane, and the reason is upstream of settlement. 29 Pinnacle-priced EPL and Liga MX fixtures produced 0 evaluations -- 20 EPL events matched no venue contract at all, and 3 Liga MX events matched `markets` rows carrying GLOBAL CLOB slugs for which the venue's own catalogue has no native contract (one of them an exact-score market, not a money line). Adding a soccer book side would change no verdict while nothing reaches the comparison, so the capture is recorded here and the interpretation is deferred to when a soccer candidate actually exists.",
+  "_what_is_still_missing_for_a_soccer_comparison": [
+    "The VENUE's own soccer settlement prose. Never read, because no soccer candidate has ever existed to read it for. `read_terms` is not sport-specific and its pattern table already carries soccer phrasing (90 minutes, extra time, penalty shootout, winner of the match), so it may parse -- but that is untested against real venue soccer text and is not claimed.",
+    "Whether the venue's soccer contract is a 2-way or 3-way market. The source prices a 3-outcome h2h (bettor_pinnacle_devig.SUPPORTED). A 2-way venue contract would be a different payout event.",
+    "Whether the venue grades on 90 minutes or on the match result. Line 382 excludes extra time and penalties; a venue that settles a knockout tie 'to the winner of the match' would disagree on exactly that branch. Neither side is assumed."
+  ]
+}
