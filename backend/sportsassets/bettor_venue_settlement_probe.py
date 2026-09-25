@@ -303,39 +303,61 @@ def probe(client, slug: str) -> dict:
     # from the SHAPES rather than from a hunch. A JSON-encoded container
     # where a list is required is a defect of ours with a named repair; an
     # absent field is not.
-    out["parser_gap"] = _parser_gap(li, st)
+    out["parser_gap"] = _parser_gap(li, st, out["reader_verdict"])
     return out
 
 
-def _parser_gap(listing, settlement) -> dict:
-    """Name a consumable-but-unconsumed field, or say there is none."""
+def _parser_gap(listing, settlement, reader_verdict=None) -> dict:
+    """Name a consumable-but-UNCONSUMED field, or say there is none.
+
+    UNCONSUMED IS THE WHOLE WORD. A field the reader now decodes is not a
+    gap, and reporting it as one would leave a closed defect looking open
+    for as long as anyone kept reading this output. So the reader's own
+    verdict gates the finding: if it resolved -- reported or derived -- then
+    whatever shape the field arrived in, it was consumed.
+    """
     gap = {"found": False, "fields": [], "why": None,
-           "what_would_change": None}
+           "what_would_change": None,
+           "reader_status": (reader_verdict or {}).get("status")}
+    status = str((reader_verdict or {}).get("status") or "")
+    if status in ("RESOLVED", "RESOLVED_DERIVED", "PENDING", "UNMATCHED"):
+        gap["why"] = (
+            "the reader reached %s, so no payout-bearing field was left "
+            "unconsumed. A shape the parser handles is not a gap" % status)
+        return gap
+    # A GAP IS A FIELD THE PARSER CANNOT CONSUME -- not merely one that
+    # arrives in an awkward shape. `bettor_live_read._as_list` now decodes a
+    # JSON-encoded container, so that shape is handled and is no longer a
+    # finding; the shapes stay in `listing.field_shapes` as evidence either
+    # way. What still counts is a present payout field that the reader's own
+    # decoder cannot turn into a list at all.
+    from . import bettor_live_read as _LR
+
     cands = (listing or {}).get("payout_candidates") or {}
     for f in ("outcomePrices", "outcome_prices", "outcomes"):
         c = cands.get(f) or {}
         if not c.get("present"):
             continue
-        sh = c.get("shape") or {}
-        if sh.get("looks_like_json_encoded") and \
-                sh.get("decoded_type") in ("list", "tuple"):
+        if _LR._as_list(c.get("value")) is None:
+            sh = c.get("shape") or {}
             gap["fields"].append(
                 {"field": f, "delivered_as": sh.get("type"),
-                 "decodes_to": "%s[%s]" % (sh.get("decoded_type"),
-                                           sh.get("decoded_member_types")),
-                 "decoded_len": sh.get("decoded_len"),
-                 "preview": sh.get("decoded_preview")})
+                 "decoder": "bettor_live_read._as_list",
+                 "decoded": None,
+                 "preview": (c.get("value") if isinstance(c.get("value"),
+                                                          str)
+                             else None)})
     if gap["fields"]:
         gap.update(
             found=True,
-            why=("the field is delivered as a JSON-encoded STRING. "
-                 "`_converged_winner` requires a list and rejects it on "
-                 "the isinstance check before reading any number, so the "
-                 "prices were present and unread the whole time"),
-            what_would_change=("decoding the string before the "
-                              "convergence test. It would produce "
-                              "RESOLVED_DERIVED -- a CONVERGED PRICE "
-                              "INFERENCE, still not a reported settlement"))
+            why=("the field is present and the reader's own decoder "
+                 "cannot produce a list from it, so a payout-bearing "
+                 "field is arriving in a shape nothing consumes"),
+            what_would_change=("teaching `_as_list` this shape. Whatever "
+                               "it then yields, a price vector still "
+                               "produces RESOLVED_DERIVED -- a CONVERGED "
+                               "PRICE INFERENCE, never a reported "
+                               "settlement"))
         return gap
     st = settlement or {}
     gap["why"] = (

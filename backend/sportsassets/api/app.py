@@ -1927,24 +1927,93 @@ async def admin_rn1x_run_management(response: Response,
                       "A_RESEED"],
            "also_manages": ext.EXPERIMENT_ID,
            "runs": []}
+    # ── THE WRITER LOCK, AND WHY THIS REFUSES RATHER THAN RACES ──────
+    #
+    # THE DEFECT THIS CLOSES, AND IT WAS MINE. The first version of this
+    # route took a pool connection and called `run_continuing_management`
+    # directly. `rn1x_shadow.run` holds `pg_advisory_lock(LOCK_KEY)` --
+    # SESSION-scoped, on one dedicated connection, for the process's whole
+    # life -- and that loop is HOSTED IN THIS SAME API. So the route was a
+    # SECOND WRITER on the same book: two `manage_open_positions` runs could
+    # decide the same position concurrently and both place an order.
+    # Invoking the scheduler's function is not the same as holding the
+    # scheduler's ownership, and I had conflated the two.
+    #
+    # SO IT CONTENDS FOR THE SAME KEY, on its own connection, with
+    # `pg_try_advisory_lock` -- and a failure to acquire is a REFUSAL, not a
+    # wait and not a bypass. While the scheduled writer is live this route
+    # will therefore always refuse, which is correct: the loop that owns the
+    # book is the one that must produce the decisions.
+    out["writer_lock_key"] = W.LOCK_KEY
+    out["lock_contract"] = (
+        "pg_try_advisory_lock on rn1x_shadow.LOCK_KEY, session-scoped, on a "
+        "dedicated connection. Not acquired -> refuse. This route never "
+        "writes while another process owns the book")
     pool = await get_pool()
-    for i in range(cycles):
-        if i and spacing:
-            # DISTINCT INSTANTS ARE THE POINT of the spacing: two decisions
-            # written inside the same second are two decisions at ONE
-            # instant, which the acceptance gate correctly will not accept.
-            await asyncio.sleep(spacing)
+    conn = await pool.acquire()
+    try:
         try:
-            async with pool.acquire() as conn:
-                got = await W.run_continuing_management(
-                    conn, experiment_id=exp)
-            out["runs"].append({"cycle": i + 1, "at": _t.time(),
-                                "result": got})
+            held = await conn.fetchval("SELECT pg_try_advisory_lock($1)",
+                                       W.LOCK_KEY)
         except Exception as exc:                               # noqa: BLE001
-            out["runs"].append({"cycle": i + 1, "at": _t.time(),
-                                "error": type(exc).__name__,
-                                "error_text": str(exc)[:300]})
-            out["ok"] = False
+            return dict(out, ok=False, refusal="WRITER_LOCK_UNREADABLE",
+                        error=type(exc).__name__,
+                        why=("the writer lock could not be probed, so "
+                             "ownership is unknown and nothing was run"))
+        out["writer_lock_acquired"] = bool(held)
+        if not held:
+            return dict(
+                out, ok=False, refusal="SCHEDULED_WRITER_HOLDS_THE_LOCK",
+                cycles_run=0,
+                why=("another process -- the scheduled rn1x_shadow loop, "
+                     "which is hosted in this same API -- holds the writer "
+                     "lock. Running here would make this a SECOND writer on "
+                     "one book, so nothing was run. The scheduled loop is "
+                     "what manages these positions, on its own cadence"),
+                what_to_do=("read the position back after a scheduler "
+                            "cadence rather than driving a cycle here"))
+        try:
+            for i in range(cycles):
+                if i and spacing:
+                    # DISTINCT INSTANTS ARE THE POINT of the spacing: two
+                    # decisions written inside the same second are two
+                    # decisions at ONE instant, which the acceptance gate
+                    # correctly will not accept.
+                    await asyncio.sleep(spacing)
+                try:
+                    got = await W.run_continuing_management(
+                        conn, experiment_id=exp)
+                    out["runs"].append({
+                        "cycle": i + 1, "at": _t.time(),
+                        # LABELLED AS MANUAL, on every cycle this route
+                        # drives, so a decision produced here is never read
+                        # as one the schedule produced by itself.
+                        "trigger": "MANUAL_ADMIN_ROUTE_NOT_THE_SCHEDULE",
+                        "held_writer_lock": True,
+                        "result": got})
+                except Exception as exc:                       # noqa: BLE001
+                    out["runs"].append({"cycle": i + 1, "at": _t.time(),
+                                        "trigger": "MANUAL_ADMIN_ROUTE_NOT_"
+                                                   "THE_SCHEDULE",
+                                        "error": type(exc).__name__,
+                                        "error_text": str(exc)[:300]})
+                    out["ok"] = False
+            out["cycles_run"] = len([r for r in out["runs"]
+                                     if "result" in r])
+        finally:
+            # RELEASED ON THE SAME CONNECTION THAT TOOK IT, always. A
+            # session lock left held on a pooled connection would make the
+            # scheduled writer a permanent standby the next time it
+            # restarted -- the containment incident this lock's own comment
+            # already records once.
+            try:
+                await conn.fetchval("SELECT pg_advisory_unlock($1)",
+                                    W.LOCK_KEY)
+                out["writer_lock_released"] = True
+            except Exception:                                  # noqa: BLE001
+                out["writer_lock_released"] = False
+    finally:
+        await pool.release(conn)
     return out
 
 

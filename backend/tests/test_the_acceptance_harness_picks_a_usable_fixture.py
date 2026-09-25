@@ -341,3 +341,152 @@ async def test_a_live_fixture_is_adopted_under_the_flag_too():
     finally:
         await _cleanup(conn)
         await conn.close()
+
+
+# ── ARIZONA'S INVENTORY AND HISTORY, AND RETRY IDEMPOTENCE ───────────
+#
+# "Left untouched" has to mean the DECISIONS, ORDERS AND FILLS too, not
+# just the position row's columns. A declined adoption that quietly dropped
+# a decision, or settled the position, or reseeded it, would satisfy a
+# column-only assertion and still destroy the record of everything that
+# position has done.
+#
+# AND A RETRY MUST ADOPT THE SAME NEW SUBJECT. The verification run calls
+# this route on every dispatch. If a second call seeded a second position
+# the acceptance subject would change under the gate and inventory would
+# grow one row per run -- which is the exact duplication the idempotence
+# guard exists to prevent, reached through the new flag instead of through
+# the error handler.
+
+DEC_SQL = """
+    INSERT INTO rn1x_decisions (decision_id, position_id, decision_ts,
+        evidence_id, selected_action, selected_qty, selection_reason,
+        ev_basis, input_labels, alternatives)
+    VALUES ($1,$2,now(),$3,'HOLD',10.0,'fixture decision',
+            'EV_HOLD_NOT_IDENTIFIED','{}'::jsonb,'{}'::jsonb)
+    ON CONFLICT (decision_id) DO NOTHING
+"""
+
+HISTORY_SQL = """
+    SELECT (SELECT count(*) FROM rn1x_decisions d
+             WHERE d.position_id = $1) AS decisions,
+           (SELECT count(*) FROM rn1x_orders o
+             WHERE o.position_id = $1) AS orders,
+           (SELECT count(*) FROM rn1x_outcomes x
+             WHERE x.position_id = $1) AS outcomes
+"""
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_declined_adoption_preserves_inventory_and_history():
+    """Arizona's own case: the position row AND every decision, order and
+    outcome row attached to it survive the decline unchanged."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _cleanup(conn)
+        await _seed(conn)
+        await _market(conn, STALE_COND, sport=_labels()[0], closed=True,
+                      resolved=True)
+        pid = "%s:POS:stale" % EXP
+        await conn.execute(POS_SQL, pid, EXP, W.ACCEPTANCE_POLICY,
+                           STALE_COND, W.ACCEPTANCE_PROVENANCE)
+        for k in range(3):
+            await conn.execute(DEC_SQL, "%s:D%03d" % (pid, k), pid,
+                               "ev-%d" % k)
+        before_row = dict(await conn.fetchrow(UNTOUCHED_SQL, pid))
+        before_hist = dict(await conn.fetchrow(HISTORY_SQL, pid))
+        assert before_hist["decisions"] == 3
+
+        got = await W.seed_acceptance_position(conn, experiment_id=EXP,
+                                              fresh_if_stale=True)
+        assert got["adopted"] is False
+        assert got["stale_adoption_declined"]["left_untouched"] is True
+
+        # THE ROW, UNCHANGED -- including the synthetic provenance.
+        after_row = dict(await conn.fetchrow(UNTOUCHED_SQL, pid))
+        assert after_row == before_row, (before_row, after_row)
+        assert after_row["provenance"] == W.ACCEPTANCE_PROVENANCE
+        # AND ITS WHOLE HISTORY, UNCHANGED. No decision dropped, no order
+        # invented, and no outcome row written -- declining to adopt is not
+        # settling.
+        after_hist = dict(await conn.fetchrow(HISTORY_SQL, pid))
+        assert after_hist == before_hist, (before_hist, after_hist)
+        assert after_hist["outcomes"] == 0, (
+            "a declined adoption must not settle the position")
+    finally:
+        await _cleanup(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_retry_adopts_the_same_new_subject_and_adds_no_row():
+    """THE RETRY CASE. Once a fresh subject exists on a usable fixture,
+    every later call must return THAT ONE. A second seed would change the
+    gate's subject mid-flight and grow inventory once per dispatch."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _cleanup(conn)
+        await _seed(conn)
+        sport = _labels()[0]
+        await _market(conn, STALE_COND, sport=sport, closed=True,
+                      resolved=True)
+        await _market(conn, LIVE_COND, sport=sport, closed=False,
+                      resolved=False)
+        stale = "%s:POS:stale" % EXP
+        fresh = "%s:POS:fresh" % EXP
+        await conn.execute(POS_SQL, stale, EXP, W.ACCEPTANCE_POLICY,
+                           STALE_COND, W.ACCEPTANCE_PROVENANCE)
+        # The fresh subject, as if a previous call had seeded it.
+        await conn.execute(POS_SQL, fresh, EXP, W.ACCEPTANCE_POLICY,
+                           LIVE_COND, W.ACCEPTANCE_PROVENANCE)
+
+        seen = []
+        for _ in range(3):
+            got = await W.seed_acceptance_position(conn, experiment_id=EXP,
+                                                   fresh_if_stale=True)
+            assert got["created"] is False, got
+            seen.append(got.get("position_id")
+                        or (got.get("demonstrable_positions") or
+                            [{}])[0].get("position_id"))
+        # THE SAME SUBJECT EVERY TIME, and it is the one on the live
+        # fixture -- never the stale one and never a new one.
+        assert set(seen) == {fresh}, seen
+        n = await conn.fetchval(
+            "SELECT count(*) FROM rn1x_positions WHERE experiment_id = $1",
+            EXP)
+        assert n == 2, "three retries must add no position"
+    finally:
+        await _cleanup(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_declined_position_is_still_readable_by_exact_identity():
+    """It stays visible, which is the other half of the instruction: the
+    unusable position keeps its honest state rather than disappearing."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _cleanup(conn)
+        await _seed(conn)
+        await _market(conn, STALE_COND, sport=_labels()[0], closed=True,
+                      resolved=True)
+        pid = "%s:POS:stale" % EXP
+        await conn.execute(POS_SQL, pid, EXP, W.ACCEPTANCE_POLICY,
+                           STALE_COND, W.ACCEPTANCE_PROVENANCE)
+        await W.seed_acceptance_position(conn, experiment_id=EXP,
+                                        fresh_if_stale=True)
+        row = await conn.fetchrow(
+            "SELECT position_id, provenance, seed_qty::text AS q "
+            "  FROM rn1x_positions WHERE position_id = $1", pid)
+        assert row is not None, "the declined position must still exist"
+        assert row["provenance"] == W.ACCEPTANCE_PROVENANCE
+        assert row["q"].startswith("10")
+    finally:
+        await _cleanup(conn)
+        await conn.close()

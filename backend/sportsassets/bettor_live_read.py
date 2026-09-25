@@ -126,6 +126,35 @@ FEE_COEFFICIENT_FIELDS = ("feeCoefficient", "fee_coefficient")
 SETTLED_AT_FIELDS = ("resolvedAt", "resolved_at", "settledAt", "settled_at",
                      "closedAt", "closed_at", "endDate", "end_date")
 
+#: WHAT THE VENUE ACTUALLY RETURNS FROM THE SETTLEMENT ENDPOINT, measured
+#: 2026-09-25 on `aec-mlb-az-col-2026-09-24` (command-verify run 55, job
+#: 108082946649), preserved verbatim in
+#: tests/fixtures/pmus_settled_market_2026_09_24_az_col.json:
+#:
+#:     {"slug": "aec-mlb-az-col-2026-09-24", "settlement": 1}
+#:
+#: THE DEFECT THIS CLOSES. `read_settlement` looked only for
+#: `settlementPrice` as an `Amount` dict -- the SDK's declared type -- found
+#: nothing, and returned NO_SETTLEMENT_PRICE_IN_RESPONSE. I then reported
+#: that as the venue declining to report an outcome. It was not: the venue
+#: reported the settlement under a different KEY and a different TYPE, and
+#: the parser walked past it. Names and shapes are both accepted now, and
+#: which one supplied the value is recorded rather than assumed.
+SETTLEMENT_PRICE_FIELDS = ("settlementPrice", "settlement",
+                           "settlement_price", "settlementValue")
+
+#: The long side's own price on the market listing, used to CORROBORATE the
+#: settlement endpoint rather than to replace it. `marketSides` carries
+#: `long` and `price` per side, so "the value the endpoint returned is the
+#: LONG side's payout" is checkable instead of assumed -- and on a book with
+#: this system's wrong-side history it is worth checking.
+MARKET_SIDES_FIELDS = ("marketSides", "market_sides")
+
+#: Settlement corroboration verdicts, kept apart from the price itself.
+CORROBORATED = "LONG_SIDE_PRICE_AGREES"
+UNCORROBORATED = "NO_LONG_SIDE_PRICE_TO_COMPARE"
+CONTRADICTED = "LONG_SIDE_PRICE_CONTRADICTS_THE_SETTLEMENT"
+
 SOURCE_TS_FIELDS = ("transactTime", "transact_time", "timestamp", "ts",
                     "asOf", "as_of")
 
@@ -133,6 +162,53 @@ SOURCE_TS_FIELDS = ("transactTime", "transact_time", "timestamp", "ts",
 def _now_iso() -> str:
     """Receipt time, aware, taken at the instant of the read."""
     return datetime.now(timezone.utc).isoformat()
+
+
+def _as_list(value):
+    """A list, decoding a JSON-encoded one, or None.
+
+    THE SECOND HALF OF THE SAME DEFECT. The venue delivers `outcomes` and
+    `outcomePrices` as JSON-ENCODED STRINGS:
+
+        "outcomes":      "[\"Arizona Diamondbacks\",\"Colorado Rockies\"]"
+        "outcomePrices": "[\"1\",\"0\"]"
+
+    `_converged_winner` requires a list and rejected them on the isinstance
+    check before reading a number -- so a market whose prices had converged
+    to exactly 1 and 0 came back
+    CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME. The prices were there the
+    whole time. Returns None for anything that is not a list and does not
+    decode to one, so a malformed field still refuses rather than guessing.
+    """
+    if isinstance(value, (list, tuple)):
+        return list(value)
+    if isinstance(value, str):
+        t = value.strip()
+        if t[:1] == "[" and t[-1:] == "]":
+            try:
+                import json as _j
+
+                got = _j.loads(t)
+            except Exception:                                  # noqa: BLE001
+                return None
+            if isinstance(got, list):
+                return got
+    return None
+
+
+def _long_side_price(market):
+    """The price of the side the venue marks `long`, as a float, or None."""
+    _, sides = _first(market, MARKET_SIDES_FIELDS)
+    sides = _as_list(sides)
+    if not sides:
+        return None
+    for sd in sides:
+        if isinstance(sd, dict) and sd.get("long") is True:
+            try:
+                return float(sd.get("price"))
+            except (TypeError, ValueError):
+                return None
+    return None
 
 
 def _first(d: dict, names) -> tuple[str | None, object]:
@@ -345,7 +421,13 @@ def read_settlement(client, market_slug: str) -> dict:
         out["status"] = PENDING if name == "NotFoundError" else UNREADABLE
         return out
 
-    amt = resp.get("settlementPrice")
+    # BY NAME AND BY SHAPE. The declared type is an `Amount` dict; what the
+    # venue sends is a bare number under `settlement`. Both are read, and
+    # the field and shape that supplied the value travel with it so a
+    # consumer can see WHERE the number came from.
+    field, amt = _first(resp, SETTLEMENT_PRICE_FIELDS)
+    out["settlement_field"] = field
+    out["settlement_shape"] = type(amt).__name__ if amt is not None else None
     raw = amt.get("value") if isinstance(amt, dict) else amt
     out["settlement_price_raw"] = str(raw) if raw is not None else None
     out["currency"] = (amt.get("currency") if isinstance(amt, dict)
@@ -398,9 +480,53 @@ def read_resolution(client, market_slug: str) -> dict:
 
     st = read_settlement(client, market_slug)
     if st["status"] == RESOLVED:
+        # ── CORROBORATE THE ORIENTATION, DO NOT ASSUME IT ────────────
+        #
+        # The endpoint returns ONE number. Which side it pays is the whole
+        # question, and this system has already settled a position against
+        # the wrong team once. `marketSides` carries `long` and `price` per
+        # side, so the claim "this value is the LONG side's payout" is
+        # checkable -- and a contradiction REFUSES rather than picking a
+        # winner. An absent `marketSides` is uncorroborated, which is
+        # reported and is not the same as contradicted.
+        corr, long_px = UNCORROBORATED, None
+        try:
+            lst = _markets(client, pmus).list({"slug": [market_slug]})
+            mkts = list((lst or {}).get("markets") or [])
+            if mkts:
+                long_px = _long_side_price(mkts[0])
+        except Exception:                                      # noqa: BLE001
+            long_px = None
+        if long_px is not None:
+            same = abs(long_px - float(st["settlement_price"])) <= 1e-9
+            corr = CORROBORATED if same else CONTRADICTED
+            if not same:
+                return {"reader": READER_VERSION, "slug": market_slug,
+                        "status": UNREADABLE, "outcome": None,
+                        "outcome_field": None, "settled_at": None,
+                        "closed": None, "keys_seen": [],
+                        "settlement_price": None,
+                        "settlement_price_raw": st["settlement_price_raw"],
+                        "long_side_price": long_px,
+                        "corroboration": CONTRADICTED,
+                        "error": "LONG_SIDE_PRICE_CONTRADICTS_THE_SETTLEMENT",
+                        "why": ("the settlement endpoint reports %s and the "
+                                "venue's own long side is priced %s. Which "
+                                "side pays is not established, so nothing "
+                                "is settled"
+                                % (st["settlement_price_raw"], long_px)),
+                        "source": "/v1/markets/{slug}/settlement"}
         return {"reader": READER_VERSION, "slug": market_slug,
                 "status": RESOLVED, "outcome": st["settlement_price_raw"],
-                "outcome_field": "settlementPrice",
+                "outcome_field": st.get("settlement_field"),
+                "settlement_field": st.get("settlement_field"),
+                "settlement_shape": st.get("settlement_shape"),
+                "long_side_price": long_px,
+                "corroboration": corr,
+                "orientation": ("the value is the LONG side's payout per "
+                                "contract. A position held SHORT pays "
+                                "1 - settlement, which the consumer's "
+                                "side_map applies"),
                 "settlement_price": st["settlement_price"],
                 # THE VENUE'S OWN STRING, carried under its own name as
                 # well as under `outcome`. A consumer that wants to record
@@ -457,8 +583,8 @@ def read_resolution(client, market_slug: str) -> dict:
     # 2. A DERIVED outcome: closed, with prices converged to 1 and 0.
     #    Reported separately and NEVER as RESOLVED, because reading a
     #    price as a winner is an inference the venue did not make.
-    labels = _first(m, OUTCOME_LABEL_FIELDS)[1]
-    prices = _first(m, OUTCOME_PRICE_FIELDS)[1]
+    labels = _as_list(_first(m, OUTCOME_LABEL_FIELDS)[1])
+    prices = _as_list(_first(m, OUTCOME_PRICE_FIELDS)[1])
     winner = _converged_winner(labels, prices)
     if winner is not None:
         return dict(out, status=RESOLVED_DERIVED, outcome=winner,

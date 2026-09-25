@@ -3084,13 +3084,20 @@ jobs:
           say "## what the venue returned (HTTP $VC)"
           # THE RAW PAYLOAD FIRST, UNCONDITIONALLY. This is the artifact the
           # investigation turns on; no formatter gets to lose it.
+          # `head -c` KILLED THIS STEP AND I WROTE IT. Under `set -uo pipefail`,
+          # `head` closing the pipe early sends jq SIGPIPE, pipefail takes jq's
+          # non-zero status, and `-e` ends the step -- exit code 2, right after
+          # the raw dump, losing every formatted line that followed. The raw
+          # evidence survived only because it printed first, which is the one
+          # thing that went right. Truncation now happens INSIDE jq, so nothing
+          # closes a pipe on it.
           say "-- raw, per slug --"
-          jq -c '.probes[]?' /tmp/vp.json 2>&1 | head -c 6000 \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.probes[]? | tojson | .[0:6000]' /tmp/vp.json 2>&1 \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
           say "-- which fixtures were picked --"
-          jq -c '.calibration_picks' /tmp/vp.json 2>&1 | head -c 600 \
-            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '.calibration_picks | tojson | .[0:600]' /tmp/vp.json 2>&1 \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
           if [ "$VC" = "200" ]; then
             jq -r 'def n(x): if x == null then "-" else (x|tostring) end;

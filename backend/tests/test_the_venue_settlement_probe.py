@@ -109,29 +109,70 @@ def test_a_converged_price_is_an_inference_and_says_so():
 
 # ── 3 · THE PARSER DEFECT, named rather than reported as absence ─────
 
-def test_a_json_encoded_price_vector_is_named_as_our_gap():
-    """THE CASE THAT WOULD OTHERWISE HIDE. Prices converged to 1 and 0,
-    delivered as a STRING. `_converged_winner` rejects it on isinstance and
-    the reader says CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME -- which
-    reads as the venue reporting nothing, while the numbers are present."""
+def test_a_json_encoded_price_vector_is_now_consumed_not_a_gap():
+    """THE DEFECT THIS TEST WAS WRITTEN FOR IS FIXED, so the assertion
+    changes with it.
+
+    When first written, `_converged_winner` rejected a JSON-encoded price
+    vector on the isinstance check and the reader returned
+    CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME -- and this test asserted
+    that the probe named it as OUR gap. Production then confirmed the venue
+    really does deliver `outcomePrices` as a string
+    (`tests/fixtures/pmus_settled_market_2026_09_24_az_col.json`), so
+    `_as_list` now decodes it and the reader reaches RESOLVED_DERIVED.
+
+    A closed defect must not keep being reported as open, so the probe's
+    `parser_gap` is gated on the reader's own verdict: consumed is not a
+    gap. The inference is still OURS and still not a reported settlement,
+    which is the part that must never drift.
+    """
     c = _Client(market=_market(outcomePrices=json.dumps(["1", "0"])),
                 raises=_NotFoundError("no settlement"))
     got = P.probe(c, SLUG)
-    # THE READER STILL REFUSES, and that refusal is preserved, not hidden.
+    # THE READER NOW CONSUMES IT -- and says so as an inference, not a
+    # reported settlement.
+    assert got["reader_verdict"]["status"] == LR.RESOLVED_DERIVED
+    assert got["terminal_reading"] == P.R_CONVERGED
+    assert got["authoritative_payout_present"] is False
+    assert "OUR INFERENCE" in got["why"]
+    # AND THE PROBE NO LONGER CALLS IT A GAP, because it is not one.
+    gap = got["parser_gap"]
+    assert gap["found"] is False, gap
+    assert gap["reader_status"] == LR.RESOLVED_DERIVED
+    assert "not a gap" in gap["why"]
+    # THE SHAPE IS STILL CAPTURED, so the string delivery stays on record.
+    sh = got["listing"]["payout_candidates"]["outcomePrices"]["shape"]
+    assert sh["type"] == "str" and sh["looks_like_json_encoded"] is True
+
+
+def test_a_decodable_but_unconverged_vector_is_not_a_parser_gap():
+    """A gap means the parser CANNOT consume the field. An unconverged
+    vector was consumed fine; the market simply has not settled."""
+    c = _Client(market=_market(outcomePrices=json.dumps(["0.6", "0.4"])),
+                raises=_NotFoundError("no settlement"))
+    got = P.probe(c, SLUG)
     assert got["reader_verdict"]["status"] == LR.UNREADABLE
-    assert got["reader_verdict"]["error"] == \
-        "CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME"
-    # BUT THE PROBE NAMES IT AS OUR GAP, with the repair and its limit.
+    assert got["parser_gap"]["found"] is False, got["parser_gap"]
+
+
+def test_a_shape_the_decoder_cannot_read_is_named_as_our_gap():
+    """THE MECHANISM IS KEPT, aimed at what it should have meant all along:
+    a payout field present in a shape `_as_list` cannot turn into a list,
+    while the reader refuses, is OUR defect and is named as one."""
+    c = _Client(market=_market(outcomePrices={"Arizona": 1, "Colorado": 0}),
+                raises=_NotFoundError("no settlement"))
+    got = P.probe(c, SLUG)
+    assert got["reader_verdict"]["status"] == LR.UNREADABLE
     gap = got["parser_gap"]
     assert gap["found"] is True, gap
     f = [x for x in gap["fields"] if x["field"] == "outcomePrices"]
     assert f, gap
-    assert f[0]["delivered_as"] == "str"
-    assert f[0]["decoded_len"] == 2
-    assert "isinstance" in gap["why"]
-    # AND THE REPAIR DOES NOT PROMOTE THE ANSWER: decoding yields a
-    # CONVERGED INFERENCE, still not a reported settlement.
-    assert "still not a reported settlement" in gap["what_would_change"]
+    assert f[0]["delivered_as"] == "dict"
+    assert f[0]["decoder"] == "bettor_live_read._as_list"
+    assert "nothing consumes" in gap["why"]
+    # AND THE LIMIT IS STILL STATED: a price vector never becomes a
+    # reported settlement, whatever shape it arrives in.
+    assert "never a reported settlement" in gap["what_would_change"]
 
 
 def test_a_genuinely_absent_field_is_not_called_a_parser_gap():

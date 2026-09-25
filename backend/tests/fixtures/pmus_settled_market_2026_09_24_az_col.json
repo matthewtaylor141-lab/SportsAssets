@@ -1,0 +1,72 @@
+{
+  "_provenance": {
+    "captured_from": "production readback, command-verify run 55, job 108082946649",
+    "captured_at": "2026-09-25T13:08:43.745967+00:00",
+    "slug": "aec-mlb-az-col-2026-09-24",
+    "endpoints": {
+      "settlement": "/v1/markets/{slug}/settlement",
+      "listing": "/v1/markets?slug={slug}"
+    },
+    "why_this_file_exists": "bettor_live_read reported NO_SETTLEMENT_PRICE_IN_RESPONSE and CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME for this market. Both were OUR parser's verdicts. This is what the venue actually returned: an authoritative settlement value under a different key and type, and the price vector as a JSON-encoded string. Trimmed of team logos and ids that carry no settlement meaning; every field the parser reads is verbatim.",
+    "redaction": "no credential appears in either payload; team branding/urls removed for size"
+  },
+  "settlement_response": {
+    "slug": "aec-mlb-az-col-2026-09-24",
+    "settlement": 1
+  },
+  "listing_market": {
+    "id": "977949",
+    "slug": "aec-mlb-az-col-2026-09-24",
+    "question": "Who will win in the upcoming baseball event Arizona Diamondbacks vs Colorado Rockies scheduled for September 24, 2026 at 7:10 PM UTC?",
+    "status": "MARKET_STATUS_RESOLVED",
+    "ep3Status": "SYNCED",
+    "closed": true,
+    "active": false,
+    "archived": false,
+    "hidden": false,
+    "outcomes": "[\"Arizona Diamondbacks\",\"Colorado Rockies\"]",
+    "outcomePrices": "[\"1\",\"0\"]",
+    "marketSides": [
+      {
+        "id": "1955382",
+        "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+        "identifier": "aec-mlb-az-col-2026-09-24",
+        "description": "Arizona Diamondbacks",
+        "price": "1",
+        "marketId": 977949,
+        "long": true,
+        "teamId": 3002,
+        "tradable": true
+      },
+      {
+        "id": "1955383",
+        "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+        "identifier": "aec-mlb-az-col-2026-09-24",
+        "description": "Colorado Rockies",
+        "price": "0",
+        "marketId": 977949,
+        "long": false,
+        "teamId": 3008,
+        "tradable": true
+      }
+    ],
+    "endDate": "2026-09-24T19:10:00Z",
+    "startDate": "2026-09-24T19:10:00Z",
+    "gameStartTime": "2026-09-24T19:10:00Z",
+    "minimumTradeQty": 0.01,
+    "orderPriceMinTickSize": 0.01,
+    "feeCoefficient": 0.0695,
+    "marketType": "SPORTS_V2",
+    "sportsMarketType": "SPORTS_MARKET_TYPE_MONEYLINE",
+    "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_V2_WINNER",
+    "category": "SPORTS",
+    "assetPriceTerms": null,
+    "tags": [],
+    "comboEnabled": false,
+    "manualActivation": false,
+    "createdAt": "2026-09-21T04:00:23Z",
+    "updatedAt": "2026-09-25T02:14:05Z",
+    "ep3SyncedAt": "2026-09-25T02:14:05Z",
+    "description": "This market settles on the final result of the game, including any extra innings. If the game is abandoned or postponed and never completed the market is void and stakes are returned."
+  }
+}
