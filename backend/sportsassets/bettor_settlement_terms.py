@@ -81,9 +81,33 @@ PAY_ON_PARTIAL_WALKOFF = (
 PAY_STAKE_BACK = "RETURNS_THE_STAKE_OR_BASIS_IN_FULL"
 PAY_NO = "RESOLVES_NO_FOR_THE_HELD_SIDE"
 PAY_LATER = "STAYS_OPEN_UNTIL_THE_FIXTURE_IS_COMPLETED"
+#: THE PAYOUT THE VENUE ACTUALLY PUBLISHES, AND IT WAS NOT IN THIS LIST.
+#:
+#: Measured 2026-09-25 against the LIVE listing for three MLB money lines
+#: (aec-mlb-az-col-2026-09-24, aec-mlb-cle-kc-2026-09-25,
+#: aec-mlb-pit-det-2026-09-25), all carrying the same four-sentence rule:
+#:
+#:   "If the game is delayed, postponed, or suspended and not rescheduled
+#:    to a date within two weeks of the originally scheduled date, the
+#:    market will settle to the LAST FAIR MARKET PRICE."
+#:
+#: That is a third thing, and it is neither of the two this module knew. It
+#: is not PAY_STAKE_BACK: the holder is paid the market's last price, which
+#: on a position entered at 0.56 and last trading at 0.20 returns 0.20 --
+#: a loss, where a stake return is whole. And it is not PAY_ON_FINAL or
+#: PAY_ON_PARTIAL: no score decides it at all, only the order book.
+#:
+#: WHY ADDING IT MAKES THE GATE STRICTER, NEVER LOOSER. Until now the
+#: sentence was unreadable, the condition read as venue-SILENT, and the
+#: verdict was UNKNOWN. Read properly it is a payout that DIFFERS from the
+#: bookmaker's stake return for the same condition, so `compare` reports a
+#: MISMATCH and the verdict becomes INCOMPATIBLE. Silence became a stated
+#: disagreement. Nothing is admitted that was not admitted before.
+PAY_LAST_FAIR_MARKET_PRICE = (
+    "PAYS_THE_LAST_FAIR_MARKET_PRICE_OF_THE_CONTRACT_NOT_A_STAKE_RETURN")
 
 PAYOUTS = (PAY_ON_FINAL, PAY_ON_PARTIAL, PAY_ON_PARTIAL_WALKOFF,
-           PAY_STAKE_BACK, PAY_NO, PAY_LATER)
+           PAY_STAKE_BACK, PAY_NO, PAY_LATER, PAY_LAST_FAIR_MARKET_PRICE)
 
 #: WHERE TWO PAYOUT NAMES DESCRIBE THE SAME CASH, PER CONDITION.
 #:
@@ -214,6 +238,16 @@ PAYOUT_PROSE = {
         r"\bbottom\s+half\b[^.;]*\b(?:lead|led|taken\s+the\s+lead)\b",
         r"\bactual\s+score\b",
         r"\bwalk-?off\b"),
+    # BEFORE PAY_STAKE_BACK, AND THE ORDER IS NOT WHY -- `read_terms`
+    # collects every match and refuses a sentence with more than one, so a
+    # sentence saying "void" AND "last fair market price" would state
+    # nothing rather than silently pick one. These patterns are written to
+    # match only the price-settlement wording.
+    PAY_LAST_FAIR_MARKET_PRICE: (
+        r"\blast\s+fair\s+market\s+price\b",
+        r"\blast\s+traded\s+price\b",
+        r"\bsettle[sd]?\s+(?:to\s+)?the\s+(?:then[\s-]*)?"
+        r"(?:current|prevailing)\s+market\s+price\b"),
     PAY_STAKE_BACK: (r"\bvoid\w*", r"\brefund\w*",
                      r"\bstakes?\s+(?:are\s+|will\s+be\s+)?return\w*",
                      r"\bno\s+action\b", r"\bmoney\s+back\b"),

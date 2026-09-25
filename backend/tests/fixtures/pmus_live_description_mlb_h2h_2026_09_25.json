@@ -1,0 +1,15 @@
+{
+  "_what": "THE VENUE'S OWN `description` FIELD, VERBATIM, AS PRODUCTION READ IT.",
+  "_why": "The other MLB fixture in this directory carries a hand-written 183-character description saying the market is VOID with STAKES RETURNED when a game is abandoned. The venue does not say that. These three were captured live on 2026-09-25 through bettor_venue_settlement_probe._terms_read, which reads the same field bettor_live_read.read_rules_text reads in production.",
+  "_captured_at": "2026-09-25T18:03:33Z",
+  "_source": "GET /v1/markets?slug=<slug> :: description",
+  "_evidence": "command-verify run 36170600524, job 108188921560, entry-run recap block 0d",
+  "markets": [
+    {"slug": "aec-mlb-az-col-2026-09-24", "chars": 380,
+     "description": "This market will settle to the winner of the Arizona Diamondbacks vs Colorado Rockies MLB game scheduled for 2026-09-24 at 3:10PM ET. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB."},
+    {"slug": "aec-mlb-cle-kc-2026-09-25", "chars": 381,
+     "description": "This market will settle to the winner of the Cleveland Guardians vs Kansas City Royals MLB game scheduled for 2026-09-25 at 7:40PM ET. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB."},
+    {"slug": "aec-mlb-pit-det-2026-09-25", "chars": 376,
+     "description": "This market will settle to the winner of the Pittsburgh Pirates vs Detroit Tigers MLB game scheduled for 2026-09-25 at 6:40PM ET. Extra innings are included if played. If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price. Outcome sourced from MLB."}
+  ]
+}
