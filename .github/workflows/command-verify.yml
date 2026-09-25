@@ -1152,28 +1152,34 @@ jobs:
       # the moment a position has taken a partial fill. It is deliberately
       # an assertion and not a printout: a printed number nobody compares
       # is how the defect survived a release.
-      - name: RN1X — the SAME position across successive cycles
+      # ITS OWN STEP, BECAUSE A `run:` BLOCK IS CAPPED AT 21,000 CHARS.
+      # Adding the named subjects pushed the successive-cycles body to
+      # 26,265 and GitHub refused to parse the workflow at all. Splitting
+      # it is the fix, and it also separates choosing the subject from
+      # judging it, which is the distinction this whole change is about.
+      - name: RN1X — choose the management subject, and drive the loop
         if: ${{ !cancelled() }}
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          # VIA env, NOT INLINE. A `run:` body containing
+          # `${{ }}` compiles to ONE expression capped at
+          # 21,000 chars; this body is near it. Through
+          # `env:` the script stays a literal.
+          API_URL: ${{ inputs.api }}
         run: |
           set -u
-          API="${{ inputs.api }}"; FAIL=0
+          API="${API_URL:?}"
           [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
           say () { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
           {
-            echo "### One position, successive cycles, sized alternatives"
+            echo "### The management subject, named"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
           if [ -z "${ADMIN_TOKEN:-}" ]; then
-            say "SKIPPED: no ADMIN_TOKEN, the authenticated read is not available here"
+            say "SKIPPED: no ADMIN_TOKEN"
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
           fi
           H="X-Admin-Token: $ADMIN_TOKEN"
-          # THE FILTER IS SERVER-SIDE ON PURPOSE. Newest-first across every
-          # experiment, the historical lane's hundreds of rows push the one
-          # challenger position off a 50-row page -- which run 37 read as
-          # "no challenger position exists" while the row was in the table.
           # ── THE SUBJECTS, NAMED. THIS IS THE DEFECT BEING FIXED ──────
           #
           # WHAT THIS STEP USED TO DO. It took the newest position whose policy
@@ -1311,7 +1317,58 @@ jobs:
               /tmp/mgmt.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
           fi
           
-          # ── AND ONLY NOW THE GATE ────────────────────────────────────
+          
+          # THE HANDOFF. A step's shell variables do not survive into the next
+          # step, so the three subjects and the harness outcome are exported
+          # explicitly. `/tmp/pos.json` and `/tmp/acc_seed.json` persist on the
+          # runner and stay the authoritative copies.
+          { echo "GATE_PID=$PID"
+            echo "GATE_SUBJECT=$SUBJECT"
+            echo "UNSUP_PID=$UNSUP"
+            echo "ARIZONA_PID=$ARIZONA"
+            echo "ACC_SEED_HTTP=$SC"
+            echo "ACC_SEED_STATE=$ACC_STATE"
+          } >> "$GITHUB_ENV"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: RN1X — the SAME position across successive cycles
+        if: ${{ !cancelled() }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          # VIA env, NOT INLINE. A `run:` body containing
+          # `${{ }}` compiles to ONE expression capped at
+          # 21,000 chars; this body is near it. Through
+          # `env:` the script stays a literal.
+          API_URL: ${{ inputs.api }}
+        run: |
+          set -u
+          API="${API_URL:?}"; FAIL=0
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          say () { echo "$*" | tee -a "$GITHUB_STEP_SUMMARY"; }
+          {
+            echo "### One position, successive cycles, sized alternatives"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            say "SKIPPED: no ADMIN_TOKEN, the authenticated read is not available here"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          # THE FILTER IS SERVER-SIDE ON PURPOSE. Newest-first across every
+          # experiment, the historical lane's hundreds of rows push the one
+          # challenger position off a 50-row page -- which run 37 read as
+          # "no challenger position exists" while the row was in the table.
+          # ── THE GATE, ON THE SUBJECT THE PREVIOUS STEP NAMED ─────────
+          #
+          # The subject is read from the environment the chooser exported, so this
+          # step cannot quietly pick a different one -- which is exactly the
+          # failure being fixed.
+          PID="${GATE_PID:-}"
+          UNSUP="${UNSUP_PID:-}"
+          ARIZONA="${ARIZONA_PID:-}"
+          SC="${ACC_SEED_HTTP:-000}"
+          ACC_STATE="${ACC_SEED_STATE:-UNKNOWN}"
+          say "gate subject  ${GATE_SUBJECT:-NONE}  ${PID:-none}"
           if [ -z "$PID" ]; then
             # THE SUBSTITUTION THAT USED TO HAPPEN SILENTLY. With no acceptance
             # subject this step previously fell through to the unsupported
@@ -2073,7 +2130,7 @@ jobs:
           # inputs.api for exactly that reason; these two did not, which is
           # why the acquisition POST 404'd while the /api/command reads in the
           # same step succeeded.
-          API="${{ inputs.api }}"
+          API="${API_URL:?}"
           say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           if [ -z "${ADMIN_TOKEN:-}" ]; then
@@ -2745,154 +2802,6 @@ jobs:
             head -c 300 /tmp/cal.json | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
-          # 4a-bis · THE LEGACY POSITION'S IDENTITY, RE-ESTABLISHED FIRST.
-          #
-          # THE PRODUCTION REFUSAL THIS ADDRESSES, verbatim from the previous
-          # run: THE_ONLY_AVAILABLE_IDENTITY_DESCRIBES_A_DIFFERENT_OUTCOME --
-          # the acceptance position holds 'Arizona Diamondbacks', the two
-          # recorded identities for its condition describe ['Colorado Rockies',
-          # 'None'], and the consumer refused rather than borrow the other
-          # side's slug. That refusal is CORRECT and it occurs BEFORE the venue
-          # is asked anything, so venue settlement stayed untested for this
-          # position.
-          #
-          # The repair re-derives the binding from `premap.resolve` -- asked for
-          # the outcome the GLOBAL CATALOGUE lists at this position's own index
-          # -- cross-checks it five ways, and writes only NULL identity columns.
-          # It never reads `external_valuations`, never touches provenance and
-          # never reseeds: the position stays synthetic, modelled and unfunded.
-          # It runs HERE, immediately before the sweep, so the repair and the
-          # readback are one run against one build.
-          PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
-          say ""
-          say "## legacy identity repair, before the sweep"
-          say "  position\t$PID"
-          
-          # THE DRY RUN FIRST. It resolves and cross-checks and writes nothing,
-          # so the answer is on the record before anything is persisted.
-          : > /tmp/rep0.json
-          C0=$(curl -s -o /tmp/rep0.json -w '%{http_code}' --max-time 120 \
-              -X POST -H "$H" -H 'Content-Type: application/json' \
-              --data "$(jq -nc --arg p "$PID" '{position_id:$p,dry_run:true}')" \
-              "$API/api/admin/rn1x-repair-position-identity" || echo 000)
-          say "-- dry run (HTTP $C0), raw --"
-          head -c 2500 /tmp/rep0.json | tee -a "$GITHUB_STEP_SUMMARY"
-          say ""
-          
-          # THEN THE WRITE. Refused on any disagreement, and a refusal is the
-          # answer -- not a reason to try a looser binding.
-          : > /tmp/rep.json
-          C1=$(curl -s -o /tmp/rep.json -w '%{http_code}' --max-time 120 \
-              -X POST -H "$H" -H 'Content-Type: application/json' \
-              --data "$(jq -nc --arg p "$PID" '{position_id:$p}')" \
-              "$API/api/admin/rn1x-repair-position-identity" || echo 000)
-          say "-- write (HTTP $C1), raw --"
-          head -c 3000 /tmp/rep.json | tee -a "$GITHUB_STEP_SUMMARY"
-          say ""
-          # THE RAW PAYLOAD IS PRINTED ABOVE, UNCONDITIONALLY, BEFORE ANY jq
-          # TOUCHES IT. Four settlement reports were lost to a jq type error
-          # eating a 200 response; the evidence is never only inside the
-          # formatter.
-          if [ "$C1" = "200" ]; then
-            cat > /tmp/rep.jq <<'JQ'
-          def n(x): if x == null then "-" else (x|tostring) end;
-          "ok\t"            + n(.repair.ok)
-                              + "  written " + n(.repair.written)
-                              + "  refusal " + n(.repair.refusal),
-          "why\t"           + n(.repair.why),
-          "held_outcome\t"  + n(.repair.held_outcome)
-                              + "  token " + n(.repair.held_token_id)
-                              + "  index " + n(.repair.outcome_index),
-          "catalogue\t"     + n(.repair.catalogue),
-          "resolver\t"      + n(.repair.resolver),
-          "identity\t"      + n(.repair.identity),
-          "provenance\t"    + n(.repair.provenance)
-                              + "  reseeds " + n(.repair.reseeds)
-                              + "  reads_valuations "
-                              + n(.repair.reads_external_valuations),
-          "-- the cross-checks, each with its own verdict --",
-          ((.repair.cross_checks // {}) | to_entries[]
-            | "  " + .key + "\t" + n(.value.passed) + "\t" + n(.value.why))
-          JQ
-            sed -i 's/^  //' /tmp/rep.jq
-            jq -r -f /tmp/rep.jq /tmp/rep.json 2>/tmp/rep.err \
-              | tee -a "$GITHUB_STEP_SUMMARY" \
-              || { say "THE REPAIR REPORT FAILED TO RENDER -- a reporting"
-                   say "fault, not a finding. The raw payload is above:"
-                   head -c 300 /tmp/rep.err | tee -a "$GITHUB_STEP_SUMMARY"; }
-          else
-            say "THE REPAIR ROUTE DID NOT RETURN 200 -- no identity was"
-            say "written and the sweep below will refuse as it did before."
-          fi
-          
-          # 4a-ter · WHAT THE VENUE ACTUALLY RETURNED, BEFORE WE INTERPRET IT.
-          #
-          # `CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME` and
-          # `NO_SETTLEMENT_PRICE_IN_RESPONSE` are OUR PARSER'S verdicts. I
-          # reported them as the venue's refusal, which is a different claim.
-          # This captures the raw redacted payload from both surfaces -- the
-          # settlement endpoint and the market listing -- with the FIELD TYPES,
-          # for Arizona and for a calibration fixture the outcome join itself
-          # recorded as unreadable. Read-only; nothing is written.
-          #
-          # The types are the half that decides it: `_converged_winner` requires
-          # `outcomePrices` to be a list, so a venue delivering it as a
-          # JSON-encoded STRING would produce exactly this symptom while the
-          # prices sat there unread. The probe names that case as OUR gap, and an
-          # absent field as the payload's. It infers no payout from `closed`,
-          # `resolved` or `settledAt`.
-          : > /tmp/vp.json
-          VC=$(curl -s -o /tmp/vp.json -w '%{http_code}' --max-time 180 \
-              -X POST -H "$H" -H 'Content-Type: application/json' \
-              --data '{"slugs": ["aec-mlb-az-col-2026-09-24"],
-                       "calibration_unreadable": 1}' \
-              "$API/api/admin/venue-settlement-probe" || echo 000)
-          say ""
-          say "## what the venue returned (HTTP $VC)"
-          # THE RAW PAYLOAD FIRST, UNCONDITIONALLY. This is the artifact the
-          # investigation turns on; no formatter gets to lose it.
-          say "-- raw, per slug --"
-          jq -c '.probes[]?' /tmp/vp.json 2>&1 | head -c 6000 \
-            | tee -a "$GITHUB_STEP_SUMMARY"
-          say ""
-          say "-- which fixtures were picked --"
-          jq -c '.calibration_picks' /tmp/vp.json 2>&1 | head -c 600 \
-            | tee -a "$GITHUB_STEP_SUMMARY"
-          say ""
-          if [ "$VC" = "200" ]; then
-            jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
-              (.probes // [])[]
-                | "slug            " + n(.slug),
-                  "  retrieved_at  " + n(.retrieved_at),
-                  "  terminal      " + n(.terminal_reading)
-                    + "  authoritative_payout " + n(.authoritative_payout_present),
-                  "  why           " + n(.why),
-                  "  settlement    " + n(.settlement.endpoint)
-                    + "  err " + n(.settlement.error)
-                    + "  keys " + n(.settlement.top_level_keys),
-                  "  listing       matched " + n(.listing.matched)
-                    + "  err " + n(.listing.error),
-                  "  outcomePrices " + n(.listing.payout_candidates.outcomePrices.shape),
-                  "  outcomes      " + n(.listing.payout_candidates.outcomes.shape),
-                  "  marketSides   " + n(.listing.payout_candidates.marketSides.shape),
-                  "  status        " + n(.listing.payout_candidates.status.value)
-                    + "  closed " + n(.listing.payout_candidates.closed.value),
-                  "  void          " + n(.listing.void_evidence.declared)
-                    + "  field " + n(.listing.void_evidence.field),
-                  "  reader        " + n(.reader_verdict.status)
-                    + "  " + n(.reader_verdict.error),
-                  "  PARSER_GAP    " + n(.parser_gap.found)
-                    + "  " + n(.parser_gap.why),
-                  "  values        " + n(.listing.raw_subset)' \
-              /tmp/vp.json 2>/tmp/vp.err | tee -a "$GITHUB_STEP_SUMMARY" \
-              || { say "THE PROBE REPORT FAILED TO RENDER -- the raw payload is"
-                   say "above and is the authoritative copy:"
-                   head -c 300 /tmp/vp.err | tee -a "$GITHUB_STEP_SUMMARY"; }
-          else
-            say "THE VENUE PROBE DID NOT RETURN 200 -- no conclusion about"
-            say "whether the gap is ours or the payload's."
-          fi
-          
           # 4b · SETTLEMENT FROM THE VENUE'S OWN RESOLUTION.
           # Every open shadow position -- the entry lane's AND the
           # acceptance position -- is asked of the venue. The answer is
@@ -3037,6 +2946,186 @@ jobs:
                      | "  " + .key + "\t" + n(.value))
                  end' /tmp/cx.json 2>/dev/null \
             | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # ITS OWN STEP, AND THAT IS A GITHUB LIMIT NOT A PREFERENCE. A
+      # single `run:` block is compiled as one expression and capped at
+      # 21,000 characters; the entry-run body reached 25,979 and the
+      # workflow stopped parsing entirely. Splitting is the fix. `/tmp`
+      # persists across steps on one runner, so the artifact upload below
+      # still collects /tmp/vp.json.
+      - name: Autonomous entry — repair the legacy identity
+        if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
+        run: |
+          set -uo pipefail
+          [ -n "${ADMIN_TOKEN:-}" ] || { echo "::error::ADMIN_TOKEN unset"; exit 1; }
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # 4a-bis · THE LEGACY POSITION'S IDENTITY, RE-ESTABLISHED FIRST.
+          #
+          # THE PRODUCTION REFUSAL THIS ADDRESSES, verbatim from the previous
+          # run: THE_ONLY_AVAILABLE_IDENTITY_DESCRIBES_A_DIFFERENT_OUTCOME --
+          # the acceptance position holds 'Arizona Diamondbacks', the two
+          # recorded identities for its condition describe ['Colorado Rockies',
+          # 'None'], and the consumer refused rather than borrow the other
+          # side's slug. That refusal is CORRECT and it occurs BEFORE the venue
+          # is asked anything, so venue settlement stayed untested for this
+          # position.
+          #
+          # The repair re-derives the binding from `premap.resolve` -- asked for
+          # the outcome the GLOBAL CATALOGUE lists at this position's own index
+          # -- cross-checks it five ways, and writes only NULL identity columns.
+          # It never reads `external_valuations`, never touches provenance and
+          # never reseeds: the position stays synthetic, modelled and unfunded.
+          # It runs HERE, immediately before the sweep, so the repair and the
+          # readback are one run against one build.
+          PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
+          say ""
+          say "## legacy identity repair, before the sweep"
+          say "  position\t$PID"
+          
+          # THE DRY RUN FIRST. It resolves and cross-checks and writes nothing,
+          # so the answer is on the record before anything is persisted.
+          : > /tmp/rep0.json
+          C0=$(curl -s -o /tmp/rep0.json -w '%{http_code}' --max-time 120 \
+              -X POST -H "$H" -H 'Content-Type: application/json' \
+              --data "$(jq -nc --arg p "$PID" '{position_id:$p,dry_run:true}')" \
+              "$API/api/admin/rn1x-repair-position-identity" || echo 000)
+          say "-- dry run (HTTP $C0), raw --"
+          head -c 2500 /tmp/rep0.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          
+          # THEN THE WRITE. Refused on any disagreement, and a refusal is the
+          # answer -- not a reason to try a looser binding.
+          : > /tmp/rep.json
+          C1=$(curl -s -o /tmp/rep.json -w '%{http_code}' --max-time 120 \
+              -X POST -H "$H" -H 'Content-Type: application/json' \
+              --data "$(jq -nc --arg p "$PID" '{position_id:$p}')" \
+              "$API/api/admin/rn1x-repair-position-identity" || echo 000)
+          say "-- write (HTTP $C1), raw --"
+          head -c 3000 /tmp/rep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          # THE RAW PAYLOAD IS PRINTED ABOVE, UNCONDITIONALLY, BEFORE ANY jq
+          # TOUCHES IT. Four settlement reports were lost to a jq type error
+          # eating a 200 response; the evidence is never only inside the
+          # formatter.
+          if [ "$C1" = "200" ]; then
+            cat > /tmp/rep.jq <<'JQ'
+          def n(x): if x == null then "-" else (x|tostring) end;
+          "ok\t"            + n(.repair.ok)
+                              + "  written " + n(.repair.written)
+                              + "  refusal " + n(.repair.refusal),
+          "why\t"           + n(.repair.why),
+          "held_outcome\t"  + n(.repair.held_outcome)
+                              + "  token " + n(.repair.held_token_id)
+                              + "  index " + n(.repair.outcome_index),
+          "catalogue\t"     + n(.repair.catalogue),
+          "resolver\t"      + n(.repair.resolver),
+          "identity\t"      + n(.repair.identity),
+          "provenance\t"    + n(.repair.provenance)
+                              + "  reseeds " + n(.repair.reseeds)
+                              + "  reads_valuations "
+                              + n(.repair.reads_external_valuations),
+          "-- the cross-checks, each with its own verdict --",
+          ((.repair.cross_checks // {}) | to_entries[]
+            | "  " + .key + "\t" + n(.value.passed) + "\t" + n(.value.why))
+          JQ
+            sed -i 's/^  //' /tmp/rep.jq
+            jq -r -f /tmp/rep.jq /tmp/rep.json 2>/tmp/rep.err \
+              | tee -a "$GITHUB_STEP_SUMMARY" \
+              || { say "THE REPAIR REPORT FAILED TO RENDER -- a reporting"
+                   say "fault, not a finding. The raw payload is above:"
+                   head -c 300 /tmp/rep.err | tee -a "$GITHUB_STEP_SUMMARY"; }
+          else
+            say "THE REPAIR ROUTE DID NOT RETURN 200 -- no identity was"
+            say "written and the sweep below will refuse as it did before."
+          fi
+          
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Autonomous entry — what the venue actually returned
+        if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
+        run: |
+          set -uo pipefail
+          [ -n "${ADMIN_TOKEN:-}" ] || { echo "::error::ADMIN_TOKEN unset"; exit 1; }
+          H="X-Admin-Token: $ADMIN_TOKEN"
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # 4a-ter · WHAT THE VENUE ACTUALLY RETURNED, BEFORE WE INTERPRET IT.
+          #
+          # `CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME` and
+          # `NO_SETTLEMENT_PRICE_IN_RESPONSE` are OUR PARSER'S verdicts. I
+          # reported them as the venue's refusal, which is a different claim.
+          # This captures the raw redacted payload from both surfaces -- the
+          # settlement endpoint and the market listing -- with the FIELD TYPES,
+          # for Arizona and for a calibration fixture the outcome join itself
+          # recorded as unreadable. Read-only; nothing is written.
+          #
+          # The types are the half that decides it: `_converged_winner` requires
+          # `outcomePrices` to be a list, so a venue delivering it as a
+          # JSON-encoded STRING would produce exactly this symptom while the
+          # prices sat there unread. The probe names that case as OUR gap, and an
+          # absent field as the payload's. It infers no payout from `closed`,
+          # `resolved` or `settledAt`.
+          : > /tmp/vp.json
+          VC=$(curl -s -o /tmp/vp.json -w '%{http_code}' --max-time 180 \
+              -X POST -H "$H" -H 'Content-Type: application/json' \
+              --data '{"slugs": ["aec-mlb-az-col-2026-09-24"],
+                       "calibration_unreadable": 1}' \
+              "$API/api/admin/venue-settlement-probe" || echo 000)
+          say ""
+          say "## what the venue returned (HTTP $VC)"
+          # THE RAW PAYLOAD FIRST, UNCONDITIONALLY. This is the artifact the
+          # investigation turns on; no formatter gets to lose it.
+          say "-- raw, per slug --"
+          jq -c '.probes[]?' /tmp/vp.json 2>&1 | head -c 6000 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- which fixtures were picked --"
+          jq -c '.calibration_picks' /tmp/vp.json 2>&1 | head -c 600 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          if [ "$VC" = "200" ]; then
+            jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+              (.probes // [])[]
+                | "slug            " + n(.slug),
+                  "  retrieved_at  " + n(.retrieved_at),
+                  "  terminal      " + n(.terminal_reading)
+                    + "  authoritative_payout " + n(.authoritative_payout_present),
+                  "  why           " + n(.why),
+                  "  settlement    " + n(.settlement.endpoint)
+                    + "  err " + n(.settlement.error)
+                    + "  keys " + n(.settlement.top_level_keys),
+                  "  listing       matched " + n(.listing.matched)
+                    + "  err " + n(.listing.error),
+                  "  outcomePrices " + n(.listing.payout_candidates.outcomePrices.shape),
+                  "  outcomes      " + n(.listing.payout_candidates.outcomes.shape),
+                  "  marketSides   " + n(.listing.payout_candidates.marketSides.shape),
+                  "  status        " + n(.listing.payout_candidates.status.value)
+                    + "  closed " + n(.listing.payout_candidates.closed.value),
+                  "  void          " + n(.listing.void_evidence.declared)
+                    + "  field " + n(.listing.void_evidence.field),
+                  "  reader        " + n(.reader_verdict.status)
+                    + "  " + n(.reader_verdict.error),
+                  "  PARSER_GAP    " + n(.parser_gap.found)
+                    + "  " + n(.parser_gap.why),
+                  "  values        " + n(.listing.raw_subset)' \
+              /tmp/vp.json 2>/tmp/vp.err | tee -a "$GITHUB_STEP_SUMMARY" \
+              || { say "THE PROBE REPORT FAILED TO RENDER -- the raw payload is"
+                   say "above and is the authoritative copy:"
+                   head -c 300 /tmp/vp.err | tee -a "$GITHUB_STEP_SUMMARY"; }
+          else
+            say "THE VENUE PROBE DID NOT RETURN 200 -- no conclusion about"
+            say "whether the gap is ours or the payload's."
+          fi
+          
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       # THE RAW PAYLOADS, SEPARATELY RETRIEVABLE. Every formatted report

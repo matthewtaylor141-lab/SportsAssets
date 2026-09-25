@@ -50,7 +50,64 @@ LIMIT = 512_000
 # down.
 MIN_HEADROOM = 32_768
 
+#: GitHub caps a single EXPRESSION at 21,000 characters, and a `run:` body
+#: that contains `${{ ... }}` is compiled into ONE expression -- a
+#: `format()` whose template is the entire script. So the cap applies to the
+#: whole body, and exceeding it fails the file with "Exceeded max expression
+#: length 21000": the YAML parses, the size guard passes, and the workflow
+#: simply will not start.
+#:
+#: IT APPLIES ONLY TO INTERPOLATED BODIES, AND I GOT THAT WRONG FIRST. A
+#: body with no `${{ }}` is a plain literal, not an expression, and is not
+#: capped: `render-ops.yml` carries a 500,669-character step and dispatches
+#: fine, as does `engine-diagnostic.yml` at 158,244. Flagging those would
+#: have been a false alarm on the release lever itself. The check therefore
+#: keys on the presence of an interpolation, which is the thing that turns a
+#: script into an expression.
+#:
+#: MEASURED 2026-09-25. Adding named subjects to the successive-cycles step
+#: took its interpolated body to 26,265 characters and every dispatch was
+#: refused. The file was nowhere near 512,000 bytes, so the size guard above
+#: saw nothing. The cheapest permanent fix for a body near the cap is to
+#: move its `${{ }}` into `env:`, which takes it out of the expression
+#: regime entirely.
+RUN_LIMIT = 21_000
+RUN_MIN_HEADROOM = 2_048
+
 WORKFLOW_DIR = os.path.join(".github", "workflows")
+
+
+def check_run_lengths(path: str, doc) -> list[str]:
+    """Every `run:` body against GitHub's per-expression cap."""
+    bad: list[str] = []
+    if not isinstance(doc, dict):
+        return bad
+    for jname, job in (doc.get("jobs") or {}).items():
+        if not isinstance(job, dict):
+            continue
+        for i, st in enumerate(job.get("steps") or []):
+            if not isinstance(st, dict):
+                continue
+            body = st.get("run")
+            if not isinstance(body, str):
+                continue
+            # NOT AN EXPRESSION, NOT CAPPED. See the note on RUN_LIMIT.
+            if "${{" not in body:
+                continue
+            n = len(body)
+            label = "job %r step %d (%s)" % (jname, i + 1,
+                                             st.get("name") or "unnamed")
+            if n >= RUN_LIMIT:
+                bad.append("%s: interpolated run body is %d chars, OVER "
+                           "the %d-char expression cap by %d. GitHub "
+                           "refuses to parse the whole workflow."
+                           % (label, n, RUN_LIMIT, n - RUN_LIMIT))
+            elif RUN_LIMIT - n < RUN_MIN_HEADROOM:
+                bad.append("%s: interpolated run body is %d chars, only "
+                           "%d under the %d-char cap. Move its ${{ }} into "
+                           "`env:` or split the step."
+                           % (label, n, RUN_LIMIT - n, RUN_LIMIT))
+    return bad
 
 
 def _iter_workflows(root: str):
@@ -186,6 +243,7 @@ def main(argv: list[str]) -> int:
         if doc is not None:
             problems += check_structure(path, doc)
             problems += check_shell(path, doc)
+            problems += check_run_lengths(path, doc)
         n = os.path.getsize(path)
         rows.append((name, n, LIMIT - n, "FAIL" if problems else "ok"))
         if problems:

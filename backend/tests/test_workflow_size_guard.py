@@ -154,3 +154,89 @@ def test_the_whole_repository_passes():
     """The guard is only a control if it is green on what is committed."""
     rc, out = _run(REPO)
     assert rc == 0, out
+
+
+# ── THE PER-STEP EXPRESSION CAP, ADDED 2026-09-25 ────────────────────
+#
+# A `run:` body containing `${{ ... }}` is compiled into ONE expression --
+# a `format()` whose template is the whole script -- and GitHub caps a
+# single expression at 21,000 characters. Exceeding it fails the file with
+# "Exceeded max expression length 21000". The YAML parses. The size guard
+# passes. The workflow does not start. That happened to command-verify.yml
+# at 26,265 characters, and nothing in this file caught it.
+#
+# THE SECOND TEST IS THE ONE THAT MATTERS, and it is the mistake I made
+# first: a body with NO interpolation is a plain literal and is NOT capped.
+# render-ops.yml carries a 500,669-character step and dispatches fine. A
+# checker that flagged it would have been a false alarm on the release
+# lever, which is how a guard becomes something people switch off.
+
+_BIG = "          echo %s\n" % ("x" * 200)
+
+
+def _interpolated(chars):
+    body = '          API="${{ inputs.api }}"\n' + _BIG * (chars // 210)
+    return """
+name: t
+on:
+  workflow_dispatch:
+    inputs:
+      api: {description: a, required: false, default: ''}
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: big
+        run: |
+%s""" % body
+
+
+def test_an_interpolated_run_body_over_the_expression_cap_fails(tmp_path):
+    rc, out = _run(_tree(tmp_path, "big.yml", _interpolated(30_000)))
+    assert rc == 1, out
+    assert "expression cap" in out
+    assert "21000" in out
+
+
+def test_an_interpolated_body_near_the_cap_also_fails(tmp_path):
+    """Headroom, for the same reason the byte guard uses headroom: a step
+    1,000 characters under the cap is pending, not passing."""
+    rc, out = _run(_tree(tmp_path, "near.yml", _interpolated(20_200)))
+    assert rc == 1, out
+    assert "under the" in out
+    assert "env:" in out, "the message must name the cheap fix"
+
+
+def test_a_long_body_with_no_interpolation_is_not_flagged(tmp_path):
+    """THE FALSE ALARM THIS AVOIDS. No `${{ }}` means no expression, so no
+    cap. render-ops.yml is exactly this shape and works."""
+    body = """
+name: t
+on:
+  workflow_dispatch:
+jobs:
+  j:
+    runs-on: ubuntu-latest
+    steps:
+      - name: big
+        run: |
+%s""" % (_BIG * 400)
+    rc, out = _run(_tree(tmp_path, "literal.yml", body))
+    assert rc == 0, out
+    assert "expression cap" not in out
+
+
+def test_the_real_render_ops_step_is_not_flagged_by_the_expression_cap():
+    """A guard that failed the release lever would be turned off, and then
+    it would not be a guard at all. render-ops's step is half a megabyte
+    and carries no interpolation, so it is out of scope by construction."""
+    import yaml as _y
+
+    with open(os.path.join(REPO, ".github", "workflows",
+                           "render-ops.yml")) as fh:
+        doc = _y.safe_load(fh)
+    step = doc["jobs"]["ops"]["steps"][0]
+    assert len(step["run"]) > 400_000
+    assert "${{" not in step["run"], (
+        "if render-ops ever interpolates inside its script it will exceed "
+        "the expression cap and stop dispatching")
