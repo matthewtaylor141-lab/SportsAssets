@@ -2409,6 +2409,35 @@ jobs:
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      # THE MANAGEMENT RECORD, LAST, SO IT IS AT THE TAIL.
+      #
+      # WHY THIS EXISTS AND IT IS NOT DECORATION. The step-19/20 verdict is
+      # produced in the middle of a ~1400-line job log, and the only
+      # programmatic way I can read a finished job is its TAIL. So the
+      # verdict was retrievable by a human in the browser and not by me,
+      # which is how I ended up reporting around it instead of from it. This
+      # re-prints the SAME evidence file the artifact carries -- it computes
+      # nothing and can reach no new conclusion.
+      - name: The management record, in one block
+        if: always()
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo "### THE MANAGEMENT RECORD (step 19/20 evidence, verbatim)" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ -s /tmp/s19.txt ]; then
+            # THE WHOLE FILE IF IT FITS, TAIL IF NOT, and which one is said.
+            B=$(wc -c < /tmp/s19.txt)
+            say "-- /tmp/s19.txt, $B bytes --"
+            [ "$B" -gt 6000 ] && say "(tail 6000 bytes; the artifact has all)"
+            tail -c 6000 /tmp/s19.txt | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            say "MISSING /tmp/s19.txt -- the management steps did not reach"
+            say "the point of writing evidence. That is not a verdict."
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
   # ── THE BOOKMAKER'S PUBLISHED TERMS, RETRIEVED VERBATIM ────────────
   #
   # WHY IT IS A JOB AND NOT A STEP. Its log has to be readable on its own:
@@ -3339,9 +3368,72 @@ jobs:
           say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
           echo "### THE OPERATING RESULT" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          for f in arm ee cx pnl; do
+          for f in arm ee cx pnl rep0 rep st vp; do
             [ -s "/tmp/$f.json" ] || say "MISSING /tmp/$f.json -- the lines it feeds are absent, not zero"
           done
+          say "-- 0a · the legacy identity, BEFORE (dry run, wrote nothing) --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            .repair as $r
+            | "  held_outcome " + n($r.held_outcome)
+              + "  index " + n($r.outcome_index)
+              + "  token " + n($r.held_token_id),
+              "  identity_as_read " + n($r.identity_before // $r.identity),
+              "  catalogue " + n($r.catalogue),
+              "  resolver  " + n($r.resolver),
+              "  ok " + n($r.ok) + "  written " + n($r.written)
+                + "  refusal " + n($r.refusal),
+              "  why " + n($r.why)' \
+            /tmp/rep0.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- 0b · the legacy identity, AFTER (the write) --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            .repair as $r
+            | "  ok " + n($r.ok) + "  written " + n($r.written)
+              + "  refusal " + n($r.refusal),
+              "  identity " + n($r.identity),
+              "  derivation catalogue=" + n($r.catalogue)
+                + "  resolver=" + n($r.resolver),
+              "  provenance " + n($r.provenance)
+                + "  reseeds " + n($r.reseeds)
+                + "  reads_valuations " + n($r.reads_valuations),
+              "  why " + n($r.why)' \
+            /tmp/rep.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- 0c · settlement from the venue, per open position --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            "  examined " + n(.settlement.examined)
+              + "  settled " + n(.settlement.settled)
+              + "  void " + n(.settlement.void)
+              + "  already " + n(.settlement.already)
+              + "  unresolved " + n(.settlement.unresolved)
+              + "  errors " + n(.settlement.errors),
+            "  by_status " + n(.settlement.by_status),
+            ((.settlement.results // [])[]
+              | "  " + n(.position_id),
+                "     slug " + n(.us_market_slug)
+                  + "  venue " + n(.venue_status) + "/" + n(.venue_class)
+                  + "  read " + n(.settlement_read),
+                "     STATUS " + n(.status) + "  written " + n(.written)
+                  + "  net " + n(.accounting.net_usd)
+                  + "  cash " + n(.accounting.realized_cash_usd)
+                  + "  residual " + n(.accounting.residual_qty),
+                "     why " + n(.why))' \
+            /tmp/st.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- 0d · the venue's own settlement prose, as read live --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            (.probes // [])[]
+            | "  " + n(.slug) + "  field " + n(.settlement_terms.field)
+                + "  chars " + n(.settlement_terms.chars)
+                + "  truncated " + n(.settlement_terms.truncated),
+              "     STATED     " + n(.settlement_terms.stated),
+              "     NOT STATED " + n(.settlement_terms.not_stated),
+              "     conflicts  " + n(.settlement_terms.contradicted)
+                + "  sentences " + n(.settlement_terms.sentences),
+              "     unused     " + n(.settlement_terms.unused_evidence),
+              "     prose      " + n(.settlement_terms.text)' \
+            /tmp/vp.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
           say "-- 1 · the research lane's arming --"
           jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
             "  authorised        " + n(.authorised.authorised)
@@ -3370,7 +3462,18 @@ jobs:
                     | unique),
               "  waiver_refusals    "
                 + n([$c[] | (.risk_verdict.research_waiver.refusals // [])[]]
-                    | unique)' \
+                    | unique),
+              # WHY A ZERO ABOVE IS NOT SELF-EXPLANATORY, and the last run
+              # left me guessing. A candidate that never reached the gate has
+              # NO risk section at all, and a row written before this build
+              # has a risk section with no waiver key. Those are different
+              # facts from "the lane was not armed", so they are counted.
+              "  risk_section_present " + n([$c[]
+                  | select(.risk_verdict != null)] | length)
+                + "   with_a_waiver_key " + n([$c[]
+                  | select(.risk_verdict.research_waiver != null)] | length),
+              "  newest_candidate " + n([$c[] | .decided_at // .observed_at]
+                  | max)' \
             /tmp/ee.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
           say "-- 3 · where each refused candidate stopped (windowed) --"
@@ -3380,7 +3483,26 @@ jobs:
               + n(.summary_in_window.refused) + " refused"
               + "   reconciles " + n(.stages.reconciles_with_window),
             ((.stages.by_first_stage // {}) | to_entries[]
-              | "  " + .key + "  " + n(.value))' \
+              | "  " + .key + "  " + n(.value)),
+            # THE DISTINCTION THAT MUST NOT BE LOST: a candidate refused
+            # before stage 5 was never priced, so its empty walk is the
+            # ABSENCE of a measurement. Only `negative_edge_with_a_walk`
+            # supports any statement about depth; `without_a_walk` is a
+            # negative edge at the observed best ask and says nothing
+            # about the rest of the book.
+            "  reached_execution_estimate "
+              + n(.stages.reached_execution_estimate)
+              + "   walk_took_levels " + n(.stages.walk_took_levels),
+            "  negative_edge_WITH_a_walk    "
+              + n(.stages.negative_edge_with_a_walk)
+              + "   (measured against walked depth)",
+            "  negative_edge_WITHOUT_a_walk "
+              + n(.stages.negative_edge_without_a_walk)
+              + "   (top of book only)",
+            "  never_priced_at_all          "
+              + n([(.stages.by_first_stage // {}) | to_entries[]
+                    | select(.key | test("^[1-4]_")) | .value] | add // 0)
+              + "   (refused before 5_EXECUTION_ESTIMATE)"' \
             /tmp/cx.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
           say "-- 4 · what this lane HOLDS, by provenance --"
@@ -3403,6 +3525,30 @@ jobs:
                   + "  total " + n(.value.total_pnl_usd)
                   + "  marked " + n(.value.unrealised.marked_positions)
                   + "/unmarked " + n(.value.unrealised.unmarked_positions))' \
+            /tmp/pnl.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          # ── 6 · MANAGEMENT EVIDENCE, ON ITS OWN EVIDENCE ─────────────
+          #
+          # THE CONFLATION THIS PREVENTS. A successful terminal-settlement
+          # read proves LIFECYCLE CLOSURE: the venue was asked, the answer
+          # was authoritative, the accounting was written and the exposure
+          # released. It proves NOTHING about recurring management, because
+          # settlement is one event and management is a repeated decision
+          # with its own observed inputs. The two are reported apart, and
+          # `with_observed_runtime_decision` is the only number that speaks
+          # to the second one.
+          say "-- 6 · recurring MANAGEMENT evidence (not settlement) --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            .statuses.prospective_rn1_management as $P
+            | "  positions " + n($P.positions)
+              + "   with_observed_runtime_decision "
+              + n($P.with_observed_runtime_decision),
+              "  by_decision_basis " + n($P.by_decision_basis),
+              "  legacy_backdated_and_reclassified "
+                + n($P.legacy_backdated_and_reclassified),
+              "  newest_decision_ts " + n($P.newest_decision_ts),
+              "  badge " + n($P.badge) + "  producing " + n($P.producing),
+              "  why " + n($P.why)' \
             /tmp/pnl.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
