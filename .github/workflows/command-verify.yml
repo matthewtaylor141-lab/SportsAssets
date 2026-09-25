@@ -2709,6 +2709,16 @@ jobs:
           # matched 25 of those 618 lines, all order-entry pages, because it
           # only knew content vocabulary. Finding the settlement pages needs
           # the path words too.
+          # SOCCER TERMS TOO, and their absence was a real gap.
+          #
+          # This extractor is how our OWN side of the settlement comparison
+          # gets established affirmatively, and its vocabulary was
+          # baseball-only. So the bookmaker's soccer grading section was
+          # never captured, `BOOK_TERMS` has no soccer entry, and every
+          # soccer comparison could only return UNKNOWN -- which is NOT the
+          # same as incompatible, and must not be reported as though it
+          # were. These words are what the publisher uses for the soccer
+          # conditions that apply to a 3-way money line.
           KEYS = re.compile(
               r"(?i)\b(baseball|innings?|money\s*line|moneyline|graded|"
               r"grading|void|refund|no\s+action|suspend\w*|postpon\w*|"
@@ -2716,7 +2726,12 @@ jobs:
               r"order\s+of\s+precedence|precedence|live\b|pre-?game|"
               r"playoff|extra\s+innings|listed\s+pitcher|resumed?|"
               r"settle\w*|resolv\w*|resolut\w*|rules?|faqs?|terms|"
-              r"glossar\w*|sports?|mlb|contract\w*)\b")
+              r"glossar\w*|sports?|mlb|contract\w*|"
+              r"soccer|football|full[\s-]?time|90\s*minutes?|"
+              r"regulation\s+time|stoppage|injury\s+time|extra\s+time|"
+              r"penalt\w*|shoot[\s-]?out|draw|aggregate|replay\w*|"
+              r"neutral\s+venue|behind\s+closed\s+doors|"
+              r"venue\s+change|fixture)\b")
           hits = [n for n, ln in enumerate(lines) if KEYS.search(ln)]
           keep = set()
           for n in hits:
