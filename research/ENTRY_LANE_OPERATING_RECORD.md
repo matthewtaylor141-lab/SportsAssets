@@ -148,16 +148,21 @@ cached one that already existed — a parallel implementation spending a
 paced request per candidate per cycle on a string that does not change.
 Deleted.
 
-### The three prices, kept apart
+### The prices, kept apart, each with exactly one consumer
 
-| | what it is |
-|---|---|
-| `submitted_limit` | what the order would be sent with: the break-even the belief implies. Nothing is taken above it. |
-| `vwap` | what the quantity actually cost, volume weighted. An **outcome** of the walk, never a limit. |
-| `levels_taken` | per-level price, quantity and cost, so the two above can be checked against the book. One fill row per level, each with the fee charged at that price. |
+| | what it is | who reads it |
+|---|---|---|
+| `submitted_limit` | the break-even the belief implies: `fair_value − fee`. Nothing is taken above it. | the ORDER record |
+| `acquisition_cost_per_contract` (= `vwap`) | what the quantity actually cost, volume weighted. An **outcome** of the walk, never a limit. | the ECONOMIC comparison — the gate's edge |
+| `fee_per_contract_realised` | the per-level fees actually charged, summed and divided by the quantity filled | the same comparison, on both sides of it |
+| `worst_case_cost_per_contract` (= the limit) | deliberately the worst case: nothing fills above the limit, so reserving there reserves the most the order could consume | the EXPOSURE reservation |
+| `levels_taken` | per-level price, quantity and cost, so all of the above can be checked against the book. One fill row per level, each with the fee charged at that price. | the fills, and any recheck |
 
 The writer refuses outright if the submitted limit is below the VWAP: the
 two did not then come from the same walk.
+
+Each row records which price it used: `executable_price_basis`,
+`cost_per_contract_basis`, and `exposure.proposed_cost_basis`.
 
 ### The three write cases
 
@@ -167,6 +172,91 @@ two did not then come from the same walk.
 | `EXACT_REPLAY_OF_A_RECORDED_OBSERVATION` | nothing written, reported as a replay rather than as a write that changed nothing |
 | `NEW_QUOTE_ON_AN_ALREADY_HELD_EXPOSURE` | refused. It is an ADD: it changes average cost and size, re-opens the market-exposure rail against the combined position, and needs its own basis for the second tranche |
 | `ADD_TO_AN_EXISTING_POSITION` | `ADD_SUPPORTED = False` — off rather than absent, so the refusal has a name to look up |
+
+---
+
+## 4c · A second review, of `85469ab`, found four more
+
+All four were real. Each is stated with what it would have done, and each
+is now pinned by a test built from the review's own counterexample.
+
+| # | defect | what it did, or would have |
+|---|---|---|
+| 1 | `_entry_plan` returned `ask = est["limit_price"]` — the SUBMITTED limit — and `evaluate` labelled it `VWAP_OF_THE_SIZED_WALK` | the limit is by construction `fair_value − fee`, so the gate's edge was zero less rounding and every candidate refused. **Reproduced**: probability .75, observed VWAP .625, fee .03125 → gate saw .71875, edge −0.00495; the walked cost gives +0.09. This accounts for run 48's 159 `NO_ACTION_HAS_POSITIVE_NET_EDGE` refusals as *arithmetic*, not a market fact |
+| 2 | `join_outcomes` read the venue's YES settlement through `payout_is_complement` | that flag describes the PROBABILITY's source event and is `false` on this lane even when the exposure is the venue's SHORT side. A YES settling at 1, held short, was recorded as outcome 1 while the exposure paid 0 — exactly wrong on every short leg |
+| 2b | `RESOLVED_DERIVED` returns a NAMED winner; `float()` on it raises | the caller recorded `None`, which was written as VOID, permanently, for a fixture that had resolved |
+| 2c | a void was inferred from any nonbinary value, and recorded as `outcome_known` with a NULL outcome | migration 103's CHECK forbids that, so the write raised and was counted as an error — voids were re-read every run forever, and the comment claiming otherwise was wrong |
+| 3 | the calibration evaluator admitted evidence that did not support its claim | it returned PASSED for 300 forecasts all saying .60 on fixtures that won 90% of the time (Brier .18 under a .24 ceiling, while a constant .90 scores .09; `beats_base_rate` was `false` and was ignored), and counted 150 fixtures represented by both complementary payouts as 300 "unique events" |
+| 4 | the lifecycle test INSERTed into `rn1x_outcomes` and asserted what it had written | nothing in production created an outcome for an entry-lane position. `manage_open_position` returns SETTLE with `settled=None`, because the challenger's settlement input is the ranking pipeline's observed-payout dict, which this lane never populates |
+
+### Two conversions, and they are not one flag
+
+| conversion | question | applied |
+|---|---|---|
+| PROBABILITY | is the de-vig's source event the complement of the payout event? | once, in `bettor_external_shadow.evaluate`, at decision time. By the time a row is written, `probability` already describes the payout event |
+| SETTLEMENT | is the exposure we hold the venue's LONG side or its SHORT side? | once, at the join and at settlement, from `buy_intent` / `ladder_side` — which must agree, or the identity is refused |
+
+`outcome_from_settlement` is the single mapper, used by BOTH the
+calibration join and the settlement consumer, so the two cannot disagree.
+
+### Four kinds of "no outcome", kept apart
+
+| class | written? |
+|---|---|
+| a settled 0/1 (`VENUE_SETTLEMENT_PRICE` / `VENUE_REPORTED_OUTCOME`) | the outcome, with its basis and the side map used |
+| `CONFIRMED_VOID` — the venue's own endpoint, a parseable price, neither side | the basis only; `outcome_known` stays false, because a void has no 0/1 truth |
+| `VENUE_NAMED_A_WINNER_NOT_A_PRICE` | nothing. The attempt is stamped so the read queue does not starve |
+| `INFERRED_FROM_CONVERGED_PRICES_NOT_VENUE_SETTLEMENT` | nothing. The venue reported no winner; this is our inference from a price |
+| `SETTLEMENT_VALUE_UNPARSEABLE`, `VENUE_SIDE_IDENTITY_NOT_ESTABLISHED` | nothing |
+
+`outcome_basis IS NOT NULL` is one condition doing two jobs: it is the
+join queue's exit condition and the calibration scope's entry condition.
+
+### The audit of what the previous release joined
+
+Migration 118 reopens every `external_valuations` row whose outcome was
+set while the complement mapping was in force: the prior value and
+timestamp are preserved verbatim in `outcome_audit`, the outcome is
+cleared so the corrected mapper re-reads the venue, and the row stays out
+of calibration until a basis is recorded for it. `classify` also treats
+any 0/1 without a recognised basis as `UNVERIFIED_OUTCOME_PROVENANCE`, so
+the exclusion does not depend on the migration having run.
+
+---
+
+## 4d · Settlement, by production code
+
+`bettor_entry_settlement` is the consumer that closes an entry-lane
+position. One transport boundary, everything else production code.
+
+| step | what |
+|---|---|
+| read | `GET /v1/markets/{slug}/settlement` via `bettor_live_read.read_resolution` — the venue's own answer |
+| map | `outcome_from_settlement`, the same venue-side identity the calibration join uses |
+| account | payout, realised cash, fees, residual closed to zero, net. `NET = REALIZED_CASH − COST_BASIS_INCLUDING_FEES` |
+| write | `rn1x_outcomes`, **exactly once**: `ON CONFLICT DO NOTHING`, and a settled position is no longer in the open query at all, so a second pass across a restart does not even re-read the venue |
+| release exposure | by that row alone. `exposure_from_rows` excludes any position whose `realized_net_usd` is non-NULL — one fact, one place, no second write |
+
+**It needs no bookmaker odds, and the test proves it by making the odds
+fetch raise.** A finished contract's value is the venue's settlement
+price. Requiring a live quote to settle a market that is already over is
+the defect that left a finished fixture carried as open inventory.
+
+**MLB "Final" settles nothing.** It establishes that a game ended. It does
+not establish that this venue settled this contract, or that it settled it
+under rules compatible with the captured terms. So the venue is what is
+asked — for the entry lane's positions and for the **acceptance position**
+alike, both swept by `run_continuing_management` on every cycle, including
+cycles with no new candidates.
+
+Nothing is reseeded. A settlement is a row *beside* the position; the
+acceptance position's synthetic, modelled, unfunded provenance is neither
+read nor rewritten here.
+
+A void returns the stake and **states** its one assumption: whether the
+venue refunds its fee on a voided market is not in the captured terms, so
+the conservative reading is taken and named
+(`FEES_ASSUMED_NOT_RETURNED_...`), not hidden.
 
 ---
 
@@ -192,21 +282,46 @@ declares, before any data is read:
 | | |
 |---|---|
 | scope | source version, de-vig method, sport families, market |
-| point in time | the probability **recorded** at decision time, and per unique event the **first** one — never the last, the best, or an average, which would be choosing among a source's own revisions after seeing which way the event went |
-| unique event | one observation per (event, payout event). A source quoted every fifteen minutes for six hours produces twenty-four rows about one coin flip |
-| resolved / void / unresolved | only resolved events are scored; void and unresolved are excluded **and counted**, because a measurement that dropped them silently would hide how much of the record it could not use |
-| metric | BRIER — proper, so it cannot be improved by shading a probability away from the honest one |
-| acceptance | Brier ≤ 0.24 **and** ≥ 300 resolved unique events, both required, with the 0.25 no-skill benchmark stated beside the ceiling |
+| point in time | the probability **recorded** at decision time, and per fixture the **first** one — never the last, the best, or an average, which would be choosing among a source's own revisions after seeing which way the event went |
+| independent unit | one observation per **FIXTURE**. A source quoted every fifteen minutes for six hours produces twenty-four rows about one coin flip, and the two sides of a two-way market are two statements about the same coin flip. Neither adds a degree of freedom |
+| outcome classes | RESOLVED / VOID / UNRESOLVED / **UNVERIFIED**. Only RESOLVED is scored, and RESOLVED requires the venue's own settlement provenance on the row. All four counts are reported |
+| baseline | a constant forecast fitted on the chronologically **earliest third** of resolved fixtures, which are then **excluded from scoring**. Fixed without any evaluation outcome, by construction |
+| metric | BRIER — proper, so it cannot be improved by shading a probability away from the honest one — reported **with its standard error** |
+| acceptance | **four** conditions, all required: ≥ 300 independent evaluation fixtures; Brier ≤ 0.24; a paired improvement over the held-out baseline whose 95% interval excludes zero; and an expected calibration error ≤ 0.05 |
 | reproducible | the result carries its inputs' hash |
+
+**What the evaluator returns that is not the verdict**, because these are
+three different questions:
+
+| | |
+|---|---|
+| predictive score | the Brier, with Murphy's decomposition into reliability − resolution + uncertainty |
+| calibration | the binned reliability table, its expected calibration error and its worst bin gap. A Brier can be respectable while every stated probability is wrong |
+| trading profitability | **not measured here.** It is a function of acquisition cost, per-level fees, fill probability and size, none of which is an input to this measurement. It is the entry lane's question and a separate verdict |
+
+**"300 events and ≤ .24" is a declared policy threshold, not proof of
+calibration**, and the declaration says so. 0.25 is the score of a constant
+0.50 forecast — exactly, for any outcome set — and nothing more; it is
+**not** the no-skill floor of an arbitrary market, which is why it is
+labelled `THE_SCORE_OF_A_CONSTANT_0.50_FORECAST_NOT_A_UNIVERSAL_NO_SKILL_FLOOR`
+and is never a criterion. On a book of heavy favourites the no-skill score
+is far lower, and that is exactly how the previous evaluator passed 300
+forecasts of .60 on fixtures that won 90% of the time.
+
+Holding out a baseline costs sample, and the cost is stated rather than
+avoided: `total_resolved_fixtures_required` is 450, because one in three is
+spent fitting and never scored.
 
 **The input did not exist before this release.** `JOIN_OUTCOME` had been in
 migration 103 since the beginning with no caller, so `outcome_known` was
 false on every row ever written and the measurement had an empty input by
 construction. `join_outcomes` now runs every cycle, bounded, through the
-venue resolution reader. A short leg is scored against the **complement**
-— the venue's settlement price is about its own YES side, and scoring the
-raw price would be exactly wrong on half the sample. A price that is
-neither 0 nor 1 is a **void**, not a fractional outcome.
+venue resolution reader. A short leg is scored against **one minus** the
+venue's settlement price, mapped through the verified venue-side identity
+(§4c) and not through the probability's complement flag. A price the
+venue's own settlement endpoint returns that is neither 0 nor 1 is a
+**confirmed void**; a name, an inference from converged prices and an
+unparseable value are three other things and stay three other things.
 
 **A shortfall is a result and is not written.** `to_row` refuses to produce
 a row from anything that is not a completed verdict, so an insufficient
@@ -239,6 +354,23 @@ the four writes.
 | a second cycle holds **one** position and **one** order | ✅ |
 | an INCOMPATIBLE settlement rule creates no inventory | ✅ |
 | an unreadable ladder and a ladder priced beyond break-even refuse by **different** names | ✅ |
+| the gate's edge is computed on the **walked cost** with the **realised per-level fees**, the ORDER carries the submitted limit, the reservation carries the worst case, and all three are different numbers on the same row | ✅ |
+| two scheduled management cycles, restart recovery, and the same position throughout | ✅ |
+| **settlement by production code**: the only thing supplied is `client.markets.settlement(slug)`; production reads it, maps it, closes the residual, writes the outcome and releases the rails | ✅ |
+| settlement asked the venue **once**, for the contract this position holds, with the odds fetch rigged to raise | ✅ |
+| a second pass, on a new connection, does not re-read the venue, does not write a second row and does not change `written_at` | ✅ |
+
+### The review's own counterexamples, as tests
+
+| counterexample | result |
+|---|---|
+| probability .75, VWAP .625, fee .03125 → the gate must see .625 and admit, not .71875 and refuse | ✅ |
+| venue YES settles 1, exposure held SHORT → outcome 0, and the accounting loses the whole basis | ✅ |
+| 300 forecasts all .60 where 90% won → FAILED on `beats_the_held_out_baseline` **and** `calibration_error_at_or_below`, with the .24 ceiling genuinely cleared | ✅ |
+| 150 fixtures represented by both payouts → 150 fixtures, 300 payout statements, INSUFFICIENT | ✅ |
+| `RESOLVED_DERIVED` with a named winner → not a void, not an outcome, nothing written | ✅ |
+| an outcome with no recorded basis → `UNVERIFIED_OUTCOME_PROVENANCE`, excluded from calibration | ✅ |
+| migration 118 reopens a row joined by the uncorrected mapping, preserves `prior outcome=1`, and the corrected mapper returns 0 | ✅ |
 
 ### Production
 
@@ -260,6 +392,20 @@ Filled in from the dispatched run — see the run table at the end.
 | the market title fallback took only the first non-empty of `title`/`event_title` | the binding was refused on exactly the markets the route exists for |
 | `input_chain` arrives as a JSON string | `jq` exited 5 and truncated the evidence print mid-decision, which read as a finding |
 | a settled position stayed in the exposure sums | exposure accumulates forever and eventually refuses every entry on a flat book |
+| `read_resolution` carried the venue's raw settlement string only under `outcome`, which holds a label on another branch | a consumer recording "what the venue said" recorded our float reading of it instead, losing the unit convention the raw string carries |
+| recording a void as `outcome_known` with a NULL outcome violates migration 103's CHECK | the write raised, was counted as an error, and the void was re-read every run forever |
+| a handful of fixtures the venue reports only as a named winner would occupy the whole per-run join budget, ordered by `decided_at` | every later fixture starved. The queue is now ordered by when the venue was last asked, never-asked first |
+
+### Not ours, but a hazard on the release route itself
+
+`render-ops.yml` is **511,578 bytes** against GitHub's 512,000-byte
+workflow ceiling — 422 bytes of headroom. `tests/test_workflow_size_guard.py`
+fails on it (2 tests), and it failed before this batch; nothing here
+touched that file. It matters because `render-ops` **is** the API-only
+release route: one ordinary added comment would push it over and GitHub
+would refuse to load the workflow at all, leaving no deploy path. It needs
+splitting, and that is its own change rather than something to fold into a
+correctness batch.
 
 ---
 
