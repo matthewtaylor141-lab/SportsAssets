@@ -2440,8 +2440,26 @@ jobs:
 
           URLS="https://www.pinnacle.com/en/future/betting-rules
           https://support.pinnacle.com/hc/en-us/articles/47846444668177-How-bets-are-graded-at-Pinnacle"
-          if [ -n "${EXTRA:-}" ]; then URLS="$URLS
-          $EXTRA"; fi
+          # SEVERAL EXTRAS IN ONE RUN, comma separated.
+          #
+          # WHY THIS CHANGED. The binding blocker on the entry lane is the
+          # VENUE side of the settlement comparison, not the bookmaker's:
+          # VOID_ABANDONMENT_RULE_NOT_ESTABLISHED is carried by all 464
+          # candidates evaluated in 24 hours, Pinnacle's baseball h2h terms
+          # ARE captured, and `compare` returns COMPATIBLE only when every
+          # applicable condition is stated by BOTH sides. Seven conditions
+          # apply to a money line; the only venue prose we hold is the
+          # listing's 380-character `description`, which states one.
+          #
+          # Finding out whether the venue publishes a per-condition document
+          # means trying several candidate URLs, and one-at-a-time meant one
+          # dispatch per guess. A 404 is a real answer to "does the venue
+          # publish this" and is recorded as one, so asking for ten answers
+          # at once is the same evidence, cheaper.
+          if [ -n "${EXTRA:-}" ]; then
+            for U in ${EXTRA//,/ }; do URLS="$URLS
+          $U"; done
+          fi
 
           i=0
           printf '%s\n' "$URLS" | while read -r U; do
