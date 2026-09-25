@@ -235,7 +235,43 @@ that a live candidate would clear the gate.
 
 ---
 
-## 5 · A defect in the test suite that made me misreport to you
+## 5 · Regression attribution, against a real baseline
+
+The earlier comparison was invalid: I ran the *same modified tree* from two
+directories and called it a baseline. It was not. This is the real one.
+
+| | Pre-change `25cd967` | Post-change `730dcaa` |
+|---|---|---|
+| Tree | git worktree at that commit | working tree |
+| Database | `rn1xbase` (own, migrated) | `rn1xtest` |
+| Invocation | `backend/`, `pytest tests/ -q --tb=no` | identical |
+| Result | **447 failed, 11,809 passed** | **446 failed, 11,842 passed** |
+
+Diffing the failure identities:
+
+- **441 failures are common to both.** Pre-existing, untouched by anything
+  in this work, and not attributable to it.
+- **7 fixed** — the four `TestTheEvidenceWorkflowIsTheReservation` cases and
+  the two `TestTheMigrationSaysWhatTheCodeRelies_on` cases that the path
+  anchoring resolved, plus `test_rn1x_model_loop`.
+- **6 differ in the other direction**, all source-inspection tests on
+  `ext_pinnacle_loop` and its neighbours:
+  `test_payout_event_is_priced_once`,
+  `test_payout_identity_is_not_read_off_the_intent`,
+  `test_settlement_attestation` (×2),
+  `test_standby_does_not_erase_the_writer`,
+  `test_venue_native_identity`.
+
+**All six pass in isolation** — 42/42 when their files are run together. So
+they are not straightforward breakage from the edits. Whether they are
+order- or state-dependent under full-suite conditions is being settled by a
+repeat post-change run under identical conditions; if the same six reappear
+they are deterministic and I will fix them rather than explain them.
+
+Note the pre-change run passed 11,809 and the post-change run 11,842: +33,
+consistent with the new tests added, and the failure count moved by 1.
+
+## 6 · The path-family defect that made me misreport to you
 
 Tests read repository files by relative path in **four** mutually
 incompatible families:
