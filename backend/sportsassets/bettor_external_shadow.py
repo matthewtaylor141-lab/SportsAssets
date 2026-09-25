@@ -653,6 +653,43 @@ def first_stage(refusals) -> str | None:
     return min(hits, key=lambda n: STAGE_ORDER.index(n))
 
 
+#: WHAT THE SETTLEMENT COMPARISON ACTUALLY RETURNED, COUNTED.
+#:
+#: WHY A COUNT AND NOT A SAMPLE. The per-candidate evidence read returns 25
+#: rows; the question "does ANY supported market have a compatible payoff"
+#: is about the whole window. Silence (UNKNOWN) and a stated conflict
+#: (INCOMPATIBLE) are different answers with different remedies -- more
+#: reading fixes one and nothing fixes the other -- so they are counted
+#: apart, together with which conditions carried the conflict.
+#: ONE ROW PER VERDICT. No join, no unnest -- a row must be counted once.
+#: (The first version of this unnested `mismatched_conditions` in the same
+#: query, which counts a row with two mismatched conditions twice. The
+#: conditions are asked for separately below.)
+SETTLEMENT_COVERAGE = """
+    SELECT coalesce(settlement_comparison::jsonb ->> 'compatibility',
+                    'NOT_RECORDED') AS verdict,
+           count(*) AS n,
+           count(*) FILTER (WHERE admissible) AS admissible,
+           count(DISTINCT us_market_slug) AS slugs
+      FROM external_valuations
+     WHERE experiment_id = $1
+       AND decided_at >= now() - ($2 || ' hours')::interval
+     GROUP BY 1 ORDER BY 2 DESC
+"""
+
+#: WHICH conditions carried a conflict, and on how many rows. Separate, so
+#: neither number distorts the other.
+SETTLEMENT_MISMATCHES = """
+    SELECT m AS condition, count(*) AS rows_carrying_it
+      FROM external_valuations ev,
+           LATERAL jsonb_array_elements_text(
+             coalesce(ev.settlement_comparison::jsonb
+                        -> 'mismatched_conditions', '[]'::jsonb)) AS m
+     WHERE ev.experiment_id = $1
+       AND ev.decided_at >= now() - ($2 || ' hours')::interval
+     GROUP BY 1 ORDER BY 2 DESC
+"""
+
 #: Per-candidate stage attribution, with the two facts that decide whether
 #: "no profitable depth" is even sayable about a row: did the execution
 #: estimate SUCCEED, and did a walk actually take levels.
@@ -755,6 +792,35 @@ async def census(conn, *, hours: int = 24) -> dict:
             "sourced independently -- never one derived from the other"),
         "credential": credential_present(),
     }
+    # ── DOES ANY SUPPORTED MARKET HAVE A COMPARABLE PAYOFF? ──────────
+    # Counted over the whole window rather than sampled, because "none"
+    # is the answer that matters and a 25-row sample cannot establish it.
+    try:
+        cov = await conn.fetch(SETTLEMENT_COVERAGE, EXPERIMENT_ID,
+                               str(int(hours)))
+        mis = await conn.fetch(SETTLEMENT_MISMATCHES, EXPERIMENT_ID,
+                               str(int(hours)))
+        out["settlement_coverage"] = {
+            "by_verdict": {r["verdict"]: {"rows": int(r["n"]),
+                                          "admissible": int(r["admissible"]),
+                                          "distinct_slugs": int(r["slugs"])}
+                           for r in cov},
+            "mismatched_conditions": {r["condition"]:
+                                      int(r["rows_carrying_it"])
+                                      for r in mis},
+            "compatible_rows": sum(int(r["n"]) for r in cov
+                                   if r["verdict"] == "COMPATIBLE"),
+            "reading": (
+                "COMPATIBLE means every applicable condition is stated by "
+                "BOTH sides and pays the same. INCOMPATIBLE means at least "
+                "one is stated by both and differs -- more reading cannot "
+                "fix that one. UNKNOWN means somebody is silent. A count of "
+                "zero COMPATIBLE rows over the window is the measured "
+                "answer to whether a tradable payoff exists here"),
+        }
+    except Exception as exc:                                   # noqa: BLE001
+        out["settlement_coverage"] = {"computed": False,
+                                      "error": type(exc).__name__}
     try:
         srows = await conn.fetch(STAGE_CENSUS, EXPERIMENT_ID,
                                  str(int(hours)))

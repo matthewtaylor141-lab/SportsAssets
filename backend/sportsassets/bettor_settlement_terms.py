@@ -174,6 +174,86 @@ COMPATIBLE = "COMPATIBLE"
 INCOMPATIBLE = "INCOMPATIBLE"
 UNKNOWN = "UNKNOWN"
 
+# ── WHAT TRIGGERS A RULE IS NOT THE SAME QUESTION AS WHAT IT PAYS ────
+#
+# THE ERROR THIS EXISTS TO STOP, AND I MADE IT. `CONDITIONS` are named for
+# what happened to the FIXTURE ("postponed or abandoned and never
+# completed"). Neither published side conditions its rule on that. They
+# condition it on a CLOCK, and on two different clocks:
+#
+#   BOOK  "If a fixture isn't started 12 hours after its scheduled starting
+#          time all bets on that fixture will be voided."
+#          -> variable: hours between scheduled start and actual start
+#
+#   VENUE "If the game is delayed, postponed, or suspended and not
+#          rescheduled to a date within two weeks of the originally
+#          scheduled date, the market will settle to the last fair market
+#          price."
+#          -> variable: whether a make-up date exists inside two weeks
+#
+# A payout comparison that ignores this reports "the same condition, two
+# payouts" when the two sides are not describing the same set of games. So
+# the qualifier is READ, recorded per condition, and a mismatch says which
+# part of the condition it was established on.
+V_TRIGGERS_IDENTICAL = "BOTH_SIDES_CONDITION_ON_THE_SAME_TRIGGER"
+V_TRIGGERS_DIFFER = "THE_TWO_SIDES_CONDITION_ON_DIFFERENT_TRIGGERS"
+V_TRIGGER_UNQUALIFIED = "NEITHER_SIDE_STATES_A_TRIGGER_QUALIFIER"
+M_ON_THE_INTERSECTION = (
+    "ESTABLISHED_ON_THE_NON_EMPTY_INTERSECTION_OF_TWO_DIFFERENT_TRIGGERS")
+
+#: Qualifier phrases that scope a rule to a clock or a threshold. Read from
+#: the SAME sentence that states the payout -- a window mentioned elsewhere
+#: in the document scopes nothing here.
+TRIGGER_QUALIFIER_PROSE = {
+    "A_MAKE_UP_DATE_INSIDE_A_NAMED_WINDOW": (
+        r"\brescheduled\b[^.;]*\bwithin\b",
+        r"\bnot\s+rescheduled\b",
+        r"\bwithin\s+two\s+weeks\b",
+        r"\bwithin\s+\d+\s+(?:days?|weeks?)\b"),
+    "HOURS_FROM_THE_SCHEDULED_START": (
+        r"\b\d+\s+hours?\b[^.;]*\b(?:scheduled|first\s+pitch|start)\b",
+        r"\b(?:scheduled|first\s+pitch|start)\w*\b[^.;]*\b\d+\s+hours?\b",
+        r"\bisn'?t\s+started\b"),
+    "A_MINIMUM_NUMBER_OF_INNINGS": (
+        r"\b(?:at\s+least|fewer\s+than|less\s+than|before)\s+"
+        r"(?:five|5|4\.5|four\s+and\s+a\s+half|eight|8|8\.5|nine|9)\b",
+        r"\bhave\s+action\s+as\s+long\s+as\b"),
+}
+
+#: THE BOOK'S OWN TRIGGER, DECLARED FROM ITS CITED QUOTE, NOT INFERRED.
+#: Filled only for the conditions whose captured quote states a clock. The
+#: value is the qualifier name above plus the window as the publisher wrote
+#: it, so a comparison can say the two windows differ without either being
+#: restated in this module's own words.
+BOOK_TRIGGER_WINDOWS = {
+    C_NOT_PLAYED: {"qualifier": "HOURS_FROM_THE_SCHEDULED_START",
+                   "window_as_published": "12 hours after its scheduled "
+                                          "starting time",
+                   "from_quote": "general rule"},
+    C_SUSPENDED_RESUMED: {"qualifier": "HOURS_FROM_THE_SCHEDULED_START",
+                          "window_as_published": "more than 12 hours from "
+                                                 "the first pitch",
+                          "from_quote": "rule 7"},
+    C_SUSPENDED_BEYOND: {"qualifier": "HOURS_FROM_THE_SCHEDULED_START",
+                         "window_as_published": "more than 12 hours from "
+                                                "the first pitch",
+                         "from_quote": "rule 7"},
+    C_CALLED_FINAL: {"qualifier": "A_MINIMUM_NUMBER_OF_INNINGS",
+                     "window_as_published": "at least 5 innings (or 4.5 if "
+                                            "the Home team is winning)",
+                     "from_quote": "rule 3"},
+    C_STOPPED_EARLY: {"qualifier": "A_MINIMUM_NUMBER_OF_INNINGS",
+                      "window_as_published": "at least 5 innings (or 4.5 if "
+                                             "the Home team is winning)",
+                      "from_quote": "rule 3"},
+}
+
+
+def trigger_qualifiers(sentence: str) -> list:
+    """Every declared qualifier this sentence states. Pure."""
+    return sorted(name for name, pats in TRIGGER_QUALIFIER_PROSE.items()
+                  if any(re.search(p, sentence or "", re.I) for p in pats))
+
 
 def same_payout(condition, a, b) -> bool:
     """Do these two payout classes deliver the same cash UNDER `condition`?"""
@@ -284,7 +364,7 @@ def read_terms(prose: str) -> dict:
     a sentence naming TWO payouts for one condition establishes nothing
     either -- two readings of one sentence are not one rule.
     """
-    found, evidence = {}, {}
+    found, evidence, quals = {}, {}, {}
     for sent in sentences(prose):
         conds = [c for c, pats in CONDITION_PROSE.items()
                  if any(re.search(p, sent) for p in pats)]
@@ -310,6 +390,11 @@ def read_terms(prose: str) -> dict:
         for c in conds:
             evidence.setdefault(c, []).append(
                 {"sentence": sent, "payouts_matched": pays, "used": True})
+            # WHAT SCOPES THIS RULE, from the same sentence that states it.
+            # A window read from a different sentence would scope nothing.
+            q = trigger_qualifiers(sent)
+            if q:
+                quals[c] = {"qualifiers": q, "from_sentence": sent}
             if c in found and found[c] != pays[0]:
                 # Two sentences giving one condition two different payouts.
                 found[c] = None
@@ -318,6 +403,11 @@ def read_terms(prose: str) -> dict:
     return {"terms": {k: v for k, v in found.items() if v},
             "contradicted": sorted(k for k, v in found.items() if v is None),
             "evidence": evidence,
+            # THE TRIGGER, KEPT BESIDE THE PAYOUT. Two sides can state the
+            # same payout for a condition and still not be comparable, if
+            # each conditions it on a different clock.
+            "trigger_qualifiers": {k: v for k, v in quals.items()
+                                   if k in found and found[k]},
             "read": bool(str(prose or "").strip()),
             "scoping": ("a payout counts for a condition only when one "
                         "sentence states both, so a shared word elsewhere "
@@ -824,7 +914,33 @@ def book_terms(*, sport_family, market="h2h", context=None, phase=None,
 
 # ── the comparison ───────────────────────────────────────────────────
 
-def compare(*, book: dict, venue: dict, conditions=None) -> dict:
+def _trigger_record(condition, venue_trigger) -> dict:
+    """Both sides' trigger qualifiers for one condition, and whether they
+    are the same variable. Pure, and it decides nothing about payouts."""
+    bk = dict(BOOK_TRIGGER_WINDOWS.get(condition) or {})
+    vq = list((venue_trigger or {}).get("qualifiers") or [])
+    out = {"book_qualifier": bk.get("qualifier"),
+           "book_window_as_published": bk.get("window_as_published"),
+           "book_from_quote": bk.get("from_quote"),
+           "venue_qualifiers": vq,
+           "venue_from_sentence": (venue_trigger or {}).get("from_sentence")}
+    if not bk.get("qualifier") and not vq:
+        out["alignment"] = V_TRIGGER_UNQUALIFIED
+    elif bk.get("qualifier") and vq == [bk["qualifier"]]:
+        out["alignment"] = V_TRIGGERS_IDENTICAL
+    else:
+        out["alignment"] = V_TRIGGERS_DIFFER
+        out["why"] = (
+            "the book conditions this rule on %r and the venue's sentence "
+            "states %s. A rule keyed to a different variable does not "
+            "describe the same set of games"
+            % (bk.get("qualifier") or "no stated qualifier",
+               vq or "no stated qualifier"))
+    return out
+
+
+def compare(*, book: dict, venue: dict, conditions=None,
+            venue_triggers=None) -> dict:
     """Per-condition compatibility of two term sets.
 
     `book` and `venue` are `{condition: payout}` (the book side may carry
@@ -849,6 +965,9 @@ def compare(*, book: dict, venue: dict, conditions=None) -> dict:
             ok = same_payout(cond, bp, vp)
             per[cond] = {"verdict": (V_MATCH if ok else V_MISMATCH),
                          "book_payout": bp, "venue_payout": vp}
+            # THE TRIGGER, BESIDE THE PAYOUT, WHETHER OR NOT THEY AGREE.
+            per[cond]["trigger"] = _trigger_record(
+                cond, (venue_triggers or {}).get(cond))
             if not ok:
                 mismatched.append(cond)
                 per[cond]["why"] = (
@@ -856,6 +975,17 @@ def compare(*, book: dict, venue: dict, conditions=None) -> dict:
                     "are different cash outcomes for the same fixture state, "
                     "so a probability of the book's event does not price the "
                     "venue's contract" % (cond, bp, vp))
+                if per[cond]["trigger"]["alignment"] == V_TRIGGERS_DIFFER:
+                    # AND THE SCOPE OF THE MISMATCH IS STATED, because the
+                    # two sides are not describing the same set of games.
+                    # The conflict is real where both triggers hold; it is
+                    # NOT established where only one does.
+                    per[cond]["mismatch_scope"] = M_ON_THE_INTERSECTION
+                    per[cond]["what_is_not_established"] = (
+                        "what either side pays where only ITS OWN trigger "
+                        "holds. The book's window and the venue's window "
+                        "are different variables, so the region between "
+                        "them is unresolved rather than agreed")
         elif bp or vp:
             per[cond] = {"verdict": (V_VENUE_SILENT if bp else V_BOOK_SILENT),
                          "book_payout": bp, "venue_payout": vp}
@@ -870,6 +1000,9 @@ def compare(*, book: dict, venue: dict, conditions=None) -> dict:
             "mismatched_conditions": mismatched,
             "unstated_conditions": silent,
             "compared_on": "CONDITION_TO_PAYOUT",
+            "trigger_alignment": {
+                c: (per[c].get("trigger") or {}).get("alignment")
+                for c in per if per[c].get("trigger")},
             "not_compared_on": ("shared vocabulary. A payout phrase counts "
                                "only for the condition stated in the same "
                                "sentence"),
@@ -914,7 +1047,8 @@ def compare_prose(*, sport_family, market="h2h", venue_prose="",
                 "why": ("no applicable condition set is declared for "
                         "%s/%s, so which terminal cases arise is itself "
                         "unknown" % (sport_family, market))}
-    cmp_ = compare(book=bk, venue=read["terms"], conditions=conds)
+    cmp_ = compare(book=bk, venue=read["terms"], conditions=conds,
+                   venue_triggers=read.get("trigger_qualifiers"))
     cmp_.update(venue_read=read, book_terms_held=bool(bk),
                 applicable_conditions=list(conds),
                 quote_context=ctx,

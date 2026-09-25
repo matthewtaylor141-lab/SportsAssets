@@ -78,6 +78,87 @@ LABEL = ("EXTERNAL BOOKMAKER VALUATION. A sharp book's own de-vigged price, "
          "not a trained proprietary model, not an internally qualified "
          "settlement model, and not validated against the venue price")
 
+# ── WHAT THIS NUMBER IS A PROBABILITY *OF*, AND WHAT IT CANNOT PRICE ──
+#
+# THE ASSUMPTION THIS MAKES EXPLICIT, BECAUSE IT WAS BEING MADE SILENTLY.
+#
+# A de-vigged Pinnacle money line is P(team wins | THE BET HAS ACTION). The
+# book's own published rule says so: "If a fixture isn't started 12 hours
+# after its scheduled starting time all bets on that fixture will be
+# voided." A voided bet is removed from the sample -- it is not a loss and
+# not a win, so the price carries no information about how often that
+# happens and none about what it would be worth.
+#
+# The venue contract does NOT void. Measured live on 2026-09-25 across
+# three MLB money lines, it says: "If the game is delayed, postponed, or
+# suspended and not rescheduled to a date within two weeks of the
+# originally scheduled date, the market will settle to the LAST FAIR MARKET
+# PRICE." The holder is paid a number produced by the order book, at a time
+# nobody can name in advance.
+#
+# So the contract's value is
+#
+#     V = P(A) * P(win | A) + P(not A) * E[last fair market price | not A]
+#
+# and this source supplies exactly ONE of those four quantities. Using it
+# alone as V is the same arithmetic as asserting P(not A) = 0 -- which is
+# an assumption about weather, scheduling and venue behaviour that nothing
+# in this repository has measured.
+#
+# NOTHING HERE SUPPLIES THE MISSING TERMS AND NOTHING HERE ESTIMATES THEM.
+# An estimate would be a fabrication with a plausible shape. The three ways
+# forward are named instead, and each is a capability, not an adjustment.
+PROBABILITY_IS_CONDITIONAL_ON = (
+    "THE_BOOKMAKERS_BET_HAVING_ACTION_UNDER_ITS_OWN_PUBLISHED_RULE")
+
+#: The terms a price-settled branch needs before this source can value a
+#: contract that has one. Each entry is HELD or MISSING, measured.
+PRICING_A_PRICE_SETTLED_CONTRACT_REQUIRES = {
+    "P_win_given_action": {
+        "state": "HELD",
+        "supplied_by": "this module, from the book's de-vigged price"},
+    "P_the_price_settlement_branch_fires": {
+        "state": "MISSING",
+        "what_it_is": ("the probability that a game is delayed, postponed "
+                       "or suspended AND no make-up date falls inside the "
+                       "venue's two-week window"),
+        "why_not_held": ("no feed in this repository reports postponements, "
+                         "make-up scheduling or the venue's own handling of "
+                         "them, and the bookmaker price cannot contain it "
+                         "because the book voids those bets out of its "
+                         "sample")},
+    "E_last_fair_market_price_given_that_branch": {
+        "state": "MISSING",
+        "what_it_is": ("the expected settlement price, which is whatever "
+                       "the venue's order book last printed -- a function "
+                       "of that book's state at an unknown future instant, "
+                       "not of the game"),
+        "why_not_held": ("it is not a sports-outcome quantity at all. No "
+                         "win probability from any book can imply it")},
+    "the_two_windows_are_the_same_variable": {
+        "state": "MISSING",
+        "what_it_is": ("the book triggers on hours from the scheduled "
+                       "start; the venue triggers on whether a make-up date "
+                       "exists within two weeks"),
+        "why_not_held": ("different variables, so even the region where "
+                         "both rules fire has to be established rather "
+                         "than assumed. See bettor_settlement_terms."
+                         "BOOK_TRIGGER_WINDOWS")},
+}
+
+#: The only three ways this becomes priceable. None of them is an
+#: adjustment factor applied to the current number.
+WAYS_FORWARD = (
+    "A_SUPPORTED_MODEL_OF_THE_ALTERNATIVE_OUTCOMES: measure P(branch) and "
+    "E[price | branch] from evidence, declare them as their own inputs, and "
+    "let the gate refuse until both are qualified",
+    "A_REFERENCE_SOURCE_WHOSE_OWN_RULE_MATCHES_THE_VENUES: a book that "
+    "settles a postponed fixture the way this venue does, so the price is "
+    "a probability of the same payout",
+    "A_MARKET_OR_VENUE_WHOSE_PAYOFF_IS_SCORE_ONLY: a contract with no "
+    "price-settled branch, where P(win | action) IS the value",
+)
+
 #: The de-vig methods, declared. `power` is the default because
 #: edge/fairvalue/devig.py records that the reference account's calibration
 #: signature (edge at 5-10c AND 30-50c AND 75-90c simultaneously) is
@@ -483,4 +564,15 @@ def describe() -> dict:
         "refusals": list(REFUSALS),
         "coverage_measured_at": "2026-09-23T23:28:56Z",
         "coverage_evidence": "feed-coverage run 35933793563",
+        # WHAT THE NUMBER IS CONDITIONAL ON, on every describe() a consumer
+        # reads. A price used as a contract value without these terms is
+        # asserting the missing ones are zero.
+        "probability_is_conditional_on": PROBABILITY_IS_CONDITIONAL_ON,
+        "pricing_a_price_settled_contract_requires":
+            {k: v["state"] for k, v in
+             PRICING_A_PRICE_SETTLED_CONTRACT_REQUIRES.items()},
+        "missing_terms": sorted(
+            k for k, v in PRICING_A_PRICE_SETTLED_CONTRACT_REQUIRES.items()
+            if v["state"] == "MISSING"),
+        "ways_forward": list(WAYS_FORWARD),
     }

@@ -2420,12 +2420,59 @@ jobs:
       # nothing and can reach no new conclusion.
       - name: The management record, in one block
         if: always()
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API_URL: ${{ inputs.api }}
         run: |
           set -uo pipefail
           say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
           echo "### THE MANAGEMENT RECORD (step 19/20 evidence, verbatim)" \
             >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # ── EVERY ACCEPTANCE-POLICY POSITION, BY EXACT ID ────────────
+          #
+          # THE CONFUSION THIS ENDS, AND I CAUSED IT. The identity repair is
+          # hardcoded to the ARIZONA position while the settlement sweep and
+          # the step-19 gate act on whichever position the acceptance
+          # harness most recently adopted. Two different ids under one
+          # policy, reported as though they were one holding. Both are read
+          # here, by id, through the same authenticated route -- so
+          # "examined" and "excluded" are statements about named rows.
+          A="${API_URL:-https://sportsassets-api.onrender.com}"
+          if [ -n "${ADMIN_TOKEN:-}" ]; then
+            for P in "${ARIZONA_PID:-}" "${GATE_PID:-}"; do
+              [ -n "$P" ] || continue
+              say ""
+              say "-- position $P"
+              C=$(curl -sS --max-time 60 -o /tmp/pid.json -w '%{http_code}' \
+                    -H "X-Admin-Token: $ADMIN_TOKEN" \
+                    "$A/api/command/rn1x/input-chain/$P" || echo 000)
+              say "   input-chain HTTP $C"
+              jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+                .position as $p
+                | "   found " + n(.found)
+                    + "  policy " + n($p.policy)
+                    + "  provenance " + n($p.provenance),
+                  "   condition " + n($p.condition_id)
+                    + "  outcome_index " + n($p.outcome_index),
+                  "   qty " + n($p.qty) + "  filled " + n($p.filled_qty)
+                    + "  residual " + n($p.residual_qty)
+                    + "  basis " + n($p.cost_basis_usd),
+                  "   terminal " + n(.terminal)
+                    + "  open_to_management " + n(.open_to_management)
+                    + "  settled " + n($p.settled)
+                    + "  net " + n($p.net_usd),
+                  "   venue_identity " + n($p.venue_identity // $p.identity)' \
+                /tmp/pid.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+              say "   raw head:"
+              jq -c '{found, terminal, open_to_management, position}' \
+                /tmp/pid.json 2>&1 | head -c 1200 \
+                | tee -a "$GITHUB_STEP_SUMMARY" || true
+              say ""
+            done
+          else
+            say "NO ADMIN_TOKEN -- the per-id reconciliation is absent, not empty"
+          fi
           if [ -s /tmp/s19.txt ]; then
             # THE WHOLE FILE IF IT FITS, TAIL IF NOT, and which one is said.
             B=$(wc -c < /tmp/s19.txt)
@@ -3504,6 +3551,23 @@ jobs:
                     | select(.key | test("^[1-4]_")) | .value] | add // 0)
               + "   (refused before 5_EXECUTION_ESTIMATE)"' \
             /tmp/cx.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          # THE COVERAGE QUESTION, COUNTED OVER THE WHOLE WINDOW. Does ANY
+          # supported market have a payoff this source can price? A 25-row
+          # sample cannot answer "none", so the census counts every row.
+          say "-- 3b · settlement coverage, over the window --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            .settlement_coverage as $S
+            | if ($S.computed == false) then
+                "  NOT COMPUTED: " + n($S.error)
+              else
+                "  COMPATIBLE rows " + n($S.compatible_rows),
+                (($S.by_verdict // {}) | to_entries[]
+                  | "  " + .key + "  rows " + n(.value.rows)
+                    + "  admissible " + n(.value.admissible)
+                    + "  distinct_slugs " + n(.value.distinct_slugs)),
+                "  conflicting conditions " + n($S.mismatched_conditions)
+              end' /tmp/cx.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
           say "-- 4 · what this lane HOLDS, by provenance --"
           jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
