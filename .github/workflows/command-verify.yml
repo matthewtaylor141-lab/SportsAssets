@@ -2513,12 +2513,25 @@ jobs:
           # THE BASEBALL SECTION, AND ITS NEIGHBOURS. The hierarchy and the
           # general/void clauses matter as much as the sport section, so a
           # window around every hit is printed rather than one keyword line.
+          # CONTENT WORDS AND PATH WORDS, because a sitemap is a list of
+          # URLs and none of the content vocabulary appears in one.
+          #
+          # WHY THIS WAS WIDENED. docs.polymarket.us/sitemap.xml answers 200
+          # with 618 enumerated URLs, and robots.txt states
+          # `Content-Signal: ai-train=yes, search=yes, ai-input=yes` -- so
+          # the documentation IS published and IS readable, and my earlier
+          # "the venue does not publish this" was wrong. The old filter
+          # matched 25 of those 618 lines, all order-entry pages, because it
+          # only knew content vocabulary. Finding the settlement pages needs
+          # the path words too.
           KEYS = re.compile(
               r"(?i)\b(baseball|innings?|money\s*line|moneyline|graded|"
               r"grading|void|refund|no\s+action|suspend\w*|postpon\w*|"
               r"abandon\w*|cancel\w*|official\s+game|rule\s+hierarchy|"
               r"order\s+of\s+precedence|precedence|live\b|pre-?game|"
-              r"playoff|extra\s+innings|listed\s+pitcher|resumed?)\b")
+              r"playoff|extra\s+innings|listed\s+pitcher|resumed?|"
+              r"settle\w*|resolv\w*|resolut\w*|rules?|faqs?|terms|"
+              r"glossar\w*|sports?|mlb|contract\w*)\b")
           hits = [n for n, ln in enumerate(lines) if KEYS.search(ln)]
           keep = set()
           for n in hits:
