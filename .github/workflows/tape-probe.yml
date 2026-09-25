@@ -31,8 +31,30 @@ on:
         type: string
         default: "1"
 
+# THE GLOBAL PMUS VENUE-ACCESS DOMAIN, ADOPTED ON THE STRICT READING.
+#
+# This workflow fetches www.polymarketexchange.com, NOT the §10 gateway, so
+# on the merits it belongs in a group of its own -- which is what it had.
+# But `venue_domain.venue_touching_workflows` classifies it as venue-
+# touching, via INVOKES_VENUE_CAPABLE_MODULE:test_tape_capture. That module
+# is only named here as the AST guard this job runs, and its single mention
+# of gateway.polymarket.us is inside
+# `test_it_cannot_reach_the_collectors_hosts_or_any_trading_host`, which
+# asserts the capturer CANNOT reach it. The classifier matched a
+# PROHIBITION and read it as a capability.
+#
+# Two ways to resolve that, and only one of them is safe. Teaching the
+# classifier to discount a host named inside a negative assertion would
+# make a venue-access gate depend on regexes distinguishing intent from
+# prohibition, and the first time that reasoning is wrong a real collector
+# escapes the domain. Joining the domain instead costs a manually
+# dispatched probe some serialisation and weakens nothing. So the strict
+# reading is honoured rather than argued with.
+#
+# The over-inclusion is deliberate and recorded: being in this group is not
+# a claim that this host shares the gateway's rate limiter.
 concurrency:
-  group: tape-probe
+  group: pmus-public-read-global
   cancel-in-progress: false
 
 permissions:

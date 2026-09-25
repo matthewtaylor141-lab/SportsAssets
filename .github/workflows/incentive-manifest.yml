@@ -31,6 +31,22 @@ on:
         required: false
         default: ''
 
+# THE GLOBAL PMUS VENUE-ACCESS DOMAIN. This workflow had NO concurrency
+# block at all, and it really does read the venue gateway: it runs
+# research/beta48/capture_incentive_manifest.py, which imports
+# sportsassets.bettor_incentive_manifest, whose INCENTIVES_URL is
+# https://gateway.polymarket.us/v1/incentives. So it could run alongside
+# any other venue reader -- including the calibration evidence gather that
+# has to prove it owns this slot before it reads.
+#
+# venue_domain.audit() named it as the reason DOMAIN_AUDIT was FAIL, which
+# made startup_census.post_acquisition refuse ownership with
+# INCOMPATIBLE_GROUP_MEMBERSHIP. Joining the domain is the fix; relaxing
+# the audit would not have been one.
+concurrency:
+  group: pmus-public-read-global
+  cancel-in-progress: false
+
 permissions:
   contents: write
 
