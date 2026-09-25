@@ -129,6 +129,11 @@ async def _seed(conn):
     # settlement consumer is back to guessing from the condition alone.
     await conn.execute(open(
         "migrations/119_positions_carry_their_venue_identity.sql").read())
+    # 120 RECORDS THE VENUE. `bettor_venue_position_model.model_for`
+    # refuses an unknown venue rather than defaulting, and the settlement
+    # replay can only honour that refusal if the venue is on the row.
+    await conn.execute(open(
+        "migrations/120_positions_record_their_venue.sql").read())
     await conn.execute("CREATE TABLE IF NOT EXISTS ingestion_state "
                        "(key TEXT PRIMARY KEY, value TEXT)")
     await conn.execute(

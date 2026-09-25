@@ -110,49 +110,140 @@ S_NOTHING_HELD = "NO_RESIDUAL_INVENTORY_REMAINS_TO_SETTLE"
 S_LEDGER_INCOMPLETE = "POSITION_LEDGER_INCOMPLETE"
 S_UNPAIRED_LEG = "A_SECOND_LEG_IS_HELD_AND_ITS_COMPLEMENT_IS_NOT_CONFIRMED"
 
-#: How the opening inventory was established.
-OPEN_FROM_FILLS = "REPLAYED_FROM_THE_POSITIONS_OWN_ORDERS_AND_FILLS"
-OPEN_FROM_SEED = "ASSIGNED_FROM_THE_POSITIONS_SEED_WITH_NO_ACQUISITION_FILL"
+# ── HOW THE OPENING INVENTORY CAME TO EXIST ──────────────────────────
+#
+# THE DEFECT THIS REPLACES, AND IT WAS MINE. `replay` decided "this
+# position was assigned its inventory" by testing whether the ledger
+# happened to contain zero BUY fills, and applied the seed AFTER replaying
+# the fills. Both halves are wrong. An ASSIGNED position that has since
+# sold part of its inventory has SELL fills and no BUY fills, so the sell
+# was replayed against an empty book and `Portfolio.sell` RAISED -- the
+# review's own case (assigned 100 at .60, sell 40 at .80, settle 60) could
+# not run at all. And an acquisition-filled position that was FULLY EXITED
+# also ends with nothing held, so seeding it would have resurrected
+# inventory that had been deliberately closed.
+#
+# The distinction is PROVENANCE, which the column already records and
+# migration 117 already enumerates. It is read, never inferred.
+ASSIGNED = "ASSIGNED_INVENTORY_NO_ACQUISITION_EXECUTION_OF_OURS"
+ACQUIRED = "ACQUIRED_BY_OUR_OWN_RECORDED_EXECUTION"
+
+OPENING_BY_PROVENANCE = {
+    # Seeded from someone else's observed on-chain trade. `ManagedPosition`
+    # books exactly this at zero fee, "because the seed is ASSIGNED at
+    # RN1's own fill price -- it is not an execution of ours".
+    "RN1_SIGNAL_DERIVED": ASSIGNED,
+    # The acceptance harness's synthetic, modelled, unfunded position.
+    "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY": ASSIGNED,
+    # This lane's own entry: the order and the fill ARE in the ledger.
+    "AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW": ACQUIRED,
+}
+
+#: Kept for the reports that name how a replay opened.
+OPEN_FROM_FILLS = "REPLAYED_FROM_THE_POSITIONS_OWN_ACQUISITION_FILLS"
+OPEN_FROM_SEED = "ASSIGNED_ONCE_FROM_THE_SEED_BEFORE_ANY_EXIT_WAS_REPLAYED"
+
+R_PROVENANCE_UNKNOWN = "OPENING_PROVENANCE_NOT_DECLARED_FOR_THIS_POSITION"
+R_VENUE_UNKNOWN = "VENUE_POSITION_MODEL_NOT_ESTABLISHED_FOR_THIS_POSITION"
+R_NO_ACQUISITION = "PROVENANCE_SAYS_ACQUIRED_BUT_NO_ACQUISITION_FILL_EXISTS"
+R_NOT_TRANSLATABLE = "A_FILL_HAS_NO_TRANSLATION_UNDER_THIS_VENUE_MODEL"
 
 
-# ── the ledger replay ────────────────────────────────────────────────
+def opening_mode(position) -> dict:
+    """ASSIGNED or ACQUIRED, from the recorded provenance. Never inferred."""
+    prov = str(position.get("provenance") or "")
+    mode = OPENING_BY_PROVENANCE.get(prov)
+    if mode is None:
+        return {"ok": False, "refusal": R_PROVENANCE_UNKNOWN,
+                "provenance": prov or None,
+                "declared": sorted(OPENING_BY_PROVENANCE),
+                "why": ("the provenance %r does not say how this position "
+                        "came to hold inventory. It is not inferred from "
+                        "whether the ledger happens to contain a BUY: an "
+                        "assigned position that has sold part of its "
+                        "inventory has no BUY either, and so does one that "
+                        "was fully exited" % (prov or None,))}
+    return {"ok": True, "mode": mode, "provenance": prov}
+
 
 def replay(position, orders, fills) -> dict:
-    """Rebuild the position's book from its own orders and fills.
+    """Rebuild the position's book, in the VENUE'S OWN position model.
 
-    Uses `bettor_desk.Portfolio`, which is the existing engine: it holds
-    per-leg quantity and average cost, realises a SELL against that
-    average, expenses fees when they are charged, keeps the two legs of a
-    condition apart, and has an invariant that catches drift. Nothing
-    about settlement arithmetic is reinvented here.
+    Uses `bettor_desk.Portfolio` -- the existing engine: per-leg quantity
+    and average cost, a SELL realised against that average, fees expensed
+    when charged, an invariant that catches drift. Nothing about
+    settlement arithmetic is reinvented here.
 
-    THE ACCEPTANCE POSITION HAS NO ACQUISITION FILL. It was assigned
-    inventory by a seeder, not filled by an order, so requiring a BUY
-    fill would refuse to settle inventory that demonstrably exists. When
-    the ledger carries no BUY fill on the held leg, the opening is taken
-    from the position's own `seed_qty` / `seed_basis_usd` and the basis of
-    the opening is REPORTED as that rather than implied.
+    ── THE VENUE'S SEMANTICS ARE PRESERVED, NOT REINTERPRETED ───────
+    `bettor_venue_position_model` maps the venue to its position model and
+    REFUSES an unknown venue rather than defaulting. On a netting venue
+    (PMUS) an opposite-side acquisition REDUCES the signed position: it is
+    booked as a sale of the held leg at one minus the complement's price,
+    and NO second inventory leg comes into existence. On a genuine
+    two-token venue both legs are held and both are settled, and that
+    accounting is kept separate rather than merged into the netting case.
 
-    Starting cash is zero on purpose: this is one position's book, and the
-    only figures asked of it are quantities, basis, proceeds, fees and
-    realised P&L -- all of which are differences and none of which depends
-    on a starting balance.
+    A REDUCTION MAY NEVER BECOME A REVERSAL, which is the position
+    model's own rule: a reducing fill is capped at the held quantity and
+    any surplus is REPORTED as a discrepancy rather than trimmed away or
+    turned into opposite exposure nobody decided to take.
+
+    ── AND THE OPENING IS ESTABLISHED FIRST, ONCE ───────────────────
+    Assigned inventory is booked BEFORE any fill is replayed, at zero fee,
+    exactly as `bettor_mgmt_lifecycle.ManagedPosition` already does it --
+    so a subsequent exit has something to sell. An acquisition-filled
+    position is never seeded, so a fully exited one stays exited.
+
+    Returns `{"ok": False, "refusal": ...}` rather than raising, so the
+    caller reports the exact state.
     """
     from . import bettor_desk as desk
+    from . import bettor_venue_position_model as vpm
 
     cond = str(position.get("condition_id") or "")
     held = int(position.get("outcome_index") or 0)
-    pf = desk.Portfolio(0.0)
 
+    mode = opening_mode(position)
+    if not mode["ok"]:
+        return {"ok": False, "refusal": mode["refusal"], "why": mode["why"],
+                "opening": mode}
+    vm = vpm.model_for(position.get("venue"))
+    if not vm["ok"]:
+        return {"ok": False, "refusal": R_VENUE_UNKNOWN, "why": vm["why"],
+                "venue_model": vm}
+
+    pf = desk.Portfolio(0.0)
+    out = {"ok": True, "portfolio": pf, "venue_model": vm,
+           "opening_mode": mode["mode"], "provenance": mode["provenance"],
+           "nets_opposite_side": bool(vm["opposite_side_reduces"]),
+           "buys": 0, "sells": 0, "reductions": 0,
+           "unknown_order_fills": 0, "discrepancies": [],
+           "entry_outlay_usd": 0.0, "direct_exit_proceeds_usd": 0.0,
+           "reduction_proceeds_usd": 0.0, "legs": [],
+           "opening_basis": None}
+
+    # ── 1 · THE OPENING, BEFORE ANY FILL ─────────────────────────────
+    if mode["mode"] == ASSIGNED:
+        seed_qty = float(position.get("seed_qty") or 0.0)
+        seed_basis = float(position.get("seed_basis_usd") or 0.0)
+        if seed_qty <= 0:
+            return {"ok": False, "refusal": R_NO_ACQUISITION,
+                    "why": ("the provenance says this position was assigned "
+                            "inventory, and it records no seed quantity")}
+        pf.buy(cond, held, seed_qty,
+               (seed_basis / seed_qty) if seed_qty else 0.0, 0.0,
+               float(position.get("decision_ts") or 0.0))
+        out["opening_basis"] = OPEN_FROM_SEED
+        out["seed_qty"] = seed_qty
+        out["seed_basis_usd"] = seed_basis
+        out["entry_outlay_usd"] = seed_basis
+    else:
+        out["opening_basis"] = OPEN_FROM_FILLS
+
+    # ── 2 · EVERY FILL, IN ORDER, THROUGH THE VENUE'S MODEL ──────────
     by_order = {str(o.get("order_id")): o for o in (orders or [])}
-    legs_seen = set()
-    buys = sells = 0
-    unknown_order = 0
-    # GROSS, NOT NET. The two are reported apart because "what we paid to
-    # get in" and "what earlier exits already brought back" are the two
-    # figures the broken version conflated into one seed basis.
-    entry_outlay = 0.0
-    exit_proceeds = 0.0
+    legs_seen = {(cond, held)} if mode["mode"] == ASSIGNED else set()
+    entry_outlay = float(out["entry_outlay_usd"])
     for f in sorted(fills or [], key=lambda x: (float(x.get("at") or 0.0),
                                                 str(x.get("fill_id")))):
         o = by_order.get(str(f.get("order_id")))
@@ -160,46 +251,94 @@ def replay(position, orders, fills) -> dict:
             # A FILL WHOSE ORDER IS MISSING HAS NO SIDE AND NO LEG. It is
             # counted and the position is refused; guessing BUY would
             # invent inventory and guessing SELL would invent proceeds.
-            unknown_order += 1
+            out["unknown_order_fills"] += 1
             continue
         oi = int(o.get("outcome_index") if o.get("outcome_index") is not None
                  else held)
         c = str(o.get("condition_id") or cond)
-        legs_seen.add((c, oi))
         qty = abs(float(f.get("qty") or 0.0))
         price = float(f.get("price") or 0.0)
         fee = abs(float(f.get("fee_usd") or 0.0))
         at = float(f.get("at") or 0.0)
-        if str(o.get("side") or "").upper() == "SELL":
-            # A SELL BEYOND WHAT IS HELD IS A LEDGER FAULT, not something
-            # to clamp. `Portfolio.sell` raises, and the caller reports it.
+        side = str(o.get("side") or "").upper()
+        same_leg = (c == cond and oi == held)
+
+        if same_leg and side == "SELL":
             pf.sell(c, oi, qty, price, fee, at)
-            exit_proceeds += qty * price
-            sells += 1
-        else:
+            out["direct_exit_proceeds_usd"] += qty * price
+            out["sells"] += 1
+            legs_seen.add((c, oi))
+            continue
+        if same_leg:
             pf.buy(c, oi, qty, price, fee, at)
             entry_outlay += qty * price
-            buys += 1
+            out["buys"] += 1
+            legs_seen.add((c, oi))
+            continue
 
-    out = {"portfolio": pf, "buys": buys, "sells": sells,
-           "unknown_order_fills": unknown_order,
-           "legs": sorted("%s:%d" % k for k in legs_seen),
-           "entry_outlay_usd": round(entry_outlay, 8),
-           "exit_proceeds_usd": round(exit_proceeds, 8),
-           "opening_basis": OPEN_FROM_FILLS}
+        # ── THE OPPOSITE SIDE ────────────────────────────────────────
+        if out["nets_opposite_side"] and c == cond and side == "BUY":
+            # ONE SIGNED NET POSITION PER MARKET. "Buying the complement of
+            # something you hold is not a second position; it is a sale of
+            # the first." A complement bought at p retires the long at
+            # 1 - p, share for share, and leaves the book FLATTER rather
+            # than holding two legs.
+            held_now = pf._leg(cond, held)["qty"]
+            take = min(qty, held_now)
+            surplus = qty - take
+            if surplus > 1e-9:
+                # A REDUCTION MAY NEVER BECOME A REVERSAL. The position
+                # model's own rule: 150 short against 100 long exits and
+                # then opens 50 of opposite exposure nobody decided to
+                # take. The cap is applied and REPORTED.
+                out["discrepancies"].append({
+                    "at": at, "order_id": str(o.get("order_id")),
+                    "requested_qty": qty, "held_qty": held_now,
+                    "surplus_qty": round(surplus, 8),
+                    "why": ("an opposite-side acquisition exceeded the held "
+                            "quantity. It is capped at the held quantity "
+                            "because a reduction may never become a "
+                            "reversal, and the surplus is reported")})
+            if take > 1e-9:
+                exit_px = 1.0 - price
+                pf.sell(cond, held, take, exit_px, fee, at)
+                out["reduction_proceeds_usd"] += take * exit_px
+                out["reductions"] += 1
+                legs_seen.add((cond, held))
+            continue
+        if not out["nets_opposite_side"] and side == "BUY":
+            # A GENUINE TWO-TOKEN VENUE. Both legs are really held, which
+            # is what `bettor_inventory`'s MATCHED_QTY and LOCKED_PNL
+            # describe, and the two are never netted.
+            pf.buy(c, oi, qty, price, fee, at)
+            entry_outlay += qty * price
+            out["buys"] += 1
+            legs_seen.add((c, oi))
+            continue
+        # A SELL OF SOMETHING OTHER THAN THE HELD LEG. Under either model
+        # this is not a shape this consumer has established a translation
+        # for, and inventing one is how a reduction becomes a reversal.
+        return {"ok": False, "refusal": R_NOT_TRANSLATABLE,
+                "why": ("a %s fill on %s:%d has no translation under the "
+                        "%s model for a position held on %s:%d"
+                        % (side or "?", c, oi, vm["model"], cond, held))}
 
-    held_leg = pf._leg(cond, held)
-    if buys == 0 and held_leg["qty"] <= 1e-9:
-        seed_qty = float(position.get("seed_qty") or 0.0)
-        seed_basis = float(position.get("seed_basis_usd") or 0.0)
-        if seed_qty > 0:
-            pf.buy(cond, held, seed_qty,
-                   (seed_basis / seed_qty) if seed_qty else 0.0, 0.0,
-                   float(position.get("decision_ts") or 0.0))
-            out["opening_basis"] = OPEN_FROM_SEED
-            out["seed_qty"] = seed_qty
-            out["seed_basis_usd"] = seed_basis
-            out["entry_outlay_usd"] = round(seed_basis, 8)
+    out["entry_outlay_usd"] = round(entry_outlay, 8)
+    out["direct_exit_proceeds_usd"] = round(out["direct_exit_proceeds_usd"], 8)
+    out["reduction_proceeds_usd"] = round(out["reduction_proceeds_usd"], 8)
+    out["exit_proceeds_usd"] = round(out["direct_exit_proceeds_usd"]
+                                     + out["reduction_proceeds_usd"], 8)
+    out["legs"] = sorted("%s:%d" % k for k in legs_seen)
+    if mode["mode"] == ACQUIRED and out["buys"] == 0:
+        # NOT SEEDED AS A FALLBACK. The provenance says our own acquisition
+        # is in the ledger; if it is not, that is a ledger fault to report,
+        # not a reason to assign inventory this position never acquired.
+        return {"ok": False, "refusal": R_NO_ACQUISITION,
+                "why": ("the provenance says this position was acquired by "
+                        "our own execution and the ledger carries no "
+                        "acquisition fill for it. Inventory is not assigned "
+                        "from the seed to cover the gap"),
+                "portfolio": pf, "opening_mode": ACQUIRED}
     return out
 
 
@@ -275,6 +414,7 @@ def accounting(replayed, *, condition_id, held_index, payout,
         "opening_basis": replayed.get("opening_basis"),
         "buys_replayed": replayed.get("buys"),
         "sells_replayed": replayed.get("sells"),
+        "discrepancies": replayed.get("discrepancies") or [],
         # ── THE FIGURES, EACH ONE ONCE ────────────────────────────────
         "settlement_cash_usd": round(settlement_cash, 8),
         # THE FIGURE THE BROKEN VERSION DROPPED. Proceeds of contracts
@@ -282,6 +422,15 @@ def accounting(replayed, *, condition_id, held_index, payout,
         # and they are neither part of the settlement payout nor a second
         # copy of it.
         "prior_exit_proceeds_usd": replayed.get("exit_proceeds_usd"),
+        # THE TWO MECHANISMS, APART. A direct sale and an opposite-side
+        # reduction return cash the same way and are executed on different
+        # ladders at different prices, and a reader has to be able to tell
+        # which one this position used.
+        "direct_exit_proceeds_usd": replayed.get("direct_exit_proceeds_usd"),
+        "reduction_proceeds_usd": replayed.get("reduction_proceeds_usd"),
+        "reductions_replayed": replayed.get("reductions"),
+        "venue_model": (replayed.get("venue_model") or {}).get("model"),
+        "opening_mode": replayed.get("opening_mode"),
         "entry_outlay_usd": replayed.get("entry_outlay_usd"),
         "total_cash_returned_usd": round(
             float(replayed.get("exit_proceeds_usd") or 0.0)
@@ -294,6 +443,12 @@ def accounting(replayed, *, condition_id, held_index, payout,
         "residual_settled_usd": round(settlement_cash, 8),
         "unpaired_qty": 0.0,
         "held_leg_before": before["held"],
+        # THE INTERMEDIATE STATE, KEPT. Cash and fees as they stood before
+        # the payout applied, so a reader can check the settlement step in
+        # isolation instead of only the end state.
+        "cash_before_settlement_usd": before["cash_before_settlement"],
+        "realized_before_settlement_usd": before["realized_before_settlement"],
+        "fees_before_settlement_usd": before["fees_so_far"],
         "reconciles": bool(inv.get("ok")),
         "invariant": inv,
         "identity": ("NET = every realised leg, entry fees expensed, exit "
@@ -342,7 +497,7 @@ def void_accounting(replayed, *, condition_id, held_index,
 #: same thing to the manager and to this consumer.
 OPEN_ENTRY_SQL = """
     SELECT p.position_id, p.condition_id, p.outcome_index, p.policy,
-           p.experiment_id,
+           p.experiment_id, p.provenance, p.entry_kind, p.venue,
            p.seed_qty::float8        AS seed_qty,
            p.seed_price::float8      AS seed_price,
            p.seed_basis_usd::float8  AS seed_basis_usd,
@@ -381,10 +536,10 @@ ALL_TOKENS_SQL = """
 #: event each one describes -- which is what makes checking them possible.
 CANDIDATE_IDENTITY_SQL = """
     SELECT DISTINCT us_market_slug, buy_intent, ladder_side, payout_event,
-           max(id) AS valuation_id
+           venue, max(id) AS valuation_id
       FROM external_valuations
      WHERE condition_id = $1 AND us_market_slug IS NOT NULL
-     GROUP BY us_market_slug, buy_intent, ladder_side, payout_event
+     GROUP BY us_market_slug, buy_intent, ladder_side, payout_event, venue
 """
 
 #: EXACTLY ONCE. The primary key is the position, and DO NOTHING means a
@@ -423,7 +578,7 @@ async def held_identity(conn, row) -> dict:
     out = {"held_outcome": None, "held_token_id": None,
            "outcomes_listed": None, "source": None,
            "us_market_slug": None, "buy_intent": None,
-           "ladder_side": None, "payout_event": None,
+           "ladder_side": None, "payout_event": None, "venue": None,
            "valuation_id": None, "candidates": 0,
            "refusal": None, "why": None}
     cond = row.get("condition_id")
@@ -463,6 +618,7 @@ async def held_identity(conn, row) -> dict:
                           % (named, idx, out["held_outcome"]))
             return out
         out.update(source="PERSISTED_ON_THE_POSITION",
+                   venue=row.get("venue"),
                    us_market_slug=row["venue_market_slug"],
                    buy_intent=row.get("venue_buy_intent"),
                    ladder_side=row.get("venue_ladder_side"),
@@ -509,6 +665,12 @@ async def held_identity(conn, row) -> dict:
         return out
     c = match[0]
     out.update(source="RESOLVED_FROM_MARKET_TOKENS_AND_CHECKED",
+               # THE VENUE COMES WITH THE IDENTITY. A position recorded
+               # before migration 120 carries none, and the valuation that
+               # named its contract is the only thing that knows which
+               # venue's position model governs it. Absent both, the replay
+               # refuses -- `model_for` never defaults.
+               venue=(row.get("venue") or c.get("venue")),
                us_market_slug=c["us_market_slug"],
                buy_intent=c.get("buy_intent"),
                ladder_side=c.get("ladder_side"),
@@ -540,6 +702,19 @@ def plan(row, ident, replayed, resolution) -> dict:
         out["status"] = ident["refusal"]
         out["why"] = ident.get("why")
         return out
+    # A REPLAY THAT COULD NOT BE DONE IS NOT AN EMPTY BOOK. An unknown
+    # provenance, an unestablished venue model, a missing acquisition fill
+    # and an untranslatable fill each stop the settlement by name.
+    if not replayed.get("ok"):
+        out["status"] = replayed.get("refusal") or S_LEDGER_INCOMPLETE
+        out["why"] = replayed.get("why")
+        out["venue_model"] = (replayed.get("venue_model") or {}).get("model")
+        return out
+    out["opening_mode"] = replayed.get("opening_mode")
+    out["venue_model"] = (replayed.get("venue_model") or {}).get("model")
+    out["nets_opposite_side"] = replayed.get("nets_opposite_side")
+    if replayed.get("discrepancies"):
+        out["discrepancies"] = replayed["discrepancies"]
     if replayed.get("unknown_order_fills"):
         out["status"] = S_LEDGER_INCOMPLETE
         out["why"] = ("%d fills reference an order this position does not "
@@ -581,10 +756,21 @@ def plan(row, ident, replayed, resolution) -> dict:
                       "settlement price cannot be mapped onto it")
         return out
 
-    # A SECOND LEG NEEDS A CONFIRMED COMPLEMENT BEFORE IT CAN BE SETTLED.
+    # ── A SECOND HELD LEG, WHICH ONLY A TWO-TOKEN VENUE CAN HAVE ─────
+    #
+    # On a netting venue the replay has already retired the opposite side
+    # against the held one, so a second leg here would mean the model was
+    # applied wrongly; it is reported rather than settled.
     others = [(c, oi) for (c, oi), leg in pf.legs.items()
               if leg["qty"] > 1e-9 and not (c == cond and oi == held)]
     same_condition = [k for k in others if k[0] == cond]
+    if others and replayed.get("nets_opposite_side"):
+        out["status"] = S_UNPAIRED_LEG
+        out["why"] = ("this venue nets one signed position per market, so "
+                      "a second held leg (%r) should not exist. It is not "
+                      "settled as a pair"
+                      % [("%s:%d" % k) for k in others])
+        return out
     if others and len(same_condition) != len(others):
         out["status"] = S_UNPAIRED_LEG
         out["why"] = ("this position holds a leg on another condition "
@@ -705,6 +891,9 @@ async def settle_open_positions(conn, *, experiment_id, policy, now,
             continue
         # THE LEDGER IS REBUILT THROUGH THE EXISTING READER, so a fill
         # this consumer cannot see is a fill nothing else can see either.
+        # The venue travels with the identity when the position row itself
+        # does not carry one.
+        row = dict(row, venue=(row.get("venue") or ident.get("venue")))
         try:
             led = await store.load_position(conn, pid)
             replayed = replay(row, led.get("orders"), led.get("fills"))
@@ -721,7 +910,8 @@ async def settle_open_positions(conn, *, experiment_id, policy, now,
         # A POSITION WITH NOTHING LEFT TO SETTLE, OR NO IDENTITY, IS NOT
         # WORTH A PACED VENUE READ. The refusal is the same either way and
         # the request budget is shared with the collector.
-        need_read = bool(slug) and not ident.get("refusal")
+        need_read = (bool(slug) and not ident.get("refusal")
+                     and bool(replayed.get("ok")))
         if need_read:
             pf = replayed["portfolio"]
             need_read = pf._leg(str(row.get("condition_id") or ""),
@@ -752,7 +942,7 @@ async def settle_open_positions(conn, *, experiment_id, policy, now,
         got["identity"] = {k: ident.get(k) for k in
                            ("held_outcome", "source", "payout_event",
                             "buy_intent", "ladder_side", "valuation_id",
-                            "candidates", "outcomes_listed")}
+                            "candidates", "outcomes_listed", "venue")}
         if got["accounting"] is None:
             if got["status"] == S_NOTHING_HELD:
                 out["nothing_held"] += 1

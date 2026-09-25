@@ -317,6 +317,11 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
             # ordering and the name is the event, so a consumer can check
             # one against the other through `market_tokens` instead of
             # trusting either alone. See migration 119.
+            # THE VENUE WHOSE POSITION MODEL GOVERNS THIS POSITION.
+            # `bettor_venue_position_model.model_for` refuses an unknown
+            # venue rather than defaulting, and a consumer can only honour
+            # that refusal if the venue is recorded. See migration 120.
+            "venue": contract.get("venue"),
             "venue_market_slug": (contract.get("us_market_slug")
                                   or rec.get("us_market_slug")),
             "venue_buy_intent": rec.get("buy_intent"),
@@ -545,9 +550,11 @@ POSITION_SQL = """
         -- written by the writer that knows it rather than rediscovered
         -- later by matching on condition alone.
         venue_market_slug, venue_buy_intent, venue_ladder_side,
-        payout_event, source_valuation_id)
+        payout_event, source_valuation_id,
+        -- MIGRATION 120: which venue's position model applies.
+        venue)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
-            $18,$19,$20,$21,$22)
+            $18,$19,$20,$21,$22,$23)
     ON CONFLICT (position_id) DO NOTHING
 """
 
@@ -643,7 +650,8 @@ async def persist_entry(conn, plan) -> dict:
             pos.get("venue_market_slug"), pos.get("venue_buy_intent"),
             pos.get("venue_ladder_side"), pos.get("payout_event"),
             (None if pos.get("source_valuation_id") is None
-             else int(pos["source_valuation_id"])))
+             else int(pos["source_valuation_id"])),
+            pos.get("venue"))
         d = plan["decision"]
         await conn.execute(
             DECISION_SQL, d["decision_id"], d["position_id"],
