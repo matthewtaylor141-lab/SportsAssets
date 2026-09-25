@@ -271,3 +271,40 @@ def test_the_store_says_what_it_will_not_do():
     assert any("without both team names" in x for x in d["will_not"])
     assert "workers.ext_pinnacle_loop (entry)" in d["consumers"]
     assert "workers.rn1x_shadow (management)" in d["consumers"]
+
+# ── and the MANAGER acquires for its own subject ─────────────────────
+#
+# THE HOLE A SHARED READER LEAVES. Entry acquires for the candidates it
+# evaluates. A position held outside that set -- the acceptance position --
+# had nothing acquiring its fixture, so a shared reader would have read the
+# same absent row forever. That is why
+# SETTLEMENT_COMPATIBILITY_ESTABLISHED was the one missing acceptance
+# requirement on 92 of Houston's first 110 decisions.
+
+def test_the_manager_acquires_for_its_own_subject_not_only_for_candidates():
+    import inspect
+
+    from sportsassets.workers import rn1x_shadow as MGR
+
+    src = inspect.getsource(MGR)
+    assert "acquire_fixture_scope as _acq_scope" in src
+    # BOUND ON THE PROVIDER'S OWN TEAM NAMES for this event, like entry.
+    assert 'home=quote.get("home")' in src
+    assert 'commence_iso=quote.get("commence_time")' in src
+    # THE READ BELOW IT IS UNCHANGED and still the authority on what is
+    # persisted -- acquisition only makes sure there is something to read.
+    assert "conn.fetchrow(FIXTURE_META_SQL, condition_id)" in src
+    # AND A FAULT IN IT IS NOT AN ABSENT FIXTURE.
+    assert "AN ACQUISITION FAULT IS NOT AN ABSENT FIXTURE" in src
+
+
+def test_the_managers_acquisition_is_reported_on_its_own_key():
+    """So a reader can tell an acquired row from a row that was merely
+    found, on the management side too."""
+    import inspect
+
+    from sportsassets.workers import rn1x_shadow as MGR
+
+    src = inspect.getsource(MGR)
+    assert 'out["fixture_acquisition"] = fmeta_acq' in src
+    assert 'dict(fmeta, read=True, acquisition=fmeta_acq)' in src

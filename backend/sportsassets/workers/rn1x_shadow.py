@@ -1372,6 +1372,34 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
     # come from the persisted row, whose provenance travels with it. An
     # UNREADABLE read is recorded and leaves the guards unsatisfied -- it is
     # never read as "no restriction applies".
+    # ACQUIRED FOR THIS SUBJECT, NOT ONLY FOR ENTRY CANDIDATES.
+    #
+    # A shared READER does not refresh a held position. The entry lane
+    # acquires the fixture evidence for the candidates it evaluates; a
+    # position held outside that set -- the acceptance position, say -- had
+    # nothing acquiring its fixture at all, so its scope stayed absent and
+    # SETTLEMENT_COMPATIBILITY_ESTABLISHED stayed the one missing
+    # acceptance requirement on 92 of its first 110 decisions.
+    #
+    # So the manager calls the SAME function, for its own subject's
+    # fixture, bound on the teams the PROVIDER named for this event. The
+    # read below is unchanged and still the authority on what is
+    # persisted; this only makes sure there is something to read.
+    fmeta_acq = None
+    try:
+        from .ext_pinnacle_loop import acquire_fixture_scope as _acq_scope
+
+        fmeta_acq = await _acq_scope(
+            conn, condition_id=condition_id,
+            home=quote.get("home"), away=quote.get("away"),
+            commence_iso=quote.get("commence_time"),
+            now=time.time(), cache={})
+        fmeta_acq = (fmeta_acq or {}).get("acquisition")
+    except Exception as exc:                                    # noqa: BLE001
+        # AN ACQUISITION FAULT IS NOT AN ABSENT FIXTURE, and it must not end
+        # a management pass -- the read below still reports whatever is
+        # persisted, and this records why no attempt succeeded.
+        fmeta_acq = {"error": "%s: %s" % (type(exc).__name__, exc)}
     fmeta, fmeta_err = None, None
     try:
         _fm = await conn.fetchrow(FIXTURE_META_SQL, condition_id)
@@ -1385,8 +1413,9 @@ async def managed_inputs_for(conn, *, condition_id, outcome_index,
             fmeta["refusals"] = _json.loads(fmeta.get("refusals") or "[]")
         except Exception:                                       # noqa: BLE001
             fmeta["refusals"] = []
+    out["fixture_acquisition"] = fmeta_acq
     out["fixture_metadata"] = (
-        dict(fmeta, read=True) if fmeta else
+        dict(fmeta, read=True, acquisition=fmeta_acq) if fmeta else
         {"read": False, "error": fmeta_err,
          "why": ("no authoritative fixture metadata is persisted for this "
                  "condition, so the competition phase, the game format and "
