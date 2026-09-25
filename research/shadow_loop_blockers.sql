@@ -96,9 +96,35 @@ SELECT coalesce(p.provenance, '(NULL)') AS provenance, p.policy,
 \echo ''
 \echo '== 8 · management decisions per position, newest first =='
 SELECT d.position_id, count(*) AS decisions,
-       min(d.decided_at) AS first_at, max(d.decided_at) AS last_at
+       min(d.decision_ts) AS first_at, max(d.decision_ts) AS last_at
   FROM rn1x_decisions d
  GROUP BY 1 ORDER BY 4 DESC NULLS LAST LIMIT 15;
+
+\echo ''
+\echo '== 8b · WHAT SHAPE IS alternatives, and is a DIRECT_EXIT priced? =='
+-- The unrealised mark has to read an executable exit price out of this
+-- column. Which FIELDS the DIRECT_EXIT row carries decides what the mark
+-- can be built on, and guessing is how a dashboard ends up reporting a
+-- number the engine never computed.
+SELECT d.position_id,
+       d.decision_ts,
+       jsonb_typeof(d.alternatives) AS alt_type,
+       jsonb_array_length(CASE WHEN jsonb_typeof(d.alternatives) = 'array'
+                               THEN d.alternatives ELSE '[]'::jsonb END)
+         AS alt_len,
+       (SELECT string_agg(DISTINCT e.value ->> 'action', ',')
+          FROM jsonb_array_elements(
+                 CASE WHEN jsonb_typeof(d.alternatives) = 'array'
+                      THEN d.alternatives ELSE '[]'::jsonb END) AS e)
+         AS actions,
+       (SELECT jsonb_pretty(e.value)
+          FROM jsonb_array_elements(
+                 CASE WHEN jsonb_typeof(d.alternatives) = 'array'
+                      THEN d.alternatives ELSE '[]'::jsonb END) AS e
+         WHERE e.value ->> 'action' = 'DIRECT_EXIT' LIMIT 1)
+         AS direct_exit_row
+  FROM rn1x_decisions d
+ ORDER BY d.decision_ts DESC NULLS LAST LIMIT 3;
 
 \echo ''
 \echo '== 9 · is the entry lane armed, and when did it last cycle? =='
