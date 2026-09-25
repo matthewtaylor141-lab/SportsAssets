@@ -326,3 +326,58 @@ def test_the_loop_reads_the_control_row_each_cycle():
     assert "rsh.authorised(conn)" in src
     assert 'research.get("authorised") is True' in src
     assert '"research_shadow": research' in src
+
+
+# ── the arming route: one key, and it cannot become a general writer ──
+
+def test_the_arming_route_writes_only_this_lanes_key():
+    """A general `ingestion_state` writer would put `live_trading_paused`
+    one admin request away. So no key parameter is accepted at all."""
+    from sportsassets.api import app as APP
+
+    src = inspect.getsource(APP.admin_arm_research_shadow)
+    assert "RSH.CONTROL_KEY" in src
+    assert "cannot be pointed at another" in src
+    # NO KEY COMES FROM THE BODY.
+    assert 'b.get("key")' not in src
+    assert 'body.get("key")' not in src
+    assert 'b["key"]' not in src
+    # AND IT NAMES THE HAZARD IT IS AVOIDING.
+    assert "live_trading_paused" in src
+
+
+def test_arming_requires_an_exact_confirm_word():
+    from sportsassets.api import app as APP
+
+    src = inspect.getsource(APP.admin_arm_research_shadow)
+    assert '== "ARM"' in src and '== "DISARM"' in src
+    assert "READ_ONLY" in src
+    assert '"wrote": False' in src
+
+
+def test_the_route_reads_the_calibration_table_rather_than_asserting():
+    """The operator must never be told "unmeasured" by a constant: if a
+    measurement has appeared the waiver stops applying on its own."""
+    from sportsassets.api import app as APP
+
+    src = inspect.getsource(APP.admin_arm_research_shadow)
+    assert "FROM external_source_calibration" in src
+    assert 'out["calibration_still_unmeasured"] = not n' in src
+
+
+def test_the_route_reads_back_through_the_modules_own_checker():
+    """So the answer is the one the LOOP will get, not the one the route
+    just wrote."""
+    from sportsassets.api import app as APP
+
+    src = inspect.getsource(APP.admin_arm_research_shadow)
+    assert "RSH.authorised(conn)" in src
+
+
+def test_the_route_reaches_no_funded_path():
+    from sportsassets.api import app as APP
+
+    src = inspect.getsource(APP.admin_arm_research_shadow)
+    for forbidden in ("guarded_submit", "submit_fok", "calibration_execute",
+                      "CALIBRATION_WRITES_ENABLED"):
+        assert forbidden not in src, forbidden

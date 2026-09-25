@@ -1885,6 +1885,86 @@ async def admin_external_source_calibration(response: Response,
     return out
 
 
+@app.post("/api/admin/rn1x-arm-research-shadow",
+          dependencies=[Depends(require_admin)])
+async def admin_arm_research_shadow(response: Response,
+                                    body: dict | None = None) -> dict:
+    """Arm or disarm the UNFUNDED research-shadow lane. One key, nothing else.
+
+    WHY THIS ROUTE EXISTS AND WHY IT IS THIS NARROW. The lane is gated on a
+    control row, matching every other loop, and there was no route that
+    could write one. `research-sql` refuses every write by design, and
+    `render-ops.yml` has 422 bytes of headroom left, so adding a preset
+    there is how that file stops parsing. This writes exactly
+    `bettor_research_shadow.CONTROL_KEY` and cannot be pointed at another
+    key -- no key parameter is accepted, so it can never become a general
+    `ingestion_state` writer, which would put `live_trading_paused` one
+    request away from an admin token.
+
+    WHAT ARMING DOES AND DOES NOT DO. It authorises the entry lane to
+    create SIMULATED inventory while MODEL_TRUST_DRIFT stays NOT_EVALUABLE.
+    It does not touch the funded gate, write a calibration measurement, or
+    make any other gate pass -- freshness, settlement compatibility, the
+    declared support, every exposure rail and positive net edge all still
+    block. See bettor_research_shadow for what is and is not waived.
+
+    `confirm` must be the exact word ARM or DISARM. A body that omits it
+    reads the current state and writes nothing.
+    """
+    from .. import bettor_research_shadow as RSH
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = body if isinstance(body, dict) else {}
+    want = str(b.get("confirm") or "").strip().upper()
+    pool = await get_pool()
+
+    out = {"ok": True, "control_key": RSH.CONTROL_KEY,
+           "version": RSH.VERSION,
+           "describe": RSH.describe(),
+           "wrote": False,
+           "funded_gate_untouched": True,
+           "calibration_still_unmeasured": True,
+           "what_this_is_not": RSH.WHAT_THE_WAIVER_IS_NOT}
+
+    # THE CALIBRATION TABLE IS READ, NOT ASSERTED. If a measurement has
+    # appeared the waiver stops applying on its own, and saying so here
+    # means the operator is never told "unmeasured" by a constant.
+    try:
+        n = await pool.fetchval(
+            "SELECT count(*) FROM external_source_calibration")
+        out["calibration_rows"] = int(n or 0)
+        out["calibration_still_unmeasured"] = not n
+    except Exception as exc:                                   # noqa: BLE001
+        out["calibration_rows"] = None
+        out["calibration_read_error"] = type(exc).__name__
+
+    if want == "ARM":
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, 'true'::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = 'true'::jsonb",
+            RSH.CONTROL_KEY)
+        out["wrote"] = True
+        out["action"] = "ARMED"
+    elif want == "DISARM":
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, 'false'::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = 'false'::jsonb",
+            RSH.CONTROL_KEY)
+        out["wrote"] = True
+        out["action"] = "DISARMED"
+    else:
+        out["action"] = "READ_ONLY"
+        out["why"] = ("confirm must be exactly ARM or DISARM; nothing was "
+                      "written")
+
+    # READ IT BACK THROUGH THE MODULE'S OWN CHECKER, so the answer is the
+    # one the loop will get rather than the one this route just wrote.
+    async with pool.acquire() as conn:
+        out["authorised"] = await RSH.authorised(conn)
+    return out
+
+
 @app.post("/api/admin/rn1x-run-management",
           dependencies=[Depends(require_admin)])
 async def admin_rn1x_run_management(response: Response,
