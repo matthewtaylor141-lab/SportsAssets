@@ -2459,6 +2459,59 @@ jobs:
             head -c 300 /tmp/cal.json | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
+          # 4b · SETTLEMENT FROM THE VENUE'S OWN RESOLUTION.
+          # Every open shadow position -- the entry lane's AND the
+          # acceptance position -- is asked of the venue. The answer is
+          # either completed accounting or the EXACT pending/unreadable
+          # state, never "probably not settled yet". An MLB feed reporting
+          # "Final" is not part of this read, and no bookmaker quote is
+          # needed: a finished contract's value is the settlement price.
+          : > /tmp/st.json
+          C=$(curl -s -o /tmp/st.json -w '%{http_code}' --max-time 300 \
+              -X POST -H "$H" -H 'Content-Type: application/json' \
+              --data '{"limit": 25}' \
+              "$API/api/admin/rn1x-settle-open-positions" || echo 000)
+          say ""
+          say "## settlement from the venue (HTTP $C)"
+          if [ "$C" = "200" ]; then
+            cat > /tmp/st.jq <<'JQ'
+          def n(x): if x == null then "-" else (x|tostring) end;
+          "needs_odds\t"       + n(.consumer.requires_fresh_bookmaker_odds),
+          "submits\t"          + n(.consumer.submits_orders),
+          "examined\t"         + n(.settlement.examined)
+                                + "  settled " + n(.settlement.settled)
+                                + "  void " + n(.settlement.void)
+                                + "  already " + n(.settlement.already)
+                                + "  unresolved " + n(.settlement.unresolved)
+                                + "  errors " + n(.settlement.errors),
+          "by_status\t"        + n(.settlement.by_status),
+          "experiments\t"      + n(.settlement.experiments),
+          "policies\t"         + n(.settlement.policies),
+          "-- one line per open position --",
+          (.settlement.results // [])[]
+            | "  " + n(.position_id)
+              + "\n     slug " + n(.us_market_slug)
+              + "  venue " + n(.venue_status) + "/" + n(.venue_class)
+              + "  read " + n(.settlement_read)
+              + "\n     side " + n(.side_map)
+              + "  own_decision " + n(.identity_is_the_own_decision)
+              + "\n     STATUS " + n(.status) + "  written " + n(.written)
+              + "\n     net " + n(.accounting.net_usd)
+              + "  cash " + n(.accounting.realized_cash_usd)
+              + "  residual " + n(.accounting.residual_qty)
+              + "\n     why " + n(.why)
+          JQ
+            sed -i 's/^          //' /tmp/st.jq
+            jq -r -f /tmp/st.jq /tmp/st.json 2>/tmp/st.err \
+              | tee -a "$GITHUB_STEP_SUMMARY" \
+              || { say "THE SETTLEMENT REPORT FAILED TO RENDER -- a"
+                   say "reporting fault, not a finding:"
+                   head -c 300 /tmp/st.err | tee -a "$GITHUB_STEP_SUMMARY"; }
+          else
+            say "THE SETTLEMENT SWEEP DID NOT RETURN 200 -- no conclusion"
+            head -c 400 /tmp/st.json | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+
           # 5 · THE CENSUS BESIDE IT, so a cycle in which nothing was even
           # a candidate is distinguishable from one in which everything
           # refused.

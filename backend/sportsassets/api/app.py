@@ -1885,6 +1885,63 @@ async def admin_external_source_calibration(response: Response,
     return out
 
 
+@app.post("/api/admin/rn1x-settle-open-positions",
+          dependencies=[Depends(require_admin)])
+async def admin_rn1x_settle_open_positions(response: Response,
+                                           body: dict | None = None
+                                           ) -> dict:
+    """SETTLE open shadow inventory from THE VENUE'S OWN RESOLUTION.
+
+    WHY THIS ROUTE EXISTS. `manage_open_position` can return SETTLE, and it
+    returns it with `settled=None`: the challenger's settlement input is
+    the ranking pipeline's observed-payout dict, which this lane never
+    populates. So nothing in production created an outcome, and positions
+    whose fixtures had finished were carried as open inventory -- valued,
+    every cycle, off a bookmaker's book for a contract that no longer
+    exists.
+
+    WHAT IT ASKS AND WHAT IT DOES NOT. It reads
+    `GET /v1/markets/{slug}/settlement` -- the venue's own answer -- for
+    each open position in the named experiments and policies, maps it
+    through the VERIFIED venue-side identity, and either completes the
+    accounting or reports the exact pending/unreadable/named-winner/
+    inferred state. An MLB feed reporting "Final" establishes that a game
+    ended; it does not establish that this venue settled this contract.
+
+    IT NEEDS NO BOOKMAKER ODDS. A finished contract's value is the
+    settlement price.
+
+    IT SUBMITS NOTHING and reseeds nothing. A settlement is a row BESIDE
+    the position; no provenance is read or rewritten, so the acceptance
+    position stays synthetic, modelled and unfunded.
+    """
+    import time as _t
+
+    from .. import bettor_entry_inventory as INV
+    from .. import bettor_entry_settlement as SETTLE
+    from .. import bettor_external_shadow as ext
+    from ..db import get_pool
+    from ..workers import rn1x_shadow as RS
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        got = await SETTLE.settle_open_positions(
+            conn,
+            experiment_id=(b.get("experiments")
+                           or [ext.EXPERIMENT_ID,
+                               RS.CHALLENGER_EXPERIMENT_ID]),
+            policy=(b.get("policies")
+                    or [INV.POLICY, RS.ACCEPTANCE_POLICY]),
+            now=_t.time(), limit=int(b.get("limit") or 25))
+    return {"ok": True, "at": _t.time(), "consumer": SETTLE.describe(),
+            "settlement": got,
+            "writes": ("at most one rn1x_outcomes row per position, and "
+                       "only when the venue itself settled the contract. "
+                       "No order, no position, no reseed")}
+
+
 @app.post("/api/admin/rn1x-fixture-metadata",
           dependencies=[Depends(require_admin)])
 async def admin_rn1x_fixture_metadata(response: Response,
