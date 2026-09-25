@@ -2804,6 +2804,19 @@ jobs:
             /tmp/cx.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
             || head -c 300 /tmp/cx.json
           say ""
+          # THE WINDOW'S OWN TOTALS FIRST. `evaluated` above is ALL TIME and the
+          # stage counts are windowed; printing them adjacent with no label made
+          # 63 + 15 = 78 look like it had lost 308 rows against an all-time 386.
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+                 "all_time_evaluated  " + n(.summary.evaluated)
+                   + "  (" + n(.summary_window) + ")",
+                 "in_window           " + n(.summary_in_window.evaluated)
+                   + " evaluated  " + n(.summary_in_window.admissible)
+                   + " admissible  " + n(.summary_in_window.refused) + " refused",
+                 "reconciles          " + n(.stages.reconciles_with_window)
+                   + "  every refused candidate in the window lands in one stage"' \
+            /tmp/cx.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
           say "-- stage attribution, raw --"
           jq -c '.stages' /tmp/cx.json 2>&1 | head -c 1500 \
             | tee -a "$GITHUB_STEP_SUMMARY"

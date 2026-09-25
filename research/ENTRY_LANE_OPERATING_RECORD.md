@@ -480,12 +480,26 @@ longer exists (§8c).
 
 ## 8c · Two checks repaired, and one conclusion narrowed
 
-**The successive-cycles check could not pass.** It demanded two complete
-priced `HOLD` decisions on the acceptance position at two distinct
-instants. Per §8b that is unsatisfiable for a position whose fixture is
-over — so the step failed on every run for a reason that had nothing to do
-with the manager. Reporting it as pre-existing was true and was not a
-defence. It now reads terminality from the **manager's own predicate**
+**The successive-cycles check could not pass.** It demands two complete
+priced `HOLD` decisions on one position at two distinct instants, and the
+position it judges cannot supply them.
+
+> **Correction, from the production run.** I wrote that the position it
+> judges is the **acceptance** position. That is wrong. Step 19 selects the
+> newest position whose policy matches `CHALLENGER`, and the acceptance
+> policy is `ACCEPTANCE_SHADOW_MANAGER_DEMO_V1`, which does not match. The
+> position it actually judged, by its own evidence file, is
+> `RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:SHADOW_CHALLENGER_HOLD_RANKED_V1:221817729`
+> — an **ATP tennis** holding on `aec-atp-fraron-peddia-2026-09-23`, payout
+> event *Pedro Boscardin Dias*, `ORDER_INTENT_BUY_SHORT`, residual 45.0 at
+> basis 0.34. The `3_PROVIDER_FIXTURE` mechanism in §8b does hold for it
+> (485 of its 521 decisions record exactly that link, and the provider
+> covers only `["MLB","Soccer"]` — tennis is not a covered sport at all, so
+> its `EV_HOLD` is unobtainable by construction rather than merely stale).
+> But the position was misnamed, and the acceptance position is judged by
+> steps 18, 22 and 24 instead.
+
+It now reads terminality from the **manager's own predicate**
 (`command_rn1x.POSITIONS_SQL` interpolates
 `bettor_rn1x_store.NOT_TERMINALLY_SETTLED` rather than restating it) and
 branches: a terminally settled position must show a venue-authoritative
@@ -499,6 +513,24 @@ by `tests/test_terminal_exclusion_is_readable.py`. The step also writes
 `/tmp/s19.txt` and uploads it as `step19-evidence`, because an assertion
 whose failure cannot be read is a rumour rather than a check.
 
+**And step 19 still fails. It is not closed.** In run 53 it returned
+`terminal=false  open_to_management=true  basis=unknown`, took the
+management branch — which is the correct branch for a non-terminal position
+— and reported `priced_holds 0 of 521`, `complete 0`, `distinct_instants 0`,
+`ACCEPTANCE NOT MET — NOT_DEMONSTRATED`. So the repair changed three things
+and not the fourth:
+
+| | before | after run 53 |
+|---|---|---|
+| terminality readable in production | not readable at all | `terminally_settled=false`, `open_to_management=true` — real values from the manager's own predicate |
+| which question the check asks | always the 2 × 2 demand | branches, and names the branch in the error text |
+| failing evidence retrievable | not retrievable (log outside any tail; archive blocked by egress) | `step19-evidence`, artifact `10854158759`, 700 bytes |
+| **does it pass** | **no** | **no** |
+
+The terminal-exclusion branch was therefore **written and unit-tested but
+never exercised in production**, because the position is not terminal. Its
+blocker is named below and is not an exit-path gap.
+
 **"Every candidate lacked profitable depth" was beyond the evidence.**
 Missing walk/VWAP fields do not establish that: a candidate refused at
 `1_PROBABILITY`, `2_FRESHNESS`, `3_IDENTITY` or `4_SETTLEMENT_SCOPE` never
@@ -510,6 +542,149 @@ now attributes every refused candidate to its **earliest** failing stage
 numbers are reported per stage from production rather than summarised into
 one claim; source calibration and capital qualification remain separate
 verdicts from software completion.
+
+---
+
+## 8d · Run 53 on `f38d194` — the production result
+
+Released API-only. Image gate `36090391939` **pass** on the exact SHA;
+`render-ops deploy-api-commit` → **`live f38d194 api` 08:39:18 → 08:40:30**,
+`c2212aa` deactivated. Regression against the previously deployed build:
+**449 failed / 11,736 passed / 0 errors**, and all 449 failure *identities*
+are byte-identical to `c2212aa`'s 449 — 0 new, 0 fixed-and-rebroken, +25
+passing (the 25 new tests). Readback: `command-verify` run **53**
+(`36114325672`).
+
+### Arizona's identity — repaired
+
+| | before | after |
+|---|---|---|
+| `venue_market_slug` | NULL | `aec-mlb-az-col-2026-09-24` |
+| `venue_buy_intent` | NULL | `ORDER_INTENT_BUY_LONG` |
+| `venue_ladder_side` | NULL | `ASK` |
+| `payout_event` | NULL | `Arizona Diamondbacks` |
+| `venue` | NULL | `PMUS` |
+| consumer's `identity_source` | *(refused before the venue)* | `PERSISTED_ON_THE_POSITION` |
+
+Derivation, as recorded in `identity_repair`: asked for
+**`Arizona Diamondbacks`**, read from `market_tokens` at the position's own
+`outcome_index` 0, token
+`10342242885337654405783832455921053801895117859258557069453021642771114407487`;
+catalogue `[{Arizona Diamondbacks, 0}, {Colorado Rockies, 1}]`; resolver
+`workers.premap.resolve` → slug `aec-mlb-az-col-2026-09-24`, intent
+`ORDER_INTENT_BUY_LONG`, side `arizona diamondbacks`, `matched_by premap`,
+score 1.0, on the venue question *"Who will win in the upcoming baseball
+event Arizona Diamondbacks vs Colorado Rockies scheduled for September 24,
+2026 at 7:10 PM UTC?"*. All five cross-checks **passed**, including
+`the_resolver_discriminates_the_sibling_side`: Colorado Rockies resolves to
+the **same** slug with the **opposite** intent (`ORDER_INTENT_BUY_SHORT`) —
+the shared-identifier `aec-` case, which discriminates and is accepted.
+`provenance ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY` unchanged, `reseeds false`,
+`reads_external_valuations false`. Dry run first (`written false`), then the
+write (`written true`).
+
+This is the binding the earlier authenticated reads named, recovered through
+the existing machinery rather than asserted.
+
+### Settlement — reached the venue, and the venue refused
+
+`examined 1  settled 0  void 0  already 0  unresolved 1  errors 0`
+
+```
+status        VENUE_RESOLUTION_UNREADABLE
+venue_status  UNREADABLE   venue_class NOT_RESOLVED:UNREADABLE
+why           the venue's resolution could not be read
+              (UNREADABLE: CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME).
+              That is a read failure, not a pending settlement
+accounting    null      basis null      settlement_read null
+residual_qty  10.0      legs_held ["0x64a5…085f:0"]
+opening_mode  ASSIGNED_INVENTORY_NO_ACQUISITION_EXECUTION_OF_OURS
+venue_model   ONE_SIGNED_NET_POSITION_PER_MARKET  nets_opposite_side true
+```
+
+**The repair did what it was for and the position did not settle.** The
+refusal is now the *venue's own answer about this contract* rather than a
+local dead end reached before the venue was asked. There is no settlement
+accounting to report, so **exclusion from management and exposure release do
+not apply**: residual stays 10.0 and the position stays open to management.
+
+### The dominant remaining blocker, measured
+
+One venue-side condition blocks settlement, terminal exclusion *and* the
+calibration measurement:
+
+`CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME` / `NO_SETTLEMENT_PRICE_IN_RESPONSE`
+— the venue marks a market `closed: true`, `resolved: true`, records a
+`settled_at`, and returns **no settlement price**.
+
+| where it shows | evidence |
+|---|---|
+| Arizona (MLB) | `VENUE_RESOLUTION_UNREADABLE`, 1 of 1 open position |
+| tennis challenger | `settled_at 2026-09-24T17:38:24Z`, `outcome null`, `settlement_probe UNREADABLE` |
+| calibration outcome join | **9 of 12 `UNREADABLE`**, 3 `PENDING`, **0 resolved** |
+| calibration verdict | `INSUFFICIENT_EVIDENCE`; 16 fixtures, 0 resolved, baseline needs 50 to fit and has 0; shortfall 300; nothing written, gate shut |
+
+A lead, not yet a finding: the probe's `keys_seen` includes `outcomePrices`
+and `status`, so the response may carry a usable terminal price the reader
+is not consuming. That needs the payload inspected before anything is
+claimed, and it must not be assumed — reading a settlement off the wrong
+field is how a position settles against the other side.
+
+### Entry counts by stage, and the claim it retires
+
+`window 6 h` · **78 candidates, 0 admissible, 78 refused**
+(`summary.evaluated 386` is **all time**, not this window — the two were
+printed adjacent and unlabelled, which is now fixed and reconciled in the
+payload itself).
+
+| first failing stage | n |
+|---|---|
+| `4_SETTLEMENT_SCOPE` | **63** |
+| `1_PROBABILITY` | **15** |
+
+`reached_execution_estimate 8` · `walk_took_levels 8` ·
+**`negative_edge_with_a_walk 0`** · **`negative_edge_without_a_walk 55`**
+
+**My claim that every candidate lacked profitable depth is refuted by the
+engine's own numbers.** Not one candidate produced a measured negative edge
+on a walked book. 55 were refused on a negative edge computed against the
+*observed best ask* with no walk behind it, which says nothing about depth
+further down because none was read. 78 stopped before execution estimation
+entirely. Raw refusal totals for the window: `RISK_GATE_BLOCKED 78`,
+`VOID_ABANDONMENT_RULE_NOT_ESTABLISHED 78`,
+`NO_ACTION_HAS_POSITIVE_NET_EDGE 71`, `EXECUTION_ESTIMATE_NOT_IDENTIFIED 70`,
+`SIZING_POLICY_NOT_APPLICABLE 70`,
+`NO_OBSERVED_DEPTH_INSIDE_THE_BREAK_EVEN_LIMIT 55`, `NO_QUALIFIED_MODEL 15`,
+`QUOTE_STALE 15`, `INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED 15`. The lane
+created no inventory this run (`INVENTORY THIS LANE HOLDS: none`).
+
+### Recurring management — reported separately, and not met
+
+A terminal-settlement check proves **lifecycle closure**. It does not prove
+two fully evidenced recurring management decisions, and nothing here should
+be read as though it did. Neither did production, and the terminal branch
+was not even reached.
+
+| position | decisions | priced holds | complete | distinct instants | first failing link |
+|---|---|---|---|---|---|
+| tennis challenger `…:221817729` | 521 | **0** | **0** | **0** | `3_PROVIDER_FIXTURE` (485), `NOT_RECORDED` (36) |
+| Arizona acceptance `…:-105276210` | 436 | **0** | — | — | `3_PROVIDER_FIXTURE` |
+
+Every decision on both is `HOLD_BY_FALLBACK_RULE` with
+`EV_HOLD_NOT_IDENTIFIED` and `ranked: NONE — every action refused`, and each
+records `reconciles true`. The declared trigger **did** run and did not fire;
+what is absent is the *input*, not the rule. For the tennis position the
+provider covers only `["MLB","Soccer"]`, so its `EV_HOLD` is unobtainable by
+construction; `supported_open_challenger_positions 0 — NONE: no open
+challenger position exists in a covered sport`.
+
+**Verdicts, each on its own evidence.**
+
+| | verdict | on what |
+|---|---|---|
+| Software completion | **not complete** | the release, regression and identity repair landed; step 19 still fails and the terminal branch is unexercised in production |
+| Shadow acceptance | **NOT_DEMONSTRATED** | 0 priced holds, 0 complete decisions, 0 distinct instants, on either position |
+| Capital qualification | **not met, and not assessed here** | calibration `INSUFFICIENT_EVIDENCE` with 0 resolved fixtures; `trading_profitability.measured_here` false |
 
 ---
 

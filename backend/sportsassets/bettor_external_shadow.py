@@ -543,6 +543,28 @@ SUMMARY = """
      WHERE experiment_id = $1
 """
 
+#: THE SAME TOTALS, INSIDE THE WINDOW THE REST OF THE CENSUS USES.
+#:
+#: THE MIS-READING THIS PREVENTS, AND IT NEARLY CAUGHT ME. `SUMMARY` takes
+#: no window: it is ALL TIME. `REFUSAL_CENSUS` and `STAGE_CENSUS` both take
+#: `hours`. So a report printing `evaluated 386` beside `4_SETTLEMENT_SCOPE
+#: 63` was putting an all-time numerator next to a six-hour one, and the 63
+#: + 15 that legitimately add to the window's 78 candidates looked like they
+#: had lost 308 rows somewhere. Two denominators side by side with no label
+#: is exactly the shape of the overstatement the stage breakdown exists to
+#: stop, so the windowed totals are computed and reported as their own
+#: block rather than left for a reader to reconcile.
+SUMMARY_IN_WINDOW = """
+    SELECT count(*) AS evaluated,
+           count(*) FILTER (WHERE admissible) AS admissible,
+           count(*) FILTER (WHERE NOT admissible) AS refused,
+           count(*) FILTER (WHERE probability IS NOT NULL) AS priced,
+           min(decided_at) AS first_at, max(decided_at) AS last_at
+      FROM external_valuations
+     WHERE experiment_id = $1
+       AND decided_at >= now() - ($2 || ' hours')::interval
+"""
+
 #: The identity split on its own, so the census can show it per basis.
 IDENTITY_CENSUS = """
     SELECT coalesce(contract_identity_basis, 'UNLABELLED') AS basis,
@@ -715,7 +737,12 @@ async def census(conn, *, hours: int = 24) -> dict:
         "experiment_id": EXPERIMENT_ID,
         "window_hours": int(hours),
         "refusals": {r["refusal"]: int(r["n"]) for r in rows},
+        # ALL TIME, AND LABELLED AS SUCH. `refusals` and `stages` below are
+        # windowed; this is not, and an unlabelled pair of totals on two
+        # different denominators is how a report invites the wrong
+        # conclusion.
         "summary": (dict(summ) if summ is not None else {}),
+        "summary_window": "ALL_TIME_NOT_THE_window_hours_ABOVE",
         # THE TWO IDENTITIES, REPORTED APART. `us_market_slug` is what the
         # venue accepts; `condition_id` is the global catalogue's id. A row
         # carrying only the latter is a valuation of a contract no venue
@@ -732,6 +759,14 @@ async def census(conn, *, hours: int = 24) -> dict:
         srows = await conn.fetch(STAGE_CENSUS, EXPERIMENT_ID,
                                  str(int(hours)))
         out["stages"] = stage_report([dict(r) for r in srows])
+        # THE WINDOW'S OWN TOTALS, so the stage counts have a denominator
+        # that belongs to them. `summary` above is all time.
+        win = await conn.fetchrow(SUMMARY_IN_WINDOW, EXPERIMENT_ID,
+                                  str(int(hours)))
+        out["summary_in_window"] = (dict(win) if win is not None else {})
+        out["stages"]["reconciles_with_window"] = (
+            int((out["summary_in_window"] or {}).get("refused") or 0)
+            == sum(out["stages"].get("by_first_stage", {}).values()))
     except Exception as exc:                                   # noqa: BLE001
         # A FAILED ATTRIBUTION IS NOT AN EMPTY ONE. The refusal counts
         # above stand on their own; this says the breakdown could not be

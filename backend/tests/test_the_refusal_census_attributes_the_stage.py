@@ -195,5 +195,18 @@ async def test_the_stage_census_statement_runs_against_the_real_schema():
         out = await ext.census(conn, hours=6)
         assert out["stages"].get("computed") is not False, out["stages"]
         assert "by_first_stage" in out["stages"]
+        # THE TWO DENOMINATORS ARE REPORTED APART AND LABELLED. `summary`
+        # is ALL TIME; the stage counts are windowed. Printing 386
+        # all-time evaluations beside 78 windowed candidates is how a
+        # reader concludes 308 rows went missing, so the window's own
+        # totals travel with the stages and the all-time block says so.
+        assert out["summary_window"].startswith("ALL_TIME")
+        assert "summary_in_window" in out
+        assert set(out["summary_in_window"]) >= {"evaluated", "admissible",
+                                                 "refused", "priced"}
+        # AND THE RECONCILIATION IS COMPUTED, not left to the reader: every
+        # refused candidate in the window lands in exactly one stage.
+        assert out["stages"]["reconciles_with_window"] is True, (
+            out["summary_in_window"], out["stages"]["by_first_stage"])
     finally:
         await conn.close()
