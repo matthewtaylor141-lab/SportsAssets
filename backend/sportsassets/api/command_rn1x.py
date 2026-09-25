@@ -28,6 +28,8 @@ added it gets its own experiment id and its own total.
 
 from __future__ import annotations
 
+from .. import bettor_rn1x_store as _store
+
 SCOPE = ("Every count and total on this page is scoped to the rn1x_* "
          "tables under one experiment id. It is not a census of the "
          "system, of the desk, or of any other lane.")
@@ -980,6 +982,59 @@ async def learning(pool) -> dict:
     return out
 
 
+#: WHETHER THE MANAGER WOULD STILL SEE THIS POSITION, by the manager's own
+#: predicate rather than a second one written here. `bettor_rn1x_store`
+#: owns both halves -- unreleased inventory and the absence of a TERMINAL
+#: settlement basis -- and they are imported rather than restated, because
+#: a reader that disagreed with the manager about what is open would make
+#: "excluded from recurring management" unfalsifiable.
+#:
+#: WHY THIS IS HERE AT ALL. The successive-cycles check demanded two priced
+#: HOLD decisions on the acceptance position. Its fixture is over, the odds
+#: provider no longer carries it, and no EV_HOLD can be identified for it
+#: again -- so that demand can never be satisfied and the check failed on
+#: every run. A position whose terminal path is SETTLEMENT must be verified
+#: by its EXCLUSION from management, which needs the exclusion to be
+#: readable. It was not.
+POSITIONS_SQL = """
+    SELECT p.position_id, p.policy, p.source_trade_id,
+           p.source_account, p.condition_id, p.outcome_index,
+           p.entry_kind, p.unknown_reason, p.provenance,
+           p.seed_qty::float8 seed_qty,
+           p.seed_price::float8 seed_price,
+           p.seed_basis_usd::float8 seed_basis_usd,
+           p.source_ts, p.detected_ts, p.decision_ts,
+           extract(epoch FROM (p.detected_ts - p.source_ts))::float8
+             detection_lag_s,
+           o.net_usd::float8 net_usd, o.fees_usd::float8 fees_usd,
+           o.residual_qty::float8 residual_qty, o.settled_at,
+           o.outcome_basis,
+           COALESCE(f.released, 0)::float8 AS released_qty,
+           NOT (%(open)s) AS terminally_settled,
+           (COALESCE(f.released, 0) < p.seed_qty AND %(open)s)
+               AS open_to_management,
+           (SELECT count(*) FROM rn1x_decisions d
+              WHERE d.position_id = p.position_id) decisions,
+           (SELECT count(*) FROM rn1x_orders r
+              WHERE r.position_id = p.position_id) orders
+      FROM rn1x_positions p
+      LEFT JOIN rn1x_outcomes o ON o.position_id = p.position_id
+      LEFT JOIN (
+            SELECT o2.position_id,
+                   sum(CASE WHEN o2.side = 'SELL' THEN fl.qty ELSE 0 END)
+                       AS released
+              FROM rn1x_orders o2
+              JOIN rn1x_fills  fl ON fl.order_id = o2.order_id
+             GROUP BY o2.position_id) f ON f.position_id = p.position_id
+     WHERE ($2::text IS NULL OR p.policy ILIKE '%%' || $2 || '%%')
+     ORDER BY p.decision_ts DESC LIMIT $1
+""" % {"open": _store.NOT_TERMINALLY_SETTLED}
+
+#: The bases that make a position terminal, republished for readers so a
+#: check does not have to hard-code the strings.
+TERMINAL_OUTCOME_BASES = _store.TERMINAL_OUTCOME_BASES
+
+
 async def positions(pool, limit: int = 50, policy: str | None = None) -> list:
     """The positions themselves, newest first, with their outcome.
 
@@ -991,27 +1046,7 @@ async def positions(pool, limit: int = 50, policy: str | None = None) -> list:
     table. A substring filter, applied in SQL, is what lets a caller ask
     for the arm it means.
     """
-    rows = await pool.fetch(
-        "SELECT p.position_id, p.policy, p.source_trade_id, "
-        "p.source_account, p.condition_id, p.outcome_index, "
-        "p.entry_kind, p.unknown_reason, p.provenance, "
-        "p.seed_qty::float8 seed_qty, "
-        "p.seed_price::float8 seed_price, "
-        "p.seed_basis_usd::float8 seed_basis_usd, "
-        "p.source_ts, p.detected_ts, p.decision_ts, "
-        "extract(epoch FROM (p.detected_ts - p.source_ts))::float8 "
-        "  detection_lag_s, "
-        "o.net_usd::float8 net_usd, o.fees_usd::float8 fees_usd, "
-        "o.residual_qty::float8 residual_qty, o.settled_at, "
-        "(SELECT count(*) FROM rn1x_decisions d "
-        "   WHERE d.position_id = p.position_id) decisions, "
-        "(SELECT count(*) FROM rn1x_orders r "
-        "   WHERE r.position_id = p.position_id) orders "
-        "FROM rn1x_positions p "
-        "LEFT JOIN rn1x_outcomes o ON o.position_id = p.position_id "
-        "WHERE ($2::text IS NULL OR p.policy ILIKE '%' || $2 || '%') "
-        "ORDER BY p.decision_ts DESC LIMIT $1",
-        int(limit), policy or None)
+    rows = await pool.fetch(POSITIONS_SQL, int(limit), policy or None)
     return [dict(r) for r in rows]
 
 

@@ -555,6 +555,152 @@ IDENTITY_CENSUS = """
 """
 
 
+# ── WHERE IN THE PIPELINE A CANDIDATE STOPPED ────────────────────────
+#
+# THE CLAIM THIS CORRECTS, AND IT WAS MINE. I reported that every
+# production candidate "lacked profitable depth" because each row showed
+# empty walk and vwap fields. That does not follow. A candidate refused at
+# the SETTLEMENT SCOPE stage never reaches execution estimation at all, so
+# its walk fields are empty because the walk was never attempted -- not
+# because the book was thin. And `NO_ACTION_HAS_POSITIVE_NET_EDGE` can
+# fire on a candidate with no execution estimate, because the gate then
+# compares the probability against the observed best ask; that is a real
+# negative edge at the TOP of the book, which is a narrower statement than
+# "no profitable depth exists".
+#
+# So the refusals are attributed to STAGES, in the order the lane runs
+# them, and a candidate is counted at the EARLIEST stage that refused it.
+# A candidate carries several refusals; the earliest one is the only one
+# that describes where it actually stopped.
+STAGES = (
+    ("1_PROBABILITY", (
+        "INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED",
+        "NO_QUALIFIED_MODEL",
+        "THIN_OUTCOME_COVERAGE",
+        R_THIN_OUTCOME)),
+    ("2_FRESHNESS", (
+        "QUOTE_STALE",
+        "VENUE_BOOK_STALE",
+        "ONE_CLOCK_IS_NOT_MEASURED")),
+    ("3_IDENTITY", (
+        "VENUE_DOES_NOT_LIST_THIS_FIXTURE",
+        "NO_PREMAP_CONTRACT_FOR_THIS_FIXTURE",
+        "PAYOUT_OUTCOME_INDEX_NOT_BOUND_TO_A_TOKEN",
+        "PAYOUT_OUTCOME_DISAGREES_WITH_THE_VENUE_INTENT")),
+    ("4_SETTLEMENT_SCOPE", (
+        "VOID_ABANDONMENT_RULE_NOT_ESTABLISHED",
+        "OVERTIME_RULE_NOT_ESTABLISHED",
+        "SETTLEMENT_TERMS_CONFLICT",
+        "SETTLEMENT_SCOPE_NOT_ESTABLISHED",
+        "UNRESOLVED_SETTLEMENT_SEMANTICS")),
+    ("5_EXECUTION_ESTIMATE", (
+        "NO_OBSERVED_DEPTH_INSIDE_THE_BREAK_EVEN_LIMIT",
+        "EXECUTION_ESTIMATE_NOT_IDENTIFIED",
+        "VENUE_BOOK_NOT_READ",
+        "P_FILL_NOT_IDENTIFIED")),
+    ("6_SIZING", (
+        "SIZING_POLICY_NOT_APPLICABLE",
+        "UNFILLED_NOTIONAL",)),
+    ("7_RISK", (
+        "RISK_GATE_BLOCKED",
+        "ACTION_EXPOSURE_EFFECT_NOT_IDENTIFIED",
+        "OPEN_SHADOW_BOOK_NOT_READ")),
+    ("8_ECONOMICS", (
+        "NO_ACTION_HAS_POSITIVE_NET_EDGE",)),
+)
+
+STAGE_OF = {code: name for name, codes in STAGES for code in codes}
+STAGE_ORDER = [name for name, _ in STAGES]
+STAGE_UNCLASSIFIED = "9_UNCLASSIFIED_REFUSAL"
+
+
+def first_stage(refusals) -> str | None:
+    """The EARLIEST pipeline stage any of these refusals belongs to.
+
+    None when the list is empty. `9_UNCLASSIFIED_REFUSAL` when refusals
+    exist but none is a code this map knows -- reported by name rather
+    than silently folded into a stage, because an unmapped code means this
+    table has drifted from the lane.
+    """
+    codes = [str(c) for c in (refusals or [])]
+    if not codes:
+        return None
+    hits = [STAGE_OF[c] for c in codes if c in STAGE_OF]
+    if not hits:
+        return STAGE_UNCLASSIFIED
+    return min(hits, key=lambda n: STAGE_ORDER.index(n))
+
+
+#: Per-candidate stage attribution, with the two facts that decide whether
+#: "no profitable depth" is even sayable about a row: did the execution
+#: estimate SUCCEED, and did a walk actually take levels.
+STAGE_CENSUS = """
+    SELECT refusals,
+           admissible,
+           COALESCE(
+             (execution_estimate::jsonb ->> 'ok') = 'true', FALSE)
+               AS estimate_ok,
+           COALESCE(jsonb_array_length(
+             COALESCE(execution_estimate::jsonb -> 'levels_taken',
+                      '[]'::jsonb)), 0) AS levels_taken,
+           (execution_estimate::jsonb ->> 'vwap')::float8 AS vwap,
+           executable_price::float8 AS executable_price,
+           probability::float8 AS probability,
+           estimated_edge_per_contract::float8 AS edge
+      FROM external_valuations
+     WHERE experiment_id = $1
+       AND decided_at >= now() - ($2 || ' hours')::interval
+"""
+
+
+def stage_report(rows) -> dict:
+    """Stage-specific counts, and what each one does and does not support.
+
+    Pure, so the attribution can be checked without a database.
+    """
+    out = {"candidates": 0, "admissible": 0,
+           "by_first_stage": {}, "reached_execution_estimate": 0,
+           "walk_took_levels": 0,
+           "negative_edge_with_a_walk": 0,
+           "negative_edge_without_a_walk": 0,
+           "stage_order": list(STAGE_ORDER)}
+    for r in rows or []:
+        out["candidates"] += 1
+        if r.get("admissible"):
+            out["admissible"] += 1
+        st = first_stage(r.get("refusals"))
+        if st is not None:
+            out["by_first_stage"][st] = out["by_first_stage"].get(st, 0) + 1
+        ok = bool(r.get("estimate_ok"))
+        took = int(r.get("levels_taken") or 0)
+        if ok:
+            out["reached_execution_estimate"] += 1
+        if took > 0:
+            out["walk_took_levels"] += 1
+        edge = r.get("edge")
+        if edge is not None and float(edge) <= 0:
+            if took > 0:
+                out["negative_edge_with_a_walk"] += 1
+            else:
+                out["negative_edge_without_a_walk"] += 1
+    out["what_this_supports"] = {
+        "negative_edge_with_a_walk": (
+            "a book was walked and the volume-weighted cost of the sized "
+            "quantity, plus the per-level fees, exceeded the probability. "
+            "This is the only class about which 'no profitable depth' is "
+            "sayable"),
+        "negative_edge_without_a_walk": (
+            "no execution estimate existed, so the gate compared the "
+            "probability against the OBSERVED BEST ASK. A real negative "
+            "edge at the top of the book -- which does NOT establish "
+            "anything about depth further down, because none was read"),
+        "refused_before_5_EXECUTION_ESTIMATE": (
+            "the walk was never attempted. An empty vwap on these rows is "
+            "the absence of a measurement, not a thin book"),
+    }
+    return out
+
+
 async def census(conn, *, hours: int = 24) -> dict:
     """What the engine did and, mostly, why it did not.
 
@@ -565,7 +711,7 @@ async def census(conn, *, hours: int = 24) -> dict:
     rows = await conn.fetch(REFUSAL_CENSUS, EXPERIMENT_ID, str(int(hours)))
     summ = await conn.fetchrow(SUMMARY, EXPERIMENT_ID)
     ident = await conn.fetch(IDENTITY_CENSUS, EXPERIMENT_ID)
-    return {
+    out = {
         "experiment_id": EXPERIMENT_ID,
         "window_hours": int(hours),
         "refusals": {r["refusal"]: int(r["n"]) for r in rows},
@@ -582,3 +728,16 @@ async def census(conn, *, hours: int = 24) -> dict:
             "sourced independently -- never one derived from the other"),
         "credential": credential_present(),
     }
+    try:
+        srows = await conn.fetch(STAGE_CENSUS, EXPERIMENT_ID,
+                                 str(int(hours)))
+        out["stages"] = stage_report([dict(r) for r in srows])
+    except Exception as exc:                                   # noqa: BLE001
+        # A FAILED ATTRIBUTION IS NOT AN EMPTY ONE. The refusal counts
+        # above stand on their own; this says the breakdown could not be
+        # computed rather than reporting zeros for every stage.
+        out["stages"] = {"computed": False,
+                         "error": type(exc).__name__,
+                         "why": ("the stage attribution read failed, so no "
+                                 "stage-specific count is reported")}
+    return out

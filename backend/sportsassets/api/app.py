@@ -1885,6 +1885,54 @@ async def admin_external_source_calibration(response: Response,
     return out
 
 
+@app.post("/api/admin/rn1x-repair-position-identity",
+          dependencies=[Depends(require_admin)])
+async def admin_rn1x_repair_position_identity(response: Response,
+                                              body: dict | None = None
+                                              ) -> dict:
+    """RE-ESTABLISH a legacy position's venue identity, from the resolver.
+
+    WHY. Migration 119 puts the identity on the position and the entry
+    writer fills it. A position opened earlier carries NULL, and the
+    settlement consumer then looks for a valuation that NAMES the outcome
+    the position holds. For the acceptance position that refused in
+    production with THE_ONLY_AVAILABLE_IDENTITY_DESCRIBES_A_DIFFERENT
+    _OUTCOME: it holds Arizona, the recorded valuation describes Colorado,
+    and borrowing Colorado's slug would settle it against the other side.
+
+    So the binding is re-derived by asking `premap.resolve` for the
+    outcome `market_tokens` lists at the position's own `outcome_index`.
+    `external_valuations` is never read, which is the strongest available
+    guarantee that no other side's row is borrowed.
+
+    Cross-checked before anything is written, refused on any
+    disagreement, recorded with its full derivation, fills only NULL
+    identity columns, and touches no provenance, entry kind, source or
+    seed column. `dry_run: true` resolves and cross-checks without
+    writing.
+    """
+    import time as _t
+
+    from .. import bettor_legacy_identity_repair as REPAIR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    pid = b.get("position_id")
+    if not pid:
+        return {"ok": False, "refusal": "NO_POSITION_ID_SUPPLIED",
+                "why": "this route repairs one named position"}
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        got = await REPAIR.repair(conn, str(pid), now=_t.time(),
+                                  write=not bool(b.get("dry_run")))
+    return {"ok": bool(got.get("ok")), "at": _t.time(),
+            "repairer": REPAIR.describe(), "repair": got,
+            "writes": ("at most the five identity columns and the audit "
+                       "record on ONE position, and only where they are "
+                       "NULL. No order, no decision, no reseed")}
+
+
 @app.post("/api/admin/rn1x-settle-open-positions",
           dependencies=[Depends(require_admin)])
 async def admin_rn1x_settle_open_positions(response: Response,

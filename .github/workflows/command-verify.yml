@@ -1174,19 +1174,41 @@ jobs:
           # experiment, the historical lane's hundreds of rows push the one
           # challenger position off a 50-row page -- which run 37 read as
           # "no challenger position exists" while the row was in the table.
-          PID=$(curl -s --max-time 45 -H "$H" \
-                "$API/api/command/rn1x/positions?policy=CHALLENGER&limit=200" \
-                | jq -r '[(.positions // . // [])[]
-                          | select((.policy // "") | test("CHALLENGER"))]
-                         | .[0].position_id // empty' 2>/dev/null)
+          # THE RESPONSE IS KEPT, not just piped into a selector. The
+          # terminal-exclusion check below reads `open_to_management`,
+          # `terminally_settled` and `outcome_basis` off the SAME row this PID
+          # came from, so a second request cannot disagree with the first about
+          # which position is being judged.
+          curl -s -o /tmp/pos.json --max-time 45 -H "$H" \
+            "$API/api/command/rn1x/positions?policy=CHALLENGER&limit=200" \
+            || echo '{}' > /tmp/pos.json
+          PID=$(jq -r '[(.positions // . // [])[]
+                        | select((.policy // "") | test("CHALLENGER"))]
+                       | .[0].position_id // empty' \
+                /tmp/pos.json 2>/dev/null)
           if [ -z "$PID" ]; then
             say "NO CHALLENGER POSITION EXISTS -- nothing to manage, and that"
             say "is the honest state, not a pass for continuing management"
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
           fi
+          # ── THIS STEP NOW WRITES ITS OWN EVIDENCE ──────────────────
+          # It has failed since before the settlement release and I could
+          # not say WHICH of its three assertions tripped: the job log is
+          # long enough that this step's lines fall outside any tail I can
+          # retrieve, and the log archive is blocked by egress policy. So
+          # the PID, each HTTP code and the head of each response go into a
+          # small file that is uploaded as an artifact and echoed at the
+          # end of the job. An assertion whose failure cannot be read is
+          # not a check, it is a rumour.
+          : > /tmp/s19.txt
+          s19 () { printf '%s\n' "$*" >> /tmp/s19.txt; }
+          s19 "step19 at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          s19 "PID=$PID"
           code=$(curl -s -o /tmp/mg.json -w '%{http_code}' --max-time 60 \
                  -H "$H" "$API/api/command/rn1x/trace/$PID" || echo 000)
           say "trace $PID HTTP $code"
+          s19 "trace_http=$code"
+          s19 "trace_head=$(head -c 300 /tmp/mg.json 2>/dev/null | tr -d '\n')"
           [ "$code" = "200" ] || { echo "::error::the trace answered $code"; FAIL=1; }
           # NORMALISE. The jsonb columns can arrive as strings depending on
           # the driver's codec, and a jq path into a string silently
@@ -1245,6 +1267,9 @@ jobs:
                    /tmp/mgn.json 2>/dev/null || echo 0)
           NDEC=$(jq '(.decisions // []) | length' /tmp/mgn.json 2>/dev/null || echo 0)
           say "priced_holds\t$PRICED of $NDEC decisions"
+          s19 "priced_holds=$PRICED of $NDEC"
+          s19 "violation_head=$(head -c 300 /tmp/viol.txt 2>/dev/null | tr -d '\n')"
+          s19 "fail_before_input_chain=$FAIL"
           if [ -s /tmp/viol.txt ]; then
             cat /tmp/viol.txt | tee -a "$GITHUB_STEP_SUMMARY"
             echo "::error::a hold was valued on a quantity other than the inventory ranked"
@@ -1269,9 +1294,14 @@ jobs:
           code=$(curl -s -o /tmp/ch.json -w '%{http_code}' --max-time 90 \
                  -H "$H" "$API/api/command/rn1x/input-chain/$PID" || echo 000)
           say "input-chain HTTP $code"
+          s19 "input_chain_http=$code"
+          s19 "input_chain_head=$(head -c 500 /tmp/ch.json 2>/dev/null | tr -d '\n')"
           if [ "$code" != "200" ]; then
             echo "::error::the input-chain read answered $code"; FAIL=1
           fi
+          s19 "FAIL=$FAIL"
+          say "-- step19 evidence (also /tmp/s19.txt) --"
+          cat /tmp/s19.txt | tee -a "$GITHUB_STEP_SUMMARY"
           jq -r '"inputs_complete\t" + ((.inputs_complete // false)|tostring),
                  "market\t"          + ((.chain[0].outcome // "-")|tostring),
                  "entry_lane_rows\t" + ((.entry_lane_valuations.rows // 0)|tostring)
@@ -1358,7 +1388,112 @@ jobs:
           IDS=$(jq -r '[.[] | select((.missing | length) == 0) | .id] | join("  ")' /tmp/acc.json)
           say "priced_holds\t$PRICED of $NDEC decisions"
           say "complete\t$COMPLETE   distinct_instants\t$DISTINCT"
-          if [ "$COMPLETE" -ge 2 ] && [ "$DISTINCT" -ge 2 ]; then
+          # ── WHICH QUESTION THIS POSITION IS ENTITLED TO BE ASKED ────
+          #
+          # THE DEFECT THIS FIXES, AND IT WAS IN THE CHECK, NOT THE CODE. This
+          # step demanded two complete priced HOLD decisions at two distinct
+          # instants, unconditionally. The acceptance position's fixture is
+          # OVER: the odds provider stops carrying a finished game, the input
+          # chain records `first_failing_link 3_PROVIDER_FIXTURE`, and no
+          # EV_HOLD can be identified for it again. So that demand was
+          # unsatisfiable for this position on every future run, and the step
+          # failed for a reason that had nothing to do with the manager. I
+          # reported it as pre-existing, which is true and is not a defence:
+          # an assertion that cannot be satisfied is not evidence of anything.
+          #
+          # A POSITION WHOSE TERMINAL PATH IS SETTLEMENT IS VERIFIED BY ITS
+          # EXCLUSION FROM MANAGEMENT, not by continued management of a
+          # contract that no longer exists. Terminality is read from the SAME
+          # predicate the scheduled manager uses -- `open_to_management` is
+          # computed from `bettor_rn1x_store.NOT_TERMINALLY_SETTLED` itself,
+          # not from a second copy written here -- so 'it has left recurring
+          # management' is a fact about the manager's own query.
+          # `// "unknown"` IS WRONG HERE AND I USED IT FIRST. In jq `//` takes
+          # the right side when the left is false OR null, so a correctly
+          # EXCLUDED position -- open_to_management false, which is the passing
+          # state -- read back as "unknown", and a build with no such field read
+          # back as "false", which is the failing state. The two cases the
+          # branch below has to tell apart were the two `//` conflates. This is
+          # the fifth time a jq subtlety has corrupted a report in this file, so
+          # ABSENCE IS TESTED WITH `has`, and the extractor is written once.
+          fld () {
+            jq -r --arg p "$PID" --arg k "$1" '[(.positions // [])[]
+                | select(.position_id == $p)] | .[0] // {}
+                | if has($k) and (.[$k] != null) then (.[$k]|tostring)
+                  else "unknown" end' /tmp/pos.json 2>/dev/null || echo unknown
+          }
+          TERM=$(fld terminally_settled)
+          OPENM=$(fld open_to_management)
+          BASIS=$(fld outcome_basis)
+          RESID=$(fld residual_qty)
+          NETU=$(fld net_usd)
+          say "terminal      $TERM  open_to_management=$OPENM  basis=$BASIS"
+          say "              residual=$RESID  net_usd=$NETU"
+          s19 "terminal=$TERM open_to_management=$OPENM basis=$BASIS"
+          s19 "residual=$RESID net_usd=$NETU"
+          if [ "$TERM" = "unknown" ]; then
+            # THE READ THAT DECIDES WHICH QUESTION TO ASK MUST ITSELF BE
+            # READABLE. A build that does not report terminality cannot be
+            # judged either way, and silently falling back to the old demand
+            # would reproduce the unsatisfiable failure under a new name.
+            echo "::error::the positions read did not report terminality, so neither acceptance question can be evaluated against this build"
+            say "TERMINALITY NOT REPORTED -- NOT EVALUATED"
+            FAIL=1
+          elif [ "$TERM" = "true" ]; then
+            say "THIS POSITION IS TERMINALLY SETTLED, so the question is
+          TERMINAL EXCLUSION, not continued management."
+            TFAIL=0
+            case "$BASIS" in
+              VENUE_AUTHORITATIVE_SETTLEMENT_OF_THE_HELD_CONTRACT|VENUE_CONFIRMED_VOID_STAKES_RETURNED)
+                say "  basis            OK    $BASIS" ;;
+              *) echo "::error::terminal was reported but the basis is $BASIS, which is not one of the venue-authoritative bases"
+                 TFAIL=1 ;;
+            esac
+            if [ "$OPENM" = "false" ]; then
+              say "  left_management   OK    the manager's own predicate no longer
+          selects it"
+            else
+              echo "::error::a terminally settled position is still open to management (open_to_management=$OPENM)"
+              TFAIL=1
+            fi
+            # EXPOSURE RELEASED. A settled contract holds nothing, and a
+            # non-zero residual beside a terminal basis is a contradiction
+            # between two records of the same position.
+            if [ "$RESID" = "0" ] || [ "$RESID" = "0.0" ]; then
+              say "  exposure          OK    residual 0"
+            else
+              echo "::error::terminal basis with residual $RESID -- the exposure was not released"
+              TFAIL=1
+            fi
+            if [ "$NETU" = "unknown" ]; then
+              echo "::error::terminal basis with no recorded net P&L -- the accounting was not written"
+              TFAIL=1
+            else
+              say "  accounting        OK    net_usd $NETU recorded"
+            fi
+            if [ "$TFAIL" = "0" ]; then
+              say "TERMINAL EXCLUSION VERIFIED: settled on a venue-authoritative
+          basis, excluded from the manager's own open-position predicate,
+          exposure released and accounting recorded. Continued hold
+          valuation is NOT required of a finished contract."
+            else
+              say "TERMINAL EXCLUSION NOT VERIFIED"
+              FAIL=1
+            fi
+            # AND THE MANAGEMENT DEMONSTRATION IS REPORTED, NOT CLAIMED. A
+            # terminal position passing exclusion does not demonstrate the
+            # manager on live rows, and this says so rather than letting the
+            # pass above read as though it had.
+            if [ "$COMPLETE" -ge 2 ] && [ "$DISTINCT" -ge 2 ]; then
+              say "and it ALSO carries $COMPLETE complete priced decisions at"
+              say "$DISTINCT distinct instants: $IDS"
+            else
+              say "THE RECURRING-MANAGEMENT DEMONSTRATION REMAINS SEPARATE AND"
+              say "IS NOT MET BY THIS POSITION: $COMPLETE complete at $DISTINCT"
+              say "instants. It needs an OPEN position in a covered sport, which"
+              say "is a different position, and is reported as unfinished."
+            fi
+          elif [ "$COMPLETE" -ge 2 ] && [ "$DISTINCT" -ge 2 ]; then
             say "ACCEPTANCE MET on the SAME position:"
             say "  $IDS"
             say "each with a verified held-exposure mapping, a probability inside"
@@ -1366,10 +1501,17 @@ jobs:
             say "residual, ranked alternatives with a selected action and"
             say "quantity, and reconciled accounting"
           else
-            echo "::error::acceptance NOT met: $COMPLETE complete decisions at $DISTINCT distinct instants (need 2 and 2); priced_holds=$PRICED of $NDEC. The INCOMPLETE lines above name what each one lacks and the input chain names the link that stopped it."
+            echo "::error::acceptance NOT met: $COMPLETE complete decisions at $DISTINCT distinct instants (need 2 and 2); priced_holds=$PRICED of $NDEC. The position is NOT terminally settled, so continued management is the right question for it. The INCOMPLETE lines above name what each one lacks and the input chain names the link that stopped it."
             say "ACCEPTANCE NOT MET -- NOT_DEMONSTRATED"
             FAIL=1
           fi
+          s19 "FAIL_after_acceptance=$FAIL"
+          # THE EVIDENCE FILE IS ECHOED AGAIN HERE, AT THE END. The earlier
+          # copy was printed before the acceptance verdict existed, so the
+          # summary held a file that stopped short of the thing a reader wants
+          # most. The uploaded artifact is this complete version.
+          say "-- step19 evidence, final --"
+          cat /tmp/s19.txt | tee -a "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit $FAIL
 
@@ -1918,6 +2060,18 @@ jobs:
       # and its decisions are read back with their own stored evidence.
       #
       # It writes one fixture_metadata row. No order, no position, no capital.
+      # THE STEP-19 EVIDENCE, SEPARATELY RETRIEVABLE. `if: always()` so a
+      # failing assertion still publishes the reason it failed -- which is
+      # the whole point of writing it to a file.
+      - name: Step 19 evidence artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: step19-evidence
+          path: /tmp/s19.txt
+          if-no-files-found: warn
+          retention-days: 14
+
       - name: RN1X — acquire fixture scope evidence, then two evidenced cycles
         if: always()
         env:
@@ -2459,6 +2613,86 @@ jobs:
             head -c 300 /tmp/cal.json | tee -a "$GITHUB_STEP_SUMMARY"
           fi
 
+          # 4a-bis · THE LEGACY POSITION'S IDENTITY, RE-ESTABLISHED FIRST.
+          #
+          # THE PRODUCTION REFUSAL THIS ADDRESSES, verbatim from the previous
+          # run: THE_ONLY_AVAILABLE_IDENTITY_DESCRIBES_A_DIFFERENT_OUTCOME --
+          # the acceptance position holds 'Arizona Diamondbacks', the two
+          # recorded identities for its condition describe ['Colorado Rockies',
+          # 'None'], and the consumer refused rather than borrow the other
+          # side's slug. That refusal is CORRECT and it occurs BEFORE the venue
+          # is asked anything, so venue settlement stayed untested for this
+          # position.
+          #
+          # The repair re-derives the binding from `premap.resolve` -- asked for
+          # the outcome the GLOBAL CATALOGUE lists at this position's own index
+          # -- cross-checks it five ways, and writes only NULL identity columns.
+          # It never reads `external_valuations`, never touches provenance and
+          # never reseeds: the position stays synthetic, modelled and unfunded.
+          # It runs HERE, immediately before the sweep, so the repair and the
+          # readback are one run against one build.
+          PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
+          say ""
+          say "## legacy identity repair, before the sweep"
+          say "  position\t$PID"
+          
+          # THE DRY RUN FIRST. It resolves and cross-checks and writes nothing,
+          # so the answer is on the record before anything is persisted.
+          : > /tmp/rep0.json
+          C0=$(curl -s -o /tmp/rep0.json -w '%{http_code}' --max-time 120 \
+              -X POST -H "$H" -H 'Content-Type: application/json' \
+              --data "$(jq -nc --arg p "$PID" '{position_id:$p,dry_run:true}')" \
+              "$API/api/admin/rn1x-repair-position-identity" || echo 000)
+          say "-- dry run (HTTP $C0), raw --"
+          head -c 2500 /tmp/rep0.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          
+          # THEN THE WRITE. Refused on any disagreement, and a refusal is the
+          # answer -- not a reason to try a looser binding.
+          : > /tmp/rep.json
+          C1=$(curl -s -o /tmp/rep.json -w '%{http_code}' --max-time 120 \
+              -X POST -H "$H" -H 'Content-Type: application/json' \
+              --data "$(jq -nc --arg p "$PID" '{position_id:$p}')" \
+              "$API/api/admin/rn1x-repair-position-identity" || echo 000)
+          say "-- write (HTTP $C1), raw --"
+          head -c 3000 /tmp/rep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          # THE RAW PAYLOAD IS PRINTED ABOVE, UNCONDITIONALLY, BEFORE ANY jq
+          # TOUCHES IT. Four settlement reports were lost to a jq type error
+          # eating a 200 response; the evidence is never only inside the
+          # formatter.
+          if [ "$C1" = "200" ]; then
+            cat > /tmp/rep.jq <<'JQ'
+          def n(x): if x == null then "-" else (x|tostring) end;
+          "ok\t"            + n(.repair.ok)
+                              + "  written " + n(.repair.written)
+                              + "  refusal " + n(.repair.refusal),
+          "why\t"           + n(.repair.why),
+          "held_outcome\t"  + n(.repair.held_outcome)
+                              + "  token " + n(.repair.held_token_id)
+                              + "  index " + n(.repair.outcome_index),
+          "catalogue\t"     + n(.repair.catalogue),
+          "resolver\t"      + n(.repair.resolver),
+          "identity\t"      + n(.repair.identity),
+          "provenance\t"    + n(.repair.provenance)
+                              + "  reseeds " + n(.repair.reseeds)
+                              + "  reads_valuations "
+                              + n(.repair.reads_external_valuations),
+          "-- the cross-checks, each with its own verdict --",
+          ((.repair.cross_checks // {}) | to_entries[]
+            | "  " + .key + "\t" + n(.value.passed) + "\t" + n(.value.why))
+          JQ
+            sed -i 's/^  //' /tmp/rep.jq
+            jq -r -f /tmp/rep.jq /tmp/rep.json 2>/tmp/rep.err \
+              | tee -a "$GITHUB_STEP_SUMMARY" \
+              || { say "THE REPAIR REPORT FAILED TO RENDER -- a reporting"
+                   say "fault, not a finding. The raw payload is above:"
+                   head -c 300 /tmp/rep.err | tee -a "$GITHUB_STEP_SUMMARY"; }
+          else
+            say "THE REPAIR ROUTE DID NOT RETURN 200 -- no identity was"
+            say "written and the sweep below will refuse as it did before."
+          fi
+          
           # 4b · SETTLEMENT FROM THE VENUE'S OWN RESOLUTION.
           # Every open shadow position -- the entry lane's AND the
           # acceptance position -- is asked of the venue. The answer is
@@ -2552,6 +2786,16 @@ jobs:
               -H "$H" "$API/api/command/rn1x/external/census?hours=6" || echo 000)
           say ""
           say "census HTTP $C"
+          # THE REFUSAL TOTALS, THEN WHERE EACH CANDIDATE ACTUALLY STOPPED.
+          #
+          # WHY THE SECOND BLOCK EXISTS, AND IT CORRECTS A CLAIM OF MINE. I
+          # reported that every candidate lacked profitable depth. Missing
+          # walk/VWAP fields do not establish that: a candidate refused at
+          # PROBABILITY, FRESHNESS, IDENTITY or SETTLEMENT SCOPE never reached
+          # execution estimation at all, so it has no walk because it was never
+          # priced -- not because the book was thin. `stages` attributes each
+          # refused candidate to its EARLIEST failing stage and counts the
+          # negative-edge cases with and without a walk separately.
           jq -r '"evaluated\t"  + ((.summary.evaluated  // 0)|tostring),
                  "admissible\t" + ((.summary.admissible // 0)|tostring),
                  "refused\t"    + ((.summary.refused    // 0)|tostring),
@@ -2559,4 +2803,45 @@ jobs:
                  (.refusals // {} | to_entries[] | "  \(.key)\t\(.value)")' \
             /tmp/cx.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
             || head -c 300 /tmp/cx.json
+          say ""
+          say "-- stage attribution, raw --"
+          jq -c '.stages' /tmp/cx.json 2>&1 | head -c 1500 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+                 if (.stages.computed == false) then
+                   "stages\tNOT COMPUTED: " + n(.stages.error)
+                 else
+                   "reached_execution_estimate\t"
+                     + n(.stages.reached_execution_estimate)
+                     + "  walk_took_levels " + n(.stages.walk_took_levels),
+                   "negative_edge_WITH_a_walk\t"
+                     + n(.stages.negative_edge_with_a_walk),
+                   "negative_edge_WITHOUT_a_walk\t"
+                     + n(.stages.negative_edge_without_a_walk),
+                   "-- first failing stage, per candidate --",
+                   ((.stages.by_first_stage // {}) | to_entries[]
+                     | "  " + .key + "\t" + n(.value))
+                 end' /tmp/cx.json 2>/dev/null \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      # THE RAW PAYLOADS, SEPARATELY RETRIEVABLE. Every formatted report
+      # above can fail on a jq type it did not expect -- that has now
+      # happened four times, and each time the run's evidence existed only
+      # inside the formatter that dropped it. These files are the
+      # unformatted answers the API gave, uploaded whatever the step's
+      # outcome, so a reporting fault can never again cost a run's result.
+      - name: Entry-run raw evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: entry-run-evidence
+          path: |
+            /tmp/rep0.json
+            /tmp/rep.json
+            /tmp/st.json
+            /tmp/cal.json
+            /tmp/cx.json
+          if-no-files-found: warn
+          retention-days: 14

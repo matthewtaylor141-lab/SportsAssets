@@ -109,8 +109,10 @@ Measurement conventions, each chosen so it can only refuse:
 - **Drawdown** counts an unsettled position whose mark is unavailable as a
   **total loss**. An unmarked position is not a position that is fine.
 - **Capital-hours** measures hours **accrued**, which is observable. It is
-  not a forecast of holding period — this lane has no exit rule, so that
-  number does not exist and is not invented.
+  not a forecast of holding period: the exit rule is a *trigger* on
+  observed state (§8b), not a predicted holding time, so a forecast
+  horizon does not exist and is not invented. (The earlier wording here
+  said "this lane has no exit rule", which was wrong — see §8b.)
 - **A settled position is excluded from the exposure rails** (its basis
   came back) but its loss counts in full on drawdown.
 - **An unread book is not an empty one.** It leaves every rail
@@ -419,10 +421,12 @@ A capped live-capital pilot would need, in order:
 1. **The calibration measurement** above. Until it exists the lane refuses
    to create even shadow inventory, and it would be wrong to fund a
    valuation whose accuracy has never been checked against outcomes.
-2. **An exit rule.** This lane has none. `MAX_CAPITAL_HOURS` is measured
-   as accrued rather than forecast precisely because of that, and
-   inventory that cannot be exited by a stated rule should not be created
-   with real money.
+2. ~~**An exit rule.** This lane has none.~~ **Withdrawn — the claim was
+   wrong, and it was mine.** This lane *does* have an exit rule, it is
+   declared, and entry-created inventory reaches it. The traced connection
+   and the one component that *is* missing are in §8b below. Nothing was
+   built to fix this; the existing manager was traced and the claim
+   corrected.
 3. **An owner-approved limit set against a named funded account.** The
    limits in §4 are shadow limits derived from a frozen shadow notional.
    They are not a capital authorization and this release says so in the
@@ -431,8 +435,81 @@ A capped live-capital pilot would need, in order:
    A different pilot account must be explicitly identified and authorized;
    nothing here selects one.
 
-Items 1 and 2 are engineering and are ours. Items 3 and 4 are the owner's
-decision and are the only things this record asks for.
+Item 1 is engineering and is ours. Item 2 is withdrawn (§8b). Items 3 and 4
+are the owner's decision and are the only things this record asks for.
+
+---
+
+## 8b · The exit path, traced — and what is actually missing
+
+I claimed this lane has no exit rule and listed building one as a pilot
+prerequisite. That was wrong, and it contradicted work already in the tree.
+The trace, component by component, with the file each claim is read from:
+
+| component | what it is | where |
+|---|---|---|
+| the **rule** (WHETHER to act) | `EXPOSURE_TRIGGER_RULE_V1` — declared thresholds: a **20 % of basis** adverse move on the last observed price, or **86,400 s** unpaired. Needs no forecast and no `EV_HOLD`; its inputs are last price, entry basis and seconds open | `bettor_mgmt_select.exposure_trigger`, `TRIGGER_DECLARATION` |
+| the **method** (HOW to act) | `rank_priced_actions` prices `DIRECT_EXIT`, `REDUCE`, `TAKE_COMPLEMENT`, `POST_COMPLEMENT` over the **same** quantity, and refuses a price with no depth behind it | `bettor_mgmt_select.rank_priced_actions` |
+| the **execution** | `Managed.decide_and_act` runs WHETHER then HOW and places the winner through the existing `place()` → `bettor_desk.Order` → `Portfolio` path. `INTENT_FOR` records which evaluated action produced the order | `bettor_mgmt_lifecycle` |
+| the **schedule** | `run_continuing_management` drives the above for the entry lane's own experiment on **every** cycle, including cycles with no new candidates | `workers/rn1x_shadow.run_continuing_management` |
+| the **connection** | `store.open_positions` returns an entry-created position with its quantity and basis, which is exactly what a `Managed` leg is built from | `bettor_rn1x_store.OPEN_POSITIONS_SQL` |
+
+Proven end to end, through the existing manager and with no second exit
+engine, by `tests/test_the_entry_lane_reaches_the_exit_path.py` (11 tests):
+the rule is declared and needs no forecast; it holds on no adverse move and
+**fires** on a 20 % adverse move; an entry-created leg exits through
+`decide_and_act` as a SELL capped at the residual with the method chosen by
+the priced comparison; a complement completion is a BUY of the other leg
+with intent `COMPLETE_PAIR`; the time condition fires with **no price at
+all**, so nothing is held forever merely because nothing quotes it; and a
+`@pg` test drives `store.open_positions` → `Managed` → exit on a position
+the real `ext_pinnacle_loop.cycle()` opened.
+
+**The component that IS missing, named.** Not a rule — an **input**, for
+one position. The acceptance position records `HOLD_BY_FALLBACK_RULE` with
+`first_failing_link 3_PROVIDER_FIXTURE`: its fixture is over, so the odds
+provider no longer carries it and no `EV_HOLD` can be identified for it
+again. The trigger *did* run and did not fire on a price move, because
+there is no price. **A position whose fixture has finished belongs to
+settlement, not to a repeated hold valuation** — which is
+`bettor_entry_settlement`'s job, and was blocked for that position by its
+missing venue identity (§5) rather than by any exit gap. That is why the
+successive-cycles check now validates **terminal exclusion** for a settled
+position instead of demanding continued management of a contract that no
+longer exists (§8c).
+
+## 8c · Two checks repaired, and one conclusion narrowed
+
+**The successive-cycles check could not pass.** It demanded two complete
+priced `HOLD` decisions on the acceptance position at two distinct
+instants. Per §8b that is unsatisfiable for a position whose fixture is
+over — so the step failed on every run for a reason that had nothing to do
+with the manager. Reporting it as pre-existing was true and was not a
+defence. It now reads terminality from the **manager's own predicate**
+(`command_rn1x.POSITIONS_SQL` interpolates
+`bettor_rn1x_store.NOT_TERMINALLY_SETTLED` rather than restating it) and
+branches: a terminally settled position must show a venue-authoritative
+basis, exclusion from that predicate, a released exposure and recorded
+accounting; a position that is **not** terminal still faces the original
+2 × 2 demand; and a build that does not report terminality at all fails as
+NOT EVALUATED rather than silently falling back. Agreement between the
+reader and `store.open_positions` is pinned across six states — unreleased,
+part-released, fully released, scored-but-not-terminal, settled and void —
+by `tests/test_terminal_exclusion_is_readable.py`. The step also writes
+`/tmp/s19.txt` and uploads it as `step19-evidence`, because an assertion
+whose failure cannot be read is a rumour rather than a check.
+
+**"Every candidate lacked profitable depth" was beyond the evidence.**
+Missing walk/VWAP fields do not establish that: a candidate refused at
+`1_PROBABILITY`, `2_FRESHNESS`, `3_IDENTITY` or `4_SETTLEMENT_SCOPE` never
+reached execution estimation, so it has no walk **because it was never
+priced**, not because the book was thin. `bettor_external_shadow.census()`
+now attributes every refused candidate to its **earliest** failing stage
+(`STAGES`, `first_stage`, `stage_report`) and counts
+`negative_edge_with_a_walk` apart from `negative_edge_without_a_walk`. The
+numbers are reported per stage from production rather than summarised into
+one claim; source calibration and capital qualification remain separate
+verdicts from software completion.
 
 ---
 
