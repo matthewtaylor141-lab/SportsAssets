@@ -190,3 +190,57 @@ def test_the_import_walk_would_follow_the_chain_if_the_file_were_scanned():
     scanned = {p.stem for p in vd._py_files(ROOT)}
     assert "capture_incentive_manifest" in scanned
     assert dep not in scanned
+
+
+# ── the venue-terms capture, recorded as facts ───────────────────────
+#
+# These live here rather than in their own file because they answer the
+# same kind of question the audit above does: what did an external party
+# actually give us, and is the gap ours or theirs.
+
+def test_the_venue_terms_attempts_are_recorded_not_remembered():
+    """A 404 answers "does the venue publish this" as definitely as a 200,
+    and a retrieval nobody wrote down has to be repeated."""
+    from sportsassets import bettor_venue_settlement as VS
+
+    atts = VS.VENUE_TERMS_CAPTURE_ATTEMPTS
+    assert len(atts) == 3, atts
+    for a in atts:
+        assert a["asked_at"].endswith("Z")
+        assert a["result"]
+        assert a["detail"]
+    results = {a["result"] for a in atts}
+    assert results == {"HTTP_404", "HTTP_200_NO_SETTLEMENT_PROSE",
+                       "HTTP_200_CLIENT_RENDERED"}
+
+
+def test_a_404_body_size_is_not_mistaken_for_a_capture():
+    """The 404s served 117 KB of documentation shell. A byte count alone
+    would have read as a hit, so the record says so."""
+    from sportsassets import bettor_venue_settlement as VS
+
+    d = [a for a in VS.VENUE_TERMS_CAPTURE_ATTEMPTS
+         if a["result"] == "HTTP_404"][0]
+    assert len(d["targets_404"]) == 5
+    assert "byte count alone" in d["detail"]
+
+
+def test_the_gap_is_named_as_external_and_not_as_ours():
+    from sportsassets import bettor_venue_settlement as VS
+
+    note = VS.VENUE_TERMS_NOT_PUBLISHED
+    assert "EXTERNAL DEPENDENCY" in note
+    assert "not a defect in this repository" in note
+    # AND IT DOES NOT PROMISE A WORKAROUND. The truthful state is that
+    # every candidate refuses, and that is what it says.
+    assert "every supported-market entry candidate refuses" in note
+    assert "truthful state" in note
+
+
+def test_nothing_was_written_into_the_settlement_tables():
+    """The capture is evidence. Which sentence states which condition is a
+    READING, and BOOK_TERMS still carries only the Pinnacle capture."""
+    from sportsassets import bettor_settlement_terms as ST
+
+    assert set(k[0] for k in ST.BOOK_TERMS) == {"baseball"}
+    assert ST.CAPTURED_SCOPE.keys() == {("baseball", "h2h")}

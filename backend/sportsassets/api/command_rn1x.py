@@ -28,6 +28,10 @@ added it gets its own experiment id and its own total.
 
 from __future__ import annotations
 
+import json
+import time
+
+from .. import bettor_external_shadow as EXT
 from .. import bettor_rn1x_store as _store
 
 SCOPE = ("Every count and total on this page is scoped to the rn1x_* "
@@ -509,6 +513,42 @@ OPEN_POSITIONS_SQL = """
      WHERE p.experiment_id = $1 AND o.position_id IS NULL
 """
 
+#: EVERY OPEN POSITION WITH ITS LATEST DECISION'S RANKING, which is where
+#: the executable exit price lives. DISTINCT ON takes one row per position
+#: -- the newest decision -- because an older cycle's bid is not a mark.
+#:
+#: `provenance` comes along so an AUTONOMOUS entry is never counted as an
+#: acceptance-seeded one. They are different claims about the engine.
+def _as_json(v):
+    """asyncpg hands JSONB back as a str on some codec settings and as a
+    dict/list on others. Both are accepted; anything else is passed through
+    so the marker names it rather than this helper guessing."""
+    if isinstance(v, (dict, list)) or v is None:
+        return v
+    if isinstance(v, (str, bytes)):
+        try:
+            return json.loads(v)
+        except (ValueError, TypeError):
+            return None
+    return v
+
+
+OPEN_WITH_LATEST_DECISION_SQL = """
+    SELECT DISTINCT ON (p.position_id)
+           p.position_id,
+           p.provenance,
+           p.policy,
+           p.seed_qty::float8      AS qty,
+           p.seed_basis_usd::float8 AS cost_basis_usd,
+           d.alternatives,
+           extract(epoch FROM d.decision_ts)::float8 AS decided_at
+      FROM rn1x_positions p
+      LEFT JOIN rn1x_outcomes  o ON o.position_id = p.position_id
+      LEFT JOIN rn1x_decisions d ON d.position_id = p.position_id
+     WHERE p.experiment_id = $1 AND o.position_id IS NULL
+     ORDER BY p.position_id, d.decision_ts DESC NULLS LAST
+"""
+
 
 async def _pnl_status(pool) -> dict:
     """REALISED SHADOW P&L, FEES, AND WHAT IS NOT MARKED.
@@ -521,14 +561,29 @@ async def _pnl_status(pool) -> dict:
     """
     from ..workers import rn1x_shadow as W
 
-    out = {"what": ("realised shadow P&L and fees per lane. Every figure "
-                    "is MODELLED: no capital moved"),
+    from .. import bettor_shadow_marks as MK
+
+    out = {"what": ("realised AND unrealised shadow P&L, fees and total per "
+                    "lane. Every figure is MODELLED: no capital moved"),
            "lanes": {},
-           "unrealised": "NOT_IDENTIFIED",
-           "why_unrealised_is_absent": (
-               "marking open inventory requires a price we may use. A "
-               "midpoint is where nobody transacted, so open inventory is "
-               "carried at cost and the mark is named as missing"),
+           # UNREALISED IS NOW IDENTIFIED, ON A NAMED BASIS.
+           #
+           # The old value here was the string NOT_IDENTIFIED, justified by
+           # "a midpoint is where nobody transacted". That reasoning is
+           # right and is kept below -- a mid is not a mark. The conclusion
+           # was too strong: the manager already prices DIRECT_EXIT as
+           # selling the held leg INTO THE OBSERVED BID, capped at that
+           # bid's own depth and net of the production fee schedule. That
+           # is transactable, and it is the number the exit decision is
+           # already made on, so marking inventory at anything else would
+           # make this display disagree with the manager about what the
+           # position is worth.
+           #
+           # Open inventory is STILL reported at cost as well, because a
+           # mark and a basis are different facts.
+           "unrealised_basis": MK.MARK_BASIS,
+           "why_not_a_midpoint": MK.WHY_NOT_A_MIDPOINT,
+           "why_not_the_hold_value": MK.WHY_NOT_THE_HOLD_VALUE,
            "rebates": {
                "value": "NOT_APPLICABLE_TO_THESE_ORDERS",
                "why": ("the fee schedule's maker side is what would pay a "
@@ -541,13 +596,56 @@ async def _pnl_status(pool) -> dict:
         out.update(badge="UNAVAILABLE", why="rn1x_outcomes is not present")
         return out
     tot = 0
-    for eid, lane in ((W.HISTORICAL_EXPERIMENT_ID, "historical"),
-                      (W.PROSPECTIVE_EXPERIMENT_ID, "prospective")):
+    # THE ENTRY LANE WAS MISSING FROM THIS DISPLAY ENTIRELY.
+    #
+    # Only the two management lanes were read, so a position the autonomous
+    # entry lane created would have carried cost, owed fees and settled
+    # without ever appearing in the P&L. Nothing had exposed it yet because
+    # that lane has produced no position -- every one of its candidates is
+    # refused upstream -- but a dashboard that silently omits a lane is one
+    # that will understate the book the moment the lane starts working.
+    lanes = ((W.HISTORICAL_EXPERIMENT_ID, "historical"),
+             (W.PROSPECTIVE_EXPERIMENT_ID, "prospective"),
+             (EXT.EXPERIMENT_ID, "autonomous_entry"))
+    now = time.time()
+    for eid, lane in lanes:
         r = await pool.fetchrow(PNL_SQL, eid)
         d = dict(r) if r else {}
         o = await pool.fetchrow(OPEN_POSITIONS_SQL, eid)
         d.update(dict(o) if o else {})
         n = int(d.get("settled_positions") or 0)
+
+        # ── THE UNREALISED MARK, PER OPEN POSITION ──────────────────
+        try:
+            rows = [dict(x) for x in
+                    await pool.fetch(OPEN_WITH_LATEST_DECISION_SQL, eid)]
+        except Exception as exc:                               # noqa: BLE001
+            # AN UNREADABLE MARK IS NOT A ZERO MARK.
+            d["unrealised"] = {
+                "readable": False, "error": type(exc).__name__,
+                "why": ("the open-position read failed, so no position "
+                        "could be marked. This is not an unrealised P&L "
+                        "of zero")}
+        else:
+            marks = [MK.mark_one(
+                position_id=x["position_id"],
+                alternatives=_as_json(x.get("alternatives")),
+                decided_at=x.get("decided_at"), now=now,
+                position_qty=x.get("qty")) for x in rows]
+            roll = MK.roll_up(
+                marks, realised_usd=d.get("net_usd"),
+                open_positions=int(d.get("open_positions") or 0))
+            roll["readable"] = True
+            # THE AUTONOMOUS/SEEDED SPLIT, carried through. An acceptance
+            # position is not evidence the engine entered anything.
+            roll["by_provenance"] = {}
+            for x in rows:
+                k = str(x.get("provenance") or "PROVENANCE_NOT_DECLARED")
+                roll["by_provenance"][k] = \
+                    roll["by_provenance"].get(k, 0) + 1
+            d["unrealised"] = roll
+            d["total_pnl_usd"] = roll.get("total_pnl_usd")
+            d["total_pnl_status"] = roll.get("total_pnl_status")
         out["lanes"][lane] = d
         tot += n
     out.update(badge=("LIVE" if tot else "EMPTY"), settled_total=tot,

@@ -178,6 +178,70 @@ def _legacy_book_terms(fam) -> dict:
                  "source_url": "", "retrieved_at": "", "quote": ""}}}
 
 
+#: DOES THE VENUE PUBLISH PER-CONDITION SETTLEMENT TERMS ANYWHERE?
+#:
+#: WHY THIS MATTERS MORE THAN ANY OTHER GAP IN THE ENTRY LANE.
+#: VOID_ABANDONMENT_RULE_NOT_ESTABLISHED is carried by 464 of 464
+#: candidates evaluated in 24 hours -- the only refusal with full
+#: coverage. `bettor_settlement_terms.compare` returns COMPATIBLE only
+#: when EVERY applicable condition is stated by BOTH sides, and
+#: `silence_is_not_agreement` is True by design. Seven conditions apply to
+#: a baseball money line. The BOOK side is captured with citations. The
+#: only VENUE prose held is the listing's `description` field, measured at
+#: 380 characters, which states one condition. Six stay silent, so the
+#: verdict is UNKNOWN and every candidate refuses.
+#:
+#: That is structural, not a parsing failure: a 380-character blurb cannot
+#: state seven conditions. So the question is whether a per-condition
+#: document exists to read at all. It was asked, from a GitHub runner with
+#: ordinary egress, because the development container's policy denies these
+#: hosts -- the same reason CAPTURE_ATTEMPTS had to run there.
+#:
+#: RECORDED AS FACTS, NOT AS THE MEMORY OF A FAILED COMMAND. A 404 answers
+#: "does the venue publish this" as definitely as a 200 would, and a
+#: retrieval nobody wrote down has to be repeated by the next person.
+VENUE_TERMS_CAPTURE_ATTEMPTS = (
+    {"asked_at": "2026-09-25T14:42:46Z",
+     "reader": "github-actions runner (ubuntu-latest, ordinary egress)",
+     "via": "command-verify capture_terms, terms_url",
+     "targets_404": ("https://docs.polymarket.us/settlement",
+                     "https://docs.polymarket.us/rules",
+                     "https://docs.polymarket.us/market-rules",
+                     "https://docs.polymarket.us/resolution",
+                     "https://docs.polymarket.us/sports-rules"),
+     "result": "HTTP_404",
+     "detail": ("five candidate paths, every one 404. The body served with "
+                "the 404 is 117 KB of documentation-site shell, which is "
+                "why a byte count alone would have looked like a hit")},
+    {"asked_at": "2026-09-25T14:42:49Z",
+     "target": "https://docs.polymarket.us/",
+     "result": "HTTP_200_NO_SETTLEMENT_PROSE",
+     "detail": ("406 words extracted and ZERO matched the settlement "
+                "keyword set -- not `void`, not `abandon`, not `graded`, "
+                "not `innings`. The documentation root does not discuss "
+                "settlement conditions")},
+    {"asked_at": "2026-09-25T14:42:50Z",
+     "targets": ("https://polymarket.us/rules",
+                 "https://polymarket.us/terms"),
+     "result": "HTTP_200_CLIENT_RENDERED",
+     "detail": ("236 KB of HTML each, 80 words of prose each, and the same "
+                "80 words both times: a sign-up offer. The extractor's own "
+                "LIKELY_CLIENT_RENDERED branch refused to call it a "
+                "capture, correctly -- the rules are not in the served "
+                "document")},
+)
+
+VENUE_TERMS_NOT_PUBLISHED = (
+    "across eight candidate URLs on two venue hosts, NO per-condition "
+    "settlement document was retrievable: five 404s, a documentation root "
+    "with no settlement vocabulary at all, and two client-rendered shells. "
+    "This is an EXTERNAL DEPENDENCY on the venue publishing its grading "
+    "rules somewhere a reader can reach, or serving them through an API. "
+    "It is not a defect in this repository and it is not cleared by "
+    "reading the listing again. Until it is resolved the void rule stays "
+    "NOT ESTABLISHED and every supported-market entry candidate refuses -- "
+    "which is the truthful state")
+
 VOID_BOOK_NOTE = (
     "the BOOKMAKER's abandonment rule is not recorded in this repository. "
     "The venue's own prose can now be read, so when it states a rule the "

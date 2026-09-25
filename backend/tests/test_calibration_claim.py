@@ -625,17 +625,22 @@ class TestTheHighWaterMarkIsAtomicAndDurable:
 
 class TestTheMigrationSaysWhatTheCodeRelies_on:
     def test_the_unique_constraint_is_declared(self):
-        import pathlib
-        sql = pathlib.Path("backend/migrations/"
-                           "066_calibration_send_attempts.sql").read_text()
+        # ANCHORED, NOT RELATIVE. This read "backend/migrations/..." --
+        # correct from the repository root and wrong from `backend/`, which
+        # is where the suite runs. The two readings are why the same suite
+        # reported different failure counts depending on where pytest was
+        # started. See conftest._deterministic_cwd.
+        from .conftest import backend_path
+        sql = backend_path(
+            "migrations", "066_calibration_send_attempts.sql").read_text()
         assert "client_order_id   TEXT NOT NULL UNIQUE" in sql
         assert "cash_booked_usd" in sql
         assert "CHECK (cash_booked_usd >= 0)" in sql
 
     def test_there_is_a_rollback_and_it_warns_about_the_history(self):
-        import pathlib
-        down = pathlib.Path(
-            "backend/migrations/rollback/"
+        from .conftest import backend_path
+        down = backend_path(
+            "migrations", "rollback",
             "066_calibration_send_attempts.down.sql").read_text()
         assert "DROP TABLE IF EXISTS calibration_send_attempts" in down
         assert "DISCARDS THAT HISTORY" in down

@@ -14,6 +14,11 @@ import pytest
 
 from sportsassets import calibration_domain as cd
 
+from .conftest import repo_path
+
+#: The reservation workflow, anchored to the repository root.
+_WF = repo_path(".github", "workflows", "calibration-evidence.yml")
+
 REPO = "matthewtaylor141-lab/SportsAssets"
 
 
@@ -255,7 +260,11 @@ class TestNoSecondCensusWasWritten:
 class TestTheEvidenceWorkflowIsTheReservation:
     def test_it_exists_and_joins_the_venue_group(self):
         import pathlib
-        p = pathlib.Path(".github/workflows/calibration-evidence.yml")
+        # ANCHORED, NOT RELATIVE. `.github/` sits at the repository root
+        # while this suite runs from `backend/`, so a bare relative path
+        # here reported this file as missing -- which I then relayed to the
+        # owner as a real funded-path blocker. See conftest._deterministic_cwd.
+        p = _WF
         assert p.exists()
         text = p.read_text()
         assert "group: pmus-public-read-global" in text
@@ -263,14 +272,12 @@ class TestTheEvidenceWorkflowIsTheReservation:
 
     def test_it_exports_the_reservation_the_code_checks_for(self):
         import pathlib
-        text = pathlib.Path(
-            ".github/workflows/calibration-evidence.yml").read_text()
+        text = _WF.read_text()
         assert "%s: pmus-public-read-global" % cd.RESERVATION_ENV in text
 
     def test_it_declares_the_outcome_side_and_the_exit_policy(self):
         import pathlib
-        text = pathlib.Path(
-            ".github/workflows/calibration-evidence.yml").read_text()
+        text = _WF.read_text()
         assert "--outcome-side" in text
         assert "--max-exit-orders" in text
 
@@ -281,8 +288,7 @@ class TestTheEvidenceWorkflowIsTheReservation:
         import pathlib
 
         import yaml
-        doc = yaml.safe_load(pathlib.Path(
-            ".github/workflows/calibration-evidence.yml").read_text())
+        doc = yaml.safe_load(_WF.read_text())
         steps = [s for j in doc["jobs"].values() for s in j.get("steps", ())]
         commands = "\n".join(str(s.get("run") or "") for s in steps)
         assert commands.strip()

@@ -276,3 +276,66 @@ def _gate_default_is_the_production_default(request):
         ok=True, why="allowlisted adapter-behaviour test"))
     yield
     _gate._restore_for_tests()
+
+
+# ── THE SUITE'S WORKING DIRECTORY, MADE DETERMINISTIC ────────────────
+#
+# THE DEFECT THIS CLOSES, AND IT COST ME A WRONG REPORT. Tests read two
+# families of repository files by RELATIVE path:
+#
+#     "migrations/103_external_valuations.sql"    -> relative to backend/
+#     ".github/workflows/calibration-evidence.yml" -> relative to the ROOT
+#
+# Those two need DIFFERENT working directories, so no single invocation
+# directory satisfies both and the suite's result depended on where pytest
+# was started. Run from `backend/`, six calibration tests failed on a file
+# that exists; run from the root, twelve entry-lane tests failed on a
+# migration that exists. I reported the first set to the owner as eight
+# real failures in the funded execution path and named a missing workflow
+# file among the causes. The file was not missing. The count was wrong.
+#
+# A relative path in a test is a path whose meaning depends on the
+# operator, so both families are anchored here instead. `BACKEND_ROOT` is
+# made the working directory because it is what the majority expect, and
+# `REPO_ROOT` is exported for the readers that want the other one, so a
+# test never has to guess which it got.
+import os                                                    # noqa: E402
+import pathlib                                               # noqa: E402
+
+BACKEND_ROOT = pathlib.Path(__file__).resolve().parent.parent
+REPO_ROOT = BACKEND_ROOT.parent
+
+#: Anchored repository paths, for tests that read files rather than code.
+#: Prefer these to a bare relative string: the string is only correct from
+#: one directory and says nothing about which one.
+def backend_path(*parts) -> pathlib.Path:
+    return BACKEND_ROOT.joinpath(*parts)
+
+
+def repo_path(*parts) -> pathlib.Path:
+    return REPO_ROOT.joinpath(*parts)
+
+
+_CWD_WAS = None
+
+
+def pytest_configure(config):
+    """Run the suite from `backend/` wherever pytest was started.
+
+    A HOOK AND NOT A FIXTURE, AND THAT MATTERS. Several tests read
+    repository files at MODULE level -- `test_bettor_observation_adapter`
+    opens "../research/beta48/acceptance/replay_sample_rows.json" on the
+    import line -- which happens during COLLECTION, before any fixture of
+    any scope has run. A session-scoped autouse fixture is therefore too
+    late: the import has already failed. `pytest_configure` runs before
+    collection, so it is early enough to fix every one of them at once.
+    """
+    global _CWD_WAS
+    _CWD_WAS = os.getcwd()
+    os.chdir(BACKEND_ROOT)
+
+
+def pytest_unconfigure(config):
+    """Put the caller's shell back where it was."""
+    if _CWD_WAS:
+        os.chdir(_CWD_WAS)

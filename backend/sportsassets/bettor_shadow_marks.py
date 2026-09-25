@@ -82,6 +82,26 @@ R_NO_DECISION = "NO_DECISION_HAS_PRICED_THIS_POSITION"
 R_NO_EXIT_CANDIDATE = "NO_EXECUTABLE_EXIT_IN_THE_LATEST_DECISION"
 R_STALE = "MARK_OLDER_THAN_THE_MANAGEMENT_CADENCE"
 R_MALFORMED = "EXIT_CANDIDATE_CARRIES_NO_USABLE_NUMBER"
+R_NO_RANKED = "THE_DECISION_RANKED_NOTHING"
+
+#: WHERE THE RANKED LIST ACTUALLY LIVES, measured rather than assumed.
+#:
+#: I built this module expecting `rn1x_decisions.alternatives` to be a JSON
+#: ARRAY of candidates. It is not. Asked of production on 2026-09-25, the
+#: three newest decision rows answer
+#:
+#:     alt_type = object    alt_len = 0    actions = NULL
+#:
+#: so the column holds a mapping, and on those rows an EMPTY one. That is
+#: consistent with what those positions are -- their fixtures have finished,
+#: so there is no bid and nothing was rankable -- but it means a reader that
+#: assumed a list would have found nothing and reported it as a malformed
+#: row rather than as "the decision ranked nothing".
+#:
+#: So both shapes are accepted, and an empty one is named. These are the
+#: keys a mapping may carry the ranked list under, in the store's own
+#: vocabulary (`persist_run` writes `"ranked": d.get("alternatives")`).
+RANKED_KEYS = ("ranked", "candidates", "alternatives", "priced")
 
 #: The ranker's own refusal names, passed through rather than renamed. A
 #: dashboard that invents its own vocabulary for a blocker the engine
@@ -101,6 +121,31 @@ def _num(v):
     return f if f == f and f not in (float("inf"), float("-inf")) else None
 
 
+def _ranked_rows(alternatives):
+    """The candidate list, out of either shape. Never raises.
+
+    A LIST is used as-is. A MAPPING is searched for the first key in
+    RANKED_KEYS that holds a list -- which is how the store writes it. A
+    mapping of action -> candidate is also accepted, because that is the
+    other plausible way a dict could carry the same information and
+    guessing wrong would report a live exit as absent.
+    """
+    if isinstance(alternatives, (list, tuple)):
+        return list(alternatives)
+    if not isinstance(alternatives, dict):
+        return []
+    for k in RANKED_KEYS:
+        v = alternatives.get(k)
+        if isinstance(v, (list, tuple)):
+            return list(v)
+    # action -> candidate, with the action recoverable from the key.
+    out = []
+    for k, v in alternatives.items():
+        if isinstance(v, dict):
+            out.append(dict(v, action=v.get("action", k)))
+    return out
+
+
 def exit_candidate(alternatives):
     """The DIRECT_EXIT row out of a decision's ranked alternatives.
 
@@ -108,7 +153,7 @@ def exit_candidate(alternatives):
     DIRECT_EXIT carries the ranker's own blocker name, which is the whole
     reason this returns it rather than just absence.
     """
-    rows = alternatives if isinstance(alternatives, (list, tuple)) else ()
+    rows = _ranked_rows(alternatives)
     blocker = None
     for row in rows:
         if not isinstance(row, dict):
@@ -125,7 +170,7 @@ def exit_candidate(alternatives):
 
 
 def mark_one(*, position_id, alternatives, decided_at, now,
-             max_age_s=MAX_MARK_AGE_S) -> dict:
+             position_qty=None, max_age_s=MAX_MARK_AGE_S) -> dict:
     """Mark ONE open position, or say by name why it is unmarked.
 
     `alternatives` is `rn1x_decisions.alternatives` for the position's
@@ -145,6 +190,18 @@ def mark_one(*, position_id, alternatives, decided_at, now,
         return out
     age = at - da
     out["mark_age_s"] = round(age, 1)
+
+    # AN EMPTY RANKING IS ITS OWN FACT. "The decision ranked nothing" and
+    # "the ranking had no exit in it" call for different actions: the first
+    # means no price was available at all, the second means an exit was
+    # considered and refused.
+    if not _ranked_rows(alternatives):
+        out["blocker"] = R_NO_RANKED
+        out["why"] = ("the latest decision carries no ranked alternatives, "
+                      "so nothing was priced for this position -- not even a "
+                      "refused exit. This is what a finished fixture looks "
+                      "like: no bid exists to rank against")
+        return out
 
     cand, blocker = exit_candidate(alternatives)
     if cand is None:
@@ -180,7 +237,11 @@ def mark_one(*, position_id, alternatives, decided_at, now,
     # THE REMAINDER THE BOOK WOULD NOT TAKE, kept apart. Its value comes
     # from the HOLD model, so it carries its own basis label and is never
     # added into the executable figure.
-    total_q = _num(cand.get("position_qty"))
+    # THE POSITION'S OWN QUANTITY COMES FROM THE POSITION, not from the
+    # candidate: the candidate carries the SELLABLE size, and dividing
+    # `value_usd` by `value_per_contract` to recover the rest would put a
+    # rounding error into an accounting figure.
+    total_q = _num(position_qty)
     if out["depth_limited"]:
         out["unmarked_residual_qty"] = (None if total_q is None
                                         else max(0.0, total_q - qty))
@@ -285,7 +346,10 @@ def describe() -> dict:
             "a total is only a total when every open position is marked",
             "a mark older than the management cadence is stale, not current",
         ),
-        "blockers": (R_NO_DECISION, R_NO_EXIT_CANDIDATE, R_STALE,
-                     R_MALFORMED) + PASS_THROUGH_BLOCKERS,
+        # R_NO_RANKED belongs here and was missing: it is the blocker that
+        # actually fires on production's current rows, so leaving it out of
+        # the self-description would have hidden the common case.
+        "blockers": (R_NO_DECISION, R_NO_RANKED, R_NO_EXIT_CANDIDATE,
+                     R_STALE, R_MALFORMED) + PASS_THROUGH_BLOCKERS,
         "everything_here_is_modelled": True,
     }
