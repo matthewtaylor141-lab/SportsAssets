@@ -437,12 +437,24 @@ def test_four_non_outcomes_stay_four_different_answers():
     joined row is never re-read."""
     long_ = dict(buy_intent="ORDER_INTENT_BUY_LONG", ladder_side="ASK")
 
-    # A CONFIRMED VOID: the venue's own settlement endpoint, a parseable
-    # price, and it paid neither side.
-    void = loop.outcome_from_settlement(_res(0.5), **long_)
+    # A PARSEABLE PRICE THAT PAID NEITHER SIDE IS NOT A VOID. It was
+    # classified as one, and the settlement consumer then assumed the
+    # stake came back. 0.5 is equally consistent with a partial
+    # settlement, a scaled payout and a unit convention we have misread.
+    neither = loop.outcome_from_settlement(_res(0.5), **long_)
+    assert neither["outcome"] is None
+    assert neither["class"] == loop.C_NEITHER_SIDE_PAID
+    assert neither["basis"] is None, "nothing is recorded for it"
+    assert neither["void_evidence"]["declared"] is False
+
+    # A CONFIRMED VOID IS ONE THE VENUE DECLARED, in a field this reader
+    # has identified.
+    void = loop.outcome_from_settlement(
+        dict(_res(0.5), voided=True), **long_)
     assert void["outcome"] is None
     assert void["class"] == loop.B_CONFIRMED_VOID
     assert void["basis"] == loop.B_CONFIRMED_VOID
+    assert void["void_evidence"]["field"] == "voided"
 
     # A NAMED WINNER is not a number and is not a void. `float()` used to
     # raise here and the caller recorded VOID for a resolved fixture.

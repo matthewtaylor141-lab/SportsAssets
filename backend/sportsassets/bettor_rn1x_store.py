@@ -127,6 +127,35 @@ def position_id(experiment_id: str, policy: str, trade_id) -> str:
 # and must not grow one: a stored conclusion on an append-only row is the
 # defect `shadow_position_lifecycle` exists to avoid. A position is open
 # when its seeded quantity has not been fully released by its fills.
+# ── WHICH OUTCOME ROWS END A POSITION ────────────────────────────────
+#
+# `rn1x_outcomes.outcome_basis` carries two very different kinds of row:
+#
+#   OBSERVED_PAYOUT_SCORING_ONLY   a payout observed FOR SCORING. The
+#                                  position may still hold inventory and
+#                                  must still be managed.
+#   the two below                   a TERMINAL settlement: the venue
+#                                  settled the contract we held, the
+#                                  residual is closed and the exposure is
+#                                  released.
+#
+# Declared HERE, in the module that owns the table, so the settlement
+# consumer and the open-position query cannot drift apart. They are a
+# tuple rather than a database view on purpose: a view would have to exist
+# in every database any test builds, and a query that silently depends on
+# one fails as "relation does not exist" a long way from the cause.
+BASIS_VENUE_SETTLED = "VENUE_AUTHORITATIVE_SETTLEMENT_OF_THE_HELD_CONTRACT"
+BASIS_VENUE_VOID = "VENUE_CONFIRMED_VOID_STAKES_RETURNED"
+TERMINAL_OUTCOME_BASES = (BASIS_VENUE_SETTLED, BASIS_VENUE_VOID)
+
+#: The SQL fragment for "this position has no terminal settlement", built
+#: from the tuple above so the two can never disagree.
+_TERMINAL_LIST = ", ".join("'%s'" % b for b in TERMINAL_OUTCOME_BASES)
+NOT_TERMINALLY_SETTLED = (
+    "NOT EXISTS (SELECT 1 FROM rn1x_outcomes x "
+    "             WHERE x.position_id = p.position_id "
+    "               AND x.outcome_basis IN (%s))" % _TERMINAL_LIST)
+
 OPEN_POSITIONS_SQL = '''
     SELECT p.position_id, p.experiment_id, p.policy, p.condition_id,
            p.outcome_index, p.source_trade_id, p.source_account,
@@ -154,9 +183,25 @@ OPEN_POSITIONS_SQL = '''
             ON d.position_id = p.position_id
      WHERE p.experiment_id = $1
        AND COALESCE(f.released, 0) < p.seed_qty
+       -- ── A TERMINALLY SETTLED POSITION IS NOT OPEN ────────────────
+       --
+       -- THE DEFECT THIS FIXES. This query asked ONLY whether SELL fills
+       -- had released the seed quantity. A position the venue had settled
+       -- has no SELL fills at all -- settlement CLOSES the contract, it
+       -- does not sell it -- so it stayed "open" forever: the manager
+       -- kept selecting it and kept valuing a contract that no longer
+       -- exists, while its own `rn1x_outcomes` row said the residual was
+       -- zero.
+       --
+       -- TERMINALITY IS A PROPERTY OF THE BASIS, not of merely having an
+       -- outcome row. Excluding every outcome row would stop managing a
+       -- live challenger position the moment a scoring-only observation
+       -- was recorded -- wrong in the other direction. The basis list is
+       -- interpolated from TERMINAL_OUTCOME_BASES above.
+       AND %s
      ORDER BY d.last_at NULLS FIRST, p.decision_ts
      LIMIT $2
-'''
+''' % NOT_TERMINALLY_SETTLED
 
 POSITION_ORDERS_SQL = '''
     SELECT order_id, decision_id, condition_id, outcome_index, side,

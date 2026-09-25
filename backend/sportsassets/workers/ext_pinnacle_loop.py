@@ -1016,7 +1016,14 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
 # recorded all four as VOID -- permanently, since a joined row is never
 # re-read:
 #
-#   CONFIRMED_VOID   the venue settled at neither 0 nor 1: stakes back.
+#   CONFIRMED_VOID   the venue DECLARED a void or refund in a field this
+#                    reader has identified. A price of neither 0 nor 1 is
+#                    NOT this: it establishes only that neither side was
+#                    paid in full, which is equally consistent with a
+#                    partial settlement, a scaled payout and a unit
+#                    convention we have misread. That case is
+#                    NEITHER_SIDE_PAID_AND_NO_REFUND_IS_ESTABLISHED and
+#                    nothing is written for it.
 #   NAMED_WINNER     a label, e.g. "Houston Astros". `float()` raises,
 #                    which is how a resolved fixture became a void.
 #   INFERRED         RESOLVED_DERIVED: closed with prices converged. The
@@ -1024,13 +1031,15 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
 #                    a price and is not settlement evidence.
 #   UNPARSEABLE      a value present that is neither.
 #
-# VOID IS NEVER INFERRED FROM A NONBINARY VALUE ALONE. "Stakes returned"
-# is a claim about what the venue did, and a number that is not 0 or 1 is
-# consistent with a void, with a partially-settled market, with a
-# different unit convention and with a payload we have misread. Only the
-# venue's own settlement endpoint, returning a parseable price that is
-# neither side, is taken as a void; anything else is reported by its own
-# name and left unjoined for a later read.
+# VOID IS NEVER INFERRED FROM A NONBINARY VALUE. "Stakes returned" is a
+# claim about what the venue DID, and a number that is not 0 or 1 is
+# consistent with a void, with a partially-settled market, with a scaled
+# payout, with a different unit convention and with a payload we have
+# misread. A void therefore requires the venue to DECLARE one, in a field
+# `_declared_void` has identified; as of 2026-09-25 the PMUS settlement
+# payload carries no such field, so in practice every nonbinary price is
+# an unresolved accounting state. Anything that is not a settled 0/1 or a
+# declared void is reported by its own name and left unjoined.
 
 # `outcome_basis IS NULL` is the queue condition, and it is the SAME
 # condition the calibration scope uses. A row leaves this queue exactly
@@ -1073,6 +1082,59 @@ C_NAMED_WINNER = "VENUE_NAMED_A_WINNER_NOT_A_PRICE"
 C_INFERRED = "INFERRED_FROM_CONVERGED_PRICES_NOT_VENUE_SETTLEMENT"
 C_UNPARSEABLE = "SETTLEMENT_VALUE_UNPARSEABLE"
 C_SIDE_UNKNOWN = "VENUE_SIDE_IDENTITY_NOT_ESTABLISHED"
+#: A parseable price that paid neither side in full, with NO declared void
+#: or refund. Not an outcome, and NOT a refund: see the long note in
+#: `outcome_from_settlement`.
+C_NEITHER_SIDE_PAID = "NEITHER_SIDE_PAID_AND_NO_REFUND_IS_ESTABLISHED"
+
+#: Fields a venue response would have to carry for a refund to be
+#: ESTABLISHED rather than inferred. Named rather than guessed at, so that
+#: when the venue does publish one the change is a one-line addition here
+#: and not a re-derivation somewhere downstream. As of 2026-09-25 the PMUS
+#: settlement payload carries none of them, which is why every nonbinary
+#: price is currently an unresolved accounting state.
+VOID_FLAG_FIELDS = ("void", "voided", "isVoid", "is_void",
+                    "refunded", "isRefunded", "is_refunded",
+                    "stakeReturned", "stake_returned", "cancelled",
+                    "canceled", "isCancelled")
+#: Values of a `status`-like field that DECLARE a void. Matched exactly
+#: after casefolding; a substring match would read "not_voided" as a void.
+VOID_STATUS_FIELDS = ("settlementStatus", "settlement_status", "status",
+                      "resolution", "resolutionStatus")
+VOID_STATUS_VALUES = ("void", "voided", "refunded", "cancelled",
+                      "canceled", "no_action", "noaction", "push")
+
+
+def _declared_void(resolution) -> dict:
+    """Did the venue DECLARE a void or refund, in a field we identified?
+
+    Returns the evidence, never a bare boolean, because "no void was
+    declared" and "we could not tell" must not read the same. A missing
+    field is not a false: it is an absent statement, and that is exactly
+    why the caller leaves the position unresolved rather than settling it.
+    """
+    out = {"declared": False, "field": None, "value": None,
+           "fields_present": [],
+           "basis": "VENUE_MUST_STATE_A_VOID_IT_IS_NEVER_INFERRED"}
+    r = resolution or {}
+    if not isinstance(r, dict):
+        return out
+    for f in VOID_FLAG_FIELDS:
+        if f in r and r[f] is not None:
+            out["fields_present"].append(f)
+            if r[f] is True or str(r[f]).strip().casefold() in (
+                    "true", "1", "yes"):
+                out.update(declared=True, field=f, value=str(r[f]))
+                return out
+    for f in VOID_STATUS_FIELDS:
+        v = r.get(f)
+        if v is None:
+            continue
+        out["fields_present"].append(f)
+        if str(v).strip().casefold() in VOID_STATUS_VALUES:
+            out.update(declared=True, field=f, value=str(v))
+            return out
+    return out
 
 #: The two venue sides, and which settlement value each of them pays.
 SIDE_LONG = "VENUE_LONG_PAYS_THE_SETTLEMENT_PRICE"
@@ -1165,10 +1227,42 @@ def outcome_from_settlement(resolution, *, buy_intent, ladder_side):
     elif abs(sp) <= _SETTLED_EPS:
         yes = 0
     else:
-        # THE VENUE'S OWN SETTLEMENT ENDPOINT, returning a parseable price
-        # that paid neither side. That -- and only that -- is a void.
-        out["class"] = B_CONFIRMED_VOID
-        out["basis"] = B_CONFIRMED_VOID
+        # ── A NONBINARY PRICE IS NOT A REFUND ────────────────────────
+        #
+        # THE DEFECT THIS CORRECTS, AND IT WAS MINE, TWICE OVER. The
+        # previous version read any parseable value other than 0 or 1 as
+        # CONFIRMED_VOID, and the settlement consumer then assumed the
+        # original stake came back, called the result authoritative and
+        # closed the inventory. A 0.5 response with no void or refund
+        # evidence anywhere produced a manufactured cash entitlement.
+        #
+        # 0.5 is consistent with a void, with a partially settled market,
+        # with a unit convention we have misread, with a scaled payout,
+        # and with a contract that does not settle in {0, 1} at all. The
+        # only thing it establishes is that NEITHER SIDE was paid in
+        # full, and "neither side paid in full" is not "stakes returned".
+        # Calling the fee treatment conservative did not establish the
+        # cash entitlement either; a conservative guess is still a guess.
+        #
+        # VERIFIED REFUND SEMANTICS ARE REQUIRED. Until the venue states
+        # a void or a refund in a field this reader has actually
+        # identified, the answer is an explicit UNRESOLVED accounting
+        # state: nothing is written, no exposure is released, and the
+        # position stays open and stays in the queue.
+        got_void = _declared_void(resolution)
+        if got_void.get("declared"):
+            out["class"] = B_CONFIRMED_VOID
+            out["basis"] = B_CONFIRMED_VOID
+            out["void_evidence"] = got_void
+            return out
+        out["class"] = C_NEITHER_SIDE_PAID
+        out["void_evidence"] = got_void
+        out["why"] = (
+            "the venue settled at %s, which paid neither side in full. "
+            "That is consistent with a void, with a partial settlement, "
+            "with a scaled payout and with a unit convention we have "
+            "misread, and it establishes none of them. No refund is "
+            "inferred and no exposure is released" % out["settlement_read"])
         return out
 
     out["outcome"] = (1 - yes) if side == SIDE_SHORT else yes
@@ -1230,7 +1324,7 @@ async def join_outcomes(conn, *, limit=MAX_JOINS_PER_RUN) -> dict:
     out = {"ran": True, "examined": 0, "resolved": 0, "void": 0,
            "pending": 0, "unreadable": 0, "unmatched": 0, "errors": 0,
            "named_winner": 0, "inferred": 0, "side_unknown": 0,
-           "unparseable": 0,
+           "unparseable": 0, "neither_side_paid": 0,
            "limit": int(limit), "by_status": {}, "by_class": {}}
     try:
         rows = await conn.fetch(UNJOINED_SQL, ext.EXPERIMENT_ID, int(limit))
@@ -1284,7 +1378,9 @@ async def join_outcomes(conn, *, limit=MAX_JOINS_PER_RUN) -> dict:
                                got["settlement_read"], at)
         except Exception:                                      # noqa: BLE001
             out["errors"] += 1
-        if cls == C_NAMED_WINNER:
+        if cls == C_NEITHER_SIDE_PAID:
+            out["neither_side_paid"] += 1
+        elif cls == C_NAMED_WINNER:
             out["named_winner"] += 1
         elif cls == C_INFERRED:
             out["inferred"] += 1
@@ -2121,6 +2217,17 @@ async def cycle(conn) -> dict:
                                             mapped["condition_id"],
                                         "payout_binding": bound})
                         continue
+                    # THE IDENTITY GOES ON THE POSITION, not left to be
+                    # rediscovered later by matching on condition alone.
+                    # `buy_intent` and `ladder_side` live on the CONTRACT
+                    # (that is where `persist` reads them from), so they
+                    # are lifted onto the record the writer sees, and the
+                    # valuation row id is the link back to the decision
+                    # that admitted this. See migration 119.
+                    rec["valuation_row_id"] = row_id
+                    rec["buy_intent"] = contract.get("buy_intent")
+                    rec["ladder_side"] = contract.get("ladder_side")
+                    rec["us_market_slug"] = contract.get("us_market_slug")
                     plan = inv.plan_entry(
                         rec, now=now,
                         outcome_index=bound["outcome_index"],

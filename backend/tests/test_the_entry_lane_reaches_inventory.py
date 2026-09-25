@@ -122,6 +122,13 @@ async def _seed(conn):
     # green. This test applies both, which is what production now does.
     await conn.execute(open(
         "migrations/117_entry_lane_evidence_and_calibration.sql").read())
+    await conn.execute(open(
+        "migrations/118_outcome_join_provenance_and_audit.sql").read())
+    # 119 PUTS THE VENUE IDENTITY ON THE POSITION. Without it the entry
+    # writer cannot record which contract and which side it opened, and the
+    # settlement consumer is back to guessing from the condition alone.
+    await conn.execute(open(
+        "migrations/119_positions_carry_their_venue_identity.sql").read())
     await conn.execute("CREATE TABLE IF NOT EXISTS ingestion_state "
                        "(key TEXT PRIMARY KEY, value TEXT)")
     await conn.execute(

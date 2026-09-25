@@ -302,6 +302,27 @@ def plan_entry(rec, *, now, outcome_index, fee_fn) -> dict:
             # adds this third name; the prose belongs in the decision's
             # own labels, where it is.
             "provenance": PROVENANCE,
+            # ── THE IDENTITY THIS POSITION WAS OPENED UNDER ──────────
+            #
+            # Recorded HERE, by the writer that knows it, because the
+            # settlement consumer used to rediscover it by taking "the
+            # latest admissible valuation for the same condition" -- a
+            # guess that is right only while exactly one exists, and that
+            # never checked whether that valuation described the side the
+            # position HOLDS. A condition has two sides and settling
+            # against the wrong one is irreversible.
+            #
+            # `payout_event` is deliberately redundant with
+            # `outcome_index`: the index is the GLOBAL catalogue's
+            # ordering and the name is the event, so a consumer can check
+            # one against the other through `market_tokens` instead of
+            # trusting either alone. See migration 119.
+            "venue_market_slug": (contract.get("us_market_slug")
+                                  or rec.get("us_market_slug")),
+            "venue_buy_intent": rec.get("buy_intent"),
+            "venue_ladder_side": rec.get("ladder_side"),
+            "payout_event": rec.get("payout_event"),
+            "source_valuation_id": rec.get("valuation_row_id"),
         },
         "decision": {
             "decision_id": did,
@@ -519,8 +540,14 @@ POSITION_SQL = """
     INSERT INTO rn1x_positions (position_id, experiment_id, policy,
         source_trade_id, source_account, condition_id, outcome_index,
         entry_kind, entry_kind_why, seed_qty, seed_price, seed_basis_usd,
-        source_ts, detected_ts, decision_ts, decision_basis, provenance)
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        source_ts, detected_ts, decision_ts, decision_basis, provenance,
+        -- MIGRATION 119: the identity this position was opened under,
+        -- written by the writer that knows it rather than rediscovered
+        -- later by matching on condition alone.
+        venue_market_slug, venue_buy_intent, venue_ladder_side,
+        payout_event, source_valuation_id)
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
+            $18,$19,$20,$21,$22)
     ON CONFLICT (position_id) DO NOTHING
 """
 
@@ -612,7 +639,11 @@ async def persist_entry(conn, plan) -> dict:
             pos["entry_kind_why"], pos["seed_qty"], pos["seed_price"],
             pos["seed_basis_usd"], _ts(pos["source_ts"]),
             _ts(pos["detected_ts"]), _ts(pos["decision_ts"]),
-            pos["decision_basis"], pos["provenance"])
+            pos["decision_basis"], pos["provenance"],
+            pos.get("venue_market_slug"), pos.get("venue_buy_intent"),
+            pos.get("venue_ladder_side"), pos.get("payout_event"),
+            (None if pos.get("source_valuation_id") is None
+             else int(pos["source_valuation_id"])))
         d = plan["decision"]
         await conn.execute(
             DECISION_SQL, d["decision_id"], d["position_id"],
