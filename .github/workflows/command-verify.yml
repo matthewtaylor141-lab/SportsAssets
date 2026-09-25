@@ -2613,6 +2613,45 @@ jobs:
     if: inputs.entry_run == 'DO'
     runs-on: ubuntu-latest
     steps:
+      - name: Autonomous entry — arm the UNFUNDED research lane
+        if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          A="${API:-https://sportsassets-api.onrender.com}"
+          say "## the UNFUNDED research-shadow lane"
+          say "It waives exactly MODEL_TRUST_DRIFT. Freshness, the settlement"
+          say "condition-to-payout comparison, the declared support, every"
+          say "exposure rail and positive net edge ALL still block, so this"
+          say "cannot make an entry happen -- only stop being the reason one"
+          say "did not. It has no path to capital."
+          say ""
+          C=$(curl -sS --max-time 45 -o /tmp/arm.json -w '%{http_code}' \
+                -X POST -H "X-Admin-Token: $ADMIN_TOKEN" \
+                -H 'Content-Type: application/json' \
+                -d '{"confirm":"ARM"}' \
+                "$A/api/admin/rn1x-arm-research-shadow" || echo 000)
+          say "arm HTTP $C"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            "  action                 " + n(.action),
+            "  wrote                  " + n(.wrote),
+            "  control_key            " + n(.control_key),
+            "  authorised             " + n(.authorised.authorised),
+            "  why                    " + n(.authorised.why),
+            "  calibration_rows       " + n(.calibration_rows)
+              + "   still_unmeasured " + n(.calibration_still_unmeasured),
+            "  waivable               " + n(.describe.waivable),
+            "  never_waivable         " + n(.describe.never_waivable)' \
+            /tmp/arm.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || {
+              say "ARM REPORT DID NOT RENDER -- raw:"
+              jq -r 'tojson | .[0:1200]' /tmp/arm.json 2>&1 \
+                | tee -a "$GITHUB_STEP_SUMMARY" || true; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Autonomous entry — run the scheduled lane and print every input
         if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
         env:
@@ -3172,6 +3211,47 @@ jobs:
       # inside the formatter that dropped it. These files are the
       # unformatted answers the API gave, uploaded whatever the step's
       # outcome, so a reporting fault can never again cost a run's result.
+      - name: Autonomous entry — the P&L, per lane and per provenance
+        if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          A="${API:-https://sportsassets-api.onrender.com}"
+          # THE SHADOW P&L, THROUGH THE SAME AUTHENTICATED READ THE COMMAND
+          # CENTRE USES. Not a second query: if this and the page disagree
+          # one of them is wrong and nobody could tell which.
+          C=$(curl -sS --max-time 60 -o /tmp/pnl.json -w '%{http_code}' \
+                -H "X-Admin-Token: $ADMIN_TOKEN" \
+                "$A/api/command/rn1x/statuses" || echo 000)
+          say "## reconciled shadow P&L (HTTP $C)"
+          jq -r 'tojson | .[0:7000]' /tmp/pnl.json 2>&1 \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- per lane --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            .shadow_pnl.unrealised_basis as $b
+            | "mark_basis " + n($b),
+              (.shadow_pnl.lanes // {} | to_entries[]
+                | "lane " + .key
+                  + "  settled " + n(.value.settled_positions)
+                  + "  open " + n(.value.open_positions)
+                  + "  realised " + n(.value.net_usd)
+                  + "  fees " + n(.value.fees_usd)
+                  + "  basis " + n(.value.open_inventory_at_cost_usd)
+                  + "  unrealised " + n(.value.unrealised.unrealised_usd)
+                  + "  total " + n(.value.total_pnl_usd)
+                  + " (" + n(.value.total_pnl_status) + ")",
+                "    marked " + n(.value.unrealised.marked_positions)
+                  + "  unmarked " + n(.value.unrealised.unmarked_positions)
+                  + "  blockers " + n(.value.unrealised.unmarked_by_blocker),
+                "    provenance " + n(.value.unrealised.by_provenance))' \
+            /tmp/pnl.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Entry-run raw evidence
         if: always()
         uses: actions/upload-artifact@v4
