@@ -36,18 +36,45 @@ Wrong on two counts.
    candidates reach the economics — where most would then be refused on
    their merits, which is the correct outcome and not a win.
 
-### Also corrected: "380 characters, stating one condition"
+### Retracted again: my own "183 characters, two conditions"
 
-The real `description` on the captured contract is **183 characters** and
-states **three** conditions' worth of rule, two of which the comparison
-accepts. I quoted a length from a different market and understated what the
-venue does say.
+I corrected a live measurement with a fixture, which is backwards.
+
+`bettor_venue_settlement` recorded the listing's `description` at **380
+characters, stating one condition**. I replaced that with **183 characters,
+stating two** — and measured the 183 from
+`backend/tests/fixtures/pmus_settled_market_2026_09_24_az_col.json`. That
+file's `description` really is 183 characters. It is a **test fixture**,
+hand-abridged, not the venue's payload. The live probe of the same slug on
+2026-09-25 reports `description: {"type":"str","len":380}`.
+
+So **the per-condition table in §2 is a measurement of a fixture, not of the
+venue**, and every "venue silent" cell in it is unsupported as a statement
+about the venue. The five-silence count may be right, wrong, or nearly
+right; it is not established either way, and nothing downstream treats it as
+established — the entry lane refuses on the live comparison, which is the
+only one that gates anything.
+
+**The instrument, not another assertion.**
+`bettor_venue_settlement_probe._terms_read` now reads the live `description`
+through the same field order `bettor_live_read.read_rules_text` uses, quotes
+it **verbatim in full** (its own 6000-character limit, not the 400-character
+payload limit that caused this), reports the true length, and runs
+`bettor_settlement_terms.read_terms` over it — reporting `stated`,
+`not_stated`, `contradicted`, and the sentences the reader saw and could not
+use. It reads the **venue side only** and returns no compatibility verdict.
+The next entry run prints it for one settled and one open contract.
 
 ---
 
 ## 2 · The actual per-condition state
 
-`aec-mlb-az-col-2026-09-24`, the venue's own `description` verbatim:
+> ⚠ **This table was computed against the 183-character TEST FIXTURE, not
+> the 380-character live payload.** See the retraction above. It stands here
+> as the record of what was claimed and how, not as evidence about the
+> venue. The live reading replaces it when the next entry run prints it.
+
+`aec-mlb-az-col-2026-09-24`, the **fixture's** `description` verbatim:
 
 > *"This market settles on the final result of the game, including any
 > extra innings. If the game is abandoned or postponed and never completed
@@ -72,7 +99,8 @@ purely from silence, and the book side is complete on all seven.
 So the gap is **five conditions where the venue states no rule**, and they
 are not arbitrary: conditions 2–5 are all *"the game started and did not
 finish normally"* — exactly where a money line's action turns, and exactly
-what a 183-character blurb does not address.
+what a short blurb of either length is least likely to address — a
+*likelihood*, and the live read is what settles it.
 
 ### One of the five is probably a reader gap, not a venue gap
 
@@ -104,22 +132,41 @@ missing set from five to four and does not on its own change the verdict.
 | `docs.polymarket.us/` | 2026-09-25T14:42:49Z | **200**, 406 words, 0 settlement keywords — client-rendered, contents unread |
 | `polymarket.us/rules` | 2026-09-25T14:42:49Z | **200**, 236 KB HTML / 80 words — client-rendered shell |
 | `polymarket.us/terms` | 2026-09-25T14:42:50Z | **200**, same 80 words |
-| contract `description` field | continuously, per cycle | **200**, 183 chars, 2 conditions accepted |
+| `docs.polymarket.us/sitemap.xml` | 2026-09-25T16:06Z | **200**, 618 enumerated URLs — the documentation IS published |
+| `docs.polymarket.us/robots.txt` | same | **200**, `ai-train=yes, search=yes, ai-input=yes` — and readable |
+| contract `description` field, **live** | continuously, per cycle | **200**, **380 chars** (probe field_shapes, 2026-09-25T16:51Z); which conditions it states is being read, not claimed |
+| contract `description` field, **fixture** | test data | 183 chars, 2 conditions accepted — **a fixture, not the venue** |
 | contract `assetPriceTerms` field | same | `None` on every contract read |
 
 Recorded in `bettor_venue_settlement.VENUE_TERMS_CAPTURE_ATTEMPTS`.
 
 ---
 
-## 4 · Supported documentation routes, in flight
+## 4 · Supported documentation routes — answered
 
-Guessing paths was the wrong method. The supported routes for a
-client-rendered documentation site are being tried instead:
-`/llms.txt`, `/llms-full.txt`, `/sitemap.xml`, `/openapi.json`,
-`/robots.txt`, and a known-good deep path
-(`/api-reference/markets/get-market-by-slug`, cited in
-`calibration_fees.SCHEDULE`) to confirm which paths the site does serve.
-Result appended when it returns.
+Guessing paths was the wrong method, and the supported route answered
+immediately:
+
+| Source | Result |
+|---|---|
+| `docs.polymarket.us/sitemap.xml` | **200**, **618 enumerated URLs** |
+| `docs.polymarket.us/robots.txt` | **200**, `Content-Signal: ai-train=yes, search=yes, ai-input=yes` |
+
+**The documentation is published and explicitly readable.** "The venue does
+not publish this" is retracted in the code as well as here
+(`bettor_venue_settlement.VENUE_TERMS_NOT_YET_LOCATED`, renamed from
+`VENUE_TERMS_NOT_PUBLISHED` because the old name asserted the retracted
+claim).
+
+What 618 URLs establish is that **pages exist**. Not one word of their
+content has been read, and no settlement condition is answered by a URL —
+so nothing here infers compatibility from the sitemap, and the entry lane's
+refusal is unchanged by it. The next step is mechanical and is instrumented:
+the capture step now recognises a sitemap as an *index* rather than running
+a prose extractor over it, enumerates every `<loc>`, and lists the paths
+whose spelling could plausibly carry settlement terms. Those pages are then
+fetched and read like any other source, and only a read sentence can change
+a condition's state.
 
 `assetPriceTerms` is also worth noting as an *existing contract-specific
 route the venue defined and left empty*. It is the field on the market

@@ -2487,6 +2487,32 @@ jobs:
 
           raw = open(sys.argv[1], encoding="utf-8", errors="replace").read()
 
+          # A SITEMAP IS AN INDEX, NOT A DOCUMENT, so it is read as one.
+          # Running the prose extractor over 618 <loc> elements printed
+          # URL fragments with two lines of context each and told me
+          # nothing about which page holds the grading rules. This branch
+          # enumerates every location, counts them, and lists the ones
+          # whose PATH could plausibly carry settlement terms -- which is
+          # the next thing to fetch, and is all an index can establish. It
+          # asserts nothing about what those pages say.
+          if re.search(r"(?i)<(urlset|sitemapindex)\b", raw):
+              locs = re.findall(r"(?is)<loc>\s*(.*?)\s*</loc>", raw)
+              print("SITEMAP\tlocations %d" % len(locs))
+              PATHY = re.compile(
+                  r"(?i)(settle|resolut|resolv|rule|grade|grading|void|"
+                  r"refund|cancel|abandon|suspend|postpon|innings?|"
+                  r"baseball|mlb|sport|faq|terms|glossar|market|contract)")
+              hits = [u for u in locs if PATHY.search(u)]
+              print("CANDIDATE_PATHS\t%d of %d" % (len(hits), len(locs)))
+              for u in hits[:200]:
+                  print("  | " + u[:200])
+              if len(hits) > 200:
+                  print("  ... %d more candidate paths" % (len(hits) - 200))
+              print("WHAT_THIS_ESTABLISHES\tthese pages EXIST. Not one word "
+                    "of their content is read here, and no settlement "
+                    "condition is answered by a URL.")
+              raise SystemExit(0)
+
           # A SPA SHELL IS NOT THE RULES. If the served document carries no
           # prose, say that instead of printing an empty section and calling
           # it a capture.
@@ -2750,6 +2776,9 @@ jobs:
             "   risk\t"         + "permitted " + n(.risk_verdict.permitted)
                                  + "  rails_failed " + n(.risk_verdict.railsNotPassed)
                                  + "  gates_failed " + n(.risk_verdict.gatesNotPassed),
+            "   waiver\t"       + "authorised " + n(.risk_verdict.research_waiver.authorised)
+                                 + "  waived " + n(.risk_verdict.research_waiver.waived)
+                                 + "  why_not " + n(.risk_verdict.research_waiver.refusals),
             "   exposure\t"     + n(.exposure_observed.observed),
             "   REFUSALS\t"     + ((.refusals // []) | join(", ")),
             ""),
@@ -3147,7 +3176,8 @@ jobs:
           : > /tmp/vp.json
           VC=$(curl -s -o /tmp/vp.json -w '%{http_code}' --max-time 180 \
               -X POST -H "$H" -H 'Content-Type: application/json' \
-              --data '{"slugs": ["aec-mlb-az-col-2026-09-24"],
+              --data '{"slugs": ["aec-mlb-az-col-2026-09-24",
+                                 "aec-mlb-cle-kc-2026-09-25"],
                        "calibration_unreadable": 1}' \
               "$API/api/admin/venue-settlement-probe" || echo 000)
           say ""
@@ -3193,7 +3223,17 @@ jobs:
                     + "  " + n(.reader_verdict.error),
                   "  PARSER_GAP    " + n(.parser_gap.found)
                     + "  " + n(.parser_gap.why),
-                  "  values        " + n(.listing.raw_subset)' \
+                  "  values        " + n(.listing.raw_subset),
+                  "  PROSE FIELD   " + n(.settlement_terms.field)
+                    + "  chars " + n(.settlement_terms.chars)
+                    + "  truncated " + n(.settlement_terms.truncated)
+                    + "  fields " + n(.settlement_terms.fields_present),
+                  "  prose VERBATIM " + n(.settlement_terms.text),
+                  "  STATED        " + n(.settlement_terms.stated),
+                  "  NOT STATED    " + n(.settlement_terms.not_stated),
+                  "  contradicted  " + n(.settlement_terms.contradicted)
+                    + "  sentences " + n(.settlement_terms.sentences),
+                  "  unused        " + n(.settlement_terms.unused_evidence)' \
               /tmp/vp.json 2>/tmp/vp.err | tee -a "$GITHUB_STEP_SUMMARY" \
               || { say "THE PROBE REPORT FAILED TO RENDER -- the raw payload is"
                    say "above and is the authoritative copy:"
@@ -3228,14 +3268,23 @@ jobs:
                 -H "X-Admin-Token: $ADMIN_TOKEN" \
                 "$A/api/command/rn1x/statuses" || echo 000)
           say "## reconciled shadow P&L (HTTP $C)"
-          jq -r 'tojson | .[0:7000]' /tmp/pnl.json 2>&1 \
-            | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # `.statuses.shadow_pnl`, AND THE MISSING PREFIX WAS THE WHOLE
+          # BUG. The route returns {scope, label, statuses:{...}} and
+          # `shadow_pnl` is a key of `statuses`, not of the response. The
+          # first version of this step indexed `.shadow_pnl` and so printed
+          # `mark_basis -` with no lane lines at all -- a null path, not an
+          # empty P&L. The raw dump is now the P&L OBJECT rather than a
+          # 7000-character prefix of the whole payload, which is what
+          # stopped the earlier run's evidence from reaching the log.
+          jq -r '.statuses.shadow_pnl | tojson | .[0:6000]' /tmp/pnl.json \
+            2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
           say "-- per lane --"
           jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
-            .shadow_pnl.unrealised_basis as $b
+            .statuses.shadow_pnl as $P
+            | $P.unrealised_basis as $b
             | "mark_basis " + n($b),
-              (.shadow_pnl.lanes // {} | to_entries[]
+              ($P.lanes // {} | to_entries[]
                 | "lane " + .key
                   + "  settled " + n(.value.settled_positions)
                   + "  open " + n(.value.open_positions)
@@ -3252,6 +3301,89 @@ jobs:
             /tmp/pnl.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      # THE OPERATING RESULT, IN ONE BLOCK AT THE END.
+      #
+      # Every number here was already printed by an earlier step; this
+      # re-reads the SAME files and states them together. It exists because
+      # the answer to "what did the run do" was spread over four steps and
+      # ~1200 log lines, and a reader (including me, through the API) could
+      # retrieve only the tail. Nothing is computed here that is not in
+      # /tmp; if a file is missing, the line says so rather than printing a
+      # zero that would read as a measurement.
+      - name: Autonomous entry — the operating result, in one block
+        if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo "### THE OPERATING RESULT" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          for f in arm ee cx pnl; do
+            [ -s "/tmp/$f.json" ] || say "MISSING /tmp/$f.json -- the lines it feeds are absent, not zero"
+          done
+          say "-- 1 · the research lane's arming --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            "  authorised        " + n(.authorised.authorised)
+              + "   key " + n(.control_key),
+            "  calibration_rows  " + n(.calibration_rows)
+              + "   still_unmeasured " + n(.calibration_still_unmeasured),
+            "  waivable          " + n(.describe.waivable)
+              + "   never " + n(.describe.never_waivable)' \
+            /tmp/arm.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- 2 · candidates, and who used the waiver --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            (.candidates // []) as $c
+            | "  candidates_read    " + n($c|length),
+              "  admissible         "
+                + n([$c[] | select(.admissible)] | length),
+              "  waiver_AUTHORISED  "
+                + n([$c[] | select(.risk_verdict.research_waiver.authorised
+                                   == true)] | length),
+              "  waiver_APPLIED     "
+                + n([$c[] | select((.risk_verdict.research_waiver.waived
+                                    // []) | length > 0)] | length)
+                + "   (a waived gate, not merely an armed lane)",
+              "  waiver_gates       "
+                + n([$c[] | (.risk_verdict.research_waiver.waived // [])[]]
+                    | unique),
+              "  waiver_refusals    "
+                + n([$c[] | (.risk_verdict.research_waiver.refusals // [])[]]
+                    | unique)' \
+            /tmp/ee.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- 3 · where each refused candidate stopped (windowed) --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            "  in_window " + n(.summary_in_window.evaluated) + " evaluated  "
+              + n(.summary_in_window.admissible) + " admissible  "
+              + n(.summary_in_window.refused) + " refused"
+              + "   reconciles " + n(.stages.reconciles_with_window),
+            ((.stages.by_first_stage // {}) | to_entries[]
+              | "  " + .key + "  " + n(.value))' \
+            /tmp/cx.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- 4 · what this lane HOLDS, by provenance --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            (.inventory // []) as $i
+            | "  positions " + n($i|length),
+              ($i | group_by(.provenance // "UNLABELLED")[]
+                | "  " + n(.[0].provenance) + "  " + n(length)
+                  + "   ids " + n([.[].position_id]))' \
+            /tmp/ee.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- 5 · reconciled P&L, per lane --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            .statuses.shadow_pnl as $P
+            | "  mark_basis " + n($P.unrealised_basis),
+              ($P.lanes // {} | to_entries[]
+                | "  " + .key + "  realised " + n(.value.net_usd)
+                  + "  fees " + n(.value.fees_usd)
+                  + "  unrealised " + n(.value.unrealised.unrealised_usd)
+                  + "  total " + n(.value.total_pnl_usd)
+                  + "  marked " + n(.value.unrealised.marked_positions)
+                  + "/unmarked " + n(.value.unrealised.unmarked_positions))' \
+            /tmp/pnl.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Entry-run raw evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -3264,5 +3396,8 @@ jobs:
             /tmp/st.json
             /tmp/cal.json
             /tmp/cx.json
+            /tmp/arm.json
+            /tmp/ee.json
+            /tmp/pnl.json
           if-no-files-found: warn
           retention-days: 14

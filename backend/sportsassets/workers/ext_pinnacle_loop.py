@@ -1787,6 +1787,22 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
                            calibration=calibration)
         verdict = entryx.verdict(action, observed=exposure["observed"],
                                  state=waiver["state"])
+        # THE WAIVER, CARRIED ON THE PERSISTED ROW. `detail` holds the
+        # complete record, but only `execution`, `risk` and `exposure` are
+        # stored as columns on the valuation -- so a later reader of the
+        # database could not tell whether a decision used the waiver, which
+        # is precisely the question the research lane has to answer. The
+        # risk verdict is the section that CONSUMED the waived map, so the
+        # record travels with it. It is a copy and an input to nothing.
+        verdict = dict(
+            verdict,
+            research_waiver={
+                "version": waiver.get("version"),
+                "authorised": waiver.get("authorised"),
+                "waived": list(waiver.get("waived") or []),
+                "refusals": list(waiver.get("refusals") or []),
+                "gate_state_as_read": waiver.get("gate_state_as_read"),
+            })
         detail["research_waiver"] = waiver
         detail.update({"exposure": exposure, "gates": gates,
                        "gates_seen_by_the_engine": waiver["state"],

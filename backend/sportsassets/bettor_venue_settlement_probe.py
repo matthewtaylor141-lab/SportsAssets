@@ -304,6 +304,97 @@ def probe(client, slug: str) -> dict:
     # where a list is required is a defect of ours with a named repair; an
     # absent field is not.
     out["parser_gap"] = _parser_gap(li, st, out["reader_verdict"])
+
+    # ── 6 · THE VENUE'S OWN SETTLEMENT PROSE, VERBATIM AND UNABRIDGED ──
+    out["settlement_terms"] = _terms_read(m)
+    return out
+
+
+#: The prose fields a settlement rule could live in, in the order
+#: `bettor_live_read.read_rules_text` prefers them -- so this probe reads
+#: the SAME text production reads, not a different one.
+PROSE_FIELDS = ("description", "assetPriceTerms", "rules",
+                "resolutionSource", "resolutionCriteria")
+
+#: The prose is quoted in full up to this length. `MAX_STR` (400) is for
+#: incidental payload strings; truncating the settlement rule at 400 is
+#: exactly the mistake below, so this is separate and generous, and the
+#: TRUE length is always reported beside it.
+MAX_PROSE = 6000
+
+R_NO_MARKET = "THE_LISTING_RETURNED_NO_MARKET"
+R_NO_PROSE = "NO_PROSE_FIELD_ON_THE_MARKET_OBJECT"
+
+
+def _terms_read(market) -> dict:
+    """What the venue's own published prose STATES, condition by condition.
+
+    ── THE DEFECT THIS CLOSES, AND IT WAS MINE ──────────────────────
+
+    The per-condition table I reported -- two conditions stated, five
+    silent -- was computed against a TEST FIXTURE whose `description` is
+    183 characters. The live listing for the same slug carries 380. A
+    fixture is not the venue, and a claim about what a venue does not say
+    cannot be made from an abridged copy of what it does say. So the prose
+    is read here from the LIVE market object, quoted in full, with its true
+    length, and run through the same reader production uses.
+
+    ── WHAT IT DOES NOT DO ──────────────────────────────────────────
+
+    It reads the VENUE SIDE ONLY. Compatibility requires both sides and an
+    admitted scope, and `bettor_settlement_terms.compare` owns that
+    decision. Nothing here infers agreement from silence, and a condition
+    absent from `stated` means the reader found no sentence stating a
+    payout for it -- which is the absence of evidence, not a rule.
+    """
+    from . import bettor_settlement_terms as ST
+
+    out = {"read": False, "field": None, "chars": None, "text": None,
+           "truncated": False, "fields_present": [], "refusal": None,
+           "applicable_conditions": None, "stated": {}, "contradicted": [],
+           "not_stated": [], "sentences": None,
+           "what_not_stated_means": (
+               "the reader found no single sentence in this text stating a "
+               "payout for that condition. It is the ABSENCE of a venue "
+               "rule, never agreement with ours"),
+           "what_this_is_not": (
+               "not a compatibility verdict. Both sides and an admitted "
+               "scope are required for that, and bettor_settlement_terms."
+               "compare is the only place that decides it")}
+    if not isinstance(market, dict):
+        out["refusal"] = R_NO_MARKET
+        return out
+    out["fields_present"] = [f for f in PROSE_FIELDS
+                             if str(market.get(f) or "").strip()]
+    field = next((f for f in PROSE_FIELDS
+                  if str(market.get(f) or "").strip()), None)
+    if field is None:
+        out["refusal"] = R_NO_PROSE
+        return out
+    text = str(market[field]).strip()
+    out.update(read=True, field=field, chars=len(text),
+               truncated=len(text) > MAX_PROSE, text=text[:MAX_PROSE])
+    try:
+        rd = ST.read_terms(text)
+        conds = ST.applicable_conditions(sport_family="baseball",
+                                        market="h2h") or ()
+        stated = dict(rd.get("terms") or {})
+        out.update(
+            stated=stated,
+            contradicted=list(rd.get("contradicted") or []),
+            applicable_conditions=list(conds),
+            not_stated=[c for c in conds if c not in stated],
+            sentences=len(list(ST.sentences(text))),
+            # THE SENTENCES THE READER SAW AND DID NOT USE. A condition can
+            # read as unstated because the venue is silent OR because a
+            # sentence names it without a payout the reader recognises, and
+            # those are different problems with different fixes.
+            unused_evidence={
+                c: [e.get("sentence") for e in evs if not e.get("used")]
+                for c, evs in (rd.get("evidence") or {}).items()
+                if any(not e.get("used") for e in evs)})
+    except Exception as exc:                                   # noqa: BLE001
+        out["refusal"] = "READER_RAISED_" + type(exc).__name__
     return out
 
 

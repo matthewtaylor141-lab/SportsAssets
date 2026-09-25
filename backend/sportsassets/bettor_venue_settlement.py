@@ -197,6 +197,28 @@ def _legacy_book_terms(fam) -> dict:
 #: ordinary egress, because the development container's policy denies these
 #: hosts -- the same reason CAPTURE_ATTEMPTS had to run there.
 #:
+#: TWO CORRECTIONS TO WHAT THIS BLOCK USED TO SAY, both mine.
+#:
+#: 1 "THE VENUE DOES NOT PUBLISH THIS" WAS WRONG and is retracted.
+#:   `docs.polymarket.us/sitemap.xml` answers 200 with 618 enumerated URLs
+#:   and `robots.txt` carries `Content-Signal: ai-train=yes, search=yes,
+#:   ai-input=yes`. The documentation IS published and IS readable. Eight
+#:   guessed paths were wrong; that is a statement about the guesses.
+#:   Whether any of those 618 pages states the five missing conditions is
+#:   OPEN -- and an existing URL answers no settlement question, so nothing
+#:   here treats the sitemap as evidence of compatibility.
+#:
+#: 2 THE 380 AND THE 183 DISAGREE, and the disagreement is unsettled. This
+#:   note's "380 characters, states one condition" was measured against a
+#:   live listing. `research/SETTLEMENT_SCOPE_EVIDENCE.md` reported 183
+#:   characters stating two conditions -- and that was measured against
+#:   `tests/fixtures/pmus_settled_market_2026_09_24_az_col.json`, a FIXTURE,
+#:   whose `description` really is 183 characters. A fixture is not the
+#:   venue. Which conditions the live prose states is therefore not yet
+#:   established either way, and `bettor_venue_settlement_probe._terms_read`
+#:   exists to settle it by reading the live field verbatim, in full, with
+#:   its true length.
+#:
 #: RECORDED AS FACTS, NOT AS THE MEMORY OF A FAILED COMMAND. A 404 answers
 #: "does the venue publish this" as definitely as a 200 would, and a
 #: retrieval nobody wrote down has to be repeated by the next person.
@@ -229,18 +251,41 @@ VENUE_TERMS_CAPTURE_ATTEMPTS = (
                 "LIKELY_CLIENT_RENDERED branch refused to call it a "
                 "capture, correctly -- the rules are not in the served "
                 "document")},
+    # THE SUPPORTED ROUTE, ASKED AFTER THE GUESSES FAILED -- and it is the
+    # attempt that retracted the conclusion the other three were used to
+    # support. Guessing paths was the wrong method; a documentation site
+    # publishes its index.
+    {"asked_at": "2026-09-25T16:06:00Z",
+     "targets": ("https://docs.polymarket.us/sitemap.xml",
+                 "https://docs.polymarket.us/robots.txt"),
+     "result": "HTTP_200_INDEX_PUBLISHED_AND_READABLE",
+     "detail": ("the sitemap answers 200 and enumerates 618 URLs, and "
+                "robots.txt carries `Content-Signal: ai-train=yes, "
+                "search=yes, ai-input=yes`. THE DOCUMENTATION IS PUBLISHED "
+                "AND READABLE, which retracts `the venue does not publish "
+                "this`. What an enumerated URL establishes is that a page "
+                "exists -- not one word of its content, and no settlement "
+                "condition")},
 )
 
-VENUE_TERMS_NOT_PUBLISHED = (
-    "across eight candidate URLs on two venue hosts, NO per-condition "
-    "settlement document was retrievable: five 404s, a documentation root "
-    "with no settlement vocabulary at all, and two client-rendered shells. "
-    "This is an EXTERNAL DEPENDENCY on the venue publishing its grading "
-    "rules somewhere a reader can reach, or serving them through an API. "
-    "It is not a defect in this repository and it is not cleared by "
-    "reading the listing again. Until it is resolved the void rule stays "
-    "NOT ESTABLISHED and every supported-market entry candidate refuses -- "
-    "which is the truthful state")
+#: RENAMED FROM `VENUE_TERMS_NOT_PUBLISHED`, because that name asserted the
+#: thing the fourth capture attempt disproved. The pages are published; we
+#: have not located the one that states the missing conditions, and those
+#: are different facts with different owners.
+VENUE_TERMS_NOT_YET_LOCATED = (
+    "eight GUESSED URLs on two venue hosts returned no per-condition "
+    "settlement document -- five 404s, a documentation root with no "
+    "settlement vocabulary, and two client-rendered shells. The supported "
+    "route then showed the documentation IS published and readable: "
+    "sitemap.xml answers 200 with 618 enumerated URLs. So the open item is "
+    "NOT that the venue publishes nothing; it is that the page stating the "
+    "five conditions has not been located and read, and that the listing's "
+    "own `description` is the only venue prose captured per contract. "
+    "Locating it is OURS to finish. Whether it then states the five "
+    "conditions is the venue's to answer, and the reading is reviewable "
+    "separately. Until a rule is READ, the void rule stays NOT ESTABLISHED "
+    "and every supported-market entry candidate refuses -- which is the "
+    "truthful state, and silence is still not agreement")
 
 VOID_BOOK_NOTE = (
     "the BOOKMAKER's abandonment rule is not recorded in this repository. "

@@ -319,6 +319,34 @@ def test_the_loop_applies_the_waiver_above_the_gate():
     assert '"research_waiver"' in src
 
 
+def test_the_waiver_travels_on_the_persisted_risk_section():
+    """WHY THIS IS NOT OPTIONAL. `detail` holds the whole record, but only
+    `execution`, `risk` and `exposure` become columns on the valuation row
+    (`bettor_external_shadow._plan_json`). `research_waiver` was in
+    `detail` alone, so nothing in the DATABASE said whether a decision used
+    the waiver -- which is the one question the research lane exists to
+    answer. The risk verdict is the section that consumed the waived map,
+    so the copy travels there."""
+    import json
+
+    from sportsassets import bettor_external_shadow as EXT
+    from sportsassets.workers import ext_pinnacle_loop as loop
+
+    src = inspect.getsource(loop._entry_plan)
+    assert "research_waiver={" in src
+    # THE SECTIONS THAT ACTUALLY PERSIST, read from the writer rather than
+    # assumed -- if a fourth section is ever added, this stays true.
+    ps = inspect.getsource(EXT.persist)
+    assert '_plan_json(rec, "risk")' in ps
+
+    # AND THE COPY IS A COPY: json-serialisable, and no gate map inside it
+    # is the one the engine reads.
+    plan_src = src[src.index("research_waiver={"):]
+    assert '"gate_state_as_read"' in plan_src
+    assert "dict(\n            verdict," in src or "dict(verdict," in src
+    assert json.dumps({"authorised": True, "waived": ["MODEL_TRUST_DRIFT"]})
+
+
 def test_the_loop_reads_the_control_row_each_cycle():
     from sportsassets.workers import ext_pinnacle_loop as loop
 
@@ -381,3 +409,121 @@ def test_the_route_reaches_no_funded_path():
     for forbidden in ("guarded_submit", "submit_fok", "calibration_execute",
                       "CALIBRATION_WRITES_ENABLED"):
         assert forbidden not in src, forbidden
+
+
+# ── CONTAINMENT BY DATA FLOW, not only by imports ────────────────────
+#
+# An empty funded-module import list says this module calls nothing
+# dangerous. It does NOT say a decision this lane produced cannot end up
+# being what a funded submission sends. That is a question about DATA, and
+# it is asked separately here.
+
+FUNDED_TABLES = ("calibration_lifecycles", "calibration_send_attempts",
+                 "calibration_sessions")
+RESEARCH_TABLES = ("rn1x_positions", "rn1x_decisions", "rn1x_orders",
+                   "rn1x_fills", "rn1x_outcomes")
+
+
+def _modules():
+    import pathlib
+
+    from .conftest import backend_path
+    root = backend_path("sportsassets")
+    return {p: p.read_text(errors="ignore")
+            for p in pathlib.Path(root).rglob("*.py")
+            if "__pycache__" not in str(p)}
+
+
+def test_no_module_touches_both_table_families():
+    """THE DATA-FLOW CUT. The funded path's economics are bound from
+    `calibration_*` rows; the research lane writes `rn1x_*` rows. If one
+    module named both, there would be somewhere for a research decision to
+    become a funded ticket -- so no module may.
+    """
+    both = []
+    for path, src in _modules().items():
+        has_funded = any(t in src for t in FUNDED_TABLES)
+        has_research = any(t in src for t in RESEARCH_TABLES)
+        if has_funded and has_research:
+            both.append(str(path))
+    assert both == [], both
+
+
+def test_the_funded_send_binds_only_from_its_own_durable_row():
+    """`guarded_submit` takes NO ticket parameter. Everything economically
+    relevant is re-read from the claimed `calibration_*` row at claim time,
+    so a caller cannot send at a price or size no human approved -- and a
+    research decision is not a thing it can be handed."""
+    from sportsassets import calibration_execute as CE
+    from sportsassets import calibration_store as CS
+
+    sig = inspect.signature(CE.guarded_submit)
+    assert "ticket" not in sig.parameters, sig
+    assert set(sig.parameters) >= {"venue", "client_order_id", "claimed_by"}
+    src = inspect.getsource(CE.guarded_submit)
+    assert "The ticket is NOT a parameter" in src
+    # AND THE BOUND FIELDS ARE THE LEDGER'S, re-checked at claim.
+    for f in ("price", "quantity", "account", "marketId"):
+        assert f in CS.BOUND_FIELDS, f
+
+
+def test_no_single_function_bridges_a_research_row_to_a_funded_ticket():
+    """FUNCTION granularity, not file. `api/app.py` is a monolith holding
+    every route, so it legitimately contains both the calibration routes and
+    the rn1x routes -- a file-level grep flags it and says nothing. The
+    question is whether any ONE callable reads an rn1x row and builds a
+    calibration ticket field from it, because that is what a bridge would
+    look like."""
+    import ast
+
+    bad = []
+    for path, src in _modules().items():
+        try:
+            tree = ast.parse(src)
+        except SyntaxError:                                    # pragma: no cover
+            continue
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            body = ast.get_source_segment(src, node) or ""
+            if not any(t in body for t in RESEARCH_TABLES):
+                continue
+            if any(t in body for t in FUNDED_TABLES) or \
+                    "clientOrderId" in body:
+                bad.append("%s::%s" % (path.name, node.name))
+    assert bad == [], bad
+
+
+def test_the_research_provenance_is_not_a_funded_environment_value():
+    """A funded ticket's `environment` must be PRODUCTION or PREPROD. The
+    research label is neither, so a research row cannot satisfy the funded
+    identity check even if its fields were copied across."""
+    from sportsassets import calibration as C
+
+    assert rsh.PROVENANCE not in C.ENVIRONMENTS
+    assert set(C.ENVIRONMENTS) == {"PRODUCTION", "PREPROD"}
+
+
+def test_what_containment_does_not_claim():
+    """HONESTY ABOUT THE REMAINING PATH. Nothing stops a HUMAN reading a
+    research decision and typing its numbers into a calibration ticket.
+    What this guarantees is narrower and is the part that matters: those
+    numbers arrive with no authority of their own, and every funded control
+    still applies to them -- per-ticket human approval confirmed by exact
+    clientOrderId, the $5.00 and $100.00 caps, one concurrent lifecycle, the
+    kill switch read fresh at submission, and `_destination_mismatch`
+    against the adapter's own identity.
+
+    So the claim is NOT "a research number can never reach the venue". It is
+    "a research number cannot reach the venue WITHOUT a human approving it
+    through the funded gate, and it gets no easier passage for having come
+    from the research lane".
+    """
+    from sportsassets import calibration as C
+
+    assert C.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE == 5.00
+    assert C.MAX_CONCURRENT_ORDER_POSITION_LIFECYCLES == 1
+    # The funded refusal names that would still fire are intact.
+    for name in ("R_UNFUNDED", "R_CASH_UNKNOWN", "R_STALE_STATE",
+                 "R_PER_TRADE", "R_CONCURRENCY"):
+        assert hasattr(C, name), name

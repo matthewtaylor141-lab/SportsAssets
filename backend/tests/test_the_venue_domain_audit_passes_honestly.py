@@ -204,14 +204,34 @@ def test_the_venue_terms_attempts_are_recorded_not_remembered():
     from sportsassets import bettor_venue_settlement as VS
 
     atts = VS.VENUE_TERMS_CAPTURE_ATTEMPTS
-    assert len(atts) == 3, atts
+    assert len(atts) == 4, atts
     for a in atts:
         assert a["asked_at"].endswith("Z")
         assert a["result"]
         assert a["detail"]
     results = {a["result"] for a in atts}
     assert results == {"HTTP_404", "HTTP_200_NO_SETTLEMENT_PROSE",
-                       "HTTP_200_CLIENT_RENDERED"}
+                       "HTTP_200_CLIENT_RENDERED",
+                       "HTTP_200_INDEX_PUBLISHED_AND_READABLE"}
+
+
+def test_the_sitemap_attempt_retracts_the_not_published_claim():
+    """THE ATTEMPT THAT CORRECTED ME. Three failed guesses were used to
+    support "the venue does not publish this". The fourth attempt reached
+    the published index, so the record has to carry the retraction beside
+    the attempts that produced the wrong conclusion -- and must not turn
+    618 URLs into a settlement answer."""
+    from sportsassets import bettor_venue_settlement as VS
+
+    a = [x for x in VS.VENUE_TERMS_CAPTURE_ATTEMPTS
+         if x["result"] == "HTTP_200_INDEX_PUBLISHED_AND_READABLE"][0]
+    assert "618" in a["detail"]
+    assert "retracts" in a["detail"]
+    # AND IT CLAIMS NOTHING ABOUT CONTENT. An enumerated URL is a page that
+    # exists; inferring compatibility from a sitemap is exactly the error
+    # this entry is here to prevent.
+    assert "not one word of its content" in a["detail"].lower()
+    assert "no settlement" in a["detail"].lower()
 
 
 def test_a_404_body_size_is_not_mistaken_for_a_capture():
@@ -228,13 +248,22 @@ def test_a_404_body_size_is_not_mistaken_for_a_capture():
 def test_the_gap_is_named_as_external_and_not_as_ours():
     from sportsassets import bettor_venue_settlement as VS
 
-    note = VS.VENUE_TERMS_NOT_PUBLISHED
-    assert "EXTERNAL DEPENDENCY" in note
-    assert "not a defect in this repository" in note
+    note = VS.VENUE_TERMS_NOT_YET_LOCATED
+    # THE SPLIT THIS ASSERTS, AND THE OLD NAME GOT IT WRONG. Locating the
+    # page is ours; what the page says is the venue's. A single
+    # "EXTERNAL DEPENDENCY" label over both was how "we guessed eight URLs
+    # badly" got reported as "the venue publishes nothing".
+    assert "Locating it is OURS to finish" in note
+    assert "the venue's to answer" in note
+    assert "GUESSED" in note
+    assert "618" in note
     # AND IT DOES NOT PROMISE A WORKAROUND. The truthful state is that
     # every candidate refuses, and that is what it says.
     assert "every supported-market entry candidate refuses" in note
     assert "truthful state" in note
+    assert "silence is still not agreement" in note
+    # THE RETRACTED CLAIM MUST NOT SURVIVE UNDER THE OLD NAME.
+    assert not hasattr(VS, "VENUE_TERMS_NOT_PUBLISHED")
 
 
 def test_nothing_was_written_into_the_settlement_tables():

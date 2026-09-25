@@ -283,3 +283,78 @@ def test_it_never_raises_when_the_venue_read_fails():
     assert got["slug"] == SLUG
     assert got["terminal_reading"] in (P.R_UNREADABLE, P.R_UNMATCHED)
     assert got["settlement"]["error"] or got["listing"]["error"]
+
+
+# ── 6 · the venue's own prose, verbatim and unabridged ───────────────
+#
+# WHY THIS SECTION EXISTS, AND IT IS A CORRECTION. The per-condition
+# settlement table I reported -- two conditions stated, five silent -- was
+# computed against `tests/fixtures/pmus_settled_market_2026_09_24_az_col
+# .json`, whose `description` is 183 characters. The LIVE listing for the
+# same slug reports 380. A fixture is not the venue, and a claim about what
+# a venue does not say cannot rest on an abridged copy of what it does.
+
+def test_the_prose_is_quoted_in_full_not_at_the_payload_string_limit():
+    """`MAX_STR` is 400 and truncating a settlement rule at 400 characters
+    is exactly the mistake this closes, so the prose has its own limit and
+    the TRUE length travels beside the text."""
+    c = _Client(market=_market(), raises=_NotFoundError("x"))
+    got = P.probe(c, SLUG)
+    t = got["settlement_terms"]
+    assert t["read"] is True
+    assert t["field"] == "description"
+    # The helper repeats its sentence 20 times, so this is far past MAX_STR.
+    assert t["chars"] > P.MAX_STR
+    assert t["chars"] == len(_market()["description"])
+    assert len(t["text"]) <= P.MAX_PROSE
+    assert t["truncated"] is (t["chars"] > P.MAX_PROSE)
+    # VERBATIM: the head of the quote is the head of the venue's text.
+    assert _market()["description"].startswith(t["text"][:120])
+
+
+def test_it_reads_the_same_field_order_production_reads():
+    """A probe that read a different field from the production reader would
+    describe a rule the lane never saw."""
+    from sportsassets import bettor_live_read as _LR
+
+    assert P.PROSE_FIELDS == _LR.RULES_TEXT_FIELDS
+
+
+def test_a_condition_the_prose_does_not_state_is_absence_not_agreement():
+    c = _Client(market=_market(description=(
+        "This market settles on the final result of the game, including "
+        "any extra innings.")), raises=_NotFoundError("x"))
+    t = P.probe(c, SLUG)["settlement_terms"]
+    assert "DECIDED_AFTER_REGULATION" in t["stated"]
+    # The five terminal cases a one-sentence blurb cannot reach.
+    assert "STOPPED_BEFORE_THE_MINIMUM" in t["not_stated"]
+    assert t["contradicted"] == []
+    assert "ABSENCE" in t["what_not_stated_means"]
+    assert "never agreement" in t["what_not_stated_means"]
+    # AND IT IS NOT A VERDICT. Compatibility needs both sides and a scope.
+    assert "not a compatibility verdict" in t["what_this_is_not"]
+    assert "compare" in t["what_this_is_not"]
+    assert "verdict" not in t
+    assert "compatibility" not in t
+
+
+def test_a_market_with_no_prose_field_refuses_by_name():
+    m = _market()
+    m.pop("description")
+    c = _Client(market=m, raises=_NotFoundError("x"))
+    t = P.probe(c, SLUG)["settlement_terms"]
+    assert t["read"] is False
+    assert t["refusal"] == P.R_NO_PROSE
+    assert t["stated"] == {}
+
+
+def test_a_sentence_naming_a_condition_with_no_payout_is_reported_unused():
+    """The difference between "the venue is silent" and "the venue mentions
+    it and our reader recognises no payout" is the difference between an
+    external gap and one of ours."""
+    c = _Client(market=_market(description=(
+        "If the game is suspended it may be resumed at the discretion of "
+        "the league.")), raises=_NotFoundError("x"))
+    t = P.probe(c, SLUG)["settlement_terms"]
+    assert t["stated"] == {}
+    assert t["unused_evidence"], t
