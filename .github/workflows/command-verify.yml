@@ -2473,6 +2473,22 @@ jobs:
               "$API/api/admin/rn1x-settle-open-positions" || echo 000)
           say ""
           say "## settlement from the venue (HTTP $C)"
+          # THE RAW PAYLOAD, UNCONDITIONALLY, BEFORE ANY FORMATTING.
+          # THIS IS THE THIRD TIME a jq type mismatch has hidden a 200
+          # response from me -- `input_chain`, then `alternatives`, now
+          # this: `Cannot index string with string "why"`. Each time the
+          # sweep RAN and I could not say what it returned. A report that
+          # can fail must never be the only copy of the evidence.
+          say "-- raw settlement payload, first 1800 bytes --"
+          head -c 1800 /tmp/st.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- types, so a mismatch names itself --"
+          jq -r '"root " + (type)
+                 + "  settlement " + (.settlement|type)
+                 + "  results " + ((.settlement.results // null)|type)
+                 + "  results[0] " + (((.settlement.results // [])[0]
+                                        // null)|type)' \
+            /tmp/st.json 2>&1 | head -3 | tee -a "$GITHUB_STEP_SUMMARY"
           if [ "$C" = "200" ]; then
             cat > /tmp/st.jq <<'JQ'
           def n(x): if x == null then "-" else (x|tostring) end;
