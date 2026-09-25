@@ -262,14 +262,77 @@ Diffing the failure identities:
   `test_standby_does_not_erase_the_writer`,
   `test_venue_native_identity`.
 
-**All six pass in isolation** — 42/42 when their files are run together. So
-they are not straightforward breakage from the edits. Whether they are
-order- or state-dependent under full-suite conditions is being settled by a
-repeat post-change run under identical conditions; if the same six reappear
-they are deterministic and I will fix them rather than explain them.
-
 Note the pre-change run passed 11,809 and the post-change run 11,842: +33,
 consistent with the new tests added, and the failure count moved by 1.
+
+### 5a · Settled, on a frozen worktree — complete identity lists
+
+The post-change run above was taken **while I was still editing the tree**,
+which is what made the six ambiguous. So it was repeated against a **frozen**
+worktree at `a329a41`, its own migrated database (`rn1xfroz`), nothing else
+running, invoked identically from `backend/`.
+
+| Run | Tree | DB | Failures |
+|---|---|---|---|
+| pre-change `25cd967` | worktree, frozen | `rn1xbase` | **447** |
+| post-change `a329a41` | worktree, frozen | `rn1xfroz` | **441** |
+| post-change `730dcaa` | working tree, **being edited** | `rn1xtest` | 446 |
+| post-change repeat | working tree, **being edited** | `rn1xtest` | 537 |
+
+**pre → frozen post: 6 failures fixed, 0 introduced.** Complete lists, by
+set difference over the failure identities (one apparent difference in both
+directions is an artifact of my own id extraction: the parametrised id
+`…logs_once[{not json]` contains a space, and the `awk` field split truncated
+it to `[{not`. It is the same test, present in every run):
+
+**In pre, not in frozen post — the 6 fixed** (the CWD-relative path family):
+
+```
+tests/test_calibration_claim.py::TestTheMigrationSaysWhatTheCodeRelies_on::test_the_unique_constraint_is_declared
+tests/test_calibration_claim.py::TestTheMigrationSaysWhatTheCodeRelies_on::test_there_is_a_rollback_and_it_warns_about_the_history
+tests/test_calibration_domain.py::TestTheEvidenceWorkflowIsTheReservation::test_it_declares_the_outcome_side_and_the_exit_policy
+tests/test_calibration_domain.py::TestTheEvidenceWorkflowIsTheReservation::test_it_exists_and_joins_the_venue_group
+tests/test_calibration_domain.py::TestTheEvidenceWorkflowIsTheReservation::test_it_exports_the_reservation_the_code_checks_for
+tests/test_calibration_domain.py::TestTheEvidenceWorkflowIsTheReservation::test_it_never_submits
+```
+
+**In frozen post, not in pre — none.** The change introduces no failure.
+
+### 5b · The six, and what actually explains them
+
+They failed in the *edited-tree* run and pass in the frozen run of the same
+commit. The complete list:
+
+```
+tests/test_payout_event_is_priced_once.py::test_the_caller_must_not_pre_invert
+tests/test_payout_identity_is_not_read_off_the_intent.py::test_the_wrapper_no_longer_derives_payout_from_intent
+tests/test_settlement_attestation.py::test_the_cycle_uses_attest_and_not_the_empty_table
+tests/test_settlement_attestation.py::test_the_evidence_comes_from_the_table_not_the_slug_grammar
+tests/test_standby_does_not_erase_the_writer.py::test_the_standby_branch_passes_the_standby_key
+tests/test_venue_native_identity.py::test_the_crossing_reuses_the_existing_resolver
+```
+
+Every one of them calls `inspect.getsource` on `workers/ext_pinnacle_loop`
+(one also on `api/command_rn1x`) — the exact files being edited while that
+run was in flight. `linecache` caches file contents by path and mtime, so a
+source-inspection assertion can read text that is not what the interpreter
+imported. That is a mechanism, demonstrated by the frozen run, not a guess.
+
+**What this does NOT claim.** An isolated pass is not a resolution, and I am
+not calling these deterministic-green. 15 serial repeats of the six files
+passed 42/42 each time, and the frozen full-suite run passes them — but the
+frozen run also carries **one failure the edited run did not**:
+
+```
+tests/test_rn1x_model_loop.py::test_the_cycle_prepares_fits_predicts_joins_and_evaluates
+```
+
+which passes on demand. So the suite is **not fully deterministic under
+full-suite load**, at least one test remains order- or resource-sensitive,
+and that is an open item rather than a closed one. What is settled is the
+attribution: against a like-for-like frozen baseline this change fixes six
+and breaks none, and the six source-inspection failures belong to the
+measurement conditions, not to the code.
 
 ## 6 · The path-family defect that made me misreport to you
 
