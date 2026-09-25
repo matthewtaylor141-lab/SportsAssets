@@ -4087,6 +4087,88 @@ jobs:
           say "  INGESTION/MAPPING defect on our side. A league with NO is"
           say "  missing venue coverage, which no code of ours can repair."
           say "  Neither verdict makes an UNKNOWN payout rule compatible."
+          say ""
+
+          # ── C2 · WHICH SOCCER CONTRACT, EXACTLY ──────────────────────
+          #
+          # NOT EVERY NATIVE SOCCER CONTRACT IS SUITABLE, and the previous
+          # report's `aec|atc` prefix test could not tell them apart: the
+          # example it printed was `atc-ebfpl-ars-che-2026-09-25-dh2-ars`,
+          # a DOUBLE CHANCE, and the MLB one was `...-i8-draw`, an INNING
+          # SEGMENT. Both classify as "moneyline" today because
+          # `copy_sports.market_type_of` returns on the KIND PREFIX alone
+          # for the venue grammar and never inspects the suffix -- the
+          # suffix analysis that catches segments and exact scores exists
+          # only on the kindless feed grammar.
+          #
+          # So the payout event has to be established from the slug's own
+          # shape before any probability is bound to it:
+          #   three-way money line   home / draw / away on the full match
+          #   binary team-win        one team, full match
+          #   double chance          two of three outcomes -- NOT the same
+          #                          payout event as a money line
+          #   exact score, segments  excluded outright
+          #
+          # This prints the FULL board of up to three soccer events through
+          # `/api/admin/desk-game`, which already applies the classifier,
+          # so the real suffix vocabulary and the classifier's verdict on
+          # each slug are visible together. It is a read; it decides
+          # nothing.
+          say "== C2 · the full soccer board, and how it classifies =="
+          jq -r '[(.games // [])[] | select(.league == "soccer") | .id]
+                 | .[0:3] | .[]' /tmp/vb.json > /tmp/socc.txt 2>/dev/null \
+            || true
+          say "soccer events sampled  $(wc -l < /tmp/socc.txt)"
+          : > /tmp/soccslugs.txt
+          while read -r EV; do
+            [ -n "$EV" ] || continue
+            say ""
+            say "-- event $EV"
+            GC=$(curl -s --max-time 90 -o /tmp/g1.json -w '%{http_code}' \
+                   -H "$H" \
+                   "$A/api/admin/desk-game?venue=polymarket&id=$EV" \
+                   || echo 000)
+            say "   desk-game HTTP $GC"
+            # EVERY market, WITH the group label beside it. The payload's
+            # exact nesting is not assumed: any object that carries a
+            # `us_slug` is printed with whatever label sits next to it, and
+            # the raw key list is printed too so a reader can see the shape
+            # rather than trust this formatter.
+            say "   raw keys: $(jq -r '[keys[]]|tostring' /tmp/g1.json 2>/dev/null | head -c 200)"
+            jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+              [.. | objects | select(has("us_slug"))]
+              | .[] | "   " + n(.us_slug)
+                      + "   label=" + (n(.label) | .[0:52])
+                      + "   group=" + n(.group // .kind)' \
+              /tmp/g1.json 2>/dev/null \
+              | head -40 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            jq -r '[.. | objects | .us_slug? // empty] | unique | .[]' \
+              /tmp/g1.json 2>/dev/null >> /tmp/soccslugs.txt || true
+          done < /tmp/socc.txt
+          say ""
+          say "-- every distinct soccer us_slug seen --"
+          sort -u /tmp/soccslugs.txt | head -60 \
+            | sed 's/^/   /' | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- the SUFFIX VOCABULARY, after the date, with counts --"
+          # The suffix is what distinguishes a full-match money line from a
+          # double chance or a segment. Counted rather than eyeballed.
+          sed -E 's/^[a-z]+-//; s/^.*-[0-9]{4}-[0-9]{2}-[0-9]{2}//; s/^-//' \
+            /tmp/soccslugs.txt 2>/dev/null \
+            | sed 's/^$/<EMPTY: bare event slug>/' \
+            | sort | uniq -c | sort -rn | head -40 \
+            | sed 's/^/   /' | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "-- the venue's own soccer LEAGUE TOKENS (alias check) --"
+          sed -E 's/^[a-z]+-//; s/-.*$//' /tmp/soccslugs.txt 2>/dev/null \
+            | sort | uniq -c | sort -rn | head -20 \
+            | sed 's/^/   /' | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "  A BARE EVENT SLUG with a kind prefix of aec/atc and NO"
+          say "  suffix is the full-match line. A suffix naming a half, a"
+          say "  period, an inning, a double chance (dh/dc), a correct or"
+          say "  exact score, or a player is NOT the same payout event and"
+          say "  must not carry the match probability."
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Entry-run raw evidence

@@ -90,7 +90,7 @@ class Managed:
 
     def __init__(self, *, condition_id, outcome_index, seed_qty,
                  seed_price, at, fee_fn, queue_share=0.25,
-                 expiry_s=900.0, account="rn1x"):
+                 expiry_s=900.0, account="rn1x", assign_seed=True):
         self.condition_id = condition_id
         self.leg = int(outcome_index)
         self.fee_fn = fee_fn
@@ -100,9 +100,22 @@ class Managed:
         # THE ASSIGNED ENTRY. Booked through Portfolio.buy at zero fee,
         # because the seed is ASSIGNED at RN1's own fill price -- it is
         # not an execution of ours and no fee of ours was paid.
+        #
+        # AND THAT IS EXACTLY WHY IT MUST NOT ALWAYS HAPPEN. `assign_seed`
+        # false means the acquisition IS ours and is already in the ledger
+        # as an order with its fills and its fees, so booking the seed here
+        # too counts the same contracts twice. Measured on the
+        # external-valuation entry lane: a 900-contract entry (one order,
+        # three fills summing 900) reloaded as 1800 held, and the manager
+        # valued HOLD on 1800 contracts it did not hold. `seed_qty` and
+        # `seed_price` are still recorded, because for that lane they are a
+        # SUMMARY of those fills (qty and vwap) -- useful to read, and not
+        # an independent acquisition to book.
         self.pf = dk.Portfolio(0.0)
-        self.pf.buy(condition_id, self.leg, float(seed_qty),
-                    float(seed_price), 0.0, float(at))
+        self.assign_seed = bool(assign_seed)
+        if self.assign_seed:
+            self.pf.buy(condition_id, self.leg, float(seed_qty),
+                        float(seed_price), 0.0, float(at))
         self.seed_basis = self.pf.inventory_cost()
         self.cons = dk.Consumption()
         self.orders = {}
@@ -742,20 +755,36 @@ RELOAD_VERSION = "BETTOR_MGMT_RELOAD_V1"
 
 
 def reload_managed(*, position, orders=(), fills=(), fee_fn,
-                   queue_share=0.25, expiry_s=900.0) -> "Managed":
+                   queue_share=0.25, expiry_s=900.0,
+                   assign_seed=None) -> "Managed":
     """Rebuild a `Managed` from persisted rows. A replay, not a restore.
 
     `position` needs condition_id, outcome_index, seed_qty, seed_price,
     decision_ts (epoch seconds). `orders` are the persisted order rows;
     `fills` the persisted fills, each naming its order.
+
+    WHOSE ACQUISITION IS IT. A position with a `source_trade_id` was seeded
+    from SOMEONE ELSE'S fill, so the seed is assigned and the ledger holds
+    only our later management executions -- both must be booked. A position
+    whose `source_trade_id` is NULL was entered by US: the acquisition is an
+    order with fills in the same ledger, and booking the seed as well would
+    count it twice.
+
+    A position row that does not carry the column at all keeps the old
+    behaviour, so no existing caller changes: the key must be PRESENT and
+    None before the seed is withheld. `assign_seed` overrides both.
     """
+    if assign_seed is None:
+        assign_seed = not ("source_trade_id" in position
+                           and position["source_trade_id"] is None)
     m = Managed(condition_id=position["condition_id"],
                 outcome_index=int(position["outcome_index"]),
                 seed_qty=float(position["seed_qty"]),
                 seed_price=float(position["seed_price"]),
                 at=float(position["decision_ts"]), fee_fn=fee_fn,
                 queue_share=float(queue_share), expiry_s=float(expiry_s),
-                account=str(position.get("account") or "rn1x"))
+                account=str(position.get("account") or "rn1x"),
+                assign_seed=bool(assign_seed))
     prefix = "%s:" % position["position_id"]
 
     def _bare(oid) -> str:
