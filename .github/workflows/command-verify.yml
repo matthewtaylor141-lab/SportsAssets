@@ -2138,7 +2138,14 @@ jobs:
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
           fi
           H="X-Admin-Token: $ADMIN_TOKEN"
-          PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
+          # THE SELECTED SUBJECT, NOT A HARDCODED ID. `GATE_PID` is what step
+          # 19 chose and exported; the literal is the Arizona fallback for a
+          # run where no subject was chosen. THE DEFECT THIS FIXES: with the
+          # id hardcoded, this step watched ARIZONA while the gate judged
+          # HOUSTON, and I read "no new decision" off the wrong position.
+          PID="${GATE_PID:-RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210}"
+          say "subject_id	$PID"
+          say "subject_source	$([ -n "${GATE_PID:-}" ] && echo "step19 GATE_PID" || echo "FALLBACK literal")"
 
           # A NON-200 IS AN UNAVAILABLE READ, NOT A FINDING. The first
           # version of this step printed "THAT EXACT ID IS NOT PRESENT" off
@@ -2285,7 +2292,14 @@ jobs:
           H="X-Admin-Token: $ADMIN_TOKEN"
           CID="${COND:-0x64a5ce26cf37db3c70c641d6cb68dda4f34d185f5faa2aaf0f0cb78105ce085f}"
           D="${FDATE:-$(date -u +%Y-%m-%d)}"
-          PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
+          # THE SELECTED SUBJECT, NOT A HARDCODED ID. `GATE_PID` is what step
+          # 19 chose and exported; the literal is the Arizona fallback for a
+          # run where no subject was chosen. THE DEFECT THIS FIXES: with the
+          # id hardcoded, this step watched ARIZONA while the gate judged
+          # HOUSTON, and I read "no new decision" off the wrong position.
+          PID="${GATE_PID:-RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210}"
+          say "subject_id	$PID"
+          say "subject_source	$([ -n "${GATE_PID:-}" ] && echo "step19 GATE_PID" || echo "FALLBACK literal")"
           say "condition\t$CID"
           say "fixture_date\t$D"
 
@@ -3180,37 +3194,96 @@ jobs:
           # never reseeds: the position stays synthetic, modelled and unfunded.
           # It runs HERE, immediately before the sweep, so the repair and the
           # readback are one run against one build.
-          PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
+          # WHICH POSITION, AND IT IS NO LONGER A LITERAL. THE DEFECT THIS
+          # FIXES: this step was pinned to the ARIZONA id while the gate and
+          # the settlement sweep act on whichever acceptance position was
+          # most recently adopted -- Houston today. So the audited repair ran
+          # against a position nobody was judging, and the one being judged
+          # kept the binding that refused. The subject is now RESOLVED from
+          # the newest row under the acceptance policy, and Arizona is
+          # repaired too rather than instead.
+          ARIZONA_PID="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
+          : > /tmp/accpos.json
+          CP=$(curl -s -o /tmp/accpos.json -w '%{http_code}' --max-time 60 \
+              -H "$H" "$API/api/command/rn1x/positions?limit=50&policy=ACCEPTANCE_SHADOW_MANAGER_DEMO_V1" \
+              || echo 000)
+          SUBJ=$(jq -r '(.positions // [])[0].position_id // ""' \
+                 /tmp/accpos.json 2>/dev/null || echo "")
           say ""
-          say "## legacy identity repair, before the sweep"
-          say "  position\t$PID"
+          say "## the acceptance positions, newest first (HTTP $CP)"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            (.positions // [])[] | "  " + n(.position_id)
+              + "  policy " + n(.policy)
+              + "  opened " + n(.opened_at // .created_at)
+              + "  qty " + n(.qty) + "  filled " + n(.filled_qty)' \
+            /tmp/accpos.json 2>&1 | head -20 \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say "  selected_subject\t${SUBJ:-<none>}"
+          say "  arizona\t$ARIZONA_PID"
+          say ""
+          say "## the audited repair, on the SELECTED SUBJECT then Arizona"
+          # A FUNCTION, NOT A LOOP INSIDE A YAML BLOCK. Two calls, two file
+          # pairs, so the recap can print both instead of whichever ran last.
+          repair () {   # $1 = position id, $2 = file suffix
+            local P="$1" SFX="$2"
+            [ -n "$P" ] || { say "  (no id for suffix '$SFX')"; return 0; }
+            say ""
+            say "  position\t$P"
+            : > "/tmp/rep0$SFX.json"
+            local D W
+            D=$(curl -s -o "/tmp/rep0$SFX.json" -w '%{http_code}' --max-time 120 \
+                -X POST -H "$H" -H 'Content-Type: application/json' \
+                --data "$(jq -nc --arg p "$P" '{position_id:$p,dry_run:true}')" \
+                "$API/api/admin/rn1x-repair-position-identity" || echo 000)
+            say "  -- dry run (HTTP $D), raw --"
+            head -c 2000 "/tmp/rep0$SFX.json" | tee -a "$GITHUB_STEP_SUMMARY"
+            say ""
+            : > "/tmp/rep$SFX.json"
+            W=$(curl -s -o "/tmp/rep$SFX.json" -w '%{http_code}' --max-time 120 \
+                -X POST -H "$H" -H 'Content-Type: application/json' \
+                --data "$(jq -nc --arg p "$P" '{position_id:$p}')" \
+                "$API/api/admin/rn1x-repair-position-identity" || echo 000)
+            say "  -- write (HTTP $W), raw --"
+            head -c 2500 "/tmp/rep$SFX.json" | tee -a "$GITHUB_STEP_SUMMARY"
+            say ""
+            # THE HELD EXPOSURE AND THE VENUE BINDING, VERIFIED INDEPENDENTLY
+            # of the repair's own answer: the trace's own view of what this
+            # position holds, read through a different route.
+            : > "/tmp/tr$SFX.json"
+            local T
+            T=$(curl -s -o "/tmp/tr$SFX.json" -w '%{http_code}' --max-time 90 \
+                -H "$H" "$API/api/command/rn1x/trace/$P" || echo 000)
+            say "  -- trace (HTTP $T): the last two decisions and the holding --"
+            jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+              "    qty " + n(.position.qty) + "  filled " + n(.position.filled_qty)
+                + "  residual " + n(.position.residual_qty)
+                + "  basis " + n(.position.cost_basis_usd),
+              "    outcome_index " + n(.position.outcome_index)
+                + "  payout_event " + n(.position.payout_event)
+                + "  slug " + n(.position.venue_market_slug),
+              "    decisions " + n((.decisions // []) | length)
+                + "  orders " + n((.orders // []) | length)
+                + "  fills " + n((.fills // []) | length)
+                + "  outcomes " + n((.outcomes // []) | length),
+              (((.decisions // []) | sort_by(.decision_ts) | reverse
+                 | .[0:2])[]
+                | "    decision " + n(.decision_id // .id)
+                  + "  at " + n(.decision_ts)
+                  + "  action " + n(.action)
+                  + "  version " + n(.engine_version // .version)
+                  + "  policy " + n(.policy)
+                  + "  settlement " + n(.settlement_qualified
+                                        // .settlement_compatibility)
+                  + "  complete " + n(.evidence_complete // .complete)),
+              "    outcome rows " + n([(.outcomes // [])[]
+                | {status: (.status // .settlement_read), net: .net_usd}])' \
+              "/tmp/tr$SFX.json" 2>&1 | head -30 \
+              | tee -a "$GITHUB_STEP_SUMMARY" || true
+          }
+          repair "${SUBJ:-}" ""
+          [ "${SUBJ:-}" = "$ARIZONA_PID" ] || repair "$ARIZONA_PID" "_az"
           
-          # THE DRY RUN FIRST. It resolves and cross-checks and writes nothing,
-          # so the answer is on the record before anything is persisted.
-          : > /tmp/rep0.json
-          C0=$(curl -s -o /tmp/rep0.json -w '%{http_code}' --max-time 120 \
-              -X POST -H "$H" -H 'Content-Type: application/json' \
-              --data "$(jq -nc --arg p "$PID" '{position_id:$p,dry_run:true}')" \
-              "$API/api/admin/rn1x-repair-position-identity" || echo 000)
-          say "-- dry run (HTTP $C0), raw --"
-          head -c 2500 /tmp/rep0.json | tee -a "$GITHUB_STEP_SUMMARY"
-          say ""
-          
-          # THEN THE WRITE. Refused on any disagreement, and a refusal is the
-          # answer -- not a reason to try a looser binding.
-          : > /tmp/rep.json
-          C1=$(curl -s -o /tmp/rep.json -w '%{http_code}' --max-time 120 \
-              -X POST -H "$H" -H 'Content-Type: application/json' \
-              --data "$(jq -nc --arg p "$PID" '{position_id:$p}')" \
-              "$API/api/admin/rn1x-repair-position-identity" || echo 000)
-          say "-- write (HTTP $C1), raw --"
-          head -c 3000 /tmp/rep.json | tee -a "$GITHUB_STEP_SUMMARY"
-          say ""
-          # THE RAW PAYLOAD IS PRINTED ABOVE, UNCONDITIONALLY, BEFORE ANY jq
-          # TOUCHES IT. Four settlement reports were lost to a jq type error
-          # eating a 200 response; the evidence is never only inside the
-          # formatter.
-          if [ "$C1" = "200" ]; then
+          if [ -s /tmp/rep.json ] || [ -s /tmp/rep_az.json ]; then
             cat > /tmp/rep.jq <<'JQ'
           def n(x): if x == null then "-" else (x|tostring) end;
           "ok\t"            + n(.repair.ok)
@@ -3232,13 +3305,22 @@ jobs:
             | "  " + .key + "\t" + n(.value.passed) + "\t" + n(.value.why))
           JQ
             sed -i 's/^  //' /tmp/rep.jq
-            jq -r -f /tmp/rep.jq /tmp/rep.json 2>/tmp/rep.err \
-              | tee -a "$GITHUB_STEP_SUMMARY" \
-              || { say "THE REPAIR REPORT FAILED TO RENDER -- a reporting"
-                   say "fault, not a finding. The raw payload is above:"
-                   head -c 300 /tmp/rep.err | tee -a "$GITHUB_STEP_SUMMARY"; }
+            for F in /tmp/rep.json /tmp/rep_az.json; do
+              [ -s "$F" ] || continue
+              say "-- formatted: $F --"
+              jq -r -f /tmp/rep.jq "$F" 2>/tmp/rep.err \
+                | tee -a "$GITHUB_STEP_SUMMARY" || true
+            done
+            # A jq FAULT IS ANNOUNCED AS ONE. The loop above swallows a
+            # failure per file so one bad payload cannot hide the other, so
+            # the error file is checked here instead.
+            if [ -s /tmp/rep.err ]; then
+              say "A REPAIR REPORT FAILED TO RENDER -- a reporting fault,"
+              say "not a finding. The raw payloads are above. jq said:"
+              head -c 300 /tmp/rep.err | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
           else
-            say "THE REPAIR ROUTE DID NOT RETURN 200 -- no identity was"
+            say "NEITHER REPAIR CALL LEFT A RESPONSE -- no identity was"
             say "written and the sweep below will refuse as it did before."
           fi
           
