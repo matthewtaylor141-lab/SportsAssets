@@ -2290,8 +2290,6 @@ jobs:
             say "SKIPPED: no ADMIN_TOKEN"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
           fi
           H="X-Admin-Token: $ADMIN_TOKEN"
-          CID="${COND:-0x64a5ce26cf37db3c70c641d6cb68dda4f34d185f5faa2aaf0f0cb78105ce085f}"
-          D="${FDATE:-$(date -u +%Y-%m-%d)}"
           # THE SELECTED SUBJECT, NOT A HARDCODED ID. `GATE_PID` is what step
           # 19 chose and exported; the literal is the Arizona fallback for a
           # run where no subject was chosen. THE DEFECT THIS FIXES: with the
@@ -2300,8 +2298,43 @@ jobs:
           PID="${GATE_PID:-RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210}"
           say "subject_id	$PID"
           say "subject_source	$([ -n "${GATE_PID:-}" ] && echo "step19 GATE_PID" || echo "FALLBACK literal")"
-          say "condition\t$CID"
-          say "fixture_date\t$D"
+          # THE SUBJECT'S OWN CONDITION AND ITS OWN DATE, NOT ARIZONA'S.
+          #
+          # THE DEFECT THIS FIXES, measured in run 66. `CID` defaulted to the
+          # ARIZONA condition and `D` to TODAY, while the subject was
+          # HOUSTON. So this step handed the acquisition route Arizona's
+          # teams on Houston's date, got
+          # `NO_FIXTURE_MATCHED: no game on 2026-09-25 pairs away 'Arizona
+          # Diamondbacks' with home 'Colorado Rockies'`, and printed
+          # "ACQUISITION DID NOT PERSIST" -- which reads as a statement about
+          # the SUBJECT'S scope and is nothing of the kind. Fixing the id in
+          # step 19 was not enough while the condition stayed hardcoded here.
+          #
+          # Both now come from the subject itself: the condition from its own
+          # input-chain row, the official date from the trailing date on the
+          # venue slug the position is bound to. An override still wins, and a
+          # value that could not be resolved is REFUSED rather than replaced
+          # by today's date.
+          curl -s --max-time 60 -H "$H" \
+            "$API/api/command/rn1x/input-chain/$PID" -o /tmp/subj.json || true
+          SUBJ_CID=$(jq -r '.position.condition_id // empty' /tmp/subj.json \
+                       2>/dev/null || true)
+          SUBJ_SLUG=$(jq -r '[.. | objects | .venue_market_slug? // empty]
+                              | map(select(. != null)) | .[0] // empty' \
+                        /tmp/subj.json 2>/dev/null || true)
+          SUBJ_DATE=$(printf '%s' "${SUBJ_SLUG:-}" \
+                        | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}$' || true)
+          CID="${COND:-$SUBJ_CID}"
+          D="${FDATE:-$SUBJ_DATE}"
+          say "condition	${CID:--}   from	$([ -n "${COND:-}" ] && echo override || echo "the subject's input-chain")"
+          say "subject_slug	${SUBJ_SLUG:--}"
+          say "fixture_date	${D:--}   from	$([ -n "${FDATE:-}" ] && echo override || echo "the slug's trailing date")"
+          if [ -z "${CID:-}" ] || [ -z "${D:-}" ]; then
+            say "REFUSED: the subject's own condition or official date could"
+            say "not be resolved, and acquiring ANOTHER fixture's scope would"
+            say "say nothing about this subject. No acquisition attempted."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
 
           # 1 · retrieve the league schedule HERE, where egress permits it
           U="https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=$D"
@@ -2400,6 +2433,20 @@ jobs:
             "      quote_ctx    " + s(l4b.quote_context),
             "      terms        " + s(l4b.terms_verdict),
             "      book_held    " + s(l4b.book_terms_held),
+            "      fixt_acq     " + (((ic.fixture_acquisition // null)
+                | if type == "object" then
+                    ((.refusal // .error // .why
+                      // (.persisted | tostring)) | tostring)
+                  else "-" end) | .[0:160]),
+            "      fixt_row     " + (((ic.fixture_metadata // null)
+                | if type == "object" then
+                    ("read=" + ((.read // false) | tostring)
+                     + "  phase=" + ((.phase // "-") | tostring)
+                     + "  fmt=" + ((.game_format // "-") | tostring)
+                     + "  begun=" + (if .play_has_begun == null then "-"
+                                     else (.play_has_begun | tostring) end)
+                     + "  at=" + ((.retrieved_at // "-") | tostring))
+                  else "-" end) | .[0:200]),
             "      unstated     " + ((l4b.unstated_conditions // []) | length | tostring),
             "      mismatched   " + ((l4b.mismatched_conditions // []) | tostring),
             "      first_fail   " + s(((ic.first_failing_link // {})
