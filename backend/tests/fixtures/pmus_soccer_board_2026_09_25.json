@@ -1,0 +1,60 @@
+{
+  "_what_this_is": "The venue's OWN soccer board, read through /api/admin/desk-game (which applies copy_sports.market_type_of) for three sampled soccer events. Captured because the previous report's `aec|atc` prefix test counted the money-line FAMILY and could not establish the payout event, and because binding a probability before establishing that event is the category error this evidence prevents.",
+  "captured_in": {
+    "workflow": "command-verify",
+    "run": 70,
+    "run_id": 36197424668,
+    "job": "entry-run",
+    "job_id": 108276348464,
+    "commit": "48c5e7fc5a0984fc301985f4b384fb4b780a834b",
+    "at": "2026-09-25T22:39:29Z"
+  },
+  "sample": {
+    "soccer_events_on_the_venue": 267,
+    "soccer_events_sampled": 3,
+    "distinct_us_slugs_seen": 9,
+    "_this_is_a_sample": "3 of 267. It cannot establish what the whole board contains, and no claim here does."
+  },
+  "events": [
+    "ebfpl-mca-liv-2026-09-25-dh2",
+    "ebfpl-tot-ars-2026-09-25-dh2",
+    "ebfpl-ars-liv-2026-09-25-dh3"
+  ],
+  "slugs_verbatim": [
+    "atc-ebfpl-ars-liv-2026-09-25-dh3-ars",
+    "atc-ebfpl-ars-liv-2026-09-25-dh3-draw",
+    "atc-ebfpl-ars-liv-2026-09-25-dh3-liv",
+    "atc-ebfpl-mca-liv-2026-09-25-dh2-draw",
+    "atc-ebfpl-mca-liv-2026-09-25-dh2-liv",
+    "atc-ebfpl-mca-liv-2026-09-25-dh2-mca",
+    "atc-ebfpl-tot-ars-2026-09-25-dh2-ars",
+    "atc-ebfpl-tot-ars-2026-09-25-dh2-draw",
+    "atc-ebfpl-tot-ars-2026-09-25-dh2-tot"
+  ],
+  "labels_verbatim": [
+    "atc-ebfpl-mca-liv-2026-09-25-dh2-mca   Premier League match scheduled for Sep 25, 2026? — Y",
+    "atc-ebfpl-mca-liv-2026-09-25-dh2-mca   Premier League match scheduled for Sep 25, 2026? — N",
+    "atc-ebfpl-mca-liv-2026-09-25-dh2-draw  Will the Man City vs Liverpool eBattles — Yes",
+    "atc-ebfpl-mca-liv-2026-09-25-dh2-draw  Will the Man City vs Liverpool eBattles — No",
+    "atc-ebfpl-ars-liv-2026-09-25-dh3-draw  Will the Arsenal vs Liverpool eBattles — Yes",
+    "atc-ebfpl-ars-liv-2026-09-25-dh3-draw  Will the Arsenal vs Liverpool eBattles — No"
+  ],
+  "suffix_vocabulary_with_counts": {
+    "dh2-draw": 2, "dh2-ars": 1, "dh2-liv": 1, "dh2-mca": 1, "dh2-tot": 1,
+    "dh3-ars": 1, "dh3-draw": 1, "dh3-liv": 1,
+    "<bare event slug, no suffix>": 0
+  },
+  "league_tokens_with_counts": {"ebfpl": 9},
+  "what_this_establishes": [
+    "THE PAYOUT EVENT IS A BINARY, NOT A THREE-WAY LINE. Each us_slug appears TWICE, labelled '— Y' and '— N'. The three outcomes (home / draw / away) are three SEPARATE yes/no contracts, not one three-way money line. A de-vigged three-outcome probability does not price a single one of them without restating which event it is on.",
+    "THE COMPETITION IS NOT THE ONE THE SOURCE PRICES. Every league token is `ebfpl` and the labels say 'eBattles' -- a simulated/esports football competition. The connected provider sport is `soccer_epl`, the REAL English Premier League. The team names coincide; the competitions do not. Binding a real-EPL probability to an `ebfpl` contract on a name match would be a cross-competition category error.",
+    "NO BARE FULL-MATCH SLUG APPEARS. Every slug in the sample carries a `dh2`/`dh3` qualifier. Nothing in this sample is the unqualified full-match contract."
+  ],
+  "what_this_does_NOT_establish": [
+    "That the venue lists no real-EPL money line anywhere. 3 of 267 soccer events were read.",
+    "What `dh2`/`dh3` denote. They are recorded verbatim and not interpreted; the reading above rests on the LABELS and the league token, not on a guess about those tokens.",
+    "That any soccer contract is or is not settlement-compatible. No soccer prose has been read on either side, so soccer settlement remains UNKNOWN."
+  ],
+  "corrects_a_previous_report": "The handoff's 'the venue sells 997 soccer events with 838 sides under its own money-line prefixes, so this is our ingestion gap' over-counted and mis-attributed. Those sides are eBattles binaries. On this sample the cause is MISSING VENUE COVERAGE OF THE COMPETITION THE SOURCE PRICES, not our ingestion, and `NO_VENUE_CONTRACT_FOR_EVENT` on 20 of 20 EPL fixtures was the CORRECT refusal.",
+  "the_next_bounded_read": "The same route over the WHOLE soccer board, reporting the league-token histogram: it answers 'does the venue list the real EPL or Liga MX at all' with counts instead of a 3-event sample. No new resolver and no new model."
+}
