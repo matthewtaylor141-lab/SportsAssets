@@ -49,6 +49,7 @@ from .. import bettor_entry_inventory as inv
 from .. import bettor_research_shadow as rsh
 from .. import bettor_external_shadow as ext
 from .. import bettor_fixture_metadata as fmeta_mod
+from .. import bettor_fixture_store as fstore
 from .. import bettor_pinnacle_devig as devig
 from .. import bettor_venue_mapping as vmap
 from .. import bettor_venue_settlement as vset
@@ -1420,25 +1421,167 @@ FIXTURE_META_SQL = """
 async def fixture_metadata_for(conn, condition_id) -> dict:
     """The persisted authoritative fixture row, or why there is none.
 
-    A FAILED READ IS NOT AN ABSENT ROW, and the two are reported
+    THROUGH THE SHARED STORE, not a second copy of the query. The manager
+    and the admin acquisition route read and write the same row through
+    `bettor_fixture_store`; a private SELECT here is how the two lanes
+    would drift apart.
+
+    A FAILED READ IS NOT AN ABSENT ROW, and the store reports them
     separately: an absent row is an acquisition task, a failed read is a
-    database problem, and treating the second as the first would let an
-    outage look like missing evidence.
+    database fault.
     """
+    return await fstore.read(conn, condition_id)
+
+
+#: One HTTP GET per official date per cycle, at most this many dates. The
+#: league's schedule endpoint is asked for a DATE, and a cycle's candidates
+#: cluster on one or two of them.
+FIXTURE_MAX_DATES_PER_CYCLE = 3
+FIXTURE_FETCH_TIMEOUT_S = 15.0
+
+
+def _official_date_candidates(commence_iso) -> list:
+    """The official dates a fixture at this instant could belong to.
+
+    A 01:40Z first pitch is a US evening game on the PREVIOUS calendar
+    date, and `officialDate` is what the league calls it. So the UTC date
+    and the day before are both tried, in that order, and a match is
+    required to be unique within the date that produced it -- never
+    stitched across the two.
+    """
+    at = fmeta_mod._epoch(commence_iso)
+    if at is None:
+        return []
+    import datetime as _dt
+
+    d = _dt.datetime.fromtimestamp(float(at), _dt.timezone.utc).date()
+    return [d.isoformat(), (d - _dt.timedelta(days=1)).isoformat()]
+
+
+def _fetch_schedule_blocking(date_str):
+    """The league's own schedule for one date. Blocking; called in a thread.
+
+    NO CREDENTIAL, no write, one GET. The failure is returned, not raised,
+    because an unreachable league host must leave the scope UNESTABLISHED
+    rather than end a cycle.
+    """
+    import json as _json
+    import urllib.request as _ur
+
+    url = fmeta_mod.SOURCE_URL % date_str
     try:
-        row = await conn.fetchrow(FIXTURE_META_SQL, str(condition_id))
+        req = _ur.Request(url, headers={"Accept": "application/json"})
+        with _ur.urlopen(req,                               # noqa: S310
+                         timeout=FIXTURE_FETCH_TIMEOUT_S) as r:
+            return {"ok": True, "url": url,
+                    "payload": _json.loads(r.read().decode("utf-8"))}
     except Exception as exc:                                   # noqa: BLE001
-        return {"read": False, "error": "%s" % type(exc).__name__,
-                "why": ("the fixture metadata read failed, which is not "
-                        "evidence that no row exists")}
-    if row is None:
-        return {"read": False, "error": None,
-                "why": ("no authoritative fixture metadata is persisted "
-                        "for this condition, so the competition phase, "
-                        "the game format and the actual event state are "
-                        "unestablished. The acquisition route populates "
-                        "it")}
-    return dict(row, read=True)
+        return {"ok": False, "url": url,
+                "error": "%s: %s" % (type(exc).__name__, exc)}
+
+
+async def acquire_fixture_scope(conn, *, condition_id, home, away,
+                                commence_iso, now, cache, fetcher=None):
+    """The scope evidence for ONE candidate's fixture, acquired if needed.
+
+    ── THE DEFECT THIS CLOSES ───────────────────────────────────────
+
+    `fixture_metadata` was written by an admin route invoked by hand for
+    one acceptance position. Ordinary candidates had no row, so the quote
+    context stayed unproven, `book_terms()` withheld the bookmaker side and
+    every settlement verdict read UNKNOWN. Measured 2026-09-25: 15 of 15
+    candidate rows carried `ctx - phase - fmt -` with `rules_read true`.
+
+    ── WHAT IT DOES ─────────────────────────────────────────────────
+
+    Reads the row; if absent, stale past `bettor_fixture_store`'s bound, or
+    carrying no reported event state, fetches the league's schedule for the
+    fixture's own official date, matches the game INDEPENDENTLY on the two
+    team names the ODDS PROVIDER gave for this event plus that date, and
+    persists the parsed evidence with its source, URL, binding and
+    retrieval time. Then it RE-READS the row, so what the lane uses is what
+    is persisted rather than what was computed in memory.
+
+    ── WHAT IT WILL NOT DO ──────────────────────────────────────────
+
+    It never infers a context from a scheduled start: the context comes
+    from `fmeta_mod.context_for`, which refuses unless the league reported
+    a state. It never selects a fixture without both team names and a date.
+    It never widens the scope guard. Every failure is a named refusal on
+    the returned row, and the caller's gate reads that refusal.
+    """
+    row = await fstore.read(conn, condition_id)
+    need = fstore.needs_acquisition(row, now=now)
+    acq = {"attempted": False, "decided": need}
+    if not need.get("acquire"):
+        return dict(row, acquisition=acq)
+    if not (str(home or "").strip() and str(away or "").strip()):
+        acq["refusal"] = "FIXTURE_BINDING_INCOMPLETE"
+        acq["why"] = ("the odds provider gave no pair of team names for "
+                      "this event, and a fixture is matched on the two "
+                      "names and the official date")
+        return dict(row, acquisition=acq)
+    dates = _official_date_candidates(commence_iso)
+    if not dates:
+        acq["refusal"] = "COMMENCE_TIME_NOT_READABLE"
+        acq["why"] = ("the event's commence time could not be read, so no "
+                      "official date could be derived to ask for")
+        return dict(row, acquisition=acq)
+
+    acq["attempted"] = True
+    acq["dates_tried"] = []
+    fetch = fetcher or _fetch_schedule_blocking
+    for date_str in dates:
+        if date_str not in cache:
+            if len([k for k in cache if cache[k] is not None]) >= \
+                    FIXTURE_MAX_DATES_PER_CYCLE:
+                acq["refusal"] = "FIXTURE_FETCH_BUDGET_SPENT"
+                acq["why"] = ("this cycle has already fetched %d schedule "
+                              "dates, which is the bound"
+                              % FIXTURE_MAX_DATES_PER_CYCLE)
+                return dict(row, acquisition=acq)
+            got = await asyncio.to_thread(fetch, date_str)
+            cache[date_str] = got if got.get("ok") else None
+            if not got.get("ok"):
+                acq.setdefault("fetch_errors", []).append(
+                    {"date": date_str, "error": got.get("error"),
+                     "url": got.get("url")})
+        got = cache.get(date_str)
+        if got is None:
+            continue
+        parsed = fmeta_mod.parse_games(got["payload"])
+        if not parsed.get("ok"):
+            acq.setdefault("parse_refusals", []).append(
+                {"date": date_str, "refusal": parsed.get("refusal")})
+            continue
+        m = fmeta_mod.match_fixture(parsed["games"], home=home, away=away,
+                                   official_date=date_str)
+        acq["dates_tried"].append({"date": date_str,
+                                   "games": parsed.get("total"),
+                                   "matched": bool(m.get("ok")),
+                                   "refusal": m.get("refusal")})
+        if not m.get("ok"):
+            continue
+        # THE RETRIEVAL TIME IS OURS, STAMPED AT THE READ, because the row
+        # is evidence and an undated observation is not evidence.
+        import datetime as _dt
+
+        at = _dt.datetime.now(_dt.timezone.utc).strftime(
+            "%Y-%m-%dT%H:%M:%SZ")
+        ev = fmeta_mod.evidence_from(m["game"], retrieved_at=at,
+                                     source_url=got["url"],
+                                     condition_id=str(condition_id))
+        wrote = await fstore.upsert(conn, ev, raw_game=m["game"])
+        acq["write"] = wrote
+        acq["evidence_refusals"] = list(ev.get("refusals") or [])
+        fresh = await fstore.read(conn, condition_id)
+        return dict(fresh, acquisition=acq)
+    acq["refusal"] = acq.get("refusal") or fmeta_mod.R_NO_MATCH
+    acq["why"] = acq.get("why") or (
+        "no schedule date returned exactly one game for %r vs %r, so the "
+        "fixture is not bound and the scope stays unestablished"
+        % (away, home))
+    return dict(row, acquisition=acq)
 
 
 def _risk_action(intent) -> str:
@@ -1600,8 +1743,27 @@ def _entry_freshness(quote, vq, now) -> dict:
     else:
         v_age = None
         v_basis = vq.get("age_basis") or "VENUE_CLOCK_NOT_PROVIDED"
+    # THE PROVIDER'S OWN STALENESS AND OUR PROCESSING DELAY, SEPARATED.
+    #
+    # `pinnacle_age_s` is the number the 30-second rule governs and it is
+    # UNCHANGED. But it is a sum: how old the price already was when the
+    # provider gave it to us, plus how long we then took to decide. A
+    # refusal reading 58 s says nothing about which, and the remedy differs
+    # -- a slow provider is a coverage fact, our own delay is ours to fix.
+    # Both are computed from clocks already on the record: the provider's
+    # `last_update` and the receipt stamp taken at the fetch.
+    recv = (quote or {}).get("received_at")
+    prov_lag = (None if (at is None or recv is None)
+                else round(float(recv) - at, 3))
+    our_delay = (None if recv is None else round(float(now) - float(recv), 3))
     out = {"pinnacle_age_s": (None if p_age is None else round(p_age, 3)),
            "pinnacle_limit_s": PINNACLE_MAX_AGE_S,
+           "pinnacle_provider_lag_s": prov_lag,
+           "pinnacle_our_processing_s": our_delay,
+           "age_decomposition": ("pinnacle_age_s = provider_lag + "
+                                 "our_processing, both from clocks on the "
+                                 "record. The 30 s rule governs the SUM "
+                                 "and is unchanged"),
            "venue_age_s": (None if v_age is None else round(float(v_age), 3)),
            "venue_age_at_read_s": vq.get("age_s"),
            "venue_limit_s": MAX_VENUE_QUOTE_AGE_S,
@@ -1844,6 +2006,10 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
 async def cycle(conn) -> dict:
     """Never raises. Returns what it did and, mostly, why it did not."""
     started = time.time()
+    # ONE SCHEDULE FETCH PER OFFICIAL DATE PER CYCLE. The candidates in a
+    # cycle cluster on one or two dates; asking per candidate would be the
+    # same answer many times over.
+    fixture_cache: dict = {}
     running, why = await _running(conn)
     if not running:
         return {"ran": False, "state": "STOPPED", "why": why}
@@ -2040,7 +2206,16 @@ async def cycle(conn) -> dict:
             # entry priced under the wrong one of those is priced against
             # a contract that does not exist. The provenance travels with
             # it: source, URL, fixture binding and retrieval time.
-            fmeta = await fixture_metadata_for(conn, mapped["condition_id"])
+            # ACQUIRED IF ABSENT, not merely read. The row used to be
+            # written only by a hand-invoked admin route, so ordinary
+            # candidates had none and the comparison could never see our
+            # own side. The lane now acquires the same evidence, through
+            # the same parser, for the candidate it is evaluating.
+            fmeta = await acquire_fixture_scope(
+                conn, condition_id=mapped["condition_id"],
+                home=quote.get("home"), away=quote.get("away"),
+                commence_iso=quote.get("commence_time"),
+                now=time.time(), cache=fixture_cache)
             ctx_ev = None
             if fmeta.get("read") and fmeta.get("play_has_begun") is not None:
                 ctx_ev = fmeta_mod.context_for(
@@ -2208,6 +2383,12 @@ async def cycle(conn) -> dict:
                 fixture_retrieved_at=fmeta.get("retrieved_at"),
                 fixture_game_pk=fmeta.get("game_pk"),
                 fixture_read=fmeta.get("read"),
+                # WHETHER THE LANE ACQUIRED IT THIS CYCLE, AND WHY NOT.
+                # An absent scope used to be indistinguishable from an
+                # unattempted one on the row.
+                fixture_acquisition=fmeta.get("acquisition"),
+                fixture_event_state=fmeta.get("event_state_raw"),
+                fixture_play_has_begun=fmeta.get("play_has_begun"),
                 venue_rules_read=bool((vevid or {}).get("rules_text")),
                 venue_rules_source=(vevid or {}).get("rules_source"))
             try:

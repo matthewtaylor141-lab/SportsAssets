@@ -2399,64 +2399,21 @@ async def admin_rn1x_fixture_metadata(response: Response,
                     "games_considered": parsed["total"]}
         ev = FM.evidence_from(m["game"], retrieved_at=at, source_url=url,
                               condition_id=cid)
-        await conn.execute(
-            """INSERT INTO fixture_metadata(condition_id, phase,
-               phase_uncovered, game_format, scheduled_innings,
-               play_has_begun, event_state_raw, abstract_state,
-               actual_start_at, start_evidence, terminal_hint, game_pk,
-               official_date, home_team, away_team, game_number,
-               double_header, source, source_url, retrieved_at,
-               reader_version, refusals, raw)
-               VALUES($1,$2,$3,$4,$5,$6,$7,$8,
-                      CASE WHEN $9::float8 IS NULL THEN NULL
-                           ELSE to_timestamp($9::float8) END,
-                      -- ::text::date, NOT ::date. asyncpg infers the
-                      -- PARAMETER's type from the cast and then encodes
-                      -- client-side, so `$13::date` demanded a
-                      -- datetime.date and raised DataError on the string
-                      -- the caller sends: "'str' object has no attribute
-                      -- 'toordinal'". That surfaced as a bare HTTP 500
-                      -- from the acquisition route, which then read as
-                      -- "the scope evidence cannot be acquired" when the
-                      -- payload was fine and the binding was right.
-                      -- Casting from text keeps the parameter a string
-                      -- and lets Postgres parse it, which is also the
-                      -- only place that knows the column's type.
-                      $10,$11,$12,$13::text::date,$14,$15,$16,$17,$18,$19,
-                      $20::text::timestamptz,$21,$22::jsonb,$23::jsonb)
-               ON CONFLICT (condition_id) DO UPDATE SET
-                 phase = EXCLUDED.phase,
-                 phase_uncovered = EXCLUDED.phase_uncovered,
-                 game_format = EXCLUDED.game_format,
-                 scheduled_innings = EXCLUDED.scheduled_innings,
-                 play_has_begun = EXCLUDED.play_has_begun,
-                 event_state_raw = EXCLUDED.event_state_raw,
-                 abstract_state = EXCLUDED.abstract_state,
-                 actual_start_at = EXCLUDED.actual_start_at,
-                 start_evidence = EXCLUDED.start_evidence,
-                 terminal_hint = EXCLUDED.terminal_hint,
-                 game_pk = EXCLUDED.game_pk,
-                 official_date = EXCLUDED.official_date,
-                 home_team = EXCLUDED.home_team,
-                 away_team = EXCLUDED.away_team,
-                 game_number = EXCLUDED.game_number,
-                 double_header = EXCLUDED.double_header,
-                 source = EXCLUDED.source,
-                 source_url = EXCLUDED.source_url,
-                 retrieved_at = EXCLUDED.retrieved_at,
-                 reader_version = EXCLUDED.reader_version,
-                 refusals = EXCLUDED.refusals,
-                 raw = EXCLUDED.raw,
-                 written_at = now()""",
-            cid, ev["phase"], ev["phase_uncovered"], ev["game_format"],
-            ev["scheduled_innings"], ev["play_has_begun"],
-            ev["event_state_raw"], ev["abstract_state"],
-            ev["actual_start_at"], ev["start_evidence"],
-            ev["terminal_hint"], ev["game_pk"], ev["official_date"],
-            ev["home"], ev["away"], ev["game_number"],
-            ev["double_header"], ev["source"], ev["source_url"], at,
-            FM.VERSION, _json.dumps(ev["refusals"]),
-            _json.dumps(m["game"]))
+        # THROUGH THE SHARED STORE. This route used to own the INSERT,
+        # which is how the entry lane ended up with a read and no writer:
+        # the only way to populate the row was to call this by hand. The
+        # statement now lives in `bettor_fixture_store` and the scheduled
+        # entry lane calls the same function for the candidates it
+        # evaluates, so one acquisition semantics serves both.
+        from .. import bettor_fixture_store as FSTORE
+
+        wrote = await FSTORE.upsert(conn, dict(ev, retrieved_at=at),
+                                    raw_game=m["game"])
+        if not wrote.get("persisted"):
+            return {"ok": False, "refusal": "FIXTURE_METADATA_WRITE_FAILED",
+                    "error": wrote.get("error"),
+                    "detail": wrote.get("detail"),
+                    "why": wrote.get("why")}
     ev["ok"] = True
     ev["persisted"] = True
     ev["writes"] = "ONE fixture_metadata row. No order, position or decision."
