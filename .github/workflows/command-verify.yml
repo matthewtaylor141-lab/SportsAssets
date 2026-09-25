@@ -2121,6 +2121,13 @@ jobs:
         if: always()
         env:
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          # THE MISSING ENV THAT KILLED THIS STEP ON EVERY RUN. The body
+          # does `API="${API_URL:?}"` under `set -u`, and this block never
+          # passed API_URL -- so the step died on line 9 with
+          # `API_URL: parameter null or not set` and reported a red X
+          # without performing a single read. A step that never ran is not
+          # a finding about the position it was meant to read.
+          API_URL: ${{ inputs.api }}
         run: |
           set -uo pipefail
           # THE API ORIGIN, NOT THE PROXIED HOST. netlify.toml proxies ONLY
@@ -2319,22 +2326,47 @@ jobs:
             "$API/api/command/rn1x/input-chain/$PID" -o /tmp/subj.json || true
           SUBJ_CID=$(jq -r '.position.condition_id // empty' /tmp/subj.json \
                        2>/dev/null || true)
-          SUBJ_SLUG=$(jq -r '[.. | objects | .venue_market_slug? // empty]
-                              | map(select(. != null)) | .[0] // empty' \
-                        /tmp/subj.json 2>/dev/null || true)
+          # THE SLUG IS NOT ON THE input-chain POSITION BLOCK. Measured in
+          # run 67: that block carries position_id, policy, condition_id,
+          # outcome_index, provenance, entry_kind, source_account, seed_qty,
+          # seed_price and decision_ts -- and no venue identity at all. So
+          # `subject_slug` read `-`, the date could not be derived, and the
+          # step refused. The TRACE read does carry it (the settlement sweep
+          # prints `slug aec-mlb-hou-ath-2026-09-25` off the same record), so
+          # the slug is taken from there, matched on the venue's own shape
+          # rather than on a field name that may move.
+          curl -s --max-time 60 -H "$H" \
+            "$API/api/command/rn1x/trace/$PID" -o /tmp/subjtr.json || true
+          SUBJ_SLUG=$(grep -oE '"aec-[a-z0-9-]+-[0-9]{4}-[0-9]{2}-[0-9]{2}"' \
+                        /tmp/subjtr.json 2>/dev/null \
+                        | head -1 | tr -d '"' || true)
+          if [ -z "${SUBJ_SLUG:-}" ]; then
+            SUBJ_SLUG=$(jq -r '[.. | objects | .venue_market_slug? // empty]
+                                | map(select(. != null)) | .[0] // empty' \
+                          /tmp/subj.json 2>/dev/null || true)
+          fi
           SUBJ_DATE=$(printf '%s' "${SUBJ_SLUG:-}" \
                         | grep -oE '[0-9]{4}-[0-9]{2}-[0-9]{2}$' || true)
           CID="${COND:-$SUBJ_CID}"
           D="${FDATE:-$SUBJ_DATE}"
           say "condition	${CID:--}   from	$([ -n "${COND:-}" ] && echo override || echo "the subject's input-chain")"
-          say "subject_slug	${SUBJ_SLUG:--}"
+          say "subject_slug	${SUBJ_SLUG:--}   from	the subject's trace"
           say "fixture_date	${D:--}   from	$([ -n "${FDATE:-}" ] && echo override || echo "the slug's trailing date")"
+          # AN UNRESOLVABLE FIXTURE SKIPS THE ACQUISITION AND NOTHING ELSE.
+          #
+          # MY OWN DEFECT, IN RUN 67: this refusal `exit 0`-ed the whole
+          # step, so Houston's decisions were never read back either -- and
+          # the decision readback does not depend on the acquisition at all.
+          # A refusal about one input must not suppress an independent read.
+          ACQUIRE=1
           if [ -z "${CID:-}" ] || [ -z "${D:-}" ]; then
-            say "REFUSED: the subject's own condition or official date could"
-            say "not be resolved, and acquiring ANOTHER fixture's scope would"
-            say "say nothing about this subject. No acquisition attempted."
-            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+            ACQUIRE=0
+            say "ACQUISITION SKIPPED: the subject's own condition or official"
+            say "date could not be resolved, and acquiring ANOTHER fixture's"
+            say "scope would say nothing about this subject. The decision"
+            say "readback below is independent and still runs."
           fi
+          if [ "$ACQUIRE" = "1" ]; then
 
           # 1 · retrieve the league schedule HERE, where egress permits it
           U="https://statsapi.mlb.com/api/v1/schedule?sportId=1&date=$D"
@@ -2345,8 +2377,8 @@ jobs:
             say "THE LEAGUE HOST IS UNREACHABLE FROM HERE TOO. That is the exact"
             say "access dependency: nothing downstream can establish the phase"
             say "or the format without it."
-            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
-          fi
+            say "The decision readback below does not depend on it and runs."
+          else
 
           # 2 · hand it to the acquisition route, which parses and persists
           jq -n --arg c "$CID" --arg u "$U" --arg at "$AT" --arg d "$D" \
@@ -2380,10 +2412,18 @@ jobs:
             || head -c 400 /tmp/acqr.json
           if ! jq -e '.ok == true' /tmp/acqr.json >/dev/null 2>&1; then
             say "ACQUISITION DID NOT PERSIST. The refusal above is the blocker;"
-            say "the decisions below cannot carry scope evidence without it."
+            say "the decisions below cannot carry scope evidence FROM THIS"
+            say "acquisition -- the manager's own acquisition is reported per"
+            say "decision on the fixt_acq / fixt_row lines."
+          fi
+          fi
           fi
 
           # 3 · let the DEPLOYED loop decide, then read its evidence back
+          #     INDEPENDENT of everything above: the manager acquires its own
+          #     subject's fixture, so these decisions are the authority on
+          #     whether that worked, and they are read whether or not the
+          #     manual acquisition in 1-2 ran at all.
           BEFORE=$(curl -s --max-time 60 -H "$H" \
             "$API/api/command/rn1x/trace/$PID" | jq '(.decisions // []) | length')
           say "decisions_before\t$BEFORE"
