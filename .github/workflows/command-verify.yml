@@ -2479,8 +2479,19 @@ jobs:
           # this: `Cannot index string with string "why"`. Each time the
           # sweep RAN and I could not say what it returned. A report that
           # can fail must never be the only copy of the evidence.
-          say "-- raw settlement payload, first 1800 bytes --"
-          head -c 1800 /tmp/st.json | tee -a "$GITHUB_STEP_SUMMARY"
+          # THE SETTLEMENT OBJECT AND EVERY RESULT, DUMPED COMPACT AND
+          # UNFORMATTED. The 1800-byte head landed inside `consumer` and
+          # never reached `settlement`, so the one thing I needed was the
+          # one thing not printed -- my fourth pass over this reporting
+          # path. These two lines index NOTHING, so no type can break
+          # them, and they are the authoritative copy of the evidence.
+          say "-- settlement, compact --"
+          jq -c '.settlement | del(.results)' /tmp/st.json 2>&1 \
+            | head -c 1200 | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- each result object, one per line --"
+          jq -c '.settlement.results[]?' /tmp/st.json 2>&1 \
+            | head -c 3000 | tee -a "$GITHUB_STEP_SUMMARY"
           say ""
           say "-- types, so a mismatch names itself --"
           jq -r '"root " + (type)
