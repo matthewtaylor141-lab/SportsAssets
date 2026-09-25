@@ -1174,22 +1174,154 @@ jobs:
           # experiment, the historical lane's hundreds of rows push the one
           # challenger position off a 50-row page -- which run 37 read as
           # "no challenger position exists" while the row was in the table.
-          # THE RESPONSE IS KEPT, not just piped into a selector. The
-          # terminal-exclusion check below reads `open_to_management`,
-          # `terminally_settled` and `outcome_basis` off the SAME row this PID
-          # came from, so a second request cannot disagree with the first about
-          # which position is being judged.
+          # ── THE SUBJECTS, NAMED. THIS IS THE DEFECT BEING FIXED ──────
+          #
+          # WHAT THIS STEP USED TO DO. It took the newest position whose policy
+          # matched CHALLENGER and judged that, whatever it was. The acceptance
+          # policy is ACCEPTANCE_SHADOW_MANAGER_DEMO_V1 and does not match, so
+          # the subject was always the challenger position -- which is an ATP
+          # TENNIS holding, and tennis is not in the provider's sport set at
+          # all. The gate was therefore being applied to inventory whose inputs
+          # cannot exist, and I reported the failure as though it were about the
+          # acceptance position. A check that does not say which subject it
+          # judged is not a check.
+          #
+          # THREE SUBJECTS NOW, EACH WITH ITS OWN ROLE:
+          #
+          #   ACCEPTANCE   a position on a COVERED, CURRENT fixture. THE GATE.
+          #                Seeded by the existing labelled, unfunded harness.
+          #   UNSUPPORTED  the tennis position. Kept VISIBLE with its honest
+          #                refusal, and never the gate: an uncoverable sport is
+          #                a coverage fact, not a management failure.
+          #   ARIZONA      read by EXACT IDENTITY, reported, never the gate.
+          #
+          # The gate itself is unchanged: two COMPLETE decisions at two DISTINCT
+          # instants, on one position, off its own stored evidence.
           curl -s -o /tmp/pos.json --max-time 45 -H "$H" \
-            "$API/api/command/rn1x/positions?policy=CHALLENGER&limit=200" \
+            "$API/api/command/rn1x/positions?limit=200" \
             || echo '{}' > /tmp/pos.json
-          PID=$(jq -r '[(.positions // . // [])[]
-                        | select((.policy // "") | test("CHALLENGER"))]
-                       | .[0].position_id // empty' \
-                /tmp/pos.json 2>/dev/null)
+          ARIZONA="RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1:ACCEPTANCE_SHADOW_MANAGER_DEMO_V1:-105276210"
+          
+          # 1 · THE ACCEPTANCE SUBJECT. Ask the harness for a position on a
+          #     usable fixture. `fresh_if_stale` makes adoption conditional on
+          #     the harness's OWN candidate predicate, so a finished fixture is
+          #     declined by name instead of adopted and reported as ready.
+          : > /tmp/acc_seed.json
+          SC=$(curl -s -o /tmp/acc_seed.json -w '%{http_code}' --max-time 180 \
+              -X POST -H "$H" -H 'Content-Type: application/json' \
+              --data '{"fresh_if_stale": true}' \
+              "$API/api/admin/rn1x-acceptance-position" || echo 000)
+          say "acceptance harness HTTP $SC"
+          head -c 1200 /tmp/acc_seed.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          ACC=$(jq -r '.position_id // empty' /tmp/acc_seed.json 2>/dev/null)
+          ACC_STATE=$(jq -r 'if .created then "CREATED"
+                             elif .adopted then "ADOPTED"
+                             else ("REFUSED:" + ((.refusal // "UNKNOWN")|tostring))
+                             end' /tmp/acc_seed.json 2>/dev/null || echo UNKNOWN)
+          say "acceptance subject  $ACC_STATE  $ACC"
+          # THE DECLINE, IF ANY, PRINTED IN FULL -- it is the evidence that the
+          # old unconditional adoption was returning an unusable subject.
+          jq -c '.stale_adoption_declined // empty' /tmp/acc_seed.json 2>/dev/null \
+            | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          
+          # 2 · THE UNSUPPORTED SUBJECT, kept visible and never the gate.
+          UNSUP=$(jq -r '[(.positions // [])[]
+                    | select(((.policy // "") | test("CHALLENGER"))
+                             and ((.policy // "") | test("ACCEPTANCE") | not))]
+                   | .[0].position_id // empty' /tmp/pos.json 2>/dev/null)
+          
+          # 3 · THE GATE'S SUBJECT. The acceptance position when there is one;
+          #     otherwise NONE, and the step says so rather than silently
+          #     substituting the unsupported one, which is what it used to do.
+          if [ -n "$ACC" ]; then PID="$ACC"; SUBJECT=ACCEPTANCE
+          else PID=""; SUBJECT=NONE; fi
+          say "gate subject        $SUBJECT  ${PID:-none}"
+          say "visible, not gated  UNSUPPORTED ${UNSUP:-none}"
+          say "visible, not gated  ARIZONA     $ARIZONA"
+          # ── THE TWO VISIBLE-BUT-NOT-GATED SUBJECTS, REPORTED FIRST ───
+          #
+          # They are reported BEFORE the gate so that a gate failure can never
+          # be mistaken for an absence of evidence about them, and so that the
+          # tennis position's refusal stays on the record under its own name
+          # rather than as the gate's verdict.
+          vis () {  # $1 = label, $2 = position id
+            [ -n "$2" ] || { say "  $1  (none)"; return 0; }
+            jq -r --arg p "$2" --arg L "$1" '[(.positions // [])[]
+                | select(.position_id == $p)] | .[0] // {}
+                | "  " + $L
+                  + "  policy=" + ((.policy // "-")|tostring)
+                  + "  terminal=" + (if has("terminally_settled")
+                                      then (.terminally_settled|tostring)
+                                      else "unknown" end)
+                  + "  open_to_mgmt=" + (if has("open_to_management")
+                                          then (.open_to_management|tostring)
+                                          else "unknown" end)
+                  + "  residual=" + ((.residual_qty // "-")|tostring)
+                  + "  decisions=" + ((.decisions // 0)|tostring)' \
+              /tmp/pos.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+            code=$(curl -s -o /tmp/vis.json -w '%{http_code}' --max-time 90 \
+                   -H "$H" "$API/api/command/rn1x/input-chain/$2" || echo 000)
+            jq -r --arg L "$1" 'def n(x): if x == null then "-" else (x|tostring) end;
+                "    " + $L + "  first_failing_link "
+                  + n(((.first_failing_link // {}) | if type == "object"
+                       then .link else null end))
+                  + "  sport " + n(.fixture.sport // (.provider_sport_labels|tostring))
+                  + "  supported_alts "
+                  + n((.supported_open_challenger_positions // []) | length)' \
+              /tmp/vis.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          }
+          say "-- visible, NOT gated --"
+          vis UNSUPPORTED "$UNSUP"
+          vis ARIZONA     "$ARIZONA"
+          say ""
+          
+          # ── DRIVE THE DEPLOYED RECURRING LOOP ────────────────────────
+          #
+          # THE SAME FUNCTION THE WORKER'S OWN SCHEDULE CALLS.
+          # /api/admin/rn1x-run-management invokes
+          # `rn1x_shadow.run_continuing_management`, which is what the loop runs
+          # on its 900 s cadence. This changes WHEN a cycle runs, not what it
+          # does: every decision below is written by `manage_open_positions`
+          # under the same policy with the same stored evidence.
+          #
+          # THE SPACING IS THE POINT. Two decisions inside one second are two
+          # decisions at ONE instant, which the gate correctly will not accept,
+          # so the cycles are separated and the gate still requires two DISTINCT
+          # instants. That requirement is not relaxed anywhere.
+          if [ -n "$ACC" ]; then
+            BEFORE_N=$(curl -s --max-time 45 -H "$H" \
+                "$API/api/command/rn1x/trace/$ACC" \
+              | jq '(.decisions // []) | length' 2>/dev/null || echo 0)
+            say "acceptance decisions before  ${BEFORE_N:-0}"
+            : > /tmp/mgmt.json
+            MC=$(curl -s -o /tmp/mgmt.json -w '%{http_code}' --max-time 300 \
+                -X POST -H "$H" -H 'Content-Type: application/json' \
+                --data '{"cycles": 3, "spacing_s": 20}' \
+                "$API/api/admin/rn1x-run-management" || echo 000)
+          say "recurring management HTTP $MC"
+          jq -c 'del(.runs[]?.result.challenger.results, .runs[]?.result.entry_lane.results)' /tmp/mgmt.json 2>&1 \
+              | head -c 1500 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            say ""
+            jq -r '"drives  " + ((.drives // "-")|tostring),
+                   "runs    " + (((.runs // []) | length)|tostring),
+                   ((.runs // [])[] | "  cycle " + ((.cycle)|tostring)
+                      + "  " + ((.error // "ok")|tostring))' \
+              /tmp/mgmt.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          fi
+          
+          # ── AND ONLY NOW THE GATE ────────────────────────────────────
           if [ -z "$PID" ]; then
-            say "NO CHALLENGER POSITION EXISTS -- nothing to manage, and that"
-            say "is the honest state, not a pass for continuing management"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+            # THE SUBSTITUTION THAT USED TO HAPPEN SILENTLY. With no acceptance
+            # subject this step previously fell through to the unsupported
+            # position and gated on that. It now FAILS, because 'the harness
+            # could not give me a subject on a covered current fixture' is a
+            # real blocker and must not read as a pass or as a skip.
+            echo "::error::NO ACCEPTANCE SUBJECT on a covered, current fixture (harness HTTP $SC, state $ACC_STATE). The unsupported position above is NOT a substitute: its sport is not in the provider set, so no priced hold is obtainable for it and gating on it measures coverage, not management."
+            say "NO SUPPORTED ACCEPTANCE SUBJECT -- NOT_DEMONSTRATED"
+            say "The unsupported position keeps its own honest refusal above."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
           fi
           # ── THIS STEP NOW WRITES ITS OWN EVIDENCE ──────────────────
           # It has failed since before the settlement release and I could
@@ -2693,6 +2825,74 @@ jobs:
             say "written and the sweep below will refuse as it did before."
           fi
           
+          # 4a-ter · WHAT THE VENUE ACTUALLY RETURNED, BEFORE WE INTERPRET IT.
+          #
+          # `CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME` and
+          # `NO_SETTLEMENT_PRICE_IN_RESPONSE` are OUR PARSER'S verdicts. I
+          # reported them as the venue's refusal, which is a different claim.
+          # This captures the raw redacted payload from both surfaces -- the
+          # settlement endpoint and the market listing -- with the FIELD TYPES,
+          # for Arizona and for a calibration fixture the outcome join itself
+          # recorded as unreadable. Read-only; nothing is written.
+          #
+          # The types are the half that decides it: `_converged_winner` requires
+          # `outcomePrices` to be a list, so a venue delivering it as a
+          # JSON-encoded STRING would produce exactly this symptom while the
+          # prices sat there unread. The probe names that case as OUR gap, and an
+          # absent field as the payload's. It infers no payout from `closed`,
+          # `resolved` or `settledAt`.
+          : > /tmp/vp.json
+          VC=$(curl -s -o /tmp/vp.json -w '%{http_code}' --max-time 180 \
+              -X POST -H "$H" -H 'Content-Type: application/json' \
+              --data '{"slugs": ["aec-mlb-az-col-2026-09-24"],
+                       "calibration_unreadable": 1}' \
+              "$API/api/admin/venue-settlement-probe" || echo 000)
+          say ""
+          say "## what the venue returned (HTTP $VC)"
+          # THE RAW PAYLOAD FIRST, UNCONDITIONALLY. This is the artifact the
+          # investigation turns on; no formatter gets to lose it.
+          say "-- raw, per slug --"
+          jq -c '.probes[]?' /tmp/vp.json 2>&1 | head -c 6000 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- which fixtures were picked --"
+          jq -c '.calibration_picks' /tmp/vp.json 2>&1 | head -c 600 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          if [ "$VC" = "200" ]; then
+            jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+              (.probes // [])[]
+                | "slug            " + n(.slug),
+                  "  retrieved_at  " + n(.retrieved_at),
+                  "  terminal      " + n(.terminal_reading)
+                    + "  authoritative_payout " + n(.authoritative_payout_present),
+                  "  why           " + n(.why),
+                  "  settlement    " + n(.settlement.endpoint)
+                    + "  err " + n(.settlement.error)
+                    + "  keys " + n(.settlement.top_level_keys),
+                  "  listing       matched " + n(.listing.matched)
+                    + "  err " + n(.listing.error),
+                  "  outcomePrices " + n(.listing.payout_candidates.outcomePrices.shape),
+                  "  outcomes      " + n(.listing.payout_candidates.outcomes.shape),
+                  "  marketSides   " + n(.listing.payout_candidates.marketSides.shape),
+                  "  status        " + n(.listing.payout_candidates.status.value)
+                    + "  closed " + n(.listing.payout_candidates.closed.value),
+                  "  void          " + n(.listing.void_evidence.declared)
+                    + "  field " + n(.listing.void_evidence.field),
+                  "  reader        " + n(.reader_verdict.status)
+                    + "  " + n(.reader_verdict.error),
+                  "  PARSER_GAP    " + n(.parser_gap.found)
+                    + "  " + n(.parser_gap.why),
+                  "  values        " + n(.listing.raw_subset)' \
+              /tmp/vp.json 2>/tmp/vp.err | tee -a "$GITHUB_STEP_SUMMARY" \
+              || { say "THE PROBE REPORT FAILED TO RENDER -- the raw payload is"
+                   say "above and is the authoritative copy:"
+                   head -c 300 /tmp/vp.err | tee -a "$GITHUB_STEP_SUMMARY"; }
+          else
+            say "THE VENUE PROBE DID NOT RETURN 200 -- no conclusion about"
+            say "whether the gap is ours or the payload's."
+          fi
+          
           # 4b · SETTLEMENT FROM THE VENUE'S OWN RESOLUTION.
           # Every open shadow position -- the entry lane's AND the
           # acceptance position -- is asked of the venue. The answer is
@@ -2853,6 +3053,7 @@ jobs:
           path: |
             /tmp/rep0.json
             /tmp/rep.json
+            /tmp/vp.json
             /tmp/st.json
             /tmp/cal.json
             /tmp/cx.json

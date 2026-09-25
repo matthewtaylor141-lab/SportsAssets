@@ -1809,6 +1809,32 @@ ACCEPTANCE_BUDGET_S = 90.0
 #: The ordering prefers the fixture NEAREST in time, because a provider
 #: carries a fixture around its start and a book has depth then. An
 #: unknown start sorts last rather than being treated as now.
+#: IS THIS ONE CONDITION STILL A USABLE FIXTURE? The SAME predicate
+#: `COVERED_CANDIDATES_SQL` selects on, asked about a single condition.
+#:
+#: WHY IT IS THE SAME PREDICATE AND NOT A NEW ONE. The question "can the
+#: manager still be demonstrated on this position" must not become a second
+#: opinion about what a usable fixture is. `COVERED_CANDIDATES_SQL` already
+#: defines it -- open, unresolved, recently updated, a covered sport, both
+#: tokens present -- so that definition is reused verbatim rather than
+#: restated with a new tolerance that could drift from it.
+CONDITION_STILL_A_CANDIDATE_SQL = """
+    SELECT m.condition_id,
+           NOT m.closed                                  AS not_closed,
+           NOT m.resolved                                 AS not_resolved,
+           (m.sport = ANY($2::text[]))                    AS covered_sport,
+           m.sport,
+           (m.updated_at >= now() - make_interval(secs => $3::float8))
+                                                          AS fresh_enough,
+           extract(epoch FROM m.updated_at)::float8       AS updated_at,
+           extract(epoch FROM s.game_start)::float8       AS game_start,
+           ((SELECT count(*) FROM market_tokens t
+              WHERE t.condition_id = m.condition_id) >= 2) AS both_tokens
+      FROM markets m
+ LEFT JOIN market_starts s ON s.condition_id = m.condition_id
+     WHERE m.condition_id = $1
+"""
+
 COVERED_CANDIDATES_SQL = """
     SELECT m.condition_id, m.title, m.event_title, m.slug, m.sport,
            m.closed, m.resolved,
@@ -1870,7 +1896,8 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
                                    candidates=ACCEPTANCE_CANDIDATES,
                                    resolve_identity=None, read_book=None,
                                    fee_fn=None, phase=None,
-                                   game_format=None):
+                                   game_format=None,
+                                   fresh_if_stale=False):
     """Create ONE acceptance position on a covered exposure, or say why not.
 
     Returns the position and its provenance, or `created: False` with the
@@ -1931,7 +1958,7 @@ async def seed_acceptance_position(conn, *, experiment_id, now=None,
             qty=qty, candidates=candidates, now=now, clock=clock,
             resolve_identity=resolve_identity, read_book=read_book,
             fee_fn=fee_fn, bs=bs, EXT=EXT, phase=phase,
-            game_format=game_format)
+            game_format=game_format, fresh_if_stale=fresh_if_stale)
     finally:
         try:
             await conn.execute("SELECT pg_advisory_unlock($1)", lock_key)
@@ -1958,6 +1985,41 @@ def _acceptance_lock_key(experiment_id) -> int:
     return int.from_bytes(h, "big", signed=True)
 
 
+R_STALE_ADOPTION_DECLINED = "ACCEPTANCE_EXISTING_FIXTURE_NO_LONGER_USABLE"
+R_ANOTHER_IS_DEMONSTRABLE = "ANOTHER_ACCEPTANCE_POSITION_IS_STILL_USABLE"
+
+
+async def acceptance_fixture_still_usable(conn, condition_id, *, labels,
+                                          stale_after_s) -> dict:
+    """Can the manager still be demonstrated on this condition's fixture?
+
+    Answered by the harness's OWN candidate predicate, per clause, so a
+    "no" names which clause failed rather than asserting staleness.
+    """
+    out = {"condition_id": condition_id, "usable": False, "failed": [],
+           "predicate": "COVERED_CANDIDATES_SQL (same clauses)",
+           "row": None, "error": None}
+    try:
+        row = await conn.fetchrow(CONDITION_STILL_A_CANDIDATE_SQL,
+                                 condition_id, list(labels),
+                                 float(stale_after_s))
+    except Exception as exc:                                   # noqa: BLE001
+        out["error"] = "%s: %s" % (type(exc).__name__, exc)
+        out["failed"].append("THE_READ_FAILED_SO_NOTHING_IS_ESTABLISHED")
+        return out
+    if row is None:
+        out["failed"].append("NO_MARKETS_ROW_FOR_THIS_CONDITION")
+        return out
+    r = dict(row)
+    out["row"] = r
+    for clause in ("not_closed", "not_resolved", "covered_sport",
+                   "fresh_enough", "both_tokens"):
+        if not r.get(clause):
+            out["failed"].append(clause.upper())
+    out["usable"] = not out["failed"]
+    return out
+
+
 R_EXISTING_LOOKUP_FAILED = "ACCEPTANCE_EXISTING_POSITION_LOOKUP_FAILED"
 
 
@@ -1965,7 +2027,8 @@ async def _seed_acceptance_locked(conn, *, out, experiment_id, tick,
                                   t_started, odds, read_rules, qty,
                                   candidates, resolve_identity, read_book,
                                   fee_fn, bs, EXT, now=None, clock=None,
-                                  phase=None, game_format=None):
+                                  phase=None, game_format=None,
+                                  fresh_if_stale=False):
     """The body, under the advisory lock. See `seed_acceptance_position`."""
     import time as _t
 
@@ -1993,6 +2056,72 @@ async def _seed_acceptance_locked(conn, *, out, experiment_id, tick,
                  "position beside one already under management. Nothing was "
                  "written and the legacy position, if any, is untouched"))
         return out
+    if have is not None and fresh_if_stale:
+        # ── ADOPT ONLY WHAT CAN STILL BE DEMONSTRATED ────────────────
+        #
+        # THE BLOCKER THIS OPENS, NAMED EXACTLY. The adoption lookup is
+        # keyed on (experiment, policy), so it returns the acceptance
+        # position regardless of whether its fixture is still live. The
+        # existing one is an MLB game that finished on 2026-09-24: the
+        # provider stops carrying a finished fixture, no EV_HOLD can be
+        # identified for it again, and the harness therefore returned
+        # `adopted: true` on a position no recurring demonstration can
+        # ever use. Under this flag the adoption is conditional on the
+        # harness's OWN candidate predicate, and a decline says which
+        # clause failed.
+        #
+        # THE GUARD IS NOT WEAKENED, IT IS RE-AIMED. What the idempotence
+        # guard exists to prevent is a SECOND position on the SAME market
+        # -- "adding inventory while reporting idempotence". Declining a
+        # stale adoption does not do that: the stale position is left
+        # exactly as it is, and the check below refuses to seed while any
+        # acceptance position IS still usable, so there is never more than
+        # one demonstrable acceptance position at a time.
+        labels0 = sorted({lbl for fam in {f for _, f in EXT.SPORTS}
+                          for lbl in EXT.VENUE_SPORT_LABELS.get(fam, ())})
+        usable = await acceptance_fixture_still_usable(
+            conn, dict(have)["condition_id"], labels=labels0,
+            stale_after_s=EXT.MARKET_STALE_AFTER_S)
+        out["existing_fixture_check"] = usable
+        if usable["error"]:
+            # AN UNREADABLE CHECK ESTABLISHES NOTHING, so it adopts (the
+            # conservative direction: no new row) rather than seeding.
+            out["stale_check_unreadable_so_adopted"] = True
+        elif not usable["usable"]:
+            others = await conn.fetch(
+                "SELECT position_id, condition_id FROM rn1x_positions "
+                " WHERE experiment_id = $1 AND policy = $2", experiment_id,
+                ACCEPTANCE_POLICY)
+            live = []
+            for o in others:
+                u = await acceptance_fixture_still_usable(
+                    conn, o["condition_id"], labels=labels0,
+                    stale_after_s=EXT.MARKET_STALE_AFTER_S)
+                if u["usable"]:
+                    live.append({"position_id": o["position_id"],
+                                 "condition_id": o["condition_id"]})
+            if live:
+                out.update(created=False, adopted=False,
+                           refusal=R_ANOTHER_IS_DEMONSTRABLE,
+                           demonstrable_positions=live,
+                           why=("an acceptance position on a still-usable "
+                                "fixture already exists, so nothing is "
+                                "seeded. Use that one"))
+                return out
+            out["stale_adoption_declined"] = {
+                "position_id": dict(have)["position_id"],
+                "condition_id": dict(have)["condition_id"],
+                "failed_clauses": usable["failed"],
+                "refusal": R_STALE_ADOPTION_DECLINED,
+                "left_untouched": True,
+                "why": ("its fixture no longer satisfies the harness's own "
+                        "candidate predicate, so no recurring "
+                        "demonstration can use it. It is NOT modified, NOT "
+                        "reseeded and NOT settled here; a fresh acceptance "
+                        "position is seeded on a current covered fixture "
+                        "instead")}
+            have = None
+
     if have is not None:
         row = dict(have)
         out.update(

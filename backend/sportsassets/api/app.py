@@ -1885,6 +1885,147 @@ async def admin_external_source_calibration(response: Response,
     return out
 
 
+@app.post("/api/admin/rn1x-run-management",
+          dependencies=[Depends(require_admin)])
+async def admin_rn1x_run_management(response: Response,
+                                    body: dict | None = None) -> dict:
+    """Run the SCHEDULER'S OWN management cycle now, N times.
+
+    NOT A SECOND ENGINE. This calls
+    `workers.rn1x_shadow.run_continuing_management` -- the exact function
+    the worker's own loop calls on its cadence, which in turn calls
+    `manage_open_positions` per experiment. Every decision it writes is
+    written by the same code path, under the same policy, with the same
+    stored evidence. Nothing here re-implements a decision.
+
+    WHY IT EXISTS. The recurring loop runs on a 900 s writer cadence, so
+    demonstrating two decisions at two distinct instants on a freshly
+    seeded acceptance position takes half an hour of waiting that a
+    verification run cannot sit through -- and waiting was the only reason
+    the demonstration kept coming back empty. Driving the cycle on demand
+    changes WHEN it runs, not WHAT it does.
+
+    IT WRITES DECISIONS, and it can place MODELLED orders through the
+    existing desk exactly as the scheduled loop does. It submits nothing to
+    any venue: the shadow experiments' only venue interaction is reading.
+    """
+    import time as _t
+
+    from .. import bettor_external_shadow as ext
+    from ..db import get_pool
+    from ..workers import rn1x_shadow as W
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    cycles = max(1, min(4, int(b.get("cycles") or 1)))
+    spacing = max(0.0, min(120.0, float(b.get("spacing_s") or 0.0)))
+    exp = str(b.get("experiment_id") or W.CHALLENGER_EXPERIMENT_ID)
+    out = {"ok": True, "at": _t.time(), "cycles_requested": cycles,
+           "spacing_s": spacing, "experiment_id": exp,
+           "drives": "workers.rn1x_shadow.run_continuing_management",
+           "is_not": ["A_SECOND_ENGINE", "A_VENUE_SUBMISSION",
+                      "A_RESEED"],
+           "also_manages": ext.EXPERIMENT_ID,
+           "runs": []}
+    pool = await get_pool()
+    for i in range(cycles):
+        if i and spacing:
+            # DISTINCT INSTANTS ARE THE POINT of the spacing: two decisions
+            # written inside the same second are two decisions at ONE
+            # instant, which the acceptance gate correctly will not accept.
+            await asyncio.sleep(spacing)
+        try:
+            async with pool.acquire() as conn:
+                got = await W.run_continuing_management(
+                    conn, experiment_id=exp)
+            out["runs"].append({"cycle": i + 1, "at": _t.time(),
+                                "result": got})
+        except Exception as exc:                               # noqa: BLE001
+            out["runs"].append({"cycle": i + 1, "at": _t.time(),
+                                "error": type(exc).__name__,
+                                "error_text": str(exc)[:300]})
+            out["ok"] = False
+    return out
+
+
+@app.post("/api/admin/venue-settlement-probe",
+          dependencies=[Depends(require_admin)])
+async def admin_venue_settlement_probe(response: Response,
+                                       body: dict | None = None) -> dict:
+    """WHAT THE VENUE ACTUALLY RETURNED for named slugs, with field types.
+
+    READ-ONLY. Two GETs per slug -- the settlement endpoint and the market
+    listing -- through the EXISTING reader (`bettor_live_read`), plus that
+    reader's own unchanged verdict beside the raw payload. It writes
+    nothing, submits nothing, and returns no credential; values whose key
+    looks secret are replaced and long strings are truncated.
+
+    WHY IT EXISTS. `CLOSED_BUT_NO_REPORTED_OR_CONVERGED_OUTCOME` and
+    `NO_SETTLEMENT_PRICE_IN_RESPONSE` are OUR parser's verdicts, and I
+    reported them as the venue's refusal. This captures the evidence that
+    decides which: whether a payout-bearing field is present in a shape the
+    parser rejects (a defect of ours, with a named repair) or genuinely
+    absent (in which case the missing field and the supported route have
+    names). It infers no payout from `closed`, `resolved` or `settledAt`.
+
+    `slugs` names them explicitly. `calibration_unreadable: N` additionally
+    picks up to N slugs the outcome join has already recorded as unreadable,
+    so a calibration fixture can be probed without hand-copying an id.
+    """
+    import time as _t
+
+    from .. import bettor_external_shadow as ext
+    from .. import bettor_venue_settlement_probe as PROBE
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    slugs = [str(x) for x in (b.get("slugs") or []) if x]
+    want_cal = int(b.get("calibration_unreadable") or 0)
+    picked: list[dict] = []
+    pool = await get_pool()
+    if want_cal > 0:
+        # THE FIXTURES THE JOIN ITSELF COULD NOT READ, taken from the
+        # ledger rather than chosen by hand, so the probe is pointed at a
+        # row whose unreadability is already on the record.
+        try:
+            rows = await pool.fetch(
+                "SELECT us_market_slug, condition_id, settlement_read, "
+                "       settlement_read_at "
+                "  FROM external_valuations "
+                " WHERE experiment_id = $1 AND us_market_slug IS NOT NULL "
+                "   AND outcome_basis IS NULL "
+                "   AND settlement_read_at IS NOT NULL "
+                " ORDER BY settlement_read_at DESC LIMIT $2",
+                ext.EXPERIMENT_ID, max(1, min(5, want_cal)))
+            for r in rows:
+                picked.append({"slug": r["us_market_slug"],
+                               "condition_id": r["condition_id"],
+                               "recorded_settlement_read":
+                                   (r["settlement_read"] or "")[:200],
+                               "recorded_at": str(r["settlement_read_at"])})
+                if r["us_market_slug"] not in slugs:
+                    slugs.append(str(r["us_market_slug"]))
+        except Exception as exc:                               # noqa: BLE001
+            picked.append({"error": type(exc).__name__,
+                           "why": "the unreadable-fixture pick failed"})
+    if not slugs:
+        return {"ok": False, "refusal": "NO_SLUG_SUPPLIED",
+                "why": ("pass `slugs` or `calibration_unreadable` -- this "
+                        "route probes named markets, it does not sweep")}
+    out = []
+    for sl in slugs[:6]:
+        try:
+            out.append(await asyncio.to_thread(PROBE.probe, None, sl))
+        except Exception as exc:                               # noqa: BLE001
+            out.append({"slug": sl, "raised": type(exc).__name__,
+                        "error_text": str(exc)[:300]})
+    return {"ok": True, "at": _t.time(), "prober": PROBE.describe(),
+            "calibration_picks": picked, "probes": out,
+            "reads": "GET only, two endpoints per slug",
+            "writes": "nothing"}
+
+
 @app.post("/api/admin/rn1x-repair-position-identity",
           dependencies=[Depends(require_admin)])
 async def admin_rn1x_repair_position_identity(response: Response,
@@ -2175,7 +2316,8 @@ async def admin_rn1x_fixture_metadata(response: Response,
 
 @app.post("/api/admin/rn1x-acceptance-position",
           dependencies=[Depends(require_admin)])
-async def admin_rn1x_acceptance_position(response: Response) -> dict:
+async def admin_rn1x_acceptance_position(response: Response,
+                                         body: dict | None = None) -> dict:
     """Create ONE acceptance position on a COVERED exposure, or say why not.
 
     THE MANAGER CANNOT BE DEMONSTRATED ON INVENTORY WHOSE INPUTS DO NOT
@@ -2197,12 +2339,20 @@ async def admin_rn1x_acceptance_position(response: Response) -> dict:
     from ..workers import rn1x_shadow as W
 
     response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    # `fresh_if_stale`: adopt the existing acceptance position only while
+    # its fixture still satisfies the harness's own candidate predicate. The
+    # existing one is a finished MLB game, so the unconditional adoption
+    # returned a position on which no recurring demonstration is possible.
+    # Default false, so the route's behaviour is unchanged unless asked.
     pool = await get_pool()
     async with pool.acquire() as conn:
         got = await W.seed_acceptance_position(
-            conn, experiment_id=W.CHALLENGER_EXPERIMENT_ID)
+            conn, experiment_id=W.CHALLENGER_EXPERIMENT_ID,
+            fresh_if_stale=bool(b.get("fresh_if_stale")))
     got["submits_orders"] = False
     got["funded"] = False
+    got["requested_fresh_if_stale"] = bool(b.get("fresh_if_stale"))
     return got
 
 
