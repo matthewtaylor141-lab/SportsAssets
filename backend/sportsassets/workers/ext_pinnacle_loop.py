@@ -442,7 +442,7 @@ MARKET_STALE_AFTER_S = 2 * 24 * 3600
 
 MARKETS_SQL = """
     SELECT condition_id, title, event_title, slug, closed, resolved,
-           updated_at
+           sport, updated_at
       FROM markets
      WHERE NOT closed AND NOT resolved
        AND sport = ANY($1::text[])
@@ -2056,6 +2056,20 @@ async def cycle(conn) -> dict:
     labels = sorted({lbl for _, fam in SPORTS
                      for lbl in VENUE_SPORT_LABELS.get(fam, ())})
     markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels, MARKET_STALE_AFTER_S)]
+    # ── THE OBSERVED UNIVERSE, AND WHERE IT NARROWS ──────────────────
+    #
+    # `markets_considered` was ONE number over BOTH supported sports, and
+    # the refusal tally was one dictionary over all of them. Neither could
+    # answer the question that was actually asked: does the OTHER supported
+    # sport contribute any candidate at all, and if not, at which step does
+    # it stop? So the universe is counted per venue label and the early
+    # gates are counted per provider sport. Reporting only -- no gate reads
+    # any of this.
+    universe: dict = {}
+    for _m in markets:
+        _lbl = str(_m.get("sport") or "UNLABELLED")
+        universe[_lbl] = universe.get(_lbl, 0) + 1
+    funnel: dict = {}
     if not markets:
         # SAY SO BY NAME rather than letting 44 mapping refusals imply the
         # mapper is at fault.
@@ -2088,14 +2102,29 @@ async def cycle(conn) -> dict:
     for sport_key, family in SPORTS:
         if evaluated >= MAX_PER_CYCLE:
             break
+        step = funnel.setdefault(sport_key, {
+            "family": family,
+            "venue_labels": list(VENUE_SPORT_LABELS.get(family, ())),
+            "venue_markets_open_and_fresh": sum(
+                universe.get(lbl, 0)
+                for lbl in VENUE_SPORT_LABELS.get(family, ())),
+            "provider_events": 0, "with_pinnacle_h2h": 0,
+            "mapped_to_a_venue_contract": 0, "evaluated": 0, "written": 0,
+            "refusals": {}})
+
+        def _step_refuse(code, _s=step):
+            _s["refusals"][code] = _s["refusals"].get(code, 0) + 1
+
         got = await fetch_odds(sport_key, api_key=api_key)
         credits["used"] = got.get("credits_used") or credits["used"]
         credits["remaining"] = (got.get("credits_remaining")
                                 or credits["remaining"])
         if not got.get("ok"):
             tally[R_PROVIDER_ERROR] = tally.get(R_PROVIDER_ERROR, 0) + 1
+            _step_refuse(R_PROVIDER_ERROR)
             continue
         received_at = got["received_at"]
+        step["provider_events"] = len(got["events"] or [])
 
         for event in got["events"]:
             if evaluated >= MAX_PER_CYCLE:
@@ -2104,7 +2133,9 @@ async def cycle(conn) -> dict:
             if quote is None:
                 tally["NO_PINNACLE_ON_EVENT"] = \
                     tally.get("NO_PINNACLE_ON_EVENT", 0) + 1
+                _step_refuse("NO_PINNACLE_ON_EVENT")
                 continue
+            step["with_pinnacle_h2h"] += 1
 
             # ── the venue contract, exactly or not at all ───────────
             mapped = vmap.map_event(home=quote["home"], away=quote["away"],
@@ -2112,7 +2143,9 @@ async def cycle(conn) -> dict:
             if not mapped["mapped"]:
                 for code in mapped["refusals"]:
                     tally[code] = tally.get(code, 0) + 1
+                    _step_refuse(code)
                 continue
+            step["mapped_to_a_venue_contract"] += 1
 
             # ── the venue's OWN contract, before any venue read ─────
             # Refusing here costs nothing: a fixture the venue's catalogue
@@ -2365,6 +2398,7 @@ async def cycle(conn) -> dict:
                 payout_is_complement=bool(ident["payout_is_complement"]),
                 extra_refusals=extra)
             evaluated += 1
+            step["evaluated"] += 1
             rec["venue_quote"] = vq
             rec["mapping"] = mapped
             rec["settlement"] = srule
@@ -2402,6 +2436,7 @@ async def cycle(conn) -> dict:
                         tally.get("DUPLICATE_OBSERVATION_SKIPPED", 0) + 1
                     continue
                 written += 1
+                step["written"] += 1
             except Exception as exc:                           # noqa: BLE001
                 tally["PERSIST:" + type(exc).__name__] = \
                     tally.get("PERSIST:" + type(exc).__name__, 0) + 1
@@ -2520,6 +2555,11 @@ async def cycle(conn) -> dict:
            "refusals": tally, "credits": credits,
            "venue_errors": venue_errors,
            "markets_considered": len(markets),
+           # WHAT WAS AVAILABLE, AND WHERE EACH SPORT STOPPED. See the
+           # comment at `universe` above: one aggregate count could not say
+           # whether a supported sport contributed anything.
+           "venue_universe_by_label": universe,
+           "funnel_by_provider_sport": funnel,
            "entries": entries,
            "source_calibration": calibration,
            "research_shadow": research,
@@ -2613,6 +2653,11 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 "credits": out.get("credits"),
                 # THE POINT OF THE WHOLE FUNCTION.
                 "refusals": out.get("refusals") or {},
+                # Three sports and two labels, so this stays a heartbeat.
+                "venue_universe_by_label":
+                    out.get("venue_universe_by_label") or {},
+                "funnel_by_provider_sport":
+                    out.get("funnel_by_provider_sport") or {},
                 # and, for the refusals that have a message, the message.
                 "venue_errors": out.get("venue_errors") or [],
             }, default=str))

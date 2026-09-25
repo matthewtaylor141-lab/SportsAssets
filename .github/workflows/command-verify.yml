@@ -3401,11 +3401,37 @@ jobs:
           # absent field as the payload's. It infers no payout from `closed`,
           # `resolved` or `settledAt`.
           : > /tmp/vp.json
+          # THE SLUGS THE LANE ACTUALLY EVALUATED, PER SPORT -- not two
+          # hardcoded baseball literals.
+          #
+          # WHY THIS CHANGED. The prose read is the only affirmative
+          # establishment of the VENUE's side, and it was pinned to two MLB
+          # slugs. So the other supported sport's payout rules were never
+          # read at all, and "no compatible pair" rested on a comparison
+          # that had only ever been run on baseball. Up to two distinct
+          # slugs per sport_family are taken from the candidates the lane
+          # just evaluated; the baseball literals remain only as the
+          # fallback for a window with no candidates.
+          jq -r '[(.candidates // [])[]
+                  | {f: (.sport_family // "UNLABELLED"),
+                     s: .us_market_slug}
+                  | select(.s != null)]
+                 | group_by(.f) | map(.[0:2]) | flatten
+                 | map(.s) | unique | .[0:6] | @json' \
+            /tmp/ee.json > /tmp/slugs.json 2>/dev/null || true
+          if ! jq -e 'length > 0' /tmp/slugs.json >/dev/null 2>&1; then
+            printf '%s\n' '["aec-mlb-az-col-2026-09-24","aec-mlb-cle-kc-2026-09-25"]' \
+              > /tmp/slugs.json
+            say "NO CANDIDATE SLUGS IN THE WINDOW -- falling back to the two"
+            say "baseball literals. The prose below is then evidence about"
+            say "those two contracts only."
+          fi
+          say "prose slugs  $(cat /tmp/slugs.json)"
+          jq -n --slurpfile s /tmp/slugs.json \
+             '{slugs: $s[0], calibration_unreadable: 1}' > /tmp/vpreq.json
           VC=$(curl -s -o /tmp/vp.json -w '%{http_code}' --max-time 180 \
               -X POST -H "$H" -H 'Content-Type: application/json' \
-              --data '{"slugs": ["aec-mlb-az-col-2026-09-24",
-                                 "aec-mlb-cle-kc-2026-09-25"],
-                       "calibration_unreadable": 1}' \
+              --data @/tmp/vpreq.json \
               "$API/api/admin/venue-settlement-probe" || echo 000)
           say ""
           say "## what the venue returned (HTTP $VC)"
@@ -3678,8 +3704,49 @@ jobs:
             "  never_priced_at_all          "
               + n([(.stages.by_first_stage // {}) | to_entries[]
                     | select(.key | test("^[1-4]_")) | .value] | add // 0)
-              + "   (refused before 5_EXECUTION_ESTIMATE)"' \
+              + "   (refused before 5_EXECUTION_ESTIMATE)",
+            # THE OPPORTUNITY ANSWER, AS ITS OWN NUMBER. "None was
+            # positive" used to be an inference from two negative counts
+            # and a total. An assessment answers "how many candidates
+            # showed positive net edge" directly, including when it is 0.
+            "  POSITIVE_EDGE                "
+              + n(.stages.positive_edge)
+              + "   edge_not_computed " + n(.stages.edge_not_computed),
+            "  execution_mode  " + n(.stages.execution_mode)
+              + "   excludes " + n(.stages.excludes)' \
             /tmp/cx.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          # ── 3a2 · THE FUNNEL, PER SUPPORTED SPORT ──────────────────
+          #
+          # WHY PER SPORT. Every count above is summed over both supported
+          # sports, so a sport that contributes nothing at all is
+          # indistinguishable from one that contributes candidates which
+          # then refuse. Those are different findings: the first is a
+          # coverage or mapping fact, the second is an economics fact.
+          # `venue_markets_open_and_fresh` is the OBSERVED UNIVERSE for
+          # that sport; `mapped_to_a_venue_contract` is the subset a
+          # connected probability source can price at all.
+          say "-- 3a2 · observed universe and funnel, per supported sport --"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            .statuses.external_valuation.last_cycle as $L
+            | if $L == null then
+                "  NO CYCLE HEARTBEAT -- the funnel is absent, not empty"
+              else
+                "  cycle_at " + n($L.at) + "  state " + n($L.state)
+                  + "  markets_considered " + n($L.markets_considered),
+                "  venue universe by label " + n($L.venue_universe_by_label),
+                (($L.funnel_by_provider_sport // {}) | to_entries[]
+                  | "  " + .key + "  (" + n(.value.family) + ")"
+                    + "  venue_open_fresh " + n(.value.venue_markets_open_and_fresh)
+                    + "  provider_events " + n(.value.provider_events)
+                    + "  with_pinnacle " + n(.value.with_pinnacle_h2h)
+                    + "  mapped " + n(.value.mapped_to_a_venue_contract)
+                    + "  evaluated " + n(.value.evaluated)
+                    + "  written " + n(.value.written)),
+                (($L.funnel_by_provider_sport // {}) | to_entries[]
+                  | "     " + .key + " refusals " + n(.value.refusals)),
+                "  venue_errors " + n($L.venue_errors)
+              end' /tmp/pnl.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
           # THE COVERAGE QUESTION, COUNTED OVER THE WHOLE WINDOW. Does ANY
           # supported market have a payoff this source can price? A 25-row
@@ -3693,6 +3760,18 @@ jobs:
                 "  COMPATIBLE rows " + n($S.compatible_rows),
                 (($S.by_verdict // {}) | to_entries[]
                   | "  " + .key + "  rows " + n(.value.rows)
+                    + "  admissible " + n(.value.admissible)
+                    + "  distinct_slugs " + n(.value.distinct_slugs)),
+                # PER SPORT, because "0 COMPATIBLE" summed over two sports
+                # does not say whether the OTHER sport was examined and
+                # refused or never reached the comparison at all. An
+                # UNKNOWN here is a MISSING STATEMENT on one side -- it is
+                # never read as agreement, and a market is never selected
+                # because a payout pattern failed to match.
+                (($S.by_verdict // {}) | to_entries[]
+                  | . as $v | ($v.value.by_sport // {}) | to_entries[]
+                  | "     " + $v.key + " / " + .key
+                    + "  rows " + n(.value.rows)
                     + "  admissible " + n(.value.admissible)
                     + "  distinct_slugs " + n(.value.distinct_slugs)),
                 "  conflicting conditions " + n($S.mismatched_conditions)

@@ -668,13 +668,14 @@ def first_stage(refusals) -> str | None:
 SETTLEMENT_COVERAGE = """
     SELECT coalesce(settlement_comparison::jsonb ->> 'compatibility',
                     'NOT_RECORDED') AS verdict,
+           sport_family,
            count(*) AS n,
            count(*) FILTER (WHERE admissible) AS admissible,
            count(DISTINCT us_market_slug) AS slugs
       FROM external_valuations
      WHERE experiment_id = $1
        AND decided_at >= now() - ($2 || ' hours')::interval
-     GROUP BY 1 ORDER BY 2 DESC
+     GROUP BY 1, 2 ORDER BY 3 DESC
 """
 
 #: WHICH conditions carried a conflict, and on how many rows. Separate, so
@@ -696,6 +697,7 @@ SETTLEMENT_MISMATCHES = """
 STAGE_CENSUS = """
     SELECT refusals,
            admissible,
+           sport_family,
            COALESCE(
              (execution_estimate::jsonb ->> 'ok') = 'true', FALSE)
                AS estimate_ok,
@@ -722,14 +724,37 @@ def stage_report(rows) -> dict:
            "walk_took_levels": 0,
            "negative_edge_with_a_walk": 0,
            "negative_edge_without_a_walk": 0,
+           # THE COUNT NOBODY PRINTED, so "none was positive" had to be
+           # inferred from two negative counts and a total. An opportunity
+           # assessment answers "how many candidates showed positive net
+           # edge", and that answer has to be a number in its own right --
+           # including when it is zero.
+           "positive_edge": 0,
+           "edge_not_computed": 0,
+           "by_sport": {},
+           # WHICH EXECUTION THE EDGE ASSUMES. The lane buys by crossing the
+           # ask and pays the TAKER fee (`fee_fn(..., maker=False)`), so
+           # every edge counted here is a CROSSING edge. A passive/maker
+           # strategy has different fill assumptions and a different fee
+           # side; none of its numbers are in this census.
+           "execution_mode": "CROSSING_THE_ASK_AT_THE_TAKER_FEE",
+           "excludes": "ANY_PASSIVE_OR_MAKER_FILL_ASSUMPTION",
            "stage_order": list(STAGE_ORDER)}
     for r in rows or []:
         out["candidates"] += 1
+        fam = str(r.get("sport_family") or "UNLABELLED")
+        sp = out["by_sport"].setdefault(
+            fam, {"candidates": 0, "admissible": 0, "priced": 0,
+                  "positive_edge": 0, "negative_or_zero_edge": 0,
+                  "by_first_stage": {}})
+        sp["candidates"] += 1
         if r.get("admissible"):
             out["admissible"] += 1
+            sp["admissible"] += 1
         st = first_stage(r.get("refusals"))
         if st is not None:
             out["by_first_stage"][st] = out["by_first_stage"].get(st, 0) + 1
+            sp["by_first_stage"][st] = sp["by_first_stage"].get(st, 0) + 1
         ok = bool(r.get("estimate_ok"))
         took = int(r.get("levels_taken") or 0)
         if ok:
@@ -737,11 +762,19 @@ def stage_report(rows) -> dict:
         if took > 0:
             out["walk_took_levels"] += 1
         edge = r.get("edge")
-        if edge is not None and float(edge) <= 0:
-            if took > 0:
-                out["negative_edge_with_a_walk"] += 1
+        if edge is None:
+            out["edge_not_computed"] += 1
+        else:
+            sp["priced"] += 1
+            if float(edge) > 0:
+                out["positive_edge"] += 1
+                sp["positive_edge"] += 1
             else:
-                out["negative_edge_without_a_walk"] += 1
+                sp["negative_or_zero_edge"] += 1
+                if took > 0:
+                    out["negative_edge_with_a_walk"] += 1
+                else:
+                    out["negative_edge_without_a_walk"] += 1
     out["what_this_supports"] = {
         "negative_edge_with_a_walk": (
             "a book was walked and the volume-weighted cost of the sized "
@@ -800,11 +833,26 @@ async def census(conn, *, hours: int = 24) -> dict:
                                str(int(hours)))
         mis = await conn.fetch(SETTLEMENT_MISMATCHES, EXPERIMENT_ID,
                                str(int(hours)))
+        # AGGREGATED, AND SPLIT BY SPORT. One number over both sports
+        # cannot answer "does the OTHER supported sport have a compatible
+        # payoff" -- and that was the open question this read was used to
+        # answer. The verdict rollup is kept so the old reading still works.
+        by_verdict: dict = {}
+        for r in cov:
+            slot = by_verdict.setdefault(
+                r["verdict"], {"rows": 0, "admissible": 0,
+                               "distinct_slugs": 0, "by_sport": {}})
+            slot["rows"] += int(r["n"])
+            slot["admissible"] += int(r["admissible"])
+            # DISTINCT PER SPORT, SUMMED. A slug belongs to one sport, so
+            # the sum is exact; it is NOT a distinct count across sports in
+            # general and is not presented as one.
+            slot["distinct_slugs"] += int(r["slugs"])
+            slot["by_sport"][str(r["sport_family"])] = {
+                "rows": int(r["n"]), "admissible": int(r["admissible"]),
+                "distinct_slugs": int(r["slugs"])}
         out["settlement_coverage"] = {
-            "by_verdict": {r["verdict"]: {"rows": int(r["n"]),
-                                          "admissible": int(r["admissible"]),
-                                          "distinct_slugs": int(r["slugs"])}
-                           for r in cov},
+            "by_verdict": by_verdict,
             "mismatched_conditions": {r["condition"]:
                                       int(r["rows_carrying_it"])
                                       for r in mis},
