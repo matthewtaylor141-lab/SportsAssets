@@ -51,12 +51,20 @@ SIDE = "side"        # the only `kind` value observed in production
 MATCH_TITLE = "Home Team vs. Away Team"
 
 
+#: The venue's OWN market type, which is the authority. `_ok` supplies a
+#: full-match one so the diagnostics can be exercised; the tests that are
+#: about the authority pass their own value, or none.
+MONEYLINE_V2 = "SPORTS_MARKET_TYPE_MONEYLINE"
+
+
 def _ok(slug, *, event_slug, side=None, kind=SIDE, siblings=249,
-        event_title=MATCH_TITLE, witness=2):
+        event_title=MATCH_TITLE, witness=2, v2=MONEYLINE_V2, v1=None):
     return V.period_of_venue_slug(slug, kind=kind, event_slug=event_slug,
                                   side=side, sibling_markets=siblings,
                                   event_title=event_title,
-                                  participant_witness=witness)
+                                  participant_witness=witness,
+                                  sports_market_type_v2=v2,
+                                  sports_market_type=v1)
 
 
 @pytest.mark.parametrize("slug,ev", [
@@ -324,3 +332,108 @@ def test_the_result_says_which_check_establishes_scope():
     assert "NOT independently prove full-match scope" in \
         w["two_participant_title"]
     assert "SCOPE" in got["does_not_establish"].upper()
+
+
+
+# ── 6 · THE VENUE'S OWN MARKET TYPE IS THE AUTHORITY ─────────────────
+#
+# The venue publishes a Sports Schema and it directs consumers away from
+# parsing identifiers. `sportsMarketTypeV2` answers what a market prices;
+# the kind, the prefix, the decomposition and the title are DIAGNOSTICS.
+# The values below are ones this repository has OBSERVED in live responses
+# (research/run85_phase2e.classify, run85_trackbl_block.GAME_TYPES).
+
+def test_the_authority_overrules_a_slug_that_looks_like_a_moneyline():
+    """A slug can read as a full-game money line and be a spread.
+
+    This is the whole reason the schema tells consumers not to parse
+    identifiers, and it is the case no amount of slug grammar can catch.
+    """
+    for v2 in ("SPORTS_MARKET_TYPE_SPREAD", "SPORTS_MARKET_TYPE_TOTAL",
+               "SPORTS_MARKET_TYPE_TOTALS", "SPORTS_MARKET_TYPE_PROP",
+               "SPORTS_MARKET_TYPE_FUTURE"):
+        got = _ok("aec-mlb-lad-sf-2026-09-25",
+                  event_slug="mlb-lad-sf-2026-09-25", v2=v2)
+        assert got["period"] is None, v2
+        assert got["refusals"] == [V.R_TYPE_NOT_MONEYLINE], v2
+
+
+def test_the_generic_value_is_not_a_licence_to_read_the_slug():
+    got = _ok("aec-mlb-lad-sf-2026-09-25",
+              event_slug="mlb-lad-sf-2026-09-25",
+              v2="SPORTS_MARKET_TYPE_UNSPECIFIED")
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_TYPE_UNSPECIFIED]
+
+
+def test_an_unseen_type_value_is_not_assumed_benign():
+    got = _ok("aec-mlb-lad-sf-2026-09-25",
+              event_slug="mlb-lad-sf-2026-09-25",
+              v2="SPORTS_MARKET_TYPE_SOMETHING_NEW")
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_TYPE_NOT_MONEYLINE]
+
+
+def test_a_missing_authority_is_an_explicit_unresolved_verdict():
+    """NOT a pass on the diagnostics, and NOT the generic unknown.
+
+    Its own name, because it says what to fix: the field exists at the
+    venue and our adapter is what drops it.
+    """
+    got = _ok("aec-mlb-lad-sf-2026-09-25",
+              event_slug="mlb-lad-sf-2026-09-25", v2=None)
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_TYPE_NOT_RETAINED]
+    assert got["market_type_authority"] == "NONE_RETAINED_BY_OUR_ADAPTER"
+    # the diagnostics still RAN and are still reported -- that is the point
+    # of putting the authority check last
+    assert got["participants_named"] == 2
+    assert "accepted_decompositions" in got
+
+
+def test_a_v1_only_row_is_still_unresolved_and_says_so():
+    got = _ok("aec-mlb-lad-sf-2026-09-25",
+              event_slug="mlb-lad-sf-2026-09-25", v2=None,
+              v1="soccer_team_full_time_winner")
+    assert got["refusals"] == [V.R_TYPE_NOT_RETAINED]
+    assert got["market_type_authority"] == \
+        "VENUE_SPORTS_SCHEMA_sportsMarketType_V1_ONLY"
+    assert "v1" in got["why"]
+
+
+def test_both_full_match_types_pass_and_only_those_two():
+    for v2 in V.FULL_MATCH_TYPES_V2:
+        got = _ok("aec-mlb-lad-sf-2026-09-25",
+                  event_slug="mlb-lad-sf-2026-09-25", v2=v2)
+        assert got["period"] == V.FULL_MATCH, v2
+    assert set(V.FULL_MATCH_TYPES_V2) == {
+        "SPORTS_MARKET_TYPE_MONEYLINE",
+        "SPORTS_MARKET_TYPE_DRAWABLE_OUTCOME"}
+
+
+def test_the_slug_and_title_are_labelled_diagnostics_in_the_result():
+    got = _ok("aec-mlb-lad-sf-2026-09-25", event_slug="mlb-lad-sf-2026-09-25")
+    assert "diagnostics" in got["slug_and_title_are_diagnostics_only"]
+    assert got["market_type_authority"] == \
+        "VENUE_SPORTS_SCHEMA_sportsMarketTypeV2"
+    # and the PERIOD still rests on the decomposition, not on the type --
+    # the venue sells half and inning money lines under the same type
+    assert "DECOMPOSITION_FOR_THE_PERIOD" in got["basis"]
+
+
+def test_a_full_match_type_does_not_excuse_a_segment_slug():
+    """The authority establishes TYPE; the decomposition establishes PERIOD."""
+    got = _ok("atc-mlb-atl-mia-2026-09-25-i6-draw", side="draw",
+              event_slug="mlb-atl-mia-2026-09-25",
+              event_title="Atlanta Braves vs. Miami Marlins",
+              v2="SPORTS_MARKET_TYPE_MONEYLINE")
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_PERIOD_SHAPE]
+
+
+def test_every_new_refusal_is_declared_and_maps_to_identity():
+    from sportsassets import bettor_external_shadow as ext
+    for code in (V.R_TYPE_NOT_RETAINED, V.R_TYPE_UNSPECIFIED,
+                 V.R_TYPE_NOT_MONEYLINE):
+        assert code in V.REFUSALS, code
+        assert ext.STAGE_OF[code] == "3_IDENTITY", code

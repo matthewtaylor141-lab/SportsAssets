@@ -129,34 +129,46 @@ R_VENUE_QUOTE_STALE = "VENUE_QUOTE_STALE"
 #: prohibition outright, that a venue timestamp belongs to the venue's clock
 #: domain and nothing subtracts it from a local reading.
 #:
-#: COULD THE ESTABLISHED CONTRACT BE REUSED HERE? IT WAS INSPECTED, AND NO.
+#: TWO DIFFERENT AGES, AND ONLY ONE OF THEM IS MEASURABLE HERE.
 #:
-#:   institutional_book.FRESHNESS_LIMIT_S is 5.0 s and `freshness_of()`
-#:   measures it from BETTOR_RECEIVED_TIMESTAMP. The SOURCE of that
-#:   guarantee is the topology, not the clock: `workers/institutional_md`
-#:   is a PERSISTENT poll process ("REST_POLL_MAINTAINED_IN_MEMORY", stream
-#:   target NOT_IDENTIFIED, in its own words) that refreshes an in-memory
-#:   store at a tight cadence, and its consumer "reads that memory; it does
-#:   not make a REST call to decide". Receipt age there answers a real
-#:   question -- HOW LONG SINCE THE FEED LAST REFRESHED THIS INSTRUMENT --
-#:   and a cache that stops being refreshed goes STALE at 5 s.
+#:   LOCAL OBSERVATION AGE = decision_instant - our receipt instant. Both
+#:   readings are OURS, the subtraction is a real interval, and it answers
+#:   a real question: how long ago did we last see a copy of this book. In
+#:   this lane it is small by construction, because the read happens at the
+#:   decision -- and SMALL IS NOT INVALID. A bounded observation age is a
+#:   genuine property of a synchronous read, not a defect in it.
 #:
-#:   THIS LANE HAS THE OPPOSITE TOPOLOGY. It calls REST **at** the decision,
-#:   so receipt age is the round trip by construction and `freshness_of()`
-#:   would return CURRENT on every read. That is not a stricter gate or a
-#:   looser one; it is a vacuous one. RECEIPT TIME ALONE DOES NOT PROVE THE
-#:   UNDERLYING BOOK IS CURRENT, and the established path does not claim it
-#:   does: it records the transactTime lag as MARKET_DATA_LAG_MS and gates
-#:   on neither.
+#:   UPSTREAM DATA AGE = how long ago the venue's own book was that shape.
+#:   THIS IS UNKNOWN. `transactTime` is the only candidate and what it
+#:   denotes is unestablished: a response stamp and a last-book-change
+#:   stamp produce the same field and opposite readings of the same number.
 #:
-#: SO THE SEMANTICS REMAIN UNRESOLVED AND THE EXPLICIT REFUSAL IS RETAINED.
-#: Both limits stay where they are. Relaxing a gate on an unestablished
-#: reading would be loosening a freshness requirement to manufacture
-#: activity, and substituting receipt time would be substituting a
-#: measurement that cannot fail. `/api/admin/venue-clock-probe` reports
-#: OBSERVATIONS -- raw stamps, our request and receipt instants, book
-#: hashes -- and classifies nothing: two samples of a few contracts cannot
-#: separate a response stamp from a last-update stamp.
+#: NEITHER TOPOLOGY ESTABLISHES UPSTREAM FRESHNESS, and this is a
+#: correction to an earlier version of this comment that implied a poll
+#: cache did. `institutional_book.FRESHNESS_LIMIT_S` (5.0 s, measured from
+#: BETTOR_RECEIVED_TIMESTAMP) bounds how stale OUR COPY is; that is a local
+#: observation age too. A persistent poll refreshing that cache
+#: (`workers/institutional_md`, its own words REST_POLL_MAINTAINED_IN_MEMORY
+#: with the stream target NOT_IDENTIFIED) makes the bound frequent -- it
+#: does not make the venue's answer current, because a poll can be served a
+#: stale snapshot exactly as a one-off read can. The established path is
+#: honest about this: it records the transactTime lag as MARKET_DATA_LAG_MS
+#: and gates on neither.
+#:
+#: SO: RECEIPT TIME ALONE DOES NOT PROVE THE UNDERLYING BOOK IS CURRENT --
+#: in either topology -- AND THE EXPLICIT REFUSAL IS RETAINED. Both limits
+#: stay where they are. Relaxing a gate on an unestablished reading would be
+#: loosening a freshness requirement to manufacture activity.
+#:
+#: WHAT THE PROBE ESTABLISHES, AND WHAT IT DOES NOT.
+#:   establishes  the field's presence, its type, its raw text, whether the
+#:                supported parser accepts it, our own request and receipt
+#:                instants, and whether the book bytes changed between two
+#:                reads.
+#:   unknown      what the stamp denotes; the venue's clock offset from
+#:                ours; whether an unchanged book means a quiet market or a
+#:                stalled upstream; and therefore the upstream data age.
+#: It classifies nothing and changes no admission.
 VENUE_CLOCK_SEMANTICS = "UNESTABLISHED__LAST_BOOK_UPDATE_OR_RESPONSE_STAMP"
 
 #: THE LABEL FOR A CYCLE THAT EVALUATED NOTHING. Not "zero positive edge":
@@ -805,6 +817,8 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
     # from the same table the resolver matched in -- one bounded query, no
     # second resolver.
     pmeta = await period_metadata(conn, out["us_market_slug"])
+    vtype = await asyncio.to_thread(venue_market_type, out["us_market_slug"])
+    out["venue_market_type"] = vtype
     period = vmap.period_of_venue_slug(
         out["us_market_slug"],
         # The catalogue's `side_norm` is preferred over the resolver's
@@ -818,8 +832,14 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
         # named. The catalogue's OWN event title, read with the same " vs "
         # split `shadow-mapgap` uses on our side of the crossing.
         event_title=pmeta.get("event_title"),
-        participant_witness=pmeta.get("side_norms_on_slug"))
+        participant_witness=pmeta.get("side_norms_on_slug"),
+        # THE AUTHORITY. The venue's own market type, from its board rather
+        # than from our slug reading. Absent -> the rule refuses by name.
+        sports_market_type_v2=vtype.get("sports_market_type_v2"),
+        sports_market_type=vtype.get("sports_market_type"),
+        type_metadata_available=vtype.get("available"))
     period["catalogue"] = pmeta
+    period["venue_market_type_read"] = vtype
     out["period_evidence"] = period
     if period.get("period") != vmap.FULL_MATCH:
         # THE SPECIFIC REASON, not one blanket unknown. An unsupported kind,
@@ -900,6 +920,76 @@ PERIOD_METADATA_SQL = """
      WHERE p1.market_slug = $1
      LIMIT 1
 """
+
+
+#: The desk board index, rebuilt when the cache behind it moves. The board
+#: is one cached list the API already holds; this is a dict over it, not a
+#: second sweep.
+_TYPE_INDEX: dict = {"built_from": None, "by_slug": {}}
+
+
+def venue_market_type(us_market_slug: str) -> dict:
+    """The VENUE'S OWN market type for a contract, or a named absence.
+
+    WHY THIS EXISTS. The venue publishes a Sports Schema and it directs
+    consumers away from parsing identifiers; `sportsMarketTypeV2` is the
+    field that answers what a market prices. `pmus.list_desk_events` was
+    dropping it -- its market rows carried `kind`, which is OUR reading of
+    the slug prefix -- so the period check had nothing but the identifier
+    to work from. The adapter now retains it and this reads it back.
+
+    An absence is reported as an absence. `available: False` is not
+    `type: None` used as a value, and the period rule refuses on it by its
+    own name rather than falling back to the slug.
+    """
+    out = {"source": "pmus.list_desk_events", "available": False,
+           "sports_market_type_v2": None, "sports_market_type": None,
+           "team": None, "team_id": None}
+    try:
+        from .. import pmus
+        events = pmus.list_desk_events()
+    except Exception as exc:                                   # noqa: BLE001
+        out["error"] = type(exc).__name__
+        return out
+    # THE INVALIDATION STAMP. An earlier version keyed on
+    # `(id(events), len(events))`; CPython reuses the id of a freed list, so
+    # two different boards with the same event count compared EQUAL and the
+    # index went stale. A test caught it. The desk cache's own timestamp is
+    # the real signal, and the row counts are the tiebreak that survives a
+    # board replaced within one clock tick.
+    try:
+        from .. import pmus as _p
+        ts = (_p._desk_cache or {}).get("ts")
+    except Exception:                                          # noqa: BLE001
+        ts = None
+    n_ev = len(events or [])
+    n_mk = sum(len(ev.get("markets") or []) for ev in (events or []))
+    stamp = (ts, n_ev, n_mk)
+    if _TYPE_INDEX["built_from"] != stamp:
+        idx = {}
+        for ev in events or []:
+            for mk in (ev.get("markets") or []):
+                sl = str(mk.get("us_slug") or "")
+                if sl and sl not in idx:
+                    idx[sl] = mk
+        _TYPE_INDEX["built_from"] = stamp
+        _TYPE_INDEX["by_slug"] = idx
+    row = _TYPE_INDEX["by_slug"].get(str(us_market_slug or ""))
+    if row is None:
+        out["why"] = ("the venue's board carries no market row for this "
+                      "slug, so its own market type is not in hand")
+        return out
+    v2 = row.get("sports_market_type_v2")
+    out.update(sports_market_type_v2=v2,
+               sports_market_type=row.get("sports_market_type"),
+               team=row.get("team"), team_id=row.get("team_id"),
+               available=bool(v2 or row.get("sports_market_type")))
+    if not out["available"]:
+        out["why"] = ("the board row exists and carries no "
+                      "`sportsMarketTypeV2`. Either the venue omits it on "
+                      "this endpoint or the adapter is still dropping it -- "
+                      "and which one it is decides the remedy")
+    return out
 
 
 async def period_metadata(conn, us_market_slug: str) -> dict:

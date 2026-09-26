@@ -1294,3 +1294,32 @@ async def test_an_entry_created_position_runs_the_whole_lifecycle(
         # the cleanup is explicit rather than the constraint being relaxed.
         await _cleanup(conn)
         await conn.close()
+
+
+# ── THE VENUE'S OWN MARKET TYPE, STOOD UP FOR THESE TESTS ────────────
+#
+# `period_of_venue_slug` now requires `sportsMarketTypeV2` -- the venue
+# publishes it and its Sports Schema directs consumers away from parsing
+# identifiers, so the slug and the title are diagnostics and cannot settle
+# the market type. A fixture that supplies no type therefore refuses with
+# VENUE_MARKET_TYPE_METADATA_NOT_RETAINED and asserts nothing about the
+# rules these tests exist for.
+#
+# THE READER IS STUBBED HERE, AND THAT IS A DELIBERATE SPLIT. These tests
+# are about the lane, not about the board; the reader
+# (`loop.venue_market_type`) has its own test against a board in the exact
+# shape `pmus.list_desk_events` now builds, including the absence cases.
+# Stubbing it here without that test existing is what would make these
+# fixtures assert nothing.
+
+@pytest.fixture(autouse=True)
+def _venue_market_type_board(monkeypatch):
+    from sportsassets.workers import ext_pinnacle_loop as _loop
+
+    def _type(us_slug):
+        return {"source": "pmus.list_desk_events", "available": True,
+                "sports_market_type_v2": "SPORTS_MARKET_TYPE_MONEYLINE",
+                "sports_market_type": None, "team": None, "team_id": None}
+
+    monkeypatch.setattr(_loop, "venue_market_type", _type)
+    yield

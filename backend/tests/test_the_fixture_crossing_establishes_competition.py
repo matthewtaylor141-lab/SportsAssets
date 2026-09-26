@@ -36,28 +36,43 @@ def _est(ours, our_token, venue_event, venue_token):
 def test_an_identical_league_token_establishes_the_competition():
     got, rec = _est("mls-phi-orl-2026-09-26-total-3pt5", "mls",
                     "mls-phi-orl-2026-09-26", "mls")
-    assert got is True
+    assert got == "ESTABLISHED"
     assert rec["competition_basis"] == "LEAGUE_TOKEN_IDENTICAL"
 
 
-def test_the_real_liga_mx_pair_bridges_on_the_resolvers_own_structure():
-    """`mex` and `lmx` differ, and the remainder agrees exactly."""
+def test_the_real_liga_mx_pair_is_a_CANDIDATE_LEAD_and_not_an_identity():
+    """`mex` and `lmx` differ and the remainder agrees -- A LEAD, NOT A MATCH.
+
+    A suffix agreement across different league codes is consistent with one
+    fixture listed twice AND with two different competitions. Establishing
+    it needs what the resolver needs: exactly one candidate league code
+    across the catalogue and a witness from the venue's own event title.
+    Neither is checked here, so it never reaches an identity.
+    """
     for ours, ev in (("mex-caz-tol-2026-09-26-exact-score-2-1",
                       "lmx-caz-tol-2026-09-26"),
                      ("mex-gua-que-2026-09-26-gua",
                       "lmx-gua-que-2026-09-26")):
         got, rec = _est(ours, "mex", ev, "lmx")
-        assert got is True, ours
-        assert "STRUCTURAL_HALF" in rec["competition_basis"]
-        # and the half this route does NOT check is named, not glossed
-        assert "witness" in rec["competition_witness_not_checked_here"]
+        assert got == "CANDIDATE_LEAD", ours
+        assert rec["competition_basis"].startswith("CANDIDATE_LEAD"), ours
+        assert "not an identity" in rec["competition_not_established_because"]
+
+
+def test_a_candidate_lead_never_reaches_all_present():
+    import inspect
+    src = inspect.getsource(A.api_venue_fixture_crossing)
+    assert "CANDIDATE_LEAD__COMPETITION_IDENTITY_NOT_" in src
+    # and the lead branch sits BEFORE the contract/payout checks
+    assert src.index("CANDIDATE_LEAD__COMPETITION_IDENTITY_NOT_") < \
+        src.index("FIXTURE_PRESENT_BUT_NO_FULL_MATCH_")
 
 
 def test_the_wrong_competition_the_resolver_reached_is_refused():
     """The CONCACAF row for a Guatemalan league fixture. This is the case."""
     got, rec = _est("gtm-mrq-adm-2026-09-26-mrq", "gtm",
                     "cnl-gtm-slv-2026-09-28", "cnl")
-    assert got is False
+    assert got == "NOT_ESTABLISHED"
     assert rec["competition_basis"] == "NOT_ESTABLISHED"
     assert "same two clubs is not the same competition" in \
         rec["competition_why"]
@@ -73,7 +88,7 @@ def test_differing_team_codes_do_not_bridge_even_on_the_same_fixture():
     """
     got, rec = _est("el1-wyc-rea-2026-09-26-draw", "el1",
                     "efl1-wyw-rea-2026-09-26", "efl1")
-    assert got is False
+    assert got == "NOT_ESTABLISHED"
     assert rec["competition_basis"] == "NOT_ESTABLISHED"
 
 

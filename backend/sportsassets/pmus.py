@@ -449,9 +449,16 @@ def list_desk_events() -> list[dict]:
     """Every active event on the US venue with its full market board.
 
     [{slug, title, league, volume_usd, close_time,
-      markets: [{us_slug, label, price, kind}]}]
+      markets: [{us_slug, label, price, kind, sports_market_type_v2,
+                 sports_market_type, team, team_id}]}]
     kind is the venue slug-grammar prefix (atc/aec moneyline, asc
-    spread, tsc total, astatc prop, ...) — the desk groups by it.
+    spread, tsc total, astatc prop, ...) — the desk groups by it. IT IS
+    OUR READING OF THE IDENTIFIER, and the venue's Sports Schema
+    directs consumers away from parsing identifiers, so it is a
+    diagnostic. sports_market_type_v2 is the venue's OWN market type
+    and is the authority; it was being dropped here, which left every
+    consumer downstream with nothing but the slug. None where the venue
+    omits it — absence is a fact, not a value.
     volume_usd/close_time come straight off the venue's event row
     (null when absent) — the v8 feed sorts and labels cards with
     them.
@@ -618,7 +625,25 @@ def _desk_sweep() -> list[dict]:
                             "kind": (ident.split("-", 1)[0]
                                      or "").lower(),
                             "label": f"{title} — {desc}",
-                            "price": _px(x.get("price"))})
+                            "price": _px(x.get("price")),
+                            # THE VENUE'S OWN MARKET TYPE, RETAINED.
+                            # `kind` above is OUR reading of the slug
+                            # prefix, and the venue's Sports Schema directs
+                            # consumers away from parsing identifiers. The
+                            # documented field was being dropped here, so
+                            # every consumer downstream had nothing but the
+                            # slug to go on. None when the venue omits it
+                            # -- absence is a fact and must not read as a
+                            # value.
+                            "sports_market_type_v2":
+                                m.get("sportsMarketTypeV2"),
+                            "sports_market_type":
+                                m.get("sportsMarketType"),
+                            # participant identity, likewise the venue's
+                            "team": (x.get("team") or {}).get("name")
+                                    if isinstance(x.get("team"), dict)
+                                    else x.get("team"),
+                            "team_id": x.get("teamId")})
                 elif m.get("slug"):
                     px = next((p for p in (_px(m.get(k)) for k in
                                ("bestAsk", "best_ask", "price"))
@@ -629,7 +654,11 @@ def _desk_sweep() -> list[dict]:
                                  or "").lower(),
                         "label": (f"{title} — {m['outcome']}"
                                   if m.get("outcome") else title),
-                        "price": px})
+                        "price": px,
+                        "sports_market_type_v2":
+                            m.get("sportsMarketTypeV2"),
+                        "sports_market_type": m.get("sportsMarketType"),
+                        "team": None, "team_id": None})
         n_got = len(got)
         # Its slim rows are built: drop the raw page before the next one
         # arrives. Rebinding `resp` on the next call would have kept

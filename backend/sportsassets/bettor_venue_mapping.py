@@ -59,7 +59,10 @@ REFUSALS = (R_NO_CONTRACT, R_AMBIGUOUS, R_CLOSED, R_COLLIDE, R_SEGMENT,
             "VENUE_CONTRACT_KIND_IS_NOT_A_CONFIRMED_MONEYLINE",
             "VENUE_SLUG_DOES_NOT_DECOMPOSE_INTO_EVENT_AND_SIDE",
             "VENUE_EVENT_IS_NOT_A_TWO_PARTICIPANT_MATCH",
-            "VENUE_EVENT_TITLE_NOT_CAPTURED")
+            "VENUE_EVENT_TITLE_NOT_CAPTURED",
+            "VENUE_MARKET_TYPE_METADATA_NOT_RETAINED",
+            "VENUE_MARKET_TYPE_IS_UNSPECIFIED",
+            "VENUE_MARKET_TYPE_IS_NOT_A_FULL_MATCH_MONEYLINE")
 
 #: Tokens that mark a venue title as covering only PART of a game. The
 #: external valuation prices full-game h2h only, so a segment contract is
@@ -288,6 +291,42 @@ R_PERIOD_NOT_A_MATCH = "VENUE_EVENT_IS_NOT_A_TWO_PARTICIPANT_MATCH"
 #: from its being measured and wrong. v2's `kind` mistake was diagnosed in
 #: one cycle because the three ways it could fail had three names.
 R_PERIOD_TITLE = "VENUE_EVENT_TITLE_NOT_CAPTURED"
+#: THE DOCUMENTED FIELD WAS NOT AVAILABLE. The venue publishes a Sports
+#: Schema and it directs consumers away from parsing slugs; the market type
+#: lives in `sportsMarketTypeV2` (with `sportsMarketType` as the v1 form).
+#: When our surface does not carry it, market type and period are
+#: UNRESOLVED -- not "established by the slug instead".
+R_TYPE_NOT_RETAINED = "VENUE_MARKET_TYPE_METADATA_NOT_RETAINED"
+#: And a present-but-generic value is not an answer either.
+R_TYPE_UNSPECIFIED = "VENUE_MARKET_TYPE_IS_UNSPECIFIED"
+#: A structured type that is not a full-match money line.
+R_TYPE_NOT_MONEYLINE = "VENUE_MARKET_TYPE_IS_NOT_A_FULL_MATCH_MONEYLINE"
+
+#: THE VENUE'S OWN MARKET-TYPE VOCABULARY, as observed in live responses by
+#: the run-85 phase-2 captures in `research/` (run85_phase2e.classify,
+#: run85_trackbl_block.GAME_TYPES, run85_phase2d_analyze's census). These
+#: are values this repository has SEEN, not values read off a page:
+#:
+#:   SPORTS_MARKET_TYPE_MONEYLINE          two-way match winner
+#:   SPORTS_MARKET_TYPE_DRAWABLE_OUTCOME   three-way match winner; carries
+#:                                         the v1 type
+#:                                         `soccer_team_full_time_winner`
+#:   SPORTS_MARKET_TYPE_SPREAD             a line, not a winner
+#:   SPORTS_MARKET_TYPE_TOTAL / _TOTALS    a total
+#:   SPORTS_MARKET_TYPE_PROP               a prop
+#:   SPORTS_MARKET_TYPE_FUTURE             a field of entrants
+#:   SPORTS_MARKET_TYPE_UNSPECIFIED        GENERIC -- establishes nothing
+#:
+#: THE TWO THAT PRICE A FULL-MATCH WINNER, and only these two.
+FULL_MATCH_TYPES_V2 = ("SPORTS_MARKET_TYPE_MONEYLINE",
+                       "SPORTS_MARKET_TYPE_DRAWABLE_OUTCOME")
+#: Observed and explicitly NOT a full-match winner.
+NON_FULL_MATCH_TYPES_V2 = ("SPORTS_MARKET_TYPE_SPREAD",
+                           "SPORTS_MARKET_TYPE_TOTAL",
+                           "SPORTS_MARKET_TYPE_TOTALS",
+                           "SPORTS_MARKET_TYPE_PROP",
+                           "SPORTS_MARKET_TYPE_FUTURE")
+GENERIC_TYPE_V2 = "SPORTS_MARKET_TYPE_UNSPECIFIED"
 
 
 def participants_in_event_title(event_title) -> list:
@@ -311,7 +350,10 @@ def participants_in_event_title(event_title) -> list:
 
 def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
                          kind=None, sibling_markets=None,
-                         event_title=None, participant_witness=None) -> dict:
+                         event_title=None, participant_witness=None,
+                         sports_market_type_v2=None,
+                         sports_market_type=None,
+                         type_metadata_available=None) -> dict:
     """FULL_MATCH, or a named refusal saying what was not established.
 
     TWO EARLIER VERSIONS OF THIS RULE WERE WRONG, and production caught
@@ -419,6 +461,62 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
                "competition is real rather than simulated, which the "
                "venue's own labels answer separately")}
 
+    # ── 0 · THE VENUE'S OWN MARKET TYPE, WHICH IS THE AUTHORITY ─────
+    #
+    # The venue publishes a Sports Schema and it directs consumers away
+    # from parsing slugs. `sportsMarketTypeV2` is the field; the values
+    # this repository has OBSERVED are listed at FULL_MATCH_TYPES_V2 above.
+    # Everything below it -- the kind, the prefix, the decomposition, the
+    # title -- is a DIAGNOSTIC and is reported as one.
+    #
+    # THREE OUTCOMES, THREE NAMES:
+    #   a full-match type      -> the authority establishes market type,
+    #                             and the decomposition still has to
+    #                             establish PERIOD (the venue sells
+    #                             half-and-inning money lines too).
+    #   any other structured
+    #   type                   -> refused outright; no slug reading can
+    #                             overturn the venue's own answer.
+    #   absent, or the generic
+    #   UNSPECIFIED            -> UNRESOLVED. Named separately, because
+    #                             "our adapter dropped the field" and "the
+    #                             venue said nothing useful" have
+    #                             different remedies.
+    v2 = str(sports_market_type_v2 or "").strip() or None
+    v1 = str(sports_market_type or "").strip() or None
+    out["sports_market_type_v2"] = v2
+    out["sports_market_type"] = v1
+    out["type_metadata_available"] = (
+        bool(v2 or v1) if type_metadata_available is None
+        else bool(type_metadata_available))
+    out["market_type_authority"] = (
+        "VENUE_SPORTS_SCHEMA_sportsMarketTypeV2" if v2
+        else ("VENUE_SPORTS_SCHEMA_sportsMarketType_V1_ONLY" if v1
+              else "NONE_RETAINED_BY_OUR_ADAPTER"))
+    out["slug_and_title_are_diagnostics_only"] = (
+        "the venue's schema directs consumers away from parsing "
+        "identifiers. The kind, prefix, decomposition and title below are "
+        "reported as diagnostics and never override the venue's own type")
+    if v2 and v2 in NON_FULL_MATCH_TYPES_V2:
+        out["refusals"].append(R_TYPE_NOT_MONEYLINE)
+        out["why"] = ("the venue's own market type for this contract is %r, "
+                      "which does not price a full-match winner. No slug "
+                      "reading overturns that" % v2)
+        return out
+    if v2 == GENERIC_TYPE_V2:
+        out["refusals"].append(R_TYPE_UNSPECIFIED)
+        out["why"] = ("the venue's own market type is the generic %r, which "
+                      "establishes nothing. A generic value is not a "
+                      "licence to fall back to the slug" % GENERIC_TYPE_V2)
+        return out
+    if v2 and v2 not in FULL_MATCH_TYPES_V2:
+        out["refusals"].append(R_TYPE_NOT_MONEYLINE)
+        out["why"] = ("the venue's own market type %r is outside the "
+                      "observed vocabulary, so what it prices is not "
+                      "established. An unseen value is not assumed benign"
+                      % v2)
+        return out
+
     m = _TRAILING_DATE.search(slug)
     if not m:
         out["refusals"].append(R_PERIOD_UNKNOWN)
@@ -505,14 +603,42 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
             "against it" % (title[:70], len(parts)))
         return out
 
+    # ── 5 · AND THE AUTHORITY MUST ACTUALLY BE PRESENT ──────────────
+    #
+    # Every diagnostic above has now run and is reported, which is the
+    # point of putting this last: the record shows what the slug and the
+    # title said AND that neither was allowed to settle it.
+    #
+    # THE VENUE DIRECTS CONSUMERS AWAY FROM PARSING IDENTIFIERS, so a
+    # verdict resting on the identifier alone is not an establishment. With
+    # no `sportsMarketTypeV2` on the row, market type is UNRESOLVED and
+    # this refuses under its own name -- which also says precisely what to
+    # fix, because the field exists at the venue and our adapter is what
+    # drops it.
+    if not v2:
+        out["refusals"].append(R_TYPE_NOT_RETAINED)
+        out["why"] = (
+            "the venue's own `sportsMarketTypeV2` is not on this row%s. The "
+            "diagnostics above are consistent with a full-match money line "
+            "and they are DIAGNOSTICS: the venue publishes the market type "
+            "and directs consumers away from parsing identifiers, so "
+            "nothing here establishes it. What the slug says is not an "
+            "answer to what the market is"
+            % (" (v1 `%s` only)" % v1 if v1 else ""))
+        return out
+
     out["period"] = FULL_MATCH
     out["why"] = (
-        "the catalogue calls this a %r market, the slug prefix %r is a "
-        "confirmed money-line family, the slug decomposes exactly into its "
-        "event %r%s with nothing between them, and the catalogue's own "
-        "event title names exactly two participants (%s)"
-        % (k, prefix, ev, (" and side %r" % side) if side else "",
+        "the venue's own market type is %r, a full-match winner; and the "
+        "slug decomposes exactly into its event %r%s with nothing between "
+        "them, which is what establishes the PERIOD -- the venue sells "
+        "half, inning and quarter money lines under the same type. "
+        "Diagnostics agreed: catalogue kind %r, prefix %r, title names two "
+        "participants (%s)"
+        % (v2, ev, (" and side %r" % side) if side else "", k, prefix,
            " vs ".join(repr(p) for p in parts[:2])))
+    out["basis"] = ("VENUE_SPORTS_SCHEMA_MARKET_TYPE_PLUS_AN_EXACT_EVENT_"
+                    "AND_SIDE_DECOMPOSITION_FOR_THE_PERIOD")
     return out
 
 

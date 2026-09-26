@@ -7700,7 +7700,7 @@ async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200),
 _DATED = re.compile(r"(\d{4}-\d{2}-\d{2})")
 
 
-def _competition_established(rec: dict, hit: dict) -> bool:
+def _competition_established(rec: dict, hit: dict) -> str:
     """Is the COMPETITION the same competition, or only the same two clubs?
 
     Participants and a date do not settle it: national teams meet in more
@@ -7713,16 +7713,22 @@ def _competition_established(rec: dict, hit: dict) -> bool:
     that suffix under a DIFFERENT league code, requires exactly one such
     code, and requires a witness from the venue's own event title. So:
 
-      identical tokens              -> established, nothing to bridge.
-      differing tokens, SAME
-      post-token remainder          -> the structural half of the
-                                       resolver's own bridge holds. The
-                                       witness half is the resolver's to
-                                       decide and is reported as such.
-      differing tokens, differing
-      remainder                     -> NOT established. Refused here.
+    IT RETURNS ONE OF THREE STATES, NEVER A BOOL:
 
-    `rec` gains the evidence either way, so the verdict can be audited
+      identical tokens              -> "ESTABLISHED". Nothing to bridge.
+      differing tokens, SAME
+      post-token remainder          -> "CANDIDATE_LEAD". A suffix agreement
+                                       across different league codes is
+                                       consistent with one fixture listed
+                                       twice AND with two different
+                                       competitions; the suffix alone does
+                                       not separate them. A LEAD IS NOT AN
+                                       IDENTITY and never reaches
+                                       ALL_PRESENT.
+      differing tokens, differing
+      remainder                     -> "NOT_ESTABLISHED".
+
+    `rec` gains the evidence in every case, so the verdict can be audited
     without re-deriving it.
     """
     ours = str(rec.get("global_slug") or "").lower()
@@ -7735,26 +7741,33 @@ def _competition_established(rec: dict, hit: dict) -> bool:
     rec["post_token_remainders"] = {"ours": our_rest, "venue": their_rest}
     if our_tok and our_tok == their_tok:
         rec["competition_basis"] = "LEAGUE_TOKEN_IDENTICAL"
-        return True
-    # Our slug carries the market suffix and theirs does not, so the
-    # comparison is "does the venue's remainder PREFIX ours" -- the same
-    # `{a}-{b}-{date}` agreement the resolver's suffix hit requires.
+        return "ESTABLISHED"
+    # A MATCHING SUFFIX UNDER A DIFFERENT LEAGUE CODE IS A LEAD, NOT AN
+    # IDENTITY. Two clubs with the same short codes on the same date under
+    # two league tokens is consistent with one fixture listed twice AND
+    # with two different competitions; the suffix alone does not separate
+    # them. `premap._yn_alias_pick` needs more than this structure --
+    # exactly one candidate league code across the catalogue AND a witness
+    # from the venue's own event title naming our anchor side -- and
+    # neither is checked here.
     if their_rest and our_rest.startswith(their_rest):
-        rec["competition_basis"] = (
-            "TOKENS_DIFFER_AND_THE_STRUCTURAL_HALF_OF_THE_RESOLVERS_OWN_"
-            "BRIDGE_HOLDS__WITNESS_IS_THE_RESOLVERS_TO_DECIDE")
-        rec["competition_witness_not_checked_here"] = (
-            "premap._yn_alias_pick additionally requires exactly one "
-            "candidate league code and a witness from the venue's event "
-            "title naming our anchor side. Neither is asserted here")
-        return True
+        rec["competition_basis"] = ("CANDIDATE_LEAD__SUFFIX_AGREES_UNDER_A_"
+                                    "DIFFERENT_LEAGUE_CODE")
+        rec["competition_not_established_because"] = (
+            "a suffix agreement across different league codes is consistent "
+            "with one fixture listed twice AND with two different "
+            "competitions. Establishing it needs what the resolver needs: "
+            "exactly one candidate league code across the catalogue, and a "
+            "witness from the venue's own event title. Neither is checked "
+            "here, so this is a lead to follow, not an identity")
+        return "CANDIDATE_LEAD"
     rec["competition_basis"] = "NOT_ESTABLISHED"
     rec["competition_why"] = (
         "the league tokens differ (%r vs %r) and the venue event's "
         "post-token remainder %r does not begin our %r, so nothing relates "
         "the two competitions. The same two clubs is not the same "
         "competition" % (our_tok, their_tok, their_rest, our_rest))
-    return False
+    return "NOT_ESTABLISHED"
 
 
 @app.get("/api/admin/venue-fixture-crossing",
@@ -7923,9 +7936,16 @@ async def api_venue_fixture_crossing(sport: str = Query("Soccer"),
         elif len(hits) > 1:
             # AMBIGUOUS IS REFUSED, not resolved by picking the first.
             rec["verdict"] = "AMBIGUOUS__MORE_THAN_ONE_VENUE_FIXTURE_MATCHED"
-        elif not _competition_established(rec, hits[0]):
+        elif _competition_established(rec, hits[0]) == "NOT_ESTABLISHED":
             rec["verdict"] = ("PARTICIPANTS_AND_DATE_AGREE_BUT_COMPETITION_"
                               "NOT_ESTABLISHED")
+        elif str(rec.get("competition_basis", "")).startswith(
+                "CANDIDATE_LEAD"):
+            # A LEAD DOES NOT REACH ALL_PRESENT. Competition identity is
+            # upstream of the contract and payout checks, so running them
+            # here would read as a conclusion.
+            rec["verdict"] = ("CANDIDATE_LEAD__COMPETITION_IDENTITY_NOT_"
+                              "INDEPENDENTLY_ESTABLISHED")
         else:
             hit = hits[0]
             full = []
