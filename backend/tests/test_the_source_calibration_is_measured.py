@@ -523,6 +523,19 @@ async def test_the_measurement_runs_against_the_real_table(monkeypatch):
             "migrations/117_entry_lane_evidence_and_calibration.sql").read())
         await conn.execute(open(
             "migrations/118_outcome_join_provenance_and_audit.sql").read())
+        # 117 RE-DECLARES `rn1x_provenance_declared` WITH THREE ORIGINS,
+        # so replaying it here and stopping NARROWED the vocabulary for
+        # every test that ran afterwards in this shared database -- a
+        # failure that lands in somebody else's file as a
+        # CheckViolationError on a provenance the code may write. 122 and
+        # 123 restore the widened set.
+        # `test_no_fixture_reverts_the_provenance_vocabulary` fails if a
+        # later migration widens it again and this list is not extended.
+        await conn.execute(open(
+            "migrations/122_uncalibrated_research_shadow_provenance.sql"
+        ).read())
+        await conn.execute(open(
+            "migrations/123_test_venue_execution_provenance.sql").read())
         exp = "CALIBRATION_TEST_EXPERIMENT"
         await conn.execute("DELETE FROM external_valuations "
                            "WHERE experiment_id = $1", exp)
@@ -615,6 +628,19 @@ async def test_the_audit_reopens_rows_joined_by_the_uncorrected_mapping():
             "migrations/117_entry_lane_evidence_and_calibration.sql").read())
         await conn.execute(open(
             "migrations/118_outcome_join_provenance_and_audit.sql").read())
+        # 117 RE-DECLARES `rn1x_provenance_declared` WITH THREE ORIGINS,
+        # so replaying it here and stopping NARROWED the vocabulary for
+        # every test that ran afterwards in this shared database -- a
+        # failure that lands in somebody else's file as a
+        # CheckViolationError on a provenance the code may write. 122 and
+        # 123 restore the widened set.
+        # `test_no_fixture_reverts_the_provenance_vocabulary` fails if a
+        # later migration widens it again and this list is not extended.
+        await conn.execute(open(
+            "migrations/122_uncalibrated_research_shadow_provenance.sql"
+        ).read())
+        await conn.execute(open(
+            "migrations/123_test_venue_execution_provenance.sql").read())
         await conn.execute("DELETE FROM external_valuations "
                            "WHERE condition_id = 'c-audit-1'")
         rid = await conn.fetchval(

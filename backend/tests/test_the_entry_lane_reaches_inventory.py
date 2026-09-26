@@ -209,6 +209,25 @@ async def _seed(conn):
     # alone, and it made the research lane's lifecycle untestable.
     await conn.execute(open(
         "migrations/122_uncalibrated_research_shadow_provenance.sql").read())
+    # AND 123, FOR THE SAME REASON, ONE MIGRATION LATER.
+    #
+    # THE RECURRENCE. The note above closed this exact trap for 122 and the
+    # trap re-opened the moment 123 widened the vocabulary again: this
+    # fixture applied 117 (three origins) and 122 (four) and stopped, so
+    # after it ran the shared test database FORBADE
+    # TEST_VENUE_EXECUTION_LIFECYCLE. Ten tests in
+    # test_the_executor_runs_an_authorized_lifecycle.py passed on their own
+    # and failed in the full suite with CheckViolationError on
+    # `rn1x_provenance_declared` -- a failure in one file caused entirely by
+    # a fixture in another. Production was never affected:
+    # `scripts/migrate.py` keys on filename and applies 113, 117, 122 and
+    # 123 in order.
+    #
+    # `test_no_fixture_reverts_the_provenance_vocabulary` now fails if a
+    # future migration widens the vocabulary and this list is not extended,
+    # so the third recurrence is caught by a test rather than by a gate run.
+    await conn.execute(open(
+        "migrations/123_test_venue_execution_provenance.sql").read())
     await conn.execute("CREATE TABLE IF NOT EXISTS ingestion_state "
                        "(key TEXT PRIMARY KEY, value TEXT)")
     await conn.execute(

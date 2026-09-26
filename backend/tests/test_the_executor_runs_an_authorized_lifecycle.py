@@ -923,3 +923,47 @@ def test_the_deployment_guard_stops_on_an_unknown_readback():
     later = wf[wf.index("== S3b . NO PENDING DEPLOY"):]
     assert 'PENDING" = "?"' in later or 'PENDING" != "0"' in later
     assert "DEPS_HTTP" in later
+
+
+def test_no_fixture_reverts_the_provenance_vocabulary():
+    """THE THIRD RECURRENCE OF A TRAP, CLOSED BY A TEST INSTEAD OF A GATE RUN.
+
+    `rn1x_provenance_declared` is DROPPED AND RE-ADDED by several migrations,
+    each widening the vocabulary: 113 declares it, 117 re-declares three
+    origins, 122 adds a fourth, 123 adds a fifth. `scripts/migrate.py` keys on
+    filename and applies them in order, so the deployed schema always holds
+    the widest set.
+
+    A TEST FIXTURE THAT REPLAYS MIGRATION FILES INTO THE SHARED TEST DATABASE
+    DOES NOT GET THAT FOR FREE. Replaying 117 and stopping narrows the
+    vocabulary for every test that runs afterwards -- and the failure lands in
+    a DIFFERENT FILE, as a CheckViolationError on a provenance the code is
+    entitled to write. It happened to the research lane when 122 landed
+    (documented in test_the_entry_lane_reaches_inventory.py) and it happened
+    again to this file when 123 landed: ten tests here passed alone and failed
+    in the full suite.
+
+    So the rule is checked mechanically. Any test file that replays a
+    migration which re-declares this constraint must also replay the LAST one
+    that does, whatever its number is when the next migration lands.
+    """
+    import pathlib
+    import re
+
+    root = pathlib.Path(__file__).resolve().parents[1]
+    declaring = sorted(
+        p.name for p in (root / "migrations").glob("*.sql")
+        if "rn1x_provenance_declared" in p.read_text(errors="ignore")
+        and "ADD CONSTRAINT" in p.read_text(errors="ignore"))
+    assert declaring, "no migration declares the constraint any more"
+    newest = declaring[-1]
+
+    offenders = []
+    for t in sorted((root / "tests").glob("*.py")):
+        body = t.read_text(errors="ignore")
+        replayed = set(re.findall(r'migrations/(\d+_[A-Za-z0-9_]+\.sql)', body))
+        touching = replayed & set(declaring)
+        if touching and newest not in replayed:
+            offenders.append("%s replays %s but not %s"
+                             % (t.name, sorted(touching), newest))
+    assert offenders == [], offenders
