@@ -106,6 +106,10 @@ on:
         description: 'Render service holding the API (operator_action only)'
         required: false
         default: 'sportsassets-api'
+      operator_commit:
+        description: 'operator_action=rotate: the 40-hex SHA to deploy after writing the env var. REQUIRED, because an env change makes Render auto-deploy the service''s TRACKED branch -- which is the protected default branch, not the reviewed build.'
+        required: false
+        default: ''
       entry_run:
         description: >-
           Set to DO to run the AUTONOMOUS ENTRY lane against current
@@ -5189,6 +5193,7 @@ jobs:
           SERVICE: ${{ inputs.operator_service }}
           API: ${{ inputs.api }}
           CONFIRM: ${{ inputs.operator_confirm }}
+          OPERATOR_COMMIT: ${{ inputs.operator_commit }}
           RENDER_KEY: ${{ secrets.RENDER_API_KEY }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
         run: |
@@ -5284,10 +5289,50 @@ jobs:
             head -c 300 /tmp/set.json || true
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
           fi
-          say "  (Render redeploys on an env change; waiting for it to serve)"
+          say ""
+          say "== S2b . PUT THE REVIEWED BUILD BACK, DELIBERATELY =="
+          say "  AN ENV CHANGE MAKES RENDER AUTO-DEPLOY THE SERVICE'S OWN"
+          say "  TRACKED BRANCH, and this service tracks the PROTECTED"
+          say "  default branch. Left alone, writing the password would"
+          say "  replace the reviewed build with whatever that branch holds."
+          say "  So the reviewed commit is deployed by id, right after."
+          case "${OPERATOR_COMMIT:-}" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+            *) say "  refused: operator_commit must be a full 40-hex sha"
+               say "  (got '${OPERATOR_COMMIT:-}'). The env var IS written;"
+               say "  deploy the reviewed commit yourself before verifying."
+               echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+          esac
+          DC=$(curl -sS --max-time 45 -o /tmp/dep.json -w '%{http_code}' \
+                 -X POST -H "Authorization: Bearer $RENDER_KEY" \
+                 -H "Accept: application/json" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"clearCache\":\"do_not_clear\",\"commitId\":\"$OPERATOR_COMMIT\"}" \
+                 "$RAPI/services/$ID/deploys" || echo 000)
+          say "  deploy ${OPERATOR_COMMIT:0:7} by id        HTTP $DC (expect 2xx)"
+          jq -r '"  deploy                         " + (.id // "?")
+                 + "  status " + (.status // "?")' \
+            /tmp/dep.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          case "$DC" in 2??) : ;; *)
+            say "  Render refused the deploy; the env var is written and the"
+            say "  serving build is NOT the reviewed one. Nothing verified."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+          esac
 
           say ""
-          say "== S3 . WAIT UNTIL THE CHANGE IS ACTUALLY SERVING =="
+          say "== S3 . WAIT UNTIL THE REVIEWED BUILD IS SERVING =="
+          say "  Two conditions, not one: the reviewed SHA must be what"
+          say "  answers /api/health, AND the control sign-in must refuse a"
+          say "  wrong password with 401 rather than 503."
+          for i in $(seq 1 60); do
+            SERVING=$(curl -sS --max-time 20 "$A/api/health" 2>/dev/null \
+                      | jq -r '.build // .commit // .sha // "?"' 2>/dev/null \
+                      || echo "?")
+            case "$SERVING" in
+              "$OPERATOR_COMMIT"*) say "  serving ${OPERATOR_COMMIT:0:7} after $((i*10))s"; break ;;
+            esac
+            sleep 10
+          done
           # The wrong-password probe flipping 503 -> 401 is the signal, and
           # it needs no secret. Bounded wait.
           OK=no
