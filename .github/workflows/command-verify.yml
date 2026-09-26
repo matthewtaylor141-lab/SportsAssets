@@ -4900,10 +4900,8 @@ jobs:
           jq -r '"  research lane armed     " + ((.state.research_lane_armed.value) | tostring),
                  "  funded executor paused  " + ((.state.funded_executor_paused.value) | tostring),
                  "  working modelled orders " + ((.state.working_modelled_orders) | tostring),
-                 "  orders this lane submitted "
-         + ((.state.funded_orders_this_lane_submitted) | tostring),
-       "  live_orders rows (history) "
-         + ((.state.live_orders_rows_all_time) | tostring),
+                 "  orders this lane submitted " + ((.state.funded_orders_this_lane_submitted) | tostring),
+                 "  live_orders rows, all time " + ((.state.live_orders_rows_all_time) | tostring),
                  "  account recorded        " + ((.state.account_proposal.name // "-") | tostring),
                  "  limits recorded         " + ((.state.limits_proposal.proposed // {}) | tostring)' \
             /tmp/ctl0.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
