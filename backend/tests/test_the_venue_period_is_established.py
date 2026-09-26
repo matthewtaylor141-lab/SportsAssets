@@ -46,9 +46,17 @@ from sportsassets import bettor_venue_mapping as V
 SIDE = "side"        # the only `kind` value observed in production
 
 
-def _ok(slug, *, event_slug, side=None, kind=SIDE, siblings=249):
+#: A two-participant event title. v4 requires one, so the default here is
+#: a fixture; the trophy and futures cases pass their own.
+MATCH_TITLE = "Home Team vs. Away Team"
+
+
+def _ok(slug, *, event_slug, side=None, kind=SIDE, siblings=249,
+        event_title=MATCH_TITLE, witness=2):
     return V.period_of_venue_slug(slug, kind=kind, event_slug=event_slug,
-                                  side=side, sibling_markets=siblings)
+                                  side=side, sibling_markets=siblings,
+                                  event_title=event_title,
+                                  participant_witness=witness)
 
 
 @pytest.mark.parametrize("slug,ev", [
@@ -169,26 +177,98 @@ def test_nothing_reaches_full_match_without_the_catalogues_fields():
 
 # ── 4 · WHAT IS STILL NOT ESTABLISHED, STATED IN THE RESULT ──────────
 
-def test_a_clean_trophy_market_still_passes_and_the_result_says_so():
-    """THE RESIDUAL HOLE, NAMED RATHER THAN CLAIMED CLOSED.
+def test_the_trophy_hole_v3_named_is_closed_by_the_participant_test():
+    """THE HOLE v3 NAMED, NOW CLOSED -- and this is the assertion that flipped.
 
-    v2 tried to catch this with a sibling count and the count turned out
-    to measure markets per event, not participants. A trophy market whose
-    catalogue event decomposes cleanly under a money-line prefix therefore
-    still passes. The result says so in `does_not_establish`, and the next
-    step is to identify a field that carries a participant count -- not to
-    guess a third rule.
+    v3 admitted `aec-nhl-stanley-2027-06-01`: it is a `side` market, `aec`
+    is a confirmed money-line family, and `aec-{event_slug}` decomposes
+    exactly. Steps 1-3 cannot separate a trophy from a fixture, because a
+    trophy decomposes identically.
+
+    v4 reads the catalogue's own `event_title` with the SAME " vs " split
+    `shadow-mapgap` already uses on our side of the crossing. "Stanley Cup
+    Winner" names one side, so it refuses by name.
     """
-    got = _ok("aec-nhl-stanley-2027-06-01", event_slug="nhl-stanley-2027-06-01")
-    assert got["period"] == V.FULL_MATCH
-    assert "trophy" in got["does_not_establish"]
-    assert "participant count" in got["does_not_establish"]
+    got = _ok("aec-nhl-stanley-2027-06-01",
+              event_slug="nhl-stanley-2027-06-01",
+              event_title="Stanley Cup Winner")
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_PERIOD_NOT_A_MATCH]
+    assert got["participants_named"] == 1
+
+
+@pytest.mark.parametrize("slug,ev,title", [
+    # every one of these is a real title from the venue's own board
+    ("aec-nhl-stanley-2027-06-01", "nhl-stanley-2027-06-01",
+     "Stanley Cup Winner"),
+    ("aec-nhl-eastconf-2027-05-19", "nhl-eastconf-2027-05-19",
+     "Eastern Conference Winner"),
+    ("aec-f1-qaagp-2026-09-26-cons", "f1-qaagp-2026-09-26-cons",
+     "Qatar Airways Azerbaijan Grand Prix Winning Constructor"),
+    ("aec-pga-prescup-2026-09-26-rd3", "pga-prescup-2026-09-26-rd3",
+     "Presidents Cup Round 3 Winner"),
+    ("aec-nascar-hc4-2026-09-27-w", "nascar-hc4-2026-09-27-w",
+     "Hollywood Casino 400 Winner"),
+    ("aec-dota2-blastslam-2026-10-11-w", "dota2-blastslam-2026-10-11-w",
+     "BLAST Slam VIII Winner"),
+    # and the non-sport markets the desk bucket also carries
+    ("aec-temp-nychigh-2026-09-26", "temp-nychigh-2026-09-26",
+     "Highest temperature in NYC on September 26?"),
+    ("aec-ntflx-1shwglbl-2026-09-29", "ntflx-1shwglbl-2026-09-29",
+     "Top Global Netflix Show This Week?"),
+])
+def test_a_field_of_entrants_is_not_a_two_participant_match(slug, ev, title):
+    """Not one trophy case -- the whole family of them, by their own titles."""
+    got = _ok(slug, event_slug=ev, event_title=title)
+    assert got["period"] is None, title
+    assert got["refusals"] == [V.R_PERIOD_NOT_A_MATCH], title
+
+
+def test_a_missing_event_title_fails_closed_under_its_own_name():
+    """UNMEASURED IS NOT BENIGN, and it is not the generic unknown either.
+
+    v2's `kind` mistake was diagnosed in one production cycle because the
+    three ways it could fail had three names. An absent title gets its own.
+    """
+    got = _ok("aec-mlb-lad-sf-2026-09-25", event_slug="mlb-lad-sf-2026-09-25",
+              event_title=None)
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_PERIOD_TITLE]
+    assert got["refusals"] != [V.R_PERIOD_NOT_A_MATCH]
+
+
+def test_the_participant_witness_gates_nothing():
+    """Carried for a later read to promote, never gated on before observed.
+
+    The sibling count was gated on before it had been read and refused
+    everything. The distinct-side_norm count is reported under the same
+    discipline and nothing depends on it.
+    """
+    for w in (None, 0, 1, 2, 3, 79, 249):
+        got = _ok("aec-mlb-lad-sf-2026-09-25",
+                  event_slug="mlb-lad-sf-2026-09-25", witness=w)
+        assert got["period"] == V.FULL_MATCH, w
+        assert got["participant_witness"] == w
+
+
+def test_a_real_two_participant_title_still_passes_in_every_observed_shape():
+    """The gate must not have become a blanket refusal -- v2's failure mode."""
+    for title in ("NYM Mets vs WSH Nationals",
+                  "Arizona Diamondbacks vs. San Diego Padres",
+                  "Jamaica vs Guatemala",
+                  "Daniil Medvedev vs. Valentin Royer",
+                  "100 Thieves vs Astralis",
+                  "Alexis de la Cerda vs Cain Lewis"):
+        got = _ok("aec-mlb-lad-sf-2026-09-25",
+                  event_slug="mlb-lad-sf-2026-09-25", event_title=title)
+        assert got["period"] == V.FULL_MATCH, title
+        assert len(got["participants_parsed"]) == 2, title
 
 
 def test_every_period_refusal_is_declared_and_maps_to_identity():
     from sportsassets import bettor_external_shadow as ext
     for code in (V.R_PERIOD_UNKNOWN, V.R_PERIOD_KIND, V.R_PERIOD_SHAPE,
-                 V.R_PERIOD_NOT_A_MATCH):
+                 V.R_PERIOD_NOT_A_MATCH, V.R_PERIOD_TITLE):
         assert code in V.REFUSALS, code
         assert ext.STAGE_OF[code] == "3_IDENTITY", code
 

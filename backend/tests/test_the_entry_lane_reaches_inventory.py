@@ -144,14 +144,17 @@ async def _seed(conn):
                        "mlb-sea-hou-2026-09-24")
     for side in ("hou", "sea"):
         await conn.execute(
+            # `event_title` too: v4's participant test reads it, and a
+            # seed that omits the field the rule reads asserts nothing.
             "INSERT INTO us_premap (identifier, event_slug, market_slug, "
-            "kind, side_norm, question, intent) "
-            "VALUES ($1,$2,$3,'side',$4,$5,'ORDER_INTENT_BUY_LONG') "
+            "kind, side_norm, question, event_title, intent) "
+            "VALUES ($1,$2,$3,'side',$4,$5,$6,'ORDER_INTENT_BUY_LONG') "
             "ON CONFLICT (identifier) DO NOTHING",
             "aec-mlb-sea-hou-2026-09-24-%s" % side,
             "mlb-sea-hou-2026-09-24",
             "aec-mlb-sea-hou-2026-09-24-%s" % side,
-            side, "Will %s win?" % side)
+            side, "Will %s win?" % side,
+            "Seattle Mariners vs. Houston Astros")
     await conn.execute(open("migrations/103_external_valuations.sql").read())
     await conn.execute(open(
         "migrations/105_external_valuations_one_per_observation.sql").read())

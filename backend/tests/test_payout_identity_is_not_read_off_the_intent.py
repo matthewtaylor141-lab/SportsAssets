@@ -59,10 +59,15 @@ SHORT = "ORDER_INTENT_BUY_SHORT"
 # catalogue's own fields, which is what production reads.
 class _CatalogueConn:
     def __init__(self, *, kind="side", event_slug=None, side_norm=None,
-                 siblings=2):
+                 siblings=2, event_title="Home Team vs. Away Team",
+                 side_norms_on_slug=2):
         self._row = {"kind": kind, "event_slug": event_slug,
                      "side_norm": side_norm,
-                     "sibling_markets": siblings}
+                     "sibling_markets": siblings,
+                     # v4 reads the catalogue's own event title for the
+                     # participant test; a stub without it asserts nothing.
+                     "event_title": event_title,
+                     "side_norms_on_slug": side_norms_on_slug}
 
     async def fetchrow(self, sql, *args):
         return self._row

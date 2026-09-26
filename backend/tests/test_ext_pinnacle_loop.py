@@ -306,15 +306,18 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
             "soccer-mci-mun-2026-09-24")
         for _side in ("city", "united"):
             await conn.execute(
+                # `event_title` too -- v4's participant test reads it.
                 "INSERT INTO us_premap (identifier, event_slug, "
-                "market_slug, kind, side_norm, question, intent) "
-                "VALUES ($1,$2,$3,'side',$4,$5,"
+                "market_slug, kind, side_norm, question, event_title, "
+                "intent) "
+                "VALUES ($1,$2,$3,'side',$4,$5,$6,"
                 "'ORDER_INTENT_BUY_LONG') "
                 "ON CONFLICT (identifier) DO NOTHING",
                 "aec-soccer-mci-mun-2026-09-24-%s" % _side,
                 "soccer-mci-mun-2026-09-24",
                 "aec-soccer-mci-mun-2026-09-24-%s" % _side,
-                _side, "Will %s win?" % _side)
+                _side, "Will %s win?" % _side,
+                "Manchester City vs. Manchester United")
 
         # 105 TOO. Without it there is no uniqueness, so the duplicate
         # test below would pass against an unmigrated database and prove

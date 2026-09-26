@@ -113,6 +113,34 @@ R_NO_TABLE = "EXTERNAL_VALUATIONS_TABLE_ABSENT"
 R_VENUE_RULE_UNKNOWN = "VENUE_SETTLEMENT_RULE_NOT_ESTABLISHED"
 R_NO_VENUE_QUOTE = "NO_CONTEMPORANEOUS_VENUE_QUOTE"
 R_VENUE_QUOTE_STALE = "VENUE_QUOTE_STALE"
+#: WHAT `marketData.transactTime` MEANS -- AND THIS IS NOT YET ESTABLISHED.
+#:
+#: The gate below computes `decision_instant - transactTime` and refuses
+#: above MAX_VENUE_QUOTE_AGE_S. That arithmetic measures OUR staleness only
+#: if the venue stamps the RESPONSE. If it stamps the LAST BOOK CHANGE, an
+#: old value means the book has not moved -- the ordinary condition of a
+#: quiet pre-game money line -- and refusing on it would refuse every quiet
+#: book and call the result freshness.
+#:
+#: TWO OTHER MODULES HERE TOOK THE OTHER SIDE, and they are the established
+#: execution path: `institutional_book.current()` computes FRESHNESS_STATUS
+#: from BETTOR_RECEIVED_TIMESTAMP -- our own clock -- and uses transactTime
+#: only for MARKET_DATA_LAG_MS as provenance; `obs/streamstate` states the
+#: prohibition outright, that a venue timestamp belongs to the venue's clock
+#: domain and nothing subtracts it from a local reading.
+#:
+#: THE GATE IS LEFT EXACTLY AS IT IS UNTIL THE SEMANTICS ARE READ. It
+#: refuses, which is the conservative direction, and relaxing it on an
+#: unestablished reading would be loosening a freshness requirement to
+#: manufacture activity. `/api/admin/venue-clock-probe` reads the same
+#: contract twice and reports whether the stamp advances while the book is
+#: unchanged; that observation, not this comment, decides the basis.
+VENUE_CLOCK_SEMANTICS = "UNESTABLISHED__LAST_BOOK_UPDATE_OR_RESPONSE_STAMP"
+
+#: THE LABEL FOR A CYCLE THAT EVALUATED NOTHING. Not "zero positive edge":
+#: that is a claim about the market, and a cycle whose candidates never
+#: reached the economics did not measure the market at all.
+ZERO_EVALUATED_INPUT_PATH_BLOCKED = "ZERO_EVALUATED__INPUT_PATH_BLOCKED"
 R_NO_DEPTH = "VENUE_ASK_HAS_NO_DEPTH"
 R_PROVIDER_ERROR = "PROVIDER_REQUEST_FAILED"
 # THREE REASONS THAT WERE ONE COUNTER. The 02:08:18Z production cycle
@@ -763,7 +791,12 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
         side=pmeta.get("side_norm") or got.get("outcome"),
         event_slug=pmeta.get("event_slug"),
         kind=pmeta.get("kind"),
-        sibling_markets=pmeta.get("sibling_markets"))
+        sibling_markets=pmeta.get("sibling_markets"),
+        # v4: the participant test that closes the futures/trophy hole v3
+        # named. The catalogue's OWN event title, read with the same " vs "
+        # split `shadow-mapgap` uses on our side of the crossing.
+        event_title=pmeta.get("event_title"),
+        participant_witness=pmeta.get("side_norms_on_slug"))
     period["catalogue"] = pmeta
     out["period_evidence"] = period
     if period.get("period") != vmap.FULL_MATCH:
@@ -834,10 +867,13 @@ EVENT_ROW_SQL = """
 #: two-participant match (2 or 3) from a trophy or a conference winner
 #: (one per entrant) -- by counting, never by reading a name.
 PERIOD_METADATA_SQL = """
-    SELECT p1.kind, p1.event_slug, p1.side_norm,
+    SELECT p1.kind, p1.event_slug, p1.side_norm, p1.event_title,
            (SELECT count(DISTINCT p2.market_slug)
               FROM us_premap p2
-             WHERE p2.event_slug = p1.event_slug) AS sibling_markets
+             WHERE p2.event_slug = p1.event_slug) AS sibling_markets,
+           (SELECT count(DISTINCT p3.side_norm)
+              FROM us_premap p3
+             WHERE p3.market_slug = p1.market_slug) AS side_norms_on_slug
       FROM us_premap p1
      WHERE p1.market_slug = $1
      LIMIT 1
@@ -852,7 +888,8 @@ async def period_metadata(conn, us_market_slug: str) -> dict:
     fallback this lane exists to avoid.
     """
     out = {"source": "us_premap", "read": False, "kind": None,
-           "event_slug": None, "side_norm": None, "sibling_markets": None}
+           "event_slug": None, "side_norm": None, "sibling_markets": None,
+           "event_title": None, "side_norms_on_slug": None}
     try:
         row = await conn.fetchrow(PERIOD_METADATA_SQL, us_market_slug)
     except Exception as exc:                                   # noqa: BLE001
@@ -864,7 +901,9 @@ async def period_metadata(conn, us_market_slug: str) -> dict:
         return out
     out.update(read=True, kind=row["kind"], event_slug=row["event_slug"],
                side_norm=row["side_norm"],
-               sibling_markets=row["sibling_markets"])
+               sibling_markets=row["sibling_markets"],
+               event_title=row["event_title"],
+               side_norms_on_slug=row["side_norms_on_slug"])
     return out
 
 
@@ -1002,10 +1041,13 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
         return {"ok": False, "refusal": R_NO_DEPTH,
                 "why": "the ask side shows no displayed quantity"}
 
-    # THE VENUE'S OWN CLOCK, when it gives one. `transactTime` is the
-    # venue stating when this book was true; our read time is only when we
-    # asked. Falling back to our read time would make every quote look
-    # fresh by construction, so the fallback is NAMED.
+    # THE VENUE'S OWN CLOCK, when it gives one. WHAT IT MEANS IS NOT
+    # ESTABLISHED -- see VENUE_CLOCK_SEMANTICS above. An earlier version of
+    # this comment asserted it is "the venue stating when this book was
+    # true"; that is one of two live readings and it was never measured.
+    # Falling back to our read time would make every quote fresh by
+    # construction in a read-then-decide loop, so the fallback is NAMED and
+    # the gate is left refusing until the probe answers.
     # THE DEFECT THIS FIXES, measured in production on build 51f20e7.
     #
     # `float(venue_ts)` was the whole parse. The venue does not send a
@@ -1017,9 +1059,12 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
     # UNKNOWN, and UNKNOWN blocks -- so nine positive-edge candidates were
     # refused for a clock we never read rather than a book that was stale.
     #
-    # `datetime.fromisoformat` in 3.11 ALSO rejects nine fractional
-    # digits, which is why the repo already has a parser for this exact
-    # shape: `bettor_market_stream._parse_ts` strips the Z, truncates the
+    # CORRECTION TO AN EARLIER VERSION OF THIS COMMENT: it claimed 3.11's
+    # `datetime.fromisoformat` rejects a bare Z and nine fractional digits.
+    # Measured, 3.11 accepts every captured form; that was true of <=3.10.
+    # The reason to use the repo's parser is the NAIVE case, where
+    # fromisoformat returns a naive datetime and `.timestamp()` silently
+    # reads it in the host's local zone: `bettor_market_stream._parse_ts` strips the Z, truncates the
     # fraction to six digits and refuses a naive stamp. That is the
     # supported parser for this venue's clock and it is reused here rather
     # than reimplemented -- the second implementation is how the first one
@@ -2252,6 +2297,24 @@ async def cycle(conn) -> dict:
     # from different people.
     venue_errors: list = []
     seen_venue_errors: set = set()
+    # ── EVERY MAPPED CANDIDATE, RECONCILED TO ITS FIRST REFUSAL ──────
+    #
+    # `funnel_by_provider_sport` says `mapped 3 -> evaluated 0` and the
+    # refusal tally says which codes fired, but neither says WHICH mapped
+    # candidate stopped WHERE. On run 75 the per-candidate census lived
+    # only in a separate route whose step died, so `mapped 3` had no
+    # reconciliation at all and the difference between three candidates
+    # failing one gate and one candidate failing three was unreadable.
+    #
+    # One row per candidate that REACHED the mapping, carrying the venue
+    # slug, the stage, the first refusal and -- where the stage is the
+    # book read -- the clock evidence. Bounded: MAX_PER_CYCLE candidates
+    # are evaluated at most, so this list cannot outgrow that.
+    ledger: list = []
+
+    def _ledger(entry: dict) -> None:
+        if len(ledger) < MAX_PER_CYCLE + 8:
+            ledger.append(entry)
     labels = sorted({lbl for _, fam in SPORTS
                      for lbl in VENUE_SPORT_LABELS.get(fam, ())})
     markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels, MARKET_STALE_AFTER_S)]
@@ -2356,6 +2419,13 @@ async def cycle(conn) -> dict:
             if not ident["ok"]:
                 code = ident["refusal"] or R_NO_PREMAP
                 tally[code] = tally.get(code, 0) + 1
+                _ledger({"global_slug": mapped.get("global_slug")
+                         or (mapped.get("market_row") or {}).get("slug"),
+                         "us_market_slug": ident.get("us_market_slug"),
+                         "priced_outcome": quote.get("home"),
+                         "stage": ext.STAGE_OF.get(code, "3_IDENTITY"),
+                         "first_refusal": code,
+                         "period_evidence": ident.get("period_evidence")})
                 key = (ident.get("global_slug"), code, ident.get("intent"))
                 if (key not in seen_venue_errors
                         and len(venue_errors) < MAX_VENUE_ERRORS):
@@ -2387,6 +2457,25 @@ async def cycle(conn) -> dict:
             if not vq.get("ok"):
                 code = vq.get("refusal") or R_NO_VENUE_QUOTE
                 tally[code] = tally.get(code, 0) + 1
+                _ledger({"global_slug": mapped.get("global_slug")
+                         or (mapped.get("market_row") or {}).get("slug"),
+                         "us_market_slug": ident.get("us_market_slug"),
+                         "priced_outcome": quote.get("home"),
+                         "stage": ext.STAGE_OF.get(code, "2_FRESHNESS"),
+                         "first_refusal": code,
+                         # THE FIVE NUMBERS A CLOCK REFUSAL OWES: the raw
+                         # value, what it parsed to, the instant it was
+                         # measured against, the age and the limit.
+                         "raw_transact_time": (
+                             (vq.get("venue_clock") or {}).get("raw")),
+                         "parsed_epoch_s": (
+                             (vq.get("venue_clock") or {})
+                             .get("parsed_epoch_s")),
+                         "decision_instant_epoch_s": round(read_at, 6),
+                         "age_s": vq.get("age_s"),
+                         "limit_s": vq.get("limit_s"),
+                         "age_basis": vq.get("age_basis"),
+                         "age_semantics": VENUE_CLOCK_SEMANTICS})
                 # THE VENUE'S OWN WORDS, kept. Run 22 named this refusal
                 # `VENUE_BOOK_READ_RETURNED_ERROR 2` -- which is the right
                 # counter and still not an answer: whether that is an
@@ -2675,6 +2764,12 @@ async def cycle(conn) -> dict:
             key = "ADMITTED" if rec.get("admissible") else None
             if key:
                 tally[key] = tally.get(key, 0) + 1
+                _ledger({"global_slug": mapped.get("global_slug")
+                         or (mapped.get("market_row") or {}).get("slug"),
+                         "us_market_slug": ident.get("us_market_slug"),
+                         "priced_outcome": quote.get("home"),
+                         "stage": "ADMITTED", "first_refusal": None,
+                         "edge": rec.get("edge")})
                 # AN ADMITTED DECISION BECOMES INVENTORY. Writing the
                 # valuation row alone is a decision record, not an entry:
                 # nothing would hold a position, owe a fee, carry
@@ -2773,6 +2868,18 @@ async def cycle(conn) -> dict:
             else:
                 for code in rec.get("refusals", []):
                     tally[code] = tally.get(code, 0) + 1
+                first = (rec.get("refusals") or [None])[0]
+                _ledger({"global_slug": mapped.get("global_slug")
+                         or (mapped.get("market_row") or {}).get("slug"),
+                         "us_market_slug": ident.get("us_market_slug"),
+                         "priced_outcome": quote.get("home"),
+                         "stage": ext.STAGE_OF.get(first, "UNMAPPED_STAGE"),
+                         "first_refusal": first,
+                         "all_refusals": list(rec.get("refusals") or [])[:6],
+                         "edge": rec.get("edge"),
+                         "estimated_edge_is_positive": (
+                             None if rec.get("edge") is None
+                             else float(rec["edge"]) > 0.0)})
 
     # THE OUTCOME JOIN RUNS EVERY CYCLE, bounded. Collection has to
     # progress on its own: a calibration that waits for someone to
@@ -2791,6 +2898,21 @@ async def cycle(conn) -> dict:
            # whether a supported sport contributed anything.
            "venue_universe_by_label": universe,
            "funnel_by_provider_sport": funnel,
+           # EVERY MAPPED CANDIDATE, RECONCILED TO ITS FIRST REFUSAL.
+           "mapped_candidate_ledger": ledger,
+           # THE CYCLE'S OWN LABEL, and the distinction it protects.
+           # "zero positive edge" is a claim ABOUT THE MARKET. It can only
+           # be made when candidates actually reached the economics. When
+           # nothing reached execution estimation, the truthful label is
+           # that the INPUT PATH was blocked -- the market was never
+           # measured and nothing here says anything about it.
+           "cycle_label": (
+               ZERO_EVALUATED_INPUT_PATH_BLOCKED if evaluated == 0
+               else "EVALUATED_%d_CANDIDATES" % evaluated),
+           "cycle_label_note": (
+               "with evaluated == 0 no candidate reached execution "
+               "estimation, so this cycle establishes NOTHING about "
+               "available edge. It is an input-path fact"),
            "entries": entries,
            "source_calibration": calibration,
            "research_shadow": research,
@@ -2891,6 +3013,14 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                     out.get("funnel_by_provider_sport") or {},
                 # and, for the refusals that have a message, the message.
                 "venue_errors": out.get("venue_errors") or [],
+                # EVERY MAPPED CANDIDATE AGAINST ITS FIRST REFUSAL, so a
+                # `mapped 3 -> evaluated 0` funnel reconciles without a
+                # second route (whose step died on run 75, taking the only
+                # per-candidate census with it).
+                "mapped_candidate_ledger":
+                    out.get("mapped_candidate_ledger") or [],
+                "cycle_label": out.get("cycle_label"),
+                "cycle_label_note": out.get("cycle_label_note"),
             }, default=str))
     except Exception:                                          # noqa: BLE001
         # A heartbeat that cannot be written must not take the cycle down.

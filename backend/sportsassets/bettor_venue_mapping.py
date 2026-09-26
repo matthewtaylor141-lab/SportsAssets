@@ -58,7 +58,8 @@ REFUSALS = (R_NO_CONTRACT, R_AMBIGUOUS, R_CLOSED, R_COLLIDE, R_SEGMENT,
             R_NO_TEAMS, "VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED",
             "VENUE_CONTRACT_KIND_IS_NOT_A_CONFIRMED_MONEYLINE",
             "VENUE_SLUG_DOES_NOT_DECOMPOSE_INTO_EVENT_AND_SIDE",
-            "VENUE_EVENT_IS_NOT_A_TWO_PARTICIPANT_MATCH")
+            "VENUE_EVENT_IS_NOT_A_TWO_PARTICIPANT_MATCH",
+            "VENUE_EVENT_TITLE_NOT_CAPTURED")
 
 #: Tokens that mark a venue title as covering only PART of a game. The
 #: external valuation prices full-game h2h only, so a segment contract is
@@ -283,10 +284,34 @@ SIDE_MARKET_KINDS = ("side",)
 R_PERIOD_KIND = "VENUE_CONTRACT_KIND_IS_NOT_A_CONFIRMED_MONEYLINE"
 R_PERIOD_SHAPE = "VENUE_SLUG_DOES_NOT_DECOMPOSE_INTO_EVENT_AND_SIDE"
 R_PERIOD_NOT_A_MATCH = "VENUE_EVENT_IS_NOT_A_TWO_PARTICIPANT_MATCH"
+#: The participant count was not MEASURABLE, which is a different problem
+#: from its being measured and wrong. v2's `kind` mistake was diagnosed in
+#: one cycle because the three ways it could fail had three names.
+R_PERIOD_TITLE = "VENUE_EVENT_TITLE_NOT_CAPTURED"
+
+
+def participants_in_event_title(event_title) -> list:
+    """The sides an event title names.
+
+    THE SPLIT IS NEITHER NEW NOR MINE. `api.app`'s `shadow-mapgap` already
+    reads a fixture's two sides exactly this way off `markets.event_title`,
+    and names its own refusal `event_title_does_not_name_two_sides` when the
+    shape does not yield two. This applies the SAME interpretation to the
+    VENUE catalogue's `event_title`, so one reading of "names two sides"
+    serves both sides of the crossing.
+
+    It is a participant test and nothing more. "Alexis de la Cerda vs Cain
+    Lewis" names two participants and passes; whether this lane holds a
+    probability for boxing is a different gate and stays one.
+    """
+    ev = str(event_title or "")
+    return [s.strip() for s in ev.replace(" vs. ", " vs ").split(" vs ")
+            if s.strip()]
 
 
 def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
-                         kind=None, sibling_markets=None) -> dict:
+                         kind=None, sibling_markets=None,
+                         event_title=None, participant_witness=None) -> dict:
     """FULL_MATCH, or a named refusal saying what was not established.
 
     TWO EARLIER VERSIONS OF THIS RULE WERE WRONG, and production caught
@@ -321,15 +346,30 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
         contract has a token between the event and the side and fails
         outright, whatever its title says.
 
+      4 TWO PARTICIPANTS, from the catalogue's own `event_title`, split on
+        " vs "/" vs. " -- the interpretation `shadow-mapgap` already uses on
+        our side of the crossing. THIS IS v4, AND IT CLOSES THE HOLE v3
+        NAMED. A trophy or futures market decomposes just as cleanly as a
+        fixture ("Stanley Cup Winner", "Qatar Airways Azerbaijan Grand Prix
+        Winning Constructor", "Presidents Cup Round 3 Winner", "Eastern
+        Conference Winner"), so the decomposition cannot tell a match from a
+        field of entrants. A title naming exactly two sides can, and it is
+        structured metadata the catalogue already carries rather than a
+        fourth guess.
+
     THE SIBLING COUNT IS GONE, because it was measuring the wrong thing.
     `sibling_markets` is still accepted and REPORTED so the readback keeps
-    showing it, and it gates nothing.
+    showing it, and it gates nothing. `participant_witness` -- a count of
+    distinct `side_norm` values on this market slug, which for an `aec`
+    two-way money line IS the participant list -- is likewise reported and
+    gates nothing: it is carried so a later read can promote it if
+    `event_title` turns out sparse, WITHOUT a fifth version of this rule
+    being guessed at first.
 
-    WHAT THIS STILL DOES NOT ESTABLISH: a trophy market whose catalogue
-    event_slug decomposes cleanly under a money-line prefix would pass.
-    Telling a fixture from a field of entrants needs a participant count,
-    and the field that carries one has not been identified. Named here
-    rather than papered over with a third guess.
+    MISSING METADATA FAILS CLOSED AND SAYS WHICH FIELD IS MISSING. An
+    absent `event_title` is refused as VENUE_EVENT_TITLE_NOT_CAPTURED, not
+    waved through and not collapsed into the generic unknown -- that
+    distinction is what let v2's `kind` mistake be diagnosed in one cycle.
     """
     slug = str(market_slug or "").lower()
     out = {"market_slug": slug, "side": side, "event_slug": event_slug,
@@ -344,10 +384,17 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
                "counting distinct market slugs under an event counts the "
                "event's MARKETS, not its participants -- observed 79 and "
                "249. Reported, never gated on"),
+           "event_title": event_title,
+           "participant_witness": participant_witness,
+           "participant_witness_gates_nothing": (
+               "a distinct-side_norm count is carried so a later read can "
+               "promote it if event_title is sparse. It is not gated on "
+               "before it has been observed"),
            "does_not_establish": (
-               "a trophy market that decomposes cleanly under a money-line "
-               "prefix would pass. A participant count would settle it and "
-               "the field carrying one is not identified")}
+               "that the two participants named are the two this lane holds "
+               "a probability for -- that is the resolver's job, not this "
+               "one's; nor that the competition is real rather than "
+               "simulated, which the venue's own labels answer separately")}
 
     m = _TRAILING_DATE.search(slug)
     if not m:
@@ -408,12 +455,41 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
             "against it" % (slug, " or ".join(repr(a) for a in accepted)))
         return out
 
+    # ── 4 · TWO PARTICIPANTS, from the catalogue's own event title ───
+    # v3 named this as an open hole and it is now closed. A trophy or a
+    # futures market decomposes exactly as cleanly as a fixture, so steps
+    # 1-3 cannot separate them; a title naming two sides can.
+    title = str(event_title or "").strip()
+    parts = participants_in_event_title(title)
+    out["participants_parsed"] = parts[:2]
+    out["participants_named"] = len(parts)
+    if not title:
+        out["refusals"].append(R_PERIOD_TITLE)
+        out["why"] = (
+            "the catalogue supplied no `event_title` for this contract, so "
+            "whether the event is a two-participant match or a field of "
+            "entrants is UNMEASURED. A futures or trophy market decomposes "
+            "into an event and a side exactly as a fixture does, so steps "
+            "1-3 cannot tell them apart and this fails closed")
+        return out
+    if len(parts) != 2:
+        out["refusals"].append(R_PERIOD_NOT_A_MATCH)
+        out["why"] = (
+            "the catalogue's own event title %r names %d side(s), not two. "
+            "A full-match money line is priced between two participants; a "
+            "trophy, a conference, an outright or a round winner is a field "
+            "of entrants and a full-match probability may not be priced "
+            "against it" % (title[:70], len(parts)))
+        return out
+
     out["period"] = FULL_MATCH
     out["why"] = (
         "the catalogue calls this a %r market, the slug prefix %r is a "
-        "confirmed money-line family, and the slug decomposes exactly into "
-        "its event %r%s with nothing between them"
-        % (k, prefix, ev, (" and side %r" % side) if side else ""))
+        "confirmed money-line family, the slug decomposes exactly into its "
+        "event %r%s with nothing between them, and the catalogue's own "
+        "event title names exactly two participants (%s)"
+        % (k, prefix, ev, (" and side %r" % side) if side else "",
+           " vs ".join(repr(p) for p in parts[:2])))
     return out
 
 

@@ -7695,6 +7695,331 @@ async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200),
     }
 
 
+@app.get("/api/admin/venue-fixture-crossing",
+         dependencies=[Depends(require_admin)])
+async def api_venue_fixture_crossing(sport: str = Query("Soccer"),
+                                     token: str = Query(""),
+                                     limit: int = Query(25, ge=1, le=80)
+                                     ) -> dict:
+    """PER PROVIDER FIXTURE: does a matching competition, fixture, full-match
+    contract and payout event actually exist on the venue's board?
+
+    WHY A FOURTH VERDICT AND NOT ONE. `NO_VENUE_CONTRACT_FOR_EVENT` collapses
+    four unrelated situations, and they have four different remedies -- or
+    none:
+
+      COMPETITION  the venue does not list this competition at all. No
+                   mapping repair reaches it.
+      FIXTURE      the competition is listed and THIS fixture is not. Also
+                   not a mapping defect.
+      CONTRACT     the fixture is listed but carries no money-line market
+                   that passes the full-match period test (`aec`/`atc`, an
+                   exact decomposition, two named participants).
+      PAYOUT       everything above exists and OUR market prices a
+                   DIFFERENT EVENT -- an exact score, a total, a spread, a
+                   team total, a half. Pairing those is the category error
+                   the period rule exists to stop, and it is a defect in
+                   the candidate query, not in the mapping.
+
+    WHAT THIS DOES NOT DO. It does not normalise anything into a match and
+    it changes no resolver. A fixture is proposed only when BOTH provider
+    sides appear in the venue event's own title under `vmap.norm_name`, and
+    the evidence for that claim is printed beside it so a wrong pairing is
+    visible rather than silently adopted. Our own payout event is read with
+    `copy_sports.family_of` -- the supported reader for a feed slug -- not
+    with a marker list invented here.
+    """
+    from .. import bettor_venue_mapping as vmap
+    from .. import copy_sports as cs
+    from .. import pmus as _pmus
+
+    try:
+        events = await asyncio.to_thread(_pmus.list_desk_events)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"error": type(exc).__name__, "events_read": 0}
+
+    want_tok = (token.strip().lower() if isinstance(token, str) else "")
+    board: list[dict] = []
+    tokens_on_board: set = set()
+    for ev in events:
+        slug = str(ev.get("slug") or "")
+        tok = (slug.split("-", 1)[0] or "").lower()
+        if not tok:
+            continue
+        tokens_on_board.add(tok)
+        if want_tok and tok != want_tok:
+            continue
+        mk = ev.get("markets") or []
+        board.append({
+            "token": tok, "event": slug,
+            "title": str(ev.get("title") or ""),
+            "moneylines": [str(m.get("us_slug") or "") for m in mk
+                           if str(m.get("kind") or "") in ("aec", "atc")],
+        })
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT condition_id, slug, title, event_title, sport
+          FROM markets
+         WHERE sport ILIKE $1
+           AND COALESCE(closed, false) = false
+           AND COALESCE(resolved, false) = false
+         ORDER BY condition_id
+         LIMIT $2
+        """, sport, int(limit))
+
+    out: dict = {
+        "version": "VENUE_FIXTURE_CROSSING_V1",
+        "reads_only": True, "submits_orders": False,
+        "sport_asked": sport, "venue_token_filter": want_tok or None,
+        "venue_events_considered": len(board),
+        "venue_tokens_on_board": sorted(tokens_on_board),
+        "verdict_counts": {}, "fixtures": [],
+    }
+    for r in rows:
+        gslug = str(r["slug"] or "")
+        fam = cs.family_of(gslug)
+        seg = (cs._feed_family(gslug) or ("", ""))[1] or None
+        sides = vmap_sides = [
+            s.strip() for s in str(r["event_title"] or "")
+            .replace(" vs. ", " vs ").split(" vs ") if s.strip()]
+        rec = {
+            "global_slug": gslug,
+            "title": str(r["title"] or "")[:90],
+            "event_title": str(r["event_title"] or "")[:90],
+            "our_sides": sides[:2],
+            "our_market_family": fam,
+            "our_segment": seg,
+            "our_payout_is_a_full_match_winner": (fam == "moneyline"
+                                                  and not seg),
+            "our_league_token": (gslug.split("-", 1)[0] or "").lower(),
+        }
+        if len(sides) != 2:
+            rec["verdict"] = "OUR_EVENT_TITLE_DOES_NOT_NAME_TWO_SIDES"
+            out["fixtures"].append(rec)
+            out["verdict_counts"][rec["verdict"]] = \
+                out["verdict_counts"].get(rec["verdict"], 0) + 1
+            continue
+
+        na, nb = vmap.norm_name(sides[0]), vmap.norm_name(sides[1])
+        rec["our_sides_normalised"] = [na, nb]
+
+        # THE FIXTURE, PROPOSED ONLY ON BOTH SIDES APPEARING. A single-side
+        # hit is exactly how `gtm-mrq-adm` reached a CONCACAF Guatemala vs
+        # El Salvador row on the shared token `gtm`, so one side is not
+        # enough and the near miss is reported rather than adopted.
+        hits, half = [], []
+        for b in board:
+            tn = vmap.norm_name(b["title"])
+            if not tn:
+                continue
+            a_in, b_in = (na and na in tn), (nb and nb in tn)
+            if a_in and b_in:
+                hits.append(b)
+            elif a_in or b_in:
+                half.append({"event": b["event"], "title": b["title"][:60],
+                             "matched_side": sides[0] if a_in else sides[1]})
+        rec["venue_fixture_candidates"] = [
+            {"event": h["event"], "title": h["title"][:70],
+             "moneylines": h["moneylines"][:6]} for h in hits[:4]]
+        rec["single_side_only_near_misses"] = half[:4]
+
+        if rec["our_league_token"] not in tokens_on_board and not hits:
+            rec["verdict"] = "NO_MATCHING_COMPETITION_ON_THE_VENUE_BOARD"
+        elif not hits:
+            rec["verdict"] = "COMPETITION_PRESENT_BUT_NO_MATCHING_FIXTURE"
+        elif len(hits) > 1:
+            # AMBIGUOUS IS REFUSED, not resolved by picking the first.
+            rec["verdict"] = "AMBIGUOUS__MORE_THAN_ONE_VENUE_FIXTURE_MATCHED"
+        else:
+            hit = hits[0]
+            full = []
+            for ms in hit["moneylines"]:
+                pre = ms.split("-", 1)[0]
+                per = vmap.period_of_venue_slug(
+                    ms, event_slug=hit["event"], kind="side",
+                    side=(ms[len("%s-%s-" % (pre, hit["event"])):]
+                          if ms.startswith("%s-%s-" % (pre, hit["event"]))
+                          else None),
+                    event_title=hit["title"])
+                if per.get("period") == vmap.FULL_MATCH:
+                    full.append(ms)
+            rec["venue_full_match_contracts"] = full[:6]
+            if not full:
+                rec["verdict"] = ("FIXTURE_PRESENT_BUT_NO_FULL_MATCH_"
+                                  "MONEYLINE_CONTRACT")
+            elif not rec["our_payout_is_a_full_match_winner"]:
+                rec["verdict"] = ("ALL_PRESENT_BUT_OUR_MARKET_PRICES_A_"
+                                  "DIFFERENT_PAYOUT_EVENT")
+                rec["our_payout_event"] = fam + (("/" + seg) if seg else "")
+            else:
+                rec["verdict"] = ("COMPETITION_FIXTURE_CONTRACT_AND_PAYOUT_"
+                                  "EVENT_ALL_PRESENT")
+        out["fixtures"].append(rec)
+        out["verdict_counts"][rec["verdict"]] = \
+            out["verdict_counts"].get(rec["verdict"], 0) + 1
+    out["reading"] = (
+        "Only COMPETITION_FIXTURE_CONTRACT_AND_PAYOUT_EVENT_ALL_PRESENT is a "
+        "mapping defect on our side. The other verdicts are absent venue "
+        "coverage or a candidate query asking for a payout event the venue "
+        "does not sell as a money line, and no normalisation repairs either.")
+    return out
+
+
+@app.get("/api/admin/venue-clock-probe",
+         dependencies=[Depends(require_admin)])
+async def api_venue_clock_probe(slugs: str = Query(...),
+                                gap_s: float = Query(12.0, ge=1.0, le=60.0)
+                                ) -> dict:
+    """WHAT `marketData.transactTime` ACTUALLY MEANS, established by reading
+    the same contract twice.
+
+    THE QUESTION, AND WHY IT DECIDES A GATE. The entry lane computes
+    `age = decision_instant - transactTime` and refuses the book above 30 s.
+    That arithmetic is only a staleness measurement if the venue stamps the
+    RESPONSE -- an observation clock. If it stamps the LAST BOOK CHANGE,
+    then an old value means the book has not moved, which is the ordinary
+    condition of a quiet pre-game money line and NOT stale executable data.
+    Refusing on it would then refuse every quiet book and call it freshness.
+
+    TWO OTHER MODULES IN THIS REPOSITORY ALREADY TOOK THE OTHER SIDE, and
+    they are the established execution path:
+
+      institutional_book.current()  computes FRESHNESS_STATUS from
+                                    BETTOR_RECEIVED_TIMESTAMP -- OUR clock
+                                    -- and uses transactTime only for
+                                    MARKET_DATA_LAG_MS, as provenance.
+      obs/streamstate.py            states the prohibition outright: a venue
+                                    timestamp "belongs to the VENUE's clock
+                                    domain", nothing subtracts it from a
+                                    local reading, and the raw value is kept
+                                    as a STRING so the arithmetic is awkward
+                                    to do by accident.
+
+    THE DISCRIMINATING OBSERVATION. Read the same slug twice, `gap_s` apart,
+    and compare the transact time against a hash of the book itself:
+
+      book UNCHANGED, transactTime ADVANCED  -> it stamps the RESPONSE.
+                                                An observation clock, and
+                                                the age arithmetic measures
+                                                path lag.
+      book UNCHANGED, transactTime FROZEN    -> it stamps the LAST CHANGE.
+                                                The age measures market
+                                                quiet, not our staleness,
+                                                and must not gate freshness.
+      book CHANGED                            -> uninformative on this pair;
+                                                both semantics advance.
+
+    This route READS ONLY. It arms nothing, writes nothing and submits
+    nothing; it shares the collector's venue budget through `venue_pace`
+    exactly as the entry lane's own read does.
+    """
+    import hashlib
+
+    from ..workers import ext_pinnacle_loop as loop
+    from .. import bettor_book_snapshot as bs
+    from .. import bettor_market_stream as ms
+
+    def _sha(md) -> str:
+        blob = json.dumps(
+            {"bids": (md or {}).get("bids"),
+             "offers": (md or {}).get("offers") or (md or {}).get("asks")},
+            sort_keys=True, default=str)
+        return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+    async def _one(slug: str) -> dict:
+        asked = time.time()
+        book = await asyncio.to_thread(loop._read_book_blocking, slug)
+        got = time.time()
+        md = (book or {}).get("marketData")
+        if (book or {}).get("error") or md is None:
+            return {"slug": slug, "error": (book or {}).get("error")
+                    or "NO_MARKET_DATA",
+                    "asked_at_epoch_s": round(asked, 6),
+                    "returned_at_epoch_s": round(got, 6)}
+        snap = bs.snapshot(md, symbol=slug, captured_at=got)
+        raw = snap.get("TRANSACT_TIME")
+        raw = None if raw in (None, bs.NOT_IDENTIFIED) else str(raw)
+        dt = ms._parse_ts(raw) if raw else None
+        ep = dt.timestamp() if dt is not None else None
+        return {
+            "slug": slug,
+            "field_path": "marketData.transactTime",
+            "raw_transact_time": raw,
+            "raw_type": type(snap.get("TRANSACT_TIME")).__name__,
+            "parsed_epoch_s": (None if ep is None else round(ep, 6)),
+            "parsed_iso": (None if dt is None else dt.isoformat()),
+            "asked_at_epoch_s": round(asked, 6),
+            "returned_at_epoch_s": round(got, 6),
+            "round_trip_s": round(got - asked, 3),
+            # THE AGE, EXACTLY AS THE GATE COMPUTES IT, at the instant the
+            # response was in hand. Reported, never enforced here.
+            "age_at_return_s": (None if ep is None
+                                else round(got - ep, 3)),
+            "configured_limit_s": loop.MAX_VENUE_QUOTE_AGE_S,
+            "book_sha16": _sha(md),
+            "best_ask": snap.get("BEST_ASK"),
+            "displayed_ask_depth": (
+                (snap.get("DISPLAYED_DEPTH_AT_T0") or {}).get("ask")),
+        }
+
+    want = [s.strip() for s in str(slugs or "").split(",") if s.strip()][:6]
+    pairs = []
+    for slug in want:
+        first = await _one(slug)
+        await asyncio.sleep(float(gap_s))
+        second = await _one(slug)
+        row = {"slug": slug, "gap_s": float(gap_s),
+               "first": first, "second": second}
+        e1, e2 = first.get("parsed_epoch_s"), second.get("parsed_epoch_s")
+        s1, s2 = first.get("book_sha16"), second.get("book_sha16")
+        if e1 is None or e2 is None:
+            row["verdict"] = "VENUE_CLOCK_NOT_READABLE_ON_BOTH_READS"
+        elif s1 != s2:
+            row["verdict"] = "BOOK_CHANGED_BETWEEN_READS_UNINFORMATIVE"
+        elif abs(e2 - e1) < 0.001:
+            row["verdict"] = "FROZEN_WHILE_BOOK_UNCHANGED__LAST_UPDATE_CLOCK"
+        else:
+            row["verdict"] = "ADVANCED_WHILE_BOOK_UNCHANGED__RESPONSE_CLOCK"
+        row["transact_time_delta_s"] = (
+            None if (e1 is None or e2 is None) else round(e2 - e1, 6))
+        row["book_changed"] = (None if (s1 is None or s2 is None)
+                               else s1 != s2)
+        pairs.append(row)
+
+    seen = {r["verdict"] for r in pairs}
+    if not pairs:
+        overall = "NO_SLUG_SUPPLIED"
+    elif seen == {"FROZEN_WHILE_BOOK_UNCHANGED__LAST_UPDATE_CLOCK"}:
+        overall = "LAST_BOOK_UPDATE__AGE_IS_MARKET_QUIET_NOT_OUR_STALENESS"
+    elif seen == {"ADVANCED_WHILE_BOOK_UNCHANGED__RESPONSE_CLOCK"}:
+        overall = "RESPONSE_OBSERVATION__AGE_IS_A_PATH_LAG_MEASUREMENT"
+    else:
+        overall = "NOT_ESTABLISHED_ON_THIS_SAMPLE"
+    return {
+        "version": "VENUE_CLOCK_SEMANTICS_PROBE_V1",
+        "reads_only": True, "submits_orders": False,
+        "configured_limit_s": loop.MAX_VENUE_QUOTE_AGE_S,
+        "pairs": pairs,
+        "semantics": overall,
+        "reading": (
+            "A single old transactTime does NOT establish a stale "
+            "executable book. Only the frozen-while-unchanged / "
+            "advanced-while-unchanged contrast does, and a pair where the "
+            "book changed says nothing either way."),
+        "established_elsewhere_in_this_repo": {
+            "institutional_book.current": (
+                "FRESHNESS_STATUS is computed from "
+                "BETTOR_RECEIVED_TIMESTAMP; transactTime feeds "
+                "MARKET_DATA_LAG_MS only"),
+            "obs.streamstate": (
+                "a venue timestamp belongs to the venue's clock domain and "
+                "nothing subtracts it from a local reading"),
+        },
+    }
+
+
 @app.get("/api/admin/shadow-mapgap",
          dependencies=[Depends(require_admin)])
 async def api_shadow_mapgap(sport: str = Query("soccer"),
@@ -12262,10 +12587,92 @@ async def api_ext_pinnacle_shadow(action: str) -> dict:
         "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
         "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
         ext.CONTROL_KEY, json.dumps(action == "on"))
-    return {"ok": True, "control_key": ext.CONTROL_KEY,
-            "armed": action == "on",
+    # THE WRITE IS READ BACK, and the readback is what is reported.
+    # An arm request that times out, 502s or is retried leaves the caller
+    # unable to say whether the row moved, and run 75's report treated a
+    # curl timeout as "nothing below is a cycle" in one line and then went
+    # on printing. `armed_requested` is what was asked for;
+    # `armed_confirmed` is what the table says afterwards. They are not the
+    # same fact and they now have different names.
+    confirmed = None
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            ext.CONTROL_KEY)
+        confirmed = _truthy_control(raw)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "control_key": ext.CONTROL_KEY,
+                "armed_requested": action == "on",
+                "armed_confirmed": None,
+                "readback_error": type(exc).__name__,
+                "why": ("the control row was written and could not be read "
+                        "back, so the armed state is UNCONFIRMED. Do not "
+                        "interpret a following cycle as armed"),
+                "env_flag_also_required": "EXT_PINNACLE_SHADOW",
+                "submits_orders": False}
+    return {"ok": confirmed == (action == "on"),
+            "control_key": ext.CONTROL_KEY,
+            "armed_requested": action == "on",
+            "armed_confirmed": confirmed,
+            # Kept for readers that already parse it, and it now means the
+            # CONFIRMED state rather than the requested one.
+            "armed": confirmed,
             "env_flag_also_required": "EXT_PINNACLE_SHADOW",
             "submits_orders": False}
+
+
+def _truthy_control(raw) -> bool:
+    """The control row's jsonb value as a bool, without guessing.
+
+    The column is jsonb, so asyncpg hands back a string. `bool("false")`
+    is True, which is exactly the sort of silent affirmative this lane
+    refuses; the parse is explicit.
+    """
+    if raw is None:
+        return False
+    if isinstance(raw, bool):
+        return raw
+    try:
+        return bool(json.loads(raw))
+    except (TypeError, ValueError):
+        return False
+
+
+@app.get("/api/admin/ext-pinnacle-shadow",
+         dependencies=[Depends(require_admin)])
+async def api_ext_pinnacle_shadow_state() -> dict:
+    """THE CONTROL STATE, read and not asserted.
+
+    Arming needs the environment flag AND this row. A report that
+    interprets a cycle as "the armed lane's output" owes both facts, read
+    after the arm rather than inferred from the POST's status code.
+    """
+    from .. import bettor_external_shadow as ext
+
+    pool = await get_pool()
+    out = {"control_key": ext.CONTROL_KEY,
+           "env_flag": "EXT_PINNACLE_SHADOW",
+           "env_flag_set": bool(os.getenv("EXT_PINNACLE_SHADOW")),
+           "submits_orders": False, "reads_only": True}
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            ext.CONTROL_KEY)
+        out["control_row_present"] = raw is not None
+        out["control_row_raw"] = (None if raw is None else str(raw)[:32])
+        out["armed_confirmed"] = _truthy_control(raw)
+    except Exception as exc:                                    # noqa: BLE001
+        out["error"] = type(exc).__name__
+        out["armed_confirmed"] = None
+        out["why"] = ("the control row could not be read, so the armed "
+                      "state is UNCONFIRMED -- not false")
+        return out
+    out["effectively_armed"] = bool(out.get("armed_confirmed")) and         out["env_flag_set"]
+    out["why"] = (
+        "effectively_armed is the conjunction the loop itself requires. "
+        "Either half false means the scheduled lane is not running, and a "
+        "cycle read in that state is not the armed lane's output")
+    return out
 
 
 @app.post("/api/admin/rn1x-model-fit/{action}",

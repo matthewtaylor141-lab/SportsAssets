@@ -267,3 +267,91 @@ def test_the_venue_error_projection_carries_the_age_limit_and_raw_value():
     for key in ("field_path", "raw", "raw_type", "parsed_epoch_s",
                 "age_at_read_s", "basis"):
         assert '"%s"' % key in src, key
+
+
+# ── 7 · THE SEMANTICS ARE NOT ESTABLISHED, AND THE CODE SAYS SO ──────
+
+def test_the_module_declares_the_clock_semantics_unestablished():
+    """The claim the gate rests on, marked as a claim.
+
+    `decision_instant - transactTime` measures OUR staleness only if the
+    venue stamps the RESPONSE. If it stamps the LAST BOOK CHANGE, an old
+    value means the book has not moved -- the ordinary condition of a quiet
+    pre-game money line -- and refusing on it would refuse every quiet book
+    and call the result freshness.
+
+    Two other modules here took the other side and they are the established
+    execution path: `institutional_book.current()` computes
+    FRESHNESS_STATUS from BETTOR_RECEIVED_TIMESTAMP and uses transactTime
+    only for MARKET_DATA_LAG_MS; `obs/streamstate` forbids subtracting a
+    venue timestamp from a local reading outright.
+    """
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    assert loop.VENUE_CLOCK_SEMANTICS.startswith("UNESTABLISHED")
+    assert "LAST_BOOK_UPDATE" in loop.VENUE_CLOCK_SEMANTICS
+    assert "RESPONSE_STAMP" in loop.VENUE_CLOCK_SEMANTICS
+
+
+def test_the_freshness_limit_is_not_relaxed_while_the_basis_is_unestablished():
+    """RELAXING A GATE ON AN UNESTABLISHED READING IS LOOSENING IT.
+
+    The conservative direction is to keep refusing. This pins the two
+    limits against the values the lane has always used, so a future edit
+    that widens them to let candidates through has to change this test and
+    say why.
+    """
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    assert loop.MAX_VENUE_QUOTE_AGE_S == 30.0
+    assert loop.PINNACLE_MAX_AGE_S == 30.0
+
+
+def test_a_book_refusal_owes_five_numbers_in_the_candidate_ledger():
+    """Raw value, parsed stamp, decision instant, age and limit.
+
+    "VENUE_QUOTE_STALE" with no number is not a finding anybody can act
+    on, and the semantics question cannot even be asked without the raw
+    string.
+    """
+    import inspect
+
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    src = inspect.getsource(loop.cycle)
+    for key in ("raw_transact_time", "parsed_epoch_s",
+                "decision_instant_epoch_s", "age_s", "limit_s",
+                "age_semantics"):
+        assert '"%s"' % key in src, key
+
+
+# ── 8 · THE CYCLE'S OWN LABEL, AND WHAT IT REFUSES TO CLAIM ──────────
+
+def test_a_cycle_that_evaluated_nothing_is_labelled_an_input_path_block():
+    """NOT "zero positive edge" -- that is a claim about the market.
+
+    A cycle whose candidates never reached execution estimation did not
+    measure the market, so it establishes nothing about available edge.
+    """
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    assert loop.ZERO_EVALUATED_INPUT_PATH_BLOCKED == \
+        "ZERO_EVALUATED__INPUT_PATH_BLOCKED"
+    import inspect
+    src = inspect.getsource(loop.cycle)
+    assert "ZERO_EVALUATED_INPUT_PATH_BLOCKED if evaluated == 0" in src
+    assert '"cycle_label"' in src
+
+
+def test_every_mapped_candidate_gets_a_ledger_row():
+    """One row per candidate that reached the mapping, at its first refusal.
+
+    Run 75 reported `mapped 3 -> evaluated 0` with no reconciliation,
+    because the only per-candidate census lived in a route whose step had
+    died. Three candidates failing one gate and one candidate failing three
+    are different facts.
+    """
+    import inspect
+
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    src = inspect.getsource(loop.cycle)
+    # the identity, book, record and admitted paths all record
+    assert src.count("_ledger({") >= 4, src.count("_ledger({")
+    assert '"first_refusal"' in src
+    assert '"mapped_candidate_ledger": ledger' in src

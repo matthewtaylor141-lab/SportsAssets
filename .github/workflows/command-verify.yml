@@ -2940,7 +2940,43 @@ jobs:
           say "arm HTTP $C"
           jq -c . /tmp/ar.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
             || head -c 200 /tmp/ar.json 2>/dev/null || true
-          [ "$C" = "200" ] || say "ARM WAS REFUSED -- nothing below is a cycle"
+          # 2b · THE ARM IS CONFIRMED FROM THE CONTROL STATE, NOT FROM A
+          #      STATUS CODE. Making the report above non-fatal is right,
+          #      and on its own it introduces a worse failure: a timed-out
+          #      or retried arm would be passed over in silence and the
+          #      cycle read afterwards presented as the armed lane's
+          #      output. `armed_requested` is what was asked for;
+          #      `armed_confirmed` is what the table says afterwards; and
+          #      `effectively_armed` is the conjunction the loop itself
+          #      requires -- the control row AND the environment flag.
+          #      UNCONFIRMED IS NOT ARMED AND IT IS NOT UNARMED EITHER.
+          AC=$(curl -s -o /tmp/arm_state.json -w '%{http_code}' --max-time 60 \
+                 -H "$H" "$API/api/admin/ext-pinnacle-shadow" || echo 000)
+          say "arm-state HTTP $AC"
+          ARMED=UNCONFIRMED
+          if [ "$AC" = "200" ]; then
+            ARMED=$(jq -r '
+              if .effectively_armed == true then "ARMED_CONFIRMED"
+              elif .armed_confirmed == null then "UNCONFIRMED"
+              elif .armed_confirmed == false then "NOT_ARMED_CONTROL_ROW_FALSE"
+              elif .env_flag_set == false then "NOT_ARMED_ENV_FLAG_UNSET"
+              else "UNCONFIRMED" end' /tmp/arm_state.json 2>/dev/null \
+              || echo UNCONFIRMED)
+            jq -c '{control_row_present, control_row_raw, armed_confirmed,
+                    env_flag_set, effectively_armed}' /tmp/arm_state.json \
+              2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" || true
+          fi
+          say "ARM VERDICT  $ARMED"
+          echo "ARM_VERDICT=$ARMED" >> "$GITHUB_ENV"
+          case "$ARMED" in
+            ARMED_CONFIRMED) : ;;
+            *) say "" ;
+               say "  THE ARM IS NOT CONFIRMED ($ARMED). Everything below" ;
+               say "  is still READ and still REPORTED -- the loop cycles" ;
+               say "  on its own schedule -- but it must NOT be described" ;
+               say "  as the armed lane's output, and an empty funnel here" ;
+               say "  says nothing about the market." ;;
+          esac
           sleep 180
 
           # 3 · EVERY INPUT BEHIND EVERY CANDIDATE. Written to a file and
@@ -3808,6 +3844,34 @@ jobs:
                     + "  written " + n(.value.written)),
                 (($L.funnel_by_provider_sport // {}) | to_entries[]
                   | "     " + .key + " refusals " + n(.value.refusals)),
+                "  CYCLE LABEL " + n($L.cycle_label),
+                "  " + n($L.cycle_label_note),
+                "",
+                "  -- every MAPPED candidate against its FIRST refusal --",
+                (($L.mapped_candidate_ledger // [])[]
+                  | "   " + n(.stage) + "  " + n(.first_refusal // "ADMITTED")
+                    + "  us " + n(.us_market_slug)
+                    + "  ours " + n(.global_slug)
+                    + "  priced " + n(.priced_outcome)
+                    + (if .edge == null then ""
+                       else "  edge " + (.edge|tostring) end)),
+                (($L.mapped_candidate_ledger // [])[]
+                  | select(.raw_transact_time != null or .age_s != null)
+                  | "      CLOCK raw " + n(.raw_transact_time)
+                    + "  parsed " + n(.parsed_epoch_s)
+                    + "  decision " + n(.decision_instant_epoch_s)
+                    + "  age " + n(.age_s) + "s  limit " + n(.limit_s) + "s"
+                    + "  basis " + n(.age_basis)),
+                (($L.mapped_candidate_ledger // [])[]
+                  | select(.age_semantics != null)
+                  | "      CLOCK SEMANTICS " + n(.age_semantics)),
+                (($L.mapped_candidate_ledger // [])[]
+                  | select(.period_evidence != null)
+                  | "      PERIOD " + n(.period_evidence.basis)
+                    + "  participants "
+                    + n(.period_evidence.participants_named)
+                    + "  title " + n(.period_evidence.event_title)),
+                "",
                 (($L.venue_errors // [])[]
                   | "  venue_error " + n(.us_market_slug // .global_slug)
                     + "  " + n(.refusal)),
@@ -4138,6 +4202,86 @@ jobs:
           say "  missing venue coverage; and our slug naming an exact"
           say "  score or a total is a payout event the venue does not"
           say "  sell as a money line, which is neither of those."
+          say ""
+          # ── S5 · WHAT THE VENUE'"'"'S transactTime ACTUALLY MEANS ──────
+          # The gate refuses a book whose transactTime is more than 30 s
+          # before the decision instant. That is a staleness measurement
+          # ONLY IF the venue stamps the RESPONSE. If it stamps the LAST
+          # BOOK CHANGE, an old value means the book has not moved -- the
+          # ordinary condition of a quiet pre-game money line -- and the
+          # gate would be refusing quiet books and calling it freshness.
+          # Two other modules here already take the other side:
+          # institutional_book computes freshness from OUR receipt clock,
+          # and obs/streamstate forbids subtracting a venue stamp from a
+          # local reading at all. READ THE SAME CONTRACT TWICE: a stamp
+          # that ADVANCES while the book is UNCHANGED stamps the response.
+          say ""
+          say "== S5 · the venue clock, read twice on the same contract =="
+          CP=$(curl -s --max-time 240 -o /tmp/clk.json -w '%{http_code}' \
+                 -H "$H" "$A/api/admin/venue-clock-probe?gap_s=12&slugs=aec-mlb-cin-tor-2026-09-26,aec-mlb-nym-wsh-2026-09-26,aec-atp-danmed-valroy-2026-09-23" \
+                 || echo 000)
+          say "venue-clock-probe HTTP $CP"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            "  configured_limit_s " + n(.configured_limit_s),
+            "  SEMANTICS " + n(.semantics),
+            ((.pairs // [])[]
+              | "  " + n(.slug) + "  gap " + n(.gap_s) + "s  " + n(.verdict),
+                "     1 raw " + n(.first.raw_transact_time)
+                  + "  type " + n(.first.raw_type)
+                  + "  parsed " + n(.first.parsed_epoch_s),
+                "       returned_at " + n(.first.returned_at_epoch_s)
+                  + "  age_at_return " + n(.first.age_at_return_s) + "s"
+                  + "  book " + n(.first.book_sha16)
+                  + "  ask " + n(.first.best_ask)
+                  + "  depth " + n(.first.displayed_ask_depth),
+                "     2 raw " + n(.second.raw_transact_time)
+                  + "  parsed " + n(.second.parsed_epoch_s),
+                "       returned_at " + n(.second.returned_at_epoch_s)
+                  + "  age_at_return " + n(.second.age_at_return_s) + "s"
+                  + "  book " + n(.second.book_sha16),
+                "     transact_delta " + n(.transact_time_delta_s) + "s"
+                  + "  book_changed " + n(.book_changed)),
+            "  " + n(.reading)' \
+            /tmp/clk.json 2>&1 | head -60 | tee -a "$GITHUB_STEP_SUMMARY" \
+            || true
+
+          # ── S6 · THE FIXTURE QUESTION, four verdicts not one ─────────
+          say ""
+          say "== S6 · competition / fixture / contract / payout event =="
+          for SP in Soccer Baseball; do
+            FX=$(curl -s --max-time 240 -o "/tmp/fx_$SP.json" \
+                   -w '%{http_code}' -H "$H" \
+                   "$A/api/admin/venue-fixture-crossing?sport=$SP&limit=30" \
+                   || echo 000)
+            say ""
+            say "-- $SP  HTTP $FX"
+            jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+              "   venue_events_considered " + n(.venue_events_considered),
+              "   verdicts " + n(.verdict_counts),
+              ((.fixtures // [])[]
+                | "   " + n(.global_slug),
+                  "      verdict " + n(.verdict),
+                  "      ours sides " + n(.our_sides)
+                    + "  family " + n(.our_market_family)
+                    + "  segment " + n(.our_segment)
+                    + "  full_match_winner "
+                    + n(.our_payout_is_a_full_match_winner),
+                  "      venue fixture " + n([(.venue_fixture_candidates
+                      // [])[].event])
+                    + "  full_match " + n(.venue_full_match_contracts),
+                  (if (.single_side_only_near_misses // []) | length > 0
+                   then "      ONE SIDE ONLY (not adopted) "
+                        + n([(.single_side_only_near_misses[]
+                              | .event)])
+                   else empty end))' \
+              "/tmp/fx_$SP.json" 2>&1 | head -120 \
+              | tee -a "$GITHUB_STEP_SUMMARY" || true
+          done
+          say ""
+          say "  ONLY the ALL_PRESENT verdict is a mapping defect on our"
+          say "  side. The rest are absent venue coverage, or a candidate"
+          say "  query asking for a payout event the venue does not sell"
+          say "  as a money line, and no normalisation repairs either."
           say ""
           say "  THE EPL QUESTION, SETTLED EITHER WAY. events_read is the"
           say "  WHOLE cached board, not desk-games' first 400, so an"
