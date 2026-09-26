@@ -5007,15 +5007,58 @@ jobs:
           say "  credentials: same-origin and no token in any URL."
 
           say ""
-          say "== E3 . ACTIVATION IS REFUSED BY THE SERVER =="
+          say "== E3 . THE SERVER DECIDES ACTIVATION, AND SAYS WHICH WAY =="
+          say "  A REFUSAL IS 409 AND AN AUTHORISATION IS 200. Production"
+          say "  has no account bound and no owner-approved limit set, so"
+          say "  409 is the expected answer here; a 200 would name the"
+          say "  verdict AUTHORIZED_FOR_A_TEST_VENUE and would still enable"
+          say "  no capital -- funded submission is off in code."
           AC=$(curl -sS -o /tmp/act.json -w '%{http_code}' -X POST -H "$H" \
                  -H 'Content-Type: application/json' -d '{"by":"CI"}' \
                  "$A/api/command/bettor/control/activate" || echo 000)
-          say "  activate                       HTTP $AC (expect 409)"
-          jq -r '"  refusal                        " + (.detail.refusal // "-"),
-                 "  unmet prerequisites            "
-                   + ((.detail.failed.unmet // []) | join(", "))' \
+          say "  activate                       HTTP $AC (expect 409 here)"
+          jq -r '(.detail // .) as $d
+                 | "  ok                             "
+                     + (($d.ok // false) | tostring),
+                   "  verdict                        "
+                     + ($d.verdict // "-"),
+                   "  refusal                        "
+                     + ($d.refusal // "-"),
+                   "  venue class                    "
+                     + ($d.venue_class // "-"),
+                   "  funded submission              "
+                     + ($d.funded_submission // "-"),
+                   "  authorises capital             "
+                     + (($d.authorises_capital // false) | tostring),
+                   "  unmet prerequisites            "
+                     + (($d.failed.unmet // []) | join(", "))' \
             /tmp/act.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+          say ""
+          say "== E4 . THE CONTROL SESSION IS SCOPED, AND SERVER-SIDE =="
+          say "  No operator password is held by this runner, so what is"
+          say "  checked is the REFUSAL side: a deliberately wrong password"
+          say "  must be rejected with a status, not a 200 carrying"
+          say "  ok:false, and it must set no cookie."
+          CS=$(curl -sS -o /tmp/ctlno.json -D /tmp/ctlno.hdr -w '%{http_code}' \
+                 -X POST -H 'Content-Type: application/json' \
+                 -d '{"password":"deliberately-not-the-operator-password"}' \
+                 "$A/api/command/session/control" || echo 000)
+          say "  wrong operator password        HTTP $CS (expect 401, or 503"
+          say "                                 if it is not configured yet)"
+          if grep -qi 'set-cookie: *bt_control' /tmp/ctlno.hdr; then
+            say "  FOUND a control cookie on a refusal -- that is a defect"
+          else
+            say "  no control cookie was set on the refusal"
+          fi
+          jq -r '"  reason                         "
+                   + ((.detail.reason // .reason) // "-")' \
+            /tmp/ctlno.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          if grep -q 'id="oppass"' /tmp/page2.html; then
+            say "  the page offers an operator PASSWORD field, not a token"
+          else
+            say "  the page has no operator password field -- check the build"
+          fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Capacity probe — the isolation audit, against production
@@ -5036,6 +5079,13 @@ jobs:
           say "  fingerprints: the condition id shape, the slug prefix and"
           say "  the payout event. NEVER by an experiment id, because the"
           say "  experiment id is what was wrong."
+          say ""
+          say "  AND THE POSITIONS ARE THE LOAD-BEARING COUNT. Positions and"
+          say "  fills feed exposure and per-lane P&L DIRECTLY -- neither"
+          say "  consumer reads external_valuations on the way to a"
+          say "  position -- so a zero valuation count would establish"
+          say "  nothing about either. The evidence is zero identified probe"
+          say "  positions AND zero of their dependent records."
           AU=$(curl -sS -o /tmp/prodaudit.json -w '%{http_code}' -H "$H" \
                  "$A/api/admin/capacity-probe-audit" || echo 000)
           say "  audit                          HTTP $AU (expect 200)"
@@ -5046,7 +5096,8 @@ jobs:
                  "  probe fills                    " + ((.fills // 0) | tostring),
                  "  probe decisions                " + ((.decisions // 0) | tostring),
                  "  probe outcome rows             " + ((.outcomes // 0) | tostring),
-                 "  probe valuations               " + ((.valuations // 0) | tostring),
+                 "  probe valuations (not the proof) "
+                   + ((.valuations // 0) | tostring),
                  "  positions in this database     " + ((.all_positions // 0) | tostring),
                  "  clean                          " + (.clean | tostring),
                  "  unreadable                     " + (.unreadable // "no")' \

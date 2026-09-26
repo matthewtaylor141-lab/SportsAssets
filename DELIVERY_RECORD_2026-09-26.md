@@ -92,11 +92,104 @@ Every action reports **requested**, **applied** (read back from the row) and
 | any control with no operator token | 401; with a read cookie only, 403 |
 | control state, as the rows read | research lane armed true, funded executor paused true, working modelled orders 3 |
 
-Activation is refused **on the server**, computed from the stored control
+Activation is decided **on the server**, computed from the stored control
 rows — the button now sends, because a disabled button establishes nothing
-when anybody can POST. The limits and account forms record **proposals**;
-they change no enforced rail, and the enforced rails are shown beside them
-with their digest.
+when anybody can POST.
+
+## The operator session, and the activation path completed
+
+### No service credential in the browser
+
+The controls take a **CONTROL-scoped operator session**. The operator
+password is sent once to `POST /api/command/session/control`; the server
+returns a short-lived HttpOnly `bt_control` cookie on the `/api/command`
+path and **never puts the token in the body**. The scope is inside the
+signed material, so a read (desk) token cannot satisfy a control challenge
+and the control token is refused wherever `require_admin` is the gate — it
+opens no `/api/admin` route.
+
+Verified in Chromium against the local build of this release, no admin
+token anywhere:
+
+| step | result |
+|---|---|
+| the page with no credential | sign-in form |
+| read sign-in with the desk password | desk opens, cookie `bt_command` only |
+| **a write with only the read session** | **REFUSED `CONTROL_REQUIRES_AN_OPERATOR_SESSION`** |
+| a wrong operator password | **REFUSED `OPERATOR_PASSWORD_NOT_ACCEPTED`** (401, no cookie set) |
+| the right operator password | control session starts, cookie `bt_control` added |
+| the cookie read from JavaScript | empty — HttpOnly |
+| the password field afterwards | cleared; nothing stored |
+| pause, then resume, with the operator session | both **APPLIED**, state read back PAUSED then ARMED |
+| the paused account by canonical id, renamed "Perfectly Fine Desk" | **REFUSED `ACCOUNT_IS_PAUSED`** — off its row, not its name |
+
+A wrong password was previously answered with a 200 carrying `ok: false`
+(the pattern the read sign-ins use). That is now **401**: a control
+credential must not be obtainable by misreading a status line.
+
+### Account and limits are executable, not proposals
+
+- the account is resolved against the **canonical registry**
+  (`bettor_desk_accounts`) by `account_id`. A display name is recorded for
+  the audit and decides nothing. Refusals, each off the row and each
+  demonstrated: `ACCOUNT_ID_NOT_SUPPLIED`,
+  `ACCOUNT_ID_NOT_IN_THE_CANONICAL_REGISTRY`, `ACCOUNT_IS_NOT_ACTIVE`,
+  `ACCOUNT_IS_PAUSED`, `ACCOUNT_ACCOUNTING_IS_NOT_RESOLVED`,
+  `VENUE_CLASS_NOT_ESTABLISHED`.
+- the owner's approved limits are **consumed**:
+  `bettor_entry_execution.effective_limits` takes the element-wise minimum
+  of the frozen rail and the approved value, so an approval can only ever
+  **tighten**. A looser number is reported `ignored_because_looser`. The
+  frozen digest `a19eb60a2817…` is **unchanged**; the effective digest with
+  the owner's four numbers applied is `8e667b126912…`.
+- approving a recorded set is **admin-gated and separate**: recording is the
+  operator's act from the desk, approving is the owner's and takes the
+  service credential the browser never holds. `confirm` must equal the
+  recorded per-order limit, so an approval names the set it approves.
+
+### Readiness is derived from evidence; UNKNOWN blocks
+
+| check | where it is derived from |
+|---|---|
+| funded submission disabled | the code constant |
+| account selected and clean | the registry row |
+| limits recorded and complete | the stored set |
+| limits approved by the owner | the approval flag |
+| approved limits tighten the enforced rails | recomputed against the frozen rails |
+| venue book freshness basis | the cycle ledger's own `venue_clock.basis` |
+| settlement compatibility | each row's `settlement_comparison` verdict |
+| market scope metadata | each row's `period` |
+| an autonomous entry was admitted unwaived | `admissible` minus research-waived rows, demonstration and acceptance books excluded by experiment **and** provenance |
+
+No evidence is **UNKNOWN**, and UNKNOWN blocks. Measured on a disposable
+local database: with the market evidence removed the three market checks go
+to UNKNOWN; with real-shaped evidence present they turn true. They are not
+constants and they are not unconditional passes.
+
+### Both directions demonstrated
+
+| path | result |
+|---|---|
+| **positive, TEST venue** — clean canonical account, owner-approved limits, all 9 checks met | **HTTP 200, `AUTHORIZED_FOR_A_TEST_VENUE`**, `funded_submission DISABLED`, `authorises_capital false`. Clicked in Chromium: "activate — APPLIED — AUTHORIZED_FOR_A_TEST_VENUE", nine PASS pills, funded executor still PAUSED, orders submitted 0 |
+| the same account bound to `PMUS` (FUNDED) | 409 `FUNDED_ACTIVATION_REQUIRES_THE_OWNERS_WRITTEN_AUTHORIZATION` — every check met and it still refuses |
+| limits recorded but not approved | 409 `LIMIT_SET_NOT_APPROVED_BY_THE_OWNER` |
+| any check unmet or UNKNOWN | 409 `FUNDED_ACTIVATION_PREREQUISITES_NOT_MET`, with the list |
+| the paused account | 409 `ACCOUNT_IS_PAUSED` |
+| an unknown venue | 409 `VENUE_CLASS_NOT_ESTABLISHED` |
+| a demonstration entry beside it | does **not** turn the admission check true — its inputs are chosen |
+| a research-waived admission | does **not** qualify — excluded by the row's own risk verdict |
+
+Two defects the live runs found and this release fixes: the route raised
+**409 unconditionally**, so a complete authorisation was indistinguishable
+from a refusal to any caller reading the status; and the authorisation was
+written **over the account binding it had just read**, so the desk showed
+"no account bound" immediately after authorising one. The authorisation now
+has its own key, and the desk shows the binding and the authorisation as two
+separate facts.
+
+**What it authorises:** the operating path against a venue **sandbox**,
+under the effective limits. Not capital, not a funded venue, and not a
+raise to any frozen rail.
 
 ## Capacity, and the isolation defect that had to be closed first
 
@@ -187,48 +280,103 @@ Production, build `fae8fff`, arm state `ARMED_CONFIRMED`:
 
 ## What still prevents funded activation
 
-Computed by the server and returned with every refused activation request:
+Computed by the server, returned with every activation request, and split by
+**who can clear it**.
 
-1. **a named funded account** — none recorded
-2. **that account approved by the owner** — approval is yours, not this panel's
-3. **an approved limit set** — none recorded; and a recorded set is a
-   proposal, never an enforced rail
-4. **venue book freshness basis** — unresolved: what
-   `marketData.transactTime` denotes is not established, so the explicit
-   refusal stands and the 30 s limits are unmoved
-5. **per-fixture settlement compatibility** — from the venue's own prose;
-   UNKNOWN refuses
-6. **market scope metadata** — the scope token sets remain provisional until
-   the published Sports Schema is in hand
-7. **an autonomous entry admitted on current markets** — 0 so far
+### Remaining engineering — mine, and none of it blocks the panel
 
-## What I need from you
+| item | state |
+|---|---|
+| `MAX_EVENT_EXPOSURE` cannot see held positions on the same event | `OPEN_BOOK_SQL` selects no event key. Open, named, unfixed |
+| the desk's `UNCLASSIFIED` book (36 positions) | pre-existing provenance that predates the declared values |
+| `us_premap` persists `sportsMarketType` only, not `sportsMarketTypeV2` | open |
+| the three P&L review-pin tests | open; see the section below |
+| `OPERATOR_PASSWORD` is not yet set in the service environment | one environment variable on the service. Until it is set, the control sign-in refuses by name (`OPERATOR_PASSWORD_NOT_CONFIGURED`) and the controls stay reachable to ops tooling server-side. **Not a secret to be typed into a chat** |
 
-1. **The funded account decision** — the exact account (name, venue,
-   identifier) that may be armed, and your approval of it. The
-   ACCOUNTING_UNCERTAIN account is refused by name and stays paused.
+### Decisions only you can make
+
+1. **The funded account.** The exact `account_id` in
+   `bettor_desk_accounts` that may be armed, its venue, and your approval of
+   it. The accounting-uncertain account is refused **by its row** and stays
+   paused; renaming it changes nothing.
 2. **The approved limits** — capital, per order, maximum exposure, daily loss
-   stop. Recording them is a proposal; making them enforced rails is a code
-   change with your authorisation behind it.
-3. **A Netlify credential**, only if you want the desk on
-   `command.bettortoken.com` as well: an auth token and the site id. Without
-   them the API-hosted URL above is the desk.
+   stop. These are now **consumed**: approval tightens the frozen rails
+   element-wise and can never loosen one. Approving takes the service
+   credential, deliberately, because it is your act and not the desk's.
+3. **Whether a FUNDED venue may be authorised at all.** A TEST-class venue
+   is authorisable from the panel today. A funded one needs your written
+   authorisation, and **enabling real submission is a code change** with that
+   authority behind it — not a form.
+
+### Evidence that has to arrive, from outside this repository
+
+4. **venue book freshness basis** — what `marketData.transactTime` denotes is
+   not established, so the explicit refusal stands and the 30 s limits are
+   unmoved. UNKNOWN blocks.
+5. **per-fixture settlement compatibility** — from the venue's own prose.
+   UNKNOWN blocks.
+6. **market scope metadata** — the scope token sets remain provisional until
+   the published Sports Schema is in hand.
+7. **an autonomous entry admitted on current markets, unwaived** — 0 so far.
+   Research-waived and demonstration activity are excluded by construction.
+
+Items 4–7 are **derived from rows**, not asserted: when the lane records the
+evidence, the checks turn true without a code change; while it does not,
+they read UNKNOWN and refuse.
 
 ## Open, and not claimed as clean
 
-- **Three tests** in `tests/test_pnl_l34_review_pins.py` fail in the
-  full-suite gate on this branch and not on the baseline (177 vs 174; zero
-  other differences, nothing newly passing). They are **not** explained by my
-  product code: they still fail with `app.py` and `command_rn1x.py` reverted
-  to the baseline and with my new test files removed, and they pass when the
-  file runs alone, on a fresh database, on the post-suite database and in a
-  four-file slice. The failing assertion is a `reduce_ref` clock seeded from
+- **Three tests** in `tests/test_pnl_l34_review_pins.py` —
+  `test_r_defect_h1_the_venue_fresher_than_the_fills_is_refused_drift_not_sized`,
+  `test_r_defect_m1_the_deploy_seed_admits_the_landed_rules_unwitnessed_reduce`,
+  `test_r_defect_m2_the_fills_axis_override_also_sizes_an_increase_past_the_fresh_reading`
+  — **are open and this gate is not called clean.** What is now established,
+  and what is not:
+
+  **They are not attributable to this release.** The same nine full-suite
+  runs, all with identical collection order (`-p no:randomly`), split by
+  **wall-clock duration**, not by commit:
+
+  | run | commit under test | duration | total failed | these three |
+  |---|---|---|---|---|
+  | GATE_BASE | baseline `6d75275` | 469 s | 177 | **present** |
+  | GATE_BASE2 | baseline `6d75275` | 435 s | 173 | absent |
+  | GATE_BASE4 | baseline `6d75275` | 415 s | 174 | absent |
+  | GATE_BASE7 | baseline `6d75275` | 414 s | 174 | absent |
+  | GATE_REL4 | this branch `fae8fff` | 460 s | 177 | **present** |
+
+  The **baseline itself** produces 177-with-the-three on a slow run and
+  174-without on a fast one. So the 177-vs-174 delta is not a difference
+  between the two commits: it is a difference between a slow run and a fast
+  run of the same code. The earlier reading — that the delta was
+  "unattributed" — understated this; it is attributable to run conditions,
+  and not to the diff.
+
+  **The mechanism is consistent with, but not yet proven to be, elapsed
+  wall-clock.** The file imports the mirror lane's fakes, which capture
+  `NOW = time.time()` **at collection**, while the planner under test reads
+  the real clock **when the test runs** — two moments that are minutes apart
+  in a full suite. The failing assertion is a `reduce_ref` clock seeded from
   `fills_clock`, which falls back to `now − 3000` when the fake holds no
-  fill — cross-test coupling in a pre-existing review-pin file on the mirror
-  lane, which this release does not touch. **Unattributed and open.**
+  fill.
+
+  **What the bounded reproducer has and has not shown.** A one-file
+  reproducer that injects the gap directly (`pytest_collection_finish`
+  sleeps, so collection and execution are N seconds apart) passes at 0 s and
+  at 120 s. Longer gaps, and the same file under machine load, are still
+  being measured. Neither half of the suite reproduces it alone — the 339
+  files collected before the target do not, and the 196 after do not — so
+  if it is not elapsed time, it is an interaction that needs both sides.
+
+  **Not done:** the reproducer does not yet reproduce. Until it does, the
+  three are open, the gate is not clean, and none of this release's evidence
+  depends on that file.
 - `MAX_EVENT_EXPOSURE` still cannot see held positions on the same event
   (`OPEN_BOOK_SQL` selects no event key).
 - `render-ops.yml` is 422 bytes under GitHub's 512,000-byte workflow ceiling.
 - `us_premap` persists `sportsMarketType` only, not `sportsMarketTypeV2`.
 - The desk's `UNCLASSIFIED` book (36 positions) is pre-existing provenance
   that predates the declared values.
+- The desk is served from the API origin only. **Netlify publication remains
+  separate** — this repository holds no Netlify credential, and you said that
+  can stay separate for this delivery.
