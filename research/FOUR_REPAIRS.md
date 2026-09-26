@@ -251,3 +251,174 @@ rails.
   touched. **Next action:** split `render-ops.yml`, or move its prose to
   `RENDER_OPS_NOTES.md`, before anything else is added to it.
 - The `ent2` "32 failed" discrepancy stays open, as recorded.
+
+---
+
+# Release readback — verified
+
+**Live SHA, from the loop's own writer identity** (not a deploy timestamp):
+
+```
+entry loop writer {"pid":1,
+                   "build":"51f20e750cca914204caa98d62fd2ff5d70167ad",
+                   "module":"sportsassets.workers.ext_pinnacle_loop",
+                   "source_sha256_12":"65231b834768"}
+state LIVE   at 1790393045.823669  = 2026-09-26T03:24:05Z
+```
+
+Worker unchanged at `f5d1c05`, confirmed in the render-ops log both before and
+after the deploy. `limits_sha a19eb60a28177fc3536487a3e56c7995ab706241a52f32860c1c4b68fa736fb7`
+— identical to runs 71 and 72, so **no limit moved across the release.**
+
+Completed scheduled cycle on that build: `markets_considered 217`, venue
+universe `{"MLB": 60, "Soccer": 157}`.
+
+## The funnel, on the verified build
+
+| | |
+|---|---|
+| research mode | `research_shadow_uncalibrated` **armed**, `calibration_rows 0`, waiver **applied to 9** candidates, waiving exactly `MODEL_TRUST_DRIFT` |
+| candidates read | 25 · windowed 136 evaluated / 0 admissible / 136 refused, reconciling |
+| first refusing stage | `1_PROBABILITY 62` · `5_EXECUTION_ESTIMATE 57` · `7_RISK 17` |
+| reached execution estimation | **17**, all 17 walked depth |
+| positive edge | **17** · `negative_edge_WITH_a_walk 0` · `negative_edge_WITHOUT_a_walk 57` |
+| **admitted entries** | **0** |
+| **autonomous positions** | **0** |
+| management | 4 positions, all RN1 legacy, `with_observed_runtime_decision 0` |
+| autonomous P&L | empty — no positions to mark |
+
+## S1, working in production
+
+Six positive-edge candidates carry the sizing record, and **every one has
+`rails_not_passed []`** where run 71 had four or five rails failing on an
+empty book:
+
+```
+reduced_by_rails true   policy_notional 1000.0   qty_cap 1593.061895   binding MAX_MARKET_EXPOSURE
+reduced_by_rails true   policy_notional 1000.0   qty_cap 2000.000000   binding MAX_RESIDUAL_INVENTORY   (×5)
+```
+
+`size` stays null because the decision is NO_TRADE — the rails no longer
+refuse, the state gates still do.
+
+## Every freshness refusal, decomposed
+
+`fresh: null` on all of them. **Not an observed stale age.**
+
+| Pinnacle age / limit | provider lag | our processing | venue age | venue clock |
+|---|---|---|---|---|
+| 21.686 / 30.0 ✓ | 9.477 | 12.209 | — | `VENUE_CLOCK_UNPARSEABLE` |
+| 21.293 / 30.0 ✓ | 9.477 | 11.815 | — | `VENUE_CLOCK_UNPARSEABLE` |
+| 9.780 / 30.0 ✓ | 9.477 | 0.302 | — | `VENUE_CLOCK_UNPARSEABLE` |
+
+- **Provider odds: not the cause.** Measured every time and inside the
+  30-second rule. The 9.477 s provider lag is constant — the feed's own
+  update cadence, not staleness.
+- **Our processing: material to the age, not the refusal.** 0.302 s to
+  12.209 s; at 12 s it is over half the total. Ours to fix.
+- **The venue book: the cause.** `VENUE_CLOCK_UNPARSEABLE` — the venue
+  returned a transact-time value `_entry_freshness` could not parse, so
+  `venue_age_s` is unmeasured and the verdict is UNKNOWN. That is different
+  from `VENUE_CLOCK_NOT_PROVIDED`: something was sent. **Next action:** log
+  the raw value and parse it, or establish that it is unusable.
+
+Three older rows carry no freshness object at all — written before the field
+existed. They are reported as `-`, not as zero.
+
+## The period check, against live contracts
+
+`VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED` fired **0 times in production**;
+9 candidates carry `period FULL_GAME` **established from the venue slug**.
+The refusing branch was not exercised in production because `map_event`'s
+title check caught the one segment first (`VENUE_CONTRACT_IS_A_SEGMENT_NOT_FULL_GAME: 1`).
+Verified directly against slugs from this run's own board read:
+
+| verdict | slug | what it is |
+|---|---|---|
+| FULL_MATCH | `aec-mlb-az-sd-2026-09-25` | full game |
+| FULL_MATCH | `aec-cs2-100t-ast-2026-09-26` | full match |
+| FULL_MATCH | `aec-atp-danmed-valroy-2026-09-23` | full match |
+| REFUSED | `atc-cfb-clmsn-cah-2026-09-25-winner-2q-clmsn` | **2nd-quarter winner — a new shape, inside the money-line family** |
+| REFUSED | `atc-mlb-atl-mia-2026-09-25-i6-draw` | inning 6 |
+| REFUSED | `aqc-nhl-eastconf-2027-05-19-finalq-bos` | conference futures |
+| REFUSED | `atc-ebfcwc-bjo-paris-2026-09-26-dh1-paris` | eBattles dh1 |
+| REFUSED | `atc-ebfwcb-bel-ger-2026-09-26-dh2` | eBattles dh2 |
+
+**AND A HOLE, FOUND AND NOT YET FIXED.** An empty residual is currently
+taken as proof of a full match without any supported interpretation of the
+rest of the identifier. Three shapes therefore pass that must not:
+
+```
+aqc-nhl-eastconf-2027-05-19     futures, unsupported kind prefix, single-entity middle
+zzz-mlb-lad-sf-2026-09-25       unsupported kind prefix
+aec-nhl-stanley-2027-06-01      supported prefix, but a trophy rather than a fixture
+```
+
+Every genuine full-game slug has a supported money-line kind prefix
+(`aec`/`atc`) and at least three middle tokens (league + two sides). The
+check must require both. **Not fixed in this release** — found while
+verifying it, and the instruction was to complete the readback first.
+
+## Liga MX — the measured mapping failure, and a correction
+
+`lmx` is on the venue's board: 9 events, 8 with money lines, 234 money-line
+sides, no simulation marker, e.g. `lmx-aft-cmf-2026-09-25` "Atlante FC vs.
+CF Monterrey". So the competition is real, listed, and priced.
+
+**It is NOT bound, and the resolver names why.** Across 14 soccer fixtures
+and 16 side probes, `shadow-mapgap` reports:
+
+```
+steps {"event_title_does_not_name_two_sides": 6, "no_side_match": 16}
+```
+
+`no_side_match`, every time — with **keys built (6–9) and venue rows FOUND
+(6, 158, 500)**. The bridge reports `not_yes_no`.
+
+**This corrects my own attribution.** I said the cause was a league-token
+gap (`mex` vs `lmx`) or a team-code gap. Both were wrong: the keys DO
+intersect and the venue's rows ARE reached. The failure is one step later —
+our outcome name matches none of the sides the venue names on those rows,
+and the yes/no bridge cannot consume the venue's question shape.
+`league_alias_would_hit` is not even evaluated, because that probe only
+runs on `no_key_intersection` misses.
+
+Rules capture does not close this and I am not claiming it does. **Next
+action:** read the venue's own side/question text for one `lmx` money-line
+row and establish what our outcome must match, through the existing
+resolver.
+
+Also measured: the lane's soccer universe in `markets` is mostly not money
+lines — of 14 sampled, six were totals, spreads, corners, both-teams-to-score
+or draw-only contracts whose event titles name no two sides.
+
+## The venue board, whole
+
+1400 events, **91 competitions, untruncated.** **No `epl` token anywhere** —
+the real Premier League is not listed, which settles that question over the
+whole board rather than a 400-event sample. English football present:
+`engnl`, `efl1`, `efl2`, `wsl`. Simulated by the venue's own labels:
+`ebfwca` 40, `ebfsa` 38, `ebfwcb` 20, `ebfcwc` 14; `lol` MIXED (1 of 24).
+
+The desk classifier's `soccer` bucket is badly imprecise — it holds
+basketball (`acb`, `bbl`, `ncaams`), hockey (`khl`, `del`, `shl`), baseball
+(`npb`, `kbo`), `boxing`, `ufc`, `f1`, `pga`, `nascar`, and non-sport
+markets (`temp` NYC temperature, `***c` BTC, `ntflx` Netflix rankings).
+
+## Regression identity, committed tree
+
+```
+pre-change   441 failed / 11952 passed / 143 skipped / 3 xfailed
+committed    441 failed / 12222 passed / 143 skipped / 3 xfailed
+NEW: none      GONE: none      failure id sets IDENTICAL
+```
+
+The three known-pre-existing failures are unchanged: the two `render-ops.yml`
+size-guard tests and the stale `semantic_code_sha` pin.
+
+## Pre-existing, confirmed not mine
+
+The `verify` job fails on run 71 (`bfa3c5f`, before these changes) and on
+both runs after, with `FAIL_after_acceptance=1` on the synthetic acceptance
+position's input-chain read (`qty`, `residual`, `net` all unknown while the
+venue has not settled it). Checked rather than assumed.
