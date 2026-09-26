@@ -885,8 +885,14 @@ async def authorize(conn, *, account_id: str, venue: str, by: str,
 
     # ── THE AUTHORISATION IS RECORDED, THEN IMMEDIATELY CONSUMED ────
     test_only = klass == VENUE_TEST
+    granted_at = time.time()
     record = {"account_id": sel["account_id"], "venue": venue,
-              "venue_class": klass, "by": by, "at": time.time(),
+              "venue_class": klass, "by": by, "at": granted_at,
+              # AN AUTHORIZATION WITH NO END is a standing permission
+              # nobody remembers granting. The execution gate enforces this.
+              "expires_at": granted_at + EX.AUTHORIZATION_TTL_S,
+              "ttl_s": EX.AUTHORIZATION_TTL_S,
+              "revoked": False,
               "effective_limits": eff["effective"],
               "effective_digest": eff["effective_digest"],
               "readiness_at_authorisation": [c["check"] for c in

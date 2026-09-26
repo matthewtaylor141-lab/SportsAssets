@@ -118,6 +118,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import time
 
 from . import bettor_book_snapshot as bs
 from . import bettor_risk_engine as risk
@@ -599,12 +600,20 @@ R_AUTH_ACCOUNT = "THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT"
 R_AUTH_VENUE = "THE_AUTHORIZATION_NAMES_A_DIFFERENT_VENUE"
 R_AUTH_LIMITS = "THE_AUTHORIZATION_DOES_NOT_COVER_THESE_EFFECTIVE_LIMITS"
 R_AUTH_NO_DIGEST = "THE_AUTHORIZATION_CARRIES_NO_EFFECTIVE_LIMIT_DIGEST"
+R_AUTH_EXPIRED = "THE_AUTHORIZATION_HAS_EXPIRED"
+R_AUTH_REVOKED = "THE_AUTHORIZATION_HAS_BEEN_REVOKED"
 R_SUBMISSION_DISABLED = "REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE"
+
+#: HOW LONG AN AUTHORIZATION IS GOOD FOR, by default. An authorization with
+#: no end is a standing permission nobody remembers granting, so the record
+#: carries an expiry and this gate enforces it.
+AUTHORIZATION_TTL_S = 24 * 3600.0
 
 
 def authorize_submission(*, account_id: str, venue: str,
                          authorization: dict | None,
-                         approved_limits: dict | None = None) -> dict:
+                         approved_limits: dict | None = None,
+                         now: float | None = None) -> dict:
     """MAY THIS ACCOUNT SUBMIT AT THIS VENUE? The execution side's answer.
 
     Every refusal is named, and the LAST one is the code constant, so a
@@ -638,6 +647,31 @@ def authorize_submission(*, account_id: str, venue: str,
                         % (want_venue, venue))
     # THE LIMITS THE OWNER APPROVED ARE PART OF THE AUTHORIZATION. If the
     # approved set has moved since, the authorization does not cover it.
+    # REVOKED FIRST. A revoked authorization is not merely stale: someone
+    # took it away, and that answer must not be reported as an expiry.
+    if rec.get("revoked") or rec.get("revoked_at"):
+        return dict(out, ok=False, refusal=R_AUTH_REVOKED,
+                    revoked_at=rec.get("revoked_at"),
+                    revoked_by=rec.get("revoked_by"),
+                    why="the authorization was revoked and is not usable")
+    # THEN EXPIRY. `expires_at` is on the record; a record without one is
+    # treated as expiring AUTHORIZATION_TTL_S after it was granted, so an
+    # older record cannot become a standing permission by omission.
+    exp = rec.get("expires_at")
+    if exp is None and rec.get("at") is not None:
+        try:
+            exp = float(rec["at"]) + AUTHORIZATION_TTL_S
+        except (TypeError, ValueError):
+            exp = None
+    out["expires_at"] = exp
+    if exp is not None:
+        left = float(exp) - float(now if now is not None else time.time())
+        out["seconds_until_expiry"] = round(left, 3)
+        if left <= 0:
+            return dict(out, ok=False, refusal=R_AUTH_EXPIRED,
+                        expired_by_s=round(-left, 3),
+                        why=("the authorization's window has closed; a new "
+                             "one has to be granted"))
     got_digest = str(rec.get("effective_digest") or "")
     if not got_digest:
         return dict(out, ok=False, refusal=R_AUTH_NO_DIGEST,

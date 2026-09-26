@@ -1,0 +1,41 @@
+========================================================================
+STEP 1 . THE CANONICAL ACCOUNT, off its registry row
+   account         acct-pilot-test-001 ok True accounting CLEAN
+   the paused one  ACCOUNT_IS_PAUSED (untouched)
+STEP 2 . THE OWNER-APPROVED LIMITS, reduced into effective rails
+   frozen digest   a19eb60a2817
+   effective       {'MAX_MARKET_EXPOSURE': 25.0, 'MAX_CAPITAL_DEPLOYED': 250.0, 'MAX_DRAWDOWN': 50.0, 'MAX_CORRELATED_EXPOSURE': 100.0}
+   tightened       {'MAX_CAPITAL_DEPLOYED': (3000.0, 250.0), 'MAX_MARKET_EXPOSURE': (1000.0, 25.0), 'MAX_CORRELATED_EXPOSURE': (1000.0, 100.0), 'MAX_DRAWDOWN': (1000.0, 50.0)}
+   effective dig.  8e667b126912
+STEP 3 . THE AUTHORIZATION, validated and recorded
+   verdict         AUTHORIZED_FOR_A_TEST_VENUE
+   the EXECUTOR's answer: REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE consumed True submitted False
+   expires in      24.0 hours
+STEP 4 . SUBMIT, against the TEST venue
+   ok True | state RESTING | our id tvx-21f56043aad340 | venue id sim-2c61d4e8b5d9
+   authorization consumed True | funded submission DISABLED
+STEP 5 . POLL: the venue reports a PARTIAL fill
+   venue state PARTIALLY_FILLED | filled 40.0 | remaining 60.0
+   fill         [{'fill_id': 'tvf-24bbf3c407574e', 'qty': 40.0, 'price': 0.5, 'fee_usd': 0.7}]
+STEP 6 . RESTART RECOVERY: a new executor, the same rows
+   case OPEN_AT_BOTH | adopted filled 40.0 | resubmitted False | orphans 0
+STEP 7 . CANCEL the remainder
+   requested CANCEL_PENDING -> state now CANCELLED
+STEP 8 . RECONCILED ACCOUNTING, from the ledger
+   orders               1
+   fills                1
+   filled_qty           40.0
+   notional_usd         20.0
+   fees_usd             0.7
+   expected_fees_usd    0.7
+   fees_reconcile       True
+   discrepancy_count    0
+   states               {'CANCELLED': 1}
+   per order           [{'order_id': 'tvx-21f56043aad340', 'state': 'CANCELLED', 'submitted_qty': 100.0, 'filled_qty_from_fills': 40.0, 'filled_qty_on_the_order': 40.0, 'remaining': 60.0, 'fees_usd': 0.7}]
+STEP 9 . THE NEGATIVE SIDE, with nothing written
+   expired          -> THE_AUTHORIZATION_HAS_EXPIRED                       
+   revoked          -> THE_AUTHORIZATION_HAS_BEEN_REVOKED                  
+   another account  -> THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT         
+   another venue    -> THE_AUTHORIZATION_NAMES_A_DIFFERENT_VENUE           
+   order rows before/after the four refusals: 1 1
+   live_orders rows written by this lane: 0
