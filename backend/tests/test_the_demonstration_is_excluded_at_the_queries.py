@@ -259,23 +259,42 @@ async def test_the_demonstration_manages_no_unrelated_inventory():
                 "  FROM rn1x_positions p WHERE p.position_id = $1", other)
             return dict(row)
 
+        async def inputs():
+            """The ordinary strategy INPUTS, by table. Compared, not
+            assumed empty."""
+            out = {}
+            for tbl in ("external_valuations", "trades", "markets",
+                        "external_source_calibration", "market_tokens"):
+                try:
+                    out[tbl] = await conn.fetchval(
+                        "SELECT count(*) FROM " + tbl)
+                except Exception as exc:                       # noqa: BLE001
+                    out[tbl] = "unreadable: " + type(exc).__name__
+            return out
+
         before = await snapshot()
+        inputs_before = await inputs()
         got = await DEMO.run_full(conn)
         assert got["ok"] is True
         after = await snapshot()
+        inputs_after = await inputs()
         assert after == before, {"before": before, "after": after}
 
         # AND THE SETTLEMENT CONSUMER IT RUNS IS SCOPED TOO: the unrelated
         # position must not have acquired an outcome row from it.
         assert after["outcomes"] == 0
-        # NOR DID ANY ORDINARY STRATEGY INPUT MOVE. The demonstration writes
-        # no valuation, no market and no trade -- so the inputs the lane
-        # reads on its next cycle are exactly what they were.
-        for tbl in ("external_valuations", "trades", "markets",
-                    "external_source_calibration"):
-            assert await conn.fetchval(
-                "SELECT count(*) FROM " + tbl) == 0 or tbl not in (
-                    "external_valuations",), tbl
+        # NOR DID ANY ORDINARY STRATEGY INPUT MOVE. The demonstration
+        # writes no valuation, no market and no trade, so the inputs the
+        # lane reads on its next cycle are exactly what they were.
+        #
+        # THE COUNTS ARE COMPARED, NOT ASSERTED TO BE ZERO -- MY OWN DEFECT.
+        # The first version of this required `external_valuations` to be
+        # empty, which is true only in a database no other suite has
+        # touched; in the full run it failed on another suite's rows and
+        # said nothing about the demonstration. What matters is that the
+        # demonstration MOVED nothing.
+        assert inputs_after == inputs_before, {"before": inputs_before,
+                                               "after": inputs_after}
         assert await conn.fetchval(
             "SELECT count(*) FROM external_valuations "
             " WHERE condition_id = ANY($1::text[])",
