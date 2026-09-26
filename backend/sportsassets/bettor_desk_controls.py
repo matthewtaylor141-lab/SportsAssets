@@ -43,15 +43,35 @@ VERSION = "BETTOR_DESK_CONTROLS_V1"
 
 #: The funded executor's own pause key -- the funded lane's existing
 #: control, not a new one, and IMPORTED rather than retyped. A halt that
-#: wrote a key nobody reads would report a stop that never happened; the
-#: constant comes from the module the executor itself reads it from.
-def _live_pause_key() -> str:
-    from . import live_executor as _LE
+#: wrote a key nobody reads would report a stop that never happened, so the
+#: value comes from the module the executor itself reads it from.
+#:
+#: RESOLVED LAZILY, AND THAT MATTERS. Doing it at import time pulled
+#: `live_executor` -- a large module with import-time setup of its own --
+#: into the process the moment anything imported this one. In the full test
+#: session that moved when that setup happened, and three unrelated
+#: mirror/P&L tests began failing on state they had been seeing in a
+#: different order. A control module must not change when another lane
+#: initialises; the lookup is deferred and cached here instead.
+_LIVE_PAUSE_KEY: str | None = None
 
-    return _LE.PAUSE_KEY
+
+def live_pause_key() -> str:
+    global _LIVE_PAUSE_KEY
+
+    if _LIVE_PAUSE_KEY is None:
+        from . import live_executor as _LE
+
+        _LIVE_PAUSE_KEY = _LE.PAUSE_KEY
+    return _LIVE_PAUSE_KEY
 
 
-LIVE_PAUSE_KEY = _live_pause_key()
+def __getattr__(name):
+    """`CTL.LIVE_PAUSE_KEY` still reads as a constant -- resolved on first
+    access rather than at import (PEP 562)."""
+    if name == "LIVE_PAUSE_KEY":
+        return live_pause_key()
+    raise AttributeError(name)
 
 #: Where a PROPOSED limit set and a PROPOSED account binding are recorded.
 #: Both are proposals: no risk rail and no account selector reads them.
@@ -243,10 +263,11 @@ async def halt(conn, *, by: str, reason: str, experiments) -> dict:
     out["components"]["research_lane"] = dict(
         await _readback_bool(conn, ext.CONTROL_KEY),
         key=ext.CONTROL_KEY, intended=False)
-    await _write_state(conn, LIVE_PAUSE_KEY, True)
+    _live = live_pause_key()
+    await _write_state(conn, _live, True)
     out["components"]["funded_executor_paused"] = dict(
-        await _readback_bool(conn, LIVE_PAUSE_KEY),
-        key=LIVE_PAUSE_KEY, intended=True)
+        await _readback_bool(conn, _live),
+        key=_live, intended=True)
     out["components"]["working_orders"] = await cancel_working_orders(
         conn, by=by, experiments=experiments)
     try:
@@ -541,7 +562,7 @@ async def state(conn) -> dict:
     out = {"version": VERSION, "at": time.time(),
            "funded_submission": "DISABLED"}
     for label, key in (("research_lane_armed", ext.CONTROL_KEY),
-                       ("funded_executor_paused", LIVE_PAUSE_KEY)):
+                       ("funded_executor_paused", live_pause_key())):
         try:
             raw = await _read_state(conn, key)
             out[label] = {"value": _truthy(raw), "key": key,
