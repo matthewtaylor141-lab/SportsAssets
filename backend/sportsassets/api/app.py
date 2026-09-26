@@ -3389,6 +3389,58 @@ async def admin_funded_activation_readiness(response: Response,
             "bound_account": rec}
 
 
+@app.get("/api/admin/funded-account-registry",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_account_registry(response: Response) -> dict:
+    """THE CANONICAL ACCOUNT REGISTRY, AS ROWS. Read-only, no balances.
+
+    WHY IT EXISTS. Activation binds an `account_id` from
+    `bettor_desk_accounts`, and until now there was no way to LOOK at that
+    registry from outside the database -- so the one decision the owner has
+    to make ("which account may be armed") could not be made from the
+    identifiers this service will actually accept, and the release readback
+    could not exercise the paused-account guard by a real id.
+
+    IT RETURNS IDENTITY AND STATE ONLY: the id, its desk, its status, the
+    `paused` flag and reason, and the accounting status. No balance, no
+    credential, nothing about money.
+    """
+    from .. import bettor_funded_activation as FA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    try:
+        rows = [dict(r) for r in await pool.fetch(
+            "SELECT account_id, desk_id, status, paused, pause_reason, "
+            "       accounting_status, "
+            "       extract(epoch FROM opened_at)::float8 AS opened_at "
+            "  FROM bettor_desk_accounts ORDER BY account_id")]
+    except Exception as exc:                                   # noqa: BLE001
+        # AN UNREADABLE REGISTRY IS NOT AN EMPTY ONE.
+        raise HTTPException(status_code=503, detail={
+            "reason": "ACCOUNT_REGISTRY_UNREADABLE",
+            "what": type(exc).__name__}) from exc
+    eligible = [r["account_id"] for r in rows
+                if str(r.get("status") or "") == "ACTIVE"
+                and not r.get("paused")
+                and str(r.get("accounting_status") or "").upper()
+                in FA.ACCOUNTING_OK]
+    return {
+        "ok": True, "accounts": rows, "count": len(rows),
+        "activation_eligible_by_their_rows": eligible,
+        "eligible_means": ("ACTIVE, not paused, and an accounting status in "
+                           "%s. It is NOT an approval: naming the account "
+                           "and approving it are the owner's act"
+                           % (list(FA.ACCOUNTING_OK),)),
+        "paused_accounts": [r["account_id"] for r in rows if r.get("paused")],
+        "the_guard_is_the_row": ("activation reads `paused` and "
+                                 "`accounting_status` off these rows, so a "
+                                 "rename or a relabel changes nothing"),
+        "holds_no_balances": True,
+    }
+
+
 @app.get("/api/admin/capacity-probe-audit",
          dependencies=[Depends(require_admin)])
 async def admin_capacity_probe_audit(response: Response) -> dict:

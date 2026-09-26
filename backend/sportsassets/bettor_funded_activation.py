@@ -522,60 +522,63 @@ async def authorize(conn, *, account_id: str, venue: str, by: str,
            "requested": {"account_id": account_id, "venue": venue},
            "funded_submission": "DISABLED",
            "authorises_capital": False}
-    klass = venue_class(venue)
-    out["venue_class"] = klass
-    if klass is None:
-        return dict(out, ok=False, applied=None,
-                    failed={"refusal": R_VENUE_UNKNOWN,
-                            "known": sorted(VENUE_CLASS)},
-                    refusal=R_VENUE_UNKNOWN)
 
+    # THE READINESS IS COMPUTED FIRST, AND REPORTED ON EVERY PATH.
+    #
+    # WHY. The first version returned at the earliest failed gate, so a
+    # request with nothing bound came back naming only that gate -- and the
+    # production readback, which asks this endpoint what still blocks funded
+    # activation, printed an EMPTY prerequisite list. The question "what is
+    # still missing" must be answered whichever gate stops the request, so
+    # the checks are evaluated up front and travel with every refusal.
+    ready = await readiness(conn, experiment_id=experiment_id, hours=hours,
+                            account_id=account_id)
+    out["readiness"] = {k: ready[k] for k in
+                        ("ready", "unmet_count", "unknown_count")}
+    out["readiness_checks"] = ready["checks"]
+    out["unmet"] = [c["check"] for c in ready["unmet"]]
+
+    def _stop(refusal, **extra):
+        failed = {"refusal": refusal, "unmet": out["unmet"]}
+        failed.update(extra)
+        return dict(out, ok=False, applied=None, failed=failed,
+                    refusal=refusal)
+
+    # THE ACCOUNT COMES FIRST, because with nothing bound the useful
+    # answer is "no account", not "no venue class".
     sel = await account_selection(conn, account_id)
     out["account_selection"] = sel
     if not sel.get("ok"):
-        return dict(out, ok=False, applied=None,
-                    failed={"refusal": sel["refusal"], "why": sel.get("why")},
-                    refusal=sel["refusal"])
+        return _stop(sel["refusal"], why=sel.get("why"))
+
+    klass = venue_class(venue)
+    out["venue_class"] = klass
+    if klass is None:
+        return _stop(R_VENUE_UNKNOWN, known=sorted(VENUE_CLASS))
 
     stored = await _state(conn, LIMITS_KEY) or {}
     proposed = dict(stored.get("proposed") or {})
     missing = [k for k in REQUIRED_LIMITS if proposed.get(k) in (None, "")]
     if missing:
-        return dict(out, ok=False, applied=None,
-                    failed={"refusal": R_LIMITS_MISSING, "missing": missing},
-                    refusal=R_LIMITS_MISSING)
+        return _stop(R_LIMITS_MISSING, missing=missing)
     if not stored.get("approved"):
-        return dict(out, ok=False, applied=None,
-                    failed={"refusal": R_LIMITS_NOT_APPROVED,
-                            "why": ("the limit set is recorded but not "
-                                    "approved by the owner")},
-                    refusal=R_LIMITS_NOT_APPROVED)
+        return _stop(R_LIMITS_NOT_APPROVED,
+                     why=("the limit set is recorded but not approved by "
+                          "the owner"))
     eff = EX.effective_limits(proposed)
     out["effective_limits"] = eff
 
-    ready = await readiness(conn, experiment_id=experiment_id, hours=hours,
-                            account_id=account_id)
-    out["readiness"] = {k: ready[k] for k in
-                        ("ready", "unmet_count", "unknown_count")}
-    out["unmet"] = [c["check"] for c in ready["unmet"]]
     if not ready["ready"]:
-        return dict(out, ok=False, applied=None,
-                    failed={"refusal": R_READINESS_UNMET,
-                            "unmet": out["unmet"],
-                            "detail": ready["unmet"]},
-                    refusal=R_READINESS_UNMET)
+        return _stop(R_READINESS_UNMET, detail=ready["unmet"])
 
     if klass == VENUE_FUNDED:
         owner = await _state(conn, OWNER_AUTH_KEY)
         out["owner_authorization_present"] = bool(owner)
-        return dict(out, ok=False, applied=None,
-                    failed={"refusal": R_OWNER_AUTH,
-                            "why": ("every check is met, and a FUNDED venue "
-                                    "still needs the owner's written "
-                                    "authorisation. Enabling real "
-                                    "submission is a code change with that "
-                                    "authority behind it, not a form")},
-                    refusal=R_OWNER_AUTH)
+        return _stop(R_OWNER_AUTH,
+                     why=("every check is met, and a FUNDED venue still "
+                          "needs the owner's written authorisation. "
+                          "Enabling real submission is a code change with "
+                          "that authority behind it, not a form"))
 
     # ── THE POSITIVE PATH, for a TEST venue ─────────────────────────
     record = {"account_id": sel["account_id"], "venue": venue,

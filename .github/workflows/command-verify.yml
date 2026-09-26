@@ -4929,12 +4929,41 @@ jobs:
           say "  funded resume            HTTP $FR (expect 409)"
           jq -r '"  refusal                  " + (.detail.reason // "-")' \
             /tmp/ctlf.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # THE GUARD IS THE ROW, SO IT IS EXERCISED BY A REAL id. The
+          # registry is read first; a display name alone proves only that a
+          # name is not an identity, which is a different refusal.
+          curl -sS -H "$H" -o /tmp/reg.json \
+            "$A/api/admin/funded-account-registry" || true
+          jq -r '"  registry accounts        " + ((.count // 0) | tostring),
+                 "  eligible by their rows   "
+                   + ((.activation_eligible_by_their_rows // [])
+                      | join(", ")),
+                 "  paused on their rows     "
+                   + ((.paused_accounts // []) | join(", ")),
+                 "  holds no balances        "
+                   + ((.holds_no_balances // false) | tostring)' \
+            /tmp/reg.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          PAUSED_ID=$(jq -r '(.paused_accounts // [])[0] // ""' \
+                        /tmp/reg.json 2>/dev/null || echo "")
+          if [ -n "$PAUSED_ID" ]; then
+            say "  submitting the PAUSED account by its canonical id,"
+            say "  under a different display name: the row must refuse it."
+            curl -sS -X POST -H "$H" -H 'Content-Type: application/json' \
+              -d "{\"account\":{\"account_id\":\"$PAUSED_ID\",\"name\":\"Perfectly Fine Desk\",\"venue\":\"PMUS_TEST\"}}" \
+              "$A/api/command/bettor/control/account" > /tmp/ctla.json || true
+            jq -r '"  paused account by id  ok " + (.ok | tostring)
+                   + "  refusal " + (.refusal // "-")' \
+              /tmp/ctla.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          else
+            say "  no paused account in the registry to exercise the guard"
+          fi
+          # AND A DISPLAY NAME ALONE IS STILL NOT AN IDENTITY.
           curl -sS -X POST -H "$H" -H 'Content-Type: application/json' \
             -d '{"account":{"name":"PMUS ACCOUNTING_UNCERTAIN","venue":"PMUS"}}' \
-            "$A/api/command/bettor/control/account" > /tmp/ctla.json || true
-          jq -r '"  paused account  ok " + (.ok | tostring)
+            "$A/api/command/bettor/control/account" > /tmp/ctlb.json || true
+          jq -r '"  a name with no id     ok " + (.ok | tostring)
                  + "  refusal " + (.refusal // "-")' \
-            /tmp/ctla.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            /tmp/ctlb.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
 
           say ""
           say "  A READ CREDENTIAL MUST NOT WRITE."

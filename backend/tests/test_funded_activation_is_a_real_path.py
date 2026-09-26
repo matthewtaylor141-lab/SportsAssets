@@ -481,3 +481,99 @@ async def test_authorising_does_not_destroy_the_binding_it_read():
                            [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
                             FA.AUTHORIZATION_KEY])
         await conn.close()
+
+
+@pg
+async def test_every_refusal_still_names_what_is_missing():
+    """THE QUESTION MUST BE ANSWERED WHICHEVER GATE STOPS THE REQUEST.
+
+    The first version returned at the earliest failed gate, so an activation
+    request with nothing bound came back naming only that gate -- and the
+    production readback, whose whole job is to ask what still blocks funded
+    activation, printed an EMPTY prerequisite list. Readiness is now computed
+    up front and travels with every refusal.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _seed_accounts(conn)
+        await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
+                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                            FA.AUTHORIZATION_KEY])
+
+        # NOTHING BOUND AT ALL -- the emptiest possible request.
+        got = await FA.authorize(conn, account_id="", venue="", by="test")
+        assert got["ok"] is False
+        # the ACCOUNT is named, not the venue: with nothing bound that is
+        # the useful answer
+        assert got["refusal"] == FA.R_NO_ACCOUNT
+        # and the prerequisites come with it
+        assert got["failed"]["unmet"], got["failed"]
+        assert len(got["readiness_checks"]) >= 8
+        assert got["readiness"]["ready"] is False
+        assert got["readiness"]["unmet_count"] >= 1
+        # the checks this test's own setup determines, whatever market
+        # evidence another test in this file happens to have left behind
+        for must in ("account_selected_and_clean",
+                     "limits_recorded_and_complete",
+                     "limits_approved_by_the_owner"):
+            assert must in got["failed"]["unmet"], (must,
+                                                    got["failed"]["unmet"])
+
+        # AND ON EVERY OTHER REFUSAL PATH TOO.
+        for kwargs in ({"account_id": "made-up-1", "venue": "PMUS_TEST"},
+                       {"account_id": PAUSED, "venue": "PMUS_TEST"},
+                       {"account_id": CLOSED, "venue": "PMUS_TEST"},
+                       {"account_id": CLEAN, "venue": "NOT_A_VENUE"},
+                       {"account_id": CLEAN, "venue": "PMUS_TEST"}):
+            r = await FA.authorize(conn, by="test", **kwargs)
+            assert r["ok"] is False, kwargs
+            assert r["applied"] is None
+            assert "unmet" in r["failed"], (kwargs, r["failed"])
+            assert r["readiness_checks"], kwargs
+            assert r["funded_submission"] == "DISABLED"
+            assert r["authorises_capital"] is False
+    finally:
+        await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
+                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                            FA.AUTHORIZATION_KEY])
+        await conn.close()
+
+
+@pg
+async def test_the_account_registry_read_shows_identity_and_no_money():
+    """The owner has to name an account_id this service will accept, so the
+    registry has to be readable -- and it must carry no balance."""
+    asyncpg = pytest.importorskip("asyncpg")
+
+    from sportsassets.api import app as A
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _seed_accounts(conn)
+    finally:
+        await conn.close()
+
+    real = A.settings
+    A.settings = lambda: type("S", (), {"admin_token": "t"})()
+    try:
+        class _R:
+            headers: dict = {}
+        got = await A.admin_funded_account_registry(response=_R())
+    finally:
+        A.settings = real
+
+    ids = {r["account_id"] for r in got["accounts"]}
+    assert {PAUSED, CLEAN, CLOSED} <= ids
+    # ELIGIBILITY IS COMPUTED FROM THE ROWS, and it is not an approval
+    assert got["activation_eligible_by_their_rows"] == [CLEAN]
+    assert PAUSED in got["paused_accounts"]
+    assert "not an approval" in got["eligible_means"] or \
+        "NOT an approval" in got["eligible_means"]
+    # NO MONEY CROSSES THIS SURFACE
+    assert got["holds_no_balances"] is True
+    for r in got["accounts"]:
+        for banned in ("opening_balance", "balance", "cash", "buying_power",
+                       "account_value", "equity"):
+            assert banned not in r, (banned, r)
