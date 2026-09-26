@@ -534,6 +534,22 @@ APPROVED_LIMIT_TO_RAIL = {
     "per_order_usd": "MAX_MARKET_EXPOSURE",
     "max_exposure_usd": "MAX_CORRELATED_EXPOSURE",
     "daily_loss_stop_usd": "MAX_DRAWDOWN",
+    # THE RAIL AN APPROVAL COULD NOT REACH.
+    #
+    # The four names above leave MAX_EVENT_EXPOSURE at its frozen $1,000
+    # however small the approved pilot is -- so a $250 approval bought a $250
+    # capital cap, a $25 per-order cap, and an event cap forty times the whole
+    # pilot. It was not a missing rail; it was a rail with no name the owner
+    # could tighten it by. Adding the name changes no digest for an approval
+    # that does not use it (effective_limits takes MIN over the rails, so an
+    # absent name leaves that rail frozen exactly as before).
+    #
+    # AND TIGHTENING IT IS NOT THE SAME AS ENFORCING IT: OPEN_BOOK_SQL selects
+    # no event key, so the event rail cannot see other positions on the same
+    # event. That defect is recorded separately and is NOT closed by this
+    # line. A pilot that wants a real event bound has to hold one position at
+    # a time until it is.
+    "event_exposure_usd": "MAX_EVENT_EXPOSURE",
 }
 
 
@@ -604,6 +620,38 @@ R_AUTH_EXPIRED = "THE_AUTHORIZATION_HAS_EXPIRED"
 R_AUTH_REVOKED = "THE_AUTHORIZATION_HAS_BEEN_REVOKED"
 R_SUBMISSION_DISABLED = "REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE"
 
+#: AN AUTHORIZATION WITH NO USABLE END IS NOT AN AUTHORIZATION.
+#:
+#: THE HOLE THIS CLOSES. `expires_at` was read, and when it was absent the
+#: code fell back to `at + AUTHORIZATION_TTL_S`. If `at` was ALSO missing or
+#: unparseable the fallback produced None -- and the expiry check was written
+#: `if exp is not None:`, so the whole check was SKIPPED. A record carrying
+#: neither timestamp was therefore a standing permission that never lapsed,
+#: which is the exact failure a TTL exists to prevent.
+R_AUTH_NO_EXPIRY = "THE_AUTHORIZATION_HAS_NO_USABLE_EXPIRY"
+
+#: AND A TIMESTAMP THAT IS NOT A FINITE NUMBER IS WORSE THAN A MISSING ONE,
+#: because arithmetic on it silently succeeds. `float("nan")` compares FALSE
+#: against everything, so `left <= 0` was false and a NaN expiry PASSED the
+#: gate; `float("inf")` passed as an authorization that never ends; and a
+#: malformed string raised ValueError out of the gate instead of refusing.
+R_AUTH_BAD_EXPIRY = "THE_AUTHORIZATION_EXPIRY_IS_NOT_A_FINITE_TIMESTAMP"
+
+#: THE DIGEST MUST BE COMPARED, NOT MERELY PRESENT.
+#:
+#: THE HOLE THIS CLOSES. The comparison was guarded by
+#: `if approved_limits is not None:`, so any caller that did not happen to
+#: supply the owner-approved set got past the limit check entirely -- the
+#: authorization was accepted on the strength of carrying SOME digest, with
+#: nothing establishing it was the digest of the limits in force NOW.
+R_AUTH_LIMITS_UNKNOWN = "THE_APPROVED_LIMIT_SET_WAS_NOT_SUPPLIED_TO_COMPARE"
+
+#: The legacy shape this gate still accepts, named so it is a decision rather
+#: than an accident. A record predating `expires_at` carries `at` alone, and
+#: its window is `at + AUTHORIZATION_TTL_S`. `at` must itself be a finite
+#: number for that to mean anything, and it is checked.
+LEGACY_EXPIRY_FALLBACK = "at + AUTHORIZATION_TTL_S, when `expires_at` is absent"
+
 #: HOW LONG AN AUTHORIZATION IS GOOD FOR, by default. An authorization with
 #: no end is a standing permission nobody remembers granting, so the record
 #: carries an expiry and this gate enforces it.
@@ -654,37 +702,81 @@ def authorize_submission(*, account_id: str, venue: str,
                     revoked_at=rec.get("revoked_at"),
                     revoked_by=rec.get("revoked_by"),
                     why="the authorization was revoked and is not usable")
-    # THEN EXPIRY. `expires_at` is on the record; a record without one is
-    # treated as expiring AUTHORIZATION_TTL_S after it was granted, so an
-    # older record cannot become a standing permission by omission.
-    exp = rec.get("expires_at")
-    if exp is None and rec.get("at") is not None:
-        try:
-            exp = float(rec["at"]) + AUTHORIZATION_TTL_S
-        except (TypeError, ValueError):
-            exp = None
+    # THEN EXPIRY, WHICH MUST EXIST AND MUST BE A FINITE NUMBER.
+    #
+    # Three things are separated on purpose, because they need different
+    # answers: an expiry we can READ and that has passed (R_AUTH_EXPIRED); an
+    # expiry we cannot read at all (R_AUTH_NO_EXPIRY); and an expiry that
+    # parses into something arithmetic cannot be trusted with -- NaN, ±inf,
+    # a bool, a malformed string (R_AUTH_BAD_EXPIRY). The old code merged the
+    # last two into "skip the check".
+    exp_raw = rec.get("expires_at")
+    basis = "expires_at"
+    if exp_raw is None:
+        # THE LEGACY FALLBACK, VALIDATED RATHER THAN ASSUMED.
+        exp_raw = rec.get("at")
+        basis = LEGACY_EXPIRY_FALLBACK
+        if exp_raw is None:
+            return dict(out, ok=False, refusal=R_AUTH_NO_EXPIRY,
+                        expiry_basis=None,
+                        legacy_fallback=LEGACY_EXPIRY_FALLBACK,
+                        why=("the record carries neither `expires_at` nor an "
+                             "`at` to derive one from, so it names no window "
+                             "and cannot be treated as current"))
+    out["expiry_basis"] = basis
+    # `bool` is an int subclass and float(True) == 1.0, which would be a
+    # 1970 timestamp read as a deliberate expiry. It is malformed, not old.
+    if isinstance(exp_raw, bool):
+        return dict(out, ok=False, refusal=R_AUTH_BAD_EXPIRY,
+                    expiry_raw=exp_raw, expiry_basis=basis,
+                    why="a boolean is not a timestamp")
+    try:
+        exp = float(exp_raw)
+    except (TypeError, ValueError):
+        return dict(out, ok=False, refusal=R_AUTH_BAD_EXPIRY,
+                    expiry_raw=exp_raw, expiry_basis=basis,
+                    why=("%r does not parse as a timestamp, so how long this "
+                         "authorization has left is unknown" % (exp_raw,)))
+    if exp != exp or exp in (float("inf"), float("-inf")):
+        return dict(out, ok=False, refusal=R_AUTH_BAD_EXPIRY,
+                    expiry_raw=exp_raw, expiry_basis=basis,
+                    why=("%r is not finite. NaN compares false against every "
+                         "bound, so it would PASS an expiry test, and an "
+                         "infinite expiry is a permission that never lapses"
+                         % (exp_raw,)))
+    if basis is LEGACY_EXPIRY_FALLBACK:
+        exp = exp + AUTHORIZATION_TTL_S
     out["expires_at"] = exp
-    if exp is not None:
-        left = float(exp) - float(now if now is not None else time.time())
-        out["seconds_until_expiry"] = round(left, 3)
-        if left <= 0:
-            return dict(out, ok=False, refusal=R_AUTH_EXPIRED,
-                        expired_by_s=round(-left, 3),
-                        why=("the authorization's window has closed; a new "
-                             "one has to be granted"))
-    got_digest = str(rec.get("effective_digest") or "")
+    left = exp - float(now if now is not None else time.time())
+    out["seconds_until_expiry"] = round(left, 3)
+    if left <= 0:
+        return dict(out, ok=False, refusal=R_AUTH_EXPIRED,
+                    expired_by_s=round(-left, 3), expiry_basis=basis,
+                    why=("the authorization's window has closed; a new "
+                         "one has to be granted"))
+    got_digest = str(rec.get("effective_digest") or "").strip()
     if not got_digest:
         return dict(out, ok=False, refusal=R_AUTH_NO_DIGEST,
                     why=("the authorization does not say which effective "
                          "limits it was granted against"))
-    if approved_limits is not None:
-        now_digest = effective_limits(approved_limits)["effective_digest"]
-        out["effective_digest_now"] = now_digest
-        if now_digest != got_digest:
-            return dict(out, ok=False, refusal=R_AUTH_LIMITS,
-                        why=("authorised against %s, the approved set now "
-                             "digests to %s" % (got_digest[:12],
-                                                now_digest[:12])))
+    # AND THE DIGEST IS COMPARED, ALWAYS. A caller that cannot produce the
+    # owner-approved set cannot establish that this authorization covers the
+    # limits in force, so it is refused rather than admitted on the strength
+    # of carrying some digest.
+    if approved_limits is None:
+        return dict(out, ok=False, refusal=R_AUTH_LIMITS_UNKNOWN,
+                    effective_digest_on_the_record=got_digest,
+                    why=("the authorization names effective limits %s, and "
+                         "the owner-approved set was not supplied, so "
+                         "nothing establishes that those are the limits in "
+                         "force now" % got_digest[:12]))
+    now_digest = effective_limits(approved_limits)["effective_digest"]
+    out["effective_digest_now"] = now_digest
+    if now_digest != got_digest:
+        return dict(out, ok=False, refusal=R_AUTH_LIMITS,
+                    why=("authorised against %s, the approved set now "
+                         "digests to %s" % (got_digest[:12],
+                                            now_digest[:12])))
     # THE AUTHORIZATION HAS BEEN READ AND IT MATCHES. What stops the
     # submission from here is the code constant, and nothing else.
     out["authorization_consumed"] = True

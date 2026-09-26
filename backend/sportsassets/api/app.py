@@ -3389,6 +3389,47 @@ async def admin_funded_activation_readiness(response: Response,
             "bound_account": rec}
 
 
+@app.get("/api/admin/pilot-prerequisites",
+         dependencies=[Depends(require_admin)])
+async def admin_pilot_prerequisites(response: Response,
+                                    hours: int = 168) -> dict:
+    """EVERY REMAINING PREREQUISITE, SORTED BY WHO CAN CLEAR IT. Read-only.
+
+    WHY IT EXISTS. The readiness endpoint above answers "what is unmet", and
+    a flat list of unmet checks was read as "the owner supplies the first few
+    and the rest follow". It does not follow: four of them are statements
+    about market and source evidence, and no decision makes a quote fresher
+    or reconciles two published payout rules. This endpoint returns the same
+    checks sorted into ENGINEERING / MARKET_EVIDENCE / OWNER_DECISION, each
+    with the reason it sits there, plus the prerequisites that live outside
+    `readiness` altogether -- and `clears` states, per category, what
+    clearing it does NOT clear.
+    """
+    from .. import bettor_account_onboarding as ON
+    from .. import bettor_funded_activation as FA
+    from .. import bettor_funded_execution as FX
+    from .. import bettor_pilot_prerequisites as PR
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        bound = await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            FA.ACCOUNT_KEY)
+        rec = json.loads(bound) if isinstance(bound, str) else bound
+        got = await FA.readiness(conn, hours=int(hours),
+                                 account_id=(rec or {}).get("account_id"))
+    return {"ok": True,
+            "prerequisites": PR.classify(got["checks"]),
+            "readiness_summary": {k: got[k] for k in
+                                  ("ready", "unmet_count", "unknown_count")},
+            "funded_execution": FX.describe(),
+            "onboarding": ON.describe(),
+            "what_remains_disabled": FX.disablements(),
+            "funded_submission": "DISABLED"}
+
+
 @app.get("/api/admin/funded-account-registry",
          dependencies=[Depends(require_admin)])
 async def admin_funded_account_registry(response: Response) -> dict:

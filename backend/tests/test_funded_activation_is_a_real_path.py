@@ -37,6 +37,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 
 import pytest
 
@@ -877,7 +878,13 @@ def test_the_execution_boundary_consumes_the_authorization():
     the record is present and matching -- from "you are not authorised" to
     "you are authorised and submission is off in code".
     """
+    # A RECORD NOW HAS TO NAME A WINDOW. The earlier version of this test
+    # built a record with NEITHER `expires_at` NOR `at` and the gate consumed
+    # it, because the expiry check was skipped when no usable timestamp could
+    # be derived. That record is now a counterexample, below.
+    _now = time.time()
     rec = {"account_id": CLEAN, "venue": "PMUS_TEST", "venue_class": "TEST",
+           "at": _now, "expires_at": _now + 3600.0,
            "effective_digest": EX.effective_limits(_LIMITS)["effective_digest"]}
 
     # NO RECORD AT ALL
@@ -890,11 +897,13 @@ def test_the_execution_boundary_consumes_the_authorization():
 
     # A RECORD FOR ANOTHER ACCOUNT, AND FOR ANOTHER VENUE
     other = EX.authorize_submission(account_id="someone-else",
-                                    venue="PMUS_TEST", authorization=rec)
+                                    venue="PMUS_TEST", authorization=rec,
+                                    approved_limits=_LIMITS)
     assert other["refusal"] == EX.R_AUTH_ACCOUNT
     assert other["authorization_consumed"] is False
     venue = EX.authorize_submission(account_id=CLEAN, venue="PMUS",
-                                    authorization=rec)
+                                    authorization=rec,
+                                    approved_limits=_LIMITS)
     assert venue["refusal"] == EX.R_AUTH_VENUE
     assert venue["authorization_consumed"] is False
 
@@ -909,8 +918,15 @@ def test_the_execution_boundary_consumes_the_authorization():
     nodig = EX.authorize_submission(
         account_id=CLEAN, venue="PMUS_TEST",
         authorization={k: v for k, v in rec.items()
-                       if k != "effective_digest"})
+                       if k != "effective_digest"},
+        approved_limits=_LIMITS)
     assert nodig["refusal"] == EX.R_AUTH_NO_DIGEST
+    # A DIGEST OF WHITESPACE IS NOT A DIGEST EITHER
+    blank = EX.authorize_submission(
+        account_id=CLEAN, venue="PMUS_TEST",
+        authorization=dict(rec, effective_digest="   "),
+        approved_limits=_LIMITS)
+    assert blank["refusal"] == EX.R_AUTH_NO_DIGEST
 
     # AND THE MATCHING RECORD: CONSUMED, then refused on the CONSTANT.
     good = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
@@ -940,7 +956,9 @@ def test_an_injected_test_venue_executor_still_submits_nothing():
             sent.append({"venue": venue, "account_id": account_id})
         return gate
 
+    _now = time.time()
     rec = {"account_id": CLEAN, "venue": "PMUS_TEST", "venue_class": "TEST",
+           "at": _now, "expires_at": _now + 3600.0,
            "effective_digest": EX.effective_limits(_LIMITS)["effective_digest"]}
     got = _submit_if_allowed(account_id=CLEAN, venue="PMUS_TEST",
                              authorization=rec, limits=_LIMITS)
@@ -1127,3 +1145,212 @@ def test_the_read_path_invents_no_basis_from_its_own_latency():
     assert 'age_basis = "OUR_REQUEST_RESPONSE_ROUND_TRIP"' not in src
     assert "our_transport_latency_is_not_an_upstream_age" in src
     assert "NO FALLBACK" in src
+
+
+# ── THE TWO HOLES IN THE AUTHORIZATION GATE, AS COUNTEREXAMPLES ─────
+
+def _rec(**over):
+    """A record that is valid in every respect except what a test changes.
+
+    `at` is NOT coerced: a test needs to put a malformed value there, which is
+    the whole point of the legacy-fallback counterexample.
+    """
+    now = time.time()
+    rec = {"account_id": CLEAN, "venue": "PMUS_TEST", "venue_class": "TEST",
+           "at": now, "expires_at": now + 3600.0,
+           "effective_digest":
+               EX.effective_limits(_LIMITS)["effective_digest"]}
+    rec.update(over)
+    return rec
+
+
+def test_an_authorization_with_no_usable_expiry_is_refused():
+    """COUNTEREXAMPLE 1. `expires_at` was read and, when absent, derived from
+    `at + AUTHORIZATION_TTL_S`. When `at` was ALSO missing the fallback gave
+    None -- and the expiry test was written `if exp is not None:`, so it was
+    SKIPPED ENTIRELY. A record carrying neither timestamp was a standing
+    permission that could never lapse, which is precisely what a TTL is for.
+    """
+    # NEITHER TIMESTAMP -> refused, and NOT consumed
+    naked = {k: v for k, v in _rec().items()
+             if k not in ("expires_at", "at")}
+    got = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                  authorization=naked,
+                                  approved_limits=_LIMITS)
+    assert got["refusal"] == EX.R_AUTH_NO_EXPIRY, got
+    assert got["authorization_consumed"] is False
+    assert got["submitted"] is False
+    # and it is NOT reported as an expiry, which would imply we read a window
+    assert got["refusal"] != EX.R_AUTH_EXPIRED
+
+    # THE LEGACY SHAPE IS STILL ACCEPTED, and it is VALIDATED: `at` alone,
+    # recent, gives a window of exactly AUTHORIZATION_TTL_S.
+    legacy = {k: v for k, v in _rec().items() if k != "expires_at"}
+    ok = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                 authorization=legacy,
+                                 approved_limits=_LIMITS)
+    assert ok["authorization_consumed"] is True, ok
+    assert ok["refusal"] == EX.R_SUBMISSION_DISABLED
+    assert ok["expiry_basis"] == EX.LEGACY_EXPIRY_FALLBACK
+    assert abs(ok["seconds_until_expiry"] - EX.AUTHORIZATION_TTL_S) < 5
+
+    # AND THE LEGACY SHAPE STILL EXPIRES. An `at` older than the TTL is not
+    # a grant that never ended; it is one that ended.
+    old = {k: v for k, v in
+           _rec(at=time.time() - EX.AUTHORIZATION_TTL_S - 60).items()
+           if k != "expires_at"}
+    lapsed = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                     authorization=old,
+                                     approved_limits=_LIMITS)
+    assert lapsed["refusal"] == EX.R_AUTH_EXPIRED, lapsed
+    assert lapsed["expiry_basis"] == EX.LEGACY_EXPIRY_FALLBACK
+
+    # A MALFORMED OR NONFINITE TIMESTAMP IS WORSE THAN A MISSING ONE, because
+    # arithmetic on it succeeds quietly. NaN compares FALSE against every
+    # bound, so `left <= 0` was false and NaN PASSED; inf never lapses; a
+    # malformed string raised ValueError out of the gate instead of refusing.
+    for bad in (float("nan"), float("inf"), float("-inf"),
+                "not-a-timestamp", "", True, False, [], {}, object()):
+        r = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                    authorization=_rec(expires_at=bad),
+                                    approved_limits=_LIMITS)
+        assert r["refusal"] == EX.R_AUTH_BAD_EXPIRY, (bad, r)
+        assert r["authorization_consumed"] is False, bad
+    # the same rule on the LEGACY field, so the fallback cannot smuggle one in
+    for bad in (float("nan"), float("inf"), "later", True):
+        naked_bad = {k: v for k, v in _rec(at=bad).items()
+                     if k != "expires_at"}
+        r = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                    authorization=naked_bad,
+                                    approved_limits=_LIMITS)
+        assert r["refusal"] == EX.R_AUTH_BAD_EXPIRY, (bad, r)
+        assert r["authorization_consumed"] is False, bad
+
+
+def test_the_approved_limit_digest_must_be_supplied_and_must_match():
+    """COUNTEREXAMPLE 2. The digest comparison was guarded by
+    `if approved_limits is not None:`, so a caller that did not supply the
+    owner-approved set skipped the limit check completely -- the record was
+    accepted for carrying SOME digest, with nothing establishing it was the
+    digest of the limits in force.
+    """
+    rec = _rec()
+
+    # NOT SUPPLIED -> refused, and not consumed. This is the hole.
+    unknown = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                      authorization=rec)
+    assert unknown["refusal"] == EX.R_AUTH_LIMITS_UNKNOWN, unknown
+    assert unknown["authorization_consumed"] is False
+    assert unknown["submitted"] is False
+    # AN EMPTY APPROVED SET IS NOT "NOT SUPPLIED". It is a real set -- the
+    # frozen rails untightened -- and it digests differently, so it is a
+    # MISMATCH and must be named as one.
+    empty = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                    authorization=rec, approved_limits={})
+    assert empty["refusal"] == EX.R_AUTH_LIMITS, empty
+    assert empty["effective_digest_now"] == \
+        EX.effective_limits({})["effective_digest"]
+
+    # A MOVED SET -> mismatch, named
+    moved = EX.authorize_submission(
+        account_id=CLEAN, venue="PMUS_TEST", authorization=rec,
+        approved_limits=dict(_LIMITS, per_order_usd=1))
+    assert moved["refusal"] == EX.R_AUTH_LIMITS
+
+    # AND THE MATCHING SET -> consumed, then the code constant and nothing
+    # else. That difference is the whole point of the gate.
+    good = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                   authorization=rec,
+                                   approved_limits=_LIMITS)
+    assert good["authorization_consumed"] is True, good
+    assert good["refusal"] == EX.R_SUBMISSION_DISABLED
+    assert good["real_order_submission_enabled"] is False
+    assert good["submitted"] is False
+    assert good["effective_digest_now"] == rec["effective_digest"]
+
+
+def test_no_caller_reaches_the_gate_without_the_approved_set():
+    """THE GATE NOW REQUIRES THE APPROVED SET, so a caller that passes
+    `approved_limits=None` gets R_AUTH_LIMITS_UNKNOWN rather than an answer
+    about submission. Every in-tree caller is checked to pass it, because a
+    refusal nobody can clear is a broken path, not a safe one."""
+    import inspect
+    import pathlib
+    import re
+
+    root = pathlib.Path(EX.__file__).resolve().parent
+    bad = []
+    for f in sorted(root.rglob("*.py")):
+        if "__pycache__" in str(f):
+            continue
+        src = f.read_text(errors="ignore")
+        for m in re.finditer(r"authorize_submission\(", src):
+            if "def authorize_submission" in src[max(0, m.start() - 40):
+                                                 m.start() + 30]:
+                continue
+            # the call's argument text, to the matching close paren
+            depth, i = 1, m.end()
+            while i < len(src) and depth:
+                depth += (src[i] == "(") - (src[i] == ")")
+                i += 1
+            if "approved_limits" not in src[m.end():i]:
+                bad.append("%s:%d" % (f.name, src[:m.start()].count("\n") + 1))
+    assert bad == [], bad
+    # and the signature still makes it explicit rather than positional
+    sig = inspect.signature(EX.authorize_submission)
+    assert sig.parameters["approved_limits"].kind is \
+        inspect.Parameter.KEYWORD_ONLY
+
+
+def test_the_event_rail_can_now_be_tightened_and_no_existing_digest_moved():
+    """THE RAIL AN APPROVAL COULD NOT REACH.
+
+    The four approved names left MAX_EVENT_EXPOSURE at its frozen $1,000
+    however small the pilot -- so a $250 approval produced a $25 per-order cap
+    beside an event cap forty times the whole pilot. `event_exposure_usd` now
+    maps to it.
+
+    AND ADDING A NAME MUST NOT MOVE AN EXISTING APPROVAL'S DIGEST, because the
+    authorization gate compares digests: if this had changed what the old four
+    numbers produce, every recorded authorization would have silently stopped
+    matching.
+    """
+    four = {"capital_usd": 250, "per_order_usd": 25,
+            "max_exposure_usd": 100, "daily_loss_stop_usd": 50}
+    a = EX.effective_limits(four)
+    # the digest the 2026-09-26 authorizations were granted against
+    assert a["effective_digest"].startswith("8e667b126912"), a[
+        "effective_digest"]
+    assert a["effective"]["MAX_EVENT_EXPOSURE"] == pytest.approx(1000.0)
+    assert "MAX_EVENT_EXPOSURE" not in a["tightened"]
+
+    five = dict(four, event_exposure_usd=30)
+    b = EX.effective_limits(five)
+    assert b["effective"]["MAX_EVENT_EXPOSURE"] == pytest.approx(30.0)
+    assert "MAX_EVENT_EXPOSURE" in b["tightened"]
+    assert b["effective_digest"] != a["effective_digest"]
+    # AND IT STILL ONLY TIGHTENS
+    loose = dict(four, event_exposure_usd=5000)
+    c = EX.effective_limits(loose)
+    assert c["effective"]["MAX_EVENT_EXPOSURE"] == pytest.approx(1000.0)
+    assert "event_exposure_usd" in c["ignored_because_looser"]
+    # the frozen set never moves
+    for got in (a, b, c):
+        assert got["frozen_digest"] == EX.LIMITS_SHA
+        assert got["frozen"]["MAX_EVENT_EXPOSURE"] == pytest.approx(1000.0)
+
+
+def test_tightening_the_event_rail_is_not_enforcing_it():
+    """AND THE HONEST HALF. The rail's measurement cannot see other positions
+    on the same event, so a tightened number is a smaller bound on a quantity
+    that is still measured incompletely. The mapping's own comment says so, and
+    the defect stays recorded rather than being treated as closed."""
+    import pathlib
+
+    src = pathlib.Path(EX.__file__).read_text()
+    at = src.index('"event_exposure_usd"')
+    window = src[max(0, at - 1400):at]
+    assert "OPEN_BOOK_SQL selects" in window
+    assert "NOT THE SAME AS ENFORCING" in window
+    # the rail is still declared, so it is not silently dropped
+    assert "MAX_EVENT_EXPOSURE" in EX.PREDECLARED_LIMITS
