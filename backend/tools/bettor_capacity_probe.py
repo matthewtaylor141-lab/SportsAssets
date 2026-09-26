@@ -98,15 +98,13 @@ R_STRATEGY_EXPERIMENT = "REFUSED_A_STRATEGY_EXPERIMENT"
 R_NOT_CONFIRMED = "REFUSED_THE_DATABASE_WAS_NOT_CONFIRMED_DISPOSABLE"
 R_HOLDS_A_STRATEGY_BOOK = "REFUSED_THE_DATABASE_HOLDS_A_STRATEGY_BOOK"
 
-#: Every experiment id this harness may write under. Anything else is a
-#: refusal, including a plausible-looking name.
-OWN_EXPERIMENTS = ("CAPACITY_PROBE_WRITER_V1", "CAPACITY_PROBE_LIFECYCLE_V1")
+# ONE DEFINITION, IMPORTED from the package, because the audit endpoint in
+# the deployed image needs the same lists and a second copy is how two
+# copies drift.
+from sportsassets import bettor_capacity_fingerprint as _FP   # noqa: E402
 
-#: The books a capacity record may never be filed under.
-STRATEGY_EXPERIMENTS = ("EXT_PINNACLE_DEVIG_V1_SHADOW",
-                        "RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1",
-                        "RN1X_SHADOW_PROSPECTIVE_V1",
-                        "RN1X_SHADOW_HISTORICAL_V1")
+OWN_EXPERIMENTS = _FP.OWN_EXPERIMENTS
+STRATEGY_EXPERIMENTS = _FP.STRATEGY_EXPERIMENTS
 
 
 def experiment_guard(experiment: str) -> dict:

@@ -35,20 +35,17 @@ import os
 import subprocess
 import sys
 
-#: The strategy books a probe record must never be filed under.
-STRATEGY_EXPERIMENTS = ("EXT_PINNACLE_DEVIG_V1_SHADOW",)
+# ONE DEFINITION, IMPORTED. The fingerprint and the book lists live in the
+# PACKAGE (`sportsassets.bettor_capacity_fingerprint`) because the deployed
+# image contains the package and not this directory -- the audit endpoint
+# needs them too, and a second copy here is how the two would drift.
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+from sportsassets import bettor_capacity_fingerprint as FP   # noqa: E402
+
+STRATEGY_EXPERIMENTS = FP.STRATEGY_EXPERIMENTS
 
 #: What identifies a probe record REGARDLESS of the experiment it carries.
-FINGERPRINT = """
-    (p.condition_id LIKE '0x%c0de0000'
-     OR p.condition_id LIKE '0x%cafe0000'
-     OR p.condition_id ~ '^0x0+c0de[0-9a-f]{4}$'
-     OR p.condition_id ~ '^0x0+cafe[0-9a-f]{4}$'
-     OR p.venue_market_slug LIKE 'aec-cap-%'
-     OR p.venue_market_slug LIKE 'aec-lifecycle-%'
-     OR p.payout_event LIKE 'Capacity Probe %'
-     OR p.payout_event LIKE 'Capacity Lifecycle %')
-"""
+FINGERPRINT = FP.FINGERPRINT
 
 COUNTS_SQL = """
 WITH probe AS (

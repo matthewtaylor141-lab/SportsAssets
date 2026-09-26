@@ -158,3 +158,49 @@ def test_the_published_evidence_carries_its_own_labels():
     assert "connection_recovery" in ph
     assert "It is NOT a process restart" in \
         ph["connection_recovery"]["what_this_is"]
+
+
+# ── THE AUDIT HAS TO WORK IN THE IMAGE, NOT ONLY IN THE REPOSITORY ──
+
+def test_the_api_imports_nothing_the_image_does_not_contain():
+    """THE DEFECT THIS PINS. The audit endpoint imported the fingerprint from
+    `backend/tools/`, which the Dockerfile does not copy into the image. It
+    passed every check in the repository and returned 500 in production, so
+    the production isolation question it exists to answer went unanswered
+    through a whole release cycle.
+
+    The rule is general: nothing under `sportsassets/` may import `tools`.
+    """
+    import pathlib
+    import re as _re
+
+    pkg = pathlib.Path(ROOT) / "backend" / "sportsassets"
+    docker = (pathlib.Path(ROOT) / "backend" / "Dockerfile").read_text()
+    assert "backend/sportsassets" in docker
+    assert "backend/tools" not in docker, (
+        "if tools/ is copied into the image this rule can be relaxed -- "
+        "until then the package must stand alone")
+    bad = []
+    for path in pkg.rglob("*.py"):
+        text = path.read_text()
+        if _re.search(r"^\s*(from tools[ .]|import tools\b)", text,
+                      _re.MULTILINE):
+            bad.append(str(path.relative_to(pkg)))
+    assert not bad, ("these package modules import `tools`, which is absent "
+                     "from the deployed image: %s" % bad)
+
+
+def test_the_fingerprint_has_one_definition():
+    """The endpoint, the manifest tool and the probe's guard must all read
+    the same fingerprint -- two copies is how two answers happen."""
+    from sportsassets import bettor_capacity_fingerprint as FP
+    from tools import capacity_probe_manifest as MAN
+
+    assert MAN.FINGERPRINT is FP.FINGERPRINT
+    assert MAN.STRATEGY_EXPERIMENTS is FP.STRATEGY_EXPERIMENTS
+    assert P.OWN_EXPERIMENTS is FP.OWN_EXPERIMENTS
+    assert P.STRATEGY_EXPERIMENTS is FP.STRATEGY_EXPERIMENTS
+    # AND THE AUDIT SQL READS ONLY.
+    up = FP.AUDIT_SQL.upper()
+    for never in ("INSERT", "UPDATE", "DELETE", "DROP", "ALTER"):
+        assert never not in up, never

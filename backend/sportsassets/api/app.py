@@ -3181,79 +3181,40 @@ async def admin_capacity_probe_audit(response: Response) -> dict:
     """DID ANY CAPACITY-HARNESS RECORD REACH THIS DATABASE. Read-only.
 
     WHY IT IS AN ENDPOINT. The harness's writer phases once stamped the
-    autonomous strategy's experiment id on their synthetic plans, so the
-    question "is any of that in production" has to be answerable FROM
-    production. The runner that verifies releases does not hold the
-    database credential, but this service does -- so the audit runs here,
-    reads nothing but counts, and writes nothing at all.
+    autonomous strategy's experiment id on their synthetic plans, so "is any
+    of that in production" has to be answerable FROM production. The runner
+    that verifies releases holds no database credential; this service does.
 
-    HOW A PROBE RECORD IS IDENTIFIED: by the fingerprints the harness
-    itself writes -- the condition id shape, the slug prefix and the payout
-    event -- and NEVER by an experiment id, because the experiment id is
-    exactly what was wrong. A row without one of those fingerprints is not
-    the harness's business, whatever book it is in.
+    AND WHY IT IMPORTS FROM THE PACKAGE. The first version imported the
+    fingerprint from `backend/tools/`, which the Dockerfile does not copy
+    into the image: the route worked in the repository and returned 500 in
+    production, so the question it exists to answer stayed unanswered. The
+    definition now lives in `bettor_capacity_fingerprint`, which ships.
+
+    A probe record is identified by the fingerprints the harness itself
+    writes -- the condition id shape, the slug prefix, the payout event --
+    and NEVER by an experiment id, because the experiment id is what was
+    wrong. This reads counts and writes nothing.
     """
-    import os as _os
-    import sys as _sys
-
+    from .. import bettor_capacity_fingerprint as FP
     from ..db import get_pool
-
-    # THE FINGERPRINT COMES FROM THE AUDIT TOOL, not a second copy. `tools`
-    # sits beside the package rather than inside it, so the path is added
-    # for this import only -- one definition of what a probe record is.
-    _root = _os.path.dirname(_os.path.dirname(_os.path.dirname(
-        _os.path.abspath(__file__))))
-    if _root not in _sys.path:
-        _sys.path.insert(0, _root)
-    from tools import capacity_probe_manifest as MAN
 
     response.headers["Cache-Control"] = "no-store"
     pool = await get_pool()
-    fp = MAN.FINGERPRINT
-    se = list(MAN.STRATEGY_EXPERIMENTS)
-    sql = """
-        WITH probe AS (
-          SELECT p.position_id, p.experiment_id, p.condition_id
-            FROM rn1x_positions p WHERE %s
-        )
-        SELECT
-          (SELECT count(*) FROM probe)                            AS positions,
-          (SELECT count(*) FROM probe WHERE experiment_id = ANY($1::text[]))
-                                                                  AS in_strategy_book,
-          (SELECT count(*) FROM rn1x_orders o
-            WHERE o.position_id IN (SELECT position_id FROM probe)) AS orders,
-          (SELECT count(*) FROM rn1x_fills f JOIN rn1x_orders o
-             ON o.order_id = f.order_id
-           WHERE o.position_id IN (SELECT position_id FROM probe)) AS fills,
-          (SELECT count(*) FROM rn1x_decisions d
-            WHERE d.position_id IN (SELECT position_id FROM probe)) AS decisions,
-          (SELECT count(*) FROM rn1x_outcomes x
-            WHERE x.position_id IN (SELECT position_id FROM probe)) AS outcomes,
-          (SELECT count(*) FROM external_valuations e
-            WHERE e.condition_id IN (SELECT condition_id FROM probe))
-                                                                  AS valuations,
-          (SELECT count(*) FROM rn1x_positions)                    AS all_positions
-    """ % fp
-    out: dict = {"audit": "CAPACITY_PROBE_AFFECTED_RECORDS_V1",
-                 "read_only": True, "writes": "nothing",
-                 "identified_by": ("the harness's own fingerprints, never "
-                                   "an experiment id"),
-                 "strategy_experiments": se,
-                 "harness_experiments": [
-                     "CAPACITY_PROBE_WRITER_V1",
-                     "CAPACITY_PROBE_LIFECYCLE_V1"]}
+    out: dict = dict(FP.describe(), audit="CAPACITY_PROBE_AFFECTED_RECORDS_V1",
+                     writes="nothing")
     try:
-        row = await pool.fetchrow(sql, se)
+        row = await pool.fetchrow(FP.AUDIT_SQL,
+                                  list(FP.STRATEGY_EXPERIMENTS))
     except Exception as exc:                                    # noqa: BLE001
         return dict(out, ok=False, unreadable=type(exc).__name__,
+                    error_text=str(exc)[:300],
                     why=("the ledger could not be read, so this is NOT a "
                          "clean result -- an unreadable audit is not an "
                          "empty one"))
     got = {k: int(v or 0) for k, v in dict(row).items()}
     try:
-        books = await pool.fetch(
-            "SELECT experiment_id, count(*) AS n FROM rn1x_positions "
-            "GROUP BY 1 ORDER BY 2 DESC LIMIT 40")
+        books = await pool.fetch(FP.BOOKS_SQL)
         out["books"] = {r["experiment_id"]: int(r["n"]) for r in books}
     except Exception as exc:                                    # noqa: BLE001
         out["books"] = {"unreadable": type(exc).__name__}
