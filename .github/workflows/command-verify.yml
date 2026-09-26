@@ -4032,16 +4032,45 @@ jobs:
           say "  with an ADOPTED/existing state is the protection working;"
           say "  migration 114's unique index is the backstop."
           say ""
-          say "== A2b · restart recovery, from this run's own restart =="
+          # WHAT THIS BLOCK DOES AND DOES NOT SHOW.
+          #
+          # It shows LIVENESS AFTER A PROCESS RESTART: the API was
+          # redeployed for this release, and the writer identity below
+          # carries THIS build's SHA, so the cycle it timestamps was run
+          # by the post-restart process. That is worth reading, and it is
+          # all it is.
+          #
+          # IT IS NOT RESTART RECOVERY OF HELD INVENTORY. Recovery means
+          # a position entered before the restart is re-read afterwards
+          # with the same identity, the same residual and no duplicate
+          # write. This lane holds ZERO positions (§4 of the operating
+          # recap), so there is nothing here for a restart to recover,
+          # and a completed cycle cannot evidence otherwise.
+          #
+          # NOR IS A CONNECTION RELOAD A PROCESS RESTART. Re-reading a
+          # position on a fresh DB connection in the same interpreter
+          # exercises the reload path, not process recovery; the two must
+          # not be reported as the same thing.
+          #
+          # Process recovery is verified separately, by two real OS
+          # processes: A enters and manages, then EXITS; B starts in a
+          # fresh interpreter and re-reads. See the acceptance record.
+          say "== A2b · post-restart liveness (NOT inventory recovery) =="
           jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
             .statuses.external_valuation.last_cycle as $L
             | "  entry loop   writer " + n($L.writer)
                 + "  state " + n($L.state)
                 + "  at " + n($L.at),
-              "  the API was redeployed for this release, so a cycle and a",
-              "  management decision AFTER that restart is recovery",
-              "  evidence: the loop retook its lock and continued on the",
-              "  same persisted inventory rather than starting a new set."' \
+              "  SHOWS      the process that ran this cycle carries this",
+              "             release's SHA, so the loop came back up after",
+              "             the redeploy and is cycling.",
+              "  DOES NOT   show restart recovery of held inventory: this",
+              "             lane holds no positions, so no identity, no",
+              "             residual and no duplicate protection is under",
+              "             test here. A connection reload is also NOT a",
+              "             process restart. Process recovery is verified",
+              "             by the two-process check in the acceptance",
+              "             record, not by this line."' \
             /tmp/pnl.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
 
