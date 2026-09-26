@@ -953,9 +953,14 @@ COMMAND_COOKIE = "bt_command"
 def require_command(bt_command: str = Cookie(default=""),
                     x_desk_token: str = Header(default=""),
                     x_admin_token: str = Header(default="")) -> str:
-    """Server-side access control for COMMAND. Cookie first, then the
+    """Server-side access control for COMMAND READS. Cookie first, then the
     existing header tokens so ops tooling and the TV wall keep working.
-    Returns the caller's role; COMMAND is read-only for every role."""
+
+    Returns the caller's role. EVERY ROLE THIS GRANTS IS READ-ONLY: the desk
+    cookie and the wall token open reads and nothing else. The desk's
+    controls are writes and go through `require_command_control`, which takes
+    the OPERATOR token instead and refuses a read credential by name -- so
+    anybody who may look at the numbers still cannot halt the lane."""
     import hmac
 
     if bt_command and (desk_token_ok(bt_command) or wall_token_ok(bt_command)):
