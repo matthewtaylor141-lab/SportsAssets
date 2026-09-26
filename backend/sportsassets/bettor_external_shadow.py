@@ -738,6 +738,19 @@ EVALUABILITY_OF = {
     "VENUE_MARKET_SCOPE_CONFLICTS_WITH_THE_IDENTIFIER": COULD_NOT_EVALUATE,
     "VOID_ABANDONMENT_RULE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
     "OVERTIME_RULE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    # WE DO NOT HOLD THE BOOK'S OWN RULE. The venue published terms; the
+    # BOOKMAKER's side is silent or was never captured, so
+    # `bettor_venue_settlement` returns established=False with
+    # evidence_class=EV_NONE. That is OUR gap -- more capture could close it
+    # -- and it is emphatically NOT the same as the two sides stating
+    # payouts that differ, which is a DECISION on real evidence. The live
+    # census of 2026-09-26 22:11 carried 1 of these alongside 22 genuine
+    # conflicts, and the classifier correctly refused to guess which it was.
+    "VOID_ABANDONMENT_BOOK_RULE_NOT_HELD": COULD_NOT_EVALUATE,
+    # The remaining settlement refusals, for the same reason: each names a
+    # comparison that could not be MADE, not one that came out against us.
+    "VENUE_SETTLEMENT_RULE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "DRAW_HANDLING_NOT_RECONCILED": COULD_NOT_EVALUATE,
     "SETTLEMENT_SCOPE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
     "UNRESOLVED_SETTLEMENT_SEMANTICS": COULD_NOT_EVALUATE,
     "EXECUTION_ESTIMATE_NOT_IDENTIFIED": COULD_NOT_EVALUATE,

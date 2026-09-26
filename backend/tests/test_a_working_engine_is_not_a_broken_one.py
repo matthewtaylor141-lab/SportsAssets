@@ -28,6 +28,22 @@ PROD_CENSUS = (
     + [["VENUE_QUOTE_STALE"]] * 2
     + [["VENUE_BOOK_READ_FAILED"]] * 2)
 
+#: THE CENSUS THE DEPLOYED BUILD 47ad3ce PRINTED AT 22:11 UTC on 2026-09-26,
+#: read back from production. It is kept because it caught a real gap: the
+#: classifier reported DRIFT on `VOID_ABANDONMENT_BOOK_RULE_NOT_HELD`, a live
+#: refusal that was not in the table. It is OUR gap (we do not hold the
+#: bookmaker's own rule, so the comparison could not be MADE) and not a stated
+#: conflict, so it classifies as COULD_NOT_EVALUATE -- and the point of the
+#: drift verdict is that the lane said "I do not know which" instead of
+#: guessing.
+LIVE_CENSUS_47ad3ce = (
+    [["VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE"]] * 22
+    + [["VOID_ABANDONMENT_BOOK_RULE_NOT_HELD"]] * 1
+    + [["QUOTE_STALE"]] * 19
+    + [["NO_VENUE_NATIVE_CONTRACT_IN_PREMAP"]] * 2
+    + [["VENUE_QUOTE_STALE"]] * 6
+    + [["VENUE_BOOK_READ_FAILED"]] * 1)
+
 
 def test_a_measured_stale_quote_is_a_decision_not_an_inability():
     """The clock was read and the price was too old. Nothing was missing."""
@@ -150,3 +166,67 @@ def test_the_desk_reports_the_verdict_with_its_counts():
     assert 'opps["per_candidate_evaluability"]' in src
     # and it says why the counts are there
     assert "could not evaluate" in src
+
+
+def test_the_live_census_from_the_deployed_build_classifies_completely():
+    """THE PRODUCTION CENSUS OF THE BUILD THAT IS ACTUALLY SERVING.
+
+    Read back from 47ad3ce at 2026-09-26T22:11Z. When first classified, this
+    census produced V_CLASSIFICATION_HAS_DRIFTED on
+    `VOID_ABANDONMENT_BOOK_RULE_NOT_HELD` -- which is the mechanism working:
+    an unknown refusal is reported as drift rather than folded into "no
+    opportunity" or blamed on somebody else.
+
+    That code means `bettor_venue_settlement` found the venue's terms but NOT
+    the bookmaker's, so it returned established=False with EV_NONE. The
+    comparison could not be MADE. That is an inability, not a refusal on
+    evidence, and classifying it as a conflict would have flattered the funnel
+    by 1.
+    """
+    v = ext.cycle_evaluability(LIVE_CENSUS_47ad3ce)
+    assert v["unclassified_codes"] == [], v["unclassified_codes"]
+    assert v["candidates"] == 51
+    assert v["admitted"] == 0
+    assert v["evaluated_to_a_judgement"] == 47
+    assert v["could_not_be_evaluated"] == 4
+    assert v["counts"][ext.COULD_NOT_EVALUATE] == 1
+    assert v["counts"][ext.EXTERNAL_DEPENDENCY] == 3
+    assert v["verdict"] == ext.V_NO_OPPORTUNITY_WITH_GAPS
+    # A RULE NOBODY HELD IS NOT A RULE THAT CONFLICTS, and the two must not
+    # collapse: 22 of these candidates carry a STATED conflict and 1 does not.
+    assert ext.evaluability(["VOID_ABANDONMENT_BOOK_RULE_NOT_HELD"]) == \
+        ext.COULD_NOT_EVALUATE
+    assert ext.evaluability(
+        ["VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE"]) == ext.DECIDED
+
+
+def test_every_settlement_refusal_this_lane_can_raise_is_classified():
+    """THE GAP FOUND IN PRODUCTION WAS A MISSING TABLE ENTRY, so the whole
+    settlement vocabulary is checked rather than the one code that happened to
+    appear in one cycle. An unclassified refusal is not a crash -- it degrades
+    the cycle verdict to DRIFT, which is exactly the kind of silent quality
+    loss a test should hold.
+
+    "CAN RAISE" IS CHECKED, NOT ASSUMED. A constant that appears only in its
+    own assignment cannot reach a census, and demanding a classification for
+    it would be padding the table with a code nobody emits.
+    `PUSH_NOT_APPLICABLE_TO_H2H` is exactly that: declared and never used.
+    It is reported here rather than quietly skipped, because a refusal
+    vocabulary with dead entries is worth knowing about.
+    """
+    import pathlib
+
+    from sportsassets import bettor_venue_settlement as st
+
+    src = pathlib.Path(st.__file__).read_text()
+    reachable, unreachable = set(), set()
+    for name, val in vars(st).items():
+        if not (name.startswith("R_") and isinstance(val, str)):
+            continue
+        # once == the declaration alone; nothing ever puts it in a refusal
+        (reachable if src.count(name) > 1 else unreachable).add(val)
+
+    missing = sorted(reachable - set(ext.EVALUABILITY_OF))
+    assert missing == [], missing
+    # the dead one, named so a later reader does not rediscover it
+    assert unreachable == {"PUSH_NOT_APPLICABLE_TO_H2H"}, unreachable

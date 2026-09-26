@@ -565,3 +565,379 @@ every gate run on a long-lived machine from now on.
 - The desk is served from the API origin only. **Netlify publication remains
   separate** — this repository holds no Netlify credential, and you said that
   can stay separate for this delivery.
+
+---
+
+# The four incomplete corrections in `0899264`, closed in `7dedc5a`
+
+Your source review found four of the previous commit's fixes did not hold.
+Each is reproduced as a counterexample first, then closed.
+
+## 1 · A missing fill id silently lost executions
+
+`fill_id_for()` answered `tvf:<order>:NO_VENUE_FILL_ID` for **every**
+unidentified fill on an order — one id for all of them. With
+`ON CONFLICT (fill_id) DO NOTHING` the first was written and every later
+**distinct** execution came back as *already held*. Two fills became one, and
+the quantity, the fees and the cash were all short.
+
+**A content hash is not an identity either.** Two separate executions on a
+resting order can share a quantity and a price exactly, so hashing them
+collides for the same reason with extra steps. There is therefore no
+substitute identity, and the code does not invent one:
+
+| input | `fill_id_for` |
+|---|---|
+| `venue_fill_id="sim-abc:f1"` | `tvf:sim-abc:sim-abc:f1` |
+| `None`, `""`, `"  "` | **`None`** |
+
+A fill with no durable identity is **not ingested and not called already
+held**. It becomes an explicit unresolved reconciliation state in
+`ingestion_state[bettor_test_venue_unresolved_executions]`, and
+`reconcile()` reports each one as an `UNRESOLVED_EXECUTION_IDENTITY`
+discrepancy with `reconciles_exactly_once: false`. A visible problem instead
+of a quantity that is quietly wrong.
+
+Live, against Postgres — two executions of the same size at the same price:
+
+```
+   two unidentified executions, same qty and price
+   written 0 | already_held 0 | UNRESOLVED 2
+   refusal       THE_VENUE_SUPPLIED_NO_DURABLE_EXECUTION_IDENTITY
+   ledger qty    40.0 (unchanged: nothing was ingested)
+```
+
+And the same fill, properly identified, handed back ten times:
+
+```
+   delivery  1 -> written 0 already_held 1 unresolved 0 ledger qty 40.0
+   delivery  2 -> written 0 already_held 1 unresolved 0 ledger qty 40.0
+   delivery 10 -> written 0 already_held 1 unresolved 0 ledger qty 40.0
+   fill ledger rows after 10 deliveries: 1 (one execution)
+```
+
+Pinned by `test_two_unidentified_fills_are_both_unresolved_not_one_ingested`.
+
+## 2 · Servicing did not establish ownership of the orders it selected
+
+`check_servicing()` read the single global authorization record while
+`_open_orders()` selected **every** open order in the experiment, with no
+account or venue filter. Replacing account A's authorization with B's
+therefore made A's orders invisible to A — stranded — and reachable from B's
+servicing path.
+
+Ownership is a property of the **order**, not of a replaceable record. It is
+now read off the order's own position row (`source_account`, `venue` — the
+position stores the real venue rather than a hard-coded literal) and the
+selection is scoped by it. `check_servicing` does not consult the
+authorization record for ownership at all; it checks the venue class and
+reports, separately and for the record, whether new exposure would currently
+be authorised.
+
+Live, with both accounts holding open orders and **B's grant in the record**:
+
+```
+   A sees         ['tvx-6fb3b22892c548'] owner {'acct-pilot-test-001'}
+   B sees         ['tvx-74ee2d41b0eb4a'] owner {'acct-pilot-test-002'}
+   disjoint       True
+   A can service  True | new exposure authorised for A: False
+                        | THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT
+   A NEW exposure THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT | ok False
+   A polls        ['tvx-6fb3b22892c548'] | refusal None
+   B polls        ['tvx-74ee2d41b0eb4a'] | refusal None
+   B cancels      ['tvx-74ee2d41b0eb4a'] -- and A's order is not among them: True
+```
+
+So servicing survives **replacement** as well as expiry and revocation, and
+one account's cancel cannot reach another's order. Pinned by
+`test_two_accounts_each_service_only_their_own_orders`.
+
+## 3 · Recovery still invented a cancellation
+
+The line was
+
+```python
+seen_state = got.get("state") or dk.CANCELLED
+```
+
+so an order absent from the venue's open list whose status could not be read
+was written `CANCELLED`. Absence plus an unreadable status is precisely the
+case where we do **not** know, and a terminal state there reports flat while
+the exposure may still be live.
+
+`recover()` now adopts only a state this executor recognises
+(`_KNOWN_STATES` = the open plus terminal vocabulary). Anything else — `None`,
+a venue's own "unknown", a spelling we do not hold — leaves the row
+**untouched** and appends the order to `unresolved`:
+
+```
+   case           OPEN_HERE_STATUS_UNREADABLE_AT_THE_VENUE
+   venue said     None | exposure PRESERVED
+   state before/after: PARTIALLY_FILLED -> PARTIALLY_FILLED | qty 40.0 -> 40.0
+   reconciled[]   0 (nothing was resolved)
+   terminal?      False
+```
+
+Only when the venue speaks again is it resolved — and the quantity still comes
+from the ledger, not from the venue's running total:
+
+```
+   case           OPEN_AT_BOTH | venue state PARTIALLY_FILLED
+   fills missed   1 | adopted qty 50.0 | from the ledger, after ingesting every fill
+```
+
+Pinned by `test_an_unreadable_status_is_not_a_cancellation`.
+
+## 4 · The deployment guard failed open
+
+S2a stopped only when it read the exact string `yes`, so a missing value, an
+unexpected response or a failed read all fell through to the password write —
+the write that creates a tracked-branch deploy. The order is now:
+
+1. **Validate the release SHA** (40 hex) **before anything is mutated.**
+2. `PATCH autoDeploy=no`, and require a **2xx on the update**.
+3. Read the service back, and require a **2xx on the read**.
+4. Require the read-back value to be an **explicit member of
+   `DISABLED_VALUES`**. `__ABSENT__` (the key is not in the response) and
+   `__UNREADABLE__` (the response would not parse) both stop the run.
+   *Unknown is treated as enabled.*
+5. Only then is the secret written.
+
+S3b likewise requires the deploy list's own HTTP to be 2xx and `PENDING` to
+parse; a failed or unparseable read is not "no pending deploys", it is no
+answer, and it fails the step.
+
+Pinned by `test_the_deployment_guard_stops_on_an_unknown_readback`, which
+asserts the ordering and the allow-list in the workflow source.
+
+**Why this matters here, measured today:**
+
+```
+sportsassets-api      srv-d9gcv6urnols73ce6er0  branch=claude/session-njaewf  autoDeploy=yes
+sportsassets-workers  srv-d9gcv6urnols73ce6erg  branch=claude/session-njaewf  autoDeploy=yes
+```
+
+Both services track the protected default branch with auto-deploy on, which
+is exactly the configuration that turns an env write into an unreviewed
+publish.
+
+## 5 · And the step that proves operator sign-in had the same shape
+
+S4 is the one step whose entire purpose is to show that ordinary password
+sign-in works and that an authorised shadow control action goes through. It
+**printed** a bad sign-in and carried on, so a run could finish green while
+the password was rejected, the cookie was never set, or the control action
+never completed — and a green run is what gets reported as "operator access is
+configured". It now stops on: a non-200 sign-in; no `bt_control` in the jar; a
+minted `scope` that is not `control`; a pause or resume that is not 200; and a
+control cookie that reaches `/api/admin` with anything but 401/403.
+
+`git diff 7dedc5a..7349772 -- backend/` is empty: this correction touches the
+workflow only.
+
+# What the gate found, in my own delivery
+
+## The harness, not the release: a stalled run
+
+A first gate run of `7dedc5a` stopped moving at 38% and produced **no
+summary**. A `py-spy` dump read like a deadlock — main thread idle in
+`selectors.select` inside `asyncio.run`, only the event loop's own self-pipe
+open. It was neither a deadlock nor the release.
+
+Postgres folds an unquoted `CREATE DATABASE gateEdb` to `gateedb`, while a
+connection string carries the name **verbatim**. My harness was invoked with
+mixed-case names, so the migrations silently did nothing and every DB-backed
+test met a connect error that `sportsassets/db.py` retries with **doubling**
+backoff. The stall was a sleep in a retry loop.
+
+| DSN | same checkout, same test |
+|---|---|
+| `…/gateEdb` | 4 failed in 62.95 s — `database "gateEdb" does not exist; retry in 1s/2s/4s/8s` |
+| `…/deskdb` | **4 passed in 1.22 s** |
+
+The harness now lower-cases the name for both the `CREATE` and the DSN, and
+runs with `--timeout=180 --timeout-method=signal`, so a future stall is one
+**named** failure with a stack rather than a run with no summary.
+Recorded in `research/evidence/gate/GATE_HARNESS_DEFECT_MIXED_CASE_DB.json`.
+
+## Two fixtures narrowed the provenance vocabulary
+
+The first valid matched pair gave **178** identities for `6d75275` and **188**
+for `7dedc5a`. Every one of the ten new ones was in my own executor test file,
+and every one was
+
+```
+CheckViolationError: new row for relation "rn1x_positions"
+violates check constraint "rn1x_provenance_declared"
+```
+
+They passed alone and in their group, and failed only in the full suite —
+which is the signature of a fixture in another file.
+
+`rn1x_provenance_declared` is dropped and re-added by four migrations, each
+widening the vocabulary: 113 declares it, 117 re-declares three origins, 122
+adds `UNCALIBRATED_RESEARCH_SHADOW`, 123 adds
+`TEST_VENUE_EXECUTION_LIFECYCLE`. `scripts/migrate.py` keys on filename and
+applies them in order, so the **deployed** schema always holds the widest set.
+**Production was never affected.** But a fixture that *replays* migration
+files into the shared test database does not get that for free, and two
+stopped early:
+
+| fixture | replayed | effect on everything that ran after it |
+|---|---|---|
+| `test_the_entry_lane_reaches_inventory.py` | 117, 122 | forbade `TEST_VENUE_EXECUTION_LIFECYCLE` |
+| `test_the_source_calibration_is_measured.py` (two sites) | 117 | forbade `UNCALIBRATED_RESEARCH_SHADOW` too |
+
+The first file's own comment documents this exact trap being closed for 122;
+it re-opened when 123 landed. The second I did not know about — the guard
+found it.
+
+Both now replay 123 (and the calibration file 122), and
+`test_no_fixture_reverts_the_provenance_vocabulary` closes the **class**: it
+scans every migration that re-declares the constraint, takes the newest, and
+fails any test file that replays one of them without also replaying the
+newest. The third recurrence will be a failure in the file that causes it.
+
+Verified on a database migrated from scratch, in suite order —
+entry_lane, executor, source_calibration → **56 passed**.
+
+## The instrument is stable, and that is why the diff means something
+
+Today's baseline run is **byte-identical** to the list recorded two hours
+earlier: the same 178 identities, on a different database, under concurrency,
+with the `--timeout` plugin added. A failure-identity diff on this suite is a
+real signal. A failure **count** is not, and this record never treats one as
+if it were.
+
+# The release, and production read back
+
+`47ad3ce` was gated, then deployed API-only **by commit id** and read back.
+
+## Operator access, configured and exercised
+
+| step | result |
+|---|---|
+| S1 before | `HTTP 503` · `OPERATOR_PASSWORD_NOT_CONFIGURED` — genuinely unset |
+| S2a | `before autoDeploy=yes branch=claude/session-njaewf` → `PATCH 200` → read back `'no'` → `confirmed disabled yes` |
+| S2 | 32 characters generated **on the runner**, `PUT OPERATOR_PASSWORD HTTP 200` |
+| S2b | `deploy 47ad3ce by id HTTP 201` |
+| S3 | serving, probe **503 → 401** |
+| S3b | deploy list `HTTP 200`, `live 47ad3ce`, **pending deploys for another commit: 0** |
+| S4 | **password sign-in HTTP 200**, `scope control`, cookie set, `ttl_s 1800` |
+| S4 | pause `200` → server readback `{"armed":false}` → `research lane now false` |
+| S4 | resume `200` → `armed_confirmed true`, `funded submission DISABLED` |
+| S4 | control cookie on `/api/admin` → **401** |
+| S5 | password in the run artifact only, masked in every log line, never a workflow input |
+
+The fail-closed S2a guard was exercised against the real service: auto-deploy
+was genuinely `yes` and had to be confirmed off before the secret was written.
+It is left off deliberately; releases go out by commit id.
+
+## The desk, off the build that is serving
+
+```
+build           47ad3cebac6b18bab5143d847882d11f1aa13f60
+funded          DISABLED
+verdict         NO_TRADE          admissible 0
+BOOK ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY  positions 4   strategy performance false
+BOOK CONTROLLED_DEMONSTRATION            positions 1   strategy performance false
+BOOK UNCLASSIFIED                        positions 35  strategy performance false
+research lane armed     true
+funded executor paused  true
+orders this lane submitted 0
+```
+
+Three books, listed separately, never summed.
+
+## The current-market cycle, candidate by candidate
+
+The autonomous entry lane against live markets, 2026-09-26 22:10 UTC:
+
+```
+candidates 63   admissible 0
+first failing stage:  1_PROBABILITY 24   5_EXECUTION_ESTIMATE 33   7_RISK 6
+reached_execution_estimate 6    walk_took_levels 6
+positive_edge 6   negative_edge_without_a_walk 33   edge_not_computed 24
+execution_mode CROSSING_THE_ASK_AT_THE_TAKER_FEE
+excludes       ANY_PASSIVE_OR_MAKER_FILL_ASSUMPTION
+```
+
+And the desk's own refusal census, 51 candidates:
+
+| blocked at | candidates | what it is |
+|---|---|---|
+| `VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE` | 22 | a **stated** payout conflict — a decision on evidence |
+| `QUOTE_STALE` | 19 | the clock was read and the price was too old — a decision |
+| `VENUE_QUOTE_STALE` | 6 | same, on the venue side — a decision |
+| `VOID_ABANDONMENT_BOOK_RULE_NOT_HELD` | 1 | we do not hold the bookmaker's rule — **an inability** |
+| `NO_VENUE_NATIVE_CONTRACT_IN_PREMAP` | 2 | theirs |
+| `VENUE_BOOK_READ_FAILED` | 1 | theirs |
+
+Classified:
+
+```
+candidates 51   admitted 0
+evaluated_to_a_judgement 47      could_not_be_evaluated 4
+counts  DECIDED 47 · COULD_NOT_EVALUATE 1 · EXTERNAL_DEPENDENCY 3
+verdict NO_OPPORTUNITY_AMONG_THOSE_EVALUATED_WITH_SOME_NOT_EVALUABLE
+```
+
+**47 of 51 were judged on evidence the lane held and declined — that part of
+the engine worked. 4 could not be evaluated at all, and those say nothing
+about opportunity.** Neither number alone is the honest headline.
+
+### And this readback found one more gap
+
+On first classification the verdict was **`REFUSAL_CLASSIFICATION_HAS_DRIFTED`**:
+`VOID_ABANDONMENT_BOOK_RULE_NOT_HELD` was a live production refusal that the
+evaluability table did not hold. That is the mechanism working — an unknown
+code is reported as drift rather than folded into "no opportunity" or blamed
+on somebody else.
+
+It is **our** gap, not a conflict: `bettor_venue_settlement` found the venue's
+terms and not the bookmaker's, returning `established=False` with `EV_NONE`,
+so the comparison could not be *made*. Classified `COULD_NOT_EVALUATE`, along
+with `VENUE_SETTLEMENT_RULE_NOT_ESTABLISHED` and
+`DRAW_HANDLING_NOT_RECONCILED`, which were missing for the same reason.
+Calling it a conflict would have flattered the funnel by one.
+
+`test_every_settlement_refusal_this_lane_can_raise_is_classified` now holds
+the whole vocabulary — and checks reachability rather than assuming it, which
+turned up `PUSH_NOT_APPLICABLE_TO_H2H`: declared and never emitted. Named
+here rather than quietly skipped.
+
+## What production says still blocks funded activation
+
+```
+ok         false
+refusal    ACCOUNT_ID_NOT_SUPPLIED
+unmet      account_selected_and_clean, limits_recorded_and_complete,
+           limits_approved_by_the_owner,
+           approved_limits_tighten_the_enforced_rails,
+           venue_book_freshness_basis, settlement_compatibility,
+           an_autonomous_entry_was_admitted_unwaived,
+           an_eligible_market_with_one_coherent_chain
+```
+
+Eight prerequisites, and the first four are **yours to supply**: no account is
+bound in production, and no limit set has been recorded or approved there. The
+implementation is complete and exercised end to end against the internal
+simulator; what it does not have is a named account and approved rails.
+
+## Not met, and pre-existing: the demonstration position
+
+`verify` step 20 fails, on the **demonstration** book, and it failed the same
+way before this release:
+
+```
+1_HELD_EXPOSURE    OK
+2_VENUE_CONTRACT   OK
+3_PROVIDER_FIXTURE OK
+4_PROBABILITY      FAILED  QUOTE_STALE -- the quote is 34.6 s old against a 30 s limit
+first_failing_link 4_PROBABILITY
+acceptance NOT met: 0 complete decisions at 0 distinct instants (need 2 and 2)
+```
+
+Links 1-3 hold; the chain stops at the source's own 30 s freshness rule. The
+refusal is measured, not assumed — but the acceptance criterion is **not met**
+and this record does not claim otherwise.
