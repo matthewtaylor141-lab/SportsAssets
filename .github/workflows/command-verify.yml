@@ -94,6 +94,18 @@ on:
         description: "condition_id of the acceptance fixture to acquire scope for"
         required: false
         default: ""
+      operator_action:
+        description: 'OPERATOR CONTROL ACCESS: status (read-only) | rotate (needs operator_confirm=DO). Blank skips the job.'
+        required: false
+        default: ''
+      operator_confirm:
+        description: 'Type DO to allow operator_action=rotate to write the service environment'
+        required: false
+        default: ''
+      operator_service:
+        description: 'Render service holding the API (operator_action only)'
+        required: false
+        default: 'sportsassets-api'
       entry_run:
         description: >-
           Set to DO to run the AUTONOMOUS ENTRY lane against current
@@ -5160,3 +5172,209 @@ jobs:
             /tmp/prodaudit.json
           if-no-files-found: warn
           retention-days: 14
+
+  # OPERATOR CONTROL ACCESS. It lives in this workflow because GitHub
+  # registers workflow_dispatch targets from the DEFAULT branch, and the
+  # default branch is protected and auto-deploying -- so a brand-new file
+  # on a feature branch cannot be dispatched at all. See the header of
+  # the operator job's first step for what it does and does not expose.
+  operator-access:
+    if: ${{ inputs.operator_action != '' }}
+    runs-on: ubuntu-latest
+    runs-on: ubuntu-latest
+    steps:
+      - name: Operator access
+        shell: bash
+        env:
+          ACTION: ${{ inputs.operator_action }}
+          SERVICE: ${{ inputs.operator_service }}
+          API: ${{ inputs.api }}
+          CONFIRM: ${{ inputs.operator_confirm }}
+          RENDER_KEY: ${{ secrets.RENDER_API_KEY }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          A="${API:-https://sportsassets-api.onrender.com}"
+
+          # ── WHAT THIS RUN CAN AND CANNOT REACH, stated first ─────────
+          if [ -z "${RENDER_KEY:-}" ]; then
+            say "MISSING PERMISSION: the RENDER_API_KEY secret is not"
+            say "available to this workflow, so the service environment"
+            say "cannot be written. That is the exact missing permission:"
+            say "a Render API key with write access to $SERVICE, exposed to"
+            say "this repository as the RENDER_API_KEY Actions secret."
+            say "Everything below that needs it is skipped."
+          else
+            echo "::add-mask::$RENDER_KEY"
+          fi
+          RAPI=https://api.render.com/v1
+          rget() { curl -sS --max-time 45 -H "Authorization: Bearer $RENDER_KEY" \
+                        -H "Accept: application/json" "$RAPI$1"; }
+          svc_id() { rget "/services?name=$1&limit=20" \
+                       | jq -r --arg n "$1" '.[]? | select(.service.name==$n) | .service.id' \
+                       2>/dev/null | head -1; }
+
+          say ""
+          say "== S1 . IS OPERATOR CONTROL CONFIGURED RIGHT NOW =="
+          # THE PROBE NEEDS NO SECRET: a deliberately wrong password tells
+          # configured (401) from not-configured (503) without holding the
+          # real one.
+          PC=$(curl -sS -o /tmp/probe.json -w '%{http_code}' -X POST \
+                 -H 'Content-Type: application/json' \
+                 -d '{"password":"deliberately-not-the-operator-password"}' \
+                 "$A/api/command/session/control" || echo 000)
+          say "  wrong-password probe           HTTP $PC"
+          jq -r '"  reason                         "
+                   + ((.detail.reason // .reason) // "-")' \
+            /tmp/probe.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          if [ "$PC" = "401" ]; then
+            say "  => CONFIGURED: the control sign-in is live and refusing"
+            say "     a wrong password with a status."
+          elif [ "$PC" = "503" ]; then
+            say "  => NOT CONFIGURED: OPERATOR_PASSWORD is unset on the"
+            say "     service, so the browser controls are unavailable."
+          else
+            say "  => UNEXPECTED: neither 401 nor 503. Nothing is assumed."
+          fi
+
+          if [ "$ACTION" != "rotate" ]; then
+            say ""
+            say "  status only; nothing was written."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          if [ "$CONFIRM" != "DO" ]; then
+            say ""
+            say "  refused: rotate needs confirm=DO (got '${CONFIRM}')"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"
+            exit 1
+          fi
+          if [ -z "${RENDER_KEY:-}" ]; then
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+
+          say ""
+          say "== S2 . GENERATE ON THIS RUNNER, WRITE TO THE SERVICE =="
+          # 30 bytes of urandom, base64, punctuation removed: ~160 bits
+          # before trimming, ~130 after. Generated here, so it never was an
+          # input and never was in a message.
+          PW="$(openssl rand -base64 45 | tr -dc 'A-Za-z0-9' | cut -c1-32)"
+          if [ "${#PW}" -lt 24 ]; then
+            say "  refusing: generated password is too short (${#PW})"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          echo "::add-mask::$PW"
+          say "  generated                      ${#PW} characters, masked"
+          ID=$(svc_id "$SERVICE")
+          if [ -z "$ID" ]; then
+            say "  no Render service named $SERVICE -- nothing written"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          say "  service                        $SERVICE ($ID)"
+          SC=$(curl -sS --max-time 45 -o /tmp/set.json -w '%{http_code}' -X PUT \
+                 -H "Authorization: Bearer $RENDER_KEY" \
+                 -H "Accept: application/json" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"value\":$(printf '%s' "$PW" | jq -Rs .)}" \
+                 "$RAPI/services/$ID/env-vars/OPERATOR_PASSWORD" || echo 000)
+          say "  PUT OPERATOR_PASSWORD          HTTP $SC (expect 200)"
+          if [ "$SC" != "200" ]; then
+            say "  the service environment was not written; nothing else ran"
+            head -c 300 /tmp/set.json || true
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          say "  (Render redeploys on an env change; waiting for it to serve)"
+
+          say ""
+          say "== S3 . WAIT UNTIL THE CHANGE IS ACTUALLY SERVING =="
+          # The wrong-password probe flipping 503 -> 401 is the signal, and
+          # it needs no secret. Bounded wait.
+          OK=no
+          for i in $(seq 1 40); do
+            sleep 15
+            P=$(curl -sS -o /dev/null -w '%{http_code}' -X POST \
+                  -H 'Content-Type: application/json' \
+                  -d '{"password":"deliberately-not-the-operator-password"}' \
+                  "$A/api/command/session/control" || echo 000)
+            if [ "$P" = "401" ]; then OK=yes; say "  live after $((i*15))s (probe HTTP 401)"; break; fi
+          done
+          if [ "$OK" != "yes" ]; then
+            say "  the probe never reached 401; the change may still be"
+            say "  deploying. Nothing below was verified."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+
+          say ""
+          say "== S4 . ORDINARY PASSWORD SIGN-IN, THEN A REAL CONTROL =="
+          say "  This is the test that matters: the PASSWORD mints the"
+          say "  session, and an admin-minted read cookie is not that test."
+          J=/tmp/opjar.txt; rm -f "$J"
+          SI=$(curl -sS -o /tmp/si.json -c "$J" -w '%{http_code}' -X POST \
+                 -H 'Content-Type: application/json' \
+                 -d "{\"password\":$(printf '%s' "$PW" | jq -Rs .)}" \
+                 "$A/api/command/session/control" || echo 000)
+          say "  password sign-in               HTTP $SI (expect 200)"
+          jq -r '"  scope                          " + (.scope // "-"),
+                 "  cookie                         " + (.cookie // "-"),
+                 "  token in body                  "
+                   + ((.token_in_body // false) | tostring),
+                 "  ttl_s                          "
+                   + ((.ttl_s // 0) | tostring)' \
+            /tmp/si.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          if grep -q 'bt_control' "$J"; then
+            say "  the jar holds bt_control       yes"
+          else
+            say "  the jar holds bt_control       NO -- nothing was set"
+          fi
+
+          # AN AUTHORISED SHADOW CONTROL ACTION, with its effect read back.
+          # pause, then resume: the research lane is left exactly as found.
+          PA=$(curl -sS -o /tmp/pa.json -w '%{http_code}' -X POST -b "$J" \
+                 -H 'Content-Type: application/json' -d '{"by":"OPERATOR_ACCESS_CI"}' \
+                 "$A/api/command/bettor/control/pause" || echo 000)
+          say "  pause with the OPERATOR cookie HTTP $PA (expect 200)"
+          jq -r '"  ok                             " + ((.ok // false) | tostring),
+                 "  applied (read back)            "
+                   + ((.applied // "nothing") | tostring),
+                 "  armed_confirmed                "
+                   + ((.armed_confirmed // false) | tostring),
+                 "  research lane now             "
+                   + ((.state_after.research_lane_armed.value // false) | tostring)' \
+            /tmp/pa.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          RE=$(curl -sS -o /tmp/re.json -w '%{http_code}' -X POST -b "$J" \
+                 -H 'Content-Type: application/json' -d '{"by":"OPERATOR_ACCESS_CI"}' \
+                 "$A/api/command/bettor/control/resume" || echo 000)
+          say "  resume with the same cookie    HTTP $RE (expect 200)"
+          jq -r '"  ok                             " + ((.ok // false) | tostring),
+                 "  armed_confirmed                "
+                   + ((.armed_confirmed // false) | tostring),
+                 "  scope                          " + (.scope // "-"),
+                 "  funded submission              " + (.funded_submission // "-")' \
+            /tmp/re.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+
+          # AND THE SCOPE IS STILL NARROW: the control cookie must not open
+          # an /api/admin route.
+          AD=$(curl -sS -o /dev/null -w '%{http_code}' -b "$J" \
+                 "$A/api/admin/funded-activation-readiness" || echo 000)
+          say "  the control cookie on /api/admin HTTP $AD (expect 401/403)"
+
+          say ""
+          say "== S5 . DELIVERY =="
+          printf '%s\n' "$PW" > /tmp/operator-password.txt
+          say "  the password is in the run artifact 'operator-credential',"
+          say "  one line, nothing else. It is masked in every log line of"
+          say "  this run and was never a workflow input."
+          say "  Rotate by running this workflow again with action=rotate;"
+          say "  the old value stops working the moment the new one serves."
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Deliver the credential
+        if: ${{ inputs.operator_action == 'rotate' && inputs.operator_confirm == 'DO' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: operator-credential
+          path: /tmp/operator-password.txt
+          retention-days: 1
+          if-no-files-found: warn
