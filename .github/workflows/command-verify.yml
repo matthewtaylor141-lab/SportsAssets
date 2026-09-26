@@ -4240,7 +4240,7 @@ jobs:
                 + "  state " + n($L.state)
                 + "  at " + n($L.at),
               "  SHOWS      the process that ran this cycle carries this",
-              "             release's SHA, so the loop came back up after",
+              "             SHA for this release, so the loop came back up",
               "             the redeploy and is cycling.",
               "  DOES NOT   show restart recovery of held inventory: this",
               "             lane holds no positions, so no identity, no",
