@@ -268,8 +268,33 @@ def test_the_gap_is_named_as_external_and_not_as_ours():
 
 def test_nothing_was_written_into_the_settlement_tables():
     """The capture is evidence. Which sentence states which condition is a
-    READING, and BOOK_TERMS still carries only the Pinnacle capture."""
+    READING, and every family in BOOK_TERMS has a capture behind it.
+
+    THIS ASSERTION USED TO READ `== {"baseball"}`, and it was right at the
+    time: Pinnacle's soccer section had been captured in run 67 and
+    deliberately NOT interpreted, because no soccer candidate existed to
+    compare and an uninterpreted capture cannot produce a wrong verdict.
+
+    Soccer is now interpreted, from that same capture, with every payout
+    class tied to a quoted line by
+    `test_soccer_settlement_terms_are_captured.py` -- which also pins the
+    three conditions the prose is SILENT on as absent from the map rather
+    than filled in. So the invariant this test protects is unchanged and
+    stated more precisely: a family is in BOOK_TERMS only if prose for it
+    was captured, and it carries a declared scope so the terms cannot be
+    applied outside what was read.
+    """
     from sportsassets import bettor_settlement_terms as ST
 
-    assert set(k[0] for k in ST.BOOK_TERMS) == {"baseball"}
-    assert ST.CAPTURED_SCOPE.keys() == {("baseball", "h2h")}
+    families = set(k[0] for k in ST.BOOK_TERMS)
+    assert families == {"baseball", "soccer"}
+    assert ST.CAPTURED_SCOPE.keys() == {("baseball", "h2h"), ("soccer", "h2h")}
+    # NO FAMILY WITHOUT A SCOPE GATE. A term set with no scope would apply
+    # everywhere, which is the overreach the gate exists to stop.
+    for family, market, _ctx in ST.BOOK_TERMS:
+        assert (family, market) in ST.CAPTURED_SCOPE, (family, market)
+    # AND NO SCOPE WITHOUT TERMS, which would admit a fixture into a
+    # comparison that has nothing to compare against.
+    for family, market in ST.CAPTURED_SCOPE:
+        assert any(k[0] == family and k[1] == market for k in ST.BOOK_TERMS), (
+            family, market)

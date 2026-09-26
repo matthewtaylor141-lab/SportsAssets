@@ -55,7 +55,7 @@ R_NO_TEAMS = "EVENT_DOES_NOT_NAME_TWO_TEAMS"
 
 REFUSALS = (R_NO_CONTRACT, R_AMBIGUOUS, R_CLOSED, R_COLLIDE, R_SEGMENT,
              "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE",
-            R_NO_TEAMS)
+            R_NO_TEAMS, "VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED")
 
 #: Tokens that mark a venue title as covering only PART of a game. The
 #: external valuation prices full-game h2h only, so a segment contract is
@@ -211,6 +211,101 @@ def map_event(*, home, away, markets):
         return out
 
     out["refusals"].append(R_AMBIGUOUS)
+    return out
+
+
+# ── WHICH PERIOD THE VENUE'S OWN CONTRACT PAYS ON ───────────────────
+#
+# THE DEFECT THIS CLOSES. Two separate places asserted the period instead
+# of establishing it:
+#
+#   1 `is_segment()` above reads the TITLE only. `is_line_market()` reads
+#     the title AND the slug, because "the slug is where the line usually
+#     lives" -- and that is just as true of a period. The venue puts the
+#     period in the slug: `atc-mlb-atl-mia-2026-09-25-i6-draw` is inning
+#     six, and its title reads as a plain fixture name.
+#
+#   2 The entry lane then set `contract["period"] = "FULL_GAME"` as a
+#     LITERAL, and passed the same literal to the valuation, so both
+#     sides of the comparison agreed on a period neither had checked.
+#
+# Run 71 proved the exposure is real rather than theoretical: the venue's
+# own board returned `atc-mlb-atl-mia-2026-09-25-i6-draw` and
+# `atc-ebfcwc-bjo-paris-2026-09-26-dh1-bjo` inside the money-line family,
+# because `copy_sports.market_type_of` classifies the venue grammar on
+# the KIND PREFIX alone and never inspects the suffix. A full-match
+# probability priced against an inning-six payout is a category error with
+# a number on it -- the same failure as the totals market in run 23,
+# arriving through the period instead of the line.
+#
+# THE RULE IS AFFIRMATIVE, AND IT NEEDS NO GRAMMAR VOCABULARY. A venue
+# money-line slug is the event, dated, optionally followed by the side
+# this contract pays on. So: take everything after the trailing
+# YYYY-MM-DD; it must be EMPTY (the `aec` family, where both sides share
+# one slug and the side is the intent) or EXACTLY the side token the
+# resolver matched. Anything else -- an extra token before the side, a
+# token that is not the side, no date at all -- is NOT ESTABLISHED, and
+# not established is a refusal rather than a full match by default.
+#
+# Guessing a period vocabulary was the alternative and it is worse: a
+# whitelist of `i6`/`dh1`/`h1`/`finalq` can only refuse the segments
+# somebody already thought of, while this refuses every shape that is not
+# demonstrably the whole fixture.
+
+FULL_MATCH = "FULL_MATCH_ESTABLISHED_FROM_THE_VENUE_SLUG"
+R_PERIOD_UNKNOWN = "VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED"
+
+_TRAILING_DATE = re.compile(r"-(\d{4}-\d{2}-\d{2})(?:-(.*))?$")
+
+
+def _norm_token(s) -> str:
+    return "".join(ch for ch in str(s or "").lower() if ch.isalnum())
+
+
+def period_of_venue_slug(market_slug, *, side=None,
+                         event_slug=None) -> dict:
+    """FULL_MATCH, or a named refusal saying what was not established.
+
+    `side` is the outcome the resolver matched for this contract -- the
+    only token allowed to follow the date. `event_slug` is corroboration
+    when the catalogue supplies it; it is reported, never required, so a
+    null column cannot silently refuse a fixture that is in fact whole.
+    """
+    slug = str(market_slug or "").lower()
+    out = {"market_slug": slug, "side": side, "event_slug": event_slug,
+           "period": None, "residual": None, "refusals": [],
+           "basis": ("EVERYTHING_AFTER_THE_TRAILING_DATE_MUST_BE_EMPTY_"
+                     "OR_EXACTLY_THE_MATCHED_SIDE"),
+           "vocabulary_free": True}
+    m = _TRAILING_DATE.search(slug)
+    if not m:
+        out["refusals"].append(R_PERIOD_UNKNOWN)
+        out["why"] = ("the venue slug %r carries no trailing YYYY-MM-DD, so "
+                      "there is no boundary after which a period token "
+                      "could be read. Nothing about the period is "
+                      "established" % slug)
+        return out
+    out["slug_date"] = m.group(1)
+    residual = (m.group(2) or "").strip("-")
+    out["residual"] = residual
+    if not residual:
+        out["period"] = FULL_MATCH
+        out["why"] = ("nothing follows the date, so this slug names the "
+                      "whole dated fixture. On the `aec` family both "
+                      "sides share it and the side is the intent")
+        return out
+    if side is not None and _norm_token(residual) == _norm_token(side):
+        out["period"] = FULL_MATCH
+        out["why"] = ("the only token after the date is the matched side "
+                      "%r, which selects an outcome of the whole fixture "
+                      "and not a part of it" % (side,))
+        return out
+    out["refusals"].append(R_PERIOD_UNKNOWN)
+    out["why"] = (
+        "%r follows the date and it is not the matched side (%r). That is "
+        "either a period, a segment or something else this lane has not "
+        "established, and a full-match probability may not be priced "
+        "against it" % (residual, side))
     return out
 
 

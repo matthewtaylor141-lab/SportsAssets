@@ -3901,6 +3901,184 @@ jobs:
       #       route the desk uses, and the difference between the two is
       #       the attribution.
       #
+      # ── THE FOUR AUTHORIZED REPAIRS, READ BACK ───────────────────────
+      #
+      # S1 sizing, S2 candidate audit, S3 soccer mapping, S4 the whole
+      # venue catalogue. Each is a READ of something the release changed;
+      # none of them writes, and none of them can submit an order.
+      - name: Repairs — sizing, candidate audit, soccer mapping, catalogue
+        if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
+        run: |
+          set -uo pipefail
+          A="${API:-https://sportsassets-api.onrender.com}"
+          H="X-Admin-Token: ${ADMIN_TOKEN:-}"
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo "### REPAIRS: S1 sizing · S2 audit · S3 soccer · S4 catalogue" \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            say "SKIPPED: no ADMIN_TOKEN"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+
+          # ── S1 + S2 · EVERY CANDIDATE THAT PRICED POSITIVELY ─────────
+          #
+          # THE SEVEN AUDIT DIMENSIONS, from the row rather than re-derived:
+          # fixture, payout identity, intent, market period, price
+          # orientation, fees and freshness. Before this release four of
+          # those were unreadable -- `period` was the literal FULL_GAME on
+          # every row, the resolver's identity evidence was three nulls
+          # because the wrapper read key names `premap.resolve` does not
+          # return, and the freshness decomposition was not persisted at
+          # all. So a +0.397 edge could not be told from an artefact.
+          say "== S2 · the positive-edge candidates, audited =="
+          EC=$(curl -s --max-time 90 -o /tmp/ev.json -w '%{http_code}' \
+                 -H "$H" \
+                 "$A/api/command/rn1x/external/entry-evidence?hours=6&limit=60" \
+                 || echo 000)
+          say "entry-evidence HTTP $EC"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            [(.candidates // [])[]
+              | select((.estimated_edge_per_contract // -1) > 0)] as $P
+            | "  positive_edge_candidates  " + ($P | length | tostring),
+              ($P[] | .risk_verdict as $R | .execution_estimate as $E
+               | "",
+                 "-- " + n(.us_market_slug) + "   edge/contract " + n(.estimated_edge_per_contract),
+                 "   1 FIXTURE      condition " + n(.condition_id)
+                   + "  event_key " + n(.event_key),
+                 "   2 PAYOUT IDENT pays_on " + n(.payout_event)
+                   + "  basis " + n(.payout_event_basis),
+                 "                  prob_event " + n(.probability_event)
+                   + "  complement " + n(.payout_is_complement),
+                 "                  resolver_asked " + n(.resolver_asked_for)
+                   + "  matched_side " + n(.matched_side_norm),
+                 "                  mapped_outcome " + n(.mapped_outcome)
+                   + "  match " + n(.mapping_match),
+                 "   3 INTENT       " + n(.buy_intent)
+                   + "  ladder_side " + n(.ladder_side)
+                   + "  identity_basis " + n(.contract_identity_basis),
+                 "   4 PERIOD       " + n(.period)
+                   + "  market " + n(.market)
+                   + "  settlement_rule " + n(.settlement_rule),
+                 "   5 ORIENTATION  p " + n(.probability)
+                   + "  executable " + n(.executable_price)
+                   + "  overround " + n(.overround)
+                   + "  devig " + n(.devig_method),
+                 "   6 FEES         cost/contract " + n(.cost_per_contract)
+                   + "  realised_fee " + n($E.fee_per_contract_realised)
+                   + "  basis " + n($E.fee_basis),
+                 "                  vwap " + n($E.vwap)
+                   + "  submitted_limit " + n($E.submitted_limit)
+                   + "  economics_use " + n($E.economics_use),
+                 "   7 FRESHNESS    fresh " + n($R.freshness_evidence.fresh)
+                   + "  pinnacle " + n($R.freshness_evidence.pinnacle_age_s)
+                   + "/" + n($R.freshness_evidence.pinnacle_limit_s)
+                   + "  venue " + n($R.freshness_evidence.venue_age_s)
+                   + "/" + n($R.freshness_evidence.venue_limit_s),
+                 "                  venue_clock " + n($R.freshness_evidence.venue_age_basis),
+                 "                  lag provider " + n($R.freshness_evidence.pinnacle_provider_lag_s)
+                   + "  ours " + n($R.freshness_evidence.pinnacle_our_processing_s),
+                 "                  why " + (n($R.freshness_evidence.why) | .[0:110]),
+                 "   S1 SIZING     reduced_by_rails " + n($R.notional_reduced_by_rails)
+                   + "  policy_notional " + n($R.policy_notional_usd),
+                 "                  qty_cap " + n($R.qty_cap.qty_cap)
+                   + "  binding " + n($R.qty_cap.binding_rail),
+                 "                  size " + n(.proposed_size)
+                   + "  rails_not_passed " + n($R.railsNotPassed),
+                 "                  gates_not_passed " + n($R.gatesNotPassed)
+                   + "  permitted " + n($R.permitted)
+                   + "  reason " + (n($R.reason) | .[0:60]),
+                 "   REFUSALS      " + ((.refusals // []) | join(", ") | .[0:190]))' \
+            /tmp/ev.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "  READ IT AS: fresh=null is UNKNOWN, not stale -- a clock was"
+          say "  not measured, and venue_clock says which. fresh=false means"
+          say "  both were measured and one was too old. Those are different"
+          say "  problems and only one of them is ours."
+          say ""
+          say "  AND: rails_failed EMPTY with a positive edge is the S1"
+          say "  repair working. Before it, a STANDARD budget reserved at"
+          say "  the break-even limit exceeded a STANDARD rail by exactly"
+          say "  the edge, so every profitable candidate failed all five."
+          say ""
+
+          # ── S3 · WHY SOCCER CANNOT REACH A VENUE CONTRACT ────────────
+          say "== S3 · the resolver's own answer, per soccer fixture =="
+          for SP in Soccer soccer; do
+            MC=$(curl -s --max-time 180 -o /tmp/mg.json -w '%{http_code}' \
+                   -H "$H" "$A/api/admin/shadow-mapgap?sport=$SP&limit=14" \
+                   || echo 000)
+            say "shadow-mapgap sport=$SP HTTP $MC"
+            if [ "$MC" = "200" ]; then break; fi
+          done
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            "  fixtures_read " + n(.fixtures_read),
+            "  steps " + ((.steps // {}) | tojson | .[0:300]),
+            ((.fixtures // [])[] | "",
+              "-- " + n(.global_slug),
+              "   title " + n(.title),
+              "   sides " + ((.sides_parsed // []) | tojson),
+              ((.per_side // {}) | to_entries[]
+                | "   " + (.key | .[0:26])
+                  + "  step " + n(.value.step)
+                  + "  keys " + n(.value.keys_built)
+                  + "  venue_rows " + n(.value.venue_rows_found),
+                  "      league_alias_would_hit " + n(.value.league_alias_would_hit)
+                    + "  stripped " + n(.value.league_alias_stripped_key)
+                    + "  rows " + n(.value.league_alias_venue_rows),
+                  "      venue_sample " + (n(.value.league_alias_venue_sample) | .[0:140]),
+                  "      bridge " + n(.value.bridge_reason)
+                    + "  would_resolve " + n(.value.bridge_would_resolve),
+                  "      resolved_slug " + n(.value.market_slug)
+                    + "  intent " + n(.value.intent)))' \
+            /tmp/mg.json 2>&1 | head -140 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "  THE STEP NAME IS THE REMEDY. no_key_intersection with"
+          say "  league_alias_would_hit=true is a LEAGUE token gap, which"
+          say "  the resolver already bridges. false with rows found is a"
+          say "  TEAM-CODE gap, which needs a witness from the venue's own"
+          say "  question text and is a different mechanism entirely."
+          say "  Naming which one applies is what stops an alias table"
+          say "  being invented."
+          say ""
+
+          # ── S4 · THE WHOLE BOARD, NOT THE FIRST 400 ──────────────────
+          say "== S4 · every competition on the venue's board =="
+          VC=$(curl -s --max-time 180 -o /tmp/vcm.json -w '%{http_code}' \
+                 -H "$H" "$A/api/admin/venue-competitions" || echo 000)
+          say "venue-competitions HTTP $VC"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            "  events_read " + n(.events_read)
+              + "  competitions " + n(.competitions)
+              + "  truncated " + n(.truncated),
+            "  REAL tokens (no simulation marker in the venue'"'"'s labels):",
+            "    " + ((.real_competition_tokens // []) | join(" ") | .[0:600]),
+            "  REAL tokens WITH a money line:",
+            "    " + ((.real_competitions_with_a_moneyline // []) | join(" ") | .[0:600]),
+            "",
+            ((.rows // [])[]
+              | "  " + n(.league_token)
+                + "  events " + n(.events)
+                + "  ml_events " + n(.moneyline_events)
+                + "  sides " + n(.moneyline_sides)
+                + "  sim " + n(.simulated_events)
+                + "  " + n(.verdict)
+                + "  desk " + ((.desk_league_buckets // {}) | tojson | .[0:60])
+                + "  e.g. " + n(.examples[0].event)
+                + " | " + n(.examples[0].title))' \
+            /tmp/vcm.json 2>&1 | head -120 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "  THE EPL QUESTION, SETTLED EITHER WAY. events_read is the"
+          say "  WHOLE cached board, not desk-games' first 400, so an"
+          say "  absent token here is absence from the board rather than"
+          say "  from a sample. A token present with ml_events 0 is listed"
+          say "  without a money line, which no mapping repair reaches."
+          say ""
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       # Nothing here writes. Every read is authenticated and existing.
       - name: Acceptance — capability, then current market, then scope
         if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}

@@ -1396,7 +1396,20 @@ ENTRY_EVIDENCE = """
            estimated_edge_per_contract, proposed_size, decision,
            admissible, refusals, decided_at, age_s, outcome_books,
            execution_estimate, risk_verdict, exposure_observed,
-           settlement_comparison
+           settlement_comparison,
+           -- THE IDENTITY AND PERIOD COLUMNS, WHICH WERE NEVER SELECTED.
+           -- Every one of these is written by the entry writer and none
+           -- could be read back through this route, so "audit the payout
+           -- identity and the market period of a candidate" had no
+           -- answer that did not involve re-deriving it. `period` in
+           -- particular used to be the literal FULL_GAME on every row;
+           -- it is now established from the venue slug, and a reader
+           -- cannot tell those apart without seeing the column.
+           period, market, settlement_rule, payout_event_basis,
+           probability_event, payout_is_complement, matched_side_norm,
+           resolver_asked_for, ladder_side, mapped_outcome, mapping_match,
+           contract_identity_basis, observed_at, received_at, overround,
+           devig_method, book, event_key
       FROM external_valuations
      WHERE experiment_id = $1
        AND decided_at >= now() - ($2 || ' hours')::interval

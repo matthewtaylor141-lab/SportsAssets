@@ -619,11 +619,41 @@ PHASE_REGULAR = "REGULAR_SEASON"
 PHASE_PLAYOFF = "PLAYOFF_OR_PLAY_IN"
 FMT_NINE = "STANDARD_NINE_INNING"
 FMT_SEVEN = "SEVEN_INNING_DOUBLEHEADER"
+#: SOCCER'S OWN FORMAT VOCABULARY. The soccer section grades match markets
+#: on "a scheduled 90 minutes of play", so that is the format the capture
+#: covers. A tie that can be decided by extra time or a shootout is a
+#: DIFFERENT format for this purpose -- not because the 90-minute rule
+#: stops applying, but because the venue's "winner of the match" contract
+#: on such a tie prices a different event and the comparison must not be
+#: run as though it did not.
+FMT_NINETY = "SCHEDULED_NINETY_MINUTES"
+FMT_KNOCKOUT = "TIE_DECIDABLE_BY_EXTRA_TIME_OR_SHOOTOUT"
 
-#: What the retrieved page's baseball rules actually cover.
+#: What the retrieved page's rules actually cover, per sport.
 CAPTURED_SCOPE = {
     ("baseball", "h2h"): {"phases": (PHASE_REGULAR,),
                           "formats": (FMT_NINE,)},
+    # SOCCER, ADDED FROM THE RUN-67 CAPTURE. Two carve-outs come straight
+    # out of the prose and both are enforced rather than noted:
+    #
+    #   World Cup fixtures get 72 hours to complete (line 390), not the 12
+    #   hours line 383 gives everything else. A World Cup fixture is
+    #   therefore a phase this capture does not describe.
+    #
+    #   A knockout tie decidable by extra time or a shootout is a format
+    #   where the 90-minute basis and a venue "winner of the match"
+    #   contract can disagree about the same match.
+    #
+    # NOTHING SUPPLIES A SOCCER PHASE OR FORMAT TODAY. `acquire_fixture_
+    # scope` reads the MLB Stats API, which knows nothing about soccer, so
+    # both arrive as None and this gate refuses by name --
+    # COMPETITION_PHASE_NOT_ESTABLISHED. That is the honest blocker and it
+    # is deliberately visible: before this entry existed the same fixture
+    # produced NO_CAPTURED_SCOPE_FOR_THIS_MARKET, which reads as "we never
+    # captured soccer" when in fact the rules are captured and the
+    # FIXTURE EVIDENCE is what is missing. Different remedies.
+    ("soccer", "h2h"): {"phases": (PHASE_REGULAR,),
+                        "formats": (FMT_NINETY,)},
 }
 
 R_PHASE_UNKNOWN = "COMPETITION_PHASE_NOT_ESTABLISHED"
@@ -639,6 +669,23 @@ SCOPE_NOTE = {
     FMT_SEVEN: ("a seven-inning doubleheader restates rules 3, 7 and 8 "
                 "against a 7-inning threshold, so the thresholds below are "
                 "the wrong numbers for it"),
+    FMT_KNOCKOUT: ("a tie decidable by extra time or a shootout is where "
+                   "the 90-minute basis diverges hardest from a venue "
+                   "contract settling on the match winner: the same match "
+                   "has two different answers and the captured terms "
+                   "describe only one of them"),
+}
+
+#: THE SOCCER PHASE THIS CAPTURE DOES NOT DESCRIBE, quoted. A World Cup
+#: fixture has 72 hours to complete instead of 12, so the void branch above
+#: carries the wrong number for it.
+SOCCER_WORLD_CUP_EXCEPTION = {
+    "quote": ("All bets on World Cup Fixtures have action as long as the "
+              "Fixture is completed within 72 hours of when it was "
+              "originally scheduled to play."),
+    "consequence": ("the 12-hour window in the void branch is not the World "
+                    "Cup window, so a World Cup fixture is outside this "
+                    "capture rather than covered by it"),
 }
 
 
@@ -778,6 +825,59 @@ def _cite(quote, rule):
             "source_url": _URL, "retrieved_at": _AT, "quote": quote}
 
 
+# ── SOCCER, FROM THE SAME PUBLISHER'S SOCCER SECTION ────────────────
+#
+# CAPTURED IN RUN 67, VERBATIM, AND HELD UNREAD UNTIL NOW. The extractor's
+# keyword vocabulary was baseball-only, so this section never reached the
+# comparison and EVERY soccer settlement verdict could only be UNKNOWN.
+# UNKNOWN is not INCOMPATIBLE and it is not compatible either -- it is a
+# comparison that was never run, which is why soccer was reported as
+# "unevaluated" rather than "incompatible".
+#
+# The capture lives in `tests/fixtures/pinnacle_soccer_rules_2026_09_25.json`
+# with its HTTP status, page size and the runner that read it. Below are
+# the lines that bear on a full-match money line. NOTHING IS INFERRED: a
+# condition the soccer section does not speak to is LEFT OUT of the map,
+# so `agrees()` reports it as unstated rather than filling it in.
+_SOCCER_AT = "2026-09-25T20:47:35Z"
+
+_Q_SOCCER_90 = (
+    "All match markets are based on the result at the end of a scheduled 90 "
+    "minutes of play unless otherwise stated. This includes any added injury "
+    "or stoppage time, but does not include extra time, a penalty shootout "
+    "or a golden goal.")
+_Q_SOCCER_VOID = (
+    "If a match is deemed void because it finished early or was abandoned, "
+    "periods that were played to completion (such as the First Half) will "
+    "have action. If a match starts and isn't completed within 12 hours of "
+    "kickoff, then all bets on uncompleted periods will be voided.")
+_Q_SOCCER_85 = (
+    "The exception to this rule is a referee ending a match after at least "
+    "85 minutes of play. In this case, all periods will have action.")
+
+
+def _cite_soccer(quote, where):
+    return {"source": "%s -- %s" % (_SRC, where),
+            "source_url": _URL, "retrieved_at": _SOCCER_AT, "quote": quote}
+
+
+#: THE 90-MINUTE BASIS IS A PAYOUT RULE, NOT A DETAIL, so it is declared
+#: rather than buried. A venue contract settling "to the winner of the
+#: match" including extra time and a shootout prices a DIFFERENT event
+#: from one graded on the 90-minute result, and on a knockout tie the two
+#: disagree on the same match. Recorded so the comparison can find that
+#: disagreement instead of a reader having to notice it.
+SOCCER_NINETY_MINUTE_BASIS = {
+    "quote": _Q_SOCCER_90,
+    "source": _SRC, "source_url": _URL, "retrieved_at": _SOCCER_AT,
+    "consequence": (
+        "the bookmaker's probability describes the 90-minute result. A "
+        "venue contract settling on the match winner after extra time or a "
+        "shootout prices a different event, and on a knockout fixture the "
+        "two can disagree about the same match"),
+}
+
+
 #: THE BOOKMAKER'S TERMS, CAPTURED, keyed by (family, market, context).
 #:
 #: PRE-GAME AND IN-PLAY DIFFER AT EXACTLY ONE CONDITION and it is the
@@ -827,6 +927,103 @@ BOOK_TERMS: dict = {
         C_NOT_PLAYED: {"payout": PAY_STAKE_BACK,
                        "cite": _cite(_Q_RULE8, "rule 8")},
     },
+    # ── SOCCER, FULL-MATCH MONEY LINE ────────────────────────────────
+    #
+    # ONE SET FOR BOTH CONTEXTS, AND THAT IS WHAT THE PROSE SAYS. The
+    # baseball section splits pre-game from in-play because rules 3, 4, 7
+    # and 8 are written as four different rules. The soccer section is not
+    # written that way: lines 382-384 state one basis and one void rule
+    # for match markets without distinguishing when the bet was placed.
+    # Recording a split the publisher does not state would be the same
+    # invention as reading a rule off the word "h2h" -- so the identical
+    # map is registered under both contexts, and the fact that it is
+    # identical is the finding, not an oversight.
+    #
+    # THREE CONDITIONS ARE DELIBERATELY ABSENT: C_CALLED_FINAL,
+    # C_SUSPENDED_RESUMED and C_SUSPENDED_BEYOND. The soccer section's
+    # 85-minute exception speaks to a referee ENDING a match, which is
+    # C_STOPPED_EARLY's neighbour rather than baseball's called-game
+    # formula, and it says nothing about a suspension resumed later. An
+    # absent condition reads as UNSTATED and blocks; a filled-in one would
+    # read as agreement.
+    ("soccer", "h2h", CTX_PRE_GAME): {
+        C_FULL: {"payout": PAY_ON_FINAL,
+                 "cite": _cite_soccer(_Q_SOCCER_90, "soccer line 382")},
+        # EXTRA TIME AND PENALTIES DO NOT COUNT. So a fixture decided
+        # after regulation still grades on the 90-minute result -- which
+        # is the OPPOSITE of baseball, where extra innings are included.
+        C_OVERTIME: {
+            "payout": PAY_ON_FINAL,
+            "cite": _cite_soccer(_Q_SOCCER_90, "soccer line 382"),
+            "note": ("PAYS_THE_WINNER_ON_THE_FINAL_SCORE means the score "
+                     "at the end of the scheduled 90 minutes plus stoppage "
+                     "time. Extra time, a shootout and a golden goal are "
+                     "excluded by the same sentence"),
+        },
+        # ABANDONED AND NOT COMPLETED WITHIN 12 HOURS: voided.
+        C_NOT_PLAYED: {
+            "payout": PAY_STAKE_BACK,
+            "cite": _cite_soccer(
+                _Q_SOCCER_VOID + " " + _Q_GENERAL_NOT_STARTED,
+                "soccer line 383 and the general rule")},
+        # A REFEREE ENDING THE MATCH AFTER 85 MINUTES: all periods have
+        # action, so the match result stands.
+        C_STOPPED_EARLY: {
+            "payout": PAY_STAKE_BACK,
+            "cite": _cite_soccer(_Q_SOCCER_VOID, "soccer line 383"),
+            "note": ("stopped BEFORE the 85-minute exception. Past 85 "
+                     "minutes line 384 gives the match action instead, "
+                     "which is why the two are not one condition")},
+    },
+    ("soccer", "h2h", CTX_LIVE): {
+        C_FULL: {"payout": PAY_ON_FINAL,
+                 "cite": _cite_soccer(_Q_SOCCER_90, "soccer line 382")},
+        C_OVERTIME: {
+            "payout": PAY_ON_FINAL,
+            "cite": _cite_soccer(_Q_SOCCER_90, "soccer line 382"),
+            "note": ("the 90-minute basis is stated for match markets "
+                     "without reference to when the bet was placed"),
+        },
+        C_NOT_PLAYED: {
+            "payout": PAY_STAKE_BACK,
+            "cite": _cite_soccer(
+                _Q_SOCCER_VOID + " " + _Q_GENERAL_NOT_STARTED,
+                "soccer line 383 and the general rule")},
+        C_STOPPED_EARLY: {
+            "payout": PAY_STAKE_BACK,
+            "cite": _cite_soccer(_Q_SOCCER_VOID, "soccer line 383"),
+            "note": ("IN-PLAY CARRIES ONE MORE VOID BRANCH the pre-game "
+                     "set does not: line 387 voids an in-play bet when a "
+                     "VAR decision materially affects its odds, and line "
+                     "388 voids one placed against incorrect score, "
+                     "corner or red-card information. Neither is a "
+                     "condition in this vocabulary, so neither is mapped "
+                     "-- they are recorded in "
+                     "SOCCER_IN_PLAY_EXTRA_VOID_BRANCHES and they mean an "
+                     "in-play soccer comparison is narrower than it looks"),
+        },
+    },
+}
+
+#: VOID BRANCHES THE CONDITION VOCABULARY DOES NOT MODEL. Not folded into
+#: the terms, because folding them in would claim the comparison covers
+#: them. An in-play soccer position carries these two additional ways to
+#: be voided, and nothing in this module checks for either.
+SOCCER_IN_PLAY_EXTRA_VOID_BRANCHES = {
+    "var_decision": {
+        "quote": ("In-Play bets will be voided if a Video Assistant Referee "
+                  "(VAR) decision materially affects the odds of the bets."),
+        "source": _SRC, "source_url": _URL, "retrieved_at": _SOCCER_AT},
+    "incorrect_market_information": {
+        "quote": ("Score, corner and red card information are considered to "
+                  "be part of the market for In-Play bets. If that "
+                  "information is incorrectly displayed on the market "
+                  "offering and/or Bet Slip, then bets placed while "
+                  "incorrect information is displayed will be deemed void."),
+        "source": _SRC, "source_url": _URL, "retrieved_at": _SOCCER_AT},
+    "consequence": ("an IN_PLAY soccer money line has two void triggers "
+                    "outside this vocabulary. A COMPATIBLE verdict on the "
+                    "seven modelled conditions does not cover them"),
 }
 
 #: THE RESUMPTION WINDOWS, per context, quoted. They are what separates

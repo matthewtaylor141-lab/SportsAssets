@@ -53,11 +53,25 @@ class _Conn:
 
 
 def _resolve_as(*, market_slug, intent, side_norm, matched_by="keys"):
+    """The shape `premap.resolve` ACTUALLY returns.
+
+    THIS STUB USED TO LIE, and it is why the bug it was guarding against
+    had a sibling nobody saw. It returned `side_norm`, `identifier` and
+    `question` -- the three keys `resolve_venue_identity` was reading --
+    while the real resolver returns the side under `outcome`, the
+    identifier under `market_slug` and the question under `title`. In
+    production all three reads came back None; here they came back
+    populated, so the assertions below passed against a shape that does
+    not exist. Three separate test files stubbed it the same wrong way.
+
+    The parameter is still called `side_norm`, because that is the venue's
+    own name for the thing; only the key it is returned under is fixed.
+    """
     async def _fake(conn, title, event_title, outcome, slug, **kw):
         return {"market_slug": market_slug, "intent": intent,
-                "side_norm": side_norm, "identifier": market_slug,
-                "matched_by": matched_by,
-                "question": "Will %s win?" % side_norm}
+                "outcome": side_norm,
+                "title": "Will %s win?" % side_norm,
+                "matched_by": matched_by, "score": 1.0}
     return _fake
 
 

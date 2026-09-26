@@ -117,6 +117,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import math
 
 from . import bettor_book_snapshot as bs
 from . import bettor_risk_engine as risk
@@ -169,12 +170,18 @@ def ladder_as_arrival_book(ladder: dict) -> dict:
 
 
 def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
-             intended_notional_usd=None) -> dict:
+             intended_notional_usd=None, headroom=None) -> dict:
     """Size, marketable execution estimate and price, or a named refusal.
 
     Returns a dict that is always safe to read: `ok` says whether an
     execution estimate exists, `refusals` names what is missing, and
     `p_fill` is present only when it was measured.
+
+    `headroom` is what `headroom_from_rows` measured for the open shadow
+    book. Supplied, the intended budget is REDUCED to what the rails
+    still allow at the reservation price -- never raised, and no limit is
+    changed. Omitted, the behaviour is exactly as before: the standard
+    notional is proposed and the rails judge it afterwards.
     """
     out = {
         "ok": False,
@@ -238,6 +245,53 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
         intended_notional_usd
         if intended_notional_usd is not None
         else sizing.STANDARD_BETTOR_SHADOW_NOTIONAL_USD)
+    out["policy_notional_usd"] = intended_notional
+
+    # ── THE RAILS REDUCE THE BUDGET BEFORE THE WALK, NOT AFTER ───────
+    #
+    # `limit` is the reservation price the rails are measured on, so the
+    # cap has to be computed here, where that number first exists.
+    #
+    # THE CONVERSION FROM A QUANTITY CAP BACK TO A BUDGET uses the BEST
+    # price, not the limit. `fill_to_notional` spends dollars, and every
+    # level it takes is priced at or above `best`, so a budget of
+    # `qty_cap * best` can never buy more than `qty_cap` contracts. It is
+    # exact when the walk takes one level and conservative when it takes
+    # several -- conservative in the only safe direction.
+    if headroom is not None:
+        # THE ROUNDED RESERVATION PRICE, WHICH IS THE ONE THE RAILS SEE.
+        # `worst_case_cost_per_contract` below is `round(limit, 6)`, and
+        # `_entry_plan` multiplies THAT by the size to get the exposure it
+        # measures. Sizing against the unrounded `limit` would let a
+        # round-half-up of 5e-7 per contract push a 2,000-contract
+        # reservation a tenth of a cent past a rail it was sized to fit --
+        # and a rail that fails by a tenth of a cent is still a failed
+        # rail. One number, used by both.
+        cap = qty_cap_from_headroom(
+            headroom, worst_case_cost_per_contract=round(limit, 6))
+        out["rail_headroom"] = headroom
+        out["qty_cap"] = cap
+        if not cap.get("ok"):
+            out["refusals"].extend(cap.get("refusals") or [R_NO_HEADROOM])
+            out["why"] = cap.get("why") or "no rail headroom"
+            return out
+        rail_budget = float(cap["qty_cap"]) * best
+        if rail_budget < intended_notional:
+            out["notional_reduced_by_rails"] = True
+            out["notional_reduction_why"] = (
+                "%s left room for %.6f contracts at the %.6f reservation "
+                "price, so the $%.2f standard intent was reduced to "
+                "$%.2f. The limit itself is unchanged"
+                % (cap["binding_rail"], cap["qty_cap"], limit,
+                   intended_notional, rail_budget))
+            intended_notional = rail_budget
+        else:
+            out["notional_reduced_by_rails"] = False
+            out["notional_reduction_why"] = (
+                "%s left room for %.6f contracts, which is more than the "
+                "$%.2f standard intent buys, so the intent governs"
+                % (cap["binding_rail"], cap["qty_cap"], intended_notional))
+
     walk = bs.fill_to_notional(ladder, intended_notional, max_price=limit)
     out.update({"intended_notional_usd": intended_notional,
                 "budget_walk": walk,
@@ -357,6 +411,15 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
         "spread_cost": fill.get("spreadCost"),
         "cost_usd": round(float(walk.get("cost") or 0.0), 6),
         "unfilled_notional_usd": sized.get("unfilledNotionalUsd"),
+        # WHICH INTENT `sizing` REPORTED AGAINST. The frozen policy holds
+        # its own standard notional and compares the book against THAT,
+        # so `sizing.status` answers "could the book support a standard
+        # trade?" -- not "did we buy what we asked for". After a rail
+        # reduction those are different questions and a reader must not
+        # take LIQUIDITY_LIMITED as evidence the rails were the cause, or
+        # the reverse.
+        "sizing_status_is_measured_against": "THE_FROZEN_POLICY_NOTIONAL",
+        "requested_notional_after_rails_usd": round(intended_notional, 6),
         "levels_consumed": walk.get("levels_used"),
         "levels_consumed_price_range": [
             best, (walk.get("levels_taken") or [{}])[-1].get("price", best)],
@@ -629,6 +692,186 @@ def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
         out["capital_hours_why"] = ("no observation instant was supplied, "
                                     "so accrued capital-hours is not "
                                     "measured and that rail blocks")
+    return out
+
+
+# ── HOW BIG A POSITION THE RAILS STILL ALLOW ────────────────────────
+#
+# THE DEFECT THIS EXISTS TO FIX, and it made this lane unable to enter
+# anything at all.
+#
+# Sizing asked for a STANDARD-dollar notional and the rails then measured
+# the RESERVATION -- quantity times the break-even limit, which is the
+# right conservative basis. But the dollar rails are themselves STANDARD
+# times one. So the comparison was
+#
+#     qty * break_even_limit   <=   STANDARD
+#     (STANDARD / vwap) * limit <=  STANDARD
+#     limit / vwap              <=  1
+#
+# and `limit > vwap` is exactly what having an edge MEANS. So every
+# candidate with any edge at all breached MAX_MARKET_EXPOSURE,
+# MAX_EVENT_EXPOSURE, MAX_CORRELATED_EXPOSURE and MAX_DRAWDOWN
+# simultaneously, and the only position that could ever clear the rails
+# was one with zero edge. Production showed it precisely: five candidates
+# priced positively, all five carried
+# rails_failed [MAX_EVENT_EXPOSURE, MAX_MARKET_EXPOSURE,
+# MAX_RESIDUAL_INVENTORY, MAX_CORRELATED_EXPOSURE, MAX_DRAWDOWN], and the
+# reserved figures were $1042.05 and $2275.86 against a $1000 rail.
+#
+# MAX_RESIDUAL_INVENTORY was unreachable for a second, independent
+# reason: a STANDARD budget buys STANDARD/price contracts, which exceeds
+# the 2000-contract rail at any price under $0.50 -- that is, on every
+# underdog.
+#
+# THE REPAIR IS TO SIZE TO THE HEADROOM, NOT TO PROPOSE AND HOPE. No
+# limit moves. The standard trade stays the INTENT CEILING and the rails
+# can only ever reduce it, never raise it. Nothing here touches funded
+# limits: these are this lane's own predeclared SHADOW numbers.
+
+#: Rails the proposed position enters in DOLLARS of reservation. Read off
+#: `exposure_from_rows` above rather than assumed: `cost` is added to
+#: market, event, total (which feeds MAX_CAPITAL_DEPLOYED and
+#: MAX_CORRELATED_EXPOSURE) and drawdown.
+DOLLAR_SCALING_RAILS = (
+    "MAX_MARKET_EXPOSURE", "MAX_EVENT_EXPOSURE", "MAX_CAPITAL_DEPLOYED",
+    "MAX_CORRELATED_EXPOSURE", "MAX_DRAWDOWN",
+)
+#: The one rail counted in CONTRACTS.
+QTY_SCALING_RAILS = ("MAX_RESIDUAL_INVENTORY",)
+#: Rails the proposed position does not move, so no size can fix them.
+#: MAX_CAPITAL_HOURS accrues from time held, and the proposal has been
+#: held for none.
+NON_SCALING_RAILS = ("MAX_CAPITAL_HOURS",)
+
+R_NO_HEADROOM = "NO_RAIL_HEADROOM_FOR_ANY_POSITION"
+R_HEADROOM_NOT_MEASURED = "RAIL_HEADROOM_NOT_MEASURED"
+
+#: One millionth of a dollar, held back from every dollar-denominated
+#: rail. The exposure a rail is measured on is `round(qty * price, 6)`, so
+#: a quantity sized to land EXACTLY on the limit can round up past it.
+#: This is the cheapest possible way to make "sized to fit" mean it.
+SAFETY_USD = 1e-6
+
+
+def headroom_from_rows(rows, *, condition_id, event_key, now=None) -> dict:
+    """What each rail still allows BEFORE anything is proposed.
+
+    The SAME measurement function, asked with a proposed position of
+    zero. Using a second implementation here would let the number that
+    sizes a position drift from the number that judges it.
+    """
+    used = exposure_from_rows(
+        rows, condition_id=condition_id, event_key=event_key,
+        proposed_cost_usd=0.0, proposed_qty=0.0, now=now,
+        proposed_cost_basis="NOTHING_PROPOSED_THIS_MEASURES_THE_BOOK_ALONE")
+    out = {"ok": False, "used": used.get("observed") or {},
+           "limits": dict(PREDECLARED_LIMITS), "headroom": {},
+           "refusals": list(used.get("refusals") or []),
+           "basis": ("PREDECLARED_SHADOW_LIMIT_MINUS_THE_OPEN_BOOK_"
+                     "MEASURED_WITH_NOTHING_PROPOSED"),
+           "does_not_change_any_limit": True}
+    if out["refusals"]:
+        out["why"] = used.get("why")
+        return out
+    # THE PROPOSED POSITION IS ALWAYS COUNTED AS AN UNMARKED TOTAL LOSS
+    # by `exposure_from_rows`, and asking with zero proposed removes that
+    # +cost -- which is the point: this is the book alone.
+    for name, limit in PREDECLARED_LIMITS.items():
+        obs = out["used"].get(name)
+        if obs is None:
+            out["headroom"][name] = None
+            continue
+        out["headroom"][name] = round(float(limit) - float(obs), 6)
+    out["ok"] = True
+    return out
+
+
+def qty_cap_from_headroom(headroom: dict, *,
+                          worst_case_cost_per_contract) -> dict:
+    """The largest quantity every rail still permits, and which one binds.
+
+    The reservation basis is the SAME one the rails are measured on --
+    quantity times the worst-case cost per contract -- so the cap and the
+    later verdict cannot disagree about what was proposed.
+    """
+    out = {"ok": False, "qty_cap": None, "binding_rail": None,
+           "per_rail_qty_cap": {}, "refusals": [],
+           "reservation_basis": "QTY_TIMES_WORST_CASE_COST_PER_CONTRACT",
+           "non_scaling_rails": list(NON_SCALING_RAILS)}
+    try:
+        px = float(worst_case_cost_per_contract)
+    except (TypeError, ValueError):
+        px = 0.0
+    if px <= 0:
+        out["refusals"].append(R_HEADROOM_NOT_MEASURED)
+        out["why"] = ("the reservation price is %r, so no quantity can be "
+                      "derived from a dollar headroom" % (
+                          worst_case_cost_per_contract,))
+        return out
+    if not (headroom or {}).get("ok"):
+        out["refusals"].append(R_HEADROOM_NOT_MEASURED)
+        out["why"] = ("the open book was not measured, so no rail "
+                      "headroom exists to size against")
+        return out
+    heads = headroom["headroom"]
+    caps = {}
+    for name in DOLLAR_SCALING_RAILS:
+        h = heads.get(name)
+        if h is None:
+            out["refusals"].append(R_HEADROOM_NOT_MEASURED)
+            out["why"] = "%s is not measured, so it cannot be sized against" % name
+            return out
+        caps[name] = max(0.0, float(h)) / px
+    for name in QTY_SCALING_RAILS:
+        h = heads.get(name)
+        if h is None:
+            out["refusals"].append(R_HEADROOM_NOT_MEASURED)
+            out["why"] = "%s is not measured, so it cannot be sized against" % name
+            return out
+        caps[name] = max(0.0, float(h))
+    # A NON-SCALING RAIL ALREADY BREACHED IS NOT A SIZING PROBLEM. No
+    # quantity reduces accrued capital-hours, so if that rail has no
+    # headroom the answer is a refusal, not a smaller trade.
+    for name in NON_SCALING_RAILS:
+        h = heads.get(name)
+        if h is None:
+            out["refusals"].append(R_HEADROOM_NOT_MEASURED)
+            out["why"] = ("%s is not measured; the proposal does not move "
+                          "it, so it cannot be sized around" % name)
+            return out
+        if float(h) < 0:
+            out["refusals"].append(R_NO_HEADROOM)
+            out["why"] = ("%s is already beyond its predeclared limit and "
+                          "the proposed position does not move it, so no "
+                          "size is admissible" % name)
+            return out
+    out["per_rail_qty_cap"] = {k: round(v, 6) for k, v in caps.items()}
+    binding = min(caps, key=lambda k: caps[k])
+    raw = caps[binding]
+    # FLOORED TO THE SIXTH DECIMAL, which is the precision every quantity
+    # on this path is rounded to. Rounding UP here would hand back a cap
+    # that breaches by half a micro-contract times the reservation price,
+    # and a rail that fails by 5e-7 is still a failed rail.
+    #
+    # THE MICRO-DOLLAR SHAVE IS NOT SUPERSTITION. Downstream, the cost is
+    # `round(qty * price, 6)`, so a product sitting exactly on the rail
+    # can round UP past it. `SAFETY_USD` costs a millionth of a dollar of
+    # headroom and removes the whole class.
+    out["safety_usd"] = SAFETY_USD
+    if binding in DOLLAR_SCALING_RAILS:
+        raw = max(0.0, (max(0.0, float(heads[binding])) - SAFETY_USD) / px)
+    out["qty_cap"] = math.floor(raw * 1e6) / 1e6
+    out["binding_rail"] = binding
+    out["ok"] = out["qty_cap"] > 0
+    if not out["ok"]:
+        out["refusals"].append(R_NO_HEADROOM)
+        out["why"] = ("%s leaves no headroom at a reservation price of "
+                      "%.6f, so no position fits inside the predeclared "
+                      "limits" % (binding, px))
+    else:
+        out["why"] = ("%s binds at %.6f contracts, reserved at %.6f each"
+                      % (binding, out["qty_cap"], px))
     return out
 
 

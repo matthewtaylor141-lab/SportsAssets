@@ -77,14 +77,21 @@ def test_a_short_intent_is_a_VALID_resolved_exposure():
     import asyncio
 
     async def _fake_resolve(conn, title, event_title, outcome, slug, **kw):
-        # WHAT premap.resolve ACTUALLY RETURNS. It matched a row FOR the
-        # requested outcome, and `side_norm` is that row's own side -- the
-        # evidence the wrapper must preserve rather than reconstruct.
+        # WHAT premap.resolve ACTUALLY RETURNS -- and this comment used to
+        # say that over a dict that got it wrong. The real resolver returns
+        # the matched side under `outcome`, the venue identifier under
+        # `market_slug`, and the venue's question under `title`. There is no
+        # `side_norm`, no `identifier` and no `question` key.
+        #
+        # `resolve_venue_identity` was reading those three absent names, so
+        # production recorded three nulls while this stub, agreeing with the
+        # bug, recorded values. A stub that mirrors the code instead of the
+        # dependency cannot catch a field-name error in either.
         return {"market_slug": "aec-mlb-chc-mia-2026-09-24-cubs",
                 "intent": "ORDER_INTENT_BUY_SHORT",
-                "side_norm": "cubs",
-                "identifier": "aec-mlb-chc-mia-2026-09-24-cubs",
-                "matched_by": "keys", "question": "Will the Cubs win?"}
+                "outcome": "cubs",
+                "title": "Will the Cubs win?",
+                "matched_by": "keys", "score": 1.0}
 
     from sportsassets.workers import premap as _pm
 
@@ -153,7 +160,13 @@ def test_a_long_intent_pays_on_the_priced_outcome():
     import asyncio
 
     async def _fake_resolve(conn, title, event_title, outcome, slug, **kw):
+        # `outcome` is carried because the venue slug ends in a side token,
+        # and the PERIOD check admits a trailing token only when it is the
+        # matched side. A stub that omits it leaves `-cubs` unexplained,
+        # which is correctly refused: an unexplained token after the date
+        # could be a half, an inning or a double chance.
         return {"market_slug": "aec-mlb-chc-mia-2026-09-24-cubs",
+                "outcome": "cubs",
                 "intent": "ORDER_INTENT_BUY_LONG"}
 
     from sportsassets.workers import premap as _pm
@@ -171,6 +184,9 @@ def test_a_long_intent_pays_on_the_priced_outcome():
     assert out["ladder_side"] == "ASK"
     assert out["payout_event"] == "Chicago Cubs"
     assert out["payout_is_complement"] is False
+    # THE PERIOD IS ESTABLISHED, not asserted, and it says how.
+    assert out["period"] == "FULL_GAME"
+    assert out["period_evidence"]["residual"] == "cubs"
 
 
 def test_no_premap_row_refuses_before_any_venue_read():

@@ -295,7 +295,24 @@ def _stub(monkeypatch, *, ladder=LADDER, prose=VENUE_PROSE,
     from sportsassets.workers import premap as _pm
 
     async def fake_resolve(conn_, title, event_title, outcome, slug, **kw):
+        # THE SHAPE `premap.resolve` ACTUALLY RETURNS, and this stub did
+        # not. It returned `market_slug` and `intent` only, so
+        # `resolve_venue_identity` -- which read `side_norm`, `identifier`
+        # and `question` -- recorded three nulls and the test could not
+        # have noticed, because the real resolver returns the side under
+        # `outcome`, the identifier under `market_slug` and the question
+        # under `title`. An unfaithful stub is how a silent field-name bug
+        # lives in production while its test suite stays green.
+        #
+        # `outcome` also matters to the PERIOD check: the only token
+        # allowed after the slug's date is the matched side, and US_SLUG
+        # ends in `-hou`. Without a side there is nothing for that token
+        # to equal, and the identity is correctly refused.
         return {"market_slug": US_SLUG,
+                "outcome": "hou",
+                "title": "Will the Houston Astros beat the Seattle Mariners?",
+                "matched_by": "premap_identity",
+                "score": 1.0,
                 "intent": "ORDER_INTENT_BUY_LONG"}
 
     monkeypatch.setattr(_pm, "resolve", fake_resolve)
@@ -466,8 +483,20 @@ async def test_an_admitted_entry_becomes_a_position_order_fill_and_basis(
         assert acct["residual_qty"] == pytest.approx(acct["filled_qty"])
         assert acct["realized_pnl_usd"] == 0.0
         # THE FROZEN POLICY'S THREE FIGURES, and only the executed one
-        # enters P&L. The ladder held $558 of the $1,000 intended.
-        assert acct["intended_notional_usd"] == 1000.0
+        # enters P&L. The ladder held $558 of what was asked for.
+        #
+        # THIS USED TO ASSERT `== 1000.0` AND IT NO LONGER CAN. Sizing now
+        # asks the exposure rails for headroom BEFORE it spends, and a
+        # $1,000 budget reserved at the break-even limit always breaches a
+        # $1,000 rail by exactly the edge -- which is why every positive-
+        # edge candidate in production failed all five rails on an empty
+        # book. The intent is therefore reduced to what the rails allow.
+        #
+        # The frozen policy's own notional is UNCHANGED and still recorded,
+        # and nothing about this fill moves: the ladder held $558, which is
+        # inside both the standard intent and the reduced one.
+        assert acct["intended_notional_usd"] < 1000.0
+        assert acct["intended_notional_usd"] > acct["executed_notional_usd"]
         assert acct["unfilled_notional_usd"] > 0
         assert acct["executed_notional_usd"] < acct["intended_notional_usd"]
         assert acct["only_executed_notional_enters_pnl"] is True

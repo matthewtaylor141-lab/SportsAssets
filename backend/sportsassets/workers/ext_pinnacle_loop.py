@@ -713,11 +713,47 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
     # The resolver's own evidence is PRESERVED rather than discarded and
     # reconstructed: side_norm, identifier, matched_by and question travel
     # onto the row, so a reader can audit which venue side was chosen.
-    out["matched_side_norm"] = got.get("side_norm")
-    out["matched_identifier"] = got.get("identifier")
+    # THE KEY NAMES THE RESOLVER ACTUALLY RETURNS.
+    #
+    # THE DEFECT THIS FIXES, and it was silent. This block read
+    # `side_norm`, `identifier` and `question` -- none of which
+    # `premap.resolve` puts in its result. It returns the side under
+    # `outcome`, the venue identifier under `market_slug`, and the
+    # question under `title`. So every candidate row in production carried
+    #
+    #     matched_side_norm  null
+    #     matched_identifier null
+    #     matched_question   null
+    #
+    # while the comment above promised the resolver's evidence was
+    # "PRESERVED rather than discarded and reconstructed". It was
+    # discarded. Nothing downstream read the nulls, so nothing broke and
+    # nothing complained -- which is exactly why payout identity could not
+    # be audited from the row it was supposed to be auditable from.
+    out["matched_side_norm"] = got.get("outcome")
+    out["matched_identifier"] = got.get("market_slug")
     out["matched_by"] = got.get("matched_by")
-    out["matched_question"] = got.get("question")
+    out["matched_question"] = got.get("title")
+    out["matched_league_alias"] = got.get("league_alias")
     out["resolver_asked_for"] = str(priced_outcome)
+
+    # ── WHICH PERIOD THE VENUE CONTRACT PAYS ON, ESTABLISHED ─────────
+    #
+    # Before this, the lane set `contract["period"] = "FULL_GAME"` as a
+    # literal and passed the same literal to the valuation, so both sides
+    # of the comparison agreed on a period neither had read. The venue's
+    # board carries `...-2026-09-25-i6-draw` (inning six) inside the
+    # money-line family, so the exposure is real.
+    period = vmap.period_of_venue_slug(
+        out["us_market_slug"], side=got.get("outcome"),
+        event_slug=got.get("event_slug"))
+    out["period_evidence"] = period
+    if period.get("period") != vmap.FULL_MATCH:
+        out["refusal"] = vmap.R_PERIOD_UNKNOWN
+        out["why"] = period.get("why")
+        return out
+    out["period"] = "FULL_GAME"
+    out["period_basis"] = period["basis"]
     out["ladder_side"] = ("BID" if intent == "ORDER_INTENT_BUY_SHORT"
                           else "ASK")
     out["intent_selects"] = (
@@ -1891,10 +1927,22 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
     quantity actually claimed, and the risk verdict.
     """
     def plan(*, fair_value, contract):
+        # ── WHAT THE RAILS STILL ALLOW, MEASURED BEFORE SIZING ───────
+        #
+        # Production run 71 showed every positive-edge candidate failing
+        # all five exposure rails at once, because a STANDARD-dollar
+        # budget reserved at the break-even limit always exceeds a
+        # STANDARD-dollar rail by exactly the edge. Sizing now asks the
+        # rails what is left FIRST and spends at most that. No limit
+        # moves; the standard trade remains the ceiling.
+        head = entryx.headroom_from_rows(
+            open_book, condition_id=condition_id, event_key=event_key,
+            now=now)
         est = entryx.estimate(ladder=ladder, fair_value=fair_value,
                               fee_fn=fee_fn,
-                              observation_age_s=observation_age_s)
-        detail = {"execution": est}
+                              observation_age_s=observation_age_s,
+                              headroom=head)
+        detail = {"execution": est, "rail_headroom": head}
         refusals = list(est.get("refusals") or [])
         if not est.get("ok"):
             # NO SIZE MEANS NO RISK QUESTION. Evaluating rails against a
@@ -1964,7 +2012,49 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
                 "waived": list(waiver.get("waived") or []),
                 "refusals": list(waiver.get("refusals") or []),
                 "gate_state_as_read": waiver.get("gate_state_as_read"),
-            })
+            },
+            # ── THE FRESHNESS EVIDENCE, FOR THE SAME REASON ──────────
+            #
+            # STALE_DATA is a gate this verdict CONSUMED, and production
+            # reported it failing on candidates whose Pinnacle quote was
+            # 16 and 22 seconds old against a 30-second rule -- which
+            # looks like a contradiction and is not one. `_entry_freshness`
+            # returns `fresh: None` whenever EITHER clock is unmeasured,
+            # and the venue supplies no `transactTime` on some reads, so
+            # the verdict is UNKNOWN rather than STALE. Those two have
+            # completely different remedies: one is our latency, the other
+            # is a field the venue did not send.
+            #
+            # None of that was on the row, so the question could only be
+            # answered by re-deriving it. It is on the row now: both ages,
+            # both limits, the venue's clock basis, and the provider-lag /
+            # our-processing split of the Pinnacle age.
+            freshness_evidence={
+                "fresh": (freshness or {}).get("fresh"),
+                "why": (freshness or {}).get("why"),
+                "pinnacle_age_s": (freshness or {}).get("pinnacle_age_s"),
+                "pinnacle_limit_s": (freshness or {}).get("pinnacle_limit_s"),
+                "pinnacle_provider_lag_s": (
+                    (freshness or {}).get("pinnacle_provider_lag_s")),
+                "pinnacle_our_processing_s": (
+                    (freshness or {}).get("pinnacle_our_processing_s")),
+                "venue_age_s": (freshness or {}).get("venue_age_s"),
+                "venue_limit_s": (freshness or {}).get("venue_limit_s"),
+                "venue_age_basis": (freshness or {}).get("venue_age_basis"),
+                "venue_age_at_read_s": (
+                    (freshness or {}).get("venue_age_at_read_s")),
+                "unknown_is_not_stale": (
+                    "fresh=null means a clock was not measured, so whether "
+                    "the pair is contemporaneous is UNKNOWN. fresh=false "
+                    "means both were measured and one was too old"),
+            },
+            # WHAT THE RAILS LEFT, AND WHICH ONE BOUND THE SIZE. Without
+            # this a reader cannot tell a rail that refused the candidate
+            # from a rail that merely sized it.
+            rail_headroom=(est.get("rail_headroom") or {}).get("headroom"),
+            qty_cap=est.get("qty_cap"),
+            notional_reduced_by_rails=est.get("notional_reduced_by_rails"),
+            policy_notional_usd=est.get("policy_notional_usd"))
         detail["research_waiver"] = waiver
         detail.update({"exposure": exposure, "gates": gates,
                        "gates_seen_by_the_engine": waiver["state"],
@@ -2315,7 +2405,14 @@ async def cycle(conn) -> dict:
                 "ladder_side": ident["ladder_side"],
                 "sport_family": family,
                 "market": "h2h",
-                "period": "FULL_GAME",
+                # ESTABLISHED, NOT ASSERTED. `resolve_venue_identity`
+                # refuses unless the venue slug demonstrably names the
+                # whole dated fixture, so reaching here means FULL_GAME
+                # was read off the venue's own identifier rather than
+                # typed in. The evidence travels with it.
+                "period": ident["period"],
+                "period_basis": ident["period_basis"],
+                "period_evidence": ident["period_evidence"],
                 "line": None,
                 "settlement_rule": srule["book_rule"],
                 "event_key": quote["event_id"],
@@ -2335,7 +2432,14 @@ async def cycle(conn) -> dict:
                        "observed_at": quote["observed_at"],
                        "received_at": quote["received_at"],
                        "event_key": quote["event_id"],
-                       "period": "FULL_GAME",
+                       # THE SAME ESTABLISHED PERIOD ON BOTH SIDES. When
+                       # this was a literal on both, the comparison could
+                       # not fail: two assertions of FULL_GAME always
+                       # agree. Now the contract's period comes from the
+                       # venue slug and the quote is declared to be the
+                       # feed's full-match h2h, so a mismatch is visible.
+                       "period": ident["period"],
+                       "period_basis": "THE_FEED_H2H_MARKET_IS_FULL_MATCH",
                        "line": None,
                        "settlement_rule": srule["book_rule"]},
                 # THE ACQUISITION PRICE, NOT THE API PRICE. For a LONG

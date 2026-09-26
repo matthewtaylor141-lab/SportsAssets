@@ -340,7 +340,15 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
         async def fake_resolve(conn_, title, event_title, outcome, slug,
                                **kw):
             assert slug, "the resolver must receive the GLOBAL slug"
+            # `outcome` under its REAL key, which this stub omitted. The
+            # venue slug ends in `-city`, and the period check admits a
+            # trailing token only when it is the side the resolver matched
+            # -- otherwise `-city` is indistinguishable from `-h1` or a
+            # double-chance token and is correctly refused.
             return {"market_slug": "aec-soccer-mci-mun-2026-09-24-city",
+                    "outcome": "city",
+                    "title": "Will Manchester City win?",
+                    "matched_by": "keys",
                     "intent": "ORDER_INTENT_BUY_LONG"}
 
         monkeypatch.setattr(_pm, "resolve", fake_resolve)

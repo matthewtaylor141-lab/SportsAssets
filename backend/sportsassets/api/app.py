@@ -7563,6 +7563,220 @@ async def api_price_truth(price: float = 0.30, qty: int = 10,
     return out
 
 
+#: Words the VENUE ITSELF uses to say a competition is simulated. Matched
+#: against the venue's own titles and market labels, never against a league
+#: token -- a token is a guess, a label is the publisher's statement.
+_SIMULATED_MARKERS = ("ebattles", "esoccer", "ebasketball", "efootball",
+                      "simulated", "cyber", "virtual", "e-battles")
+
+
+@app.get("/api/admin/venue-competitions",
+         dependencies=[Depends(require_admin)])
+async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200)
+                                 ) -> dict:
+    """EVERY competition on the venue's board, real and simulated apart.
+
+    WHY THIS ROUTE EXISTS. `desk-games?league=everything` returns
+    `counts.everything = 1400` and then `cards[:400]` -- so the census run
+    71 published was a 400-event SAMPLE of a 1400-event board, sorted by
+    the tail of the event id. Concluding "no `epl` token appears" from it
+    was therefore unsound in one direction: absence from a sample is not
+    absence from the board. The board is ALREADY IN HAND -- `_desk_sweep`
+    pages 14 x 100 and caches the lot -- so the only thing missing was a
+    read that does not truncate. No second venue sweep happens here; this
+    reads the same cache the desk reads.
+
+    REAL AND SIMULATED ARE SEPARATED BY THE VENUE'S OWN WORDS. `ebfcwc`,
+    `ebfsa`, `ebfwca` and `ebfwcb` carry real club names -- "Boca Juniors
+    vs Paris", "Man City vs Boca Juniors" -- and their market labels say
+    "eBattles". Binding a real-league probability to one of those on a name
+    match is a cross-competition category error, so the marker is matched
+    against titles and labels rather than inferred from the token.
+
+    MONEY-LINE PRESENCE IS REPORTED PER COMPETITION, because a competition
+    the venue lists without a money line is not a competition this lane can
+    reach even after every mapping repair.
+    """
+    from .. import pmus as _pmus
+    try:
+        events = await asyncio.to_thread(_pmus.list_desk_events)
+    except Exception as exc:  # noqa: BLE001
+        return {"error": type(exc).__name__, "events_read": 0}
+
+    buckets: dict[str, dict] = {}
+    for ev in events:
+        slug = str(ev.get("slug") or "")
+        token = (slug.split("-", 1)[0] or "").lower()
+        if not token:
+            continue
+        b = buckets.setdefault(token, {
+            "league_token": token, "events": 0,
+            "moneyline_events": 0, "moneyline_sides": 0,
+            "simulated_events": 0, "desk_league_buckets": {},
+            "examples": [], "simulated_markers_seen": []})
+        b["events"] += 1
+        # The desk's own classifier verdict, tallied rather than trusted:
+        # run 71 found non-soccer tokens inside its `soccer` bucket, and
+        # that imprecision belongs on the record next to the token.
+        dl = _desk_league_of(ev.get("league"))
+        b["desk_league_buckets"][dl] = b["desk_league_buckets"].get(dl, 0) + 1
+        mkts = ev.get("markets") or []
+        ml = [m for m in mkts if str(m.get("kind") or "") in ("aec", "atc")]
+        if ml:
+            b["moneyline_events"] += 1
+            b["moneyline_sides"] += len(ml)
+        hay = " ".join([str(ev.get("title") or "")]
+                       + [str(m.get("label") or "") for m in mkts]).lower()
+        hits = [w for w in _SIMULATED_MARKERS if w in hay]
+        if hits:
+            b["simulated_events"] += 1
+            for w in hits:
+                if w not in b["simulated_markers_seen"]:
+                    b["simulated_markers_seen"].append(w)
+        if len(b["examples"]) < 2:
+            b["examples"].append({
+                "event": slug, "title": str(ev.get("title") or "")[:70],
+                "moneyline_example": (ml[0].get("us_slug") if ml else None)})
+
+    rows = [b for b in buckets.values() if b["events"] >= min_events]
+    for b in rows:
+        # EVERY EVENT CARRIED A MARKER, or none did, or some did. The third
+        # case is the one that must not be collapsed: a token holding both
+        # is not a competition, it is a token.
+        if b["simulated_events"] == 0:
+            b["verdict"] = "NO_SIMULATION_MARKER_IN_THE_VENUES_OWN_LABELS"
+        elif b["simulated_events"] == b["events"]:
+            b["verdict"] = "SIMULATED_BY_THE_VENUES_OWN_LABELS"
+        else:
+            b["verdict"] = "MIXED_SOME_EVENTS_CARRY_A_SIMULATION_MARKER"
+    rows.sort(key=lambda b: (-b["events"], b["league_token"]))
+    real = [b for b in rows if b["simulated_events"] == 0]
+    return {
+        "events_read": len(events),
+        "competitions": len(rows),
+        "truncated": False,
+        "no_second_venue_sweep": True,
+        "source": "pmus.list_desk_events (the cache the desk reads)",
+        "real_competition_tokens": [b["league_token"] for b in real],
+        "real_competitions_with_a_moneyline": [
+            b["league_token"] for b in real if b["moneyline_events"] > 0],
+        "simulated_markers": list(_SIMULATED_MARKERS),
+        "verdict_note": (
+            "NO_SIMULATION_MARKER means the venue's own titles and labels "
+            "said nothing about simulation for any event under this token. "
+            "It is not a claim that the competition is real -- only that "
+            "the publisher did not mark it otherwise"),
+        "rows": rows,
+    }
+
+
+@app.get("/api/admin/shadow-mapgap",
+         dependencies=[Depends(require_admin)])
+async def api_shadow_mapgap(sport: str = Query("soccer"),
+                            limit: int = Query(12, ge=1, le=60)) -> dict:
+    """WHY the shadow entry lane cannot reach a venue contract, per fixture.
+
+    `unmapped-census` above answers this for the COPY population. The
+    external-valuation lane has a different universe -- open rows in
+    `markets` for the sports its probability source prices -- and run 71
+    reported `NO_VENUE_CONTRACT_FOR_EVENT 20` for `soccer_epl` and 6 for
+    `soccer_mexico_ligamx` with no attribution behind the number.
+
+    THE QUESTION THIS SETTLES. The venue's own board lists `lmx` (real
+    Liga MX): `lmx-aft-cmf-2026-09-25`, "Atlante FC vs. CF Monterrey" --
+    the same fixture the lane refused as the global slug
+    `mex-atla-mon1-2026-09-25-mon1`. So the refusal is ours, not missing
+    venue coverage. But WHICH part is ours has two very different
+    remedies, and the slug shows both candidates at once:
+
+        league token   ours `mex`, the venue's `lmx`
+        team codes     ours `atla`/`mon1`, the venue's `aft`/`cmf`
+
+    A league alias is a one-token bridge the resolver already has
+    (`_yn_alias_pick`, matched_by `premap_alias`). Team codes are a
+    different mechanism entirely (`code_translated`, `code_pair`,
+    `club_by_exclusion`), and they need a WITNESS from the venue's own
+    question text. Guessing which applies is how an alias table gets
+    invented, so this asks the resolver and reports its own step name.
+
+    READ-ONLY. `resolve_explain` writes nothing and places no orders; it
+    walks the same decision points `resolve` walks and names the one that
+    returned None. `fetch_kick=False` keeps it off the venue's network,
+    exactly as the census does.
+    """
+    from ..workers.premap import resolve_explain
+
+    pool = await get_pool()
+    out: dict = {"sport": sport, "steps": {}, "fixtures": [],
+                 "read_only": True, "resolver": "workers.premap.resolve",
+                 "why": ("one resolve_explain pass per open fixture; the "
+                         "step name is the resolver's own, not this "
+                         "route's interpretation")}
+    async with pool.acquire() as conn:
+        rows = await conn.fetch(
+            """
+            SELECT condition_id, slug, title, event_title, sport
+              FROM markets
+             WHERE sport ILIKE $1
+               AND COALESCE(closed, false) = false
+               AND COALESCE(resolved, false) = false
+             ORDER BY condition_id
+             LIMIT $2
+            """, sport, int(limit))
+    for r in rows:
+        rec = {"condition_id": r["condition_id"], "global_slug": r["slug"],
+               "title": (r["title"] or "")[:90],
+               "event_title": (r["event_title"] or "")[:90]}
+        # THE OUTCOME IS READ FROM THE ROW'S OWN TITLES, never invented:
+        # the event title names both sides and the first is the one the
+        # lane prices (it asks for `quote["home"]`). Where the shape does
+        # not yield two sides, that is itself the answer.
+        ev = str(r["event_title"] or "")
+        sides = [s.strip() for s in ev.replace(" vs. ", " vs ").split(" vs ")
+                 if s.strip()]
+        rec["sides_parsed"] = sides[:2]
+        if len(sides) != 2:
+            rec["step"] = "event_title_does_not_name_two_sides"
+            out["steps"][rec["step"]] = out["steps"].get(rec["step"], 0) + 1
+            out["fixtures"].append(rec)
+            continue
+        for who in sides[:2]:
+            try:
+                ex = await resolve_explain(
+                    pool, r["title"], r["event_title"], who, r["slug"],
+                    condition_id=r["condition_id"], fetch_kick=False)
+            except Exception as exc:                       # noqa: BLE001
+                ex = {"step": "explain_raised",
+                      "detail": type(exc).__name__}
+            step = str(ex.get("step") or "unknown")
+            lap = ex.get("league_alias_probe") or {}
+            br = ex.get("bridge") or {}
+            rec.setdefault("per_side", {})[who[:40]] = {
+                "step": step,
+                "keys_built": ex.get("keys"),
+                "venue_rows_found": ex.get("rows"),
+                "market_slug": ex.get("market_slug"),
+                "intent": ex.get("intent"),
+                # WOULD DROPPING THE LEAGUE TOKEN HAVE FOUND ROWS? The
+                # probe the census already relies on. `true` here means a
+                # LEAGUE alias is the whole gap; `false` with rows found
+                # means the gap is elsewhere (team codes, side, intent).
+                "league_alias_would_hit": lap.get("would_have_hit"),
+                "league_alias_stripped_key": (
+                    (lap.get("stripped_keys") or [None])[0]),
+                "league_alias_venue_rows": lap.get("rows_it_would_find"),
+                "league_alias_venue_sample": lap.get("sample"),
+                "bridge_reason": br.get("reason") or br.get("error"),
+                "bridge_would_resolve": br.get("would_resolve"),
+                "bridge_matched_question": str(
+                    br.get("matched_question") or "")[:120],
+            }
+            out["steps"][step] = out["steps"].get(step, 0) + 1
+        out["fixtures"].append(rec)
+    out["fixtures_read"] = len(rows)
+    return out
+
+
 @app.get("/api/admin/unmapped-census",
          dependencies=[Depends(require_admin)])
 async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:

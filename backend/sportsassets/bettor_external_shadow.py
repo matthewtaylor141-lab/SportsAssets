@@ -608,7 +608,11 @@ STAGES = (
         "VENUE_DOES_NOT_LIST_THIS_FIXTURE",
         "NO_PREMAP_CONTRACT_FOR_THIS_FIXTURE",
         "PAYOUT_OUTCOME_INDEX_NOT_BOUND_TO_A_TOKEN",
-        "PAYOUT_OUTCOME_DISAGREES_WITH_THE_VENUE_INTENT")),
+        "PAYOUT_OUTCOME_DISAGREES_WITH_THE_VENUE_INTENT",
+        # WHICH PERIOD THE CONTRACT PAYS ON IS PART OF ITS IDENTITY. A
+        # full-match probability priced against an inning-six payout is
+        # the wrong contract, not a stale one.
+        "VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED")),
     ("4_SETTLEMENT_SCOPE", (
         "VOID_ABANDONMENT_RULE_NOT_ESTABLISHED",
         "OVERTIME_RULE_NOT_ESTABLISHED",
@@ -622,6 +626,13 @@ STAGES = (
         "P_FILL_NOT_IDENTIFIED")),
     ("6_SIZING", (
         "SIZING_POLICY_NOT_APPLICABLE",
+        # SIZING NOW ASKS THE RAILS FOR HEADROOM BEFORE IT SPENDS, so a
+        # book with no room left refuses HERE rather than proposing a
+        # position that 7_RISK then rejects. The distinction matters to
+        # the census: "the book is full" is a portfolio state, while
+        # RISK_GATE_BLOCKED at stage 7 is a gate on the candidate.
+        "NO_RAIL_HEADROOM_FOR_ANY_POSITION",
+        "RAIL_HEADROOM_NOT_MEASURED",
         "UNFILLED_NOTIONAL",)),
     ("7_RISK", (
         "RISK_GATE_BLOCKED",
