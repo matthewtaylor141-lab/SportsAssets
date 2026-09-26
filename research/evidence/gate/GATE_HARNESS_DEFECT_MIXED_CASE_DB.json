@@ -1,0 +1,20 @@
+{
+ "record": "GATE_HARNESS_DEFECT_V1",
+ "what": "A gate run of 7dedc5a stalled at 38% and produced no summary. The cause was in MY harness, not in the release and not in the suite.",
+ "mechanism": "Postgres folds an UNQUOTED identifier to lower case, so `CREATE DATABASE gateEdb` creates `gateedb`. A connection string, by contrast, carries the database name VERBATIM -- so `postgresql://.../gateEdb` names a database that does not exist. The migrations silently did nothing and every DB-backed test met a connect error.",
+ "why_it_looked_like_a_deadlock": "sportsassets/db.py retries a failed connect with DOUBLING backoff (1s, 2s, 4s, 8s, ...). A py-spy dump showed the main thread idle in selectors.select inside asyncio.run with only the event loop's own self-pipe open -- which reads exactly like a future that never completes. It was a sleep in a retry loop.",
+ "where_it_surfaced": "tests/test_e9_fast_path.py::test_e9_the_wake_fires_for_every_ingested_fill_of_his_sell_and_buy_chain_and_poll -- the first test after the stall point that reaches a real get_pool().",
+ "proof_it_is_the_harness_and_not_the_release": {
+  "same_checkout_nonexistent_db": "RN1X_TEST_DSN=.../gateEdb -> 4 failed in 62.95s, each with `DB connect failed (database \"gateEdb\" does not exist); retry in 1s/2s/4s/8s`",
+  "same_checkout_real_db": "RN1X_TEST_DSN=.../deskdb  -> 4 passed in 1.22s",
+  "database_list": "pg_database holds gateedb, gatecdb, gatebtdb, gatertdb -- all lower case. No mixed-case name was ever created."
+ },
+ "affected_runs": [
+  "GATE_CORRECTED_0899264 (gateCdb) -- killed before completion, no evidence was taken from it",
+  "GATE_7dedc5a (gateEdb) -- stalled at 38%, discarded",
+  "GATE_T_BASE_6d75275 / GATE_T_REL_7dedc5a (gateBTdb / gateRTdb) -- killed on this finding, discarded"
+ ],
+ "earlier_recorded_runs_are_not_affected": "The identity lists in this directory came from runs whose database names were already lower case (base8db, gate5db, gate6db, ...), and each finished with 12,707 passed in ~450 s. A run without a database cannot pass 12,707 tests, so those lists were produced against a real, migrated database.",
+ "fix": "/tmp/gate_run6.sh lower-cases the database name before both the CREATE and the DSN, and adds --timeout=180 --timeout-method=signal so that any future stall becomes one NAMED failure with a stack rather than a run with no summary at all.",
+ "lesson_kept": "A stalled gate is not a slow gate. The percentage stopped moving while CPU stayed at 26% and only the loop's self-pipe was open; that combination is a sleep, and it was worth 90 seconds with py-spy to find out whose."
+}
