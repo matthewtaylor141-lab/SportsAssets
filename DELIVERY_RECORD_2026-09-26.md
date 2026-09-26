@@ -941,3 +941,100 @@ acceptance NOT met: 0 complete decisions at 0 distinct instants (need 2 and 2)
 Links 1-3 hold; the chain stops at the source's own 30 s freshness rule. The
 refusal is measured, not assumed — but the acceptance criterion is **not met**
 and this record does not claim otherwise.
+
+# Final readback: `c6dbd89` serving, and the one decision that is yours
+
+`c6dbd89` was gated (178 identities, identical to `6d75275`; 12,809 passed),
+deployed API-only **by commit id**, and read back. The protected worker was
+listed before and after the deploy and is unchanged: `f5d1c05 live`.
+
+**A correction in the doing of it.** The first deploy dispatch carried a 40-hex
+SHA I had expanded from the short form **without reading it** —
+`c6dbd89e9d3d…` instead of `c6dbd898e59c…`. Render refused the unknown commit
+and the run failed, so nothing was published and production kept serving
+`47ad3ce`. The value was then taken from `git rev-parse` and the deploy
+succeeded: `HTTP 201`, `dep-das4d660tbcc73dpkfi0`.
+
+## The desk, off the build that is serving
+
+```
+build           c6dbd898e59ced8a7b291f9178b00139eb1cefe2
+as of           2026-09-26T22:44:07Z
+funded          DISABLED          verdict NO_TRADE      admissible 0
+BOOK ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY  positions 4   strategy performance false
+BOOK CONTROLLED_DEMONSTRATION            positions 1   strategy performance false
+BOOK UNCLASSIFIED                        positions 35  strategy performance false
+research lane armed     true
+funded executor paused  true
+orders this lane submitted 0
+funded resume            HTTP 409  FUNDED_RESUME_IS_NOT_AVAILABLE_FROM_THE_DESK
+control with no operator token  HTTP 401
+```
+
+## The cycle, on the corrected classifier
+
+Entry lane, live markets: **66 candidates, 0 admissible** — first failing
+stage `1_PROBABILITY` 29, `5_EXECUTION_ESTIMATE` 31, `7_RISK` 6;
+`positive_edge` 6, `negative_edge_without_a_walk` 31, `edge_not_computed` 29,
+`negative_edge_with_a_walk` 0.
+
+Desk census, 49 candidates, and **no drift this time**:
+
+```
+QUOTE_STALE                                   25   decision
+VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE 18   decision
+VENUE_QUOTE_STALE                              2   decision
+VOID_ABANDONMENT_BOOK_RULE_NOT_HELD            1   inability (ours)
+NO_VENUE_NATIVE_CONTRACT_IN_PREMAP             2   theirs
+VENUE_BOOK_READ_FAILED                         1   theirs
+
+candidates 49   admitted 0
+evaluated_to_a_judgement 45      could_not_be_evaluated 4
+DECIDED 45 · COULD_NOT_EVALUATE 1 · EXTERNAL_DEPENDENCY 3
+unclassified_codes []
+verdict NO_OPPORTUNITY_AMONG_THOSE_EVALUATED_WITH_SOME_NOT_EVALUABLE
+```
+
+## THE DECISION THAT IS YOURS, and why it is now concrete
+
+Production's account registry holds **one** row, and it is the paused one:
+
+```
+registry accounts        1
+eligible by their rows   (none)
+paused on their rows     acct_fc2d773a2afa4851
+holds no balances        true
+paused account by id  ok false  refusal ACCOUNT_IS_PAUSED
+a name with no id     ok false  refusal ACCOUNT_ID_NOT_SUPPLIED
+account recorded         -
+limits recorded          {}
+```
+
+So there is **no eligible funded account in production**: the only registered
+account is the accounting-uncertain one, and it is still paused by its own row
+— refused by canonical id, under a different display name, exactly as it must
+be.
+
+The execution path is complete and exercised end to end: authorization →
+submission → acknowledgement → partial fill → recovery → cancellation →
+reconciled accounting, against an internal simulator, with expired, revoked,
+mismatched-account and mismatched-venue authorization each refusing a new
+submission while servicing continues. What it does not have is an account and
+approved rails, and neither of those is mine to invent.
+
+**Needed from the owner, to go further:**
+
+1. **A named funded account** — either a new account id to register as
+   ACTIVE with CLEAN accounting, or a decision to resolve the accounting on
+   `acct_fc2d773a2afa4851` and unpause it. Until one exists, `authorize()`
+   refuses at `account_selected_and_clean`, correctly.
+2. **The approved limits**, as four numbers: capital, per-order, max
+   exposure, daily-loss stop. Approvals may only TIGHTEN — the frozen rails
+   digest `a19eb60a2817…` cannot be raised from here, and a proposal above a
+   frozen rail is reduced to it element-wise.
+3. **Final activation authorization**, in writing, naming that account and
+   that limit set.
+
+Funded submission stays **DISABLED in code** regardless of all three: enabling
+it is a separate code change, and this record does not treat any of the above
+as authorising a real-money order.
