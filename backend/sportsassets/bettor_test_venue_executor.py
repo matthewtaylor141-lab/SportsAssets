@@ -59,6 +59,10 @@ R_NOT_AUTHORIZED = "THE_EXECUTION_BOUNDARY_REFUSED_THIS_SUBMISSION"
 R_NO_OPEN_ORDER = "NO_OPEN_ORDER_TO_ACT_ON"
 R_VENUE_REJECTED = "THE_VENUE_REJECTED_THE_ORDER"
 
+#: The order states this executor will ADOPT from a venue. Anything else --
+#: including a venue's own "unknown" -- is not evidence of a state change.
+_KNOWN_STATES = frozenset(dk.OPEN_STATES) | frozenset(dk.TERMINAL_STATES)
+
 #: A submission is DESCRIBED to the venue in these terms and no others, so
 #: an adapter cannot quietly depend on our internals.
 SUBMISSION_FIELDS = ("client_order_id", "condition_id", "outcome_index",
@@ -145,6 +149,9 @@ class InternalOrderLifecycleSimulator:
         self.late_fill_on_cancel = float(late_fill_on_cancel)
         self._orders: dict = {}
         self.calls: list = []
+        #: Venue order ids whose status the simulator refuses to report, and
+        #: which it also drops from `open_orders`. The exact counterexample.
+        self.unreadable: set = set()
 
     # -- the interface ------------------------------------------------
     def submit(self, order: dict) -> dict:
@@ -166,6 +173,11 @@ class InternalOrderLifecycleSimulator:
 
     def poll(self, venue_order_id: str) -> dict:
         self.calls.append(("poll", venue_order_id))
+        if venue_order_id in self.unreadable:
+            # THE CASE THAT MATTERS: the venue does not list the order open
+            # AND cannot tell us its status. Not a cancellation.
+            return {"state": None, "filled_qty": None, "fills": [],
+                    "why": "SIMULATED_UNREADABLE_STATUS"}
         o = self._orders.get(venue_order_id)
         if o is None:
             return {"state": "UNKNOWN_AT_THE_VENUE", "filled_qty": 0.0,
@@ -202,6 +214,8 @@ class InternalOrderLifecycleSimulator:
         return [rec]
 
     def fills(self, venue_order_id: str) -> list:
+        if venue_order_id in self.unreadable:
+            return []
         o = self._orders.get(venue_order_id)
         return [dict(f) for f in (o or {}).get("fills", [])]
 
@@ -234,7 +248,16 @@ class InternalOrderLifecycleSimulator:
 
     def open_orders(self) -> list:
         return [dict(o) for o in self._orders.values()
-                if o["state"] in dk.OPEN_STATES]
+                if o["state"] in dk.OPEN_STATES
+                and o["venue_order_id"] not in self.unreadable]
+
+    def go_unreadable(self, venue_order_id: str) -> None:
+        """Absent from the open list AND no status. The case an executor must
+        not resolve into a cancellation."""
+        self.unreadable.add(str(venue_order_id))
+
+    def becomes_readable_again(self, venue_order_id: str) -> None:
+        self.unreadable.discard(str(venue_order_id))
 
 
 # ── 2 · FEES, FROM THE DEPLOYED SCHEDULE ────────────────────────────
@@ -292,39 +315,43 @@ async def check_servicing(conn, *, account_id: str, venue: str) -> dict:
 
     Cancelling, ingesting a fill and reconciling REDUCE or merely RECORD
     exposure. Blocking them because the submission grant lapsed is how a
-    lapse turns into an unmanaged position, so they are gated on ownership
-    alone -- and ownership is still checked, on the account and the venue.
+    lapse turns into an unmanaged position, so they do not need a live
+    submission authorization.
+
+    AND OWNERSHIP IS NOT READ FROM THE AUTHORIZATION RECORD. There is one
+    such record and it is replaceable; reading ownership from it meant a new
+    account's grant could strand the previous account's orders and expose
+    them to the new account's servicing path. Ownership lives on each order's
+    own position row, and `_open_orders` filters on it -- so this gate checks
+    only what is true of the REQUEST (the venue class) and reports, for the
+    record, whether new exposure would currently be authorised.
     """
     klass = FA.venue_class(venue)
     out = {"version": VERSION, "gate": "SERVICING", "venue": venue,
            "venue_class": klass, "account_id": account_id,
-           "this_gate_authorises_no_new_exposure": True}
+           "this_gate_authorises_no_new_exposure": True,
+           "ownership_is_read_from": ("each order's own position row "
+                                     "(source_account, venue), never from "
+                                     "the authorization record")}
     if klass not in ALLOWED_VENUE_CLASSES:
         return dict(out, ok=False, refusal=R_VENUE_CLASS_NOT_ALLOWED,
                     allowed=list(ALLOWED_VENUE_CLASSES))
-    rec = await _authorization(conn)
-    if not rec:
+    if not str(account_id or "").strip():
         return dict(out, ok=False, refusal=R_NO_OWNERSHIP,
-                    why=("no record binds any order to this account and "
-                         "venue, so there is nothing here to service"))
-    out["authorization_record_present"] = True
+                    why="an account id is required to scope the selection")
+    rec = await _authorization(conn)
+    gate = EX.authorize_submission(
+        account_id=account_id, venue=venue, authorization=rec or None,
+        approved_limits=await _approved_limits(conn) or None)
     out["submission_authority"] = {
-        "valid_for_new_exposure": bool(
-            EX.authorize_submission(
-                account_id=account_id, venue=venue, authorization=rec,
-                approved_limits=await _approved_limits(conn) or None
-            ).get("authorization_consumed")),
-        "expired_or_revoked_does_not_block_servicing": True}
-    if str(rec.get("account_id") or "") != str(account_id or ""):
-        return dict(out, ok=False, refusal=R_OWNERSHIP_ACCOUNT,
-                    why="the record names account %r" % rec.get("account_id"))
-    if str(rec.get("venue") or "").upper() != str(venue or "").upper():
-        return dict(out, ok=False, refusal=R_OWNERSHIP_VENUE,
-                    why="the record names venue %r" % rec.get("venue"))
+        "valid_for_new_exposure": bool(gate.get("authorization_consumed")),
+        "refusal_if_any": gate.get("refusal"),
+        "expired_revoked_or_replaced_does_not_block_servicing": True}
     return dict(out, ok=True, refusal=None,
-                why=("ownership holds. Servicing an existing order does not "
-                     "need a live submission authorization, and refusing it "
-                     "because one lapsed would strand the exposure"))
+                why=("servicing is scoped to this account's own orders at "
+                     "this venue. It needs no live submission grant, and "
+                     "refusing it because one lapsed or was replaced would "
+                     "strand the exposure"))
 
 
 async def check_authorized(conn, *, account_id: str, venue: str) -> dict:
@@ -382,7 +409,7 @@ async def _position_id(conn, *, condition_id: str) -> str | None:
 
 
 async def open_position(conn, *, condition_id: str, slug: str,
-                        account_id: str,
+                        account_id: str, venue: str,
                         outcome_index: int = 0,
                         qty: float = 100.0, price: float = 0.50,
                         now: float | None = None) -> dict:
@@ -405,12 +432,12 @@ async def open_position(conn, *, condition_id: str, slug: str,
                 'a test-venue execution lifecycle',
                 $6,$7,$8, to_timestamp($9), to_timestamp($9),
                 to_timestamp($9),'RUNTIME_WALL_CLOCK','MEASURED',
-                $10,$11,$12,'PMUS_TEST', FALSE)
+                $10,$11,$12,$14, FALSE)
         ON CONFLICT (position_id) DO NOTHING
         """, pid, EXPERIMENT, EXPERIMENT, condition_id, int(outcome_index),
         float(qty), float(price), round(float(qty) * float(price), 6), at,
         PROVENANCE, slug,
-        "A test-venue execution lifecycle", account_id)
+        "A test-venue execution lifecycle", account_id, venue)
     return {"position_id": pid, "case": "WROTE"}
 
 
@@ -435,7 +462,7 @@ async def submit(conn, venue_adapter, *, account_id: str, venue: str,
 
     await ensure_book(conn)
     pos = await open_position(conn, condition_id=condition_id, slug=slug,
-                             account_id=account_id,
+                             account_id=account_id, venue=venue,
                              outcome_index=outcome_index, qty=qty,
                              price=limit_price, now=at)
     coid = "tvx-%s" % uuid.uuid4().hex[:14]
@@ -496,17 +523,30 @@ async def submit(conn, venue_adapter, *, account_id: str, venue: str,
                 funded_submission="DISABLED")
 
 
-async def _open_orders(conn):
+async def _open_orders(conn, *, account_id: str, venue: str):
+    """THIS ACCOUNT'S OPEN ORDERS AT THIS VENUE, and nobody else's.
+
+    THE DEFECT THIS CLOSES. Selection was scoped by EXPERIMENT ONLY, and
+    ownership was checked against the single global authorization record. So
+    replacing account A's authorization with B's made every one of A's open
+    orders invisible to A -- stranded -- and reachable from B's servicing
+    path. Ownership is a property of the ORDER, so it is read off the order's
+    own position row and the selection is scoped by it. The authorization
+    record is not consulted for ownership at all.
+    """
     return [dict(r) for r in await conn.fetch(
-        "SELECT order_id, venue_order_id, condition_id, "
-        "       position_id, side, qty::float8 AS qty, "
-        "       filled_qty::float8 AS filled_qty, "
-        "       limit_price::float8 AS limit_price, state "
-        "  FROM rn1x_orders o "
-        " WHERE o.position_id IN (SELECT position_id FROM rn1x_positions "
-        "                          WHERE experiment_id = $1) "
-        "   AND o.state = ANY($2::text[])", EXPERIMENT,
-        list(dk.OPEN_STATES))]
+        "SELECT o.order_id, o.venue_order_id, o.condition_id, "
+        "       o.position_id, o.side, o.qty::float8 AS qty, "
+        "       o.filled_qty::float8 AS filled_qty, "
+        "       o.limit_price::float8 AS limit_price, o.state, "
+        "       p.source_account AS owner_account, p.venue AS owner_venue "
+        "  FROM rn1x_orders o JOIN rn1x_positions p "
+        "    ON p.position_id = o.position_id "
+        " WHERE p.experiment_id = $1 "
+        "   AND p.source_account = $2 "
+        "   AND upper(coalesce(p.venue, '')) = upper($3) "
+        "   AND o.state = ANY($4::text[])", EXPERIMENT,
+        str(account_id or ""), str(venue or ""), list(dk.OPEN_STATES))]
 
 
 async def poll_once(conn, venue_adapter, *, account_id: str, venue: str,
@@ -525,7 +565,7 @@ async def poll_once(conn, venue_adapter, *, account_id: str, venue: str,
            "gate": "SERVICING", "orders": []}
     if not auth.get("ok"):
         return dict(out, ok=False, refusal=auth.get("refusal"))
-    rows = await _open_orders(conn)
+    rows = await _open_orders(conn, account_id=account_id, venue=venue)
     if not rows:
         return dict(out, ok=True, refusal=R_NO_OPEN_ORDER, orders=[])
     for r in rows:
@@ -555,14 +595,34 @@ async def poll_once(conn, venue_adapter, *, account_id: str, venue: str,
 #: doubled, and nothing in the ledger could tell the two apart. The id is now
 #: derived from the venue's own identifiers and the insert is idempotent, so
 #: the tenth delivery of a fill writes exactly what the first one did.
-def fill_id_for(venue_order_id: str, venue_fill_id) -> str:
+R_NO_EXECUTION_IDENTITY = "THE_VENUE_SUPPLIED_NO_DURABLE_EXECUTION_IDENTITY"
+
+#: Where unresolved executions are kept. Existing machinery: the same
+#: key-value store every control row lives in.
+UNRESOLVED_KEY = "bettor_test_venue_unresolved_executions"
+
+
+def fill_id_for(venue_order_id: str, venue_fill_id) -> str | None:
+    """The durable fill identity, or None when the venue supplied none.
+
+    THE COLLISION THIS CLOSES. The previous version answered
+    `tvf:<order>:NO_VENUE_FILL_ID` for EVERY unidentified fill on an order --
+    one id for all of them. With `ON CONFLICT DO NOTHING` the first one was
+    written and every later DISTINCT execution was silently reported as
+    "already held". Two separate fills became one, and the quantity, the fees
+    and the cash were all short.
+
+    AND A CONTENT HASH IS NOT AN IDENTITY EITHER. Two separate executions can
+    share a quantity and a price exactly -- that is normal on a resting order
+    -- so hashing them would collide for the same reason with extra steps.
+    A fill with no venue identity is therefore NOT INGESTED: it becomes an
+    explicit unresolved reconciliation state, which is a problem a human can
+    see rather than a quantity that is quietly wrong.
+    """
     vid = str(venue_order_id or "")
-    fid = str(venue_fill_id or "")
+    fid = str(venue_fill_id or "").strip()
     if not fid:
-        # A VENUE THAT SENDS NO FILL ID gets a deterministic id derived from
-        # the order and the fill's own content, which is still idempotent
-        # for an identical redelivery. It is NOT a uuid.
-        return "tvf:%s:NO_VENUE_FILL_ID" % vid
+        return None
     return "tvf:%s:%s" % (vid, fid)
 
 
@@ -574,11 +634,25 @@ async def ingest_fills(conn, order_row, fills, *, at: float) -> dict:
     LEDGER rather than from the number the venue happened to send -- so the
     two can never disagree.
     """
-    written, already = [], []
+    written, already, unresolved = [], [], []
     for f in fills or ():
         q, px = float(f["qty"]), float(f["price"])
         fee = fee_for(q, px)
         fid = fill_id_for(order_row["venue_order_id"], f.get("venue_fill_id"))
+        if fid is None:
+            # NO IDENTITY, NO INGESTION. Recorded as unresolved so the
+            # execution is VISIBLE and the reconciliation says so, instead of
+            # being folded into another fill's row.
+            rec = {"order_id": order_row["order_id"],
+                   "venue_order_id": order_row["venue_order_id"],
+                   "qty": q, "price": px, "at": at,
+                   "refusal": R_NO_EXECUTION_IDENTITY,
+                   "why": ("the venue reported an execution with no durable "
+                           "id. It is neither ingested nor discarded: the "
+                           "quantity is unreconciled until the venue names "
+                           "it")}
+            unresolved.append(rec)
+            continue
         # THE EVIDENCE IS THE VENUE'S OWN REPORT, and `queue_share` is 1.0
         # because nothing was modelled: the venue said it filled.
         res = await conn.execute(
@@ -600,9 +674,39 @@ async def ingest_fills(conn, order_row, fills, *, at: float) -> dict:
         "UPDATE rn1x_orders SET filled_qty = $2, updated_at = "
         "to_timestamp($3) WHERE order_id = $1",
         order_row["order_id"], total, at)
+    if unresolved:
+        await _record_unresolved(conn, unresolved)
     return {"written": written, "already_held": already,
+            "unresolved": unresolved,
+            "unresolved_count": len(unresolved),
             "filled_qty_from_the_ledger": round(total, 6),
-            "idempotent_on": "the venue's own fill id"}
+            "idempotent_on": "the venue's own fill id",
+            "a_fill_with_no_identity_is": ("recorded as UNRESOLVED and not "
+                                           "ingested. It is not treated as "
+                                           "already held")}
+
+
+async def _record_unresolved(conn, rows) -> None:
+    """Append unresolved executions to the durable list. Existing store."""
+    raw = await conn.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = $1", UNRESOLVED_KEY)
+    held = (json.loads(raw) if isinstance(raw, str) else raw) or {}
+    items = list(held.get("executions") or [])
+    items.extend(rows)
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb", UNRESOLVED_KEY,
+        json.dumps({"version": VERSION, "executions": items[-500:],
+                    "what": ("executions the venue reported with no durable "
+                             "id. They are NOT in the fill ledger and the "
+                             "quantity they represent is unreconciled")}))
+
+
+async def unresolved_executions(conn) -> list:
+    raw = await conn.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = $1", UNRESOLVED_KEY)
+    held = (json.loads(raw) if isinstance(raw, str) else raw) or {}
+    return list(held.get("executions") or [])
 
 
 async def _apply_venue_state(conn, order_row, *, state, at: float) -> str:
@@ -631,7 +735,7 @@ async def cancel_open(conn, venue_adapter, *, account_id: str, venue: str,
            "gate": "SERVICING", "cancelled": []}
     if not auth.get("ok"):
         return dict(out, ok=False, refusal=auth.get("refusal"))
-    rows = await _open_orders(conn)
+    rows = await _open_orders(conn, account_id=account_id, venue=venue)
     for r in rows:
         # THE REQUEST MOVES US TO CANCEL_PENDING AND NO FURTHER.
         #
@@ -688,10 +792,11 @@ async def recover(conn, venue_adapter, *, account_id: str, venue: str,
     auth = await check_servicing(conn, account_id=account_id, venue=venue)
     out = {"version": VERSION, "action": "recover", "authorization": auth,
            "gate": "SERVICING", "resubmitted_anything": False,
-           "reconciled": [], "orphans": []}
+           "reconciled": [], "unresolved": [], "orphans": []}
     if not auth.get("ok"):
         return dict(out, ok=False, refusal=auth.get("refusal"))
-    ours = {r["venue_order_id"]: r for r in await _open_orders(conn)}
+    ours = {r["venue_order_id"]: r for r in
+            await _open_orders(conn, account_id=account_id, venue=venue)}
     theirs = {o["venue_order_id"]: o for o in venue_adapter.open_orders()}
     # THE FILLS WE MISSED ARE INGESTED, NOT INFERRED.
     #
@@ -704,24 +809,51 @@ async def recover(conn, venue_adapter, *, account_id: str, venue: str,
     # last poll" view, which is empty after downtime) and ingests them on
     # the same idempotent path as a live poll.
     for vid, r in list(ours.items()):
+        # WHAT THE VENUE SAYS, AND NOTHING INVENTED WHEN IT SAYS NOTHING.
+        #
+        # THE DEFECT THIS CLOSES. The line was
+        #     seen_state = got.get("state") or dk.CANCELLED
+        # so an order absent from the venue's open list whose status could
+        # not be read was written CANCELLED. Absence plus an unreadable
+        # status is not a cancellation: it is exactly the case where we do
+        # NOT know, and writing a terminal state there reports flat while
+        # the exposure may still be live. The row is left alone and the
+        # order is reported UNRESOLVED until authoritative evidence arrives.
         seen_state = (theirs.get(vid) or {}).get("state")
-        if vid not in theirs:
+        readable = seen_state is not None
+        if not readable:
             got = venue_adapter.poll(vid)
-            seen_state = got.get("state") or dk.CANCELLED
+            seen_state = got.get("state")
+            readable = seen_state is not None and \
+                str(seen_state) in _KNOWN_STATES
         every = list(venue_adapter.fills(vid) or ())
         ing = await ingest_fills(conn, r, every, at=at)
-        state = await _apply_venue_state(conn, r, state=seen_state, at=at)
-        out["reconciled"].append({
+        row = {
             "order_id": r["order_id"],
-            "case": ("OPEN_AT_BOTH" if vid in theirs
-                     else "OPEN_HERE_CLOSED_AT_THE_VENUE"),
-            "venue_state": state,
+            "venue_order_id": vid,
             "fills_the_venue_holds": len(every),
             "fills_we_had_missed": ing["written"],
             "fills_already_held": len(ing["already_held"]),
+            "unresolved_executions": ing["unresolved_count"],
             "filled_qty_from_the_ledger": ing["filled_qty_from_the_ledger"],
-            "adopted_filled_qty": ing["filled_qty_from_the_ledger"],
-            "quantity_came_from": "the ledger, after ingesting every fill"})
+            "quantity_came_from": "the ledger, after ingesting every fill"}
+        if not readable:
+            out["unresolved"].append(dict(
+                row, case="OPEN_HERE_STATUS_UNREADABLE_AT_THE_VENUE",
+                venue_said=seen_state,
+                state_left_as=str(r["state"]),
+                exposure="PRESERVED",
+                why=("the venue does not list it open and its status could "
+                     "not be read. That is not a cancellation, so the state "
+                     "is unchanged and the exposure stands until "
+                     "authoritative evidence arrives")))
+            continue
+        state = await _apply_venue_state(conn, r, state=seen_state, at=at)
+        out["reconciled"].append(dict(
+            row, case=("OPEN_AT_BOTH" if vid in theirs
+                       else "OPEN_HERE_CLOSED_AT_THE_VENUE"),
+            venue_state=state,
+            adopted_filled_qty=ing["filled_qty_from_the_ledger"]))
     for vid in set(theirs) - set(ours):
         out["orphans"].append({"venue_order_id": vid,
                                "what": ("the venue holds an order this book "
@@ -787,9 +919,25 @@ async def reconcile(conn) -> dict:
                          % (o["state"], remaining))})
         per_order.append(row)
 
+    # EXECUTIONS WITH NO DURABLE IDENTITY ARE A DISCREPANCY, NOT A GAP IN
+    # THE LEDGER NOBODY MENTIONS. They are quantity the venue reported that
+    # this book cannot place.
+    pending = await unresolved_executions(conn)
+    for u in pending:
+        discrepancies.append({
+            "order_id": u.get("order_id"),
+            "state": "UNRESOLVED_EXECUTION_IDENTITY",
+            "what": ("the venue reported %s at %s with no durable execution "
+                     "id, so it is NOT in the fill ledger and the quantity "
+                     "is unreconciled" % (u.get("qty"), u.get("price"))),
+            "refusal": u.get("refusal")})
+
     return {
         "version": VERSION, "experiment_id": EXPERIMENT,
         "orders": len(orders), "fills": len(fills),
+        "unresolved_executions": pending,
+        "unresolved_execution_count": len(pending),
+        "reconciles_exactly_once": (not discrepancies),
         "filled_qty": filled_qty, "notional_usd": notional,
         "fees_usd": fees, "expected_fees_usd": expected_fees,
         "fees_reconcile": abs(fees - expected_fees) < 1e-6,

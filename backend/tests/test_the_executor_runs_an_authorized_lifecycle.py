@@ -273,7 +273,7 @@ async def test_a_venue_rejection_is_recorded_and_not_swallowed():
             got["order_id"])
         assert state == dk.REJECTED
         # and it is not an open order
-        assert await TX._open_orders(conn) == []
+        assert await TX._open_orders(conn, account_id=ACCT, venue=VENUE) == []
     finally:
         await _wipe(conn)
         await conn.close()
@@ -447,15 +447,17 @@ async def test_revoking_authority_stops_new_exposure_and_not_servicing():
         assert per["remaining"] == pytest.approx(50.0)
         assert per["state"] == dk.CANCELLED
 
-        # 7 · OWNERSHIP IS STILL CHECKED while servicing
+        # 7 · OWNERSHIP IS ENFORCED BY THE SELECTION, which is stronger
+        #     than a record read: a call naming another account or venue
+        #     SELECTS NOTHING and therefore touches nothing.
         wrong = await TX.cancel_open(conn, v, account_id="someone-else",
                                      venue=VENUE)
-        assert wrong["ok"] is False
-        assert wrong["refusal"] == TX.R_OWNERSHIP_ACCOUNT
+        assert wrong["refusal"] == TX.R_NO_OPEN_ORDER, wrong
+        assert wrong["cancelled"] == []
         wrong_v = await TX.poll_once(conn, v, account_id=ACCT,
                                     venue="SANDBOX")
-        assert wrong_v["ok"] is False
-        assert wrong_v["refusal"] == TX.R_OWNERSHIP_VENUE
+        assert wrong_v["refusal"] == TX.R_NO_OPEN_ORDER
+        assert wrong_v["orders"] == []
         # and a FUNDED venue is refused even for servicing
         funded = await TX.poll_once(conn, v, account_id=ACCT, venue="PMUS")
         assert funded["refusal"] == TX.R_VENUE_CLASS_NOT_ALLOWED
@@ -518,7 +520,7 @@ async def test_a_redelivered_fill_is_recorded_exactly_once():
         one = await TX.reconcile(conn)
 
         # REDELIVER THE SAME FILL, three times, exactly as a venue would
-        row = (await TX._open_orders(conn))[0]
+        row = (await TX._open_orders(conn, account_id=ACCT, venue=VENUE))[0]
         for _ in range(3):
             again = v.redeliver(vid)
             ing = await TX.ingest_fills(conn, row, again["fills"],
@@ -653,3 +655,271 @@ def test_the_lifecycle_endpoint_is_admin_gated_and_test_venue_only():
     assert '"funded_submission"' in src
     # and it stops at the first refusal rather than pressing on
     assert 'out["stopped_at"] = "submit"' in src
+
+
+# ── THE FOUR COUNTEREXAMPLES FROM THE SOURCE REVIEW ─────────────────
+
+@pg
+async def test_two_unidentified_fills_are_both_unresolved_not_one_ingested():
+    """COUNTEREXAMPLE 1, and the collision is reproduced first.
+
+    `fill_id_for` used to answer `tvf:<order>:NO_VENUE_FILL_ID` for EVERY
+    unidentified fill on an order -- one id for all of them. With ON CONFLICT
+    DO NOTHING the first was written and every later DISTINCT execution came
+    back as "already held". Two separate fills became one and the quantity,
+    the fees and the cash were all short.
+
+    A fill with no durable identity is now NOT ingested and NOT called
+    already-held: it becomes an explicit unresolved reconciliation state.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _wipe(conn)
+        await _seed_account(conn)
+        await _authorize(conn)
+        v = TX.InternalOrderLifecycleSimulator()
+        got = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
+                              condition_id=CID, slug=SLUG, qty=100.0,
+                              limit_price=0.50)
+        row = (await TX._open_orders(conn, account_id=ACCT,
+                                     venue=VENUE))[0]
+
+        # THE COLLISION, REPRODUCED: the id function refuses to invent one
+        assert TX.fill_id_for(row["venue_order_id"], None) is None
+        assert TX.fill_id_for(row["venue_order_id"], "") is None
+        assert TX.fill_id_for(row["venue_order_id"], "  ") is None
+
+        # TWO DISTINCT EXECUTIONS, neither identified, and they are NOT the
+        # same fill: different quantities at the same price.
+        ing = await TX.ingest_fills(conn, row, [
+            {"qty": 10.0, "price": 0.50},
+            {"qty": 15.0, "price": 0.50}], at=time.time())
+        assert ing["written"] == [], ing
+        assert ing["already_held"] == [], ing
+        assert ing["unresolved_count"] == 2, ing
+        assert all(u["refusal"] == TX.R_NO_EXECUTION_IDENTITY
+                   for u in ing["unresolved"])
+        # NOTHING entered the ledger
+        assert await conn.fetchval(
+            "SELECT count(*) FROM rn1x_fills WHERE order_id = $1",
+            row["order_id"]) == 0
+        assert ing["filled_qty_from_the_ledger"] == pytest.approx(0.0)
+
+        # AND TWO EXECUTIONS THAT SHARE A QUANTITY AND A PRICE EXACTLY are
+        # still two: a content hash would have collapsed them.
+        ing2 = await TX.ingest_fills(conn, row, [
+            {"qty": 12.0, "price": 0.50},
+            {"qty": 12.0, "price": 0.50}], at=time.time())
+        assert ing2["unresolved_count"] == 2, ing2
+
+        # THE RECONCILIATION SAYS SO, as a discrepancy
+        acc = await TX.reconcile(conn)
+        assert acc["unresolved_execution_count"] == 4, acc
+        assert acc["reconciles_exactly_once"] is False
+        states = {d.get("state") for d in acc["discrepancies"]}
+        assert "UNRESOLVED_EXECUTION_IDENTITY" in states
+
+        # AND A PROPERLY IDENTIFIED FILL, DELIVERED REPEATEDLY, is one row
+        good = [{"venue_fill_id": "%s:f9" % row["venue_order_id"],
+                 "qty": 20.0, "price": 0.50}]
+        first = await TX.ingest_fills(conn, row, good, at=time.time())
+        assert len(first["written"]) == 1 and first["unresolved_count"] == 0
+        for _ in range(3):
+            again = await TX.ingest_fills(conn, row, good, at=time.time())
+            assert again["written"] == []
+            assert len(again["already_held"]) == 1
+            assert again["unresolved_count"] == 0
+        assert await conn.fetchval(
+            "SELECT count(*) FROM rn1x_fills WHERE order_id = $1",
+            row["order_id"]) == 1
+        final = await TX.reconcile(conn)
+        assert final["filled_qty"] == pytest.approx(20.0)
+    finally:
+        await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                           TX.UNRESOLVED_KEY)
+        await _wipe(conn)
+        await conn.close()
+
+
+@pg
+async def test_two_accounts_each_service_only_their_own_orders():
+    """COUNTEREXAMPLE 2. Selection was scoped by EXPERIMENT only and ownership
+    was read from the single global authorization record -- so replacing
+    account A's authorization with B's stranded A's orders AND exposed them to
+    B's servicing path. Ownership is on the order's own position row."""
+    asyncpg = pytest.importorskip("asyncpg")
+
+    B = "acct-second-pilot-002"
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _wipe(conn)
+        await conn.execute(
+            "DELETE FROM rn1x_positions WHERE experiment_id = $1 "
+            "AND source_account = $2", TX.EXPERIMENT, B)
+        await _seed_account(conn)
+        await conn.execute(
+            "INSERT INTO bettor_desk_accounts (account_id, desk_id, status, "
+            "opening_balance, opened_at, note, provenance, paused, "
+            "pause_reason, accounting_status, accounting_detail) VALUES "
+            "($1,'desk-3','ACTIVE',0, now(),'a second pilot','{}'::jsonb, "
+            "FALSE, NULL,'CLEAN','{}'::jsonb) "
+            "ON CONFLICT (account_id) DO NOTHING", B)
+
+        va = TX.InternalOrderLifecycleSimulator()
+        vb = TX.InternalOrderLifecycleSimulator()
+
+        # A submits under A's authorization
+        await _authorize(conn)
+        a_order = await TX.submit(conn, va, account_id=ACCT, venue=VENUE,
+                                  condition_id=CID, slug="tvx-a")
+        assert a_order["ok"] is True
+
+        # NOW A'S AUTHORIZATION IS REPLACED BY B'S -- the exact defect
+        await _authorize(conn, account_id=B)
+        b_order = await TX.submit(conn, vb, account_id=B, venue=VENUE,
+                                  condition_id="0x" + "bb" * 32,
+                                  slug="tvx-b")
+        assert b_order["ok"] is True
+
+        # B SEES ONLY B'S ORDER
+        b_rows = await TX._open_orders(conn, account_id=B, venue=VENUE)
+        assert [r["order_id"] for r in b_rows] == [b_order["order_id"]]
+        assert all(r["owner_account"] == B for r in b_rows)
+
+        # AND A'S ORDER IS NOT STRANDED: A can still service it, with A's
+        # authorization gone entirely.
+        a_rows = await TX._open_orders(conn, account_id=ACCT, venue=VENUE)
+        assert [r["order_id"] for r in a_rows] == [a_order["order_id"]]
+        a_poll = await TX.poll_once(conn, va, account_id=ACCT, venue=VENUE)
+        assert a_poll["ok"] is True, a_poll
+        assert a_poll["authorization"]["submission_authority"][
+            "valid_for_new_exposure"] is False
+        assert [o["order_id"] for o in a_poll["orders"]] == \
+            [a_order["order_id"]]
+
+        # B'S CANCEL TOUCHES ONLY B'S ORDER
+        b_cancel = await TX.cancel_open(conn, vb, account_id=B, venue=VENUE)
+        assert [c["order_id"] for c in b_cancel["cancelled"]] == \
+            [b_order["order_id"]]
+        assert await conn.fetchval(
+            "SELECT state FROM rn1x_orders WHERE order_id = $1",
+            a_order["order_id"]) in dk.OPEN_STATES
+
+        # AND A CAN STILL CANCEL A'S OWN
+        a_cancel = await TX.cancel_open(conn, va, account_id=ACCT,
+                                       venue=VENUE)
+        assert [c["order_id"] for c in a_cancel["cancelled"]] == \
+            [a_order["order_id"]]
+        assert a_cancel["cancelled"][0]["state_confirmed_by_a_read"] == \
+            dk.CANCELLED
+    finally:
+        await conn.execute(
+            "DELETE FROM rn1x_fills WHERE order_id IN (SELECT o.order_id "
+            "FROM rn1x_orders o JOIN rn1x_positions p ON p.position_id = "
+            "o.position_id WHERE p.experiment_id = $1)", TX.EXPERIMENT)
+        await conn.execute(
+            "DELETE FROM rn1x_orders WHERE position_id IN (SELECT "
+            "position_id FROM rn1x_positions WHERE experiment_id = $1)",
+            TX.EXPERIMENT)
+        await conn.execute(
+            "DELETE FROM rn1x_decisions WHERE position_id IN (SELECT "
+            "position_id FROM rn1x_positions WHERE experiment_id = $1)",
+            TX.EXPERIMENT)
+        await conn.execute("DELETE FROM rn1x_positions WHERE "
+                           "experiment_id = $1", TX.EXPERIMENT)
+        await conn.execute("DELETE FROM bettor_desk_accounts WHERE "
+                           "account_id = $1", B)
+        await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
+                           [FA.AUTHORIZATION_KEY, FA.LIMITS_KEY])
+        await conn.close()
+
+
+@pg
+async def test_an_unreadable_status_is_not_a_cancellation():
+    """COUNTEREXAMPLE 3, the exact line. `recover` held
+
+        seen_state = got.get("state") or dk.CANCELLED
+
+    so an order absent from the venue's open list whose status could not be
+    read was written CANCELLED. Absence plus an unreadable status is precisely
+    the case where we do NOT know, and a terminal state there reports flat
+    while the exposure may still be live."""
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _wipe(conn)
+        await _seed_account(conn)
+        await _authorize(conn)
+        v = TX.InternalOrderLifecycleSimulator(partial_ratio=0.4)
+        got = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
+                              condition_id=CID, slug=SLUG, qty=100.0,
+                              limit_price=0.50)
+        vid, oid = got["venue_order_id"], got["order_id"]
+        await TX.poll_once(conn, v, account_id=ACCT, venue=VENUE)
+        before = await conn.fetchval(
+            "SELECT state FROM rn1x_orders WHERE order_id = $1", oid)
+        assert before == dk.PARTIALLY_FILLED
+
+        # THE VENUE GOES SILENT: not in the open list, no status.
+        v.go_unreadable(vid)
+        rec = await TX.recover(conn, v, account_id=ACCT, venue=VENUE)
+        assert rec["ok"] is True
+        assert rec["reconciled"] == [], rec
+        assert len(rec["unresolved"]) == 1, rec
+        u = rec["unresolved"][0]
+        assert u["case"] == "OPEN_HERE_STATUS_UNREADABLE_AT_THE_VENUE"
+        assert u["venue_said"] is None
+        assert u["exposure"] == "PRESERVED"
+        assert u["state_left_as"] == dk.PARTIALLY_FILLED
+
+        # THE ROW IS UNCHANGED, and the order is still open exposure.
+        after = await conn.fetchval(
+            "SELECT state FROM rn1x_orders WHERE order_id = $1", oid)
+        assert after == before
+        assert after not in dk.TERMINAL_STATES
+        still = await TX._open_orders(conn, account_id=ACCT, venue=VENUE)
+        assert [r["order_id"] for r in still] == [oid]
+
+        # WHEN AUTHORITATIVE EVIDENCE ARRIVES, it resolves normally.
+        v.becomes_readable_again(vid)
+        rec2 = await TX.recover(conn, v, account_id=ACCT, venue=VENUE)
+        assert rec2["unresolved"] == []
+        assert rec2["reconciled"][0]["case"] == "OPEN_AT_BOTH"
+        assert rec2["reconciled"][0]["venue_state"] == dk.PARTIALLY_FILLED
+    finally:
+        await _wipe(conn)
+        await conn.close()
+
+
+def test_the_deployment_guard_stops_on_an_unknown_readback():
+    """COUNTEREXAMPLE 4, read off the workflow. The guard stopped only when
+    the read-back said "yes", so a missing value, an unexpected response or a
+    failed read fell through to the password write."""
+    import pathlib
+
+    wf = (pathlib.Path(__file__).resolve().parents[2] / ".github"
+          / "workflows" / "command-verify.yml").read_text()
+    blk = wf[wf.index("== S2a . SUSPEND AUTO-DEPLOY"):
+             wf.index("== S3 . WAIT UNTIL THE REVIEWED BUILD IS SERVING")]
+    # an explicit allow-list of DISABLED values, not a test for "yes"
+    assert "DISABLED_VALUES=" in blk
+    assert 'NOW_AD" = "yes"' not in blk, "still testing only for yes"
+    # the update must have SUCCEEDED -- a 2xx case, and a stop otherwise
+    assert 'case "$AD" in' in blk
+    assert "did NOT succeed" in blk
+    # the read-back must itself have succeeded
+    assert 'case "$RB" in' in blk
+    assert "state of auto-deploy is UNKNOWN" in blk or \
+        "is UNKNOWN, so the run stops here" in blk
+    # an absent field is UNKNOWN, not permission
+    assert "__ABSENT__" in blk and "__UNREADABLE__" in blk
+    assert "treated as ENABLED" in blk
+    # and the release SHA is validated BEFORE the secret is written
+    assert blk.index("40-hex") < blk.index("OPERATOR_PASSWORD")
+    # the queued/building check must itself succeed
+    later = wf[wf.index("== S3b . NO PENDING DEPLOY"):]
+    assert 'PENDING" = "?"' in later or 'PENDING" != "0"' in later
+    assert "DEPS_HTTP" in later

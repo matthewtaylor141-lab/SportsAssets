@@ -5263,34 +5263,75 @@ jobs:
           say "== S2a . SUSPEND AUTO-DEPLOY *BEFORE* TOUCHING THE ENV =="
           say "  THE RACE THIS CLOSES. An env change makes Render create a"
           say "  deploy from the service's TRACKED branch -- here the"
-          say "  protected default branch. \"Deploy the reviewed SHA"
-          say "  immediately afterward\" does not prevent that: the"
-          say "  tracked-branch build is already queued and can go live in"
-          say "  the gap, publishing the wrong code however briefly. The"
-          say "  only ordering that prevents it is to turn auto-deploy OFF"
-          say "  FIRST, so the env write creates no deploy at all."
+          say "  protected default branch. Deploying the reviewed SHA"
+          say "  afterwards does not prevent it: that build is already"
+          say "  queued and can go live in the gap. So auto-deploy goes OFF"
+          say "  FIRST, and this step FAILS CLOSED -- an unknown readback,"
+          say "  an unexpected response or a failed read all stop the run"
+          say "  BEFORE any secret is written."
+          #
+          # THE RELEASE SHA IS VALIDATED FIRST, before anything is mutated.
+          case "${OPERATOR_COMMIT:-}" in
+            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
+            *) say "  refused: operator_commit must be a full 40-hex sha"
+               say "  (got '${OPERATOR_COMMIT:-}'). NOTHING has been changed."
+               echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+          esac
+          say "  release sha                    ${OPERATOR_COMMIT:0:7} (validated)"
           ID=$(svc_id "$SERVICE")
           if [ -z "$ID" ]; then
-            say "  no Render service named $SERVICE -- nothing written"
+            say "  no Render service named $SERVICE -- NOTHING changed"
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
           fi
           say "  service                        $SERVICE ($ID)"
           BEFORE=$(rget "/services/$ID" \
                    | jq -r '"autoDeploy=" + (.autoDeploy // "?")
-                            + " branch=" + (.branch // "?")')
+                            + " branch=" + (.branch // "?")' 2>/dev/null \
+                   || echo "unreadable")
           say "  before                         $BEFORE"
           AD=$(curl -sS --max-time 45 -o /tmp/ad.json -w '%{http_code}' \
                  -X PATCH -H "Authorization: Bearer $RENDER_KEY" \
                  -H "Accept: application/json" \
                  -H "Content-Type: application/json" \
                  -d '{"autoDeploy":"no"}' "$RAPI/services/$ID" || echo 000)
-          say "  PATCH autoDeploy=no            HTTP $AD (expect 200)"
-          NOW_AD=$(rget "/services/$ID" | jq -r '.autoDeploy // "?"')
-          say "  read back                      autoDeploy=$NOW_AD"
-          if [ "$NOW_AD" = "yes" ]; then
-            say "  REFUSING TO CONTINUE: auto-deploy is still on, so writing"
-            say "  the password would publish the tracked branch. Nothing"
-            say "  was written."
+          say "  PATCH autoDeploy=no            HTTP $AD"
+          # THE UPDATE MUST HAVE SUCCEEDED. Not "did not obviously fail".
+          case "$AD" in
+            2??) : ;;
+            *) say "  the settings update did NOT succeed (HTTP $AD), so"
+               say "  auto-deploy may still be on. NOTHING has been written."
+               echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+          esac
+          # AND THE READ-BACK MUST BE AN EXPLICIT DISABLED VALUE. Anything
+          # else -- empty, absent, a new spelling, an unreadable response --
+          # is UNKNOWN and stops the run. The previous version stopped only
+          # when it read the exact string "yes", so every one of those cases
+          # fell through to the password write.
+          RB=$(curl -sS --max-time 45 -o /tmp/svc.json -w '%{http_code}' \
+                 -H "Authorization: Bearer $RENDER_KEY" \
+                 -H "Accept: application/json" "$RAPI/services/$ID" \
+               || echo 000)
+          case "$RB" in
+            2??) : ;;
+            *) say "  could not read the service back (HTTP $RB). The state"
+               say "  of auto-deploy is UNKNOWN, so the run stops here."
+               echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+          esac
+          NOW_AD=$(jq -r 'if has("autoDeploy") then (.autoDeploy | tostring)
+                          else "__ABSENT__" end' /tmp/svc.json 2>/dev/null \
+                   || echo "__UNREADABLE__")
+          DISABLED_VALUES="no false off No NO False FALSE Off OFF"
+          CONFIRMED=no
+          for want in $DISABLED_VALUES; do
+            [ "$NOW_AD" = "$want" ] && CONFIRMED=yes
+          done
+          say "  read back                      autoDeploy='$NOW_AD'"
+          say "  confirmed disabled             $CONFIRMED"
+          if [ "$CONFIRMED" != "yes" ]; then
+            say "  NOT CONFIRMED DISABLED. '$NOW_AD' is not one of the"
+            say "  values this workflow accepts as off ($DISABLED_VALUES)."
+            say "  An unknown state is treated as ENABLED. NOTHING has been"
+            say "  written and no secret was mutated."
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
           fi
 
@@ -5324,13 +5365,6 @@ jobs:
           say "  tracked-branch deploy is created by the env write itself and"
           say "  can go live in the gap. Auto-deploy was suspended BEFORE the"
           say "  write (S2a), so no such deploy was ever created."
-          case "${OPERATOR_COMMIT:-}" in
-            [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
-            *) say "  refused: operator_commit must be a full 40-hex sha"
-               say "  (got '${OPERATOR_COMMIT:-}'). The env var IS written;"
-               say "  deploy the reviewed commit yourself before verifying."
-               echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
-          esac
           DC=$(curl -sS --max-time 45 -o /tmp/dep.json -w '%{http_code}' \
                  -X POST -H "Authorization: Bearer $RENDER_KEY" \
                  -H "Accept: application/json" \
@@ -5383,7 +5417,20 @@ jobs:
           say "  Checked, not assumed: every deploy Render is holding is"
           say "  listed, and any that is live-or-queued for a DIFFERENT"
           say "  commit is a failure of this step."
-          rget "/services/$ID/deploys?limit=10" > /tmp/deps.json || true
+          DEPS_HTTP=$(curl -sS --max-time 45 -o /tmp/deps.json \
+                        -w '%{http_code}' \
+                        -H "Authorization: Bearer $RENDER_KEY" \
+                        -H "Accept: application/json" \
+                        "$RAPI/services/$ID/deploys?limit=10" || echo 000)
+          say "  deploy list                    HTTP $DEPS_HTTP"
+          # THE CHECK MUST SUCCEED TO COUNT. A failed read is not "no
+          # pending deploys"; it is no answer.
+          case "$DEPS_HTTP" in
+            2??) : ;;
+            *) say "  could not list deploys, so whether one is queued is"
+               say "  UNKNOWN. This run does not call the build safe."
+               echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+          esac
           jq -r '.[]? | .deploy
                  | "  " + (.status // "?") + "  " + ((.commit.id // "?")[0:7])
                    + "  " + (.createdAt // "?")' /tmp/deps.json \
@@ -5393,6 +5440,11 @@ jobs:
                       | select((.commit.id // "") != $c)] | length' \
                     /tmp/deps.json 2>/dev/null || echo "?")
           say "  pending deploys for another commit: $PENDING (expect 0)"
+          if [ "$PENDING" = "?" ] || [ -z "$PENDING" ]; then
+            say "  the deploy list could not be PARSED, so the answer is"
+            say "  UNKNOWN. Stopping rather than assuming zero."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
           if [ "$PENDING" != "0" ]; then
             say "  A DEPLOY OF ANOTHER COMMIT IS IN FLIGHT. The reviewed"
             say "  build could be replaced; this run does not call it safe."
