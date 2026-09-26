@@ -424,3 +424,30 @@ async def test_an_orphan_at_the_venue_is_reported_and_never_adopted():
     finally:
         await _wipe(conn)
         await conn.close()
+
+
+def test_the_lifecycle_endpoint_is_admin_gated_and_test_venue_only():
+    """IT SUBMITS -- to a simulator, on a TEST venue, with real submission off
+    -- and it is still the only surface here that drives an order lifecycle.
+    The scoped operator session REMOVES authority; this exercises it, so it
+    takes the service credential."""
+    import inspect
+
+    from fastapi import Depends
+
+    from sportsassets.api import app as A
+
+    route = next(r for r in A.app.routes
+                 if getattr(r, "path", "") == "/api/admin/test-venue-lifecycle")
+    deps = [getattr(d.dependency, "__name__", "")
+            for d in getattr(route, "dependencies", [])]
+    assert "require_admin" in deps
+    src = inspect.getsource(A.admin_test_venue_lifecycle)
+    # it drives the executor, not a private copy of the lifecycle
+    assert "TX.submit(" in src and "TX.poll_once(" in src
+    assert "TX.cancel_open(" in src and "TX.recover(" in src
+    assert "TX.reconcile(" in src
+    assert "SimulatedTestVenue" in src
+    assert '"funded_submission"' in src
+    # and it stops at the first refusal rather than pressing on
+    assert 'out["stopped_at"] = "submit"' in src

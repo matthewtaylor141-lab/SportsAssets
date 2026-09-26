@@ -3423,6 +3423,71 @@ async def admin_funded_account_registry(response: Response) -> dict:
     return dict(FA.summarise_registry(rows), ok=True)
 
 
+@app.post("/api/admin/test-venue-lifecycle",
+          dependencies=[Depends(require_admin)])
+async def admin_test_venue_lifecycle(response: Response,
+                                     body: dict | None = None) -> dict:
+    """RUN THE AUTHORIZED ORDER LIFECYCLE against the TEST venue. Admin-gated.
+
+    WHY ADMIN AND NOT THE DESK'S CONTROL SESSION. This action SUBMITS -- to a
+    simulator, on a TEST-class venue, with real submission off in code, but it
+    is still the only surface in this service that drives an order lifecycle.
+    The scoped operator session removes authority (pause, halt, cancel); this
+    exercises it, so it takes the service credential.
+
+    IT CANNOT REACH A FUNDED VENUE. `bettor_test_venue_executor` refuses any
+    venue class but TEST before an adapter exists, and every action inside it
+    asks `bettor_entry_execution.authorize_submission` first -- so an expired,
+    mismatched or revoked authorization stops it with nothing written.
+    """
+    from .. import bettor_test_venue_executor as TX
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    account_id = str(b.get("account_id") or "")
+    venue = str(b.get("venue") or "PMUS_TEST")
+    stage = str(b.get("stage") or "full").lower()
+    cid = str(b.get("condition_id") or ("0x" + "ee" * 32))
+    slug = str(b.get("slug") or "tvx-lifecycle")
+    qty = float(b.get("qty") or 100.0)
+    price = float(b.get("limit_price") or 0.50)
+    ratio = float(b.get("partial_ratio") or 0.4)
+
+    venue_adapter = TX.SimulatedTestVenue(partial_ratio=ratio)
+    out = {"ok": True, "version": TX.VERSION, "contract": TX.describe(),
+           "stage": stage, "steps": []}
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        submitted = await TX.submit(conn, venue_adapter,
+                                    account_id=account_id, venue=venue,
+                                    condition_id=cid, slug=slug, qty=qty,
+                                    limit_price=price)
+        out["steps"].append({"step": "submit", "result": submitted})
+        if not submitted.get("ok"):
+            out["ok"] = False
+            out["stopped_at"] = "submit"
+            out["refusal"] = submitted.get("refusal")
+            return out
+        if stage in ("full", "poll", "cancel"):
+            out["steps"].append({"step": "poll", "result": await TX.poll_once(
+                conn, venue_adapter, account_id=account_id, venue=venue)})
+        if stage == "full":
+            out["steps"].append({"step": "recover",
+                                 "result": await TX.recover(
+                                     conn, venue_adapter,
+                                     account_id=account_id, venue=venue)})
+        if stage in ("full", "cancel"):
+            out["steps"].append({"step": "cancel", "result":
+                                 await TX.cancel_open(
+                                     conn, venue_adapter,
+                                     account_id=account_id, venue=venue)})
+        out["accounting"] = await TX.reconcile(conn)
+    out["venue_calls"] = venue_adapter.calls
+    out["funded_submission"] = "DISABLED"
+    return out
+
+
 @app.get("/api/admin/capacity-probe-audit",
          dependencies=[Depends(require_admin)])
 async def admin_capacity_probe_audit(response: Response) -> dict:
