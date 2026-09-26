@@ -87,9 +87,9 @@ Every action reports **requested**, **applied** (read back from the row) and
 | pause | ok true, `armed_confirmed false` |
 | resume (research scope) | ok true, `armed_confirmed true`, `scope RESEARCH_SHADOW_ONLY` |
 | resume with `scope: funded` | **409 `FUNDED_RESUME_IS_NOT_AVAILABLE_FROM_THE_DESK`** |
-| account = "PMUS ACCOUNTING_UNCERTAIN" | **refused `THE_ACCOUNTING_UNCERTAIN_ACCOUNT_STAYS_PAUSED`**, nothing stored |
+| account, by canonical id, paused on its row | **refused `ACCOUNT_IS_PAUSED`**, nothing stored — read off the registry, not off a display name |
 | activate | **409 `FUNDED_ACTIVATION_PREREQUISITES_NOT_MET`**, with the unmet list |
-| any control with no operator token | 401; with a read cookie only, 403 |
+| any control with no credential | 401 `OPERATOR_SESSION_REQUIRED`; with a read cookie only, 403 `CONTROL_REQUIRES_AN_OPERATOR_SESSION` |
 | control state, as the rows read | research lane armed true, funded executor paused true, working modelled orders 3 |
 
 Activation is decided **on the server**, computed from the stored control
