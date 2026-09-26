@@ -402,11 +402,23 @@ they read UNKNOWN and refuse.
   300 s in; in a 415 s suite, sooner. That is the duration correlation,
   explained.
 
-  **What this means, stated plainly.** It is a pre-existing clock-discipline
-  problem in the mirror lane — a path reading the wall clock instead of the
-  `now_ts` its tick was handed — surfaced by suite duration. It is not
-  attributable to this release, and no evidence in this record depends on
-  that file. **It is still open: nothing in it has been fixed.**
+  **And the cause is a real-clock read, not flaky tests.** The reproducer's
+  second knob holds `time.time()` at its collection-time value while keeping
+  the same gap. Same file, same 320 s:
+
+  | 320 s gap | result |
+  |---|---|
+  | real clock running (`PNL_REPRO_FREEZE=0`) | **5 failed**, 5 passed |
+  | real clock held still (`PNL_REPRO_FREEZE=1`) | **10 passed** |
+
+  Freezing the wall clock cannot affect a path that uses the `now_ts` its
+  tick was handed. It changed the outcome, so **some path under test reads
+  `time.time()` directly** — a clock-discipline defect in the mirror lane,
+  of which these test failures are the symptom.
+
+  **Stated plainly:** pre-existing, in a lane this delivery does not touch,
+  identical on the baseline, and **still open — nothing in it has been
+  fixed.** No evidence in this record depends on that file.
 
 ## One more gate failure, and why it is arithmetic and not a regression
 
