@@ -221,3 +221,49 @@ def test_the_clock_record_names_the_field_the_value_and_the_parser():
                 "parsed_epoch_s", "age_at_read_s"):
         assert '"%s"' % key in src, key
     assert "marketData.transactTime" in src
+
+
+# ── 6 · THE HEARTBEAT CARRIES THE NUMBER IT REFUSED ON ───────────────
+
+def test_a_stale_refusal_is_only_reachable_once_the_age_is_measured():
+    """Run 75's proof that the parse works, stated as a rule.
+
+    `VENUE_QUOTE_STALE` comes from exactly one `return`, and it sits
+    behind `age is not None`. When the clock does not parse, `age` is
+    None and this refusal CANNOT fire -- which is why seeing it in
+    production established the repair. If that guard is ever relaxed to
+    fire on an unmeasured age, an UNKNOWN would start reporting itself as
+    an observed stale book, and this test is what stops it.
+    """
+    import inspect
+    import re
+
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    src = inspect.getsource(loop.venue_quote)
+    hits = [m for m in re.finditer(
+        r"if age is not None and age > MAX_VENUE_QUOTE_AGE_S:", src)]
+    assert len(hits) == 1, "the stale gate moved or was duplicated"
+    after = src[hits[0].end():hits[0].end() + 400]
+    assert "R_VENUE_QUOTE_STALE" in after
+    # And nowhere else returns it, so there is no second, unguarded path.
+    assert src.count("R_VENUE_QUOTE_STALE") == 1
+
+
+def test_the_venue_error_projection_carries_the_age_limit_and_raw_value():
+    """A refusal that names a number must show it.
+
+    Run 75 printed `VENUE_QUOTE_STALE` on
+    `aec-mlb-nym-wsh-2026-09-26` and could not say by how much the book
+    was stale or what string it read, because the heartbeat projection
+    kept only the slug and the code.
+    """
+    import inspect
+
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    src = inspect.getsource(loop.cycle)
+    for key in ("age_s", "limit_s", "age_basis", "venue_clock"):
+        assert '"%s"' % key in src, key
+    assert 'diag["venue_clock"]' in src
+    for key in ("field_path", "raw", "raw_type", "parsed_epoch_s",
+                "age_at_read_s", "basis"):
+        assert '"%s"' % key in src, key

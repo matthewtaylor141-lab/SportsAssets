@@ -422,3 +422,161 @@ The `verify` job fails on run 71 (`bfa3c5f`, before these changes) and on
 both runs after, with `FAIL_after_acceptance=1` on the synthetic acceptance
 position's input-chain read (`qty`, `residual`, `net` all unknown while the
 venue has not settled it). Checked rather than assumed.
+
+---
+
+# Run 75 — what production said about the three defects
+
+Live build confirmed from the loop's own writer identity, not from a
+timestamp:
+
+```
+entry loop writer {"pid":1,"build":"37ff0717718e0cd00d46bb1549d3302f205b8380",
+                   "module":"sportsassets.workers.ext_pinnacle_loop",
+                   "source_sha256_12":"0eb286923dab"}   state LIVE
+cycle_at 1790418776.804552  (2026-09-26T10:32:56Z)
+```
+
+The entry lane runs INSIDE the API service (`pid 1`, build = the API's
+SHA), which is why an API-only deploy reaches it and why the pinned
+worker `f5d1c05` is untouched by any of this.
+
+## 1 · The venue clock — REPAIRED, and production is the proof
+
+The cycle's own `venue_errors` carried:
+
+```
+{"refusal":"VENUE_QUOTE_STALE","us_market_slug":"aec-mlb-nym-wsh-2026-09-26",
+ "condition_id":"0x34373e81f3a16de90e7164743f397186819dbaf5757ef9f7044a781c49a032ae"}
+```
+
+`VENUE_QUOTE_STALE` is returned from exactly one place, and that place is
+guarded `if age is not None and age > MAX_VENUE_QUOTE_AGE_S`. **The
+refusal is unreachable unless the venue clock parsed.** Before the repair
+every book read recorded `VENUE_CLOCK_UNPARSEABLE` with `age=None`, and
+the verdict was `fresh=null` — UNKNOWN. A measured staleness verdict in
+its place is the whole repair, observed on a real contract.
+
+Two things were still wrong with the *record*, and are now fixed:
+
+* the heartbeat projection carried no `age_s`, no `limit_s` and no raw
+  value, so the one line that established the repair could not say by how
+  much the book was stale or what string it read. The measured age, the
+  limit, the basis and the raw clock now travel with the refusal.
+* the arm POST timed out at 45 s on the first request after the redeploy,
+  `/tmp/ar.json` was absent, and the `head` that reports the body exited 1
+  under `set -uo pipefail` — **killing the whole step**, and with it the
+  per-candidate stage census, the settlement coverage and the holdings
+  block. Timeout raised to 90 s and the read made non-fatal. That was my
+  defect, not the lane's.
+
+## 2 · The period rule — v3 admits a real full-game money line
+
+`aec-mlb-nym-wsh-2026-09-26` passed the catalogue-kind check, the
+money-line prefix check and the exact decomposition, and **reached the
+book read**. So v3 is not the blanket refusal v2 was (`mapped 3 →
+evaluated 0`, nothing reaching the book at all).
+
+What it refuses, on the same cycle, with separate names:
+
+```
+baseball_mlb refusals {"NO_PINNACLE_ON_EVENT":6,
+                       "VENUE_CONTRACT_IS_A_SEGMENT_NOT_FULL_GAME":2,
+                       "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE":4}
+```
+
+And the board shows exactly the contracts those two rules exist for:
+`atc-mlb-atl-mia-2026-09-26-i9-draw` (inning nine) and
+`atc-cfb-airf-nevada-2026-09-26-winner-2q-nevada` (second quarter). A
+full-game de-vigged probability priced against either of those is a
+category error with a number on it.
+
+## 3 · Liga MX — the inspection is done, and it refutes the premise
+
+`no_side_match` is **not** a spelling problem. Three separate facts, all
+measured, and none of them a normalisation defect:
+
+**(a) The venue's `side_norm` vocabulary is the BINARY LEG, not the
+participant.** Every row reached carries `side_norm` ∈ {yes, no} (or
+{over, under} on a line market). The participant lives in the slug
+suffix:
+
+```
+atc-cnl-gtm-slv-2026-09-28-gtm   kind side  side_norm yes  | Will Guatemala win against El Salvador …
+atc-cnl-gtm-slv-2026-09-28-gtm   kind side  side_norm no   | Will Guatemala win against El Salvador …
+atc-cnl-gtm-slv-2026-09-28-draw  kind side  side_norm yes  | Will the … match … end in a draw
+```
+
+So the resolver compares a provider outcome name against a set that is
+always {yes, no}. **No spelling normalisation can ever make "CD
+Marquense" equal "yes".** The `bridge not_yes_no` flag on every row was
+naming this and I read it as a near miss.
+
+**(b) Most rows the resolver reaches are a DIFFERENT FIXTURE, often a
+different competition.** The key intersection hits on a shared country or
+league token and then has nothing to disambiguate:
+
+```
+ours  gtm-mrq-adm-2026-09-26   CD Marquense vs CD Malacateco   (Guatemala, lng)
+reached  atc-cnl-gtm-slv-…, atc-cnl-jam-gtm-…  CONCACAF Nations League, Guatemala vs El Salvador / Jamaica vs Guatemala
+
+ours  mls-phi-orl-2026-09-26   Philadelphia Union vs Orlando City
+reached  asc-mls-atl-nyc-…     Atlanta United vs NYC, and SPREAD markets (asc)
+```
+
+Binding those would be a **wrong** binding, not a repaired one. The
+resolver refusing is correct behaviour.
+
+**(c) Where the fixture genuinely matches, the mismatch is the payout
+event, on OUR side.** `el1-wyc-rea-2026-09-26-draw` reaches
+`efl1-wyw-rea-2026-09-26-draw` — same competition, same two clubs, same
+market. But our row's `sides` are `["Wycombe Wanderers FC","Reading
+FC"]` on a market whose payout event is **a draw**. The outcome being
+asked for is not the market's payout event.
+
+And Liga MX specifically, from the cycle's own refusals:
+
+```
+mex-caz-tol-2026-09-26-exact-score-2-1  NO_VENUE_NATIVE_CONTRACT_IN_PREMAP  (Cruz Azul)
+mex-gua-que-2026-09-26-gua              NO_VENUE_NATIVE_CONTRACT_IN_PREMAP  (Guadalajara)
+```
+
+The first is an **exact-score 2–1** contract. The venue lists
+`lmx-caz-tol-2026-09-26` (CF Cruz Azul vs Deportivo Toluca) as a money
+line — a *different payout event*. No mapping repair reaches that, and
+pairing them would be the same category error as the inning contract.
+The second names a fixture whose presence on the board is now decided by
+the `?token=lmx` census rather than inferred, because `examples` kept two
+events per token and could answer "is `lmx` on the board" but not "is
+THIS fixture on the board".
+
+**Nothing in `premap.resolve` was changed.** The instrument was built,
+the read was taken, and the read says the premise was wrong.
+
+## The funnel, run 75
+
+```
+markets_considered 193
+
+source                  open_fresh  provider  w/pinnacle  mapped  evaluated  written
+soccer_epl (soccer)         158        20        20          0        0         0
+baseball_mlb (baseball)      35        13         7          3        0         0
+soccer_mexico_ligamx         158         7         7          2        0         0
+```
+
+positive estimated edge        0
+fresh executable book          0   (one contract reached the book; VENUE_QUOTE_STALE)
+settlement qualification       0   (not reached)
+risk approval                  0   (not reached)
+shadow entry                   0
+
+Autonomous positions 0. Autonomous P&L empty (`marked 0 / unmarked 0`).
+The 4 positions in this lane are the pre-migration-104 backdated ones,
+`BACKDATED_TO_AVAILABILITY_UNAUDITED`, and none carries an observed
+runtime decision instant.
+
+**No positive estimated edge exists this cycle, so nothing here is a
+qualified opportunity.** The nine positive edges seen on `51f20e7` were
+priced with the period check trusting the identifier — the same cycle
+that now names two segment and four line refusals. That is the honest
+reading of where they came from.

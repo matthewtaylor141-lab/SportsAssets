@@ -2927,12 +2927,19 @@ jobs:
           # is the lane's own limits sha and versions.
 
           # 2 · ARM the control row and let one cycle run.
-          C=$(curl -s -o /tmp/ar.json -w '%{http_code}' --max-time 45 \
+          # 90s, NOT 45. Run 75's arm POST timed out at 45s on the first
+          # request after a redeploy; `/tmp/ar.json` was then absent, the
+          # `head` that reports the body exited 1 under `set -uo pipefail`,
+          # and THE WHOLE STEP DIED -- taking the per-candidate stage
+          # census, the settlement coverage and the holdings block with
+          # it. A read that fails must report and continue: the cycle runs
+          # on the loop's own schedule and does not need this POST.
+          C=$(curl -s -o /tmp/ar.json -w '%{http_code}' --max-time 90 \
               -X POST -H "$H" "$API/api/admin/ext-pinnacle-shadow/on" \
               || echo 000)
           say "arm HTTP $C"
           jq -c . /tmp/ar.json 2>/dev/null | tee -a "$GITHUB_STEP_SUMMARY" \
-            || head -c 200 /tmp/ar.json
+            || head -c 200 /tmp/ar.json 2>/dev/null || true
           [ "$C" = "200" ] || say "ARM WAS REFUSED -- nothing below is a cycle"
           sleep 180
 
@@ -2945,7 +2952,8 @@ jobs:
           say "entry-evidence HTTP $C"
           if [ "$C" != "200" ]; then
             say "THE READ DID NOT RETURN 200 -- no conclusion follows"
-            head -c 400 /tmp/ee.json | tee -a "$GITHUB_STEP_SUMMARY"
+            head -c 400 /tmp/ee.json 2>/dev/null \
+              | tee -a "$GITHUB_STEP_SUMMARY" || true
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
           fi
           cat > /tmp/ee.jq <<'JQ'
@@ -3800,6 +3808,19 @@ jobs:
                     + "  written " + n(.value.written)),
                 (($L.funnel_by_provider_sport // {}) | to_entries[]
                   | "     " + .key + " refusals " + n(.value.refusals)),
+                (($L.venue_errors // [])[]
+                  | "  venue_error " + n(.us_market_slug // .global_slug)
+                    + "  " + n(.refusal)),
+                (($L.venue_errors // [])[]
+                  | select(.venue_clock != null)
+                  | "     RAW CLOCK path " + n(.venue_clock.field_path)
+                    + "  type " + n(.venue_clock.raw_type)
+                    + "  raw " + n(.venue_clock.raw)),
+                (($L.venue_errors // [])[]
+                  | select(.venue_clock != null)
+                  | "     BOOK AGE " + n(.age_s) + "s  limit "
+                    + n(.limit_s) + "s  basis " + n(.age_basis)
+                    + "  parsed_epoch " + n(.venue_clock.parsed_epoch_s)),
                 "  venue_errors " + n($L.venue_errors)
               end' /tmp/pnl.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
@@ -4088,6 +4109,35 @@ jobs:
                 + "  e.g. " + n(.examples[0].event)
                 + " | " + n(.examples[0].title))' \
             /tmp/vcm.json 2>&1 | head -120 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          # ── S4b · THE FIXTURE QUESTION, not the token question ───────
+          # The lane refuses per FIXTURE. `lmx` being on the board does not
+          # mean the fixture we hold a probability for is, and a token
+          # census cannot tell those apart. `lmx` holds 7 events, so every
+          # one of them fits in the record.
+          for T in lmx efl1 cnl lng; do
+            say ""
+            say "-- S4b · every venue event under '$T' --"
+            VT=$(curl -s --max-time 180 -o "/tmp/vt_$T.json" \
+                   -w '%{http_code}' -H "$H" \
+                   "$A/api/admin/venue-competitions?token=$T" || echo 000)
+            say "   HTTP $VT"
+            jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+              ((.token_events // [])[]
+                | "   " + n(.event) + "  | " + n(.title)
+                  + "  kinds " + ((.market_kinds // []) | join(","))
+                  + "  ml " + ((.moneyline_us_slugs // []) | join(" ")
+                               | .[0:150]))' \
+              "/tmp/vt_$T.json" 2>&1 | head -40 \
+              | tee -a "$GITHUB_STEP_SUMMARY" || true
+          done
+          say ""
+          say "  READ IT AS: our own market slug names a fixture and a"
+          say "  PAYOUT EVENT. A venue event listed here with an aec/atc"
+          say "  money line is reachable; the same fixture absent is"
+          say "  missing venue coverage; and our slug naming an exact"
+          say "  score or a total is a payout event the venue does not"
+          say "  sell as a money line, which is neither of those."
           say ""
           say "  THE EPL QUESTION, SETTLED EITHER WAY. events_read is the"
           say "  WHOLE cached board, not desk-games' first 400, so an"

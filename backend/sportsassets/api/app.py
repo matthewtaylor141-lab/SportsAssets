@@ -7572,7 +7572,8 @@ _SIMULATED_MARKERS = ("ebattles", "esoccer", "ebasketball", "efootball",
 
 @app.get("/api/admin/venue-competitions",
          dependencies=[Depends(require_admin)])
-async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200)
+async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200),
+                                 token: str = Query("")
                                  ) -> dict:
     """EVERY competition on the venue's board, real and simulated apart.
 
@@ -7603,12 +7604,33 @@ async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200)
     except Exception as exc:  # noqa: BLE001
         return {"error": type(exc).__name__, "events_read": 0}
 
+    # EVERY EVENT UNDER ONE NAMED TOKEN, when asked for. `examples` keeps
+    # two per token, which answered "is `lmx` on the board" and could not
+    # answer "is THIS Liga MX fixture on the board" -- the question the
+    # entry lane actually refuses on. Run 75 refused
+    # `mex-gua-que-2026-09-26-gua` for want of a venue contract, and
+    # whether that is a mapping defect or genuine absent coverage is
+    # decided by whether the venue lists Guadalajara vs Queretaro at all.
+    # Bounded by the token: `lmx` holds 7 events, not 1400.
+    want = str(token or "").strip().lower()
+    token_events: list[dict] = []
     buckets: dict[str, dict] = {}
     for ev in events:
         slug = str(ev.get("slug") or "")
         token = (slug.split("-", 1)[0] or "").lower()
         if not token:
             continue
+        if want and token == want:
+            mk = ev.get("markets") or []
+            token_events.append({
+                "event": slug,
+                "title": str(ev.get("title") or "")[:90],
+                "moneyline_us_slugs": [
+                    m.get("us_slug") for m in mk
+                    if str(m.get("kind") or "") in ("aec", "atc")][:8],
+                "market_kinds": sorted({str(m.get("kind") or "")
+                                        for m in mk})[:12],
+            })
         b = buckets.setdefault(token, {
             "league_token": token, "events": 0,
             "moneyline_events": 0, "moneyline_sides": 0,
@@ -7666,6 +7688,9 @@ async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200)
             "said nothing about simulation for any event under this token. "
             "It is not a claim that the competition is real -- only that "
             "the publisher did not mark it otherwise"),
+        "token_asked_for": want or None,
+        "token_events": sorted(token_events,
+                               key=lambda r: str(r.get("event") or "")),
         "rows": rows,
     }
 

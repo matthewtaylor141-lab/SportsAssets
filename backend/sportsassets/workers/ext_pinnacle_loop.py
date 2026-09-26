@@ -2398,6 +2398,24 @@ async def cycle(conn) -> dict:
                 diag["condition_id"] = mapped["condition_id"]
                 diag["us_market_slug"] = ident["us_market_slug"]
                 diag["refusal"] = code
+                # THE CLOCK TRAVELS WITH THE REFUSAL. Run 75 refused
+                # `aec-mlb-nym-wsh-2026-09-26` with VENUE_QUOTE_STALE --
+                # which is only reachable once the age is MEASURED, so it
+                # was itself the proof that transactTime now parses. But
+                # the projection carried no age, no limit and no raw
+                # value, so the one line that established the repair could
+                # not say by how much the book was stale or what string it
+                # read. A refusal that names a number must show it.
+                for k in ("age_s", "limit_s", "age_basis"):
+                    if vq.get(k) is not None:
+                        diag[k] = vq.get(k)
+                vclock = vq.get("venue_clock")
+                if isinstance(vclock, dict):
+                    diag["venue_clock"] = {
+                        kk: vclock.get(kk) for kk in
+                        ("field_path", "raw", "raw_type", "parser",
+                         "parsed_epoch_s", "age_at_read_s", "basis", "why")
+                        if vclock.get(kk) is not None}
                 diag.setdefault("why", _sanitize(vq.get("why") or "",
                                                  limit=120))
                 key = (diag.get("slug"), diag.get("code"),
