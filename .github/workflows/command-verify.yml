@@ -4210,11 +4210,20 @@ jobs:
           # BOOK CHANGE, an old value means the book has not moved -- the
           # ordinary condition of a quiet pre-game money line -- and the
           # gate would be refusing quiet books and calling it freshness.
-          # Two other modules here already take the other side:
-          # institutional_book computes freshness from OUR receipt clock,
-          # and obs/streamstate forbids subtracting a venue stamp from a
-          # local reading at all. READ THE SAME CONTRACT TWICE: a stamp
-          # that ADVANCES while the book is UNCHANGED stamps the response.
+          # institutional_book'"'"'s own contract was INSPECTED and does not
+          # transfer: its 5 s limit measures OUR CACHED COPY, and what
+          # makes that meaningful is a persistent poll process refreshing
+          # the cache while the consumer reads memory instead of calling
+          # REST to decide. This lane calls REST AT the decision, so
+          # receipt age is the round trip and the check cannot fail.
+          # obs/streamstate forbids the subtraction outright. THE REFUSAL
+          # IS RETAINED and both limits stay where they are.
+          #
+          # SO THIS BLOCK REPORTS OBSERVATIONS AND DRAWS NO VERDICT: raw
+          # stamps, our request and receipt instants, book hashes and the
+          # deltas. Two samples of three contracts cannot separate a
+          # response stamp from a last-update stamp, and nothing about
+          # admission moves either way.
           say ""
           say "== S5 · the venue clock, read twice on the same contract =="
           CP=$(curl -s --max-time 240 -o /tmp/clk.json -w '%{http_code}' \

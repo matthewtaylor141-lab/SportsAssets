@@ -349,7 +349,12 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
       4 TWO PARTICIPANTS, from the catalogue's own `event_title`, split on
         " vs "/" vs. " -- the interpretation `shadow-mapgap` already uses on
         our side of the crossing. THIS IS v4, AND IT CLOSES THE HOLE v3
-        NAMED. A trophy or futures market decomposes just as cleanly as a
+        NAMED. IT IS A PARTICIPANT TEST AND NOT A SCOPE TEST: a
+        two-participant event sells first-half, inning and quarter
+        contracts too, and step 3 is what refuses those. Step 4 without
+        step 3 would admit every segment of a real fixture; step 3 without
+        step 4 admits every trophy. Both are required and neither is
+        redundant. A trophy or futures market decomposes just as cleanly as a
         fixture ("Stanley Cup Winner", "Qatar Airways Azerbaijan Grand Prix
         Winning Constructor", "Presidents Cup Round 3 Winner", "Eastern
         Conference Winner"), so the decomposition cannot tell a match from a
@@ -377,7 +382,22 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
            "period": None, "residual": None, "refusals": [],
            "basis": ("CATALOGUE_SIDE_MARKET_KIND_PLUS_A_CONFIRMED_"
                      "MONEYLINE_SLUG_PREFIX_PLUS_AN_EXACT_EVENT_AND_SIDE_"
-                     "DECOMPOSITION"),
+                     "DECOMPOSITION_PLUS_A_TWO_PARTICIPANT_EVENT_TITLE"),
+           "what_each_check_establishes": {
+               "catalogue_kind": "an outcome market, not a line or a total",
+               "slug_prefix": "a confirmed money-line family",
+               "exact_decomposition": (
+                   "THE SCOPE. Nothing sits between the event and the "
+                   "side, so no half, inning, quarter or leg token is "
+                   "present. This is the only check that speaks to period"),
+               "two_participant_title": (
+                   "A FIXTURE RATHER THAN A FIELD OF ENTRANTS. It does "
+                   "NOT independently prove full-match scope -- a "
+                   "two-participant event can still sell a first-half or "
+                   "an inning contract, and the decomposition is what "
+                   "refuses those. The two checks are not "
+                   "interchangeable and neither is redundant"),
+           },
            "moneyline_prefixes": list(MONEYLINE_PREFIXES),
            "side_market_kinds": list(SIDE_MARKET_KINDS),
            "sibling_markets_gates_nothing": (
@@ -391,10 +411,13 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
                "promote it if event_title is sparse. It is not gated on "
                "before it has been observed"),
            "does_not_establish": (
-               "that the two participants named are the two this lane holds "
-               "a probability for -- that is the resolver's job, not this "
-               "one's; nor that the competition is real rather than "
-               "simulated, which the venue's own labels answer separately")}
+               "full-match SCOPE from the title alone -- a two-participant "
+               "event also sells halves, innings and quarters, and only "
+               "the exact decomposition refuses those; nor that the two "
+               "participants named are the two this lane holds a "
+               "probability for, which is the resolver's job; nor that the "
+               "competition is real rather than simulated, which the "
+               "venue's own labels answer separately")}
 
     m = _TRAILING_DATE.search(slug)
     if not m:

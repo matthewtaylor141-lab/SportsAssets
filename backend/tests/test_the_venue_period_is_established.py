@@ -277,3 +277,50 @@ def test_the_confirmed_vocabularies_are_the_observed_ones():
     assert set(V.MONEYLINE_PREFIXES) == {"aec", "atc"}
     assert "aqc" not in V.MONEYLINE_PREFIXES
     assert set(V.SIDE_MARKET_KINDS) == {"side"}
+
+
+# ── 5 · THE TWO CHECKS ARE NOT INTERCHANGEABLE ───────────────────────
+
+def test_the_participant_title_does_not_by_itself_establish_scope():
+    """A REAL FIXTURE'S SEGMENT still refuses, title notwithstanding.
+
+    The title test separates a fixture from a field of entrants. It says
+    NOTHING about period: a two-participant event sells first halves,
+    innings and quarters as well, and the exact decomposition is the only
+    check that speaks to scope. Step 4 without step 3 would admit every
+    segment of a real fixture.
+    """
+    got = _ok("atc-mlb-atl-mia-2026-09-25-i6-draw", side="draw",
+              event_slug="mlb-atl-mia-2026-09-25",
+              event_title="Atlanta Braves vs. Miami Marlins")
+    assert got["period"] is None
+    # THE SCOPE CHECK FIRES FIRST and the refusal is its own, so step 4
+    # never runs -- first refusal wins, by design.
+    assert got["refusals"] == [V.R_PERIOD_SHAPE]
+    assert "participants_named" not in got
+    # and the title it did not need to read DOES name two participants
+    assert len(V.participants_in_event_title(got["event_title"])) == 2, (
+        "the title names two participants -- and scope still refused")
+
+
+def test_the_decomposition_alone_would_admit_a_trophy():
+    """And step 3 without step 4 admits every trophy -- the v3 hole.
+
+    Stated as a pair with the test above so neither check can be dropped
+    as redundant by a future reader.
+    """
+    trophy = _ok("aec-nhl-stanley-2027-06-01",
+                 event_slug="nhl-stanley-2027-06-01",
+                 event_title="Stanley Cup Winner")
+    assert trophy["refusals"] == [V.R_PERIOD_NOT_A_MATCH]
+    # the decomposition itself was satisfied -- that is exactly the point
+    assert "aec-nhl-stanley-2027-06-01" in trophy["accepted_decompositions"]
+
+
+def test_the_result_says_which_check_establishes_scope():
+    got = _ok("aec-mlb-lad-sf-2026-09-25", event_slug="mlb-lad-sf-2026-09-25")
+    w = got["what_each_check_establishes"]
+    assert "THE SCOPE" in w["exact_decomposition"]
+    assert "NOT independently prove full-match scope" in \
+        w["two_participant_title"]
+    assert "SCOPE" in got["does_not_establish"].upper()

@@ -129,12 +129,34 @@ R_VENUE_QUOTE_STALE = "VENUE_QUOTE_STALE"
 #: prohibition outright, that a venue timestamp belongs to the venue's clock
 #: domain and nothing subtracts it from a local reading.
 #:
-#: THE GATE IS LEFT EXACTLY AS IT IS UNTIL THE SEMANTICS ARE READ. It
-#: refuses, which is the conservative direction, and relaxing it on an
-#: unestablished reading would be loosening a freshness requirement to
-#: manufacture activity. `/api/admin/venue-clock-probe` reads the same
-#: contract twice and reports whether the stamp advances while the book is
-#: unchanged; that observation, not this comment, decides the basis.
+#: COULD THE ESTABLISHED CONTRACT BE REUSED HERE? IT WAS INSPECTED, AND NO.
+#:
+#:   institutional_book.FRESHNESS_LIMIT_S is 5.0 s and `freshness_of()`
+#:   measures it from BETTOR_RECEIVED_TIMESTAMP. The SOURCE of that
+#:   guarantee is the topology, not the clock: `workers/institutional_md`
+#:   is a PERSISTENT poll process ("REST_POLL_MAINTAINED_IN_MEMORY", stream
+#:   target NOT_IDENTIFIED, in its own words) that refreshes an in-memory
+#:   store at a tight cadence, and its consumer "reads that memory; it does
+#:   not make a REST call to decide". Receipt age there answers a real
+#:   question -- HOW LONG SINCE THE FEED LAST REFRESHED THIS INSTRUMENT --
+#:   and a cache that stops being refreshed goes STALE at 5 s.
+#:
+#:   THIS LANE HAS THE OPPOSITE TOPOLOGY. It calls REST **at** the decision,
+#:   so receipt age is the round trip by construction and `freshness_of()`
+#:   would return CURRENT on every read. That is not a stricter gate or a
+#:   looser one; it is a vacuous one. RECEIPT TIME ALONE DOES NOT PROVE THE
+#:   UNDERLYING BOOK IS CURRENT, and the established path does not claim it
+#:   does: it records the transactTime lag as MARKET_DATA_LAG_MS and gates
+#:   on neither.
+#:
+#: SO THE SEMANTICS REMAIN UNRESOLVED AND THE EXPLICIT REFUSAL IS RETAINED.
+#: Both limits stay where they are. Relaxing a gate on an unestablished
+#: reading would be loosening a freshness requirement to manufacture
+#: activity, and substituting receipt time would be substituting a
+#: measurement that cannot fail. `/api/admin/venue-clock-probe` reports
+#: OBSERVATIONS -- raw stamps, our request and receipt instants, book
+#: hashes -- and classifies nothing: two samples of a few contracts cannot
+#: separate a response stamp from a last-update stamp.
 VENUE_CLOCK_SEMANTICS = "UNESTABLISHED__LAST_BOOK_UPDATE_OR_RESPONSE_STAMP"
 
 #: THE LABEL FOR A CYCLE THAT EVALUATED NOTHING. Not "zero positive edge":

@@ -7695,6 +7695,68 @@ async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200),
     }
 
 
+#: A trailing or embedded YYYY-MM-DD in a slug. Both sides of the crossing
+#: carry one, and two clubs meeting on two different dates are two fixtures.
+_DATED = re.compile(r"(\d{4}-\d{2}-\d{2})")
+
+
+def _competition_established(rec: dict, hit: dict) -> bool:
+    """Is the COMPETITION the same competition, or only the same two clubs?
+
+    Participants and a date do not settle it: national teams meet in more
+    than one competition on the same day, and a shared country token is how
+    `gtm-mrq-adm` reached CONCACAF rows.
+
+    THE TEST IS READ OUT OF THE SCHEDULED RESOLVER, not invented here.
+    `premap._yn_alias_pick` does not consult a league-alias table. It takes
+    our `{a}-{b}-{date}-{t}` suffix, finds catalogue identifiers ending in
+    that suffix under a DIFFERENT league code, requires exactly one such
+    code, and requires a witness from the venue's own event title. So:
+
+      identical tokens              -> established, nothing to bridge.
+      differing tokens, SAME
+      post-token remainder          -> the structural half of the
+                                       resolver's own bridge holds. The
+                                       witness half is the resolver's to
+                                       decide and is reported as such.
+      differing tokens, differing
+      remainder                     -> NOT established. Refused here.
+
+    `rec` gains the evidence either way, so the verdict can be audited
+    without re-deriving it.
+    """
+    ours = str(rec.get("global_slug") or "").lower()
+    theirs = str(hit.get("event") or "").lower()
+    our_tok = str(rec.get("our_league_token") or "")
+    their_tok = str(hit.get("token") or "")
+    rec["competition_tokens"] = {"ours": our_tok, "venue": their_tok}
+    our_rest = ours.split("-", 1)[1] if "-" in ours else ""
+    their_rest = theirs.split("-", 1)[1] if "-" in theirs else ""
+    rec["post_token_remainders"] = {"ours": our_rest, "venue": their_rest}
+    if our_tok and our_tok == their_tok:
+        rec["competition_basis"] = "LEAGUE_TOKEN_IDENTICAL"
+        return True
+    # Our slug carries the market suffix and theirs does not, so the
+    # comparison is "does the venue's remainder PREFIX ours" -- the same
+    # `{a}-{b}-{date}` agreement the resolver's suffix hit requires.
+    if their_rest and our_rest.startswith(their_rest):
+        rec["competition_basis"] = (
+            "TOKENS_DIFFER_AND_THE_STRUCTURAL_HALF_OF_THE_RESOLVERS_OWN_"
+            "BRIDGE_HOLDS__WITNESS_IS_THE_RESOLVERS_TO_DECIDE")
+        rec["competition_witness_not_checked_here"] = (
+            "premap._yn_alias_pick additionally requires exactly one "
+            "candidate league code and a witness from the venue's event "
+            "title naming our anchor side. Neither is asserted here")
+        return True
+    rec["competition_basis"] = "NOT_ESTABLISHED"
+    rec["competition_why"] = (
+        "the league tokens differ (%r vs %r) and the venue event's "
+        "post-token remainder %r does not begin our %r, so nothing relates "
+        "the two competitions. The same two clubs is not the same "
+        "competition" % (our_tok, their_tok, their_rest, our_rest))
+    return False
+
+
 @app.get("/api/admin/venue-fixture-crossing",
          dependencies=[Depends(require_admin)])
 async def api_venue_fixture_crossing(sport: str = Query("Soccer"),
@@ -7804,34 +7866,66 @@ async def api_venue_fixture_crossing(sport: str = Query("Soccer"),
 
         na, nb = vmap.norm_name(sides[0]), vmap.norm_name(sides[1])
         rec["our_sides_normalised"] = [na, nb]
+        our_date = _DATED.search(gslug)
+        rec["our_date"] = our_date.group(1) if our_date else None
 
-        # THE FIXTURE, PROPOSED ONLY ON BOTH SIDES APPEARING. A single-side
-        # hit is exactly how `gtm-mrq-adm` reached a CONCACAF Guatemala vs
-        # El Salvador row on the shared token `gtm`, so one side is not
-        # enough and the near miss is reported rather than adopted.
-        hits, half = [], []
+        # PARTICIPANTS, DATE AND COMPETITION ARE THREE SEPARATE FACTS.
+        #
+        # A pair of club names is not a fixture: the same two national
+        # teams meet in more than one competition, and a shared country
+        # token is how `gtm-mrq-adm` reached CONCACAF rows. So a candidate
+        # must agree on BOTH participants AND the date, and then the
+        # COMPETITION has to be established on its own.
+        #
+        # HOW THE SCHEDULED RESOLVER ESTABLISHES COMPETITION -- read out of
+        # `premap._yn_alias_pick` rather than invented here. It is NOT a
+        # league-alias table. It takes our `{a}-{b}-{date}-{t}` suffix,
+        # finds catalogue identifiers ending in that suffix under a
+        # DIFFERENT league code, requires EXACTLY ONE such code, and
+        # requires a WITNESS from the venue's own event title naming our
+        # anchor side. This diagnostic can check the structural half (the
+        # tokens agree, or the venue event's post-token remainder equals
+        # ours) and reports the witness half as the resolver's to decide.
+        hits, half, wrongdate = [], [], []
         for b in board:
             tn = vmap.norm_name(b["title"])
             if not tn:
                 continue
             a_in, b_in = (na and na in tn), (nb and nb in tn)
-            if a_in and b_in:
-                hits.append(b)
-            elif a_in or b_in:
+            if not (a_in or b_in):
+                continue
+            bd = _DATED.search(b["event"])
+            b_date = bd.group(1) if bd else None
+            if a_in and b_in and b_date and b_date == rec["our_date"]:
+                hits.append(dict(b, venue_date=b_date))
+            elif a_in and b_in:
+                wrongdate.append({"event": b["event"],
+                                  "title": b["title"][:60],
+                                  "venue_date": b_date,
+                                  "our_date": rec["our_date"]})
+            else:
                 half.append({"event": b["event"], "title": b["title"][:60],
                              "matched_side": sides[0] if a_in else sides[1]})
         rec["venue_fixture_candidates"] = [
             {"event": h["event"], "title": h["title"][:70],
+             "venue_date": h.get("venue_date"),
+             "venue_token": h["token"],
              "moneylines": h["moneylines"][:6]} for h in hits[:4]]
         rec["single_side_only_near_misses"] = half[:4]
+        rec["both_sides_but_a_different_date"] = wrongdate[:4]
 
         if rec["our_league_token"] not in tokens_on_board and not hits:
             rec["verdict"] = "NO_MATCHING_COMPETITION_ON_THE_VENUE_BOARD"
+        elif not hits and wrongdate:
+            rec["verdict"] = "SAME_PARTICIPANTS_ON_A_DIFFERENT_DATE"
         elif not hits:
             rec["verdict"] = "COMPETITION_PRESENT_BUT_NO_MATCHING_FIXTURE"
         elif len(hits) > 1:
             # AMBIGUOUS IS REFUSED, not resolved by picking the first.
             rec["verdict"] = "AMBIGUOUS__MORE_THAN_ONE_VENUE_FIXTURE_MATCHED"
+        elif not _competition_established(rec, hits[0]):
+            rec["verdict"] = ("PARTICIPANTS_AND_DATE_AGREE_BUT_COMPETITION_"
+                              "NOT_ESTABLISHED")
         else:
             hit = hits[0]
             full = []
@@ -7864,6 +7958,14 @@ async def api_venue_fixture_crossing(sport: str = Query("Soccer"),
         "mapping defect on our side. The other verdicts are absent venue "
         "coverage or a candidate query asking for a payout event the venue "
         "does not sell as a money line, and no normalisation repairs either.")
+    out["a_match_here_is_not_a_resolver_binding"] = (
+        "A match reported here does NOT mean the scheduled resolver "
+        "consumes it. `premap.resolve` runs its own arms, needs an "
+        "identifier-suffix hit under exactly one league code AND a witness "
+        "from the venue's own event title, and refuses ambiguity. This "
+        "route changes no resolver and admits nothing; an ALL_PRESENT row "
+        "is a lead to check against the resolver's own step name, not a "
+        "binding.")
     return out
 
 
@@ -7897,19 +7999,26 @@ async def api_venue_clock_probe(slugs: str = Query(...),
                                     as a STRING so the arithmetic is awkward
                                     to do by accident.
 
-    THE DISCRIMINATING OBSERVATION. Read the same slug twice, `gap_s` apart,
-    and compare the transact time against a hash of the book itself:
+    THIS ROUTE REPORTS OBSERVATIONS AND CLASSIFIES NOTHING. It reads the
+    same slug twice, `gap_s` apart, and returns, for each read: the raw
+    stamp and its type, the parsed epoch, OUR request instant, OUR receipt
+    instant, the round trip, a hash of the book, the top of book, and the
+    age the gate would compute. It also returns the deltas between the two
+    reads.
 
-      book UNCHANGED, transactTime ADVANCED  -> it stamps the RESPONSE.
-                                                An observation clock, and
-                                                the age arithmetic measures
-                                                path lag.
-      book UNCHANGED, transactTime FROZEN    -> it stamps the LAST CHANGE.
-                                                The age measures market
-                                                quiet, not our staleness,
-                                                and must not gate freshness.
-      book CHANGED                            -> uninformative on this pair;
-                                                both semantics advance.
+    IT DOES NOT INFER THE SEMANTICS, and it deliberately has no verdict
+    field. Two samples of one contract cannot separate a response stamp
+    from a last-update stamp: a quiet book and a stalled feed look
+    identical, a stamp may advance for reasons other than a response
+    (a trade, a cancel, an unrelated level), and a gap of seconds on a
+    handful of markets is not a sample. Naming a semantics here would be
+    the same mistake as the period rule's first three versions -- a rule
+    read off a vocabulary nobody had established.
+
+    NOTHING ABOUT ADMISSION CHANGES FROM THIS ROUTE. The freshness gate and
+    both limits are untouched; see VENUE_CLOCK_SEMANTICS in
+    `workers.ext_pinnacle_loop`, which records the question as open and the
+    refusal as retained.
 
     This route READS ONLY. It arms nothing, writes nothing and submits
     nothing; it shares the collector's venue budget through `venue_pace`
@@ -7974,45 +8083,50 @@ async def api_venue_clock_probe(slugs: str = Query(...),
                "first": first, "second": second}
         e1, e2 = first.get("parsed_epoch_s"), second.get("parsed_epoch_s")
         s1, s2 = first.get("book_sha16"), second.get("book_sha16")
-        if e1 is None or e2 is None:
-            row["verdict"] = "VENUE_CLOCK_NOT_READABLE_ON_BOTH_READS"
-        elif s1 != s2:
-            row["verdict"] = "BOOK_CHANGED_BETWEEN_READS_UNINFORMATIVE"
-        elif abs(e2 - e1) < 0.001:
-            row["verdict"] = "FROZEN_WHILE_BOOK_UNCHANGED__LAST_UPDATE_CLOCK"
-        else:
-            row["verdict"] = "ADVANCED_WHILE_BOOK_UNCHANGED__RESPONSE_CLOCK"
+        # OBSERVED DIFFERENCES ONLY. No verdict, no classifier: see the
+        # docstring. A reader may look at these; this code draws nothing
+        # from them and nothing downstream reads them.
         row["transact_time_delta_s"] = (
             None if (e1 is None or e2 is None) else round(e2 - e1, 6))
-        row["book_changed"] = (None if (s1 is None or s2 is None)
-                               else s1 != s2)
+        row["transact_time_readable_on_both_reads"] = not (e1 is None
+                                                           or e2 is None)
+        row["our_receipt_delta_s"] = (
+            None if (first.get("returned_at_epoch_s") is None
+                     or second.get("returned_at_epoch_s") is None)
+            else round(second["returned_at_epoch_s"]
+                       - first["returned_at_epoch_s"], 6))
+        row["book_sha_changed"] = (None if (s1 is None or s2 is None)
+                                   else s1 != s2)
         pairs.append(row)
 
-    seen = {r["verdict"] for r in pairs}
-    if not pairs:
-        overall = "NO_SLUG_SUPPLIED"
-    elif seen == {"FROZEN_WHILE_BOOK_UNCHANGED__LAST_UPDATE_CLOCK"}:
-        overall = "LAST_BOOK_UPDATE__AGE_IS_MARKET_QUIET_NOT_OUR_STALENESS"
-    elif seen == {"ADVANCED_WHILE_BOOK_UNCHANGED__RESPONSE_CLOCK"}:
-        overall = "RESPONSE_OBSERVATION__AGE_IS_A_PATH_LAG_MEASUREMENT"
-    else:
-        overall = "NOT_ESTABLISHED_ON_THIS_SAMPLE"
     return {
-        "version": "VENUE_CLOCK_SEMANTICS_PROBE_V1",
+        "version": "VENUE_CLOCK_OBSERVATIONS_V2",
         "reads_only": True, "submits_orders": False,
+        "classifies_semantics": False,
+        "changes_admission": False,
         "configured_limit_s": loop.MAX_VENUE_QUOTE_AGE_S,
         "pairs": pairs,
-        "semantics": overall,
         "reading": (
-            "A single old transactTime does NOT establish a stale "
-            "executable book. Only the frozen-while-unchanged / "
-            "advanced-while-unchanged contrast does, and a pair where the "
-            "book changed says nothing either way."),
-        "established_elsewhere_in_this_repo": {
-            "institutional_book.current": (
-                "FRESHNESS_STATUS is computed from "
-                "BETTOR_RECEIVED_TIMESTAMP; transactTime feeds "
-                "MARKET_DATA_LAG_MS only"),
+            "These are OBSERVATIONS. Two samples of a few contracts do not "
+            "separate a response stamp from a last-update stamp: a quiet "
+            "book and a stalled feed look identical, a stamp can advance "
+            "for reasons other than a response, and this is not a sample. "
+            "No semantics is inferred here and no gate moves."),
+        "what_the_repo_already_establishes": {
+            "institutional_book.FRESHNESS_LIMIT_S": (
+                "5.0 s, measured from BETTOR_RECEIVED_TIMESTAMP -- the age "
+                "of OUR CACHED COPY. transactTime feeds MARKET_DATA_LAG_MS "
+                "and is recorded, never gated on"),
+            "workers.institutional_md": (
+                "a PERSISTENT poll process refreshes that cache at a tight "
+                "cadence and the consumer reads memory rather than calling "
+                "REST to decide (its own words). That topology is what "
+                "makes a receipt clock a staleness measure there"),
+            "why_it_does_not_transfer": (
+                "the entry lane calls REST AT the decision, so receipt age "
+                "is the round trip by construction and freshness_of() "
+                "would return CURRENT always. Cache recency is not "
+                "evidence that the venue's book is current"),
             "obs.streamstate": (
                 "a venue timestamp belongs to the venue's clock domain and "
                 "nothing subtracts it from a local reading"),

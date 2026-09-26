@@ -355,3 +355,61 @@ def test_every_mapped_candidate_gets_a_ledger_row():
     assert src.count("_ledger({") >= 4, src.count("_ledger({")
     assert '"first_refusal"' in src
     assert '"mapped_candidate_ledger": ledger' in src
+
+
+# ── 9 · THE PROBE OBSERVES; IT DOES NOT CLASSIFY ─────────────────────
+
+def test_the_clock_probe_returns_no_semantics_verdict():
+    """TWO SAMPLES DO NOT SETTLE A TIMESTAMP'S MEANING.
+
+    A quiet book and a stalled feed look identical; a stamp can advance
+    for reasons other than a response; and a gap of seconds on a handful
+    of contracts is not a sample. A verdict field here would be the same
+    mistake as the period rule's first three versions -- a rule read off a
+    vocabulary nobody had established.
+    """
+    import inspect
+
+    from sportsassets.api import app as A
+    src = inspect.getsource(A.api_venue_clock_probe)
+    assert '"classifies_semantics": False' in src
+    assert '"changes_admission": False' in src
+    for banned in ("LAST_UPDATE_CLOCK", "RESPONSE_CLOCK",
+                   "AGE_IS_A_PATH_LAG_MEASUREMENT",
+                   "AGE_IS_MARKET_QUIET"):
+        assert banned not in src, banned
+    # what it DOES return: raw stamps, our two local clocks, book hashes
+    for key in ("raw_transact_time", "asked_at_epoch_s",
+                "returned_at_epoch_s", "round_trip_s", "book_sha16",
+                "transact_time_delta_s", "our_receipt_delta_s",
+                "book_sha_changed", "configured_limit_s"):
+        assert '"%s"' % key in src, key
+
+
+def test_the_probe_records_why_the_established_contract_does_not_transfer():
+    """institutional_book's guarantee is about a CACHE, and it was checked.
+
+    FRESHNESS_LIMIT_S = 5.0 s measures BETTOR_RECEIVED_TIMESTAMP, and the
+    reason that is meaningful there is `workers/institutional_md`: a
+    persistent poll process refreshes an in-memory store at a tight cadence
+    and its consumer reads memory rather than calling REST to decide. This
+    lane calls REST AT the decision, so receipt age is the round trip by
+    construction and the check cannot fail.
+    """
+    import inspect
+
+    from sportsassets.api import app as A
+    src = inspect.getsource(A.api_venue_clock_probe)
+    assert "why_it_does_not_transfer" in src
+    assert "institutional_book.FRESHNESS_LIMIT_S" in src
+    assert "workers.institutional_md" in src
+
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    import sportsassets.workers.ext_pinnacle_loop as mod
+    modsrc = inspect.getsource(mod)
+    assert "RECEIPT TIME ALONE DOES NOT PROVE THE" in modsrc
+    assert "THE EXPLICIT REFUSAL IS RETAINED" in modsrc
+    # and the established limit is real, so the comparison is not invented
+    from sportsassets import institutional_book as ib
+    assert ib.FRESHNESS_LIMIT_S == 5.0
+    assert loop.MAX_VENUE_QUOTE_AGE_S == 30.0
