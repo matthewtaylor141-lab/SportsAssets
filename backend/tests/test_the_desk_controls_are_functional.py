@@ -14,9 +14,13 @@ cannot be selected, and a recorded limit set is a PROPOSAL that changes no
 enforced rail.
 
 THE READ ROLES STAY READ-ONLY. A desk cookie opens every read on this
-surface and no write; a write needs the operator token. That distinction is
-asserted, because sharing one credential between "look at the numbers" and
-"halt the lane" is exactly the mistake a single gate would make.
+surface and no write; a write needs a CONTROL-scoped operator session -- the
+`bt_control` cookie, minted from the operator password, which opens these
+actions and no /api/admin route. The browser never carries the service
+credential. That distinction is asserted, because sharing one credential
+between "look at the numbers" and "halt the lane" is exactly the mistake a
+single gate would make, and `test_the_operator_session_is_scoped.py` pins
+the scoping itself.
 """
 
 from __future__ import annotations
@@ -82,13 +86,15 @@ def test_a_read_credential_cannot_write():
     operator signed in for reading has to be told what is missing."""
     with pytest.raises(HTTPException) as e:
         A.require_command_control(x_admin_token="", x_desk_token="",
-                                  bt_command="a-read-cookie")
+                                  bt_control="", bt_command="a-read-cookie")
     assert e.value.status_code == 403
-    assert e.value.detail["reason"] == "CONTROL_REQUIRES_THE_OPERATOR_TOKEN"
+    assert e.value.detail["reason"] == "CONTROL_REQUIRES_AN_OPERATOR_SESSION"
     assert e.value.detail["reads_still_work"] is True
+    assert e.value.detail[
+        "no_service_credential_is_needed_in_the_browser"] is True
     with pytest.raises(HTTPException) as e2:
         A.require_command_control(x_admin_token="", x_desk_token="",
-                                  bt_command="")
+                                  bt_control="", bt_command="")
     assert e2.value.status_code == 401
 
 
@@ -149,28 +155,45 @@ def test_every_action_reports_requested_applied_and_failed_separately():
     assert CTL.RESULT_FIELDS == ("requested", "applied", "failed")
     src = inspect.getsource(CTL)
     for fn in ("def pause", "def resume", "def cancel_working_orders",
-               "def halt", "def set_limits", "def set_account",
-               "def activate"):
+               "def halt", "def set_limits", "def set_account"):
         body = src.split(fn, 1)[1].split("\nasync def ")[0].split(
             "\ndef ")[0]
         for f in CTL.RESULT_FIELDS:
             assert '"%s"' % f in body, (fn, f)
+    # ACTIVATE DELEGATES to the activation module, so the three facts are
+    # produced there -- and every return path in it carries all three.
+    from sportsassets import bettor_funded_activation as FA
+
+    auth = inspect.getsource(FA.authorize)
+    for f in CTL.RESULT_FIELDS:
+        assert '"%s"' % f in auth or ("%s=" % f) in auth, f
+    # every `return dict(out, ...)` on a refusal path names applied and
+    # failed, so a refusal can never read as an applied action
+    for chunk in auth.split("return dict(out,")[1:]:
+        head = chunk[:400]
+        assert "applied" in head and "failed" in head, head[:200]
 
 
 def test_activation_is_refused_on_the_server_not_by_a_disabled_button():
     """A greyed-out control proves nothing -- anybody can POST. The endpoint
     itself must refuse, with the prerequisites it found unmet."""
+    from sportsassets import bettor_funded_activation as FA
+
     src = inspect.getsource(A.bettor_control_act)
     assert "CTL.activate" in src
     assert "status_code=409" in src
+    # THE REFUSAL IS 409 AND THE AUTHORISATION IS 200. A path that answered
+    # 409 either way would make a complete authorisation unobservable.
+    assert 'if not got.get("ok"):' in src
     assert "activate" in CTL.ACTIONS
     flat = " ".join(inspect.getsource(CTL.activate).split())
-    assert "R_NOT_READY" in flat
-    assert CTL.R_NOT_READY == "FUNDED_ACTIVATION_PREREQUISITES_NOT_MET"
-    # The sentence is split across two string literals in the source, so
-    # the halves are what is checked.
-    assert "disabled button in a page" in flat, flat[:200]
     assert "establishes nothing" in flat
+    # The readiness refusal itself lives in the activation module now, and
+    # the desk's constant is the same string rather than a second one.
+    assert CTL.R_NOT_READY == "FUNDED_ACTIVATION_PREREQUISITES_NOT_MET"
+    assert FA.R_READINESS_UNMET == CTL.R_NOT_READY
+    auth = " ".join(inspect.getsource(FA.authorize).split())
+    assert "R_READINESS_UNMET" in auth
     # AND THE SHIPPED PAGE SENDS IT, rather than sitting inert.
     from sportsassets.api.desk_page import DESK_PAGE_HTML as H
 
@@ -197,6 +220,33 @@ def test_a_partial_limit_set_is_not_an_approved_limit_set():
 
 
 # ── against a real database ─────────────────────────────────────────
+
+#: The canonical registry ids these tests use. The PAUSED one is the
+#: accounting-uncertain account: it stays paused, and it is stopped by its
+#: ROW, so no rename or relabel reaches past the guard.
+_PAUSED_ACCT = "acct-paused-accounting-uncertain"
+_CLEAN_ACCT = "acct-pilot-test-001"
+_CLOSED_ACCT = "acct-closed-unattributable"
+
+
+async def _seed_accounts(conn):
+    await conn.execute("DELETE FROM bettor_desk_accounts")
+    await conn.execute(
+        """
+        INSERT INTO bettor_desk_accounts
+          (account_id, desk_id, status, opening_balance, opened_at, note,
+           provenance, paused, pause_reason, accounting_status,
+           accounting_detail)
+        VALUES
+          ($1,'desk-1','ACTIVE',0, now(),'the accounting-uncertain account',
+           '{}'::jsonb, TRUE,'accounting recovery defect','UNCERTAIN',
+           '{}'::jsonb),
+          ($2,'desk-2','ACTIVE',0, now(),'a clean test-venue pilot',
+           '{}'::jsonb, FALSE, NULL,'CLEAN','{}'::jsonb),
+          ($3,'desk-3','CLOSED_UNATTRIBUTABLE',0, now(),'a closed period',
+           '{}'::jsonb, FALSE, NULL,'CLEAN','{}'::jsonb)
+        """, _PAUSED_ACCT, _CLEAN_ACCT, _CLOSED_ACCT)
+
 
 @pg
 async def test_every_control_action_takes_and_reads_back():
@@ -241,25 +291,44 @@ async def test_every_control_action_takes_and_reads_back():
         assert good["stored"]["approved"] is False
         assert good["stored"]["enforced"] is False
 
-        # ACCOUNT: the paused account is refused BY NAME and stores nothing.
+        # ACCOUNT: resolved against the CANONICAL REGISTRY, and the paused
+        # account is stopped by its ROW -- not by its display name.
+        from sportsassets import bettor_funded_activation as FA
+
         await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
                            CTL.ACCOUNT_KEY)
-        for blob in ({"name": "PMUS ACCOUNTING_UNCERTAIN", "venue": "PMUS"},
-                     {"name": "desk", "venue": "PMUS",
-                      "account_id": "accounting_uncertain-1"}):
+        await _seed_accounts(conn)
+        for blob, want in (
+                # a display name alone is not an identity
+                ({"name": "PMUS ACCOUNTING_UNCERTAIN", "venue": "PMUS_TEST"},
+                 FA.R_NO_ACCOUNT),
+                # an id that is in no registry
+                ({"account_id": "made-up-1", "venue": "PMUS_TEST"},
+                 FA.R_ACCOUNT_UNKNOWN),
+                # a venue whose class is not established
+                ({"account_id": _CLEAN_ACCT, "venue": "SOMEWHERE"},
+                 FA.R_VENUE_UNKNOWN),
+                # THE PAUSED ACCOUNT, UNDER A FLATTERING NEW NAME. The row
+                # says paused, so the rename changes nothing.
+                ({"account_id": _PAUSED_ACCT, "name": "Perfectly Fine Desk",
+                  "venue": "PMUS_TEST"}, FA.R_ACCOUNT_PAUSED),
+                # and an account whose period is closed
+                ({"account_id": _CLOSED_ACCT, "venue": "PMUS_TEST"},
+                 FA.R_ACCOUNT_NOT_ACTIVE)):
             ref = await CTL.set_account(conn, by="test", account=blob)
             assert ref["ok"] is False, ref
-            assert ref["refusal"] == CTL.R_PAUSED_ACCOUNT, ref
+            assert ref["refusal"] == want, (blob, ref["refusal"])
             assert await CTL._read_state(conn, CTL.ACCOUNT_KEY) is None
-        unnamed = await CTL.set_account(conn, by="test", account={})
-        assert unnamed["ok"] is False
-        assert unnamed["refusal"] == "ACCOUNT_NOT_NAMED"
         ok = await CTL.set_account(conn, by="test", account={
-            "name": "Bettor Pilot One", "venue": "PMUS",
-            "account_id": "pilot-1"})
+            "name": "Bettor Pilot One", "venue": "PMUS_TEST",
+            "account_id": _CLEAN_ACCT})
         assert ok["ok"] is True and ok["activates_nothing"] is True
-        assert ok["stored"]["bound"] is False
+        assert ok["stored"]["account_id"] == _CLEAN_ACCT
+        assert ok["stored"]["venue_class"] == "TEST"
         assert ok["stored"]["approved"] is False
+        # the registry's own fields are recorded beside it, for the audit
+        assert ok["stored"]["registry"]["accounting_status"] == "CLEAN"
+        assert ok["stored"]["registry"]["paused"] is False
 
         # REQUESTED / APPLIED / FAILED, on a real action against real rows.
         p1 = await CTL.pause(conn, by="test")
@@ -271,23 +340,46 @@ async def test_every_control_action_takes_and_reads_back():
         assert r1["applied"] == {"armed": True}
         assert r1["failed"] is None
 
-        # ACTIVATION IS REFUSED, and every unmet check is named.
+        # ACTIVATION: the limits are recorded but NOT owner-approved, so it
+        # stops there and names that, with nothing applied.
         act = await CTL.activate(conn, by="test")
         assert act["ok"] is False
         assert act["applied"] is None
-        assert act["failed"]["refusal"] == CTL.R_NOT_READY
-        assert act["readiness"]["ready"] is False
-        named = {c["check"] for c in act["readiness"]["checks"]}
-        for must in ("funded_submission_disabled", "account_named",
-                     "limits_approved_by_the_owner",
-                     "venue_book_freshness_basis"):
-            assert must in named, must
-        assert "account_approved_by_the_owner" in act["failed"]["unmet"]
+        assert act["failed"]["refusal"] == FA.R_LIMITS_NOT_APPROVED
         assert act["funded_submission"] == "DISABLED"
+        assert act["authorises_capital"] is False
+        assert act["bound_account"]["account_id"] == _CLEAN_ACCT
+        # AND THE READINESS IS DERIVED, not asserted. With the market
+        # evidence REMOVED the market checks go to UNKNOWN -- which blocks --
+        # rather than quietly defaulting to met. (The evidence is removed
+        # here rather than assumed absent, so the assertion does not depend
+        # on what another test left behind.)
+        await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                           "ext_pinnacle_last_cycle")
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        ready = await FA.readiness(conn, account_id=_CLEAN_ACCT)
+        assert ready["ready"] is False
+        named = {c["check"] for c in ready["checks"]}
+        for must in ("funded_submission_disabled", "account_selected_and_clean",
+                     "limits_approved_by_the_owner",
+                     "limits_recorded_and_complete",
+                     "approved_limits_tighten_the_enforced_rails",
+                     "venue_book_freshness_basis", "settlement_compatibility",
+                     "market_scope_metadata",
+                     "an_autonomous_entry_was_admitted_unwaived"):
+            assert must in named, (must, sorted(named))
+        # an UNKNOWN check is not a met check, and it blocks
+        assert ready["unknown_count"] >= 1, [
+            (c["check"], c["met"]) for c in ready["checks"]]
+        assert all(c["met"] is not True for c in ready["unmet"])
+        unknown = {c["check"] for c in ready["checks"] if c["met"] is None}
+        assert "venue_book_freshness_basis" in unknown
 
         # STATE reads the rows, and says so per field.
         st = await CTL.state(conn)
         assert st["research_lane_armed"]["value"] is True
+        assert st["account_proposal"]["account_id"] == _CLEAN_ACCT
         assert st["account_proposal"]["name"] == "Bettor Pilot One"
         assert st["limits_proposal"]["proposed"]["capital_usd"] == 250.0
         assert st["funded_submission"] == "DISABLED"

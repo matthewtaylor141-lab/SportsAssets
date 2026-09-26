@@ -103,9 +103,24 @@ with their digest.
 **The defect (mine):** the harness's writer phases stamped the autonomous
 strategy's experiment id on every synthetic plan. Enumerated, not assumed:
 **2,249 probe positions across four databases, 2,080 of them in a strategy
-book**, with their orders, fills and decisions — and **no
-`external_valuations` row anywhere**, so no calibration sample or
-valuation-driven consumer could see them.
+book**, with their orders, fills and decisions.
+
+**And the earlier explanation of why that was contained was wrong.** I
+reported zero `external_valuations` rows as the evidence of no exposure or
+P&L impact. It is not evidence of that. **Positions and fills feed exposure
+and per-lane P&L directly** — no consumer of either reads
+`external_valuations` on the way to a position — so a probe position with
+its orders and fills would have entered both with no valuation row in
+sight. `external_valuations` is the *calibration* sample's input, and its
+being empty says only that the calibration sample saw nothing.
+
+**The evidence that actually establishes it** is the positions and what
+hangs off them: **zero identified probe positions in production, and zero
+of their dependent records — 0 orders, 0 fills, 0 decisions, 0 outcome
+rows** — read from production itself, with the probe identified by the
+fingerprints the harness writes and never by an experiment id. The
+enumeration keys on positions and walks down to their dependents, in that
+order, for the same reason.
 
 - **Environment:** all four (`cap1`, `cap2`, `cap3`, `cap4`) are disposable
   local databases inside this session's container at `127.0.0.1:5432`. The
@@ -114,8 +129,9 @@ valuation-driven consumer could see them.
   credential.
 - **Production, asked of production itself** (read-only, via
   `GET /api/admin/capacity-probe-audit`): **0 probe positions, 0 in a
-  strategy book, 0 orders, 0 fills, 0 decisions, 0 outcome rows, 0
-  valuations**, against 508 positions total. `clean: true`,
+  strategy book, 0 orders, 0 fills, 0 decisions, 0 outcome rows** — and, as
+  one further consumer that saw nothing rather than as the proof, 0
+  valuations — against 508 positions total. `clean: true`,
   `unreadable: no`. Books present: `RN1X_MGMT_PAIR091_STOP16_V1` 499,
   `RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1` 4,
   `RN1X_MGMT_PAIR091_STOP16_V1_PROSPECTIVE` 4,

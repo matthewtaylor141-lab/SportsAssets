@@ -73,10 +73,15 @@ def __getattr__(name):
         return live_pause_key()
     raise AttributeError(name)
 
-#: Where a PROPOSED limit set and a PROPOSED account binding are recorded.
-#: Both are proposals: no risk rail and no account selector reads them.
-LIMITS_KEY = "bettor_funded_limits_proposal"
-ACCOUNT_KEY = "bettor_funded_account_proposal"
+#: WHERE THE LIMIT SET AND THE ACCOUNT BINDING LIVE, and they are no longer
+#: inert. `bettor_funded_activation` reads both; the approved limit set is
+#: consumed by `bettor_entry_execution.effective_limits`, where it can only
+#: TIGHTEN a rail; and the account id is resolved against the canonical
+#: registry before anything accepts it.
+from . import bettor_funded_activation as FA           # noqa: E402
+
+LIMITS_KEY = FA.LIMITS_KEY
+ACCOUNT_KEY = FA.ACCOUNT_KEY
 
 #: The account that must not be selected or unpaused from anywhere. Its
 #: accounting is unresolved; that is why it is paused.
@@ -123,6 +128,16 @@ def _truthy(raw) -> bool:
         return bool(json.loads(raw))
     except (TypeError, ValueError):
         return False
+
+
+def _obj(raw):
+    """A jsonb value as an object, or None. Never a guess."""
+    if raw is None or isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw)
+    except (TypeError, ValueError):
+        return None
 
 
 async def _write_state(conn, key: str, value) -> None:
@@ -380,7 +395,12 @@ async def set_limits(conn, *, by: str, proposed: dict) -> dict:
                                               "limit")},
                 "why": "nothing was stored"}
     record = {"proposed": clean, "by": by, "at": time.time(),
+              # APPROVAL IS THE OWNER'S ACT, through the admin route. An
+              # operator records the intent; approving it is what makes it
+              # an enforced tightening.
               "approved": False, "enforced": False,
+              "approval_route": "POST /api/admin/funded-limits/approve",
+              "effective_when_approved": None,
               "why_not_enforced": ("the enforced rails are frozen in "
                                    "bettor_entry_execution and are read "
                                    "from there at every decision. This is "
@@ -402,164 +422,103 @@ async def set_limits(conn, *, by: str, proposed: dict) -> dict:
 
 
 async def set_account(conn, *, by: str, account: dict) -> dict:
-    """Record a PROPOSED funded account binding. It activates nothing.
+    """BIND A CANONICAL ACCOUNT ID, resolved against the registry or refused.
 
-    THE PAUSED ACCOUNT IS REFUSED BY NAME. An account whose identifier or
-    label carries ACCOUNTING_UNCERTAIN is not selectable here: its
-    accounting is unresolved, which is why it is paused, and a control
-    panel is exactly where that must not be quietly undone.
+    WHAT CHANGED. The first version stored whatever name it was given and
+    refused the paused account by looking for a STRING in it -- a rename
+    would have walked straight past the guard. The id is now resolved
+    against `bettor_desk_accounts`, and every refusal comes off that row:
+    unknown id, not ACTIVE, `paused` true, or an accounting status that is
+    not resolved. The display name is recorded for the audit and decides
+    nothing.
+
+    IT STILL ACTIVATES NOTHING. Binding is the owner's stated intent;
+    `activate` runs the authorisation, and funded submission is off in code
+    either way.
     """
+    ident = str(account.get("account_id") or "").strip()
     name = str(account.get("name") or "").strip()
     venue = str(account.get("venue") or "").strip()
-    ident = str(account.get("account_id") or "").strip()
-    if not name or not venue:
-        return {"action": "account", "ok": False,
-                "requested": dict(account), "applied": None,
-                "failed": {"refusal": "ACCOUNT_NOT_NAMED"},
-                "refusal": "ACCOUNT_NOT_NAMED",
-                "why": ("an activation needs a named account and its venue. "
-                        "Nothing was stored")}
-    blob = " ".join((name, venue, ident)).upper()
-    if PAUSED_ACCOUNT_MARKER in blob:
-        return {"action": "account", "ok": False,
-                "requested": {"name": name, "venue": venue,
-                              "account_id": ident or None},
+    req = {"account_id": ident or None, "name": name or None,
+           "venue": venue or None}
+    if not ident:
+        return {"action": "account", "ok": False, "requested": req,
                 "applied": None,
-                "failed": {"refusal": R_PAUSED_ACCOUNT},
-                "refusal": R_PAUSED_ACCOUNT,
-                "why": ("that account's accounting is unresolved and it is "
-                        "paused for that reason. This panel cannot select "
-                        "it, switch to it or unpause it"),
-                "stored": None}
-    record = {"name": name, "venue": venue, "account_id": ident or None,
-              "by": by, "at": time.time(), "bound": False,
-              "approved": False,
-              "why_not_bound": ("naming an account is not activating it. "
-                                "Funded submission stays disabled until the "
-                                "readiness evidence exists and the owner "
-                                "authorises it")}
+                "failed": {"refusal": FA.R_NO_ACCOUNT,
+                           "why": ("a canonical account_id is required: a "
+                                   "display name is not an identity")},
+                "refusal": FA.R_NO_ACCOUNT}
+    if not venue or FA.venue_class(venue) is None:
+        return {"action": "account", "ok": False, "requested": req,
+                "applied": None,
+                "failed": {"refusal": FA.R_VENUE_UNKNOWN,
+                           "known": sorted(FA.VENUE_CLASS)},
+                "refusal": FA.R_VENUE_UNKNOWN}
+    sel = await FA.account_selection(conn, ident)
+    if not sel.get("ok"):
+        return {"action": "account", "ok": False, "requested": req,
+                "applied": None, "selection": sel,
+                "failed": {"refusal": sel["refusal"], "why": sel.get("why")},
+                "refusal": sel["refusal"],
+                "resolved_from": "bettor_desk_accounts, by account_id"}
+    record = {"account_id": ident, "name": name or None, "venue": venue,
+              "venue_class": FA.venue_class(venue),
+              "by": by, "at": time.time(), "bound": True, "approved": False,
+              "registry": {k: sel["account"].get(k) for k in
+                           ("desk_id", "status", "paused",
+                            "accounting_status")},
+              "authorises_nothing": ("binding records the intent. "
+                                     "Authorisation is a separate action "
+                                     "and funded submission stays off")}
     await _write_state(conn, ACCOUNT_KEY, record)
     stored = await _read_state(conn, ACCOUNT_KEY)
-    return {"action": "account", "ok": stored is not None,
-            "requested": {"name": name, "venue": venue,
-                          "account_id": ident or None},
-            "applied": ({"recorded_as_a_proposal": True}
+    return {"action": "account", "ok": stored is not None, "requested": req,
+            "applied": ({"bound_account_id": ident, "venue_class":
+                         FA.venue_class(venue)}
                         if stored is not None else None),
             "failed": (None if stored is not None
-                       else {"why": "the proposal did not read back"}),
+                       else {"why": "the binding did not read back"}),
             "stored": (json.loads(stored) if isinstance(stored, str)
                        else stored),
-            "key": ACCOUNT_KEY,
-            "activates_nothing": True,
-            "activation_still_blocked": True}
-
-
-
-# ── ACTIVATION IS REFUSED ON THE SERVER, NOT BY A DISABLED BUTTON ───
-#
-# A greyed-out control proves nothing: anybody can POST. So the activation
-# request is a real endpoint that computes its prerequisites HERE, from the
-# stored control rows and the lane's own limitations, and refuses with the
-# ones that are unmet. When they are all met it STILL refuses, because the
-# last step is an authorisation this service does not hold -- the owner's,
-# for a specific account and a specific limit set.
-READINESS_CHECKS = (
-    "a named funded account, recorded AND approved by the owner",
-    "an approved limit set, compared against the enforced rails",
-    "the venue book freshness basis (unresolved: what "
-    "marketData.transactTime denotes is not established)",
-    "per-fixture settlement compatibility from the venue's own prose",
-    "market scope metadata from the specific sportsMarketType scope token",
-    "an autonomous entry admitted on current markets under the lane's own "
-    "gates",
-)
+            "selection": sel,
+            "resolved_from": "bettor_desk_accounts, by account_id",
+            "activates_nothing": True, "activation_still_blocked": True}
 
 
 async def readiness(conn) -> dict:
-    """WHAT STILL BLOCKS FUNDED ACTIVATION, computed from stored state.
+    """WHAT STILL BLOCKS FUNDED ACTIVATION -- derived from evidence.
 
-    Each check is evaluated, not declared. A check this service cannot
-    evaluate is UNKNOWN and blocks -- the same rule the risk rails use for
-    an unevaluable limit.
+    This used to assemble its own list, three of whose checks were hard
+    coded FALSE. It now delegates to `bettor_funded_activation`, which reads
+    the rows: the cycle's own book-read bases, the settlement comparisons,
+    the resolved market scopes, and whether an entry was admitted WITHOUT
+    the calibration waiver. A check with no evidence is UNKNOWN and blocks.
     """
-    st = await state(conn)
-    acct = st.get("account_proposal") or {}
-    lims = st.get("limits_proposal") or {}
-    checks = [
-        {"check": "funded_submission_disabled",
-         "met": True,
-         "detail": ("the lane's writer CHECKs order_submitted FALSE and the "
-                    "venue-boundary gate authorises every submission "
-                    "independently of this panel")},
-        {"check": "account_named", "met": bool(acct.get("name")),
-         "detail": (acct.get("name") or "no account is recorded")},
-        {"check": "account_approved_by_the_owner",
-         "met": bool(acct.get("approved")),
-         "detail": ("recording a name is the owner's stated intent; "
-                    "approval is a separate act this panel cannot perform")},
-        {"check": "limits_recorded", "met": bool(lims.get("proposed")),
-         "detail": (str(lims.get("proposed") or "no limit set is recorded"))},
-        {"check": "limits_approved_by_the_owner",
-         "met": bool(lims.get("approved")),
-         "detail": ("a recorded limit set is not an enforced rail. The "
-                    "enforced rails are frozen in bettor_entry_execution")},
-        {"check": "venue_book_freshness_basis", "met": False,
-         "detail": ("UNRESOLVED. What marketData.transactTime denotes is "
-                    "not established, so the explicit refusal stands and "
-                    "the 30 s limits are unmoved")},
-        {"check": "settlement_compatibility", "met": False,
-         "detail": ("per fixture, from the venue's own prose. Where a rule "
-                    "is not stated the comparison returns UNKNOWN and the "
-                    "entry refuses")},
-        {"check": "market_scope_metadata", "met": False,
-         "detail": ("scope comes from the v1 type's own scope token; the "
-                    "published Sports Schema is retrieved on the runner and "
-                    "the token sets are provisional until it is in hand")},
-    ]
-    try:
-        admitted = await conn.fetchval(
-            "SELECT count(*) FROM external_valuations "
-            " WHERE experiment_id = $1 AND admissible", ext.EXPERIMENT_ID)
-        checks.append({
-            "check": "an_autonomous_entry_was_admitted_on_current_markets",
-            "met": int(admitted or 0) > 0,
-            "detail": ("%s admissible candidate(s) recorded by the "
-                       "scheduled lane" % int(admitted or 0))})
-    except Exception as exc:                                   # noqa: BLE001
-        checks.append({
-            "check": "an_autonomous_entry_was_admitted_on_current_markets",
-            "met": None, "detail": ("could not be read: %s -- an "
-                                    "unevaluable check BLOCKS"
-                                    % type(exc).__name__)})
-    unmet = [c for c in checks if c["met"] is not True]
-    return {"checks": checks, "unmet": unmet, "unmet_count": len(unmet),
-            "ready": not unmet,
-            "even_when_ready": (
-                "activation also needs the owner's authorisation for a "
-                "SPECIFIC account and a SPECIFIC limit set. This panel "
-                "cannot grant it, so it refuses in every case"),
-            "required": list(READINESS_CHECKS)}
+    bound = _obj(await _read_state(conn, ACCOUNT_KEY)) or {}
+    return await FA.readiness(conn, account_id=bound.get("account_id"))
 
 
 async def activate(conn, *, by: str) -> dict:
-    """THE FUNDED ACTIVATION REQUEST. Refused server-side, with reasons."""
-    r = await readiness(conn)
-    return {
-        "action": "activate", "by": by, "at": time.time(),
-        "requested": {"funded_trading": True},
-        "applied": None,
-        "failed": {"refusal": R_NOT_READY,
-                   "unmet": [c["check"] for c in r["unmet"]],
-                   "detail": r["unmet"]},
-        "ok": False,
-        "refusal": R_NOT_READY,
-        "readiness": r,
-        "funded_submission": "DISABLED",
-        "enforced_server_side": (
-            "this refusal is computed here from the stored control rows and "
-            "the lane's open limitations. A disabled button in a page "
-            "establishes nothing: this endpoint refuses the POST"),
-    }
+    """RUN THE AUTHORISATION. It can succeed -- for a TEST venue.
+
+    The refusal is still computed on the server and still names what is
+    unmet; what changed is that the path is COMPLETE. With a clean
+    canonical account, an owner-approved limit set inside the frozen rails
+    and every readiness check met, a TEST-class venue is AUTHORIZED and its
+    effective limits are recorded. Capital is not enabled by any of it: real
+    submission is off in code and the venue-boundary gate is separate.
+    """
+    bound = _obj(await _read_state(conn, ACCOUNT_KEY)) or {}
+    got = await FA.authorize(conn, account_id=bound.get("account_id") or "",
+                             venue=bound.get("venue") or "", by=by)
+    got["action"] = "activate"
+    got.setdefault("requested", {"funded_trading": True})
+    got["bound_account"] = bound or None
+    got["enforced_server_side"] = (
+        "the account is resolved against the canonical registry, the limits "
+        "against the frozen rails, and the readiness checks against the "
+        "lane's own rows. A disabled button establishes nothing")
+    return got
 
 
 async def state(conn) -> dict:
@@ -581,7 +540,8 @@ async def state(conn) -> dict:
             out[label] = {"value": None, "key": key,
                           "unreadable": type(exc).__name__}
     for label, key in (("limits_proposal", LIMITS_KEY),
-                       ("account_proposal", ACCOUNT_KEY)):
+                       ("account_proposal", ACCOUNT_KEY),
+                       ("authorization", FA.AUTHORIZATION_KEY)):
         try:
             raw = await _read_state(conn, key)
             out[label] = (json.loads(raw) if isinstance(raw, str)
@@ -625,6 +585,31 @@ def describe() -> dict:
                               "this panel at all"),
             R_PAUSED_ACCOUNT: ("the ACCOUNTING_UNCERTAIN account stays "
                                "paused and cannot be selected here"),
+            FA.R_ACCOUNT_PAUSED: ("the account's own registry row says "
+                                  "paused. THIS is the guard: it is read "
+                                  "off `bettor_desk_accounts`, so renaming "
+                                  "the account, relabelling it on a screen "
+                                  "or submitting it under another display "
+                                  "name changes nothing"),
+            FA.R_ACCOUNTING_UNCERTAIN: ("the account's accounting status is "
+                                        "not resolved on its row"),
+            FA.R_ACCOUNT_NOT_ACTIVE: "the account's status is not ACTIVE",
+            FA.R_ACCOUNT_UNKNOWN: ("no such account_id in the canonical "
+                                   "registry"),
+            FA.R_NO_ACCOUNT: ("a canonical account_id is required: a display "
+                              "name is not an identity"),
+        },
+        "the_paused_account_is_protected_by": (
+            "its row in bettor_desk_accounts, not by its display name"),
+        "activation_verdicts": {
+            "AUTHORIZED_FOR_A_TEST_VENUE": (
+                "200. Every check met, a TEST-class venue, a clean canonical "
+                "account and an owner-approved limit set. It authorises the "
+                "operating path against a venue sandbox and no capital"),
+            FA.R_OWNER_AUTH: ("409. Every check met and the venue is FUNDED: "
+                              "the owner's written authorisation is a "
+                              "separate act this service can only read"),
+            R_NOT_READY: "409, with the unmet and UNKNOWN checks named",
         },
         "proposals_not_settings": ["limits", "account"],
         "enforced_rails_live_in": "bettor_entry_execution",

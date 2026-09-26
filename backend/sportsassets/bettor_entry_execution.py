@@ -516,6 +516,69 @@ def _sha(obj) -> str:
 LIMITS_SHA = _sha(PREDECLARED_LIMITS)
 
 
+# ── AN APPROVED LIMIT SET, CONSUMED BY THE ENFORCEMENT PATH ─────────
+#
+# WHY THIS EXISTS. The desk let an owner record a limit set, and nothing
+# read it: a number typed into a page that no rail consulted is not a
+# limit. This is the consuming function, and it has exactly one rule --
+#
+#   AN APPROVAL CAN ONLY TIGHTEN.
+#
+# The effective limit for a rail is min(frozen, approved). An approved
+# value ABOVE the frozen rail is ignored and reported as ignored, so no
+# form can ever raise a rail; and the effective set carries its own digest,
+# so a reader can tell an enforced-with-approval run from a frozen one.
+APPROVED_LIMIT_TO_RAIL = {
+    "capital_usd": "MAX_CAPITAL_DEPLOYED",
+    "per_order_usd": "MAX_MARKET_EXPOSURE",
+    "max_exposure_usd": "MAX_CORRELATED_EXPOSURE",
+    "daily_loss_stop_usd": "MAX_DRAWDOWN",
+}
+
+
+def effective_limits(approved: dict | None = None) -> dict:
+    """PREDECLARED ∧ APPROVED, element-wise minimum. Never a raise."""
+    import hashlib
+    import json as _json
+
+    eff = dict(PREDECLARED_LIMITS)
+    tightened, ignored, unmapped = {}, {}, {}
+    for name, value in dict(approved or {}).items():
+        rail = APPROVED_LIMIT_TO_RAIL.get(name)
+        if rail is None:
+            unmapped[name] = value
+            continue
+        try:
+            v = float(value)
+        except (TypeError, ValueError):
+            ignored[name] = {"value": value, "why": "not a number"}
+            continue
+        frozen = float(PREDECLARED_LIMITS[rail])
+        if v < frozen:
+            eff[rail] = round(v, 6)
+            tightened[rail] = {"from": frozen, "to": round(v, 6),
+                               "approved_as": name}
+        else:
+            ignored[name] = {"value": v, "rail": rail, "frozen": frozen,
+                             "why": ("an approval may only TIGHTEN a rail, "
+                                     "so a looser number is ignored")}
+    digest = hashlib.sha256(
+        _json.dumps(eff, sort_keys=True).encode()).hexdigest()
+    return {
+        "effective": eff,
+        "frozen": dict(PREDECLARED_LIMITS),
+        "frozen_digest": LIMITS_SHA,
+        "effective_digest": digest,
+        "tightened": tightened,
+        "ignored_because_looser": ignored,
+        "unmapped_approved_names": unmapped,
+        "rule": "EFFECTIVE = MIN(FROZEN, APPROVED); AN APPROVAL NEVER RAISES",
+        "is_not_a_capital_authorization": (
+            "tightening a shadow rail authorises nothing. Real submission "
+            "stays off in code and the venue-boundary gate is separate"),
+    }
+
+
 def declaration() -> dict:
     """The limit set, its derivation and what it does not authorise."""
     return {
@@ -754,7 +817,8 @@ R_HEADROOM_NOT_MEASURED = "RAIL_HEADROOM_NOT_MEASURED"
 SAFETY_USD = 1e-6
 
 
-def headroom_from_rows(rows, *, condition_id, event_key, now=None) -> dict:
+def headroom_from_rows(rows, *, condition_id, event_key, now=None,
+                       approved_limits=None) -> dict:
     """What each rail still allows BEFORE anything is proposed.
 
     The SAME measurement function, asked with a proposed position of
@@ -765,8 +829,15 @@ def headroom_from_rows(rows, *, condition_id, event_key, now=None) -> dict:
         rows, condition_id=condition_id, event_key=event_key,
         proposed_cost_usd=0.0, proposed_qty=0.0, now=now,
         proposed_cost_basis="NOTHING_PROPOSED_THIS_MEASURES_THE_BOOK_ALONE")
+    # THE APPROVED SET IS CONSUMED HERE, and it can only tighten. With no
+    # approval this is exactly the frozen set, so the unapproved path is
+    # unchanged.
+    _eff = effective_limits(approved_limits)
+    _limits = _eff["effective"]
     out = {"ok": False, "used": used.get("observed") or {},
-           "limits": dict(PREDECLARED_LIMITS), "headroom": {},
+           "limits": dict(_limits), "frozen_limits": dict(PREDECLARED_LIMITS),
+           "approved_tightened": _eff["tightened"],
+           "effective_digest": _eff["effective_digest"], "headroom": {},
            "refusals": list(used.get("refusals") or []),
            "basis": ("PREDECLARED_SHADOW_LIMIT_MINUS_THE_OPEN_BOOK_"
                      "MEASURED_WITH_NOTHING_PROPOSED"),
@@ -777,7 +848,7 @@ def headroom_from_rows(rows, *, condition_id, event_key, now=None) -> dict:
     # THE PROPOSED POSITION IS ALWAYS COUNTED AS AN UNMARKED TOTAL LOSS
     # by `exposure_from_rows`, and asking with zero proposed removes that
     # +cost -- which is the point: this is the book alone.
-    for name, limit in PREDECLARED_LIMITS.items():
+    for name, limit in _limits.items():
         obs = out["used"].get(name)
         if obs is None:
             out["headroom"][name] = None

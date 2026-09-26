@@ -87,4 +87,21 @@ def describe() -> dict:
         "strategy_experiments": list(STRATEGY_EXPERIMENTS),
         "read_only": True,
         "an_unreadable_audit_is_not_an_empty_one": True,
+        # WHAT THE COUNTS DO AND DO NOT ESTABLISH. The positions count is
+        # the load-bearing one: positions and fills feed exposure and
+        # per-lane P&L DIRECTLY, so zero valuation rows would prove nothing
+        # about either -- no consumer of exposure or P&L reads
+        # external_valuations on the way to a position. The evidence that
+        # nothing reached those consumers is zero IDENTIFIED PROBE POSITIONS
+        # together with zero of their dependent records.
+        "the_load_bearing_count": "positions",
+        "what_the_valuations_count_is": (
+            "one more consumer that saw nothing -- the calibration sample's "
+            "input. It is reported beside the others, NOT as the proof: a "
+            "probe position with its orders and fills would have entered "
+            "exposure and P&L with no valuation row in sight"),
+        "the_isolation_evidence": (
+            "zero identified probe positions AND zero dependent records "
+            "(orders, fills, decisions, outcomes) -- enumerated from the "
+            "positions downwards"),
     }

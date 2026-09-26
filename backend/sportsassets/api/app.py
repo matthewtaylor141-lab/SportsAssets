@@ -505,6 +505,61 @@ def mint_desk_token(now: float | None = None) -> tuple[str, int]:
     return f"{exp}.{sig}", exp
 
 
+#: THE CONTROL SCOPE. A control token opens the desk's control actions and
+#: nothing else: it is not the admin token, it cannot reach an /api/admin
+#: route, and it expires on its own.
+CONTROL_SCOPE = "control"
+CONTROL_TOKEN_TTL_S = 1800.0
+
+
+def mint_control_token(now: float | None = None) -> tuple[str, int]:
+    """A SCOPED, SHORT-LIVED CONTROL TOKEN. Not the admin token.
+
+    WHY IT EXISTS. The desk's first control wiring asked the operator to
+    paste the ADMIN token into the page -- a service credential with the
+    entire admin API behind it, living in a browser. This token is signed
+    with the same server-side key but carries the scope in the signed
+    material, so it authorises the control actions and cannot be presented
+    anywhere `require_admin` is the gate.
+    """
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    exp = int(now if now is not None else _t.time()) + int(
+        CONTROL_TOKEN_TTL_S)
+    key = (settings().admin_token or "").strip().encode()
+    sig = _hmac.new(key, ("%s:%d" % (CONTROL_SCOPE, exp)).encode(),
+                    hashlib.sha256).hexdigest()
+    return "%s.%s.%s" % (CONTROL_SCOPE, exp, sig), exp
+
+
+def control_token_ok(token: str, now: float | None = None) -> bool:
+    """Verify a control token: right scope, unexpired, correct signature.
+
+    A DESK TOKEN MUST NOT PASS HERE, and it cannot: the scope is inside
+    the signed material, so a read token's signature never matches a
+    control challenge.
+    """
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    parts = (token or "").split(".")
+    if len(parts) != 3 or parts[0] != CONTROL_SCOPE:
+        return False
+    try:
+        exp = int(parts[1])
+    except (TypeError, ValueError):
+        return False
+    if exp <= int(now if now is not None else _t.time()):
+        return False
+    key = (settings().admin_token or "").strip().encode()
+    want = _hmac.new(key, ("%s:%d" % (CONTROL_SCOPE, exp)).encode(),
+                     hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(parts[2], want)
+
+
 def desk_token_ok(token: str, now: float | None = None) -> bool:
     import hashlib
     import hmac as _hmac
@@ -3039,40 +3094,102 @@ async def bettor_demonstration_run(response: Response,
     return out
 
 
+CONTROL_COOKIE = "bt_control"
+
+
 def require_command_control(x_admin_token: str = Header(default=""),
                             x_desk_token: str = Header(default=""),
+                            bt_control: str = Cookie(default=""),
                             bt_command: str = Cookie(default="")) -> str:
-    """WRITE access for the desk's controls. The OPERATOR token, only.
+    """WRITE access for the desk's controls. A SCOPED credential, or ops.
 
-    COMMAND's read roles stay read-only, exactly as they were: a desk
-    cookie or a wall token opens every read on this surface and NO write.
-    A control action needs the operator token the ops tooling already
-    uses -- the same credential `require_admin` takes -- supplied per
-    action and never stored by the page.
+    THREE WAYS IN, AND THEY ARE NOT THE SAME THING:
 
-    WHY THE DISTINCTION MATTERS. The desk is a page many people may be
-    shown; the controls change durable state. Sharing one credential
-    between "look at the numbers" and "halt the lane" would mean anybody
-    who can read can also stop the system, and the reverse mistake --
-    making the buttons inert -- leaves an operator without a kill switch.
-    Two credentials, one surface.
+      bt_control cookie   an operator who signed in with the OPERATOR
+                          password. Scoped to the control actions, short
+                          lived, HttpOnly, and it opens no /api/admin
+                          route. This is what the browser uses.
+      X-Admin-Token       ops tooling and CI, which already hold the
+                          service credential server-side.
+      anything else       refused.
+
+    WHAT CHANGED AND WHY. The first version accepted ONLY the admin token,
+    which meant the page had to carry a service credential to send a
+    control -- the whole admin API in a browser tab. The scoped cookie
+    replaces it. A READ credential is still refused, by name: anybody who
+    may look at the numbers must not thereby be able to halt the lane.
     """
     import hmac
 
+    if bt_control and control_token_ok(bt_control):
+        return "operator"
     supplied = (x_admin_token or "").strip()
     expected = (settings().admin_token or "").strip()
     if expected and hmac.compare_digest(supplied, expected):
-        return "operator"
-    # A READ CREDENTIAL IS REFUSED BY NAME, not with a bare 401, so an
-    # operator who is signed in for reading knows what is missing.
+        return "admin"
     if bt_command or x_desk_token:
         raise HTTPException(status_code=403, detail={
-            "reason": "CONTROL_REQUIRES_THE_OPERATOR_TOKEN",
-            "what": ("this session is signed in for READING. A control "
-                     "action needs the operator token in the "
-                     "X-Admin-Token header"),
-            "reads_still_work": True})
-    raise HTTPException(status_code=401, detail="operator token required")
+            "reason": "CONTROL_REQUIRES_AN_OPERATOR_SESSION",
+            "what": ("this session is signed in for READING. Sign in with "
+                     "the operator password at "
+                     "POST /api/command/session/control to obtain a scoped "
+                     "control session"),
+            "reads_still_work": True,
+            "no_service_credential_is_needed_in_the_browser": True})
+    raise HTTPException(status_code=401, detail={
+        "reason": "OPERATOR_SESSION_REQUIRED",
+        "what": "POST /api/command/session/control with the operator "
+                "password, or present the operator token server-side"})
+
+
+@app.post("/api/command/session/control")
+async def command_session_control(request: Request, response: Response,
+                                  body: DeskUnlockBody) -> dict:
+    """OPERATOR PASSWORD -> a SCOPED control cookie. No service credential.
+
+    It shares the unlock throttle with the read sign-in, so the two are one
+    guess oracle rather than two. The token is set as an HttpOnly cookie on
+    this origin's `/api/command` path and is NEVER returned in the body.
+
+    AN UNCONFIGURED OPERATOR PASSWORD IS A REFUSAL, NOT A DEFAULT. A
+    default operator password would be worse than no control sign-in at
+    all, so an empty setting refuses by name and says what to set.
+    """
+    import hmac
+
+    if _throttled(_UNLOCK_HITS, request):
+        raise HTTPException(status_code=429, detail="slow down")
+    expected = (settings().operator_password or "").strip()
+    if not expected:
+        raise HTTPException(status_code=503, detail={
+            "reason": "OPERATOR_PASSWORD_NOT_CONFIGURED",
+            "what": ("this service has no operator control password set, so "
+                     "the scoped control sign-in cannot be offered. Set "
+                     "OPERATOR_PASSWORD in the service environment"),
+            "reads_still_work": True,
+            "controls_remain_available_to_ops_tooling": (
+                "through the operator token, server-side")})
+    supplied = (body.password or "").strip()
+    if not hmac.compare_digest(supplied, expected):
+        # 401, NOT a 200 carrying `ok: false`. The read sign-ins on this
+        # service answer a wrong password with a 200 body, and a caller that
+        # checks only the status then treats a refusal as a session. A
+        # CONTROL credential must not be obtainable by misreading a status
+        # line, so this one refuses with the status too.
+        raise HTTPException(status_code=401, detail={
+            "ok": False, "reason": "OPERATOR_PASSWORD_NOT_ACCEPTED",
+            "cookie_set": False})
+    token, exp = mint_control_token()
+    response.set_cookie(CONTROL_COOKIE, token,
+                        max_age=int(CONTROL_TOKEN_TTL_S),
+                        httponly=True, secure=True, samesite="lax",
+                        path="/api/command")
+    return {"ok": True, "expires_at": exp, "scope": CONTROL_SCOPE,
+            "cookie": CONTROL_COOKIE, "token_in_body": False,
+            "ttl_s": CONTROL_TOKEN_TTL_S,
+            "opens": "the desk's control actions",
+            "does_not_open": ["any /api/admin route",
+                              "any funded submission path"]}
 
 
 @app.get("/api/command/bettor/control",
@@ -3151,13 +3268,16 @@ async def bettor_control_act(action: str, response: Response,
             got = await CTL.set_account(
                 conn, by=by, account=dict(b.get("account") or {}))
         elif act == "activate":
-            # THE REFUSAL IS COMPUTED HERE, on the server, from the stored
+            # THE VERDICT IS COMPUTED HERE, on the server, from the stored
             # rows. A disabled button establishes nothing -- anybody can
-            # POST -- so the endpoint itself refuses and names what is
-            # unmet. 409, because the request is understood and blocked.
+            # POST -- so the endpoint itself decides and names what is
+            # unmet. A refusal is 409, because the request is understood
+            # and blocked; an AUTHORIZED test venue is 200, because the
+            # path is complete and must be observable as a success.
             got = await CTL.activate(conn, by=by)
             got["state_after"] = await CTL.state(conn)
-            raise HTTPException(status_code=409, detail=got)
+            if not got.get("ok"):
+                raise HTTPException(status_code=409, detail=got)
         else:                                   # "state"
             got = {"action": "state", "ok": True}
         got["state_after"] = await CTL.state(conn)
@@ -3178,6 +3298,95 @@ def _desk_page_headers() -> dict:
             "Pragma": "no-cache",
             "Content-Security-Policy": _DESK_PAGE_CSP,
             "X-Content-Type-Options": "nosniff"}
+
+
+@app.post("/api/admin/funded-limits/approve",
+          dependencies=[Depends(require_admin)])
+async def admin_approve_funded_limits(response: Response,
+                                      body: dict | None = None) -> dict:
+    """THE OWNER APPROVES A RECORDED LIMIT SET. Admin-gated, deliberately.
+
+    WHY THE SEPARATION. An OPERATOR records the limits from the desk with a
+    scoped control session; APPROVING them is the owner's act and takes the
+    service credential, which the browser never holds. Approval is also what
+    makes the set ENFORCED -- `bettor_entry_execution.effective_limits`
+    consumes it, and it can only ever TIGHTEN a frozen rail.
+
+    `confirm` must equal the recorded per-order limit, so an approval cannot
+    be triggered by replaying a body against a set the owner has not read.
+    """
+    from .. import bettor_entry_execution as EX
+    from .. import bettor_funded_activation as FA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    pool = await get_pool()
+    raw = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = $1", FA.LIMITS_KEY)
+    rec = json.loads(raw) if isinstance(raw, str) else raw
+    if not rec or not (rec.get("proposed") or {}):
+        raise HTTPException(status_code=409, detail={
+            "reason": FA.R_LIMITS_MISSING,
+            "what": "no limit set has been recorded to approve"})
+    proposed = dict(rec["proposed"])
+    want = str(b.get("confirm") or "")
+    if want != str(proposed.get("per_order_usd")):
+        raise HTTPException(status_code=400, detail={
+            "reason": "APPROVAL_NOT_CONFIRMED",
+            "what": ("confirm must equal the recorded per_order_usd, so an "
+                     "approval names the set it approves"),
+            "recorded_per_order_usd": proposed.get("per_order_usd")})
+    eff = EX.effective_limits(proposed)
+    rec.update(approved=True, approved_by=str(b.get("by") or "OWNER")[:120],
+               approved_at=time.time(), enforced=True,
+               effective_when_approved=eff["effective"],
+               effective_digest=eff["effective_digest"],
+               tightened=eff["tightened"],
+               ignored_because_looser=eff["ignored_because_looser"])
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        FA.LIMITS_KEY, json.dumps(rec))
+    back = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = $1", FA.LIMITS_KEY)
+    read = json.loads(back) if isinstance(back, str) else back
+    return {"ok": bool((read or {}).get("approved")),
+            "requested": {"approve": proposed},
+            "applied": {"approved": bool((read or {}).get("approved")),
+                        "effective": eff["effective"],
+                        "tightened": eff["tightened"]},
+            "failed": None if (read or {}).get("approved") else
+                      {"why": "the approval did not read back"},
+            "frozen_digest": eff["frozen_digest"],
+            "effective_digest": eff["effective_digest"],
+            "an_approval_can_only_tighten": True,
+            "funded_submission": "DISABLED",
+            "is_not_a_capital_authorization": (
+                "tightening a shadow rail authorises nothing. Real "
+                "submission is off in code and the venue-boundary gate is "
+                "separate")}
+
+
+@app.get("/api/admin/funded-activation-readiness",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_activation_readiness(response: Response,
+                                            hours: int = 168) -> dict:
+    """EVERY READINESS CHECK, WITH THE EVIDENCE IT READ. Read-only."""
+    from .. import bettor_funded_activation as FA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        bound = await conn.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            FA.ACCOUNT_KEY)
+        rec = json.loads(bound) if isinstance(bound, str) else bound
+        got = await FA.readiness(conn, hours=int(hours),
+                                 account_id=(rec or {}).get("account_id"))
+    return {"ok": True, "contract": FA.describe(), "readiness": got,
+            "bound_account": rec}
 
 
 @app.get("/api/admin/capacity-probe-audit",
@@ -3582,14 +3791,20 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
         "readiness": ready,
         "unmet_prerequisites": [c["check"] for c in (ready.get("unmet") or [])],
         "activation_endpoint": ("POST /api/command/bettor/control/activate "
-                                "-- refuses 409 with the unmet list"),
+                                "-- 409 with the unmet list, or 200 with "
+                                "AUTHORIZED_FOR_A_TEST_VENUE when every "
+                                "check is met against a TEST-class venue"),
         "funded_submission": "DISABLED",
         "controls": CTL.describe(),
         "control_state": ctl_state,
         "control_endpoint": "/api/command/bettor/control/{action}",
-        "control_requires": ("the operator token in X-Admin-Token. The "
-                             "read roles open every read on this surface "
-                             "and no write"),
+        "control_requires": ("a CONTROL-scoped operator session -- the "
+                             "`bt_control` cookie minted by POST "
+                             "/api/command/session/control from the "
+                             "operator password. The service credential is "
+                             "never needed in a browser, and the read "
+                             "roles open every read on this surface and no "
+                             "write"),
         "enforced_risk_rails": ENTRYX.declaration(),
         "proposed_limits": lims or None,
         "proposed_account": acct or None,

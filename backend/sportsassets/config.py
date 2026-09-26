@@ -110,6 +110,18 @@ class Settings(BaseSettings):
     # phone browser. Compared constant-time; a successful unlock mints a
     # short-lived HMAC token derived from admin_token (see api/app.py).
     desk_password: str = "bt"
+    # OPERATOR CONTROL PASSWORD (2026-09-26). The desk's CONTROLS are
+    # writes, and the first version made the browser carry the ADMIN
+    # token to send them -- a service credential, with the whole admin
+    # API behind it, typed into a page. This is a SECOND, NARROWER
+    # credential: a successful sign-in mints a short-lived scoped token
+    # that opens the control actions and NOTHING ELSE (see
+    # api/app.py: mint_control_token / require_command_control).
+    #
+    # EMPTY MEANS THE CONTROL SIGN-IN IS NOT CONFIGURED, and the endpoint
+    # refuses by name rather than falling back to a default -- a default
+    # operator password would be worse than none.
+    operator_password: str = ""
     # Committed capital (owner directive 2026-08-22): dollars the owner
     # has committed to restore to the Polymarket account (an owner draw
     # outstanding). Displayed ONLY as part of the clearly-labeled

@@ -86,7 +86,17 @@ async def _seed_a_genuine_strategy_position(conn):
 
 
 async def _consumer_snapshot(conn):
-    """WHAT THE CONSUMERS SEE. Not what the desk labels."""
+    """WHAT THE CONSUMERS SEE. Not what the desk labels.
+
+    AND THE POSITIONS ARE THE LOAD-BEARING PART. Exposure is measured from
+    open positions and per-lane P&L from fills, so neither consumer reads
+    `external_valuations` on the way to a position: a count of zero
+    valuation rows would establish nothing about either. The valuation and
+    calibration counts are in this snapshot as two more consumers that must
+    not move -- the position count, the exposure sum and the per-lane P&L
+    are what would actually catch a synthetic record reaching a strategy
+    book.
+    """
     from sportsassets.api import command_rn1x as RN
 
     ev = await RN.entry_evidence(conn, hours=720, limit=200)

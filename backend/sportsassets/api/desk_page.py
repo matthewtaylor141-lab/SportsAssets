@@ -788,21 +788,71 @@ window.BTCore = {
    * lane's existing control surface -- and each one reports the server's
    * READBACK rather than the fact that a request was made.
    *
-   * THE OPERATOR TOKEN IS HELD IN MEMORY AND NOWHERE ELSE. It is typed per
-   * session, kept in this closure, never written to localStorage, never
-   * placed in a URL, and it is gone when the tab closes. The desk's READ
-   * needs only the Command session; a WRITE needs this token, because
-   * anybody who may look at the numbers must not thereby be able to halt
-   * the lane.
+   * THIS PAGE HOLDS NO CREDENTIAL. A read needs the Command session; a
+   * write needs a scoped operator session, because anybody who may look at
+   * the numbers must not thereby be able to halt the lane. Both are
+   * HttpOnly cookies the server sets, so nothing is stored by this script
+   * and nothing is ever put in a URL.
    */
-  var OPTOKEN = '';
+  /* ── THE CONTROL CREDENTIAL: A SCOPED SESSION, NOT A SERVICE TOKEN ──
+   *
+   * WHAT CHANGED AND WHY. The first wiring asked the operator to paste the
+   * ADMIN token into this page -- a service credential with the whole admin
+   * API behind it, living in a browser tab. It is gone. The operator signs
+   * in with the OPERATOR password, the server mints a SCOPED, short-lived
+   * HttpOnly cookie that opens the desk's control actions and nothing else,
+   * and this page never holds a credential of any kind: the password goes
+   * straight to the session endpoint in one request body and is not kept.
+   *
+   * READS STILL NEED ONLY THE COMMAND SESSION, and a read credential is
+   * refused for a write by the server, with a name. */
+  var CONTROL_PATH = '/api/command/session/control';
   var LAST_CONTROL = null;
+  var CONTROL_SESSION = null;     /* {expires_at} as the server reported it */
 
-  function controlHeaders() {
-    var h = {Accept: 'application/json',
-             'Content-Type': 'application/json'};
-    if (OPTOKEN) { h['X-Admin-Token'] = OPTOKEN; }
-    return h;
+  function jsonHeaders() {
+    return {Accept: 'application/json', 'Content-Type': 'application/json'};
+  }
+
+  function signInOperator() {
+    var el = document.getElementById('oppass');
+    var pass = el ? el.value : '';
+    if (el) { el.value = ''; }          /* not kept, not even in the field */
+    LAST_CONTROL = {action: 'operator sign-in', ok: null};
+    render(LAST_DESK || {});
+    fetch(CONTROL_PATH, {method: 'POST', credentials: 'same-origin',
+                         headers: jsonHeaders(), cache: 'no-store',
+                         body: JSON.stringify({password: pass})})
+      .then(function (r) {
+        return r.json().then(function (j) {
+          return {status: r.status, body: j};
+        }, function () { return {status: r.status, body: null}; });
+      })
+      .then(function (res) {
+        var b = res.body || {};
+        if (res.status === 503) {
+          LAST_CONTROL = {action: 'operator sign-in', ok: false,
+            refusal: (b.detail && b.detail.reason) || 'NOT_CONFIGURED',
+            detail: b.detail || b};
+        } else if (b.ok) {
+          CONTROL_SESSION = {expires_at: b.expires_at, scope: b.scope};
+          LAST_CONTROL = {action: 'operator sign-in', ok: true, detail: b};
+        } else {
+          /* 401 with `ok: false` -- the refusal is in the STATUS as well as
+           * the body, so a caller cannot read a rejected password as a
+           * session by looking at the status line alone. */
+          LAST_CONTROL = {
+            action: 'operator sign-in', ok: false,
+            refusal: (b.detail && b.detail.reason) || null,
+            error: 'that password was not accepted'};
+        }
+        load();
+      })
+      .catch(function (e) {
+        LAST_CONTROL = {action: 'operator sign-in', ok: false,
+                        error: e && e.message ? e.message : String(e)};
+        render(LAST_DESK || {});
+      });
   }
 
   function sendControl(action, payload) {
@@ -814,18 +864,13 @@ window.BTCore = {
       render(LAST_DESK || {});
       return;
     }
-    if (!OPTOKEN) {
-      LAST_CONTROL = {action: action, ok: false,
-                      error: 'enter the operator token first — a control ' +
-                             'action needs it and the desk never stores it'};
-      render(LAST_DESK || {});
-      return;
-    }
     LAST_CONTROL = {action: action, ok: null, error: null,
                     sent_at: new Date().toISOString()};
     render(LAST_DESK || {});
+    /* THE COOKIE CARRIES THE AUTHORISATION. No token is read from the page,
+     * and none is put in the URL. */
     fetch(path, {method: 'POST', credentials: 'same-origin',
-                 headers: controlHeaders(), cache: 'no-store',
+                 headers: jsonHeaders(), cache: 'no-store',
                  body: JSON.stringify(payload || {})})
       .then(function (r) {
         return r.json().then(function (j) {
@@ -834,15 +879,19 @@ window.BTCore = {
       })
       .then(function (res) {
         var b = res.body || {};
+        var d = (b.detail && (b.detail.action || b.detail.refusal))
+                ? b.detail : b;
         LAST_CONTROL = {
           action: action, status: res.status,
-          /* THE SERVER'S OWN VERDICT. A 200 is not success: `ok` on the
-           * body is the readback, and a refusal carries its name. */
+          /* THE SERVER'S OWN VERDICT. A 200 is not success: `ok` on the body
+           * is the readback, and a refusal carries its name. 401 and 403
+           * mean the control session is missing or is a read credential. */
           ok: (res.status >= 200 && res.status < 300) ? (b.ok === true)
                                                      : false,
           refusal: (b.detail && (b.detail.refusal || b.detail.reason))
                    || b.refusal || null,
-          detail: (b.detail && b.detail.action) ? b.detail : b,
+          needs_sign_in: (res.status === 401 || res.status === 403),
+          detail: d,
           at: new Date().toISOString()
         };
         load();
@@ -863,7 +912,8 @@ window.BTCore = {
      * afterwards, and -- when it did not take -- why. A control panel that
      * collapses these into a tick is how a failed halt gets read as a
      * halt. */
-    var what = r.ok === true ? 'APPLIED'
+    var what = r.ok === true
+      ? (d.verdict ? 'APPLIED — ' + d.verdict : 'APPLIED')
       : r.ok === null ? 'SENT — awaiting the server readback'
       : (r.refusal ? 'REFUSED — ' + r.refusal : 'NOT APPLIED');
     var lines = '';
@@ -957,22 +1007,43 @@ window.BTCore = {
       fact('live_orders rows (funded lane history)',
         '<span class="mono">' + dash(st.live_orders_rows_all_time) +
         '</span>') +
-      fact('Bound account', acct.name
-        ? esc(acct.name) + ' <span class="pill pill-warn">RECORDED, NOT ' +
-          'APPROVED</span>'
+      /* THE ID IS THE IDENTITY. A display name is recorded for the audit
+       * and decides nothing: the account is resolved against the canonical
+       * registry by id, and the paused account is stopped by its own row. */
+      fact('Bound account', acct.account_id
+        ? '<span class="mono">' + esc(acct.account_id) + '</span>' +
+          (acct.name ? ' ' + esc(acct.name) : '') +
+          ' <span class="pill ' +
+          (acct.venue_class === 'TEST' ? 'pill-blue' : 'pill-warn') + '">' +
+          esc(acct.venue_class || 'VENUE CLASS UNKNOWN') + '</span>'
         : '<span class="pill pill-warn">NONE RECORDED</span>') +
+      /* AND WHETHER IT HAS BEEN AUTHORISED, which is a separate record. */
+      fact('Authorization', (st.authorization && st.authorization.venue_class)
+        ? '<span class="pill pill-good">' +
+          esc(st.authorization.venue_class) + ' VENUE AUTHORISED</span>' +
+          ' <span class="mono">' + esc(st.authorization.venue || '') +
+          '</span>'
+        : '<span class="pill pill-warn">NONE</span>') +
       fact('Enforced rail digest', '<span class="mono">' +
         dash(rails.limitsSha) + '</span>') +
       '</div>';
 
-    /* THE OPERATOR CREDENTIAL. In memory only, and said so. */
-    body += '<h3 class="h3">Operator token</h3><div class="optoken">' +
-      '<input id="optoken" type="password" autocomplete="off" ' +
-      'spellcheck="false" placeholder="operator token (held in memory ' +
-      'only)" value="' + esc(OPTOKEN) + '">' +
-      '<span class="why">A control action needs this token. It is kept in ' +
-      'this page’s memory, never stored, never put in a URL, and gone when ' +
-      'the tab closes. Reads need only the Command session.</span></div>';
+    /* THE OPERATOR SIGN-IN. No service credential, and none is stored. */
+    var signedIn = CONTROL_SESSION && CONTROL_SESSION.expires_at;
+    body += '<h3 class="h3">Operator session</h3><div class="optoken">' +
+      '<input id="oppass" type="password" autocomplete="current-password" ' +
+      'spellcheck="false" placeholder="operator password">' +
+      '<button type="button" id="btn-signin">Start control session</button>' +
+      '<span class="why">' +
+      (signedIn
+        ? 'Control session active until ' +
+          esc(epochIso(CONTROL_SESSION.expires_at)) + ', scope ' +
+          esc(CONTROL_SESSION.scope || 'control') + '. '
+        : 'Controls need an operator session. ') +
+      'The password is sent once to this origin\u2019s session endpoint; ' +
+      'the server returns a scoped, short-lived HttpOnly cookie that opens ' +
+      'the control actions and nothing else. This page holds no admin ' +
+      'token and no service credential, and stores nothing.</span></div>';
 
     body += controlResultHtml();
 
@@ -1043,9 +1114,11 @@ window.BTCore = {
    * re-rendered from scratch on each read and a listener bound to a removed
    * node is a control that silently stopped working. */
   function bindControls() {
-    var tok = document.getElementById('optoken');
-    if (tok) {
-      tok.addEventListener('input', function () { OPTOKEN = tok.value; });
+    var pw = document.getElementById('oppass');
+    if (pw) {
+      pw.addEventListener('keydown', function (e) {
+        if (e.key === 'Enter') { signInOperator(); }
+      });
     }
     function on(id, fn) {
       var el = document.getElementById(id);
@@ -1055,6 +1128,7 @@ window.BTCore = {
       var el = document.getElementById(id);
       return el ? el.value : '';
     }
+    on('btn-signin', signInOperator);
     on('btn-activate', function () {
       sendControl('activate', {by: 'DESK'});
     });

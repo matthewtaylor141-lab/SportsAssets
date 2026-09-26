@@ -2427,7 +2427,22 @@
    "this container has no egress to the production database or API host, which is why every production read in this session goes through a GitHub Actions runner",
    "the same audit is run against production's own DATABASE_URL on the runner, read-only, as part of the release readback -- see the step named `Capacity probe -- the isolation audit, against production` in .github/workflows/command-verify.yml"
   ],
-  "appeared_in_strategy_inventory_exposure_calibration_or_pnl": "NO, in any database: the probe wrote no external_valuations row (0 in every database audited), so no calibration sample and no valuation-driven consumer could see it; and the positions it wrote existed only in the four disposable databases below, none of which any deployed service reads"
+  "appeared_in_strategy_inventory_exposure_calibration_or_pnl": "NO -- and the reason is the POSITIONS, not the valuations. Positions and fills feed exposure and per-lane P&L DIRECTLY: a zero external_valuations count would not have established anything about either, because no consumer of exposure or P&L reads that table on the way to a position. What establishes it is this: zero IDENTIFIED PROBE POSITIONS in production and zero dependent records of any kind -- 0 orders, 0 fills, 0 decisions, 0 outcome rows -- read from production itself. The zero external_valuations count is reported beside them as one more consumer that saw nothing, not as the proof.",
+  "why_the_valuation_count_is_not_the_proof": "external_valuations is the CALIBRATION sample's input. Exposure is measured from open positions, and per-lane P&L from fills, so a probe position with its orders and fills would have entered both with no valuation row in sight. The affected-record enumeration is therefore keyed on positions and walks DOWN to their dependents.",
+  "the_production_evidence": {
+   "identified_probe_positions": 0,
+   "dependent_records": {
+    "orders": 0,
+    "fills": 0,
+    "decisions": 0,
+    "outcomes": 0
+   },
+   "external_valuations_rows": 0,
+   "read": "from production itself, read-only, via GET /api/admin/capacity-probe-audit on the deployed API",
+   "identified_how": "by the fingerprints the harness writes -- condition id shape, slug prefix, payout event -- never by experiment id",
+   "positions_in_production_total_at_the_audit": 508
+  },
+  "where_the_records_were": "the four disposable local databases enumerated below, inside this session's container. No deployed service reads any of them."
  },
  "correction": {
   "what_was_wrong": "the writer phases stamped EXT_PINNACLE_DEVIG_V1_SHADOW -- the autonomous strategy's own experiment id -- on every synthetic plan, so 2,080 of the 2,249 probe positions sat in the book that means real decisions",
