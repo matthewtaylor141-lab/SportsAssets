@@ -55,7 +55,10 @@ R_NO_TEAMS = "EVENT_DOES_NOT_NAME_TWO_TEAMS"
 
 REFUSALS = (R_NO_CONTRACT, R_AMBIGUOUS, R_CLOSED, R_COLLIDE, R_SEGMENT,
              "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE",
-            R_NO_TEAMS, "VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED")
+            R_NO_TEAMS, "VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED",
+            "VENUE_CONTRACT_KIND_IS_NOT_A_CONFIRMED_MONEYLINE",
+            "VENUE_SLUG_DOES_NOT_DECOMPOSE_INTO_EVENT_AND_SIDE",
+            "VENUE_EVENT_IS_NOT_A_TWO_PARTICIPANT_MATCH")
 
 #: Tokens that mark a venue title as covering only PART of a game. The
 #: external valuation prices full-game h2h only, so a segment contract is
@@ -262,50 +265,148 @@ def _norm_token(s) -> str:
     return "".join(ch for ch in str(s or "").lower() if ch.isalnum())
 
 
-def period_of_venue_slug(market_slug, *, side=None,
-                         event_slug=None) -> dict:
+#: KINDS CONFIRMED to be the venue's money-line family, from its own slug
+#: grammar. `aqc` is deliberately absent: it was observed on NHL
+#: conference futures (`aqc-nhl-eastconf-2027-05-19-finalq-bos`), which is
+#: not a match money line at all.
+MONEYLINE_KINDS = ("aec", "atc")
+
+#: How many contracts a two-participant match may publish under one event:
+#: two (a binary team-win pair) or three (home / draw / away). A futures
+#: market publishes one per entrant, which is how a trophy is told from a
+#: fixture WITHOUT reading any name.
+MATCH_SIBLING_COUNTS = (2, 3)
+
+R_PERIOD_KIND = "VENUE_CONTRACT_KIND_IS_NOT_A_CONFIRMED_MONEYLINE"
+R_PERIOD_SHAPE = "VENUE_SLUG_DOES_NOT_DECOMPOSE_INTO_EVENT_AND_SIDE"
+R_PERIOD_NOT_A_MATCH = "VENUE_EVENT_IS_NOT_A_TWO_PARTICIPANT_MATCH"
+
+
+def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
+                         kind=None, sibling_markets=None) -> dict:
     """FULL_MATCH, or a named refusal saying what was not established.
 
-    `side` is the outcome the resolver matched for this contract -- the
-    only token allowed to follow the date. `event_slug` is corroboration
-    when the catalogue supplies it; it is reported, never required, so a
-    null column cannot silently refuse a fixture that is in fact whole.
+    WHY THE TOKEN-SHAPE RULE WAS NOT ENOUGH, and this is the correction.
+    The first version admitted any slug whose trailing date was followed by
+    nothing or by the matched side. That is a NECESSARY condition and
+    nowhere near sufficient: it admitted
+
+        aqc-nhl-eastconf-2027-05-19      conference futures
+        aec-nhl-stanley-2027-06-01       a trophy, not a fixture
+        zzz-mlb-lad-sf-2026-09-25        an unsupported kind prefix
+
+    all of which have an empty residual. Requiring "a supported prefix plus
+    three middle tokens" would have papered over it with a second guess --
+    a token count is not evidence about a market.
+
+    So the period is now established from the venue's OWN STRUCTURED
+    METADATA, three facts that all have to hold:
+
+      1 KIND. `us_premap.kind` must be a CONFIRMED money-line kind. `aqc`
+        is not one, on the evidence of the futures slug above.
+      2 DECOMPOSITION. the market slug must be exactly
+        `kind-event_slug` or `kind-event_slug-side_norm`, using the
+        catalogue's own `event_slug` and `side_norm` -- not a parse of our
+        own. An inning-six contract carries `-i6-` between them and fails
+        this outright, whatever its title says.
+      3 IT IS A MATCH. the event must publish 2 or 3 sibling contracts. A
+        conference winner publishes one per entrant, so a trophy is told
+        from a fixture by COUNTING, never by reading names.
+
+    `side`/`event_slug`/`kind`/`sibling_markets` all come from the
+    catalogue. Any of them missing leaves the period NOT ESTABLISHED --
+    fail-closed, because an absent field is not a full match.
     """
     slug = str(market_slug or "").lower()
     out = {"market_slug": slug, "side": side, "event_slug": event_slug,
+           "kind": kind, "sibling_markets": sibling_markets,
            "period": None, "residual": None, "refusals": [],
-           "basis": ("EVERYTHING_AFTER_THE_TRAILING_DATE_MUST_BE_EMPTY_"
-                     "OR_EXACTLY_THE_MATCHED_SIDE"),
-           "vocabulary_free": True}
+           "basis": ("VENUE_STRUCTURED_METADATA_KIND_PLUS_EXACT_EVENT_AND_"
+                     "SIDE_DECOMPOSITION_PLUS_A_TWO_PARTICIPANT_"
+                     "SIBLING_COUNT"),
+           "moneyline_kinds": list(MONEYLINE_KINDS),
+           "match_sibling_counts": list(MATCH_SIBLING_COUNTS),
+           "a_token_count_is_not_evidence": True}
+
+    # ── 0 · the trailing date, which is still necessary ──────────────
     m = _TRAILING_DATE.search(slug)
     if not m:
         out["refusals"].append(R_PERIOD_UNKNOWN)
         out["why"] = ("the venue slug %r carries no trailing YYYY-MM-DD, so "
-                      "there is no boundary after which a period token "
-                      "could be read. Nothing about the period is "
-                      "established" % slug)
+                      "it does not even have the shape of a dated fixture"
+                      % slug)
         return out
     out["slug_date"] = m.group(1)
-    residual = (m.group(2) or "").strip("-")
-    out["residual"] = residual
-    if not residual:
-        out["period"] = FULL_MATCH
-        out["why"] = ("nothing follows the date, so this slug names the "
-                      "whole dated fixture. On the `aec` family both "
-                      "sides share it and the side is the intent")
+    out["residual"] = (m.group(2) or "").strip("-")
+
+    # ── 1 · the kind, from the catalogue ─────────────────────────────
+    k = str(kind or "").strip().lower()
+    if not k:
+        out["refusals"].append(R_PERIOD_UNKNOWN)
+        out["why"] = ("the catalogue supplied no `kind` for this contract, "
+                      "so which market family it belongs to is not "
+                      "established")
         return out
-    if side is not None and _norm_token(residual) == _norm_token(side):
-        out["period"] = FULL_MATCH
-        out["why"] = ("the only token after the date is the matched side "
-                      "%r, which selects an outcome of the whole fixture "
-                      "and not a part of it" % (side,))
+    out["kind"] = k
+    if k not in MONEYLINE_KINDS:
+        out["refusals"].append(R_PERIOD_KIND)
+        out["why"] = ("the venue's own kind for this contract is %r, which "
+                      "is not a confirmed money-line kind (%s). `aqc` was "
+                      "observed on conference futures"
+                      % (k, ", ".join(MONEYLINE_KINDS)))
         return out
-    out["refusals"].append(R_PERIOD_UNKNOWN)
+
+    # ── 2 · the decomposition, against the catalogue's own fields ────
+    ev = str(event_slug or "").strip().lower()
+    if not ev:
+        out["refusals"].append(R_PERIOD_UNKNOWN)
+        out["why"] = ("the catalogue supplied no `event_slug`, so the "
+                      "market slug cannot be decomposed into an event and "
+                      "a side, and anything between them would go unseen")
+        return out
+    accepted = ["%s-%s" % (k, ev)]
+    if side:
+        accepted.append("%s-%s-%s" % (k, ev, str(side).strip().lower()))
+    out["accepted_decompositions"] = accepted
+    if slug not in accepted:
+        out["refusals"].append(R_PERIOD_SHAPE)
+        out["why"] = (
+            "the market slug is %r, and the catalogue's own kind, event and "
+            "side compose to %s. Whatever sits between them -- a half, an "
+            "inning, a quarter, a leg -- is a market this lane has not "
+            "established, and a full-match probability may not be priced "
+            "against it" % (slug, " or ".join(repr(a) for a in accepted)))
+        return out
+
+    # ── 3 · a match, not a trophy ────────────────────────────────────
+    if sibling_markets is None:
+        out["refusals"].append(R_PERIOD_UNKNOWN)
+        out["why"] = ("the number of contracts the venue publishes for "
+                      "this event was not counted, so whether it is a "
+                      "two-participant match or a field of entrants is "
+                      "not established")
+        return out
+    try:
+        n = int(sibling_markets)
+    except (TypeError, ValueError):
+        n = -1
+    out["sibling_markets"] = n
+    if n not in MATCH_SIBLING_COUNTS:
+        out["refusals"].append(R_PERIOD_NOT_A_MATCH)
+        out["why"] = (
+            "the venue publishes %d contracts under this event. A "
+            "two-participant match publishes %s; a trophy or a conference "
+            "winner publishes one per entrant, and a full-match h2h "
+            "probability does not price that"
+            % (n, " or ".join(str(c) for c in MATCH_SIBLING_COUNTS)))
+        return out
+
+    out["period"] = FULL_MATCH
     out["why"] = (
-        "%r follows the date and it is not the matched side (%r). That is "
-        "either a period, a segment or something else this lane has not "
-        "established, and a full-match probability may not be priced "
-        "against it" % (residual, side))
+        "the venue's own kind is %r, its market slug decomposes exactly "
+        "into its event %r%s with nothing between them, and it publishes "
+        "%d contracts for that event -- a two-participant match"
+        % (k, ev, (" and side %r" % side) if side else "", n))
     return out
 
 

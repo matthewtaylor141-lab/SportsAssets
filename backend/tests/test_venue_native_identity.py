@@ -26,6 +26,26 @@ from sportsassets import bettor_venue_mapping as vmap
 from sportsassets.workers import ext_pinnacle_loop as loop
 
 
+# THE CATALOGUE ROW THE PERIOD CHECK READS.
+#
+# `resolve_venue_identity` now asks `us_premap` for the venue's own kind,
+# event and side, and for how many contracts it publishes for that event.
+# A connection stub with no `fetchrow` makes that read raise, which
+# correctly refuses the identity -- and would leave these tests asserting
+# nothing about the payout-orientation rule they exist for. So the stub
+# answers with the catalogue's own fields, which is what production reads.
+class _CatalogueConn:
+    def __init__(self, *, kind="aec", event_slug=None, side_norm=None,
+                 siblings=2):
+        self._row = {"kind": kind, "event_slug": event_slug,
+                     "side_norm": side_norm, "sibling_markets": siblings}
+
+    async def fetchrow(self, sql, *args):
+        return self._row
+
+
+
+
 def test_the_venue_read_takes_a_venue_native_slug():
     sig = inspect.signature(loop.venue_quote)
     assert "us_slug" in sig.parameters, (
@@ -99,7 +119,7 @@ def test_a_short_intent_is_a_VALID_resolved_exposure():
     _pm.resolve = _fake_resolve
     try:
         out = asyncio.run(loop.resolve_venue_identity(
-            _Conn(), market_row={"slug": "mlb-chc-mia-2026-09-24",
+            _CatalogueConn(event_slug="mlb-chc-mia-2026-09-24", side_norm="cubs"), market_row={"slug": "mlb-chc-mia-2026-09-24",
                                  "condition_id": "0xabc",
                                  "title": "Will the Cubs beat the Marlins?",
                                  "event_title": "Chicago Cubs vs Miami Marlins"},
@@ -143,7 +163,7 @@ def test_an_unconsumable_intent_still_refuses_by_name():
     _pm.resolve = _fake_resolve
     try:
         out = asyncio.run(loop.resolve_venue_identity(
-            _Conn(), market_row={"slug": "s", "condition_id": "0x1",
+            _CatalogueConn(event_slug="mlb-chc-mia-2026-09-24", side_norm="cubs"), market_row={"slug": "s", "condition_id": "0x1",
                                  "title": "t", "event_title": "e"},
             priced_outcome="Chicago Cubs"))
     finally:
@@ -175,7 +195,7 @@ def test_a_long_intent_pays_on_the_priced_outcome():
     _pm.resolve = _fake_resolve
     try:
         out = asyncio.run(loop.resolve_venue_identity(
-            _Conn(), market_row={"slug": "s", "condition_id": "0x1",
+            _CatalogueConn(event_slug="mlb-chc-mia-2026-09-24", side_norm="cubs"), market_row={"slug": "s", "condition_id": "0x1",
                                  "title": "t", "event_title": "e"},
             priced_outcome="Chicago Cubs"))
     finally:

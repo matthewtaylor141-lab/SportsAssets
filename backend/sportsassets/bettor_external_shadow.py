@@ -612,7 +612,14 @@ STAGES = (
         # WHICH PERIOD THE CONTRACT PAYS ON IS PART OF ITS IDENTITY. A
         # full-match probability priced against an inning-six payout is
         # the wrong contract, not a stale one.
-        "VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED")),
+        "VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED",
+        # THE THREE SPECIFIC WAYS IT IS NOT ESTABLISHED, each with its own
+        # remedy: an unsupported market family, a slug carrying something
+        # between its event and its side, and a field of entrants rather
+        # than two participants.
+        "VENUE_CONTRACT_KIND_IS_NOT_A_CONFIRMED_MONEYLINE",
+        "VENUE_SLUG_DOES_NOT_DECOMPOSE_INTO_EVENT_AND_SIDE",
+        "VENUE_EVENT_IS_NOT_A_TWO_PARTICIPANT_MATCH")),
     ("4_SETTLEMENT_SCOPE", (
         "VOID_ABANDONMENT_RULE_NOT_ESTABLISHED",
         "OVERTIME_RULE_NOT_ESTABLISHED",

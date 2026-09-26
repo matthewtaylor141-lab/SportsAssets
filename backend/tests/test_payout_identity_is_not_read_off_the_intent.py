@@ -48,6 +48,25 @@ LONG = "ORDER_INTENT_BUY_LONG"
 SHORT = "ORDER_INTENT_BUY_SHORT"
 
 
+
+# THE CATALOGUE ROW THE PERIOD CHECK READS.
+#
+# `resolve_venue_identity` now asks `us_premap` for the venue's own kind,
+# event and side, and for how many contracts it publishes for that event.
+# A `_Conn` with no `fetchrow` makes that read raise, which correctly
+# refuses the identity -- and would make these tests assert nothing about
+# the payout-orientation rule they exist for. So the stub answers with the
+# catalogue's own fields, which is what production reads.
+class _CatalogueConn:
+    def __init__(self, *, kind="aec", event_slug=None, side_norm=None,
+                 siblings=2):
+        self._row = {"kind": kind, "event_slug": event_slug,
+                     "side_norm": side_norm,
+                     "sibling_markets": siblings}
+
+    async def fetchrow(self, sql, *args):
+        return self._row
+
 class _Conn:
     pass
 
@@ -84,7 +103,7 @@ def _identity(*, intent, side_norm, requested):
         intent=intent, side_norm=side_norm)
     try:
         return asyncio.run(loop.resolve_venue_identity(
-            _Conn(),
+            _CatalogueConn(event_slug="mlb-chc-mia-2026-09-24", side_norm="cubs"),
             market_row={"slug": "mlb-chc-mia-2026-09-24",
                         "condition_id": "0xabc",
                         "title": "Will the Cubs beat the Marlins?",

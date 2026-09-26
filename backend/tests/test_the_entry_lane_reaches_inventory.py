@@ -110,6 +110,48 @@ LADDER = {
 
 
 async def _seed(conn):
+    # ── THE VENUE'S CATALOGUE, because the PERIOD CHECK READS IT ──────
+    #
+    # `us_premap` is created by the copy lane's own bootstrap rather than
+    # by a migration, which is why 031 and 055 fail on a fresh database.
+    # The entry lane's period check now reads this table for the
+    # catalogue's own kind, event and side, and for how many contracts the
+    # venue publishes for the event -- so a test database without it
+    # refuses every identity, correctly and unhelpfully.
+    #
+    # THE DDL IS THE AUTHORITATIVE ONE, copied from
+    # `workers/premap.py:ensure_schema`, and only the columns the period
+    # query actually selects are relied on. Two rows are inserted, because
+    # a two-participant match publishes two contracts and the sibling
+    # count is what tells a fixture from a trophy.
+    await conn.execute("""
+        CREATE TABLE IF NOT EXISTS us_premap (
+            identifier text PRIMARY KEY,
+            event_slug text,
+            event_title text,
+            market_slug text,
+            question text,
+            kind text,
+            line text,
+            side_norm text,
+            event_keys text[],
+            intent text,
+            signed text,
+            updated_at timestamptz NOT NULL DEFAULT now()
+        )
+    """)
+    await conn.execute("DELETE FROM us_premap WHERE event_slug = $1",
+                       "mlb-sea-hou-2026-09-24")
+    for side in ("hou", "sea"):
+        await conn.execute(
+            "INSERT INTO us_premap (identifier, event_slug, market_slug, "
+            "kind, side_norm, question, intent) "
+            "VALUES ($1,$2,$3,'aec',$4,$5,'ORDER_INTENT_BUY_LONG') "
+            "ON CONFLICT (identifier) DO NOTHING",
+            "aec-mlb-sea-hou-2026-09-24-%s" % side,
+            "mlb-sea-hou-2026-09-24",
+            "aec-mlb-sea-hou-2026-09-24-%s" % side,
+            side, "Will %s win?" % side)
     await conn.execute(open("migrations/103_external_valuations.sql").read())
     await conn.execute(open(
         "migrations/105_external_valuations_one_per_observation.sql").read())

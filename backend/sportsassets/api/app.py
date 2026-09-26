@@ -7753,6 +7753,15 @@ async def api_shadow_mapgap(sport: str = Query("soccer"),
             br = ex.get("bridge") or {}
             rec.setdefault("per_side", {})[who[:40]] = {
                 "step": step,
+                # THE RESOLVER'S OWN DETAIL, which this route dropped. At
+                # the `no_side_match` step it prints the exact
+                # (side_norm, line) pairs the venue's rows carry against
+                # the outcome we asked for -- which is the whole question:
+                # whether these are the same side spelled differently, or
+                # not the same side at all. Without it, `no_side_match`
+                # was a count with no content.
+                "detail": str(ex.get("detail") or "")[:400],
+                "family": ex.get("family"),
                 "keys_built": ex.get("keys"),
                 "venue_rows_found": ex.get("rows"),
                 "market_slug": ex.get("market_slug"),
@@ -7772,8 +7781,57 @@ async def api_shadow_mapgap(sport: str = Query("soccer"),
                     br.get("matched_question") or "")[:120],
             }
             out["steps"][step] = out["steps"].get(step, 0) + 1
+        # ── THE VENUE'S OWN ROWS, FOR THE EVENT THE KEYS REACHED ─────
+        #
+        # `no_side_match` says our outcome matched none of the venue's
+        # sides. It does NOT say they are the same sides spelled
+        # differently -- an earlier census found candidates labelled
+        # ('1 50', '1.50'), which carry no participant name at all and
+        # could never match a named pick however it were normalised.
+        #
+        # So the rows are shown: the venue's own competition token, market
+        # kind, side spelling, question text and how many contracts it
+        # publishes for that event. Competition, participants, market type
+        # and payout event, from the venue, before any normalisation is
+        # touched.
+        async with pool.acquire() as conn:
+            try:
+                vr = await conn.fetch(
+                    """
+                    SELECT p.market_slug, p.event_slug, p.kind, p.side_norm,
+                           left(coalesce(p.question, ''), 130) AS question,
+                           p.team_league, p.sports_type,
+                           (SELECT count(DISTINCT q.market_slug)
+                              FROM us_premap q
+                             WHERE q.event_slug = p.event_slug)
+                             AS siblings_for_event
+                      FROM us_premap p
+                     WHERE p.event_slug IN (
+                             SELECT DISTINCT event_slug FROM us_premap
+                              WHERE market_slug LIKE '%' || $1 || '%'
+                              LIMIT 3)
+                     ORDER BY p.event_slug, p.market_slug
+                     LIMIT 24
+                    """,
+                    str(r["slug"] or "").split("-")[0])
+            except Exception as exc:                          # noqa: BLE001
+                vr = []
+                rec["venue_rows_error"] = type(exc).__name__
+        rec["venue_rows"] = [
+            {"market_slug": x["market_slug"], "event_slug": x["event_slug"],
+             "kind": x["kind"], "side_norm": x["side_norm"],
+             "question": x["question"], "league": x["team_league"],
+             "sports_type": x["sports_type"],
+             "siblings_for_event": x["siblings_for_event"]}
+            for x in vr]
         out["fixtures"].append(rec)
     out["fixtures_read"] = len(rows)
+    out["reading"] = (
+        "`detail` at the no_side_match step holds the venue's own "
+        "(side_norm, line) pairs against the outcome asked for. Compare it "
+        "with `venue_rows`: if the venue names no participant at all, these "
+        "are not equivalent sides with different spellings and no "
+        "normalisation change applies")
     return out
 
 

@@ -288,6 +288,34 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
     try:
         await conn.execute(
             open("migrations/103_external_valuations.sql").read())
+        # THE VENUE'S CATALOGUE, which the period check reads for the
+        # kind, the event, the side and the sibling count. `us_premap`
+        # is created by the copy lane's bootstrap, not by a migration,
+        # so a test database has to stand it up. The DDL is the
+        # authoritative one from `workers/premap.py:ensure_schema`.
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS us_premap (
+                identifier text PRIMARY KEY, event_slug text,
+                event_title text, market_slug text, question text,
+                kind text, line text, side_norm text,
+                event_keys text[], intent text, signed text,
+                updated_at timestamptz NOT NULL DEFAULT now())
+        """)
+        await conn.execute(
+            "DELETE FROM us_premap WHERE event_slug = $1",
+            "soccer-mci-mun-2026-09-24")
+        for _side in ("city", "united"):
+            await conn.execute(
+                "INSERT INTO us_premap (identifier, event_slug, "
+                "market_slug, kind, side_norm, question, intent) "
+                "VALUES ($1,$2,$3,'aec',$4,$5,"
+                "'ORDER_INTENT_BUY_LONG') "
+                "ON CONFLICT (identifier) DO NOTHING",
+                "aec-soccer-mci-mun-2026-09-24-%s" % _side,
+                "soccer-mci-mun-2026-09-24",
+                "aec-soccer-mci-mun-2026-09-24-%s" % _side,
+                _side, "Will %s win?" % _side)
+
         # 105 TOO. Without it there is no uniqueness, so the duplicate
         # test below would pass against an unmigrated database and prove
         # nothing.

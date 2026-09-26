@@ -1,0 +1,60 @@
+{
+  "_what_this_is": "The venue's `marketData.transactTime` field, in every form this repository has actually captured from it. Held as a fixture because the entry lane parsed this field with float(), which refuses ALL of them, and recorded VENUE_CLOCK_UNPARSEABLE on every book read in production on build 51f20e7.",
+  "field_path": "marketData.transactTime",
+  "json_type": "string",
+  "python_type": "str",
+  "documented_format": "ISO-8601, UTC, bare trailing Z, VARIABLE fractional-second precision from 0 to 9 digits",
+  "units": "the fraction is sub-second; the parsed result is seconds since the epoch",
+  "_why_float_could_never_work": "float('2026-09-21T18:20:25.743291447Z') raises ValueError. So does float() on every other form below. The old parse was `vt = float(venue_ts)` followed by a ms-or-s heuristic (`vt/1000.0 if vt > 1e11`), which is the shape of a parser written for a NUMERIC epoch field. This field is not numeric and never was.",
+  "_why_fromisoformat_alone_is_not_enough": "CORRECTED. An earlier draft of this fixture said 3.11's datetime.fromisoformat rejects a bare Z and nine fractional digits. Measured on this interpreter, it ACCEPTS all five forms below -- that was true of <=3.10 and is not true here. The defect is narrower and not less real: the field is a STRING and the lane called float() on it. `bettor_market_stream._parse_ts` is still the parser to reuse, because it also refuses a NAIVE stamp rather than silently reading it as UTC, which fromisoformat would happily return as a naive datetime.",
+  "supported_parser": "sportsassets.bettor_market_stream._parse_ts",
+  "observed_forms": [
+    {
+      "value": "2026-09-21T18:20:25.743291447Z",
+      "fractional_digits": 9,
+      "note": "NANOSECOND precision. This is the form that makes the field unmistakably a string: float() raises on it, as it does on all of them.",
+      "expected_epoch_s": 1790014825.743291
+    },
+    {
+      "value": "2026-09-20T11:59:59.900000Z",
+      "fractional_digits": 6,
+      "note": "microsecond precision",
+      "expected_epoch_s": 1789905599.9
+    },
+    {
+      "value": "2026-09-21T00:00:00Z",
+      "fractional_digits": 0,
+      "note": "no fraction at all",
+      "expected_epoch_s": 1789948800.0
+    },
+    {
+      "value": "2026-09-19T21:42:26Z",
+      "fractional_digits": 0,
+      "expected_epoch_s": 1789854146.0
+    },
+    {
+      "value": "2026-09-10T14:05:00Z",
+      "fractional_digits": 0,
+      "expected_epoch_s": 1789049100.0
+    }
+  ],
+  "must_stay_unparsed": [
+    {
+      "value": "",
+      "why": "empty"
+    },
+    {
+      "value": "NOT_IDENTIFIED",
+      "why": "the snapshot's own absent-field sentinel"
+    },
+    {
+      "value": "2026-09-21T18:20:25.743291447",
+      "why": "NAIVE -- no zone. Reading it as UTC would be an assumption, and reading it as local time would shift every age by the host's offset. The supported parser refuses it, and the verdict stays UNKNOWN."
+    },
+    {
+      "value": "not a timestamp",
+      "why": "not a timestamp"
+    }
+  ],
+  "_what_this_fixture_does_not_establish": "That these are the only forms the venue can send. They are the forms captured so far. A value the supported parser refuses still yields VENUE_CLOCK_UNPARSEABLE -- with the raw value and its type now carried on the row, so the next unknown form names itself instead of disappearing into the same bucket."
+}

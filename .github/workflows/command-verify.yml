@@ -3973,12 +3973,21 @@ jobs:
                  "                  vwap " + n($E.vwap)
                    + "  submitted_limit " + n($E.submitted_limit)
                    + "  economics_use " + n($E.economics_use),
+                 "   4b CATALOGUE  kind " + n(.period_evidence.kind)
+                   + "  event " + n(.period_evidence.event_slug)
+                   + "  side " + n(.period_evidence.side)
+                   + "  siblings " + n(.period_evidence.sibling_markets),
                  "   7 FRESHNESS    fresh " + n($R.freshness_evidence.fresh)
                    + "  pinnacle " + n($R.freshness_evidence.pinnacle_age_s)
                    + "/" + n($R.freshness_evidence.pinnacle_limit_s)
                    + "  venue " + n($R.freshness_evidence.venue_age_s)
                    + "/" + n($R.freshness_evidence.venue_limit_s),
                  "                  venue_clock " + n($R.freshness_evidence.venue_age_basis),
+                 "   7b RAW CLOCK   path " + n($R.freshness_evidence.venue_clock.field_path)
+                   + "  type " + n($R.freshness_evidence.venue_clock.raw_type),
+                 "                  raw " + n($R.freshness_evidence.venue_clock.raw),
+                 "                  parser " + n($R.freshness_evidence.venue_clock.parser)
+                   + "  parsed_epoch " + n($R.freshness_evidence.venue_clock.parsed_epoch_s),
                  "                  lag provider " + n($R.freshness_evidence.pinnacle_provider_lag_s)
                    + "  ours " + n($R.freshness_evidence.pinnacle_our_processing_s),
                  "                  why " + (n($R.freshness_evidence.why) | .[0:110]),
@@ -4033,7 +4042,16 @@ jobs:
                   "      bridge " + n(.value.bridge_reason)
                     + "  would_resolve " + n(.value.bridge_would_resolve),
                   "      resolved_slug " + n(.value.market_slug)
-                    + "  intent " + n(.value.intent)))' \
+                    + "  intent " + n(.value.intent),
+                  "      DETAIL " + (n(.value.detail) | .[0:240])),
+              "   -- the VENUE'"'"'S OWN ROWS for this event --",
+              ((.venue_rows // [])[]
+                | "      " + n(.market_slug)
+                  + "  kind " + n(.kind)
+                  + "  side_norm " + n(.side_norm)
+                  + "  siblings " + n(.siblings_for_event)
+                  + "  lg " + n(.league)
+                  + "  | " + (n(.question) | .[0:80])))' \
             /tmp/mg.json 2>&1 | head -140 | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
           say "  THE STEP NAME IS THE REMEDY. no_key_intersection with"

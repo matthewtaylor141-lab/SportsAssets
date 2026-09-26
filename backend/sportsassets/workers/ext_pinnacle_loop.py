@@ -50,6 +50,12 @@ from .. import bettor_research_shadow as rsh
 from .. import bettor_external_shadow as ext
 from .. import bettor_fixture_metadata as fmeta_mod
 from .. import bettor_fixture_store as fstore
+# THE SUPPORTED PARSER FOR THIS VENUE'S CLOCK, imported rather than
+# rewritten. `_parse_ts` handles the bare `Z` and the venue's variable
+# fractional precision (up to nanoseconds), and refuses a naive stamp.
+# A second implementation here is exactly how the first one came to be
+# `float()`, which refused every real value the venue sends.
+from ..bettor_market_stream import _parse_ts as _stream_parse_ts
 from .. import bettor_pinnacle_devig as devig
 from .. import bettor_venue_mapping as vmap
 from .. import bettor_venue_settlement as vset
@@ -744,13 +750,31 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
     # of the comparison agreed on a period neither had read. The venue's
     # board carries `...-2026-09-25-i6-draw` (inning six) inside the
     # money-line family, so the exposure is real.
+    # THE CATALOGUE'S OWN FIELDS, read for this contract. `premap.resolve`
+    # does not return the kind or the sibling count, so they are read here
+    # from the same table the resolver matched in -- one bounded query, no
+    # second resolver.
+    pmeta = await period_metadata(conn, out["us_market_slug"])
     period = vmap.period_of_venue_slug(
-        out["us_market_slug"], side=got.get("outcome"),
-        event_slug=got.get("event_slug"))
+        out["us_market_slug"],
+        # The catalogue's `side_norm` is preferred over the resolver's
+        # returned outcome: the decomposition has to be checked against
+        # the venue's own spelling, not ours.
+        side=pmeta.get("side_norm") or got.get("outcome"),
+        event_slug=pmeta.get("event_slug"),
+        kind=pmeta.get("kind"),
+        sibling_markets=pmeta.get("sibling_markets"))
+    period["catalogue"] = pmeta
     out["period_evidence"] = period
     if period.get("period") != vmap.FULL_MATCH:
-        out["refusal"] = vmap.R_PERIOD_UNKNOWN
+        # THE SPECIFIC REASON, not one blanket unknown. An unsupported kind,
+        # a slug that will not decompose, and a field of entrants have three
+        # different remedies and the census has to be able to tell them
+        # apart.
+        out["refusal"] = ((period.get("refusals") or [None])[0]
+                          or vmap.R_PERIOD_UNKNOWN)
         out["why"] = period.get("why")
+        out["period_evidence"] = period
         return out
     out["period"] = "FULL_GAME"
     out["period_basis"] = period["basis"]
@@ -803,6 +827,45 @@ EVENT_ROW_SQL = """
     SELECT event_slug, team_league, sports_type, game_start, kind, side_norm
       FROM us_premap WHERE market_slug = $1 LIMIT 1
 """
+
+#: THE STRUCTURED METADATA THE PERIOD CHECK NEEDS, in one query: the
+#: catalogue's own kind, event and side for this contract, plus HOW MANY
+#: contracts it publishes for that event. The count is what separates a
+#: two-participant match (2 or 3) from a trophy or a conference winner
+#: (one per entrant) -- by counting, never by reading a name.
+PERIOD_METADATA_SQL = """
+    SELECT p1.kind, p1.event_slug, p1.side_norm,
+           (SELECT count(DISTINCT p2.market_slug)
+              FROM us_premap p2
+             WHERE p2.event_slug = p1.event_slug) AS sibling_markets
+      FROM us_premap p1
+     WHERE p1.market_slug = $1
+     LIMIT 1
+"""
+
+
+async def period_metadata(conn, us_market_slug: str) -> dict:
+    """The catalogue's own kind, event, side and sibling count, or empties.
+
+    A read that FAILS leaves every field None, and the period check then
+    refuses by name. Returning partial defaults would be the silent
+    fallback this lane exists to avoid.
+    """
+    out = {"source": "us_premap", "read": False, "kind": None,
+           "event_slug": None, "side_norm": None, "sibling_markets": None}
+    try:
+        row = await conn.fetchrow(PERIOD_METADATA_SQL, us_market_slug)
+    except Exception as exc:                                   # noqa: BLE001
+        out["error"] = type(exc).__name__
+        return out
+    if row is None:
+        out["why"] = ("the venue's catalogue has no row for this market "
+                      "slug, so none of its structured fields exist")
+        return out
+    out.update(read=True, kind=row["kind"], event_slug=row["event_slug"],
+               side_norm=row["side_norm"],
+               sibling_markets=row["sibling_markets"])
+    return out
 
 
 async def venue_settlement_evidence(conn, us_market_slug: str) -> dict:
@@ -943,20 +1006,58 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
     # venue stating when this book was true; our read time is only when we
     # asked. Falling back to our read time would make every quote look
     # fresh by construction, so the fallback is NAMED.
+    # THE DEFECT THIS FIXES, measured in production on build 51f20e7.
+    #
+    # `float(venue_ts)` was the whole parse. The venue does not send a
+    # number: `marketData.transactTime` is an ISO-8601 UTC string with a
+    # bare `Z` and VARIABLE fractional precision, up to nanoseconds --
+    # "2026-09-21T18:20:25.743291447Z". `float()` raises on it, so every
+    # book read recorded VENUE_CLOCK_UNPARSEABLE, `venue_age_s` stayed
+    # unmeasured, and `_entry_freshness` returned `fresh: null`. That is
+    # UNKNOWN, and UNKNOWN blocks -- so nine positive-edge candidates were
+    # refused for a clock we never read rather than a book that was stale.
+    #
+    # `datetime.fromisoformat` in 3.11 ALSO rejects nine fractional
+    # digits, which is why the repo already has a parser for this exact
+    # shape: `bettor_market_stream._parse_ts` strips the Z, truncates the
+    # fraction to six digits and refuses a naive stamp. That is the
+    # supported parser for this venue's clock and it is reused here rather
+    # than reimplemented -- the second implementation is how the first one
+    # came to be `float()`.
+    #
+    # THE RAW VALUE TRAVELS WITH THE VERDICT. Its type and its repr are
+    # carried out so a future mismatch names itself instead of collapsing
+    # into "unparseable" again.
     venue_ts = snap.get("TRANSACT_TIME")
     age, age_basis, vt = None, "VENUE_CLOCK_NOT_PROVIDED", None
-    try:
-        if venue_ts not in (None, bs.NOT_IDENTIFIED):
-            vt = float(venue_ts)
-            vt = vt / 1000.0 if vt > 1e11 else vt      # ms or s
+    clock = {"field_path": "marketData.transactTime",
+             "raw": (None if venue_ts is None else str(venue_ts)[:64]),
+             "raw_type": type(venue_ts).__name__,
+             "parser": "bettor_market_stream._parse_ts",
+             "parser_accepts": ("ISO_8601_UTC_WITH_A_BARE_Z_AND_UP_TO_"
+                                "NANOSECOND_FRACTIONAL_SECONDS")}
+    if venue_ts not in (None, bs.NOT_IDENTIFIED):
+        dt = _stream_parse_ts(venue_ts)
+        if dt is None:
+            age, age_basis, vt = None, "VENUE_CLOCK_UNPARSEABLE", None
+            clock["why"] = ("the venue sent a value the supported parser "
+                            "refuses. It is NOT absent, and it is NOT an "
+                            "observed stale age: the age is UNMEASURED")
+        else:
+            vt = dt.timestamp()
             age = float(now) - vt
             age_basis = "VENUE_TRANSACT_TIME"
-    except (TypeError, ValueError):
-        age, age_basis, vt = None, "VENUE_CLOCK_UNPARSEABLE", None
+    else:
+        clock["why"] = ("the venue supplied no transactTime, so our read "
+                        "clock is the only one -- and using it would make "
+                        "every book fresh by construction")
+    clock["parsed_epoch_s"] = vt
+    clock["age_at_read_s"] = (None if age is None else round(age, 3))
+    clock["basis"] = age_basis
     if age is not None and age > MAX_VENUE_QUOTE_AGE_S:
         return {"ok": False, "refusal": R_VENUE_QUOTE_STALE,
                 "age_s": age, "limit_s": MAX_VENUE_QUOTE_AGE_S,
-                "age_basis": age_basis}
+                "age_basis": age_basis, "venue_clock": clock}
 
     # THE SIDE THAT ACTUALLY PAYS ON OUR OUTCOME, in cost space.
     lad = bs.acquisition_ladder(book.get("marketData"), intent=intent)
@@ -992,6 +1093,9 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
             # one price with a number beside it.
             "acquisition_ladder": lad,
             "age_s": age, "age_basis": age_basis,
+            # THE CLOCK'S OWN EVIDENCE: field path, raw value, its type,
+            # which parser was applied and what that parser accepts.
+            "venue_clock": clock,
             # THE VENUE'S OWN INSTANT, CARRIED OUT. `age_s` is the age at
             # READ time, and a decision taken after two more network reads
             # is not that fresh. Returning the timestamp lets the freshness
@@ -1804,6 +1908,7 @@ def _entry_freshness(quote, vq, now) -> dict:
            "venue_age_at_read_s": vq.get("age_s"),
            "venue_limit_s": MAX_VENUE_QUOTE_AGE_S,
            "venue_age_basis": v_basis,
+           "venue_clock": vq.get("venue_clock"),
            "both_reaged_at_the_decision": True,
            "stalest_governs": True}
     if p_age is None or v_age is None:
@@ -2041,6 +2146,10 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
                 "venue_age_s": (freshness or {}).get("venue_age_s"),
                 "venue_limit_s": (freshness or {}).get("venue_limit_s"),
                 "venue_age_basis": (freshness or {}).get("venue_age_basis"),
+                # THE RAW CLOCK VALUE AND ITS TYPE, on the row. A refusal
+                # that says only "unparseable" cannot be acted on; one that
+                # carries the field path, the value and the parser can.
+                "venue_clock": (freshness or {}).get("venue_clock"),
                 "venue_age_at_read_s": (
                     (freshness or {}).get("venue_age_at_read_s")),
                 "unknown_is_not_stale": (
