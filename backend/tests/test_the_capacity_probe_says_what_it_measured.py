@@ -65,8 +65,11 @@ def test_the_restart_phase_actually_restarts_a_process():
     # A real child, killed without a chance to clean up.
     assert "subprocess.Popen" in src and ".kill()" in src
     assert "SIGKILL" in src
-    # A SECOND process finishes the batch.
-    assert "subprocess.run" in src
+    # A SECOND process finishes the batch -- spawned with Popen too, so its
+    # pid can be reported: "a different process finished the work" is the
+    # whole claim, and a pid is what supports it.
+    assert src.count("subprocess.Popen") == 2, src.count("subprocess.Popen")
+    assert "SECOND_WRITER_FINISHED" in src
     # And the checks that matter: no duplicate, everything flat, fees tie.
     for probe in ("no_duplicate_position", "all_positions_flat",
                   "fee_reconciles"):
@@ -81,6 +84,56 @@ def test_the_lifecycle_book_is_not_the_strategys_book():
     from sportsassets import bettor_external_shadow as ext
 
     assert P.LIFECYCLE_EXPERIMENT != ext.EXPERIMENT_ID
+
+
+def test_the_restart_phase_names_its_operating_system_processes():
+    """A PROCESS RESTART WITH NO PROCESS IDENTITY IS A CLAIM. The parent and
+    both children are reported by pid, and they must be three distinct
+    operating-system processes."""
+    src = inspect.getsource(P.phase_process_restart)
+    assert "parent_pid" in src and "os.getpid()" in src
+    assert "FIRST_WRITER_KILLED" in src and "SECOND_WRITER_FINISHED" in src
+    assert "distinct_os_processes" in src
+
+
+def test_the_published_evidence_names_its_isolation_and_its_processes():
+    with open(EVIDENCE) as fh:
+        d = json.load(fh)
+    # THE RUN IS IDENTIFIED, AND SO IS ITS BOOK.
+    assert d["run_id"].startswith("CAPRUN-")
+    assert d["experiment"] in P.OWN_EXPERIMENTS
+    assert d["isolation"] == "CONFIRMED_DISPOSABLE_AND_NO_STRATEGY_BOOK"
+    assert set(d["books"].values()) == set(P.OWN_EXPERIMENTS)
+    assert "isolated_from_the_strategy_book" in d
+    assert d["isolation_evidence"].endswith(
+        "CAPACITY_PROBE_AFFECTED_IDS.json")
+    # THREE PROCESSES, NAMED.
+    r = d["phases"]["actual_process_restart"]
+    assert r["distinct_os_processes"] == 3, r
+    roles = {p["role"] for p in r["processes"]}
+    assert roles == {"FIRST_WRITER_KILLED", "SECOND_WRITER_FINISHED"}
+    assert r["parent_pid"] not in [p["pid"] for p in r["processes"]]
+
+
+def test_the_affected_id_manifest_is_preserved_and_says_what_happened():
+    path = os.path.join(ROOT, "research", "evidence",
+                        "CAPACITY_PROBE_AFFECTED_IDS.json")
+    with open(path) as fh:
+        m = json.load(fh)
+    assert m["read_only"] is True
+    # THE IDENTIFICATION RULE IS THE FINGERPRINT, never the experiment id.
+    assert "NEVER by the experiment id" in         m["how_a_probe_record_is_identified"]
+    assert m["environment"]["reached_production"] is False
+    assert m["correction"]["databases_rebuilt"]
+    # AND THE CORRECTION DID NOT DELETE BY EXPERIMENT.
+    assert "REBUILD" in m["correction"]["method"]
+    assert "no genuine row was touched" in m["correction"]["method"]
+    assert m["correction"]["audited_again_afterwards"][
+        "probe_positions_total"] == 0
+    # THE IDS THEMSELVES ARE KEPT, which is the point of a manifest.
+    kept = sum(len(v) for db in m["databases"].values()
+               for v in (db.get("position_ids_by_experiment") or {}).values())
+    assert kept == m["probe_positions_total"] > 0, kept
 
 
 def test_the_published_evidence_carries_its_own_labels():

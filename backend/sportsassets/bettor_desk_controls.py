@@ -67,12 +67,22 @@ PAUSED_ACCOUNT_MARKER = "ACCOUNTING_UNCERTAIN"
 OPERATOR_STOP_TIMEOUT_S = 10.0
 
 ACTIONS = ("pause", "resume", "cancel-working-orders", "halt", "limits",
-           "account", "state")
+           "account", "activate", "state")
+
+#: EVERY RESPONSE SAYS THESE THREE THINGS SEPARATELY, because "the button
+#: was pressed", "the state changed" and "it did not work" are three facts
+#: and a single ok flag collapses them:
+#:
+#:    requested   what was asked for
+#:    applied     what the SERVER read back afterwards
+#:    failed      the action did not take, with its reason
+RESULT_FIELDS = ("requested", "applied", "failed")
 
 #: Refusals, by name, so a blocked action never looks like a failure.
 R_FUNDED_RESUME = "FUNDED_RESUME_IS_NOT_AVAILABLE_FROM_THE_DESK"
 R_PAUSED_ACCOUNT = "THE_ACCOUNTING_UNCERTAIN_ACCOUNT_STAYS_PAUSED"
 R_UNKNOWN_ACTION = "UNKNOWN_CONTROL_ACTION"
+R_NOT_READY = "FUNDED_ACTIVATION_PREREQUISITES_NOT_MET"
 R_LIMITS_INCOMPLETE = "LIMIT_SET_INCOMPLETE"
 
 #: The limit names an activation proposal must carry. A partial set is
@@ -132,6 +142,12 @@ async def pause(conn, *, by: str) -> dict:
     rb = await _readback_bool(conn, ext.CONTROL_KEY)
     return {"action": "pause", "control_key": ext.CONTROL_KEY,
             "requested": {"armed": False}, "armed_confirmed": rb["confirmed"],
+            "applied": {"armed": rb["confirmed"]},
+            "failed": (None if rb["confirmed"] is False
+                       else {"why": ("the row does not read false "
+                                     "afterwards, so the pause is NOT "
+                                     "applied"),
+                             "readback": rb}),
             "ok": rb["confirmed"] is False, "readback": rb,
             "by": by, "at": time.time(),
             "effect": ("the scheduled research lane stops admitting at its "
@@ -147,6 +163,11 @@ async def resume(conn, *, by: str) -> dict:
     rb = await _readback_bool(conn, ext.CONTROL_KEY)
     return {"action": "resume", "control_key": ext.CONTROL_KEY,
             "requested": {"armed": True}, "armed_confirmed": rb["confirmed"],
+            "applied": {"armed": rb["confirmed"]},
+            "failed": (None if rb["confirmed"] is True
+                       else {"why": ("the row does not read true afterwards, "
+                                     "so the lane is NOT armed"),
+                             "readback": rb}),
             "ok": rb["confirmed"] is True, "readback": rb,
             "by": by, "at": time.time(),
             "scope": "RESEARCH_SHADOW_ONLY",
@@ -185,6 +206,9 @@ async def cancel_working_orders(conn, *, by: str, experiments) -> dict:
     rows = await conn.fetch(CANCEL_SQL, dk.CANCELLED,
                             list(dk.OPEN_STATES), list(experiments))
     return {"action": "cancel-working-orders", "by": by, "at": time.time(),
+            "requested": {"cancel_open_modelled_orders_in": list(experiments)},
+            "applied": {"cancelled": len(rows)},
+            "failed": None,
             "cancelled": len(rows),
             "orders": [dict(r) for r in rows],
             "states_considered_open": list(dk.OPEN_STATES),
@@ -258,6 +282,21 @@ async def halt(conn, *, by: str, reason: str, experiments) -> dict:
     out["partial"] = not out["ok"]
     out["does_not"] = ["liquidate inventory", "settle a position",
                        "cancel a venue order (none exists)"]
+    out["requested"] = {"research_lane_armed": False,
+                        "funded_executor_paused": True,
+                        "operator_stop": True,
+                        "cancel_working_modelled_orders": True}
+    out["applied"] = {
+        "research_lane_armed": lane,
+        "funded_executor_paused": live,
+        "operator_stop": out["components"]["operator_stop"].get("taken"),
+        "working_orders_cancelled":
+            out["components"]["working_orders"].get("cancelled")}
+    out["failed"] = (None if out["ok"] else {
+        "why": ("at least one component of the halt did not take. A halt is "
+                "not partial-then-reported-as-done"),
+        "components": {k: v for k, v in out["applied"].items()
+                       if v is None or v is False}})
     return out
 
 
@@ -275,6 +314,9 @@ async def set_limits(conn, *, by: str, proposed: dict) -> dict:
                if proposed.get(k) in (None, "")]
     if missing:
         return {"action": "limits", "ok": False,
+                "requested": dict(proposed), "applied": None,
+                "failed": {"refusal": R_LIMITS_INCOMPLETE,
+                           "missing": missing},
                 "refusal": R_LIMITS_INCOMPLETE, "missing": missing,
                 "required": list(REQUIRED_LIMITS),
                 "why": ("a partial limit set is not an approved limit set. "
@@ -292,10 +334,16 @@ async def set_limits(conn, *, by: str, proposed: dict) -> dict:
         clean[k] = v
     if bad:
         return {"action": "limits", "ok": False,
+                "requested": dict(proposed), "applied": None,
+                "failed": {"refusal": R_LIMITS_INCOMPLETE, "invalid": bad},
                 "refusal": R_LIMITS_INCOMPLETE, "invalid": bad,
                 "why": "nothing was stored"}
     if clean["per_order_usd"] > clean["capital_usd"]:
         return {"action": "limits", "ok": False,
+                "requested": dict(proposed), "applied": None,
+                "failed": {"refusal": R_LIMITS_INCOMPLETE,
+                           "invalid": {"per_order_usd": ("cannot exceed the "
+                                                         "capital limit")}},
                 "refusal": R_LIMITS_INCOMPLETE,
                 "invalid": {"per_order_usd": ("cannot exceed the capital "
                                               "limit")},
@@ -310,6 +358,11 @@ async def set_limits(conn, *, by: str, proposed: dict) -> dict:
     await _write_state(conn, LIMITS_KEY, record)
     stored = await _read_state(conn, LIMITS_KEY)
     return {"action": "limits", "ok": stored is not None,
+            "requested": clean,
+            "applied": ({"recorded_as_a_proposal": True}
+                        if stored is not None else None),
+            "failed": (None if stored is not None
+                       else {"why": "the proposal did not read back"}),
             "stored": (json.loads(stored) if isinstance(stored, str)
                        else stored),
             "key": LIMITS_KEY,
@@ -330,12 +383,18 @@ async def set_account(conn, *, by: str, account: dict) -> dict:
     ident = str(account.get("account_id") or "").strip()
     if not name or not venue:
         return {"action": "account", "ok": False,
+                "requested": dict(account), "applied": None,
+                "failed": {"refusal": "ACCOUNT_NOT_NAMED"},
                 "refusal": "ACCOUNT_NOT_NAMED",
                 "why": ("an activation needs a named account and its venue. "
                         "Nothing was stored")}
     blob = " ".join((name, venue, ident)).upper()
     if PAUSED_ACCOUNT_MARKER in blob:
         return {"action": "account", "ok": False,
+                "requested": {"name": name, "venue": venue,
+                              "account_id": ident or None},
+                "applied": None,
+                "failed": {"refusal": R_PAUSED_ACCOUNT},
                 "refusal": R_PAUSED_ACCOUNT,
                 "why": ("that account's accounting is unresolved and it is "
                         "paused for that reason. This panel cannot select "
@@ -351,11 +410,125 @@ async def set_account(conn, *, by: str, account: dict) -> dict:
     await _write_state(conn, ACCOUNT_KEY, record)
     stored = await _read_state(conn, ACCOUNT_KEY)
     return {"action": "account", "ok": stored is not None,
+            "requested": {"name": name, "venue": venue,
+                          "account_id": ident or None},
+            "applied": ({"recorded_as_a_proposal": True}
+                        if stored is not None else None),
+            "failed": (None if stored is not None
+                       else {"why": "the proposal did not read back"}),
             "stored": (json.loads(stored) if isinstance(stored, str)
                        else stored),
             "key": ACCOUNT_KEY,
             "activates_nothing": True,
             "activation_still_blocked": True}
+
+
+
+# ── ACTIVATION IS REFUSED ON THE SERVER, NOT BY A DISABLED BUTTON ───
+#
+# A greyed-out control proves nothing: anybody can POST. So the activation
+# request is a real endpoint that computes its prerequisites HERE, from the
+# stored control rows and the lane's own limitations, and refuses with the
+# ones that are unmet. When they are all met it STILL refuses, because the
+# last step is an authorisation this service does not hold -- the owner's,
+# for a specific account and a specific limit set.
+READINESS_CHECKS = (
+    "a named funded account, recorded AND approved by the owner",
+    "an approved limit set, compared against the enforced rails",
+    "the venue book freshness basis (unresolved: what "
+    "marketData.transactTime denotes is not established)",
+    "per-fixture settlement compatibility from the venue's own prose",
+    "market scope metadata from the specific sportsMarketType scope token",
+    "an autonomous entry admitted on current markets under the lane's own "
+    "gates",
+)
+
+
+async def readiness(conn) -> dict:
+    """WHAT STILL BLOCKS FUNDED ACTIVATION, computed from stored state.
+
+    Each check is evaluated, not declared. A check this service cannot
+    evaluate is UNKNOWN and blocks -- the same rule the risk rails use for
+    an unevaluable limit.
+    """
+    st = await state(conn)
+    acct = st.get("account_proposal") or {}
+    lims = st.get("limits_proposal") or {}
+    checks = [
+        {"check": "funded_submission_disabled",
+         "met": True,
+         "detail": ("the lane's writer CHECKs order_submitted FALSE and the "
+                    "venue-boundary gate authorises every submission "
+                    "independently of this panel")},
+        {"check": "account_named", "met": bool(acct.get("name")),
+         "detail": (acct.get("name") or "no account is recorded")},
+        {"check": "account_approved_by_the_owner",
+         "met": bool(acct.get("approved")),
+         "detail": ("recording a name is the owner's stated intent; "
+                    "approval is a separate act this panel cannot perform")},
+        {"check": "limits_recorded", "met": bool(lims.get("proposed")),
+         "detail": (str(lims.get("proposed") or "no limit set is recorded"))},
+        {"check": "limits_approved_by_the_owner",
+         "met": bool(lims.get("approved")),
+         "detail": ("a recorded limit set is not an enforced rail. The "
+                    "enforced rails are frozen in bettor_entry_execution")},
+        {"check": "venue_book_freshness_basis", "met": False,
+         "detail": ("UNRESOLVED. What marketData.transactTime denotes is "
+                    "not established, so the explicit refusal stands and "
+                    "the 30 s limits are unmoved")},
+        {"check": "settlement_compatibility", "met": False,
+         "detail": ("per fixture, from the venue's own prose. Where a rule "
+                    "is not stated the comparison returns UNKNOWN and the "
+                    "entry refuses")},
+        {"check": "market_scope_metadata", "met": False,
+         "detail": ("scope comes from the v1 type's own scope token; the "
+                    "published Sports Schema is retrieved on the runner and "
+                    "the token sets are provisional until it is in hand")},
+    ]
+    try:
+        admitted = await conn.fetchval(
+            "SELECT count(*) FROM external_valuations "
+            " WHERE experiment_id = $1 AND admissible", ext.EXPERIMENT_ID)
+        checks.append({
+            "check": "an_autonomous_entry_was_admitted_on_current_markets",
+            "met": int(admitted or 0) > 0,
+            "detail": ("%s admissible candidate(s) recorded by the "
+                       "scheduled lane" % int(admitted or 0))})
+    except Exception as exc:                                   # noqa: BLE001
+        checks.append({
+            "check": "an_autonomous_entry_was_admitted_on_current_markets",
+            "met": None, "detail": ("could not be read: %s -- an "
+                                    "unevaluable check BLOCKS"
+                                    % type(exc).__name__)})
+    unmet = [c for c in checks if c["met"] is not True]
+    return {"checks": checks, "unmet": unmet, "unmet_count": len(unmet),
+            "ready": not unmet,
+            "even_when_ready": (
+                "activation also needs the owner's authorisation for a "
+                "SPECIFIC account and a SPECIFIC limit set. This panel "
+                "cannot grant it, so it refuses in every case"),
+            "required": list(READINESS_CHECKS)}
+
+
+async def activate(conn, *, by: str) -> dict:
+    """THE FUNDED ACTIVATION REQUEST. Refused server-side, with reasons."""
+    r = await readiness(conn)
+    return {
+        "action": "activate", "by": by, "at": time.time(),
+        "requested": {"funded_trading": True},
+        "applied": None,
+        "failed": {"refusal": R_NOT_READY,
+                   "unmet": [c["check"] for c in r["unmet"]],
+                   "detail": r["unmet"]},
+        "ok": False,
+        "refusal": R_NOT_READY,
+        "readiness": r,
+        "funded_submission": "DISABLED",
+        "enforced_server_side": (
+            "this refusal is computed here from the stored control rows and "
+            "the lane's open limitations. A disabled button in a page "
+            "establishes nothing: this endpoint refuses the POST"),
+    }
 
 
 async def state(conn) -> dict:

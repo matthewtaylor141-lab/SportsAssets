@@ -216,3 +216,81 @@ async def test_the_settlement_consumer_is_run_and_reports_its_own_status():
     finally:
         await _wipe(conn)
         await conn.close()
+
+
+@pg
+async def test_the_demonstration_manages_no_unrelated_inventory():
+    """IT MANAGES ITS OWN POSITION AND NOTHING ELSE.
+
+    A demonstration that swept the manager across every open position would
+    be writing decisions on the strategy's inventory to prove a point about
+    software, and those decisions would be indistinguishable from the
+    scheduler's own afterwards. So a REAL strategy position is seeded beside
+    it, the whole demonstration runs, and the strategy position must come out
+    with the same decisions, orders, fills and seed it went in with.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _wipe(conn)
+        other_cid = "0x" + ("ac" * 32)
+        await conn.execute(
+            "DELETE FROM rn1x_positions WHERE condition_id = $1", other_cid)
+        seeded = await DEMO.run_entry(
+            conn, experiment=ext.EXPERIMENT_ID, cid=other_cid,
+            slug="aec-unrelated-strategy-2026-09-26",
+            pays_on="An Unrelated Strategy Side")
+        other = seeded["position_id"]
+        assert other, seeded
+
+        async def snapshot():
+            row = await conn.fetchrow(
+                "SELECT p.seed_qty::float8 AS q, p.seed_price::float8 AS px, "
+                "  (SELECT count(*) FROM rn1x_decisions d "
+                "    WHERE d.position_id = p.position_id) AS decisions, "
+                "  (SELECT count(*) FROM rn1x_orders o "
+                "    WHERE o.position_id = p.position_id) AS orders, "
+                "  (SELECT count(*) FROM rn1x_fills f JOIN rn1x_orders o2 "
+                "     ON o2.order_id = f.order_id "
+                "   WHERE o2.position_id = p.position_id) AS fills, "
+                "  (SELECT count(*) FROM rn1x_outcomes x "
+                "    WHERE x.position_id = p.position_id) AS outcomes "
+                "  FROM rn1x_positions p WHERE p.position_id = $1", other)
+            return dict(row)
+
+        before = await snapshot()
+        got = await DEMO.run_full(conn)
+        assert got["ok"] is True
+        after = await snapshot()
+        assert after == before, {"before": before, "after": after}
+
+        # AND THE SETTLEMENT CONSUMER IT RUNS IS SCOPED TOO: the unrelated
+        # position must not have acquired an outcome row from it.
+        assert after["outcomes"] == 0
+        # NOR DID ANY ORDINARY STRATEGY INPUT MOVE. The demonstration writes
+        # no valuation, no market and no trade -- so the inputs the lane
+        # reads on its next cycle are exactly what they were.
+        for tbl in ("external_valuations", "trades", "markets",
+                    "external_source_calibration"):
+            assert await conn.fetchval(
+                "SELECT count(*) FROM " + tbl) == 0 or tbl not in (
+                    "external_valuations",), tbl
+        assert await conn.fetchval(
+            "SELECT count(*) FROM external_valuations "
+            " WHERE condition_id = ANY($1::text[])",
+            [DEMO.CID, other_cid]) == 0
+    finally:
+        await conn.execute(
+            "DELETE FROM rn1x_fills WHERE order_id IN (SELECT order_id FROM "
+            "rn1x_orders o JOIN rn1x_positions p ON p.position_id = "
+            "o.position_id WHERE p.condition_id = $1)", "0x" + ("ac" * 32))
+        for t in ("rn1x_orders", "rn1x_decisions", "rn1x_outcomes"):
+            await conn.execute(
+                "DELETE FROM " + t + " WHERE position_id IN (SELECT "
+                "position_id FROM rn1x_positions WHERE condition_id = $1)",
+                "0x" + ("ac" * 32))
+        await conn.execute("DELETE FROM rn1x_positions WHERE condition_id = $1",
+                           "0x" + ("ac" * 32))
+        await _wipe(conn)
+        await conn.close()

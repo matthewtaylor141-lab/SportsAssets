@@ -3145,6 +3145,14 @@ async def bettor_control_act(action: str, response: Response,
         elif act == "account":
             got = await CTL.set_account(
                 conn, by=by, account=dict(b.get("account") or {}))
+        elif act == "activate":
+            # THE REFUSAL IS COMPUTED HERE, on the server, from the stored
+            # rows. A disabled button establishes nothing -- anybody can
+            # POST -- so the endpoint itself refuses and names what is
+            # unmet. 409, because the request is understood and blocked.
+            got = await CTL.activate(conn, by=by)
+            got["state_after"] = await CTL.state(conn)
+            raise HTTPException(status_code=409, detail=got)
         else:                                   # "state"
             got = {"action": "state", "ok": True}
         got["state_after"] = await CTL.state(conn)
@@ -3165,6 +3173,40 @@ def _desk_page_headers() -> dict:
             "Pragma": "no-cache",
             "Content-Security-Policy": _DESK_PAGE_CSP,
             "X-Content-Type-Options": "nosniff"}
+
+
+@app.post("/api/command/session/operator",
+          dependencies=[Depends(require_admin)])
+async def command_session_from_operator_token(response: Response) -> dict:
+    """MINT THE COMMAND COOKIE FROM THE OPERATOR TOKEN. Same cookie.
+
+    WHY IT EXISTS. The desk's sign-in takes the desk PASSWORD, which lives
+    in the service environment and in no repository secret -- so an
+    authorised runner, which holds the operator token and not the password,
+    could not obtain a session and could not verify that the cookie works on
+    this hostname at all. Serving the HTML is not the same as the session
+    working there, and that had to be checkable.
+
+    IT GRANTS NOTHING NEW. The caller already holds the operator token,
+    which opens every read this cookie opens and every write it does not.
+    The cookie minted here is byte-for-byte the one `/api/command/session`
+    issues -- same `mint_desk_token`, same name, same
+    `path=/api/command`, same HttpOnly, Secure and SameSite -- so what it
+    verifies is the real thing. The token is never returned in the body.
+    """
+    token, exp = mint_desk_token()
+    response.set_cookie(COMMAND_COOKIE, token, max_age=DESK_TOKEN_TTL_S,
+                        httponly=True, secure=True, samesite="lax",
+                        path="/api/command")
+    return {"ok": True, "expires_at": exp,
+            "cookie": COMMAND_COOKIE,
+            "cookie_path": "/api/command",
+            "same_cookie_as": "POST /api/command/session",
+            "token_in_body": False,
+            "what_it_is_for": ("verifying, from an authorised runner, that "
+                               "the COMMAND session works on this hostname "
+                               "and that the desk page is reachable with "
+                               "the cookie alone")}
 
 
 @app.get("/api/command/bettor/desk/page", include_in_schema=False)
@@ -3472,8 +3514,18 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
         ctl_state = {"error": type(exc).__name__}
     acct = (ctl_state.get("account_proposal") or {}) or {}
     lims = (ctl_state.get("limits_proposal") or {}) or {}
+    try:
+        ready = await CTL.readiness(pool)
+    except Exception as exc:                                    # noqa: BLE001
+        ready = {"error": type(exc).__name__, "ready": False}
     out["activation"] = {
         "section": "Activation",
+        # THE SAME COMPUTATION THE ENDPOINT REFUSES WITH, so the page cannot
+        # show a readiness the server would not agree with.
+        "readiness": ready,
+        "unmet_prerequisites": [c["check"] for c in (ready.get("unmet") or [])],
+        "activation_endpoint": ("POST /api/command/bettor/control/activate "
+                                "-- refuses 409 with the unmet list"),
         "funded_submission": "DISABLED",
         "controls": CTL.describe(),
         "control_state": ctl_state,

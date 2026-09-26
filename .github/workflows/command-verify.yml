@@ -4901,7 +4901,10 @@ jobs:
                  "  funded orders           " + ((.state.funded_orders) | tostring),
                  "  account recorded        " + ((.state.account_proposal.name // "-") | tostring),
                  "  limits recorded         " + ((.state.limits_proposal.proposed // {}) | tostring)' \
-            /tmp/ctl0.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            /tmp/ctl0.json
+            /tmp/sess.json
+            /tmp/act.json
+            /tmp/prodaudit.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
 
           say "  -- a pause, then a resume, each confirmed from the row --"
           curl -sS -X POST -H "$H" -H 'Content-Type: application/json' \
@@ -4941,6 +4944,121 @@ jobs:
           say "  control with no operator token   HTTP $NW (expect 401)"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
+      - name: Operating desk — the COMMAND session on this hostname
+        if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
+        env:
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          A="${API:-https://sportsassets-api.onrender.com}"
+          H="X-Admin-Token: ${ADMIN_TOKEN}"
+          J=/tmp/cj.txt
+          rm -f "$J"
+
+          say "== E1 . THE SESSION COOKIE, ON THIS HOSTNAME =="
+          say "  Serving the page here does not establish that the COMMAND"
+          say "  session works here. The cookie is minted, then every read"
+          say "  below is made with the COOKIE ALONE and no operator token."
+          SC=$(curl -sS -o /tmp/sess.json -w '%{http_code}' -X POST \
+                 -H "$H" -c "$J" "$A/api/command/session/operator" \
+                 || echo 000)
+          say "  mint the session               HTTP $SC (expect 200)"
+          jq -r '"  cookie                        " + (.cookie // "-")
+                 + "   path " + (.cookie_path // "-")
+                 + "   token in body " + ((.token_in_body // true) | tostring)' \
+            /tmp/sess.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          if grep -q "bt_command" "$J"; then
+            say "  the jar holds bt_command      yes"
+            say "  cookie attributes as sent     $(grep bt_command "$J" | cut -f1-6 | tr '\t' ' ')"
+          else
+            say "  the jar holds bt_command      NO -- nothing was set"
+          fi
+          for U in "/api/command/bettor/desk/page" \
+                   "/api/command/bettor/desk" \
+                   "/api/command/bettor/control" \
+                   "/api/command/bettor/desk/page"; do
+            printf '  cookie only  %-34s HTTP %s\n' "$U" \
+              "$(curl -sS -o /dev/null -w '%{http_code}' -b "$J" "$A$U")" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          say "  (the fourth line is a REFRESH of the page, same cookie)"
+          WC=$(curl -sS -o /dev/null -w '%{http_code}' -X POST -b "$J" \
+                 -H 'Content-Type: application/json' -d '{}' \
+                 "$A/api/command/bettor/control/pause" || echo 000)
+          say "  a WRITE with the cookie alone  HTTP $WC (expect 403 -- the"
+          say "                                 read roles stay read-only)"
+
+          say ""
+          say "== E2 . NO CREDENTIAL IN THE PAGE, THE URL OR STORAGE =="
+          curl -sS -b "$J" -o /tmp/page2.html \
+            "$A/api/command/bettor/desk/page" || true
+          for PAT in "X-Admin-Token: [A-Za-z0-9]" "localStorage\." \
+                     "sessionStorage\." "token=" "password="; do
+            if grep -qE "$PAT" /tmp/page2.html; then
+              say "  FOUND in the served page      $PAT"
+            else
+              say "  absent from the served page   $PAT"
+            fi
+          done
+          say "  the page reads /api/command/bettor/desk with"
+          say "  credentials: same-origin and no token in any URL."
+
+          say ""
+          say "== E3 . ACTIVATION IS REFUSED BY THE SERVER =="
+          AC=$(curl -sS -o /tmp/act.json -w '%{http_code}' -X POST -H "$H" \
+                 -H 'Content-Type: application/json' -d '{"by":"CI"}' \
+                 "$A/api/command/bettor/control/activate" || echo 000)
+          say "  activate                       HTTP $AC (expect 409)"
+          jq -r '"  refusal                        " + (.detail.refusal // "-"),
+                 "  unmet prerequisites            "
+                   + ((.detail.failed.unmet // []) | join(", "))' \
+            /tmp/act.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Capacity probe — the isolation audit, against production
+        if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          say "== F1 . DID ANY CAPACITY-PROBE RECORD REACH PRODUCTION =="
+          say "  READ ONLY. It identifies a probe record by the fingerprints"
+          say "  the harness writes -- the condition id shape, the slug"
+          say "  prefix, the payout event -- and NEVER by an experiment id."
+          if [ -z "${DATABASE_URL:-}" ]; then
+            say "  the DATABASE_URL secret is not available to this job, so"
+            say "  this audit did NOT run. That is not a clean result."
+            exit 0
+          fi
+          cd backend
+          python3 -m pip install --quiet asyncpg 2>/dev/null || true
+          python3 -m tools.capacity_probe_manifest --dsn "$DATABASE_URL" \
+            --no-ids > /tmp/prodaudit.json 2>/tmp/prodaudit.err \
+            || say "  the audit command failed: $(tail -2 /tmp/prodaudit.err)"
+          jq -r '.databases | to_entries[]?
+                 | "  probe positions              " + ((.value.positions // 0) | tostring)
+                   + "\n  of those in a strategy book   " + ((.value.in_strategy_book // 0) | tostring)
+                   + "\n  probe orders                 " + ((.value.orders // 0) | tostring)
+                   + "\n  probe fills                  " + ((.value.fills // 0) | tostring)
+                   + "\n  probe valuations             " + ((.value.valuations // 0) | tostring)
+                   + "\n  positions in this database   " + ((.value.all_positions // 0) | tostring)' \
+            /tmp/prodaudit.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          jq -r '.databases | to_entries[]? | .value.books // {} | to_entries[]?
+                 | "  BOOK " + .key + "   positions " + (.value | tostring)' \
+            /tmp/prodaudit.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          if jq -e '.probe_positions_total == 0' /tmp/prodaudit.json \
+               > /dev/null 2>&1; then
+            say "  RESULT: no capacity-probe record exists in production."
+          else
+            say "  RESULT: probe records ARE present -- see the counts above."
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
       - name: Entry-run raw evidence
         if: always()
         uses: actions/upload-artifact@v4
@@ -4960,5 +5078,8 @@ jobs:
             /tmp/desk.json
             /tmp/ee2.json
             /tmp/ctl0.json
+            /tmp/sess.json
+            /tmp/act.json
+            /tmp/prodaudit.json
           if-no-files-found: warn
           retention-days: 14

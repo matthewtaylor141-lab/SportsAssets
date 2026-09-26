@@ -21,6 +21,7 @@ asserted, because sharing one credential between "look at the numbers" and
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 
@@ -133,8 +134,59 @@ def test_the_page_carries_the_control_path_and_the_token_field():
 
     assert not _re.search(r"(local|session)Storage\s*[.\[]", H), (
         "the desk page must not touch browser storage at all")
-    # The activation button stays disabled in the shipped page.
-    assert "id=\"btn-activate\" disabled" in H
+    # THE ACTIVATION BUTTON IS NOT DISABLED ANY MORE, and that is the
+    # point: a greyed-out control proves nothing because anybody can POST.
+    # It sends, and the SERVER refuses with the unmet prerequisites.
+    assert 'id="btn-activate"' in H
+    assert 'id="btn-activate" disabled' not in H
+    assert "refused by the server" in H
+
+
+def test_every_action_reports_requested_applied_and_failed_separately():
+    """"The button was pressed", "the state changed" and "it did not work"
+    are three facts. A single ok flag collapses them, and that is how a
+    failed halt gets read as a halt."""
+    assert CTL.RESULT_FIELDS == ("requested", "applied", "failed")
+    src = inspect.getsource(CTL)
+    for fn in ("def pause", "def resume", "def cancel_working_orders",
+               "def halt", "def set_limits", "def set_account",
+               "def activate"):
+        body = src.split(fn, 1)[1].split("\nasync def ")[0].split(
+            "\ndef ")[0]
+        for f in CTL.RESULT_FIELDS:
+            assert '"%s"' % f in body, (fn, f)
+
+
+def test_activation_is_refused_on_the_server_not_by_a_disabled_button():
+    """A greyed-out control proves nothing -- anybody can POST. The endpoint
+    itself must refuse, with the prerequisites it found unmet."""
+    src = inspect.getsource(A.bettor_control_act)
+    assert "CTL.activate" in src
+    assert "status_code=409" in src
+    assert "activate" in CTL.ACTIONS
+    flat = " ".join(inspect.getsource(CTL.activate).split())
+    assert "R_NOT_READY" in flat
+    assert CTL.R_NOT_READY == "FUNDED_ACTIVATION_PREREQUISITES_NOT_MET"
+    # The sentence is split across two string literals in the source, so
+    # the halves are what is checked.
+    assert "disabled button in a page" in flat, flat[:200]
+    assert "establishes nothing" in flat
+    # AND THE SHIPPED PAGE SENDS IT, rather than sitting inert.
+    from sportsassets.api.desk_page import DESK_PAGE_HTML as H
+
+    assert "btn-activate" in H and "Request funded activation" in H
+    assert "sendControl('activate'" in H
+
+
+def test_the_page_reads_the_servers_readiness_not_its_own():
+    """The screen and the endpoint must not be able to disagree."""
+    from sportsassets.api.desk_page import DESK_PAGE_HTML as H
+
+    assert "a.readiness" in H
+    assert "ready.checks" in H
+    desk = inspect.getsource(A.bettor_desk)
+    assert "CTL.readiness" in desk
+    assert "unmet_prerequisites" in desk
 
 
 def test_a_partial_limit_set_is_not_an_approved_limit_set():
@@ -208,6 +260,30 @@ async def test_every_control_action_takes_and_reads_back():
         assert ok["ok"] is True and ok["activates_nothing"] is True
         assert ok["stored"]["bound"] is False
         assert ok["stored"]["approved"] is False
+
+        # REQUESTED / APPLIED / FAILED, on a real action against real rows.
+        p1 = await CTL.pause(conn, by="test")
+        assert p1["requested"] == {"armed": False}
+        assert p1["applied"] == {"armed": False}
+        assert p1["failed"] is None
+        r1 = await CTL.resume(conn, by="test")
+        assert r1["requested"] == {"armed": True}
+        assert r1["applied"] == {"armed": True}
+        assert r1["failed"] is None
+
+        # ACTIVATION IS REFUSED, and every unmet check is named.
+        act = await CTL.activate(conn, by="test")
+        assert act["ok"] is False
+        assert act["applied"] is None
+        assert act["failed"]["refusal"] == CTL.R_NOT_READY
+        assert act["readiness"]["ready"] is False
+        named = {c["check"] for c in act["readiness"]["checks"]}
+        for must in ("funded_submission_disabled", "account_named",
+                     "limits_approved_by_the_owner",
+                     "venue_book_freshness_basis"):
+            assert must in named, must
+        assert "account_approved_by_the_owner" in act["failed"]["unmet"]
+        assert act["funded_submission"] == "DISABLED"
 
         # STATE reads the rows, and says so per field.
         st = await CTL.state(conn)

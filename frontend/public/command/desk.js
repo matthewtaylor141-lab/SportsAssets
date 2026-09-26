@@ -496,8 +496,9 @@
            * body is the readback, and a refusal carries its name. */
           ok: (res.status >= 200 && res.status < 300) ? (b.ok === true)
                                                      : false,
-          refusal: (b.detail && b.detail.reason) || b.refusal || null,
-          detail: b,
+          refusal: (b.detail && (b.detail.refusal || b.detail.reason))
+                   || b.refusal || null,
+          detail: (b.detail && b.detail.action) ? b.detail : b,
           at: new Date().toISOString()
         };
         load();
@@ -512,15 +513,37 @@
   function controlResultHtml() {
     var r = LAST_CONTROL;
     if (!r) { return ''; }
+    var d = r.detail || {};
     var cls = r.ok === true ? 'good' : r.ok === null ? '' : 'bad';
-    var what = r.ok === true ? 'TOOK' : r.ok === null ? 'SENT — awaiting the '
-      + 'readback' : (r.refusal ? 'REFUSED — ' + r.refusal
-                                : 'DID NOT TAKE');
+    /* THREE FACTS, NOT ONE. What was asked for, what the server read back
+     * afterwards, and -- when it did not take -- why. A control panel that
+     * collapses these into a tick is how a failed halt gets read as a
+     * halt. */
+    var what = r.ok === true ? 'APPLIED'
+      : r.ok === null ? 'SENT — awaiting the server readback'
+      : (r.refusal ? 'REFUSED — ' + r.refusal : 'NOT APPLIED');
+    var lines = '';
+    if (d.requested !== undefined && d.requested !== null) {
+      lines += '<div class="fact"><span class="k">requested</span>' +
+        '<span class="v mono">' + esc(JSON.stringify(d.requested)) +
+        '</span></div>';
+    }
+    if (d.applied !== undefined) {
+      lines += '<div class="fact"><span class="k">applied (read back)' +
+        '</span><span class="v mono">' +
+        esc(d.applied === null ? 'nothing' : JSON.stringify(d.applied)) +
+        '</span></div>';
+    }
+    if (d.failed) {
+      lines += '<div class="fact"><span class="k">failed</span>' +
+        '<span class="v mono">' + esc(JSON.stringify(d.failed)) +
+        '</span></div>';
+    }
     return '<div class="verdict ' + cls + '"><b>' + esc(r.action) + ' — ' +
-      esc(what) + '</b>' + esc(r.error || '') +
-      (r.detail ? '</div>' + audit('Audit — the control response as read',
-                                   r.detail)
-                : '</div>');
+      esc(what) + '</b>' + esc(r.error || '') + '</div>' +
+      (lines ? '<div class="facts">' + lines + '</div>' : '') +
+      (r.detail ? audit('Audit — the control response as read', r.detail)
+                : '');
   }
 
   function funded(d) {
@@ -532,54 +555,24 @@
     var acct = a.proposed_account || {};
     var rails = a.enforced_risk_rails || {};
 
-    /* THE CHECKS ARE DERIVED FROM THE READ, NOT DECLARED HERE. A check this
-     * page cannot evaluate is UNKNOWN and blocks, exactly as an unevaluable
-     * risk rail does. */
-    var checks = [
-      {name: 'Funded submission disabled',
-       ok: d.funded_submission === 'DISABLED',
-       detail: 'The lane writes with order_submitted CHECK FALSE and the ' +
-         'venue-boundary gate authorises every submission independently ' +
-         'of this page.'},
-      {name: 'Account named',
-       ok: a.account_named === true ? true : null,
-       detail: a.account_named
-         ? ('Recorded: ' + String(acct.name || '—') + ' at ' +
-            String(acct.venue || '—') + '. Recording a name is not ' +
-            'approving it.')
-         : ('No funded account is recorded. Use the account control below; ' +
-            'the ACCOUNTING_UNCERTAIN account is refused by name.')},
-      {name: 'Account approved by the owner',
-       ok: a.account_approved_by_owner === true,
-       detail: 'An account this panel recorded is the owner’s stated ' +
-         'intent. Approval is the owner’s act and is not granted here.'},
-      {name: 'Limit set recorded',
-       ok: a.limits_recorded === true ? true : null,
-       detail: a.limits_recorded
-         ? ('Capital ' + usd(pl.capital_usd) + ', per order ' +
-            usd(pl.per_order_usd) + ', exposure ' +
-            usd(pl.max_exposure_usd) + ', daily loss stop ' +
-            usd(pl.daily_loss_stop_usd) + '. PROPOSED — the enforced ' +
-            'rails are frozen in code and are unchanged.')
-         : 'No limit set is recorded. All four limits are required.'},
-      {name: 'Limits approved by the owner',
-       ok: a.limits_approved_by_owner === true,
-       detail: 'A recorded limit set does not become an enforced rail. The ' +
-         'enforced rails are in the audit below with their own digest.'},
-      {name: 'Venue book freshness basis',
-       ok: false,
-       detail: String(lim.venue_book_freshness || 'unresolved')},
-      {name: 'Settlement compatibility',
-       ok: false,
-       detail: String(lim.settlement_compatibility || 'unresolved')},
-      {name: 'Market scope metadata',
-       ok: false,
-       detail: String(lim.market_scope_metadata || 'unresolved')},
-      {name: 'Autonomous entry on current markets',
-       ok: (d.opportunities || {}).verdict !== 'NO_TRADE',
-       detail: 'A funded account must not be armed on a lane that has not ' +
-         'yet admitted an entry on current markets under its own gates.'}
-    ];
+    /* THE CHECKS ARE THE SERVER'S OWN, READ BACK. They used to be assembled
+     * here from whatever fields the page could see, which meant the screen
+     * and the endpoint could disagree about readiness. `activation.readiness`
+     * is computed by `bettor_desk_controls.readiness` -- the same function
+     * the activation endpoint refuses with -- so what is shown is what would
+     * be enforced. A check the server could not evaluate is UNKNOWN and
+     * blocks, exactly as an unevaluable risk rail does. */
+    var ready = a.readiness || {};
+    var checks = (ready.checks || []).map(function (c) {
+      return {name: String(c.check || '').replace(/_/g, ' '),
+              ok: c.met === true ? true : c.met === false ? false : null,
+              detail: String(c.detail == null ? '' : c.detail)};
+    });
+    if (!checks.length) {
+      checks = [{name: 'readiness', ok: null,
+                 detail: 'the server did not return its readiness checks, ' +
+                   'so activation is treated as blocked.'}];
+    }
     var blocking = checks.filter(function (x) { return x.ok !== true; });
 
     var body = '<p class="muted">Every control below is an existing ' +
@@ -634,17 +627,21 @@
     body += controlResultHtml();
 
     body += '<div class="activate">' +
-      '<button type="button" id="btn-activate" disabled ' +
-      'aria-disabled="true">Activate funded trading</button>' +
+      /* IT SENDS, DELIBERATELY. A disabled button establishes nothing --
+       * anybody can POST -- so the request is made and the SERVER's refusal,
+       * with the prerequisites it found unmet, is what appears. */
+      '<button type="button" id="btn-activate">Request funded activation' +
+      '</button>' +
       '<button type="button" id="btn-pause">Pause research lane</button>' +
       '<button type="button" id="btn-resume">Resume research lane</button>' +
       '<button type="button" id="btn-cancel">Cancel working orders' +
       '</button><button type="button" id="btn-halt" class="danger">' +
       'Emergency halt</button>' +
-      '<span class="why">Activation locked — ' + esc(blocking.length) +
-      ' unresolved check(s): ' +
+      '<span class="why">Activation is refused by the server while ' +
+      esc(blocking.length) + ' check(s) are unmet: ' +
       esc(blocking.map(function (x) { return x.name; }).join('; ')) +
-      '</span></div>';
+      '. Pressing it returns that refusal rather than activating ' +
+      'anything.</span></div>';
 
     /* THE TWO PROPOSAL FORMS. They record intent; they enforce nothing. */
     body += '<h3 class="h3">Account configuration</h3>' +
@@ -708,6 +705,9 @@
       var el = document.getElementById(id);
       return el ? el.value : '';
     }
+    on('btn-activate', function () {
+      sendControl('activate', {by: 'DESK'});
+    });
     on('btn-pause', function () { sendControl('pause', {by: 'DESK'}); });
     on('btn-resume', function () {
       sendControl('resume', {by: 'DESK', scope: 'research'});

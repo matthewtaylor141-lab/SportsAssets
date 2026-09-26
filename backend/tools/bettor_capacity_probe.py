@@ -59,9 +59,122 @@ from sportsassets import bettor_external_shadow as ext          # noqa: E402
 #: The fee schedule the lane uses, per contract, taker side.
 FEE_PER_CONTRACT = 0.016
 
+#: THE HARNESS HAS ITS OWN BOOKS, AND THIS IS NOT COSMETIC.
+#:
+#: THE DEFECT: the writer phases stamped `ext.EXPERIMENT_ID` on every
+#: synthetic plan -- the AUTONOMOUS STRATEGY's own experiment id. On a
+#: scratch database that is harmless; run against any database the strategy
+#: also uses, it would have put hundreds of fabricated positions in the
+#: book that means "what the engine decided on current markets". A capacity
+#: harness must not be able to do that even by accident, so both phases
+#: carry their own experiment ids and every count below is scoped by them.
+WRITER_EXPERIMENT = "CAPACITY_PROBE_WRITER_V1"
+
+
+
+# ── THE ISOLATION BOUNDARY, ENFORCED BEFORE THE FIRST WRITE ─────────
+#
+# THE DEFECT THIS CLOSES, AND IT WAS MINE. The writer phases stamped
+# `ext.EXPERIMENT_ID` -- the AUTONOMOUS STRATEGY's own experiment id -- on
+# every synthetic plan. On the scratch databases this harness actually ran
+# against that produced 2,080 fabricated positions sitting in the book that
+# means "what the engine decided on current markets". Nothing reached
+# production (see research/evidence/CAPACITY_PROBE_AFFECTED_IDS.json for the
+# enumeration and the databases), but the harness MUST NOT BE ABLE to do it,
+# and a filter on a screen is not the boundary. Three checks, all before any
+# write:
+#
+#   1 THE EXPERIMENT. A capacity run carries one of this harness's own ids.
+#     Asking for a strategy experiment is refused by name, and the refusal
+#     happens before the pool is even used.
+#   2 THE DATABASE IS CHOSEN, EXPLICITLY. `--confirm-disposable DO` is
+#     required, so a DSN cannot be inherited from the environment and used
+#     by accident.
+#   3 THE DATABASE MUST NOT HOLD A STRATEGY BOOK. If `rn1x_positions`
+#     contains a row under a strategy experiment that this harness did not
+#     write, the run refuses: whatever that database is, it is not
+#     disposable.
+R_STRATEGY_EXPERIMENT = "REFUSED_A_STRATEGY_EXPERIMENT"
+R_NOT_CONFIRMED = "REFUSED_THE_DATABASE_WAS_NOT_CONFIRMED_DISPOSABLE"
+R_HOLDS_A_STRATEGY_BOOK = "REFUSED_THE_DATABASE_HOLDS_A_STRATEGY_BOOK"
+
+#: Every experiment id this harness may write under. Anything else is a
+#: refusal, including a plausible-looking name.
+OWN_EXPERIMENTS = ("CAPACITY_PROBE_WRITER_V1", "CAPACITY_PROBE_LIFECYCLE_V1")
+
+#: The books a capacity record may never be filed under.
+STRATEGY_EXPERIMENTS = ("EXT_PINNACLE_DEVIG_V1_SHADOW",
+                        "RN1X_SHADOW_CHALLENGER_HOLD_RANKED_V1",
+                        "RN1X_SHADOW_PROSPECTIVE_V1",
+                        "RN1X_SHADOW_HISTORICAL_V1")
+
+
+def experiment_guard(experiment: str) -> dict:
+    """PURE. Returns the refusal, or None, for one requested experiment."""
+    e = str(experiment or "").strip()
+    if not e:
+        return {"refusal": R_STRATEGY_EXPERIMENT,
+                "why": "a capacity run must name its own experiment"}
+    if e in STRATEGY_EXPERIMENTS or e == ext.EXPERIMENT_ID:
+        return {"refusal": R_STRATEGY_EXPERIMENT, "requested": e,
+                "why": ("that is a STRATEGY experiment. A capacity run may "
+                        "not write into a book that means real decisions, "
+                        "and this refusal is before the first write"),
+                "allowed": list(OWN_EXPERIMENTS)}
+    if e not in OWN_EXPERIMENTS:
+        return {"refusal": R_STRATEGY_EXPERIMENT, "requested": e,
+                "why": ("a capacity run writes under this harness's own "
+                        "experiment ids and no others"),
+                "allowed": list(OWN_EXPERIMENTS)}
+    return {}
+
+
+async def database_guard(pool, *, confirmed: str) -> dict:
+    """The database has to be CHOSEN and it must hold no strategy book."""
+    if str(confirmed or "").strip().upper() != "DO":
+        return {"refusal": R_NOT_CONFIRMED,
+                "why": ("pass --confirm-disposable DO. A capacity run writes "
+                        "thousands of synthetic positions and must never be "
+                        "pointed at a database by inheritance")}
+    try:
+        rows = await pool.fetch(
+            "SELECT experiment_id, count(*) AS n FROM rn1x_positions "
+            " WHERE experiment_id <> ALL($1::text[]) "
+            "   AND experiment_id = ANY($2::text[]) GROUP BY 1",
+            list(OWN_EXPERIMENTS), list(STRATEGY_EXPERIMENTS))
+    except Exception as exc:                                    # noqa: BLE001
+        # AN UNREADABLE LEDGER IS NOT AN EMPTY ONE.
+        return {"refusal": R_HOLDS_A_STRATEGY_BOOK,
+                "why": ("the ledger could not be inspected, so whether this "
+                        "database holds a strategy book is unknown: %s"
+                        % type(exc).__name__)}
+    held = {r["experiment_id"]: int(r["n"]) for r in rows}
+    if held:
+        return {"refusal": R_HOLDS_A_STRATEGY_BOOK, "strategy_books": held,
+                "why": ("this database holds positions under a strategy "
+                        "experiment. Whatever it is, it is not a disposable "
+                        "capacity-test database")}
+    return {}
+
+
+def run_id(stamp: float) -> str:
+    """A per-run identifier, stamped into every row this run writes.
+
+    It is derived from the caller's clock rather than generated here so the
+    manifest, the report and the rows all carry the SAME id.
+    """
+    return "CAPRUN-%d" % int(stamp)
+
 
 def _fee(qty, price, maker=False):
     return FEE_PER_CONTRACT * float(qty)
+
+
+#: Set once per run by `run()`, and written into every row this run
+#: creates, so a record can be attributed to the run that made it and not
+#: merely to the harness.
+RUN = {"id": "CAPRUN-UNSET", "experiment": None,
+       "lifecycle_experiment": None, "stamp": 0.0}
 
 
 def _record(i: int) -> dict:
@@ -70,10 +183,10 @@ def _record(i: int) -> dict:
     slug = "aec-cap-%05d-2026-09-26" % i
     return {
         "admissible": True,
-        "experiment_id": ext.EXPERIMENT_ID,
+        "experiment_id": RUN["experiment"] or WRITER_EXPERIMENT,
         "observed_at": 1_000_000.0 + i,
         "received_at": 1_000_000.0 + i,
-        "payout_event": "Capacity Probe Side A",
+        "payout_event": "Capacity Probe Side A " + RUN["id"],
         "contract": {"condition_id": cid, "us_market_slug": slug,
                      "buy_intent": "ORDER_INTENT_BUY_LONG",
                      "event_key": "cap-%05d" % i},
@@ -91,29 +204,34 @@ async def _counts(pool) -> dict:
             return await pool.fetchval(sql)
         except Exception as exc:                                # noqa: BLE001
             return "ERR:" + type(exc).__name__
+    # SCOPED BY THE HARNESS'S OWN EXPERIMENT. Counting by `policy` would
+    # have counted the strategy's positions as the harness's own -- and a
+    # capacity figure that includes real inventory is not a capacity figure.
+    E = WRITER_EXPERIMENT
     return {
+        "experiment": E,
         "positions": await one(
-            "SELECT count(*) FROM rn1x_positions WHERE policy = '%s'"
-            % inv.POLICY),
+            "SELECT count(*) FROM rn1x_positions WHERE experiment_id = "
+            "'%s'" % E),
         "orders": await one(
             "SELECT count(*) FROM rn1x_orders o JOIN rn1x_positions p "
-            "ON p.position_id = o.position_id WHERE p.policy = '%s'"
-            % inv.POLICY),
+            "ON p.position_id = o.position_id WHERE p.experiment_id = '%s'"
+            % E),
         "fills": await one(
-            "SELECT count(*) FROM rn1x_fills f JOIN rn1x_orders o "
-            "ON o.order_id = f.order_id JOIN rn1x_positions p "
-            "ON p.position_id = o.position_id WHERE p.policy = '%s'"
-            % inv.POLICY),
+            "SELECT count(*) FROM rn1x_fills f "
+            "JOIN rn1x_orders o ON o.order_id = f.order_id "
+            "JOIN rn1x_positions p ON p.position_id = o.position_id "
+            "WHERE p.experiment_id = '%s'" % E),
         "fee_total": await one(
             "SELECT coalesce(sum(f.fee_usd), 0) FROM rn1x_fills f "
             "JOIN rn1x_orders o ON o.order_id = f.order_id "
             "JOIN rn1x_positions p ON p.position_id = o.position_id "
-            "WHERE p.policy = '%s'" % inv.POLICY),
+            "WHERE p.experiment_id = '%s'" % E),
         "filled_qty_total": await one(
             "SELECT coalesce(sum(f.qty), 0) FROM rn1x_fills f "
             "JOIN rn1x_orders o ON o.order_id = f.order_id "
             "JOIN rn1x_positions p ON p.position_id = o.position_id "
-            "WHERE p.policy = '%s'" % inv.POLICY),
+            "WHERE p.experiment_id = '%s'" % E),
     }
 
 
@@ -177,7 +295,9 @@ def _stats(lat, wall, n):
 
 
 async def run(dsn: str, entries: int, burst: int, concurrency: int,
-              lifecycles: int = 0, restart: int = 0) -> dict:
+              lifecycles: int = 0, restart: int = 0,
+              confirm_disposable: str = "", experiment: str = "",
+              stamp: float = 0.0) -> dict:
     import asyncpg
 
     out: dict = {
@@ -192,6 +312,13 @@ async def run(dsn: str, entries: int, burst: int, concurrency: int,
             "not a count of qualifying opportunities and must never be "
             "quoted as one"),
         "policy": inv.POLICY,
+        "books": {"writer_microbenchmark": WRITER_EXPERIMENT,
+                  "complete_lifecycles": "CAPACITY_PROBE_LIFECYCLE_V1"},
+        "isolated_from_the_strategy_book": (
+            "every row this harness writes carries one of the two experiment "
+            "ids above. Neither is the autonomous strategy's experiment, so "
+            "no strategy read, P&L lane or calibration sample can reach a "
+            "synthetic position written here"),
         "fee_per_contract": FEE_PER_CONTRACT,
         "implied_per_day_is_an_extrapolation": (
             "entries_per_s is measured; implied_per_day multiplies it by "
@@ -203,10 +330,26 @@ async def run(dsn: str, entries: int, burst: int, concurrency: int,
             "magnitude"),
         "phases": {},
     }
+    # ── THE GUARDS, BEFORE ANY POOL IS OPENED OR ANY ROW IS WRITTEN ──
+    want = experiment or WRITER_EXPERIMENT
+    bad = experiment_guard(want)
+    if bad:
+        return dict(out, ok=False, wrote_nothing=True, refused=bad,
+                    isolation="REFUSED_BEFORE_THE_FIRST_WRITE")
+    RUN.update(id=run_id(stamp or 0.0), experiment=want,
+               lifecycle_experiment=LIFECYCLE_EXPERIMENT,
+               stamp=float(stamp or 0.0))
+    out["run_id"] = RUN["id"]
+    out["experiment"] = want
     pool = await asyncpg.create_pool(dsn, min_size=2, max_size=concurrency + 2)
     try:
+        held = await database_guard(pool, confirmed=confirm_disposable)
+        if held:
+            return dict(out, ok=False, wrote_nothing=True, refused=held,
+                        isolation="REFUSED_BEFORE_THE_FIRST_WRITE")
+        out["isolation"] = "CONFIRMED_DISPOSABLE_AND_NO_STRATEGY_BOOK"
         async with pool.acquire() as conn:
-            await inv.ensure_experiment(conn, ext.EXPERIMENT_ID)
+            await inv.ensure_experiment(conn, want)
         out["baseline"] = await _counts(pool)
 
         # ── 1 · SUSTAINED THROUGHPUT ────────────────────────────────
@@ -337,7 +480,7 @@ def _lc_identity(i: int) -> tuple:
     """A distinct contract per lifecycle. Synthetic, and unmistakably so."""
     return ("0x%064x" % (0xCAFE0000 + i),
             "aec-lifecycle-%05d-2026-09-26" % i,
-            "Capacity Lifecycle %05d Side A" % i)
+            "Capacity Lifecycle %05d Side A %s" % (i, RUN["id"]))
 
 
 async def _one_lifecycle(pool, i: int) -> dict:
@@ -527,9 +670,19 @@ async def phase_process_restart(pool, dsn: str, lo: int, hi: int,
     import subprocess
 
     out = {"phase": "actual_process_restart", "range": [lo, hi],
-           "kill_after_completions": kill_after}
+           "kill_after_completions": kill_after,
+           # THE PROCESSES ARE NAMED BY PID, because "a process restart"
+           # with no process identity is a claim, not a measurement. Three
+           # distinct operating-system processes take part: this parent, the
+           # child that is killed, and the child that finishes the batch.
+           "parent_pid": os.getpid(),
+           "processes": []}
     cmd = [sys.executable, "-m", "tools.bettor_capacity_probe",
-           "--dsn", dsn, "--child-lifecycles", "%d:%d" % (lo, hi)]
+           "--dsn", dsn, "--child-lifecycles", "%d:%d" % (lo, hi),
+           # THE CHILD CARRIES THE SAME RUN ID, so the rows two different
+           # processes wrote are attributable to one run.
+           "--run-id-stamp", str(RUN["stamp"]),
+           "--confirm-disposable", "DO"]
     root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
     first = subprocess.Popen(cmd, cwd=root, stdout=subprocess.PIPE,
                              stderr=subprocess.PIPE, text=True)
@@ -550,11 +703,30 @@ async def phase_process_restart(pool, dsn: str, lo: int, hi: int,
             pass
     out["first_child"] = {"pid": first.pid, "completed_before_kill":
                           len(seen), "returncode": first.returncode,
-                          "killed_with": "SIGKILL"}
+                          "killed_with": "SIGKILL",
+                          "returncode_means": (
+                              "-9 is death by SIGKILL: the process got no "
+                              "chance to flush, close a connection or run a "
+                              "finally block")}
+    out["processes"].append({"role": "FIRST_WRITER_KILLED", "pid": first.pid,
+                             "completed": len(seen)})
     mid = await _lc_counts(pool)
     out["counts_after_kill"] = mid
-    second = subprocess.run(cmd, cwd=root, capture_output=True, text=True,
-                            timeout=600)
+    # A SECOND, SEPARATE INTERPRETER. Popen so its pid can be reported --
+    # the point of the phase is that a DIFFERENT process finished the work.
+    second = subprocess.Popen(cmd, cwd=root, stdout=subprocess.PIPE,
+                              stderr=subprocess.PIPE, text=True)
+    s_out, s_err = second.communicate(timeout=600)
+
+    class _Done:                       # the shape the rest of this reads
+        returncode = second.returncode
+        stdout = s_out
+        stderr = s_err
+
+    out["processes"].append({"role": "SECOND_WRITER_FINISHED",
+                             "pid": second.pid})
+    out["distinct_os_processes"] = len({os.getpid(), first.pid, second.pid})
+    second = _Done
     done2 = [json.loads(ln[len(RESTART_MARKER):])
              for ln in (second.stdout or "").splitlines()
              if ln.startswith(RESTART_MARKER)]
@@ -629,8 +801,20 @@ def main() -> int:
                     help="lifecycles for the actual process-restart phase")
     ap.add_argument("--child-lifecycles", default="",
                     help="INTERNAL: lo:hi, the child process's own batch")
+    ap.add_argument("--confirm-disposable", default="",
+                    help="DO -- the database is a disposable test database")
+    ap.add_argument("--experiment", default="",
+                    help="the harness experiment to write under; a strategy "
+                         "experiment is refused before the first write")
+    ap.add_argument("--run-id-stamp", type=float, default=0.0,
+                    help="epoch seconds to derive the run id from "
+                         "(default: now)")
     a = ap.parse_args()
     if a.child_lifecycles:
+        # THE CHILD RUNS UNDER THE SAME RUN ID as its parent.
+        RUN.update(id=run_id(a.run_id_stamp or 0.0),
+                   experiment=WRITER_EXPERIMENT,
+                   lifecycle_experiment=LIFECYCLE_EXPERIMENT)
         # THE CHILD PROCESS. It runs lifecycles and announces each one; the
         # parent kills it mid-batch. It prints no report of its own.
         lo, hi = (int(x) for x in a.child_lifecycles.split(":"))
@@ -639,7 +823,14 @@ def main() -> int:
         print("a --dsn (or RN1X_TEST_DSN) is required", file=sys.stderr)
         return 2
     out = asyncio.run(run(a.dsn, a.entries, a.burst, a.concurrency,
-                          lifecycles=a.lifecycles, restart=a.restart))
+                          lifecycles=a.lifecycles, restart=a.restart,
+                          confirm_disposable=a.confirm_disposable,
+                          experiment=a.experiment,
+                          stamp=(a.run_id_stamp or time.time())))
+    if out.get("refused"):
+        print(json.dumps(out, indent=1, default=str))
+        print("REFUSED: %s" % out["refused"].get("refusal"), file=sys.stderr)
+        return 3
     print(json.dumps(out, indent=1, default=str))
     lc = out["phases"].get("complete_lifecycles") or {}
     dup = out["phases"].get("duplicate_lifecycles") or {}

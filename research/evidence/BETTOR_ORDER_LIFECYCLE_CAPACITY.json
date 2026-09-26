@@ -5,25 +5,31 @@
  "workload_note": "every plan is fabricated to exercise the writer. None came from a venue and none is evidence that such a trade existed",
  "processing_capacity_is_not_opportunity": "entries per day here is what the lifecycle can PROCESS. It is not a count of qualifying opportunities and must never be quoted as one",
  "policy": "EXT_PINNACLE_ENTRY_V1",
+ "books": {
+  "writer_microbenchmark": "CAPACITY_PROBE_WRITER_V1",
+  "complete_lifecycles": "CAPACITY_PROBE_LIFECYCLE_V1"
+ },
+ "isolated_from_the_strategy_book": "every row this harness writes carries one of the two experiment ids above. Neither is the autonomous strategy's experiment, so no strategy read, P&L lane or calibration sample can reach a synthetic position written here",
  "fee_per_contract": 0.016,
  "implied_per_day_is_an_extrapolation": "entries_per_s is measured; implied_per_day multiplies it by 86400 and is NOT a claim that the lane would process that many. The real constraints are the 900 s cycle, the shared venue read budget and the provider's credit limit -- none of which this probe touches. Read it as: the WRITER is not the bottleneck at hundreds of trades a day, by three orders of magnitude",
  "phases": {
   "sustained": {
    "n": 500,
-   "wall_s": 1.712,
-   "entries_per_s": 292.06,
-   "implied_per_day": 25233644,
+   "wall_s": 1.47,
+   "entries_per_s": 340.14,
+   "implied_per_day": 29387755,
    "latency_ms": {
-    "p50": 3.03,
-    "p90": 5.43,
-    "p99": 7.27,
-    "max": 13.53,
-    "mean": 3.42
+    "p50": 2.69,
+    "p90": 4.01,
+    "p99": 7.66,
+    "max": 13.35,
+    "mean": 2.94
    },
    "cases": {
     "NEW_EXPOSURE": 500
    },
    "counts_after": {
+    "experiment": "CAPACITY_PROBE_WRITER_V1",
     "positions": 500,
     "orders": 500,
     "fills": 500,
@@ -33,20 +39,21 @@
   },
   "replay": {
    "n": 500,
-   "wall_s": 0.285,
-   "entries_per_s": 1754.39,
-   "implied_per_day": 151578947,
+   "wall_s": 0.197,
+   "entries_per_s": 2538.07,
+   "implied_per_day": 219289340,
    "latency_ms": {
-    "p50": 0.45,
-    "p90": 0.91,
-    "p99": 1.92,
-    "max": 6.55,
-    "mean": 0.57
+    "p50": 0.36,
+    "p90": 0.51,
+    "p99": 0.89,
+    "max": 1.19,
+    "mean": 0.39
    },
    "cases": {
     "EXACT_REPLAY_OF_A_RECORDED_OBSERVATION": 500
    },
    "counts_after": {
+    "experiment": "CAPACITY_PROBE_WRITER_V1",
     "positions": 500,
     "orders": 500,
     "fills": 500,
@@ -58,21 +65,22 @@
   },
   "burst": {
    "n": 150,
-   "wall_s": 0.418,
-   "entries_per_s": 358.85,
-   "implied_per_day": 31004784,
+   "wall_s": 0.428,
+   "entries_per_s": 350.47,
+   "implied_per_day": 30280373,
    "latency_ms": {
-    "p50": 16.53,
-    "p90": 263.31,
-    "p99": 279.61,
-    "max": 280.26,
-    "mean": 43.41
+    "p50": 13.31,
+    "p90": 298.04,
+    "p99": 312.87,
+    "max": 314.19,
+    "mean": 44.61
    },
    "cases": {
     "NEW_EXPOSURE": 150
    },
    "concurrency": 16,
    "counts_after": {
+    "experiment": "CAPACITY_PROBE_WRITER_V1",
     "positions": 650,
     "orders": 650,
     "fills": 650,
@@ -84,20 +92,21 @@
   },
   "connection_recovery": {
    "n": 50,
-   "wall_s": 0.024,
-   "entries_per_s": 2083.33,
-   "implied_per_day": 180000000,
+   "wall_s": 0.03,
+   "entries_per_s": 1666.67,
+   "implied_per_day": 144000000,
    "latency_ms": {
-    "p50": 0.32,
-    "p90": 0.93,
-    "p99": 3.34,
-    "max": 3.34,
-    "mean": 0.49
+    "p50": 0.38,
+    "p90": 1.15,
+    "p99": 3.36,
+    "max": 3.36,
+    "mean": 0.59
    },
    "cases": {
     "EXACT_REPLAY_OF_A_RECORDED_OBSERVATION": 50
    },
    "counts_after": {
+    "experiment": "CAPACITY_PROBE_WRITER_V1",
     "positions": 650,
     "orders": 650,
     "fills": 650,
@@ -110,15 +119,15 @@
   },
   "complete_lifecycles": {
    "n": 120,
-   "wall_s": 12.468,
-   "entries_per_s": 9.62,
-   "implied_per_day": 831568,
+   "wall_s": 12.362,
+   "entries_per_s": 9.71,
+   "implied_per_day": 838699,
    "latency_ms": {
-    "p50": 99.04,
-    "p90": 127.72,
-    "p99": 151.0,
-    "max": 187.37,
-    "mean": 103.84
+    "p50": 102.11,
+    "p90": 122.74,
+    "p99": 140.31,
+    "max": 164.68,
+    "mean": 102.96
    },
    "phase": "complete_lifecycles",
    "completed": 120,
@@ -153,13 +162,13 @@
     "buys_equal_sells": true,
     "discrepancies": []
    },
-   "lifecycles_per_s": 9.625,
+   "lifecycles_per_s": 9.707,
    "what_this_measures": "a COMPLETE lifecycle: entry, recurring management, a reduction, a completing exit and reconciled accounting, through the deployed functions. Its inputs are chosen; its code is production's",
    "what_it_does_not_measure": "opportunity. It says nothing about how many contracts a venue would show, a provider would price or the gates would admit",
    "examples": [
     {
      "i": 0,
-     "ms": 103.977524995571,
+     "ms": 111.38471700542141,
      "cycles_run": 7,
      "flat": true,
      "reconciles": true,
@@ -176,7 +185,7 @@
     },
     {
      "i": 1,
-     "ms": 79.71930599887855,
+     "ms": 81.99048499955097,
      "cycles_run": 7,
      "flat": true,
      "reconciles": true,
@@ -193,7 +202,7 @@
     },
     {
      "i": 2,
-     "ms": 74.15872199635487,
+     "ms": 90.58900499803713,
      "cycles_run": 7,
      "flat": true,
      "reconciles": true,
@@ -212,15 +221,15 @@
   },
   "duplicate_lifecycles": {
    "n": 5,
-   "wall_s": 0.19,
-   "entries_per_s": 26.32,
-   "implied_per_day": 2273684,
+   "wall_s": 0.211,
+   "entries_per_s": 23.7,
+   "implied_per_day": 2047393,
    "latency_ms": {
-    "p50": 38.22,
-    "p90": 43.26,
-    "p99": 43.26,
-    "max": 43.26,
-    "mean": 37.95
+    "p50": 40.47,
+    "p90": 49.85,
+    "p99": 49.85,
+    "max": 49.85,
+    "mean": 42.16
    },
    "phase": "duplicate_delivery_of_complete_lifecycles",
    "redelivered": 5,
@@ -258,11 +267,24 @@
     500015
    ],
    "kill_after_completions": 5,
+   "parent_pid": 1757,
+   "processes": [
+    {
+     "role": "FIRST_WRITER_KILLED",
+     "pid": 1790,
+     "completed": 5
+    },
+    {
+     "role": "SECOND_WRITER_FINISHED",
+     "pid": 1793
+    }
+   ],
    "first_child": {
-    "pid": 12529,
+    "pid": 1790,
     "completed_before_kill": 5,
     "returncode": -9,
-    "killed_with": "SIGKILL"
+    "killed_with": "SIGKILL",
+    "returncode_means": "-9 is death by SIGKILL: the process got no chance to flush, close a connection or run a finally block"
    },
    "counts_after_kill": {
     "positions": 125,
@@ -272,6 +294,7 @@
     "fee_total": "400.000000000000015265566588595902430824935436248779296875",
     "filled_qty_total": "25000"
    },
+   "distinct_os_processes": 3,
    "second_child": {
     "returncode": 0,
     "lifecycles_reported": 15,
@@ -301,7 +324,11 @@
    "ok": true
   }
  },
+ "run_id": "CAPRUN-1790439348",
+ "experiment": "CAPACITY_PROBE_WRITER_V1",
+ "isolation": "CONFIRMED_DISPOSABLE_AND_NO_STRATEGY_BOOK",
  "baseline": {
+  "experiment": "CAPACITY_PROBE_WRITER_V1",
   "positions": 0,
   "orders": 0,
   "fills": 0,
@@ -320,13 +347,15 @@
   "why": "every accepted entry writes exactly one position, one order and one fill, and the fee total must equal the schedule times the filled quantity. A mismatch is a double count, not a rounding note"
  },
  "final_counts": {
+  "experiment": "CAPACITY_PROBE_WRITER_V1",
   "positions": 650,
   "orders": 650,
   "fills": 650,
   "fee_total": "1040.000000000000057731597280508140102028846740722656250",
   "filled_qty_total": "65000"
  },
- "measured_at": "2026-09-26T15:40:00Z",
- "database": "a database built from this repository's migrations from nothing (applied 118, failed 2 -- the two known copy-lane migrations that need the catalogue bootstrap)",
- "how_to_reproduce": "python3 -m tools.bettor_capacity_probe --dsn ... --entries 500 --burst 150 --concurrency 16 --lifecycles 120 --restart 15"
+ "measured_at": "2026-09-26T16:16:00Z",
+ "database": "cap6 -- a disposable local database built from this repository's migrations from nothing (applied 118, failed 2: the two known copy-lane migrations that need the catalogue bootstrap), on 127.0.0.1:5432 in this session's container. It held no strategy book, which is now a precondition the harness checks before its first write",
+ "isolation_evidence": "research/evidence/CAPACITY_PROBE_AFFECTED_IDS.json",
+ "how_to_reproduce": "python3 -m tools.bettor_capacity_probe --dsn ... --entries 500 --burst 150 --concurrency 16 --lifecycles 120 --restart 15 --confirm-disposable DO"
 }
