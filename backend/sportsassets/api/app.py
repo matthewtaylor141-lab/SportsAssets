@@ -3411,34 +3411,16 @@ async def admin_funded_account_registry(response: Response) -> dict:
     response.headers["Cache-Control"] = "no-store"
     pool = await get_pool()
     try:
-        rows = [dict(r) for r in await pool.fetch(
-            "SELECT account_id, desk_id, status, paused, pause_reason, "
-            "       accounting_status, "
-            "       extract(epoch FROM opened_at)::float8 AS opened_at "
-            "  FROM bettor_desk_accounts ORDER BY account_id")]
+        rows = [dict(r) for r in await pool.fetch(FA.REGISTRY_READ_SQL)]
     except Exception as exc:                                   # noqa: BLE001
         # AN UNREADABLE REGISTRY IS NOT AN EMPTY ONE.
         raise HTTPException(status_code=503, detail={
             "reason": "ACCOUNT_REGISTRY_UNREADABLE",
             "what": type(exc).__name__}) from exc
-    eligible = [r["account_id"] for r in rows
-                if str(r.get("status") or "") == "ACTIVE"
-                and not r.get("paused")
-                and str(r.get("accounting_status") or "").upper()
-                in FA.ACCOUNTING_OK]
-    return {
-        "ok": True, "accounts": rows, "count": len(rows),
-        "activation_eligible_by_their_rows": eligible,
-        "eligible_means": ("ACTIVE, not paused, and an accounting status in "
-                           "%s. It is NOT an approval: naming the account "
-                           "and approving it are the owner's act"
-                           % (list(FA.ACCOUNTING_OK),)),
-        "paused_accounts": [r["account_id"] for r in rows if r.get("paused")],
-        "the_guard_is_the_row": ("activation reads `paused` and "
-                                 "`accounting_status` off these rows, so a "
-                                 "rename or a relabel changes nothing"),
-        "holds_no_balances": True,
-    }
+    # THE SUMMARY IS PURE AND LIVES IN THE ACTIVATION MODULE, beside the
+    # refusals it mirrors -- so the eligibility rule is testable without a
+    # connection pool and cannot drift from the guard.
+    return dict(FA.summarise_registry(rows), ok=True)
 
 
 @app.get("/api/admin/capacity-probe-audit",

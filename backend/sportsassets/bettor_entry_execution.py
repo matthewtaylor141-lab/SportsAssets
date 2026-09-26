@@ -579,6 +579,91 @@ def effective_limits(approved: dict | None = None) -> dict:
     }
 
 
+# ── THE SUBMISSION AUTHORIZATION GATE ───────────────────────────────
+#
+# WHY IT IS HERE AND NOT IN THE PANEL. `bettor_funded_activation` decides
+# whether an authorization may be RECORDED. Recording one proves nothing
+# about execution: an authorization nothing consumes is a note in a table.
+# This is the gate on the EXECUTION side -- the single sanctioned entry to a
+# submission -- and it CONSUMES the recorded authorization: it matches the
+# account, the venue and the digest of the limits that were approved, and
+# only then reaches the hard constant that keeps real submission off.
+#
+# WHAT IT DOES NOT DO. It never submits, and it never enables submission.
+# With a valid authorization the answer changes from
+# SUBMISSION_IS_NOT_AUTHORIZED... to REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE
+# -- and that difference is the proof that the authorization was read.
+
+R_NO_AUTHORIZATION = "NO_SUBMISSION_AUTHORIZATION_HAS_BEEN_RECORDED"
+R_AUTH_ACCOUNT = "THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT"
+R_AUTH_VENUE = "THE_AUTHORIZATION_NAMES_A_DIFFERENT_VENUE"
+R_AUTH_LIMITS = "THE_AUTHORIZATION_DOES_NOT_COVER_THESE_EFFECTIVE_LIMITS"
+R_AUTH_NO_DIGEST = "THE_AUTHORIZATION_CARRIES_NO_EFFECTIVE_LIMIT_DIGEST"
+R_SUBMISSION_DISABLED = "REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE"
+
+
+def authorize_submission(*, account_id: str, venue: str,
+                         authorization: dict | None,
+                         approved_limits: dict | None = None) -> dict:
+    """MAY THIS ACCOUNT SUBMIT AT THIS VENUE? The execution side's answer.
+
+    Every refusal is named, and the LAST one is the code constant, so a
+    caller can tell "you are not authorised" from "you are authorised and
+    submission is off". `authorization_consumed` is true only when the
+    record was actually read and matched.
+    """
+    out = {"lane": LANE, "account_id": account_id, "venue": venue,
+           "submitted": False,
+           "real_order_submission_enabled": REAL_ORDER_SUBMISSION_ENABLED,
+           "authorization_consumed": False,
+           "authorization_source": "bettor_funded_activation.AUTHORIZATION",
+           "this_gate_never_submits": True}
+    rec = dict(authorization or {})
+    if not rec:
+        return dict(out, ok=False, refusal=R_NO_AUTHORIZATION,
+                    why=("no authorization record was supplied, so there is "
+                         "nothing to consume"))
+    want_acct = str(rec.get("account_id") or "")
+    want_venue = str(rec.get("venue") or "")
+    out["authorization"] = {k: rec.get(k) for k in
+                            ("account_id", "venue", "venue_class",
+                             "effective_digest", "by", "at")}
+    if want_acct != str(account_id or "") or not want_acct:
+        return dict(out, ok=False, refusal=R_AUTH_ACCOUNT,
+                    why="authorised for %r, asked for %r"
+                        % (want_acct, account_id))
+    if want_venue.upper() != str(venue or "").upper() or not want_venue:
+        return dict(out, ok=False, refusal=R_AUTH_VENUE,
+                    why="authorised for %r, asked for %r"
+                        % (want_venue, venue))
+    # THE LIMITS THE OWNER APPROVED ARE PART OF THE AUTHORIZATION. If the
+    # approved set has moved since, the authorization does not cover it.
+    got_digest = str(rec.get("effective_digest") or "")
+    if not got_digest:
+        return dict(out, ok=False, refusal=R_AUTH_NO_DIGEST,
+                    why=("the authorization does not say which effective "
+                         "limits it was granted against"))
+    if approved_limits is not None:
+        now_digest = effective_limits(approved_limits)["effective_digest"]
+        out["effective_digest_now"] = now_digest
+        if now_digest != got_digest:
+            return dict(out, ok=False, refusal=R_AUTH_LIMITS,
+                        why=("authorised against %s, the approved set now "
+                             "digests to %s" % (got_digest[:12],
+                                                now_digest[:12])))
+    # THE AUTHORIZATION HAS BEEN READ AND IT MATCHES. What stops the
+    # submission from here is the code constant, and nothing else.
+    out["authorization_consumed"] = True
+    if not REAL_ORDER_SUBMISSION_ENABLED:
+        return dict(out, ok=False, refusal=R_SUBMISSION_DISABLED,
+                    why=("the authorization covers this account, venue and "
+                         "limit set, and real order submission is off in "
+                         "code. Turning it on is a code change, not a "
+                         "record"))
+    return dict(out, ok=True, refusal=None,                # pragma: no cover
+                why="authorised, and submission is enabled in code")
+
+
 def declaration() -> dict:
     """The limit set, its derivation and what it does not authorise."""
     return {

@@ -135,12 +135,16 @@ async def _seed_accounts(conn):
         """, PAUSED, CLEAN, CLOSED)
 
 
+#: The one limit set these fixtures record and approve. Named, so the
+#: authorization tests can digest exactly what was approved.
+_LIMITS = {"capital_usd": 250, "per_order_usd": 25,
+           "max_exposure_usd": 100, "daily_loss_stop_usd": 50}
+
+
 async def _record_and_approve_limits(conn, *, approved=True):
     from sportsassets import bettor_desk_controls as CTL
 
-    got = await CTL.set_limits(conn, by="test", proposed={
-        "capital_usd": 250, "per_order_usd": 25,
-        "max_exposure_usd": 100, "daily_loss_stop_usd": 50})
+    got = await CTL.set_limits(conn, by="test", proposed=dict(_LIMITS))
     assert got["ok"], got
     if not approved:
         return got
@@ -157,8 +161,19 @@ async def _record_and_approve_limits(conn, *, approved=True):
     return got
 
 
-async def _seed_evidence(conn, *, waived: bool):
-    """The rows the four derived checks read. Labelled as a fixture."""
+async def _seed_evidence(conn, *, waived: bool, basis: str | None = None,
+                        age_at_read: float | None = 1.2,
+                        settlement: str = "COMPATIBLE",
+                        period: str = "FULL_GAME"):
+    """The rows the derived checks read. Labelled as a fixture.
+
+    THE BASIS TOKENS ARE THE LANE'S OWN. An earlier version of this fixture
+    used `VENUE_TRANSACT_TIME_ESTABLISHED`, which no writer emits -- and the
+    check passed on it, because it only looked for substrings it disliked.
+    The supported tokens are asserted against the writer's source elsewhere
+    in this file.
+    """
+    tok = basis or "VENUE_TRANSACT_TIME"
     # a cycle whose book reads recorded an ESTABLISHED age basis
     await conn.execute(
         "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
@@ -167,11 +182,19 @@ async def _seed_evidence(conn, *, waived: bool):
             "at": 1_790_000_000.0, "cycle_label": "EVALUATED_1_CANDIDATE",
             "mapped_candidate_ledger": [
                 {"us_market_slug": "aec-x-2026-09-26",
-                 "venue_clock": {"basis": "VENUE_TRANSACT_TIME_ESTABLISHED",
-                                 "age_at_read_s": 1.2}}]}))
-    risk = ({"research_waiver": {"authorised": True,
-                                 "waived": ["MODEL_TRUST_DRIFT"]}}
-            if waived else {"rails_failed": []})
+                 "venue_clock": {"basis": tok,
+                                 "age_at_read_s": age_at_read}}]}))
+    # THE WAIVER RECORD IS PRESENT EITHER WAY, because the lane writes it on
+    # every verdict. What differs is whether anything was WAIVED.
+    risk = {
+        "research_waiver": {"authorised": bool(waived),
+                            "waived": (["MODEL_TRUST_DRIFT"] if waived
+                                       else [])},
+        "freshness_evidence": {"venue_age_basis": tok,
+                               "venue_age_at_read_s": age_at_read,
+                               "venue_age_s": 3.4,
+                               "fresh": True},
+    }
     # AN ADMISSIBLE ROW IS COMPLETE, and the table's own CHECK says so:
     # probability, executable price, cost, edge, mapped outcome and an
     # observation instant, with decision = 'BUY'. The fixture supplies them
@@ -191,9 +214,10 @@ async def _seed_evidence(conn, *, waived: bool):
                 '{}'::jsonb, 2, 2, $2,'aec-x-2026-09-26',
                 0.70, 0.62, 0.636, 0.064,'Chosen Side A', now(),
                 'BUY', TRUE, ARRAY[]::text[],'a seeded fixture row', now(),
-                FALSE,'FULL_GAME','{"verdict":"COMPATIBLE"}'::jsonb,
+                FALSE,$4,$5::jsonb,
                 $3::jsonb, FALSE)
-        """, ext.EXPERIMENT_ID, "0x" + ("11" * 32), json.dumps(risk))
+        """, ext.EXPERIMENT_ID, "0x" + ("11" * 32), json.dumps(risk),
+             period, json.dumps({"verdict": settlement}))
 
 
 @pg
@@ -544,36 +568,480 @@ async def test_every_refusal_still_names_what_is_missing():
 @pg
 async def test_the_account_registry_read_shows_identity_and_no_money():
     """The owner has to name an account_id this service will accept, so the
-    registry has to be readable -- and it must carry no balance."""
-    asyncpg = pytest.importorskip("asyncpg")
+    registry has to be readable -- and it must carry no balance.
 
-    from sportsassets.api import app as A
+    IT DRIVES THE SQL AND THE PURE SUMMARY, not the route handler: the
+    handler's only extra job is to build a connection pool, and doing that
+    inside a full-suite run raced the loop and failed on a socket.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
 
     conn = await asyncpg.connect(DSN)
     try:
         await _seed_accounts(conn)
+        rows = [dict(r) for r in await conn.fetch(FA.REGISTRY_READ_SQL)]
     finally:
         await conn.close()
 
-    real = A.settings
-    A.settings = lambda: type("S", (), {"admin_token": "t"})()
-    try:
-        class _R:
-            headers: dict = {}
-        got = await A.admin_funded_account_registry(response=_R())
-    finally:
-        A.settings = real
-
+    got = FA.summarise_registry(rows)
     ids = {r["account_id"] for r in got["accounts"]}
     assert {PAUSED, CLEAN, CLOSED} <= ids
     # ELIGIBILITY IS COMPUTED FROM THE ROWS, and it is not an approval
     assert got["activation_eligible_by_their_rows"] == [CLEAN]
     assert PAUSED in got["paused_accounts"]
-    assert "not an approval" in got["eligible_means"] or \
-        "NOT an approval" in got["eligible_means"]
+    assert "NOT an approval" in got["eligible_means"]
     # NO MONEY CROSSES THIS SURFACE
     assert got["holds_no_balances"] is True
     for r in got["accounts"]:
-        for banned in ("opening_balance", "balance", "cash", "buying_power",
-                       "account_value", "equity"):
+        for banned in FA.REGISTRY_FORBIDDEN_FIELDS:
             assert banned not in r, (banned, r)
+
+
+def test_the_registry_summary_strips_money_even_if_the_table_grows():
+    """The stripping is on the SUMMARY, not on the query, so a column added
+    to the table tomorrow cannot leak through a `SELECT *` somewhere."""
+    got = FA.summarise_registry([
+        {"account_id": "a", "status": "ACTIVE", "paused": False,
+         "accounting_status": "CLEAN", "opening_balance": 1234.5,
+         "buying_power": 99.0, "provenance": {"x": 1}},
+        {"account_id": "b", "status": "ACTIVE", "paused": True,
+         "accounting_status": "UNCERTAIN"},
+        {"account_id": "c", "status": "CLOSED_UNATTRIBUTABLE",
+         "paused": False, "accounting_status": "CLEAN"},
+    ])
+    assert got["activation_eligible_by_their_rows"] == ["a"]
+    assert got["paused_accounts"] == ["b"]
+    assert all("opening_balance" not in r and "buying_power" not in r
+               for r in got["accounts"])
+    # AND THE ROUTE RETURNS EXACTLY THIS, plus ok
+    import inspect
+
+    from sportsassets.api import app as A
+
+    src = inspect.getsource(A.admin_funded_account_registry)
+    assert "FA.summarise_registry(rows)" in src
+    assert "FA.REGISTRY_READ_SQL" in src
+    assert "ACCOUNT_REGISTRY_UNREADABLE" in src
+
+
+# ── THE COUNTEREXAMPLES, EACH PINNED ────────────────────────────────
+
+@pg
+async def test_a_venue_clock_that_was_never_provided_is_not_a_basis():
+    """COUNTEREXAMPLE 1, reproduced and pinned.
+
+    `VENUE_CLOCK_NOT_PROVIDED` is the token the lane writes when the venue
+    sent no transact time at all -- the clearest possible statement that the
+    age was never measured. The first check asked only whether the token
+    contained "UNESTABLISHED", "NOT_RECORDED" or "UNKNOWN", so this PASSED.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        for tok, want in (("VENUE_CLOCK_NOT_PROVIDED", False),
+                          ("VENUE_CLOCK_UNPARSEABLE", False),
+                          ("VENUE_TRANSACT_TIME", True)):
+            await conn.execute(
+                "INSERT INTO ingestion_state (key, value) "
+                "VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE "
+                "SET value = $2::jsonb", "ext_pinnacle_last_cycle",
+                json.dumps({"at": 1_790_000_000.0, "cycle_label": "X",
+                            "mapped_candidate_ledger": [
+                                {"venue_clock": {"basis": tok,
+                                                 "age_at_read_s": 1.0}}]}))
+            got = await FA._freshness_check(conn)
+            assert got["met"] is want, (tok, got["met"], got["detail"])
+
+        # AN ESTABLISHED TOKEN WITH NO MEASURED AGE IS NOT EVIDENCE OF ONE.
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            "ext_pinnacle_last_cycle",
+            json.dumps({"at": 1.0, "cycle_label": "X",
+                        "mapped_candidate_ledger": [
+                            {"venue_clock": {"basis": "VENUE_TRANSACT_TIME",
+                                             "age_at_read_s": None}}]}))
+        got = await FA._freshness_check(conn)
+        assert got["met"] is None, got
+        assert "evidence for it is missing" in got["detail"]
+
+        # AND A TOKEN NOBODY WRITES IS UNKNOWN, NOT A PASS.
+        await conn.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            "ext_pinnacle_last_cycle",
+            json.dumps({"at": 1.0, "cycle_label": "X",
+                        "mapped_candidate_ledger": [
+                            {"venue_clock": {
+                                "basis": "VENUE_TRANSACT_TIME_ESTABLISHED",
+                                "age_at_read_s": 1.0}}]}))
+        got = await FA._freshness_check(conn)
+        assert got["met"] is None, got
+        assert "not in this check's vocabulary" in got["detail"]
+    finally:
+        await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                           "ext_pinnacle_last_cycle")
+        await conn.close()
+
+
+def test_the_basis_vocabulary_is_the_writers_own():
+    """A vocabulary that drifts from the writer is a substring guess with
+    extra steps. The tokens are asserted against the module that emits
+    them."""
+    import inspect
+
+    from sportsassets.workers import ext_pinnacle_loop as LOOP
+
+    src = inspect.getsource(LOOP)
+    for tok in FA.FRESHNESS_BASIS_ESTABLISHED:
+        assert '"%s"' % tok in src, tok
+    for tok in FA.FRESHNESS_BASIS_UNESTABLISHED:
+        if tok == "NOT_RECORDED":
+            continue          # this check's own word for "no token at all"
+        assert '"%s"' % tok in src, tok
+    # and the token an older fixture invented is emitted by nobody
+    assert '"VENUE_TRANSACT_TIME_ESTABLISHED"' not in src
+
+
+@pg
+async def test_one_incompatible_settlement_verdict_refuses_the_window():
+    """COUNTEREXAMPLE 2, reproduced and pinned.
+
+    The settlement module's word for a conflict is INCOMPATIBLE. The first
+    check counted conflicts by looking for "CONFLICT", which INCOMPATIBLE
+    does not contain -- so a window holding one COMPATIBLE and one
+    INCOMPATIBLE row reported "1 compatible and none conflicted" and PASSED,
+    on evidence that included a fixture whose payouts provably differ.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+
+    from sportsassets import bettor_settlement_terms as ST
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        # one COMPATIBLE alone: met
+        await _seed_evidence(conn, waived=False, settlement=ST.COMPATIBLE)
+        first = await FA._settlement_check(conn, ext.EXPERIMENT_ID, 168)
+        assert first["met"] is True, first
+        assert first["evidence"]["conflicting"] == 0
+
+        # add ONE INCOMPATIBLE beside it: the window must refuse
+        await _seed_evidence(conn, waived=False, settlement=ST.INCOMPATIBLE)
+        got = await FA._settlement_check(conn, ext.EXPERIMENT_ID, 168)
+        assert got["met"] is False, got
+        assert got["evidence"]["conflicting"] == 1, got["evidence"]
+        assert got["evidence"]["compatible"] == 1, got["evidence"]
+        assert "INCOMPATIBLE" in got["detail"]
+        assert "none conflicted" not in got["detail"]
+
+        # a verdict outside the enum is UNKNOWN, not a pass and not a fail
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        await _seed_evidence(conn, waived=False, settlement="PROBABLY_FINE")
+        odd = await FA._settlement_check(conn, ext.EXPERIMENT_ID, 168)
+        assert odd["met"] is None, odd
+        assert "outside the enum" in odd["detail"]
+    finally:
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        await conn.close()
+
+
+@pg
+async def test_the_waiver_test_reads_the_waiver_and_not_the_json_text():
+    """COUNTEREXAMPLE 3, of the same family, found while fixing the others.
+
+    The lane writes the waiver RECORD on every verdict it persists, so
+    `risk_verdict::text LIKE '%research_waiver%'` matched every row: every
+    admission counted as waived and the check could never be satisfied by
+    anything. It failed closed, so it granted nothing it should not have --
+    it was simply unsatisfiable, and it said "0 admitted without a waiver"
+    about rows where nothing had been waived.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        await _seed_evidence(conn, waived=False)
+        got = await FA._admitted_check(conn, ext.EXPERIMENT_ID, 168,
+                                      (inv.PROVENANCE,))
+        assert got["met"] is True, got
+        assert got["evidence"]["of_those_research_waived"] == 0, got["evidence"]
+
+        # AND A CONSUMED WAIVER STILL DOES NOT QUALIFY.
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        await _seed_evidence(conn, waived=True)
+        waived = await FA._admitted_check(conn, ext.EXPERIMENT_ID, 168,
+                                         (inv.PROVENANCE,))
+        assert waived["met"] is False, waived
+        assert waived["evidence"]["of_those_research_waived"] == 1
+        assert waived["evidence"]["admitted_without_a_waiver"] == 0
+    finally:
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        await conn.close()
+
+
+@pg
+async def test_readiness_is_never_assembled_from_unrelated_rows():
+    """FOUR CHECKS PASSING ON FOUR DIFFERENT MARKETS IS NOT AN OPPORTUNITY.
+
+    Each per-kind check reads its own rows, so all four can be met while no
+    single market carries the whole chain. The composite check is what
+    gates, and it names the market when one exists.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+
+    from sportsassets import bettor_settlement_terms as ST
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        # MARKET A: admitted and unwaived, but its scope is a segment and
+        # its settlement is UNKNOWN.
+        await _seed_evidence(conn, waived=False, settlement=ST.UNKNOWN,
+                             period="FIRST_HALF")
+        # MARKET B: a COMPATIBLE settlement and a whole-fixture scope, but
+        # its clock basis was never provided, and it is not admissible.
+        await conn.execute(
+            """
+            INSERT INTO external_valuations
+              (experiment_id, version, source_class, provider, book,
+               devig_method, venue, contract_selection, sport_family, market,
+               raw_odds, outcomes_priced, expected_outcomes, condition_id,
+               us_market_slug, decision, admissible, refusals, why,
+               decided_at, outcome_known, period, settlement_comparison,
+               risk_verdict, order_submitted)
+            VALUES ($1,'v','EXTERNAL_BOOKMAKER_VALUATION','PINNACLE',
+                    'pinnacle','power','PMUS','B','baseball','MONEYLINE',
+                    '{}'::jsonb, 2, 2, $2, 'market-b-2026-09-26',
+                    'NO_TRADE', FALSE, ARRAY[]::text[], 'market B', now(),
+                    FALSE, 'FULL_GAME', $3::jsonb, $4::jsonb, FALSE)
+            """, ext.EXPERIMENT_ID, "0x" + ("22" * 32),
+            json.dumps({"verdict": ST.COMPATIBLE}),
+            json.dumps({"research_waiver": {"authorised": False,
+                                            "waived": []},
+                        "freshness_evidence": {
+                            "venue_age_basis": "VENUE_CLOCK_NOT_PROVIDED",
+                            "venue_age_at_read_s": None}}))
+
+        comp = await FA._eligible_market_check(conn, ext.EXPERIMENT_ID, 168)
+        assert comp["met"] is False, comp
+        assert comp["evidence"]["eligible_markets"] == 0
+        assert "do not together make an eligible market" in \
+            comp["evidence"]["why_none"]
+
+        # NOW ONE MARKET WITH THE WHOLE CHAIN: it is met, and NAMED.
+        await _seed_evidence(conn, waived=False, settlement=ST.COMPATIBLE,
+                             period="FULL_GAME")
+        ok = await FA._eligible_market_check(conn, ext.EXPERIMENT_ID, 168)
+        assert ok["met"] is True, ok
+        assert ok["evidence"]["eligible_markets"] >= 1
+        top = ok["evidence"]["markets"][0]
+        assert top["us_market_slug"] == "aec-x-2026-09-26"
+        assert top["settlement_verdict"] == ST.COMPATIBLE
+        assert top["period"] == "FULL_GAME"
+        assert top["venue_age_basis"] in FA.FRESHNESS_BASIS_ESTABLISHED
+        assert top["venue_age_at_read_s"] is not None
+        assert top["us_market_slug"] in ok["detail"]
+
+        # and readiness carries it as the check that gates
+        r = await FA.readiness(conn, account_id=CLEAN)
+        names = {c["check"] for c in r["checks"]}
+        assert r["the_eligible_market_check_is"] in names
+        assert "unrelated rows" in r["what_ready_means"]
+    finally:
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        await conn.close()
+
+
+# ── THE AUTHORIZATION IS CONSUMED BY THE EXECUTION BOUNDARY ─────────
+
+def test_the_execution_boundary_consumes_the_authorization():
+    """RECORDING ONE PROVES NOTHING. An authorization nothing reads is a note
+    in a table, so the proof is that the EXECUTION side's answer CHANGES when
+    the record is present and matching -- from "you are not authorised" to
+    "you are authorised and submission is off in code".
+    """
+    rec = {"account_id": CLEAN, "venue": "PMUS_TEST", "venue_class": "TEST",
+           "effective_digest": EX.effective_limits(_LIMITS)["effective_digest"]}
+
+    # NO RECORD AT ALL
+    none = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                   authorization=None)
+    assert none["ok"] is False
+    assert none["refusal"] == EX.R_NO_AUTHORIZATION
+    assert none["authorization_consumed"] is False
+    assert none["submitted"] is False
+
+    # A RECORD FOR ANOTHER ACCOUNT, AND FOR ANOTHER VENUE
+    other = EX.authorize_submission(account_id="someone-else",
+                                    venue="PMUS_TEST", authorization=rec)
+    assert other["refusal"] == EX.R_AUTH_ACCOUNT
+    assert other["authorization_consumed"] is False
+    venue = EX.authorize_submission(account_id=CLEAN, venue="PMUS",
+                                    authorization=rec)
+    assert venue["refusal"] == EX.R_AUTH_VENUE
+    assert venue["authorization_consumed"] is False
+
+    # A RECORD GRANTED AGAINST DIFFERENT LIMITS
+    moved = dict(_LIMITS, per_order_usd=999)
+    stale = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                    authorization=rec, approved_limits=moved)
+    assert stale["refusal"] == EX.R_AUTH_LIMITS
+    assert stale["authorization_consumed"] is False
+
+    # A RECORD WITH NO DIGEST AT ALL
+    nodig = EX.authorize_submission(
+        account_id=CLEAN, venue="PMUS_TEST",
+        authorization={k: v for k, v in rec.items()
+                       if k != "effective_digest"})
+    assert nodig["refusal"] == EX.R_AUTH_NO_DIGEST
+
+    # AND THE MATCHING RECORD: CONSUMED, then refused on the CONSTANT.
+    good = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
+                                   authorization=rec,
+                                   approved_limits=_LIMITS)
+    assert good["authorization_consumed"] is True, good
+    assert good["ok"] is False
+    assert good["refusal"] == EX.R_SUBMISSION_DISABLED
+    assert good["submitted"] is False
+    assert good["real_order_submission_enabled"] is False
+    # the difference between the two answers IS the consumption
+    assert none["refusal"] != good["refusal"]
+
+
+def test_an_injected_test_venue_executor_still_submits_nothing():
+    """AN INJECTED SUBMITTER, driven through the gate. It is handed a TEST
+    venue and a valid authorization, and it must still send nothing --
+    because the only sanctioned path to a submission ends at the constant."""
+    sent = []
+
+    def _submit_if_allowed(*, account_id, venue, authorization, limits):
+        """The shape any future submitter must have: ask the gate FIRST."""
+        gate = EX.authorize_submission(account_id=account_id, venue=venue,
+                                       authorization=authorization,
+                                       approved_limits=limits)
+        if gate.get("ok"):                             # pragma: no cover
+            sent.append({"venue": venue, "account_id": account_id})
+        return gate
+
+    rec = {"account_id": CLEAN, "venue": "PMUS_TEST", "venue_class": "TEST",
+           "effective_digest": EX.effective_limits(_LIMITS)["effective_digest"]}
+    got = _submit_if_allowed(account_id=CLEAN, venue="PMUS_TEST",
+                             authorization=rec, limits=_LIMITS)
+    assert got["authorization_consumed"] is True
+    assert got["refusal"] == EX.R_SUBMISSION_DISABLED
+    assert sent == [], "the injected submitter sent something"
+
+    # AND THERE IS NO OTHER SUBMITTER IN THE TREE. `order_submitted` is
+    # never written true anywhere, so this gate is not one path among many.
+    import pathlib
+    import re
+
+    root = pathlib.Path(EX.__file__).resolve().parent
+    offenders = []
+    for f in root.rglob("*.py"):
+        if "__pycache__" in str(f):
+            continue
+        txt = f.read_text(errors="ignore")
+        for m in re.finditer(r"order_submitted\s*=\s*(True|true)", txt):
+            offenders.append("%s: %s" % (f.name, m.group(0)))
+    assert offenders == [], offenders
+
+
+@pg
+async def test_the_funded_branch_validates_the_owners_record():
+    """IT NO LONGER REFUSES BLIND. The branch returned the same refusal
+    whether or not the owner's authorisation existed, so the record could be
+    present and correct and nothing would change. Now: absent refuses,
+    mismatched refuses BY ITS OWN NAME, and matching is accepted -- with
+    submission still off in code and the executor saying so.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _seed_accounts(conn)
+        await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
+                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                            FA.AUTHORIZATION_KEY, FA.OWNER_AUTH_KEY])
+        await _record_and_approve_limits(conn, approved=True)
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        await _seed_evidence(conn, waived=False)
+
+        # 1 · ABSENT: the standing refusal, and it says the record is absent
+        a = await FA.authorize(conn, account_id=CLEAN, venue="PMUS",
+                               by="test")
+        assert a["ok"] is False
+        assert a["refusal"] == FA.R_OWNER_AUTH
+        assert a["owner_authorization_present"] is False
+        assert "no owner authorisation record exists" in a["failed"]["why"]
+
+        eff = EX.effective_limits(_LIMITS)
+
+        async def _owner(**kw):
+            rec = {"account_id": CLEAN, "venue": "PMUS",
+                   "effective_digest": eff["effective_digest"],
+                   "by": "owner", "at": 1.0,
+                   "statement": "a test fixture, not a real authorisation"}
+            rec.update(kw)
+            await conn.execute(
+                "INSERT INTO ingestion_state (key, value) "
+                "VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE "
+                "SET value = $2::jsonb", FA.OWNER_AUTH_KEY,
+                json.dumps(rec))
+
+        # 2 · PRESENT BUT FOR ANOTHER ACCOUNT / VENUE / LIMIT SET
+        await _owner(account_id="someone-else")
+        b = await FA.authorize(conn, account_id=CLEAN, venue="PMUS",
+                               by="test")
+        assert b["refusal"] == FA.R_OWNER_AUTH_ACCOUNT, b["refusal"]
+        assert b["owner_authorization_present"] is True
+
+        await _owner(venue="POLYMARKET")
+        c = await FA.authorize(conn, account_id=CLEAN, venue="PMUS",
+                               by="test")
+        assert c["refusal"] == FA.R_OWNER_AUTH_VENUE, c["refusal"]
+
+        await _owner(effective_digest="0" * 64)
+        d = await FA.authorize(conn, account_id=CLEAN, venue="PMUS",
+                               by="test")
+        assert d["refusal"] == FA.R_OWNER_AUTH_LIMITS, d["refusal"]
+
+        # 3 · MATCHING: accepted, and the EXECUTOR is what refuses next
+        await _owner()
+        e = await FA.authorize(conn, account_id=CLEAN, venue="PMUS",
+                               by="test")
+        assert e["ok"] is True, e
+        assert e["owner_authorization_validated"] is True
+        assert e["venue_class"] == FA.VENUE_FUNDED
+        assert e["verdict"] == ("AUTHORIZED_FOR_A_FUNDED_VENUE_"
+                               "SUBMISSION_STILL_DISABLED_IN_CODE")
+        # NO CAPITAL IS ENABLED BY ANY OF IT
+        assert e["funded_submission"] == "DISABLED"
+        assert e["authorises_capital"] is False
+        # AND THE EXECUTION BOUNDARY CONSUMED IT AND STILL REFUSED
+        boundary = e["execution_boundary"]
+        assert boundary["authorization_consumed"] is True, boundary
+        assert boundary["ok"] is False
+        assert boundary["refusal"] == EX.R_SUBMISSION_DISABLED
+        assert boundary["submitted"] is False
+        assert e["submission_would_be"] == EX.R_SUBMISSION_DISABLED
+    finally:
+        await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
+                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                            FA.AUTHORIZATION_KEY, FA.OWNER_AUTH_KEY,
+                            "ext_pinnacle_last_cycle"])
+        await conn.execute("DELETE FROM external_valuations "
+                           "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
+        await conn.close()

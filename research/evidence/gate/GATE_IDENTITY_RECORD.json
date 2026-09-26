@@ -1,0 +1,33 @@
+{
+ "record": "GATE_FAILURE_IDENTITY_LISTS_V1",
+ "why": "A count is not a comparison. These are the SORTED FAILURE IDENTITIES of each full-suite run, so a later reader can diff them instead of trusting a number, and so the matched pair survives the container that produced it.",
+ "how_each_run_was_made": "a frozen `git archive <sha> | tar -x` checkout, its own freshly migrated database, `python3 -m pytest tests -q -p no:randomly`",
+ "runs": {
+  "baseline_6d75275": {
+   "file": "FAILURES_BASELINE_6d75275_2026-09-26.txt",
+   "failed": 178,
+   "duration_s": 447.61,
+   "log": "GATE_BASE8"
+  },
+  "release_60de482": {
+   "file": "FAILURES_RELEASE_60de482_2026-09-26.txt",
+   "failed": 178,
+   "duration_s": 460.91,
+   "log": "GATE_REL5",
+   "identical_to_baseline": true
+  },
+  "release_1df2068": {
+   "file": "FAILURES_RELEASE_1df2068_2026-09-26.txt",
+   "failed": 179,
+   "duration_s": 461.21,
+   "log": "GATE_REL6",
+   "new_vs_baseline": [
+    "tests/test_funded_activation_is_a_real_path.py::test_the_account_registry_read_shows_identity_and_no_money"
+   ],
+   "gone_vs_baseline": []
+  }
+ },
+ "the_matched_pair": "60de482 against 6d75275, minutes apart on the same machine: 178 and 178, and the identity sets are IDENTICAL -- nothing new, nothing gone, nothing newly passing.",
+ "clock_sensitive_defects_are_recorded_separately": "research/evidence/CLOCK_SENSITIVE_TEST_DEFECTS.json",
+ "not_a_clean_gate": "178 pre-existing failures remain on the baseline itself. Nothing here claims otherwise."
+}

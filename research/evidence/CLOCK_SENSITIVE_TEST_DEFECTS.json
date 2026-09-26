@@ -1,0 +1,55 @@
+{
+ "record": "CLOCK_SENSITIVE_TEST_DEFECTS_V1",
+ "why_separate": "These are recorded apart from the gate identity lists on purpose. They are pre-existing, they are not attributable to any release in this batch, and they move the gate's failure COUNT for reasons that have nothing to do with a diff -- so mixing them into a release comparison makes both unreadable.",
+ "what_is_demonstrated_and_what_is_not": "Freezing the wall clock demonstrates TIME SENSITIVITY: it shows the outcome depends on a real-clock read rather than on the clock the code was handed. It does NOT identify the offending call site. Naming the exact line that reads time.time() instead of its `now_ts` is a SEPARATE finding, and it has not been made.",
+ "defects": [
+  {
+   "id": "PNL_L34_REVIEW_PINS_CLOCK_GAP",
+   "tests": [
+    "tests/test_pnl_l34_review_pins.py::test_r_defect_h1_the_venue_fresher_than_the_fills_is_refused_drift_not_sized",
+    "tests/test_pnl_l34_review_pins.py::test_r_defect_m1_the_deploy_seed_admits_the_landed_rules_unwitnessed_reduce",
+    "tests/test_pnl_l34_review_pins.py::test_r_defect_m2_the_fills_axis_override_also_sizes_an_increase_past_the_fresh_reading",
+    "tests/test_pnl_l34_review_pins.py::test_r_kill_the_per_market_read_this_tick_is_never_explained_by_the_walks_clock",
+    "tests/test_pnl_l34_review_pins.py::test_r_the_fast_tick_explains_the_walks_drift_the_same_way"
+   ],
+   "lane": "the mirror lane (sportsassets/workers/mirror_live.py); untouched by this batch",
+   "mechanism_demonstrated": "the fixtures capture NOW = time.time() when the mirror-lane fakes are IMPORTED (collection); some path under test reads the real clock when the test RUNS. Once that gap exceeds ~250-270 s the pins break.",
+   "reproducer": "backend/tools/pnl_clock_gap_plugin.py",
+   "reproducer_command": "cd backend && RN1X_TEST_DSN=... DATABASE_URL=... ADMIN_TOKEN=t PNL_REPRO_DELAY_S=300 python3 -m pytest tests/test_pnl_l34_review_pins.py -q -p no:randomly -p tools.pnl_clock_gap_plugin",
+   "measured": {
+    "delay_0_s": "10 passed",
+    "delay_120_s": "10 passed",
+    "delay_240_s": "10 passed",
+    "delay_270_s": "3 failed (h1, m1, the fast-tick drift pin)",
+    "delay_300_s": "5 failed (those, plus m2 and the per-market read)",
+    "delay_320_s_clock_frozen": "10 passed",
+    "delay_320_s_clock_running": "5 failed"
+   },
+   "threshold_s": "240 < T <= 270",
+   "eliminated": [
+    "an import-time effect: importing all 536 modules while running ONLY the three suspects gives 3 passed",
+    "the prefix's runtime effects alone: the whole 339-file prefix reaches the file at 243 s elapsed with none of them failing"
+   ],
+   "still_open": true,
+   "separate_finding_not_yet_made": "the exact call site that reads time.time() instead of the tick's now_ts. Candidates are reachable from mirror_live.tick_once; nothing here names one, and no line has been changed."
+  },
+  {
+   "id": "RUN834_MICROSECOND_ULP",
+   "tests": [
+    "tests/test_run834_retention_and_races.py::test_race_update_one_microsecond_before_receipt_is_the_zero_ms_state"
+   ],
+   "lane": "sportsassets/obs (stream state selection); untouched by this batch",
+   "mechanism": "the test reads clock.now(), whose `monotonic` field is time.monotonic() -- container uptime -- subtracts one microsecond and asserts the difference is 0.001 ms within 1e-9. A double's ulp doubles at 2**16 = 65,536 s, so past 18.20 h of uptime the difference lands 6.9e-9 away and the assertion cannot be satisfied.",
+   "measured": {
+    "monotonic_40000_s": "err 3.4e-10, passes",
+    "monotonic_60000_s": "err 3.4e-10, passes",
+    "monotonic_66995_s": "err 6.9e-9, FAILS",
+    "container_uptime_when_first_seen_h": 18.61
+   },
+   "not_a_regression": "it fails STANDALONE in the baseline checkout as well as in the release checkouts, and it is in the baseline's own same-day gate set",
+   "the_one_line_fix_not_made_here": "scale the tolerance to math.ulp(base.monotonic), or build the Instant from a small fixed base instead of the live monotonic clock",
+   "still_open": true
+  }
+ ],
+ "consequence_for_reading_gates": "On a long-lived machine both defects are present in EVERY run of every commit, so a gate's failure COUNT is not a release signal. Compare sorted failure IDENTITIES between a baseline and a release taken under the same conditions; see research/evidence/gate/GATE_IDENTITY_RECORD.json."
+}
