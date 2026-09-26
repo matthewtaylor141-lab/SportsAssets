@@ -2921,6 +2921,124 @@ async def command_center_snapshot(response: Response) -> dict:
         }) from inc
 
 
+#: THE CONTROLLED DEMONSTRATION'S OWN EXPERIMENT. It is NOT the acceptance
+#: position and NOT the autonomous lane: it is the CURRENT EV lane's own
+#: writers, driven on a scenario whose inputs are chosen to pass every gate,
+#: so that the software's order -> fill -> inventory -> management ->
+#: settlement -> accounting path can be inspected end to end on demand.
+#:
+#: IT IS A SEPARATE BOOK AND IS EXCLUDED FROM STRATEGY PERFORMANCE. Its
+#: experiment id carries the word DEMONSTRATION so no reader can mistake it,
+#: and `bettor_desk` books it apart from `AUTONOMOUS_ENTRY_*`. Proving the
+#: software runs is not evidence of opportunity selection, and the two are
+#: never added together.
+DEMONSTRATION_EXPERIMENT = "CONTROLLED_DEMONSTRATION_EXTERNAL_VALUATION_V1"
+
+#: WHAT EACH BOOK IS, so a reader never has to infer it from a name. Only
+#: the autonomous book is strategy performance; the other three are software
+#: proof, replayed history and a synthetic lifecycle exercise.
+_BOOK_MEANING = {
+    "AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW": (
+        "the scheduler's own decisions on CURRENT markets, unfunded. THIS "
+        "is the only book that is strategy performance"),
+    "UNCALIBRATED_RESEARCH_SHADOW": (
+        "the research lane running under the authorized calibration waiver. "
+        "Its entries are real lane decisions and its calibration is absent, "
+        "which is why it is booked apart"),
+    "CONTROLLED_DEMONSTRATION": (
+        "a chosen scenario through the DEPLOYED components, to show the "
+        "lifecycle runs. Excluded from strategy performance"),
+    "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY": (
+        "the synthetic, modelled, unfunded position used to exercise the "
+        "lifecycle. Not an autonomous decision"),
+    "RN1_SIGNAL_DERIVED": (
+        "replayed history from an earlier case study. Not autonomous Bettor "
+        "output"),
+}
+DEMONSTRATION_WHY = (
+    "a controlled scenario through the DEPLOYED shadow components. Its "
+    "prices, depth and probability are CHOSEN to pass every gate; they are "
+    "not a market observation and this book is not strategy performance")
+
+
+@app.post("/api/admin/bettor-demonstration/run",
+          dependencies=[Depends(require_admin)])
+async def bettor_demonstration_run(response: Response) -> dict:
+    """Drive the current EV lane's own lifecycle on a controlled scenario.
+
+    WHAT IS REAL HERE AND WHAT IS CHOSEN. The COMPONENTS are the deployed
+    ones -- `bettor_entry_inventory.plan_entry` and `persist_entry`, the
+    same two functions the scheduled lane calls, writing the same four rows
+    to the same tables under the same duplicate protection. The INPUTS are
+    chosen: a probability above the ask, a ladder with depth, a fee from the
+    real schedule. Nothing here observed a venue.
+
+    SO IT PROVES THE SOFTWARE OPERATES AND NOTHING ELSE. It is not evidence
+    that such a trade existed, was available, or would have filled, and it
+    is booked apart from the autonomous lane for exactly that reason.
+
+    IDEMPOTENT BY THE SAME RULE AS PRODUCTION. A second call replays the
+    same observation, `classify_write` answers
+    EXACT_REPLAY_OF_A_RECORDED_OBSERVATION and nothing is written -- the
+    demonstration cannot inflate its own book.
+    """
+    from .. import bettor_entry_inventory as inv
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+
+    cid = "0x" + ("de" * 32)
+    rec = {
+        "admissible": True,
+        "experiment_id": DEMONSTRATION_EXPERIMENT,
+        "observed_at": 1_790_000_000.0,
+        "received_at": 1_790_000_000.0,
+        "payout_event": "Demonstration Side A",
+        "contract": {"condition_id": cid,
+                     "us_market_slug": "aec-demo-side-a-2026-09-26",
+                     "buy_intent": "ORDER_INTENT_BUY_LONG",
+                     "event_key": "demo-2026-09-26"},
+        "execution_plan": {"execution": {
+            "size": 100.0, "vwap": 0.62, "submitted_limit": 0.70,
+            "intended_notional_usd": 1000.0,
+            "unfilled_notional_usd": 938.0,
+            "levels_taken": [{"price": 0.62, "qty": 100.0, "cost": 62.0}]}},
+    }
+
+    def fee(qty, price, maker=False):
+        return 0.016 * float(qty)
+
+    out: dict = {"experiment_id": DEMONSTRATION_EXPERIMENT,
+                 "why": DEMONSTRATION_WHY,
+                 "excluded_from_strategy_performance": True,
+                 "submits_orders": False,
+                 "funded": False,
+                 "inputs_are_chosen_not_observed": True}
+    plan = inv.plan_entry(rec, now=1_790_000_100.0, outcome_index=0,
+                          fee_fn=fee)
+    out["plan_ok"] = bool(plan.get("ok"))
+    if not plan.get("ok"):
+        out["refusals"] = plan.get("refusals")
+        out["why_refused"] = plan.get("why")
+        return out
+    async with pool.acquire() as conn:
+        await inv.ensure_experiment(conn, DEMONSTRATION_EXPERIMENT)
+        wrote = await inv.persist_entry(conn, plan)
+    out["write"] = wrote
+    pid = wrote.get("position_id")
+    out["position_id"] = pid
+    out["case"] = wrote.get("case")
+    out["trace"] = ("/api/command/rn1x/trace/" + str(pid)) if pid else None
+    out["input_chain"] = (("/api/command/rn1x/input-chain/" + str(pid))
+                          if pid else None)
+    out["reading"] = (
+        "a first call writes one position, one order and one fill; a second "
+        "answers EXACT_REPLAY_OF_A_RECORDED_OBSERVATION and writes nothing. "
+        "Follow `trace` for the decision, the orders, the fills, the "
+        "management decisions and the accounting")
+    return out
+
+
 @app.get("/api/command/bettor/desk",
          dependencies=[Depends(require_command)])
 async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
@@ -3064,13 +3182,29 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
     for row in pos:
         lane = str(row.get("provenance") or row.get("lane")
                    or "UNCLASSIFIED").upper()
+        # THE CONTROLLED DEMONSTRATION GETS ITS OWN BOOK, by its experiment
+        # rather than its provenance -- it IS a shadow, so the provenance is
+        # accurate, and the experiment is what says it is a demonstration.
+        # Booking it with the autonomous lane would present software proof
+        # as opportunity selection.
+        exp = str(row.get("experiment_id") or "")
+        if "DEMONSTRATION" in exp.upper():
+            lane = "CONTROLLED_DEMONSTRATION"
         books.setdefault(lane, []).append(row)
     out["positions"] = {
         "section": "Positions",
-        "books": {k: {"count": len(v), "rows": v[:20]}
+        "books": {k: {"count": len(v), "rows": v[:20],
+                      "counts_toward_strategy_performance":
+                          k.startswith("AUTONOMOUS_ENTRY"),
+                      "what_it_is": _BOOK_MEANING.get(
+                          k, "an unclassified holding; its provenance was "
+                              "not one of the declared values")}
                   for k, v in sorted(books.items())},
-        "note": ("separate books, never summed. A historical, copied or "
-                 "synthetic holding is not autonomous Bettor inventory"),
+        "note": ("separate books, never summed. A historical, copied, "
+                 "demonstrated or synthetic holding is not autonomous "
+                 "Bettor inventory"),
+        "only_this_book_is_strategy_performance":
+            "AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW",
         "trace_link_template": "/api/command/rn1x/trace/{position_id}",
         "audit": {"reader": "command_rn1x.positions"},
     }

@@ -104,3 +104,75 @@ def test_funded_submission_is_declared_disabled_on_the_face_of_it():
 
 def test_the_response_is_never_cached():
     assert "no-store" in SRC
+
+
+# ── THE CONTROLLED DEMONSTRATION IS ITS OWN BOOK ─────────────────────
+#
+# Proving the software runs is not evidence of opportunity selection, and
+# the two must never be added together. The demonstration is booked by its
+# EXPERIMENT rather than its provenance -- it genuinely IS a shadow, so the
+# provenance is accurate, and the experiment is what says it is a chosen
+# scenario rather than a market decision.
+
+DEMO_SRC = inspect.getsource(A.bettor_demonstration_run)
+
+
+def test_the_demonstration_route_drives_the_deployed_writers():
+    """THE COMPONENTS ARE REAL. `plan_entry` and `persist_entry` are the
+    same two functions the scheduled lane calls; this route supplies the
+    inputs and nothing else."""
+    assert "inv.plan_entry" in DEMO_SRC
+    assert "inv.persist_entry" in DEMO_SRC
+    assert "ensure_experiment" in DEMO_SRC
+
+
+def test_the_demonstration_says_its_inputs_are_chosen():
+    assert '"inputs_are_chosen_not_observed": True' in DEMO_SRC
+    assert '"excluded_from_strategy_performance": True' in DEMO_SRC
+    assert '"submits_orders": False' in DEMO_SRC
+    assert '"funded": False' in DEMO_SRC
+    # the declared reason lives on the module constant the route returns
+    assert "not a market observation" in A.DEMONSTRATION_WHY
+    assert "not strategy performance" in A.DEMONSTRATION_WHY
+    flat = " ".join(DEMO_SRC.split())
+    assert "not evidence that such a trade existed" in flat
+
+
+def test_the_demonstration_cannot_inflate_its_own_book():
+    """A second call must replay, not write. The same duplicate protection
+    production uses -- there is no separate path for the demonstration."""
+    flat = " ".join(DEMO_SRC.split())
+    assert "EXACT_REPLAY_OF_A_RECORDED_OBSERVATION" in flat
+    assert "cannot inflate its own book" in flat
+
+
+def test_the_demonstration_links_its_whole_trace():
+    assert '"trace"' in DEMO_SRC and "rn1x/trace/" in DEMO_SRC
+    assert '"input_chain"' in DEMO_SRC
+
+
+def test_the_desk_books_the_demonstration_apart():
+    assert 'lane = "CONTROLLED_DEMONSTRATION"' in SRC
+    assert '"DEMONSTRATION" in exp.upper()' in SRC
+
+
+def test_only_the_autonomous_book_is_strategy_performance():
+    assert '"only_this_book_is_strategy_performance"' in SRC
+    assert 'k.startswith("AUTONOMOUS_ENTRY")' in SRC
+    assert '"counts_toward_strategy_performance"' in SRC
+
+
+def test_every_declared_book_has_a_stated_meaning():
+    for k in ("AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW",
+              "UNCALIBRATED_RESEARCH_SHADOW",
+              "CONTROLLED_DEMONSTRATION",
+              "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY",
+              "RN1_SIGNAL_DERIVED"):
+        assert k in A._BOOK_MEANING, k
+        assert len(A._BOOK_MEANING[k]) > 40, k
+    # and the one that IS strategy performance says so
+    assert "only book that is strategy performance" in \
+        A._BOOK_MEANING["AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW"]
+    # while the demonstration says it is excluded
+    assert "Excluded from strategy performance" in \
+        A._BOOK_MEANING["CONTROLLED_DEMONSTRATION"]

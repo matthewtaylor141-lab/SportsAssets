@@ -62,7 +62,12 @@ DSN_BASE = os.environ.get(
 # creates it at boot; the migrations assume it stands)
 US_PREMAP_DDL = ("CREATE TABLE IF NOT EXISTS us_premap (identifier text PRIMARY KEY, event_slug text, "
                  "event_title text, market_slug text, question text, kind text, line text, side_norm text, "
-                 "event_keys text[], intent text, signed text, updated_at timestamptz NOT NULL DEFAULT now())")
+                 "event_keys text[], intent text, signed text, "
+                 # `sports_type` is `sportsMarketType`; migration 055 cannot
+                 # add it on a fresh database, so the DDL that stands the
+                 # table up carries it. This file seeds no row, and it is
+                 # patched anyway so one table shape serves every fixture.
+                 "sports_type text, updated_at timestamptz NOT NULL DEFAULT now())")
 
 # ------------------------------------------------------------------ fixture
 # whale 99 is RN1 (the seed migrations own the low ids). Times are

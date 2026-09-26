@@ -1129,6 +1129,13 @@ POSITIONS_SQL = """
     SELECT p.position_id, p.policy, p.source_trade_id,
            p.source_account, p.condition_id, p.outcome_index,
            p.entry_kind, p.unknown_reason, p.provenance,
+           -- THE EXPERIMENT COMES ALONG TOO. `provenance` says HOW a
+           -- position came to exist and the controlled demonstration is
+           -- honestly a shadow entry, so its provenance is the autonomous
+           -- one. Only the experiment distinguishes a chosen scenario from
+           -- a market decision, and a reader that cannot see it books
+           -- software proof as strategy performance.
+           p.experiment_id,
            p.seed_qty::float8 seed_qty,
            p.seed_price::float8 seed_price,
            p.seed_basis_usd::float8 seed_basis_usd,

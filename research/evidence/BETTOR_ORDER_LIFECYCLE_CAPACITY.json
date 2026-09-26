@@ -1,0 +1,135 @@
+{
+ "probe": "BETTOR_ORDER_LIFECYCLE_CAPACITY_V1",
+ "workload_is_synthetic": true,
+ "workload_note": "every plan is fabricated to exercise the writer. None came from a venue and none is evidence that such a trade existed",
+ "processing_capacity_is_not_opportunity": "entries per day here is what the lifecycle can PROCESS. It is not a count of qualifying opportunities and must never be quoted as one",
+ "policy": "EXT_PINNACLE_ENTRY_V1",
+ "fee_per_contract": 0.016,
+ "implied_per_day_is_an_extrapolation": "entries_per_s is measured; implied_per_day multiplies it by 86400 and is NOT a claim that the lane would process that many. The real constraints are the 900 s cycle, the shared venue read budget and the provider's credit limit -- none of which this probe touches. Read it as: the WRITER is not the bottleneck at hundreds of trades a day, by three orders of magnitude",
+ "phases": {
+  "sustained": {
+   "n": 500,
+   "wall_s": 1.526,
+   "entries_per_s": 327.65,
+   "implied_per_day": 28309305,
+   "latency_ms": {
+    "p50": 2.78,
+    "p90": 4.07,
+    "p99": 6.42,
+    "max": 12.33,
+    "mean": 3.05
+   },
+   "cases": {
+    "NEW_EXPOSURE": 500
+   },
+   "counts_after": {
+    "positions": 500,
+    "orders": 500,
+    "fills": 500,
+    "fee_total": "800.000000000000044408920985006261616945266723632812500",
+    "filled_qty_total": "5E+4"
+   }
+  },
+  "replay": {
+   "n": 500,
+   "wall_s": 0.237,
+   "entries_per_s": 2109.7,
+   "implied_per_day": 182278481,
+   "latency_ms": {
+    "p50": 0.33,
+    "p90": 0.86,
+    "p99": 2.34,
+    "max": 5.33,
+    "mean": 0.47
+   },
+   "cases": {
+    "EXACT_REPLAY_OF_A_RECORDED_OBSERVATION": 500
+   },
+   "counts_after": {
+    "positions": 500,
+    "orders": 500,
+    "fills": 500,
+    "fee_total": "800.000000000000044408920985006261616945266723632812500",
+    "filled_qty_total": "5E+4"
+   },
+   "wrote_nothing": true,
+   "fee_unchanged": true
+  },
+  "burst": {
+   "n": 150,
+   "wall_s": 0.451,
+   "entries_per_s": 332.59,
+   "implied_per_day": 28736141,
+   "latency_ms": {
+    "p50": 16.95,
+    "p90": 298.21,
+    "p99": 308.77,
+    "max": 312.96,
+    "mean": 46.78
+   },
+   "cases": {
+    "NEW_EXPOSURE": 150
+   },
+   "concurrency": 16,
+   "counts_after": {
+    "positions": 650,
+    "orders": 650,
+    "fills": 650,
+    "fee_total": "1040.000000000000057731597280508140102028846740722656250",
+    "filled_qty_total": "65000"
+   },
+   "positions_added": 150,
+   "no_duplicate_position": true
+  },
+  "restart_recovery": {
+   "n": 50,
+   "wall_s": 0.047,
+   "entries_per_s": 1063.83,
+   "implied_per_day": 91914893,
+   "latency_ms": {
+    "p50": 0.35,
+    "p90": 1.1,
+    "p99": 22.07,
+    "max": 22.07,
+    "mean": 0.94
+   },
+   "cases": {
+    "EXACT_REPLAY_OF_A_RECORDED_OBSERVATION": 50
+   },
+   "counts_after": {
+    "positions": 650,
+    "orders": 650,
+    "fills": 650,
+    "fee_total": "1040.000000000000057731597280508140102028846740722656250",
+    "filled_qty_total": "65000"
+   },
+   "wrote_nothing_after_restart": true,
+   "why": "a rebuilt pool must not re-admit an observation the ledger already holds. Recovery is only correct if the replay still writes nothing"
+  }
+ },
+ "baseline": {
+  "positions": 0,
+  "orders": 0,
+  "fills": 0,
+  "fee_total": "0",
+  "filled_qty_total": "0"
+ },
+ "accounting": {
+  "positions_created": 650,
+  "fills_recorded": 650,
+  "one_fill_per_position": true,
+  "filled_qty_total": 65000.0,
+  "fee_total": 1040.0,
+  "fee_expected_from_qty": 1040.0,
+  "fee_reconciles": true,
+  "orders_equal_positions": true,
+  "why": "every accepted entry writes exactly one position, one order and one fill, and the fee total must equal the schedule times the filled quantity. A mismatch is a double count, not a rounding note"
+ },
+ "final_counts": {
+  "positions": 650,
+  "orders": 650,
+  "fills": 650,
+  "fee_total": "1040.000000000000057731597280508140102028846740722656250",
+  "filled_qty_total": "65000"
+ }
+}

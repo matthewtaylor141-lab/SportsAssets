@@ -1,0 +1,51 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090d14">
+  <meta name="description" content="Bettor EV Engine — the operating desk: opportunities, orders, positions, management, performance and controls.">
+  <title>Bettor EV Engine | Operating Desk</title>
+  <link rel="stylesheet" href="command.css">
+  <link rel="stylesheet" href="desk.css">
+</head>
+<body class="deskbody">
+  <a class="skip-link" href="#deskmain">Skip to the desk</a>
+
+  <header class="deskbar">
+    <div class="deskbar-brand">
+      <span class="deskmark">B</span>
+      <span class="deskname">Bettor EV Engine</span>
+      <span id="mode-pill" class="pill pill-blue">MODE —</span>
+      <span id="funded-pill" class="pill pill-grey">FUNDED —</span>
+    </div>
+    <nav class="desknav" aria-label="Desk sections">
+      <a href="#controls">Controls</a>
+      <a href="#opportunities">Opportunities</a>
+      <a href="#orders">Orders</a>
+      <a href="#positions">Positions</a>
+      <a href="#management">Management</a>
+      <a href="#performance">Performance</a>
+      <a href="#funded">Activation</a>
+      <a href="index.html">Command</a>
+    </nav>
+  </header>
+
+  <main id="deskmain" class="deskmain">
+    <div id="deskstate" class="deskstate" role="status" aria-live="polite">
+      Opening the desk…
+    </div>
+    <div id="desk" hidden></div>
+  </main>
+
+  <footer class="deskfoot">
+    <span id="asof">—</span>
+    <span>Read-only. This page sends no order and holds no credential.</span>
+  </footer>
+
+  <script src="config.js"></script>
+  <script src="unlock.js"></script>
+  <script src="core.js"></script>
+  <script src="desk.js"></script>
+</body>
+</html>

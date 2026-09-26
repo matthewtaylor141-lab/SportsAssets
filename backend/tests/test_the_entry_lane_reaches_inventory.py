@@ -137,6 +137,16 @@ async def _seed(conn):
             event_keys text[],
             intent text,
             signed text,
+            -- `sports_type` IS the venue's `sportsMarketType`, and the
+            -- period rule reads it for SCOPE. It arrives in production with
+            -- the C6 column set; migration 055 cannot add it on a fresh
+            -- database because `us_premap` is created by the copy lane's
+            -- bootstrap rather than by a migration, so the fixture that
+            -- stands the table up must carry it. A seed that inserts a
+            -- column the table does not have fails the whole test, which
+            -- is how a full-suite gate caught this and a single-file run
+            -- on a database that already had the column did not.
+            sports_type text,
             updated_at timestamptz NOT NULL DEFAULT now()
         )
     """)

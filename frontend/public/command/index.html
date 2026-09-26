@@ -12,6 +12,18 @@
 </head>
 <body>
   <a class="skip-link" href="#pagebody">Skip to dashboard</a>
+  <!-- THE OPERATING DESK. A plain anchor to a sibling static page, for the
+       same reason COMMAND itself is one: this is a directory in the publish
+       root, not a route, so nothing intercepts the click. It is placed
+       before #app so a failure inside app.js still leaves the desk
+       reachable -- the 22:34:18Z blank-page fault would otherwise have hidden
+       both pages at once. -->
+  <a class="desk-jump" href="desk.html"
+     style="position:fixed;right:14px;bottom:14px;z-index:40;
+            padding:9px 14px;border-radius:999px;
+            border:1px solid #1d3e5e;background:#10263c;color:#8fc4ff;
+            font:600 13px/1 ui-sans-serif,system-ui,sans-serif;
+            text-decoration:none">Bettor desk →</a>
   <div id="app"><div class="boot"><div class="boot-mark">B</div><p>Opening Command…</p></div></div>
   <div id="overlay-root"></div>
   <div id="toast" role="status" aria-live="polite"></div>

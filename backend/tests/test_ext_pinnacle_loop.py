@@ -299,6 +299,11 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
                 event_title text, market_slug text, question text,
                 kind text, line text, side_norm text,
                 event_keys text[], intent text, signed text,
+                -- `sports_type` IS `sportsMarketType`, which the period
+                -- rule reads for SCOPE. Migration 055 cannot add it on a
+                -- fresh database, so the fixture that stands the table up
+                -- must carry it.
+                sports_type text,
                 updated_at timestamptz NOT NULL DEFAULT now())
         """)
         await conn.execute(
