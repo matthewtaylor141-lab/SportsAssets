@@ -1,7 +1,7 @@
 {
  "record": "GATE_FAILURE_IDENTITY_LISTS_V1",
  "why": "A count is not a comparison. These are the SORTED FAILURE IDENTITIES of each full-suite run, so a later reader can diff them instead of trusting a number, and so the matched pair survives the container that produced it.",
- "how_each_run_was_made": "a frozen `git archive <sha> | tar -x` checkout, its own freshly migrated database, `python3 -m pytest tests -q -p no:randomly`",
+ "how_each_run_was_made": "a frozen `git archive <sha> | tar -x` checkout, its own freshly migrated database whose name is LOWER CASE (Postgres folds an unquoted CREATE DATABASE, while a DSN does not -- see GATE_HARNESS_DEFECT_MIXED_CASE_DB.json), `python3 -m pytest tests -q -p no:randomly`. From the 21:37 pair onward, also `--timeout=180 --timeout-method=signal`, so a stall becomes one NAMED failure instead of a run with no summary. The pair is run CONCURRENTLY so both sides see the same machine load.",
  "runs": {
   "baseline_6d75275": {
    "file": "FAILURES_BASELINE_6d75275_2026-09-26.txt",
@@ -25,9 +25,35 @@
     "tests/test_funded_activation_is_a_real_path.py::test_the_account_registry_read_shows_identity_and_no_money"
    ],
    "gone_vs_baseline": []
+  },
+  "release_1a1d9d9": {
+   "file": "FAILURES_RELEASE_1a1d9d9_2026-09-26.txt",
+   "failed": 178,
+   "log": "GATE_REL7",
+   "identical_to_baseline": true
+  },
+  "baseline_6d75275_rerun_2137": {
+   "file": "FAILURES_BASELINE_6d75275_2026-09-26_rerun.txt",
+   "failed": 178,
+   "duration_s": 450.66,
+   "log": "GATE_V_BASE",
+   "byte_identical_to_the_first_baseline_list": true,
+   "why_it_matters": "Two hours later, on a different database, under concurrency, with the --timeout plugin added, the baseline's 178 failure IDENTITIES are byte-identical. That is what makes an identity diff on this suite a signal -- and a COUNT still is not one."
+  },
+  "release_47ad3ce": {
+   "file": "FAILURES_RELEASE_47ad3ce_2026-09-26.txt",
+   "failed": 178,
+   "passed": 12807,
+   "duration_s": 454.72,
+   "log": "GATE_V_REL",
+   "paired_with": "baseline_6d75275_rerun_2137 (concurrent)",
+   "new_vs_baseline": [],
+   "gone_vs_baseline": [],
+   "identical_to_baseline": true,
+   "note": "100 more tests PASS than on the baseline (12,807 vs 12,707) and not one more fails."
   }
  },
- "the_matched_pair": "60de482 against 6d75275, minutes apart on the same machine: 178 and 178, and the identity sets are IDENTICAL -- nothing new, nothing gone, nothing newly passing.",
+ "the_matched_pair": "47ad3ce against 6d75275, run concurrently on 2026-09-26: 178 and 178, and the identity sets are IDENTICAL -- nothing new, nothing gone, nothing newly passing among the 178. The release adds 100 passing tests. An earlier pair on 7dedc5a gave 188 against 178, and all ten extra identities were a REAL defect this gate caught: two test fixtures replayed migration 117 and stopped, narrowing `rn1x_provenance_declared` for every test that ran afterwards. Fixed in 47ad3ce, with `test_no_fixture_reverts_the_provenance_vocabulary` to close the class.",
  "clock_sensitive_defects_are_recorded_separately": "research/evidence/CLOCK_SENSITIVE_TEST_DEFECTS.json",
  "not_a_clean_gate": "178 pre-existing failures remain on the baseline itself. Nothing here claims otherwise."
 }
