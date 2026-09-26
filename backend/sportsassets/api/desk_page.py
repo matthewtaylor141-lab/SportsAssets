@@ -1,3 +1,347 @@
+"""THE OPERATING DESK, SERVED FROM THE API'S OWN ORIGIN.
+
+WHY HERE AND NOT ONLY ON THE STATIC SITE. The static Command bundle lives
+under `frontend/public/command/` and reaches its users through Netlify,
+which builds from the branch Netlify tracks. This repository has no Netlify
+credential -- no NETLIFY_AUTH_TOKEN and no site id among its secrets -- so
+that publish is not a step this session can take. The API origin IS
+deployable, through the same API-only release route every backend change
+uses, and it is SAME-ORIGIN with `/api/command/*` by construction rather
+than by a proxy rule. So the desk is served here too, and that is the URL
+that works today.
+
+IT IS GENERATED, NOT HAND-COPIED. `tools/build_desk_page.py` inlines
+`desk.html`, `desk.css` and `desk.js` from the static bundle; a test
+compares the two for drift on the substantive markers. Editing this file by
+hand is how the two copies would diverge.
+
+IT IS READ-ONLY AND GATED. The route sits behind `require_command` like
+every other COMMAND read, sends no order, holds no credential, and its only
+fetch is the one same-origin desk read.
+"""
+
+DESK_PAGE_HTML = r"""<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#090d14">
+  <meta name="description" content="Bettor EV Engine — the operating desk: opportunities, orders, positions, management, performance and controls.">
+  <title>Bettor EV Engine | Operating Desk</title>
+  <style>/* BETTOR EV ENGINE · OPERATING DESK — presentation only.
+ *
+ * It styles what `/api/command/bettor/desk` returns and computes nothing.
+ * Every figure on this page comes from that read; there is no display
+ * arithmetic that could disagree with the accounting ledger.
+ *
+ * The palette is taken from command.css's own surfaces so the two pages
+ * read as one product rather than two. Tokens are declared once here and
+ * every rule below uses them. */
+
+:root {
+  --dk-bg: #090d14;
+  --dk-surface: #0f141c;
+  --dk-surface-2: #141b25;
+  --dk-line: #1e2733;
+  --dk-line-soft: #18202b;
+  --dk-ink: #e6ebf2;
+  --dk-ink-2: #9fb0c4;
+  --dk-ink-3: #64788f;
+  --dk-accent: #4c9ffe;
+  --dk-good: #3ddc97;
+  --dk-warn: #f2b544;
+  --dk-bad: #ff6b6b;
+  --dk-radius: 10px;
+}
+
+* { box-sizing: border-box; }
+
+.deskbody {
+  margin: 0;
+  background: var(--dk-bg);
+  color: var(--dk-ink);
+  font: 14px/1.55 ui-sans-serif, system-ui, -apple-system, "Segoe UI",
+        Roboto, sans-serif;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* ── the bar ─────────────────────────────────────────────────────── */
+.deskbar {
+  display: flex; flex-wrap: wrap; gap: 12px 20px;
+  align-items: center; justify-content: space-between;
+  padding: 14px 20px;
+  border-bottom: 1px solid var(--dk-line);
+  background: linear-gradient(180deg, #0c1119, #090d14);
+  position: sticky; top: 0; z-index: 5;
+}
+/* THE BRAND ROW MUST WRAP. At 390px an unwrapped row of a mark, a name and
+ * two pills measured 442px and pushed the whole document sideways -- the
+ * page-level horizontal scroll a browser check caught. It wraps, the name
+ * may shrink, and the pills keep their own line if they need one. */
+.deskbar-brand {
+  display: flex; align-items: center; gap: 8px 10px;
+  flex-wrap: wrap; min-width: 0; max-width: 100%;
+}
+.deskbar-brand .pill { flex: 0 1 auto; min-width: 0; }
+.deskname { min-width: 0; overflow-wrap: anywhere; }
+.deskmark {
+  width: 28px; height: 28px; border-radius: 8px;
+  display: grid; place-items: center;
+  background: var(--dk-accent); color: #04121f;
+  font-weight: 700; font-size: 15px;
+}
+.deskname { font-weight: 650; letter-spacing: .2px; }
+.desknav { display: flex; flex-wrap: wrap; gap: 4px; }
+.desknav a {
+  color: var(--dk-ink-2); text-decoration: none;
+  padding: 6px 10px; border-radius: 8px; font-size: 13px;
+}
+.desknav a:hover, .desknav a:focus-visible {
+  color: var(--dk-ink); background: var(--dk-surface-2); outline: none;
+}
+
+/* ── layout ──────────────────────────────────────────────────────── */
+.deskmain {
+  padding: 20px 16px; max-width: 1180px; margin: 0 auto; min-width: 0;
+}
+.deskstate { color: var(--dk-ink-2); padding: 24px 0; }
+.deskfoot {
+  display: flex; flex-wrap: wrap; gap: 8px 20px;
+  justify-content: space-between;
+  padding: 16px 20px 28px; color: var(--dk-ink-3); font-size: 12px;
+  border-top: 1px solid var(--dk-line-soft); margin-top: 8px;
+}
+
+.card {
+  background: var(--dk-surface);
+  border: 1px solid var(--dk-line);
+  border-radius: var(--dk-radius);
+  margin: 0 0 16px;
+  overflow: hidden;
+}
+.card > h2 {
+  margin: 0; padding: 13px 16px; font-size: 14px; font-weight: 640;
+  border-bottom: 1px solid var(--dk-line-soft);
+  display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+}
+.card > h2 .sub {
+  font-weight: 400; font-size: 12px; color: var(--dk-ink-3);
+}
+.card-body { padding: 14px 16px; }
+
+/* facts: a label/value grid that stays readable at phone width */
+.facts { display: grid; gap: 10px 18px; grid-template-columns: 1fr; }
+@media (min-width: 640px) {
+  .facts { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+  .facts.three { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+}
+.fact { min-width: 0; }
+.fact .k {
+  display: block; font-size: 11px; letter-spacing: .06em;
+  text-transform: uppercase; color: var(--dk-ink-3);
+}
+.fact .v {
+  display: block; font-variant-numeric: tabular-nums;
+  overflow-wrap: anywhere;
+}
+
+/* pills */
+.pill {
+  display: inline-block; padding: 2px 9px; border-radius: 999px;
+  font-size: 11px; font-weight: 600; letter-spacing: .04em;
+  border: 1px solid transparent; white-space: nowrap;
+}
+.pill-blue { background: #10263c; color: #8fc4ff; border-color: #1d3e5e; }
+.pill-good { background: #102b22; color: var(--dk-good); border-color: #1d4437; }
+.pill-warn { background: #2e2413; color: var(--dk-warn); border-color: #4a3a18; }
+.pill-bad  { background: #2e1616; color: var(--dk-bad);  border-color: #4a2020; }
+.pill-grey { background: #171d26; color: var(--dk-ink-2); border-color: #242e3b; }
+
+/* tables */
+/* A wide table scrolls IN ITS OWN CONTAINER. The page never scrolls
+ * sideways; the table does. */
+.tablewrap { overflow-x: auto; max-width: 100%; min-width: 0; }
+.card, .card-body, .book { min-width: 0; max-width: 100%; }
+h3.h3 { font-size: 13px; margin: 16px 0 6px; }
+table.dt { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.dt th, table.dt td {
+  text-align: left; padding: 8px 10px;
+  border-bottom: 1px solid var(--dk-line-soft); white-space: nowrap;
+}
+table.dt th {
+  font-size: 11px; letter-spacing: .06em; text-transform: uppercase;
+  color: var(--dk-ink-3); font-weight: 600;
+}
+table.dt td.num, table.dt th.num {
+  text-align: right; font-variant-numeric: tabular-nums;
+}
+table.dt tr:last-child td { border-bottom: 0; }
+.mono {
+  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  font-size: 12px;
+}
+.muted { color: var(--dk-ink-3); }
+.good { color: var(--dk-good); }
+.bad  { color: var(--dk-bad); }
+.warn { color: var(--dk-warn); }
+
+/* the NO_TRADE banner: a result, stated, never an empty panel */
+.verdict {
+  border-radius: 8px; padding: 12px 14px; margin: 0 0 12px;
+  border: 1px solid #4a3a18; background: #221b0e; color: #ffd98a;
+}
+.verdict.good { border-color: #1d4437; background: #0f241d; color: #9ff0cd; }
+.verdict b { display: block; font-size: 15px; margin-bottom: 2px; }
+
+/* books: separate, never summed */
+.book { border: 1px solid var(--dk-line); border-radius: 8px;
+        padding: 10px 12px; margin: 0 0 10px; background: var(--dk-surface-2); }
+.book h3 { margin: 0 0 6px; font-size: 13px; }
+.book .lanenote { font-size: 12px; color: var(--dk-ink-3); }
+
+/* audit: internal identifiers live here and nowhere else */
+details.audit {
+  border-top: 1px dashed var(--dk-line); margin-top: 12px; padding-top: 10px;
+}
+details.audit > summary {
+  cursor: pointer; color: var(--dk-ink-2); font-size: 12px;
+  letter-spacing: .04em; text-transform: uppercase;
+}
+details.audit > summary:focus-visible { outline: 1px solid var(--dk-accent); }
+details.audit pre {
+  margin: 10px 0 0; padding: 10px; overflow-x: auto;
+  background: #0b1016; border: 1px solid var(--dk-line-soft);
+  border-radius: 8px; font-size: 12px; color: var(--dk-ink-2);
+}
+
+/* readiness checklist */
+ul.checks { list-style: none; margin: 0; padding: 0; }
+ul.checks li {
+  display: flex; gap: 10px; align-items: flex-start;
+  padding: 8px 0; border-bottom: 1px solid var(--dk-line-soft);
+}
+ul.checks li:last-child { border-bottom: 0; }
+ul.checks .cw { min-width: 0; }
+ul.checks .cw b { display: block; font-weight: 600; font-size: 13px; }
+ul.checks .cw span { color: var(--dk-ink-3); font-size: 12px; }
+
+/* the activation control, locked */
+.activate {
+  margin-top: 12px; display: flex; gap: 12px; align-items: center;
+  flex-wrap: wrap;
+}
+.activate button {
+  padding: 9px 16px; border-radius: 8px; font: inherit; font-weight: 600;
+  border: 1px solid #2b3644; background: #161d27; color: var(--dk-ink-3);
+}
+.activate button[disabled] { cursor: not-allowed; opacity: .75; }
+/* A LIVE CONTROL LOOKS LIVE. The locked one keeps the muted treatment
+ * above; the ones that actually send are legible as buttons, and the
+ * emergency stop is the only red thing on the page. */
+.activate button:not([disabled]) {
+  cursor: pointer; color: var(--dk-ink-1); border-color: #3a4757;
+  background: #1b2430;
+}
+.activate button:not([disabled]):hover { background: #222d3b; }
+.activate button.danger:not([disabled]) {
+  border-color: #6b2531; background: #2a1419; color: #ffd9de;
+}
+.activate button:focus-visible {
+  outline: 2px solid var(--dk-accent, #6aa9ff); outline-offset: 2px;
+}
+.activate .why { font-size: 12px; color: var(--dk-warn); }
+
+/* the operator token field and the two proposal forms */
+.optoken, .ctlform {
+  margin-top: 8px; display: flex; gap: 10px; align-items: center;
+  flex-wrap: wrap;
+}
+.optoken input, .ctlform input {
+  padding: 8px 10px; border-radius: 8px; font: inherit; font-size: 13px;
+  border: 1px solid #2b3644; background: #10151d; color: var(--dk-ink-1);
+  min-width: 0; flex: 1 1 170px; max-width: 320px;
+}
+.optoken input:focus-visible, .ctlform input:focus-visible {
+  outline: 2px solid var(--dk-accent, #6aa9ff); outline-offset: 1px;
+}
+.ctlform button {
+  padding: 8px 14px; border-radius: 8px; font: inherit; font-weight: 600;
+  cursor: pointer; border: 1px solid #3a4757; background: #1b2430;
+  color: var(--dk-ink-1);
+}
+.optoken .why, .ctlform .why {
+  flex: 1 1 100%; font-size: 12px; color: var(--dk-ink-3);
+}
+
+.limits { font-size: 12px; }
+.openlim { font-size: 12.5px; color: var(--dk-ink-2); }
+.openlim li { margin-bottom: 8px; }
+
+@media (prefers-reduced-motion: reduce) {
+  * { animation: none !important; transition: none !important; }
+}
+</style>
+</head>
+<body class="deskbody">
+  <a class="skip-link" href="#deskmain">Skip to the desk</a>
+
+  <header class="deskbar">
+    <div class="deskbar-brand">
+      <span class="deskmark">B</span>
+      <span class="deskname">Bettor EV Engine</span>
+      <span id="mode-pill" class="pill pill-blue">MODE —</span>
+      <span id="funded-pill" class="pill pill-grey">FUNDED —</span>
+    </div>
+    <nav class="desknav" aria-label="Desk sections">
+      <a href="#controls">Controls</a>
+      <a href="#opportunities">Opportunities</a>
+      <a href="#orders">Orders</a>
+      <a href="#positions">Positions</a>
+      <a href="#management">Management</a>
+      <a href="#performance">Performance</a>
+      <a href="#demonstration">Demonstration</a>
+      <a href="#funded">Activation</a>
+      <a href="/command/">Command</a>
+    </nav>
+  </header>
+
+  <main id="deskmain" class="deskmain">
+    <div id="deskstate" class="deskstate" role="status" aria-live="polite">
+      Opening the desk…
+    </div>
+    <div id="desk" hidden></div>
+  </main>
+
+  <footer class="deskfoot">
+    <span id="asof">—</span>
+    <span>Reads need only the Command session. The controls send to the lane’s existing control paths and need an operator token held in memory only. This page submits no order to any venue.</span>
+  </footer>
+
+  <script>
+window.BTCore = {
+  esc: function (v) {
+    return String(v == null ? "" : v).replace(/[&<>"']/g, function (c) {
+      return {"&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;",
+              "'": "&#39;"}[c];
+    });
+  },
+  usd: function (v, d) {
+    d = (d === undefined) ? 0 : d;
+    return new Intl.NumberFormat("en-US", {
+      style: "currency", currency: "USD",
+      minimumFractionDigits: d, maximumFractionDigits: d}).format(v);
+  },
+  endpoint: function (path) {
+    if (typeof path !== "string"
+        || !/^\/api\/command(?:\/|$)/.test(path)
+        || path.indexOf("..") >= 0 || path.indexOf("\\") >= 0
+        || /[?#]/.test(path)) {
+      throw new Error("Only configured same-origin /api/command/ read " +
+                      "endpoints are allowed.");
+    }
+    return path;
+  }
+};
 /* BETTOR EV ENGINE · OPERATING DESK — the read, rendered.
  *
  * ONE SOURCE. Everything here comes from a single authenticated same-origin
@@ -820,3 +1164,14 @@
 
   window.BettorDesk = {load: load, render: render, VERSION: '1.0.0'};
 }());
+</script>
+</body>
+</html>
+"""
+
+#: The markers a drift test holds both copies to.
+CONTRACT_MARKERS = (
+    "Bettor EV Engine", "Controls", "Opportunities", "Orders", "Positions",
+    "Management", "Performance", "Activation", "NO_TRADE",
+    "/api/command/bettor/desk", "audit",
+)

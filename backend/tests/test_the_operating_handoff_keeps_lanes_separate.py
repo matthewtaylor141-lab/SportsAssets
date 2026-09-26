@@ -116,14 +116,38 @@ def test_the_response_is_never_cached():
 
 DEMO_SRC = inspect.getsource(A.bettor_demonstration_run)
 
+# THE LIFECYCLE MOVED INTO ITS OWN MODULE, and these assertions followed
+# it. The route now takes a stage and calls `bettor_demonstration`, which
+# drives the same deployed functions AND carries the position through
+# management, a reduction, a completing exit and the reconciliation -- more
+# than the route's first version did, not less. Asserting on the route's
+# text alone would have meant this file passed only while the whole
+# lifecycle lived in one handler.
+from sportsassets import bettor_demonstration as DEMO      # noqa: E402
+
+MODULE_SRC = inspect.getsource(DEMO)
+
 
 def test_the_demonstration_route_drives_the_deployed_writers():
     """THE COMPONENTS ARE REAL. `plan_entry` and `persist_entry` are the
-    same two functions the scheduled lane calls; this route supplies the
-    inputs and nothing else."""
-    assert "inv.plan_entry" in DEMO_SRC
-    assert "inv.persist_entry" in DEMO_SRC
-    assert "ensure_experiment" in DEMO_SRC
+    same two functions the scheduled lane calls, and the manager and the
+    settlement consumer are the scheduler's own. The demonstration supplies
+    the inputs and nothing else."""
+    assert "inv.plan_entry" in MODULE_SRC
+    assert "inv.persist_entry" in MODULE_SRC
+    assert "ensure_experiment" in MODULE_SRC
+    # AND THE REST OF THE LIFECYCLE, through the deployed functions too.
+    assert "runner.manage_open_position" in MODULE_SRC
+    assert "store.persist_run" in MODULE_SRC
+    assert "SETTLE.settle_open_positions" in MODULE_SRC
+    named = DEMO.describe()["deployed_components"]
+    for fn in ("bettor_entry_inventory.plan_entry",
+               "bettor_rn1x_run.manage_open_position",
+               "bettor_entry_settlement.settle_open_positions"):
+        assert fn in named, fn
+    # The route is what the operator calls, and it calls the module.
+    assert "bettor_demonstration as DEMO" in DEMO_SRC
+    assert "DEMO.run_full" in DEMO_SRC
 
 
 def test_the_demonstration_says_its_inputs_are_chosen():
@@ -134,14 +158,20 @@ def test_the_demonstration_says_its_inputs_are_chosen():
     # the declared reason lives on the module constant the route returns
     assert "not a market observation" in A.DEMONSTRATION_WHY
     assert "not strategy performance" in A.DEMONSTRATION_WHY
-    flat = " ".join(DEMO_SRC.split())
-    assert "not evidence that such a trade existed" in flat
+    flat = " ".join((DEMO_SRC + " " + MODULE_SRC).split())
+    assert "not evidence that such a contract existed" in flat \
+        or "not evidence that such a trade existed" in flat
+    # AND THE CHOSEN NUMBERS ARE ENUMERATED, not buried in a scenario.
+    chosen = DEMO.describe()["chosen_inputs"]
+    for k in ("entry_vwap", "bid_at_reduction", "probability_at_entry",
+              "fee_per_contract_usd"):
+        assert k in chosen, k
 
 
 def test_the_demonstration_cannot_inflate_its_own_book():
     """A second call must replay, not write. The same duplicate protection
     production uses -- there is no separate path for the demonstration."""
-    flat = " ".join(DEMO_SRC.split())
+    flat = " ".join((DEMO_SRC + " " + MODULE_SRC).split())
     assert "EXACT_REPLAY_OF_A_RECORDED_OBSERVATION" in flat
     assert "cannot inflate its own book" in flat
 

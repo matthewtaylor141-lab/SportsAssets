@@ -1423,8 +1423,24 @@ ENTRY_EVIDENCE = """
      ORDER BY decided_at DESC LIMIT $3
 """
 
+#: THE POLICY IS NOT THE EXPERIMENT, and scoping on the policy alone let
+#: another experiment's position into this lane's inventory.
+#:
+#: `rn1x_positions` is unique on (experiment_id, policy, source_trade_id):
+#: the POLICY names the sizing and accounting rules, the EXPERIMENT names
+#: whose decision it was. The controlled demonstration deliberately drives
+#: the same writer -- that is what makes it a demonstration of the shipped
+#: software -- so it carries the same `policy` and differs only in
+#: `experiment_id`. Selecting on the policy therefore returned the
+#: demonstration position inside a response whose `experiment_id` field
+#: says EXT_PINNACLE_DEVIG_V1_SHADOW, which is exactly the confusion
+#: between "software works" and "the strategy holds this" that the
+#: separate book exists to prevent. The experiment is now part of the
+#: predicate, and it is also SELECTED, so a reader can see the scope on
+#: each row rather than trusting the envelope.
 ENTRY_INVENTORY = """
-    SELECT p.position_id, p.condition_id, p.outcome_index, p.provenance,
+    SELECT p.position_id, p.experiment_id, p.policy,
+           p.condition_id, p.outcome_index, p.provenance,
            p.seed_qty::float8      AS qty,
            p.seed_price::float8    AS price,
            p.seed_basis_usd::float8 AS cost_basis_usd,
@@ -1442,8 +1458,8 @@ ENTRY_INVENTORY = """
            (SELECT count(*) FROM rn1x_outcomes x
              WHERE x.position_id = p.position_id) AS outcomes
       FROM rn1x_positions p
-     WHERE p.policy = $1
-     ORDER BY p.decision_ts DESC LIMIT $2
+     WHERE p.policy = $1 AND p.experiment_id = $2
+     ORDER BY p.decision_ts DESC LIMIT $3
 """
 
 
@@ -1471,7 +1487,7 @@ async def entry_evidence(conn, *, hours: int = 24, limit: int = 20) -> dict:
     rows = await conn.fetch(ENTRY_EVIDENCE, ext.EXPERIMENT_ID,
                             str(max(1, min(720, int(hours)))),
                             max(1, min(200, int(limit))))
-    held = await conn.fetch(ENTRY_INVENTORY, inv.POLICY,
+    held = await conn.fetch(ENTRY_INVENTORY, inv.POLICY, ext.EXPERIMENT_ID,
                             max(1, min(200, int(limit))))
     try:
         cal = await conn.fetchrow(

@@ -26,9 +26,13 @@ WHAT IT EXERCISES, each reported on its own:
                answer EXACT_REPLAY_OF_A_RECORDED_OBSERVATION and write
                nothing: no second position, no second order, no second
                fill, no second fee.
-  RESTART      the pool is closed and rebuilt mid-run, then the same
-               observations are replayed. Recovery is correct only if the
-               replay still writes nothing and the counts are unchanged.
+  CONNECTION   the pool is closed and rebuilt mid-run, then the same
+  RECOVERY     observations are replayed. THIS IS CONNECTION RECOVERY AND
+               NOT A PROCESS RESTART -- the interpreter, its module state
+               and its caches all survive, so it exercises the database
+               handle and nothing else. An actual process restart is a
+               separate phase (`--restart-child`), which re-execs a child
+               interpreter so nothing in memory carries over.
   ACCOUNTING   after every phase, basis and fees are summed from the
                ledger and compared against the writes that were accepted.
                A double-counted basis, a duplicated fee or a fill on an
@@ -172,11 +176,13 @@ def _stats(lat, wall, n):
     }
 
 
-async def run(dsn: str, entries: int, burst: int, concurrency: int) -> dict:
+async def run(dsn: str, entries: int, burst: int, concurrency: int,
+              lifecycles: int = 0, restart: int = 0) -> dict:
     import asyncpg
 
     out: dict = {
-        "probe": "BETTOR_ORDER_LIFECYCLE_CAPACITY_V1",
+        "probe": "BETTOR_ORDER_LIFECYCLE_CAPACITY_V2",
+        "scope": ("A WRITER MICROBENCHMARK plus, when --lifecycles is\n                  given, a bounded batch of COMPLETE lifecycles. The two\n                  are reported separately because they measure different\n                  things"),
         "workload_is_synthetic": True,
         "workload_note": (
             "every plan is fabricated to exercise the writer. None came "
@@ -243,15 +249,18 @@ async def run(dsn: str, entries: int, burst: int, concurrency: int) -> dict:
         pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
         p4 = await _phase_serial(pool, recs[:min(50, entries)], 4_000_000.0)
         after_restart = await _counts(pool)
-        out["phases"]["restart_recovery"] = dict(
+        out["phases"]["connection_recovery"] = dict(
             _stats(p4["lat_ms"], p4["wall_s"], min(50, entries)),
             cases=p4["cases"], counts_after=after_restart,
-            wrote_nothing_after_restart=(
+            wrote_nothing_after_reconnect=(
                 after_restart["positions"] == after_burst["positions"]
                 and after_restart["fills"] == after_burst["fills"]),
+            what_this_is=("CONNECTION RECOVERY. The pool is closed and "
+                          "rebuilt; the interpreter, its imports and its "
+                          "caches all survive. It is NOT a process restart "
+                          "and must not be reported as one"),
             why=("a rebuilt pool must not re-admit an observation the "
-                 "ledger already holds. Recovery is only correct if the "
-                 "replay still writes nothing"))
+                 "ledger already holds"))
 
         # ── 5 · ACCOUNTING RECONCILIATION ──────────────────────────
         final = await _counts(pool)
@@ -277,11 +286,334 @@ async def run(dsn: str, entries: int, burst: int, concurrency: int) -> dict:
                     "double count, not a rounding note"),
         }
         out["final_counts"] = final
+
+        # ── 6 · COMPLETE LIFECYCLES, and the duplicate delivery of them ─
+        if lifecycles:
+            async with pool.acquire() as conn:
+                await inv.ensure_experiment(conn, LIFECYCLE_EXPERIMENT)
+            out["phases"]["complete_lifecycles"] = await phase_lifecycles(
+                pool, lifecycles)
+            out["phases"]["duplicate_lifecycles"] = \
+                await phase_duplicate_lifecycles(
+                    pool, min(lifecycles, 5))
+
+        # ── 7 · AN ACTUAL PROCESS RESTART ──────────────────────────────
+        if restart:
+            async with pool.acquire() as conn:
+                await inv.ensure_experiment(conn, LIFECYCLE_EXPERIMENT)
+            lo = 500_000
+            out["phases"]["actual_process_restart"] = \
+                await phase_process_restart(
+                    pool, dsn, lo, lo + restart,
+                    kill_after=max(1, restart // 3))
     finally:
         try:
             await pool.close()
         except Exception:                                       # noqa: BLE001
             pass
+    return out
+
+
+
+# ── COMPLETE LIFECYCLES ─────────────────────────────────────────────
+#
+# WHY THIS PHASE EXISTS. Everything above measures the ENTRY WRITER: one
+# plan in, one position, one order and one fill out. That is a writer
+# microbenchmark and it was reported as one, but it is not what the lane
+# does for a living. A complete lifecycle is entry, recurring management
+# cycles, a marketable reduction, a completing exit and reconciled
+# accounting -- five to eight writes, several reads and a decision each
+# time -- and its cost per position is an order of magnitude larger.
+#
+# IT RUNS THE SAME DEPLOYED FUNCTIONS. `bettor_demonstration.run_full`
+# drives `plan_entry`/`persist_entry`, `manage_open_position`,
+# `persist_run` and `settle_open_positions` -- the scheduled lane's own
+# components -- with CHOSEN inputs, on this harness's own book. The inputs
+# are synthetic; the code under measurement is not.
+LIFECYCLE_EXPERIMENT = "CAPACITY_PROBE_LIFECYCLE_V1"
+
+
+def _lc_identity(i: int) -> tuple:
+    """A distinct contract per lifecycle. Synthetic, and unmistakably so."""
+    return ("0x%064x" % (0xCAFE0000 + i),
+            "aec-lifecycle-%05d-2026-09-26" % i,
+            "Capacity Lifecycle %05d Side A" % i)
+
+
+async def _one_lifecycle(pool, i: int) -> dict:
+    """One complete lifecycle. Returns what happened, including a failure."""
+    from sportsassets import bettor_demonstration as D
+
+    cid, slug, pays = _lc_identity(i)
+    t0 = time.perf_counter()
+    try:
+        async with pool.acquire() as conn:
+            got = await D.run_full(conn, experiment=LIFECYCLE_EXPERIMENT,
+                                   cid=cid, slug=slug, pays_on=pays)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"i": i, "ms": (time.perf_counter() - t0) * 1000.0,
+                "completed": False, "error": "%s: %s" % (type(exc).__name__,
+                                                         exc)}
+    rec = (got.get("reconciliation") or {})
+    rows = rec.get("positions") or []
+    r0 = rows[0] if rows else {}
+    return {
+        "i": i, "ms": (time.perf_counter() - t0) * 1000.0,
+        "cycles_run": got.get("cycles_run"),
+        "flat": bool(got.get("position_is_flat")),
+        "reconciles": bool(rec.get("reconciles")),
+        # COMPLETED MEANS THE POSITION WENT FLAT AND THE LEDGER ADDS UP.
+        # A lifecycle that merely ran without raising is not completed.
+        "completed": bool(got.get("position_is_flat")
+                          and rec.get("reconciles")),
+        "bought": r0.get("bought_qty"), "sold": r0.get("sold_qty"),
+        "held": r0.get("held_qty"), "fees_usd": r0.get("fees_usd"),
+        "realised_net_usd": r0.get("realised_net_of_fees_usd"),
+        "decisions": r0.get("decisions"), "orders": r0.get("orders"),
+        "fills": r0.get("fills"),
+        "identity_holds": r0.get("quantity_identity_holds"),
+    }
+
+
+async def _lc_counts(pool) -> dict:
+    """The lifecycle book's own totals, by the experiment that owns it."""
+    async def one(sql):
+        try:
+            return await pool.fetchval(sql, LIFECYCLE_EXPERIMENT)
+        except Exception as exc:                                # noqa: BLE001
+            return "ERR:" + type(exc).__name__
+    return {
+        "positions": await one(
+            "SELECT count(*) FROM rn1x_positions WHERE experiment_id = $1"),
+        "orders": await one(
+            "SELECT count(*) FROM rn1x_orders o JOIN rn1x_positions p "
+            "ON p.position_id = o.position_id WHERE p.experiment_id = $1"),
+        "fills": await one(
+            "SELECT count(*) FROM rn1x_fills f JOIN rn1x_orders o "
+            "ON o.order_id = f.order_id JOIN rn1x_positions p "
+            "ON p.position_id = o.position_id WHERE p.experiment_id = $1"),
+        "decisions": await one(
+            "SELECT count(*) FROM rn1x_decisions d JOIN rn1x_positions p "
+            "ON p.position_id = d.position_id WHERE p.experiment_id = $1"),
+        "fee_total": await one(
+            "SELECT coalesce(sum(f.fee_usd), 0) FROM rn1x_fills f "
+            "JOIN rn1x_orders o ON o.order_id = f.order_id "
+            "JOIN rn1x_positions p ON p.position_id = o.position_id "
+            "WHERE p.experiment_id = $1"),
+        "filled_qty_total": await one(
+            "SELECT coalesce(sum(f.qty), 0) FROM rn1x_fills f "
+            "JOIN rn1x_orders o ON o.order_id = f.order_id "
+            "JOIN rn1x_positions p ON p.position_id = o.position_id "
+            "WHERE p.experiment_id = $1"),
+    }
+
+
+async def phase_lifecycles(pool, n: int) -> dict:
+    """A bounded batch of complete lifecycles, measured end to end."""
+    before = await _lc_counts(pool)
+    results = []
+    t0 = time.perf_counter()
+    for i in range(n):
+        results.append(await _one_lifecycle(pool, i))
+    wall = time.perf_counter() - t0
+    after = await _lc_counts(pool)
+    done = [r for r in results if r.get("completed")]
+    failed = [r for r in results if not r.get("completed")]
+    qty = float(after["filled_qty_total"]) - float(
+        before["filled_qty_total"])
+    fees = float(after["fee_total"]) - float(before["fee_total"])
+    expect = round(FEE_PER_CONTRACT * qty, 6)
+    return dict(
+        _stats([r["ms"] for r in results], round(wall, 3), n),
+        phase="complete_lifecycles",
+        completed=len(done), attempted=n,
+        completion_rate=(round(len(done) / n, 4) if n else None),
+        failures=[{k: r.get(k) for k in ("i", "error", "flat", "reconciles",
+                                         "cycles_run")}
+                  for r in failed][:20],
+        failure_count=len(failed),
+        # EVERY LIFECYCLE'S OWN ARITHMETIC, and then the book's.
+        all_identities_hold=all(r.get("identity_holds") is True
+                                for r in done),
+        median_cycles=(statistics.median([r["cycles_run"] for r in done])
+                       if done else None),
+        median_writes_per_lifecycle=(
+            statistics.median([(r.get("orders") or 0) + (r.get("fills") or 0)
+                               + (r.get("decisions") or 0) for r in done])
+            if done else None),
+        counts_before=before, counts_after=after,
+        accounting={
+            "filled_qty_added": round(qty, 6),
+            "fee_added": round(fees, 6),
+            "fee_expected_from_qty": expect,
+            "fee_reconciles": abs(fees - expect) < 0.01,
+            "buys_equal_sells": all(
+                abs(float(r.get("bought") or 0)
+                    - float(r.get("sold") or 0)) < 1e-9 for r in done),
+            "discrepancies": [
+                {"i": r["i"], "bought": r.get("bought"),
+                 "sold": r.get("sold"), "held": r.get("held")}
+                for r in done
+                if abs(float(r.get("held") or 0)) > 1e-9],
+        },
+        lifecycles_per_s=(round(n / wall, 3) if wall > 0 else None),
+        what_this_measures=(
+            "a COMPLETE lifecycle: entry, recurring management, a "
+            "reduction, a completing exit and reconciled accounting, "
+            "through the deployed functions. Its inputs are chosen; its "
+            "code is production's"),
+        what_it_does_not_measure=(
+            "opportunity. It says nothing about how many contracts a venue "
+            "would show, a provider would price or the gates would admit"),
+        examples=results[:3],
+    )
+
+
+async def phase_duplicate_lifecycles(pool, n: int) -> dict:
+    """THE WHOLE LIFECYCLE, DELIVERED TWICE. Nothing may be written.
+
+    Not just the entry: the management decisions carry derived ids too, so
+    re-running the lifecycle must add no decision, no order and no fill,
+    and must not move a single fee.
+    """
+    before = await _lc_counts(pool)
+    t0 = time.perf_counter()
+    results = [await _one_lifecycle(pool, i) for i in range(n)]
+    wall = time.perf_counter() - t0
+    after = await _lc_counts(pool)
+    same = {k: (str(before[k]) == str(after[k])) for k in before}
+    return dict(
+        _stats([r["ms"] for r in results], round(wall, 3), n),
+        phase="duplicate_delivery_of_complete_lifecycles",
+        redelivered=n,
+        counts_before=before, counts_after=after,
+        unchanged=same,
+        wrote_nothing=all(same.values()),
+        why=("a re-delivered observation is a duplicate at every stage of "
+             "the lifecycle, not only at entry. One extra fill here would "
+             "be a fabricated contract and a fabricated fee"))
+
+
+# ── AN ACTUAL PROCESS RESTART ───────────────────────────────────────
+#
+# WHAT MAKES THIS DIFFERENT FROM `connection_recovery`. There, the pool is
+# closed and rebuilt inside a living interpreter: the imports, the module
+# globals and every cache survive. Here a CHILD INTERPRETER is spawned,
+# killed with SIGKILL part-way through its batch, and a SECOND child is
+# spawned to finish the same batch. Nothing in memory carries over, the
+# first child gets no chance to clean up, and the only state the second
+# child can rely on is what reached the database.
+RESTART_MARKER = "LIFECYCLE_DONE "
+
+
+async def _child_lifecycles(dsn: str, lo: int, hi: int) -> int:
+    """The child's own job: run lifecycles lo..hi, announcing each."""
+    import asyncpg
+
+    pool = await asyncpg.create_pool(dsn, min_size=1, max_size=4)
+    try:
+        for i in range(lo, hi):
+            got = await _one_lifecycle(pool, i)
+            print(RESTART_MARKER + json.dumps(
+                {"i": i, "completed": got.get("completed")}), flush=True)
+    finally:
+        await pool.close()
+    return 0
+
+
+async def phase_process_restart(pool, dsn: str, lo: int, hi: int,
+                                kill_after: int) -> dict:
+    """Kill a child mid-batch, then finish the batch in a NEW process."""
+    import subprocess
+
+    out = {"phase": "actual_process_restart", "range": [lo, hi],
+           "kill_after_completions": kill_after}
+    cmd = [sys.executable, "-m", "tools.bettor_capacity_probe",
+           "--dsn", dsn, "--child-lifecycles", "%d:%d" % (lo, hi)]
+    root = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+    first = subprocess.Popen(cmd, cwd=root, stdout=subprocess.PIPE,
+                             stderr=subprocess.PIPE, text=True)
+    seen = []
+    t0 = time.perf_counter()
+    try:
+        while len(seen) < kill_after and time.perf_counter() - t0 < 180:
+            line = first.stdout.readline()
+            if not line:
+                break
+            if line.startswith(RESTART_MARKER):
+                seen.append(json.loads(line[len(RESTART_MARKER):]))
+    finally:
+        first.kill()                      # SIGKILL: no cleanup, no flush
+        try:
+            first.wait(timeout=20)
+        except Exception:                                       # noqa: BLE001
+            pass
+    out["first_child"] = {"pid": first.pid, "completed_before_kill":
+                          len(seen), "returncode": first.returncode,
+                          "killed_with": "SIGKILL"}
+    mid = await _lc_counts(pool)
+    out["counts_after_kill"] = mid
+    second = subprocess.run(cmd, cwd=root, capture_output=True, text=True,
+                            timeout=600)
+    done2 = [json.loads(ln[len(RESTART_MARKER):])
+             for ln in (second.stdout or "").splitlines()
+             if ln.startswith(RESTART_MARKER)]
+    out["second_child"] = {"returncode": second.returncode,
+                           "lifecycles_reported": len(done2),
+                           "all_completed": all(d.get("completed")
+                                                for d in done2) and
+                           bool(done2),
+                           "stderr_tail": (second.stderr or "")[-400:]}
+    after = await _lc_counts(pool)
+    out["counts_after_restart"] = after
+    # ONE POSITION PER CONTRACT IN THE RANGE, AND NOT ONE MORE. A restart
+    # that re-admitted an entry would show up here as a duplicate row.
+    n = 0
+    dupes = []
+    flat = []
+    for i in range(lo, hi):
+        cid, _slug, _p = _lc_identity(i)
+        rows = await pool.fetchval(
+            "SELECT count(*) FROM rn1x_positions WHERE experiment_id = $1 "
+            "AND condition_id = $2", LIFECYCLE_EXPERIMENT, cid)
+        n += int(rows or 0)
+        if int(rows or 0) > 1:
+            dupes.append({"i": i, "positions": int(rows)})
+        held = await pool.fetchval(
+            "SELECT coalesce(sum(CASE WHEN upper(o.side) = 'BUY' THEN f.qty "
+            "ELSE -f.qty END), 0)::float8 FROM rn1x_fills f "
+            "JOIN rn1x_orders o ON o.order_id = f.order_id "
+            "JOIN rn1x_positions p ON p.position_id = o.position_id "
+            "WHERE p.experiment_id = $1 AND p.condition_id = $2",
+            LIFECYCLE_EXPERIMENT, cid)
+        flat.append(abs(float(held or 0.0)) < 1e-9)
+    qty = float(after["filled_qty_total"]) - float(mid["filled_qty_total"])
+    fees = float(after["fee_total"]) - float(mid["fee_total"])
+    out.update(
+        positions_in_range=n, expected_positions=hi - lo,
+        duplicate_positions=dupes,
+        no_duplicate_position=(n == hi - lo and not dupes),
+        all_positions_flat=all(flat),
+        flat_count=sum(1 for f in flat if f),
+        fee_added_after_restart=round(fees, 6),
+        fee_expected_after_restart=round(FEE_PER_CONTRACT * qty, 6),
+        fee_reconciles=abs(fees - FEE_PER_CONTRACT * qty) < 0.01,
+        what_this_is=(
+            "AN ACTUAL PROCESS RESTART. A child interpreter was SIGKILLed "
+            "part-way through its batch and a second child finished the "
+            "same batch. No module state, cache or connection survived, "
+            "and the only thing the second process could rely on is what "
+            "reached the database"),
+        what_it_proves=(
+            "the ledger is the state. A killed writer leaves no duplicate "
+            "and no half-written position that a new process would "
+            "re-admit"),
+        what_it_does_not_prove=(
+            "that the hosted scheduler recovers on Render's own restart "
+            "path, which has its own lock and its own cadence"))
+    out["ok"] = bool(out["no_duplicate_position"]
+                     and out["all_positions_flat"]
+                     and out["fee_reconciles"])
     return out
 
 
@@ -291,16 +623,34 @@ def main() -> int:
     ap.add_argument("--entries", type=int, default=400)
     ap.add_argument("--burst", type=int, default=120)
     ap.add_argument("--concurrency", type=int, default=12)
+    ap.add_argument("--lifecycles", type=int, default=0,
+                    help="run this many COMPLETE lifecycles as well")
+    ap.add_argument("--restart", type=int, default=0,
+                    help="lifecycles for the actual process-restart phase")
+    ap.add_argument("--child-lifecycles", default="",
+                    help="INTERNAL: lo:hi, the child process's own batch")
     a = ap.parse_args()
+    if a.child_lifecycles:
+        # THE CHILD PROCESS. It runs lifecycles and announces each one; the
+        # parent kills it mid-batch. It prints no report of its own.
+        lo, hi = (int(x) for x in a.child_lifecycles.split(":"))
+        return asyncio.run(_child_lifecycles(a.dsn, lo, hi))
     if not a.dsn:
         print("a --dsn (or RN1X_TEST_DSN) is required", file=sys.stderr)
         return 2
-    out = asyncio.run(run(a.dsn, a.entries, a.burst, a.concurrency))
+    out = asyncio.run(run(a.dsn, a.entries, a.burst, a.concurrency,
+                          lifecycles=a.lifecycles, restart=a.restart))
     print(json.dumps(out, indent=1, default=str))
-    ok = (out["phases"]["replay"]["wrote_nothing"]
+    lc = out["phases"].get("complete_lifecycles") or {}
+    dup = out["phases"].get("duplicate_lifecycles") or {}
+    rst = out["phases"].get("actual_process_restart") or {}
+    ok = ((lc.get("completion_rate") in (None, 1.0))
+          and (dup.get("wrote_nothing") in (None, True))
+          and (rst.get("ok") in (None, True))
+          and out["phases"]["replay"]["wrote_nothing"]
           and out["phases"]["replay"]["fee_unchanged"]
-          and out["phases"]["restart_recovery"][
-              "wrote_nothing_after_restart"]
+          and out["phases"]["connection_recovery"][
+              "wrote_nothing_after_reconnect"]
           and out["accounting"]["fee_reconciles"]
           and out["accounting"]["one_fill_per_position"])
     return 0 if ok else 1

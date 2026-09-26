@@ -205,7 +205,43 @@ ul.checks .cw span { color: var(--dk-ink-3); font-size: 12px; }
   border: 1px solid #2b3644; background: #161d27; color: var(--dk-ink-3);
 }
 .activate button[disabled] { cursor: not-allowed; opacity: .75; }
+/* A LIVE CONTROL LOOKS LIVE. The locked one keeps the muted treatment
+ * above; the ones that actually send are legible as buttons, and the
+ * emergency stop is the only red thing on the page. */
+.activate button:not([disabled]) {
+  cursor: pointer; color: var(--dk-ink-1); border-color: #3a4757;
+  background: #1b2430;
+}
+.activate button:not([disabled]):hover { background: #222d3b; }
+.activate button.danger:not([disabled]) {
+  border-color: #6b2531; background: #2a1419; color: #ffd9de;
+}
+.activate button:focus-visible {
+  outline: 2px solid var(--dk-accent, #6aa9ff); outline-offset: 2px;
+}
 .activate .why { font-size: 12px; color: var(--dk-warn); }
+
+/* the operator token field and the two proposal forms */
+.optoken, .ctlform {
+  margin-top: 8px; display: flex; gap: 10px; align-items: center;
+  flex-wrap: wrap;
+}
+.optoken input, .ctlform input {
+  padding: 8px 10px; border-radius: 8px; font: inherit; font-size: 13px;
+  border: 1px solid #2b3644; background: #10151d; color: var(--dk-ink-1);
+  min-width: 0; flex: 1 1 170px; max-width: 320px;
+}
+.optoken input:focus-visible, .ctlform input:focus-visible {
+  outline: 2px solid var(--dk-accent, #6aa9ff); outline-offset: 1px;
+}
+.ctlform button {
+  padding: 8px 14px; border-radius: 8px; font: inherit; font-weight: 600;
+  cursor: pointer; border: 1px solid #3a4757; background: #1b2430;
+  color: var(--dk-ink-1);
+}
+.optoken .why, .ctlform .why {
+  flex: 1 1 100%; font-size: 12px; color: var(--dk-ink-3);
+}
 
 .limits { font-size: 12px; }
 .openlim { font-size: 12.5px; color: var(--dk-ink-2); }

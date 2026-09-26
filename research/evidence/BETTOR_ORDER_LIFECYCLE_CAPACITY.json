@@ -1,5 +1,6 @@
 {
- "probe": "BETTOR_ORDER_LIFECYCLE_CAPACITY_V1",
+ "probe": "BETTOR_ORDER_LIFECYCLE_CAPACITY_V2",
+ "scope": "A WRITER MICROBENCHMARK plus, when --lifecycles is\n                  given, a bounded batch of COMPLETE lifecycles. The two\n                  are reported separately because they measure different\n                  things",
  "workload_is_synthetic": true,
  "workload_note": "every plan is fabricated to exercise the writer. None came from a venue and none is evidence that such a trade existed",
  "processing_capacity_is_not_opportunity": "entries per day here is what the lifecycle can PROCESS. It is not a count of qualifying opportunities and must never be quoted as one",
@@ -9,15 +10,15 @@
  "phases": {
   "sustained": {
    "n": 500,
-   "wall_s": 1.526,
-   "entries_per_s": 327.65,
-   "implied_per_day": 28309305,
+   "wall_s": 1.712,
+   "entries_per_s": 292.06,
+   "implied_per_day": 25233644,
    "latency_ms": {
-    "p50": 2.78,
-    "p90": 4.07,
-    "p99": 6.42,
-    "max": 12.33,
-    "mean": 3.05
+    "p50": 3.03,
+    "p90": 5.43,
+    "p99": 7.27,
+    "max": 13.53,
+    "mean": 3.42
    },
    "cases": {
     "NEW_EXPOSURE": 500
@@ -32,15 +33,15 @@
   },
   "replay": {
    "n": 500,
-   "wall_s": 0.237,
-   "entries_per_s": 2109.7,
-   "implied_per_day": 182278481,
+   "wall_s": 0.285,
+   "entries_per_s": 1754.39,
+   "implied_per_day": 151578947,
    "latency_ms": {
-    "p50": 0.33,
-    "p90": 0.86,
-    "p99": 2.34,
-    "max": 5.33,
-    "mean": 0.47
+    "p50": 0.45,
+    "p90": 0.91,
+    "p99": 1.92,
+    "max": 6.55,
+    "mean": 0.57
    },
    "cases": {
     "EXACT_REPLAY_OF_A_RECORDED_OBSERVATION": 500
@@ -57,15 +58,15 @@
   },
   "burst": {
    "n": 150,
-   "wall_s": 0.451,
-   "entries_per_s": 332.59,
-   "implied_per_day": 28736141,
+   "wall_s": 0.418,
+   "entries_per_s": 358.85,
+   "implied_per_day": 31004784,
    "latency_ms": {
-    "p50": 16.95,
-    "p90": 298.21,
-    "p99": 308.77,
-    "max": 312.96,
-    "mean": 46.78
+    "p50": 16.53,
+    "p90": 263.31,
+    "p99": 279.61,
+    "max": 280.26,
+    "mean": 43.41
    },
    "cases": {
     "NEW_EXPOSURE": 150
@@ -81,17 +82,17 @@
    "positions_added": 150,
    "no_duplicate_position": true
   },
-  "restart_recovery": {
+  "connection_recovery": {
    "n": 50,
-   "wall_s": 0.047,
-   "entries_per_s": 1063.83,
-   "implied_per_day": 91914893,
+   "wall_s": 0.024,
+   "entries_per_s": 2083.33,
+   "implied_per_day": 180000000,
    "latency_ms": {
-    "p50": 0.35,
-    "p90": 1.1,
-    "p99": 22.07,
-    "max": 22.07,
-    "mean": 0.94
+    "p50": 0.32,
+    "p90": 0.93,
+    "p99": 3.34,
+    "max": 3.34,
+    "mean": 0.49
    },
    "cases": {
     "EXACT_REPLAY_OF_A_RECORDED_OBSERVATION": 50
@@ -103,8 +104,201 @@
     "fee_total": "1040.000000000000057731597280508140102028846740722656250",
     "filled_qty_total": "65000"
    },
-   "wrote_nothing_after_restart": true,
-   "why": "a rebuilt pool must not re-admit an observation the ledger already holds. Recovery is only correct if the replay still writes nothing"
+   "wrote_nothing_after_reconnect": true,
+   "what_this_is": "CONNECTION RECOVERY. The pool is closed and rebuilt; the interpreter, its imports and its caches all survive. It is NOT a process restart and must not be reported as one",
+   "why": "a rebuilt pool must not re-admit an observation the ledger already holds"
+  },
+  "complete_lifecycles": {
+   "n": 120,
+   "wall_s": 12.468,
+   "entries_per_s": 9.62,
+   "implied_per_day": 831568,
+   "latency_ms": {
+    "p50": 99.04,
+    "p90": 127.72,
+    "p99": 151.0,
+    "max": 187.37,
+    "mean": 103.84
+   },
+   "phase": "complete_lifecycles",
+   "completed": 120,
+   "attempted": 120,
+   "completion_rate": 1.0,
+   "failures": [],
+   "failure_count": 0,
+   "all_identities_hold": true,
+   "median_cycles": 7.0,
+   "median_writes_per_lifecycle": 17.0,
+   "counts_before": {
+    "positions": 0,
+    "orders": 0,
+    "fills": 0,
+    "decisions": 0,
+    "fee_total": "0",
+    "filled_qty_total": "0"
+   },
+   "counts_after": {
+    "positions": 120,
+    "orders": 600,
+    "fills": 480,
+    "decisions": 960,
+    "fee_total": "384.000000000000014654943925052066333591938018798828125000",
+    "filled_qty_total": "24000"
+   },
+   "accounting": {
+    "filled_qty_added": 24000.0,
+    "fee_added": 384.0,
+    "fee_expected_from_qty": 384.0,
+    "fee_reconciles": true,
+    "buys_equal_sells": true,
+    "discrepancies": []
+   },
+   "lifecycles_per_s": 9.625,
+   "what_this_measures": "a COMPLETE lifecycle: entry, recurring management, a reduction, a completing exit and reconciled accounting, through the deployed functions. Its inputs are chosen; its code is production's",
+   "what_it_does_not_measure": "opportunity. It says nothing about how many contracts a venue would show, a provider would price or the gates would admit",
+   "examples": [
+    {
+     "i": 0,
+     "ms": 103.977524995571,
+     "cycles_run": 7,
+     "flat": true,
+     "reconciles": true,
+     "completed": true,
+     "bought": 100.0,
+     "sold": 100.0,
+     "held": 0.0,
+     "fees_usd": 3.2,
+     "realised_net_usd": 5.8,
+     "decisions": 8,
+     "orders": 5,
+     "fills": 4,
+     "identity_holds": true
+    },
+    {
+     "i": 1,
+     "ms": 79.71930599887855,
+     "cycles_run": 7,
+     "flat": true,
+     "reconciles": true,
+     "completed": true,
+     "bought": 100.0,
+     "sold": 100.0,
+     "held": 0.0,
+     "fees_usd": 3.2,
+     "realised_net_usd": 5.8,
+     "decisions": 8,
+     "orders": 5,
+     "fills": 4,
+     "identity_holds": true
+    },
+    {
+     "i": 2,
+     "ms": 74.15872199635487,
+     "cycles_run": 7,
+     "flat": true,
+     "reconciles": true,
+     "completed": true,
+     "bought": 100.0,
+     "sold": 100.0,
+     "held": 0.0,
+     "fees_usd": 3.2,
+     "realised_net_usd": 5.8,
+     "decisions": 8,
+     "orders": 5,
+     "fills": 4,
+     "identity_holds": true
+    }
+   ]
+  },
+  "duplicate_lifecycles": {
+   "n": 5,
+   "wall_s": 0.19,
+   "entries_per_s": 26.32,
+   "implied_per_day": 2273684,
+   "latency_ms": {
+    "p50": 38.22,
+    "p90": 43.26,
+    "p99": 43.26,
+    "max": 43.26,
+    "mean": 37.95
+   },
+   "phase": "duplicate_delivery_of_complete_lifecycles",
+   "redelivered": 5,
+   "counts_before": {
+    "positions": 120,
+    "orders": 600,
+    "fills": 480,
+    "decisions": 960,
+    "fee_total": "384.000000000000014654943925052066333591938018798828125000",
+    "filled_qty_total": "24000"
+   },
+   "counts_after": {
+    "positions": 120,
+    "orders": 600,
+    "fills": 480,
+    "decisions": 960,
+    "fee_total": "384.000000000000014654943925052066333591938018798828125000",
+    "filled_qty_total": "24000"
+   },
+   "unchanged": {
+    "positions": true,
+    "orders": true,
+    "fills": true,
+    "decisions": true,
+    "fee_total": true,
+    "filled_qty_total": true
+   },
+   "wrote_nothing": true,
+   "why": "a re-delivered observation is a duplicate at every stage of the lifecycle, not only at entry. One extra fill here would be a fabricated contract and a fabricated fee"
+  },
+  "actual_process_restart": {
+   "phase": "actual_process_restart",
+   "range": [
+    500000,
+    500015
+   ],
+   "kill_after_completions": 5,
+   "first_child": {
+    "pid": 12529,
+    "completed_before_kill": 5,
+    "returncode": -9,
+    "killed_with": "SIGKILL"
+   },
+   "counts_after_kill": {
+    "positions": 125,
+    "orders": 625,
+    "fills": 500,
+    "decisions": 1000,
+    "fee_total": "400.000000000000015265566588595902430824935436248779296875",
+    "filled_qty_total": "25000"
+   },
+   "second_child": {
+    "returncode": 0,
+    "lifecycles_reported": 15,
+    "all_completed": true,
+    "stderr_tail": ""
+   },
+   "counts_after_restart": {
+    "positions": 135,
+    "orders": 675,
+    "fills": 540,
+    "decisions": 1080,
+    "fee_total": "432.000000000000016486811915683574625290930271148681640625",
+    "filled_qty_total": "27000"
+   },
+   "positions_in_range": 15,
+   "expected_positions": 15,
+   "duplicate_positions": [],
+   "no_duplicate_position": true,
+   "all_positions_flat": true,
+   "flat_count": 15,
+   "fee_added_after_restart": 32.0,
+   "fee_expected_after_restart": 32.0,
+   "fee_reconciles": true,
+   "what_this_is": "AN ACTUAL PROCESS RESTART. A child interpreter was SIGKILLed part-way through its batch and a second child finished the same batch. No module state, cache or connection survived, and the only thing the second process could rely on is what reached the database",
+   "what_it_proves": "the ledger is the state. A killed writer leaves no duplicate and no half-written position that a new process would re-admit",
+   "what_it_does_not_prove": "that the hosted scheduler recovers on Render's own restart path, which has its own lock and its own cadence",
+   "ok": true
   }
  },
  "baseline": {
@@ -131,5 +325,8 @@
   "fills": 650,
   "fee_total": "1040.000000000000057731597280508140102028846740722656250",
   "filled_qty_total": "65000"
- }
+ },
+ "measured_at": "2026-09-26T15:40:00Z",
+ "database": "a database built from this repository's migrations from nothing (applied 118, failed 2 -- the two known copy-lane migrations that need the catalogue bootstrap)",
+ "how_to_reproduce": "python3 -m tools.bettor_capacity_probe --dsn ... --entries 500 --burst 150 --concurrency 16 --lifecycles 120 --restart 15"
 }

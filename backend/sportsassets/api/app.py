@@ -17,7 +17,8 @@ from fastapi import (Cookie, Depends, FastAPI, Header, HTTPException, Query,
                      Request)
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
-from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+from fastapi.responses import (HTMLResponse, PlainTextResponse,
+                               RedirectResponse, Response, StreamingResponse)
 from pydantic import BaseModel, Field
 
 from .. import procmem as _procmem
@@ -256,8 +257,13 @@ async def lifespan(_: FastAPI):
                 after = _procmem.rss_mb()
                 freed = (before - after) if (before is not None and after is not None) else None
                 logging.getLogger(__name__).info(
+                    # `rss_label()` TAKES NO ARGUMENT. It read the process's
+                    # own RSS, so passing `after` raised TypeError on every
+                    # tick: the trim ran, the log line never printed, and a
+                    # WARNING with a traceback printed each minute instead.
+                    # The measured value is formatted here.
                     "api rss %s MB trim returned %s MB",
-                    _procmem.rss_label(after),
+                    "?" if after is None else "%.1f" % after,
                     "?" if freed is None else int(max(0.0, freed)))
             except Exception:  # noqa: BLE001 — never kill the loop
                 logging.getLogger(__name__).warning(
@@ -2963,80 +2969,259 @@ DEMONSTRATION_WHY = (
 
 @app.post("/api/admin/bettor-demonstration/run",
           dependencies=[Depends(require_admin)])
-async def bettor_demonstration_run(response: Response) -> dict:
-    """Drive the current EV lane's own lifecycle on a controlled scenario.
+async def bettor_demonstration_run(response: Response,
+                                   body: dict | None = None) -> dict:
+    """Drive the EV lane's WHOLE lifecycle on one controlled scenario.
 
-    WHAT IS REAL HERE AND WHAT IS CHOSEN. The COMPONENTS are the deployed
-    ones -- `bettor_entry_inventory.plan_entry` and `persist_entry`, the
-    same two functions the scheduled lane calls, writing the same four rows
-    to the same tables under the same duplicate protection. The INPUTS are
-    chosen: a probability above the ask, a ladder with depth, a fee from the
-    real schedule. Nothing here observed a venue.
+    WHAT IS DEPLOYED CODE AND WHAT IS CHOSEN INPUT. The COMPONENTS are the
+    deployed ones, named on the response: the entry writer
+    (`plan_entry`/`persist_entry`), the recurring manager
+    (`manage_open_position` + `persist_run`) and the settlement consumer
+    (`settle_open_positions`). The INPUTS are chosen -- a probability, a
+    bid with depth, a sale ladder, a print -- and no venue or bookmaker is
+    read on this path at all.
 
-    SO IT PROVES THE SOFTWARE OPERATES AND NOTHING ELSE. It is not evidence
-    that such a trade existed, was available, or would have filled, and it
-    is booked apart from the autonomous lane for exactly that reason.
+    SO IT PROVES THE SOFTWARE OPERATES AND NOTHING ELSE. Entry, recurring
+    management, a marketable reduction, a completing exit and reconciled
+    accounting, in the deployed order, on one position. It is NOT evidence
+    that such a contract existed, was priced this way, or would have
+    filled, and it is booked apart from the autonomous lane for exactly
+    that reason.
+
+    `stage` selects how far it runs: "entry" writes the entry only,
+    "full" (the default) carries the same position through management, the
+    reduction, the exit, the settlement consumer and the reconciliation.
 
     IDEMPOTENT BY THE SAME RULE AS PRODUCTION. A second call replays the
     same observation, `classify_write` answers
-    EXACT_REPLAY_OF_A_RECORDED_OBSERVATION and nothing is written -- the
-    demonstration cannot inflate its own book.
+    EXACT_REPLAY_OF_A_RECORDED_OBSERVATION and nothing new is written --
+    the demonstration cannot inflate its own book.
+
+    NO OBSERVATION TABLE IS WRITTEN. The chosen print is handed to the
+    manager in memory; `trades`, `markets` and `external_valuations` are
+    untouched, so a chosen input can never be read back as a venue's or a
+    provider's own statement.
     """
-    from .. import bettor_entry_inventory as inv
+    from .. import bettor_demonstration as DEMO
 
     response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    stage = str(b.get("stage") or "full").lower()
     pool = await get_pool()
-
-    cid = "0x" + ("de" * 32)
-    rec = {
-        "admissible": True,
-        "experiment_id": DEMONSTRATION_EXPERIMENT,
-        "observed_at": 1_790_000_000.0,
-        "received_at": 1_790_000_000.0,
-        "payout_event": "Demonstration Side A",
-        "contract": {"condition_id": cid,
-                     "us_market_slug": "aec-demo-side-a-2026-09-26",
-                     "buy_intent": "ORDER_INTENT_BUY_LONG",
-                     "event_key": "demo-2026-09-26"},
-        "execution_plan": {"execution": {
-            "size": 100.0, "vwap": 0.62, "submitted_limit": 0.70,
-            "intended_notional_usd": 1000.0,
-            "unfilled_notional_usd": 938.0,
-            "levels_taken": [{"price": 0.62, "qty": 100.0, "cost": 62.0}]}},
-    }
-
-    def fee(qty, price, maker=False):
-        return 0.016 * float(qty)
-
-    out: dict = {"experiment_id": DEMONSTRATION_EXPERIMENT,
-                 "why": DEMONSTRATION_WHY,
+    out: dict = {"experiment_id": DEMO.EXPERIMENT, "why": DEMO.WHY,
+                 "stage_requested": stage,
                  "excluded_from_strategy_performance": True,
-                 "submits_orders": False,
-                 "funded": False,
+                 "submits_orders": False, "funded": False,
                  "inputs_are_chosen_not_observed": True}
-    plan = inv.plan_entry(rec, now=1_790_000_100.0, outcome_index=0,
-                          fee_fn=fee)
-    out["plan_ok"] = bool(plan.get("ok"))
-    if not plan.get("ok"):
-        out["refusals"] = plan.get("refusals")
-        out["why_refused"] = plan.get("why")
-        return out
     async with pool.acquire() as conn:
-        await inv.ensure_experiment(conn, DEMONSTRATION_EXPERIMENT)
-        wrote = await inv.persist_entry(conn, plan)
-    out["write"] = wrote
-    pid = wrote.get("position_id")
+        if stage == "entry":
+            out["entry"] = await DEMO.run_entry(conn)
+            out["ok"] = bool(out["entry"].get("plan_ok"))
+        else:
+            out["lifecycle"] = await DEMO.run_full(conn)
+            out["ok"] = bool(out["lifecycle"].get("ok"))
+    pid = ((out.get("lifecycle") or {}).get("position_id")
+           or (out.get("entry") or {}).get("position_id"))
     out["position_id"] = pid
-    out["case"] = wrote.get("case")
     out["trace"] = ("/api/command/rn1x/trace/" + str(pid)) if pid else None
     out["input_chain"] = (("/api/command/rn1x/input-chain/" + str(pid))
                           if pid else None)
+    out["desk"] = "/api/command/bettor/desk"
     out["reading"] = (
-        "a first call writes one position, one order and one fill; a second "
-        "answers EXACT_REPLAY_OF_A_RECORDED_OBSERVATION and writes nothing. "
-        "Follow `trace` for the decision, the orders, the fills, the "
-        "management decisions and the accounting")
+        "follow `desk` for the demonstration book as the operating desk "
+        "shows it, and `trace` for the decisions, orders, fills and "
+        "accounting of this one position. A second call writes nothing")
     return out
+
+
+def require_command_control(x_admin_token: str = Header(default=""),
+                            x_desk_token: str = Header(default=""),
+                            bt_command: str = Cookie(default="")) -> str:
+    """WRITE access for the desk's controls. The OPERATOR token, only.
+
+    COMMAND's read roles stay read-only, exactly as they were: a desk
+    cookie or a wall token opens every read on this surface and NO write.
+    A control action needs the operator token the ops tooling already
+    uses -- the same credential `require_admin` takes -- supplied per
+    action and never stored by the page.
+
+    WHY THE DISTINCTION MATTERS. The desk is a page many people may be
+    shown; the controls change durable state. Sharing one credential
+    between "look at the numbers" and "halt the lane" would mean anybody
+    who can read can also stop the system, and the reverse mistake --
+    making the buttons inert -- leaves an operator without a kill switch.
+    Two credentials, one surface.
+    """
+    import hmac
+
+    supplied = (x_admin_token or "").strip()
+    expected = (settings().admin_token or "").strip()
+    if expected and hmac.compare_digest(supplied, expected):
+        return "operator"
+    # A READ CREDENTIAL IS REFUSED BY NAME, not with a bare 401, so an
+    # operator who is signed in for reading knows what is missing.
+    if bt_command or x_desk_token:
+        raise HTTPException(status_code=403, detail={
+            "reason": "CONTROL_REQUIRES_THE_OPERATOR_TOKEN",
+            "what": ("this session is signed in for READING. A control "
+                     "action needs the operator token in the "
+                     "X-Admin-Token header"),
+            "reads_still_work": True})
+    raise HTTPException(status_code=401, detail="operator token required")
+
+
+@app.get("/api/command/bettor/control",
+         dependencies=[Depends(require_command)])
+async def bettor_control_state(response: Response) -> dict:
+    """WHAT EVERY CONTROL READS RIGHT NOW. A read, so the read role opens it.
+
+    The panel displays this rather than remembering what it last sent: a
+    control state inferred from a button press is a control state nobody
+    checked.
+    """
+    from .. import bettor_desk_controls as CTL
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        st = await CTL.state(conn)
+    return {"ok": True, "contract": CTL.describe(), "state": st}
+
+
+@app.post("/api/command/bettor/control/{action}",
+          dependencies=[Depends(require_command_control)])
+async def bettor_control_act(action: str, response: Response,
+                             body: dict | None = None) -> dict:
+    """RUN ONE CONTROL ACTION, and report the readback rather than the send.
+
+    Every action here is one of the lane's EXISTING controls: the research
+    lane's control row, the funded executor's own pause key, the durable
+    operator stop and the shadow ledger's working orders. There is no venue
+    submission path in any of them, `live_orders` is never written, and
+    resuming a funded lane is refused by name rather than implemented.
+    """
+    from .. import bettor_demonstration as DEMO
+    from .. import bettor_desk_controls as CTL
+    from .. import bettor_external_shadow as ext
+    from ..workers import rn1x_shadow as RS
+
+    response.headers["Cache-Control"] = "no-store"
+    b = dict(body or {})
+    by = str(b.get("by") or "DESK_OPERATOR")[:120]
+    act = str(action or "").strip().lower()
+    if act not in CTL.ACTIONS:
+        raise HTTPException(status_code=422, detail={
+            "reason": CTL.R_UNKNOWN_ACTION, "actions": list(CTL.ACTIONS)})
+    # THE FUNDED RESUME IS REFUSED HERE, at the surface, and named. It is
+    # not implemented further down either; this is so the refusal has a
+    # reason attached rather than a 404's silence.
+    if act == "resume" and str(b.get("scope") or "research").lower() != \
+            "research":
+        raise HTTPException(status_code=409, detail={
+            "reason": CTL.R_FUNDED_RESUME,
+            "what": ("this panel can resume the RESEARCH lane only. A "
+                     "funded lane is activated with the owner's "
+                     "authorisation and the readiness evidence, not from "
+                     "a page")})
+    experiments = [ext.EXPERIMENT_ID, RS.CHALLENGER_EXPERIMENT_ID,
+                   DEMO.EXPERIMENT]
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        if act == "pause":
+            got = await CTL.pause(conn, by=by)
+        elif act == "resume":
+            got = await CTL.resume(conn, by=by)
+        elif act == "cancel-working-orders":
+            got = await CTL.cancel_working_orders(
+                conn, by=by, experiments=experiments)
+        elif act == "halt":
+            got = await CTL.halt(conn, by=by,
+                                 reason=str(b.get("reason")
+                                            or "OPERATOR_HALT")[:300],
+                                 experiments=experiments)
+        elif act == "limits":
+            got = await CTL.set_limits(conn, by=by,
+                                       proposed=dict(b.get("limits") or {}))
+        elif act == "account":
+            got = await CTL.set_account(
+                conn, by=by, account=dict(b.get("account") or {}))
+        else:                                   # "state"
+            got = {"action": "state", "ok": True}
+        got["state_after"] = await CTL.state(conn)
+    got["funded_submission"] = "DISABLED"
+    got["contract"] = CTL.describe()
+    return got
+
+
+_DESK_PAGE_CSP = ("default-src 'none'; style-src 'unsafe-inline'; "
+                  "script-src 'unsafe-inline'; connect-src 'self'; "
+                  "base-uri 'none'; form-action 'none'")
+
+
+def _desk_page_headers() -> dict:
+    """No caching, no external origin, no sniffing. A cached desk shown as
+    current is the failure this whole surface exists to avoid."""
+    return {"Cache-Control": "no-store, no-cache, must-revalidate",
+            "Pragma": "no-cache",
+            "Content-Security-Policy": _DESK_PAGE_CSP,
+            "X-Content-Type-Options": "nosniff"}
+
+
+@app.get("/api/command/bettor/desk/page", include_in_schema=False)
+async def bettor_desk_page(bt_command: str = Cookie(default=""),
+                           x_desk_token: str = Header(default=""),
+                           x_admin_token: str = Header(default="")):
+    """THE DESK, SERVED FROM THIS ORIGIN. The URL that works in a browser.
+
+    WHY THIS EXISTS BESIDE THE STATIC BUNDLE. The Command bundle reaches its
+    users through Netlify, which builds from the branch Netlify tracks. This
+    repository holds NO Netlify credential -- there is no NETLIFY_AUTH_TOKEN
+    and no site id among its secrets -- so publishing there is not a step
+    this session can take, and saying the page is "deployed" while it sits
+    only in the repository would be false. THE API ORIGIN IS DEPLOYABLE,
+    through the same API-only release route every backend change uses, so
+    the desk is served here as well.
+
+    WHY THE PATH IS UNDER /api/command AND NOT /command/desk. THE DEFECT WAS
+    MINE AND A BROWSER FOUND IT. The COMMAND cookie is minted with
+    `path=/api/command`, so a browser sends it only to paths under that
+    prefix. Served at `/command/desk` the page was gated correctly and
+    unreachable in practice: a signed-in browser sent no cookie and got 401
+    every time. Every header-authenticated check I had run passed, because a
+    header is not a cookie. `/command/desk` now redirects here.
+
+    AND IT IS SAME-ORIGIN BY CONSTRUCTION. On this host `/api/command/*` is
+    this service, not a proxied rule, so the page's fetches need no redirect
+    and the `endpoint()` guard holds without any host configuration.
+
+    AN UNAUTHENTICATED VIEWER GETS A SIGN-IN FORM, not a 401 body. The
+    form posts the desk password to this origin's own session endpoint;
+    the desk's DATA endpoint stays gated either way, so nothing is
+    disclosed by serving it.
+    """
+    from .desk_page import DESK_PAGE_HTML
+    from .desk_signin import SIGN_IN_HTML
+
+    try:
+        require_command(bt_command=bt_command, x_desk_token=x_desk_token,
+                        x_admin_token=x_admin_token)
+    except HTTPException:
+        return HTMLResponse(content=SIGN_IN_HTML, status_code=401,
+                            headers=_desk_page_headers())
+    return HTMLResponse(content=DESK_PAGE_HTML, status_code=200,
+                        headers=_desk_page_headers())
+
+
+@app.get("/command/desk", include_in_schema=False)
+async def bettor_desk_page_redirect():
+    """The short URL, kept working. It redirects; it serves no page.
+
+    A route outside `/api/command` cannot be opened by a cookie-signed-in
+    browser at all (see above), so this sends the viewer to the path where
+    the cookie is sent rather than serving a page they could not load.
+    """
+    return RedirectResponse(url="/api/command/bettor/desk/page",
+                            status_code=307)
 
 
 @app.get("/api/command/bettor/desk",
@@ -3217,6 +3402,43 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
         "trace_link_template": "/api/command/rn1x/trace/{position_id}",
     }
 
+    # ── THE CONTROLLED DEMONSTRATION, AS ITS OWN BOOK ────────────────
+    #
+    # IT IS SHOWN IN FULL AND IT IS SHOWN APART. The whole point of a
+    # demonstration is that a reader can inspect the lifecycle -- the
+    # decisions, the orders, the fills, the fees and the accounting -- so
+    # hiding it would defeat it; and the whole point of a separate book is
+    # that software proof is not performance, so summing it into the
+    # strategy would defeat that. Both, therefore: its own section, its own
+    # experiment id, and `counts_toward_strategy_performance` false here as
+    # well as at every consuming query.
+    from .. import bettor_demonstration as DEMO
+
+    try:
+        demo = await DEMO.reconcile(pool)
+    except Exception as exc:                                    # noqa: BLE001
+        demo = {"error": type(exc).__name__}
+    out["demonstration"] = {
+        "section": "Demonstration",
+        "label": "CONTROLLED DEMONSTRATION — SOFTWARE PROOF, NOT PERFORMANCE",
+        "experiment_id": DEMO.EXPERIMENT,
+        "counts_toward_strategy_performance": False,
+        "inputs_are_chosen_not_observed": True,
+        "chosen_inputs": dict(DEMO.CHOSEN_INPUTS),
+        "deployed_components": DEMO.describe()["deployed_components"],
+        "reconciliation": demo,
+        "residual_settlement": (
+            "a residual is settled from the VENUE's own answer. This "
+            "scenario's identity resolves at no venue, so where the "
+            "position was closed in the market there is nothing to settle, "
+            "and where it was not the settlement consumer reports its own "
+            "unresolved status rather than inventing a payout"),
+        "run_it": "POST /api/admin/bettor-demonstration/run",
+        "audit": {"reader": "bettor_demonstration.reconcile",
+                  "experiment_id": DEMO.EXPERIMENT,
+                  "excluded_at": DEMO.describe()["excluded_at"]},
+    }
+
     # ── PERFORMANCE: realised, fees, unrealised, mark age, unmarked ──
     try:
         pnl = await RN._pnl_status(pool)
@@ -3232,6 +3454,48 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
                  "LANE and are not added across lanes. Unmarked inventory "
                  "is shown as unmarked rather than valued at zero"),
         "audit": {"reader": "command_rn1x._pnl_status"},
+    }
+
+    # ── ACTIVATION: the controls, their live state, and the blockers ──
+    #
+    # THE PANEL'S STATE IS READ, NOT REMEMBERED. Every figure below comes
+    # from the control rows and the frozen rail declaration at the instant
+    # of this read, so a button that was pressed and did not take shows as
+    # not taken. The ENFORCED rails and the PROPOSED limits are separate
+    # fields on purpose: a number an owner typed is not a risk limit.
+    from .. import bettor_desk_controls as CTL
+    from .. import bettor_entry_execution as ENTRYX
+
+    try:
+        ctl_state = await CTL.state(pool)
+    except Exception as exc:                                    # noqa: BLE001
+        ctl_state = {"error": type(exc).__name__}
+    acct = (ctl_state.get("account_proposal") or {}) or {}
+    lims = (ctl_state.get("limits_proposal") or {}) or {}
+    out["activation"] = {
+        "section": "Activation",
+        "funded_submission": "DISABLED",
+        "controls": CTL.describe(),
+        "control_state": ctl_state,
+        "control_endpoint": "/api/command/bettor/control/{action}",
+        "control_requires": ("the operator token in X-Admin-Token. The "
+                             "read roles open every read on this surface "
+                             "and no write"),
+        "enforced_risk_rails": ENTRYX.declaration(),
+        "proposed_limits": lims or None,
+        "proposed_account": acct or None,
+        "account_named": bool(acct.get("name")),
+        "limits_recorded": bool(lims.get("proposed")),
+        "limits_approved_by_owner": bool(lims.get("approved")),
+        "account_approved_by_owner": bool(acct.get("approved")),
+        "why_still_blocked": (
+            "activation needs a named account the owner approved, an "
+            "approved limit set, and the readiness evidence. A recorded "
+            "proposal is intent, not approval, and this panel cannot "
+            "grant it"),
+        "the_paused_account_stays_paused": (
+            "the ACCOUNTING_UNCERTAIN account is refused by name by the "
+            "account control; nothing here switches to it or unpauses it"),
     }
 
     # ── WHAT THIS VIEW DOES NOT RESOLVE, stated rather than implied ──
