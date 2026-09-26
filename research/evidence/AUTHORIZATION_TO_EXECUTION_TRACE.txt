@@ -1,41 +1,81 @@
-========================================================================
+AUTHORIZATION TO EXECUTION, TRACED AGAINST A REAL POSTGRES
+commit 7dedc5a  ·  2026-09-26  ·  venue adapter: InternalOrderLifecycleSimulator
+
+The adapter is an INTERNAL SIMULATOR. It is not a connected venue sandbox:
+it holds no credential and opens no socket. Funded submission is DISABLED in
+code and every submission below went to that simulator.
+
+==========================================================================
 STEP 1 . THE CANONICAL ACCOUNT, off its registry row
    account         acct-pilot-test-001 ok True accounting CLEAN
    the paused one  ACCOUNT_IS_PAUSED (untouched)
 STEP 2 . THE OWNER-APPROVED LIMITS, reduced into effective rails
    frozen digest   a19eb60a2817
-   effective       {'MAX_MARKET_EXPOSURE': 25.0, 'MAX_CAPITAL_DEPLOYED': 250.0, 'MAX_DRAWDOWN': 50.0, 'MAX_CORRELATED_EXPOSURE': 100.0}
    tightened       {'MAX_CAPITAL_DEPLOYED': (3000.0, 250.0), 'MAX_MARKET_EXPOSURE': (1000.0, 25.0), 'MAX_CORRELATED_EXPOSURE': (1000.0, 100.0), 'MAX_DRAWDOWN': (1000.0, 50.0)}
    effective dig.  8e667b126912
 STEP 3 . THE AUTHORIZATION, validated and recorded
    verdict         AUTHORIZED_FOR_A_TEST_VENUE
    the EXECUTOR's answer: REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE consumed True submitted False
    expires in      24.0 hours
-STEP 4 . SUBMIT, against the TEST venue
-   ok True | state RESTING | our id tvx-21f56043aad340 | venue id sim-2c61d4e8b5d9
+STEP 4 . SUBMIT, against the internal simulator (TEST class)
+   the adapter     InternalOrderLifecycleSimulator | connected venue sandbox: False | holds no credential: True
+   ok True | state RESTING | our id tvx-e90860f5584d49 | venue id sim-858f9ce8669c
    authorization consumed True | funded submission DISABLED
 STEP 5 . POLL: the venue reports a PARTIAL fill
    venue state PARTIALLY_FILLED | filled 40.0 | remaining 60.0
-   fill         [{'fill_id': 'tvf-24bbf3c407574e', 'qty': 40.0, 'price': 0.5, 'fee_usd': 0.7}]
-STEP 6 . RESTART RECOVERY: a new executor, the same rows
-   case OPEN_AT_BOTH | adopted filled 40.0 | resubmitted False | orphans 0
-STEP 7 . CANCEL the remainder
-   requested CANCEL_PENDING -> state now CANCELLED
-STEP 8 . RECONCILED ACCOUNTING, from the ledger
-   orders               1
-   fills                1
-   filled_qty           40.0
-   notional_usd         20.0
-   fees_usd             0.7
-   expected_fees_usd    0.7
-   fees_reconcile       True
-   discrepancy_count    0
-   states               {'CANCELLED': 1}
-   per order           [{'order_id': 'tvx-21f56043aad340', 'state': 'CANCELLED', 'submitted_qty': 100.0, 'filled_qty_from_fills': 40.0, 'filled_qty_on_the_order': 40.0, 'remaining': 60.0, 'fees_usd': 0.7}]
-STEP 9 . THE NEGATIVE SIDE, with nothing written
-   expired          -> THE_AUTHORIZATION_HAS_EXPIRED                       
-   revoked          -> THE_AUTHORIZATION_HAS_BEEN_REVOKED                  
-   another account  -> THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT         
-   another venue    -> THE_AUTHORIZATION_NAMES_A_DIFFERENT_VENUE           
-   order rows before/after the four refusals: 1 1
+   fill         [{'fill_id': 'tvf:sim-858f9ce8669c:sim-858f9ce8669c:f1', 'qty': 40.0, 'price': 0.5, 'fee_usd': 0.7}]
+STEP 6 . B . REDELIVERY of a properly identified fill
+   delivery  1 -> written 0 already_held 1 unresolved 0 ledger qty 40.0
+   delivery  2 -> written 0 already_held 1 unresolved 0 ledger qty 40.0
+   delivery 10 -> written 0 already_held 1 unresolved 0 ledger qty 40.0
+   fill ledger rows after 10 deliveries: 1 (one execution)
+STEP 7 . A . AN EXECUTION THE VENUE CANNOT NAME
+   two unidentified executions, same qty and price
+   written 0 | already_held 0 | UNRESOLVED 2
+   refusal       THE_VENUE_SUPPLIED_NO_DURABLE_EXECUTION_IDENTITY
+   ledger qty    40.0 (unchanged: nothing was ingested)
+STEP 8 . C . TWO ACCOUNTS, EACH SERVICING ONLY ITS OWN
+   B's grant      AUTHORIZED_FOR_A_TEST_VENUE -- it REPLACED A's in the record
+   B submitted    True sim-594b5ff62a31 None
+   A sees         ['tvx-e90860f5584d49'] owner {'acct-pilot-test-001'}
+   B sees         ['tvx-9a4c4999bc0640'] owner {'acct-pilot-test-002'}
+   disjoint       True
+   A can service  True | new exposure authorised for A: False | THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT
+   A NEW exposure THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT | ok False
+   A polls        ['tvx-e90860f5584d49'] | refusal None
+   B polls        ['tvx-9a4c4999bc0640'] | refusal None
+   B cancels      ['tvx-9a4c4999bc0640'] -- and A's order is not among them: True
+STEP 9 . D . AN UNREADABLE STATUS IS NOT A CANCELLATION
+   case           OPEN_HERE_STATUS_UNREADABLE_AT_THE_VENUE
+   venue said     None | exposure PRESERVED
+   state before/after: PARTIALLY_FILLED -> PARTIALLY_FILLED | qty 40.0 -> 40.0
+   reconciled[]   0 (nothing was resolved)
+   terminal?      False
+STEP 10 . THE VENUE SPEAKS AGAIN, and only then is it resolved
+   case           OPEN_AT_BOTH | venue state PARTIALLY_FILLED
+   fills missed   1 | adopted qty 50.0 | from the ledger, after ingesting every fill
+STEP 11 . CANCEL the remainder -- request, not conclusion
+   requested    CANCEL_PENDING | venue accepted True
+   confirmed BY A READ: CANCELLED | terminal True
+   late fills   [] | ledger qty 50.0
+STEP 12 . RECONCILED ACCOUNTING, from the ledger
+   orders                       2
+   fills                        3
+   filled_qty                   66.0
+   notional_usd                 33.0
+   fees_usd                     1.15
+   expected_fees_usd            1.15
+   fees_reconcile               True
+   unresolved_execution_count   2
+   discrepancy_count            2
+   reconciles_exactly_once      False
+   states                       {'CANCELLED': 2}
+   discrepancy    UNRESOLVED_EXECUTION_IDENTITY | the venue reported 7.0 at 0.5 with no durable execution id, so it is NOT in 
+   discrepancy    UNRESOLVED_EXECUTION_IDENTITY | the venue reported 7.0 at 0.5 with no durable execution id, so it is NOT in 
+STEP 13 . THE NEGATIVE SIDE, with nothing written
+   expired          submit -> THE_AUTHORIZATION_HAS_EXPIRED                        servicing -> True
+   revoked          submit -> THE_AUTHORIZATION_HAS_BEEN_REVOKED                   servicing -> True
+   another account  submit -> THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT          servicing -> True
+   another venue    submit -> THE_AUTHORIZATION_NAMES_A_DIFFERENT_VENUE            servicing -> True
+   order rows before/after the four refusals: 2 2
    live_orders rows written by this lane: 0

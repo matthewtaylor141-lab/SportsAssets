@@ -5472,10 +5472,33 @@ jobs:
                  "  ttl_s                          "
                    + ((.ttl_s // 0) | tostring)' \
             /tmp/si.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # THIS STEP IS THE DELIVERABLE, SO IT FAILS CLOSED.
+          #
+          # It used to REPORT a bad sign-in and carry on, so the run could
+          # finish green while the password was not accepted -- the same
+          # fail-open shape corrected in S2a, in the one step whose whole
+          # purpose is to prove operator access works.
+          if [ "$SI" != "200" ]; then
+            say "  SIGN-IN DID NOT SUCCEED. The credential is configured but"
+            say "  the ordinary password route did not accept it, so operator"
+            say "  access is NOT verified by this run."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
           if grep -q 'bt_control' "$J"; then
             say "  the jar holds bt_control       yes"
           else
-            say "  the jar holds bt_control       NO -- nothing was set"
+            say "  the jar holds bt_control       NO -- nothing was set, so"
+            say "  there is no operator session to exercise."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          # AND THE SCOPE IN THE MINTED SESSION IS THE CONTROL SCOPE, not a
+          # read scope that happens to carry the same cookie name.
+          SC=$(jq -r '.scope // "__ABSENT__"' /tmp/si.json 2>/dev/null \
+               || echo "__UNREADABLE__")
+          if [ "$SC" != "control" ]; then
+            say "  the minted scope is '$SC', not 'control'. A read session"
+            say "  is not the thing this step exists to verify."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
           fi
 
           # AN AUTHORISED SHADOW CONTROL ACTION, with its effect read back.
@@ -5502,12 +5525,31 @@ jobs:
                  "  scope                          " + (.scope // "-"),
                  "  funded submission              " + (.funded_submission // "-")' \
             /tmp/re.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # THE CONTROL ACTION HAD TO ACTUALLY WORK, both ways. A pause that
+          # did not take, or a resume that failed, would leave the research
+          # lane in a state this run did not intend AND would be reported as
+          # a pass.
+          if [ "$PA" != "200" ] || [ "$RE" != "200" ]; then
+            say "  THE CONTROL ACTION DID NOT COMPLETE (pause $PA, resume"
+            say "  $RE). An authorised shadow control is NOT demonstrated,"
+            say "  and the lane may be left paused -- check it."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
 
           # AND THE SCOPE IS STILL NARROW: the control cookie must not open
           # an /api/admin route.
           AD=$(curl -sS -o /dev/null -w '%{http_code}' -b "$J" \
                  "$A/api/admin/funded-activation-readiness" || echo 000)
           say "  the control cookie on /api/admin HTTP $AD (expect 401/403)"
+          # A CONTROL COOKIE THAT OPENS AN ADMIN ROUTE IS THE FAILURE THIS
+          # PROBE EXISTS TO CATCH, so it fails the run rather than printing
+          # the surprising number and continuing.
+          case "$AD" in
+            401|403) : ;;
+            *) say "  THE CONTROL COOKIE REACHED AN ADMIN ROUTE (HTTP $AD)."
+               say "  The operator scope is not narrow. This is a failure."
+               echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+          esac
 
           say ""
           say "== S5 . DELIVERY =="
