@@ -4164,11 +4164,48 @@ jobs:
             | sort | uniq -c | sort -rn | head -20 \
             | sed 's/^/   /' | tee -a "$GITHUB_STEP_SUMMARY" || true
           say ""
-          say "  A BARE EVENT SLUG with a kind prefix of aec/atc and NO"
-          say "  suffix is the full-match line. A suffix naming a half, a"
-          say "  period, an inning, a double chance (dh/dc), a correct or"
-          say "  exact score, or a player is NOT the same payout event and"
-          say "  must not carry the match probability."
+          say "  A suffix naming a half, a period, an inning, a correct or"
+          say "  exact score, or a player is NOT the full-match payout event."
+          say ""
+          say "  AND A CORRECTION TO MY OWN EARLIER READING: binary YES/NO"
+          say "  PACKAGING DOES NOT DISQUALIFY A CONTRACT. \"Team A wins the"
+          say "  match? Y/N\" IS one outcome of a three-way match, and a"
+          say "  de-vigged three-way probability prices it directly. Three"
+          say "  such binaries -- home, draw, away -- are a three-way money"
+          say "  line sold as three contracts. What disqualifies a contract"
+          say "  is the EVENT it pays on, not how it is packaged. I said"
+          say "  otherwise and it was wrong."
+          say ""
+
+          # ── C3 · REAL vs SIMULATED, OVER THE WHOLE SOCCER BOARD ──────
+          #
+          # The 3-event sample in C2 cannot answer the coverage question:
+          # whether the venue lists the competitions the SOURCE prices --
+          # the real English Premier League (`soccer_epl`) and Liga MX
+          # (`soccer_mexico_ligamx`). This histograms the league token of
+          # EVERY soccer event the board returned, which is already in hand
+          # from the call above, so it costs nothing more.
+          #
+          # A SIMULATED COMPETITION IS NOT ITS REAL NAMESAKE. `ebfpl` is
+          # eBattles FPL, whose own labels say "eBattles"; its fixtures
+          # carry real club names and are not real fixtures. Binding a
+          # real-league probability to one on a name match is a
+          # cross-competition category error, and the token is the only
+          # thing that separates them.
+          say "== C3 · every soccer league token on the board =="
+          jq -r '[(.games // [])[] | select(.league == "soccer")] as $s
+                 | "  soccer events on the board  " + ($s | length | tostring),
+                   ($s | group_by(.id | split("-")[0])[]
+                     | "  " + (.[0].id | split("-")[0])
+                       + "   events " + (length | tostring)
+                       + "   e.g. " + (.[0].id)
+                       + "   title " + ((.[0].title // "-") | .[0:56]))' \
+            /tmp/vb.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          say ""
+          say "  THE SOURCE PRICES: soccer_epl (the REAL Premier League)"
+          say "  and soccer_mexico_ligamx (the REAL Liga MX). A token above"
+          say "  that is neither is a competition we hold no probability"
+          say "  for, however familiar the club names look."
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Entry-run raw evidence

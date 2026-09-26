@@ -134,6 +134,21 @@ async def _seed(conn):
     # replay can only honour that refusal if the venue is on the row.
     await conn.execute(open(
         "migrations/120_positions_record_their_venue.sql").read())
+    # 122 MUST COME AFTER 117, AND OMITTING IT REVERTED THE SCHEMA.
+    #
+    # THE DEFECT THIS CLOSES. 117 above re-adds `rn1x_provenance_declared`
+    # with THREE permitted origins; 122 widens it to four by adding
+    # UNCALIBRATED_RESEARCH_SHADOW, the provenance an entry created under
+    # the unfunded research waiver carries. This fixture applied 117 and
+    # not 122, so every test built on it ran against a schema that FORBIDS
+    # that provenance -- and the uncalibrated research lane's write failed
+    # with `CheckViolationError` on `rn1x_provenance_declared` after the
+    # entry had already been ADMITTED. Production is unaffected:
+    # `scripts/migrate.py` applies 122 after 117 and keys on filename, so
+    # the deployed schema permits all four. The fault was this fixture's
+    # alone, and it made the research lane's lifecycle untestable.
+    await conn.execute(open(
+        "migrations/122_uncalibrated_research_shadow_provenance.sql").read())
     await conn.execute("CREATE TABLE IF NOT EXISTS ingestion_state "
                        "(key TEXT PRIMARY KEY, value TEXT)")
     await conn.execute(

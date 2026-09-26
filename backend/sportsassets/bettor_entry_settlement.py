@@ -137,6 +137,22 @@ OPENING_BY_PROVENANCE = {
     "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY": ASSIGNED,
     # This lane's own entry: the order and the fill ARE in the ledger.
     "AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW": ACQUIRED,
+    # THE SAME ACQUISITION, UNDER THE RESEARCH WAIVER. Migration 122 added
+    # this fourth provenance and the entry writer stamps it whenever the
+    # unfunded research lane's waiver was applied -- but this map was not
+    # extended with it, so every such position settled as
+    # OPENING_PROVENANCE_NOT_DECLARED_FOR_THIS_POSITION: enterable,
+    # manageable, and then carried as open inventory forever with no
+    # reconciled accounting. Measured on the controlled uncalibrated run,
+    # which is the only configuration production can currently reach.
+    #
+    # ACQUIRED, and for exactly the reason the line above is: the order and
+    # its fills are in OUR ledger with OUR fees. The waiver changes which
+    # GATE was satisfied, not who executed. It is listed separately rather
+    # than folded in, because the two provenances must stay
+    # distinguishable in every read -- that is what migration 122 exists
+    # for -- and a shared alias would hide which one a row carried.
+    "UNCALIBRATED_RESEARCH_SHADOW": ACQUIRED,
 }
 
 #: Kept for the reports that name how a replay opened.
