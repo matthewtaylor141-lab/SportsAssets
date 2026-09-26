@@ -210,6 +210,111 @@ separate facts.
 under the effective limits. Not capital, not a funded venue, and not a
 raise to any frozen rail.
 
+## Readiness: two reproduced false passes, a third of the same family, and one coherent chain
+
+### The counterexamples, each reproduced and pinned
+
+**1 · `_freshness_check` passed on a clock that was never provided.** It asked
+whether the basis token contained `UNESTABLISHED`, `NOT_RECORDED` or
+`UNKNOWN`, and counted everything else as established. The lane's own word for
+"the venue sent no transact time at all" is `VENUE_CLOCK_NOT_PROVIDED`, which
+contains none of those.
+
+| basis token in the last cycle's ledger | before | now |
+|---|---|---|
+| `VENUE_CLOCK_NOT_PROVIDED` | **met (false pass)** | **False** |
+| `VENUE_CLOCK_UNPARSEABLE` | met (false pass) | **False** |
+| `VENUE_TRANSACT_TIME` | met | met |
+| `VENUE_TRANSACT_TIME` with **no** measured age | met (false pass) | **UNKNOWN** |
+| `VENUE_TRANSACT_TIME_ESTABLISHED` — a token **no writer emits** | met (false pass) | **UNKNOWN** |
+
+The vocabulary is now enumerated, an established basis must also carry a
+measured age, and an unrecognised token is UNKNOWN — not a pass and not a
+fail. A test asserts the vocabulary against
+`workers/ext_pinnacle_loop`, the module that emits it, so it cannot drift back
+into a substring guess. The invented token came from my own earlier fixture,
+and the old check passed on it.
+
+**2 · `_settlement_check` could not see a conflict.** It counted conflicts by
+looking for `CONFLICT`; the settlement module's word is `INCOMPATIBLE`, which
+contains no such substring.
+
+| window | before | now |
+|---|---|---|
+| one `COMPATIBLE` | met | met |
+| one `COMPATIBLE` **+ one `INCOMPATIBLE`** | **met, reporting "none conflicted" (false pass)** | **False** — "1 of 2 recent candidates are INCOMPATIBLE" |
+| a verdict outside the enum | counted as neither | **UNKNOWN** |
+
+The three verdicts are imported from `bettor_settlement_terms`. One conflict in
+the window refuses, whatever else is compatible.
+
+**3 · A third of the same family, found while fixing those.** The admission
+check used `risk_verdict::text LIKE '%research_waiver%'`. The lane writes the
+waiver **record** on every verdict, so the predicate matched **every row**:
+every admission counted as waived and the check could never be satisfied by
+anything. It failed closed — it granted nothing it should not have — but it was
+unsatisfiable, and it reported "0 admitted without a waiver" about rows where
+nothing had been waived. The test is now the waiver's own content
+(`jsonb_array_length(... -> 'waived') > 0`).
+
+### What "ready" means, and the coherent chain
+
+Each per-kind check reads its own rows, so all four could be met while **no
+single market carried the whole chain** — freshness on market A, settlement on
+B, scope on C, admission on D. That is not an opportunity, and qualification
+must not be assembled that way. A composite check now requires every link on
+**one row** of `external_valuations`, which is where the lane records all of
+them, including the venue clock basis and its measured age inside
+`risk_verdict -> 'freshness_evidence'`:
+
+- `admissible`, `decision = 'BUY'`
+- no waiver consumed
+- `settlement_comparison->>'verdict' = 'COMPATIBLE'`
+- `period` in FULL_GAME / FULL_TIME / FULL_MATCH
+- a supported established venue clock basis **and** its measured age
+
+When one exists it is **named** — slug, condition id and each link's value.
+The four per-kind checks are labelled diagnostics. `readiness()` says so in
+`what_ready_means`, and a test seeds four markets that each satisfy a different
+link and asserts the composite refuses.
+
+## The authorization boundary, stated accurately
+
+**The funded branch no longer refuses blind.** It returned the same refusal
+whether or not the owner's authorisation existed, so the record could be
+present and correct and nothing would change — "requires the owner's written
+authorisation" while holding it.
+
+| owner authorisation record | result |
+|---|---|
+| absent | `FUNDED_ACTIVATION_REQUIRES_THE_OWNERS_WRITTEN_AUTHORIZATION`, and it says the record is absent |
+| names a different account | `THE_OWNERS_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT` |
+| names a different venue | `THE_OWNERS_AUTHORIZATION_NAMES_A_DIFFERENT_VENUE` |
+| covers a different limit set | `THE_OWNERS_AUTHORIZATION_COVERS_DIFFERENT_LIMITS` |
+| matches account, venue and the effective-limit digest | **accepted** — verdict `AUTHORIZED_FOR_A_FUNDED_VENUE_SUBMISSION_STILL_DISABLED_IN_CODE` |
+
+**And an executor consumes it.** Recording an authorization proves nothing; a
+record nothing reads is a note in a table. `bettor_entry_execution.authorize_submission`
+is the execution-side gate, and the proof of consumption is that its answer
+*changes*:
+
+| what the gate is given | refusal | `authorization_consumed` |
+|---|---|---|
+| no record | `NO_SUBMISSION_AUTHORIZATION_HAS_BEEN_RECORDED` | false |
+| a record for another account | `THE_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT` | false |
+| a record for another venue | `THE_AUTHORIZATION_NAMES_A_DIFFERENT_VENUE` | false |
+| a record granted against different limits | `THE_AUTHORIZATION_DOES_NOT_COVER_THESE_EFFECTIVE_LIMITS` | false |
+| a record with no digest | `THE_AUTHORIZATION_CARRIES_NO_EFFECTIVE_LIMIT_DIGEST` | false |
+| **the matching record** | **`REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE`** | **true** |
+
+`authorize()` calls the gate immediately after recording, so the response
+carries the **executor's** answer under `execution_boundary`, not the panel's.
+An injected submitter is driven through the gate with a **TEST venue** and a
+valid authorization and sends nothing, and a test asserts that
+`order_submitted = True` appears **nowhere** in the package — so this gate is
+not one path among many. `submitted` is false on every path, and
+`authorises_capital` stays false.
+
 ## Capacity, and the isolation defect that had to be closed first
 
 **The defect (mine):** the harness's writer phases stamped the autonomous
