@@ -234,12 +234,22 @@ async def cancel_working_orders(conn, *, by: str, experiments) -> dict:
             "states_considered_open": list(dk.OPEN_STATES),
             "experiments": list(experiments),
             "ok": True,
-            "what_this_is": ("MODELLED orders in our own ledger moved to "
-                             "CANCELLED. No venue order existed, so no "
-                             "venue cancellation was sent or claimed"),
+            "what_this_is": ("MODELLED orders in this ledger moved to "
+                             "CANCELLED. This lane submitted nothing to a "
+                             "venue, so no venue cancellation was sent or "
+                             "claimed"),
             "funded_orders_cancelled": 0,
-            "why_zero": ("no funded order exists: funded submission is "
-                         "disabled and `live_orders` is untouched")}
+            # CORRECTED AFTER READING PRODUCTION. The first version said "no
+            # funded order exists". `live_orders` in production holds 166,585
+            # rows from the earlier live beta -- historical, not open, and
+            # nothing to do with this lane, but the claim as written was
+            # false. What is true is narrower and is what matters: this
+            # statement cannot reach that table at all.
+            "why_zero": ("this control touches `rn1x_orders` only, filtered "
+                         "to modelled rows in the named experiments. It does "
+                         "not read or write `live_orders`, which holds the "
+                         "funded lane's own history, and it cannot cancel "
+                         "anything at a venue")}
 
 
 async def halt(conn, *, by: str, reason: str, experiments) -> dict:
@@ -587,11 +597,20 @@ async def state(conn) -> dict:
         out["working_modelled_orders"] = None
         out["working_modelled_orders_unreadable"] = type(exc).__name__
     try:
-        out["funded_orders"] = int(await conn.fetchval(
+        # ROWS IN `live_orders`, WHICH IS HISTORY AND NOT AN OPEN POSITION.
+        # Production holds 166,585 of them from the earlier live beta;
+        # reporting that as "funded orders" invited exactly the wrong
+        # reading, so the field says what it counts.
+        out["live_orders_rows_all_time"] = int(await conn.fetchval(
             "SELECT count(*) FROM live_orders") or 0)
+        out["funded_orders_this_lane_submitted"] = 0
+        out["funded_orders_note"] = (
+            "`live_orders` is the funded lane's own table and its rows are "
+            "HISTORICAL. This research lane has submitted none of them: its "
+            "writer CHECKs order_submitted FALSE")
     except Exception as exc:                                   # noqa: BLE001
-        out["funded_orders"] = None
-        out["funded_orders_unreadable"] = type(exc).__name__
+        out["live_orders_rows_all_time"] = None
+        out["live_orders_unreadable"] = type(exc).__name__
     return out
 
 

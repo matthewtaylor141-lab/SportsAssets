@@ -4824,12 +4824,13 @@ jobs:
             "$A/api/admin/bettor-demonstration/run" > /tmp/demo.json \
             || say "  the demonstration call failed"
           jq -r '"  experiment      " + (.experiment_id // "-"),
-                 "  ok              " + ((.ok // false) | tostring),
+                 "  ok              " + (.ok | tostring),
                  "  position        " + (.position_id // "-"),
                  "  cycles run      " + ((.lifecycle.cycles_run // 0) | tostring),
-                 "  flat            " + ((.lifecycle.position_is_flat // false) | tostring),
+                 "  flat            " + (.lifecycle.position_is_flat | tostring),
                  "  residual        " + (.lifecycle.residual_settlement // "-"),
-                 "  strategy perf   " + ((.excluded_from_strategy_performance // false) | tostring)' \
+                 "  excluded from strategy performance  "
+                   + (.excluded_from_strategy_performance | tostring)' \
             /tmp/demo.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           jq -r '.lifecycle.reconciliation.positions[]?
                  | "  RECONCILED  bought " + (.bought_qty | tostring)
@@ -4863,19 +4864,20 @@ jobs:
             /tmp/desk.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           jq -r '.positions.books | to_entries[]?
                  | "  BOOK " + .key + "  positions " + ((.value.count // 0) | tostring)
-                   + "  strategy performance " + ((.value.counts_toward_strategy_performance // false) | tostring)' \
+                   + "  strategy performance "
+                   + (.value.counts_toward_strategy_performance | tostring)' \
             /tmp/desk.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           jq -r '.opportunities.no_trade_reasons // {} | to_entries[]?
                  | "  BLOCKED AT  " + .key + "   candidates " + (.value | tostring)' \
             /tmp/desk.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           jq -r '"  demonstration counts toward strategy performance  "
-                 + ((.demonstration.counts_toward_strategy_performance // true) | tostring)' \
+                 + (.demonstration.counts_toward_strategy_performance | tostring)' \
             /tmp/desk.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
 
           say ""
           say "== D4 . THE EXCLUSION, AT THE CONSUMING QUERY =="
           curl -sS -H "$H" \
-            "$A/api/command/rn1x/entry-evidence?hours=720&limit=50" \
+            "$A/api/command/rn1x/external/entry-evidence?hours=720&limit=50" \
             > /tmp/ee2.json || say "  the entry-evidence read failed"
           jq -r '"  evidence is scoped to   " + (.experiment_id // "-"),
                  "  inventory rows          " + ((.inventory // []) | length | tostring),
@@ -4901,22 +4903,19 @@ jobs:
                  "  funded orders           " + ((.state.funded_orders) | tostring),
                  "  account recorded        " + ((.state.account_proposal.name // "-") | tostring),
                  "  limits recorded         " + ((.state.limits_proposal.proposed // {}) | tostring)' \
-            /tmp/ctl0.json
-            /tmp/sess.json
-            /tmp/act.json
-            /tmp/prodaudit.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+            /tmp/ctl0.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
 
           say "  -- a pause, then a resume, each confirmed from the row --"
           curl -sS -X POST -H "$H" -H 'Content-Type: application/json' \
             -d '{"by":"COMMAND_VERIFY"}' \
             "$A/api/command/bettor/control/pause" > /tmp/ctlp.json || true
-          jq -r '"  pause  ok " + ((.ok // false) | tostring)
+          jq -r '"  pause  ok " + (.ok | tostring)
                  + "  armed_confirmed " + ((.armed_confirmed) | tostring)' \
             /tmp/ctlp.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           curl -sS -X POST -H "$H" -H 'Content-Type: application/json' \
             -d '{"by":"COMMAND_VERIFY","scope":"research"}' \
             "$A/api/command/bettor/control/resume" > /tmp/ctlr.json || true
-          jq -r '"  resume ok " + ((.ok // false) | tostring)
+          jq -r '"  resume ok " + (.ok | tostring)
                  + "  armed_confirmed " + ((.armed_confirmed) | tostring)
                  + "  scope " + (.scope // "-")' \
             /tmp/ctlr.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
@@ -4932,7 +4931,7 @@ jobs:
           curl -sS -X POST -H "$H" -H 'Content-Type: application/json' \
             -d '{"account":{"name":"PMUS ACCOUNTING_UNCERTAIN","venue":"PMUS"}}' \
             "$A/api/command/bettor/control/account" > /tmp/ctla.json || true
-          jq -r '"  paused account  ok " + ((.ok // true) | tostring)
+          jq -r '"  paused account  ok " + (.ok | tostring)
                  + "  refusal " + (.refusal // "-")' \
             /tmp/ctla.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
 
@@ -4968,7 +4967,7 @@ jobs:
           say "  mint the session               HTTP $SC (expect 200)"
           jq -r '"  cookie                        " + (.cookie // "-")
                  + "   path " + (.cookie_path // "-")
-                 + "   token in body " + ((.token_in_body // true) | tostring)' \
+                 + "   token in body " + (.token_in_body | tostring)' \
             /tmp/sess.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
           if grep -q "bt_command" "$J"; then
             say "  the jar holds bt_command      yes"
@@ -5021,42 +5020,39 @@ jobs:
       - name: Capacity probe — the isolation audit, against production
         if: ${{ !cancelled() && github.event.inputs.entry_run == 'DO' }}
         env:
-          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          API: ${{ github.event.inputs.api }}
         run: |
           set -uo pipefail
           say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          A="${API:-https://sportsassets-api.onrender.com}"
+          H="X-Admin-Token: ${ADMIN_TOKEN}"
           say "== F1 . DID ANY CAPACITY-PROBE RECORD REACH PRODUCTION =="
-          say "  READ ONLY. It identifies a probe record by the fingerprints"
-          say "  the harness writes -- the condition id shape, the slug"
-          say "  prefix, the payout event -- and NEVER by an experiment id."
-          if [ -z "${DATABASE_URL:-}" ]; then
-            say "  the DATABASE_URL secret is not available to this job, so"
-            say "  this audit did NOT run. That is not a clean result."
-            exit 0
-          fi
-          cd backend
-          python3 -m pip install --quiet asyncpg 2>/dev/null || true
-          python3 -m tools.capacity_probe_manifest --dsn "$DATABASE_URL" \
-            --no-ids > /tmp/prodaudit.json 2>/tmp/prodaudit.err \
-            || say "  the audit command failed: $(tail -2 /tmp/prodaudit.err)"
-          jq -r '.databases | to_entries[]?
-                 | "  probe positions              " + ((.value.positions // 0) | tostring)
-                   + "\n  of those in a strategy book   " + ((.value.in_strategy_book // 0) | tostring)
-                   + "\n  probe orders                 " + ((.value.orders // 0) | tostring)
-                   + "\n  probe fills                  " + ((.value.fills // 0) | tostring)
-                   + "\n  probe valuations             " + ((.value.valuations // 0) | tostring)
-                   + "\n  positions in this database   " + ((.value.all_positions // 0) | tostring)' \
+          say "  ASKED OF PRODUCTION ITSELF, read-only. The runner holds no"
+          say "  database credential, so the service -- which does -- runs"
+          say "  the audit. A probe record is identified by the harness own"
+          say "  fingerprints: the condition id shape, the slug prefix and"
+          say "  the payout event. NEVER by an experiment id, because the"
+          say "  experiment id is what was wrong."
+          AU=$(curl -sS -o /tmp/prodaudit.json -w '%{http_code}' -H "$H" \
+                 "$A/api/admin/capacity-probe-audit" || echo 000)
+          say "  audit                          HTTP $AU (expect 200)"
+          jq -r '"  verdict                        " + (.verdict // "-"),
+                 "  probe positions                " + ((.positions // 0) | tostring),
+                 "  of those in a strategy book    " + ((.in_strategy_book // 0) | tostring),
+                 "  probe orders                   " + ((.orders // 0) | tostring),
+                 "  probe fills                    " + ((.fills // 0) | tostring),
+                 "  probe decisions                " + ((.decisions // 0) | tostring),
+                 "  probe outcome rows             " + ((.outcomes // 0) | tostring),
+                 "  probe valuations               " + ((.valuations // 0) | tostring),
+                 "  positions in this database     " + ((.all_positions // 0) | tostring),
+                 "  clean                          " + (.clean | tostring),
+                 "  unreadable                     " + (.unreadable // "no")' \
             /tmp/prodaudit.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
-          jq -r '.databases | to_entries[]? | .value.books // {} | to_entries[]?
-                 | "  BOOK " + .key + "   positions " + (.value | tostring)' \
+          jq -r '.books // {} | to_entries[]?
+                 | "  BOOK " + (.key // "-") + "   positions " + (.value | tostring)' \
             /tmp/prodaudit.json 2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
-          if jq -e '.probe_positions_total == 0' /tmp/prodaudit.json \
-               > /dev/null 2>&1; then
-            say "  RESULT: no capacity-probe record exists in production."
-          else
-            say "  RESULT: probe records ARE present -- see the counts above."
-          fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Entry-run raw evidence

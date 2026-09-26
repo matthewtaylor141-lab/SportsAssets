@@ -291,7 +291,11 @@ async def test_every_control_action_takes_and_reads_back():
         assert st["account_proposal"]["name"] == "Bettor Pilot One"
         assert st["limits_proposal"]["proposed"]["capital_usd"] == 250.0
         assert st["funded_submission"] == "DISABLED"
-        assert st["funded_orders"] == 0
+        # THE FIELD SAYS WHAT IT COUNTS. `live_orders` is the funded lane's
+        # own history (production holds 166,585 rows from the earlier live
+        # beta); what matters here is that THIS lane submitted none.
+        assert st["funded_orders_this_lane_submitted"] == 0
+        assert "live_orders_rows_all_time" in st
     finally:
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
                            [CTL.LIMITS_KEY, CTL.ACCOUNT_KEY])

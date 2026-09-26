@@ -948,9 +948,15 @@ window.BTCore = {
                                                            : '—') +
         '</span>') +
       fact('Working modelled orders', dash(st.working_modelled_orders)) +
-      fact('Funded orders', '<span class="pill ' +
-        (st.funded_orders === 0 ? 'pill-good' : 'pill-bad') + '">' +
-        dash(st.funded_orders) + '</span>') +
+      /* WHAT THE NUMBER COUNTS, ON ITS LABEL. `live_orders` is the funded
+       * lane's own table and its rows are HISTORY -- production holds
+       * 166,585 from the earlier live beta. Calling that "funded orders"
+       * beside a research desk invited the worst possible misreading. */
+      fact('Orders this lane submitted', '<span class="pill pill-good">' +
+        dash(st.funded_orders_this_lane_submitted) + '</span>') +
+      fact('live_orders rows (funded lane history)',
+        '<span class="mono">' + dash(st.live_orders_rows_all_time) +
+        '</span>') +
       fact('Bound account', acct.name
         ? esc(acct.name) + ' <span class="pill pill-warn">RECORDED, NOT ' +
           'APPROVED</span>'
