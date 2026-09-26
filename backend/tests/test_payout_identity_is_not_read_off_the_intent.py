@@ -58,7 +58,7 @@ SHORT = "ORDER_INTENT_BUY_SHORT"
 # the payout-orientation rule they exist for. So the stub answers with the
 # catalogue's own fields, which is what production reads.
 class _CatalogueConn:
-    def __init__(self, *, kind="aec", event_slug=None, side_norm=None,
+    def __init__(self, *, kind="side", event_slug=None, side_norm=None,
                  siblings=2):
         self._row = {"kind": kind, "event_slug": event_slug,
                      "side_norm": side_norm,

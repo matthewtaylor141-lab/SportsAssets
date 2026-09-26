@@ -308,7 +308,7 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
             await conn.execute(
                 "INSERT INTO us_premap (identifier, event_slug, "
                 "market_slug, kind, side_norm, question, intent) "
-                "VALUES ($1,$2,$3,'aec',$4,$5,"
+                "VALUES ($1,$2,$3,'side',$4,$5,"
                 "'ORDER_INTENT_BUY_LONG') "
                 "ON CONFLICT (identifier) DO NOTHING",
                 "aec-soccer-mci-mun-2026-09-24-%s" % _side,
