@@ -51,9 +51,21 @@
    "gone_vs_baseline": [],
    "identical_to_baseline": true,
    "note": "100 more tests PASS than on the baseline (12,807 vs 12,707) and not one more fails."
+  },
+  "release_c6dbd89": {
+   "file": "FAILURES_RELEASE_c6dbd89_2026-09-26.txt",
+   "failed": 178,
+   "passed": 12809,
+   "duration_s": 453.52,
+   "log": "GATE_W_REL",
+   "paired_with": "a third concurrent 6d75275 run, 178 failed, 449.75s",
+   "new_vs_baseline": [],
+   "gone_vs_baseline": [],
+   "identical_to_baseline": true,
+   "note": "102 more tests pass than on the baseline and not one more fails. The third independent baseline run of the day is again BYTE-IDENTICAL to the first, so three matched pairs now say the same thing about this instrument."
   }
  },
- "the_matched_pair": "47ad3ce against 6d75275, run concurrently on 2026-09-26: 178 and 178, and the identity sets are IDENTICAL -- nothing new, nothing gone, nothing newly passing among the 178. The release adds 100 passing tests. An earlier pair on 7dedc5a gave 188 against 178, and all ten extra identities were a REAL defect this gate caught: two test fixtures replayed migration 117 and stopped, narrowing `rn1x_provenance_declared` for every test that ran afterwards. Fixed in 47ad3ce, with `test_no_fixture_reverts_the_provenance_vocabulary` to close the class.",
+ "the_matched_pair": "c6dbd89 against 6d75275, run concurrently: 178 and 178, identity sets IDENTICAL. Three separate baseline runs today (19:49, 21:37, 22:2x) produced BYTE-IDENTICAL 178-identity lists across different databases and load, which is what makes an identity diff here a signal. Along the way the instrument earned it: the 7dedc5a pair gave 188 against 178 and every one of the ten extra identities was a real defect -- two fixtures replaying migration 117 and stopping, narrowing `rn1x_provenance_declared` for whatever ran next.",
  "clock_sensitive_defects_are_recorded_separately": "research/evidence/CLOCK_SENSITIVE_TEST_DEFECTS.json",
  "not_a_clean_gate": "178 pre-existing failures remain on the baseline itself. Nothing here claims otherwise."
 }
