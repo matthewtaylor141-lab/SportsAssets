@@ -50,17 +50,16 @@ def test_the_executor_only_runs_a_test_class_venue():
         "bettor_entry_execution.authorize_submission"
     assert d["recovery_never_resubmits"] is True
     # AND IT SAYS WHAT IT IS NOT.
-    assert "no venue sandbox credential is connected" in \
-        d["what_is_not_claimed"]
-    assert set(d["venue_interface"]) == {"submit", "poll", "cancel",
+    assert "NO VENUE SANDBOX IS CONNECTED" in d["what_is_not_claimed"]
+    assert "INTERNAL SIMULATOR" in d["what_is_not_claimed"]
+    # TWO GATES, and the split is part of the contract
+    assert set(d["two_gates_not_one"]) == {"submission", "servicing"}
+    assert "strand an open order" in d["two_gates_not_one"]["servicing"]
+    assert "idempotent" in d["fill_identity"]
+    assert "not a cancellation" in d["cancellation_is_confirmed_by_a_read"]
+    assert set(d["venue_interface"]) == {"submit", "poll", "fills", "cancel",
                                          "open_orders"}
 
-
-def test_the_simulator_admits_that_it_is_one():
-    v = TX.SimulatedTestVenue()
-    assert v.is_a_simulator is True
-    assert v.reaches_a_real_venue is False
-    assert "SIMULATED" in v.name
 
 
 def test_the_book_is_not_a_strategy_book():
@@ -146,7 +145,7 @@ async def test_the_whole_lifecycle_submit_ack_partial_cancel_recover_reconcile()
         await _wipe(conn)
         await _seed_account(conn)
         await _authorize(conn)
-        v = TX.SimulatedTestVenue(partial_ratio=0.4)
+        v = TX.InternalOrderLifecycleSimulator(partial_ratio=0.4)
 
         # 1 · SUBMIT. The gate is asked first and the ACK is recorded.
         got = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
@@ -213,8 +212,12 @@ async def test_the_whole_lifecycle_submit_ack_partial_cancel_recover_reconcile()
         # 4 · CANCEL THE REMAINDER, through CANCEL_PENDING to CANCELLED.
         can = await TX.cancel_open(conn, v, account_id=ACCT, venue=VENUE)
         assert can["ok"] is True, can
-        assert can["cancelled"][0]["requested"] == dk.CANCEL_PENDING
-        assert can["cancelled"][0]["state_now"] == dk.CANCELLED
+        c0 = can["cancelled"][0]
+        assert c0["requested"] == dk.CANCEL_PENDING
+        assert c0["venue_accepted_the_request"] is True
+        # THE TERMINAL STATE CAME FROM A READ, not from the acknowledgement
+        assert c0["state_confirmed_by_a_read"] == dk.CANCELLED
+        assert c0["terminal"] is True
         state = await conn.fetchval(
             "SELECT state FROM rn1x_orders WHERE order_id = $1", oid)
         assert state == dk.CANCELLED
@@ -255,12 +258,13 @@ async def test_a_venue_rejection_is_recorded_and_not_swallowed():
         await _wipe(conn)
         await _seed_account(conn)
         await _authorize(conn)
-        v = TX.SimulatedTestVenue(reject_next=True)
+        v = TX.InternalOrderLifecycleSimulator(reject_next=True)
         got = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
                               condition_id=CID, slug=SLUG)
         assert got["ok"] is False
         assert got["refusal"] == TX.R_VENUE_REJECTED
-        assert got["rejected_because"] == "SIMULATED_VENUE_REJECTION"
+        assert got["rejected_because"] == \
+            "SIMULATED_REJECTION_FROM_THE_INTERNAL_SIMULATOR"
         assert got["state"] == dk.REJECTED
         # THE ROW EXISTS AND SAYS REJECTED. An order we sent and the venue
         # refused is a fact, not an absence.
@@ -285,7 +289,7 @@ async def test_expired_mismatched_and_revoked_authorization_all_stop_it():
     try:
         await _wipe(conn)
         await _seed_account(conn)
-        v = TX.SimulatedTestVenue()
+        v = TX.InternalOrderLifecycleSimulator()
 
         async def _try():
             got = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
@@ -361,9 +365,19 @@ async def test_expired_mismatched_and_revoked_authorization_all_stop_it():
 
 
 @pg
-async def test_poll_and_cancel_are_gated_too():
-    """THE GATE IS IN FRONT OF EVERY ACTION, not only the first one. An
-    authorization revoked mid-flight stops the next action."""
+async def test_revoking_authority_stops_new_exposure_and_not_servicing():
+    """THE SEQUENCE THE REVIEW ASKED FOR, and the defect it names.
+
+      submit -> partial fill -> REVOKE -> reject a new entry ->
+      cancel the outstanding remainder -> ingest a late fill -> reconcile
+
+    THE DEFECT. Every action asked the SUBMISSION gate, so revoking the
+    authorization stopped `poll_once`, `cancel_open` and `recover` before they
+    reached the venue. The grant that lapsed was permission to take NEW
+    exposure; refusing to cancel or to ingest a fill because of it LEFT the
+    exposure running and unaccounted. Expiry must reduce what we may do, never
+    strand what we already did.
+    """
     asyncpg = pytest.importorskip("asyncpg")
 
     conn = await asyncpg.connect(DSN)
@@ -371,26 +385,214 @@ async def test_poll_and_cancel_are_gated_too():
         await _wipe(conn)
         await _seed_account(conn)
         await _authorize(conn)
-        v = TX.SimulatedTestVenue()
+        # a fill lands AFTER the cancel is accepted, which is what a real
+        # venue does and what an inferred cancellation would lose
+        v = TX.InternalOrderLifecycleSimulator(partial_ratio=0.4,
+                                               late_fill_on_cancel=10.0)
+
+        # 1 · SUBMIT and take a partial fill while the grant is live
+        got = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
+                              condition_id=CID, slug=SLUG, qty=100.0,
+                              limit_price=0.50)
+        assert got["ok"] is True
+        oid, vid = got["order_id"], got["venue_order_id"]
+        poll = await TX.poll_once(conn, v, account_id=ACCT, venue=VENUE)
+        assert poll["orders"][0]["filled_qty"] == pytest.approx(40.0)
+
+        # 2 · REVOKE
+        await _authorize(conn, revoked=True, revoked_by="OWNER",
+                         revoked_at=time.time())
+
+        # 3 · A NEW ENTRY IS REFUSED, with nothing written and no venue call
+        calls = len(v.calls)
+        orders_before = await conn.fetchval(
+            "SELECT count(*) FROM rn1x_orders o JOIN rn1x_positions p "
+            "ON p.position_id = o.position_id WHERE p.experiment_id = $1",
+            TX.EXPERIMENT)
+        new_entry = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
+                                    condition_id="0x" + "cd" * 32,
+                                    slug="tvx-second-entry")
+        assert new_entry["ok"] is False
+        assert new_entry["refusal"] == EX.R_AUTH_REVOKED
+        assert len(v.calls) == calls, "a revoked grant still submitted"
+        assert await conn.fetchval(
+            "SELECT count(*) FROM rn1x_orders o JOIN rn1x_positions p "
+            "ON p.position_id = o.position_id WHERE p.experiment_id = $1",
+            TX.EXPERIMENT) == orders_before
+
+        # 4 · AND THE OUTSTANDING REMAINDER IS STILL CANCELLABLE
+        can = await TX.cancel_open(conn, v, account_id=ACCT, venue=VENUE)
+        assert can["ok"] is True, can
+        assert can["authorization"]["gate"] == "SERVICING"
+        assert can["authorization"]["submission_authority"][
+            "valid_for_new_exposure"] is False
+        c0 = can["cancelled"][0]
+        assert c0["venue_accepted_the_request"] is True
+        # 5 · THE LATE FILL WAS INGESTED, not lost
+        assert len(c0["late_fills_ingested"]) == 1, c0
+        assert c0["filled_qty_from_the_ledger"] == pytest.approx(50.0)
+        # and the terminal state came from a READ
+        assert c0["state_confirmed_by_a_read"] == dk.CANCELLED
+        assert c0["terminal"] is True
+
+        # 6 · RECONCILE, with the revocation still in force
+        acc = await TX.reconcile(conn)
+        assert acc["fills"] == 2
+        assert acc["filled_qty"] == pytest.approx(50.0)
+        assert acc["fees_reconcile"] is True
+        assert acc["discrepancy_count"] == 0, acc["discrepancies"]
+        per = acc["per_order"][0]
+        assert per["filled_qty_from_fills"] == pytest.approx(50.0)
+        assert per["filled_qty_on_the_order"] == pytest.approx(50.0)
+        assert per["remaining"] == pytest.approx(50.0)
+        assert per["state"] == dk.CANCELLED
+
+        # 7 · OWNERSHIP IS STILL CHECKED while servicing
+        wrong = await TX.cancel_open(conn, v, account_id="someone-else",
+                                     venue=VENUE)
+        assert wrong["ok"] is False
+        assert wrong["refusal"] == TX.R_OWNERSHIP_ACCOUNT
+        wrong_v = await TX.poll_once(conn, v, account_id=ACCT,
+                                    venue="SANDBOX")
+        assert wrong_v["ok"] is False
+        assert wrong_v["refusal"] == TX.R_OWNERSHIP_VENUE
+        # and a FUNDED venue is refused even for servicing
+        funded = await TX.poll_once(conn, v, account_id=ACCT, venue="PMUS")
+        assert funded["refusal"] == TX.R_VENUE_CLASS_NOT_ALLOWED
+    finally:
+        await _wipe(conn)
+        await conn.close()
+
+
+@pg
+async def test_an_expired_grant_also_leaves_servicing_available():
+    """Expiry and revocation are different facts and both must behave the
+    same way here: no new exposure, full servicing."""
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _wipe(conn)
+        await _seed_account(conn)
+        await _authorize(conn)
+        v = TX.InternalOrderLifecycleSimulator()
         got = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
                               condition_id=CID, slug=SLUG)
         assert got["ok"] is True
-        calls = len(v.calls)
+        await _authorize(conn, at=time.time() - 25 * 3600)
 
-        # REVOKE IT MID-FLIGHT
-        await _authorize(conn, revoked=True, revoked_by="OWNER")
-        for fn in (TX.poll_once, TX.cancel_open, TX.recover):
+        assert (await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
+                                condition_id="0x" + "ab" * 32,
+                                slug="x"))["refusal"] == EX.R_AUTH_EXPIRED
+        for fn in (TX.poll_once, TX.recover, TX.cancel_open):
             r = await fn(conn, v, account_id=ACCT, venue=VENUE)
-            assert r["ok"] is False, (fn.__name__, r)
-            assert r["refusal"] == EX.R_AUTH_REVOKED, (fn.__name__, r)
-        assert len(v.calls) == calls, "a revoked session still reached the venue"
+            assert r["ok"] is True, (fn.__name__, r)
+            assert r["authorization"]["submission_authority"][
+                "valid_for_new_exposure"] is False
+    finally:
+        await _wipe(conn)
+        await conn.close()
 
-        # THE ORDER IS LEFT EXACTLY AS IT WAS.
-        row = dict(await conn.fetchrow(
-            "SELECT state, filled_qty::float8 AS filled_qty FROM rn1x_orders "
-            "WHERE order_id = $1", got["order_id"]))
-        assert row["state"] == dk.RESTING
-        assert row["filled_qty"] == 0.0
+
+@pg
+async def test_a_redelivered_fill_is_recorded_exactly_once():
+    """THE DEFECT. `poll_once` minted a fresh uuid per returned fill, so a
+    venue redelivering a fill -- a reconnect, a replay, an at-least-once feed
+    -- produced a SECOND ledger row for the SAME execution: quantity, fees and
+    cash all doubled. The id is the venue's own and the insert is idempotent.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _wipe(conn)
+        await _seed_account(conn)
+        await _authorize(conn)
+        v = TX.InternalOrderLifecycleSimulator(partial_ratio=0.4)
+        got = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
+                              condition_id=CID, slug=SLUG, qty=100.0,
+                              limit_price=0.50)
+        vid = got["venue_order_id"]
+        first = await TX.poll_once(conn, v, account_id=ACCT, venue=VENUE)
+        assert len(first["orders"][0]["fills_written"]) == 1
+        one = await TX.reconcile(conn)
+
+        # REDELIVER THE SAME FILL, three times, exactly as a venue would
+        row = (await TX._open_orders(conn))[0]
+        for _ in range(3):
+            again = v.redeliver(vid)
+            ing = await TX.ingest_fills(conn, row, again["fills"],
+                                        at=time.time())
+            assert ing["written"] == [], ing
+            assert len(ing["already_held"]) == 1
+
+        after = await TX.reconcile(conn)
+        assert after["fills"] == one["fills"] == 1
+        assert after["filled_qty"] == one["filled_qty"] == pytest.approx(40.0)
+        assert after["fees_usd"] == one["fees_usd"]
+        assert after["notional_usd"] == one["notional_usd"]
+        assert after["discrepancy_count"] == 0
+        # AND THE ID IS DERIVED, not random
+        fid = await conn.fetchval(
+            "SELECT fill_id FROM rn1x_fills WHERE order_id = $1",
+            got["order_id"])
+        assert fid == TX.fill_id_for(vid, "%s:f1" % vid)
+        assert fid.startswith("tvf:%s:" % vid)
+    finally:
+        await _wipe(conn)
+        await conn.close()
+
+
+@pg
+async def test_a_fill_during_downtime_is_ingested_by_recovery():
+    """THE DEFECT. Recovery overwrote `filled_qty` with the venue's running
+    total and wrote NO fill row -- so a fill that landed while nothing was
+    polling left the quantity right and the LEDGER wrong: no fee, no cash, and
+    a reconciliation that could only report an unexplainable discrepancy."""
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _wipe(conn)
+        await _seed_account(conn)
+        await _authorize(conn)
+        v = TX.InternalOrderLifecycleSimulator(partial_ratio=0.4)
+        got = await TX.submit(conn, v, account_id=ACCT, venue=VENUE,
+                              condition_id=CID, slug=SLUG, qty=100.0,
+                              limit_price=0.50)
+        vid = got["venue_order_id"]
+        await TX.poll_once(conn, v, account_id=ACCT, venue=VENUE)
+
+        # WE GO DOWN. The venue fills another 25 with nobody watching.
+        v.fill_while_we_are_down(vid, 25.0)
+
+        rec = await TX.recover(conn, v, account_id=ACCT, venue=VENUE)
+        r0 = rec["reconciled"][0]
+        assert r0["fills_the_venue_holds"] == 2
+        assert len(r0["fills_we_had_missed"]) == 1, r0
+        assert r0["fills_already_held"] == 1
+        assert r0["filled_qty_from_the_ledger"] == pytest.approx(65.0)
+        assert r0["quantity_came_from"] == \
+            "the ledger, after ingesting every fill"
+        assert rec["resubmitted_anything"] is False
+
+        # THE LEDGER RECONCILES EXACTLY ONCE: two fills, both fees, no
+        # discrepancy between the order and its fills.
+        acc = await TX.reconcile(conn)
+        assert acc["fills"] == 2
+        assert acc["filled_qty"] == pytest.approx(65.0)
+        assert acc["notional_usd"] == pytest.approx(32.5)
+        assert acc["fees_usd"] == pytest.approx(
+            TX.fee_for(40.0, 0.50) + TX.fee_for(25.0, 0.50))
+        assert acc["fees_reconcile"] is True
+        assert acc["discrepancy_count"] == 0, acc["discrepancies"]
+
+        # AND RUNNING RECOVERY AGAIN CHANGES NOTHING.
+        twice = await TX.recover(conn, v, account_id=ACCT, venue=VENUE)
+        assert twice["reconciled"][0]["fills_we_had_missed"] == []
+        same = await TX.reconcile(conn)
+        assert same["fills"] == 2
+        assert same["fees_usd"] == pytest.approx(acc["fees_usd"])
     finally:
         await _wipe(conn)
         await conn.close()
@@ -407,7 +609,7 @@ async def test_an_orphan_at_the_venue_is_reported_and_never_adopted():
         await _wipe(conn)
         await _seed_account(conn)
         await _authorize(conn)
-        v = TX.SimulatedTestVenue()
+        v = TX.InternalOrderLifecycleSimulator()
         # an order at the venue that we never recorded
         v.submit({"client_order_id": "not-ours", "condition_id": CID,
                   "outcome_index": 0, "side": "BUY", "qty": 10.0,
@@ -447,7 +649,7 @@ def test_the_lifecycle_endpoint_is_admin_gated_and_test_venue_only():
     assert "TX.submit(" in src and "TX.poll_once(" in src
     assert "TX.cancel_open(" in src and "TX.recover(" in src
     assert "TX.reconcile(" in src
-    assert "SimulatedTestVenue" in src
+    assert "InternalOrderLifecycleSimulator" in src
     assert '"funded_submission"' in src
     # and it stops at the first refusal rather than pressing on
     assert 'out["stopped_at"] = "submit"' in src

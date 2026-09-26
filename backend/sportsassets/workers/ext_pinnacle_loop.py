@@ -1133,9 +1133,9 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
                 "why": ("no venue-native slug was supplied. A global "
                         "condition id is not a US market slug and must "
                         "never be passed as one")}
-    # THE INSTANT THE REQUEST LEFT. This is the one clock whose meaning is
-    # not in doubt, and it is why the freshness question is answerable at
-    # all -- see `OUR_REQUEST_RESPONSE_ROUND_TRIP` below.
+    # THE INSTANT THE REQUEST LEFT. Recorded because it is real and because
+    # our own latency is worth knowing -- NOT because it bounds the age of
+    # the book. See the note on our own clocks below.
     request_sent_at = time.time()
     try:
         book = await asyncio.wait_for(
@@ -1203,46 +1203,48 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
     # THE RAW VALUE TRAVELS WITH THE VERDICT. Its type and its repr are
     # carried out so a future mismatch names itself instead of collapsing
     # into "unparseable" again.
-    # ── THE SUPPORTED BOOK-FRESHNESS SEMANTICS, STATED ───────────────
+    # ── WHAT OUR OWN CLOCKS DO AND DO NOT ESTABLISH ──────────────────
     #
-    # WHAT WAS UNRESOLVED, AND WHY IT BLOCKED. `marketData.transactTime`
-    # could denote either the instant the venue GENERATED THE RESPONSE or
-    # the instant the book LAST CHANGED, and the two give opposite readings:
+    # THE CLAIM THAT WAS WRONG, AND IT WAS MINE. An earlier version of this
+    # read treated the request-to-response round trip as an upper bound on
+    # the age of the book: "the venue answered after we asked, so what we
+    # received cannot be older than the round trip". That is FALSE. The
+    # round trip measures TRANSPORT LATENCY. A server can answer in 20 ms
+    # with a snapshot it cached minutes ago, or with a book it never
+    # revalidated against its own matching engine -- and a latency-derived
+    # bound would then CERTIFY that stale snapshot as fresh. The faster the
+    # answer, the stronger the false certificate. That is precisely the
+    # substitution of an assumption for evidence that the freshness gate
+    # exists to refuse, and it was written into the gate itself.
     #
-    #   * response stamp  -> age measures OUR latency only. The book itself
-    #                        could be far older, so the age UNDERSTATES
-    #                        staleness. Acting on it is unsafe.
-    #   * last-change     -> age measures how long the book has been still.
-    #                        The state is current as of the response, so the
-    #                        age OVERSTATES staleness. Conservative.
+    # WHAT IS STILL TRUE AND STILL RECORDED. Three instants, each labelled
+    # for what it is: when WE sent the request, when WE received the
+    # response, and when the decision was taken. They bound OUR contribution
+    # to the delay, they are what a latency investigation needs, and not one
+    # of them says anything about how old the venue's book was.
     #
-    # Unable to tell which, the lane refused -- correctly, but permanently.
-    #
-    # THE RESOLUTION DOES NOT NEED THE VENUE'S DEFINITION. The question that
-    # matters is "how old is the information I am about to act on", and OUR
-    # OWN send time bounds it: the venue answered after we asked, so the
-    # state we received cannot be older than `now - request_sent_at`
-    # measured at the decision, whatever its field denotes. That is a
-    # MEASURED, SUPPORTED basis -- OUR_REQUEST_RESPONSE_ROUND_TRIP -- and it
-    # is established on every successful read.
-    #
-    # The venue's own stamp is still parsed and still carried, because when
-    # it IS parseable it corroborates the round trip and would reveal a
-    # book far older than our latency. It is no longer the only way to
-    # establish an age, so an absent transactTime stops being a hard block
-    # and becomes what it is: one of two clocks, the other of which we own.
+    # SO ADMISSION IS A STATED POLICY, NOT A DERIVED BOUND. The upstream age
+    # is established only by the VENUE's own clock. When `transactTime` is
+    # absent or unparseable the age is UNMEASURED and the candidate is
+    # refused -- a policy with a reason attached, not a claim that the book
+    # was stale. What would change it: the venue publishing what the field
+    # denotes, or an endpoint returning a revalidation instant.
     round_trip_s = max(0.0, float(read_at) - float(request_sent_at))
     venue_ts = snap.get("TRANSACT_TIME")
     age, age_basis, vt = None, "VENUE_CLOCK_NOT_PROVIDED", None
     clock = {"field_path": "marketData.transactTime",
+             # OUR OWN OBSERVATIONS, labelled as ours and as latency.
              "our_request_sent_at": request_sent_at,
-             "our_response_read_at": read_at,
-             "our_round_trip_s": round(round_trip_s, 6),
-             "supported_semantics": (
-                 "the age of the information acted on is bounded by OUR "
-                 "request-to-response round trip, which needs no assumption "
-                 "about what the venue's transactTime denotes. The venue's "
-                 "stamp corroborates it when parseable"),
+             "our_response_received_at": read_at,
+             "our_transport_latency_s": round(round_trip_s, 6),
+             "our_transport_latency_is_not_an_upstream_age": (
+                 "a server can answer quickly with a cached or unrevalidated "
+                 "snapshot, so this number cannot bound how old the book "
+                 "was. It bounds OUR contribution to the delay and nothing "
+                 "else"),
+             "upstream_age_established_only_by": (
+                 "the venue's own clock. Absent or unparseable, the upstream "
+                 "age is UNMEASURED and the candidate is refused by policy"),
              "raw": (None if venue_ts is None else str(venue_ts)[:64]),
              "raw_type": type(venue_ts).__name__,
              "parser": "bettor_market_stream._parse_ts",
@@ -1263,17 +1265,11 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
         clock["why"] = ("the venue supplied no transactTime, so our read "
                         "clock is the only one -- and using it would make "
                         "every book fresh by construction")
-    clock["parsed_epoch_s"] = vt
-    if age is None:
-        # OUR CLOCK, NAMED AS OURS. This is not the venue's transact time
-        # renamed: it is a different, weaker and HONEST measurement -- an
-        # upper bound on the age of what we received, owned by us.
-        age = round_trip_s
-        age_basis = "OUR_REQUEST_RESPONSE_ROUND_TRIP"
-        clock["venue_clock_contributed"] = False
-    else:
-        clock["venue_clock_contributed"] = True
-        clock["our_round_trip_corroborates"] = bool(age >= round_trip_s - 1e-6)
+    # NO FALLBACK. When the venue's clock gives nothing the age stays None
+    # and the basis stays VENUE_CLOCK_NOT_PROVIDED / _UNPARSEABLE, which is
+    # UNMEASURED and refuses. Substituting our latency here is the defect
+    # described above.
+    clock["venue_clock_contributed"] = age is not None
     clock["parsed_epoch_s"] = vt
     clock["age_at_read_s"] = (None if age is None else round(age, 3))
     clock["basis"] = age_basis

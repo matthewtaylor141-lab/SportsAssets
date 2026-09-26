@@ -3454,7 +3454,7 @@ async def admin_test_venue_lifecycle(response: Response,
     price = float(b.get("limit_price") or 0.50)
     ratio = float(b.get("partial_ratio") or 0.4)
 
-    venue_adapter = TX.SimulatedTestVenue(partial_ratio=ratio)
+    venue_adapter = TX.InternalOrderLifecycleSimulator(partial_ratio=ratio)
     out = {"ok": True, "version": TX.VERSION, "contract": TX.describe(),
            "stage": stage, "steps": []}
     pool = await get_pool()

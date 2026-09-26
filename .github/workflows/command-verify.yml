@@ -5260,6 +5260,41 @@ jobs:
           fi
 
           say ""
+          say "== S2a . SUSPEND AUTO-DEPLOY *BEFORE* TOUCHING THE ENV =="
+          say "  THE RACE THIS CLOSES. An env change makes Render create a"
+          say "  deploy from the service's TRACKED branch -- here the"
+          say "  protected default branch. \"Deploy the reviewed SHA"
+          say "  immediately afterward\" does not prevent that: the"
+          say "  tracked-branch build is already queued and can go live in"
+          say "  the gap, publishing the wrong code however briefly. The"
+          say "  only ordering that prevents it is to turn auto-deploy OFF"
+          say "  FIRST, so the env write creates no deploy at all."
+          ID=$(svc_id "$SERVICE")
+          if [ -z "$ID" ]; then
+            say "  no Render service named $SERVICE -- nothing written"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          say "  service                        $SERVICE ($ID)"
+          BEFORE=$(rget "/services/$ID" \
+                   | jq -r '"autoDeploy=" + (.autoDeploy // "?")
+                            + " branch=" + (.branch // "?")')
+          say "  before                         $BEFORE"
+          AD=$(curl -sS --max-time 45 -o /tmp/ad.json -w '%{http_code}' \
+                 -X PATCH -H "Authorization: Bearer $RENDER_KEY" \
+                 -H "Accept: application/json" \
+                 -H "Content-Type: application/json" \
+                 -d '{"autoDeploy":"no"}' "$RAPI/services/$ID" || echo 000)
+          say "  PATCH autoDeploy=no            HTTP $AD (expect 200)"
+          NOW_AD=$(rget "/services/$ID" | jq -r '.autoDeploy // "?"')
+          say "  read back                      autoDeploy=$NOW_AD"
+          if [ "$NOW_AD" = "yes" ]; then
+            say "  REFUSING TO CONTINUE: auto-deploy is still on, so writing"
+            say "  the password would publish the tracked branch. Nothing"
+            say "  was written."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+
+          say ""
           say "== S2 . GENERATE ON THIS RUNNER, WRITE TO THE SERVICE =="
           # 30 bytes of urandom, base64, punctuation removed: ~160 bits
           # before trimming, ~130 after. Generated here, so it never was an
@@ -5271,12 +5306,6 @@ jobs:
           fi
           echo "::add-mask::$PW"
           say "  generated                      ${#PW} characters, masked"
-          ID=$(svc_id "$SERVICE")
-          if [ -z "$ID" ]; then
-            say "  no Render service named $SERVICE -- nothing written"
-            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
-          fi
-          say "  service                        $SERVICE ($ID)"
           SC=$(curl -sS --max-time 45 -o /tmp/set.json -w '%{http_code}' -X PUT \
                  -H "Authorization: Bearer $RENDER_KEY" \
                  -H "Accept: application/json" \
@@ -5291,11 +5320,10 @@ jobs:
           fi
           say ""
           say "== S2b . PUT THE REVIEWED BUILD BACK, DELIBERATELY =="
-          say "  AN ENV CHANGE MAKES RENDER AUTO-DEPLOY THE SERVICE'S OWN"
-          say "  TRACKED BRANCH, and this service tracks the PROTECTED"
-          say "  default branch. Left alone, writing the password would"
-          say "  replace the reviewed build with whatever that branch holds."
-          say "  So the reviewed commit is deployed by id, right after."
+          say "  Deploying the reviewed commit AFTERWARDS is not enough: the"
+          say "  tracked-branch deploy is created by the env write itself and"
+          say "  can go live in the gap. Auto-deploy was suspended BEFORE the"
+          say "  write (S2a), so no such deploy was ever created."
           case "${OPERATOR_COMMIT:-}" in
             [0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f][0-9a-f]) : ;;
             *) say "  refused: operator_commit must be a full 40-hex sha"
@@ -5349,6 +5377,31 @@ jobs:
             say "  deploying. Nothing below was verified."
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
           fi
+
+          say ""
+          say "== S3b . NO PENDING DEPLOY CAN REPLACE THE REVIEWED SHA =="
+          say "  Checked, not assumed: every deploy Render is holding is"
+          say "  listed, and any that is live-or-queued for a DIFFERENT"
+          say "  commit is a failure of this step."
+          rget "/services/$ID/deploys?limit=10" > /tmp/deps.json || true
+          jq -r '.[]? | .deploy
+                 | "  " + (.status // "?") + "  " + ((.commit.id // "?")[0:7])
+                   + "  " + (.createdAt // "?")' /tmp/deps.json \
+            2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          PENDING=$(jq -r --arg c "$OPERATOR_COMMIT" '[.[]? | .deploy
+                      | select((.status // "") | test("build_in_progress|created|queued|update_in_progress|pre_deploy_in_progress"))
+                      | select((.commit.id // "") != $c)] | length' \
+                    /tmp/deps.json 2>/dev/null || echo "?")
+          say "  pending deploys for another commit: $PENDING (expect 0)"
+          if [ "$PENDING" != "0" ]; then
+            say "  A DEPLOY OF ANOTHER COMMIT IS IN FLIGHT. The reviewed"
+            say "  build could be replaced; this run does not call it safe."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          say "  autoDeploy is still            $(rget "/services/$ID" | jq -r '.autoDeploy // "?"')"
+          say "  (left OFF deliberately: auto-deploy from the protected"
+          say "   default branch is the hazard this step exists to close."
+          say "   Releases go out by commit id through render-ops.)"
 
           say ""
           say "== S4 . ORDINARY PASSWORD SIGN-IN, THEN A REAL CONTROL =="

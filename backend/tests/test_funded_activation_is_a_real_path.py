@@ -642,9 +642,12 @@ async def test_a_venue_clock_that_was_never_provided_is_not_a_basis():
         for tok, want in (("VENUE_CLOCK_NOT_PROVIDED", False),
                           ("VENUE_CLOCK_UNPARSEABLE", False),
                           ("VENUE_TRANSACT_TIME", True),
-                          # OUR OWN ROUND TRIP is a supported established
-                          # basis: the venue answered after we asked.
-                          ("OUR_REQUEST_RESPONSE_ROUND_TRIP", True)):
+                          # OUR OWN LATENCY IS NOT AN UPSTREAM AGE. It was
+                          # briefly in the established list and it must not
+                          # be: see the dedicated counterexample below.
+                          ("OUR_REQUEST_RESPONSE_ROUND_TRIP", None),
+                          ("OUR_TRANSPORT_LATENCY_NOT_AN_UPSTREAM_AGE",
+                           None)):
             await conn.execute(
                 "INSERT INTO ingestion_state (key, value) "
                 "VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE "
@@ -1048,3 +1051,79 @@ async def test_the_funded_branch_validates_the_owners_record():
         await conn.execute("DELETE FROM external_valuations "
                            "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
         await conn.close()
+
+
+def test_transport_latency_is_never_an_upstream_freshness_basis():
+    """THE COUNTEREXAMPLE, and it killed a claim I had written into the gate.
+
+    An earlier version added OUR_REQUEST_RESPONSE_ROUND_TRIP to the
+    established bases, arguing that the venue answered after we asked so what
+    we received could not be older than the round trip. FALSE. The round trip
+    measures TRANSPORT LATENCY. A server can answer in 20 ms with a snapshot
+    it cached minutes ago -- and the FASTER it answers, the stronger the false
+    certificate of freshness.
+    """
+    assert "OUR_REQUEST_RESPONSE_ROUND_TRIP" not in \
+        FA.FRESHNESS_BASIS_ESTABLISHED
+    assert FA.OUR_TRANSPORT_LATENCY not in FA.FRESHNESS_BASIS_ESTABLISHED
+    for tok in FA.OUR_OWN_TIMESTAMPS:
+        assert tok not in FA.FRESHNESS_BASIS_ESTABLISHED, tok
+    # THE ESTABLISHED SET IS THE VENUE'S OWN CLOCK, and only that.
+    assert set(FA.FRESHNESS_BASIS_ESTABLISHED) == {
+        "VENUE_TRANSACT_TIME", "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION"}
+    # AND THE POLICY SAYS SO, with the counterexample in it.
+    pol = FA.FRESHNESS_ADMISSION_POLICY
+    assert "cached minutes ago" in pol["why_transport_latency_is_not_an_age"]
+    assert "UNMEASURED" in pol["when_the_venue_clock_is_absent_or_unparseable"]
+    assert pol["upstream_age_is_established_only_by"] == \
+        list(FA.FRESHNESS_BASIS_ESTABLISHED)
+
+
+@pg
+async def test_a_fast_response_with_an_old_snapshot_establishes_nothing():
+    """THE COUNTEREXAMPLE, DRIVEN. A read that came back in 12 ms and carried
+    no venue clock must leave the upstream age UNMEASURED -- the speed of the
+    answer is not evidence about the book."""
+    asyncpg = pytest.importorskip("asyncpg")
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        for label, clock in (
+                ("fast answer, no venue clock", {
+                    "basis": "VENUE_CLOCK_NOT_PROVIDED",
+                    "age_at_read_s": None,
+                    "our_transport_latency_s": 0.012}),
+                ("fast answer, unparseable venue clock", {
+                    "basis": "VENUE_CLOCK_UNPARSEABLE",
+                    "age_at_read_s": None,
+                    "our_transport_latency_s": 0.009})):
+            await conn.execute(
+                "INSERT INTO ingestion_state (key, value) "
+                "VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE "
+                "SET value = $2::jsonb", "ext_pinnacle_last_cycle",
+                json.dumps({"at": 1.0, "cycle_label": "X",
+                            "mapped_candidate_ledger": [
+                                {"venue_clock": clock}]}))
+            got = await FA._freshness_check(conn)
+            assert got["met"] is False, (label, got)
+            ev = got["evidence"]
+            assert ev["reads_established_AND_with_a_measured_age"] == 0
+            # the latency is VISIBLE and it is not counted as a basis
+            assert clock["our_transport_latency_s"] < 0.02
+    finally:
+        await conn.execute("DELETE FROM ingestion_state WHERE key = $1",
+                           "ext_pinnacle_last_cycle")
+        await conn.close()
+
+
+def test_the_read_path_invents_no_basis_from_its_own_latency():
+    """The fallback that assigned our latency as the age is gone from the
+    reader, not merely unlisted in the checker."""
+    import inspect
+
+    from sportsassets.workers import ext_pinnacle_loop as LOOP
+
+    src = inspect.getsource(LOOP)
+    assert 'age_basis = "OUR_REQUEST_RESPONSE_ROUND_TRIP"' not in src
+    assert "our_transport_latency_is_not_an_upstream_age" in src
+    assert "NO FALLBACK" in src

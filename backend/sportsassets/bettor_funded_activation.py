@@ -265,14 +265,56 @@ async def account_selection(conn, account_id: str) -> dict:
 FRESHNESS_BASIS_ESTABLISHED = (
     "VENUE_TRANSACT_TIME",
     "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION",
-    # OUR OWN CLOCK, AND THE ONE WHOSE MEANING IS NOT IN DOUBT. The venue
-    # answered after we asked, so the state we received cannot be older than
-    # our request-to-response round trip -- whatever `transactTime` denotes.
-    # It is a weaker measurement than the venue's stamp and it is HONEST:
-    # an upper bound we own, established on every successful read. See the
-    # supported-semantics note in `workers/ext_pinnacle_loop`.
-    "OUR_REQUEST_RESPONSE_ROUND_TRIP",
 )
+
+#: OUR OWN TIMESTAMPS, AND WHAT THEY ARE NOT.
+#:
+#: THE ERROR THIS RECORDS, AND IT WAS MINE. An earlier version added
+#: `OUR_REQUEST_RESPONSE_ROUND_TRIP` to the list above, on the argument that
+#: "the venue answered after we asked, so what we received cannot be older
+#: than the round trip". That argument is FALSE. The round trip measures
+#: TRANSPORT LATENCY. A server can answer in 20 ms with a snapshot it cached
+#: minutes ago, or with a book it has not revalidated against its own
+#: matching engine -- and the fast answer would then have CERTIFIED the stale
+#: data as fresh. A latency measurement cannot bound an upstream age, and
+#: treating it as one is exactly the assumption substituted for evidence that
+#: this whole check exists to refuse.
+#:
+#: The three instants are still recorded, because they are real observations
+#: and they are useful -- they bound OUR contribution to the delay and they
+#: say when the decision was taken. They are labelled for what they are, and
+#: none of them establishes upstream freshness.
+OUR_OWN_TIMESTAMPS = (
+    "OUR_REQUEST_SENT_AT",
+    "OUR_RESPONSE_RECEIVED_AT",
+    "OUR_DECISION_TAKEN_AT",
+)
+OUR_TRANSPORT_LATENCY = "OUR_TRANSPORT_LATENCY_NOT_AN_UPSTREAM_AGE"
+
+#: HOW UPSTREAM FRESHNESS IS ADMITTED, as a stated policy rather than a
+#: derived bound. The endpoint's supported contract has to say what its
+#: timestamp denotes; until it does, an absent or unparseable venue clock
+#: leaves the age UNMEASURED and the candidate is refused. That is a policy
+#: decision with a reason, not a mathematical claim.
+FRESHNESS_ADMISSION_POLICY = {
+    "upstream_age_is_established_only_by": list(FRESHNESS_BASIS_ESTABLISHED),
+    "our_own_timestamps_are": ("separately labelled observations of OUR "
+                              "transport and OUR decision instant. They "
+                              "bound our contribution to the delay and "
+                              "nothing about the upstream state"),
+    "why_transport_latency_is_not_an_age": (
+        "a server can answer in 20 ms with a snapshot cached minutes ago. A "
+        "fast response carrying an old or unverified snapshot would be "
+        "certified fresh by any latency-derived bound"),
+    "when_the_venue_clock_is_absent_or_unparseable": (
+        "the upstream age is UNMEASURED and the candidate is refused. This "
+        "is the stated policy; it is not a claim that the book was stale"),
+    "what_would_change_it": (
+        "the venue's published contract stating what `marketData."
+        "transactTime` denotes -- a response stamp or a last-book-change "
+        "stamp -- or an endpoint that returns a revalidation instant. Until "
+        "one of those is in hand the refusal stands"),
+}
 FRESHNESS_BASIS_UNESTABLISHED = (
     "VENUE_CLOCK_NOT_PROVIDED",
     "VENUE_CLOCK_UNPARSEABLE",
