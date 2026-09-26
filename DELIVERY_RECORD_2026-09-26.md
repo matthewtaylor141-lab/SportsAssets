@@ -35,6 +35,25 @@ COMMAND cookie **alone** and no operator token:
 | the protected worker | untouched, still pinned at `f5d1c05` |
 | the enforced risk rails | digest `a19eb60a28177fc3536487a3e56c7995ab706241a52f32860c1c4b68fa736fb7` — unchanged by this release |
 
+### The gate on this release, compared like for like
+
+Both runs from a **frozen `git archive` checkout**, each with its own freshly
+migrated database, `-p no:randomly`, on the same machine within minutes of
+each other:
+
+| run | commit | duration | failed | the three P&L pins | the race arithmetic pin |
+|---|---|---|---|---|---|
+| `GATE_BASE8` | baseline `6d75275` | 447.61 s | **178** | present | present |
+| `GATE_REL5` | this release `60de482` | 460.91 s | **178** | present | present |
+
+**The two failure-identity sets are byte-identical** — `comm` reports nothing
+new and nothing gone, and nothing newly passing. So this release introduces
+**no failure identity**. The earlier 177-versus-174 reading was a
+run-condition artefact, and both of its causes are now identified below.
+
+It is still not a clean gate: 178 pre-existing failures remain, and two of
+them are explained here rather than fixed.
+
 ## The completed demonstration, in production
 
 One position, the whole deployed lifecycle, **chosen inputs**:
@@ -352,25 +371,74 @@ they read UNKNOWN and refuse.
   "unattributed" — understated this; it is attributable to run conditions,
   and not to the diff.
 
-  **The mechanism is consistent with, but not yet proven to be, elapsed
-  wall-clock.** The file imports the mirror lane's fakes, which capture
-  `NOW = time.time()` **at collection**, while the planner under test reads
-  the real clock **when the test runs** — two moments that are minutes apart
-  in a full suite. The failing assertion is a `reduce_ref` clock seeded from
-  `fills_clock`, which falls back to `now − 3000` when the fake holds no
-  fill.
+  **The mechanism, now reproduced.** The file imports the mirror lane's
+  fakes, which capture `NOW = time.time()` **at collection**, while a path
+  under test reads the **real** clock when the test runs. A one-file
+  reproducer injects exactly that gap and nothing else — a
+  `pytest_collection_finish` hook that sleeps, committed as
+  `backend/tools/pnl_clock_gap_plugin.py`:
 
-  **What the bounded reproducer has and has not shown.** A one-file
-  reproducer that injects the gap directly (`pytest_collection_finish`
-  sleeps, so collection and execution are N seconds apart) passes at 0 s and
-  at 120 s. Longer gaps, and the same file under machine load, are still
-  being measured. Neither half of the suite reproduces it alone — the 339
-  files collected before the target do not, and the 196 after do not — so
-  if it is not elapsed time, it is an interaction that needs both sides.
+  ```
+  cd backend
+  RN1X_TEST_DSN=... DATABASE_URL=... ADMIN_TOKEN=t PNL_REPRO_DELAY_S=300 \
+    python3 -m pytest tests/test_pnl_l34_review_pins.py -q -p no:randomly \
+            -p tools.pnl_clock_gap_plugin
+  ```
 
-  **Not done:** the reproducer does not yet reproduce. Until it does, the
-  three are open, the gate is not clean, and none of this release's evidence
-  depends on that file.
+  | gap between collection and execution | result |
+  |---|---|
+  | 0 s | 10 passed |
+  | 120 s | 10 passed |
+  | 240 s | 10 passed |
+  | **270 s** | **3 failed** — h1, m1, the fast-tick drift pin |
+  | **300 s** | **5 failed** — those, plus m2 and the per-market read |
+
+  The failing set **grows with the gap**, and the three the gate reports are
+  a subset of the 300 s set. Two further results fix the mechanism: importing
+  all 536 modules while running **only** the three suspects gives **3
+  passed**, so it is not an import-time effect; and running the whole
+  339-file prefix reaches the file at **243 s elapsed** with **0** of them
+  failing — just inside the threshold. In a 460 s suite the file runs about
+  300 s in; in a 415 s suite, sooner. That is the duration correlation,
+  explained.
+
+  **What this means, stated plainly.** It is a pre-existing clock-discipline
+  problem in the mirror lane — a path reading the wall clock instead of the
+  `now_ts` its tick was handed — surfaced by suite duration. It is not
+  attributable to this release, and no evidence in this record depends on
+  that file. **It is still open: nothing in it has been fixed.**
+
+## One more gate failure, and why it is arithmetic and not a regression
+
+An earlier baseline run reported **177** where the runs today report **178**.
+The extra identity is
+`tests/test_run834_retention_and_races.py::test_race_update_one_microsecond_before_receipt_is_the_zero_ms_state`,
+and it is **not caused by this release**: it fails *standalone* in all three
+frozen checkouts, the baseline included, and it is in the baseline's own
+same-day gate set.
+
+The cause is float64 resolution. The test reads `clock.now()` — whose
+`monotonic` field is `time.monotonic()`, i.e. container uptime — subtracts
+one microsecond, and asserts the difference is `0.001 ms ± 1e-9`. The ulp of
+a double doubles at 2¹⁶ = 65,536 s:
+
+| monotonic | ulp | measured | error vs 0.001 ms | verdict |
+|---|---|---|---|---|
+| 40,000 s | 7.276e-12 | 0.001000000339 | 3.4e-10 | passes |
+| 60,000 s | 7.276e-12 | 0.001000000339 | 3.4e-10 | passes |
+| **66,995 s** | **1.455e-11** | 0.000999993063 | **6.9e-9** | **fails** |
+
+This container crossed 65,536 s (18.20 h) of uptime during the session and
+is at 18.61 h, which is why sixteen earlier gate runs passed this test and
+this one did not. **The fix is one line in the test** — scale the tolerance
+to `math.ulp(base.monotonic)`, or build the `Instant` from a small fixed base
+instead of the live monotonic clock. It is **not changed here**: it is an
+assertion in a lane this delivery does not touch, and you should know it is
+an arithmetic boundary rather than a regression, because it will appear in
+every gate run on a long-lived machine from now on.
+
+## Open, and not claimed as clean (continued)
+
 - `MAX_EVENT_EXPOSURE` still cannot see held positions on the same event
   (`OPEN_BOOK_SQL` selects no event key).
 - `render-ops.yml` is 422 bytes under GitHub's 512,000-byte workflow ceiling.
