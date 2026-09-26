@@ -3602,6 +3602,7 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
     one to fill it.
     """
     from . import command_rn1x as RN
+    from .. import bettor_external_shadow as ext
 
     response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
     response.headers["Pragma"] = "no-cache"
@@ -3696,6 +3697,28 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
             "forced and no edge was invented")
     else:
         opps["verdict"] = "ADMISSIBLE_CANDIDATES_PRESENT"
+
+    # ── DID THE ENGINE DECIDE, OR COULD IT NOT EVALUATE? ─────────────
+    #
+    # NO_TRADE alone cannot tell those apart, and they need different
+    # actions: one is "wait for a better market", the other is "fix
+    # something". Every candidate's refusals are classified and the cycle
+    # carries the verdict that follows from the classification.
+    per_candidate = [list(c.get("refusals") or []) for c in cands]
+    for row in ((cycle or {}).get("mapped_candidate_ledger") or []):
+        first = row.get("first_refusal")
+        per_candidate.append(list(row.get("all_refusals")
+                                  or ([first] if first else [])))
+    ev_cycle = ext.cycle_evaluability(per_candidate)
+    opps["evaluability"] = ev_cycle
+    opps["evaluability_note"] = (
+        "a working engine that declines every candidate and an engine that "
+        "could not evaluate them both end in NO_TRADE. These counts are what "
+        "separates them, and an unclassified refusal code is reported as "
+        "drift rather than folded into either")
+    opps["per_candidate_evaluability"] = [
+        {"first_refusal": (r or [None])[0],
+         "class": ext.evaluability(r)} for r in per_candidate[:40]]
     opps["audit"] = {"experiment_id": (ev or {}).get("experiment_id"),
                      "policy": (ev or {}).get("policy")}
     out["opportunities"] = opps

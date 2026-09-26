@@ -661,6 +661,206 @@ STAGE_ORDER = [name for name, _ in STAGES]
 STAGE_UNCLASSIFIED = "9_UNCLASSIFIED_REFUSAL"
 
 
+# ── IS THIS A DECISION OR AN INABILITY? ─────────────────────────────
+#
+# THE QUESTION THIS ANSWERS. A cycle that ends NO_TRADE can mean two
+# completely different things, and the census could not tell them apart:
+#
+#   * the engine EVALUATED the candidates and declined them -- no positive
+#     edge, a rail with no headroom, a stated payout conflict, a quote whose
+#     age was measured and too old. That is a working engine reporting that
+#     there was nothing to do.
+#
+#   * the engine COULD NOT EVALUATE them -- a book it never read, a fair
+#     value it could not establish, a contract whose period was never
+#     bound, a clock that was not measured. That is not an absence of
+#     opportunity. It is an absence of an answer, and reporting it as
+#     "no opportunity" is the single most misleading thing this lane could
+#     do.
+#
+# So every refusal is classified, and a cycle carries a verdict built from
+# the classification rather than from the trade count. An unclassified code
+# is reported BY NAME as UNCLASSIFIED -- never folded into either bucket,
+# because a drifted table must not quietly become "the engine was fine".
+
+#: The engine reached a judgement on evidence it had. NO_TRADE here is an
+#: answer.
+DECIDED = "DECIDED_ON_THE_EVIDENCE"
+#: The engine lacked an input it needs. NO_TRADE here is not an answer.
+COULD_NOT_EVALUATE = "COULD_NOT_EVALUATE"
+#: A subclass of COULD_NOT_EVALUATE: the missing input is SOMEONE ELSE'S --
+#: the venue or the provider refused, errored or does not carry it. Separated
+#: because the remedy is a conversation with them, not a code change here.
+EXTERNAL_DEPENDENCY = "EXTERNAL_DEPENDENCY"
+EVALUABILITY_UNCLASSIFIED = "UNCLASSIFIED_REFUSAL"
+
+#: THE CLASSIFICATION, by refusal code. Each entry is a judgement about
+#: whether the lane HAD what it needed, and the comment says why.
+EVALUABILITY_OF = {
+    # ── DECIDED: evidence was present and the answer was no ──────────
+    "NO_ACTION_HAS_POSITIVE_NET_EDGE": DECIDED,
+    "RISK_GATE_BLOCKED": DECIDED,
+    "NO_RAIL_HEADROOM_FOR_ANY_POSITION": DECIDED,
+    "NO_OBSERVED_DEPTH_INSIDE_THE_BREAK_EVEN_LIMIT": DECIDED,
+    "UNFILLED_NOTIONAL": DECIDED,
+    # A MEASURED AGE PAST THE LIMIT IS A DECISION. The clock was read and
+    # the price was too old; nothing was missing.
+    "QUOTE_STALE": DECIDED,
+    "VENUE_BOOK_STALE": DECIDED,
+    "VENUE_QUOTE_STALE": DECIDED,
+    # A STATED PAYOUT CONFLICT IS A DECISION, and the most important one in
+    # this table: both sides published a rule and the payouts differ. It is
+    # preserved as a refusal on purpose and must never be relaxed into a
+    # capability gap to make the funnel look better.
+    "SETTLEMENT_TERMS_CONFLICT": DECIDED,
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": DECIDED,
+    "OVERTIME_RULE_CONFLICTS_WITH_BOOK_RULE": DECIDED,
+    # A SEGMENT SCOPE IS A DECISION: the contract pays on part of the
+    # fixture, and this lane prices whole fixtures.
+    "VENUE_MARKET_SCOPE_IS_A_SEGMENT": DECIDED,
+    "PAYOUT_OUTCOME_DISAGREES_WITH_THE_VENUE_INTENT": DECIDED,
+
+    # ── COULD NOT EVALUATE: an input we need was not established ──────
+    "INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "NO_QUALIFIED_MODEL": COULD_NOT_EVALUATE,
+    "THIN_OUTCOME_COVERAGE": COULD_NOT_EVALUATE,
+    "ONE_CLOCK_IS_NOT_MEASURED": COULD_NOT_EVALUATE,
+    "PAYOUT_OUTCOME_INDEX_NOT_BOUND_TO_A_TOKEN": COULD_NOT_EVALUATE,
+    "VENUE_CONTRACT_PERIOD_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "VENUE_CONTRACT_KIND_IS_NOT_A_CONFIRMED_MONEYLINE": COULD_NOT_EVALUATE,
+    "VENUE_SLUG_DOES_NOT_DECOMPOSE_INTO_EVENT_AND_SIDE": COULD_NOT_EVALUATE,
+    "VENUE_EVENT_IS_NOT_A_TWO_PARTICIPANT_MATCH": COULD_NOT_EVALUATE,
+    "VENUE_EVENT_TITLE_NOT_CAPTURED": COULD_NOT_EVALUATE,
+    "VENUE_MARKET_TYPE_METADATA_NOT_RETAINED": COULD_NOT_EVALUATE,
+    "VENUE_MARKET_TYPE_IS_UNSPECIFIED": COULD_NOT_EVALUATE,
+    "VENUE_MARKET_TYPE_IS_NOT_A_WINNER_STRUCTURE": COULD_NOT_EVALUATE,
+    "VENUE_MARKET_SCOPE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "VENUE_MARKET_SCOPE_CONFLICTS_WITH_THE_IDENTIFIER": COULD_NOT_EVALUATE,
+    "VOID_ABANDONMENT_RULE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "OVERTIME_RULE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "SETTLEMENT_SCOPE_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "UNRESOLVED_SETTLEMENT_SEMANTICS": COULD_NOT_EVALUATE,
+    "EXECUTION_ESTIMATE_NOT_IDENTIFIED": COULD_NOT_EVALUATE,
+    "P_FILL_NOT_IDENTIFIED": COULD_NOT_EVALUATE,
+    "RAIL_HEADROOM_NOT_MEASURED": COULD_NOT_EVALUATE,
+    "ACTION_EXPOSURE_EFFECT_NOT_IDENTIFIED": COULD_NOT_EVALUATE,
+    "OPEN_SHADOW_BOOK_NOT_READ": COULD_NOT_EVALUATE,
+    "SIZING_POLICY_NOT_APPLICABLE": COULD_NOT_EVALUATE,
+
+    # ── EXTERNAL DEPENDENCY: the missing input is theirs ──────────────
+    "VENUE_BOOK_NOT_READ": EXTERNAL_DEPENDENCY,
+    "VENUE_BOOK_READ_FAILED": EXTERNAL_DEPENDENCY,
+    "VENUE_BOOK_READ_RETURNED_ERROR": EXTERNAL_DEPENDENCY,
+    "VENUE_DOES_NOT_LIST_THIS_FIXTURE": EXTERNAL_DEPENDENCY,
+    "NO_VENUE_CONTRACT_FOR_EVENT": EXTERNAL_DEPENDENCY,
+    "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP": EXTERNAL_DEPENDENCY,
+    "NO_PREMAP_CONTRACT_FOR_THIS_FIXTURE": EXTERNAL_DEPENDENCY,
+}
+
+
+def evaluability(refusals) -> str | None:
+    """Did the lane DECIDE, or could it not evaluate? None when nothing
+    refused.
+
+    THE WORST CASE WINS. A candidate that both could not be valued and had
+    no edge is reported as COULD_NOT_EVALUATE, because the edge was computed
+    from an input that was not established. Order of severity:
+    EXTERNAL_DEPENDENCY, then COULD_NOT_EVALUATE, then DECIDED.
+    """
+    codes = [str(c) for c in (refusals or [])]
+    if not codes:
+        return None
+    seen = {EVALUABILITY_OF.get(c, EVALUABILITY_UNCLASSIFIED) for c in codes}
+    for worst in (EVALUABILITY_UNCLASSIFIED, EXTERNAL_DEPENDENCY,
+                  COULD_NOT_EVALUATE, DECIDED):
+        if worst in seen:
+            return worst
+    return None
+
+
+#: What a cycle is allowed to conclude, and when.
+V_NO_OPPORTUNITY = "NO_OPPORTUNITY_ON_A_FUNCTIONING_EVALUATION"
+V_EVALUATION_INCOMPLETE = "EVALUATION_INCOMPLETE"
+V_BLOCKED_EXTERNALLY = "BLOCKED_ON_AN_EXTERNAL_DEPENDENCY"
+V_ADMITTED = "AT_LEAST_ONE_CANDIDATE_WAS_ADMITTED"
+V_NOTHING_REACHED_EVALUATION = "NOTHING_REACHED_EVALUATION"
+V_NO_OPPORTUNITY_WITH_GAPS = ("NO_OPPORTUNITY_AMONG_THOSE_EVALUATED_"
+                              "WITH_SOME_NOT_EVALUABLE")
+V_CLASSIFICATION_HAS_DRIFTED = "REFUSAL_CLASSIFICATION_HAS_DRIFTED"
+
+
+def cycle_evaluability(per_candidate) -> dict:
+    """THE CYCLE'S OWN VERDICT, from the classification and not the count.
+
+    `per_candidate` is an iterable of refusal lists (one per candidate that
+    reached the mapping). The verdict distinguishes an engine that worked
+    and found nothing from an engine that could not answer -- which is the
+    difference between "wait for a better market" and "fix something".
+    """
+    rows = [list(r or []) for r in (per_candidate or [])]
+    counts = {DECIDED: 0, COULD_NOT_EVALUATE: 0, EXTERNAL_DEPENDENCY: 0,
+              EVALUABILITY_UNCLASSIFIED: 0}
+    admitted = 0
+    for r in rows:
+        k = evaluability(r)
+        if k is None:
+            admitted += 1
+        else:
+            counts[k] += 1
+    evaluated = counts[DECIDED] + admitted
+    out = {"candidates": len(rows), "admitted": admitted, "counts": counts,
+           "evaluated_to_a_judgement": evaluated,
+           "could_not_be_evaluated": (counts[COULD_NOT_EVALUATE]
+                                      + counts[EXTERNAL_DEPENDENCY]
+                                      + counts[EVALUABILITY_UNCLASSIFIED])}
+    if not rows:
+        return dict(out, verdict=V_NOTHING_REACHED_EVALUATION,
+                    why=("no candidate reached the mapping, so the engine "
+                         "was not exercised at all this cycle"))
+    gaps = out["could_not_be_evaluated"]
+    unknown_codes = sorted({str(c) for r in rows for c in r
+                            if str(c) not in EVALUABILITY_OF})
+    out["unclassified_codes"] = unknown_codes
+    if unknown_codes:
+        # A DRIFTED TABLE IS ITS OWN FINDING. Folding an unknown code into
+        # "external" would let a new refusal quietly become somebody else's
+        # fault, and folding it into "decided" would let it become "no
+        # opportunity". Neither is knowable, so it is named.
+        return dict(out, verdict=V_CLASSIFICATION_HAS_DRIFTED,
+                    why=("%d refusal code(s) are not in this lane's "
+                         "evaluability table (%s), so whether the engine "
+                         "decided or could not evaluate is UNKNOWN for them"
+                         % (len(unknown_codes), ", ".join(unknown_codes))))
+    if admitted:
+        return dict(out, verdict=V_ADMITTED)
+    if evaluated and not gaps:
+        return dict(out, verdict=V_NO_OPPORTUNITY,
+                    why=("every candidate was evaluated on evidence the "
+                         "lane had, and each was declined. This is a "
+                         "working engine reporting no opportunity"))
+    if evaluated and gaps:
+        # PROPORTIONATE, NOT EITHER EXTREME. Saying "blocked" when 45 of 53
+        # candidates were judged is as wrong as saying "no opportunity" when
+        # 8 were never evaluated. Both counts are in the verdict.
+        return dict(out, verdict=V_NO_OPPORTUNITY_WITH_GAPS,
+                    why=("%d candidate(s) were evaluated on evidence the "
+                         "lane had and declined -- that part of the engine "
+                         "worked -- and %d could not be evaluated at all "
+                         "(%d of those on an external dependency). The "
+                         "second group says NOTHING about opportunity"
+                         % (evaluated, gaps, counts[EXTERNAL_DEPENDENCY])))
+    if counts[EXTERNAL_DEPENDENCY] >= counts[COULD_NOT_EVALUATE]:
+        return dict(out, verdict=V_BLOCKED_EXTERNALLY,
+                    why=("NOTHING was evaluated, and the largest group "
+                         "failed because the venue or the provider did not "
+                         "supply an input. NO_TRADE here is not a statement "
+                         "about opportunity at all"))
+    return dict(out, verdict=V_EVALUATION_INCOMPLETE,
+                why=("nothing reached a judgement: %d candidate(s) could "
+                     "not be evaluated. A cycle in this state must NOT be "
+                     "read as 'no opportunity'" % gaps))
+
+
 def first_stage(refusals) -> str | None:
     """The EARLIEST pipeline stage any of these refusals belongs to.
 

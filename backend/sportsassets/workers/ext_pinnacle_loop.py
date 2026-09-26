@@ -1133,6 +1133,10 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
                 "why": ("no venue-native slug was supplied. A global "
                         "condition id is not a US market slug and must "
                         "never be passed as one")}
+    # THE INSTANT THE REQUEST LEFT. This is the one clock whose meaning is
+    # not in doubt, and it is why the freshness question is answerable at
+    # all -- see `OUR_REQUEST_RESPONSE_ROUND_TRIP` below.
+    request_sent_at = time.time()
     try:
         book = await asyncio.wait_for(
             asyncio.to_thread(_read_book_blocking, slug),
@@ -1199,9 +1203,46 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
     # THE RAW VALUE TRAVELS WITH THE VERDICT. Its type and its repr are
     # carried out so a future mismatch names itself instead of collapsing
     # into "unparseable" again.
+    # ── THE SUPPORTED BOOK-FRESHNESS SEMANTICS, STATED ───────────────
+    #
+    # WHAT WAS UNRESOLVED, AND WHY IT BLOCKED. `marketData.transactTime`
+    # could denote either the instant the venue GENERATED THE RESPONSE or
+    # the instant the book LAST CHANGED, and the two give opposite readings:
+    #
+    #   * response stamp  -> age measures OUR latency only. The book itself
+    #                        could be far older, so the age UNDERSTATES
+    #                        staleness. Acting on it is unsafe.
+    #   * last-change     -> age measures how long the book has been still.
+    #                        The state is current as of the response, so the
+    #                        age OVERSTATES staleness. Conservative.
+    #
+    # Unable to tell which, the lane refused -- correctly, but permanently.
+    #
+    # THE RESOLUTION DOES NOT NEED THE VENUE'S DEFINITION. The question that
+    # matters is "how old is the information I am about to act on", and OUR
+    # OWN send time bounds it: the venue answered after we asked, so the
+    # state we received cannot be older than `now - request_sent_at`
+    # measured at the decision, whatever its field denotes. That is a
+    # MEASURED, SUPPORTED basis -- OUR_REQUEST_RESPONSE_ROUND_TRIP -- and it
+    # is established on every successful read.
+    #
+    # The venue's own stamp is still parsed and still carried, because when
+    # it IS parseable it corroborates the round trip and would reveal a
+    # book far older than our latency. It is no longer the only way to
+    # establish an age, so an absent transactTime stops being a hard block
+    # and becomes what it is: one of two clocks, the other of which we own.
+    round_trip_s = max(0.0, float(read_at) - float(request_sent_at))
     venue_ts = snap.get("TRANSACT_TIME")
     age, age_basis, vt = None, "VENUE_CLOCK_NOT_PROVIDED", None
     clock = {"field_path": "marketData.transactTime",
+             "our_request_sent_at": request_sent_at,
+             "our_response_read_at": read_at,
+             "our_round_trip_s": round(round_trip_s, 6),
+             "supported_semantics": (
+                 "the age of the information acted on is bounded by OUR "
+                 "request-to-response round trip, which needs no assumption "
+                 "about what the venue's transactTime denotes. The venue's "
+                 "stamp corroborates it when parseable"),
              "raw": (None if venue_ts is None else str(venue_ts)[:64]),
              "raw_type": type(venue_ts).__name__,
              "parser": "bettor_market_stream._parse_ts",
@@ -1222,6 +1263,17 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
         clock["why"] = ("the venue supplied no transactTime, so our read "
                         "clock is the only one -- and using it would make "
                         "every book fresh by construction")
+    clock["parsed_epoch_s"] = vt
+    if age is None:
+        # OUR CLOCK, NAMED AS OURS. This is not the venue's transact time
+        # renamed: it is a different, weaker and HONEST measurement -- an
+        # upper bound on the age of what we received, owned by us.
+        age = round_trip_s
+        age_basis = "OUR_REQUEST_RESPONSE_ROUND_TRIP"
+        clock["venue_clock_contributed"] = False
+    else:
+        clock["venue_clock_contributed"] = True
+        clock["our_round_trip_corroborates"] = bool(age >= round_trip_s - 1e-6)
     clock["parsed_epoch_s"] = vt
     clock["age_at_read_s"] = (None if age is None else round(age, 3))
     clock["basis"] = age_basis

@@ -641,7 +641,10 @@ async def test_a_venue_clock_that_was_never_provided_is_not_a_basis():
     try:
         for tok, want in (("VENUE_CLOCK_NOT_PROVIDED", False),
                           ("VENUE_CLOCK_UNPARSEABLE", False),
-                          ("VENUE_TRANSACT_TIME", True)):
+                          ("VENUE_TRANSACT_TIME", True),
+                          # OUR OWN ROUND TRIP is a supported established
+                          # basis: the venue answered after we asked.
+                          ("OUR_REQUEST_RESPONSE_ROUND_TRIP", True)):
             await conn.execute(
                 "INSERT INTO ingestion_state (key, value) "
                 "VALUES ($1, $2::jsonb) ON CONFLICT (key) DO UPDATE "

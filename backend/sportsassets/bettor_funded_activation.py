@@ -265,6 +265,13 @@ async def account_selection(conn, account_id: str) -> dict:
 FRESHNESS_BASIS_ESTABLISHED = (
     "VENUE_TRANSACT_TIME",
     "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION",
+    # OUR OWN CLOCK, AND THE ONE WHOSE MEANING IS NOT IN DOUBT. The venue
+    # answered after we asked, so the state we received cannot be older than
+    # our request-to-response round trip -- whatever `transactTime` denotes.
+    # It is a weaker measurement than the venue's stamp and it is HONEST:
+    # an upper bound we own, established on every successful read. See the
+    # supported-semantics note in `workers/ext_pinnacle_loop`.
+    "OUR_REQUEST_RESPONSE_ROUND_TRIP",
 )
 FRESHNESS_BASIS_UNESTABLISHED = (
     "VENUE_CLOCK_NOT_PROVIDED",
