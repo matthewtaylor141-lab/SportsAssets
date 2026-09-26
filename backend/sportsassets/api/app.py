@@ -2921,6 +2921,210 @@ async def command_center_snapshot(response: Response) -> dict:
         }) from inc
 
 
+@app.get("/api/command/bettor/desk",
+         dependencies=[Depends(require_command)])
+async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
+                      limit: int = Query(40, ge=1, le=120)) -> dict:
+    """THE BETTOR EV ENGINE'S OPERATING HANDOFF, in one read.
+
+    WHAT THIS IS AND IS NOT. It ASSEMBLES readers that already exist --
+    `command_rn1x.statuses/_control/_pnl_status/entry_evidence/positions`
+    and the scheduled lane's own heartbeat -- under the product's
+    vocabulary: Controls, Opportunities, Orders, Positions, Management,
+    Performance. It computes no new economics, holds no mutating
+    statement, opens no venue client and decides nothing. The internal
+    experiment and policy identifiers are PRESERVED in `audit` on every
+    section, because renaming a heading must not detach a figure from the
+    row it came from.
+
+    THE LANES ARE SEPARATE BOOKS AND ARE NOT ADDED TOGETHER:
+
+      autonomous_research      what the scheduler decided on CURRENT
+                               markets, in research mode, unfunded.
+      controlled_demonstration the labelled scenario that proves the
+                               software runs end to end. EXCLUDED from
+                               strategy performance.
+      historical_benchmark     replayed history. Not autonomous output.
+      acceptance               the synthetic, modelled, unfunded position
+                               used to exercise the lifecycle.
+
+    Mixing them is the specific misreport this shape exists to prevent:
+    a copied, historical or synthetic fill is not Bettor performance.
+
+    NO_TRADE IS A RESULT. When the scheduler admitted nothing, this says
+    NO_TRADE and lists the exact gate each candidate stopped at. It does
+    not present an empty screen as an absence of opportunity, nor invent
+    one to fill it.
+    """
+    from . import command_rn1x as RN
+
+    response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate"
+    response.headers["Pragma"] = "no-cache"
+    pool = await get_pool()
+
+    out: dict = {"product": "Bettor EV Engine",
+                 "view": "OPERATING_HANDOFF_V1",
+                 "as_of": datetime.now(timezone.utc).isoformat(),
+                 "funded_submission": "DISABLED",
+                 "reads_only": True,
+                 "lanes_are_separate_books": True}
+
+    # ── CONTROLS: build identity, mode, heartbeat, control state ─────
+    controls: dict = {"section": "Controls"}
+    try:
+        controls["control_state"] = await RN._control(pool)
+    except Exception as exc:                                    # noqa: BLE001
+        controls["control_state"] = {"error": type(exc).__name__}
+    try:
+        hb = await RN._heartbeat(pool)
+    except Exception as exc:                                    # noqa: BLE001
+        hb = {"error": type(exc).__name__}
+    controls["scheduler_heartbeat"] = hb
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key = $1",
+            "ext_pinnacle_last_cycle")
+        cycle = json.loads(raw) if raw else {}
+    except Exception as exc:                                    # noqa: BLE001
+        cycle = {"error": type(exc).__name__}
+    controls["research_mode"] = {
+        "label": "RESEARCH — UNFUNDED SHADOW",
+        "env_flag": "EXT_PINNACLE_SHADOW",
+        "env_flag_set": bool(os.getenv("EXT_PINNACLE_SHADOW")),
+        "submits_orders": False,
+        "why": ("research mode has no funded submission path: the lane's "
+                "only writer CHECKs order_submitted FALSE and the "
+                "venue-boundary gate authorises every submission "
+                "independently of this view"),
+    }
+    controls["build_identity"] = (cycle or {}).get("writer")
+    controls["last_cycle_at"] = (cycle or {}).get("at")
+    controls["cycle_state"] = (cycle or {}).get("state")
+    controls["cycle_label"] = (cycle or {}).get("cycle_label")
+    controls["audit"] = {"heartbeat_key": "ext_pinnacle_last_cycle",
+                         "control_key_module": "bettor_external_shadow"}
+    out["controls"] = controls
+
+    # ── OPPORTUNITIES: the funnel, and the exact blocker per candidate ──
+    opps: dict = {"section": "Opportunities",
+                  "universe": (cycle or {}).get("venue_universe_by_label"),
+                  "markets_considered": (cycle or {}).get(
+                      "markets_considered"),
+                  "funnel": (cycle or {}).get("funnel_by_provider_sport"),
+                  "refusals": (cycle or {}).get("refusals"),
+                  "first_refusal_per_mapped_candidate": (cycle or {}).get(
+                      "mapped_candidate_ledger"),
+                  "venue_errors": (cycle or {}).get("venue_errors")}
+    try:
+        ev = await RN.entry_evidence(pool, hours=int(hours),
+                                     limit=int(limit))
+    except Exception as exc:                                    # noqa: BLE001
+        ev = {"error": type(exc).__name__}
+    cands = list((ev or {}).get("candidates") or [])
+    opps["candidates"] = cands
+    opps["calibration"] = (ev or {}).get("source_calibration")
+    opps["fair_value_source"] = {
+        "name": "PINNACLE_DEVIG_V1",
+        "kind": "EXTERNAL_BOOKMAKER_DEVIGGED_PROBABILITY",
+        "is_an_internally_trained_model": False,
+        "why": ("this is a de-vigged price from an external bookmaker, "
+                "identified as such. It is NOT an independently trained "
+                "internal model and must not be presented as one"),
+    }
+    admitted = [c for c in cands if c.get("admissible")]
+    opps["admissible_count"] = len(admitted)
+    if not admitted:
+        blockers: dict = {}
+        for c in cands:
+            first = (c.get("refusals") or [None])[0]
+            if first:
+                blockers[first] = blockers.get(first, 0) + 1
+        for row in ((cycle or {}).get("mapped_candidate_ledger") or []):
+            first = row.get("first_refusal")
+            if first:
+                blockers[first] = blockers.get(first, 0) + 1
+        opps["verdict"] = "NO_TRADE"
+        opps["no_trade_reasons"] = blockers
+        opps["no_trade_note"] = (
+            "NO_TRADE is a result, not an empty screen. Every count above "
+            "is a named gate a specific candidate stopped at; no order was "
+            "forced and no edge was invented")
+    else:
+        opps["verdict"] = "ADMISSIBLE_CANDIDATES_PRESENT"
+    opps["audit"] = {"experiment_id": (ev or {}).get("experiment_id"),
+                     "policy": (ev or {}).get("policy")}
+    out["opportunities"] = opps
+
+    # ── POSITIONS / ORDERS / MANAGEMENT, per separate book ───────────
+    try:
+        pos = await RN.positions(pool, limit=int(limit))
+    except Exception as exc:                                    # noqa: BLE001
+        pos = []
+    books: dict = {}
+    for row in pos:
+        lane = str(row.get("provenance") or row.get("lane")
+                   or "UNCLASSIFIED").upper()
+        books.setdefault(lane, []).append(row)
+    out["positions"] = {
+        "section": "Positions",
+        "books": {k: {"count": len(v), "rows": v[:20]}
+                  for k, v in sorted(books.items())},
+        "note": ("separate books, never summed. A historical, copied or "
+                 "synthetic holding is not autonomous Bettor inventory"),
+        "trace_link_template": "/api/command/rn1x/trace/{position_id}",
+        "audit": {"reader": "command_rn1x.positions"},
+    }
+    out["orders"] = {
+        "section": "Orders",
+        "note": ("simulated orders and fills only. Every fill is MODELLED "
+                 "and licensed by an observed print at a declared queue "
+                 "share; P_FILL stays NOT_IDENTIFIED"),
+        "open_inventory_rows": (ev or {}).get("inventory"),
+        "trace_link_template": "/api/command/rn1x/trace/{position_id}",
+    }
+
+    # ── PERFORMANCE: realised, fees, unrealised, mark age, unmarked ──
+    try:
+        pnl = await RN._pnl_status(pool)
+    except Exception as exc:                                    # noqa: BLE001
+        pnl = {"error": type(exc).__name__}
+    out["performance"] = {
+        "section": "Performance",
+        "per_lane": (pnl or {}).get("lanes"),
+        "mark_basis": (pnl or {}).get("unrealised_basis"),
+        "why_not_a_midpoint": (pnl or {}).get("why_not_a_midpoint"),
+        "rebates": (pnl or {}).get("rebates"),
+        "note": ("realised, fees, unrealised and total are reported PER "
+                 "LANE and are not added across lanes. Unmarked inventory "
+                 "is shown as unmarked rather than valued at zero"),
+        "audit": {"reader": "command_rn1x._pnl_status"},
+    }
+
+    # ── WHAT THIS VIEW DOES NOT RESOLVE, stated rather than implied ──
+    out["open_limitations"] = {
+        "venue_book_freshness": (
+            "UNRESOLVED. What `marketData.transactTime` denotes is not "
+            "established -- a response stamp and a last-book-change stamp "
+            "produce the same field and opposite readings -- so the "
+            "explicit refusal is retained and the 30 s limits are unmoved. "
+            "institutional_book's 5 s contract measures OUR CACHED COPY "
+            "and does not transfer to a read made at the decision"),
+        "settlement_compatibility": (
+            "PER FIXTURE, at evaluation time, from the venue's own prose. "
+            "Where a rule is not stated the comparison returns UNKNOWN and "
+            "the entry refuses. This view does not resolve it"),
+        "market_scope_metadata": (
+            "scope comes from `sportsMarketType`'s own scope token; a "
+            "winner STRUCTURE from `sportsMarketTypeV2` cannot establish "
+            "it, because a full game and a half share one v2 value. The "
+            "published Sports Schema is retrieved on the runner and the "
+            "token sets are provisional until it is in hand"),
+        "not_resolved_by_this_metadata_repair": [
+            "venue book freshness", "settlement compatibility"],
+    }
+    return out
+
+
 @app.get("/api/command/center/describe",
          dependencies=[Depends(require_command)])
 async def command_center_describe(response: Response) -> dict:
@@ -7630,6 +7834,18 @@ async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200),
                     if str(m.get("kind") or "") in ("aec", "atc")][:8],
                 "market_kinds": sorted({str(m.get("kind") or "")
                                         for m in mk})[:12],
+                # THE TWO PUBLISHED TYPE FIELDS, TOGETHER AND RAW. v2 is
+                # the STRUCTURE and cannot carry scope -- a full game, a
+                # first half and a second half return the same v2 -- so the
+                # pair has to be read side by side to see which field says
+                # what. Reported verbatim; nothing is derived here.
+                "market_types": [
+                    {"us_slug": m.get("us_slug"),
+                     "kind_diagnostic_only": m.get("kind"),
+                     "sportsMarketTypeV2": m.get("sports_market_type_v2"),
+                     "sportsMarketType": m.get("sports_market_type"),
+                     "team": m.get("team"), "team_id": m.get("team_id")}
+                    for m in mk][:14],
             })
         b = buckets.setdefault(token, {
             "league_token": token, "events": 0,

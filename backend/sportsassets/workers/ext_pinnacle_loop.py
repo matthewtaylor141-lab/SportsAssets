@@ -817,7 +817,7 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
     # from the same table the resolver matched in -- one bounded query, no
     # second resolver.
     pmeta = await period_metadata(conn, out["us_market_slug"])
-    vtype = await asyncio.to_thread(venue_market_type, out["us_market_slug"])
+    vtype = venue_market_type(out["us_market_slug"])
     out["venue_market_type"] = vtype
     period = vmap.period_of_venue_slug(
         out["us_market_slug"],
@@ -835,9 +835,12 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
         participant_witness=pmeta.get("side_norms_on_slug"),
         # THE AUTHORITY. The venue's own market type, from its board rather
         # than from our slug reading. Absent -> the rule refuses by name.
-        sports_market_type_v2=vtype.get("sports_market_type_v2"),
-        sports_market_type=vtype.get("sports_market_type"),
-        type_metadata_available=vtype.get("available"))
+        # v2 is not persisted anywhere this lane may read, so it is None
+        # and v1 carries both structure and scope -- it is strictly more
+        # specific, and the copy lane already trusts it that way.
+        sports_market_type_v2=None,
+        sports_market_type=pmeta.get("sports_type"),
+        type_metadata_available=bool(pmeta.get("sports_type")))
     period["catalogue"] = pmeta
     period["venue_market_type_read"] = vtype
     out["period_evidence"] = period
@@ -908,8 +911,21 @@ EVENT_ROW_SQL = """
 #: contracts it publishes for that event. The count is what separates a
 #: two-participant match (2 or 3) from a trophy or a conference winner
 #: (one per entrant) -- by counting, never by reading a name.
+#: `sports_type` IS `sportsMarketType`. The catalogue writer stamps it from
+#: `m.get("sportsMarketType")` (workers/premap.py) and the copy lane already
+#: trusts it as a scope discriminator -- its `_C7_FULL_TIME` is the literal
+#: `soccer_team_full_time_winner`. So the venue's own market type reaches
+#: this lane through the CATALOGUE, like every other catalogue field, and
+#: the funding guard that permits only `book_read` and `_get_client` off
+#: `pmus` stays exactly as it is. No schema change and no new reader.
+#:
+#: THE COLUMN MAY BE ABSENT. It arrives with the C6 column set (migration
+#: 055 / the bootstrap's ALTER), so the read is written to tolerate its
+#: absence and report it as VENUE_MARKET_TYPE_METADATA_NOT_RETAINED rather
+#: than to fail the query.
 PERIOD_METADATA_SQL = """
     SELECT p1.kind, p1.event_slug, p1.side_norm, p1.event_title,
+           p1.sports_type,
            (SELECT count(DISTINCT p2.market_slug)
               FROM us_premap p2
              WHERE p2.event_slug = p1.event_slug) AS sibling_markets,
@@ -922,74 +938,53 @@ PERIOD_METADATA_SQL = """
 """
 
 
-#: The desk board index, rebuilt when the cache behind it moves. The board
-#: is one cached list the API already holds; this is a dict over it, not a
-#: second sweep.
-_TYPE_INDEX: dict = {"built_from": None, "by_slug": {}}
-
-
 def venue_market_type(us_market_slug: str) -> dict:
-    """The VENUE'S OWN market type for a contract, or a named absence.
+    """THE VENUE'S OWN MARKET TYPE -- WHICH THIS LANE CANNOT YET REACH.
 
-    WHY THIS EXISTS. The venue publishes a Sports Schema and it directs
-    consumers away from parsing identifiers; `sportsMarketTypeV2` is the
-    field that answers what a market prices. `pmus.list_desk_events` was
-    dropping it -- its market rows carried `kind`, which is OUR reading of
-    the slug prefix -- so the period check had nothing but the identifier
-    to work from. The adapter now retains it and this reads it back.
+    THE FIELD EXISTS AND IS RETAINED. `pmus.list_desk_events` now carries
+    `sports_market_type_v2`, `sports_market_type`, `team` and `team_id` on
+    every desk market row, and `/api/admin/venue-competitions?token=` shows
+    them raw.
 
-    An absence is reported as an absence. `available: False` is not
-    `type: None` used as a value, and the period rule refuses on it by its
-    own name rather than falling back to the slug.
+    THE GUARD THAT STOPS THIS LANE READING IT, and it is deliberate.
+    `test_ext_shadow_cannot_fund` asserts that exactly two names are taken
+    off `pmus` here -- `book_read` and `_get_client` -- so the lane cannot
+    acquire a venue capability by accident. An earlier version of this
+    function called `pmus.list_desk_events()`, which is a cache read rather
+    than a venue call, and the guard refused it anyway. THE GUARD IS RIGHT
+    AND IT IS NOT BEING WIDENED: a control that only holds when the thing
+    it blocks looks dangerous is not a control.
+
+    SO THE TYPE IS NOT AVAILABLE TO THIS LANE, AND THAT IS REPORTED RATHER
+    THAN WORKED AROUND. The period rule refuses with
+    VENUE_MARKET_TYPE_METADATA_NOT_RETAINED, which names precisely what is
+    missing and where. The authorized path is for the catalogue writer --
+    the component that already reads the venue's board -- to persist these
+    two fields beside the rest of `us_premap`, which this lane then reads
+    like every other catalogue field. That is a schema change to a shared
+    table and it is NOT bundled into this release.
     """
-    out = {"source": "pmus.list_desk_events", "available": False,
-           "sports_market_type_v2": None, "sports_market_type": None,
-           "team": None, "team_id": None}
-    try:
-        from .. import pmus
-        events = pmus.list_desk_events()
-    except Exception as exc:                                   # noqa: BLE001
-        out["error"] = type(exc).__name__
-        return out
-    # THE INVALIDATION STAMP. An earlier version keyed on
-    # `(id(events), len(events))`; CPython reuses the id of a freed list, so
-    # two different boards with the same event count compared EQUAL and the
-    # index went stale. A test caught it. The desk cache's own timestamp is
-    # the real signal, and the row counts are the tiebreak that survives a
-    # board replaced within one clock tick.
-    try:
-        from .. import pmus as _p
-        ts = (_p._desk_cache or {}).get("ts")
-    except Exception:                                          # noqa: BLE001
-        ts = None
-    n_ev = len(events or [])
-    n_mk = sum(len(ev.get("markets") or []) for ev in (events or []))
-    stamp = (ts, n_ev, n_mk)
-    if _TYPE_INDEX["built_from"] != stamp:
-        idx = {}
-        for ev in events or []:
-            for mk in (ev.get("markets") or []):
-                sl = str(mk.get("us_slug") or "")
-                if sl and sl not in idx:
-                    idx[sl] = mk
-        _TYPE_INDEX["built_from"] = stamp
-        _TYPE_INDEX["by_slug"] = idx
-    row = _TYPE_INDEX["by_slug"].get(str(us_market_slug or ""))
-    if row is None:
-        out["why"] = ("the venue's board carries no market row for this "
-                      "slug, so its own market type is not in hand")
-        return out
-    v2 = row.get("sports_market_type_v2")
-    out.update(sports_market_type_v2=v2,
-               sports_market_type=row.get("sports_market_type"),
-               team=row.get("team"), team_id=row.get("team_id"),
-               available=bool(v2 or row.get("sports_market_type")))
-    if not out["available"]:
-        out["why"] = ("the board row exists and carries no "
-                      "`sportsMarketTypeV2`. Either the venue omits it on "
-                      "this endpoint or the adapter is still dropping it -- "
-                      "and which one it is decides the remedy")
-    return out
+    return {"source": "NOT_AVAILABLE_TO_THIS_LANE",
+            "available": False,
+            "sports_market_type_v2": None, "sports_market_type": None,
+            "team": None, "team_id": None,
+            "why": ("the venue's own market type is retained on the desk "
+                    "board but this lane may not read it: the funding guard "
+                    "permits only `book_read` and `_get_client` off `pmus`, "
+                    "and widening that control to fetch metadata would be "
+                    "the wrong trade. The catalogue writer must persist "
+                    "`sportsMarketTypeV2` and `sportsMarketType` into "
+                    "`us_premap` for this lane to reach them"),
+            "remedy": ("persist the two fields into `us_premap` from the "
+                       "catalogue writer (workers.premap.ensure_schema and "
+                       "its writer), then read them in `period_metadata` "
+                       "beside the rest of the catalogue"),
+            "inspectable_at": ("/api/admin/venue-competitions?token=<league>"
+                               " -> token_events[].market_types")}
+
+
+PERIOD_METADATA_SQL_PRE_C6 = PERIOD_METADATA_SQL.replace(
+    "p1.sports_type,", "NULL::text AS sports_type,")
 
 
 async def period_metadata(conn, us_market_slug: str) -> dict:
@@ -1001,12 +996,27 @@ async def period_metadata(conn, us_market_slug: str) -> dict:
     """
     out = {"source": "us_premap", "read": False, "kind": None,
            "event_slug": None, "side_norm": None, "sibling_markets": None,
-           "event_title": None, "side_norms_on_slug": None}
+           "event_title": None, "side_norms_on_slug": None,
+           "sports_type": None, "sports_type_column_present": None}
     try:
         row = await conn.fetchrow(PERIOD_METADATA_SQL, us_market_slug)
+        out["sports_type_column_present"] = True
     except Exception as exc:                                   # noqa: BLE001
+        # THE C6 COLUMN MAY NOT BE THERE. A database without migration 055
+        # has no `sports_type`, and that is a different fact from the read
+        # failing -- so the pre-C6 query is tried and the absence recorded.
         out["error"] = type(exc).__name__
-        return out
+        try:
+            row = await conn.fetchrow(PERIOD_METADATA_SQL_PRE_C6,
+                                      us_market_slug)
+            out["sports_type_column_present"] = False
+            out.pop("error", None)
+            out["why_no_type"] = (
+                "this database has no `sports_type` column (the C6 set, "
+                "migration 055), so the venue's own market type is not "
+                "retained here and scope cannot be established")
+        except Exception:                                      # noqa: BLE001
+            return out
     if row is None:
         out["why"] = ("the venue's catalogue has no row for this market "
                       "slug, so none of its structured fields exist")
@@ -1016,6 +1026,10 @@ async def period_metadata(conn, us_market_slug: str) -> dict:
                sibling_markets=row["sibling_markets"],
                event_title=row["event_title"],
                side_norms_on_slug=row["side_norms_on_slug"])
+    try:
+        out["sports_type"] = row["sports_type"]
+    except (KeyError, IndexError):
+        out["sports_type"] = None
     return out
 
 

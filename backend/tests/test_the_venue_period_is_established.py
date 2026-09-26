@@ -57,8 +57,13 @@ MATCH_TITLE = "Home Team vs. Away Team"
 MONEYLINE_V2 = "SPORTS_MARKET_TYPE_MONEYLINE"
 
 
+#: The venue's v1 type, which is where SCOPE lives. `_ok` supplies a
+#: full-scope one so the other checks can be exercised.
+FULL_V1 = "baseball_team_full_game_winner"
+
+
 def _ok(slug, *, event_slug, side=None, kind=SIDE, siblings=249,
-        event_title=MATCH_TITLE, witness=2, v2=MONEYLINE_V2, v1=None):
+        event_title=MATCH_TITLE, witness=2, v2=MONEYLINE_V2, v1=FULL_V1):
     return V.period_of_venue_slug(slug, kind=kind, event_slug=event_slug,
                                   side=side, sibling_markets=siblings,
                                   event_title=event_title,
@@ -105,7 +110,10 @@ def test_an_inning_segment_is_refused_on_the_decomposition():
     got = _ok("atc-mlb-atl-mia-2026-09-25-i6-draw",
               event_slug="mlb-atl-mia-2026-09-25", side="draw")
     assert got["period"] is None
-    assert V.R_PERIOD_SHAPE in got["refusals"]
+    # the identifier disagreeing with the venue's own full scope is a
+    # CONFLICT now; the identifier no longer refuses on its own
+    assert V.R_SCOPE_CONFLICT in got["refusals"]
+    assert got["slug_decomposes_cleanly"] is False
 
 
 def test_a_quarter_winner_is_refused_on_the_decomposition():
@@ -113,7 +121,10 @@ def test_a_quarter_winner_is_refused_on_the_decomposition():
     got = _ok("atc-cfb-clmsn-cah-2026-09-25-winner-2q-clmsn",
               event_slug="cfb-clmsn-cah-2026-09-25", side="clmsn")
     assert got["period"] is None
-    assert V.R_PERIOD_SHAPE in got["refusals"]
+    # the identifier disagreeing with the venue's own full scope is a
+    # CONFLICT now; the identifier no longer refuses on its own
+    assert V.R_SCOPE_CONFLICT in got["refusals"]
+    assert got["slug_decomposes_cleanly"] is False
 
 
 @pytest.mark.parametrize("slug,side", [
@@ -149,7 +160,10 @@ def test_a_market_type_outside_the_observed_vocabulary_is_refused():
 def test_a_token_between_the_event_and_the_side_is_refused(slug, ev, side):
     got = _ok(slug, event_slug=ev, side=side)
     assert got["period"] is None, got
-    assert V.R_PERIOD_SHAPE in got["refusals"]
+    # the identifier disagreeing with the venue's own full scope is a
+    # CONFLICT now; the identifier no longer refuses on its own
+    assert V.R_SCOPE_CONFLICT in got["refusals"]
+    assert got["slug_decomposes_cleanly"] is False
 
 
 def test_no_trailing_date_establishes_nothing():
@@ -277,6 +291,9 @@ def test_every_period_refusal_is_declared_and_maps_to_identity():
     from sportsassets import bettor_external_shadow as ext
     for code in (V.R_PERIOD_UNKNOWN, V.R_PERIOD_KIND, V.R_PERIOD_SHAPE,
                  V.R_PERIOD_NOT_A_MATCH, V.R_PERIOD_TITLE):
+        # R_PERIOD_SHAPE stays DECLARED though the identifier no longer
+        # refuses on its own: the code is still reachable through the
+        # scope-conflict path's evidence and removing it would lose the name.
         assert code in V.REFUSALS, code
         assert ext.STAGE_OF[code] == "3_IDENTITY", code
 
@@ -302,10 +319,10 @@ def test_the_participant_title_does_not_by_itself_establish_scope():
               event_slug="mlb-atl-mia-2026-09-25",
               event_title="Atlanta Braves vs. Miami Marlins")
     assert got["period"] is None
-    # THE SCOPE CHECK FIRES FIRST and the refusal is its own, so step 4
-    # never runs -- first refusal wins, by design.
-    assert got["refusals"] == [V.R_PERIOD_SHAPE]
-    assert "participants_named" not in got
+    # THE VENUE'S OWN SCOPE IS WHAT REFUSES, and the identifier's
+    # disagreement is named as the conflict it is.
+    assert got["refusals"] == [V.R_SCOPE_CONFLICT]
+    assert got["slug_decomposes_cleanly"] is False
     # and the title it did not need to read DOES name two participants
     assert len(V.participants_in_event_title(got["event_title"])) == 2, (
         "the title names two participants -- and scope still refused")
@@ -375,13 +392,15 @@ def test_an_unseen_type_value_is_not_assumed_benign():
 
 
 def test_a_missing_authority_is_an_explicit_unresolved_verdict():
-    """NOT a pass on the diagnostics, and NOT the generic unknown.
+    """BOTH fields absent -- NOT a pass on the diagnostics, and its own name.
 
-    Its own name, because it says what to fix: the field exists at the
-    venue and our adapter is what drops it.
+    CORRECTED: an earlier version of this test required v2. v1 alone is
+    sufficient and strictly more specific -- it carries sport, subject,
+    SCOPE and structure where v2 carries structure alone -- so only the
+    absence of BOTH leaves the type unestablished.
     """
     got = _ok("aec-mlb-lad-sf-2026-09-25",
-              event_slug="mlb-lad-sf-2026-09-25", v2=None)
+              event_slug="mlb-lad-sf-2026-09-25", v2=None, v1=None)
     assert got["period"] is None
     assert got["refusals"] == [V.R_TYPE_NOT_RETAINED]
     assert got["market_type_authority"] == "NONE_RETAINED_BY_OUR_ADAPTER"
@@ -391,14 +410,37 @@ def test_a_missing_authority_is_an_explicit_unresolved_verdict():
     assert "accepted_decompositions" in got
 
 
-def test_a_v1_only_row_is_still_unresolved_and_says_so():
+def test_a_v1_only_row_establishes_both_structure_and_scope():
+    """v1 IS THE AUTHORITY WHEN v2 IS ABSENT, and this is the case that
+    matters: v2 is not persisted anywhere the entry lane may read, and
+    `us_premap.sports_type` -- which the copy lane's own writer stamps from
+    `sportsMarketType` -- is. This repository already trusts v1 that way:
+    `premap._C7_FULL_TIME` is the literal `soccer_team_full_time_winner`.
+    """
+    got = _ok("atc-cnl-jam-gtm-2026-09-25-draw", side="draw",
+              event_slug="cnl-jam-gtm-2026-09-25",
+              event_title="Jamaica vs Guatemala", v2=None,
+              v1="soccer_team_full_time_winner")
+    assert got["period"] == V.FULL_MATCH, got.get("why")
+    assert got["market_type_authority"] == \
+        "VENUE_SPORTS_SCHEMA_sportsMarketType_V1_STRUCTURE_AND_SCOPE"
+    assert got["structure_from_v1"] == "WINNER"
+    assert got["scope_evidence"]["scope_token"] == "full_time"
+
+
+def test_a_v1_only_row_that_is_not_a_winner_still_refuses():
     got = _ok("aec-mlb-lad-sf-2026-09-25",
               event_slug="mlb-lad-sf-2026-09-25", v2=None,
-              v1="soccer_team_full_time_winner")
-    assert got["refusals"] == [V.R_TYPE_NOT_RETAINED]
-    assert got["market_type_authority"] == \
-        "VENUE_SPORTS_SCHEMA_sportsMarketType_V1_ONLY"
-    assert "v1" in got["why"]
+              v1="baseball_team_full_game_spread")
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_TYPE_NOT_MONEYLINE]
+
+
+def test_a_v1_only_row_with_no_structure_token_refuses_as_unspecified():
+    got = _ok("aec-mlb-lad-sf-2026-09-25",
+              event_slug="mlb-lad-sf-2026-09-25", v2=None, v1="moneyline")
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_TYPE_UNSPECIFIED]
 
 
 def test_both_full_match_types_pass_and_only_those_two():
@@ -418,17 +460,17 @@ def test_the_slug_and_title_are_labelled_diagnostics_in_the_result():
         "VENUE_SPORTS_SCHEMA_sportsMarketTypeV2"
     # and the PERIOD still rests on the decomposition, not on the type --
     # the venue sells half and inning money lines under the same type
-    assert "DECOMPOSITION_FOR_THE_PERIOD" in got["basis"]
+    assert "SCOPE_FROM_THE_V1" in got["basis"]
 
 
-def test_a_full_match_type_does_not_excuse_a_segment_slug():
-    """The authority establishes TYPE; the decomposition establishes PERIOD."""
+def test_a_winner_structure_does_not_excuse_a_segment_identifier():
+    """STRUCTURE from v2, SCOPE from v1, and a disagreement is a conflict."""
     got = _ok("atc-mlb-atl-mia-2026-09-25-i6-draw", side="draw",
               event_slug="mlb-atl-mia-2026-09-25",
               event_title="Atlanta Braves vs. Miami Marlins",
               v2="SPORTS_MARKET_TYPE_MONEYLINE")
     assert got["period"] is None
-    assert got["refusals"] == [V.R_PERIOD_SHAPE]
+    assert got["refusals"] == [V.R_SCOPE_CONFLICT]
 
 
 def test_every_new_refusal_is_declared_and_maps_to_identity():
@@ -437,3 +479,151 @@ def test_every_new_refusal_is_declared_and_maps_to_identity():
                  V.R_TYPE_NOT_MONEYLINE):
         assert code in V.REFUSALS, code
         assert ext.STAGE_OF[code] == "3_IDENTITY", code
+
+
+
+# ── 7 · v2 IS STRUCTURE; SCOPE COMES FROM v1 ─────────────────────────
+#
+# THE OBSERVATION THAT SETTLES IT, from
+# research/evidence/phasex1/PMUS_EQUIVALENCE_RECORDS.json -- four captured
+# rows sharing ONE v2 value:
+#
+#   football_team_full_game_spread      SPORTS_MARKET_TYPE_SPREAD
+#   baseball_team_full_game_spread      SPORTS_MARKET_TYPE_SPREAD
+#   soccer_team_first_half_spread       SPORTS_MARKET_TYPE_SPREAD
+#   football_team_second_half_spread    SPORTS_MARKET_TYPE_SPREAD
+#
+# A full game, a first half and a second half return the same v2. So v2
+# cannot establish scope, and MONEYLINE / DRAWABLE_OUTCOME establish
+# STRUCTURE only.
+
+def test_the_captured_evidence_shows_v2_cannot_carry_scope():
+    """The premise, asserted against the captured values themselves."""
+    same_v2 = {
+        "football_team_full_game_spread": "SPORTS_MARKET_TYPE_SPREAD",
+        "baseball_team_full_game_spread": "SPORTS_MARKET_TYPE_SPREAD",
+        "soccer_team_first_half_spread": "SPORTS_MARKET_TYPE_SPREAD",
+        "football_team_second_half_spread": "SPORTS_MARKET_TYPE_SPREAD",
+    }
+    assert len(set(same_v2.values())) == 1
+    scopes = {V.scope_from_v1(k)["scope"] for k in same_v2}
+    assert scopes == {"FULL", "SEGMENT"}, (
+        "one v2 value spans both scopes, which is the whole point")
+
+
+@pytest.mark.parametrize("v1,scope,token", [
+    ("football_team_full_game_winner", "FULL", "full_game"),
+    ("soccer_team_full_time_winner", "FULL", "full_time"),
+    ("baseball_team_full_game_spread", "FULL", "full_game"),
+    ("soccer_team_first_half_spread", "SEGMENT", "first_half"),
+    ("football_team_second_half_spread", "SEGMENT", "second_half"),
+    ("baseball_team_first_five_innings_winner", "SEGMENT",
+     "first_five_innings"),
+    # no recognised token -> UNRESOLVED, never read as full
+    ("tennis_match_winner", None, None),
+    ("ufc_fight_winner", None, None),
+    ("cricket_match_winner", None, None),
+    ("moneyline", None, None),
+    ("soccer_game_exact_score", None, None),
+    ("football_team_total_first_downs", None, None),
+    (None, None, None),
+])
+def test_the_scope_reader_on_every_captured_v1_value(v1, scope, token):
+    got = V.scope_from_v1(v1)
+    assert got["scope"] == scope, v1
+    assert got["scope_token"] == token, v1
+
+
+def test_a_whole_contest_word_is_not_read_as_full_game_scope():
+    """`tennis_match_winner` plausibly covers the match. Plausibly is not
+    established, and reading "match" as "full game" is identifier parsing
+    under another name."""
+    got = _ok("aec-atp-danmed-valroy-2026-09-23",
+              event_slug="atp-danmed-valroy-2026-09-23",
+              v1="tennis_match_winner")
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_SCOPE_UNRESOLVED]
+
+
+def test_a_winner_structure_with_a_segment_scope_refuses_on_scope():
+    got = _ok("aec-mlb-lad-sf-2026-09-25", event_slug="mlb-lad-sf-2026-09-25",
+              v1="baseball_team_first_five_innings_winner")
+    assert got["refusals"] == [V.R_SCOPE_SEGMENT]
+
+
+def test_a_v1_carrying_both_a_full_and_a_segment_token_is_conflicting():
+    got = _ok("aec-mlb-lad-sf-2026-09-25", event_slug="mlb-lad-sf-2026-09-25",
+              v1="baseball_team_full_game_first_half_winner")
+    assert got["refusals"] == [V.R_SCOPE_CONFLICT]
+    assert got["scope_evidence"]["scope"] == "CONFLICTING"
+
+
+def test_a_missing_v1_leaves_scope_unresolved_even_with_a_winner_v2():
+    got = _ok("aec-mlb-lad-sf-2026-09-25", event_slug="mlb-lad-sf-2026-09-25",
+              v1=None)
+    assert got["refusals"] == [V.R_SCOPE_UNRESOLVED]
+    assert "cannot establish full-game scope" in got["why"]
+
+
+def test_the_identifier_no_longer_decides_admission():
+    """IT IS A DIAGNOSTIC, AND A DIAGNOSTIC DOES NOT DECIDE.
+
+    The decomposition used to `return` on failure -- that is deciding
+    admission, whatever it was called. It now records
+    `slug_decomposes_cleanly` and the venue's own scope is what refuses.
+    """
+    import inspect
+    import re
+    src = inspect.getsource(V.period_of_venue_slug)
+    # THE DECOMPOSITION'S OWN BRANCH must not return. Steps after it (the
+    # participant title, which reads the catalogue's structured metadata)
+    # legitimately do -- they are not the identifier.
+    m = re.search(r"\n    if slug not in accepted:\n(.*?)\n    #",
+                  src, re.S)
+    assert m, "the decomposition branch moved; re-point this test"
+    assert "return" not in m.group(1), (
+        "the identifier check returns on its own, which makes it the "
+        "authority again:\n" + m.group(1)[:400])
+    # and what it does instead is record a diagnostic
+    assert "slug_diagnostic_why" in m.group(1)
+
+
+def test_a_full_scope_venue_type_still_refuses_a_disagreeing_identifier():
+    """Conflict is not resolved by preferring the metadata either."""
+    got = _ok("atc-mlb-atl-mia-2026-09-25-i6-draw", side="draw",
+              event_slug="mlb-atl-mia-2026-09-25",
+              event_title="Atlanta Braves vs. Miami Marlins",
+              v1="baseball_team_full_game_winner")
+    assert got["period"] is None
+    assert got["refusals"] == [V.R_SCOPE_CONFLICT]
+    assert got["slug_decomposes_cleanly"] is False
+
+
+def test_the_basis_names_both_fields_and_what_each_settles():
+    got = _ok("aec-mlb-lad-sf-2026-09-25", event_slug="mlb-lad-sf-2026-09-25")
+    assert got["period"] == V.FULL_MATCH
+    assert "STRUCTURE_FROM_V2" in got["basis"]
+    assert "SCOPE_FROM_THE_V1" in got["basis"]
+    assert got["scope"] == "FULL"
+
+
+def test_the_three_scope_refusals_are_declared_and_map_to_identity():
+    from sportsassets import bettor_external_shadow as ext
+    for code in (V.R_SCOPE_UNRESOLVED, V.R_SCOPE_SEGMENT,
+                 V.R_SCOPE_CONFLICT):
+        assert code in V.REFUSALS, code
+        assert ext.STAGE_OF[code] == "3_IDENTITY", code
+
+
+def test_the_module_says_the_published_schema_is_still_outstanding():
+    """Captured samples show which values occur, never what they cover.
+
+    Older repository classifiers are not a substitute for the published
+    schema and the module must not offer them as one.
+    """
+    import inspect
+    src = inspect.getsource(V)
+    assert "docs.polymarket.us" in src
+    assert "PENDING that" in src or "PENDING" in src
+    assert "not a substitute for the" in src
+    assert "published" in src

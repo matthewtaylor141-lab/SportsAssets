@@ -37,13 +37,18 @@ from sportsassets.workers import ext_pinnacle_loop as loop
 class _CatalogueConn:
     def __init__(self, *, kind="side", event_slug=None, side_norm=None,
                  siblings=2, event_title="Home Team vs. Away Team",
-                 side_norms_on_slug=2):
+                 side_norms_on_slug=2,
+                 sports_type="baseball_team_full_game_winner"):
         self._row = {"kind": kind, "event_slug": event_slug,
                      "side_norm": side_norm, "sibling_markets": siblings,
                      # v4 reads the catalogue's own event title for the
                      # participant test; a stub without it asserts nothing.
                      "event_title": event_title,
-                     "side_norms_on_slug": side_norms_on_slug}
+                     "side_norms_on_slug": side_norms_on_slug,
+                     # `sports_type` IS the venue's `sportsMarketType`,
+                     # which is where SCOPE lives -- a full game and a half
+                     # share one v2 value, so v2 cannot carry it.
+                     "sports_type": sports_type}
 
     async def fetchrow(self, sql, *args):
         return self._row
@@ -320,14 +325,9 @@ def test_the_insert_and_its_arguments_agree():
 # Stubbing it here without that test existing is what would make these
 # fixtures assert nothing.
 
-@pytest.fixture(autouse=True)
-def _venue_market_type_board(monkeypatch):
-    from sportsassets.workers import ext_pinnacle_loop as _loop
-
-    def _type(us_slug):
-        return {"source": "pmus.list_desk_events", "available": True,
-                "sports_market_type_v2": "SPORTS_MARKET_TYPE_MONEYLINE",
-                "sports_market_type": None, "team": None, "team_id": None}
-
-    monkeypatch.setattr(_loop, "venue_market_type", _type)
-    yield
+# NO READER STUB IS NEEDED ANY MORE. The venue's own market type reaches
+# the lane through the CATALOGUE -- `us_premap.sports_type`, which the copy
+# lane's writer already stamps from `sportsMarketType` -- so these fixtures
+# seed the column (or answer it in their catalogue stub) exactly as they
+# seed every other catalogue field. The funding guard that permits only
+# `book_read` and `_get_client` off `pmus` needs no exception.

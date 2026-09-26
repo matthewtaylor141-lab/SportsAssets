@@ -4203,6 +4203,155 @@ jobs:
           say "  score or a total is a payout event the venue does not"
           say "  sell as a money line, which is neither of those."
           say ""
+          # ── S4b2 · THE COMMAND CENTRE ITSELF, INSPECTED ──────────────
+          # The operating handoff, read through the deployed interface --
+          # not a description of it. Controls, Opportunities, Orders,
+          # Positions and Performance, with the books kept separate and
+          # NO_TRADE reported as a result when the scheduler admitted
+          # nothing.
+          say ""
+          say "== S4b2 · the Bettor EV Engine operating handoff =="
+          DK=$(curl -s --max-time 120 -o /tmp/desk.json -w '%{http_code}' \
+                 -H "$H" "$A/api/command/bettor/desk?hours=24&limit=40" \
+                 || echo 000)
+          say "  GET /api/command/bettor/desk  HTTP $DK"
+          jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+            "  product " + n(.product) + "  view " + n(.view),
+            "  funded_submission " + n(.funded_submission)
+              + "  reads_only " + n(.reads_only),
+            "",
+            "  -- CONTROLS --",
+            "  mode " + n(.controls.research_mode.label)
+              + "  env_flag_set " + n(.controls.research_mode.env_flag_set)
+              + "  submits_orders " + n(.controls.research_mode.submits_orders),
+            "  build " + n(.controls.build_identity.build)
+              + "  source_sha12 " + n(.controls.build_identity.source_sha256_12)
+              + "  pid " + n(.controls.build_identity.pid),
+            "  cycle_at " + n(.controls.last_cycle_at)
+              + "  state " + n(.controls.cycle_state)
+              + "  LABEL " + n(.controls.cycle_label),
+            "  control_state " + ((.controls.control_state // {}) | tojson | .[0:200]),
+            "",
+            "  -- OPPORTUNITIES --",
+            "  markets_considered " + n(.opportunities.markets_considered)
+              + "  candidates " + n((.opportunities.candidates // []) | length)
+              + "  admissible " + n(.opportunities.admissible_count),
+            "  VERDICT " + n(.opportunities.verdict),
+            "  fair value " + n(.opportunities.fair_value_source.name)
+              + "  internally_trained "
+              + n(.opportunities.fair_value_source.is_an_internally_trained_model),
+            (((.opportunities.no_trade_reasons // {}) | to_entries[])
+              | "     blocker " + .key + "  x" + (.value|tostring)),
+            (((.opportunities.funnel // {}) | to_entries[])
+              | "     funnel " + .key
+                + "  mapped " + n(.value.mapped_to_a_venue_contract)
+                + "  evaluated " + n(.value.evaluated)
+                + "  written " + n(.value.written)),
+            (((.opportunities.first_refusal_per_mapped_candidate // [])[])
+              | "     candidate " + n(.us_market_slug)
+                + "  stage " + n(.stage)
+                + "  first_refusal " + n(.first_refusal)),
+            "",
+            "  -- POSITIONS, SEPARATE BOOKS --",
+            (((.positions.books // {}) | to_entries[])
+              | "     book " + .key + "  count " + (.value.count|tostring)),
+            "  " + n(.positions.note),
+            "",
+            "  -- PERFORMANCE, PER LANE --",
+            (((.performance.per_lane // {}) | to_entries[])
+              | "     " + .key + "  " + (.value | tojson | .[0:220])),
+            "  mark_basis " + n(.performance.mark_basis),
+            "",
+            "  -- OPEN LIMITATIONS, STATED --",
+            "  freshness   " + n(.open_limitations.venue_book_freshness),
+            "  settlement  " + n(.open_limitations.settlement_compatibility),
+            "  scope       " + n(.open_limitations.market_scope_metadata)' \
+            /tmp/desk.json 2>&1 | head -90 | tee -a "$GITHUB_STEP_SUMMARY" \
+            || true
+          if [ "$DK" != "200" ]; then
+            say "  THE HANDOFF DID NOT RETURN 200 -- head of the body:"
+            head -c 400 /tmp/desk.json 2>/dev/null \
+              | tee -a "$GITHUB_STEP_SUMMARY" || true
+          fi
+          say ""
+
+          # ── S4c · THE PUBLISHED SCHEMA, FETCHED ON THIS RUNNER ───────
+          # The container the agent works in cannot reach
+          # docs.polymarket.us (its egress proxy blocks the domain). This
+          # runner can, and the published schema is the authority for what
+          # the two type fields MEAN -- captured samples show which values
+          # occur, never what they cover. Fetched read-only, printed with
+          # its source named, and it is NOT replaced by older repository
+          # classifiers.
+          say ""
+          say "== S4c · the venue's PUBLISHED Sports Schema =="
+          SCU="https://docs.polymarket.us/trader-guide/sports-schema"
+          say "  source $SCU"
+          SC=$(curl -sL --max-time 60 -o /tmp/schema.html \
+                 -w '%{http_code}' "$SCU" || echo 000)
+          say "  HTTP $SC  bytes $(wc -c < /tmp/schema.html 2>/dev/null || echo 0)"
+          if [ "$SC" = "200" ]; then
+            python3 - <<'PYS' | tee -a "$GITHUB_STEP_SUMMARY" || true
+          import html, re, sys
+          t = open("/tmp/schema.html", errors="replace").read()
+          t = re.sub(r"(?is)<(script|style)[^>]*>.*?</\1>", " ", t)
+          t = html.unescape(re.sub(r"(?s)<[^>]+>", "\n", t))
+          lines = [l.strip() for l in t.splitlines() if l.strip()]
+          keys = ("sportsMarketType", "marketSportType", "market_sport_type",
+                  "SPORTS_MARKET_TYPE", "full_game", "full_time",
+                  "first_half", "second_half", "period", "scope",
+                  "slug", "identifier", "participant", "team")
+          hits = [l for l in lines if any(k in l for k in keys)]
+          print("  schema lines mentioning the fields: %d" % len(hits))
+          for l in hits[:80]:
+              print("   | " + l[:160])
+          if not hits:
+              print("   NO FIELD NAMES FOUND IN THE FETCHED TEXT -- the page")
+              print("   may render client-side. Then the published schema is")
+              print("   NOT in hand and the token sets stay provisional.")
+          PYS
+          else
+            say "  THE SCHEMA WAS NOT RETRIEVED. The scope token sets in"
+            say "  bettor_venue_mapping remain PROVISIONAL -- established"
+            say "  from captured responses and held conservatively -- and"
+            say "  that is stated in the module, not glossed."
+          fi
+          say ""
+
+          # ── S4d · THE TWO TYPE FIELDS, TOGETHER, ON REAL CONTRACTS ───
+          # v2 is the STRUCTURE and cannot carry scope: captured rows show
+          # full_game, first_half and second_half SPREADs all returning
+          # SPORTS_MARKET_TYPE_SPREAD. So the pair is printed side by side
+          # for a full-game shape, a segment shape and a future shape.
+          say "== S4d · sportsMarketTypeV2 AND sportsMarketType, together =="
+          for T in mlb cfb nhl f1 lmx; do
+            MT=$(curl -s --max-time 180 -o "/tmp/mt_$T.json" \
+                   -w '%{http_code}' -H "$H" \
+                   "$A/api/admin/venue-competitions?token=$T" || echo 000)
+            say ""
+            say "-- $T  HTTP $MT"
+            jq -r 'def n(x): if x == null then "-" else (x|tostring) end;
+              ((.token_events // [])[]
+                | "   event " + n(.event) + "  | " + n(.title),
+                  ((.market_types // [])[]
+                    | "      " + n(.us_slug)
+                      + "\n         v2 " + n(.sportsMarketTypeV2)
+                      + "\n         v1 " + n(.sportsMarketType)
+                      + "\n         kind(diagnostic only) "
+                      + n(.kind_diagnostic_only)
+                      + "  team " + n(.team) + "/" + n(.team_id)))' \
+              "/tmp/mt_$T.json" 2>&1 | head -80 \
+              | tee -a "$GITHUB_STEP_SUMMARY" || true
+          done
+          say ""
+          say "  READ IT AS: v2 establishes STRUCTURE only. If a full game"
+          say "  and a half show the SAME v2, that is the proof, and scope"
+          say "  must come from v1's own scope token. A v1 with no"
+          say "  recognised token -- the generic \`moneyline\`, or a"
+          say "  whole-contest form like \`tennis_match_winner\` -- leaves"
+          say "  scope UNRESOLVED rather than full."
+          say ""
+
           # ── S5 · WHAT THE VENUE'"'"'S transactTime ACTUALLY MEANS ──────
           # The gate refuses a book whose transactTime is more than 30 s
           # before the decision instant. That is a staleness measurement

@@ -62,7 +62,10 @@ REFUSALS = (R_NO_CONTRACT, R_AMBIGUOUS, R_CLOSED, R_COLLIDE, R_SEGMENT,
             "VENUE_EVENT_TITLE_NOT_CAPTURED",
             "VENUE_MARKET_TYPE_METADATA_NOT_RETAINED",
             "VENUE_MARKET_TYPE_IS_UNSPECIFIED",
-            "VENUE_MARKET_TYPE_IS_NOT_A_FULL_MATCH_MONEYLINE")
+            "VENUE_MARKET_TYPE_IS_NOT_A_WINNER_STRUCTURE",
+            "VENUE_MARKET_SCOPE_NOT_ESTABLISHED",
+            "VENUE_MARKET_SCOPE_IS_A_SEGMENT",
+            "VENUE_MARKET_SCOPE_CONFLICTS_WITH_THE_IDENTIFIER")
 
 #: Tokens that mark a venue title as covering only PART of a game. The
 #: external valuation prices full-game h2h only, so a segment contract is
@@ -300,27 +303,79 @@ R_TYPE_NOT_RETAINED = "VENUE_MARKET_TYPE_METADATA_NOT_RETAINED"
 #: And a present-but-generic value is not an answer either.
 R_TYPE_UNSPECIFIED = "VENUE_MARKET_TYPE_IS_UNSPECIFIED"
 #: A structured type that is not a full-match money line.
-R_TYPE_NOT_MONEYLINE = "VENUE_MARKET_TYPE_IS_NOT_A_FULL_MATCH_MONEYLINE"
+R_TYPE_NOT_MONEYLINE = "VENUE_MARKET_TYPE_IS_NOT_A_WINNER_STRUCTURE"
+#: SCOPE IS A SEPARATE FACT FROM STRUCTURE, and v2 cannot carry it: a full
+#: game, a first half and a second half all return the same v2 value. These
+#: three name the three ways scope fails.
+R_SCOPE_UNRESOLVED = "VENUE_MARKET_SCOPE_NOT_ESTABLISHED"
+R_SCOPE_SEGMENT = "VENUE_MARKET_SCOPE_IS_A_SEGMENT"
+R_SCOPE_CONFLICT = "VENUE_MARKET_SCOPE_CONFLICTS_WITH_THE_IDENTIFIER"
 
-#: THE VENUE'S OWN MARKET-TYPE VOCABULARY, as observed in live responses by
-#: the run-85 phase-2 captures in `research/` (run85_phase2e.classify,
-#: run85_trackbl_block.GAME_TYPES, run85_phase2d_analyze's census). These
-#: are values this repository has SEEN, not values read off a page:
+#: THE VENUE PUBLISHES TWO MARKET-TYPE FIELDS AND THEY ANSWER DIFFERENT
+#: QUESTIONS. This is established from CAPTURED RESPONSES, not from the
+#: version suffix -- the suffix says nothing about which field means what.
 #:
-#:   SPORTS_MARKET_TYPE_MONEYLINE          two-way match winner
-#:   SPORTS_MARKET_TYPE_DRAWABLE_OUTCOME   three-way match winner; carries
-#:                                         the v1 type
-#:                                         `soccer_team_full_time_winner`
-#:   SPORTS_MARKET_TYPE_SPREAD             a line, not a winner
-#:   SPORTS_MARKET_TYPE_TOTAL / _TOTALS    a total
-#:   SPORTS_MARKET_TYPE_PROP               a prop
-#:   SPORTS_MARKET_TYPE_FUTURE             a field of entrants
-#:   SPORTS_MARKET_TYPE_UNSPECIFIED        GENERIC -- establishes nothing
+#: THE OBSERVATION THAT SETTLES IT, from
+#: `research/evidence/phasex1/PMUS_EQUIVALENCE_RECORDS.json`, four rows
+#: sharing ONE v2 value:
 #:
-#: THE TWO THAT PRICE A FULL-MATCH WINNER, and only these two.
+#:   sportsMarketType                    sportsMarketTypeV2
+#:   football_team_full_game_spread      SPORTS_MARKET_TYPE_SPREAD
+#:   baseball_team_full_game_spread      SPORTS_MARKET_TYPE_SPREAD
+#:   soccer_team_first_half_spread       SPORTS_MARKET_TYPE_SPREAD
+#:   football_team_second_half_spread    SPORTS_MARKET_TYPE_SPREAD
+#:
+#: A full game, a first half and a second half all carry the SAME v2. So:
+#:
+#:   v2 ESTABLISHES STRUCTURE and nothing else -- winner, spread, total,
+#:      prop, future. IT CANNOT ESTABLISH SCOPE. `SPORTS_MARKET_TYPE_
+#:      MONEYLINE` on an inning-six contract is the same value as on the
+#:      full game, so admitting on v2 alone would admit every segment.
+#:   v1 IS WHERE SCOPE LIVES, as `{sport}_{subject}_{scope}_{structure}`.
+#:
+#: EVERY v1 VALUE THIS REPOSITORY HAS CAPTURED, with its scope token:
+#:
+#:   football_team_full_game_winner      full_game    <- full scope
+#:   soccer_team_full_time_winner        full_time    <- full scope
+#:   football_team_full_game_spread      full_game
+#:   baseball_team_full_game_spread      full_game
+#:   soccer_team_first_half_spread       first_half   <- a SEGMENT
+#:   football_team_second_half_spread    second_half  <- a SEGMENT
+#:   tennis_match_winner                 (none)       <- UNRECOGNISED
+#:   ufc_fight_winner                    (none)       <- UNRECOGNISED
+#:   cricket_match_winner                (none)       <- UNRECOGNISED
+#:   moneyline                           (none)       <- GENERIC
+#:   soccer_game_exact_score             (none)       <- not a winner
+#:   football_team_total_first_downs     (none)       <- not a winner
+#:
+#: THE THREE "match/fight winner" FORMS ARE NOT TREATED AS FULL SCOPE. They
+#: plausibly name a whole contest, and plausibly is not established. They
+#: stay UNRESOLVED until the published schema says what they cover; reading
+#: "match" as "full game" would be the identifier-parsing this whole
+#: correction exists to stop, moved into a different string.
+#:
+#: WHAT IS STILL OUTSTANDING, AND IT IS NOT CLOSED BY THIS: the venue's
+#: PUBLISHED Sports Schema at docs.polymarket.us/trader-guide/sports-schema
+#: is blocked from the container this runs in and is retrieved on the
+#: authorized runner instead (see the readback's SCHEMA block). These token
+#: sets are the captured evidence, held conservatively, PENDING that
+#: retrieval. Older repository classifiers are not a substitute for the
+#: published schema and are not offered as one.
+FULL_SCOPE_TOKENS_V1 = ("full_game", "full_time")
+SEGMENT_SCOPE_TOKENS_V1 = (
+    "first_half", "second_half", "first_quarter", "second_quarter",
+    "third_quarter", "fourth_quarter", "halftime", "half_time",
+    "first_period", "second_period", "third_period",
+    "first_inning", "first_five_innings", "first_3_innings",
+    "inning", "quarter", "period", "map", "set", "game_1", "game_2",
+    "first_set", "second_set", "third_set", "overtime", "extra_time")
+#: A v1 value that names no scope at all. Generic is not full scope.
+GENERIC_TYPE_V1 = "moneyline"
+
+#: STRUCTURE, from v2. These two are winner structures; the rest are not.
 FULL_MATCH_TYPES_V2 = ("SPORTS_MARKET_TYPE_MONEYLINE",
                        "SPORTS_MARKET_TYPE_DRAWABLE_OUTCOME")
-#: Observed and explicitly NOT a full-match winner.
+#: Observed and explicitly NOT a winner structure.
 NON_FULL_MATCH_TYPES_V2 = ("SPORTS_MARKET_TYPE_SPREAD",
                            "SPORTS_MARKET_TYPE_TOTAL",
                            "SPORTS_MARKET_TYPE_TOTALS",
@@ -346,6 +401,84 @@ def participants_in_event_title(event_title) -> list:
     ev = str(event_title or "")
     return [s.strip() for s in ev.replace(" vs. ", " vs ").split(" vs ")
             if s.strip()]
+
+
+#: THE STRUCTURE TOKEN v1 ENDS IN. v1 is strictly MORE specific than v2:
+#: `football_team_full_game_winner` carries sport, subject, scope AND
+#: structure, where v2 carries structure alone. So where v1 is in hand and
+#: v2 is not, v1 answers both -- and this repository already trusts v1 that
+#: way: the copy lane's `_C7_FULL_TIME` is the literal
+#: `soccer_team_full_time_winner`, used as its own full-time discriminator.
+_V1_WINNER_SUFFIXES = ("_winner", "_match_winner", "_fight_winner")
+_V1_NON_WINNER_TOKENS = ("_spread", "_total", "_totals", "_exact_score",
+                         "_first_downs", "_handicap", "_btts", "_score")
+
+
+def _structure_from_v1(v1: str) -> dict:
+    """Winner or not, from the v1 type's own trailing token."""
+    if any(t in v1 for t in _V1_NON_WINNER_TOKENS):
+        return {"structure_from_v1": "NOT_A_WINNER",
+                "structure_token_v1": next(
+                    t for t in _V1_NON_WINNER_TOKENS if t in v1)}
+    if any(v1.endswith(t) for t in _V1_WINNER_SUFFIXES):
+        return {"structure_from_v1": "WINNER", "structure_token_v1": "winner"}
+    return {"structure_from_v1": None, "structure_token_v1": None}
+
+
+def scope_from_v1(sports_market_type) -> dict:
+    """The SCOPE a v1 market type names, or a named failure to name one.
+
+    v1 reads `{sport}_{subject}_{scope}_{structure}` -- captured evidence,
+    not a guess: `football_team_full_game_spread` and
+    `soccer_team_first_half_spread` differ ONLY in the scope token and
+    carry the identical v2. The full-scope tokens are the two observed
+    (`full_game`, `full_time`); a segment token refuses; and anything with
+    no recognised token -- the generic `moneyline`, or a whole-contest form
+    like `tennis_match_winner` -- is UNRESOLVED rather than read as full.
+
+    Reading "match" as "full game" would be the identifier-parsing this
+    correction exists to stop, relocated into a different string.
+    """
+    v1 = str(sports_market_type or "").strip().lower()
+    out = {"sports_market_type": v1 or None, "scope": None,
+           "scope_token": None, "basis": "VENUE_SPORTS_SCHEMA_"
+                                        "sportsMarketType_SCOPE_TOKEN"}
+    if not v1:
+        out["why"] = ("no `sportsMarketType` on the row, so scope is "
+                      "UNMEASURED. v2 cannot supply it -- a full game, a "
+                      "first half and a second half share one v2 value")
+        return out
+    # SEGMENTS FIRST. `first_half` contains `half`, and a value carrying
+    # both a segment token and a full token is a conflict, not a pass.
+    seg = [t for t in SEGMENT_SCOPE_TOKENS_V1 if t in v1]
+    full = [t for t in FULL_SCOPE_TOKENS_V1 if t in v1]
+    out["segment_tokens_found"] = seg
+    out["full_tokens_found"] = full
+    if seg and full:
+        out["scope"] = "CONFLICTING"
+        out["why"] = ("the venue's own type %r carries a full-scope token "
+                      "%r AND a segment token %r. Conflicting is not "
+                      "resolved by preferring one" % (v1, full[0], seg[0]))
+        return out
+    if seg:
+        out["scope"], out["scope_token"] = "SEGMENT", seg[0]
+        out["why"] = ("the venue's own type %r names the segment %r"
+                      % (v1, seg[0]))
+        return out
+    if full:
+        out["scope"], out["scope_token"] = "FULL", full[0]
+        out["why"] = ("the venue's own type %r names the full-contest scope "
+                      "%r" % (v1, full[0]))
+        out.update(_structure_from_v1(v1))
+        return out
+    out["scope"] = None
+    out["why"] = (
+        "the venue's own type %r names no scope token this lane has "
+        "OBSERVED. %s Reading a whole-contest word as full-game scope would "
+        "be identifier parsing under another name, so this is UNRESOLVED"
+        % (v1, ("`moneyline` is the generic form. "
+                if v1 == GENERIC_TYPE_V1 else "")))
+    return out
 
 
 def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
@@ -499,9 +632,9 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
         "reported as diagnostics and never override the venue's own type")
     if v2 and v2 in NON_FULL_MATCH_TYPES_V2:
         out["refusals"].append(R_TYPE_NOT_MONEYLINE)
-        out["why"] = ("the venue's own market type for this contract is %r, "
-                      "which does not price a full-match winner. No slug "
-                      "reading overturns that" % v2)
+        out["why"] = ("the venue's own market STRUCTURE for this contract is "
+                      "%r, which is not a winner. No slug reading overturns "
+                      "that" % v2)
         return out
     if v2 == GENERIC_TYPE_V2:
         out["refusals"].append(R_TYPE_UNSPECIFIED)
@@ -566,15 +699,20 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
     if side:
         accepted.append("%s-%s-%s" % (prefix, ev, str(side).strip().lower()))
     out["accepted_decompositions"] = accepted
+    # A DIAGNOSTIC IS SOMETHING THAT DOES NOT DECIDE ADMISSION, and this one
+    # used to decide it. It is recorded and compared against the venue's own
+    # scope below; it no longer returns on its own.
+    out["slug_decomposes_cleanly"] = slug in accepted
+    out["slug_scope_diagnostic"] = (
+        "FULL_BY_THE_IDENTIFIER" if slug in accepted
+        else "SEGMENT_OR_UNKNOWN_BY_THE_IDENTIFIER")
     if slug not in accepted:
-        out["refusals"].append(R_PERIOD_SHAPE)
-        out["why"] = (
-            "the market slug is %r, and the catalogue's own event and side "
-            "compose to %s. Whatever sits between them -- a half, an "
-            "inning, a quarter, a leg -- is a market this lane has not "
-            "established, and a full-match probability may not be priced "
-            "against it" % (slug, " or ".join(repr(a) for a in accepted)))
-        return out
+        out["slug_diagnostic_why"] = (
+            "the market slug is %r and the catalogue's own event and side "
+            "compose to %s, so something sits between them. THIS IS A "
+            "DIAGNOSTIC: the venue publishes the scope and directs consumers "
+            "away from parsing identifiers"
+            % (slug, " or ".join(repr(a) for a in accepted)))
 
     # ── 4 · TWO PARTICIPANTS, from the catalogue's own event title ───
     # v3 named this as an open hole and it is now closed. A trophy or a
@@ -615,30 +753,95 @@ def period_of_venue_slug(market_slug, *, side=None, event_slug=None,
     # this refuses under its own name -- which also says precisely what to
     # fix, because the field exists at the venue and our adapter is what
     # drops it.
-    if not v2:
+    if not v2 and not v1:
         out["refusals"].append(R_TYPE_NOT_RETAINED)
         out["why"] = (
-            "the venue's own `sportsMarketTypeV2` is not on this row%s. The "
-            "diagnostics above are consistent with a full-match money line "
-            "and they are DIAGNOSTICS: the venue publishes the market type "
-            "and directs consumers away from parsing identifiers, so "
-            "nothing here establishes it. What the slug says is not an "
-            "answer to what the market is"
-            % (" (v1 `%s` only)" % v1 if v1 else ""))
+            "neither `sportsMarketTypeV2` nor `sportsMarketType` is on this "
+            "row, so neither the market STRUCTURE nor its SCOPE is "
+            "established. The slug and the title agree with a winner and "
+            "they are DIAGNOSTICS: the venue publishes the type and directs "
+            "consumers away from parsing identifiers")
+        return out
+    if not v2:
+        # v1 ONLY, AND THAT IS ENOUGH -- v1 is strictly more specific. It
+        # carries sport, subject, scope and structure where v2 carries
+        # structure alone, and this repository already trusts it that way
+        # (`premap._C7_FULL_TIME` is the literal
+        # `soccer_team_full_time_winner`). The structure is read from v1's
+        # own trailing token and refused when it is not a winner.
+        st = _structure_from_v1(v1)
+        out.update(st)
+        if st.get("structure_from_v1") == "NOT_A_WINNER":
+            out["refusals"].append(R_TYPE_NOT_MONEYLINE)
+            out["why"] = ("the venue's own type %r names the non-winner "
+                          "structure %r" % (v1, st.get("structure_token_v1")))
+            return out
+        if st.get("structure_from_v1") != "WINNER":
+            out["refusals"].append(R_TYPE_UNSPECIFIED)
+            out["why"] = ("the venue's own type %r ends in no structure "
+                          "token this lane has observed, so what it prices "
+                          "is not established" % v1)
+            return out
+        out["market_type_authority"] = (
+            "VENUE_SPORTS_SCHEMA_sportsMarketType_V1_STRUCTURE_AND_SCOPE")
+
+    # ── 6 · SCOPE, WHICH v2 CANNOT CARRY ────────────────────────────
+    #
+    # `SPORTS_MARKET_TYPE_MONEYLINE` is the SAME value on a full game and on
+    # an inning six; the captured rows prove it for SPREAD across full game,
+    # first half and second half. So a winner structure establishes
+    # STRUCTURE only, and scope is read from the v1 type's own scope token.
+    sc = scope_from_v1(v1)
+    out["scope_evidence"] = sc
+    out["scope"] = sc.get("scope")
+    if sc.get("scope") == "SEGMENT":
+        out["refusals"].append(R_SCOPE_SEGMENT)
+        out["why"] = sc["why"]
+        return out
+    if sc.get("scope") == "CONFLICTING":
+        out["refusals"].append(R_SCOPE_CONFLICT)
+        out["why"] = sc["why"]
+        return out
+    if sc.get("scope") != "FULL":
+        out["refusals"].append(R_SCOPE_UNRESOLVED)
+        out["why"] = (
+            "market STRUCTURE is established (%r) and SCOPE is not: %s. A "
+            "winner structure is the same value on a full game and on an "
+            "inning, so it cannot establish full-game scope, and the "
+            "identifier is a diagnostic rather than an authority"
+            % (v2, sc.get("why")))
+        return out
+
+    # ── 7 · AND THE DIAGNOSTIC MUST NOT CONTRADICT THE VENUE ────────
+    #
+    # The identifier does not decide admission, and a disagreement between
+    # it and the venue's own scope is not something to wave through: one of
+    # the two readings is wrong and which one is not established here.
+    if not out.get("slug_decomposes_cleanly"):
+        out["refusals"].append(R_SCOPE_CONFLICT)
+        out["why"] = (
+            "the venue's own type %r names full scope (%r) while the "
+            "identifier does not decompose into the catalogue's event and "
+            "side -- %s. The two readings disagree and this lane does not "
+            "pick a winner between them"
+            % (v1, sc.get("scope_token"),
+               out.get("slug_diagnostic_why", "no detail")))
         return out
 
     out["period"] = FULL_MATCH
     out["why"] = (
-        "the venue's own market type is %r, a full-match winner; and the "
-        "slug decomposes exactly into its event %r%s with nothing between "
-        "them, which is what establishes the PERIOD -- the venue sells "
-        "half, inning and quarter money lines under the same type. "
-        "Diagnostics agreed: catalogue kind %r, prefix %r, title names two "
-        "participants (%s)"
-        % (v2, ev, (" and side %r" % side) if side else "", k, prefix,
+        "the venue's own STRUCTURE is %r (a winner) and its own SCOPE token "
+        "is %r (from `sportsMarketType` %r), which is what establishes the "
+        "full-contest period -- v2 alone cannot, because a full game and a "
+        "half carry the same v2. The identifier agreed as a diagnostic: it "
+        "decomposes into event %r%s, catalogue kind %r, prefix %r, title "
+        "names two participants (%s)"
+        % (v2 or ("v1:" + str(out.get("structure_token_v1"))),
+           sc.get("scope_token"), v1, ev,
+           (" and side %r" % side) if side else "", k, prefix,
            " vs ".join(repr(p) for p in parts[:2])))
-    out["basis"] = ("VENUE_SPORTS_SCHEMA_MARKET_TYPE_PLUS_AN_EXACT_EVENT_"
-                    "AND_SIDE_DECOMPOSITION_FOR_THE_PERIOD")
+    out["basis"] = ("VENUE_SPORTS_SCHEMA_STRUCTURE_FROM_V2_PLUS_SCOPE_FROM_"
+                    "THE_V1_TYPES_OWN_SCOPE_TOKEN")
     return out
 
 

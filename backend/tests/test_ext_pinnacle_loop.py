@@ -309,15 +309,17 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
                 # `event_title` too -- v4's participant test reads it.
                 "INSERT INTO us_premap (identifier, event_slug, "
                 "market_slug, kind, side_norm, question, event_title, "
-                "intent) "
-                "VALUES ($1,$2,$3,'side',$4,$5,$6,"
+                "sports_type, intent) "
+                "VALUES ($1,$2,$3,'side',$4,$5,$6,$7,"
                 "'ORDER_INTENT_BUY_LONG') "
                 "ON CONFLICT (identifier) DO NOTHING",
                 "aec-soccer-mci-mun-2026-09-24-%s" % _side,
                 "soccer-mci-mun-2026-09-24",
                 "aec-soccer-mci-mun-2026-09-24-%s" % _side,
                 _side, "Will %s win?" % _side,
-                "Manchester City vs. Manchester United")
+                "Manchester City vs. Manchester United",
+                # the venue's own soccer full-time winner type
+                "soccer_team_full_time_winner")
 
         # 105 TOO. Without it there is no uniqueness, so the duplicate
         # test below would pass against an unmigrated database and prove
@@ -681,14 +683,9 @@ def test_the_candidate_set_is_bounded_by_recency():
 # Stubbing it here without that test existing is what would make these
 # fixtures assert nothing.
 
-@pytest.fixture(autouse=True)
-def _venue_market_type_board(monkeypatch):
-    from sportsassets.workers import ext_pinnacle_loop as _loop
-
-    def _type(us_slug):
-        return {"source": "pmus.list_desk_events", "available": True,
-                "sports_market_type_v2": "SPORTS_MARKET_TYPE_MONEYLINE",
-                "sports_market_type": None, "team": None, "team_id": None}
-
-    monkeypatch.setattr(_loop, "venue_market_type", _type)
-    yield
+# NO READER STUB IS NEEDED ANY MORE. The venue's own market type reaches
+# the lane through the CATALOGUE -- `us_premap.sports_type`, which the copy
+# lane's writer already stamps from `sportsMarketType` -- so these fixtures
+# seed the column (or answer it in their catalogue stub) exactly as they
+# seed every other catalogue field. The funding guard that permits only
+# `book_read` and `_get_client` off `pmus` needs no exception.

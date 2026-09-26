@@ -147,14 +147,19 @@ async def _seed(conn):
             # `event_title` too: v4's participant test reads it, and a
             # seed that omits the field the rule reads asserts nothing.
             "INSERT INTO us_premap (identifier, event_slug, market_slug, "
-            "kind, side_norm, question, event_title, intent) "
-            "VALUES ($1,$2,$3,'side',$4,$5,$6,'ORDER_INTENT_BUY_LONG') "
+            "kind, side_norm, question, event_title, sports_type, "
+            "intent) "
+            "VALUES ($1,$2,$3,'side',$4,$5,$6,$7,"
+            "'ORDER_INTENT_BUY_LONG') "
             "ON CONFLICT (identifier) DO NOTHING",
             "aec-mlb-sea-hou-2026-09-24-%s" % side,
             "mlb-sea-hou-2026-09-24",
             "aec-mlb-sea-hou-2026-09-24-%s" % side,
             side, "Will %s win?" % side,
-            "Seattle Mariners vs. Houston Astros")
+            "Seattle Mariners vs. Houston Astros",
+            # the venue's OWN market type: a full-game winner. SCOPE lives
+            # here, not in v2 -- a full game and a half share one v2.
+            "baseball_team_full_game_winner")
     await conn.execute(open("migrations/103_external_valuations.sql").read())
     await conn.execute(open(
         "migrations/105_external_valuations_one_per_observation.sql").read())
@@ -1312,14 +1317,9 @@ async def test_an_entry_created_position_runs_the_whole_lifecycle(
 # Stubbing it here without that test existing is what would make these
 # fixtures assert nothing.
 
-@pytest.fixture(autouse=True)
-def _venue_market_type_board(monkeypatch):
-    from sportsassets.workers import ext_pinnacle_loop as _loop
-
-    def _type(us_slug):
-        return {"source": "pmus.list_desk_events", "available": True,
-                "sports_market_type_v2": "SPORTS_MARKET_TYPE_MONEYLINE",
-                "sports_market_type": None, "team": None, "team_id": None}
-
-    monkeypatch.setattr(_loop, "venue_market_type", _type)
-    yield
+# NO READER STUB IS NEEDED ANY MORE. The venue's own market type reaches
+# the lane through the CATALOGUE -- `us_premap.sports_type`, which the copy
+# lane's writer already stamps from `sportsMarketType` -- so these fixtures
+# seed the column (or answer it in their catalogue stub) exactly as they
+# seed every other catalogue field. The funding guard that permits only
+# `book_read` and `_get_client` off `pmus` needs no exception.
