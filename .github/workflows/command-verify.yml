@@ -5181,7 +5181,6 @@ jobs:
   operator-access:
     if: ${{ inputs.operator_action != '' }}
     runs-on: ubuntu-latest
-    runs-on: ubuntu-latest
     steps:
       - name: Operator access
         shell: bash
