@@ -88,6 +88,29 @@ def test_every_submitting_call_site_is_accounted_for():
         "sportsassets/workers/mirror_live.py",     # probe, reserved place
         "sportsassets/workers/underdog.py",        # enter, cashout, exit
         "sportsassets/calibration_adapter.py",     # stored reference
+        # ── ADDED 2026-09-26, AND HERE IS THE DECISION THIS FILE ASKS FOR ──
+        #
+        # `bettor_funded_execution` is the EV lane's funded path: a qualifying
+        # external-valuation decision -> account binding -> owner-approved
+        # limits -> authorization -> pmus.submit_fok. It is a genuine new
+        # order route and this census went red when it was written, which is
+        # what the file is for.
+        #
+        # THE CONTROLS IT GETS, asserted in
+        # `test_the_funded_ev_route_declares_its_controls` below:
+        #   * everything at the boundary, like every other route: the
+        #     execution_gate `submit` authorization inside pmus.submit_fok,
+        #     which denies by RAISING and is read at submission time;
+        #   * FOUR additional disablements of its own, the first two being
+        #     code constants that are currently False;
+        #   * a per-order rail check against the OWNER-APPROVED effective
+        #     limits before the adapter is reached at all -- which no other
+        #     route on this list has, because no other route is funded by an
+        #     owner-approved pilot set.
+        #
+        # It is the only route here that cannot reach the venue at all in the
+        # shipped build.
+        "sportsassets/bettor_funded_execution.py",
     }
     assert set(modules) == expected, (
         "order-capable modules changed.\n  now: %s\n  was: %s"
@@ -192,3 +215,64 @@ def test_the_clob_submission_path_is_gated_too():
     # prose first and reports the gate as misplaced.
     assert src.index("_gate.authorize") < src.index("client.post_order(")
     assert src.index("_gate.authorize") < src.index("client.create_order(")
+
+
+def test_the_funded_ev_route_declares_its_controls():
+    """THE DECISION THE CENSUS DEMANDS, WRITTEN AS ASSERTIONS.
+
+    `bettor_funded_execution` was added to the inventory above. A new order
+    route is only allowed onto that list once someone says which controls bind
+    it, so this test is that statement -- and it fails if any of them is
+    removed later.
+    """
+    import inspect
+
+    from sportsassets import bettor_entry_execution as EX
+    from sportsassets import bettor_funded_activation as FA
+    from sportsassets import bettor_funded_execution as FX
+    from sportsassets import pmus
+
+    src = inspect.getsource(FX)
+
+    # 1 · THE BOUNDARY'S OWN GATE, unchanged and not bypassed. This route
+    #     reaches the venue only through submit_fok, which authorizes.
+    assert "_gate.authorize" in inspect.getsource(pmus.submit_fok)
+    assert "submit_fok" in FX.ADAPTER_SURFACE
+    assert FX.ADAPTER_MODULE == "sportsassets.pmus"
+    # IT CONSTRUCTS NO CLIENT OF ITS OWN -- checked on the parsed module, not
+    # on its text. The module NAMES `_get_client` in its docstring (as the
+    # chain it goes through) and in `describe()["transport_seam_for_tests"]`
+    # (so a test knows where to cut). Naming a seam is not using it, and a
+    # textual check here would forbid the documentation rather than the call.
+    called = {getattr(n.func, "attr", None) or getattr(n.func, "id", None)
+              for n in ast.walk(ast.parse(src)) if isinstance(n, ast.Call)}
+    for banned in ("ClobClient", "PolymarketUS", "_get_client"):
+        assert banned not in called, banned
+
+    # 2 · FUNDED CLASS ONLY, and disjoint from the test-venue executor
+    assert FX.ALLOWED_VENUE_CLASSES == (FA.VENUE_FUNDED,)
+
+    # 3 · ITS OWN FOUR DISABLEMENTS, two of them code constants that are off
+    d = {x["what"]: x for x in FX.disablements()}
+    assert len(d) == 4
+    assert d["FUNDED_SUBMISSION_ENABLED"]["value"] is False
+    assert d["REAL_ORDER_SUBMISSION_ENABLED"]["value"] is False
+    assert "execution_gate" in d
+    assert "PMUS_KEY_ID / PMUS_SECRET_KEY" in d
+    for x in d.values():
+        assert x.get("cleared_by"), x
+
+    # 4 · THE AUTHORIZATION GATE IS CONSULTED, and its answer is required
+    assert "authorize_submission" in src
+    assert "authorization_consumed" in src
+    assert FX.R_NOT_AUTHORIZED in (FX.describe()["refusals"])
+
+    # 5 · A PER-ORDER RAIL CHECK AGAINST THE OWNER-APPROVED SET, which is
+    #     unique to this route on the census
+    assert "MAX_MARKET_EXPOSURE" in src
+    assert FX.R_OVER_RAIL in FX.describe()["refusals"]
+    assert "effective_limits" in src
+
+    # 6 · AND IT WRITES NO ROWS, so it cannot record an order it did not send
+    assert "INSERT INTO" not in src.upper()
+    assert EX.REAL_ORDER_SUBMISSION_ENABLED is False
