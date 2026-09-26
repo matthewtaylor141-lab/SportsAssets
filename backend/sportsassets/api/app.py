@@ -7612,7 +7612,7 @@ async def api_venue_competitions(min_events: int = Query(1, ge=1, le=200),
     # whether that is a mapping defect or genuine absent coverage is
     # decided by whether the venue lists Guadalajara vs Queretaro at all.
     # Bounded by the token: `lmx` holds 7 events, not 1400.
-    want = str(token or "").strip().lower()
+    want = (token.strip().lower() if isinstance(token, str) else "")
     token_events: list[dict] = []
     buckets: dict[str, dict] = {}
     for ev in events:
