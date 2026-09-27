@@ -133,16 +133,42 @@ class _Orders:
 
 
 class _Markets:
+    """The venue's market endpoints, including the BOOK feed the exit selector
+    reads. The ladder is published in the venue's own shape -- `bids` /
+    `offers` with `{"px": {"value": ...}, "qty": ...}` levels -- because
+    `bettor_book_snapshot` parses that and a double answering in our shape
+    would skip the parser."""
+
+    def __init__(self, bids=None, offers=None, raise_on_book=False):
+        self._bids = bids
+        self._offers = offers
+        self._raise = raise_on_book
+
     def retrieve_by_slug(self, slug):
         return {"market": {"marketSides": [
             {"identifier": slug + "-a", "description": "A"},
             {"identifier": slug + "-b", "description": "B"}]}}
 
+    def book(self, slug):
+        if self._raise:
+            raise RuntimeError("the venue's book feed is unreachable")
+        if self._bids is None and self._offers is None:
+            return {}          # NO_MARKET_DATA_IN_PAYLOAD
+        return {"marketData": {
+            "bids": list(self._bids or []),
+            "offers": list(self._offers or [])}}
+
+
+def _level(px, qty):
+    return {"px": {"value": "%.2f" % px, "currency": "USD"}, "qty": str(qty)}
+
 
 class _Client:
-    def __init__(self, sent, **kw):
+    def __init__(self, sent, *, bids=None, offers=None,
+                 raise_on_book=False, **kw):
         self.orders = _Orders(sent, **kw)
-        self.markets = _Markets()
+        self.markets = _Markets(bids=bids, offers=offers,
+                                raise_on_book=raise_on_book)
 
 
 def _transport(monkeypatch, **kw):
@@ -219,16 +245,26 @@ async def _clean(conn):
         await conn.execute("DELETE FROM ingestion_state WHERE key=$1", k)
 
 
+PAYS_ON = "KANSAS_CITY_CHIEFS"
+
+
 async def _entry(conn, *, intent_id, qty=10, price=0.62, slug=SLUG,
                  event=EVENT, intent=FX.LONG, vo="vo-1", fill_qty=None,
-                 fill_id="vf-1", commission=None):
-    """AN ENTRY THAT FILLED, through the book's own writers."""
+                 fill_id="vf-1", commission=None, payout_event=PAYS_ON):
+    """AN ENTRY THAT FILLED, through the book's own writers.
+
+    `payout_event` is persisted because `ev_hold` refuses without it and it is
+    NOT derivable from the order intent. Passing None models a row written
+    before the column existed, which the selector must report rather than
+    guess around.
+    """
     coll = FX.collateral_for(price, qty, intent)
     got = await FB.record_intent(
         conn, intent_id=intent_id, account_id=ACCT, venue=VENUE,
         venue_class=FA.VENUE_FUNDED, us_market_slug=slug, event_key=event,
         order_intent=intent, limit_price=price, quantity=qty,
-        collateral_usd=coll, effective_digest="d")
+        collateral_usd=coll, effective_digest="d",
+        payout_event=payout_event, held_is_long=(intent == FX.LONG))
     if not got.get("ok"):
         return got
     await FB.record_acknowledgement(conn, intent_id, venue_order_id=vo,
@@ -505,15 +541,34 @@ def test_market_coincidence_is_not_ownership():
     assert got["adopt"] is None
     assert got["refusal"] == FB.R_CANDIDATE_PREDATES_US
 
-    # (h) AND THE ONE CASE THAT IS OURS.
+    # (h) AND THE CASE THAT USED TO BE ADOPTED AND MUST NOT BE: ONE order,
+    #     agreeing on every term, created after our send. It is still not
+    #     ours. One manual order at the same price and size satisfies all
+    #     four terms, and this venue accepts no client order identity, so the
+    #     difference cannot be established. THIS is the counterexample the
+    #     four-term rule failed.
     got = FB.correlate_venue_order(
-        mine, [norm(_venue_order(oid="ours",
+        mine, [norm(_venue_order(oid="looks-like-ours",
                                  created="2026-09-27T12:00:05Z")),
                norm(_venue_order(oid="unrelated", qty=3))],
         sent_at="2026-09-27T12:00:00Z")
-    assert got["venue_order_id"] == "ours"
-    assert got["refusal"] is None
+    assert got["adopt"] is None
+    assert got["refusal"] == FB.R_NO_DURABLE_IDENTITY
+    assert got["term_match_only"] == "looks-like-ours"
     assert got["created_after_our_send"] is True
+    assert got["would_need"]["venue_accepts_it"] is False
+
+    # (i) AND THE VENUE REALLY DOES NOT ACCEPT ONE. Asserted against the
+    #     INSTALLED SDK rather than described, because this is the fact the
+    #     whole rule rests on.
+    import polymarket_us.types.orders as _o
+    import inspect as _i
+
+    params = _i.getsource(_o.CreateOrderParams)
+    for name in ("clientOrderId", "clOrdId", "clOrdID", "clientId",
+                 "externalId", "idempotency"):
+        assert name not in params, name
+    assert FB.CLIENT_ORDER_IDENTITY_SUPPORTED is False
 
 
 def test_the_clock_check_reads_the_timestamp_the_database_hands_it():
@@ -539,11 +594,15 @@ def test_the_clock_check_reads_the_timestamp_the_database_hands_it():
         {"us_market_slug": SLUG, "order_intent": FX.LONG,
          "limit_price": 0.62, "quantity": 10},
         [__import__("sportsassets.pmus", fromlist=["x"])._norm_order(
-            _venue_order(oid="ours", created="nonsense"))],
+            _venue_order(oid="term-match", created="nonsense"))],
         sent_at=when)
-    assert got["venue_order_id"] == "ours"
+    # AN UNREADABLE TIMESTAMP USED TO FALL BACK TO "THE FOUR TERMS ALONE",
+    # which was the adoption path -- so the weakest evidence produced the
+    # strongest action. It now establishes nothing and nothing is adopted.
+    assert got["adopt"] is None
+    assert got["refusal"] == FB.R_NO_DURABLE_IDENTITY
     assert got["created_after_our_send"] is None
-    assert "unreadable" in got["time_check"]
+    assert "not even the weak time discriminator" in got["time_check"]
 
 
 def test_one_executions_reader_handles_both_adapter_shapes():
@@ -782,8 +841,13 @@ def test_the_servicing_lane_can_only_reduce_exposure():
     # variable here would be a buy leaving the servicing lane.
     fourth = sub[0].args[3]
     assert isinstance(fourth, ast.Constant) and fourth.value is True
-    for banned in ("submit_fok", "submit_exit", "record_intent"):
-        assert banned not in inspect.getsource(FM.manage), banned
+    # `manage` DOES call `submit_exit` now -- that is the whole correction, and
+    # asserting it did not was pinning the gap. What must stay true is that it
+    # cannot OPEN a position: no entry submission, and no ENTRY intent written.
+    mg = inspect.getsource(FM.manage)
+    assert "submit_exit" in mg
+    for banned in ("submit_for_decision", "record_intent", "submit_fok"):
+        assert banned not in mg, banned
 
 
 def test_the_servicing_switch_is_separate_from_the_entry_switch():
@@ -982,14 +1046,19 @@ async def test_an_exit_is_never_refused_by_the_one_position_rule():
         # ... and the exit path passes the same authorization boundary an
         # entry does -- an exit is still a real order -- and then stops at its
         # OWN switch, which is what "servicing outlives entry" means.
+        # ... and the exit reaches its OWN switch with the entry-side
+        # authorization gate NOT consulted as a blocker. REAL_ORDER_SUBMISSION
+        # is off here and it does not matter: that constant governs adding
+        # exposure. The servicing gate is ownership.
         got = await FM.submit_exit(conn, intent_id="fpi-stuck",
                                   limit_price=0.70)
-        assert got["refusal"] == FM.R_GATE_NOT_AFFIRMATIVE, got
-        import unittest.mock as _mock
-        with _mock.patch.object(EX, "REAL_ORDER_SUBMISSION_ENABLED", True):
-            got = await FM.submit_exit(conn, intent_id="fpi-stuck",
-                                      limit_price=0.70)
         assert got["refusal"] == FM.R_EXIT_DISABLED, got
+        assert got["servicing_gate"]["ok"] is True
+        assert got["servicing_gate"]["owns_the_row"] is True
+        assert got["submission_authority_for_the_record"][
+            "does_not_gate_this_exit"] is True
+        assert got["submission_authority_for_the_record"][
+            "affirmative"] is False
         assert got["would_send"]["args"][3] is True        # sell
         assert got["plan"]["quantity"] == 10
         # AND NO EXIT PRICE IS EVER INVENTED.
@@ -1135,9 +1204,16 @@ async def test_one_servicing_pass_reconciles_settles_and_measures(monkeypatch):
         assert got["loss_stop"]["rail"] == "MAX_DRAWDOWN"
         assert got["loss_stop"]["limit_usd"] == pytest.approx(40.0)
         assert got["loss_stop"]["tripped"] is False
-        # WHAT NEEDS A DECISION IS SAID, not implied by an absence.
+        # THE MISSING INPUT IS NAMED SPECIFICALLY, not as a generic "a
+        # decision is needed". Here there is no probability row for this slug,
+        # so the selector stops at the first input it cannot get.
+        # This fixture's client publishes no book, so the selector stops at
+        # the first input it cannot get and NAMES it. An unreadable book is
+        # not a reason to sell and not a reason to say nothing.
         needs = [n["what"] for n in got["needs_a_decision"]]
-        assert "AN_EXIT_LIMIT_OR_AN_AUTHORITATIVE_SETTLEMENT" in needs
+        assert FM.R_BOOK_UNREADABLE in needs, needs
+        assert got["selection"] and got["selection"][0]["ok"] is False
+        assert got["exits"] == []
         assert [k for k, _ in sent if k in ("create", "cancel")] == []
 
         # AND THE VENUE SETTLING IT CLOSES IT ON THE NEXT PASS.
@@ -1156,7 +1232,7 @@ async def test_one_servicing_pass_reconciles_settles_and_measures(monkeypatch):
         # be: this venue stated no commission, so the fee inside that realised
         # loss is still the schedule's estimate.
         needs = [n["what"] for n in got["needs_a_decision"]]
-        assert "AN_EXIT_LIMIT_OR_AN_AUTHORITATIVE_SETTLEMENT" not in needs
+        assert FM.R_BOOK_UNREADABLE not in needs
         assert needs == ["A_FEE_THAT_IS_NOT_RECONCILED"]
         assert got["pnl"]["realised_is_provisional"] is True
     finally:

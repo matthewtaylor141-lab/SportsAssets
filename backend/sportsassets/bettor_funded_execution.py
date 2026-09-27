@@ -240,9 +240,25 @@ def plan_from_decision(rec: dict | None) -> dict:
                     why=("%s cannot be expressed in the venue's two decimals "
                          "on this side without loosening the bound the plan "
                          "was sized against" % limit))
+    # THE EVENT THIS CONTRACT WOULD PAY ON, carried from the decision and
+    # never derived. `bettor_hold_value.ev_hold` refuses without it, so exit
+    # management is impossible for a position whose entry did not record it --
+    # and it is NOT the order intent: a BUY_SHORT pays on the complement, and
+    # on a three-way book the complement is not the opposing team. The shadow
+    # record computes it (`payout_is_complement`), so it is read, not guessed.
+    payout_event = (rec.get("payout_event")
+                    or (rec.get("identity") or {}).get("payout_event"))
     return {"version": VERSION, "ok": True, "refusal": None,
             "us_market_slug": str(slug), "event_key": str(event_key),
             "intent": intent,
+            "payout_event": (None if not payout_event else str(payout_event)),
+            "held_is_long": intent == LONG,
+            "payout_event_note": (
+                "absent here means the decision did not state it. The entry is "
+                "not refused for that -- the rails and the authorization do not "
+                "depend on it -- but the resulting position CANNOT be valued "
+                "for an exit, and select_exit says so by name rather than "
+                "deriving one"),
             "limit_price": wire, "quantity": contracts,
             "sell": False, "tif": TIF, "post_only": False,
             "collateral_usd": collateral_for(wire, contracts, intent),
@@ -468,8 +484,11 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
         limit_price=plan["limit_price"], quantity=plan["quantity"],
         collateral_usd=plan["collateral_usd"],
         effective_digest=eff["effective_digest"],
+        payout_event=plan.get("payout_event"),
+        held_is_long=plan.get("held_is_long"),
         decision_ref={"admissible": True,
                       "sized_from": plan["sized_from"],
+                      "payout_event": plan.get("payout_event"),
                       "authorization_at": auth.get("authorization",
                                                    {}).get("at")})
     out["intent"] = got

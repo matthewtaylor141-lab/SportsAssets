@@ -80,8 +80,20 @@ R_NOTHING_HELD = "THIS_POSITION_HOLDS_NO_RESIDUAL_INVENTORY"
 R_OVER_RESIDUAL = "THE_EXIT_IS_LARGER_THAN_THE_INVENTORY_HELD"
 R_EXIT_DISABLED = "FUNDED_EXIT_SUBMISSION_IS_DISABLED_IN_CODE"
 R_EXIT_PRICE_UNREPRESENTABLE = "THE_EXIT_LIMIT_CANNOT_BE_SENT_WITHOUT_ACCEPTING_LESS"
-R_NOT_AUTHORIZED = "THE_AUTHORIZATION_GATE_REFUSED_THIS_SUBMISSION"
-R_GATE_NOT_AFFIRMATIVE = "THE_EXECUTION_GATE_DID_NOT_AFFIRMATIVELY_ALLOW_IT"
+#: RETIRED. An exit no longer refuses on the ENTRY authorization gate --
+#: `bettor_funded_book.check_servicing` is its boundary. Kept as names so a
+#: reader grepping for them finds this note rather than nothing, and so a
+#: future caller cannot resurrect the coupling by accident.
+R_NOT_AUTHORIZED = "RETIRED_AN_EXIT_DOES_NOT_NEED_A_LIVE_SUBMISSION_GRANT"
+R_GATE_NOT_AFFIRMATIVE = "RETIRED_SEE_R_NOT_AUTHORIZED"
+
+#: Missing inputs the exit SELECTOR names, each pointing at one thing.
+R_NO_PAYOUT_EVENT = "THE_POSITION_DOES_NOT_RECORD_THE_EVENT_IT_PAYS_ON"
+R_BOOK_UNREADABLE = "THE_VENUES_EXECUTABLE_BOOK_COULD_NOT_BE_READ"
+R_NO_EXIT_SIDE = "THE_SIDE_A_CLOSE_WOULD_CONSUME_PUBLISHES_NO_EXECUTABLE_LEVEL"
+R_NO_PROBABILITY = "NO_ELIGIBLE_PROBABILITY_ROW_PRICES_THIS_CONTRACT"
+R_HOLD_NOT_PRICED = "EV_HOLD_IS_NOT_IDENTIFIED_SO_NO_ACTION_CAN_BEAT_HOLDING"
+R_NO_BASIS = "THE_POSITION_HAS_NO_PER_CONTRACT_BASIS_TO_RANK_AGAINST"
 R_NO_ADAPTER = "THE_VENUE_ADAPTER_COULD_NOT_BE_RESOLVED"
 R_SETTLEMENT_NOT_AUTHORITATIVE = "THE_VENUE_STATES_NO_AUTHORITATIVE_OUTCOME"
 R_NO_EXIT_PRICE = "NO_EXIT_LIMIT_WAS_SUPPLIED_AND_THIS_LANE_INVENTS_NONE"
@@ -148,6 +160,7 @@ async def open_positions(conn, *, account_id: str, venue: str) -> list[dict]:
     rows = await conn.fetch(
         "SELECT intent_id, account_id, venue, us_market_slug, event_key, "
         "       order_intent, state, venue_order_id, kind, "
+        "       payout_event, held_is_long, "
         "       quantity::float8 AS quantity, "
         "       residual_qty::float8 AS residual, "
         "       collateral_usd::float8 AS collateral, "
@@ -164,6 +177,281 @@ async def open_positions(conn, *, account_id: str, venue: str) -> list[dict]:
 
 
 # ── 2 · THE EXIT, THROUGH THE SAME ADAPTER ───────────────────────────
+
+# ── THE EXIT DECISION, THROUGH THE COMPONENTS THAT ALREADY EXIST ────
+
+def funded_fee_fn(*, qty, price):
+    """The deployed fee schedule, in the shape the selectors call."""
+    got, _ = FB.fee_for(float(qty), float(price), at=time.time())
+    return float(got)
+
+
+async def select_exit(conn, position, *, client=None, now=None,
+                      fee_fn=None, book_reader=None) -> dict:
+    """WHAT TO DO WITH A FUNDED HOLDING, AND HOW MUCH OF IT.
+
+    THE DEFECT THIS CLOSES. `manage()` reconciled, asked about settlement, and
+    then emitted `needs_a_decision`. That is servicing infrastructure reporting
+    that a decision is owed -- it is not exit management, and describing it as
+    such was the overstatement. Nothing selected an action.
+
+    THIS SELECTS ONE, THROUGH THE DEPLOYED DECISION PATH and not a second copy
+    of it:
+
+      pmus.book_read                 the venue's own executable book
+      bettor_book_snapshot.exit_ladder    what CLOSING pays, level by level,
+                                     with the complement price beside it
+      bettor_hold_value.latest_probability   the freshest ELIGIBLE row; a held
+                                     row is never used for a decision
+      bettor_hold_value.ev_hold      EV_HOLD under its own freshness bound,
+                                     its payout-event agreement check and its
+                                     terminal-rule gate
+      bettor_mgmt_select.rank_with_hold   every action scored, the marginal
+                                     quantity the book pays a premium for, the
+                                     MIN_IMPROVEMENT gate, and `selected`
+
+    EVERY EVIDENCE REQUIREMENT THOSE COMPONENTS CARRY IS RETAINED. The freshness
+    bound is theirs, the eligible-row rule is theirs, the payout-event agreement
+    is theirs, and the settlement-compatibility gate is theirs. This function
+    supplies funded inputs and reports what is missing; it relaxes nothing.
+
+    AND A MISSING INPUT IS NAMED, ONE AT A TIME. "Needs a decision" was the old
+    answer to five different problems. Each now has its own refusal, so the
+    next engineering step is identified rather than guessed.
+    """
+    from . import bettor_book_snapshot as BS
+    from . import bettor_hold_value as HV
+    from . import bettor_mgmt_select as MS
+
+    at = float(now if now is not None else time.time())
+    slug = str(position.get("us_market_slug"))
+    opened_with = str(position.get("order_intent"))
+    residual = float(position.get("residual") or position.get("residual_qty")
+                     or 0)
+    out = {"version": VERSION, "at": at, "intent_id": position.get("intent_id"),
+           "us_market_slug": slug, "residual_qty": residual,
+           "selected": None, "selected_qty": None, "limit_price": None,
+           "components": {
+               "book": "pmus.book_read",
+               "ladder": "bettor_book_snapshot.exit_ladder",
+               "probability": "bettor_hold_value.latest_probability",
+               "hold_value": "bettor_hold_value.ev_hold",
+               "ranking": "bettor_mgmt_select.rank_with_hold"},
+           "evidence_requirements_are_the_components_own": True}
+    if residual <= 0:
+        return dict(out, ok=False, refusal=R_NOTHING_HELD)
+
+    # ── THE EVENT THIS CONTRACT PAYS ON, never derived ──────────────
+    payout_event = position.get("payout_event")
+    if not payout_event:
+        return dict(out, ok=False, refusal=R_NO_PAYOUT_EVENT,
+                    missing_input="bettor_funded_intents.payout_event",
+                    why=("`ev_hold` requires the event OUR contract pays on, "
+                         "and it is NOT the order intent: a BUY_SHORT pays on "
+                         "the complement, and on a three-way book the "
+                         "complement is not the opposing team. This position "
+                         "was recorded before the column existed, or by a "
+                         "caller that did not supply it. Deriving it here "
+                         "would value the holding against the wrong outcome"))
+
+    # ── THE BASIS, FROM THE ENTRY FILLS ────────────────────────────
+    rb = await FB.remaining_basis(conn, str(position.get("intent_id")))
+    out["basis"] = rb
+    if rb["basis_per_contract"] is None:
+        return dict(out, ok=False, refusal=R_NO_BASIS,
+                    why=("no entry fill carries a cost for this position, so "
+                         "there is nothing to rank an exit against"))
+    basis_per = float(rb["basis_per_contract"])
+
+    # ── THE EXECUTABLE BOOK ────────────────────────────────────────
+    from . import pmus as _p
+
+    reader = book_reader or _p.book_read
+    # RESOLVE A CLIENT WHEN THE CALLER SUPPLIED NONE. `pmus.book_read` takes the
+    # client explicitly and does NOT fall back, so a scheduled caller that
+    # passes nothing gets `NO_BOOK_FEED_ON_CLIENT` -- an answer about our
+    # argument, dressed as an answer about the venue. The resolution goes
+    # through `_get_client`, which is the transport seam, so the substituted
+    # transport in a test and the real credential in production take the same
+    # path. No credential raises, and that is reported as the credential it is.
+    use = client
+    if use is None:
+        try:
+            use = _p._get_client()
+        except Exception as exc:                           # noqa: BLE001
+            return dict(out, ok=False, refusal=R_BOOK_UNREADABLE,
+                        error="%s: %s" % (type(exc).__name__,
+                                          str(exc)[:200]),
+                        why=("no venue client could be resolved, so the "
+                             "executable book was never read. In this "
+                             "deployment that is the absent credential, not "
+                             "an empty market"))
+    try:
+        got = reader(use, slug) or {}
+    except Exception as exc:                               # noqa: BLE001
+        return dict(out, ok=False, refusal=R_BOOK_UNREADABLE,
+                    error="%s: %s" % (type(exc).__name__, str(exc)[:200]))
+    if got.get("error") or not got.get("marketData"):
+        return dict(out, ok=False, refusal=R_BOOK_UNREADABLE,
+                    book_error=got.get("error"),
+                    why=("an unreadable book and an empty book are different "
+                         "facts and only one of them is about the market. "
+                         "Neither is a reason to sell"))
+    lad = BS.exit_ladder(got["marketData"], held_intent=opened_with)
+    out["exit_ladder"] = {k: lad.get(k) for k in
+                          ("ok", "refusal", "best_exit_price", "size_at_best",
+                           "displayed_depth", "levels_read", "parse_status")}
+    if not lad.get("ok"):
+        return dict(out, ok=False, refusal=R_NO_EXIT_SIDE,
+                    ladder_refusal=lad.get("refusal"), why=lad.get("why"))
+
+    # ── EV_HOLD, UNDER ITS OWN RULES ───────────────────────────────
+    prob = await HV.latest_probability(conn, us_market_slug=slug)
+    out["probability_read"] = {k: prob.get(k) for k in
+                               ("found", "refusal", "eligibility", "why")}
+    if not prob.get("found"):
+        return dict(out, ok=False, refusal=R_NO_PROBABILITY,
+                    probability_refusal=prob.get("refusal"),
+                    why=prob.get("why"))
+    hv = HV.ev_hold(qty=residual, basis_per_contract=basis_per,
+                    probability_row=prob["row"], now=at,
+                    payout_event_held=str(payout_event),
+                    event_state=position.get("event_state"),
+                    settlement=position.get("settlement_rule"))
+    out["ev_hold"] = {k: hv.get(k) for k in
+                      ("status", "refusal", "why", "ev_hold_usd",
+                       "probability", "age_bound_s", "event_state",
+                       "probability_event", "payout_event_held")}
+    if hv.get("status") != "IDENTIFIED":
+        return dict(out, ok=False, refusal=R_HOLD_NOT_PRICED,
+                    hold_refusal=hv.get("refusal"), why=hv.get("why"),
+                    what_is_missing=(
+                        "EV_HOLD is the reference every action is measured "
+                        "against. Without it nothing can be shown to beat "
+                        "holding, and selling because a price exists is not a "
+                        "decision. THIS IS AN ENGINEERING INPUT, not "
+                        "calibration evidence: the two are not "
+                        "interchangeable, and accumulating outcome history "
+                        "would not supply it"))
+
+    # ── THE RANKING, AND ITS OWN GATES ─────────────────────────────
+    sale = BS.as_sale_ladder(lad)
+    ranked = MS.rank_with_hold(
+        residual, basis_per, ev_hold=hv,
+        bid=lad.get("best_exit_price"), bid_size=lad.get("size_at_best"),
+        complement_ask=lad.get("best_complement_price"),
+        complement_ask_size=lad.get("size_at_best"),
+        fee_fn=(fee_fn or funded_fee_fn),
+        venue=position.get("venue"), us_market_slug=slug,
+        held_is_long=(opened_with != SHORT),
+        sale_ladder=sale)
+    out["ranking"] = {k: ranked.get(k) for k in
+                      ("selected", "selected_qty", "selection_reason",
+                       "operating_state", "governing_rule", "runner_up",
+                       "improvement_over_hold_per_contract",
+                       "is_a_deliberate_hold")}
+    out["not_rankable"] = ranked.get("not_rankable")
+    sel = ranked.get("selected")
+    qty = ranked.get("selected_qty")
+    if sel in ("DIRECT_EXIT", "REDUCE") and qty and float(qty) > 0:
+        # THE PRICE IS A LEVEL THE BOOK PUBLISHED, not a mark we invented.
+        px = lad.get("best_exit_price")
+        return dict(out, ok=True, refusal=None, selected=sel,
+                    selected_qty=float(qty), limit_price=float(px),
+                    is_an_evidenced_exit=True,
+                    price_source=("the best level of the venue's own exit "
+                                  "ladder at the moment of the decision"),
+                    why=ranked.get("selection_reason"))
+    return dict(out, ok=True, refusal=None, selected=sel,
+                selected_qty=(None if qty is None else float(qty)),
+                is_an_evidenced_exit=False,
+                why=ranked.get("selection_reason"),
+                note=("this IS a decision. HOLD chosen by a named rule on "
+                      "observed inputs is not the same as no decision, and "
+                      "the reason above says which rule"))
+
+
+async def _reserve_exit(conn, *, parent: str, row, venue: str,
+                        opened_with: str, wire: float,
+                        contracts: int) -> dict:
+    """TAKE THE INVENTORY BEFORE SENDING ANYTHING, under a row lock.
+
+    THE DEFECT THIS CLOSES, and it is the one the one-open-position index
+    cannot: `submit_exit` read `residual_qty`, then inserted an EXIT. EXIT rows
+    are deliberately OUTSIDE that unique index, because an exit must never be
+    refused for reducing an open position -- so there was nothing at all between
+    the read and the insert. Two concurrent full exits both read 10 held and
+    both sold 10. A retry after an ambiguous answer did the same thing, because
+    the first attempt's UNRESOLVED exit consumed no fills and so did not appear
+    in the residual.
+
+    THE RESERVATION IS THE INSERT. `SELECT ... FOR UPDATE` on the PARENT row
+    serialises callers on the position itself, and
+    `bettor_funded_available_to_exit` -- evaluated inside that lock -- subtracts
+    the unfilled remainder of every exit already outstanding or unresolved. The
+    second caller therefore reads an availability the first has already
+    committed against, and is refused rather than queued into an oversell.
+
+    A SELECT-then-INSERT outside a transaction could not do this, which is the
+    same reason the entry path's guarantee is a unique index rather than a
+    check.
+    """
+    out = {"parent_intent_id": parent, "asked_qty": contracts,
+           "serialised_by": "SELECT ... FOR UPDATE on the parent position",
+           "availability_is": ("residual minus the unfilled remainder of "
+                               "every outstanding or unresolved exit")}
+    async with conn.transaction():
+        locked = await conn.fetchrow(
+            "SELECT residual_qty::float8 AS residual, closed_at "
+            "  FROM bettor_funded_intents "
+            " WHERE intent_id=$1 AND kind='ENTRY' FOR UPDATE", parent)
+        if locked is None:
+            return dict(out, ok=False, refusal=R_NO_SUCH_POSITION)
+        if locked["closed_at"] is not None:
+            return dict(out, ok=False, refusal=R_NOTHING_HELD,
+                        why="the position closed while this exit was priced")
+        avail = float(await conn.fetchval(
+            "SELECT bettor_funded_available_to_exit($1)::float8", parent)
+            or 0.0)
+        out["available_to_exit"] = avail
+        out["residual_qty"] = float(locked["residual"] or 0)
+        if contracts > avail + 1e-9:
+            return dict(out, ok=False, refusal=R_OVER_RESIDUAL,
+                        why=("%d contracts were requested and %s are "
+                             "available: the residual is %s and the rest is "
+                             "already reserved by an exit that is outstanding "
+                             "or unresolved. Refused INSIDE the lock, so two "
+                             "callers cannot both pass here"
+                             % (contracts, avail,
+                                float(locked["residual"] or 0))))
+        xid = FB.new_intent_id()
+        await conn.execute(
+            "INSERT INTO bettor_funded_intents (intent_id, account_id, venue,"
+            " venue_class, us_market_slug, event_key, order_intent,"
+            " limit_price, quantity, collateral_usd, effective_digest,"
+            " decision_ref, state, provenance, kind, parent_intent_id,"
+            " payout_event, held_is_long, client_identity_supported) "
+            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,"
+            "        'INTENT_RECORDED',$13,'EXIT',$14,$15,$16,$17)",
+            xid, str(row["account_id"]), venue, str(row["venue_class"]),
+            str(row["us_market_slug"]), str(row["event_key"]), opened_with,
+            wire, contracts,
+            # AN EXIT COMMITS NO COLLATERAL. It releases it.
+            0.0, str(row["effective_digest"] or ""),
+            '{"servicing": true, "reduces_exposure": true}',
+            FB.PROVENANCE, parent,
+            row["payout_event"] if "payout_event" in row.keys() else None,
+            row["held_is_long"] if "held_is_long" in row.keys() else None,
+            FB.CLIENT_ORDER_IDENTITY_SUPPORTED)
+        # READ THE AVAILABILITY BACK inside the same transaction, so the
+        # reservation this insert took is a measured fact and not an assumption.
+        after = float(await conn.fetchval(
+            "SELECT bettor_funded_available_to_exit($1)::float8", parent)
+            or 0.0)
+    return dict(out, ok=True, refusal=None, exit_intent_id=xid,
+                available_after_reserving=after,
+                reserved_qty=round(avail - after, 6))
+
 
 async def submit_exit(conn, *, intent_id: str, limit_price=None,
                       quantity=None, adapter=None, venue: str | None = None,
@@ -188,6 +476,7 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
     row = await conn.fetchrow(
         "SELECT intent_id, account_id, venue, venue_class, us_market_slug, "
         "       event_key, order_intent, effective_digest, closed_at, "
+        "       payout_event, held_is_long, "
         "       residual_qty::float8 AS residual, "
         "       quantity::float8 AS quantity "
         "  FROM bettor_funded_intents WHERE intent_id=$1 AND kind='ENTRY'",
@@ -201,13 +490,24 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
                     residual_qty=residual,
                     why=("there is nothing to sell back: the position holds "
                          "no residual inventory or has already been closed"))
-    want = residual if quantity is None else float(quantity)
-    if want <= 0 or want > residual + 1e-9:
+    # A FIRST, UNLOCKED SIZING READ -- deliberately not the authority. The
+    # binding check is `_reserve_exit` below, which takes FOR UPDATE on the
+    # parent and computes availability inside the transaction that inserts the
+    # exit. This one exists only so an obviously-oversized request is refused
+    # before a price is rounded and a gate is consulted.
+    avail_hint = await conn.fetchval(
+        "SELECT bettor_funded_available_to_exit($1)::float8", intent_id)
+    avail_hint = float(avail_hint or 0.0)
+    out["available_to_exit_hint"] = avail_hint
+    want = avail_hint if quantity is None else float(quantity)
+    if want <= 0 or want > avail_hint + 1e-9:
         return dict(out, ok=False, refusal=R_OVER_RESIDUAL,
                     asked=want, residual_qty=residual,
-                    why=("an exit larger than the inventory held would open a "
-                         "position on the other side, which this lane does "
-                         "not do"))
+                    available_to_exit=avail_hint,
+                    why=("an exit larger than the inventory AVAILABLE would "
+                         "oversell: %s contracts are held and %s of them are "
+                         "already reserved by an exit that is outstanding or "
+                         "unresolved" % (residual, residual - avail_hint)))
     contracts = int(want)
     if contracts < 1:
         return dict(out, ok=False, refusal=R_OVER_RESIDUAL, asked=want,
@@ -245,28 +545,43 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
                                   else "CEIL"),
                     "why": ("the direction that cannot receive less per "
                             "contract than the plan assumed")}}
-    sel = await FA.account_selection(conn, str(row["account_id"]))
-    out["account_selection"] = sel
-    if not sel.get("ok"):
-        return dict(out, ok=False, refusal=sel["refusal"],
-                    why=sel.get("why"))
+    # ── THE SERVICING BOUNDARY: OWNERSHIP, NOT ENTRY PERMISSION ─────
+    #
+    # THE DEFECT THIS CLOSES. This required an AFFIRMATIVE
+    # `authorize_submission` -- the entry gate. So an expired grant, a revoked
+    # one, a replaced approved-limit set, or `REAL_ORDER_SUBMISSION_ENABLED`
+    # being off blocked the EXIT too, and the separate servicing switch bought
+    # nothing: the lapse that removed permission to ADD exposure also removed
+    # the ability to REDUCE it. Now the gate is the established ownership one --
+    # this position's own row must belong to this account at this venue -- and
+    # submission authority is reported without gating.
+    gate = await FB.check_servicing(conn, intent_id=intent_id,
+                                   account_id=str(row["account_id"]),
+                                   venue=ven)
+    out["servicing_gate"] = gate
+    if not gate.get("ok"):
+        return dict(out, ok=False, refusal=gate["refusal"],
+                    why=gate.get("why"))
+    # FOR THE RECORD ONLY. A lapsed grant is reported and does not refuse.
     approved = await _approved(conn)
     auth = EX.authorize_submission(
         account_id=str(row["account_id"]), venue=ven,
         authorization=FA._obj(await FA._state(conn, FA.AUTHORIZATION_KEY)),
         approved_limits=approved, now=at)
-    out["authorization"] = auth
-    if not auth.get("authorization_consumed"):
-        return dict(out, ok=False, refusal=R_NOT_AUTHORIZED,
-                    gate_refusal=auth.get("refusal"),
-                    why=("an exit is still a real order at a real venue, so "
-                         "it passes the same authorization boundary an entry "
-                         "does"))
-    if not auth.get("ok"):
-        return dict(out, ok=False, refusal=R_GATE_NOT_AFFIRMATIVE,
-                    gate_refusal=auth.get("refusal"),
-                    why=("the record was consumed and the execution gate "
-                         "still did not allow it: %s" % auth.get("refusal")))
+    out["submission_authority_for_the_record"] = {
+        "valid_for_new_exposure": bool(auth.get("authorization_consumed")),
+        "affirmative": bool(auth.get("ok")),
+        "refusal_if_any": auth.get("refusal"),
+        "does_not_gate_this_exit": True,
+        "why": ("an exit reduces exposure. Gating it on the grant to ADD "
+                "exposure is how an expiry strands inventory")}
+    # THE ACCOUNT'S OWN STATE IS REPORTED, NOT ENFORCED, for the same reason:
+    # a paused account must still be able to sell what it holds.
+    sel = await FA.account_selection(conn, str(row["account_id"]))
+    out["account_selection_for_the_record"] = {
+        "eligible_for_new_exposure": bool(sel.get("ok")),
+        "refusal_if_any": sel.get("refusal"),
+        "does_not_gate_this_exit": True}
     out["would_send"] = {
         "callable": "%s.submit_fok" % ADAPTER_MODULE,
         "args": [row["us_market_slug"], wire, contracts, True],
@@ -285,22 +600,15 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
     except Exception as exc:                               # noqa: BLE001
         return dict(out, ok=False, refusal=R_NO_ADAPTER, error=str(exc)[:200])
 
-    # ── THE EXIT INTENT IS COMMITTED BEFORE THE REQUEST LEAVES ──────
-    xid = FB.new_intent_id()
-    await conn.execute(
-        "INSERT INTO bettor_funded_intents (intent_id, account_id, venue,"
-        " venue_class, us_market_slug, event_key, order_intent, limit_price,"
-        " quantity, collateral_usd, effective_digest, decision_ref, state,"
-        " provenance, kind, parent_intent_id) "
-        "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,"
-        "        'INTENT_RECORDED',$13,'EXIT',$14)",
-        xid, str(row["account_id"]), ven, str(row["venue_class"]),
-        str(row["us_market_slug"]), str(row["event_key"]), opened_with,
-        wire, contracts,
-        # AN EXIT COMMITS NO COLLATERAL. It releases it.
-        0.0, str(row["effective_digest"] or ""),
-        '{"servicing": true, "reduces_exposure": true}',
-        FB.PROVENANCE, intent_id)
+    # ── THE EXIT INTENT IS RESERVED AND COMMITTED, ATOMICALLY ───────
+    res = await _reserve_exit(conn, parent=intent_id, row=row, venue=ven,
+                             opened_with=opened_with, wire=wire,
+                             contracts=contracts)
+    out["reservation"] = res
+    if not res.get("ok"):
+        return dict(out, ok=False, refusal=res["refusal"],
+                    why=res.get("why"))
+    xid = res["exit_intent_id"]
     out["exit_intent_id"] = xid
     await FB.mark_send_attempted(conn, xid)
     try:
@@ -464,15 +772,26 @@ async def reconcile_settlement(conn, *, intent_id: str, client=None,
                          "stands" % reading))
     opened_with = str(row["order_intent"])
     if reading == "EXPLICIT_VOID":
-        # A VOID RETURNS THE COLLATERAL, so the position nets to its fees.
-        paid = await conn.fetchval(
-            "SELECT coalesce(sum(CASE WHEN direction='ENTRY' THEN cash_usd "
-            "                       ELSE -cash_usd END),0)::float8 "
-            "  FROM bettor_funded_fills WHERE intent_id=$1", intent_id)
-        amount = float(paid or 0.0)
-        basis = ("the venue declared a void, so the collateral this position "
-                 "paid is returned. Fees already booked are NOT returned by "
-                 "this and stay in the realised total")
+        # A VOID RETURNS THE COLLATERAL ON WHAT IS STILL HELD -- NOT THE
+        # ORIGINAL ACQUISITION COST.
+        #
+        # THE DEFECT THIS CLOSES. This summed the PARENT's own fills:
+        # `WHERE intent_id = $1`, which reads the ENTRY's rows and none of the
+        # exit children's, because an exit is its own intent. After a partial
+        # exit that total is the cost of the WHOLE original clip. The exit's
+        # proceeds had already been booked as EXIT_PROCEEDS, so refunding the
+        # full acquisition cost on top of them made a void look PROFITABLE --
+        # a fabricated gain in the one case whose correct answer is close to
+        # minus the fees.
+        rb = await FB.remaining_basis(conn, intent_id)
+        amount = float(rb["remaining_basis_usd"])
+        basis = ("the venue declared a void, so the collateral on the %s "
+                 "contracts STILL HELD is returned: %s per contract from the "
+                 "entry fills. Contracts already exited are not refunded -- "
+                 "their proceeds are booked. Fees are not returned by this "
+                 "and stay in the realised total"
+                 % (rb["residual_qty"], rb["basis_per_contract"]))
+        out["remaining_basis"] = rb
         reason = "VOIDED_BY_THE_VENUE"
         payout_px = None
     else:
@@ -527,30 +846,41 @@ async def _approved(conn) -> dict:
 # ── 4 · THE RECURRING PASS ───────────────────────────────────────────
 
 async def manage(conn, *, account_id: str, venue: str, adapter=None,
-                 client=None, probe=None, now: float | None = None) -> dict:
-    """ONE SERVICING CYCLE over every open funded position.
+                 client=None, probe=None, fee_fn=None, book_reader=None,
+                 now: float | None = None) -> dict:
+    """ONE MANAGEMENT CYCLE over every open funded position.
 
-    WHAT IT DOES, all of it reads unless a servicing switch is on:
+    IT MANAGES; IT DOES NOT ONLY REPORT. The earlier version reconciled, asked
+    about settlement, and then emitted `needs_a_decision` -- which is servicing
+    infrastructure saying a decision is owed. Nothing chose an action. Now:
 
       1. RECONCILE THE ORDER against the venue -- `bettor_funded_book.recover`,
-         which requires an established correlation before adopting anything
-         and reads the adapter's `executions`, so a fill that happened while
-         this lane was not running lands in the book.
-      2. ASK ABOUT SETTLEMENT for anything still held, and close only on the
+         which never adopts an order it cannot prove is ours and reads the
+         adapter's `executions`, so a fill that happened while this lane was
+         not running lands in the book.
+      2. REPAIR any fill whose economic events an interruption left unwritten,
+         so realised P&L is not silently understated.
+      3. ASK ABOUT SETTLEMENT for anything still held, and close only on the
          venue's own authoritative answer.
-      3. RE-MEASURE the book: exposure, realised P&L and the drawdown the loss
+      4. SELECT AN ACTION for anything still held, through `select_exit` --
+         the venue's executable book, EV_HOLD under its own freshness and
+         payout-event rules, and the deployed ranking with its MIN_IMPROVEMENT
+         gate. An evidenced exit is EXECUTED through `submit_exit`.
+      5. RE-MEASURE the book: exposure, realised P&L and the drawdown the loss
          stop is enforced on.
-      4. REPORT what needs a decision -- a held position with no supported
-         exit price, an unresolved intent, a fee the venue charged differently
-         -- rather than acting on a guess.
+      6. NAME WHAT IS MISSING, one input at a time, for anything that could not
+         be decided.
 
-    It never opens a position. It is safe to run on a schedule with every
-    submission switch off, which is the configuration this deployment is in.
+    IT NEVER OPENS A POSITION. Its exits and cancels sit behind
+    `FUNDED_EXIT_SUBMISSION_ENABLED`, which is off, so in this deployment step
+    4 selects and then stops at that switch with the adapter uncalled. The
+    reconciliation, repair and settlement reads are not gated at all.
     """
     at = float(now if now is not None else time.time())
     out = {"version": VERSION, "at": at, "account_id": account_id,
            "venue": venue, "opened_anything": False,
            "recovered": None, "settlement": [], "needs_a_decision": [],
+           "selection": [], "decisions": [], "exits": [],
            "what_remains_disabled": disablements()}
     try:
         mod = _adapter(adapter)
@@ -565,6 +895,13 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
         except Exception as exc:                           # noqa: BLE001
             out["recovery_error"] = "%s: %s" % (type(exc).__name__,
                                                 str(exc)[:200])
+    # ── EVERY FILL'S ECONOMICS, REPAIRED IF AN EARLIER WRITE STOPPED ─
+    try:
+        out["economics_repair"] = await FB.repair_missing_economics(
+            conn, account_id=account_id, venue=venue, at=at)
+    except Exception as exc:                               # noqa: BLE001
+        out["economics_repair_error"] = "%s: %s" % (type(exc).__name__,
+                                                    str(exc)[:200])
     held = await open_positions(conn, account_id=account_id, venue=venue)
     out["open_positions"] = held
     for p in held:
@@ -573,15 +910,50 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
         got = await reconcile_settlement(conn, intent_id=p["intent_id"],
                                         client=client, probe=probe, now=at)
         out["settlement"].append(got)
-        if not got.get("closed"):
+        if got.get("closed"):
+            continue
+        # ── THE EXIT DECISION, TAKEN RATHER THAN DEFERRED ───────────
+        pick = await select_exit(conn, p, client=client, now=at,
+                                fee_fn=fee_fn, book_reader=book_reader)
+        out["selection"].append(pick)
+        if not pick.get("ok"):
+            # A NAMED MISSING INPUT, not "needs a decision". Each of these
+            # points at one thing to build or one row to supply.
             out["needs_a_decision"].append({
                 "intent_id": p["intent_id"],
                 "us_market_slug": p["us_market_slug"],
                 "residual_qty": p["residual"],
-                "what": "AN_EXIT_LIMIT_OR_AN_AUTHORITATIVE_SETTLEMENT",
-                "why": ("this position holds inventory, the venue states no "
-                        "authoritative outcome (%s), and this lane invents no "
-                        "exit price" % got.get("terminal_reading"))})
+                "what": pick["refusal"],
+                "missing_input": pick.get("missing_input"),
+                "why": pick.get("why")})
+            continue
+        if not pick.get("is_an_evidenced_exit"):
+            # HOLD, BY A NAMED RULE. Recorded as a decision taken.
+            out["decisions"].append({
+                "intent_id": p["intent_id"], "selected": pick["selected"],
+                "governing_rule": (pick.get("ranking") or {}).get(
+                    "governing_rule"),
+                "why": pick.get("why")})
+            continue
+        # ── EXECUTE IT ─────────────────────────────────────────────
+        ex = await submit_exit(conn, intent_id=p["intent_id"],
+                              limit_price=pick["limit_price"],
+                              quantity=pick["selected_qty"],
+                              adapter=mod, venue=venue, now=at)
+        out["exits"].append({"intent_id": p["intent_id"],
+                             "selected": pick["selected"],
+                             "selected_qty": pick["selected_qty"],
+                             "limit_price": pick["limit_price"],
+                             "submitted": ex.get("submitted"),
+                             "refusal": ex.get("refusal"),
+                             "exit_intent_id": ex.get("exit_intent_id"),
+                             "position_after": ex.get("position_after"),
+                             "why": ex.get("why")})
+        out["decisions"].append({
+            "intent_id": p["intent_id"], "selected": pick["selected"],
+            "executed": bool(ex.get("submitted")),
+            "stopped_at": ex.get("refusal"),
+            "why": pick.get("why")})
     out["exposure"] = await FB.exposure(conn, account_id=account_id,
                                        venue=venue)
     out["pnl"] = await FB.pnl(conn, account_id=account_id, venue=venue)

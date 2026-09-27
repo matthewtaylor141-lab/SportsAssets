@@ -492,7 +492,7 @@ async def test_a_lost_acknowledgement_leaves_an_unresolved_intent_never_a_resend
 
 @pg
 @pytest.mark.asyncio
-async def test_recovery_adopts_only_on_an_established_correlation():
+async def test_recovery_never_adopts_without_a_durable_identity():
     """COUNTEREXAMPLE 5b: RESTART. A fresh process finds the committed intent
     and reconciles it against the venue. `recover` has no send path at all.
 
@@ -537,7 +537,8 @@ async def test_recovery_adopts_only_on_an_established_correlation():
             " WHERE intent_id='fpi-lost'") is None
 
         class _Venue:
-            """Every term of the request we sent, present in the order."""
+            """Every term of the request we sent, present in the order --
+            and STILL not adopted, because a term match is not ownership."""
 
             def open_orders(self):
                 return [{"order_id": "venue-ord-9", "us_market_slug": SLUG,
@@ -552,15 +553,22 @@ async def test_recovery_adopts_only_on_an_established_correlation():
         got = await FB.recover(conn, _Venue(), account_id=ACCT, venue=VENUE)
         assert got["ok"] is True
         assert got["resubmitted_anything"] is False
-        assert got["reconciled"][0]["case"] == \
-            "ADOPTED_ON_AN_ESTABLISHED_CORRELATION"
+        # THE TERM MATCH IS FOUND, REPORTED, AND NOT CLAIMED. This venue
+        # accepts no client order identity, so ownership cannot be established
+        # and a single manual order at our price and size would satisfy every
+        # term. It is recorded as a discrepancy for a human.
+        assert got["reconciled"] == [], got
+        u = got["unresolved"][0]
+        assert u["correlation"]["refusal"] == FB.R_NO_DURABLE_IDENTITY
+        assert u["correlation"]["term_match_only"] == "venue-ord-9"
+        assert u["term_match_recorded_as_a_discrepancy"] is True
         row = await conn.fetchrow(
             "SELECT state, venue_order_id FROM bettor_funded_intents")
-        assert row["venue_order_id"] == "venue-ord-9"
-        # ACKNOWLEDGED, and then read back in the same pass: adopting an id
-        # without asking about the order would leave a row with no fills
-        # against a position that may have filled during the downtime.
-        assert row["state"] == "ACKNOWLEDGED"
+        assert row["venue_order_id"] is None
+        assert row["state"] == "UNRESOLVED"
+        d = await conn.fetchrow(
+            "SELECT kind, detail FROM bettor_funded_discrepancies")
+        assert d["kind"] == FB.D_TERM_MATCH_NOT_OWNERSHIP
         # STRUCTURAL: recovery cannot submit
         src = inspect.getsource(FB.recover)
         assert "submit_fok" not in src

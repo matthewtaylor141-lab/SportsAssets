@@ -141,16 +141,65 @@ BEYOND_READINESS = (
                    "that cannot trade. And with no closed funded position the "
                    "measured drawdown is a sum over an empty set -- the "
                    "measurement is real, the threshold is an owner input")},
-    {"id": "funded_exit_price_source",
-     "category": MARKET_EVIDENCE,
-     "state": "NOT_ESTABLISHED",
-     "what": ("an exit needs a limit, and this lane has no funded MARK it "
-              "would stand behind. `submit_exit` refuses without a supplied "
-              "price and invents none; `pnl()` reports unrealised P&L as "
-              "UNMEASURED by name rather than as zero"),
-     "remaining": ("until a mark source is established, an exit is an "
-                   "operator decision with an operator price. Inventing one "
-                   "would manufacture the very number the exit measures")},
+    {"id": "funded_exit_selection",
+     "category": ENGINEERING,
+     "state": "BUILT_AND_TESTED_DISABLED",
+     "what": ("`bettor_funded_management.select_exit` connects funded residual "
+              "inventory to the DEPLOYED decision path: `pmus.book_read` for "
+              "the venue's executable book, `bettor_book_snapshot.exit_ladder` "
+              "for what closing pays level by level, "
+              "`bettor_hold_value.latest_probability` + `ev_hold` for EV_HOLD "
+              "under its own freshness, eligible-row and payout-event rules, "
+              "and `bettor_mgmt_select.rank_with_hold` for the action, the "
+              "marginal quantity and the MIN_IMPROVEMENT gate. `manage()` "
+              "EXECUTES an evidenced exit through `submit_exit`; it no longer "
+              "reports that a decision is owed"),
+     "remaining": ("every evidence requirement belongs to those components and "
+                   "none is relaxed here, so a missing input is named ONE AT A "
+                   "TIME -- no payout event on the position, an unreadable "
+                   "book, no exit side, no eligible probability row, or "
+                   "EV_HOLD not identified. In this deployment the absent "
+                   "venue credential means the book cannot be read at all, "
+                   "which is reported as the credential rather than as an "
+                   "empty market")},
+    {"id": "funded_venue_mark_at_runtime",
+     "category": OWNER_DECISION,
+     "state": "BLOCKED_ON_A_CREDENTIAL",
+     "what": ("the exit price is a LEVEL THE VENUE PUBLISHED, read at the "
+              "moment of the decision -- not a mark this lane invents. That "
+              "read needs PMUS_KEY_ID / PMUS_SECRET_KEY"),
+     "remaining": ("this is ENGINEERING that is complete and an INPUT that is "
+                   "absent. It is NOT the same thing as source calibration, "
+                   "and accumulating outcome history would not supply it")},
+    {"id": "funded_exit_inventory_reservation",
+     "category": ENGINEERING,
+     "state": "ENFORCED_BY_THE_DATABASE",
+     "what": ("`bettor_funded_available_to_exit` is evaluated inside a "
+              "transaction holding FOR UPDATE on the parent position, and "
+              "subtracts the unfilled remainder of every exit already "
+              "outstanding or unresolved. EXIT rows are outside the "
+              "one-open-position index by design, so nothing else could stop "
+              "two concurrent exits -- or a retry after an ambiguous answer -- "
+              "from each selling the same residual"),
+     "remaining": ("an oversell that reaches the book anyway is recorded in "
+                   "`bettor_funded_discrepancies` rather than clamped to a "
+                   "tidy zero by max(0, ...)")},
+    {"id": "funded_ownership_is_not_provable_after_a_lost_answer",
+     "category": ENGINEERING,
+     "state": "OPEN_AND_BOUNDED_BY_THE_VENUE",
+     "what": ("a lost acknowledgement cannot be reconciled on this venue. "
+              "polymarket_us CreateOrderParams accepts no client order "
+              "identifier, so an order the venue holds cannot be proved to be "
+              "the one we sent -- slug, side, limit and clip together identify "
+              "an order with our TERMS, and one manual order satisfies all "
+              "four. Recovery therefore never adopts: the intent stays "
+              "UNRESOLVED with its exposure preserved and the term match is "
+              "recorded as a discrepancy for manual reconciliation"),
+     "remaining": ("this is a VENUE limitation, not missing code. "
+                   "`CLIENT_ORDER_IDENTITY_SUPPORTED` is the one line to flip "
+                   "if the venue ever accepts one, and a test asserts its "
+                   "absence against the installed SDK so the claim cannot go "
+                   "stale")},
     {"id": "venue_balance_read",
      "category": ENGINEERING,
      "state": "BUILT",

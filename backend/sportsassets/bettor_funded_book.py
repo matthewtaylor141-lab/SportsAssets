@@ -83,7 +83,38 @@ R_NO_CORRELATED_ORDER = "NO_VENUE_ORDER_CORRELATES_WITH_THIS_INTENT"
 R_AMBIGUOUS_CORRELATION = "SEVERAL_VENUE_ORDERS_CORRELATE_AND_NONE_IS_OURS"
 R_CANDIDATE_PREDATES_US = "THE_ONLY_CORRELATED_ORDER_PREDATES_OUR_REQUEST"
 
-#: THE FIELDS AN ADOPTION MUST AGREE ON, every one of them.
+#: DOES THIS VENUE LET US PUT OUR OWN IDENTITY ON A REQUEST? No.
+#:
+#: THE WHOLE `CreateOrderParams` SURFACE of the deployed SDK (polymarket_us
+#: 0.1.2) is: marketSlug, intent, type, price, quantity, tif,
+#: participateDontInitiate, goodTillTime, cashOrderQty, manualOrderIndicator,
+#: synchronousExecution, maxBlockTime, slippageTolerance. There is no
+#: clientOrderId, no clOrdID, no external reference, no idempotency key -- the
+#: string does not appear anywhere in the package.
+#:
+#: WHY THAT SETTLES THE RECOVERY QUESTION. A durable request-to-venue identity
+#: is the only thing that can prove an order the venue holds is the one WE
+#: sent. Matching slug, side, limit and clip identifies an order with matching
+#: TERMS, and a single manual order can satisfy all four -- which is precisely
+#: the case the earlier `candidates[0]` rule adopted and the four-term rule
+#: still adopted. So on this venue a lost acknowledgement has NOTHING to
+#: reconcile against, and the correct behaviour is to stay UNRESOLVED and say
+#: what would be needed. If the venue later accepts a client identity, set this
+#: True, send it, and adoption becomes provable rather than inferred.
+CLIENT_ORDER_IDENTITY_SUPPORTED = False
+
+#: What we would send if it were supported, named so the change is one line.
+CLIENT_ORDER_IDENTITY_FIELD = "clientOrderId"
+CLIENT_ORDER_IDENTITY_WOULD_BE = "the funded intent_id, which is already "\
+                                 "committed before the request leaves"
+
+R_NO_DURABLE_IDENTITY = "THE_VENUE_ACCEPTS_NO_CLIENT_ORDER_IDENTITY_SO_OWNERSHIP_IS_NOT_PROVABLE"
+
+#: THE FIELDS A TERM MATCH AGREES ON. They are NOT ownership -- see
+#: `CLIENT_ORDER_IDENTITY_SUPPORTED`. They are computed and reported because an
+#: operator reconciling by hand needs to know which orders to look at, and
+#: because "nothing matched" and "one thing matched and we still cannot claim
+#: it" are different facts about the same UNRESOLVED row.
 #:
 #: WHY THIS LIST AND NOT THE SLUG ALONE. Recovery used to take
 #: `candidates[0]` off a match on `us_market_slug`, so a manual desk order, a
@@ -234,25 +265,38 @@ def _epoch_of(v):
 
 def correlate_venue_order(intent: dict, venue_orders, *, claimed=(),
                           sent_at=None) -> dict:
-    """WHICH VENUE ORDER -- IF ANY -- IS PROVABLY THE ONE WE SENT.
+    """WHICH VENUE ORDERS MATCH OUR TERMS -- WHICH IS NOT WHICH ONE IS OURS.
 
     Answers `{"adopt": <order|None>, "refusal": <str|None>, ...}` and is pure,
     so the rule can be tested without a database or an adapter.
 
-    THE RULE, in the order it is applied:
+    `adopt` IS None ON THIS VENUE, ALWAYS, and that is the correction. This
+    function used to return the single four-term match as an adoption, on the
+    reasoning that slug AND side AND exact limit AND exact clip together
+    identify our request. They do not. They identify an order with our TERMS,
+    and one manual order placed at the same price and size satisfies every one
+    of them -- so the rule adopted somebody else's order in exactly the case it
+    was written to prevent, just less often than `candidates[0]` did. The
+    timestamp check did not rescue it either: it falls back to the four terms
+    whenever either timestamp is unreadable, which is the common case for a
+    venue that did not acknowledge.
+
+    OWNERSHIP NEEDS A DURABLE REQUEST-TO-VENUE IDENTITY, and this venue accepts
+    none (`CLIENT_ORDER_IDENTITY_SUPPORTED`). So the term match is computed,
+    reported, and never acted on: an operator reconciling a lost
+    acknowledgement by hand needs to know which orders to look at, and "nothing
+    matched" and "one thing matched and we still cannot claim it" are different
+    facts about the same UNRESOLVED row.
+
+    THE TERM ASSESSMENT, in the order it is applied:
 
       1. An order another funded intent has already claimed is THAT intent's,
          never a candidate here.
-      2. Every term of `CORRELATION_TERMS` must agree. The slug alone is a
-         market coincidence; the slug plus the intent plus the exact limit
-         plus the exact clip is the request we sent.
-      3. Exactly one survivor. Two orders that both match our request are
-         indistinguishable from each other, so neither is established as ours
-         and the intent stays UNRESOLVED -- the one case where doing nothing is
-         the only correct action.
-      4. If both times are readable, the survivor must not predate our send by
-         more than the clock tolerance. An order that already existed when we
-         sent ours cannot be ours.
+      2. Every term of `CORRELATION_TERMS` must agree.
+      3. How many survived: none, one, or several. One is not enough.
+      4. If both times are readable, whether the survivor predates our send.
+         An order that already existed cannot be ours -- but the converse does
+         not follow, and an unreadable timestamp establishes nothing.
     """
     claimed = {str(c) for c in (claimed or ()) if c}
     want_slug = str(intent.get("us_market_slug") or "").strip().lower()
@@ -314,9 +358,10 @@ def correlate_venue_order(intent: dict, venue_orders, *, claimed=(),
                     why=("%d orders agree with this request and nothing "
                          "distinguishes them, so none of them is established "
                          "as ours" % len(cands)))
-    adopt = cands[0]
-    made = _epoch_of(adopt.get("created_at") or adopt.get("createTime")
-                     or adopt.get("insertTime"))
+    only = cands[0]
+    report["single_term_match"] = _venue_order_id_of(only)
+    made = _epoch_of(only.get("created_at") or only.get("createTime")
+                     or only.get("insertTime"))
     ours = _epoch_of(sent_at)
     if made is not None and ours is not None:
         if made < ours - CORRELATION_CLOCK_TOLERANCE_S:
@@ -328,11 +373,43 @@ def correlate_venue_order(intent: dict, venue_orders, *, claimed=(),
                              "happens to match" % (ours - made)))
         report["created_after_our_send"] = True
     else:
+        # AND AN UNREADABLE TIMESTAMP ESTABLISHES NOTHING. It used to fall back
+        # to "the four terms alone", which was the adoption path; now it simply
+        # records that the one discriminator we had was unavailable.
         report["created_after_our_send"] = None
         report["time_check"] = ("one of the two timestamps was unreadable, so "
-                               "the correlation rests on the four terms alone")
-    return dict(report, adopt=adopt, refusal=None,
-                venue_order_id=_venue_order_id_of(adopt))
+                               "not even the weak time discriminator applies")
+    # ── ONE MATCH IS STILL NOT OURS ─────────────────────────────────
+    #
+    # Everything above narrowed the field. Nothing above proved ownership, and
+    # on this venue nothing can: see CLIENT_ORDER_IDENTITY_SUPPORTED.
+    if not CLIENT_ORDER_IDENTITY_SUPPORTED:
+        return dict(report, adopt=None, refusal=R_NO_DURABLE_IDENTITY,
+                    term_match_only=_venue_order_id_of(only),
+                    would_need={
+                        "field": CLIENT_ORDER_IDENTITY_FIELD,
+                        "value": CLIENT_ORDER_IDENTITY_WOULD_BE,
+                        "venue_accepts_it": False},
+                    why=("exactly one order the venue holds agrees with every "
+                         "term of our request, and a term match is not "
+                         "ownership: one manual order at the same price and "
+                         "size satisfies all of them. This venue's order "
+                         "parameters carry no client identity, so ownership "
+                         "cannot be established and this order is NOT "
+                         "adopted. It is reported for manual reconciliation"))
+    # Reachable only if a future venue accepts a client identity AND the sent
+    # value came back on the order.
+    sent_id = str(intent.get("client_identity") or "").strip()
+    got_id = str(only.get("client_identity")
+                 or only.get(CLIENT_ORDER_IDENTITY_FIELD) or "").strip()
+    if not sent_id or sent_id != got_id:
+        return dict(report, adopt=None, refusal=R_NO_DURABLE_IDENTITY,
+                    term_match_only=_venue_order_id_of(only),
+                    why=("the venue supports a client identity and this order "
+                         "does not carry ours, so it is not ours"))
+    return dict(report, adopt=only, refusal=None,
+                proved_by="the client identity we sent, echoed by the venue",
+                venue_order_id=_venue_order_id_of(only))
 
 
 def new_intent_id() -> str:
@@ -403,7 +480,9 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
                         event_key: str, order_intent: str,
                         limit_price: float, quantity: int,
                         collateral_usd: float, effective_digest: str,
-                        decision_ref: dict | None = None) -> dict:
+                        decision_ref: dict | None = None,
+                        payout_event: str | None = None,
+                        held_is_long: bool | None = None) -> dict:
     """WRITE THE INTENT AND COMMIT IT. Nothing has been sent yet.
 
     The one-live-intent unique index is what makes the concurrency guarantee
@@ -417,14 +496,21 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
             "INSERT INTO bettor_funded_intents (intent_id, account_id, venue,"
             " venue_class, us_market_slug, event_key, order_intent,"
             " limit_price, quantity, collateral_usd, effective_digest,"
-            " decision_ref, state, provenance) "
+            " decision_ref, state, provenance, payout_event, held_is_long,"
+            " client_identity_supported) "
             "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,"
-            "        'INTENT_RECORDED',$13)",
+            "        'INTENT_RECORDED',$13,$14,$15,$16)",
             intent_id, str(account_id), str(venue), str(venue_class),
             str(us_market_slug), str(event_key), str(order_intent),
             float(limit_price), int(quantity), float(collateral_usd),
             str(effective_digest), json.dumps(decision_ref or {}),
-            PROVENANCE)
+            PROVENANCE,
+            # THE EVENT THIS CONTRACT PAYS ON, carried from the decision. An
+            # intent written without it cannot be valued later and says so
+            # rather than being valued against a derived guess.
+            (None if payout_event is None else str(payout_event)),
+            (None if held_is_long is None else bool(held_is_long)),
+            CLIENT_ORDER_IDENTITY_SUPPORTED)
     except Exception as exc:                                # noqa: BLE001
         msg = str(exc)
         # BOTH INDEX NAMES ARE MATCHED, and that is not belt-and-braces.
@@ -541,6 +627,36 @@ async def mark_unresolved(conn, intent_id: str, reason: str) -> dict:
 
 # ── 2 · FILLS, KEYED BY THE VENUE'S OWN IDENTITY ────────────────────
 
+#: DISCREPANCY KINDS. Each is a thing that cannot be true at once.
+D_OVERSOLD = "AN_EXIT_SOLD_MORE_THAN_WAS_HELD"
+D_ECONOMICS_MISSING = "A_FILL_HAD_NO_ECONOMIC_EVENTS"
+D_FEE_DISAGREES = "THE_VENUE_CHARGED_WHAT_THE_SCHEDULE_DID_NOT_PREDICT"
+D_ORPHAN_ORDER = "THE_VENUE_HOLDS_AN_ORDER_NO_INTENT_OWNS"
+D_TERM_MATCH_NOT_OWNERSHIP = "A_VENUE_ORDER_MATCHES_OUR_TERMS_BUT_IS_NOT_OURS"
+D_FILLED_NO_EXECUTIONS = "THE_VENUE_REPORTS_FILLED_SHARES_AND_NO_EXECUTIONS"
+
+
+async def record_discrepancy(conn, *, kind: str, intent_id=None,
+                             detail: dict | None = None,
+                             discrepancy_id: str | None = None) -> str:
+    """WRITE DOWN SOMETHING THAT CANNOT BE TRUE. Idempotent on the id.
+
+    WHY THIS EXISTS. The alternative to a discrepancy row is a number that
+    quietly becomes plausible -- `max(0, ...)` on a negative residual, a
+    missing ledger entry read as "already held", an unowned venue order
+    dropped from a report. Each of those is a real state the book can be in,
+    and each of them reads as normal once it has been smoothed. A row an
+    operator has to close cannot be smoothed.
+    """
+    did = discrepancy_id or "fd-%s" % uuid.uuid4().hex[:16]
+    await conn.execute(
+        "INSERT INTO bettor_funded_discrepancies (discrepancy_id, intent_id,"
+        " kind, detail) VALUES ($1,$2,$3,$4::jsonb) "
+        "ON CONFLICT (discrepancy_id) DO UPDATE SET detail=$4::jsonb",
+        did, intent_id, str(kind), json.dumps(detail or {}, default=str))
+    return did
+
+
 async def _recompute_residual(conn, intent_id: str) -> float:
     """RESIDUAL = ENTRY FILLS - EXIT FILLS, FROM THE LEDGER, ALWAYS.
 
@@ -563,7 +679,37 @@ async def _recompute_residual(conn, intent_id: str) -> float:
         "  FROM bettor_funded_fills f JOIN bettor_funded_intents i "
         "    ON i.intent_id=f.intent_id "
         " WHERE i.intent_id=$1 OR i.parent_intent_id=$1", intent_id)
-    residual = max(0.0, round(float(row["in_qty"]) - float(row["out_qty"]), 6))
+    raw = round(float(row["in_qty"]) - float(row["out_qty"]), 6)
+    residual = max(0.0, raw)
+    if raw < -1e-9:
+        # AN OVERSELL IS NOT A ZERO RESIDUAL. `max(0, ...)` is here because the
+        # column has a `>= 0` CHECK and a flat position is the common case --
+        # but clamping a NEGATIVE residual to zero produces the one number that
+        # reads as "flat and finished", when what actually happened is that we
+        # sold contracts we could not have held. Either an entry fill was
+        # missed, an exit fill was double-counted, or we are SHORT at the
+        # venue. The clamp still protects the column; the discrepancy is what
+        # stops it from being the whole story.
+        await record_discrepancy(
+            conn, kind=D_OVERSOLD, intent_id=intent_id,
+            discrepancy_id="fd:%s:OVERSOLD" % intent_id,
+            detail={"entry_qty": float(row["in_qty"]),
+                    "exit_qty": float(row["out_qty"]),
+                    "unclamped_residual": raw,
+                    "stored_residual": residual,
+                    "what_it_means": (
+                        "exits exceed entries by %s contracts on this "
+                        "position. The stored residual is clamped to 0 "
+                        "because the column forbids a negative, and this row "
+                        "exists so the clamp is not mistaken for flat"
+                        % abs(raw)),
+                    "possible_causes": [
+                        "an entry fill the venue reported and we never "
+                        "ingested",
+                        "an exit fill counted twice under two identities",
+                        "an exit that oversold because a reservation was "
+                        "bypassed -- which is what "
+                        "bettor_funded_available_to_exit exists to prevent"]})
     await conn.execute(
         "UPDATE bettor_funded_intents SET residual_qty=$2, updated_at=now() "
         " WHERE intent_id=$1", intent_id, residual)
@@ -659,6 +805,208 @@ def reconcile_fee(qty: float, price: float, observed, *, at=None) -> dict:
             "reconciliation": got}
 
 
+async def _write_fill_economics(conn, *, fill_id: str, econ_intent: str,
+                                direction: str, qty: float, cash: float,
+                                fee: dict, buy_intent: str,
+                                at: float) -> None:
+    """THE TWO EVENTS A FILL MOVES, and the flag that says they are there.
+
+    Called only inside a transaction that also inserts or has already inserted
+    the fill. Both events are keyed off the fill's own id, so writing them
+    twice writes them once.
+    """
+    await record_economic_event(
+        conn, intent_id=econ_intent,
+        kind=("EXIT_PROCEEDS" if direction == "EXIT" else "ENTRY_COST"),
+        amount_usd=(cash if direction == "EXIT" else -cash),
+        qty=qty, at=at,
+        basis=("live_executor.fill_cash(%s) at the venue's own fill price"
+               % buy_intent),
+        evidence={"fill_id": fill_id, "direction": direction},
+        event_id="fev:%s:CASH" % fill_id)
+    await record_economic_event(
+        conn, intent_id=econ_intent, kind="FEE",
+        amount_usd=-float(fee["booked_fee_usd"]), qty=qty, at=at,
+        basis=fee["fee_basis"],
+        provisional=(fee["fee_state"] == FEE_PROVISIONAL),
+        evidence={"fill_id": fill_id, "fee_state": fee["fee_state"],
+                  "expected": fee["expected_fee_usd"],
+                  "observed": fee["observed_fee_usd"],
+                  "reconciliation": fee["reconciliation"]},
+        event_id="fev:%s:FEE" % fill_id)
+    await conn.execute(
+        "UPDATE bettor_funded_fills SET economics_written=TRUE "
+        " WHERE fill_id=$1", fill_id)
+
+
+async def _repair_one_fill(conn, *, fill_id: str, econ_intent: str,
+                           direction: str, buy_intent: str, observed,
+                           at: float) -> dict:
+    """FINISH WHAT AN INTERRUPTION LEFT, AND BOOK A FEE THAT ARRIVED LATE.
+
+    TWO REPAIRS, BOTH IDEMPOTENT.
+
+    THE FIRST: a fill whose economic events were never written. An
+    interruption between the fill insert and the events used to be permanent,
+    because the redelivery saw the fill already present and stopped. Now the
+    redelivery writes the missing events from the STORED fill -- never from the
+    incoming payload, which may differ -- so the repair reproduces what the
+    first attempt would have written.
+
+    THE SECOND: a PROVISIONAL fee replaced by the venue's actual charge. The
+    booked fee was the schedule's estimate because the venue had stated none.
+    When a later delivery carries `commission_usd`, the fill's observed fee,
+    its state and its booked number are updated, and the difference is written
+    as a FEE_ADJUSTMENT event -- so the cash moves by exactly the gap rather
+    than the original FEE event being rewritten behind the reader's back. The
+    original event's `provisional` flag is cleared in the same transaction,
+    because it is no longer an estimate.
+    """
+    out = {"repaired_economics": False, "fee_reconciled_late": False}
+    async with conn.transaction():
+        cur = await conn.fetchrow(
+            "SELECT fill_id, qty::float8 AS qty, price::float8 AS price, "
+            "       cash_usd::float8 AS cash, fee_usd::float8 AS fee, "
+            "       expected_fee_usd::float8 AS expected, "
+            "       observed_fee_usd::float8 AS observed, fee_state, "
+            "       fee_basis, economics_written, direction "
+            "  FROM bettor_funded_fills WHERE fill_id=$1 FOR UPDATE", fill_id)
+        if cur is None:
+            return out
+        have = await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_economics "
+            " WHERE event_id = ANY($1::text[])",
+            ["fev:%s:CASH" % fill_id, "fev:%s:FEE" % fill_id])
+        if int(have or 0) < 2:
+            # THE INTERRUPTION REPAIR, from the stored row.
+            await _write_fill_economics(
+                conn, fill_id=fill_id, econ_intent=econ_intent,
+                direction=cur["direction"] or direction,
+                qty=float(cur["qty"]), cash=float(cur["cash"]),
+                fee={"booked_fee_usd": float(cur["fee"]),
+                     "expected_fee_usd": cur["expected"],
+                     "observed_fee_usd": cur["observed"],
+                     "fee_state": cur["fee_state"],
+                     "fee_basis": cur["fee_basis"],
+                     "reconciliation": {"written_by": "REPAIR_PASS"}},
+                buy_intent=buy_intent, at=at)
+            out["repaired_economics"] = True
+            out["events_found_before_repair"] = int(have or 0)
+            await record_discrepancy(
+                conn, kind=D_ECONOMICS_MISSING, intent_id=econ_intent,
+                discrepancy_id="fd:%s:ECONOMICS" % fill_id,
+                detail={"fill_id": fill_id,
+                        "events_found": int(have or 0),
+                        "repaired_at": at,
+                        "what_it_means": (
+                            "this fill existed with fewer than its two "
+                            "economic events, which means a previous write "
+                            "was interrupted between the fill and the "
+                            "ledger. The events have been reconstructed from "
+                            "the stored fill and the realised total was "
+                            "understated until now")})
+        elif cur["fee_state"] == FEE_PROVISIONAL and observed is not None:
+            # THE LATE FEE. Only from PROVISIONAL: a RECONCILED or DISAGREES
+            # fill already has the venue's number and a second delivery of it
+            # must not move the cash again.
+            got = reconcile_fee(float(cur["qty"]), float(cur["price"]),
+                                observed, at=at)
+            delta = float(got["booked_fee_usd"]) - float(cur["fee"])
+            await conn.execute(
+                "UPDATE bettor_funded_fills SET observed_fee_usd=$2, "
+                "  fee_usd=$3, fee_state=$4, fee_reconciliation=$5::jsonb "
+                " WHERE fill_id=$1",
+                fill_id, got["observed_fee_usd"], got["booked_fee_usd"],
+                got["fee_state"],
+                json.dumps(got["reconciliation"], default=str))
+            # THE ORIGINAL FEE EVENT IS NO LONGER PROVISIONAL.
+            await conn.execute(
+                "UPDATE bettor_funded_economics SET provisional=FALSE "
+                " WHERE event_id=$1", "fev:%s:FEE" % fill_id)
+            if abs(delta) > 1e-9:
+                await record_economic_event(
+                    conn, intent_id=econ_intent, kind="FEE_ADJUSTMENT",
+                    amount_usd=-delta, qty=float(cur["qty"]), at=at,
+                    basis=("the venue's stated commission minus the "
+                           "schedule's expectation, booked as the difference "
+                           "so the original FEE event is not rewritten"),
+                    evidence={"fill_id": fill_id,
+                              "expected": cur["expected"],
+                              "provisionally_booked": float(cur["fee"]),
+                              "observed": got["observed_fee_usd"],
+                              "fee_state": got["fee_state"]},
+                    event_id="fev:%s:FEE_ADJ" % fill_id)
+            out.update(fee_reconciled_late=True,
+                       fee_state=got["fee_state"],
+                       adjustment_usd=round(-delta, 6),
+                       was_provisional=True)
+            if got["fee_state"] == FEE_DISAGREES:
+                await record_discrepancy(
+                    conn, kind=D_FEE_DISAGREES, intent_id=econ_intent,
+                    discrepancy_id="fd:%s:FEE" % fill_id,
+                    detail={"fill_id": fill_id, "expected": cur["expected"],
+                            "observed": got["observed_fee_usd"],
+                            "arrived": "on a later delivery"})
+    return out
+
+
+async def repair_missing_economics(conn, *, account_id=None,
+                                   venue=None, at: float | None = None
+                                   ) -> dict:
+    """SWEEP FOR FILLS WHOSE ECONOMIC EVENTS ARE MISSING, and write them.
+
+    THE REPLAY-REPAIR PROOF. The transaction in `ingest_fills` makes an
+    interruption between the fill and its events impossible going forward; this
+    makes one RECOVERABLE if it ever happened -- including on rows written by
+    the earlier non-atomic path, which is every fill that predates migration
+    128. It is a read for any book that is already consistent.
+
+    Safe to run on a schedule. It writes only what is absent.
+    """
+    now = float(at if at is not None else time.time())
+    sql = ("SELECT f.fill_id, f.intent_id, i.parent_intent_id, "
+           "       i.order_intent, p.order_intent AS parent_intent, "
+           "       f.direction "
+           "  FROM bettor_funded_fills f "
+           "  JOIN bettor_funded_intents i ON i.intent_id=f.intent_id "
+           "  LEFT JOIN bettor_funded_intents p "
+           "    ON p.intent_id=i.parent_intent_id "
+           " WHERE NOT f.economics_written")
+    args: list = []
+    if account_id is not None:
+        args.append(str(account_id))
+        sql += " AND i.account_id=$%d" % len(args)
+    if venue is not None:
+        args.append(str(venue))
+        sql += " AND upper(i.venue)=upper($%d)" % len(args)
+    rows = await conn.fetch(sql, *args)
+    repaired, already = [], []
+    for r in rows:
+        econ = r["parent_intent_id"] or r["intent_id"]
+        got = await _repair_one_fill(
+            conn, fill_id=r["fill_id"], econ_intent=econ,
+            direction=r["direction"],
+            buy_intent=(r["parent_intent"] or r["order_intent"]),
+            observed=None, at=now)
+        if got.get("repaired_economics"):
+            repaired.append(r["fill_id"])
+        else:
+            # THE EVENTS WERE THERE ALL ALONG -- an older row whose flag was
+            # never set. Setting it is what stops this sweep re-examining it.
+            await conn.execute(
+                "UPDATE bettor_funded_fills SET economics_written=TRUE "
+                " WHERE fill_id=$1", r["fill_id"])
+            already.append(r["fill_id"])
+    for iid in {r["parent_intent_id"] or r["intent_id"] for r in rows}:
+        await _recompute_residual(conn, iid)
+    return {"examined": len(rows), "repaired": repaired,
+            "already_written_flag_set": already,
+            "is_a_read_when_the_book_is_consistent": not rows,
+            "why": ("a fill without its economic events is inventory whose "
+                    "cost is in no ledger. This finds any and writes them "
+                    "from the stored fill")}
+
+
 async def ingest_fills(conn, intent_id: str, fills, *,
                        direction: str = "ENTRY",
                        at: float | None = None) -> dict:
@@ -702,46 +1050,55 @@ async def ingest_fills(conn, intent_id: str, fills, *,
             continue
         cash = cash_for(qty, px, buy_intent)
         fee = reconcile_fee(qty, px, _observed_fee_of(f), at=now)
-        res = await conn.execute(
-            "INSERT INTO bettor_funded_fills (fill_id, intent_id,"
-            " venue_order_id, venue_fill_id, at, qty, price, cash_usd,"
-            " fee_usd, fee_basis, raw, direction, expected_fee_usd,"
-            " observed_fee_usd, fee_state, fee_reconciliation) "
-            "VALUES ($1,$2,$3,$4,to_timestamp($5),$6,$7,$8,$9,$10,$11::jsonb,"
-            "        $12,$13,$14,$15,$16::jsonb)"
-            " ON CONFLICT (fill_id) DO NOTHING",
-            fid, intent_id, str(row["venue_order_id"] or ""), str(vfid),
-            now, qty, px, cash, fee["booked_fee_usd"], fee["fee_basis"],
-            json.dumps(f, default=str), direction,
-            fee["expected_fee_usd"], fee["observed_fee_usd"],
-            fee["fee_state"], json.dumps(fee["reconciliation"], default=str))
-        if res.endswith("1"):
+        # ── ONE TRANSACTION: THE FILL, ITS EVENTS, AND THE FLAG ─────
+        #
+        # THE DEFECT THIS CLOSES. The fill went in, then the cash event, then
+        # the fee event, as three statements. Stop between the first and the
+        # second -- a restart, a killed worker, a dropped connection -- and the
+        # redelivery hits `ON CONFLICT DO NOTHING` on the fill, concludes
+        # "already held", and NEVER writes the events. The contracts sit in
+        # inventory with their cost in no ledger, so realised P&L is wrong by
+        # exactly that fill and nothing reports it.
+        #
+        # `economics_written` is set in the SAME transaction as the events, so
+        # it can only be true if they exist -- and `repair_missing_economics`
+        # below finds any fill where it is not.
+        async with conn.transaction():
+            res = await conn.execute(
+                "INSERT INTO bettor_funded_fills (fill_id, intent_id,"
+                " venue_order_id, venue_fill_id, at, qty, price, cash_usd,"
+                " fee_usd, fee_basis, raw, direction, expected_fee_usd,"
+                " observed_fee_usd, fee_state, fee_reconciliation) "
+                "VALUES ($1,$2,$3,$4,to_timestamp($5),$6,$7,$8,$9,$10,"
+                "        $11::jsonb,$12,$13,$14,$15,$16::jsonb)"
+                " ON CONFLICT (fill_id) DO NOTHING",
+                fid, intent_id, str(row["venue_order_id"] or ""), str(vfid),
+                now, qty, px, cash, fee["booked_fee_usd"], fee["fee_basis"],
+                json.dumps(f, default=str), direction,
+                fee["expected_fee_usd"], fee["observed_fee_usd"],
+                fee["fee_state"],
+                json.dumps(fee["reconciliation"], default=str))
+            fresh = res.endswith("1")
+            if fresh:
+                await _write_fill_economics(
+                    conn, fill_id=fid, econ_intent=econ_intent,
+                    direction=direction, qty=qty, cash=cash, fee=fee,
+                    buy_intent=buy_intent, at=now)
+        if fresh:
             written.append({"fill_id": fid, "qty": qty, "price": px,
                             "cash_usd": cash, **fee})
-            # ── THE ECONOMIC EVENTS, keyed off the fill so they are
-            #    idempotent with it ──
-            await record_economic_event(
-                conn, intent_id=econ_intent,
-                kind=("EXIT_PROCEEDS" if direction == "EXIT"
-                      else "ENTRY_COST"),
-                amount_usd=(cash if direction == "EXIT" else -cash),
-                qty=qty, at=now,
-                basis=("live_executor.fill_cash(%s) at the venue's own fill "
-                       "price" % buy_intent),
-                evidence={"fill_id": fid, "direction": direction},
-                event_id="fev:%s:CASH" % fid)
-            await record_economic_event(
-                conn, intent_id=econ_intent, kind="FEE",
-                amount_usd=-float(fee["booked_fee_usd"]), qty=qty, at=now,
-                basis=fee["fee_basis"],
-                provisional=(fee["fee_state"] == FEE_PROVISIONAL),
-                evidence={"fill_id": fid, "fee_state": fee["fee_state"],
-                          "expected": fee["expected_fee_usd"],
-                          "observed": fee["observed_fee_usd"],
-                          "reconciliation": fee["reconciliation"]},
-                event_id="fev:%s:FEE" % fid)
         else:
-            already.append({"fill_id": fid, "qty": qty, "price": px})
+            # ── A REDELIVERY IS NOT NOTHING ─────────────────────────
+            #
+            # It is the second chance to finish an interrupted write, and the
+            # occasion on which the venue's ACTUAL commission often arrives
+            # for the first time. Both are handled here, idempotently, so a
+            # replay repairs rather than merely declining to duplicate.
+            rep = await _repair_one_fill(
+                conn, fill_id=fid, econ_intent=econ_intent,
+                direction=direction, buy_intent=buy_intent,
+                observed=_observed_fee_of(f), at=now)
+            already.append({"fill_id": fid, "qty": qty, "price": px, **rep})
     # THIS ORDER'S OWN FILLED QUANTITY, in its own direction. An exit's fills
     # carry direction='EXIT', so summing only the ENTRY column would read every
     # exit as unfilled and leave its state wrong.
@@ -788,6 +1145,110 @@ async def ingest_fills(conn, intent_id: str, fills, *,
             "cash_usd_from_the_ledger": round(float(tot["cash"]), 6),
             "fees_usd_from_the_ledger": round(float(tot["fee"]), 6),
             "idempotent_on": "the venue's own fill id"}
+
+
+async def remaining_basis(conn, intent_id: str) -> dict:
+    """WHAT THE CONTRACTS WE STILL HOLD COST US, pro rata.
+
+    THE DEFECT THIS CLOSES. The void refund summed the PARENT's entry fills and
+    handed that back -- `SELECT sum(cash) ... WHERE intent_id = parent`, which
+    reads the entry's own rows and none of the exit children's. After a partial
+    exit that is the ORIGINAL acquisition cost of the whole clip, not the cost
+    of what is left, so a void on a position already half sold refunded roughly
+    twice what the venue was still holding. The exit's proceeds were booked
+    too, so the position came out ahead on a void -- which is a fabricated
+    profit in the one case where the correct answer is close to zero.
+
+    The basis is per-contract from the ENTRY fills, times the residual.
+    """
+    row = await conn.fetchrow(
+        "SELECT coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.cash_usd "
+        "                       ELSE 0 END),0)::float8 AS entry_cash, "
+        "       coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.qty "
+        "                       ELSE 0 END),0)::float8 AS entry_qty, "
+        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.cash_usd "
+        "                       ELSE 0 END),0)::float8 AS exit_cash, "
+        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.qty "
+        "                       ELSE 0 END),0)::float8 AS exit_qty "
+        "  FROM bettor_funded_fills f JOIN bettor_funded_intents i "
+        "    ON i.intent_id=f.intent_id "
+        " WHERE i.intent_id=$1 OR i.parent_intent_id=$1", intent_id)
+    eq = float(row["entry_qty"])
+    ec = float(row["entry_cash"])
+    per = (ec / eq) if eq > 0 else None
+    residual = await conn.fetchval(
+        "SELECT residual_qty::float8 FROM bettor_funded_intents "
+        " WHERE intent_id=$1", intent_id)
+    res = float(residual or 0.0)
+    return {"entry_cash_usd": round(ec, 6),
+            "entry_qty": round(eq, 6),
+            "exit_cash_usd": round(float(row["exit_cash"]), 6),
+            "exit_qty": round(float(row["exit_qty"]), 6),
+            "basis_per_contract": (None if per is None else round(per, 8)),
+            "residual_qty": round(res, 6),
+            "remaining_basis_usd": (0.0 if per is None
+                                    else round(per * res, 6)),
+            "why": ("the cost of the contracts STILL HELD -- per-contract "
+                    "entry cost times the residual -- not the original "
+                    "acquisition cost of a clip that has been partly sold")}
+
+
+R_NOT_OUR_ROW = "THIS_POSITION_BELONGS_TO_ANOTHER_ACCOUNT_OR_VENUE"
+R_NO_ROW = "NO_SUCH_FUNDED_POSITION"
+
+
+async def check_servicing(conn, *, intent_id: str, account_id: str,
+                          venue: str) -> dict:
+    """MAY WE SERVICE A POSITION WE ALREADY HOLD? OWNERSHIP, NOT PERMISSION.
+
+    THE DEFECT THIS CLOSES. `submit_exit` required an AFFIRMATIVE
+    `authorize_submission` result -- the same gate an entry passes. So an
+    expired grant, a revoked one, a replaced approved-limit set, or
+    `REAL_ORDER_SUBMISSION_ENABLED` being off blocked the EXIT as well as the
+    entry. That is the wrong failure in the most expensive direction: the thing
+    that lapsed was permission to take NEW exposure, and the consequence was
+    that existing exposure could no longer be reduced. A lapse must shrink what
+    we may do; it must never strand what we already did.
+
+    This is the same boundary `bettor_test_venue_executor.check_servicing`
+    established for the shadow lane, applied to the funded book: ownership is
+    read from THE POSITION'S OWN ROW (`account_id`, `venue`), never from the
+    authorization record -- which is a single replaceable row, so reading
+    ownership from it would let a new account's grant service the previous
+    account's positions. Submission authority is reported for the record and
+    gates nothing here.
+
+    WHAT STILL GATES AN EXIT, and it is not nothing: the venue class, this
+    row's ownership, `FUNDED_EXIT_SUBMISSION_ENABLED`, the adapter's own
+    `execution_gate.authorize('submit')`, and the absence of credentials.
+    """
+    from . import bettor_funded_activation as FA
+
+    klass = FA.venue_class(venue)
+    out = {"gate": "FUNDED_SERVICING", "intent_id": intent_id,
+           "account_id": account_id, "venue": venue, "venue_class": klass,
+           "this_gate_authorises_no_new_exposure": True,
+           "ownership_is_read_from": ("the position's own row (account_id, "
+                                     "venue), never the authorization record"),
+           "needs_a_live_submission_grant": False,
+           "why_not": ("an exit REDUCES exposure. Refusing it because the "
+                       "grant to ADD exposure lapsed is how a lapse becomes "
+                       "an unmanaged position")}
+    if klass != FA.VENUE_FUNDED:
+        return dict(out, ok=False, refusal="NOT_A_FUNDED_CLASS_VENUE")
+    row = await conn.fetchrow(
+        "SELECT intent_id, account_id, venue, kind FROM bettor_funded_intents "
+        " WHERE intent_id=$1", intent_id)
+    if row is None:
+        return dict(out, ok=False, refusal=R_NO_ROW)
+    if (str(row["account_id"]) != str(account_id)
+            or str(row["venue"]).upper() != str(venue).upper()):
+        return dict(out, ok=False, refusal=R_NOT_OUR_ROW,
+                    row_belongs_to={"account_id": row["account_id"],
+                                    "venue": row["venue"]},
+                    why=("a lapsed or replaced grant is not a licence to "
+                         "service somebody else's positions"))
+    return dict(out, ok=True, refusal=None, owns_the_row=True)
 
 
 async def mark_position_closed(conn, intent_id: str,
@@ -955,6 +1416,29 @@ async def recover(conn, adapter, *, account_id: str, venue: str,
                     conn, iid,
                     "sent with no acknowledgement and %s; the exposure stands "
                     "until the venue establishes it" % corr["refusal"])
+                if corr.get("term_match_only"):
+                    # A TERM MATCH IS A LEAD, NOT A CLAIM. It is recorded so an
+                    # operator knows which order to look at -- and recorded as
+                    # a DISCREPANCY rather than a resolution, because the one
+                    # thing that must not happen is this row quietly becoming
+                    # ours on the strength of a price and a size.
+                    await record_discrepancy(
+                        conn, kind=D_TERM_MATCH_NOT_OWNERSHIP, intent_id=iid,
+                        discrepancy_id="fd:%s:TERM_MATCH" % iid,
+                        detail={"venue_order_id": corr["term_match_only"],
+                                "terms": list(CORRELATION_TERMS),
+                                "client_identity_supported":
+                                    CLIENT_ORDER_IDENTITY_SUPPORTED,
+                                "what_it_means": (
+                                    "one order the venue holds agrees with "
+                                    "every term of a request we sent and "
+                                    "never got an answer to. It may be ours. "
+                                    "It may be a manual order at the same "
+                                    "price and size. This venue accepts no "
+                                    "client order identity, so the difference "
+                                    "cannot be established from here and a "
+                                    "human must look")})
+                    rec["term_match_recorded_as_a_discrepancy"] = True
                 out["unresolved"].append(dict(rec, **got, **extra))
                 continue
             aid = corr["venue_order_id"]
@@ -989,7 +1473,18 @@ async def recover(conn, adapter, *, account_id: str, venue: str,
         # under `executions`, never `fills`, and reading the wrong key is what
         # made a fill during downtime invisible.
         read = executions_of(st)
-        ing = await ingest_fills(conn, iid, read["executions"], at=at)
+        # THE DIRECTION COMES FROM THE INTENT, NOT FROM A DEFAULT.
+        #
+        # THE DEFECT THIS CLOSES. `ingest_fills` defaults to ENTRY, and since
+        # exits became intents in their own right, recovery iterates them too --
+        # so an exit whose fill arrived during downtime was booked as an ENTRY.
+        # The residual then GREW by the quantity we had just sold: a 10-contract
+        # position that fully exited read 20 held. Found by the scheduled-path
+        # lifecycle test, which is the only place the two halves meet.
+        direction = "EXIT" if str(r["kind"]) == "EXIT" else "ENTRY"
+        rec["direction"] = direction
+        ing = await ingest_fills(conn, iid, read["executions"], at=at,
+                                direction=direction)
         after = await conn.fetchval(
             "SELECT state FROM bettor_funded_intents WHERE intent_id=$1", iid)
         if st.get("executions") is None:
@@ -1414,6 +1909,29 @@ async def command_center(conn) -> dict:
             "amount_usd": r["amount"], "basis": r["basis"],
             "what_it_means": ("this amount is in the realised total and is "
                              "explicitly incomplete")})
+    # ── AND THE RECORDED ONES, which are the ones nothing smoothed over ──
+    #
+    # Everything above is DERIVED from the current state of the book. These are
+    # events that happened: an oversell whose residual was clamped, a fill whose
+    # economic events an interruption lost, a venue order matching our terms
+    # that we cannot claim. A derived view cannot show them, because the whole
+    # problem with each is that the book now looks consistent.
+    recorded = await conn.fetch(
+        "SELECT discrepancy_id, intent_id, kind, "
+        "       EXTRACT(EPOCH FROM at)::float8 AS at, detail "
+        "  FROM bettor_funded_discrepancies WHERE resolved_at IS NULL "
+        " ORDER BY at DESC")
+    for r in recorded:
+        det = r["detail"]
+        if isinstance(det, str):
+            det = json.loads(det)
+        discrepancies.append({
+            "kind": r["kind"], "intent_id": r["intent_id"],
+            "discrepancy_id": r["discrepancy_id"], "at": r["at"],
+            "recorded": True, "detail": det,
+            "what_it_means": (det or {}).get(
+                "what_it_means",
+                "a recorded discrepancy an operator must close")})
     for r in stranded:
         discrepancies.append({
             "kind": "RESIDUAL_INVENTORY_STILL_HELD",
@@ -1489,7 +2007,16 @@ def describe() -> dict:
                                    "candidate",
             "clock_tolerance_s": CORRELATION_CLOCK_TOLERANCE_S,
             "executions_read_from": "executions (both adapter shapes), never "
-                                    "a `fills` key order_status never sends"},
+                                    "a `fills` key order_status never sends",
+            # AND THE ONE THAT MATTERS MOST: a term match is not ownership.
+            "a_durable_identity": CLIENT_ORDER_IDENTITY_SUPPORTED,
+            "adoption_is_possible_on_this_venue": (
+                CLIENT_ORDER_IDENTITY_SUPPORTED),
+            "why_not": ("polymarket_us CreateOrderParams accepts no client "
+                        "order identifier, so an order the venue holds cannot "
+                        "be proved to be the one we sent. A lost "
+                        "acknowledgement stays UNRESOLVED and the term match "
+                        "is recorded for manual reconciliation")},
         "unresolved_preserves_exposure": True,
         "shadow_cannot_stand_in": ("rn1x_orders carries CHECK (is_modelled); "
                                    "every read here is scoped to "

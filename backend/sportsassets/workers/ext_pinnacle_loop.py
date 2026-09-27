@@ -2503,16 +2503,44 @@ async def cycle(conn) -> dict:
     # cycle cluster on one or two dates; asking per candidate would be the
     # same answer many times over.
     fixture_cache: dict = {}
+
+    # ── SERVICING FIRST, BEFORE ANY ENTRY-SIDE GATE ─────────────────
+    #
+    # THE DEFECT THIS CLOSES. `_funded_service` used to run at the BOTTOM of
+    # this function, after three early returns: the observation stop
+    # (`_running`), the shadow table check, and the odds-provider credential.
+    # So a paused entry loop, an unmigrated shadow table, or a missing
+    # EDGE_ODDS_API_KEY all silently stopped the funded book from being
+    # reconciled, settled and re-measured -- while the position stayed open at
+    # the venue. Every one of those three is a reason to stop ADDING exposure
+    # and none of them is a reason to stop managing what is already held.
+    #
+    # It runs here, unconditionally, and its own result says what it did. It
+    # submits nothing that the servicing switch does not permit.
+    funded_service = await _funded_service(conn, now=time.time())
+
     running, why = await _running(conn)
     if not running:
-        return {"ran": False, "state": "STOPPED", "why": why}
+        return {"ran": False, "state": "STOPPED", "why": why,
+                "funded_servicing": funded_service,
+                "servicing_ran_anyway": ("a stopped entry loop is a reason to "
+                                         "add nothing, not a reason to stop "
+                                         "managing an open position")}
     if not await _table_ready(conn):
-        return {"ran": False, "state": "BLOCKED", "why": R_NO_TABLE}
+        return {"ran": False, "state": "BLOCKED", "why": R_NO_TABLE,
+                "funded_servicing": funded_service,
+                "servicing_ran_anyway": True}
 
     cred = ext.credential_present()
     if not cred["present"]:
         return {"ran": False, "state": "BLOCKED",
-                "why": cred["refusal"], "credential": cred}
+                "why": cred["refusal"], "credential": cred,
+                "funded_servicing": funded_service,
+                "servicing_ran_anyway": ("the odds provider prices NEW "
+                                         "candidates. An open funded position "
+                                         "is managed from the VENUE's book "
+                                         "and the venue's settlement, neither "
+                                         "of which needs this credential")}
     api_key = os.environ["EDGE_ODDS_API_KEY"]
 
     from .. import bettor_fee_schedule as FEES
@@ -3160,13 +3188,6 @@ async def cycle(conn) -> dict:
     # progress on its own: a calibration that waits for someone to
     # remember to run a backfill is a calibration that never happens.
     joined = await join_outcomes(conn)
-
-    # THE FUNDED LANE IS SERVICED EVERY CYCLE, whether or not anything was
-    # offered to it. Inventory it already owns has to be reconciled against the
-    # venue, settled where the venue says so, and re-measured -- otherwise the
-    # drawdown the loss stop reads goes stale and a position that settled
-    # during a pause never leaves the book. It submits nothing.
-    funded_service = await _funded_service(conn, now=time.time())
 
     out = {"ran": True, "state": "LIVE",
            "experiment_id": ext.EXPERIMENT_ID,
