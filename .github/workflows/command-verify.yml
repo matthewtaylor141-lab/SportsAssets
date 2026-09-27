@@ -110,6 +110,25 @@ on:
         description: 'operator_action=rotate: the 40-hex SHA to deploy after writing the env var. REQUIRED, because an env change makes Render auto-deploy the service''s TRACKED branch -- which is the protected default branch, not the reviewed build.'
         required: false
         default: ''
+      expect_commit:
+        description: >-
+          funded_readback only: the 7-or-40-hex SHA this readback expects the
+          API to be SERVING. Blank prints the serving commit without judging
+          it; a value fails the job on any other build, so a readback cannot
+          be attributed to a deploy that did not land.
+        required: false
+        default: ""
+      funded_readback:
+        description: >-
+          on|blank. `on` runs the SEPARATE funded-readback job, which reads
+          the SERVING build back and prints, from the running process: every
+          submission switch and its value, the funded command-centre section
+          in full, the last COMPLETED scheduled cycle with its actual
+          blockers, and the separately labelled demonstration books. Every
+          call is a GET behind the command role. It arms nothing, writes
+          nothing and submits nothing.
+        required: false
+        default: ""
       entry_run:
         description: >-
           Set to DO to run the AUTONOMOUS ENTRY lane against current
@@ -5569,3 +5588,260 @@ jobs:
           path: /tmp/operator-password.txt
           retention-days: 1
           if-no-files-found: warn
+
+  # ── THE FUNDED READBACK, FROM THE SERVING PROCESS ──────────────────
+  #
+  # WHY IT IS A SEPARATE JOB. The `verify` job above is twenty-six steps of
+  # shadow-lane acceptance and takes most of an hour; a release readback that
+  # has to be quoted in a handoff must be readable on its own, and must not
+  # be reported as passing because a step nineteen places away passed.
+  #
+  # WHAT IT ESTABLISHES, and nothing beyond it: which build is serving, what
+  # every submission switch is set to IN THAT PROCESS, what the funded
+  # command-centre section actually says, what the last COMPLETED scheduled
+  # cycle did and what actually blocked it, and that the demonstration books
+  # are labelled and are not summed into any strategy total.
+  #
+  # WHAT IT IS NOT. It is not a funded trade, not an order, not a venue
+  # interaction, and not evidence about the market. Every call below is a GET
+  # behind the command role.
+  funded-readback:
+    if: ${{ inputs.funded_readback != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: S1 · The serving build
+        id: build
+        env:
+          API: ${{ inputs.api }}
+          EXPECT: ${{ inputs.expect_commit }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### S1 · the serving build' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          code=$(curl -s -o /tmp/hz.json -w '%{http_code}' --max-time 45 \
+                 "$API/healthz" || echo 000)
+          say "GET /healthz                   HTTP $code"
+          [ "$code" = "200" ] || { say "the service did not answer; nothing below is a readback"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          jq -r '"  serving commit               " + (.commit|tostring),
+                 "  db reachable                 " + (.db_ok|tostring),
+                 "  boot id                      " + (.boot_id|tostring),
+                 "  uptime_s                     " + (.uptime_s|tostring)' \
+            /tmp/hz.json | tee -a "$GITHUB_STEP_SUMMARY"
+          GOT=$(jq -r '.commit' /tmp/hz.json)
+          if [ -n "${EXPECT:-}" ]; then
+            SHORT=$(printf '%s' "$EXPECT" | cut -c1-7)
+            if [ "$GOT" = "$SHORT" ]; then
+              say "  => SERVING THE EXPECTED BUILD ($SHORT)"
+            else
+              say "  => NOT the expected build: expected $SHORT, serving $GOT"
+              echo '```' >> "$GITHUB_STEP_SUMMARY"
+              exit 1
+            fi
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: S2 · Every submission switch, as the serving process reports it
+        env:
+          API: ${{ inputs.api }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          echo '### S2 · the submission switches, in the serving process' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            say "SKIPPED: no ADMIN_TOKEN secret, so the authenticated read is unavailable from here"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          code=$(curl -s -o /tmp/desk.json -w '%{http_code}' --max-time 90 \
+                 -H "X-Admin-Token: $ADMIN_TOKEN" \
+                 "$API/api/command/bettor/desk" || echo 000)
+          say "GET /api/command/bettor/desk   HTTP $code"
+          [ "$code" = "200" ] || { say "the command role was not accepted; there is no readback to quote"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          cp /tmp/desk.json /tmp/desk.keep.json
+          say ""
+          say "-- the entry lane (adding funded exposure) --"
+          jq -r '.funded_book.entry_lane_disablements[]
+                 | "  \(.n). \(.what)  =  \(.value|tostring)"
+                   + "\n      where       \(.where)"
+                   + "\n      cleared by  \(.cleared_by)"' /tmp/desk.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- the servicing lane (exits and cancels on what is held) --"
+          jq -r '.funded_book.servicing_lane_disablements[]
+                 | "  \(.n). \(.what)  =  \(.value|tostring)"
+                   + "\n      where       \(.where)"
+                   + "\n      cleared by  \(.cleared_by)"' /tmp/desk.json \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          jq -r '"  activation.funded_submission   " + (.activation.funded_submission|tostring)' \
+            /tmp/desk.json | tee -a "$GITHUB_STEP_SUMMARY"
+          # THE ASSERTION, not the eyeball: no boolean switch in either lane
+          # may be true. A non-boolean value (the process-bound execution gate,
+          # an absent credential) is reported as its own line above and is not
+          # asserted here, because "bound per process" is not a flag.
+          TRUES=$(jq '[ (.funded_book.entry_lane_disablements
+                         + .funded_book.servicing_lane_disablements)[]
+                        | select(.value == true) ] | length' /tmp/desk.json)
+          say ""
+          if [ "$TRUES" = "0" ]; then
+            say "  => EVERY BOOLEAN SUBMISSION SWITCH IS FALSE in the serving process."
+          else
+            say "  => $TRUES SWITCH(ES) ARE TRUE. This build can submit. FAILING."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          SUB=$(jq -r '.activation.funded_submission' /tmp/desk.json)
+          [ "$SUB" = "DISABLED" ] || { say "  => activation reports funded_submission=$SUB. FAILING."; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: S3 · The funded command-centre section, in full
+        env:
+          API: ${{ inputs.api }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          echo '### S3 · the funded book, as the command centre serves it' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          [ -s /tmp/desk.keep.json ] || { say "S2 left no desk read"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          jq -r '.funded_book
+                 | "  section                        " + (.section|tostring),
+                   "  label                          " + (.label|tostring),
+                   "  books                          " + (.book_count|tostring),
+                   "  counts_toward_strategy_perf.   " + (.counts_toward_strategy_performance|tostring),
+                   "  unresolved discrepancies       " + (.unresolved_discrepancy_count|tostring),
+                   "  error (if the read failed)     " + ((.error // "none")|tostring)' \
+            /tmp/desk.keep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- one book per account and venue, with its own exposure and P&L --"
+          jq -r 'if (.funded_book.books | length) == 0
+                 then "  (no funded intent exists at any account or venue)"
+                 else (.funded_book.books[]
+                   | "  \(.account_id) @ \(.venue)  intents=\(.intents)"
+                     + "\n      exposure   \(.exposure|tostring)"
+                     + "\n      pnl        \(.pnl|tostring)") end' \
+            /tmp/desk.keep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- every unresolved discrepancy, as a list and not a total --"
+          jq -r 'if (.funded_book.unresolved_discrepancies | length) == 0
+                 then "  (none recorded)"
+                 else (.funded_book.unresolved_discrepancies[]
+                   | "  \(.kind)  intent=\(.intent_id // "-")") end' \
+            /tmp/desk.keep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          jq -r '"  servicing_outlives_entry:", ("    " + (.funded_book.servicing_outlives_entry|tostring)),
+                 "  is_not_summed_with:", ("    " + (.funded_book.is_not_summed_with|join(", ")))' \
+            /tmp/desk.keep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: S4 · The last completed scheduled cycle, and what actually blocked it
+        env:
+          API: ${{ inputs.api }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          echo '### S4 · one completed scheduled cycle, and its actual blockers' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          code=$(curl -s -o /tmp/st.json -w '%{http_code}' --max-time 60 \
+                 -H "X-Admin-Token: $ADMIN_TOKEN" \
+                 "$API/api/command/rn1x/statuses" || echo 000)
+          say "GET /api/command/rn1x/statuses HTTP $code"
+          [ "$code" = "200" ] || { say "no status read; the cycle cannot be quoted"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          say ""
+          say "-- the scheduled lane's own heartbeat (the process that cycles) --"
+          jq -r '.statuses.external_valuation.last_cycle
+                 | "  writer                 " + ((.writer // "none")|tostring),
+                   "  reported_at            " + ((.at // "none")|tostring),
+                   "  state                  " + ((.state // "none")|tostring),
+                   "  markets_considered     " + ((.markets_considered // "none")|tostring),
+                   "  evaluated              " + ((.evaluated // "none")|tostring),
+                   "  written                " + ((.written // "none")|tostring),
+                   "  elapsed_s              " + ((.elapsed_s // "none")|tostring)' \
+            /tmp/st.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- THE ACTUAL BLOCKERS: every refusal counter this cycle recorded --"
+          jq -r '((.statuses.external_valuation.last_cycle.refusals // {})
+                  | to_entries | map(select(.value != 0 and .value != null)))
+                 | if length == 0 then "  (no refusal counter fired)"
+                   else (.[] | "  \(.key)   \(.value)") end' \
+            /tmp/st.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          jq -r '((.statuses.external_valuation.last_cycle.venue_errors // [])
+                 | if length == 0 then "  venue_errors: none"
+                   else (.[] | "  venue_error: " + (.|tostring)) end)' \
+            /tmp/st.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- what the same cycle's SERVICING pass had to work with --"
+          say "   cycle() runs _funded_service FIRST, before the entry lane's"
+          say "   stop, table and credential gates, so none of the refusals"
+          say "   above can stop the funded book being serviced. It returns"
+          say "   not-configured when no funded account is BOUND, and the"
+          say "   heartbeat row persists the ENTRY lane's tally only, so the"
+          say "   servicing result is not in it. Its precondition is read"
+          say "   directly instead:"
+          code=$(curl -s -o /tmp/fr.json -w '%{http_code}' --max-time 60 \
+                 -H "X-Admin-Token: $ADMIN_TOKEN" \
+                 "$API/api/admin/funded-activation-readiness" || echo 000)
+          say "   GET /api/admin/funded-activation-readiness  HTTP $code"
+          if [ "$code" = "200" ]; then
+            jq -r '"   bound funded account   "
+                     + ((.bound_account.account_id // "NONE BOUND")|tostring),
+                   "   bound venue            "
+                     + ((.bound_account.venue // "none")|tostring),
+                   "   readiness.ready        "
+                     + ((.readiness.ready // "unknown")|tostring)' \
+              /tmp/fr.json | tee -a "$GITHUB_STEP_SUMMARY"
+            jq -r '"   unmet checks           "
+                     + (((.readiness.unmet // []) | length)|tostring)' \
+              /tmp/fr.json | tee -a "$GITHUB_STEP_SUMMARY"
+            jq -r '((.readiness.unmet // [])
+                   | if length == 0 then "     (none)"
+                     else (.[] | "     - "
+                       + ((if type == "object" then (.check // .) else . end)
+                          |tostring)) end)' \
+              /tmp/fr.json | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            say "   the admin role did not serve it from here"
+          fi
+          say ""
+          say "-- and the same question from the command centre's own panel --"
+          jq -r '"  activation.readiness.ready     " + ((.activation.readiness.ready // "unknown")|tostring),
+                 "  unmet prerequisites            " + (((.activation.unmet_prerequisites // []) | length)|tostring)' \
+            /tmp/desk.keep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '((.activation.unmet_prerequisites // [])
+                 | if length == 0 then "  (none)" else (.[] | "    - " + (.|tostring)) end)' \
+            /tmp/desk.keep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: S5 · The demonstration books are labelled, and are not summed
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### S5 · the demonstration, separately and plainly labelled' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          jq -r '.demonstration
+                 | "  section                        " + (.section|tostring),
+                   "  label                          " + (.label|tostring),
+                   "  experiment_id                  " + (.experiment_id|tostring),
+                   "  counts_toward_strategy_perf.   " + (.counts_toward_strategy_performance|tostring),
+                   "  inputs_are_chosen_not_observed " + (.inputs_are_chosen_not_observed|tostring)' \
+            /tmp/desk.keep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          say "-- every position book, and whether it is strategy performance --"
+          jq -r '.positions.books | to_entries[]
+                 | "  \(.key)  count=\(.value.count)  counts_toward_strategy_performance=\(.value.counts_toward_strategy_performance)"' \
+            /tmp/desk.keep.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          COUNTED=$(jq -r '[ .positions.books | to_entries[]
+                             | select(.value.counts_toward_strategy_performance == true)
+                             | .key ] | join(", ")' /tmp/desk.keep.json)
+          say "  the ONLY book flagged as strategy performance: ${COUNTED:-none}"
+          DEMO=$(jq -r '.demonstration.counts_toward_strategy_performance' /tmp/desk.keep.json)
+          [ "$DEMO" = "false" ] || { say "  => the demonstration claims to count toward performance. FAILING."; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          say "  => the demonstration is published in full, labelled, and excluded."
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
