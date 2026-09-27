@@ -76,6 +76,14 @@ COMMENT ON COLUMN bettor_funded_intents.client_identity_supported IS
 -- over a non-matching row returns NULL, not 0 -- and a NULL available quantity
 -- compared against a requested one is false in every direction, which would
 -- have read as "no room" for a real position and as "fine" for a typo.
+--
+-- EVERY REFERENCE IN THIS BODY IS SCHEMA-QUALIFIED, for the reason migration
+-- 126's header now records: PostgreSQL 17 and later re-parse a SQL function
+-- body under a safe `search_path` of `pg_catalog, pg_temp` whenever maintenance
+-- inlines it, and an unqualified name cannot be resolved there. This function
+-- is not an index predicate today, so it is not yet exposed to that path -- it
+-- is qualified anyway, because the difference between "safe" and "safe until
+-- someone indexes it" is one line of a future migration.
 CREATE OR REPLACE FUNCTION bettor_funded_available_to_exit(parent text)
 RETURNS numeric AS $$
     SELECT coalesce((
@@ -87,14 +95,14 @@ RETURNS numeric AS $$
         -- full unfilled size too. Both are reservations against the same
         -- inventory.
         SELECT sum(GREATEST(0, c.quantity - coalesce((
-                     SELECT sum(f.qty) FROM bettor_funded_fills f
+                     SELECT sum(f.qty) FROM public.bettor_funded_fills f
                       WHERE f.intent_id = c.intent_id
                         AND f.direction = 'EXIT'), 0)))
-          FROM bettor_funded_intents c
+          FROM public.bettor_funded_intents c
          WHERE c.parent_intent_id = p.intent_id
            AND c.kind = 'EXIT'
-           AND bettor_funded_order_is_outstanding(c.state)), 0))
-      FROM bettor_funded_intents p
+           AND public.bettor_funded_order_is_outstanding(c.state)), 0))
+      FROM public.bettor_funded_intents p
      WHERE p.intent_id = parent), 0)
 $$ LANGUAGE sql STABLE;
 

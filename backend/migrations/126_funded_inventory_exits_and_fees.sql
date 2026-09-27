@@ -149,20 +149,42 @@ RETURNS boolean AS $$
 $$ LANGUAGE sql IMMUTABLE;
 
 -- A POSITION IS OPEN IF EITHER IS TRUE.
+--
+-- THE INNER CALLS ARE SCHEMA-QUALIFIED, AND THAT IS NOT STYLE. This function
+-- is the predicate of two partial indexes below, and PostgreSQL 17 and later
+-- run maintenance work -- an index BUILD included -- under a deliberately safe
+-- `search_path` of `pg_catalog, pg_temp`. A SQL function body is re-parsed when
+-- the planner inlines it, so an UNQUALIFIED call inside this body cannot be
+-- resolved at that moment, and the index creation fails with
+--
+--     function bettor_funded_order_is_outstanding(text) does not exist
+--     CONTEXT: SQL function "bettor_funded_position_is_open" during inlining
+--
+-- Production said exactly that on 2026-09-27: the whole file rolled back, the
+-- API served the previous funded schema, and the funded command-centre section
+-- reported `column "residual_qty" does not exist`. It passed everywhere else
+-- because every other database this file had met was PostgreSQL 16, where
+-- maintenance keeps the session's path. The server version was the only
+-- difference; the file was byte-identical.
+--
+-- Qualifying the body fixes it at the cause. `IN` and the comparison operators
+-- need no qualification: they resolve in pg_catalog, which is on the safe path.
 CREATE OR REPLACE FUNCTION bettor_funded_position_is_open(s text,
                                                           residual numeric,
                                                           closed timestamptz)
 RETURNS boolean AS $$
-    SELECT bettor_funded_order_is_outstanding(s)
-        OR bettor_funded_holds_inventory(residual, closed)
+    SELECT public.bettor_funded_order_is_outstanding(s)
+        OR public.bettor_funded_holds_inventory(residual, closed)
 $$ LANGUAGE sql IMMUTABLE;
 
 -- The old name is kept as an alias so nothing that still calls it silently
 -- changes meaning -- it now answers the OUTSTANDING-ORDER question, which is
 -- what it always computed.
+-- Qualified for the same reason: it was an index predicate before this file
+-- and may be one again in any database that has not yet applied this.
 CREATE OR REPLACE FUNCTION bettor_funded_intent_is_live(s text)
 RETURNS boolean AS $$
-    SELECT bettor_funded_order_is_outstanding(s)
+    SELECT public.bettor_funded_order_is_outstanding(s)
 $$ LANGUAGE sql IMMUTABLE;
 
 -- ── 4 · ONE OPEN *POSITION* AT A TIME ───────────────────────────────

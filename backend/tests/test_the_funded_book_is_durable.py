@@ -828,3 +828,106 @@ def test_the_live_state_definition_agrees_with_the_database():
     fn = body[body.index("bettor_funded_intent_is_live"):]
     named = set(re.findall(r"'([A-Z_]+)'", fn[:fn.index("$$ LANGUAGE")]))
     assert named == set(FB.LIVE_STATES), (named, FB.LIVE_STATES)
+
+
+# ── 6 · A PREDICATE MUST NOT DEPEND ON THE SESSION'S search_path ─────
+#
+# THE DEFECT PRODUCTION FOUND AND THIS SUITE DID NOT. Migration 126 creates
+# `bettor_funded_position_is_open` and uses it as the predicate of two partial
+# indexes. Its body called the two inner predicates UNQUALIFIED. PostgreSQL 17
+# and later run maintenance work -- an index build included -- under a
+# deliberately safe `search_path` of `pg_catalog, pg_temp`, and a SQL function
+# body is re-parsed when the planner inlines it. So on the 18.6 server the API
+# actually talks to, the index creation failed with
+#
+#     function bettor_funded_order_is_outstanding(text) does not exist
+#     CONTEXT: SQL function "bettor_funded_position_is_open" during inlining
+#
+# the whole migration rolled back, and the funded command-centre section served
+# `column "residual_qty" does not exist` on a build whose gate was green. The
+# gate's database is PostgreSQL 16, where maintenance keeps the session's path,
+# so nothing here could see it. These two tests see it on 16: the first sets the
+# restricted path EXPLICITLY, which is the condition, not the version; the
+# second reads every funded function's stored body out of the catalogue.
+
+_MAINTENANCE_PATH = "pg_catalog, pg_temp"
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_funded_predicate_resolves_under_the_maintenance_path():
+    """Each funded predicate must evaluate with only pg_catalog on the path.
+
+    Evaluating it is the same operation that failed: the planner inlines the
+    SQL body, re-parses it, and resolves the names it finds there. A qualified
+    body does not care what the path is; an unqualified one raises exactly the
+    production error.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        calls = [
+            "SELECT public.bettor_funded_order_is_outstanding('ACKNOWLEDGED')",
+            "SELECT public.bettor_funded_holds_inventory(1, NULL)",
+            "SELECT public.bettor_funded_position_is_open('FILLED', 1, NULL)",
+            "SELECT public.bettor_funded_intent_is_live('ACKNOWLEDGED')",
+            "SELECT public.bettor_funded_available_to_exit('no-such-intent')",
+        ]
+        for sql in calls:
+            tx = conn.transaction()
+            await tx.start()
+            try:
+                await conn.execute("SET LOCAL search_path = %s"
+                                   % _MAINTENANCE_PATH)
+                await conn.fetchval(sql)
+            except Exception as exc:                            # noqa: BLE001
+                raise AssertionError(
+                    "%s cannot be evaluated under search_path=%s, which is "
+                    "the path PostgreSQL 17+ uses for an index build: %s: %s"
+                    % (sql, _MAINTENANCE_PATH, type(exc).__name__, exc))
+            finally:
+                await tx.rollback()
+    finally:
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_no_funded_function_body_leaves_a_name_unqualified():
+    """The catalogue's own copy of every funded body, read back.
+
+    The behavioural test above covers the functions that exist today. This one
+    covers the ones somebody adds tomorrow: any `bettor_funded%` SQL function
+    whose body names another funded function or table without a schema is a
+    latent version-dependent failure, whether or not it is indexed yet.
+    """
+    import re
+
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        rows = await conn.fetch(
+            "SELECT p.proname, p.prosrc "
+            "  FROM pg_proc p "
+            "  JOIN pg_namespace n ON n.oid = p.pronamespace "
+            "  JOIN pg_language l ON l.oid = p.prolang "
+            " WHERE n.nspname = 'public' "
+            "   AND l.lanname = 'sql' "
+            "   AND p.proname LIKE 'bettor_funded%' "
+            " ORDER BY p.proname")
+        assert rows, "no funded SQL functions found; the schema is not migrated"
+        bad = []
+        for r in rows:
+            src = str(r["prosrc"])
+            # Strip -- comments, then find every funded name that is NOT
+            # preceded by a schema qualification.
+            stripped = re.sub(r"--[^\n]*", "", src)
+            for m in re.finditer(r"(\w*\.)?\b(bettor_funded_\w+)", stripped):
+                if not m.group(1):
+                    bad.append((r["proname"], m.group(2)))
+        assert not bad, (
+            "these funded function bodies name a funded object without a "
+            "schema, so an index build under PostgreSQL 17+'s safe "
+            "search_path cannot resolve it: %s" % sorted(set(bad)))
+    finally:
+        await conn.close()
