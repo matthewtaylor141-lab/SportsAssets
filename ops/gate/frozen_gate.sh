@@ -219,11 +219,39 @@ RC=$?
 kill "$MONITOR" 2>/dev/null
 
 # ── 6 · WAS THE ENVIRONMENT VALID FOR THE WHOLE RUN? ────────────────
-DOWN_SAMPLES=$(grep -c 'pg=DOWN' "$HEALTH" 2>/dev/null || echo 0)
+# THE SAME BUG CLASS AS THE MIGRATION ONE, AND ALSO MINE.
+#
+# This read `$(grep -c 'pg=DOWN' "$HEALTH" || echo 0)`. When grep finds ZERO
+# matches it exits 1 -- so on a HEALTHY run both the grep's own "0" AND the
+# `echo 0` fired, and DOWN_SAMPLES became the two-line string "0\n0". The
+# arithmetic test then failed with "integer expression expected", which is
+# non-zero, so the `||` branch ran and the gate VOIDED a run in which
+# PostgreSQL never went down.
+#
+# Observed exactly that on the baseline run: pg_down_samples=0,
+# min_free_mb=16628, and "GATE VOID: PostgreSQL was unreachable in 0 0
+# sample(s)". A healthy environment, reported as an invalid one.
+#
+# `grep -c` counting nothing is not an error, so `|| true` is the right
+# suppressor and `tr -dc` makes the value arithmetic-safe whatever grep printed.
+# `head -1` because a multi-line value is what caused this.
+DOWN_SAMPLES=$(grep -c 'pg=DOWN' "$HEALTH" 2>/dev/null | head -1 | tr -dc '0-9')
+DOWN_SAMPLES=${DOWN_SAMPLES:-0}
 MIN_FREE_SEEN=$(awk '{for(i=1;i<=NF;i++) if($i ~ /^free_mb=/){split($i,a,"=");
-                 if(m==""||a[2]<m) m=a[2]}} END{print (m==""?"?":m)}' "$HEALTH")
+                 if(m==""||a[2]<m) m=a[2]}} END{print (m==""?"?":m)}' "$HEALTH" \
+                | head -1 | tr -dc '0-9?')
+MIN_FREE_SEEN=${MIN_FREE_SEEN:-?}
+SAMPLES=$(wc -l < "$HEALTH" 2>/dev/null | tr -dc '0-9')
+
+# AND THE MONITOR MUST HAVE RUN AT ALL. Zero samples means the sampler never
+# started, so "no DOWN samples" would be vacuously true -- an absent witness
+# reported as a clean one, which is the failure this whole section exists to
+# refuse.
+[ "${SAMPLES:-0}" -ge 1 ] \
+  || void "the health sampler produced no samples, so nothing observed the
+  environment during the run. An absent witness is not a clean one" 91
 echo "exit=$RC sha=$(cat "$DIR/.gate_sha") db=$DB"
-echo "health: pg_down_samples=$DOWN_SAMPLES min_free_mb=$MIN_FREE_SEEN samples=$(wc -l < "$HEALTH")"
+echo "health: pg_down_samples=$DOWN_SAMPLES min_free_mb=$MIN_FREE_SEEN samples=$SAMPLES"
 
 [ "${DOWN_SAMPLES:-0}" -eq 0 ] \
   || void "PostgreSQL was unreachable in $DOWN_SAMPLES sample(s) DURING the run.
