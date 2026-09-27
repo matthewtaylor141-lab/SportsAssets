@@ -95,6 +95,19 @@ R_SETTLEMENT_NOT_ESTABLISHED = \
     "THE_SETTLEMENT_RULE_IS_NOT_ESTABLISHED_FOR_A_FUNDED_ACTION"
 R_EXIT_WIRE_UNREPRESENTABLE = \
     "THE_SELECTED_LEVEL_CANNOT_BE_SENT_WITHOUT_ACCEPTING_LESS"
+R_ASSESSMENT_EXPIRED = "THE_ASSESSMENT_THIS_EXIT_RESTS_ON_HAS_EXPIRED"
+
+#: HOW LONG A SELECTION MAY SIT BEFORE IT IS SENT.
+#:
+#: THE HOLE THIS CLOSES. `select_exit` ages the book and the probability at one
+#: decision instant, and then `submit_exit` runs -- resolving an account, a
+#: servicing gate, a reservation, an adapter. If that takes material time the
+#: order goes out against an assessment that has expired, and nothing noticed
+#: because the ageing happened in the other function.
+#:
+#: It is the TIGHTER of the two bounds the assessment rests on, because an
+#: assessment is only as fresh as its stalest input.
+MAX_ASSESSMENT_AGE_S = min(FA.MAX_VENUE_BOOK_AGE_S, 30.0)
 R_NO_EXIT_SIDE = "THE_SIDE_A_CLOSE_WOULD_CONSUME_PUBLISHES_NO_EXECUTABLE_LEVEL"
 R_NO_PROBABILITY = "NO_ELIGIBLE_PROBABILITY_ROW_PRICES_THIS_CONTRACT"
 R_HOLD_NOT_PRICED = "EV_HOLD_IS_NOT_IDENTIFIED_SO_NO_ACTION_CAN_BEAT_HOLDING"
@@ -220,22 +233,37 @@ def event_state_of(raw) -> str:
 
 
 async def _decision_evidence(conn, probability_row) -> dict:
-    """THE FIXTURE AND SETTLEMENT EVIDENCE THE ENTRY DECISION ALREADY HAD.
+    """THE FIXTURE AND SETTLEMENT EVIDENCE BESIDE THE PROBABILITY BEING USED.
 
-    `ev_hold` needs an event state (for its freshness bound) and a settlement
-    attestation (for its terminal rule). Neither is a column on the funded
-    position, and reading them off the position dict -- which is what this used
-    to do -- yielded None for both on every call.
+    WHICH ROW THIS IS, PRECISELY. `latest_probability` returns the freshest
+    ELIGIBLE valuation row for this market -- the CURRENT one, selected for this
+    decision. It is NOT necessarily the historical row that priced the entry,
+    and an earlier version of this docstring said it was. The distinction
+    matters: the entry may have been taken minutes or hours ago against a
+    different quote, a different fixture phase and possibly a different
+    settlement attestation. What this function returns is the evidence attached
+    to the row the EXIT is being valued on, which is the correct pairing for
+    that valuation and is not a claim about the entry.
 
-    They are persisted: `external_valuations.settlement_rule` is the attested
-    rule the entry was decided under, and `settlement_comparison` carries the
-    fixture evidence that scoped it, including `fixture_event_state`. Both are
-    read from the row this probability came from, so the exit is valued under
-    the same evidence the entry was.
+    WHY IT IS READ AT ALL. `ev_hold` needs an event state (for its freshness
+    bound) and a settlement attestation (for its terminal rule). Neither is a
+    column on the funded position, and reading them off the position dict --
+    which is what this used to do -- yielded None for both on every call. They
+    live on the valuation row: `settlement_rule` is the attested rule and
+    `settlement_comparison` carries the fixture evidence that scoped it,
+    including `fixture_event_state`.
+
+    The row's own id and observation time are returned so a reader can see
+    exactly which observation the valuation rests on rather than inferring it.
     """
     out = {"read": False, "event_state": "UNKNOWN", "event_state_raw": None,
            "settlement_rule": None, "settlement_supplied": False,
-           "valuation_row_id": (probability_row or {}).get("id")}
+           "valuation_row_id": (probability_row or {}).get("id"),
+           "valuation_observed_at": None,
+           "which_row_this_is": (
+               "the freshest ELIGIBLE valuation row for this market, selected "
+               "for THIS decision. NOT necessarily the historical row that "
+               "priced the entry")}
     rid = out["valuation_row_id"]
     if rid is None:
         return dict(out, why=("the probability row carries no id, so the "
@@ -263,12 +291,16 @@ async def _decision_evidence(conn, probability_row) -> dict:
         except ValueError:
             cmp_ = None
     raw_state = (cmp_ or {}).get("fixture_event_state")
+    obs = (probability_row or {}).get("observed_at")
     return dict(out, read=True, settlement_rule=rule,
                 settlement_supplied=bool(rule),
                 event_state_raw=raw_state,
                 event_state=event_state_of(raw_state),
-                why=("the entry decision's own persisted evidence, so the "
-                     "exit is valued under the rule the entry was"))
+                valuation_observed_at=(None if obs is None
+                                       else str(obs)),
+                why=("the persisted evidence attached to the valuation row "
+                     "this decision is using. The exit is valued under the "
+                     "rule attested for THAT observation"))
 
 
 async def select_exit(conn, position, *, client=None, now=None,
@@ -371,11 +403,18 @@ async def select_exit(conn, position, *, client=None, now=None,
                              "executable book was never read. In this "
                              "deployment that is the absent credential, not "
                              "an empty market"))
+    # ── THE THREE INSTANTS, TAKEN SEPARATELY ────────────────────────
+    #
+    # `at` is when this pass STARTED. It is not the decision instant and it is
+    # not when the book arrived, and using it for either understates the age by
+    # however long acquisition took.
+    requested_at = time.time()
     try:
         got = reader(use, slug) or {}
     except Exception as exc:                               # noqa: BLE001
         return dict(out, ok=False, refusal=R_BOOK_UNREADABLE,
                     error="%s: %s" % (type(exc).__name__, str(exc)[:200]))
+    received_at = time.time()
     if got.get("error") or not got.get("marketData"):
         return dict(out, ok=False, refusal=R_BOOK_UNREADABLE,
                     book_error=got.get("error"),
@@ -390,15 +429,9 @@ async def select_exit(conn, position, *, client=None, now=None,
     # age, which is a different claim about a different source: a fresh
     # probability against a stale book is precisely the pair that produces a
     # confident decision on a price that no longer exists.
-    fresh = FA.venue_book_age(got.get("marketData"), now=at)
-    out["venue_book_age"] = fresh
-    if not fresh.get("ok"):
-        return dict(out, ok=False, refusal=R_BOOK_NOT_FRESH,
-                    book_refusal=fresh.get("refusal"), why=fresh.get("why"),
-                    note=("probability freshness does not establish book "
-                          "freshness. This is the entry lane's own admission "
-                          "policy, applied to a funded exit"))
-
+    # ── THE LADDER, PARSED FIRST. It needs no clock, and a side that
+    #    publishes no executable level has nothing to sell into whatever any
+    #    probability says -- so it is refused before a database read.
     lad = BS.exit_ladder(got["marketData"], held_intent=opened_with)
     out["exit_ladder"] = {k: lad.get(k) for k in
                           ("ok", "refusal", "best_exit_price",
@@ -408,7 +441,11 @@ async def select_exit(conn, position, *, client=None, now=None,
         return dict(out, ok=False, refusal=R_NO_EXIT_SIDE,
                     ladder_refusal=lad.get("refusal"), why=lad.get("why"))
 
-    # ── EV_HOLD, UNDER ITS OWN RULES, WITH THE EVIDENCE IT EXPECTS ───
+    # THE DECISION INSTANT, TAKEN AFTER EVERY ACQUISITION -- the book above and
+    # the probability and evidence reads below. Both clocks are aged against
+    # THIS instant, so a decision cannot be stamped fresher than the work that
+    # produced it, and a slow read counts against the bound rather than
+    # disappearing into it.
     prob = await HV.latest_probability(conn, us_market_slug=slug)
     out["probability_read"] = {k: prob.get(k) for k in
                                ("found", "refusal", "eligibility", "why")}
@@ -416,7 +453,33 @@ async def select_exit(conn, position, *, client=None, now=None,
         return dict(out, ok=False, refusal=R_NO_PROBABILITY,
                     probability_refusal=prob.get("refusal"),
                     why=prob.get("why"))
-    # THE FIXTURE AND SETTLEMENT EVIDENCE, FROM THE ROW THAT PRICED IT.
+    evidence = await _decision_evidence(conn, prob["row"])
+    decision_at = time.time()
+    out["instants"] = {
+        "pass_started_at": at, "book_requested_at": requested_at,
+        "book_received_at": received_at, "decision_at": decision_at,
+        "acquisition_s": round(received_at - requested_at, 3),
+        "reads_after_the_book_s": round(decision_at - received_at, 3),
+        "why": ("the age of every input is evaluated at `decision_at`, which "
+                "is after all of them. `pass_started_at` is when this pass "
+                "began and is NOT the decision instant -- aging against it "
+                "was the defect: it understated every age by the whole "
+                "acquisition")}
+    fresh = FA.venue_book_age(got.get("marketData"),
+                             decision_at=decision_at,
+                             received_at=received_at,
+                             requested_at=requested_at)
+    out["venue_book_age"] = fresh
+    if not fresh.get("ok"):
+        return dict(out, ok=False, refusal=R_BOOK_NOT_FRESH,
+                    book_refusal=fresh.get("refusal"), why=fresh.get("why"),
+                    note=("probability freshness does not establish book "
+                          "freshness. This is the entry lane's own admission "
+                          "policy, applied to a funded exit"))
+
+    # ── EV_HOLD, UNDER ITS OWN RULES, WITH THE EVIDENCE IT EXPECTS ───
+    #
+    # THE FIXTURE AND SETTLEMENT EVIDENCE, read above beside the probability.
     #
     # THE DEFECT THIS CLOSES. `open_positions()` supplies neither
     # `event_state` nor `settlement_rule` -- they are not columns on the
@@ -430,12 +493,17 @@ async def select_exit(conn, position, *, client=None, now=None,
     # `external_valuations` row this probability came from: the attested
     # settlement rule, and the fixture's event state inside the settlement
     # comparison that scoped it.
-    ev = await _decision_evidence(conn, prob["row"])
+    ev = evidence
     out["decision_evidence"] = {k: ev.get(k) for k in
                                 ("read", "event_state", "event_state_raw",
-                                 "settlement_supplied", "why")}
+                                 "settlement_supplied", "valuation_row_id",
+                                 "valuation_observed_at",
+                                 "which_row_this_is", "why")}
+    # AGED AT THE DECISION INSTANT, the same one the book was aged at. Passing
+    # the pass-start instant here would have let a slow acquisition carry an
+    # expired probability into a live comparison.
     hv = HV.ev_hold(qty=residual, basis_per_contract=basis_per,
-                    probability_row=prob["row"], now=at,
+                    probability_row=prob["row"], now=decision_at,
                     payout_event_held=str(payout_event),
                     event_state=ev.get("event_state"),
                     settlement=ev.get("settlement_rule"))
@@ -544,6 +612,11 @@ async def select_exit(conn, position, *, client=None, now=None,
                              "selected on" % (rounded, got_per, proceeds_per)))
         return dict(out, ok=True, refusal=None, selected=sel,
                     selected_qty=float(qty),
+                    # WHEN THIS WAS ASSESSED, so a caller that sits on it can
+                    # be refused rather than sending a stale bound.
+                    assessed_at=decision_at,
+                    assessment_expires_at=decision_at + MAX_ASSESSMENT_AGE_S,
+                    assessment_max_age_s=MAX_ASSESSMENT_AGE_S,
                     # WHAT IS SENT.
                     limit_price=rounded,
                     price_space="VENUE_WIRE_CONTRACT_PRICE",
@@ -559,6 +632,7 @@ async def select_exit(conn, position, *, client=None, now=None,
                     why=ranked.get("selection_reason"))
     return dict(out, ok=True, refusal=None, selected=sel,
                 selected_qty=(None if qty is None else float(qty)),
+                assessed_at=decision_at,
                 is_an_evidenced_exit=False,
                 why=ranked.get("selection_reason"),
                 note=("this IS a decision. HOLD chosen by a named rule on "
@@ -650,7 +724,7 @@ async def _reserve_exit(conn, *, parent: str, row, venue: str,
 
 async def submit_exit(conn, *, intent_id: str, limit_price=None,
                       quantity=None, adapter=None, venue: str | None = None,
-                      expect_proceeds_per_contract=None,
+                      expect_proceeds_per_contract=None, assessed_at=None,
                       now: float | None = None) -> dict:
     """SELL BACK SOME OR ALL OF A HELD FUNDED POSITION.
 
@@ -737,6 +811,25 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
     ven = str(venue or row["venue"])
     proceeds = exit_proceeds(contracts, wire, opened_with)
     per_contract = exit_proceeds(1, wire, opened_with)
+    # ── THE ASSESSMENT MUST STILL BE CURRENT ────────────────────────
+    #
+    # Checked BEFORE anything is reserved or sent. The book and the probability
+    # were aged at `assessed_at`; if material time has passed since, the prices
+    # this order rests on are no longer established and the correct action is to
+    # re-assess, not to send.
+    if assessed_at is not None:
+        stale = at - float(assessed_at)
+        out["assessment"] = {"assessed_at": float(assessed_at),
+                             "age_at_submission_s": round(stale, 3),
+                             "max_age_s": MAX_ASSESSMENT_AGE_S}
+        if stale > MAX_ASSESSMENT_AGE_S:
+            return dict(out, ok=False, refusal=R_ASSESSMENT_EXPIRED,
+                        why=("the book and probability behind this exit were "
+                             "assessed %.1f s ago against a %.0f s bound. The "
+                             "prices it rests on are no longer established, "
+                             "so it is re-assessed rather than sent"
+                             % (stale, MAX_ASSESSMENT_AGE_S)))
+
     # ── THE BOUND THE CALLER SELECTED ON, CHECKED AGAINST THE WIRE ───
     if expect_proceeds_per_contract is not None:
         want = float(expect_proceeds_per_contract)
@@ -1172,7 +1265,8 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
                               # receive less than the level it was chosen on.
                               expect_proceeds_per_contract=pick[
                                   "proceeds_per_contract"],
-                              adapter=mod, venue=venue, now=at)
+                              assessed_at=pick.get("assessed_at"),
+                              adapter=mod, venue=venue, now=time.time())
         out["exits"].append({"intent_id": p["intent_id"],
                              "selected": pick["selected"],
                              "selected_qty": pick["selected_qty"],

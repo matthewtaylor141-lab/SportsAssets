@@ -291,75 +291,12 @@ OUR_OWN_TIMESTAMPS = (
 )
 OUR_TRANSPORT_LATENCY = "OUR_TRANSPORT_LATENCY_NOT_AN_UPSTREAM_AGE"
 
-#: THE BOUND, and it is the SAME NUMBER the scheduled entry lane admits on.
-#: `workers/ext_pinnacle_loop.MAX_VENUE_QUOTE_AGE_S` is the original; a test
-#: asserts the two are equal, because two lanes admitting the same venue book
-#: on two different ages is the drift this module exists to prevent.
-MAX_VENUE_BOOK_AGE_S = 30.0
+FRESHNESS_BASIS_UNESTABLISHED = (
+    "VENUE_CLOCK_NOT_PROVIDED",
+    "VENUE_CLOCK_UNPARSEABLE",
+    "NOT_RECORDED",
+)
 
-R_BOOK_AGE_UNMEASURED = "THE_VENUE_BOOK_AGE_IS_UNMEASURED"
-R_BOOK_STALE = "THE_VENUE_BOOK_IS_OLDER_THAN_THE_ADMITTED_BOUND"
-
-
-def venue_book_age(market_data, *, now) -> dict:
-    """HOW OLD IS THIS BOOK, BY THE VENUE'S OWN CLOCK -- or UNMEASURED.
-
-    THE ONE PLACE THIS POLICY IS EXPRESSED FOR A FUNDED READ. The funded exit
-    selector applied NO book freshness check at all: it read the payload and
-    used the ladder. Probability freshness was checked, by `ev_hold`, and that
-    establishes nothing about the book -- a thirty-second-old probability
-    against a ten-minute-old ladder is two different claims and only one of
-    them was tested.
-
-    THE RULE IS THE ENTRY LANE'S, UNCHANGED. `marketData.transactTime`, parsed
-    by the supported parser, aged against the decision instant, bounded by
-    `MAX_VENUE_BOOK_AGE_S`. An absent or unparseable clock leaves the age
-    UNMEASURED and REFUSES -- it is not a claim the book was stale, and it is
-    emphatically not our transport latency, which cannot bound an upstream age
-    (see `FRESHNESS_ADMISSION_POLICY`).
-    """
-    from . import bettor_book_snapshot as _bs
-
-    out = {"field_path": "marketData.transactTime",
-           "bound_s": MAX_VENUE_BOOK_AGE_S,
-           "basis": "VENUE_CLOCK_NOT_PROVIDED",
-           "age_s": None, "ok": False, "refusal": R_BOOK_AGE_UNMEASURED,
-           "admission_policy": "bettor_funded_activation.venue_book_age",
-           "our_latency_is_not_an_age": OUR_TRANSPORT_LATENCY}
-    if not market_data:
-        return dict(out, why="no market data was supplied to age")
-    snap = _bs.snapshot(market_data, symbol="funded-exit-read") or {}
-    raw = snap.get("TRANSACT_TIME")
-    out["raw"] = (None if raw is None else str(raw)[:64])
-    if raw in (None, _bs.NOT_IDENTIFIED):
-        return dict(out, why=("the venue supplied no transactTime, so our "
-                              "read clock is the only one -- and using it "
-                              "would make every book fresh by construction"))
-    try:
-        from .bettor_market_stream import _parse_ts as _pt
-        dt = _pt(raw)
-    except Exception:                                          # noqa: BLE001
-        dt = None
-    if dt is None:
-        return dict(out, basis="VENUE_CLOCK_UNPARSEABLE",
-                    why=("the venue sent a value the supported parser "
-                         "refuses. It is NOT absent and it is NOT an observed "
-                         "stale age: the age is UNMEASURED"))
-    age = float(now) - dt.timestamp()
-    out.update(basis="VENUE_TRANSACT_TIME", age_s=round(age, 3),
-               parsed_epoch_s=dt.timestamp())
-    if age < 0:
-        # THE VENUE'S CLOCK IS AHEAD OF OURS. Not a refusal -- a book cannot be
-        # too fresh -- but it is recorded, because a LARGE negative age means
-        # the two clocks disagree and every age measured against this one is
-        # shifted by that amount.
-        out["venue_clock_ahead_of_ours_s"] = round(-age, 3)
-    if age > MAX_VENUE_BOOK_AGE_S:
-        return dict(out, ok=False, refusal=R_BOOK_STALE,
-                    why=("the venue's own clock puts this book %.1f s old "
-                         "against a %.0f s bound" % (age, MAX_VENUE_BOOK_AGE_S)))
-    return dict(out, ok=True, refusal=None,
-                why="the venue's own clock puts this book %.1f s old" % age)
 
 #: HOW UPSTREAM FRESHNESS IS ADMITTED, as a stated policy rather than a
 #: derived bound. The endpoint's supported contract has to say what its
@@ -391,11 +328,161 @@ FRESHNESS_BASIS_UNESTABLISHED = (
     "NOT_RECORDED",
 )
 
+#: THE BOUND, and it is the SAME NUMBER the scheduled entry lane admits on.
+#: `workers/ext_pinnacle_loop.MAX_VENUE_QUOTE_AGE_S` is the original; a test
+#: asserts the two are equal, because two lanes admitting the same venue book
+#: on two different ages is the drift this module exists to prevent.
+MAX_VENUE_BOOK_AGE_S = 30.0
+
+#: HOW FAR AHEAD OF OUR RECEIPT A VENUE TIMESTAMP MAY SIT AND STILL BE USED.
+#:
+#: THE DEFECT THIS REPLACES. The first version recorded a negative age, noted
+#: that the venue's clock was ahead, and returned ok=True -- on the reasoning
+#: that "a book cannot be too fresh". That is wrong. A negative age is not a
+#: fresher book; it is TWO CLOCKS THAT DISAGREE, and a clock we cannot reconcile
+#: cannot establish an age at all. A timestamp an hour in the future would have
+#: been certified fresh by that rule, and an hour of skew in that direction is
+#: exactly as much evidence of an unusable clock as an hour in the other.
+#:
+#: SO SKEW IS A BOUNDED, STATED ALLOWANCE. A venue stamp may legitimately land
+#: slightly after our RECEIPT instant -- ordinary clock offset between two
+#: machines, at the scale of a network hop. Beyond this bound the two clocks are
+#: inconsistent and the age is REFUSED rather than believed.
+MAX_VENUE_CLOCK_SKEW_AHEAD_S = 2.0
+
+R_BOOK_AGE_UNMEASURED = "THE_VENUE_BOOK_AGE_IS_UNMEASURED"
+R_BOOK_STALE = "THE_VENUE_BOOK_IS_OLDER_THAN_THE_ADMITTED_BOUND"
+R_BOOK_CLOCK_INCONSISTENT = \
+    "THE_VENUE_CLOCK_IS_AHEAD_OF_OUR_RECEIPT_BEYOND_THE_ALLOWED_SKEW"
+
+#: THE THREE INSTANTS AN AGE IS MEASURED BETWEEN, named so a caller cannot
+#: collapse them. The earlier version took ONE `now` and the caller passed the
+#: instant it happened to have -- which in the scheduled path was captured
+#: BEFORE the book was requested. Age against a pre-request instant understates
+#: it by the whole acquisition, and a slow acquisition then admits a book that
+#: is already past the bound by the time the decision is taken.
+AGE_INSTANTS = {
+    "requested_at": "when WE asked the venue for the book",
+    "received_at": ("when WE had the response in hand. A venue stamp after "
+                    "this is skew, bounded by MAX_VENUE_CLOCK_SKEW_AHEAD_S"),
+    "decision_at": ("the instant the decision is actually taken, AFTER every "
+                    "acquisition. The age is evaluated here, so acquisition "
+                    "delay counts against the bound instead of vanishing"),
+}
+
 
 def _check(name, met, detail, evidence=None, basis=None) -> dict:
     return {"check": name, "met": met, "detail": detail,
             "evidence": evidence or {},
             "basis": basis or "READ_AT_THIS_INSTANT"}
+
+
+def venue_book_age(market_data, *, decision_at, received_at=None,
+                   requested_at=None, now=None) -> dict:
+    """HOW OLD IS THIS BOOK AT THE DECISION INSTANT -- or UNMEASURED.
+
+    THE ONE PLACE THIS POLICY IS EXPRESSED FOR A FUNDED READ. The funded exit
+    selector applied NO book freshness check at all: it read the payload and
+    used the ladder. Probability freshness was checked, by `ev_hold`, and that
+    establishes nothing about the book -- a thirty-second-old probability
+    against a ten-minute-old ladder is two different claims and only one of
+    them was tested.
+
+    THE AGE IS TAKEN AT `decision_at`, WHICH IS AFTER ACQUISITION. The three
+    instants are separate (see `AGE_INSTANTS`) because collapsing them hides
+    the acquisition: a snapshot twenty seconds old when it arrived is forty
+    seconds old by a decision taken twenty seconds later, and the bound does
+    not move to accommodate that.
+
+    A VENUE STAMP AFTER OUR RECEIPT IS SKEW, AND IT IS BOUNDED. A small offset
+    between two machines is ordinary and allowed; anything beyond
+    `MAX_VENUE_CLOCK_SKEW_AHEAD_S` means the clocks disagree and the age is
+    refused. An hour in the future is not an hour fresh.
+
+    AN ABSENT OR UNPARSEABLE CLOCK is UNMEASURED and refuses -- our transport
+    latency cannot bound an upstream age (see `FRESHNESS_ADMISSION_POLICY`).
+    """
+    from . import bettor_book_snapshot as _bs
+
+    # `now` is the retired single-instant parameter. Accepting it keeps an old
+    # caller working and it is recorded as the imprecise reading it is.
+    d_at = float(decision_at if decision_at is not None else now)
+    out = {"field_path": "marketData.transactTime",
+           "bound_s": MAX_VENUE_BOOK_AGE_S,
+           "skew_allowance_s": MAX_VENUE_CLOCK_SKEW_AHEAD_S,
+           "basis": "VENUE_CLOCK_NOT_PROVIDED",
+           "age_s": None, "ok": False, "refusal": R_BOOK_AGE_UNMEASURED,
+           "instants": {"requested_at": requested_at,
+                        "received_at": received_at,
+                        "decision_at": d_at},
+           "age_evaluated_at": "decision_at",
+           "admission_policy": "bettor_funded_activation.venue_book_age",
+           "our_latency_is_not_an_age": OUR_TRANSPORT_LATENCY}
+    if requested_at is not None and received_at is not None:
+        out["acquisition_s"] = round(float(received_at)
+                                     - float(requested_at), 3)
+    if received_at is not None:
+        out["decision_lag_after_receipt_s"] = round(
+            d_at - float(received_at), 3)
+    if not market_data:
+        return dict(out, why="no market data was supplied to age")
+    snap = _bs.snapshot(market_data, symbol="funded-exit-read") or {}
+    raw = snap.get("TRANSACT_TIME")
+    out["raw"] = (None if raw is None else str(raw)[:64])
+    if raw in (None, _bs.NOT_IDENTIFIED):
+        return dict(out, why=("the venue supplied no transactTime, so our "
+                              "read clock is the only one -- and using it "
+                              "would make every book fresh by construction"))
+    try:
+        from .bettor_market_stream import _parse_ts as _pt
+        dt = _pt(raw)
+    except Exception:                                          # noqa: BLE001
+        dt = None
+    if dt is None:
+        return dict(out, basis="VENUE_CLOCK_UNPARSEABLE",
+                    why=("the venue sent a value the supported parser "
+                         "refuses. It is NOT absent and it is NOT an observed "
+                         "stale age: the age is UNMEASURED"))
+    stamped = dt.timestamp()
+    age = d_at - stamped
+    out.update(basis="VENUE_TRANSACT_TIME", age_s=round(age, 3),
+               parsed_epoch_s=stamped)
+    # ── THE CLOCKS MUST AGREE BEFORE AN AGE MEANS ANYTHING ───────────
+    #
+    # Compared against RECEIPT, not against the decision instant: a stamp
+    # between our request and our receipt is ordinary, and by the decision
+    # instant it is legitimately in the past.
+    if received_at is not None:
+        ahead = stamped - float(received_at)
+        out["stamp_after_our_receipt_s"] = round(ahead, 3)
+        if ahead > MAX_VENUE_CLOCK_SKEW_AHEAD_S:
+            return dict(out, ok=False, refusal=R_BOOK_CLOCK_INCONSISTENT,
+                        why=("the venue stamped this book %.1f s AFTER we "
+                             "received it, beyond the %.1f s skew allowed. "
+                             "Two clocks that disagree by that much cannot "
+                             "establish an age, and a future stamp is not a "
+                             "fresh book"
+                             % (ahead, MAX_VENUE_CLOCK_SKEW_AHEAD_S)))
+    elif age < -MAX_VENUE_CLOCK_SKEW_AHEAD_S:
+        # NO RECEIPT INSTANT SUPPLIED. The only check available is against the
+        # decision instant, which is weaker -- and it is still applied, because
+        # the alternative is certifying an arbitrarily future stamp as fresh.
+        return dict(out, ok=False, refusal=R_BOOK_CLOCK_INCONSISTENT,
+                    why=("the venue stamped this book %.1f s after the "
+                         "decision instant and no receipt instant was "
+                         "supplied to compare against. Beyond the %.1f s "
+                         "allowance that is an inconsistent clock"
+                         % (-age, MAX_VENUE_CLOCK_SKEW_AHEAD_S)),
+                    weaker_check=("no received_at was supplied, so the skew "
+                                  "was measured against decision_at"))
+    if age > MAX_VENUE_BOOK_AGE_S:
+        return dict(out, ok=False, refusal=R_BOOK_STALE,
+                    why=("at the decision instant the venue's own clock puts "
+                         "this book %.1f s old against a %.0f s bound"
+                         % (age, MAX_VENUE_BOOK_AGE_S)))
+    return dict(out, ok=True, refusal=None,
+                why=("at the decision instant the venue's own clock puts "
+                     "this book %.1f s old" % age))
 
 
 async def _freshness_check(conn) -> dict:

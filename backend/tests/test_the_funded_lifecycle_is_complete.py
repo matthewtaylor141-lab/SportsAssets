@@ -1550,3 +1550,225 @@ def test_the_fill_commit_covers_the_inventory_transition():
     # and the lock is on the POSITION, which is what an exit reservation
     # locks too -- same row, same order, so they serialise.
     assert "econ_intent" in src
+
+
+# ════════════════════════════════════════════════════════════════════
+# 10 · A FUTURE TIMESTAMP IS NOT A FRESH ONE
+# ════════════════════════════════════════════════════════════════════
+
+def _stamp(offset_s):
+    """A venue transactTime `offset_s` from now, in the shape the parser
+    accepts. Positive is in the FUTURE."""
+    import datetime as _dt
+
+    t = _dt.datetime.now(_dt.timezone.utc) + _dt.timedelta(seconds=offset_s)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
+def _md(offset_s):
+    return {"transactTime": _stamp(offset_s), "bids": [_level(0.75, 40)],
+            "offers": [_level(0.77, 40)]}
+
+
+def test_a_timestamp_an_hour_ahead_gets_no_fresh_certificate():
+    """THE DEFECT THIS CLOSES. The first version recorded a negative age, noted
+    the venue's clock was ahead, and returned ok=True -- "a book cannot be too
+    fresh". A negative age is not a fresher book: it is two clocks that
+    disagree, and a clock we cannot reconcile cannot establish an age. An hour
+    ahead would have been certified fresh."""
+    now = time.time()
+    got = FA.venue_book_age(_md(3600), decision_at=now + 0.1,
+                            received_at=now, requested_at=now - 0.2)
+    assert got["ok"] is False
+    assert got["refusal"] == FA.R_BOOK_CLOCK_INCONSISTENT
+    assert got["stamp_after_our_receipt_s"] > 3500
+    assert "not a fresh book" in got["why"]
+    # AND WITH NO RECEIPT INSTANT the weaker check still refuses rather than
+    # certifying an arbitrarily future stamp.
+    bare = FA.venue_book_age(_md(3600), decision_at=now)
+    assert bare["ok"] is False
+    assert bare["refusal"] == FA.R_BOOK_CLOCK_INCONSISTENT
+    assert "no received_at was supplied" in bare["weaker_check"]
+
+
+def test_slow_acquisition_ages_the_book_against_the_unchanged_bound():
+    """A 20-SECOND-OLD SNAPSHOT IS 40 SECONDS OLD TWENTY SECONDS LATER, and the
+    30-second bound does not move to accommodate the delay. Aging against a
+    pre-request instant is what made acquisition free."""
+    now = time.time()
+    md = _md(-20)                       # 20 s old when it arrived
+    quick = FA.venue_book_age(md, decision_at=now + 0.2, received_at=now,
+                              requested_at=now - 0.3)
+    assert quick["ok"] is True
+    assert 19.5 < quick["age_s"] < 21.5
+    slow = FA.venue_book_age(md, decision_at=now + 20.5, received_at=now,
+                             requested_at=now - 0.3)
+    assert slow["ok"] is False
+    assert slow["refusal"] == FA.R_BOOK_STALE
+    assert slow["age_s"] > FA.MAX_VENUE_BOOK_AGE_S
+    assert slow["bound_s"] == pytest.approx(FA.MAX_VENUE_BOOK_AGE_S)
+    assert slow["decision_lag_after_receipt_s"] > 20.0
+    assert slow["age_evaluated_at"] == "decision_at"
+
+
+def test_a_stamp_between_request_and_receipt_is_ordinary():
+    """AND THE CORRECTION TO MY OWN CLAIM. A response timestamp landing after
+    the instant we captured BEFORE asking is not evidence of clock skew -- it is
+    the ordinary case. It is assessed against the later decision instant, where
+    it is legitimately in the past."""
+    now = time.time()
+    got = FA.venue_book_age(
+        {"transactTime": _stamp(0.05), "bids": [_level(0.75, 40)]},
+        decision_at=now + 0.4, received_at=now + 0.2, requested_at=now)
+    assert got["ok"] is True, got
+    assert got["refusal"] is None
+    assert got["age_s"] > 0                      # past, at the decision
+    assert got["stamp_after_our_receipt_s"] < FA.MAX_VENUE_CLOCK_SKEW_AHEAD_S
+    assert got["acquisition_s"] >= 0
+    # THE SKEW ALLOWANCE IS EXPLICIT AND BOUNDED, not "any future is fine".
+    assert FA.MAX_VENUE_CLOCK_SKEW_AHEAD_S > 0
+    assert FA.MAX_VENUE_CLOCK_SKEW_AHEAD_S < 10
+    assert set(FA.AGE_INSTANTS) == {"requested_at", "received_at",
+                                    "decision_at"}
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_selector_ages_both_clocks_at_the_decision_instant(
+        monkeypatch):
+    """ONE INSTANT FOR BOTH INPUTS, TAKEN AFTER ACQUISITION. The book and the
+    probability must be aged at the same instant, and it must be later than
+    every read -- otherwise a slow acquisition carries an expired probability
+    into a live comparison."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        await _probability(conn, p=0.55)
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        _, _, client = _transport(monkeypatch, bids=[_level(0.75, 40)])
+        got = await FM.select_exit(conn, pos, client=client)
+        assert got["ok"] is True, got
+        ins = got["instants"]
+        # THE ORDER OF THE FOUR INSTANTS IS THE WHOLE POINT.
+        assert ins["pass_started_at"] <= ins["book_requested_at"]
+        assert ins["book_requested_at"] <= ins["book_received_at"]
+        assert ins["book_received_at"] <= ins["decision_at"]
+        assert ins["decision_at"] > ins["pass_started_at"]
+        # BOTH CLOCKS AGED AT `decision_at`.
+        assert got["venue_book_age"]["instants"]["decision_at"] == \
+            pytest.approx(ins["decision_at"])
+        assert got["assessed_at"] == pytest.approx(ins["decision_at"])
+        assert got["ev_hold"]["age_bound_s"] == pytest.approx(30.0)
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_delayed_submission_cannot_reuse_an_expired_assessment(
+        monkeypatch):
+    """MATERIAL DELAY BETWEEN SELECTION AND SUBMISSION. The book and the
+    probability were aged at the selection's decision instant; if the order
+    goes out well after that, it rests on prices no longer established. The
+    submission refuses instead of sending."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        await _probability(conn, p=0.55)
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+        pmus, sent, client = _transport(monkeypatch, order_id="vo-x",
+                                       bids=[_level(0.75, 40)],
+                                       exec_by_call=[[]])
+        pick = await FM.select_exit(conn, pos, client=client)
+        assert pick["ok"] is True
+        assert pick["assessment_max_age_s"] == pytest.approx(
+            FM.MAX_ASSESSMENT_AGE_S)
+
+        # ── THE DELAY: submitted well past the assessment's bound ────
+        late = pick["assessed_at"] + FM.MAX_ASSESSMENT_AGE_S + 5.0
+        stale = await FM.submit_exit(
+            conn, intent_id=pos["intent_id"], limit_price=pick["limit_price"],
+            quantity=pick["selected_qty"],
+            expect_proceeds_per_contract=pick["proceeds_per_contract"],
+            assessed_at=pick["assessed_at"], adapter=pmus, venue=VENUE,
+            now=late)
+        assert stale["ok"] is False
+        assert stale["refusal"] == FM.R_ASSESSMENT_EXPIRED, stale
+        assert stale["assessment"]["age_at_submission_s"] > \
+            FM.MAX_ASSESSMENT_AGE_S
+        # NOTHING WAS SENT AND NOTHING WAS RESERVED.
+        assert [k for k, _ in sent if k == "create"] == []
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_intents "
+            " WHERE kind='EXIT'") == 0
+
+        # ── AND PROMPTLY, IT PROCEEDS ───────────────────────────────
+        ok = await FM.submit_exit(
+            conn, intent_id=pos["intent_id"], limit_price=pick["limit_price"],
+            quantity=pick["selected_qty"],
+            expect_proceeds_per_contract=pick["proceeds_per_contract"],
+            assessed_at=pick["assessed_at"], adapter=pmus, venue=VENUE)
+        assert ok["submitted"] is True, ok
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_evidence_says_which_row_it_actually_read(monkeypatch):
+    """THE DESCRIPTION, CORRECTED WITHOUT TOUCHING THE QUERY.
+
+    `latest_probability` returns the freshest ELIGIBLE row -- the CURRENT one
+    selected for this decision, NOT necessarily the historical row that priced
+    the entry. An earlier docstring said it was the entry's. The query is right
+    and unchanged; what it returns is now named accurately, with the row's own
+    id and observation time so a reader can see exactly which observation the
+    valuation rests on.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        # TWO observations: an older one, then a newer one. The entry was
+        # notionally taken against the older; the exit uses the NEWER.
+        await _probability(conn, p=0.40, at=time.time() - 300)
+        older = await conn.fetchval(
+            "SELECT id FROM external_valuations ORDER BY id DESC LIMIT 1")
+        await _probability(conn, p=0.55)
+        newer = await conn.fetchval(
+            "SELECT id FROM external_valuations ORDER BY id DESC LIMIT 1")
+        assert newer > older
+
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        _, _, client = _transport(monkeypatch, bids=[_level(0.75, 40)])
+        got = await FM.select_exit(conn, pos, client=client)
+        assert got["ok"] is True, got
+        ev = got["decision_evidence"]
+        # IT IS THE CURRENT ROW, AND IT SAYS SO.
+        assert ev["valuation_row_id"] == newer
+        assert ev["valuation_row_id"] != older
+        assert ev["valuation_observed_at"] is not None
+        assert "NOT necessarily the historical row" in ev["which_row_this_is"]
+        assert got["ev_hold"]["probability"] == pytest.approx(0.55)
+        # THE DOCSTRING NO LONGER CLAIMS THE ENTRY'S ROW.
+        import inspect
+        doc = inspect.getdoc(FM._decision_evidence)
+        assert "NOT necessarily the historical row that priced the entry" in doc
+    finally:
+        await _clean(conn)
+        await conn.close()

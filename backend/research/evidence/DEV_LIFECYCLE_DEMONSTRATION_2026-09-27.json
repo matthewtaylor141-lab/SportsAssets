@@ -1,5 +1,6 @@
 {
- "what": "SCHEDULED_FUNDED_LIFECYCLE_TRACE",
+ "what": "DEVELOPMENT_LIFECYCLE_DEMONSTRATION",
+ "this_is_not": "funded performance, production execution, or evidence about a live venue. The transport is a python list and the database is a development one",
  "steps": [
   {
    "n": "ENTRY HELD (short)",
@@ -14,13 +15,26 @@
    "opened_anything": false
   },
   {
-   "n": "BOOK ADMITTED ON THE VENUE'S OWN CLOCK",
-   "basis": "VENUE_TRANSACT_TIME",
-   "age_s": -0.008,
-   "bound_s": 30.0
+   "n": "THE FOUR INSTANTS, SEPARATELY",
+   "acquisition_s": 0.0,
+   "reads_after_the_book_s": 0.002,
+   "age_evaluated_at": "decision_at",
+   "decision_after_pass_start_s": 0.013
   },
   {
-   "n": "EVIDENCE FROM THE ENTRY DECISION'S OWN ROW",
+   "n": "BOOK ADMITTED AT THE DECISION INSTANT",
+   "basis": "VENUE_TRANSACT_TIME",
+   "age_s": 0.002,
+   "bound_s": 30.0,
+   "stamp_after_our_receipt_s": -0.001,
+   "skew_allowance_s": 2.0,
+   "note": "a stamp landing between our request and our receipt is ORDINARY, not clock skew. Only a stamp beyond the allowance AFTER receipt refuses"
+  },
+  {
+   "n": "EVIDENCE BESIDE THE PROBABILITY BEING USED",
+   "valuation_row_id": 217,
+   "valuation_observed_at": "2026-09-27 03:12:33.677967+00:00",
+   "which_row": "the freshest ELIGIBLE valuation row for this market, selected for THIS decision. NOT necessarily the historical row that priced the entry",
    "event_state_raw": "IN_PROGRESS",
    "event_state": "IN_PLAY",
    "settlement": "ESTABLISHED"
@@ -64,6 +78,16 @@
    "n": "POSITION CLOSED",
    "residual": 0.0,
    "closed_reason": "EXITED_IN_THE_MARKET"
+  },
+  {
+   "n": "THE REALISED NUMBER IS PROVISIONAL, AND WHY",
+   "realised_pnl_usd": 1.7,
+   "realised_is_provisional": true,
+   "qualification": "PROVISIONAL: the ENTRY fill's fee is the schedule's ESTIMATE because this venue stated no commission on it. The exit's fee is the venue's actual charge. So the figure is not final and is not funded performance -- the transport here is a python list",
+   "provisional_rows": [
+    "A_FEE_THE_VENUE_HAS_NOT_STATED",
+    "A_PROVISIONAL_ECONOMIC_EVENT"
+   ]
   },
   {
    "n": "COMMAND CENTRE READBACK",
