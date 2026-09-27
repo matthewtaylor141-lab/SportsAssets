@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react'
 import { EmptyState } from '../components/EmptyState'
 import { PnlCalendar } from '../components/PnlCalendar'
 import { api } from '../lib/api'
+import { deskAdminToken, deskToken } from '../lib/desk'
 import { fmtAgo, fmtCents, fmtPct, fmtSignedUsd, fmtUsd } from '../lib/format'
 
 interface AIReport {
@@ -95,8 +96,20 @@ interface PmusAccount {
 function PmusAccountCard() {
   const [acct, setAcct] = useState<PmusAccount | null>(null)
 
+  // THE ACCOUNT READ NOW CARRIES A CREDENTIAL (audit finding A6). This route
+  // returned the funded account's value, cash, positions and realised P&L to
+  // any unauthenticated caller; it is behind `require_desk` on the server now,
+  // so the desk token travels with the request. Without a desk session the card
+  // renders nothing, which is the same thing it does when the account is
+  // unconfigured -- an unauthorised reader sees no account state, not an error.
   useEffect(() => {
-    const load = () => api<PmusAccount>('/api/pmus-account').then(setAcct).catch(() => {})
+    const load = () => {
+      const tok = deskToken() || deskAdminToken()
+      if (!tok) { setAcct(null); return }
+      api<PmusAccount>('/api/pmus-account', {
+        headers: { 'X-Desk-Token': tok },
+      }).then(setAcct).catch(() => setAcct(null))
+    }
     load()
     const t = setInterval(load, 30000)
     return () => clearInterval(t)

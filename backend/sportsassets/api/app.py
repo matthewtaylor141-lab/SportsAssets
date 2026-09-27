@@ -16211,10 +16211,31 @@ async def api_venue_truth() -> dict:
     return await snapshot()
 
 
-@app.get("/api/pmus-account")
+@app.get("/api/pmus-account", dependencies=[Depends(require_desk)])
 async def api_pmus_account() -> dict:
     """The REAL Polymarket US account, live from the venue's portfolio API:
-    value, cash, open positions, realized PnL, recent trades. 30s cache."""
+    value, cash, open positions, realized PnL, recent trades. 30s cache.
+
+    NOW BEHIND `require_desk`, AND IT WAS BEHIND NOTHING (audit finding A6).
+    This route returned the funded account's value, cash, open positions,
+    realised P&L and recent trades to any unauthenticated caller. It moves no
+    money -- it is a GET -- and it disclosed the whole state of the account that
+    money sits in, which is the half of a credential boundary that gets forgotten
+    because nothing breaks when it is missing.
+
+    FOUND BY BUILDING THE PERMISSION MATRIX rather than by reading routes one at
+    a time: `tests/test_the_permission_matrix_is_deliberate.py` classifies every
+    route by the guard it actually carries, and this one had none.
+
+    `require_desk` and not `require_admin`: the desk token already opens
+    `/api/admin/book` and the desk reads, this is the same class of information,
+    and the ops tooling that holds the admin token is accepted by it too.
+
+    THE CALLER CHANGED WITH IT. `frontend/src/pages/AITrader.tsx` called this
+    with no credential; it now sends the desk token. The static frontend releases
+    separately from the API, so between the two releases that page's account
+    panel will 401 -- which is the correct failure and is stated here rather than
+    left to be discovered."""
     from .pmus_account import account_snapshot
 
     return await account_snapshot()

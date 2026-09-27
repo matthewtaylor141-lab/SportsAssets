@@ -21,7 +21,7 @@ VERIFIED is exactly the production readback the audit asked for.
 
 ---
 
-## A1 · Freshness and market interpretation — **IMPLEMENTED**
+## A1 · Freshness and market interpretation — **PARTIALLY IMPLEMENTED**
 
 **Audit finding.** At audited head the entry loop asserted `LAST_BOOK_CHANGE`
 from unchanged two-read observations and marked a recently received book fresh
@@ -114,7 +114,7 @@ collected fee on a discriminating vector.
 
 ---
 
-## A3 · Activation / onboarding integration — **IMPLEMENTED**
+## A3 · Activation / onboarding integration — **IMPLEMENTED, PENDING VERIFICATION**
 
 **Audit finding.** The activation package promised a live onboarding
 reconciliation through readiness; the reviewed endpoint read registry/market
@@ -161,7 +161,13 @@ working, not a gap in it. → **EXTERNAL DEPENDENCY** for the live run.
 
 ---
 
-## A4 · Risk contract — **IMPLEMENTED**
+## A4 · Risk contract — **PARTIALLY IMPLEMENTED**
+
+**Why PARTIALLY and not IMPLEMENTED.** Units, the loss window, the aggregation
+scope and the single limit list are repaired. **Cross-lane account exposure is
+not**, and that is not a detail: `SCOPE_WHOLE_BOOK` currently means *this lane's*
+open book. Two lanes drawing on one account can each satisfy their own rails and
+together exceed the account's. A finding is not closed because part of it is.
 
 **Audit finding.** Event limit supported in execution but not required by
 activation; "daily loss" is drawdown; residual inventory is contracts but the
@@ -341,7 +347,7 @@ merge.
 
 ---
 
-## A9 · Shadow exposure — **IMPLEMENTED**
+## A9 · Shadow exposure — **IMPLEMENTED, PENDING VERIFICATION**
 
 **Audit finding.** The recorded shadow open-book query lacks event identity for
 cross-position event exposure, while the newer funded path carries its own event
@@ -407,3 +413,56 @@ cannot fix.
 **Nothing here is a request for owner action yet**, because the authorized
 engineering is not finished. When it is, the account, limits, remaining evidence
 and activation steps will be presented together, as one package.
+
+---
+
+## Added after the register's first version — the permission matrix (A6)
+
+Building the deliberate read/control/admin matrix the audit asked for
+(`backend/tests/test_the_permission_matrix_is_deliberate.py`) found something
+reading routes one at a time would not have.
+
+**The matrix classifies every route by the guard it actually carries**, read out
+of the app's own dependency table — so a route that forgets its guard fails a
+test instead of being discovered by whoever calls it first. Exercised against the
+real ASGI app: unauthenticated calls on all three classes, a read credential on a
+control route (403 with the named reason), a control cookie on an admin route
+(refused), a wrong admin token, and an unset admin secret — which must refuse
+everyone rather than admit everyone.
+
+**One capital-relevant hole, found and fixed.** `GET /api/pmus-account` returned
+the funded account's **value, cash, open positions, realised P&L and recent
+trades** to any unauthenticated caller. It is a GET, so it moved no money — and
+it disclosed the entire state of the account the money sits in. Now behind
+`require_desk`, with its frontend caller sending the desk token. The static
+frontend releases separately from the API, so between those two releases that
+page's account panel will 401; that is the correct failure and it is stated
+rather than left to be found.
+
+**A standing residue of 46 routes, frozen and named — OPEN.** These carry no
+dependency guard and no recorded inline check. **Six of them accept a write with
+no credential:**
+
+| route | method |
+|---|---|
+| `/api/engine/manual-kalshi-result` | POST |
+| `/api/engine/kud-result` | POST |
+| `/api/engine/methodology` | POST |
+| `/api/push/subscribe` | POST |
+| `/api/push/unsubscribe` | POST |
+| `/api/prefs/{user_key}` | PUT |
+
+The other 40 are public reads — legacy copy-trading and report routes
+(`/api/track-record`, `/api/whales/*`, `/api/venue-truth`, `/api/copy-report`
+and similar).
+
+**Why they are frozen and not fixed.** The protected copying machinery calls some
+of them, and adding a guard to a route whose caller does not authenticate breaks
+production quietly. Each needs its caller identified first. The set is asserted to
+match **exactly**, so a new unguarded route fails and guarding one requires
+visibly removing it from the inventory — a ceiling alone would let one be fixed
+while another appeared and still report progress.
+
+**This is the part of A6 that "purging localStorage" does not touch**, and the
+instruction is right about that. Server-side authority for the provider key is
+still OPEN; so is this residue.

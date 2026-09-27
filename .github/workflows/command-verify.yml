@@ -51,6 +51,18 @@ on:
         description: "API origin behind the proxy"
         required: false
         default: "https://sportsassets-api.onrender.com"
+      fee_docs:
+        description: >-
+          on|blank. `on` retrieves the venue's OFFICIAL published fee
+          documentation and prints the rounding rule, the cumulative
+          taker-fill treatment, the effective date and the execution-report
+          units VERBATIM. This runner has egress the build container does
+          not: docs.polymarket.us returns CONNECT 403 through the agent
+          proxy, which is why the rounding question could not be settled in
+          source and why tie vectors alone were recorded instead of a policy.
+          Read-only, and it touches no account.
+        required: false
+        default: ""
       arm_external:
         description: >-
           POST the external-valuation shadow's control row (on|off), then
@@ -6390,4 +6402,98 @@ jobs:
             say "  READING: mixed or insufficient. Nothing is concluded; the"
             say "  numbers above are the record."
           fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ── THE OFFICIAL FEE DOCUMENTATION, RETRIEVED WHERE EGRESS EXISTS ──
+  #
+  # WHY THIS JOB EXISTS. `calibration_fees` implements half-up rounding and the
+  # 2026-09-27 management audit reports the current published policy is half-even
+  # with a cumulative taker-fill adjustment. The difference is one cent on an
+  # exact tie, and it cannot be settled from the build container: outbound HTTPS
+  # to docs.polymarket.us is denied by the egress policy (CONNECT 403). So the
+  # module records the discrepancy, carries both figures and pins six
+  # discriminating vectors -- and REFUSES to change the arithmetic to match a
+  # page nobody has read. That refusal is correct and it is not an answer.
+  #
+  # THIS RUNNER CAN REACH THE PAGE. It fetches it, prints the relevant sentences
+  # VERBATIM rather than summarising them, and records the fetch instant and the
+  # response's own headers so the retrieval is datable. A summary of a fee policy
+  # is how the `min(p, 1-p)` defect got written; the text is what settles it.
+  fee-docs:
+    if: ${{ inputs.fee_docs != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Retrieve the published fee policy, verbatim
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### the venue fee policy, as published' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          say "retrieved_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          ok=0
+          for url in "https://docs.polymarket.us/fees" \
+                     "https://docs.polymarket.us/trading/fees" \
+                     "https://docs.polymarket.us/" ; do
+            code=$(curl -sS -L -o /tmp/fees.html -D /tmp/fees.hdr \
+                   -w '%{http_code}' --max-time 60 "$url" || echo 000)
+            say "GET $url  HTTP $code  bytes=$(wc -c < /tmp/fees.html 2>/dev/null || echo 0)"
+            if [ "$code" = "200" ] && [ -s /tmp/fees.html ]; then ok=1; break; fi
+          done
+          if [ "$ok" != "1" ]; then
+            say "NOT RETRIEVED. The rounding question stays UNRECONCILED and"
+            say "calibration_fees.FEE_ARITHMETIC_IS_EXACT stays False."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          say ""
+          say "-- response metadata (datable retrieval) --"
+          grep -iE '^(date|last-modified|etag|age|cache-control):' /tmp/fees.hdr \
+            | sed 's/^/  /' | tee -a "$GITHUB_STEP_SUMMARY" || true
+          # TEXT, NOT TAGS. A fee sentence inside a <span> is still the sentence.
+          python3 - <<'PYEOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import html, re, sys
+          raw = open('/tmp/fees.html', encoding='utf-8', errors='replace').read()
+          raw = re.sub(r'(?is)<(script|style)[^>]*>.*?</\1>', ' ', raw)
+          txt = html.unescape(re.sub(r'(?s)<[^>]+>', ' ', raw))
+          txt = re.sub(r'[ \t\r\f\v]+', ' ', txt)
+          lines = [l.strip() for l in txt.splitlines() if l.strip()]
+          flat = ' '.join(lines)
+          print()
+          print('-- VERBATIM sentences bearing on the four questions --')
+          WANT = {
+            'rounding': r'round|half[- ]?up|half[- ]?even|banker|nearest cent|truncat',
+            'cumulative_taker_fill': r'cumulat|partial fill|per fill|aggregate|incremental',
+            'effective_date': r'effective|as of|updated|last revised|20\d\d-\d\d-\d\d',
+            'execution_report_units': r'unit|cent|micro|notional|basis point|bps|scale|decimal',
+            'coefficient_and_formula': r'0\.0695|0\.0125|coefficient|p \* \(1|price \(1|rebate',
+          }
+          for name, pat in WANT.items():
+              hits = [s.strip() for s in re.split(r'(?<=[.!?])\s+', flat)
+                      if re.search(pat, s, re.I)]
+              print()
+              print('[%s] %d matching sentence(s)' % (name, len(hits)))
+              for h in hits[:8]:
+                  print('   | ' + h[:400])
+              if not hits:
+                  print('   | NONE FOUND IN THE RETRIEVED PAGE -- this question is'
+                        ' NOT answered by this document and stays unreconciled')
+          print()
+          print('-- what this job does NOT do --')
+          print('   it does not change any fee arithmetic. A human reads the')
+          print('   sentences above and, if they settle the question, the change')
+          print('   is a separate reviewed commit with the quote in its message.')
+          PYEOF
+          say ""
+          say "-- our discriminating vectors, for comparison --"
+          python3 -c "
+          import json, sys
+          sys.path.insert(0, 'backend')
+          from sportsassets import calibration_fees as CF
+          d = CF.rounding_discriminators()
+          for v in d['vectors']:
+              print('   q=%-5s p=%-5s raw=%-13s half_up=%-6s half_even=%s'
+                    % (v['quantity'], v['price'], v['raw'],
+                       v['if_half_up'], v['if_half_even']))
+          print('   implemented_here=%s verified=%s' % (d['implemented_here'], d['verified']))
+          " | tee -a "$GITHUB_STEP_SUMMARY" || true
           echo '```' >> "$GITHUB_STEP_SUMMARY"

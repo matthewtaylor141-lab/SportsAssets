@@ -41,6 +41,7 @@ import time
 
 import pytest
 
+from sportsassets import bettor_account_onboarding as _ON
 from sportsassets import bettor_entry_execution as EX
 from sportsassets import bettor_entry_inventory as inv
 from sportsassets import bettor_external_shadow as ext
@@ -222,7 +223,8 @@ async def _record_reconciliation_evidence(conn, *, account_id: str,
 async def _seed_evidence(conn, *, waived: bool, basis: str | None = None,
                         age_at_read: float | None = 1.2,
                         settlement: str = "COMPATIBLE",
-                        period: str = "FULL_GAME"):
+                        period: str = "FULL_GAME",
+                        reconciled: bool = True):
     """The rows the derived checks read. Labelled as a fixture.
 
     THE BASIS TOKENS ARE THE LANE'S OWN. An earlier version of this fixture
@@ -237,6 +239,12 @@ async def _seed_evidence(conn, *, waived: bool, basis: str | None = None,
     # unresolved. A fixture that wants readiness to see an established basis has
     # to name a mechanism with a published contract, which is what the lane
     # itself now records.
+    # A3: the account check needs a CURRENT reconciliation as well as a clean
+    # registry row, and this fixture is "the rows the derived checks read" -- so
+    # it supplies that too. A test that wants the account check to FAIL on the
+    # evidence passes `reconciled=False` or writes its own record.
+    if reconciled:
+        await _record_reconciliation_evidence(conn, account_id=CLEAN)
     tok = basis or "M1_LIVE_MARKET_DATA_SUBSCRIPTION"
     # a cycle whose book reads recorded an ESTABLISHED age basis
     await conn.execute(
@@ -292,7 +300,8 @@ async def test_every_negative_path_is_reached_by_its_own_name():
     try:
         await _seed_accounts(conn)
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY])
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY])
 
         # THE ACCOUNT, from the canonical registry
         assert (await FA.account_selection(conn, ""))["refusal"] == \
@@ -370,7 +379,8 @@ async def test_every_negative_path_is_reached_by_its_own_name():
         await conn.execute("DELETE FROM external_valuations "
                            "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY,
                             FA.AUTHORIZATION_KEY,
                             "ext_pinnacle_last_cycle"])
         await conn.close()
@@ -426,7 +436,8 @@ async def test_the_positive_path_authorises_a_test_venue_and_no_capital():
         await conn.execute("DELETE FROM external_valuations "
                            "WHERE experiment_id = $1", ext.EXPERIMENT_ID)
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY,
                             FA.AUTHORIZATION_KEY,
                             "ext_pinnacle_last_cycle"])
         await conn.close()
@@ -470,7 +481,8 @@ async def test_the_demonstration_book_cannot_qualify_an_activation():
             "DELETE FROM rn1x_positions WHERE experiment_id = $1",
             DEMO.EXPERIMENT)
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY])
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY])
         await conn.close()
 
 
@@ -528,7 +540,8 @@ async def test_authorising_does_not_destroy_the_binding_it_read():
     try:
         await _seed_accounts(conn)
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY,
                             FA.AUTHORIZATION_KEY])
         assert FA.AUTHORIZATION_KEY != FA.ACCOUNT_KEY
         await _record_and_approve_limits(conn, approved=True)
@@ -568,7 +581,8 @@ async def test_authorising_does_not_destroy_the_binding_it_read():
         assert st["funded_submission"] == "DISABLED"
     finally:
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY,
                             FA.AUTHORIZATION_KEY])
         await conn.close()
 
@@ -589,7 +603,8 @@ async def test_every_refusal_still_names_what_is_missing():
     try:
         await _seed_accounts(conn)
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY,
                             FA.AUTHORIZATION_KEY])
 
         # NOTHING BOUND AT ALL -- the emptiest possible request.
@@ -626,7 +641,8 @@ async def test_every_refusal_still_names_what_is_missing():
             assert r["authorises_capital"] is False
     finally:
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY,
                             FA.AUTHORIZATION_KEY])
         await conn.close()
 
@@ -1086,7 +1102,8 @@ async def test_the_funded_branch_validates_the_owners_record():
     try:
         await _seed_accounts(conn)
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY,
                             FA.AUTHORIZATION_KEY, FA.OWNER_AUTH_KEY])
         await _record_and_approve_limits(conn, approved=True)
         await conn.execute("DELETE FROM external_valuations "
@@ -1153,7 +1170,8 @@ async def test_the_funded_branch_validates_the_owners_record():
         assert e["submission_would_be"] == EX.R_SUBMISSION_DISABLED
     finally:
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
-                           [FA.LIMITS_KEY, FA.ACCOUNT_KEY,
+                           [_ON.RECONCILIATION_KEY,
+                            FA.LIMITS_KEY, FA.ACCOUNT_KEY,
                             FA.AUTHORIZATION_KEY, FA.OWNER_AUTH_KEY,
                             "ext_pinnacle_last_cycle"])
         await conn.execute("DELETE FROM external_valuations "
