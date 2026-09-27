@@ -5660,11 +5660,38 @@ jobs:
             say "SKIPPED: no ADMIN_TOKEN secret, so the authenticated read is unavailable from here"
             echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
           fi
-          code=$(curl -s -o /tmp/desk.json -w '%{http_code}' --max-time 90 \
-                 -H "X-Admin-Token: $ADMIN_TOKEN" \
-                 "$API/api/command/bettor/desk" || echo 000)
-          say "GET /api/command/bettor/desk   HTTP $code"
-          [ "$code" = "200" ] || { say "the command role was not accepted; there is no readback to quote"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          # THE STATUS CLASSES ARE NOT THE SAME ANSWER, and the first version of
+          # this step called a 502 "the command role was not accepted" -- a
+          # statement about our credential when the service had simply not
+          # finished booting. A freshly deployed instance is also mid
+          # catalogue-sweep at over a gigabyte of RSS, and this read assembles
+          # every section, so it is the one read that deserves a retry.
+          code=000
+          for attempt in 1 2 3 4 5; do
+            code=$(curl -s -o /tmp/desk.json -w '%{http_code}' --max-time 120 \
+                   -H "X-Admin-Token: $ADMIN_TOKEN" \
+                   "$API/api/command/bettor/desk" || echo 000)
+            say "GET /api/command/bettor/desk   HTTP $code  (attempt $attempt)"
+            case "$code" in
+              200) break ;;
+              401|403)
+                say "  the command role was REFUSED with $code. That is an"
+                say "  authorization answer, not a service one, and retrying"
+                say "  cannot change it."
+                echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+              5*|000)
+                say "  the service did not serve this read. Waiting 25 s."
+                sleep 25 ;;
+              *)
+                say "  unexpected status; waiting 25 s."
+                sleep 25 ;;
+            esac
+          done
+          if [ "$code" != "200" ]; then
+            say "  five attempts, last status $code. The service is not"
+            say "  serving the command read, so there is no readback to quote."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
           cp /tmp/desk.json /tmp/desk.keep.json
           say ""
           say "-- the entry lane (adding funded exposure) --"
