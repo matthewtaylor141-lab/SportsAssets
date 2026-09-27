@@ -33,11 +33,40 @@ from sportsassets import bettor_stream_currency as SC
 from sportsassets import bettor_venue_currency as VC
 
 
+#: THE AUTHENTICATED OWNER. A bare `accepted_by` string is no longer accepted --
+#: echoing a sentence verbatim is not authentication, and neither is naming
+#: yourself, so the record is built only from a principal the SERVER
+#: authenticated. `ACCOUNT` and `INSTRUMENTS` are the other scopes the
+#: acceptance is bound to.
+PRINCIPAL = AP.authenticated_principal(
+    subject="owner@example", authenticated_by="COMMAND_SESSION",
+    authenticated_at=1_000_000_000.0)
+ACCOUNT = "acct_under_test"
+INSTRUMENTS = ("aec-x", "aec-y")
+
+
 def _accepted(**kw):
-    base = dict(accepted_by="owner@example", echoed_assumption=AP.THE_ASSUMPTION,
-                venue="PMUS")
+    base = dict(principal=PRINCIPAL, echoed_assumption=AP.THE_ASSUMPTION,
+                venue="PMUS", account_id=ACCOUNT, instruments=INSTRUMENTS,
+                policy_version=AP.POLICY_VERSION)
     base.update(kw)
     return AP.acceptance_record(**base)
+
+
+def _all_other_requirements():
+    """EVERY REQUIREMENT THE EXCEPTION CANNOT WAIVE, satisfied. Supplied so the
+    tests below isolate the POLICY bounds; a test that wants to see the
+    waives-nothing-else refusal drops one on purpose."""
+    return {k: True for k in AP.REQUIREMENTS_IT_CANNOT_WAIVE}
+
+
+def _admit_kw(**kw):
+    base = dict(venue="PMUS", presenting_principal=PRINCIPAL,
+                account_id=ACCOUNT, instrument=INSTRUMENTS[0],
+                policy_version=AP.POLICY_VERSION, intent=AP.INTENT_NEW,
+                other_requirements=_all_other_requirements())
+    base.update(kw)
+    return base
 
 
 def _live_sub(now, *, msg_age=1.0, silence=1.0):
@@ -88,8 +117,8 @@ def test_a_signed_record_alone_starts_nothing():
     rec = _accepted()
     assert rec["ok"] is True
     now = time.time()
-    got = AP.admits(record=rec, subscription=_live_sub(now), venue="PMUS",
-                    proposed_cost_usd=10.0, now=now)
+    got = AP.admits(**_admit_kw(record=rec, subscription=_live_sub(now),
+                               proposed_cost_usd=10.0, now=now))
     assert got["ok"] is False
     assert got["refusal"] == AP.R_NOT_ENABLED
     assert "two_things_must_both_be_true" in AP.describe()
@@ -112,8 +141,9 @@ def test_the_basis_token_can_never_read_as_a_measurement():
     assert "NOT_A_MEASUREMENT" in AP.BASIS_OWNER_POLICY
     assert "ESTABLISHED" not in AP.BASIS_OWNER_POLICY
     now = time.time()
-    got = AP.admits(record=_accepted(), subscription=_live_sub(now),
-                    venue="PMUS", proposed_cost_usd=10.0, now=now)
+    got = AP.admits(**_admit_kw(record=_accepted(),
+                               subscription=_live_sub(now),
+                               proposed_cost_usd=10.0, now=now))
     assert got["basis"] == AP.BASIS_OWNER_POLICY
     assert got["this_is_not_a_measurement"] is True
     assert got["the_currency_verdict_is_still"] == "BOOK_CURRENCY_NOT_ESTABLISHED"
@@ -153,17 +183,203 @@ def test_the_verbatim_text_is_accepted_and_names_what_is_given_up():
     assert "detected only afterwards" in a
 
 
-def test_an_acceptance_must_name_who_accepted_it():
-    assert _accepted(accepted_by="")["refusal"] == AP.R_NO_RECORD
-    assert _accepted(accepted_by="   ")["refusal"] == AP.R_NO_RECORD
+def test_ECHOING_A_SENTENCE_VERBATIM_IS_NOT_AUTHENTICATION():
+    """THE CORRECTION THIS TEST REPLACES.
+
+    It used to assert that an acceptance must NAME who accepted it, and that was
+    the whole of the identity check. But a name is a string the caller chose, and
+    so is a verbatim echo of THE_ASSUMPTION -- anything able to call this
+    function can supply both, so between them they authenticated nobody.
+
+    The record is now built only from a principal the SERVER authenticated, and
+    `accepted_by` is DERIVED from it rather than accepted alongside it.
+    """
+    # A bare name, with or without the verbatim text, is refused as an
+    # AUTHENTICATION failure -- not as a missing field.
+    assert _accepted(principal=None, accepted_by="owner@example")["refusal"] == (
+        AP.R_PRINCIPAL_UNVERIFIED)
+    assert _accepted(principal=None)["refusal"] == AP.R_NO_PRINCIPAL
+
+    # A principal missing any of its three parts is not a principal.
+    for bad in ({"subject": "o"},
+                {"subject": "o", "authenticated_by": "CMD"},
+                {"subject": "", "authenticated_by": "CMD",
+                 "authenticated_at": 1.0},
+                {"subject": "o", "authenticated_by": "",
+                 "authenticated_at": 1.0},
+                {"subject": "o", "authenticated_by": "CMD",
+                 "authenticated_at": None},
+                "owner@example", 42, ()):
+        assert _accepted(principal=bad)["refusal"] == AP.R_NO_PRINCIPAL, bad
+
+    # AND `accepted_by` IS DERIVED, so it cannot disagree with the principal.
+    rec = _accepted(accepted_by="somebody-else-entirely")
+    assert rec["ok"] is True
+    assert rec["accepted_by"] == PRINCIPAL["subject"]
+    assert rec["principal"]["authenticated_by"] == "COMMAND_SESSION"
+
+
+@pytest.mark.parametrize("kw,expected", [
+    ({"account_id": None}, AP.R_NO_ACCOUNT),
+    ({"account_id": "   "}, AP.R_NO_ACCOUNT),
+    ({"instruments": ()}, AP.R_NO_INSTRUMENTS),
+    ({"instruments": ("", "  ")}, AP.R_NO_INSTRUMENTS),
+    ({"policy_version": None}, AP.R_POLICY_VERSION),
+    ({"policy_version": "ADMISSION_POLICY_V1"}, AP.R_POLICY_VERSION),
+])
+def test_the_record_must_be_BOUND_to_every_scope(kw, expected):
+    """An acceptance with no account, no instrument set or a different policy
+    version is not a bounded exception, and each gap refuses by its own name."""
+    assert _accepted(**kw)["refusal"] == expected
+
+
+def test_a_record_carries_every_binding_and_says_what_it_cannot_waive():
+    rec = _accepted()
+    assert rec["account_id"] == ACCOUNT
+    assert rec["instruments"] == tuple(sorted(INSTRUMENTS))
+    assert rec["policy_version"] == AP.POLICY_VERSION
+    assert rec["revoked"] is False and rec["revoked_at"] is None
+    assert rec["expires_at"] > rec["accepted_at"]
+    bound = " ".join(rec["what_it_is_bound_to"])
+    for scope in ("principal", "account", "venue", "instruments",
+                  "policy version", "expiry", "revocation"):
+        assert scope in bound, scope
+    assert rec["and_what_it_still_cannot_waive"] == list(
+        AP.REQUIREMENTS_IT_CANNOT_WAIVE)
+
+
+# ── 3b · the bindings are enforced at admission, not just stored ─────
+
+@pytest.mark.parametrize("kw,expected", [
+    ({"presenting_principal": None}, AP.R_PRINCIPAL_UNVERIFIED),
+    ({"presenting_principal": AP.authenticated_principal(
+        subject="someone-else", authenticated_by="COMMAND_SESSION",
+        authenticated_at=1.0)}, AP.R_PRINCIPAL_MISMATCH),
+    ({"presenting_principal": AP.authenticated_principal(
+        subject="owner@example", authenticated_by="A_DIFFERENT_MECHANISM",
+        authenticated_at=1.0)}, AP.R_PRINCIPAL_MISMATCH),
+    ({"account_id": "acct_someone_else"}, AP.R_ACCOUNT_MISMATCH),
+    ({"instrument": "not-in-the-set"}, AP.R_INSTRUMENT_NOT_COVERED),
+    ({"policy_version": "ADMISSION_POLICY_V1"}, AP.R_POLICY_VERSION),
+    ({"intent": "SOMETHING_ELSE"}, AP.R_UNKNOWN_INTENT),
+    ({"intent": None}, AP.R_UNKNOWN_INTENT),
+])
+def test_each_binding_refuses_at_admission_by_its_own_name(monkeypatch, kw,
+                                                          expected):
+    """A report must never say only 'refused'. Each scope that failed says so."""
+    monkeypatch.setattr(AP, "POLICY_ADMISSION_ENABLED", True)
+    now = time.time()
+    got = AP.admits(**_admit_kw(record=_accepted(now=now),
+                                subscription=_live_sub(now),
+                                proposed_cost_usd=10.0, now=now, **kw))
+    assert got["ok"] is False
+    assert got["refusal"] == expected, got
+
+
+def test_the_exception_CANNOT_WAIVE_ANYTHING_ELSE(monkeypatch):
+    """PROVED BY ENFORCEMENT, not by a sentence. Every requirement outside this
+    exception's scope must be explicitly True, so UNKNOWN IS A REFUSAL and the
+    exception can never be the sole authority for an order."""
+    monkeypatch.setattr(AP, "POLICY_ADMISSION_ENABLED", True)
+    now = time.time()
+
+    def _go(reqs):
+        return AP.admits(**_admit_kw(record=_accepted(now=now),
+                                     subscription=_live_sub(now),
+                                     proposed_cost_usd=10.0, now=now,
+                                     other_requirements=reqs))
+
+    # Nothing supplied at all.
+    for empty in (None, {}):
+        got = _go(empty)
+        assert got["refusal"] == AP.R_OTHER_REQUIREMENT_NOT_MET
+        assert set(got["requirements_not_met"]) == set(
+            AP.REQUIREMENTS_IT_CANNOT_WAIVE)
+
+    # EACH ONE ALONE IS ENOUGH TO BLOCK, and it is named.
+    for missing in AP.REQUIREMENTS_IT_CANNOT_WAIVE:
+        reqs = _all_other_requirements()
+        for value in (False, None, "yes", 1):
+            reqs[missing] = value
+            got = _go(reqs)
+            assert got["refusal"] == AP.R_OTHER_REQUIREMENT_NOT_MET, (
+                missing, value)
+            assert got["requirements_not_met"] == [missing], (missing, value)
+        del reqs[missing]
+        assert _go(reqs)["requirements_not_met"] == [missing]
+
+    # The named list covers settlement, calibration, identity, accounting,
+    # exposure and execution -- each one the user asked to see kept separate.
+    named = " ".join(AP.REQUIREMENTS_IT_CANNOT_WAIVE)
+    for topic in ("SETTLEMENT", "CALIBRATION", "IDENTITY", "ACCOUNTING",
+                  "EXPOSURE", "EXECUTION", "RISK_RAILS", "AUTHORIZATION"):
+        assert topic in named, topic
+
+
+@pytest.mark.parametrize("break_it", ["expire", "revoke"])
+def test_expiry_and_revocation_STOP_NEW_EXPOSURE_AND_PRESERVE_SERVICING(
+        monkeypatch, break_it):
+    """THE ASYMMETRY, AND WHY IT MATTERS. A lapsed or revoked assumption must
+    stop us OPENING anything new. It must NOT stop us cancelling, exiting or
+    settling what is already held -- freezing servicing would convert an expiry
+    into trapped capital, which is worse than the risk the expiry ends."""
+    monkeypatch.setattr(AP, "POLICY_ADMISSION_ENABLED", True)
+    now = time.time()
+    rec = _accepted(now=now)
+    if break_it == "expire":
+        rec = dict(rec, expires_at=now - 1.0)
+        expected, flag = AP.R_EXPIRED, "expired_but_servicing_is_permitted"
+    else:
+        rec = AP.revoke(rec, by=PRINCIPAL, now=now)["record"]
+        expected, flag = AP.R_REVOKED, "revoked_but_servicing_is_permitted"
+
+    new = AP.admits(**_admit_kw(record=rec, subscription=_live_sub(now),
+                                proposed_cost_usd=10.0, now=now,
+                                intent=AP.INTENT_NEW))
+    assert new["ok"] is False
+    assert new["refusal"] == expected
+
+    svc = AP.admits(**_admit_kw(record=rec, subscription=_live_sub(now),
+                                proposed_cost_usd=10.0, now=now,
+                                intent=AP.INTENT_SERVICING))
+    assert svc["ok"] is True, svc
+    assert svc[flag] is True
+
+
+def test_a_revocation_also_needs_an_authenticated_principal():
+    assert AP.revoke(_accepted(), by=None)["refusal"] == AP.R_NO_PRINCIPAL
+    assert AP.revoke(_accepted(), by="someone")["refusal"] == AP.R_NO_PRINCIPAL
+    ok = AP.revoke(_accepted(), by=PRINCIPAL, now=5.0)
+    assert ok["ok"] is True
+    assert ok["record"]["revoked_at"] == 5.0
+    assert ok["record"]["revoked_by"]["subject"] == PRINCIPAL["subject"]
+    assert "trapped capital" in ok["record"]["and_servicing_is_unaffected"]
+
+
+def test_SERVICING_does_not_waive_the_other_requirements_either(monkeypatch):
+    """Servicing survives expiry. It does not survive a missing settlement or
+    accounting requirement -- the asymmetry is about the ASSUMPTION's lifetime,
+    not a second, looser gate."""
+    monkeypatch.setattr(AP, "POLICY_ADMISSION_ENABLED", True)
+    now = time.time()
+    rec = dict(_accepted(now=now), expires_at=now - 1.0)
+    reqs = _all_other_requirements()
+    reqs["EXECUTION_ACCOUNTING"] = False
+    got = AP.admits(**_admit_kw(record=rec, subscription=_live_sub(now),
+                                proposed_cost_usd=10.0, now=now,
+                                intent=AP.INTENT_SERVICING,
+                                other_requirements=reqs))
+    assert got["refusal"] == AP.R_OTHER_REQUIREMENT_NOT_MET
+    assert got["requirements_not_met"] == ["EXECUTION_ACCOUNTING"]
 
 
 def test_an_absent_record_is_a_refusal_not_a_default(monkeypatch):
     monkeypatch.setattr(AP, "POLICY_ADMISSION_ENABLED", True)
     now = time.time()
     for rec in (None, {}, {"accepted_by": ""}):
-        got = AP.admits(record=rec, subscription=_live_sub(now), venue="PMUS",
-                        proposed_cost_usd=10.0, now=now)
+        got = AP.admits(**_admit_kw(record=rec,
+                                   subscription=_live_sub(now),
+                                   proposed_cost_usd=10.0, now=now))
         assert got["refusal"] == AP.R_NO_RECORD
         assert "not a default" in got["why"]
 
@@ -179,8 +395,9 @@ def test_the_correct_case_ADMITS_under_the_policy(on):
     """CORRECT CASES MUST PASS. If this failed the module would be refusing
     everything and proving nothing."""
     now = time.time()
-    got = AP.admits(record=_accepted(), subscription=_live_sub(now),
-                    venue="PMUS", proposed_cost_usd=20.0, now=now)
+    got = AP.admits(**_admit_kw(record=_accepted(),
+                               subscription=_live_sub(now),
+                               proposed_cost_usd=20.0, now=now))
     assert got["ok"] is True, got
     assert got["refusal"] is None
     assert got["accepted_by"] == "owner@example"
@@ -246,8 +463,8 @@ def test_each_bound_refuses_by_its_own_name(on, kw, expected):
     now = time.time()
     sub_kw = {k: kw.pop(k) for k in ("msg_age", "silence") if k in kw}
     sub = kw.pop("subscription", _live_sub(now, **sub_kw))
-    call = dict(record=_accepted(), subscription=sub, venue="PMUS",
-                proposed_cost_usd=10.0, now=now)
+    call = _admit_kw(record=_accepted(), subscription=sub,
+                     proposed_cost_usd=10.0, now=now)
     call.update(kw)
     got = AP.admits(**call)
     assert got["ok"] is False
@@ -259,8 +476,8 @@ def test_the_acceptance_expires_and_must_be_re_signed(on):
     indefinitely."""
     now = time.time()
     rec = _accepted(now=now - 25 * 3600)
-    got = AP.admits(record=rec, subscription=_live_sub(now), venue="PMUS",
-                    proposed_cost_usd=10.0, now=now)
+    got = AP.admits(**_admit_kw(record=rec, subscription=_live_sub(now),
+                               proposed_cost_usd=10.0, now=now))
     assert got["refusal"] == AP.R_EXPIRED
     assert "lapsed and must be re-signed" in got["why"]
 
@@ -269,8 +486,8 @@ def test_a_revoked_acceptance_refuses_distinctly_from_an_expired_one(on):
     """They need different responses: re-sign, or stop."""
     now = time.time()
     rec = dict(_accepted(), revoked=True)
-    got = AP.admits(record=rec, subscription=_live_sub(now), venue="PMUS",
-                    proposed_cost_usd=10.0, now=now)
+    got = AP.admits(**_admit_kw(record=rec, subscription=_live_sub(now),
+                               proposed_cost_usd=10.0, now=now))
     assert got["refusal"] == AP.R_REVOKED
 
 
@@ -278,8 +495,8 @@ def test_changing_the_assumption_text_invalidates_old_signatures(on):
     """If the risk being accepted changes, the old signature does not cover it."""
     now = time.time()
     rec = dict(_accepted(), assumption="something I signed last week")
-    got = AP.admits(record=rec, subscription=_live_sub(now), venue="PMUS",
-                    proposed_cost_usd=10.0, now=now)
+    got = AP.admits(**_admit_kw(record=rec, subscription=_live_sub(now),
+                               proposed_cost_usd=10.0, now=now))
     assert got["refusal"] == AP.R_TEXT_MISMATCH
     assert "needs a new signature" in got["why"]
 
@@ -303,8 +520,8 @@ def test_a_missing_subscription_is_refused_even_with_a_valid_signature(on):
     """The clearest case of the above: the owner accepted a TIMING risk, not a
     licence to trade without a book."""
     now = time.time()
-    got = AP.admits(record=_accepted(), subscription=None, venue="PMUS",
-                    proposed_cost_usd=10.0, now=now)
+    got = AP.admits(**_admit_kw(record=_accepted(), subscription=None,
+                               proposed_cost_usd=10.0, now=now))
     assert got["refusal"] == AP.R_NO_SUBSCRIPTION
     assert "TIMING only" in got["why"]
     assert "does not excuse a missing book" in got["why"]
