@@ -14,10 +14,43 @@ decide, and the exact changes that would follow a decision.
 |---|---|---|
 | **Engineering verified** | **NO** | see §6. The binding item is that no mechanism can currently establish that a venue book is current |
 | **Ready for an authorized funded pilot** | **NO** | no reconciled account, no credential, no approved limits, and the release has not been gated or deployed |
-| **Actual funded execution and reconciliation verified** | **NO** | zero real orders have ever been sent. Every lifecycle proof to date used a **substituted transport** |
+| **Actual funded execution and reconciliation verified** | **NO** | **zero verified real orders from the new autonomous EV lane.** Every lifecycle proof for *this* lane used a **substituted transport**. Earlier, separate activity exists and is not this lane's record — §0a |
 | **Strategy profitability validated** | **NO** | zero autonomous positions. No calibrated source. A payout conflict and an absent edge that engineering cannot fix |
 
 No deployment, passing suite or modelled profit moves the last two.
+
+### 0a · A correction to the scope of that third verdict
+
+I wrote **"zero real orders have ever been sent."** That was wrong, and wrong in
+the direction that flatters this lane: it erases earlier activity by making the
+whole system sound untouched.
+
+**What the evidence actually says.** `live_orders` is the funded lane's own table
+and production holds **166,585 rows** in it, from the earlier live beta
+(`008_live_orders_venue.sql`: *"The LIVE beta can now execute on the …"*). Those
+are historical rows on a different path, under different code, at a different
+time. `bettor_desk_controls` already reports them correctly —
+`live_orders_rows_all_time` separate from `funded_orders_this_lane_submitted: 0`,
+with a note saying the research lane submitted none of them. My prose did not
+match my own instrumentation.
+
+**The two statements, kept apart, because neither substitutes for the other:**
+
+| | statement | basis |
+|---|---|---|
+| **this lane** | **zero verified real orders from the new autonomous EV lane.** Its writer `CHECK`s `order_submitted FALSE`; the three submission constants are `False`; no order-submission path is nameable from the shadow loop | tests + schema constraint |
+| **legacy** | **166,585 historical `live_orders` rows exist** from the earlier live beta. They are not reconciled into this lane's books and are **not** this lane's track record | production row count |
+
+**Both directions of the error matter.** Legacy activity must not disappear — it
+happened, and it sits in a table this system still reads. And it must not become
+this lane's track record — 166,585 rows of earlier beta execution prove nothing
+about an EV lane that has submitted nothing. Nowhere in this package, the
+register or the management report is a legacy number summed with an autonomous
+one.
+
+**What it does not change.** The verdict stays **NO**. *This* lane's funded
+execution and reconciliation are unverified, and a legacy row count cannot
+verify them.
 
 ---
 
@@ -43,12 +76,39 @@ venue boundary; and without `PMUS_KEY_ID`/`PMUS_SECRET_KEY` **no client can be
 constructed at all**. A test asserts no order-submission path is even *nameable*
 from the shadow loop.
 
-**One gap in the scope claim, and it is real.** `MAX_EVENT_EXPOSURE`'s
-aggregation scope is `EVERY_OPEN_POSITION_IN_THIS_LANE`. Two lanes sharing one
-account can each satisfy their own rails and together exceed the account's.
-**Cross-lane account exposure is not implemented.** Until it is, the pilot
-procedure below holds **one position at a time**, which makes the gap
-unreachable in practice rather than merely unlikely.
+**One gap in the scope claim, and my earlier mitigation for it was wrong.**
+`MAX_EVENT_EXPOSURE`'s aggregation scope is
+`EVERY_OPEN_POSITION_IN_THIS_LANE`. Two lanes sharing one account can each
+satisfy their own rails and together exceed the account's.
+
+I wrote: *"Until it is, the pilot procedure below holds **one position at a
+time**, which makes the gap unreachable in practice rather than merely
+unlikely."* **That is withdrawn.** One position *in this lane* is a fact about
+this lane. The venue sees one account, and what the legacy copier, the manual
+sleeve, or an unresolved submission has already committed there is unaffected by
+how many positions this lane holds. The mechanism I leaned on — the one-live-intent
+guarantee — is a **UNIQUE INDEX on `bettor_funded_intents`**, and a row in
+`live_orders` does not violate it. It bounds this lane's rows, not the account's
+risk.
+
+**There are two honest routes and `bettor_account_exposure` implements the
+machinery for both**, rather than choosing one by assertion:
+
+| route | what it requires | state |
+|---|---|---|
+| **ENFORCE** | measure exposure across every path sharing the account and gate on the total | **built.** `account_exposure()` reads this lane, `live_orders` (which since migration 014 carries *both* the legacy copier and the manual sleeve), and the venue. It counts **held contracts, working orders and unresolved submissions** — the last at **full requested size**, because an unknown outcome treated as zero is how a timed-out submission becomes a double position. It **fails closed**: a required path that cannot be read makes the total `UNREADABLE`, never a partial sum that looks like a total |
+| **ISOLATE** | demonstrate that no other automated or manual path *can* add exposure under the approved scope | **NOT DEMONSTRATED.** Five named requirements, each with the exhibit that would show it: one API key on the account, no manual login, no pre-existing holdings, no open orders, no unresolved submissions. `isolation_evidence()` returns `NOT_DEMONSTRATED` until each is supplied, and there is no way to pass it by asserting it |
+
+**The binding dependency on ENFORCE.** The venue is the authority on what the
+account holds — including anything put there by a path this repository does not
+know about — and reading it needs the account credential. Without that read the
+total is `UNREADABLE` and the gate refuses. That is the correct state, and it is
+the difference between measuring exposure and assuming it.
+
+**An absent table and a failed read are kept apart.** A table that does not
+exist holds no rows, so that path is knowably zero; a table we could not read may
+hold anything. The venue path has no table, so it can never report "absent" — no
+missing migration can quietly excuse the authority.
 
 ---
 
@@ -179,7 +239,11 @@ gated and deployed.
    funded submission.**
 4. **Servicing switch only** (§5, release one). Verify: a management cycle runs,
    reconciles, and submits nothing because there is nothing to exit.
-5. **Entry switch** (§5, release two), with **one position at a time**, which is
+5. **Entry switch** (§5, release two). **One position at a time is no longer
+   offered as the mitigation for the cross-lane gap** — see §1. The pilot must
+   run with either the account-wide total measured (which needs the venue read)
+   or isolation demonstrated. One position at a time remains a sensible *size*
+   limit and is not a risk control across lanes. It is
    what makes the cross-lane aggregation gap unreachable.
 6. **One position, full lifecycle, reconciled**: intent before send, affirmative
    authorization, expiry rechecked immediately before submission, limit binding,

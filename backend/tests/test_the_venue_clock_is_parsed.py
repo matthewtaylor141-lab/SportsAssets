@@ -436,8 +436,27 @@ def test_origin_generation_alone_is_a_partial_and_never_admits():
     assert verdict["contract"]["revalidation_possible"] is True
 
 
-def test_a_304_from_the_origin_establishes_currency():
-    """M2. The origin affirming the representation we hold is still current."""
+def test_an_in_bound_304_STILL_DOES_NOT_ESTABLISH_THE_BOOK():
+    """THIS TEST USED TO ASSERT THE OPPOSITE, AND IT WAS WRONG.
+
+    It read `test_a_304_from_the_origin_establishes_currency` and asserted
+    ESTABLISHED on M2. The reasoning was that a 304 affirms what we hold. It
+    affirms the REPRESENTATION, and on this venue that is demonstrably
+    unconnected to the book:
+
+        last-modified: Sun, 27 Sep 2026 16:24:27 GMT   equals `date`, exactly
+        transactTime:  2026-02-20T03:07:30.947946180Z  219 days earlier
+        state:         MARKET_STATE_EXPIRED, 0 bids / 0 offers
+
+    Two independent markets, and `last-modified` held still across an 8 s gap
+    while `date` advanced. So the origin really does validate a representation
+    while its own market-data source is arbitrarily delayed --
+    research/evidence/VENUE_BOOK_PROTOCOL_2026-09-27.md, runs 36332797806 and
+    36333087522.
+
+    The exchange still happens and is still reported. What changed is that it
+    cannot admit, which is the difference between a signal and a certificate.
+    """
     import email.utils
 
     from sportsassets import bettor_venue_currency as vc
@@ -449,9 +468,60 @@ def test_a_304_from_the_origin_establishes_currency():
         revalidation={"status": 304,
                       "headers": {"date": email.utils.formatdate(
                           now - 4.0, usegmt=True)}})
-    assert verdict["verdict"] == vc.ESTABLISHED
-    assert verdict["mechanism"] == vc.M2_REVALIDATION
-    assert verdict["book_state_age_s"] == pytest.approx(4.0, abs=1.0)
+    assert verdict["verdict"] == vc.NOT_ESTABLISHED
+    assert vc.admits(verdict) is False
+    assert verdict["mechanism"] == vc.NO_MECHANISM
+    # THE EXCHANGE IS REPORTED AS HAVING SUCCEEDED, so this is not mistaken for
+    # a request that failed.
+    assert verdict["revalidation"]["affirmed_in_bound"] is True
+    m2 = [m for m in verdict["mechanisms_unavailable"]
+          if m["mechanism"] == vc.M2_REVALIDATION][0]
+    assert m2["exchange_succeeded"] is True
+    assert "affirms the representation rather than the book" in m2["why"]
+    assert "third false certificate" in m2["why"]
+    # AND M2 IS NO LONGER LISTED AS ESTABLISHING.
+    assert vc.M2_REVALIDATION not in vc.ESTABLISHING_MECHANISMS
+    assert vc.M2_REVALIDATION in vc.PARTIAL_MECHANISMS
+
+
+def test_the_withdrawal_of_M2_carries_its_evidence():
+    """A mechanism removed on evidence records the evidence, so the change is
+    auditable rather than a quiet edit in the other direction."""
+    from sportsassets import bettor_venue_currency as vc
+
+    w = vc.M2_WITHDRAWN_AS_ESTABLISHING
+    assert w["withdrawn_on"] == "2026-09-27"
+    assert w["the_contradicting_observation"]["last_modified_equals_date"] is True
+    assert w["the_contradicting_observation"]["transact_time_lag_s"] > 18_000_000
+    assert "VENUE_BOOK_PROTOCOL_2026-09-27" in (
+        w["the_contradicting_observation"]["source"])
+    assert "not a book clock" in w["so"]
+    # AND WHAT WOULD BRING IT BACK IS NAMED, because "withdrawn" must not mean
+    # "closed": an absent route and an unproven one are different findings.
+    assert "documenting that its validator changes" in (
+        w["what_would_make_it_establishing"])
+
+
+def test_the_three_response_ages_are_kept_apart_from_the_book_age():
+    """FOUR QUANTITIES, AND COLLAPSING ANY TWO IS HOW EACH FALSE CERTIFICATE
+    GOT BUILT. Transport latency, our receipt instant and now an HTTP validator
+    were each, at some point, about to stand in for the one age that matters."""
+    from sportsassets import bettor_venue_currency as vc
+
+    ages = vc.DISTINCT_AGES
+    assert set(ages) == {"HTTP_CACHE_AGE", "ORIGIN_GENERATION_AGE",
+                         "OUR_OBSERVATION_AGE", "UPSTREAM_MARKET_DATA_AGE"}
+    for name in ("HTTP_CACHE_AGE", "ORIGIN_GENERATION_AGE",
+                 "OUR_OBSERVATION_AGE"):
+        assert "a market-data age" in ages[name]["is_not"], name
+    up = ages["UPSTREAM_MARKET_DATA_AGE"]
+    assert up["from"] == "NO HEADER STATES IT"
+    assert "the only one that matters" in up["bounds"]
+    assert "transactTime" in up["the_only_candidate"]
+    assert "unresolved" in up["the_only_candidate"]
+    # OUR OWN RECEIPT INSTANT IS FLAGGED AS THE MOST DANGEROUS, because it is
+    # the one that reads as a measurement while being zero by construction.
+    assert "most dangerous" in ages["OUR_OBSERVATION_AGE"]["is_not"]
 
 
 def test_a_cache_hit_inside_the_bound_is_still_not_the_origin_speaking():

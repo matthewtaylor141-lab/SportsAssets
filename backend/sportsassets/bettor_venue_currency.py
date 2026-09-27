@@ -100,16 +100,99 @@ M2_REVALIDATION = "M2_CONDITIONAL_REVALIDATION_304"
 M3_ORIGIN_GENERATION = "M3_ORIGIN_GENERATION_INSTANT"
 NO_MECHANISM = "NO_MECHANISM_AVAILABLE"
 
-#: M1 and M2 establish the BOOK STATE. M3 establishes the RESPONSE only.
+#: WHICH MECHANISM ESTABLISHES THE BOOK STATE -- AND M2 NO LONGER DOES.
+#:
+#: M2 WAS IN THIS TUPLE AND IT IS NOW OUT, ON EVIDENCE. I had M2 as an
+#: establishing mechanism on the reasoning that a 304 affirms what we hold. It
+#: affirms the REPRESENTATION, and the venue's own responses show that is a
+#: different thing from the book:
+#:
+#:     last-modified: Sun, 27 Sep 2026 16:24:27 GMT   <- equals `date`, exactly
+#:     transactTime:  2026-02-20T03:07:30.947946180Z  <- 219 days earlier
+#:     state:         MARKET_STATE_EXPIRED,  0 bids / 0 offers
+#:
+#: The origin stamped the representation "now" over market data 219 days old,
+#: on two independent markets, and `last-modified` held still across an 8 s gap
+#: while `date` advanced. So an origin here really does validate a
+#: representation while its own market-data source is arbitrarily delayed, and a
+#: 304 cannot be a market-data age. Recorded in
+#: research/evidence/VENUE_BOOK_PROTOCOL_2026-09-27.md, runs 36332797806 and
+#: 36333087522.
+#:
+#: THIS IS THE TRAP AVOIDED, NAMED. Having found that ETag was absent I was one
+#: step from treating the validator's PRESENCE as the qualifying condition -- a
+#: third false certificate after transport latency and our own receipt instant.
+#: A present validator does not establish a numeric market-data age any more
+#: than an absent one proves no data path exists.
 #:
 #: M1 REMAINS IN THIS TUPLE ON PURPOSE. It is the mechanism that WOULD establish
 #: currency, its verdict is computed from the live feed state rather than
 #: hard-coded, and `bettor_stream_currency` is what reports that the feed cannot
-#: currently satisfy it. Removing it here would hide the requirement instead of
-#: reporting the gap -- and if the venue publishes a sequence, the mechanism
-#: becomes available by MEASUREMENT rather than by someone deciding it has.
-ESTABLISHING_MECHANISMS = (M1_LIVE_SUBSCRIPTION, M2_REVALIDATION)
-PARTIAL_MECHANISMS = (M3_ORIGIN_GENERATION,)
+#: currently satisfy it -- now on a TIMING gap (P5) rather than on the
+#: replacement-authority and delta-continuity gaps I wrongly asserted.
+ESTABLISHING_MECHANISMS = (M1_LIVE_SUBSCRIPTION,)
+
+#: M2 and M3 both bound the HTTP RESPONSE. Neither bounds the book, and neither
+#: alone admits anything.
+PARTIAL_MECHANISMS = (M2_REVALIDATION, M3_ORIGIN_GENERATION)
+
+#: WITHDRAWN AS AN ESTABLISHING MECHANISM, with the evidence attached so the
+#: change is auditable rather than a quiet edit.
+M2_WITHDRAWN_AS_ESTABLISHING = {
+    "withdrawn_on": "2026-09-27",
+    "mechanism": M2_REVALIDATION,
+    "what_I_claimed": ("a 304 within the bound establishes that the book we "
+                       "hold is current"),
+    "what_a_304_actually_affirms": (
+        "that the stored REPRESENTATION is still the current representation "
+        "(RFC 9110 §13, RFC 9111 §4.3). That is a statement about the "
+        "response, not about the market data inside it"),
+    "the_contradicting_observation": {
+        "last_modified_equals_date": True,
+        "transact_time_lag_s": 18969408.2,
+        "markets": 2,
+        "across_an_8s_gap": "date +8.0 s, last-modified +0.0 s",
+        "source": "research/evidence/VENUE_BOOK_PROTOCOL_2026-09-27.md",
+    },
+    "so": ("the exchange is AVAILABLE and it is a real signal about the "
+           "representation. It is not a book clock, and it is no longer "
+           "allowed to admit"),
+    "what_would_make_it_establishing": (
+        "the venue documenting that its validator changes when and only when "
+        "the book changes. Nothing on the pages read says so, and the observed "
+        "behaviour says the opposite"),
+}
+
+#: THE THREE AGES, WHICH ARE THREE DIFFERENT QUANTITIES. Collapsing any two of
+#: them is how each false certificate got built.
+DISTINCT_AGES = {
+    "HTTP_CACHE_AGE": {
+        "from": "the Age header",
+        "bounds": "how long a cache has held this representation",
+        "is_not": "a market-data age",
+    },
+    "ORIGIN_GENERATION_AGE": {
+        "from": "Date minus Age (RFC 9111 §5.1, §6.1)",
+        "bounds": "when the ORIGIN produced the response",
+        "is_not": ("a market-data age. The origin can produce a fresh "
+                   "response over a delayed source, and on this venue it "
+                   "demonstrably does"),
+    },
+    "OUR_OBSERVATION_AGE": {
+        "from": "our own receipt instant",
+        "bounds": "how long WE have held it",
+        "is_not": ("a market-data age, and it is the most dangerous of the "
+                   "three: in a read-then-decide loop it is near zero by "
+                   "construction, so it makes every book fresh"),
+    },
+    "UPSTREAM_MARKET_DATA_AGE": {
+        "from": "NO HEADER STATES IT",
+        "bounds": "when the BOOK was what it says -- the only one that matters",
+        "the_only_candidate": ("transactTime, which is established to be a "
+                               "market-data instant and whose exact "
+                               "denotation is unresolved"),
+    },
+}
 
 #: How current the book state must be. The SAME number the lane has always
 #: applied to the venue side. It is not moved by this file in either direction:
@@ -410,20 +493,38 @@ def evaluate(*, now, observation=None, subscription=None, revalidation=None,
                                                   else round(affirmed_age, 3))}
         if status == 304 and affirmed_age is not None \
                 and affirmed_age <= float(bound_s):
-            out["verdict"] = ESTABLISHED
-            out["mechanism"] = M2_REVALIDATION
-            out["book_state_established_at_epoch_s"] = float(r_date)
-            out["book_state_age_s"] = round(affirmed_age, 3)
-            out["why"] = (
-                "the origin answered 304 Not Modified %.1f s ago to a "
-                "conditional request carrying this representation's validator: "
-                "it is affirming that what we hold is still the current "
-                "representation" % affirmed_age)
-            return out
-        out["mechanisms_unavailable"].append(
-            {"mechanism": M2_REVALIDATION,
-             "why": ("the conditional request did not produce an in-bound 304 "
-                     "(status %s)" % status)})
+            # AN IN-BOUND 304, AND IT STILL DOES NOT ADMIT.
+            #
+            # This branch used to return ESTABLISHED. It does not any more, and
+            # the reason is the venue's own responses rather than caution: its
+            # `last-modified` equals `date` over market data 219 days old, so
+            # the validator it is affirming has no connection to the book. A
+            # 304 here says "the representation you hold is still the
+            # representation I would send" -- which is true, useful, and not a
+            # market-data age.
+            out["revalidation"]["affirmed_in_bound"] = True
+            out["revalidation"]["but_this_does_not_establish_the_book"] = (
+                "a 304 affirms the REPRESENTATION. On this venue the "
+                "representation's validator tracks the response instant, not "
+                "the book -- see M2_WITHDRAWN_AS_ESTABLISHING")
+            out["mechanisms_unavailable"].append(
+                {"mechanism": M2_REVALIDATION,
+                 "exchange_succeeded": True,
+                 "why": ("the origin DID answer 304 within the bound, and that "
+                         "affirms the representation rather than the book. "
+                         "Treating it as a book clock would be the third false "
+                         "certificate, after transport latency and our own "
+                         "receipt instant"),
+                 "evidence": M2_WITHDRAWN_AS_ESTABLISHING[
+                     "the_contradicting_observation"]["source"]})
+        else:
+            out["mechanisms_unavailable"].append(
+                {"mechanism": M2_REVALIDATION,
+                 "exchange_succeeded": False,
+                 "why": ("the conditional request did not produce an in-bound "
+                         "304 (status %s). NOTE this is not the reason M2 "
+                         "cannot admit -- an in-bound 304 would not admit "
+                         "either" % status)})
 
     # ── M3. Origin generation, which is a PARTIAL and never enough alone.
     if gen is None:

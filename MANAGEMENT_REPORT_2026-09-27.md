@@ -146,7 +146,7 @@ engineering column is not empty.
 |---|---|
 | M1 market-data subscription for the EV lane's candidates | **NOT DONE.** The binding blocker. Protocol exists; the lane does not subscribe. |
 | M2 conditional revalidation on the book path | **NOT DONE.** Blocked on reading one V3 probe result to learn whether a validator is emitted. |
-| Event-key selection in `OPEN_BOOK_SQL` | **NOT DONE.** `MAX_EVENT_EXPOSURE` can now be *tightened* by an approval but cannot *see* other positions on the same event. A pilot must hold one position at a time until this is closed. |
+| Event-key selection in `OPEN_BOOK_SQL` | **DONE** for the event rail — `OPEN_BOOK_SQL` joins `us_premap` and refuses `R_EVENT_IDENTITY_UNRESOLVED` when the event key is unknown. The **cross-lane** part is separate and remains open: `MAX_EVENT_EXPOSURE` aggregates `EVERY_OPEN_POSITION_IN_THIS_LANE`. **I previously wrote that a pilot holding one position at a time closes that gap; that is withdrawn** — the lane-local unique index does not constrain `live_orders`, so one position here says nothing about the account. `bettor_account_exposure` now measures across every path or reports `UNREADABLE`; the venue read is the binding dependency. |
 | Cumulative taker-fill fee adjustment | **NOT IMPLEMENTED.** Multi-fill expectations are marked PROVISIONAL. |
 | Funded schema as an enforced release condition | DONE — every submission path refuses when an object is missing. |
 | Inputs' own expiry, checked after any lock, released without a venue call | DONE — proven with a real `FOR UPDATE` held on a second connection; zero adapter calls. |

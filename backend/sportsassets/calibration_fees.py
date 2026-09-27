@@ -407,8 +407,22 @@ def order_fees(price, fills, *, sport=None, at=None) -> dict:
     of collected amounts is what the venue would collect fill by fill rather than
     a total reconciled afterwards.
 
-    `fills` is a sequence of contract counts, in fill order. A single-element
-    sequence is the ordinary case and the cap never binds on it.
+    `fills` is a sequence in fill order, and each element is EITHER a contract
+    count -- which fills at `price` -- OR a `(quantity, price)` pair.
+
+    WHY THE PAIR FORM EXISTS, AND IT IS NOT GENERALITY FOR ITS OWN SAKE. A
+    marketable order walks a ladder and takes each level at that level's own
+    price, so a real multi-fill taker order fills at several DIFFERENT prices.
+    A single-price signature cannot express one, which is exactly why
+    `bettor_entry_execution.estimate` summed independent per-level fees
+    instead of calling this function: the function could not describe what it
+    was doing. The published cap is stated on "the cumulative exact fee", and
+    that quantity is the sum over fills of theta x C_i x p_i x (1 - p_i)
+    whether the prices agree or not, so nothing about the algorithm changes --
+    only the arithmetic's inputs.
+
+    A single-element sequence is the ordinary case and the cap never binds on
+    it.
     """
     coef = taker_coefficient(sport, at)
     factor = price_factor(price)
@@ -422,23 +436,37 @@ def order_fees(price, fills, *, sport=None, at=None) -> dict:
                "never exceeds the banker's rounding of the cumulative exact "
                "fee"),
            "per_fill": []}
-    if factor is None:
-        return dict(out, TOTAL=None, BLOCKER=B_BAD_INPUT)
-    qtys = []
-    for q in (fills or []):
+    # EACH FILL CARRIES ITS OWN PRICE FACTOR. `price` remains the default for
+    # the bare-quantity form; a pair overrides it. `factor` may legitimately be
+    # None when every fill states its own price, so it is only required when
+    # some fill relies on it.
+    legs = []
+    for item in (fills or []):
+        if isinstance(item, (tuple, list)) and len(item) == 2:
+            q, px = item
+            f = price_factor(px)
+        else:
+            q, px, f = item, price, factor
         d = _d(q)
-        if d is None or d <= 0:
+        if d is None or d <= 0 or f is None:
             return dict(out, TOTAL=None, BLOCKER=B_BAD_INPUT)
-        qtys.append(d)
-    if not qtys:
+        legs.append((d, px, f))
+    if not legs:
         return dict(out, TOTAL=None, BLOCKER=B_BAD_INPUT)
+    out["prices"] = sorted({str(px) for _, px, _ in legs})
+    out["one_price"] = len(out["prices"]) == 1
 
     cum_qty = Decimal("0")
+    exact_cum = Decimal("0")
     collected = Decimal("0.00")
-    for i, q in enumerate(qtys):
+    for i, (q, px, f) in enumerate(legs):
         cum_qty += q
-        exact_fill = coef * q * factor
-        exact_cum = coef * cum_qty * factor
+        exact_fill = coef * q * f
+        # THE CUMULATIVE EXACT FEE IS A RUNNING SUM, not a product of the
+        # running quantity. Those are the same number only when every fill
+        # took the same price, and writing it as the product is how a
+        # multi-price walk would silently get the wrong cap.
+        exact_cum += exact_fill
         cap = _half_even(exact_cum)                  # the order's ceiling so far
         want = _half_even(exact_fill)                # this fill's own rounding
         take = want
@@ -448,7 +476,7 @@ def order_fees(price, fills, *, sport=None, at=None) -> dict:
                 take = Decimal("0.00")
         collected += take
         out["per_fill"].append({
-            "index": i, "quantity": q,
+            "index": i, "quantity": q, "price": px,
             "exact_fill": exact_fill,
             "unadjusted": want,
             "collected": take,
@@ -457,8 +485,8 @@ def order_fees(price, fills, *, sport=None, at=None) -> dict:
             "cumulative_collected": collected,
         })
     out["TOTAL"] = collected
-    out["cumulative_exact"] = coef * cum_qty * factor
-    out["cumulative_cap"] = _half_even(out["cumulative_exact"])
+    out["cumulative_exact"] = exact_cum
+    out["cumulative_cap"] = _half_even(exact_cum)
     out["total_never_exceeds_the_cap"] = bool(collected <= out["cumulative_cap"])
     out["BLOCKER"] = None
     return out

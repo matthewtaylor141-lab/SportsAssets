@@ -397,10 +397,23 @@ class TestTheFeeScheduleAndItsProvenance:
         assert cf.expected_fee("0.39", 10)["FEE"] == Decimal("0.17")
 
     def test_the_arithmetic_is_exact_not_binary_float(self):
+        """THIS ASSERTION USED TO READ `ROUND_HALF_UP` AND IT WAS WRONG.
+
+        Not wrong about the module -- the module did round half up. Wrong
+        about the venue. The page retrieved on 2026-09-27 says "All fees and
+        rebates are rounded to the nearest $0.01 using banker's rounding
+        (round half to even)", quoted in
+        research/evidence/VENUE_FEE_POLICY_2026-09-27.md.
+
+        So this test was pinning a defect in place. It is the shape of test
+        that reads as coverage and supplies none: it asserted what the
+        implementation did rather than what the venue charges, so the only
+        thing it could ever catch was someone fixing the bug.
+        """
         q = cf.expected_fee("0.39", 10, role=cf.ROLE_TAKER)
         assert isinstance(q["FEE"], Decimal)
         assert q["priceFactor"] == Decimal("0.2379")
-        assert q["rounding"] == "ROUND_HALF_UP"
+        assert q["rounding"] == "ROUND_HALF_EVEN"
 
     def test_the_price_factor_is_p_times_one_minus_p(self):
         assert cf.price_factor("0.39") == Decimal("0.2379")

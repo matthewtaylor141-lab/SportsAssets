@@ -170,6 +170,135 @@ def ladder_as_arrival_book(ladder: dict) -> dict:
     return {"asks": levels, "bids": []}
 
 
+#: What `walk_fee` reports about whose arithmetic answered.
+FEE_VIA_PUBLISHED_ORDER_SCHEDULE = "CALIBRATION_FEES_ORDER_FEES"
+FEE_VIA_CALLER_PER_LEVEL_SUM = "CALLER_FEE_FN_SUMMED_PER_LEVEL"
+
+
+class _NotTheTakerCurve(Exception):
+    """The caller's fee_fn is not pricing the published taker curve.
+
+    Raised internally so the reason travels with the refusal instead of being
+    reconstructed. It is never allowed to escape `walk_fee`: a fee question
+    must not be able to abort a sizing decision.
+    """
+
+
+def walk_fee(levels_taken, filled, fee_fn) -> dict:
+    """THE FEE A DEPTH WALK ACTUALLY INCURS, under the published algorithm.
+
+    A MARKETABLE WALK ACROSS THREE LADDER LEVELS IS A THREE-FILL ORDER. This
+    function existed as one expression inside `estimate`:
+
+        sum(abs(fee_fn(qty=lv["qty"], price=lv["price"]))
+            for lv in levels_taken) / filled
+
+    which charges every level its own independently rounded fee. The venue's
+    published rule is the opposite: each fill is charged its banker's-rounded
+    fee ADJUSTED so the order's total never exceeds the banker's rounding of
+    the cumulative exact fee. Summing independent roundings is the calculation
+    that rule replaces, and it was being applied to the number the economic
+    comparison uses.
+
+    THIS IS THE DEFECT MY OWN FEE WORK MISSED. I corrected
+    `calibration_fees`, added `order_fees` with the cumulative cap, and
+    reported the finding closed -- while `order_fees` had no production caller
+    and this expression went on summing per level. A corrected module is not
+    corrected fees.
+
+    WHY THE `fee_fn` FALLBACK REMAINS, AND HOW IT IS DECIDED. `estimate` takes
+    a `fee_fn` from its caller, and not every caller is on the published taker
+    curve: one passes a maker-side function (a REBATE, opposite sign and about
+    a fifth the size) and the tests pass doubles. The cumulative cap is a TAKER
+    rule -- the same page says maker rebates are computed per fill
+    independently -- so applying it to a maker walk would be a new defect of
+    exactly the kind this function removes.
+
+    So the caller's function is not guessed at from its name or its module: it
+    is CHECKED against the published single-fill taker fee at each level
+    actually taken. Agreement to the cent on every level means the caller is
+    pricing the taker curve and the cap applies. Any disagreement means it is
+    pricing something else, its own summation stands, and
+    `schedule_reaches: False` says so -- so a path that is not on the
+    published algorithm can never be reported as though it were.
+
+    Both numbers are returned either way: `independent` is what the old
+    expression would have produced, so the difference is visible in the record
+    rather than having to be reconstructed from a schedule.
+    """
+    legs = [(float(lv["qty"]), float(lv["price"]))
+            for lv in (levels_taken or [])
+            if float(lv.get("qty") or 0) > 0]
+    f = float(filled or 0.0)
+    independent = None
+    if legs:
+        try:
+            independent = round(
+                sum(abs(float(fee_fn(qty=q, price=p))) for q, p in legs)
+                / f, 8) if f else 0.0
+        except Exception:                                      # noqa: BLE001
+            independent = None
+    out = {"total": None, "per_contract": independent,
+           "basis": FEE_VIA_CALLER_PER_LEVEL_SUM,
+           "schedule_reaches": False, "cap_applied": None,
+           "independent": independent,
+           "why_not_the_schedule": None}
+    if not legs or not f:
+        out["why_not_the_schedule"] = "no level was taken"
+        return out
+    try:
+        from . import calibration_fees as CF
+        # IS THE CALLER ON THE PUBLISHED TAKER CURVE? Checked level by level
+        # against the schedule's own single-fill answer, because that is the
+        # only thing that distinguishes a taker fee_fn from a maker one
+        # without trusting a name.
+        for q, p in legs:
+            mine = CF.expected_fee(p, q, CF.ROLE_TAKER)
+            if mine.get("BLOCKER") or mine.get("FEE") is None:
+                raise _NotTheTakerCurve(
+                    "the schedule will not price %s @ %s: %s"
+                    % (q, p, mine.get("BLOCKER")))
+            theirs = abs(float(fee_fn(qty=q, price=p)))
+            if abs(theirs - float(mine["FEE"])) > 0.005:
+                raise _NotTheTakerCurve(
+                    "the caller's fee_fn gave %.4f at %s x %s where the "
+                    "published TAKER curve gives %.4f, so it is pricing "
+                    "something else (a maker rebate, or a double) and the "
+                    "taker cumulative cap must not be imposed on it"
+                    % (theirs, q, p, float(mine["FEE"])))
+        got = CF.order_fees(None, legs)
+    except _NotTheTakerCurve as exc:
+        out["why_not_the_schedule"] = str(exc)
+        return out
+    except Exception as exc:                                   # noqa: BLE001
+        out["why_not_the_schedule"] = (
+            "the published schedule raised %s, so the caller's own "
+            "summation stands and is reported as such" % type(exc).__name__)
+        return out
+    if got.get("BLOCKER") or got.get("TOTAL") is None:
+        # A SCHEDULE THAT REFUSES TO PRICE IS NOT A ZERO FEE, and it is not a
+        # licence to fall back silently either -- the refusal is named.
+        out["why_not_the_schedule"] = (
+            "the published schedule refused this walk: %s"
+            % (got.get("BLOCKER") or "no total"))
+        return out
+    total = float(got["TOTAL"])
+    out.update({
+        "total": round(total, 8),
+        "per_contract": round(total / f, 8),
+        "basis": FEE_VIA_PUBLISHED_ORDER_SCHEDULE,
+        "schedule_reaches": True,
+        "cap_applied": bool(any(x["adjusted"] for x in got["per_fill"])),
+        "cumulative_cap": float(got["cumulative_cap"]),
+        "prices_walked": got.get("prices"),
+        "per_fill": [{"qty": float(x["quantity"]), "price": x["price"],
+                      "collected": float(x["collected"]),
+                      "adjusted": x["adjusted"]}
+                     for x in got["per_fill"]],
+    })
+    return out
+
+
 def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
              intended_notional_usd=None, headroom=None) -> dict:
     """Size, marketable execution estimate and price, or a named refusal.
@@ -342,6 +471,7 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
         executable_notional_usd=float(walk.get("total_inside_limit") or 0.0))
     executed = float(sized.get("executedEntryNotionalUsd") or 0.0)
     coverage = min(1.0, executed / intended_notional)
+    _walk_fee = walk_fee(walk.get("levels_taken") or [], filled, fee_fn)
     out.update({
         "ok": True,
         "p_fill": round(coverage, 6),
@@ -397,11 +527,12 @@ def estimate(*, ladder, fair_value, fee_fn, observation_age_s=None,
         # understates that. Each gets its own number.
         "acquisition_cost_per_contract": round(vwap, 6),
         "acquisition_cost_is": "MODELLED_VOLUME_WEIGHTED_COST_OF_THE_WALK",
-        "fee_per_contract_realised": round(
-            (sum(abs(float(fee_fn(qty=lv["qty"], price=lv["price"])))
-                 for lv in (walk.get("levels_taken") or []))
-             / filled) if filled else 0.0, 8),
-        "fee_basis": "SUM_OF_PER_LEVEL_FEES_DIVIDED_BY_FILLED_QTY",
+        "fee_per_contract_realised": _walk_fee["per_contract"],
+        "fee_total_usd": _walk_fee["total"],
+        "fee_basis": _walk_fee["basis"],
+        "fee_schedule_reaches_this_path": _walk_fee["schedule_reaches"],
+        "fee_cap_applied": _walk_fee["cap_applied"],
+        "fee_if_levels_were_priced_independently": _walk_fee["independent"],
         "worst_case_cost_per_contract": round(limit, 6),
         "worst_case_cost_is": (
             "THE_SUBMITTED_LIMIT_NOTHING_FILLS_ABOVE_IT"),

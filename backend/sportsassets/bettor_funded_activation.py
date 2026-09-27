@@ -353,15 +353,29 @@ async def account_selection(conn, account_id: str) -> dict:
 #
 # WHAT ESTABLISHES CURRENCY IS A MECHANISM WITH A PUBLISHED CONTRACT, and the
 # names are `bettor_venue_currency`'s, so there is one vocabulary rather than
-# two: a live market-data subscription (M1) or a conditional revalidation the
-# origin answered 304 (M2). `Date` minus `Age` (M3) bounds the RESPONSE and not
-# the book, so it is a partial and is deliberately absent from this list.
+# two, and this list is DERIVED from that module rather than restated -- which
+# is why M2 leaving the establishing set there took effect here without an edit.
+#
+# M2 IS NO LONGER ESTABLISHING, AND THAT WAS A CORRECTION TO ME. A 304 affirms
+# the REPRESENTATION. The venue's own responses carry `last-modified` equal to
+# `date` over market data 219 days old, so the validator it affirms has no
+# connection to the book -- see `_VC.M2_WITHDRAWN_AS_ESTABLISHING` and
+# research/evidence/VENUE_BOOK_PROTOCOL_2026-09-27.md. Same failure mode as the
+# round trip recorded below: a real quantity, measured correctly, about the
+# wrong thing.
+#
+# `Date` minus `Age` (M3) likewise bounds the RESPONSE and not the book, so it
+# is a partial and is deliberately absent from this list.
 FRESHNESS_BASIS_ESTABLISHED = tuple(_VC.ESTABLISHING_MECHANISMS)
-#: Kept because the recorded evidence of earlier cycles uses it, and it is now
-#: labelled for what it is: a stamp we could read, which is not an establishment.
+#: Kept because the recorded evidence of earlier cycles uses these, and they are
+#: now labelled for what they are: things we could read or exchanges that
+#: succeeded, neither of which is an establishment. M2 sits here rather than
+#: being dropped, because the exchange works and is a real signal about the
+#: response -- an unproven mechanism and an absent one are different findings.
 FRESHNESS_BASIS_READABLE_BUT_NOT_ESTABLISHING = (
     "VENUE_TRANSACT_TIME",
     "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION",
+    _VC.M2_REVALIDATION,
 )
 
 #: OUR OWN TIMESTAMPS, AND WHAT THEY ARE NOT.

@@ -755,7 +755,68 @@ def _observed_fee_of(f: dict):
     return None
 
 
-def reconcile_fee(qty: float, price: float, observed, *, at=None) -> dict:
+async def prior_taker_legs(conn, intent_id: str, direction: str) -> list:
+    """THIS ORDER'S ALREADY-INGESTED FILLS, in fill order, as (qty, price).
+
+    WHY THE EXPECTATION NEEDS THEM. The venue charges an order, not a fill:
+    each fill pays its banker's-rounded fee ADJUSTED so the order's total never
+    exceeds the banker's rounding of the cumulative exact fee. A fill's
+    expected fee therefore depends on what the order has already been charged,
+    which means it cannot be computed from the fill alone -- and `reconcile_fee`
+    was computing it from the fill alone.
+
+    READ FROM THE TABLE, NOT FROM MEMORY, AND THAT IS THE POINT. Three
+    properties fall out of deriving the sequence from persisted rows rather
+    than from a batch variable:
+
+      RESTART        a worker that dies mid-order and comes back reads the
+                     same prior fills, so the fourth fill is priced as the
+                     fourth fill and not as the first.
+      REDELIVERY     a duplicate delivery of fill 2 finds fill 2 already
+                     present (it is excluded by id below), so it is priced
+                     against the same prior sequence and yields the same
+                     number rather than shifting the cap.
+      PARTIAL FILL   an order that fills in pieces minutes apart is one order
+                     to the venue and is now one order here too.
+
+    Ordered by `at` then `fill_id` so the sequence is deterministic when two
+    fills share a timestamp -- the venue's own order is not recoverable in that
+    case, and an arbitrary but STABLE order is what keeps a re-run from
+    producing different per-fill numbers for the same facts.
+    """
+    rows = await conn.fetch(
+        "SELECT fill_id, qty::float8 AS q, price::float8 AS p "
+        "  FROM bettor_funded_fills "
+        " WHERE intent_id=$1 AND direction=$2 "
+        " ORDER BY at, fill_id", intent_id, direction)
+    return [(float(r["q"]), float(r["p"]), r["fill_id"]) for r in rows]
+
+
+def order_expected_fees(legs) -> dict:
+    """THE PUBLISHED PER-FILL TAKER EXPECTATION for a whole order's legs.
+
+    `legs` is [(qty, price), ...] in fill order. Returns the schedule's own
+    per-fill collected amounts under the running cumulative cap, so the caller
+    can attribute the LAST leg's amount to the fill it is ingesting.
+
+    A BLOCKER is returned rather than a number the schedule would not state.
+    """
+    from . import calibration_fees as CF
+    got = CF.order_fees(None, [(q, p) for q, p in legs])
+    if got.get("BLOCKER") or got.get("TOTAL") is None:
+        return {"BLOCKER": got.get("BLOCKER") or "NO_TOTAL", "per_fill": None}
+    return {
+        "BLOCKER": None,
+        "per_fill": [float(x["collected"]) for x in got["per_fill"]],
+        "TOTAL": float(got["TOTAL"]),
+        "cumulative_cap": float(got["cumulative_cap"]),
+        "adjusted": [bool(x["adjusted"]) for x in got["per_fill"]],
+        "algorithm": got["algorithm"],
+    }
+
+
+def reconcile_fee(qty: float, price: float, observed, *, at=None,
+                  prior_legs=None) -> dict:
     """EXPECTED AGAINST OBSERVED, through the deployed reconciler.
 
     THE DEFECT THIS CLOSES. `ingest_fills` called `expected_fee` and stored the
@@ -765,10 +826,46 @@ def reconcile_fee(qty: float, price: float, observed, *, at=None) -> dict:
     not absorbed.
     """
     expected, basis = fee_for(qty, price, at=at)
+    # THE ORDER'S CUMULATIVE CAP, WHERE THE ORDER'S SEQUENCE IS KNOWN.
+    #
+    # `fee_for` prices this fill as if it were the only one, which is right for
+    # a single-fill order and wrong for every other. When the caller can supply
+    # the fills already ingested against this order, the expectation becomes the
+    # increment the published algorithm attributes to THIS fill: the whole
+    # sequence is priced under the running cap and the last leg's collected
+    # amount is taken. That is not the same as capping the total afterwards --
+    # the adjustment lands on the fill that would breach the cap, which is what
+    # a per-fill reconciliation has to compare against.
+    #
+    # `prior_legs` omitted keeps the old single-fill behaviour, because a caller
+    # that cannot see the order's history must not have a cap invented for it.
+    cumulative = None
+    if prior_legs is not None:
+        legs = [(q, p) for q, p, *_ in prior_legs] + [(qty, price)]
+        got = order_expected_fees(legs)
+        if got["BLOCKER"] is None:
+            cumulative = {
+                "expected_fee_usd_single_fill": expected,
+                "order_legs": len(legs),
+                "this_leg_index": len(legs) - 1,
+                "order_total_expected_usd": got["TOTAL"],
+                "cumulative_cap_usd": got["cumulative_cap"],
+                "cap_adjusted_this_leg": got["adjusted"][-1],
+                "algorithm": got["algorithm"],
+            }
+            expected = got["per_fill"][-1]
+            basis = ("calibration_fees.order_fees(leg %d of %d, %s)"
+                     % (len(legs), len(legs), got["algorithm"]))
+        else:
+            # A SCHEDULE THAT WILL NOT PRICE THE SEQUENCE FALLS BACK TO THE
+            # SINGLE-FILL NUMBER AND SAYS SO, rather than silently reporting a
+            # capped figure it did not compute.
+            cumulative = {"BLOCKER": got["BLOCKER"],
+                          "fell_back_to": "single-fill expected_fee"}
     if observed is None:
         return {"expected_fee_usd": expected, "observed_fee_usd": None,
                 "booked_fee_usd": expected, "fee_state": FEE_PROVISIONAL,
-                "fee_basis": basis,
+                "fee_basis": basis, "cumulative": cumulative,
                 "reconciliation": {
                     "AGREED": None,
                     "why": ("the venue stated no commission on this "
@@ -796,6 +893,7 @@ def reconcile_fee(qty: float, price: float, observed, *, at=None) -> dict:
                           "FEE": decimal.Decimal(str(observed))}, at=when)
     agreed = bool(got.get("AGREED"))
     return {"expected_fee_usd": expected,
+            "cumulative": cumulative,
             "observed_fee_usd": float(observed),
             # THE OBSERVED CHARGE IS WHAT THE ACCOUNT PAID, so it is what the
             # accounting books once it exists.
@@ -1093,7 +1191,21 @@ async def _ingest_locked(conn, *, intent_id, fills, direction, now, row,
                                "refusal": R_NO_EXECUTION_IDENTITY})
             continue
         cash = cash_for(qty, px, buy_intent)
-        fee = reconcile_fee(qty, px, _observed_fee_of(f), at=now)
+        # THIS ORDER'S EARLIER FILLS, READ BACK INSIDE THE LOCK.
+        #
+        # Read per fill rather than once per batch, because the batch itself
+        # writes rows: fill 2 of a three-fill delivery must see fill 1, which
+        # was inserted a few lines below on the previous iteration. Reading
+        # once up front would price all three as firsts.
+        #
+        # A REDELIVERY IS EXCLUDED BY ITS OWN ID. Without that, re-ingesting
+        # fill 2 would see fill 2 among the priors and price it as a third
+        # leg -- a duplicate delivery would change the expectation, which is
+        # the opposite of idempotent.
+        priors = [t for t in await prior_taker_legs(conn, intent_id, direction)
+                  if t[2] != fid]
+        fee = reconcile_fee(qty, px, _observed_fee_of(f), at=now,
+                            prior_legs=priors)
         # ── ONE TRANSACTION: THE FILL, ITS EVENTS, AND THE FLAG ─────
         #
         # THE DEFECT THIS CLOSES. The fill went in, then the cash event, then

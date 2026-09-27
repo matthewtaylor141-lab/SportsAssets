@@ -1194,14 +1194,28 @@ def test_transport_latency_is_never_an_upstream_freshness_basis():
     assert FA.OUR_TRANSPORT_LATENCY not in FA.FRESHNESS_BASIS_ESTABLISHED
     for tok in FA.OUR_OWN_TIMESTAMPS:
         assert tok not in FA.FRESHNESS_BASIS_ESTABLISHED, tok
-    # THE ESTABLISHED SET IS THE VENUE'S OWN CLOCK, and only that.
+    # THE ESTABLISHED SET IS THE VENUE'S OWN CLOCK, and only that -- AND M2 HAS
+    # NOW LEFT IT TOO, on the venue's own responses.
+    #
+    # This assertion used to include M2_CONDITIONAL_REVALIDATION_304. A 304
+    # affirms the REPRESENTATION, and this venue's `last-modified` equals `date`
+    # over market data 219 days old, so the validator it affirms is unconnected
+    # to the book. Same failure mode as the round trip above: something real,
+    # measured correctly, about the wrong quantity. Having found ETag absent I
+    # was one step from treating the validator's PRESENCE as the qualifying
+    # condition -- the third false certificate in this file's own history.
     assert set(FA.FRESHNESS_BASIS_ESTABLISHED) == {
-        "M1_LIVE_MARKET_DATA_SUBSCRIPTION", "M2_CONDITIONAL_REVALIDATION_304"}
+        "M1_LIVE_MARKET_DATA_SUBSCRIPTION"}
+    assert "M2_CONDITIONAL_REVALIDATION_304" in (
+        FA.FRESHNESS_BASIS_READABLE_BUT_NOT_ESTABLISHING), (
+        "M2 must be recorded as readable-but-not-establishing rather than "
+        "dropped: the exchange works and is a real signal about the response")
     # AND THE STAMP TOKENS ARE ON THE OTHER SIDE NOW. A readable value is not
     # an establishment, so they sit with the unestablished set and are labelled
     # readable-but-not-establishing.
     assert set(FA.FRESHNESS_BASIS_READABLE_BUT_NOT_ESTABLISHING) == {
-        "VENUE_TRANSACT_TIME", "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION"}
+        "VENUE_TRANSACT_TIME", "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION",
+        "M2_CONDITIONAL_REVALIDATION_304"}
     for tok in FA.FRESHNESS_BASIS_READABLE_BUT_NOT_ESTABLISHING:
         assert tok in FA.FRESHNESS_BASIS_UNESTABLISHED, tok
         assert tok not in FA.FRESHNESS_BASIS_ESTABLISHED, tok

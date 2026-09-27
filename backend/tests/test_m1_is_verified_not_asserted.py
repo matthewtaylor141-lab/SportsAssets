@@ -65,33 +65,149 @@ def test_the_contract_is_read_from_the_shipped_client_not_from_prose():
         "the client reconnects now; the epoch-invalidation reasoning changes")
     assert SC.FEED_CONTRACT["client_reconnects"] is False
     assert SC.FEED_CONTRACT["client_resynchronises"] is False
-    # THE 'FULL BOOK' CLAIM IS A DOCSTRING, and the record says so.
-    assert "docstring" in SC.FEED_CONTRACT["full_book_claim_rests_on"]
+    # THE 'FULL BOOK' CLAIM IS PUBLISHED, AND I HAD REPORTED IT AS A DOCSTRING.
+    #
+    # This assertion used to require the word "docstring" here, which pinned my
+    # own mistake in place. The venue's WebSocket page states it in its
+    # subscription-types table -- read on the runner 2026-09-27, run
+    # 36332797806, preserved in
+    # research/evidence/VENUE_BOOK_PROTOCOL_2026-09-27.md. The SDK docstring
+    # AGREES with the published protocol; it was never the only source.
+    assert "PUBLISHED" in SC.FEED_CONTRACT["full_book_claim_rests_on"]
+    assert "was wrong" in SC.FEED_CONTRACT["full_book_claim_rests_on"]
     assert "full order book" in (types_mod.MarketData.__doc__ or "").lower()
+    pp = SC.PUBLISHED_PROTOCOL
+    assert pp["states_full_order_book"] is True
+    assert pp["subscription_types"]["SUBSCRIPTION_TYPE_MARKET_DATA"] == (
+        "Full order book and market stats")
+    # AND THE PAGE DOCUMENTS NO INCREMENTAL MECHANISM AT ALL, which is why a
+    # delta-continuity requirement was the wrong shape.
+    assert pp["sentences_on_deltas_or_increments"] == 0
+    assert pp["sentences_on_sequence_or_ordering_or_gaps"] == 0
+    # NOR ANY TIMING GUARANTEE, which is the gap that actually binds.
+    assert pp["sentences_stating_a_latency_or_as_of_guarantee"] == 0
+    # THE SDK AND THE PUBLISHED PROTOCOL AGREE, INCLUDING ON THE ABSENCES --
+    # which is what makes them properties of the FEED rather than of this client.
+    assert SC.FEED_CONTRACT["sdk_and_protocol_disagree_on"].startswith(
+        "nothing found")
+    assert "full-replacement semantics" in (
+        SC.FEED_CONTRACT["sdk_and_protocol_agree_on"])
 
 
 # ── §2 · THE PRECONDITIONS ──────────────────────────────────────────
 
-def test_m1_needs_four_things_and_two_are_missing():
+def test_the_verdict_is_unchanged_but_the_MISSING_PRECONDITIONS_ARE_NOT():
+    """THE CORRECTION, AND IT DOES NOT MOVE THE ANSWER.
+
+    This test used to be `test_m1_needs_four_things_and_two_are_missing` and
+    asserted the missing two were P1 (replacement authority) and P3 (gap-free
+    continuity). Both were wrong, in opposite directions:
+
+      P1 is ESTABLISHED -- the venue PUBLISHES full-book semantics.
+      P3 was the WRONG REQUIREMENT -- a delta-reconstruction guarantee demanded
+         of a feed that documents no deltas.
+
+    What is actually missing is TIMING (P5) and RESYNCHRONISATION (P6). The
+    verdict is still M1_NOT_AVAILABLE, so no gate loosened; what changed is that
+    the refusal now points at the real gap, and the gap is a narrower claim.
+    """
     st = SC.mechanism_status()
-    assert st["status"] == SC.M1_NOT_AVAILABLE
-    assert set(st["missing"]) == {SC.P1_REPLACEMENT_AUTHORITY,
-                                  SC.P3_CONTINUITY}
-    # THE TWO THAT ARE AVAILABLE ARE NOT ENOUGH, and the record says why.
+    assert st["status"] == SC.M1_NOT_AVAILABLE, "the verdict does not move"
+    assert set(st["missing"]) == {SC.P5_DOCUMENTED_TIMING,
+                                  SC.P6_RESYNCHRONISATION}
+    assert st["preconditions"][SC.P1_REPLACEMENT_AUTHORITY]["available"] is True
     assert st["preconditions"][SC.P2_LIVENESS]["available"] is True
+    assert st["preconditions"][SC.P3_CONNECTION_CONTINUITY]["available"] is True
     assert st["preconditions"][SC.P4_IDENTITY]["available"] is True
-    assert "socket is open" in st["what_a_subscription_here_does_prove"]
-    assert "neither is a currency guarantee" in \
+    assert "the WHOLE book" in st["what_a_subscription_here_does_prove"]
+    assert "none of them is a currency guarantee" in \
         st["what_a_subscription_here_does_prove"]
 
 
-def test_the_missing_continuity_reason_is_the_right_one():
-    """A gap is invisible by construction, and `transactTime` cannot stand in."""
-    p3 = SC.PRECONDITION_STATUS[SC.P3_CONTINUITY]
-    assert p3["available"] is False
-    assert "leaves no trace" in p3["why"]
-    assert "unresolved" in p3["transact_time_cannot_substitute"]
-    assert "BETWEEN two changes" in p3["transact_time_cannot_substitute"]
+def test_the_two_questions_are_answered_SEPARATELY():
+    """FUSING THEM IS WHAT PRODUCED A CONCLUSION WIDER THAN THE EVIDENCE.
+
+    Q1 is about the message's AUTHORITY, Q2 about its TIMING. This feed settles
+    Q1 completely and says nothing about Q2, and one verdict covering both
+    reported the first as missing.
+    """
+    q = SC.questions()
+    q1 = q[SC.Q1_REPLACEMENT_AUTHORITY]
+    q2 = q[SC.Q2_SUFFICIENTLY_CURRENT]
+    assert q1["answered"] is True and q1["missing"] == []
+    assert q2["answered"] is False
+    assert set(q2["missing"]) == {SC.P5_DOCUMENTED_TIMING,
+                                  SC.P6_RESYNCHRONISATION}
+    # AND THE REASON A MISSING SEQUENCE DOES NOT TOUCH Q1 IS STATED.
+    assert "DELTA stream" in q1["and_a_missing_sequence_does_not_change_it"]
+    assert "does not build on the increments before it" in (
+        q1["and_a_missing_sequence_does_not_change_it"])
+    assert "an unmeasured age is not an old one" == (
+        q2["and_this_is_not_a_claim_of_staleness"]), (
+        "NOT_ESTABLISHED is the default and is not an accusation of staleness")
+
+
+def test_the_withdrawn_delta_requirement_is_recorded_as_withdrawn():
+    """A requirement dropped is written down, not quietly deleted -- otherwise
+    it reads as though it had never been asserted."""
+    w = SC.WITHDRAWN_REQUIREMENTS[SC.P3_WITHDRAWN_REQUIREMENT]
+    assert w["withdrawn_on"] == "2026-09-27"
+    assert "DELTA-stream requirement" in w["why_withdrawn"]
+    assert "FULL-REPLACEMENT feed" in w["why_withdrawn"]
+    assert "ZERO sentences" in w["why_withdrawn"]
+    assert w["what_replaced_it"] == SC.P3_CONNECTION_CONTINUITY
+    assert "the verdict" in w["and_what_did_not_change"]
+    assert "TIMING gap" in w["and_what_did_not_change"]
+
+
+def test_the_surviving_continuity_requirement_is_about_OUR_socket():
+    """P3 was replaced, not deleted. What survives is enforceable without a
+    sequence number, because it is a fact about our own connection."""
+    p3 = SC.PRECONDITION_STATUS[SC.P3_CONNECTION_CONTINUITY]
+    assert p3["available"] is True
+    assert "DISCARDS every market's state on a drop" in p3["why"]
+    assert "not claim" in p3["this_is_not_the_withdrawn_requirement"]
+    assert "did not hold a book across a disconnect" in (
+        p3["this_is_not_the_withdrawn_requirement"])
+
+
+def test_the_binding_precondition_is_TIMING_and_it_names_its_exit():
+    p5 = SC.PRECONDITION_STATUS[SC.P5_DOCUMENTED_TIMING]
+    assert p5["available"] is False
+    assert p5["this_is_the_binding_precondition"] is True
+    assert "no as-of instant" in p5["why"]
+    assert "MOVING book" in p5["what_would_establish_it"]
+
+
+def test_transact_time_is_a_market_data_instant_and_no_more_than_that():
+    """THE DISCRIMINATOR WAS STATED BEFORE IT RAN, and it settles one direction
+    only. A response stamp cannot precede its own response, so a 219-day lag
+    CONTRADICTS the response-stamp reading -- and no number of observations
+    could establish the positive direction, which is why this is not the
+    resampling withdrawn earlier."""
+    t = SC.TRANSACT_TIME
+    assert "cannot precede its own response" in (
+        t["discriminator_stated_before_running"])
+    assert t["observed"]["date_minus_transact_time_s"] > 18_000_000
+    assert t["observed"]["book_levels"].startswith("0 bids")
+    assert "MARKET-DATA instant" in t["ESTABLISHED"]
+    # AND THE PART IT DOES NOT SETTLE IS NAMED, not resolved conveniently.
+    assert "WHICH market-data instant" in t["NOT_ESTABLISHED"]
+    assert "coincide on an expired zero-depth book" in t["NOT_ESTABLISHED"]
+    assert "quiet book and a delayed feed predict the same" in (
+        t["why_more_of_the_same_cannot_help"])
+    # WHAT TURNS ON IT, INCLUDING THAT THE ANSWER IS NOT A LOOSENING.
+    assert "NOT a loosening" in t["what_turns_on_it"]
+
+
+def test_the_conclusion_is_narrower_than_no_engineering_route():
+    """'Our predicate cannot qualify this feed' is narrower than 'the venue has
+    no engineering route', and I asserted the second."""
+    st = SC.mechanism_status()
+    assert "CANNOT QUALIFY THIS FEED" in st["the_conclusion_is"]
+    assert "no engineering route" in st["the_conclusion_is_NOT"]
+    assert "I asserted it" in st["the_conclusion_is_NOT"]
+    assert st["how_it_could_close"], "a gap with no named exit is a dead end"
 
 
 def test_the_bounds_are_not_widened_by_this_module():
@@ -113,12 +229,17 @@ def test_a_live_looking_subscription_does_not_make_this_book_current():
 
     state = SC.subscription_state("aec-x", now=now)
     assert state["usable_as_a_currency_mechanism"] is False
-    assert set(state["unmet"]) == {SC.P1_REPLACEMENT_AUTHORITY,
-                                   SC.P3_CONTINUITY}
-    # THE TWO LIVE CHECKS PASSED, which is what makes the refusal informative.
+    assert set(state["unmet"]) == {SC.P5_DOCUMENTED_TIMING,
+                                   SC.P6_RESYNCHRONISATION}
+    # EVERY LIVE CHECK PASSED, which is what makes the refusal informative --
+    # and now includes P1, so the refusal is explicitly NOT a doubt about
+    # whether the message is the whole book.
+    assert state["checks"][SC.P1_REPLACEMENT_AUTHORITY]["met"] is True
     assert state["checks"][SC.P2_LIVENESS]["met"] is True
+    assert state["checks"][SC.P3_CONNECTION_CONTINUITY]["met"] is True
     assert state["checks"][SC.P4_IDENTITY]["met"] is True
     assert "no amount of subscribing supplies them" in state["why"]
+    assert "TIMING refusal" in state["why"]
 
 
 def test_the_refusal_is_not_relieved_by_passing_a_subscription_argument():
@@ -131,8 +252,7 @@ def test_the_refusal_is_not_relieved_by_passing_a_subscription_argument():
     assert got["subscription"] is None
     assert got["m1"]["status"] == SC.M1_NOT_AVAILABLE
     assert set(got["m1"]["missing_from_the_feed"]) == {
-        SC.P1_REPLACEMENT_AUTHORITY, SC.P3_CONTINUITY}
-    assert "no sequence number" in got["why_none"]
+        SC.P5_DOCUMENTED_TIMING, SC.P6_RESYNCHRONISATION}
     assert "properties of the FEED" in got["why_none"]
 
 
@@ -249,8 +369,9 @@ def test_the_mechanism_works_once_the_feed_supplies_the_two_guarantees(
     the right instrument on a connection with proven continuity.
     """
     status = {k: dict(v) for k, v in SC.PRECONDITION_STATUS.items()}
-    status[SC.P1_REPLACEMENT_AUTHORITY]["available"] = True
-    status[SC.P3_CONTINUITY]["available"] = True
+    # THE TWO THAT ARE ACTUALLY MISSING NOW: timing and resynchronisation.
+    status[SC.P5_DOCUMENTED_TIMING]["available"] = True
+    status[SC.P6_RESYNCHRONISATION]["available"] = True
     monkeypatch.setattr(SC, "PRECONDITION_STATUS", status)
     monkeypatch.setattr(SC, "MISSING_PRECONDITIONS", ())
     monkeypatch.setattr(SC, "M1_STATUS", SC.M1_AVAILABLE)
