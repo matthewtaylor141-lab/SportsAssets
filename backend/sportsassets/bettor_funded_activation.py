@@ -291,6 +291,76 @@ OUR_OWN_TIMESTAMPS = (
 )
 OUR_TRANSPORT_LATENCY = "OUR_TRANSPORT_LATENCY_NOT_AN_UPSTREAM_AGE"
 
+#: THE BOUND, and it is the SAME NUMBER the scheduled entry lane admits on.
+#: `workers/ext_pinnacle_loop.MAX_VENUE_QUOTE_AGE_S` is the original; a test
+#: asserts the two are equal, because two lanes admitting the same venue book
+#: on two different ages is the drift this module exists to prevent.
+MAX_VENUE_BOOK_AGE_S = 30.0
+
+R_BOOK_AGE_UNMEASURED = "THE_VENUE_BOOK_AGE_IS_UNMEASURED"
+R_BOOK_STALE = "THE_VENUE_BOOK_IS_OLDER_THAN_THE_ADMITTED_BOUND"
+
+
+def venue_book_age(market_data, *, now) -> dict:
+    """HOW OLD IS THIS BOOK, BY THE VENUE'S OWN CLOCK -- or UNMEASURED.
+
+    THE ONE PLACE THIS POLICY IS EXPRESSED FOR A FUNDED READ. The funded exit
+    selector applied NO book freshness check at all: it read the payload and
+    used the ladder. Probability freshness was checked, by `ev_hold`, and that
+    establishes nothing about the book -- a thirty-second-old probability
+    against a ten-minute-old ladder is two different claims and only one of
+    them was tested.
+
+    THE RULE IS THE ENTRY LANE'S, UNCHANGED. `marketData.transactTime`, parsed
+    by the supported parser, aged against the decision instant, bounded by
+    `MAX_VENUE_BOOK_AGE_S`. An absent or unparseable clock leaves the age
+    UNMEASURED and REFUSES -- it is not a claim the book was stale, and it is
+    emphatically not our transport latency, which cannot bound an upstream age
+    (see `FRESHNESS_ADMISSION_POLICY`).
+    """
+    from . import bettor_book_snapshot as _bs
+
+    out = {"field_path": "marketData.transactTime",
+           "bound_s": MAX_VENUE_BOOK_AGE_S,
+           "basis": "VENUE_CLOCK_NOT_PROVIDED",
+           "age_s": None, "ok": False, "refusal": R_BOOK_AGE_UNMEASURED,
+           "admission_policy": "bettor_funded_activation.venue_book_age",
+           "our_latency_is_not_an_age": OUR_TRANSPORT_LATENCY}
+    if not market_data:
+        return dict(out, why="no market data was supplied to age")
+    snap = _bs.snapshot(market_data, symbol="funded-exit-read") or {}
+    raw = snap.get("TRANSACT_TIME")
+    out["raw"] = (None if raw is None else str(raw)[:64])
+    if raw in (None, _bs.NOT_IDENTIFIED):
+        return dict(out, why=("the venue supplied no transactTime, so our "
+                              "read clock is the only one -- and using it "
+                              "would make every book fresh by construction"))
+    try:
+        from .bettor_market_stream import _parse_ts as _pt
+        dt = _pt(raw)
+    except Exception:                                          # noqa: BLE001
+        dt = None
+    if dt is None:
+        return dict(out, basis="VENUE_CLOCK_UNPARSEABLE",
+                    why=("the venue sent a value the supported parser "
+                         "refuses. It is NOT absent and it is NOT an observed "
+                         "stale age: the age is UNMEASURED"))
+    age = float(now) - dt.timestamp()
+    out.update(basis="VENUE_TRANSACT_TIME", age_s=round(age, 3),
+               parsed_epoch_s=dt.timestamp())
+    if age < 0:
+        # THE VENUE'S CLOCK IS AHEAD OF OURS. Not a refusal -- a book cannot be
+        # too fresh -- but it is recorded, because a LARGE negative age means
+        # the two clocks disagree and every age measured against this one is
+        # shifted by that amount.
+        out["venue_clock_ahead_of_ours_s"] = round(-age, 3)
+    if age > MAX_VENUE_BOOK_AGE_S:
+        return dict(out, ok=False, refusal=R_BOOK_STALE,
+                    why=("the venue's own clock puts this book %.1f s old "
+                         "against a %.0f s bound" % (age, MAX_VENUE_BOOK_AGE_S)))
+    return dict(out, ok=True, refusal=None,
+                why="the venue's own clock puts this book %.1f s old" % age)
+
 #: HOW UPSTREAM FRESHNESS IS ADMITTED, as a stated policy rather than a
 #: derived bound. The endpoint's supported contract has to say what its
 #: timestamp denotes; until it does, an absent or unparseable venue clock

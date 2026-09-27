@@ -877,6 +877,14 @@ async def _repair_one_fill(conn, *, fill_id: str, econ_intent: str,
             "SELECT count(*) FROM bettor_funded_economics "
             " WHERE event_id = ANY($1::text[])",
             ["fev:%s:CASH" % fill_id, "fev:%s:FEE" % fill_id])
+        # ── BOTH REPAIRS, IN THIS ONE TRANSACTION ───────────────────
+        #
+        # THE DEFECT THIS CLOSES. The fee update was an `elif` on the missing-
+        # events branch. A redelivery that BOTH finished an interrupted write
+        # AND carried the venue's actual commission therefore wrote the events
+        # and threw the fee away -- and since the venue states a commission
+        # once, that was the only copy. The two repairs are independent facts
+        # about the same fill and both are done here.
         if int(have or 0) < 2:
             # THE INTERRUPTION REPAIR, from the stored row.
             await _write_fill_economics(
@@ -905,8 +913,9 @@ async def _repair_one_fill(conn, *, fill_id: str, econ_intent: str,
                             "ledger. The events have been reconstructed from "
                             "the stored fill and the realised total was "
                             "understated until now")})
-        elif cur["fee_state"] == FEE_PROVISIONAL and observed is not None:
-            # THE LATE FEE. Only from PROVISIONAL: a RECONCILED or DISAGREES
+        if cur["fee_state"] == FEE_PROVISIONAL and observed is not None:
+            # THE LATE FEE -- checked INDEPENDENTLY of the repair above, not as
+            # its alternative. Only from PROVISIONAL: a RECONCILED or DISAGREES
             # fill already has the venue's number and a second delivery of it
             # must not move the cash again.
             got = reconcile_fee(float(cur["qty"]), float(cur["price"]),
@@ -1038,6 +1047,41 @@ async def ingest_fills(conn, intent_id: str, fills, *,
         if parent:
             buy_intent = parent["order_intent"]
     written, already, unresolved = [], [], []
+    # ── ONE TRANSACTION, UNDER THE POSITION'S OWN LOCK ──────────────
+    #
+    # THE DEFECT THIS CLOSES. The previous version made the FILL and its
+    # ECONOMIC EVENTS atomic and then updated the ORDER STATE and the RESIDUAL
+    # afterwards, outside. That leaves a window with a specific and expensive
+    # shape: an entry set to FILLED, whose `residual_qty` is still the 0 it was
+    # inserted with. `bettor_funded_position_is_open` reads FILLED as not
+    # outstanding and residual 0 as nothing held -- so the one-open-position
+    # slot is RELEASED while the account actually holds the contracts, and the
+    # next entry is admitted against inventory no rail can see.
+    #
+    # The ledger, the order state and the residual/closure transition are
+    # therefore one commit, taken under `FOR UPDATE` on the POSITION row -- the
+    # same lock `_reserve_exit` takes, in the same order, so an exit
+    # reservation and a fill ingest serialise against each other instead of
+    # interleaving.
+    async with conn.transaction():
+        await conn.execute(
+            "SELECT 1 FROM bettor_funded_intents WHERE intent_id=$1 "
+            " FOR UPDATE", econ_intent)
+        return await _ingest_locked(
+            conn, intent_id=intent_id, fills=fills, direction=direction,
+            now=now, row=row, econ_intent=econ_intent,
+            buy_intent=buy_intent, written=written, already=already,
+            unresolved=unresolved)
+
+
+async def _ingest_locked(conn, *, intent_id, fills, direction, now, row,
+                         econ_intent, buy_intent, written, already,
+                         unresolved):
+    """THE BODY OF `ingest_fills`, running inside its transaction and lock.
+
+    Split out only so the lock and the commit boundary are visible in one
+    place at the call site rather than as an indentation level here.
+    """
     for f in list(fills or ()):
         qty = float(f.get("qty") or 0)
         px = float(f.get("price") or 0)
@@ -1063,6 +1107,11 @@ async def ingest_fills(conn, intent_id: str, fills, *,
         # `economics_written` is set in the SAME transaction as the events, so
         # it can only be true if they exist -- and `repair_missing_economics`
         # below finds any fill where it is not.
+        #
+        # THIS IS NOW A SAVEPOINT inside the caller's transaction, which holds
+        # the position lock and also covers the state and residual transition.
+        # It is kept because it scopes ONE fill: a failure here rolls that fill
+        # back without discarding fills already ingested in this batch.
         async with conn.transaction():
             res = await conn.execute(
                 "INSERT INTO bettor_funded_fills (fill_id, intent_id,"

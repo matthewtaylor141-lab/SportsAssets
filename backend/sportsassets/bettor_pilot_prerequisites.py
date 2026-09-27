@@ -162,6 +162,53 @@ BEYOND_READINESS = (
                    "venue credential means the book cannot be read at all, "
                    "which is reported as the credential rather than as an "
                    "empty market")},
+    {"id": "funded_exit_price_space",
+     "category": ENGINEERING,
+     "state": "BUILT_AND_TESTED_DISABLED",
+     "what": ("proceeds and the venue's wire price are separate numbers and "
+              "are named separately. `exit_ladder.exit_price` is CASH RECEIVED "
+              "per held contract; `api_price` is what goes on the order. They "
+              "coincide on a long and are complements on a short, so passing "
+              "proceeds as the wire limit inverted the bound: a long-side ask "
+              "of 0.20 is 0.80 of proceeds to a short holder, and 0.80 sent "
+              "as the short wire accepts 0.20. `submit_exit` now also takes "
+              "the proceeds the action was selected on and REFUSES a wire "
+              "that would receive less"),
+     "remaining": ("tested through the real adapter with transport "
+                   "substituted, on BOTH sides, asserting on the price the "
+                   "venue was actually told")},
+    {"id": "funded_exit_book_admission",
+     "category": ENGINEERING,
+     "state": "BUILT_AND_TESTED_DISABLED",
+     "what": ("a funded exit admits the venue book on the ENTRY LANE'S OWN "
+              "policy, declared once in "
+              "`bettor_funded_activation.venue_book_age`: "
+              "`marketData.transactTime`, the supported parser, aged against "
+              "the decision instant, bounded by the same number the entry "
+              "lane uses. An absent or unparseable venue clock is UNMEASURED "
+              "and refuses -- our transport latency cannot bound an upstream "
+              "age"),
+     "remaining": ("probability freshness establishes nothing about the book, "
+                   "and the selector previously checked only the former. A "
+                   "test asserts the two lanes' bounds are the same number so "
+                   "they cannot drift")},
+    {"id": "funded_exit_settlement_admission",
+     "category": ENGINEERING,
+     "state": "BUILT_AND_TESTED_DISABLED",
+     "what": ("a funded exit requires an ESTABLISHED settlement attestation. "
+              "`bettor_hold_value` deliberately RETAINS an UNKNOWN terminal "
+              "rule as a conditional valuation and ranks it -- correct for a "
+              "shadow decision, since the probability is still the best "
+              "estimate. For a funded action it is not: an unestablished rule "
+              "means we do not know what the contract pays on an overtime, a "
+              "push or a void, which is the number the comparison rests on. "
+              "The fixture state and the attested rule are read from the "
+              "`external_valuations` row that priced the ENTRY, so the exit "
+              "is valued under the evidence the entry was"),
+     "remaining": ("in production this means most funded exits are restricted "
+                   "until the venue's prose is read and compared -- which is "
+                   "the same restriction the entry lane already applies, and "
+                   "it is a market-evidence dependency, not missing code")},
     {"id": "funded_venue_mark_at_runtime",
      "category": OWNER_DECISION,
      "state": "BLOCKED_ON_A_CREDENTIAL",

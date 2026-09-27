@@ -90,6 +90,11 @@ R_GATE_NOT_AFFIRMATIVE = "RETIRED_SEE_R_NOT_AUTHORIZED"
 #: Missing inputs the exit SELECTOR names, each pointing at one thing.
 R_NO_PAYOUT_EVENT = "THE_POSITION_DOES_NOT_RECORD_THE_EVENT_IT_PAYS_ON"
 R_BOOK_UNREADABLE = "THE_VENUES_EXECUTABLE_BOOK_COULD_NOT_BE_READ"
+R_BOOK_NOT_FRESH = "THE_VENUE_BOOK_IS_STALE_OR_ITS_AGE_IS_UNMEASURED"
+R_SETTLEMENT_NOT_ESTABLISHED = \
+    "THE_SETTLEMENT_RULE_IS_NOT_ESTABLISHED_FOR_A_FUNDED_ACTION"
+R_EXIT_WIRE_UNREPRESENTABLE = \
+    "THE_SELECTED_LEVEL_CANNOT_BE_SENT_WITHOUT_ACCEPTING_LESS"
 R_NO_EXIT_SIDE = "THE_SIDE_A_CLOSE_WOULD_CONSUME_PUBLISHES_NO_EXECUTABLE_LEVEL"
 R_NO_PROBABILITY = "NO_ELIGIBLE_PROBABILITY_ROW_PRICES_THIS_CONTRACT"
 R_HOLD_NOT_PRICED = "EV_HOLD_IS_NOT_IDENTIFIED_SO_NO_ACTION_CAN_BEAT_HOLDING"
@@ -184,6 +189,86 @@ def funded_fee_fn(*, qty, price):
     """The deployed fee schedule, in the shape the selectors call."""
     got, _ = FB.fee_for(float(qty), float(price), at=time.time())
     return float(got)
+
+
+#: The fixture states the venue and provider record, mapped onto the
+#: hold-value vocabulary. A token outside this table becomes UNKNOWN, which
+#: takes the established bound -- never a wider one.
+_EVENT_STATE_TOKENS = {
+    "PRE": "PRE_MATCH", "PREGAME": "PRE_MATCH", "PRE_MATCH": "PRE_MATCH",
+    "SCHEDULED": "PRE_MATCH", "NOT_STARTED": "PRE_MATCH",
+    "IN": "IN_PLAY", "IN_PLAY": "IN_PLAY", "LIVE": "IN_PLAY",
+    "INPROGRESS": "IN_PLAY", "IN_PROGRESS": "IN_PLAY",
+    "BREAK": "BREAK", "HALFTIME": "BREAK", "HALF_TIME": "BREAK",
+    "SUSPENDED": "SUSPENDED", "DELAYED": "SUSPENDED",
+    "FINAL": "FINAL", "FINISHED": "FINAL", "COMPLETED": "FINAL",
+    "ABANDONED": "ABANDONED", "CANCELLED": "ABANDONED",
+    "POSTPONED": "ABANDONED",
+}
+
+
+def event_state_of(raw) -> str:
+    """A fixture's own state token, in the hold-value vocabulary.
+
+    An unrecognised token is UNKNOWN, which takes the ESTABLISHED age bound.
+    That is the safe direction: every admissible state takes the same bound and
+    only a named experiment widens it, so a token this table does not know
+    cannot buy a staler quote.
+    """
+    tok = str(raw or "").strip().upper().replace("-", "_").replace(" ", "_")
+    return _EVENT_STATE_TOKENS.get(tok, "UNKNOWN")
+
+
+async def _decision_evidence(conn, probability_row) -> dict:
+    """THE FIXTURE AND SETTLEMENT EVIDENCE THE ENTRY DECISION ALREADY HAD.
+
+    `ev_hold` needs an event state (for its freshness bound) and a settlement
+    attestation (for its terminal rule). Neither is a column on the funded
+    position, and reading them off the position dict -- which is what this used
+    to do -- yielded None for both on every call.
+
+    They are persisted: `external_valuations.settlement_rule` is the attested
+    rule the entry was decided under, and `settlement_comparison` carries the
+    fixture evidence that scoped it, including `fixture_event_state`. Both are
+    read from the row this probability came from, so the exit is valued under
+    the same evidence the entry was.
+    """
+    out = {"read": False, "event_state": "UNKNOWN", "event_state_raw": None,
+           "settlement_rule": None, "settlement_supplied": False,
+           "valuation_row_id": (probability_row or {}).get("id")}
+    rid = out["valuation_row_id"]
+    if rid is None:
+        return dict(out, why=("the probability row carries no id, so the "
+                              "decision evidence beside it cannot be found"))
+    try:
+        row = await conn.fetchrow(
+            "SELECT settlement_rule, settlement_comparison "
+            "  FROM external_valuations WHERE id=$1", rid)
+    except Exception as exc:                                   # noqa: BLE001
+        return dict(out, why="%s: %s" % (type(exc).__name__, str(exc)[:200]))
+    if row is None:
+        return dict(out, why="no valuation row %s exists any more" % rid)
+    import json as _j
+
+    rule = row["settlement_rule"]
+    if isinstance(rule, str):
+        try:
+            rule = _j.loads(rule)
+        except ValueError:
+            rule = None
+    cmp_ = row["settlement_comparison"]
+    if isinstance(cmp_, str):
+        try:
+            cmp_ = _j.loads(cmp_)
+        except ValueError:
+            cmp_ = None
+    raw_state = (cmp_ or {}).get("fixture_event_state")
+    return dict(out, read=True, settlement_rule=rule,
+                settlement_supplied=bool(rule),
+                event_state_raw=raw_state,
+                event_state=event_state_of(raw_state),
+                why=("the entry decision's own persisted evidence, so the "
+                     "exit is valued under the rule the entry was"))
 
 
 async def select_exit(conn, position, *, client=None, now=None,
@@ -297,15 +382,33 @@ async def select_exit(conn, position, *, client=None, now=None,
                     why=("an unreadable book and an empty book are different "
                          "facts and only one of them is about the market. "
                          "Neither is a reason to sell"))
+    # ── THE VENUE BOOK'S OWN AGE, UNDER THE DECLARED ADMISSION POLICY ─
+    #
+    # THE DEFECT THIS CLOSES. `book_read` retrieves the payload and nothing
+    # more, and this applied no freshness check at all -- so a ten-minute-old
+    # ladder was as good as a current one. `ev_hold` checks the PROBABILITY's
+    # age, which is a different claim about a different source: a fresh
+    # probability against a stale book is precisely the pair that produces a
+    # confident decision on a price that no longer exists.
+    fresh = FA.venue_book_age(got.get("marketData"), now=at)
+    out["venue_book_age"] = fresh
+    if not fresh.get("ok"):
+        return dict(out, ok=False, refusal=R_BOOK_NOT_FRESH,
+                    book_refusal=fresh.get("refusal"), why=fresh.get("why"),
+                    note=("probability freshness does not establish book "
+                          "freshness. This is the entry lane's own admission "
+                          "policy, applied to a funded exit"))
+
     lad = BS.exit_ladder(got["marketData"], held_intent=opened_with)
     out["exit_ladder"] = {k: lad.get(k) for k in
-                          ("ok", "refusal", "best_exit_price", "size_at_best",
+                          ("ok", "refusal", "best_exit_price",
+                           "best_api_price", "size_at_best",
                            "displayed_depth", "levels_read", "parse_status")}
     if not lad.get("ok"):
         return dict(out, ok=False, refusal=R_NO_EXIT_SIDE,
                     ladder_refusal=lad.get("refusal"), why=lad.get("why"))
 
-    # ── EV_HOLD, UNDER ITS OWN RULES ───────────────────────────────
+    # ── EV_HOLD, UNDER ITS OWN RULES, WITH THE EVIDENCE IT EXPECTS ───
     prob = await HV.latest_probability(conn, us_market_slug=slug)
     out["probability_read"] = {k: prob.get(k) for k in
                                ("found", "refusal", "eligibility", "why")}
@@ -313,15 +416,38 @@ async def select_exit(conn, position, *, client=None, now=None,
         return dict(out, ok=False, refusal=R_NO_PROBABILITY,
                     probability_refusal=prob.get("refusal"),
                     why=prob.get("why"))
+    # THE FIXTURE AND SETTLEMENT EVIDENCE, FROM THE ROW THAT PRICED IT.
+    #
+    # THE DEFECT THIS CLOSES. `open_positions()` supplies neither
+    # `event_state` nor `settlement_rule` -- they are not columns on the
+    # position at all -- and this read them off the position dict, so both
+    # were always None. `ev_hold` then took its default UNKNOWN state and an
+    # unsupplied settlement, and `_terminal_rule` labelled the result
+    # CONDITIONAL and ranked it anyway. Checking `status == IDENTIFIED` passed
+    # on a valuation whose terminal rule was never established.
+    #
+    # The evidence is the ENTRY DECISION'S OWN, persisted on the
+    # `external_valuations` row this probability came from: the attested
+    # settlement rule, and the fixture's event state inside the settlement
+    # comparison that scoped it.
+    ev = await _decision_evidence(conn, prob["row"])
+    out["decision_evidence"] = {k: ev.get(k) for k in
+                                ("read", "event_state", "event_state_raw",
+                                 "settlement_supplied", "why")}
     hv = HV.ev_hold(qty=residual, basis_per_contract=basis_per,
                     probability_row=prob["row"], now=at,
                     payout_event_held=str(payout_event),
-                    event_state=position.get("event_state"),
-                    settlement=position.get("settlement_rule"))
+                    event_state=ev.get("event_state"),
+                    settlement=ev.get("settlement_rule"))
     out["ev_hold"] = {k: hv.get(k) for k in
                       ("status", "refusal", "why", "ev_hold_usd",
                        "probability", "age_bound_s", "event_state",
                        "probability_event", "payout_event_held")}
+    term = dict(hv.get("terminal_rule") or {})
+    out["terminal_rule"] = {k: term.get(k) for k in
+                            ("compatibility", "established", "asked", "unmet",
+                             "conflicts", "disqualifies_selection",
+                             "unknown_is_retained_as_conditional")}
     if hv.get("status") != "IDENTIFIED":
         return dict(out, ok=False, refusal=R_HOLD_NOT_PRICED,
                     hold_refusal=hv.get("refusal"), why=hv.get("why"),
@@ -333,6 +459,29 @@ async def select_exit(conn, position, *, client=None, now=None,
                         "calibration evidence: the two are not "
                         "interchangeable, and accumulating outcome history "
                         "would not supply it"))
+    # ── AND `IDENTIFIED` IS NOT ENOUGH FOR A FUNDED ACTION ──────────
+    #
+    # The hold-value component deliberately RETAINS an UNKNOWN terminal rule as
+    # a conditional valuation and ranks it, because for a SHADOW decision the
+    # probability is still the best available estimate. A funded exit is not a
+    # shadow decision: an unestablished terminal rule means we do not know what
+    # the contract pays on an overtime, a push or a void, and that is the
+    # number the whole comparison rests on. UNKNOWN therefore restricts the
+    # funded action instead of being labelled and acted upon.
+    if term.get("compatibility") != "ESTABLISHED":
+        return dict(out, ok=False, refusal=R_SETTLEMENT_NOT_ESTABLISHED,
+                    compatibility=term.get("compatibility"),
+                    unmet=term.get("unmet"),
+                    why=("the terminal rule is %s. The hold-value component "
+                         "retains that as a CONDITIONAL shadow valuation and "
+                         "ranks it, which is right for a shadow decision and "
+                         "not for a funded one: %s"
+                         % (term.get("compatibility"),
+                            term.get("why_not") or "no attestation supplied")),
+                    funded_restriction=(
+                        "a funded exit requires an ESTABLISHED settlement "
+                        "attestation. Conditional valuation is admissible for "
+                        "the shadow book and is not admissible here"))
 
     # ── THE RANKING, AND ITS OWN GATES ─────────────────────────────
     sale = BS.as_sale_ladder(lad)
@@ -354,10 +503,56 @@ async def select_exit(conn, position, *, client=None, now=None,
     sel = ranked.get("selected")
     qty = ranked.get("selected_qty")
     if sel in ("DIRECT_EXIT", "REDUCE") and qty and float(qty) > 0:
-        # THE PRICE IS A LEVEL THE BOOK PUBLISHED, not a mark we invented.
-        px = lad.get("best_exit_price")
+        # ── PROCEEDS AND WIRE PRICE ARE DIFFERENT NUMBERS ────────────
+        #
+        # THE DEFECT THIS CLOSES, and it inverted the economic bound on every
+        # short. `exit_ladder.best_exit_price` is CASH RECEIVED per held
+        # contract. `submit_exit`'s `limit_price` is the WIRE price -- the
+        # contract price the venue puts on the order. On a LONG they happen to
+        # coincide. On a SHORT they are complements: a long-side ask of 0.20
+        # means exit proceeds of 0.80, and passing 0.80 as the wire limit told
+        # the venue to accept anything down to 0.20 in proceeds. The selector
+        # chose the action on 0.80 and would have submitted a bound of 0.20.
+        #
+        # THE LADDER ALREADY CARRIES BOTH, by name and for this reason:
+        # `exit_price` is the proceeds and `api_price` is the venue's own price
+        # at that level. `api_price` IS the wire on both sides -- long:
+        # proceeds = wire; short: proceeds = 1 - wire -- so it is what is sent,
+        # and the proceeds ride beside it as what the decision was made on.
+        proceeds_per = float(lad["best_exit_price"])
+        wire = float(lad["best_api_price"])
+        rounded = safe_exit_cent(wire, opened_with)
+        if rounded is None:
+            return dict(out, ok=False, refusal=R_EXIT_WIRE_UNREPRESENTABLE,
+                        wire_asked=wire, proceeds_per_contract=proceeds_per,
+                        why=("%s cannot be expressed in the venue's two "
+                             "decimals on this side without accepting less "
+                             "than the level the action was chosen on"
+                             % wire))
+        # AND THE ROUNDING IS CHECKED, not trusted. `safe_exit_cent` ceils a
+        # long wire and floors a short one, which is the direction that cannot
+        # reduce proceeds -- so this assertion should never fire, and it is
+        # here because "should never" is how the inversion above survived.
+        got_per = exit_proceeds(1, rounded, opened_with)
+        if got_per < proceeds_per - 1e-9:
+            return dict(out, ok=False, refusal=R_EXIT_WIRE_UNREPRESENTABLE,
+                        wire_asked=wire, wire_rounded=rounded,
+                        proceeds_per_contract=proceeds_per,
+                        proceeds_after_rounding=got_per,
+                        why=("rounding the wire to %s would receive %.6f per "
+                             "contract against the %.6f the action was "
+                             "selected on" % (rounded, got_per, proceeds_per)))
         return dict(out, ok=True, refusal=None, selected=sel,
-                    selected_qty=float(qty), limit_price=float(px),
+                    selected_qty=float(qty),
+                    # WHAT IS SENT.
+                    limit_price=rounded,
+                    price_space="VENUE_WIRE_CONTRACT_PRICE",
+                    # WHAT THE DECISION WAS MADE ON.
+                    proceeds_per_contract=proceeds_per,
+                    proceeds_after_rounding=got_per,
+                    proceeds_space=("cash received per held contract: wire on "
+                                    "a long, (1 - wire) on a short"),
+                    rounding=("CEIL" if opened_with != SHORT else "FLOOR"),
                     is_an_evidenced_exit=True,
                     price_source=("the best level of the venue's own exit "
                                   "ladder at the moment of the decision"),
@@ -455,8 +650,18 @@ async def _reserve_exit(conn, *, parent: str, row, venue: str,
 
 async def submit_exit(conn, *, intent_id: str, limit_price=None,
                       quantity=None, adapter=None, venue: str | None = None,
+                      expect_proceeds_per_contract=None,
                       now: float | None = None) -> dict:
     """SELL BACK SOME OR ALL OF A HELD FUNDED POSITION.
+
+    `limit_price` IS THE VENUE'S WIRE PRICE -- the contract price the order
+    carries -- and NOT the cash we receive. On a long those coincide; on a
+    short the proceeds are `1 - wire`. `expect_proceeds_per_contract`, when
+    supplied, is the per-contract CASH the caller selected the action on, and
+    the submission refuses if the wire it is about to send would receive less
+    than that. Passing proceeds into `limit_price` is the inversion that made
+    an 0.80 short exit accept 0.20, so the two spaces are named here and
+    checked against each other before anything is sent.
 
     THE ORDER OF OPERATIONS IS THE ENTRY PATH'S, for the same reasons: every
     refusal happens before anything is written, the exit intent is COMMITTED
@@ -531,6 +736,22 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
                          "assumed" % limit_price))
     ven = str(venue or row["venue"])
     proceeds = exit_proceeds(contracts, wire, opened_with)
+    per_contract = exit_proceeds(1, wire, opened_with)
+    # ── THE BOUND THE CALLER SELECTED ON, CHECKED AGAINST THE WIRE ───
+    if expect_proceeds_per_contract is not None:
+        want = float(expect_proceeds_per_contract)
+        if per_contract < want - 1e-9:
+            return dict(out, ok=False,
+                        refusal=R_EXIT_WIRE_UNREPRESENTABLE,
+                        wire=wire, proceeds_per_contract=per_contract,
+                        selected_on_proceeds_per_contract=want,
+                        opened_with=opened_with,
+                        why=("this wire receives %.6f per contract and the "
+                             "action was selected on %.6f. A wire that "
+                             "accepts less than the level the decision was "
+                             "made on is not the same order -- on a short the "
+                             "two spaces are complements and confusing them "
+                             "inverts the bound" % (per_contract, want)))
     out["plan"] = {
         "us_market_slug": row["us_market_slug"], "quantity": contracts,
         "limit_price": wire, "sell": True,
@@ -540,6 +761,13 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
                               "BUY intent is passed so the adapter never "
                               "sells a side we do not hold"),
         "expected_proceeds_usd": proceeds,
+        "proceeds_per_contract": per_contract,
+        "price_space": "VENUE_WIRE_CONTRACT_PRICE",
+        "proceeds_space": ("cash received per held contract: wire on a long, "
+                           "(1 - wire) on a short"),
+        "selected_on_proceeds_per_contract": (
+            None if expect_proceeds_per_contract is None
+            else float(expect_proceeds_per_contract)),
         "rounded": {"asked": float(limit_price), "sent": wire,
                     "direction": ("FLOOR" if opened_with == SHORT
                                   else "CEIL"),
@@ -939,11 +1167,18 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
         ex = await submit_exit(conn, intent_id=p["intent_id"],
                               limit_price=pick["limit_price"],
                               quantity=pick["selected_qty"],
+                              # THE WIRE AND THE PROCEEDS, BOTH, so the
+                              # submission can refuse a wire that would
+                              # receive less than the level it was chosen on.
+                              expect_proceeds_per_contract=pick[
+                                  "proceeds_per_contract"],
                               adapter=mod, venue=venue, now=at)
         out["exits"].append({"intent_id": p["intent_id"],
                              "selected": pick["selected"],
                              "selected_qty": pick["selected_qty"],
-                             "limit_price": pick["limit_price"],
+                             "wire_limit_price": pick["limit_price"],
+                             "proceeds_per_contract": pick[
+                                 "proceeds_per_contract"],
                              "submitted": ex.get("submitted"),
                              "refusal": ex.get("refusal"),
                              "exit_intent_id": ex.get("exit_intent_id"),

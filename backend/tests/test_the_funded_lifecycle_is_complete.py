@@ -126,10 +126,27 @@ class _Orders:
         return {}
 
 
+#: "the caller said nothing", as distinct from "the venue sent no clock".
+_UNSET_TS = object()
+
+
+def _venue_clock(age_s=0.0):
+    """A `marketData.transactTime` the supported parser accepts: ISO 8601 UTC
+    with a bare Z. This is the ONLY thing that establishes the book's age --
+    our own read clock would make every book fresh by construction."""
+    import datetime as _dt
+
+    t = _dt.datetime.now(_dt.timezone.utc) - _dt.timedelta(seconds=age_s)
+    return t.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z"
+
+
 class _Markets:
-    def __init__(self, bids=None, offers=None, raise_on_book=False):
+    def __init__(self, bids=None, offers=None, raise_on_book=False,
+                 book_age_s=0.0, transact_time=_UNSET_TS):
         self._bids, self._offers = bids, offers
         self._raise = raise_on_book
+        self._age = book_age_s
+        self._ts = transact_time
 
     def retrieve_by_slug(self, slug):
         return {"market": {"marketSides": [
@@ -141,16 +158,25 @@ class _Markets:
             raise RuntimeError("the venue's book feed is unreachable")
         if self._bids is None and self._offers is None:
             return {}
-        return {"marketData": {"bids": list(self._bids or []),
-                               "offers": list(self._offers or [])}}
+        md = {"bids": list(self._bids or []),
+              "offers": list(self._offers or [])}
+        # THE VENUE'S OWN CLOCK. `transact_time=None` models a venue that sent
+        # none, which is UNMEASURED and refuses -- not a stale book.
+        if self._ts is _UNSET_TS:
+            md["transactTime"] = _venue_clock(self._age)
+        elif self._ts is not None:
+            md["transactTime"] = self._ts
+        return {"marketData": md}
 
 
 class _Client:
     def __init__(self, sent, *, bids=None, offers=None, raise_on_book=False,
-                 **kw):
+                 book_age_s=0.0, transact_time=_UNSET_TS, **kw):
         self.orders = _Orders(sent, **kw)
         self.markets = _Markets(bids=bids, offers=offers,
-                                raise_on_book=raise_on_book)
+                                raise_on_book=raise_on_book,
+                                book_age_s=book_age_s,
+                                transact_time=transact_time)
 
 
 def _transport(monkeypatch, **kw):
@@ -206,14 +232,15 @@ async def _clean(conn):
 
 async def _entry(conn, *, intent_id="fpi-a", qty=10, price=0.62,
                  payout_event=PAYS_ON, vo="vo-1", fill_id="vf-1",
-                 fill_qty=None, commission=None):
-    coll = FX.collateral_for(price, qty, FX.LONG)
+                 fill_qty=None, commission=None, intent=None):
+    opened = intent or FX.LONG
+    coll = FX.collateral_for(price, qty, opened)
     got = await FB.record_intent(
         conn, intent_id=intent_id, account_id=ACCT, venue=VENUE,
         venue_class=FA.VENUE_FUNDED, us_market_slug=SLUG, event_key=EVENT,
-        order_intent=FX.LONG, limit_price=price, quantity=qty,
+        order_intent=opened, limit_price=price, quantity=qty,
         collateral_usd=coll, effective_digest="d",
-        payout_event=payout_event, held_is_long=True)
+        payout_event=payout_event, held_is_long=(opened == FX.LONG))
     if not got.get("ok"):
         return got
     await FB.record_acknowledgement(conn, intent_id, venue_order_id=vo,
@@ -225,9 +252,34 @@ async def _entry(conn, *, intent_id="fpi-a", qty=10, price=0.62,
     return dict(got, fills=await FB.ingest_fills(conn, intent_id, [f]))
 
 
+#: AN ESTABLISHED TERMINAL RULE, in the shape `bettor_venue_settlement.attest`
+#: produces and `bettor_hold_value._terminal_rule` reads. `overall_established`
+#: with no `unmet` is what makes the compatibility ESTABLISHED -- which a
+#: FUNDED exit requires. Anything less is UNKNOWN, which the shadow book
+#: retains as conditional and this lane refuses.
+SETTLED_RULE = {
+    "overall_established": True,
+    "unmet": [],
+    "attested": ["DRAW", "OVERTIME", "PUSH", "VOID"],
+    "book_rule": "MONEYLINE_REGULATION_PLUS_OVERTIME",
+    "venue_rules_text_read": True,
+    "venue_rules_field": "rulesText",
+}
+#: AND THE UNESTABLISHED ONE: the venue published nothing to compare, so the
+#: four conditions are unmet. This is the common production case.
+UNSETTLED_RULE = {
+    "overall_established": False,
+    "unmet": ["DRAW_NOT_STATED", "OVERTIME_NOT_STATED"],
+    "attested": [],
+    "venue_rules_text_read": False,
+}
+
+
 async def _probability(conn, *, p=0.55, slug=SLUG, at=None,
-                       eligibility="ELIGIBLE"):
-    """AN ELIGIBLE EXTERNAL VALUATION ROW, in the shape `ev_hold` reads."""
+                       eligibility="ELIGIBLE", settled=True,
+                       event_state="IN_PROGRESS"):
+    """AN ELIGIBLE EXTERNAL VALUATION ROW, in the shape `ev_hold` reads --
+    carrying the fixture and settlement evidence the entry decision had."""
     when = at if at is not None else time.time()
     await conn.execute(
         "INSERT INTO external_valuations (experiment_id, version, "
@@ -238,14 +290,19 @@ async def _probability(conn, *, p=0.55, slug=SLUG, at=None,
         " payout_event, payout_is_complement, buy_intent, observed_at, "
         " received_at, age_s, eligibility, decided_at, executable_price, "
         " cost_per_contract, estimated_edge_per_contract, mapped_outcome, "
-        " ineligible_reason) "
+        " ineligible_reason, settlement_rule, settlement_comparison) "
         "VALUES ('EXP','v','EXTERNAL_BOOKMAKER_VALUATION','PINNACLE','pinnacle','multiplicative',"
         " $1,$2,'basketball','WINNER','{}'::jsonb,2,2,'BUY',TRUE,'t',"
         " ARRAY[]::text[],$3,$4,$5,$5,FALSE,$6,to_timestamp($7),"
-        " to_timestamp($7),0.5,$8,to_timestamp($7),0.5,0.5,0.05,$2,$9)",
+        " to_timestamp($7),0.5,$8,to_timestamp($7),0.5,0.5,0.05,$2,$9,"
+        " $10::jsonb,$11::jsonb)",
         "PMUS_TEST_COMPLETE", PAYS_ON, slug, float(p), PAYS_ON, FX.LONG,
         float(when), eligibility,
-        (None if eligibility == "ELIGIBLE" else "HELD_BY_A_TEST"))
+        (None if eligibility == "ELIGIBLE" else "HELD_BY_A_TEST"),
+        json.dumps(SETTLED_RULE if settled else UNSETTLED_RULE),
+        json.dumps({"verdict": ("COMPATIBLE" if settled else "UNKNOWN"),
+                    "fixture_event_state": event_state,
+                    "fixture_read": True}))
 
 
 # ════════════════════════════════════════════════════════════════════
@@ -1031,3 +1088,465 @@ async def test_the_scheduled_path_selects_executes_recovers_and_reports(
     finally:
         await _clean(conn)
         await conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 6 · PROCEEDS AND WIRE PRICE ARE DIFFERENT NUMBERS
+# ════════════════════════════════════════════════════════════════════
+
+def test_the_ladder_keeps_proceeds_and_wire_apart_on_both_sides():
+    """THE ARITHMETIC, PURE. A long-side ask of 0.20 is 0.80 of proceeds to a
+    short holder, and 0.80 sent as a short wire limit accepts 0.20. The two
+    spaces are complements on a short and coincide on a long."""
+    from sportsassets import bettor_book_snapshot as BS
+
+    md = {"bids": [_level(0.18, 30)], "offers": [_level(0.20, 40)]}
+    short = BS.exit_ladder(md, held_intent="ORDER_INTENT_BUY_SHORT")
+    assert short["best_exit_price"] == pytest.approx(0.80)   # cash received
+    assert short["best_api_price"] == pytest.approx(0.20)    # the wire
+    # THE INVERSION, SHOWN: proceeds passed as a wire halve-and-flip.
+    bad = FM.safe_exit_cent(short["best_exit_price"], "ORDER_INTENT_BUY_SHORT")
+    assert FM.exit_proceeds(1, bad, "ORDER_INTENT_BUY_SHORT") == \
+        pytest.approx(0.20)
+    # THE WIRE, CORRECTLY: api_price recovers the proceeds.
+    good = FM.safe_exit_cent(short["best_api_price"], "ORDER_INTENT_BUY_SHORT")
+    assert FM.exit_proceeds(1, good, "ORDER_INTENT_BUY_SHORT") == \
+        pytest.approx(0.80)
+
+    long_ = BS.exit_ladder(md, held_intent=FX.LONG)
+    # ON A LONG THEY COINCIDE, which is why the bug hid.
+    assert long_["best_exit_price"] == pytest.approx(0.18)
+    assert long_["best_api_price"] == pytest.approx(0.18)
+    w = FM.safe_exit_cent(long_["best_api_price"], FX.LONG)
+    assert FM.exit_proceeds(1, w, FX.LONG) >= 0.18 - 1e-9
+
+
+@pg
+@pytest.mark.asyncio
+@pytest.mark.parametrize("side", ["LONG", "SHORT"])
+async def test_the_submitted_limit_cannot_accept_less_than_the_selection(
+        monkeypatch, side):
+    """THE SCHEDULED SELECTOR THROUGH THE REAL ADAPTER, BOTH SIDES.
+
+    `select_exit` chooses on PROCEEDS and submits a WIRE; the order that
+    reaches `pmus.submit_fok` must not permit less cash per contract than the
+    level the action was selected on.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        if side == "LONG":
+            # Held long at 0.60; the bid pays 0.75.
+            opened, entry_px = FX.LONG, 0.60
+            bids, offers = [_level(0.75, 40)], [_level(0.77, 40)]
+            p = 0.55
+        else:
+            # Held short at 0.60 of collateral (wire 0.40); the long-side ask
+            # is 0.20, so closing the short receives 0.80.
+            opened, entry_px = "ORDER_INTENT_BUY_SHORT", 0.40
+            bids, offers = [_level(0.18, 40)], [_level(0.20, 40)]
+            p = 0.05          # the payout event is unlikely -> holding is poor
+        await _entry(conn, qty=10, price=entry_px, intent=opened)
+        await _probability(conn, p=p)
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+        pmus, sent, client = _transport(monkeypatch, order_id="vo-x",
+                                       bids=bids, offers=offers,
+                                       exec_by_call=[[]])
+        pick = await FM.select_exit(conn, pos, client=client)
+        assert pick["ok"] is True, pick
+        assert pick["is_an_evidenced_exit"] is True, pick.get("why")
+        # THE TWO NUMBERS ARE BOTH REPORTED AND THEY ARE THE RIGHT WAY ROUND.
+        assert pick["price_space"] == "VENUE_WIRE_CONTRACT_PRICE"
+        if side == "SHORT":
+            assert pick["proceeds_per_contract"] == pytest.approx(0.80)
+            assert pick["limit_price"] == pytest.approx(0.20)
+            assert pick["rounding"] == "FLOOR"
+        else:
+            assert pick["proceeds_per_contract"] == pytest.approx(0.75)
+            assert pick["limit_price"] == pytest.approx(0.75)
+            assert pick["rounding"] == "CEIL"
+        # ── THROUGH THE REAL ADAPTER ────────────────────────────────
+        ex = await FM.submit_exit(
+            conn, intent_id=pos["intent_id"], limit_price=pick["limit_price"],
+            quantity=pick["selected_qty"],
+            expect_proceeds_per_contract=pick["proceeds_per_contract"],
+            adapter=pmus, venue=VENUE)
+        assert ex["submitted"] is True, ex
+        create = [q for k, q in sent if k == "create"][-1]
+        wire_sent = float((create["price"] or {}).get("value"))
+        # THE ASSERTION THAT MATTERS: what the venue was told cannot receive
+        # less per contract than what the decision was made on.
+        got_per = FM.exit_proceeds(1, wire_sent, opened)
+        assert got_per >= pick["proceeds_per_contract"] - 1e-9, (
+            "wire %s receives %s against a selection on %s"
+            % (wire_sent, got_per, pick["proceeds_per_contract"]))
+        assert create["intent"] == (
+            "ORDER_INTENT_SELL_SHORT" if side == "SHORT"
+            else "ORDER_INTENT_SELL_LONG")
+        if side == "SHORT":
+            assert wire_sent == pytest.approx(0.20)
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_submit_exit_refuses_a_wire_that_would_accept_less(monkeypatch):
+    """THE GUARD, DIRECTLY. Hand `submit_exit` the PROCEEDS where the wire
+    belongs on a short -- the exact old mistake -- and it refuses instead of
+    sending an inverted bound."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.40,
+                     intent="ORDER_INTENT_BUY_SHORT")
+        monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+        pmus, sent, _ = _transport(monkeypatch)
+        got = await FM.submit_exit(
+            conn, intent_id="fpi-a",
+            limit_price=0.80,                      # proceeds, not the wire
+            expect_proceeds_per_contract=0.80,
+            adapter=pmus, venue=VENUE)
+        assert got["ok"] is False
+        assert got["refusal"] == FM.R_EXIT_WIRE_UNREPRESENTABLE, got
+        assert got["proceeds_per_contract"] == pytest.approx(0.20)
+        assert got["selected_on_proceeds_per_contract"] == pytest.approx(0.80)
+        assert [k for k, _ in sent if k == "create"] == []
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 7 · THE EVIDENCE THE COMPONENTS EXPECT, FROM THE DATABASE
+# ════════════════════════════════════════════════════════════════════
+
+def test_the_funded_book_age_policy_is_the_entry_lanes_own():
+    """ONE BOUND, NOT TWO. Two lanes admitting the same venue book on two
+    different ages is exactly the drift a shared declaration prevents."""
+    from sportsassets.workers import ext_pinnacle_loop as L
+
+    assert FA.MAX_VENUE_BOOK_AGE_S == L.MAX_VENUE_QUOTE_AGE_S
+    assert "VENUE_TRANSACT_TIME" in FA.FRESHNESS_BASIS_ESTABLISHED
+
+
+@pg
+@pytest.mark.asyncio
+@pytest.mark.parametrize("book", ["STALE", "NO_CLOCK", "UNPARSEABLE"])
+async def test_a_book_whose_age_is_not_established_refuses_the_exit(
+        monkeypatch, book):
+    """PROBABILITY FRESHNESS IS NOT BOOK FRESHNESS. The probability is current
+    in all three of these; the book is not admissible in any of them."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        await _probability(conn, p=0.55)
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        kw = {"bids": [_level(0.75, 40)]}
+        if book == "STALE":
+            kw["book_age_s"] = 600.0
+        elif book == "NO_CLOCK":
+            kw["transact_time"] = None
+        else:
+            kw["transact_time"] = "not-a-timestamp"
+        _, sent, client = _transport(monkeypatch, **kw)
+        got = await FM.select_exit(conn, pos, client=client)
+        assert got["ok"] is False
+        assert got["refusal"] == FM.R_BOOK_NOT_FRESH, got
+        age = got["venue_book_age"]
+        if book == "STALE":
+            assert age["basis"] == "VENUE_TRANSACT_TIME"
+            assert age["refusal"] == FA.R_BOOK_STALE
+            assert age["age_s"] > 30.0
+        else:
+            # UNMEASURED IS NOT STALE, and the two are not collapsed.
+            assert age["refusal"] == FA.R_BOOK_AGE_UNMEASURED
+            assert age["basis"] in ("VENUE_CLOCK_NOT_PROVIDED",
+                                    "VENUE_CLOCK_UNPARSEABLE")
+        assert [k for k, _ in sent if k == "create"] == []
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_an_unestablished_settlement_rule_restricts_the_funded_exit(
+        monkeypatch):
+    """`IDENTIFIED` IS NOT ENOUGH. The hold-value component retains an UNKNOWN
+    terminal rule as a CONDITIONAL valuation and ranks it -- right for a shadow
+    decision, not for a funded one. The restriction is explicit."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        # The venue published nothing to compare: UNKNOWN, not INCOMPATIBLE.
+        await _probability(conn, p=0.55, settled=False)
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        _, sent, client = _transport(monkeypatch, bids=[_level(0.75, 40)])
+        got = await FM.select_exit(conn, pos, client=client)
+        assert got["ok"] is False
+        assert got["refusal"] == FM.R_SETTLEMENT_NOT_ESTABLISHED, got
+        # THE VALUATION ITSELF WAS IDENTIFIED -- that is the whole point.
+        assert got["ev_hold"]["status"] == "IDENTIFIED"
+        assert got["terminal_rule"]["compatibility"] == "UNKNOWN"
+        assert got["terminal_rule"][
+            "unknown_is_retained_as_conditional"] is True
+        assert "not admissible here" in got["funded_restriction"]
+        assert [k for k, _ in sent if k == "create"] == []
+
+        # AND WITH THE RULE ESTABLISHED, the same position proceeds.
+        await conn.execute("DELETE FROM external_valuations WHERE venue=$1",
+                           "PMUS_TEST_COMPLETE")
+        await _probability(conn, p=0.55, settled=True)
+        ok = await FM.select_exit(conn, pos, client=client)
+        assert ok["ok"] is True, ok
+        assert ok["terminal_rule"]["compatibility"] == "ESTABLISHED"
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_evidence_comes_from_the_database_projection(monkeypatch):
+    """NOT A HAND-BUILT POSITION. `open_positions()` is the projection the
+    scheduler uses, and it carries no `event_state` and no `settlement_rule`
+    -- so the selector must find them itself, on the valuation row that priced
+    the entry. Reading them off the position was always None."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        await _probability(conn, p=0.55, event_state="IN_PROGRESS")
+        rows = await FM.open_positions(conn, account_id=ACCT, venue=VENUE)
+        pos = rows[0]
+        # THE PROJECTION DOES NOT CARRY THEM, and that is correct: decision
+        # evidence does not belong on an inventory row.
+        assert "event_state" not in pos
+        assert "settlement_rule" not in pos
+        got = await FM.select_exit(
+            conn, pos, client=_transport(monkeypatch,
+                                        bids=[_level(0.75, 40)])[2])
+        assert got["ok"] is True, got
+        ev = got["decision_evidence"]
+        assert ev["read"] is True
+        assert ev["event_state_raw"] == "IN_PROGRESS"
+        assert ev["event_state"] == "IN_PLAY"
+        assert ev["settlement_supplied"] is True
+        # THE BOUND IS THE ESTABLISHED ONE FOR THAT STATE.
+        assert got["ev_hold"]["event_state"] == "IN_PLAY"
+        assert got["ev_hold"]["age_bound_s"] == pytest.approx(30.0)
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 8 · ONE REDELIVERY DOES BOTH REPAIRS
+# ════════════════════════════════════════════════════════════════════
+
+@pg
+@pytest.mark.asyncio
+async def test_one_redelivery_repairs_the_events_and_books_the_only_fee():
+    """THE `elif` DEFECT. A redelivery that both finishes an interrupted write
+    AND carries the venue's actual commission must do both -- the venue states
+    a commission once, so the branch that skipped it discarded the only copy.
+
+    After this single delivery there is no further venue contact, and the fee,
+    the adjustment, the provisional status and the P&L must all be final.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn)                        # no commission stated
+        fid = await conn.fetchval("SELECT fill_id FROM bettor_funded_fills")
+        expected = float(await conn.fetchval(
+            "SELECT expected_fee_usd FROM bettor_funded_fills"))
+        # THE INTERRUPTION: the fill landed, the events did not.
+        await conn.execute("DELETE FROM bettor_funded_economics")
+        await conn.execute(
+            "UPDATE bettor_funded_fills SET economics_written=FALSE")
+
+        charged = round(expected + 0.27, 4)
+        again = await FB.ingest_fills(conn, "fpi-a", [
+            {"qty": 10.0, "price": 0.62, "venue_fill_id": "vf-1",
+             "commission_usd": charged}])
+        rep = again["already_held"][0]
+        # BOTH, from ONE delivery.
+        assert rep["repaired_economics"] is True
+        assert rep["fee_reconciled_late"] is True, rep
+        assert rep["adjustment_usd"] == pytest.approx(-0.27, abs=1e-6)
+
+        fill = await conn.fetchrow("SELECT * FROM bettor_funded_fills")
+        assert fill["fee_state"] == FB.FEE_DISAGREES
+        assert float(fill["observed_fee_usd"]) == pytest.approx(charged)
+        assert float(fill["fee_usd"]) == pytest.approx(charged)
+        assert fill["economics_written"] is True
+        # THE LEDGER: cash, the expected fee, and the adjustment to actual.
+        kinds = {r["kind"]: float(r["amount_usd"]) for r in await conn.fetch(
+            "SELECT kind, amount_usd FROM bettor_funded_economics")}
+        assert set(kinds) == {"ENTRY_COST", "FEE", "FEE_ADJUSTMENT"}
+        assert kinds["FEE"] + kinds["FEE_ADJUSTMENT"] == \
+            pytest.approx(-charged)
+        assert await conn.fetchval(
+            "SELECT bool_and(NOT provisional) FROM bettor_funded_economics"
+        ) is True
+
+        pnl = await FB.pnl(conn, account_id=ACCT, venue=VENUE)
+        assert pnl["fills_with_provisional_fees"] == 0
+        assert pnl["fees_usd"] == pytest.approx(charged)
+        assert pnl["fee_variance_usd"] == pytest.approx(0.27, abs=1e-6)
+        assert pnl["realised_is_provisional"] is False
+
+        # ── AND A REPLAY CHANGES NOTHING ───────────────────────────
+        for _ in range(3):
+            more = await FB.ingest_fills(conn, "fpi-a", [
+                {"qty": 10.0, "price": 0.62, "venue_fill_id": "vf-1",
+                 "commission_usd": charged}])
+            assert more["already_held"][0]["fee_reconciled_late"] is False
+            assert more["already_held"][0]["repaired_economics"] is False
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_economics") == 3
+        after = await FB.pnl(conn, account_id=ACCT, venue=VENUE)
+        assert after["fees_usd"] == pytest.approx(pnl["fees_usd"])
+        assert after["cost_basis_usd"] == pytest.approx(pnl["cost_basis_usd"])
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+# ════════════════════════════════════════════════════════════════════
+# 9 · THE INVENTORY TRANSITION IS INSIDE THE COMMIT
+# ════════════════════════════════════════════════════════════════════
+
+@pg
+@pytest.mark.asyncio
+async def test_an_interruption_inside_the_fill_commit_leaves_no_open_slot():
+    """THE WINDOW THIS CLOSES. The state transition to FILLED and the residual
+    recompute used to be two statements AFTER the fill's transaction. A crash
+    between them leaves an entry marked FILLED whose residual is still the 0 it
+    was inserted with -- which reads as "not outstanding and nothing held", so
+    the one-open-position slot is RELEASED while the contracts are owned.
+
+    The interruption is injected at exactly that boundary, and a second
+    connection then attempts another entry.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    other = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await FB.record_intent(
+            conn, intent_id="fpi-a", account_id=ACCT, venue=VENUE,
+            venue_class=FA.VENUE_FUNDED, us_market_slug=SLUG, event_key=EVENT,
+            order_intent=FX.LONG, limit_price=0.62, quantity=10,
+            collateral_usd=6.2, effective_digest="d", payout_event=PAYS_ON)
+        await FB.record_acknowledgement(conn, "fpi-a", venue_order_id="vo-1",
+                                       status="open")
+        assert float(await conn.fetchval(
+            "SELECT residual_qty FROM bettor_funded_intents "
+            " WHERE intent_id='fpi-a'")) == pytest.approx(0.0)
+
+        # THE INJECTION: fail the residual recompute, which is the statement
+        # that used to run after the commit.
+        import sportsassets.bettor_funded_book as _fb
+        real = _fb._recompute_residual
+
+        async def _die(c, iid):
+            raise RuntimeError("interrupted between FILLED and the residual")
+
+        _fb._recompute_residual = _die
+        try:
+            with pytest.raises(RuntimeError):
+                await FB.ingest_fills(conn, "fpi-a", [
+                    {"qty": 10.0, "price": 0.62, "venue_fill_id": "vf-1"}])
+        finally:
+            _fb._recompute_residual = real
+
+        # ── NOTHING PARTIAL SURVIVED ───────────────────────────────
+        row = await conn.fetchrow(
+            "SELECT state, residual_qty::float8 AS r, "
+            "       bettor_funded_position_is_open(state, residual_qty, "
+            "           closed_at) AS open "
+            "  FROM bettor_funded_intents WHERE intent_id='fpi-a'")
+        # The whole ingest rolled back: the order is NOT FILLED, and the
+        # position is still open on its outstanding order -- so the slot is
+        # held either way and no exposure was invented or lost.
+        assert row["state"] == "ACKNOWLEDGED"
+        assert row["open"] is True
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_fills") == 0
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_economics") == 0
+
+        # ── AND A SECOND ENTRY FROM ANOTHER CONNECTION IS REFUSED ──
+        second = await FB.record_intent(
+            other, intent_id="fpi-b", account_id=ACCT, venue=VENUE,
+            venue_class=FA.VENUE_FUNDED, us_market_slug=SLUG, event_key=EVENT,
+            order_intent=FX.LONG, limit_price=0.62, quantity=10,
+            collateral_usd=6.2, effective_digest="d", payout_event=PAYS_ON)
+        assert second["ok"] is False
+        assert second["refusal"] == FB.R_ANOTHER_INTENT_IS_LIVE
+
+        # ── THE REDELIVERY THEN COMPLETES IT, ATOMICALLY ───────────
+        ok = await FB.ingest_fills(conn, "fpi-a", [
+            {"qty": 10.0, "price": 0.62, "venue_fill_id": "vf-1"}])
+        assert len(ok["written"]) == 1
+        row = await conn.fetchrow(
+            "SELECT state, residual_qty::float8 AS r, "
+            "       bettor_funded_position_is_open(state, residual_qty, "
+            "           closed_at) AS open "
+            "  FROM bettor_funded_intents WHERE intent_id='fpi-a'")
+        assert row["state"] == "FILLED"
+        assert float(row["r"]) == pytest.approx(10.0)
+        assert row["open"] is True          # FILLED, and the stock is held
+        still = await FB.record_intent(
+            other, intent_id="fpi-c", account_id=ACCT, venue=VENUE,
+            venue_class=FA.VENUE_FUNDED, us_market_slug=SLUG, event_key=EVENT,
+            order_intent=FX.LONG, limit_price=0.62, quantity=10,
+            collateral_usd=6.2, effective_digest="d", payout_event=PAYS_ON)
+        assert still["ok"] is False
+        assert still["refusal"] == FB.R_ANOTHER_INTENT_IS_LIVE
+    finally:
+        await _clean(conn)
+        await conn.close()
+        await other.close()
+
+
+def test_the_fill_commit_covers_the_inventory_transition():
+    """STRUCTURAL. The state transition, the residual recompute and the closure
+    must all sit inside the locked transaction, not after it."""
+    import inspect
+
+    src = inspect.getsource(FB.ingest_fills)
+    assert "FOR UPDATE" in src
+    assert "_ingest_locked" in src
+    body = inspect.getsource(FB._ingest_locked)
+    for stmt in ("state='FILLED'", "_recompute_residual",
+                 "mark_position_closed"):
+        assert stmt in body, stmt
+    # and the lock is on the POSITION, which is what an exit reservation
+    # locks too -- same row, same order, so they serialise.
+    assert "econ_intent" in src

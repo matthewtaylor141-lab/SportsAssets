@@ -1,0 +1,101 @@
+{
+ "what": "SCHEDULED_FUNDED_LIFECYCLE_TRACE",
+ "steps": [
+  {
+   "n": "ENTRY HELD (short)",
+   "residual": 10.0,
+   "collateral_usd": 6.0,
+   "payout_event": "BOSTON_CELTICS"
+  },
+  {
+   "n": "CYCLE 1 -- entry loop STOPPED, servicing ran anyway",
+   "cycle_state": "STOPPED",
+   "servicing_ok": true,
+   "opened_anything": false
+  },
+  {
+   "n": "BOOK ADMITTED ON THE VENUE'S OWN CLOCK",
+   "basis": "VENUE_TRANSACT_TIME",
+   "age_s": -0.008,
+   "bound_s": 30.0
+  },
+  {
+   "n": "EVIDENCE FROM THE ENTRY DECISION'S OWN ROW",
+   "event_state_raw": "IN_PROGRESS",
+   "event_state": "IN_PLAY",
+   "settlement": "ESTABLISHED"
+  },
+  {
+   "n": "EV_HOLD",
+   "status": "IDENTIFIED",
+   "probability": 0.05,
+   "ev_hold_usd": -5.5,
+   "age_bound_s": 30.0
+  },
+  {
+   "n": "ACTION SELECTED",
+   "selected": "DIRECT_EXIT",
+   "qty": 10.0,
+   "proceeds_per_contract": 0.8,
+   "wire_limit_price": 0.2,
+   "rounding": "FLOOR",
+   "why": "DIRECT_EXIT over 10 contracts scores 1.8900, ahead of TAKE_COMPLEMENT at 1.8900 by 0.0000. HOLD was IN the com"
+  },
+  {
+   "n": "SENT THROUGH pmus.submit_fok",
+   "venue_intent": "ORDER_INTENT_SELL_SHORT",
+   "wire_on_the_wire": 0.2,
+   "quantity": 10,
+   "proceeds_that_wire_receives": 0.8,
+   "cannot_accept_less_than_selection": true
+  },
+  {
+   "n": "RESERVED -- nothing filled yet",
+   "available_to_exit": 0.0,
+   "residual": 10.0
+  },
+  {
+   "n": "CYCLE 2 after RESTART -- the exit's fill recovered",
+   "direction": "EXIT",
+   "executions_read": 1,
+   "fills_written": 1
+  },
+  {
+   "n": "POSITION CLOSED",
+   "residual": 0.0,
+   "closed_reason": "EXITED_IN_THE_MARKET"
+  },
+  {
+   "n": "COMMAND CENTRE READBACK",
+   "section": "Funded book",
+   "label": "REAL MONEY \u2014 NEVER SUMMED WITH ANY MODELLED BOOK",
+   "contracts_held": 0.0,
+   "cost_basis_usd": 6.0,
+   "exit_proceeds_usd": 8.0,
+   "fees_usd": 0.3,
+   "realised_pnl_usd": 1.7,
+   "max_drawdown_usd": 0.0,
+   "unrealised": null,
+   "closed_positions": 1,
+   "discrepancies": [
+    "A_FEE_THE_VENUE_CHARGED_DIFFERENTLY",
+    "A_FEE_THE_VENUE_HAS_NOT_STATED",
+    "A_PROVISIONAL_ECONOMIC_EVENT"
+   ]
+  }
+ ],
+ "switches": {
+  "flipped_in_this_trace_process_only": [
+   "bettor_funded_management.FUNDED_EXIT_SUBMISSION_ENABLED",
+   "bettor_entry_execution.REAL_ORDER_SUBMISSION_ENABLED",
+   "pmus._get_client (the transport seam)",
+   "pmus._gate.authorize (the venue boundary)"
+  ],
+  "shipped_values_read_from_a_clean_interpreter": {
+   "FUNDED_SUBMISSION_ENABLED": false,
+   "FUNDED_EXIT_SUBMISSION_ENABLED": false,
+   "REAL_ORDER_SUBMISSION_ENABLED": false
+  },
+  "no_order_left_this_process": "the transport is a python list"
+ }
+}
