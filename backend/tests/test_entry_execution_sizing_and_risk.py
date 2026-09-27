@@ -343,37 +343,85 @@ def test_a_settled_position_stops_occupying_capital_but_keeps_its_loss():
 
 # ── the decision clock, and re-ageing at it ──────────────────────────
 
-def test_the_venue_book_is_reaged_at_the_decision_not_at_the_read():
-    """THE HALF-FIX THIS COMPLETES. Moving the decision instant after the
-    venue, rules and fixture reads is only half the repair: the book's age
-    was still the age it had when it was READ, so a decision taken forty
-    seconds later inherited "2 s fresh"."""
+def test_the_venue_arm_ages_our_read_and_reports_the_books_quiet_time():
+    """WHAT THIS TEST USED TO PIN, AND WHY IT CHANGED.
+
+    It pinned that the venue book was re-aged from `transactTime` at the
+    decision instant and refused above 30 s. Re-ageing at the decision was and
+    is right. What was wrong is the QUANTITY: on 2026-09-27 six contracts were
+    read twice, twenty seconds apart, and the stamp was identical on all six
+    while the best ask was identical too. `transactTime` is a LAST-CHANGE stamp,
+    so this asked "has this market ticked in the last thirty seconds" and
+    refused every quiet money line -- the refusal that ends most of this lane's
+    candidates.
+
+    The venue arm now ages OUR READ at the decision instant -- both instants
+    ours, the interval real -- and REPORTS the book's quiet time instead of
+    refusing on it. The 30 s number is not loosened: it stays on the probability
+    side, where it is applied to the bookmaker's own observation instant.
+    """
     from sportsassets.workers import ext_pinnacle_loop as loop
 
-    # read at t=100 against a venue stamp of 98; decision at t=140.
+    # read at t=138 against a venue stamp of 98 (the book last moved 42 s
+    # before the decision); decision at t=140.
+    got = loop._entry_freshness({"observed_at": 130.0},
+                                {"age_s": 2.0, "venue_ts": 98.0,
+                                 "read_at": 138.0,
+                                 "age_basis": "VENUE_TRANSACT_TIME"},
+                                140.0)
+    assert got["venue_age_s"] == 2.0
+    assert got["venue_age_basis"] == (
+        "OUR_OWN_RECEIPT_INSTANT_REAGED_AT_THE_DECISION")
+    assert got["venue_limit_s"] == loop.MAX_OUR_READ_AGE_S
+    assert got["venue_book_last_moved_s"] == 42.0
+    assert got["venue_book_is_quiet"] is True
+    assert got["venue_stamp_semantics"] == "LAST_BOOK_CHANGE"
+    assert got["fresh"] is True, got["why"]
+    # AND THE PROBABILITY SIDE'S RULE IS UNTOUCHED: 10 s of a 30 s bound.
+    assert got["pinnacle_age_s"] == 10.0
+    assert got["pinnacle_limit_s"] == 30.0
+
+
+def test_a_read_we_sat_on_is_refused_however_recently_the_book_moved():
+    """THE QUANTITY THAT ACTUALLY EXPIRES. A book received four minutes before
+    the decision is not current, and the market having ticked one second before
+    we read it does not make it current."""
+    from sportsassets.workers import ext_pinnacle_loop as loop
+
+    got = loop._entry_freshness({"observed_at": 380.0},
+                                {"age_s": 1.0, "venue_ts": 139.0,
+                                 "read_at": 140.0,
+                                 "age_basis": "VENUE_TRANSACT_TIME"},
+                                400.0)
+    assert got["venue_age_s"] == 260.0
+    assert got["venue_book_last_moved_s"] == 261.0
+    assert got["fresh"] is False, got["why"]
+
+
+def test_without_our_own_receipt_instant_freshness_stays_unmeasured():
+    """OUR OWN BOOKKEEPING, MISSING. The venue's stamp is no longer the
+    currency instrument, so its absence costs the quiet-time observation and
+    nothing else. Our RECEIPT instant is the instrument, and without it the age
+    of our read is unknown -- which blocks, because an unknown age is not a
+    fresh one."""
+    from sportsassets.workers import ext_pinnacle_loop as loop
+
     got = loop._entry_freshness({"observed_at": 130.0},
                                 {"age_s": 2.0, "venue_ts": 98.0,
                                  "age_basis": "VENUE_TRANSACT_TIME"},
                                 140.0)
-    assert got["venue_age_at_read_s"] == 2.0
-    assert got["venue_age_s"] == 42.0
-    assert got["venue_age_basis"] == (
-        "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION")
-    assert got["both_reaged_at_the_decision"] is True
-    # AND IT REFUSES: 42 s is beyond the venue's own 30 s bound, which the
-    # read-time age would have hidden.
-    assert got["fresh"] is False
-
-
-def test_without_the_venues_own_clock_freshness_stays_unmeasured():
-    """There is nothing to re-age from, and our read time is not a
-    substitute: using it would make every quote fresh by construction."""
-    from sportsassets.workers import ext_pinnacle_loop as loop
-
-    got = loop._entry_freshness({"observed_at": 130.0},
-                                {"age_s": 2.0, "venue_ts": None,
-                                 "age_basis": "VENUE_CLOCK_NOT_PROVIDED"},
-                                140.0)
     assert got["venue_age_s"] is None
     assert got["fresh"] is None
-    assert got["venue_age_basis"] == "VENUE_CLOCK_NOT_PROVIDED"
+    assert got["venue_age_basis"] == "OUR_RECEIPT_INSTANT_NOT_RECORDED"
+
+    # AND AN ABSENT VENUE STAMP NO LONGER BLOCKS: our read is two seconds old,
+    # and what is lost is the quiet-time observation, reported as None.
+    ok = loop._entry_freshness({"observed_at": 130.0},
+                               {"age_s": None, "venue_ts": None,
+                                "read_at": 138.0,
+                                "age_basis": "VENUE_CLOCK_NOT_PROVIDED"},
+                               140.0)
+    assert ok["venue_age_s"] == 2.0
+    assert ok["venue_book_last_moved_s"] is None
+    assert ok["venue_book_is_quiet"] is None
+    assert ok["fresh"] is True, ok["why"]

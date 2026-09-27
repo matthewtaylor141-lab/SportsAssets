@@ -4036,6 +4036,203 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
     }
 
     # ── WHAT THIS VIEW DOES NOT RESOLVE, stated rather than implied ──
+    # ── THE OPERATING RESULT, IN ONE PLACE, AT THE TOP ──────────────
+    #
+    # WHY THIS SECTION EXISTS. Everything in it is already above, in eight
+    # sections, each correct and none of them answering the question that gets
+    # asked first: IS THE AUTONOMOUS TRADER OPERATING, AND WHAT HAS IT DONE. A
+    # reader had to assemble that from the funnel, the books, three P&L blocks
+    # and the activation panel, and an assembled answer is the one place a
+    # demonstration gets mistaken for performance.
+    #
+    # IT COMPUTES NOTHING NEW. Every figure is lifted from the section that owns
+    # it, so this cannot disagree with the detail below it. What it adds is the
+    # arrangement: the strategy's own book first and alone, the demonstration and
+    # the funded book beside it and never added to it, and the count that
+    # matters -- how many positions the EV strategy itself opened -- stated as a
+    # number even when that number is zero.
+    strat_books = {k: v for k, v in (books or {}).items()
+                   if k.startswith("AUTONOMOUS_ENTRY")}
+    strat_rows = [r for v in strat_books.values() for r in (v or [])]
+    lanes = ((pnl or {}).get("lanes") or {})
+
+    def _lane(name):
+        """One lane's figures, under whatever names that reader uses.
+
+        THE KEYS ARE NOT GUESSED. `_pnl_status` composes each lane from its own
+        SQL, so the spelling has changed before (`net_usd` and `realised` are
+        both in use downstream). This picks the first present spelling, reports
+        which one it used, and carries the lane dict's own keys so a reader can
+        see what was actually available rather than a column of nulls.
+        """
+        want = None
+        for k, v in lanes.items():
+            if str(k).upper().startswith(str(name).upper()):
+                want, key = dict(v or {}), k
+                break
+        if want is None:
+            return {"lane": None,
+                    "why": "no lane whose name starts with %s is reported"
+                           % name}
+
+        def pick(*names):
+            for n in names:
+                if want.get(n) is not None:
+                    return {"value": want[n], "field": n}
+            return {"value": None, "field": None,
+                    "why": "none of %s is present on this lane"
+                           % ", ".join(names)}
+
+        unreal = want.get("unrealised")
+        return {
+            "lane": key,
+            "realised": pick("realised", "realised_usd", "net_usd"),
+            "fees": pick("fees", "fees_usd"),
+            "unrealised": (unreal if isinstance(unreal, dict)
+                           else pick("unrealised", "unrealised_usd")),
+            "settled_positions": want.get("settled_positions"),
+            "open_positions": want.get("open_positions"),
+            "fields_available": sorted(want),
+        }
+
+    cyc = cycle or {}
+    refus = {k: v for k, v in (cyc.get("refusals") or {}).items() if v}
+    out["operating"] = {
+        "section": "Bettor EV Engine — operating",
+        "read_this_first": True,
+        "computes_nothing_new": ("every figure is the one the owning section "
+                                 "reports; this is arrangement, not arithmetic"),
+
+        # 1 · MODE AND THE LAST COMPLETED CYCLE
+        "mode": {
+            "label": (controls.get("research_mode") or {}).get("label"),
+            "submits_orders": False,
+            "armed": bool((controls.get("research_mode") or {}).get(
+                "env_flag_set")),
+            "serving_build": (cyc.get("writer") or {}).get("build"),
+            "writer_pid": (cyc.get("writer") or {}).get("pid"),
+        },
+        "last_completed_cycle": {
+            "reported_at": cyc.get("at"),
+            "state": cyc.get("state"),
+            "elapsed_s": cyc.get("elapsed_s"),
+            "markets_considered": cyc.get("markets_considered"),
+            "evaluated": cyc.get("evaluated"),
+            "written": cyc.get("written"),
+            "what_markets_considered_is": (
+                "the venue universe this cycle looked at. It is NOT coverage: "
+                "the refusal counters and the evaluated count are what say how "
+                "many were carried how far"),
+        },
+
+        # 2 · OPPORTUNITIES, ADMISSIONS AND THE NAMED REFUSALS
+        "opportunities": {
+            "evaluated_this_cycle": cyc.get("evaluated"),
+            "admissible_now": opps.get("admissible_count"),
+            "refusals_that_fired": refus,
+            "refusal_total": sum(int(v) for v in refus.values()),
+            "first_refusal_per_candidate":
+                "opportunities.first_refusal_per_mapped_candidate",
+            "a_no_trade_is_a_result": (
+                "a candidate refused by a named rule on observed inputs is a "
+                "DECISION. An engine that could not evaluate anything and an "
+                "engine that declined everything both end at zero positions, "
+                "and the refusal names are what separate them"),
+            "fair_value_source": opps.get("fair_value_source"),
+        },
+
+        # 3 · WHAT THE STRATEGY ITSELF OWNS. Zero is reported as zero.
+        "strategy_own_book": {
+            "provenance_counted": sorted(strat_books),
+            "positions": len(strat_rows),
+            "autonomous_entries_opened": len(strat_rows),
+            "position_ids": [r.get("position_id") for r in strat_rows][:20],
+            # WHAT THE ROWS THEMSELVES CARRY. `entry_evidence` reports
+            # candidates and held inventory; it has no orders summary and
+            # inventing keys that are always null would read as "none" when the
+            # truth is "not carried here".
+            "held_inventory_rows": len((ev or {}).get("inventory") or []),
+            "held_inventory": ((ev or {}).get("inventory") or [])[:10],
+            "modelled_not_submitted": (
+                "every order and fill in this book is MODELLED against observed "
+                "depth. No order was submitted to any venue and no capital is "
+                "at risk"),
+            "what_does_not_count_here": [
+                "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY — a seeded harness position",
+                "CONTROLLED_DEMONSTRATION — a chosen-input scenario",
+                "UNCLASSIFIED — historical and copied holdings",
+                "any funded intent — that book is money and is reported apart"],
+            "if_this_is_zero": (
+                "then the strategy has opened nothing, and the refusal census "
+                "above is the measured reason. It is not substituted by the "
+                "demonstration"),
+        },
+
+        # 4 · MANAGEMENT, EXITS, SETTLEMENT
+        "management": {
+            "strategy_positions_under_management": len(strat_rows),
+            "with_a_recorded_management_decision": len(
+                [r for r in strat_rows
+                 if r.get("last_decision") or r.get("selected_action")]),
+            "with_a_settlement_reading": len(
+                [r for r in strat_rows if r.get("settlement")
+                 or r.get("settlement_status")]),
+            "per_position_detail": (
+                "/api/command/rn1x/trace/{position_id} carries the decisions, "
+                "orders, fills and the outcome for one position"),
+            "where_the_detail_is": ["positions", "orders", "performance"],
+            "exits_and_settlement": (
+                "an exit or a settlement on a MODELLED holding is a modelled "
+                "event too. The funded lane's exits are the ones that would "
+                "reach a venue, and that book is separate and disabled"),
+        },
+
+        # 5 · THREE P&Ls, SIDE BY SIDE AND NEVER ADDED
+        "profit_and_loss": {
+            "never_summed": True,
+            "strategy": _lane("AUTONOMOUS_ENTRY"),
+            "demonstration": {
+                "experiment_id": (out.get("demonstration") or {}).get(
+                    "experiment_id"),
+                "counts_toward_strategy_performance": False,
+                "reconciliation": (out.get("demonstration") or {}).get(
+                    "reconciliation"),
+                "inputs_are_chosen_not_observed": True},
+            "funded": {
+                "capability": funded.get("funded_capability"),
+                "books": funded.get("book_count"),
+                "unresolved_discrepancies": funded.get(
+                    "unresolved_discrepancy_count"),
+                "label": funded.get("label")},
+            "completeness": {
+                "unrealised": (pnl or {}).get("unrealised_basis"),
+                "unmarked_inventory_is_shown_unmarked": True,
+                "provisional_and_unknown_stay_qualified": (
+                    "a provisional fee, an unmeasured mark and an UNKNOWN "
+                    "settlement are reported by those names. None of them is "
+                    "rendered as a zero"),
+            },
+        },
+
+        # 6 · AND WHAT ACTUALLY BLOCKS ACTIVATION
+        "activation_blockers": {
+            "unmet": [c["check"] for c in
+                      ((ready or {}).get("unmet") or [])],
+            "count": len((ready or {}).get("unmet") or []),
+            "funded_submission": "DISABLED",
+            "owner_decisions": [
+                "which funded account, and its accounting reconciled",
+                "the venue credential",
+                "the approved limit set in dollars",
+                "activation itself, which is a code change"],
+            "engineering_and_market_evidence_are_separate": (
+                "the unmet list mixes both. `venue_book_freshness_basis` and "
+                "`settlement_compatibility` are market evidence; "
+                "`account_selected_and_clean`, `limits_recorded_and_complete` "
+                "and `limits_approved_by_the_owner` are owner decisions"),
+        },
+    }
+
     out["open_limitations"] = {
         "venue_book_freshness": (
             "UNRESOLVED. What `marketData.transactTime` denotes is not "

@@ -1,0 +1,101 @@
+{
+ "record": "WHAT marketData.transactTime TRACKS -- ESTABLISHED BY MEASUREMENT",
+ "date": "2026-09-27",
+ "why_it_mattered": [
+  "The entry lane refused any candidate whose `decision_instant - transactTime`",
+  "exceeded 30 s. 1,018 valuations have been written by this lane and every one",
+  "is NO_TRADE; the candidate ledger's dominant first refusal is VENUE_QUOTE_STALE",
+  "with ages of 42 s, 94 s, 287 s and 522 s. If the stamp tracks the RESPONSE those",
+  "are stale reads and the gate is right. If it tracks the LAST BOOK CHANGE they are",
+  "quiet markets and the gate refuses the entire catalogue while calling it",
+  "freshness. The repository recorded the question as open and both readings as",
+  "possible."
+ ],
+ "method": {
+  "route": "GET /api/admin/venue-clock-probe (already present, draws no verdict)",
+  "how": "each contract read TWICE, 20 s apart, against the serving build",
+  "contracts": [
+   "aec-mlb-nym-wsh-2026-09-27",
+   "aec-mlb-hou-ath-2026-09-27",
+   "aec-mlb-cle-kc-2026-09-27",
+   "aec-mlb-tb-phi-2026-09-27",
+   "aec-mlb-col-cws-2026-09-27",
+   "aec-mlb-cin-tor-2026-09-27"
+  ],
+  "the_discriminator": "a RESPONSE stamp advances by the gap between our two receipts; a LAST-CHANGE stamp does not move at all while the book does not move"
+ },
+ "observed": {
+  "contracts_read": 6,
+  "our_receipt_delta_s": [
+   20.015,
+   20.034,
+   20.089,
+   20.031,
+   20.049,
+   20.032
+  ],
+  "transact_time_delta_s": [
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0,
+   0.0
+  ],
+  "book_content_changed": 0,
+  "best_ask_identical_on_both_reads": 6,
+  "last_change_age_at_first_read_s": [
+   17.01,
+   17.714,
+   522.551,
+   11.206,
+   286.656,
+   93.892
+  ],
+  "last_change_age_at_second_read_s": [
+   37.025,
+   37.747,
+   542.64,
+   31.237,
+   306.705,
+   113.924
+  ]
+ },
+ "conclusion": "LAST_BOOK_CHANGE",
+ "the_decisive_detail": [
+  "Two of the six were inside the 30 s bound on the first read and outside it on",
+  "the second -- twenty seconds later, with the stamp unmoved, the book unchanged",
+  "and the best ask identical. The prices had not gone stale. Only the clock had",
+  "moved, and it was ours."
+ ],
+ "what_changed_in_the_code": {
+  "admission": "the venue arm of `_entry_freshness` and the gate in `venue_quote` now age OUR READ at the decision instant (MAX_OUR_READ_AGE_S = 10 s, both instants ours) and refuse with OUR_OWN_BOOK_READ_IS_STALE_AT_THE_DECISION_INSTANT",
+  "reported_not_enforced": "the last-change age is carried on every quote as `book_last_moved_s` with `book_is_quiet` against the unchanged 30 s threshold. It informs depth and sizing; it refuses nothing",
+  "untouched": [
+   "PINNACLE_MAX_AGE_S = 30 s on the bookmaker's own observation instant",
+   "MAX_VENUE_QUOTE_AGE_S = 30 s, now as the quiet-book threshold",
+   "the funded lane's own venue_book_age gate, which still refuses on the last-change age and is therefore strictly tighter than the shadow lane"
+  ],
+  "tests": [
+   "tests/test_the_venue_clock_is_parsed.py (section 4, rewritten)",
+   "tests/test_entry_execution_sizing_and_risk.py (the re-ageing pins)",
+   "tests/test_the_entry_lane_acquires_its_own_scope.py (the two-clock split)"
+  ]
+ },
+ "what_this_is_not": [
+  "NOT a loosening of a freshness bound. No number moved. The 30 s bound was being",
+  "applied to a quantity it cannot measure, and it is now applied to the quantity it",
+  "can, with a tighter limit (10 s) than the one it replaced.",
+  "NOT a claim that a quiet book is a good book. A market that has not moved in nine",
+  "minutes may be thin, and that is what the depth and sizing evidence is for.",
+  "NOT a claim that any candidate will now qualify. Two of the most recent priced",
+  "candidates carried NEGATIVE net edge and one carried a void-rule conflict; those",
+  "are economic and payout answers and this changes neither."
+ ],
+ "the_honest_limit_of_this_determination": [
+  "One window, six contracts, one sport. 6/6 is unanimous and the mechanism is not",
+  "subtle, but a second window on a different sport would strengthen it, and the",
+  "probe is a dispatch away. If a later window shows the stamp tracking our request,",
+  "this reading is wrong and the code has to go back."
+ ]
+}

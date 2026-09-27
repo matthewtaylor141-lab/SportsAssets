@@ -139,74 +139,126 @@ def test_the_lane_no_longer_calls_float_on_the_clock():
     assert "VENUE_CLOCK_NOT_PROVIDED" in src
 
 
-def test_the_freshness_limits_are_unchanged():
+def test_the_freshness_limits_are_unchanged_and_say_what_they_govern():
+    """THE NUMBERS ARE THE SAME. What each one is applied to is not.
+
+    30 s still governs the bookmaker's own observation instant. 30 s is still
+    the venue-book threshold -- but after the 2026-09-27 determination that
+    `transactTime` is a LAST-CHANGE stamp, it is a QUIET-BOOK threshold and an
+    observation, not an admission gate. The gate is our own read's age, which is
+    the only interval here whose both instants are ours.
+    """
     from sportsassets.workers import ext_pinnacle_loop as loop
     assert loop.PINNACLE_MAX_AGE_S == 30.0
     assert loop.MAX_VENUE_QUOTE_AGE_S == 30.0
+    assert loop.QUIET_BOOK_CAUTION_S == loop.MAX_VENUE_QUOTE_AGE_S
+    assert loop.VENUE_STAMP_SEMANTICS == "LAST_BOOK_CHANGE"
+    assert loop.MAX_OUR_READ_AGE_S == 10.0
+    # AND THE DETERMINATION TRAVELS WITH THE CONSTANT, so nobody has to take
+    # the semantics on trust to read the code.
+    d = loop.STAMP_DETERMINATION
+    assert d["observed"]["contracts"] == 6
+    assert d["observed"]["stamp_identical_on_both_reads"] == 6
+    assert d["observed"]["stamp_tracked_our_request"] == 0
+    assert d["conclusion"] == "LAST_BOOK_CHANGE"
 
 
 # ── 4 · THE AGE IS RE-AGED AT THE DECISION, NOT AT THE READ ──────────
 
 def test_the_decision_instant_governs_not_the_receipt_time():
-    """`_entry_freshness` must re-age BOTH clocks at the decision."""
+    """`_entry_freshness` re-ages at the DECISION, and that has not changed.
+
+    What changed is WHICH venue quantity is aged. The stamp is a last-change
+    stamp, so the admission arm ages OUR READ; the book's quiet time is still
+    re-aged at the decision and still reported.
+    """
     from sportsassets.workers import ext_pinnacle_loop as loop
 
     read_at = 1_000_000.0
     decided_at = read_at + 9.0          # two more network reads happened
-    venue_epoch = read_at - 4.0         # the book was 4 s old when read
-    quote = {"observed_at": "2026-09-21T18:20:25Z",
-             "received_at": decided_at - 1.0}
-    # The quote's own clock, so only the venue side is under test here.
+    venue_epoch = read_at - 4.0         # the book last moved 4 s before the read
     got = loop._entry_freshness(
-        quote={"observed_at": decided_at - 3.0, "received_at": decided_at - 1.0},
-        vq={"venue_ts": venue_epoch, "age_s": 4.0,
+        quote={"observed_at": decided_at - 3.0,
+               "received_at": decided_at - 1.0},
+        vq={"venue_ts": venue_epoch, "age_s": 4.0, "read_at": read_at,
             "age_basis": "VENUE_TRANSACT_TIME"},
         now=decided_at)
-    # 13 s at the decision, not the 4 s measured at the read.
-    assert got["venue_age_s"] == pytest.approx(13.0, abs=1e-6)
-    assert got["venue_age_at_read_s"] == 4.0
+    # OUR READ is 9 s old at the decision, not the 0 s it was when taken.
+    assert got["venue_age_s"] == pytest.approx(9.0, abs=1e-6)
     assert got["venue_age_basis"] == (
-        "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION")
+        "OUR_OWN_RECEIPT_INSTANT_REAGED_AT_THE_DECISION")
+    # AND THE QUIET TIME IS RE-AGED AT THE DECISION TOO: 13 s, not 4 s.
+    assert got["venue_book_last_moved_s"] == pytest.approx(13.0, abs=1e-6)
+    assert got["venue_age_at_read_s"] == 4.0
     assert got["both_reaged_at_the_decision"] is True
 
 
-def test_an_unmeasured_venue_clock_leaves_the_verdict_unknown():
-    """UNKNOWN, and explicitly not an observed stale age."""
+def test_an_unmeasured_venue_clock_no_longer_blocks_but_is_reported():
+    """WHAT THIS TEST USED TO ASSERT AND WHY IT CHANGED.
+
+    It asserted that an unparseable `transactTime` left the verdict UNKNOWN and
+    blocked. That followed from the stamp being the currency instrument. It is
+    not: it is a last-change stamp, so its absence costs the QUIET-TIME
+    observation and tells us nothing about whether our read is current. Our own
+    receipt instant is the instrument, and THAT missing still blocks -- which
+    the next test pins.
+    """
     from sportsassets.workers import ext_pinnacle_loop as loop
     got = loop._entry_freshness(
         quote={"observed_at": 1_000_000.0, "received_at": 1_000_000.0},
-        vq={"venue_ts": None, "age_s": None,
+        vq={"venue_ts": None, "age_s": None, "read_at": 1_000_000.5,
             "age_basis": "VENUE_CLOCK_UNPARSEABLE"},
+        now=1_000_001.0)
+    assert got["fresh"] is True, got["why"]
+    assert got["venue_age_s"] == pytest.approx(0.5)
+    assert got["venue_book_last_moved_s"] is None
+    assert got["venue_book_is_quiet"] is None
+
+
+def test_an_unmeasured_read_instant_leaves_the_verdict_unknown():
+    """OURS, MISSING. An unknown age is not a fresh one, and this is the
+    quantity admission now depends on -- so it blocks."""
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    got = loop._entry_freshness(
+        quote={"observed_at": 1_000_000.0, "received_at": 1_000_000.0},
+        vq={"venue_ts": 999_999.0, "age_s": 1.0,
+            "age_basis": "VENUE_TRANSACT_TIME"},
         now=1_000_001.0)
     assert got["fresh"] is None
     assert got["venue_age_s"] is None
-    assert got["venue_age_basis"] == "VENUE_CLOCK_UNPARSEABLE"
+    assert got["venue_age_basis"] == "OUR_RECEIPT_INSTANT_NOT_RECORDED"
 
 
-def test_a_parsed_clock_inside_the_limit_is_fresh():
+def test_a_quiet_book_read_a_moment_ago_is_admitted():
+    """THE CASE THAT WAS REFUSING EVERY CANDIDATE. Two minutes since the market
+    last ticked, and our read is a second old: admitted, with the quiet time
+    reported."""
     from sportsassets.workers import ext_pinnacle_loop as loop
     now = 1_000_000.0
     got = loop._entry_freshness(
         quote={"observed_at": now - 5.0, "received_at": now - 1.0},
-        vq={"venue_ts": now - 6.0, "age_s": 5.0,
+        vq={"venue_ts": now - 120.0, "age_s": 119.0, "read_at": now - 1.0,
             "age_basis": "VENUE_TRANSACT_TIME"},
         now=now)
     assert got["fresh"] is True, got["why"]
-    assert got["venue_age_s"] == pytest.approx(6.0)
+    assert got["venue_age_s"] == pytest.approx(1.0)
+    assert got["venue_book_last_moved_s"] == pytest.approx(120.0)
+    assert got["venue_book_is_quiet"] is True
     assert got["pinnacle_age_s"] == pytest.approx(5.0)
 
 
-def test_a_parsed_clock_beyond_the_limit_is_false_not_unknown():
-    """The distinction the report has to make: false vs null."""
+def test_a_read_we_sat_on_is_false_not_unknown():
+    """The distinction the report has to make: false vs null. A read we held
+    for four minutes is measurably not current."""
     from sportsassets.workers import ext_pinnacle_loop as loop
     now = 1_000_000.0
     got = loop._entry_freshness(
         quote={"observed_at": now - 2.0, "received_at": now - 1.0},
-        vq={"venue_ts": now - 120.0, "age_s": 119.0,
+        vq={"venue_ts": now - 121.0, "age_s": 1.0, "read_at": now - 240.0,
             "age_basis": "VENUE_TRANSACT_TIME"},
         now=now)
     assert got["fresh"] is False
-    assert got["venue_age_s"] == pytest.approx(120.0)
+    assert got["venue_age_s"] == pytest.approx(240.0)
 
 
 # ── 5 · THE RAW VALUE TRAVELS WITH THE VERDICT ───────────────────────
@@ -240,13 +292,22 @@ def test_a_stale_refusal_is_only_reachable_once_the_age_is_measured():
 
     from sportsassets.workers import ext_pinnacle_loop as loop
     src = inspect.getsource(loop.venue_quote)
+    # THE GATE MOVED, ON PURPOSE, AND THE PROPERTY IS THE SAME ONE.
+    #
+    # `VENUE_QUOTE_STALE` fired on the venue's LAST-CHANGE age, which is not a
+    # statement about our read. The refusal that can fire now is
+    # `OUR_OWN_BOOK_READ_IS_STALE...`, it sits behind a comparison of two of OUR
+    # instants, and there is exactly one return of it -- so an unmeasured age
+    # still cannot report itself as an observed stale book.
     hits = [m for m in re.finditer(
-        r"if age is not None and age > MAX_VENUE_QUOTE_AGE_S:", src)]
-    assert len(hits) == 1, "the stale gate moved or was duplicated"
+        r"if our_read_age > MAX_OUR_READ_AGE_S:", src)]
+    assert len(hits) == 1, "the read-age gate moved or was duplicated"
     after = src[hits[0].end():hits[0].end() + 400]
-    assert "R_VENUE_QUOTE_STALE" in after
-    # And nowhere else returns it, so there is no second, unguarded path.
-    assert src.count("R_VENUE_QUOTE_STALE") == 1
+    assert "R_OUR_READ_IS_STALE" in after
+    assert src.count("R_OUR_READ_IS_STALE") == 1
+    # AND THE OLD REFUSAL IS NO LONGER RETURNED FROM HERE AT ALL.
+    assert "R_VENUE_QUOTE_STALE" not in src, (
+        "the last-change age must not refuse a candidate any more")
 
 
 def test_the_venue_error_projection_carries_the_age_limit_and_raw_value():

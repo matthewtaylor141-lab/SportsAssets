@@ -249,8 +249,17 @@ def test_the_two_clocks_are_separated_and_the_rule_is_unchanged():
     different remedies. The 30-second bound is untouched and governs the
     sum, exactly as before."""
     q = {"observed_at": "2026-09-25T18:00:00Z", "received_at": 1790359215.0}
-    f = LOOP._entry_freshness(q, {"venue_ts": 1790359220.0, "age_s": 1.0},
+    # `read_at` IS OUR RECEIPT INSTANT FOR THE BOOK, and the venue arm ages it
+    # rather than the venue's last-change stamp (established 2026-09-27: the
+    # stamp did not move across two reads twenty seconds apart). The real
+    # `venue_quote` always carries it; a stub without it leaves our read age
+    # unmeasured, which blocks -- correctly.
+    f = LOOP._entry_freshness(q, {"venue_ts": 1790359220.0, "age_s": 1.0,
+                                  "read_at": 1790359228.0},
                               1790359230.0)
+    assert f["venue_age_s"] == 2.0
+    assert f["venue_age_basis"] == (
+        "OUR_OWN_RECEIPT_INSTANT_REAGED_AT_THE_DECISION")
     assert f["pinnacle_age_s"] == 30.0
     assert f["pinnacle_provider_lag_s"] == 15.0
     assert f["pinnacle_our_processing_s"] == 15.0
@@ -259,9 +268,11 @@ def test_the_two_clocks_are_separated_and_the_rule_is_unchanged():
     assert f["pinnacle_limit_s"] == LOOP.PINNACLE_MAX_AGE_S == 30.0
     assert f["fresh"] is True
     # One second more and it refuses, as it did before the split.
-    f2 = LOOP._entry_freshness(q, {"venue_ts": 1790359220.0, "age_s": 1.0},
+    f2 = LOOP._entry_freshness(q, {"venue_ts": 1790359220.0, "age_s": 1.0,
+                                   "read_at": 1790359229.0},
                                1790359231.0)
     assert f2["fresh"] is False
+    assert f2["pinnacle_age_s"] == 31.0, "the refusal is the PROBABILITY side"
 
 
 def test_the_store_says_what_it_will_not_do():

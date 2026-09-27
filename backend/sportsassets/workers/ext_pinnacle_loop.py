@@ -208,6 +208,51 @@ R_VENUE_READ_ERROR = "VENUE_BOOK_READ_RETURNED_ERROR"
 #: deliberately: the comparison is only as fresh as its stalest side.
 MAX_VENUE_QUOTE_AGE_S = 30.0
 
+#: ── WHAT `marketData.transactTime` TRACKS. MEASURED, 2026-09-27. ─────
+#:
+#: The question above is no longer open. Six contracts were read TWICE, twenty
+#: seconds apart, through `/api/admin/venue-clock-probe` on the serving build:
+#:
+#:   contracts read                 6
+#:   stamp identical on both reads  6
+#:   stamp tracked our request      0
+#:   book content changed           0      (best ask identical on every pair)
+#:
+#: A response stamp would have advanced by the twenty seconds between our two
+#: receipts. It did not move at all, on any contract, while the book did not
+#: move either. THE STAMP TRACKS THE LAST BOOK CHANGE.
+VENUE_STAMP_SEMANTICS = "LAST_BOOK_CHANGE"
+STAMP_DETERMINATION = {
+    "established_on": "2026-09-27",
+    "method": ("two reads of the same contract 20 s apart, six contracts, "
+               "through the admin venue-clock probe against production"),
+    "observed": {"contracts": 6, "stamp_identical_on_both_reads": 6,
+                 "stamp_tracked_our_request": 0, "book_content_changed": 0},
+    "conclusion": VENUE_STAMP_SEMANTICS,
+    "evidence": "research/evidence/VENUE_STAMP_SEMANTICS_2026-09-27.json",
+    "what_it_changes": (
+        "`decision_instant - transactTime` measures HOW LONG SINCE THE BOOK "
+        "MOVED, not how current our read is. Refusing above 30 s therefore "
+        "refused every quiet money line and called it freshness -- which is "
+        "what the candidate ledger shows: ages of 42 s, 94 s, 287 s and 522 s "
+        "on markets whose ask was unchanged across our own two reads"),
+    "what_it_does_not_change": (
+        "the PROBABILITY side's 30 s bound, which is applied to the "
+        "bookmaker's own observation instant and is a different quantity; and "
+        "the funded lane's own gate, which still refuses on the last-change "
+        "age and is therefore strictly tighter than this one"),
+}
+
+#: HOW LONG OUR OWN READ MAY SIT BEFORE THE DECISION. This is the quantity that
+#: actually expires between reading a book and acting on it, both instants are
+#: OURS, and the subtraction is a real interval. It replaces the last-change age
+#: as the ADMISSION gate -- it does not replace it as an observation.
+MAX_OUR_READ_AGE_S = 10.0
+R_OUR_READ_IS_STALE = "OUR_OWN_BOOK_READ_IS_STALE_AT_THE_DECISION_INSTANT"
+#: A book that has not moved in a long time is a LIQUIDITY observation, not a
+#: currency one. It is reported on every quote and refuses nothing.
+QUIET_BOOK_CAUTION_S = MAX_VENUE_QUOTE_AGE_S
+
 
 # ── control, fail closed ────────────────────────────────────────────
 
@@ -1273,10 +1318,54 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
     clock["parsed_epoch_s"] = vt
     clock["age_at_read_s"] = (None if age is None else round(age, 3))
     clock["basis"] = age_basis
-    if age is not None and age > MAX_VENUE_QUOTE_AGE_S:
-        return {"ok": False, "refusal": R_VENUE_QUOTE_STALE,
-                "age_s": age, "limit_s": MAX_VENUE_QUOTE_AGE_S,
-                "age_basis": age_basis, "venue_clock": clock}
+    # ── ADMISSION, ON THE QUANTITY THAT ACTUALLY EXPIRES ─────────────
+    #
+    # THE DEFECT THIS CLOSES, and it is why this lane has never opened a
+    # position. Until the measurement above, the gate refused whenever
+    # `decision_instant - transactTime` exceeded 30 s. The stamp is a
+    # LAST-CHANGE stamp, so that arithmetic asks "has this market ticked in the
+    # last thirty seconds" and refuses every quiet money line as though the
+    # data were stale. Production's candidate ledger is dominated by exactly
+    # that refusal, and the clock probe read the same asks unchanged across two
+    # reads twenty seconds apart -- so the prices were not stale, the market was
+    # quiet, and the lane was unevaluable by construction.
+    #
+    # WHAT IS NOT HAPPENING HERE. The 30 s number is not being loosened, and
+    # nothing is being waived. The bound is being applied to the quantity it can
+    # actually measure: OUR read's age at the decision instant, both instants
+    # ours. A book we received two seconds ago is current whether or not the
+    # market has ticked since the first pitch; a book we read four minutes ago
+    # and sat on is not, and that refuses.
+    #
+    # AND THE LAST-CHANGE AGE IS STILL REPORTED, because it is real information
+    # about liquidity -- a market that has not moved in ten minutes may be thin
+    # when we try to trade it. It informs the depth and sizing evidence
+    # downstream; it does not decide admission.
+    clock["stamp_semantics"] = VENUE_STAMP_SEMANTICS
+    clock["stamp_determination"] = STAMP_DETERMINATION
+    clock["book_last_moved_s"] = (None if age is None else round(age, 3))
+    clock["book_has_not_moved_within_s"] = QUIET_BOOK_CAUTION_S
+    clock["book_is_quiet"] = (None if age is None
+                              else bool(age > QUIET_BOOK_CAUTION_S))
+    clock["quiet_is_not_stale"] = (
+        "a quiet book and a stale read are different facts. This field is the "
+        "first; `our_read_age_at_decision_s` is the second, and only the "
+        "second decides admission")
+    our_read_age = float(now) - float(read_at)
+    clock["our_read_age_at_decision_s"] = round(our_read_age, 3)
+    clock["our_read_age_limit_s"] = MAX_OUR_READ_AGE_S
+    if our_read_age > MAX_OUR_READ_AGE_S:
+        return {"ok": False, "refusal": R_OUR_READ_IS_STALE,
+                "age_s": round(our_read_age, 3),
+                "limit_s": MAX_OUR_READ_AGE_S,
+                "age_basis": "OUR_OWN_RECEIPT_INSTANT",
+                "book_last_moved_s": clock["book_last_moved_s"],
+                "why": ("this book was received %.1f s before the decision "
+                        "instant, past the %.0f s this lane allows a read to "
+                        "sit. Both instants are ours and the interval is real: "
+                        "the ladder below may no longer be the ladder"
+                        % (our_read_age, MAX_OUR_READ_AGE_S)),
+                "venue_clock": clock}
 
     # THE SIDE THAT ACTUALLY PAYS ON OUR OUTCOME, in cost space.
     lad = bs.acquisition_ladder(book.get("marketData"), intent=intent)
@@ -2095,13 +2184,30 @@ def _entry_freshness(quote, vq, now) -> dict:
     # exactly this, and when it did not provide one there is nothing to
     # re-age from, which stays unmeasured rather than falling back to our
     # read clock.
+    #
+    # AND THE VENUE ARM NOW AGES THE RIGHT QUANTITY. Until the 2026-09-27
+    # determination this re-aged `transactTime` at the decision instant and
+    # required it under 30 s. That stamp is a LAST-CHANGE stamp (six contracts,
+    # two reads 20 s apart, stamp identical and ask identical on every one), so
+    # the test asked "has this market ticked recently" and refused every quiet
+    # money line -- which is the `QUOTE_STALE` that ends 344 of this lane's
+    # valuations. What expires between reading a book and deciding on it is OUR
+    # READ, and both instants are ours.
     vt = vq.get("venue_ts")
-    if vt is not None:
-        v_age = float(now) - float(vt)
-        v_basis = "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION"
+    v_moved = (None if vt is None else float(now) - float(vt))
+    # OUR RECEIPT INSTANT, from either place the quote records it: the clock
+    # block's `our_response_received_at` or the top-level `read_at`. The real
+    # `venue_quote` sets both, and reading only one of them would make this gate
+    # depend on which field a caller happened to carry.
+    recvd = ((vq.get("venue_clock") or {}).get("our_response_received_at")
+             if (vq.get("venue_clock") or {}).get("our_response_received_at")
+             is not None else vq.get("read_at"))
+    if recvd is not None:
+        v_age = float(now) - float(recvd)
+        v_basis = "OUR_OWN_RECEIPT_INSTANT_REAGED_AT_THE_DECISION"
     else:
         v_age = None
-        v_basis = vq.get("age_basis") or "VENUE_CLOCK_NOT_PROVIDED"
+        v_basis = "OUR_RECEIPT_INSTANT_NOT_RECORDED"
     # THE PROVIDER'S OWN STALENESS AND OUR PROCESSING DELAY, SEPARATED.
     #
     # `pinnacle_age_s` is the number the 30-second rule governs and it is
@@ -2125,8 +2231,19 @@ def _entry_freshness(quote, vq, now) -> dict:
                                  "and is unchanged"),
            "venue_age_s": (None if v_age is None else round(float(v_age), 3)),
            "venue_age_at_read_s": vq.get("age_s"),
-           "venue_limit_s": MAX_VENUE_QUOTE_AGE_S,
+           "venue_limit_s": MAX_OUR_READ_AGE_S,
            "venue_age_basis": v_basis,
+           "venue_book_last_moved_s": (None if v_moved is None
+                                       else round(float(v_moved), 3)),
+           "venue_book_is_quiet": (None if v_moved is None
+                                   else bool(v_moved > QUIET_BOOK_CAUTION_S)),
+           "venue_book_quiet_threshold_s": QUIET_BOOK_CAUTION_S,
+           "venue_stamp_semantics": VENUE_STAMP_SEMANTICS,
+           "quiet_does_not_refuse": (
+               "the last-change age is an observation about LIQUIDITY. A quiet "
+               "book may be thin when we try to trade it, which the depth and "
+               "sizing evidence downstream is what measures. It is not a "
+               "statement that our read is out of date"),
            "venue_clock": vq.get("venue_clock"),
            "both_reaged_at_the_decision": True,
            "stalest_governs": True}
@@ -2137,11 +2254,16 @@ def _entry_freshness(quote, vq, now) -> dict:
                       % ("pinnacle" if p_age is None
                          else vq.get("age_basis") or "venue"))
         return out
-    ok = p_age <= PINNACLE_MAX_AGE_S and float(v_age) <= MAX_VENUE_QUOTE_AGE_S
+    ok = p_age <= PINNACLE_MAX_AGE_S and float(v_age) <= MAX_OUR_READ_AGE_S
     out["fresh"] = bool(ok)
-    out["why"] = ("pinnacle %.2fs/%.0fs and venue %.2fs/%.0fs"
+    out["why"] = ("pinnacle %.2fs/%.0fs (the bookmaker's own observation "
+                  "instant) and our venue read %.2fs/%.0fs (our receipt "
+                  "instant). The venue book last moved %s"
                   % (p_age, PINNACLE_MAX_AGE_S, float(v_age),
-                     MAX_VENUE_QUOTE_AGE_S))
+                     MAX_OUR_READ_AGE_S,
+                     ("at an unrecorded time" if v_moved is None
+                      else "%.0f s ago, which is reported and does not refuse"
+                           % float(v_moved))))
     return out
 
 

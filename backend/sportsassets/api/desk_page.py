@@ -293,6 +293,7 @@ ul.checks .cw span { color: var(--dk-ink-3); font-size: 12px; }
       <span id="funded-pill" class="pill pill-grey">FUNDED —</span>
     </div>
     <nav class="desknav" aria-label="Desk sections">
+      <a href="#operating">Operating</a>
       <a href="#controls">Controls</a>
       <a href="#opportunities">Opportunities</a>
       <a href="#orders">Orders</a>
@@ -425,6 +426,150 @@ window.BTCore = {
   function audit(label, obj) {
     return '<details class="audit"><summary>' + esc(label) +
       '</summary><pre>' + json(obj) + '</pre></details>';
+  }
+
+  /* THE OPERATING CARD, FIRST ON THE PAGE.
+   *
+   * WHY IT IS FIRST AND WHY IT IS SHORT. Everything in it is rendered again in
+   * detail below. The question a reader arrives with is whether the autonomous
+   * trader is running and what it has done, and eight correct sections do not
+   * answer that until somebody assembles them -- which is where a demonstration
+   * gets read as performance. So: the mode, the last completed cycle, the
+   * funnel's outcome, the number of positions THE STRATEGY ITSELF opened, three
+   * P&Ls side by side and never added, and the activation blockers.
+   *
+   * ZERO IS PRINTED AS ZERO. An empty strategy book renders the count and the
+   * reason, not an empty table that reads like an absence of information. */
+  function operating(d) {
+    var o = d.operating || {};
+    if (!o.section) { return ''; }
+    var m = o.mode || {}, c = o.last_completed_cycle || {};
+    var opp = o.opportunities || {}, sb = o.strategy_own_book || {};
+    var mg = o.management || {}, pl = o.profit_and_loss || {};
+    var ab = o.activation_blockers || {};
+    var refus = opp.refusals_that_fired || {};
+    var body = '';
+
+    body += '<div class="facts">' +
+      fact('Mode', esc(dash(m.label))) +
+      fact('Armed', m.armed === true ? 'yes' : 'no',
+           m.armed === true ? 'good' : 'warn') +
+      fact('Submits orders', m.submits_orders === false ? 'no' : 'YES',
+           m.submits_orders === false ? 'good' : 'bad') +
+      fact('Serving build', esc(String(m.serving_build || '—').slice(0, 7)),
+           'mono') +
+      '</div>';
+
+    body += '<div class="h3">Last completed cycle</div><div class="facts">' +
+      fact('Reported', esc(epochIso(c.reported_at))) +
+      fact('State', esc(dash(c.state))) +
+      fact('Elapsed', c.elapsed_s == null ? '—' : esc(num(c.elapsed_s)) + ' s') +
+      fact('Markets considered', esc(dash(c.markets_considered))) +
+      fact('Evaluated', esc(dash(c.evaluated))) +
+      fact('Valuations written', esc(dash(c.written))) +
+      '</div>' +
+      '<p class="muted">' + esc(c.what_markets_considered_is || '') + '</p>';
+
+    var rk = Object.keys(refus);
+    body += '<div class="h3">Opportunities</div><div class="facts">' +
+      fact('Evaluated', esc(dash(opp.evaluated_this_cycle))) +
+      fact('Admissible now', esc(dash(opp.admissible_now)),
+           Number(opp.admissible_now) > 0 ? 'good' : 'warn') +
+      fact('Refusals that fired', esc(dash(opp.refusal_total))) +
+      '</div>';
+    if (rk.length) {
+      body += '<div class="tablewrap"><table class="dt"><thead><tr>' +
+        '<th>Named refusal</th><th class="num">Count</th></tr></thead>' +
+        '<tbody>' + rk.sort(function (a, b) {
+          return Number(refus[b]) - Number(refus[a]);
+        }).map(function (k) {
+          return '<tr><td>' + esc(k) + '</td><td class="num">' +
+                 esc(refus[k]) + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    }
+    body += '<p class="muted">' + esc(opp.a_no_trade_is_a_result || '') +
+            '</p>';
+    var fv = opp.fair_value_source || {};
+    if (fv.name) {
+      body += '<p class="why"><strong>' + esc(fv.name) + '</strong> — ' +
+        esc(dash(fv.kind)) + '. Internally trained model: ' +
+        esc(fv.is_an_internally_trained_model === false ? 'NO' : 'unclear') +
+        '. ' + esc(fv.why || '') + '</p>';
+    }
+
+    body += '<div class="h3">What the strategy itself owns</div>' +
+      '<div class="facts">' +
+      fact('Autonomous entries opened', esc(dash(sb.autonomous_entries_opened)),
+           Number(sb.autonomous_entries_opened) > 0 ? 'good' : 'warn') +
+      fact('Positions', esc(dash(sb.positions))) +
+      fact('Held inventory rows', esc(dash(sb.held_inventory_rows))) +
+      fact('Under management',
+           esc(dash(mg.strategy_positions_under_management))) +
+      '</div>';
+    if (!Number(sb.positions)) {
+      body += '<p class="why">' + esc(sb.if_this_is_zero || '') + '</p>';
+    } else if ((sb.position_ids || []).length) {
+      body += '<p class="muted mono">IDs: ' +
+        esc((sb.position_ids || []).join(', ')) + '</p>';
+    }
+    body += '<p class="muted">Not counted here: ' +
+      esc((sb.what_does_not_count_here || []).join(' · ')) + '</p>';
+
+    /* THREE BOOKS, SIDE BY SIDE, NEVER ADDED. Each figure carries the field
+     * name it came from, because a number whose provenance is unclear is what
+     * lets a demonstration be read as performance. */
+    function f(x) {
+      if (!x || typeof x !== 'object') { return '—'; }
+      if (x.value == null) { return '<span class="warn">—</span>'; }
+      return esc(signedUsd(x.value)) + '<span class="muted"> (' +
+             esc(x.field) + ')</span>';
+    }
+    var st = pl.strategy || {}, de = pl.demonstration || {},
+        fu = pl.funded || {}, cp = pl.completeness || {};
+    var un = st.unrealised || {};
+    body += '<div class="h3">Profit and loss — three books, never added</div>' +
+      '<div class="tablewrap"><table class="dt"><thead><tr><th>Book</th>' +
+      '<th class="num">Realised</th><th class="num">Fees</th>' +
+      '<th class="num">Unrealised</th>' +
+      '<th>Counts as strategy performance</th></tr></thead><tbody>' +
+      '<tr><td>Strategy · ' + esc(dash(st.lane)) + '</td>' +
+      '<td class="num">' + f(st.realised) + '</td>' +
+      '<td class="num">' + f(st.fees) + '</td>' +
+      '<td class="num">' + (un && un.value != null ? f(un)
+        : '<span class="warn">' + esc(dash(un.basis || un.why
+            || 'UNMEASURED')) + '</span>') + '</td>' +
+      '<td>yes</td></tr>' +
+      '<tr><td>Demonstration · ' + esc(dash(de.experiment_id)) + '</td>' +
+      '<td colspan="3" class="muted">chosen inputs — see Demonstration</td>' +
+      '<td class="good">no</td></tr>' +
+      '<tr><td>Funded · ' + esc(dash(fu.label)) + '</td>' +
+      '<td colspan="3" class="muted">capability ' +
+      esc(dash(fu.capability)) + ' · books ' + esc(dash(fu.books)) +
+      ' · unresolved discrepancies ' +
+      esc(dash(fu.unresolved_discrepancies)) + '</td>' +
+      '<td class="good">no</td></tr>' +
+      '</tbody></table></div>' +
+      '<p class="muted">' +
+      esc(cp.provisional_and_unknown_stay_qualified || '') +
+      ' Unrealised basis: ' + esc(dash(cp.unrealised)) + '</p>';
+
+    body += '<div class="h3">Activation blockers</div><div class="facts">' +
+      fact('Unmet checks', esc(dash(ab.count)),
+           Number(ab.count) ? 'warn' : 'good') +
+      fact('Funded submission', esc(dash(ab.funded_submission)),
+           ab.funded_submission === 'DISABLED' ? 'good' : 'bad') +
+      '</div>';
+    if ((ab.unmet || []).length) {
+      body += '<ul class="checks">' + (ab.unmet || []).map(function (x) {
+        return '<li><span class="cw"><b>' + esc(x) + '</b></span></li>';
+      }).join('') + '</ul>';
+    }
+    body += '<p class="muted">' +
+      esc(ab.engineering_and_market_evidence_are_separate || '') + '</p>';
+    body += audit('Audit — the operating read, as assembled', o);
+
+    return card('operating', 'Bettor EV Engine — operating',
+                o.computes_nothing_new || '', body);
   }
 
   function controls(d) {
@@ -1182,9 +1327,9 @@ window.BTCore = {
     if (asof) { asof.textContent = 'Read ' + (d.as_of || '—'); }
 
     LAST_DESK = d;
-    host.innerHTML = controls(d) + opportunities(d) + orders(d) +
-      positions(d) + management(d) + demonstration(d) + performance(d) +
-      funded(d);
+    host.innerHTML = operating(d) + controls(d) + opportunities(d) +
+      orders(d) + positions(d) + management(d) + demonstration(d) +
+      performance(d) + funded(d);
     host.hidden = false;
     if (state) { state.hidden = true; }
     bindControls();
