@@ -160,6 +160,26 @@ class Settings(BaseSettings):
     committed_capital_pm_usd: float = 0.0
     # Shared secret the edge-engine uses to record its shadow fills here.
     engine_ingest_token: str = ""
+    # ── SESSION EPOCH: REVOKE EVERY SESSION WITHOUT ROTATING THE KEY ──
+    #
+    # WHY IT EXISTS. Every desk, wall and command token is an HMAC keyed by
+    # `admin_token`, so the only way to revoke them all was to rotate that key.
+    # That works, and it has a cost: the SAME token is the credential the
+    # authorized verification workflows present, held as a GitHub secret. Rotating
+    # it on the service without simultaneously updating that secret breaks the
+    # API-only readback route -- the mechanism used to prove the fix landed.
+    #
+    # THE PUBLISHED-DEFAULT DEFECT MADE THIS CONCRETE. Sessions minted against the
+    # default password stay valid for up to 12 h (desk) or 7 DAYS (wall), and
+    # removing the default stops NEW sessions without touching existing ones. They
+    # have to be revoked, and revoking them must not require breaking the
+    # verification route in the same move.
+    #
+    # So the epoch goes INSIDE THE SIGNED MATERIAL. Bumping it invalidates every
+    # outstanding token at once. IT IS NOT A SECRET -- it is a counter, so it can
+    # be set through the ordinary env route without the value needing to be
+    # private, and it is safe to print.
+    session_epoch: str = "1"
 
     # Copy-trade feasibility probes: on each fresh whale BUY, snapshot the
     # residual order book and compute achievable prices. assumed_edge is the

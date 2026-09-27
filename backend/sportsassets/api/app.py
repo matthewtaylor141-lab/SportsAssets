@@ -519,6 +519,24 @@ def _signing_key() -> bytes:
     return key
 
 
+def _session_epoch() -> str:
+    """THE EPOCH THAT GOES INSIDE EVERY SIGNATURE.
+
+    Bumping `SESSION_EPOCH` invalidates every outstanding desk, wall and control
+    token, without rotating `admin_token` -- which is also the credential the
+    authorized verification workflows present, so rotating it to revoke sessions
+    would break the route used to prove the revocation happened.
+
+    It is a counter, not a secret.
+
+    READ WITH A DEFAULT, deliberately. An absent or blank epoch resolves to "1"
+    rather than raising: two deployments that disagreed about what "" means would
+    silently reject each other's tokens, and a signature helper that can throw
+    turns a missing setting into a 500 on every sign-in.
+    """
+    return (getattr(settings(), "session_epoch", "1") or "1").strip() or "1"
+
+
 def mint_desk_token(now: float | None = None) -> tuple[str, int]:
     import hashlib
     import hmac as _hmac
@@ -526,7 +544,8 @@ def mint_desk_token(now: float | None = None) -> tuple[str, int]:
 
     exp = int(now if now is not None else _t.time()) + DESK_TOKEN_TTL_S
     key = _signing_key()
-    sig = _hmac.new(key, f"desk:{exp}".encode(), hashlib.sha256).hexdigest()
+    sig = _hmac.new(key, f"desk:{exp}:{_session_epoch()}".encode(),
+                    hashlib.sha256).hexdigest()
     return f"{exp}.{sig}", exp
 
 
@@ -554,7 +573,8 @@ def mint_control_token(now: float | None = None) -> tuple[str, int]:
     exp = int(now if now is not None else _t.time()) + int(
         CONTROL_TOKEN_TTL_S)
     key = _signing_key()
-    sig = _hmac.new(key, ("%s:%d" % (CONTROL_SCOPE, exp)).encode(),
+    sig = _hmac.new(key, ("%s:%d:%s" % (CONTROL_SCOPE, exp,
+                                        _session_epoch())).encode(),
                     hashlib.sha256).hexdigest()
     return "%s.%s.%s" % (CONTROL_SCOPE, exp, sig), exp
 
@@ -585,7 +605,8 @@ def control_token_ok(token: str, now: float | None = None) -> bool:
     key = (settings().admin_token or "").strip().encode()
     if not key:
         return False
-    want = _hmac.new(key, ("%s:%d" % (CONTROL_SCOPE, exp)).encode(),
+    want = _hmac.new(key, ("%s:%d:%s" % (CONTROL_SCOPE, exp,
+                                         _session_epoch())).encode(),
                      hashlib.sha256).hexdigest()
     return _hmac.compare_digest(parts[2], want)
 
@@ -610,7 +631,7 @@ def desk_token_ok(token: str, now: float | None = None) -> bool:
     key = (settings().admin_token or "").strip().encode()
     if not key:
         return False
-    want = _hmac.new(key, f"desk:{exp}".encode(),
+    want = _hmac.new(key, f"desk:{exp}:{_session_epoch()}".encode(),
                      hashlib.sha256).hexdigest()
     return _hmac.compare_digest(sig, want)
 
@@ -631,7 +652,8 @@ def mint_wall_token(now: float | None = None) -> tuple[str, int]:
 
     exp = int(now if now is not None else _t.time()) + WALL_TOKEN_TTL_S
     key = _signing_key()
-    sig = _hmac.new(key, f"wall:{exp}".encode(), hashlib.sha256).hexdigest()
+    sig = _hmac.new(key, f"wall:{exp}:{_session_epoch()}".encode(),
+                    hashlib.sha256).hexdigest()
     return f"{exp}.{sig}", exp
 
 
@@ -655,7 +677,7 @@ def wall_token_ok(token: str, now: float | None = None) -> bool:
     key = (settings().admin_token or "").strip().encode()
     if not key:
         return False
-    want = _hmac.new(key, f"wall:{exp}".encode(),
+    want = _hmac.new(key, f"wall:{exp}:{_session_epoch()}".encode(),
                      hashlib.sha256).hexdigest()
     return _hmac.compare_digest(sig, want)
 

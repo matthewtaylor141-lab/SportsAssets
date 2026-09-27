@@ -351,3 +351,57 @@ def test_healthz_publishes_the_posture_without_authentication(monkeypatch,
     body = client.get("/healthz").json()
     assert body["auth_all_configured"] is True
     assert body["auth_not_configured"] == []
+
+
+# ── 7 · THE SESSION EPOCH REVOKES WITHOUT ROTATING THE KEY ───────────
+
+def test_bumping_the_session_epoch_invalidates_every_outstanding_token(
+        monkeypatch):
+    """THE MECHANISM THAT MAKES REVOCATION POSSIBLE WITHOUT BREAKING VERIFICATION.
+
+    Rotating `admin_token` revokes every session -- and it is also the credential
+    the authorized verification workflows present, held as a GitHub secret. So
+    rotating it on the service to revoke sessions would break the route used to
+    prove the revocation landed.
+
+    The epoch is inside the signed material instead. It is a counter, not a
+    secret, so it travels by the ordinary env route and is safe to print.
+    """
+    _with(monkeypatch, ADMIN_TOKEN="an-unchanged-admin-token", SESSION_EPOCH="1")
+    desk, _ = A.mint_desk_token()
+    wall, _ = A.mint_wall_token()
+    ctl, _ = A.mint_control_token()
+    assert A.desk_token_ok(desk) and A.wall_token_ok(wall)
+    assert A.control_token_ok(ctl)
+
+    # THE SIGNING KEY IS UNCHANGED. Only the epoch moves.
+    _with(monkeypatch, ADMIN_TOKEN="an-unchanged-admin-token", SESSION_EPOCH="2")
+    assert A.desk_token_ok(desk) is False
+    assert A.wall_token_ok(wall) is False
+    assert A.control_token_ok(ctl) is False
+
+    # AND NEW SESSIONS STILL WORK -- a revocation that bricked sign-in would be
+    # an outage, not a revocation.
+    fresh, _ = A.mint_desk_token()
+    assert A.desk_token_ok(fresh) is True
+    fresh_ctl, _ = A.mint_control_token()
+    assert A.control_token_ok(fresh_ctl) is True
+
+
+def test_the_epoch_defaults_to_a_value_and_is_never_empty(monkeypatch):
+    """An unset or blank epoch must not make the signed material ambiguous: two
+    deployments reading "" and "1" differently would silently reject each other's
+    tokens."""
+    for value in (None, "", "   "):
+        _with(monkeypatch, ADMIN_TOKEN="a-real-admin-token", SESSION_EPOCH=value)
+        assert A._session_epoch() == "1"
+
+
+def test_the_epoch_is_NOT_treated_as_a_secret(monkeypatch):
+    """It is a counter. Treating it as a secret would push it into the private
+    provisioning path, where a value nobody may read is a value nobody can bump."""
+    from sportsassets import config
+
+    assert "session_epoch" not in config.CREDENTIAL_CONSEQUENCES
+    _with(monkeypatch, SESSION_EPOCH="7")
+    assert "session_epoch" not in config.credential_posture()["credentials"]
