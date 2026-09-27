@@ -265,7 +265,23 @@ if [ "$RC" -eq 124 ]; then
 fi
 
 # ── 7 · ONLY NOW IS THERE A RESULT ──────────────────────────────────
+# AN IDENTITY IS A TEST, NOT A LOG LINE -- AND THIS PRODUCED A FALSE POSITIVE.
+#
+# pytest's captured-log sections contain lines like
+#
+#     sportsassets.api.app:app.py:5032 whale identities refresh failed
+#
+# and `^(FAILED|ERROR) ` does not match those -- but pytest ALSO prints them
+# under an "ERROR" log level inside the short summary region, so one was landing
+# in the list. Adding two import lines shifted it from app.py:5032 to
+# app.py:5034, and the comparison against the baseline then reported a NEW
+# identity that was the same log line at a different line number.
+#
+# That is exactly the kind of false positive that trains a reader to skim the
+# diff, which is the one thing this list must not do. A pytest node id always
+# contains `::` and starts at column 0 with a path, so the filter requires both.
 grep -E "^(FAILED|ERROR) " "$LOG" | sed -E 's/^(FAILED|ERROR) //; s/ - .*//' \
+    | grep -E '^[A-Za-z0-9_./-]+\.py::' \
     | sort -u > "$LOG.ids"
 cp -f "$LOG.ids" "$EVIDENCE/$(basename "$LOG").ids.$STAMP" 2>/dev/null || true
 cp -f "$HEALTH" "$EVIDENCE/$(basename "$HEALTH").$STAMP" 2>/dev/null || true
