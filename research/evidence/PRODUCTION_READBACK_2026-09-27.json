@@ -1,0 +1,205 @@
+{
+ "record": "THE DISABLED PRODUCTION RELEASE, AND WHAT THE SERVING PROCESS ANSWERED",
+ "date": "2026-09-27",
+ "what_this_is": [
+  "Every figure here came back from the process serving https://sportsassets-api.onrender.com,",
+  "read from a GitHub runner because this container has no egress to that host (403 at the",
+  "proxy). Nothing here was read from a test interpreter, and nothing here submitted an order."
+ ],
+ "the_defect_the_first_readback_found": {
+  "symptom": "GET /api/command/bettor/desk .funded_book.error = 'UndefinedColumnError: column \"residual_qty\" does not exist'",
+  "serving_build_at_the_time": "07c67f3",
+  "boot_log": [
+   "INFO:__main__:applying 125_funded_pilot_intents_and_fills.sql",
+   "INFO:__main__:applying 126_funded_inventory_exits_and_fees.sql",
+   "asyncpg.exceptions.UndefinedFunctionError: function bettor_funded_order_is_outstanding(text) does not exist",
+   "migrate failed — serving anyway; will apply on next boot"
+  ],
+  "cause": [
+   "production is PostgreSQL 18.6; every database the file had met (local, and every gate",
+   "checkout) is 16.13. PostgreSQL 17 and later run maintenance work -- an index BUILD",
+   "included -- under a safe search_path of 'pg_catalog, pg_temp', and a SQL function body is",
+   "re-parsed when the planner inlines it. The two partial indexes in 126 have a predicate",
+   "whose body called two other funded functions unqualified, so those names could not be",
+   "resolved at build time and the whole file rolled back."
+  ],
+  "reproduced_on_16": {
+   "how": "SET search_path = pg_catalog, pg_temp, then evaluate the predicate",
+   "unqualified_body": "ERROR: function f_out(text) does not exist / CONTEXT: SQL function \"f_open\" during inlining",
+   "qualified_body": "builds and evaluates"
+  },
+  "fix": "714680b -- every funded SQL function body schema-qualifies the funded functions and tables it names",
+  "regression_guard": [
+   "tests/test_the_funded_book_is_durable.py::test_a_funded_predicate_resolves_under_the_maintenance_path",
+   "tests/test_the_funded_book_is_durable.py::test_no_funded_function_body_leaves_a_name_unqualified"
+  ],
+  "both_tests_fail_against_the_unfixed_migrations_on_postgresql_16": true,
+  "what_it_says_about_the_gate": [
+   "a suite whose database is two major versions behind production cannot see a",
+   "version-dependent failure. The gate on 07c67f3 was green by identity and the schema still",
+   "did not apply. The two tests move the check into a form 16 can evaluate; they do not make",
+   "the gate a substitute for the production boot log."
+  ],
+  "what_it_says_about_the_panel": [
+   "it reported the failure instead of rendering an empty book. A funded section that had shown",
+   "'0 positions, $0.00' over an unmigrated schema would have been the serious outcome."
+  ]
+ },
+ "after_the_fix": {
+  "deploy": {
+   "route": "render-ops action=deploy-api-commit, confirm=DO",
+   "commit": "714680bb947538b090b57e7519c5ba4a9aded58b",
+   "deploy_id": "dep-das9848jo6nc73ap8s20",
+   "worker_deploys_before": "dep-daqgpvh5efls7396e41g live f5d1c05 2026-09-24T11:43:58Z",
+   "worker_deploys_after": "dep-daqgpvh5efls7396e41g live f5d1c05 2026-09-24T11:43:58Z",
+   "worker_unchanged": true
+  },
+  "serving_build": {
+   "endpoint": "GET /healthz",
+   "commit": "714680b",
+   "db_ok": true,
+   "matched_against_expect_commit": true,
+   "and_the_scheduled_loop_agrees": "heartbeat writer = {pid 1, build 714680bb947538b090b57e7519c5ba4a9aded58b, module sportsassets.workers.ext_pinnacle_loop}"
+  },
+  "migrations_now_recorded": {
+   "126_funded_inventory_exits_and_fees.sql": "2026-09-27 03:58:00.139458+00",
+   "127_an_exit_commits_no_collateral.sql": "2026-09-27 03:58:00.155035+00",
+   "128_exit_reservation_and_discrepancies.sql": "2026-09-27 03:58:00.175490+00"
+  },
+  "funded_functions_in_production": [
+   "bettor_funded_available_to_exit(parent text) -> numeric, STABLE",
+   "bettor_funded_holds_inventory(residual numeric, closed timestamptz) -> boolean, IMMUTABLE",
+   "bettor_funded_intent_is_live(s text) -> boolean, IMMUTABLE",
+   "bettor_funded_order_is_outstanding(s text) -> boolean, IMMUTABLE",
+   "bettor_funded_position_is_open(s text, residual numeric, closed timestamptz) -> boolean, IMMUTABLE"
+  ],
+  "the_funded_command_centre_section": {
+   "section": "Funded book",
+   "label": "REAL MONEY — NEVER SUMMED WITH ANY MODELLED BOOK",
+   "books": 0,
+   "unresolved_discrepancies": 0,
+   "error": "none",
+   "is_not_summed_with": [
+    "AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW",
+    "CONTROLLED_DEMONSTRATION",
+    "the acceptance book",
+    "UNCLASSIFIED"
+   ]
+  },
+  "every_submission_switch": {
+   "asserted": "no boolean switch in either lane is true; activation.funded_submission = DISABLED",
+   "entry_lane": [
+    "FUNDED_SUBMISSION_ENABLED = false (sportsassets.bettor_funded_execution)",
+    "REAL_ORDER_SUBMISSION_ENABLED = false (sportsassets.bettor_entry_execution)",
+    "execution_gate = bound per process; denial RAISES inside submit_fok (sportsassets.pmus)",
+    "PMUS_KEY_ID / PMUS_SECRET_KEY = absent in this deployment"
+   ],
+   "servicing_lane": [
+    "FUNDED_EXIT_SUBMISSION_ENABLED = false (sportsassets.bettor_funded_management)",
+    "execution_gate inside pmus.submit_fok = process-bound",
+    "PMUS_KEY_ID / PMUS_SECRET_KEY = absent",
+    "settlement and status reconciliation = DELIBERATELY AVAILABLE"
+   ],
+   "no_order_was_sent": true
+  },
+  "operator_access": {
+   "probe": "wrong password",
+   "status": "HTTP 401",
+   "reason": "OPERATOR_PASSWORD_NOT_ACCEPTED",
+   "verdict": "the control sign-in is live and refusing a wrong password with a status",
+   "nothing_was_written": true,
+   "no_credential_appears_in_any_log_line_or_in_chat": true
+  },
+  "one_completed_scheduled_cycle": {
+   "state": "LIVE",
+   "markets_considered": 556,
+   "evaluated": 1,
+   "written": 1,
+   "elapsed_s": 138.39,
+   "reported_at": 1790481740.0828261,
+   "refusals_that_actually_fired": {
+    "NO_VENUE_CONTRACT_FOR_EVENT": 22,
+    "NO_PINNACLE_ON_EVENT": 5,
+    "VENUE_MAPPING_AMBIGUOUS": 5,
+    "VENUE_QUOTE_STALE": 3,
+    "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE": 3,
+    "VENUE_CONTRACT_IS_A_SEGMENT_NOT_FULL_GAME": 2,
+    "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP": 1,
+    "RISK_GATE_BLOCKED": 1,
+    "SIZING_POLICY_NOT_APPLICABLE": 1,
+    "NO_ACTION_HAS_POSITIVE_NET_EDGE": 1,
+    "EXECUTION_ESTIMATE_NOT_IDENTIFIED": 1,
+    "NO_OBSERVED_DEPTH_INSIDE_THE_BREAK_EVEN_LIMIT": 1,
+    "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE": 1
+   },
+   "one_staleness_refusal_in_full": {
+    "refusal": "VENUE_QUOTE_STALE",
+    "age_s": 152.84,
+    "limit_s": 30.0,
+    "age_basis": "VENUE_TRANSACT_TIME",
+    "raw": "2026-09-27T03:58:13.697904685Z",
+    "us_market_slug": "aec-mlb-nym-wsh-2026-09-27"
+   },
+   "what_this_establishes": [
+    "the scheduled engine reached evaluation on current markets and declined on named grounds.",
+    "It is not 'nothing happened': thirteen distinct refusal counters fired, one candidate was",
+    "evaluated and one valuation was written. It is also not a qualifying candidate."
+   ],
+   "what_it_does_not_establish": "any funded activity. No funded account is bound, so servicing returns not-configured."
+  },
+  "the_funded_servicing_precondition": {
+   "bound_funded_account": "NONE BOUND",
+   "bound_venue": "none",
+   "unmet_checks": [
+    "account_selected_and_clean",
+    "limits_recorded_and_complete",
+    "limits_approved_by_the_owner",
+    "approved_limits_tighten_the_enforced_rails",
+    "venue_book_freshness_basis",
+    "settlement_compatibility",
+    "an_autonomous_entry_was_admitted_unwaived",
+    "an_eligible_market_with_one_coherent_chain"
+   ],
+   "read_twice_and_agreeing": "the admin readiness endpoint and the command centre's own activation panel report the same eight",
+   "why_the_heartbeat_does_not_carry_the_servicing_result": [
+    "cycle() runs _funded_service first, ahead of the entry lane's stop, table and credential",
+    "gates, but _heartbeat persists the ENTRY lane's tally only. The precondition is therefore",
+    "read directly rather than inferred from a row that does not contain it."
+   ]
+  },
+  "the_demonstration_is_separate_and_labelled": {
+   "label": "CONTROLLED DEMONSTRATION — SOFTWARE PROOF, NOT PERFORMANCE",
+   "experiment_id": "CONTROLLED_DEMONSTRATION_EXTERNAL_VALUATION_V1",
+   "counts_toward_strategy_performance": false,
+   "inputs_are_chosen_not_observed": true,
+   "every_position_book_and_its_flag": {
+    "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY": {"count": 4, "counts_toward_strategy_performance": false},
+    "CONTROLLED_DEMONSTRATION": {"count": 1, "counts_toward_strategy_performance": false},
+    "UNCLASSIFIED": {"count": 35, "counts_toward_strategy_performance": false}
+   },
+   "books_flagged_as_strategy_performance": "none"
+  }
+ },
+ "the_readback_instrument": {
+  "workflow": ".github/workflows/command-verify.yml, job funded-readback",
+  "why_its_own_job": [
+   "the acceptance suite is twenty-six steps and most of an hour, and it spends the odds and",
+   "venue budgets. A release readback has to be legible on its own and must not inherit a pass",
+   "from a step nineteen places away, so a funded_readback dispatch skips that job entirely."
+  ],
+  "expect_commit": "fails the job on any build other than the named SHA, so a readback cannot be attributed to a deploy that did not land",
+  "two_defects_in_the_instrument_itself_found_and_fixed_during_this_release": [
+   "it called every non-200 on the desk read 'the command role was not accepted' -- an",
+   "authorization answer where the truth was a 502 four seconds after a deploy went live. 401",
+   "and 403 now fail at once; 5xx and a dead connection retry.",
+   "'|| echo 000' concatenated a second 000 onto curl's own timeout status and printed HTTP",
+   "000000, a status that does not exist."
+  ]
+ },
+ "what_this_record_does_not_claim": [
+  "that the funded lane has traded. It has not, and no funded account is bound.",
+  "that a qualifying candidate exists. One valuation was written; nothing was admitted.",
+  "that the gate establishes production behaviour. It runs on PostgreSQL 16.13 and production is 18.6.",
+  "that any of this is authorization to trade."
+ ]
+}
