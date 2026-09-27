@@ -3602,6 +3602,52 @@ def cancel_order(order_id: str, us_market_slug: str) -> dict:
                                       f"{str(exc)[:160]}"}
 
 
+def balances() -> dict:
+    """WHAT THE VENUE SAYS THE ACCOUNT HOLDS. Read-only; raises to the caller.
+
+    WHY IT WAS MISSING AND WHY IT IS HERE NOW. This module could read
+    positions, activities and open orders but nothing that stated the
+    account's cash, so onboarding could not reconcile a balance and answered
+    `ADAPTER_CANNOT_READ_BALANCES` -- which correctly blocked every account on
+    this venue from becoming eligible. The venue does expose it:
+    `GET /v1/account/balances`, wrapped by the SDK as `client.account.balances()`,
+    answering `{"balances": [UserBalance, ...]}` with `currentBalance`,
+    `buyingPower`, `openOrders`, `unsettledFunds`, `balanceReservation` and
+    `marginRequirement` per currency.
+
+    IT RAISES RATHER THAN ANSWERING ZERO. Every other read in this module that
+    could be mistaken for "nothing there" fails closed, and a balance is the
+    one number where "we could not look" and "the account is empty" must never
+    render the same: the first blocks onboarding, the second is a fact about
+    the account.
+
+    THE FIGURES ARE RETURNED AS THE VENUE STATED THEM. No netting, no
+    derivation, no defaulting an absent field to 0 -- an absent field is
+    reported absent, because a reconciliation that silently reads a missing
+    `unsettledFunds` as zero is the same class of error as a fee schedule that
+    answers 0 when it cannot price.
+    """
+    resp = _get_client().account.balances() or {}
+    rows = [b for b in (resp.get("balances") or []) if isinstance(b, dict)]
+    fields = ("currentBalance", "currency", "lastUpdated", "buyingPower",
+              "assetNotional", "assetAvailable", "pendingCredit",
+              "openOrders", "unsettledFunds", "marginRequirement",
+              "balanceReservation")
+    out = []
+    for b in rows:
+        rec = {k: b.get(k) for k in fields if k in b}
+        rec["absent_fields"] = [k for k in fields if k not in b]
+        rec["pending_withdrawals"] = len(b.get("pendingWithdrawals") or [])
+        out.append(rec)
+    return {"endpoint": "/v1/account/balances",
+            "read_via": "polymarket_us client.account.balances()",
+            "currencies": len(out),
+            "balances": out,
+            "verbatim": ("every figure is the venue's own; nothing here is "
+                         "netted, derived or defaulted"),
+            "raw": resp}
+
+
 def probe() -> dict:
     """Connectivity/diag probe usable from the deployed API (admin panel):
     unauthenticated market list + whether creds are configured. Never orders."""

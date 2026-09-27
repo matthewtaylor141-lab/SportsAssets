@@ -2421,6 +2421,41 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
 
 # ── one cycle ───────────────────────────────────────────────────────
 
+async def _funded_attempt(conn, rec, *, now):
+    """OFFER ONE ADMITTED DECISION TO THE FUNDED CONNECTOR.
+
+    Returns None when the funded lane is not configured at all, so an
+    unconfigured deployment adds nothing to the cycle report. Otherwise it
+    returns the connector's whole answer, refusal included, because "what
+    stopped it" is the useful line in a cycle log.
+
+    NOTHING HERE DECIDES ANYTHING. Every gate lives in the connector: the
+    account row, the owner-approved limits, the complete rails against the
+    funded book, the authorization gate's affirmative answer, and the code
+    switch. This function only carries the decision across.
+    """
+    from .. import bettor_funded_activation as _FA
+    from .. import bettor_funded_execution as _FX
+
+    try:
+        bound = _FA._obj(await _FA._state(conn, _FA.ACCOUNT_KEY)) or {}
+    except Exception:                                          # noqa: BLE001
+        return None
+    account_id = str(bound.get("account_id") or "").strip()
+    venue = str(bound.get("venue") or "").strip()
+    if not account_id or not venue:
+        # NOT CONFIGURED. Not a refusal -- there is nothing to refuse yet.
+        return None
+    try:
+        return await _FX.submit_for_decision(
+            conn, rec, account_id=account_id, venue=venue, now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        # A CONNECTOR THAT RAISES MUST NOT TAKE THE CYCLE DOWN, and it must
+        # not be reported as a clean refusal either.
+        return {"ok": False, "refusal": "FUNDED_CONNECTOR_RAISED",
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+
+
 async def cycle(conn) -> dict:
     """Never raises. Returns what it did and, mostly, why it did not."""
     started = time.time()
@@ -2988,6 +3023,32 @@ async def cycle(conn) -> dict:
                         fee_fn=fee_fn)
                     wrote = await inv.persist_entry(conn, plan)
                     rec["inventory"] = wrote
+                    # ── THE FUNDED PATH, CALLED FROM THE SCHEDULE ───
+                    #
+                    # THE GAP THIS CLOSES. This worker had NO ORDER PATH at
+                    # all: `api/app.py` recorded that it "reaches
+                    # pmus.book_read and nothing else on that module", so a
+                    # qualifying decision could never reach a venue however
+                    # complete the connector was. It is called here, on the
+                    # SAME admitted record the shadow inventory was written
+                    # from, so the two can never disagree about what the
+                    # decision said.
+                    #
+                    # AND IT SENDS NOTHING TODAY. `FUNDED_SUBMISSION_ENABLED`
+                    # is False, so the connector runs every gate it has and
+                    # returns before the adapter is reached. The call is here
+                    # rather than absent because an unwired path cannot be
+                    # tested, and because what it refuses on is the thing
+                    # worth reading in a cycle report.
+                    rec["event_key"] = quote.get("event_id")
+                    rec["order_intent"] = contract.get("buy_intent")
+                    funded = await _funded_attempt(conn, rec, now=now)
+                    if funded is not None:
+                        rec["funded"] = funded
+                        tally["FUNDED:" + str(funded.get("refusal")
+                                              or "SUBMITTED")] = tally.get(
+                            "FUNDED:" + str(funded.get("refusal")
+                                            or "SUBMITTED"), 0) + 1
                     entries.append({
                         "position_id": wrote.get("position_id"),
                         "decision_id": wrote.get("decision_id"),

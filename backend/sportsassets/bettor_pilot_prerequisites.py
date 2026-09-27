@@ -98,22 +98,32 @@ BEYOND_READINESS = (
                   "change"},
     {"id": "scheduled_lane_calls_the_connection",
      "category": ENGINEERING,
-     "state": "NOT_WIRED",
-     "what": ("`workers/ext_pinnacle_loop` has no order path at all -- "
-              "api/app.py records that it reaches `pmus.book_read` and "
-              "nothing else. The connection exists; the SCHEDULE does not "
-              "call it yet"),
-     "remaining": ("one call site in the cycle, behind the same switch, plus "
-                   "the inventory write. Deliberately not added while "
-                   "submission is disabled and no account is eligible")},
+     "state": "WIRED_AND_TESTED_DISABLED",
+     "what": ("`workers/ext_pinnacle_loop` now calls the funded connector "
+              "from its cycle, on the SAME admitted record the shadow "
+              "inventory is written from, via `_funded_attempt`"),
+     "remaining": ("it sends nothing: with the shipped switches the "
+                   "connector refuses before the adapter is reached, and "
+                   "that refusal is reported in the cycle tally")},
+    {"id": "durable_funded_book",
+     "category": ENGINEERING,
+     "state": "BUILT_AND_TESTED",
+     "what": ("`bettor_funded_book` on migration 125: intent committed "
+              "BEFORE the request leaves, venue order and fill identities "
+              "retained, fills idempotent on the venue's own id, recovery "
+              "that reconciles and cannot resubmit, and exposure preserved "
+              "when the venue cannot establish an outcome"),
+     "remaining": ("no funded fill exists yet, so the accounting is exercised "
+                   "against substituted transport only")},
     {"id": "venue_balance_read",
      "category": ENGINEERING,
-     "state": "MISSING",
-     "what": ("`pmus` exposes portfolio.positions, portfolio.activities and "
-              "orders.list, and nothing that states the account's cash"),
-     "remaining": ("onboarding reports ADAPTER_CANNOT_READ_BALANCES and "
-                   "refuses to mark any account on this venue eligible until "
-                   "the read exists")},
+     "state": "BUILT",
+     "what": ("`pmus.balances()` reads GET /v1/account/balances via the "
+              "SDK's `client.account.balances()` and returns the venue's "
+              "figures verbatim, with absent fields reported absent"),
+     "remaining": ("it cannot be exercised against production without a "
+                   "venue credential; without one it raises, which onboarding "
+                   "reports as UNREADABLE and which blocks")},
     {"id": "venue_credential",
      "category": OWNER_DECISION,
      "state": "ABSENT",
@@ -122,11 +132,13 @@ BEYOND_READINESS = (
                    "itself an authorization to trade")},
     {"id": "account_venue_reconciliation",
      "category": ENGINEERING,
-     "state": "BUILT_BLOCKED_ON_THE_BALANCE_READ",
+     "state": "BUILT_BLOCKED_ON_A_CREDENTIAL",
      "what": ("`bettor_account_onboarding` reconciles balances, positions, "
-              "open orders and executions before any account is eligible"),
-     "remaining": ("it cannot pass on PMUS until the balance read exists, "
-                   "which is the engineering item above")},
+              "open orders and executions -- all four now reaching real "
+              "adapter calls -- before any account is eligible"),
+     "remaining": ("without a venue credential every read raises, so all four "
+                   "answer UNREADABLE and no account can be marked eligible. "
+                   "That is the reconciliation working, not a gap in it")},
     {"id": "source_calibration",
      "category": MARKET_EVIDENCE,
      "state": "NOT_ESTABLISHED",
@@ -146,11 +158,21 @@ BEYOND_READINESS = (
                    "CLOCK_SENSITIVE_TEST_DEFECTS.json; neither is fixed")},
     {"id": "max_event_exposure_blindness",
      "category": ENGINEERING,
-     "state": "OPEN",
-     "what": ("MAX_EVENT_EXPOSURE cannot see held positions on the same "
-              "event, because OPEN_BOOK_SQL selects no event key"),
-     "remaining": ("a real rail gap. It matters more with funded capital "
-                   "than without it")},
+     "state": "OPEN_IN_THE_SHADOW_LANE_CLOSED_IN_THE_FUNDED_ONE",
+     "what": ("the SHADOW lane's OPEN_BOOK_SQL selects no event key, so its "
+              "event rail cannot see siblings. The FUNDED lane carries a "
+              "canonical event key on every intent (NOT NULL) and enforces "
+              "MAX_EVENT_EXPOSURE per event against pending collateral"),
+     "remaining": ("the shadow lane's blindness is unchanged and still "
+                   "recorded. The funded lane no longer depends on it")},
+    {"id": "one_position_at_a_time",
+     "category": ENGINEERING,
+     "state": "ENFORCED_BY_THE_DATABASE",
+     "what": ("a UNIQUE index over the live-intent subset "
+              "(`bettor_funded_one_live_intent`) makes a second concurrent "
+              "submission fail at the database, whatever the interleaving"),
+     "remaining": ("it was a sentence in a proposal until this index existed; "
+                   "a SELECT-then-INSERT check could not have done it")},
 )
 
 

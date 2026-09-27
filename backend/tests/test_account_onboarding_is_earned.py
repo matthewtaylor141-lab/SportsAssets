@@ -111,7 +111,7 @@ class _Venue:
     def open_orders(self):
         return self._orders.list(None)["orders"]
 
-    def balance(self):
+    def balances(self):
         if self._balance is None:
             raise RuntimeError("balance read failed")
         return dict(self._balance)
@@ -122,8 +122,26 @@ class _Venue:
         return list(self._trades.get(slug) or [])
 
 
+#: THE VENUE'S OWN BALANCE SHAPE, as `pmus.balances()` returns it after
+#: reading GET /v1/account/balances. A double that answered in OUR shape would
+#: skip the field inspection the reconciliation now does.
+def _bal(current=1000.0, reserved=0.0, absent=()):
+    row = {"currency": "USD", "current_balance": current,
+           "buying_power": current, "reserved_by_open_orders": reserved,
+           "unsettled_funds": 0.0, "balance_reservation": 0.0,
+           "pending_withdrawals": 0, "absent_fields": list(absent)}
+    if current is None:
+        row.pop("current_balance")
+    return {"endpoint": "/v1/account/balances", "currencies": 1,
+            "balances": [{"currency": "USD", "currentBalance": current,
+                          "buyingPower": current, "openOrders": reserved,
+                          "unsettledFunds": 0.0, "balanceReservation": 0.0,
+                          "absent_fields": list(absent),
+                          "pending_withdrawals": 0}]}
+
+
 def _clean_venue(**kw):
-    return _Venue(positions={}, orders=[], balance={"cash": 1000.0}, **kw)
+    return _Venue(positions={}, orders=[], balance=_bal(), **kw)
 
 
 async def _drop(conn):
@@ -147,21 +165,108 @@ def test_a_new_registry_id_is_not_evidence_of_clean_accounting():
     assert ON.NOT_SUPPORTED not in ON.PASSING
 
 
-def test_the_real_adapter_cannot_read_balances_and_that_is_reported():
-    """THE ENGINEERING GAP, NAMED. `pmus` exposes positions, activities and
-    orders.list and nothing that states the account's cash, so check 1 cannot
-    pass on the funded venue today. It is reported as NOT_SUPPORTED with the
-    missing read named -- not skipped, and not assumed fine."""
+def test_the_adapter_now_reads_balances_and_fails_closed_without_one():
+    """THE GAP THAT WAS NAMED IS CLOSED, and the reader fails closed.
+
+    The previous version of this test asserted `pmus` had NO balance read and
+    that onboarding reported ADAPTER_CANNOT_READ_BALANCES. That was the honest
+    state then; it is no longer. The venue does expose it --
+    `GET /v1/account/balances`, wrapped by the SDK as
+    `client.account.balances()` -- so `pmus.balances()` exists and onboarding
+    reaches it.
+
+    AND IT RAISES RATHER THAN ANSWERING ZERO. Without a credential the client
+    cannot read the account, and that must surface as UNREADABLE (which
+    blocks) and never as an empty balance (which would look like a fact).
+    """
+    import inspect
+
     from sportsassets import pmus
 
-    got = ON.read_balances(pmus)
-    assert got["verdict"] == ON.NOT_SUPPORTED, got
-    assert got["refusal"] == "ADAPTER_CANNOT_READ_BALANCES"
-    assert got["engineering_gap"] is True
-    assert "balance read" in got["missing"]
-    # and it is listed in describe(), so a readback prints it
-    assert any("balance read" in g
-               for g in ON.describe()["known_adapter_gaps_on_pmus"])
+    assert callable(getattr(pmus, "balances", None))
+    src = inspect.getsource(pmus.balances)
+    assert "account.balances()" in src
+    assert "/v1/account/balances" in src
+    # no defaulting of an absent field to zero
+    assert "absent_fields" in src
+
+    # UNCREDENTIALLED: the read must fail, not answer zero. The transport is
+    # substituted so this test makes no network call of its own.
+    class _Raises:
+        __name__ = "pmus_like"
+
+        @staticmethod
+        def balances():
+            raise RuntimeError("401 Unauthorized")
+
+    got = ON.read_balances(_Raises)
+    assert got["verdict"] == ON.UNREADABLE, got
+    assert got["verdict"] not in ON.PASSING
+    assert "Unknown is not empty" in got["why"]
+
+
+def test_a_balance_call_that_succeeds_is_not_a_reconciliation():
+    """A 200 IS NOT AN ANSWER. A response with no currency row, or a row whose
+    currentBalance does not parse, establishes nothing about the account's
+    cash -- and reading an absent field as 0 is the failure this module
+    exists to refuse."""
+    class _Empty:
+        __name__ = "empty"
+
+        @staticmethod
+        def balances():
+            return {"balances": []}
+
+    got = ON.read_balances(_Empty)
+    assert got["verdict"] == ON.DISCREPANCY, got
+    assert "no currency row" in got["why"]
+
+    class _Unparseable:
+        __name__ = "weird"
+
+        @staticmethod
+        def balances():
+            return {"balances": [{"currency": "USD",
+                                  "currentBalance": None,
+                                  "absent_fields": ["currentBalance"]}]}
+
+    got = ON.read_balances(_Unparseable)
+    assert got["verdict"] == ON.DISCREPANCY, got
+    assert "not a balance of zero" in got["why"]
+
+    # AND A GENUINE READ RECONCILES, with the venue's figures recorded
+    ok = ON.read_balances(_Venue(balance=_bal(1234.5)))
+    assert ok["verdict"] == ON.RECONCILED, ok
+    assert ok["currencies"][0]["current_balance"] == pytest.approx(1234.5)
+
+
+def test_reserved_funds_the_open_order_list_cannot_explain_is_a_discrepancy():
+    """THE TWO VENUE READS MUST AGREE WITH EACH OTHER. Cash held against
+    resting orders while the open-order list is empty means the venue's own
+    answers disagree, and neither is then a basis for marking an account
+    clean."""
+    import asyncio
+
+    import pytest as _p
+    asyncpg = _p.importorskip("asyncpg")
+    if not DSN:
+        _p.skip("needs RN1X_TEST_DSN")
+
+    async def go():
+        conn = await asyncpg.connect(DSN)
+        try:
+            v = _Venue(positions={}, orders=[], balance=_bal(reserved=25.0))
+            rec = await ON.reconcile(conn, account_id="x", venue=VENUE,
+                                     adapter=v)
+            bad = [c for c in rec["checks"]
+                   if c["verdict"] == ON.DISCREPANCY]
+            assert bad, rec["checks"]
+            assert bad[0]["reserved_by_open_orders"] == _p.approx(25.0)
+            assert bad[0]["open_orders_the_venue_listed"] == 0
+            assert rec["eligible"] is False
+        finally:
+            await conn.close()
+    asyncio.run(go())
 
 
 # ── 2 · EACH READ'S THREE OUTCOMES ──────────────────────────────────
@@ -351,7 +456,7 @@ async def test_the_paused_account_is_not_unpaused_by_a_decision_to_unpause_it():
         got = await ON.resolve_existing(conn, account_id=paused, venue=VENUE,
                                         by="pytest",
                                         adapter=_Venue(fail_positions=True,
-                                                       balance={"cash": 1.0},
+                                                       balance=_bal(1.0),
                                                        orders=[]))
         assert got["ok"] is False
         assert got["still_paused"] is True

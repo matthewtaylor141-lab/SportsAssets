@@ -23,14 +23,21 @@ UNREADABLE -- and unreadable blocks, because "we could not look" must never
 render the same as "we looked and it was empty". That distinction is the whole
 reason this module exists as something other than an UPDATE statement.
 
-WHAT IS NOT AVAILABLE TODAY, NAMED RATHER THAN WORKED AROUND. The retail
-venue adapter `pmus` carries no balance read: it has `portfolio.positions`,
-`portfolio.activities` and `orders.list`, and nothing that answers what cash
-the account holds. (`pmx.balance()` exists, but `pmx` is the institutional
-PRE-PRODUCTION adapter and refuses by host guard to speak to anything else.)
-So check 1 cannot pass on PMUS until that read exists, and this module says
-`ADAPTER_CANNOT_READ_BALANCES` instead of skipping it. That is an engineering
-gap in THIS module's dependency, and it is reported as one.
+THE BALANCE READ EXISTS NOW, AND THAT IS A CHANGE FROM THE FIRST VERSION OF
+THIS MODULE. It reported `ADAPTER_CANNOT_READ_BALANCES` because `pmus` had no
+call that stated the account's cash. The venue does expose one --
+`GET /v1/account/balances`, wrapped by the SDK as `client.account.balances()`
+-- so `pmus.balances()` was written and check 1 is reachable. The refusal is
+kept for an adapter that genuinely has no such call, because a venue module
+without a balance read still must not produce an eligible account.
+
+A SUCCESSFUL CALL IS STILL NOT A RECONCILIATION. A 200 with no currency row,
+or a row whose `currentBalance` does not parse, establishes nothing -- and
+reading an absent field as 0 is the same error as a fee schedule answering 0
+when it cannot price. Both are DISCREPANCY. And the venue's two answers are
+checked against EACH OTHER: cash reserved against resting orders while the
+open-order list is empty means the venue contradicts itself, which is not a
+basis for marking an account clean.
 
 AND acct_fc2d773a2afa4851 STAYS PAUSED. `resolve_existing` exists to take it
 through the same four reconciliations as any other account; nothing here
@@ -101,20 +108,60 @@ def read_balances(mod) -> dict:
     cash cannot be read cannot be sized against, so this returns
     NOT_SUPPORTED and the account does not become eligible.
     """
-    for name in ("balance", "balances", "account_balance"):
+    for name in ("balances", "balance", "account_balance"):
         fn = getattr(mod, name, None)
-        if callable(fn):
+        if not callable(fn):
+            continue
+        via = "%s.%s" % (mod.__name__, name)
+        try:
+            said = fn()
+        except Exception as exc:                           # noqa: BLE001
+            return {"check": "balances", "verdict": UNREADABLE,
+                    "read_via": via,
+                    "error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+                    "why": ("the balance read failed, so what this account "
+                            "holds is unknown. Unknown is not empty")}
+        # THE CALL SUCCEEDING IS NOT THE RECONCILIATION.
+        #
+        # A 200 carrying no currency row, or a row that does not state
+        # `currentBalance`, establishes nothing about the account's cash --
+        # and an absent field read as 0 is exactly the failure mode this
+        # module exists to refuse. So the figures are inspected.
+        rows = list((said or {}).get("balances") or [])
+        if not rows:
+            return {"check": "balances", "verdict": DISCREPANCY,
+                    "read_via": via, "venue_said": said,
+                    "why": ("the venue answered with no currency row, so the "
+                            "account's cash is not established")}
+        usable, unusable = [], []
+        for r in rows:
+            cur = str(r.get("currency") or "?")
             try:
-                return {"check": "balances", "verdict": RECONCILED,
-                        "read_via": "%s.%s" % (mod.__name__, name),
-                        "venue_said": fn()}
-            except Exception as exc:                       # noqa: BLE001
-                return {"check": "balances", "verdict": UNREADABLE,
-                        "read_via": "%s.%s" % (mod.__name__, name),
-                        "error": "%s: %s" % (type(exc).__name__,
-                                             str(exc)[:200]),
-                        "why": ("the balance read failed, so what this "
-                                "account holds is unknown")}
+                bal = float(r.get("currentBalance"))
+            except (TypeError, ValueError):
+                unusable.append({"currency": cur,
+                                 "currentBalance": r.get("currentBalance"),
+                                 "absent_fields": r.get("absent_fields")})
+                continue
+            usable.append({
+                "currency": cur, "current_balance": bal,
+                "buying_power": r.get("buyingPower"),
+                "reserved_by_open_orders": r.get("openOrders"),
+                "unsettled_funds": r.get("unsettledFunds"),
+                "balance_reservation": r.get("balanceReservation"),
+                "pending_withdrawals": r.get("pending_withdrawals"),
+                "absent_fields": r.get("absent_fields") or []})
+        if unusable:
+            return {"check": "balances", "verdict": DISCREPANCY,
+                    "read_via": via, "unusable_rows": unusable,
+                    "usable_rows": usable,
+                    "why": ("a currency row that does not state a parseable "
+                            "currentBalance is not a balance of zero")}
+        return {"check": "balances", "verdict": RECONCILED,
+                "read_via": via, "currencies": usable,
+                "venue_said": said,
+                "why": ("the venue stated a parseable balance for every "
+                        "currency row it returned")}
     return {"check": "balances", "verdict": NOT_SUPPORTED,
             "missing": "a balance read on %s" % mod.__name__,
             "refusal": "ADAPTER_CANNOT_READ_BALANCES",
@@ -189,8 +236,14 @@ def read_executions(mod, *, since_ts: float, slugs) -> dict:
     activities read is per-slug; a market with no position has no residual to
     reconcile and is named as out of scope rather than silently omitted.
     """
-    fn = getattr(mod, "market_trades", None) or getattr(
-        mod, "account_trades", None)
+    # `pmus.recent_trades(slug, since_ts)` IS this read, and it already
+    # raises when the venue cannot be read OR when its pages ran out before
+    # reaching `since_ts` -- "unreadable" and "truncated" are not "no fills".
+    # That is exactly the contract this check needs, so it is used rather than
+    # a new one being written beside it.
+    fn = (getattr(mod, "recent_trades", None)
+          or getattr(mod, "market_trades", None)
+          or getattr(mod, "account_trades", None))
     if not callable(fn):
         return {"check": "executions", "verdict": NOT_SUPPORTED,
                 "missing": "a per-market trade read on %s" % mod.__name__,
@@ -264,6 +317,30 @@ async def reconcile(conn, *, account_id: str, venue: str, adapter=None,
             "venue_holds_positions_this_book_does_not_know_about": unbooked,
             "why": ("each of these is live exposure with no row here. "
                     "Marking the account clean would adopt it silently")})
+
+    # FUNDS THE VENUE HAS RESERVED THAT OUR BOOK CANNOT EXPLAIN.
+    #
+    # `openOrders` on a balance row is cash the venue is holding against
+    # resting orders. If it is non-zero while `orders.list` showed us none,
+    # the two venue reads disagree with each other -- and an account whose own
+    # venue cannot be read consistently is not one to mark clean.
+    reserved = 0.0
+    for cur in (bal.get("currencies") or []):
+        try:
+            reserved += float(cur.get("reserved_by_open_orders") or 0.0)
+        except (TypeError, ValueError):
+            reserved = float("nan")
+            break
+    seen_orders = len(orders.get("open_orders") or [])
+    if reserved != reserved or (reserved > 0 and seen_orders == 0):
+        out["checks"].append({
+            "check": "balances", "verdict": DISCREPANCY,
+            "reserved_by_open_orders": reserved,
+            "open_orders_the_venue_listed": seen_orders,
+            "why": ("the venue is holding cash against resting orders while "
+                    "its own open-order list is empty. Its two answers do "
+                    "not agree, so neither is a basis for marking the "
+                    "account clean")})
 
     verdicts = {c["check"]: c["verdict"] for c in out["checks"]}
     blocking = [c for c in out["checks"] if c["verdict"] not in PASSING]
@@ -408,10 +485,14 @@ def describe() -> dict:
                        "accounting_status": NEW_ACCOUNTING, "paused": True},
         "execution_window_s": EXECUTION_WINDOW_S,
         "accounting_status_that_activation_accepts": list(FA.ACCOUNTING_OK),
-        "known_adapter_gaps_on_pmus": [
-            "no balance read -> ADAPTER_CANNOT_READ_BALANCES",
-            "no per-market trade read exposed -> "
-            "ADAPTER_CANNOT_READ_EXECUTIONS"],
+        "pmus_reads_used": {
+            "balances": "pmus.balances() -> GET /v1/account/balances",
+            "positions": "client.portfolio.positions, paged to eof",
+            "open_orders": "pmus.open_orders() -> orders.list",
+            "executions": ("pmus.recent_trades(slug, since_ts) -> "
+                           "portfolio.activities; it RAISES on an "
+                           "unreadable or truncated page set")},
+        "remaining_adapter_gap": None,
         "refusals": [R_NO_ADAPTER, R_NOT_RECONCILED, R_NO_ACCOUNT_ROW,
                      R_STILL_PAUSED],
     }

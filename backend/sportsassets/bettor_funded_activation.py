@@ -924,8 +924,25 @@ async def authorize(conn, *, account_id: str, venue: str, by: str,
                          why=("the owner's authorisation names venue %r; "
                               "this request is for %r"
                               % (owner.get("venue"), venue)))
-        od = str(owner.get("effective_digest") or "")
-        if od and od != eff["effective_digest"]:
+        # THE OWNER'S AUTHORISATION MUST SAY WHICH LIMITS IT COVERS.
+        #
+        # THE HOLE THIS CLOSES. The test was `if od and od != ...`, so an
+        # owner record with NO digest, or an empty one, skipped the comparison
+        # entirely and was accepted -- an authorisation for "this account at
+        # this venue, under whatever rails happen to be in force", which is
+        # precisely the open-ended permission the digest exists to prevent.
+        # A written authorisation that does not name the limit set it was
+        # given against is not a narrower permission than one that does; it is
+        # a wider one.
+        od = str(owner.get("effective_digest") or "").strip()
+        if not od:
+            return _stop(R_OWNER_AUTH_LIMITS,
+                         owner_effective_digest=None,
+                         why=("the owner's authorisation carries no effective "
+                              "limit digest, so nothing establishes which "
+                              "rails it was granted against. It is refused "
+                              "rather than read as covering today's"))
+        if od != eff["effective_digest"]:
             return _stop(R_OWNER_AUTH_LIMITS,
                          why=("the owner authorised the limit set digesting "
                               "to %s; the effective set now digests to %s"

@@ -63,12 +63,26 @@ def test_the_engineering_gaps_are_listed_including_the_ones_not_yet_wired():
     assert ids["funded_execution_connection"]["category"] == PR.ENGINEERING
     assert "FUNDED_SUBMISSION_ENABLED" in \
         ids["funded_execution_connection"]["remaining"]
-    # the schedule does NOT call it, and that is stated as incomplete
-    assert ids["scheduled_lane_calls_the_connection"]["state"] == "NOT_WIRED"
-    # the balance read is missing and blocks onboarding
-    assert ids["venue_balance_read"]["state"] == "MISSING"
-    assert "ADAPTER_CANNOT_READ_BALANCES" in \
-        ids["venue_balance_read"]["remaining"]
+    # the schedule now CALLS it, and still sends nothing
+    assert ids["scheduled_lane_calls_the_connection"]["state"] == \
+        "WIRED_AND_TESTED_DISABLED"
+    assert "sends nothing" in \
+        ids["scheduled_lane_calls_the_connection"]["remaining"]
+    # the balance read exists; what blocks it now is a credential, not code
+    assert ids["venue_balance_read"]["state"] == "BUILT"
+    assert "/v1/account/balances" in ids["venue_balance_read"]["what"]
+    assert "credential" in ids["venue_balance_read"]["remaining"]
+    # the durable book is built, and says what it has NOT yet exercised
+    assert ids["durable_funded_book"]["state"] == "BUILT_AND_TESTED"
+    assert "substituted transport" in \
+        ids["durable_funded_book"]["remaining"]
+    # the one-position rule is enforced, not proposed
+    assert ids["one_position_at_a_time"]["state"] == \
+        "ENFORCED_BY_THE_DATABASE"
+    assert "UNIQUE index" in ids["one_position_at_a_time"]["what"]
+    # and the shadow lane's event blindness is still recorded as open
+    assert "OPEN_IN_THE_SHADOW_LANE" in \
+        ids["max_event_exposure_blindness"]["state"]
     # calibration is EVIDENCE, not engineering, and not an owner decision
     assert ids["source_calibration"]["category"] == PR.MARKET_EVIDENCE
     # and the credential is the owner's, with the disclaimer attached

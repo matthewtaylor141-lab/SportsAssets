@@ -32,6 +32,7 @@ import pytest
 
 from sportsassets import bettor_entry_execution as EX
 from sportsassets import bettor_funded_activation as FA
+from sportsassets import bettor_funded_book as FB
 from sportsassets import bettor_funded_execution as FX
 
 DSN = __import__("os").environ.get("RN1X_TEST_DSN", "")
@@ -49,6 +50,10 @@ def _decision(**over):
     returns and `bettor_entry_inventory.plan_entry` already consumes."""
     rec = {"admissible": True, "refusals": [],
            "us_market_slug": SLUG,
+           # THE CANONICAL EVENT KEY, now required: MAX_EVENT_EXPOSURE is
+           # enforced per event and a key guessed from the slug would let the
+           # rail pass on a guess.
+           "event_key": "ev-lad-sf-2026-09-26",
            "order_intent": FX.LONG,
            "execution_plan": {"execution": {
                "size": 20, "vwap": 0.62, "limit_price": 0.63}}}
@@ -68,11 +73,12 @@ class _Orders:
     """
 
     def __init__(self, sent, *, preview_cost=None, executions=None,
-                 preview_states_nothing=False):
+                 preview_states_nothing=False, raise_on_create=None):
         self.sent = sent
         self._cost = preview_cost
         self._execs = executions
         self._silent = preview_states_nothing
+        self._raise = raise_on_create
 
     def preview(self, body):
         req = (body or {}).get("request") or {}
@@ -90,11 +96,17 @@ class _Orders:
 
     def create(self, params):
         self.sent.append(("create", dict(params)))
+        if self._raise is not None:
+            raise self._raise
         qty = int(params.get("quantity") or 0)
         px = float((params.get("price") or {}).get("value") or 0)
         execs = self._execs
         if execs is None:
-            execs = [{"type": "EXECUTION_TYPE_FILL",
+            # A REAL VENUE NAMES ITS EXECUTION, and the funded book requires
+            # that identity: an execution with no id is recorded UNRESOLVED
+            # rather than ingested (proved in
+            # tests/test_the_funded_book_is_durable.py).
+            execs = [{"id": "vexec-1", "type": "EXECUTION_TYPE_FILL",
                       "lastPx": {"value": "%.2f" % px, "currency": "USD"},
                       "lastShares": qty,
                       "order": {"state": "ORDER_STATE_FILLED"}}]
@@ -164,6 +176,8 @@ async def _seed(conn, *, approved=True, paused=False, accounting="CLEAN",
 
 
 async def _clean(conn):
+    await conn.execute("DELETE FROM bettor_funded_fills")
+    await conn.execute("DELETE FROM bettor_funded_intents")
     await conn.execute("DELETE FROM bettor_desk_accounts WHERE account_id=$1",
                        ACCT)
     for k in (FA.AUTHORIZATION_KEY, FA.LIMITS_KEY):
@@ -228,7 +242,8 @@ def test_the_plan_is_read_off_the_decision_and_refuses_what_it_cannot_read():
     assert plan["intent"] == FX.LONG
     assert plan["limit_price"] == 0.63
     assert plan["quantity"] == 20
-    assert plan["notional_usd"] == pytest.approx(12.6)
+    assert plan["collateral_usd"] == pytest.approx(12.6)
+    assert plan["collateral_space"] == "price x qty"
 
     # A REFUSED DECISION IS NOT AN ORDER
     assert FX.plan_from_decision(
@@ -275,19 +290,23 @@ async def test_the_funded_path_stops_at_the_code_switch_with_everything_else_met
             got = await FX.submit_for_decision(
                 conn, _decision(), account_id=ACCT, venue=VENUE)
         assert got["ok"] is False
-        assert got["refusal"] == FX.R_FUNDED_DISABLED, got
+        # SHIPPED SETTINGS: both switches are off and the EXECUTION GATE is
+        # asked first, so its refusal is the one reported. Which of the two
+        # answers is a detail; the property is that nothing was sent.
+        assert got["refusal"] == FX.R_GATE_NOT_AFFIRMATIVE, got
+        assert got["gate_refusal"] == EX.R_SUBMISSION_DISABLED
         assert got["submitted"] is False
-        # EVERY EARLIER GATE PASSED, which is what makes this the last one
+        # EVERY OWNER-SIDE GATE PASSED, which is what makes this the last one
         assert got["account_selection"]["ok"] is True
-        assert got["authorization"]["authorization_consumed"] is True
-        assert got["authorization"]["refusal"] == EX.R_SUBMISSION_DISABLED
+        assert got["owner_side_satisfied"] is True
+        assert got["execution_gate_affirmative"] is False
         assert got["plan"]["ok"] is True
-        # and the venue was NOT spoken to
+        assert got["rails"]["unmeasured"] == []
+        # and the venue was NOT spoken to, and no intent row was written
         assert sent == [], sent
-        # the call it would have made is stated, so the wiring is inspectable
-        assert got["would_send"]["callable"] == "sportsassets.pmus.submit_fok"
-        assert got["would_send"]["args"][0] == SLUG
-        assert got["would_send"]["kwargs"]["intent"] == FX.LONG
+        assert got["intent_id"] is None
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_intents") == 0
     finally:
         await _clean(conn)
         await conn.close()
@@ -310,14 +329,23 @@ async def test_with_the_switch_flipped_the_real_adapter_runs_and_places_it(
         await _seed(conn)
         pmus, sent = _substitute_transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         got = await FX.submit_for_decision(
             conn, _decision(), account_id=ACCT, venue=VENUE)
 
         assert got["submitted"] is True, got
         assert got["ok"] is True, got
         assert got["order"]["venue_order_id"] == "venue-ord-1"
-        assert got["order"]["filled_shares"] == pytest.approx(20.0)
-        assert got["order"]["fill_price"] == pytest.approx(0.63)
+        # THE QUANTITY COMES FROM THE FUNDED LEDGER, not from the answer
+        assert got["order"]["filled_qty_from_the_ledger"] == \
+            pytest.approx(20.0)
+        assert got["order"]["cash_usd_from_the_ledger"] == pytest.approx(12.6)
+        assert got["order"]["fees_usd_from_the_ledger"] > 0
+        assert got["order"]["unresolved_executions"] == 0
+        row = await conn.fetchrow(
+            "SELECT state, venue_order_id FROM bettor_funded_intents")
+        assert row["state"] == "FILLED"
+        assert row["venue_order_id"] == "venue-ord-1"
 
         # THE ADAPTER'S OWN STEPS RAN, IN ORDER
         assert [k for k, _ in sent] == ["preview", "create"], sent
@@ -357,6 +385,7 @@ async def test_the_adapters_own_preview_guard_still_refuses_on_this_path(
         # tolerance is 2%, so 20.00 is far outside)
         pmus, sent = _substitute_transport(monkeypatch, preview_cost=20.00)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         got = await FX.submit_for_decision(
             conn, _decision(), account_id=ACCT, venue=VENUE)
         assert got["submitted"] is True          # the adapter WAS reached
@@ -367,6 +396,8 @@ async def test_the_adapters_own_preview_guard_still_refuses_on_this_path(
         # AND A PREVIEW THAT STATES NOTHING IS NOT AGREEMENT
         pmus, sent2 = _substitute_transport(
             monkeypatch, preview_states_nothing=True)
+        await conn.execute("DELETE FROM bettor_funded_fills")
+        await conn.execute("DELETE FROM bettor_funded_intents")
         got2 = await FX.submit_for_decision(
             conn, _decision(), account_id=ACCT, venue=VENUE)
         assert got2["ok"] is False
@@ -390,15 +421,42 @@ async def test_the_adapters_execution_gate_is_a_separate_boundary(monkeypatch):
         sent: list = []
         monkeypatch.setattr(pmus, "_get_client", lambda: _Client(sent))
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
 
+        # THE REAL EXCEPTION TYPE. `Denied` is what the gate raises, from
+        # submit_fok's FIRST statement -- before _get_client(), the preview or
+        # any socket. The connector recognises it as PROVABLY pre-send.
         def _deny(*a, **k):
-            raise RuntimeError("EXECUTION_GATE_DENIED_submit")
+            raise pmus._gate.Denied("live_trading_paused", "paused for a test")
         monkeypatch.setattr(pmus._gate, "authorize", _deny)
 
-        with pytest.raises(RuntimeError, match="EXECUTION_GATE_DENIED"):
-            await FX.submit_for_decision(
-                conn, _decision(), account_id=ACCT, venue=VENUE)
+        got = await FX.submit_for_decision(
+            conn, _decision(), account_id=ACCT, venue=VENUE)
+        assert got["refusal"] == FX.R_VENUE_GATE_DENIED, got
+        assert got["submitted"] is False
+        assert got["exposure"] == "NONE"
         assert sent == [], "the gate must deny BEFORE any venue call"
+        # NOTHING WAS SENT, so the intent is ABANDONED and does not hold the
+        # one-live slot -- calling this "unresolved" would block the lane for
+        # exposure that never existed.
+        row = await conn.fetchrow(
+            "SELECT state FROM bettor_funded_intents")
+        assert row["state"] == "ABANDONED", row
+        assert row["state"] in FB.TERMINAL_STATES
+
+        # AND ANY OTHER FAILURE DEFAULTS TO UNRESOLVED, the safe direction:
+        # a timeout means the venue MAY hold an order.
+        await conn.execute("DELETE FROM bettor_funded_intents")
+        monkeypatch.setattr(pmus._gate, "authorize", lambda *a, **k: {"ok": 1})
+        monkeypatch.setattr(
+            pmus, "_get_client",
+            lambda: _Client(sent, raise_on_create=TimeoutError("lost")))
+        lost = await FX.submit_for_decision(
+            conn, _decision(), account_id=ACCT, venue=VENUE)
+        assert lost["refusal"] == FX.R_LOST_ACKNOWLEDGEMENT, lost
+        assert lost["exposure"] == "PRESERVED"
+        row = await conn.fetchrow("SELECT state FROM bettor_funded_intents")
+        assert row["state"] == "UNRESOLVED"
     finally:
         await _clean(conn)
         await conn.close()
@@ -417,6 +475,7 @@ async def test_each_owner_side_precondition_refuses_and_sends_nothing(
     try:
         pmus, sent = _substitute_transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
 
         # A PAUSED ACCOUNT
         await _seed(conn, paused=True)
@@ -454,8 +513,8 @@ async def test_each_owner_side_precondition_refuses_and_sends_nothing(
         r = await FX.submit_for_decision(conn, big, account_id=ACCT,
                                          venue=VENUE)
         assert r["refusal"] == FX.R_OVER_RAIL, r
-        assert r["over"]["rail"] == "MAX_MARKET_EXPOSURE"
-        assert r["over"]["limit"] == pytest.approx(25.0)
+        rails = {o["rail"] for o in r["over"]}
+        assert "MAX_MARKET_EXPOSURE" in rails, r["over"]
 
         # A TEST-CLASS VENUE ON THE FUNDED PATH
         r = await FX.submit_for_decision(conn, _decision(), account_id=ACCT,

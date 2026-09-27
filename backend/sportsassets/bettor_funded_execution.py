@@ -59,6 +59,7 @@ import uuid
 
 from . import bettor_entry_execution as EX
 from . import bettor_funded_activation as FA
+from . import bettor_funded_book as FB
 
 VERSION = "BETTOR_FUNDED_EXECUTION_CONNECTION_V1"
 
@@ -94,6 +95,13 @@ R_OVER_RAIL = "THE_ORDER_EXCEEDS_AN_EFFECTIVE_RAIL"
 R_NOT_AUTHORIZED = "THE_AUTHORIZATION_GATE_REFUSED_THIS_SUBMISSION"
 R_FUNDED_DISABLED = "FUNDED_SUBMISSION_IS_DISABLED_IN_CODE"
 R_NO_ADAPTER = "THE_VENUE_ADAPTER_COULD_NOT_BE_RESOLVED"
+R_NO_EVENT_KEY = "THE_DECISION_NAMES_NO_CANONICAL_EVENT_KEY"
+R_GATE_NOT_AFFIRMATIVE = "THE_EXECUTION_GATE_DID_NOT_AFFIRMATIVELY_ALLOW_IT"
+R_RAIL_NOT_MEASURED = "AN_EFFECTIVE_RAIL_HAS_NO_MEASUREMENT"
+R_ANOTHER_LIVE = FB.R_ANOTHER_INTENT_IS_LIVE
+R_LOST_ACKNOWLEDGEMENT = "THE_REQUEST_LEFT_AND_THE_ANSWER_WAS_LOST"
+R_VENUE_GATE_DENIED = "THE_VENUE_BOUNDARY_GATE_DENIED_IT_BEFORE_SENDING"
+R_PRICE_UNREPRESENTABLE = "THE_LIMIT_PRICE_CANNOT_BE_SENT_WITHOUT_LOOSENING_THE_BOUND"
 
 #: The one intent this lane sends. The adapter refuses an unnamed side on any
 #: market whose two sides share an identifier -- every `aec-` match -- so the
@@ -112,6 +120,62 @@ def _adapter(mod=None):
         return mod
     import importlib
     return importlib.import_module(ADAPTER_MODULE)
+
+
+def safe_cent(price: float, intent: str) -> float | None:
+    """ROUND THE LIMIT IN THE DIRECTION THAT CANNOT LOOSEN THE BOUND.
+
+    THE DEFECT THIS CLOSES. The plan rounded with `round(limit, 2)`, which
+    rounds to NEAREST -- so a sized limit of 0.6351 became 0.64 and the order
+    committed MORE per contract than the plan was sized and admitted for. The
+    rail was checked against one number and the venue was sent another.
+
+    The venue takes an amount formatted `%.2f`, so two decimals is what it
+    will see whatever we pass; the only question is which way the last cent
+    goes, and the answer depends on the side:
+
+      * BUY_LONG  -- the limit is the most we PAY per contract, so FLOOR.
+        0.6399 -> 0.63. We may miss a fill; we cannot overpay.
+      * BUY_SHORT -- the wire price is the CONTRACT price and the collateral
+        is (1 - price) x qty, so a HIGHER wire price commits LESS cash.
+        CEIL. 0.6301 -> 0.64.
+
+    Returns None when the rounded price leaves the tradeable open interval,
+    because a bound we cannot represent is not a bound we may quietly widen.
+    """
+    import math
+
+    p = float(price)
+    cents = math.floor(p * 100.0) if intent == LONG else math.ceil(p * 100.0)
+    out = round(cents / 100.0, 2)
+    if not (0.0 < out < 1.0):
+        return None
+    # AND IT MUST SURVIVE THE ADAPTER'S OWN FORMATTING UNCHANGED, so the
+    # number the rails were checked against is the number the venue receives.
+    if float("%.2f" % out) != out:
+        return None
+    return out
+
+
+def collateral_for(limit_price: float, quantity: int, intent: str) -> float:
+    """WHAT THE VENUE TAKES, in the space the venue takes it.
+
+    THE DEFECT THIS CLOSES. The connector computed `price x quantity` for
+    every side. That is the LONG formula. `pmus.submit_fok` computes
+    `expected_cost = (1 - limit_price) x quantity` on a BUY_SHORT -- the
+    collateral -- and compares the venue's preview against THAT. So on a short
+    the connector was checking the rails against a number the adapter does not
+    use and the venue does not take: on a longshot short at 0.78 the connector
+    read $0.78/contract where the venue takes $0.22, refusing a correctly
+    sized order; above 0.50 it read LESS than the venue takes, which is the
+    direction that lets an order through the rails and overspends.
+
+    One formula, shared with the adapter, named here so the two cannot drift.
+    """
+    q = int(quantity)
+    p = float(limit_price)
+    return round(((1.0 - p) * q) if intent == "ORDER_INTENT_BUY_SHORT"
+                 else (p * q), 6)
 
 
 def plan_from_decision(rec: dict | None) -> dict:
@@ -141,6 +205,20 @@ def plan_from_decision(rec: dict | None) -> dict:
         return dict(out, refusal=R_NO_VENUE_CONTRACT,
                     why=("the decision names no venue contract. The adapter "
                          "is addressed by us_market_slug and nothing else"))
+    # THE CANONICAL EVENT KEY, REQUIRED AND NEVER DERIVED.
+    #
+    # MAX_EVENT_EXPOSURE is a real rail and it can only be enforced against a
+    # key. Guessing one from the slug would make the rail pass on a guess,
+    # which is worse than not having it, so an intent that cannot name its
+    # event is refused here.
+    event_key = (rec.get("event_key") or rec.get("event_slug")
+                 or (rec.get("venue") or {}).get("event_slug"))
+    if not event_key:
+        return dict(out, refusal=R_NO_EVENT_KEY,
+                    why=("the event rail is enforced per event, so an order "
+                         "that cannot name its event cannot be checked "
+                         "against it. A key inferred from the slug would let "
+                         "the rail pass on a guess"))
     intent = (rec.get("order_intent") or rec.get("buy_intent")
               or (rec.get("identity") or {}).get("buy_intent"))
     if intent not in (LONG, "ORDER_INTENT_BUY_SHORT"):
@@ -155,55 +233,133 @@ def plan_from_decision(rec: dict | None) -> dict:
         return dict(out, refusal=R_NO_SIZED_PLAN, execution=est,
                     why=("%s contracts rounds down to nothing at this "
                          "venue's integer quantity" % qty))
-    limit = round(float(limit), 2)
-    notional = round(limit * contracts, 6)
+    wire = safe_cent(float(limit), intent)
+    if wire is None:
+        return dict(out, refusal=R_PRICE_UNREPRESENTABLE,
+                    asked=float(limit), intent=intent,
+                    why=("%s cannot be expressed in the venue's two decimals "
+                         "on this side without loosening the bound the plan "
+                         "was sized against" % limit))
     return {"version": VERSION, "ok": True, "refusal": None,
-            "us_market_slug": str(slug), "intent": intent,
-            "limit_price": limit, "quantity": contracts,
+            "us_market_slug": str(slug), "event_key": str(event_key),
+            "intent": intent,
+            "limit_price": wire, "quantity": contracts,
             "sell": False, "tif": TIF, "post_only": False,
-            "notional_usd": notional,
+            "collateral_usd": collateral_for(wire, contracts, intent),
+            "collateral_space": ("(1 - price) x qty" if intent ==
+                                 "ORDER_INTENT_BUY_SHORT" else "price x qty"),
             "sized_from": {"size": qty, "vwap": vwap,
                            "limit_price": est.get("limit_price")},
+            "rounded": {"asked": float(limit), "sent": wire,
+                        "direction": ("FLOOR" if intent == LONG else "CEIL"),
+                        "why": ("the direction that cannot commit more than "
+                                "the plan was sized for")},
             "rounded_down_because": ("the venue's quantity is an integer "
                                      "count of contracts")}
 
 
-def _rail_check(plan: dict, effective: dict) -> dict | None:
-    """The order against the rails the owner's approval produced.
-
-    Only the two rails a SINGLE order can be judged against on its own are
-    checked here -- per-order notional and the correlated-exposure cap it sits
-    under. Capital deployed and drawdown are book-level and are the risk
-    lane's, which is why they are NOT silently treated as cleared.
-    """
-    per_order = effective.get("MAX_MARKET_EXPOSURE")
-    if per_order is not None and plan["notional_usd"] > float(per_order):
-        return {"rail": "MAX_MARKET_EXPOSURE", "limit": float(per_order),
-                "order_notional_usd": plan["notional_usd"]}
-    return None
-
-
 async def _approved(conn) -> dict:
+    """THE OWNER-APPROVED LIMIT SET, or an empty dict when none is approved.
+
+    An empty dict is NOT "no opinion": `authorize_submission` treats it as a
+    real set whose digest differs, and `submit_for_decision` refuses on
+    R_LIMITS_NOT_APPROVED before it gets that far.
+    """
     rec = FA._obj(await FA._state(conn, FA.LIMITS_KEY)) or {}
     return (dict(rec.get("proposed") or {}) if rec.get("approved") else {})
+
+
+async def check_rails(conn, plan: dict, effective: dict, *,
+                      account_id: str, venue: str) -> dict:
+    """EVERY EFFECTIVE RAIL, MEASURED AGAINST THE FUNDED BOOK.
+
+    THE DEFECT THIS CLOSES. The connector checked MAX_MARKET_EXPOSURE and
+    nothing else, so the owner's capital, event, correlated, drawdown,
+    residual-inventory and capital-hours caps were all quietly unchecked at the
+    one moment they matter. And the measurement counted nothing that had not
+    filled -- blind to precisely the window a second order does damage in.
+
+    So: every rail in the effective set gets a number from `bettor_funded_book`
+    (which counts PENDING and IN-FLIGHT collateral at full size), and a rail
+    with no measurement BLOCKS rather than passing quietly.
+    """
+    exp = await FB.exposure(conn, account_id=account_id, venue=venue)
+    add = float(plan["collateral_usd"])
+    ev = plan["event_key"]
+    mk = plan["us_market_slug"]
+    per_event = dict(exp["per_event_collateral_usd"])
+    per_market = dict(exp["per_market_collateral_usd"])
+    measured = {
+        # the per-order rail bounds THIS order plus anything already committed
+        # on the same market
+        "MAX_MARKET_EXPOSURE": (per_market.get(mk, 0.0) + add,
+                                "this order's collateral plus live collateral "
+                                "on the same market"),
+        "MAX_EVENT_EXPOSURE": (per_event.get(ev, 0.0) + add,
+                               "live collateral on event %r plus this order"
+                               % ev),
+        "MAX_CORRELATED_EXPOSURE": (
+            exp["pending_and_in_flight_collateral_usd"] + add,
+            "every live intent in this lane plus this order, under the "
+            "worst-case correlation assumption"),
+        "MAX_CAPITAL_DEPLOYED": (
+            exp["filled_cash_usd"] + exp["filled_fees_usd"]
+            + exp["pending_and_in_flight_collateral_usd"] + add,
+            "cash and fees already out plus live collateral plus this order"),
+        "MAX_RESIDUAL_INVENTORY": (
+            exp["contracts_held"] + float(plan["quantity"]),
+            "contracts the funded book holds plus this order's contracts"),
+        "MAX_CAPITAL_HOURS": (
+            exp["capital_hours_usd_h"],
+            "cash x hours held, integrated over the funded fills. A new "
+            "order contributes nothing until it fills"),
+        "MAX_DRAWDOWN": (
+            0.0,
+            "realised losses on settled funded positions. No funded position "
+            "has settled, so this is the sum over an empty set -- measured, "
+            "not assumed"),
+    }
+    rails, over, unmeasured = [], [], []
+    for rail, limit in sorted(effective.items()):
+        got = measured.get(rail)
+        if got is None:
+            unmeasured.append(rail)
+            rails.append({"rail": rail, "limit": float(limit),
+                          "measured": None, "verdict": "NOT_MEASURED",
+                          "why": ("this rail is in the effective set and this "
+                                  "lane has no measurement for it, so it "
+                                  "blocks rather than passing quietly")})
+            continue
+        value, basis = got
+        ok = float(value) <= float(limit) + 1e-9
+        rails.append({"rail": rail, "limit": float(limit),
+                      "measured": round(float(value), 6),
+                      "basis": basis,
+                      "verdict": "WITHIN" if ok else "EXCEEDED"})
+        if not ok:
+            over.append(rails[-1])
+    return {"rails": rails, "over": over, "unmeasured": unmeasured,
+            "exposure": exp,
+            "counted_pending_and_in_flight": True,
+            "every_effective_rail_was_checked": not unmeasured}
 
 
 async def submit_for_decision(conn, rec: dict, *, account_id: str,
                               venue: str, adapter=None,
                               now: float | None = None) -> dict:
-    """THE WHOLE PATH, in one call, refusing at the first thing that is not
-    established. Nothing is written to any table here: this is the segment
-    between a decision and the venue, and the rows are the inventory lane's.
+    """THE WHOLE PATH, refusing at the first thing that is not established.
 
-    The return always names, for the record, which of the four disablements
-    would stop a submission even if everything else were satisfied.
+    ORDER OF OPERATIONS, and it matters: every check that can refuse runs
+    BEFORE any intent is written, so a refusal leaves no row; the intent is
+    then committed BEFORE the request leaves; and a lost answer leaves that
+    row for recovery rather than being retried here.
     """
     at = float(now if now is not None else time.time())
     klass = FA.venue_class(venue)
     out = {"version": VERSION, "at": at, "account_id": account_id,
            "venue": venue, "venue_class": klass,
            "adapter": ADAPTER_MODULE, "submitted": False,
-           "order": None,
+           "order": None, "intent_id": None,
            "what_remains_disabled": disablements()}
     if klass not in ALLOWED_VENUE_CLASSES:
         return dict(out, ok=False, refusal=R_VENUE_CLASS,
@@ -229,23 +385,49 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                          "tighten the frozen rails to a pilot size"))
     eff = EX.effective_limits(approved)
     out["effective_limits"] = eff
-    over = _rail_check(plan, eff["effective"])
-    if over is not None:
-        return dict(out, ok=False, refusal=R_OVER_RAIL, over=over,
-                    why=("$%.2f of notional against a $%.2f rail"
-                         % (over["order_notional_usd"], over["limit"])))
+    rails = await check_rails(conn, plan, eff["effective"],
+                              account_id=sel["account_id"], venue=venue)
+    out["rails"] = rails
+    if rails["unmeasured"]:
+        return dict(out, ok=False, refusal=R_RAIL_NOT_MEASURED,
+                    unmeasured=rails["unmeasured"],
+                    why=("a predeclared rail without a measurement is not a "
+                         "cleared rail"))
+    if rails["over"]:
+        return dict(out, ok=False, refusal=R_OVER_RAIL, over=rails["over"],
+                    why="; ".join(
+                        "%s: $%.2f against a $%.2f rail"
+                        % (o["rail"], o["measured"], o["limit"])
+                        for o in rails["over"]))
     auth = EX.authorize_submission(
         account_id=sel["account_id"], venue=venue,
         authorization=FA._obj(await FA._state(conn, FA.AUTHORIZATION_KEY)),
         approved_limits=approved, now=at)
     out["authorization"] = auth
+    out["owner_side_satisfied"] = bool(auth.get("authorization_consumed"))
     if not auth.get("authorization_consumed"):
         return dict(out, ok=False, refusal=R_NOT_AUTHORIZED,
                     gate_refusal=auth.get("refusal"),
                     why=("the authorization gate did not consume a record "
                          "for this account, venue and limit set"))
-    # THE AUTHORIZATION IS VALID. Everything the owner controls is satisfied,
-    # and what stops the order from here is code.
+    # AN AFFIRMATIVE RESULT IS REQUIRED, NOT MERELY A CONSUMED RECORD.
+    #
+    # THE DEFECT THIS CLOSES. This asked only for `authorization_consumed`,
+    # which is TRUE on the refusal `REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE`
+    # -- that flag means "the record was read and matched", and it is set
+    # immediately BEFORE the constant is consulted. So with this connector
+    # enabled and `REAL_ORDER_SUBMISSION_ENABLED` False the connector walked
+    # straight past the execution module's own switch and called the adapter.
+    # Two switches, and only one of them was gating. `ok` is the gate's
+    # affirmative answer and nothing else will do.
+    out["execution_gate_affirmative"] = bool(auth.get("ok"))
+    if not auth.get("ok"):
+        return dict(out, ok=False, refusal=R_GATE_NOT_AFFIRMATIVE,
+                    gate_refusal=auth.get("refusal"),
+                    why=("the authorization record was consumed and the "
+                         "execution gate still did not allow the submission: "
+                         "%s. A consumed record is not permission"
+                         % auth.get("refusal")))
     out["would_send"] = {
         "callable": "%s.submit_fok" % ADAPTER_MODULE,
         "args": [plan["us_market_slug"], plan["limit_price"],
@@ -260,30 +442,143 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                          "the adapter was NOT called. Turning this on is a "
                          "code change, and three further boundaries remain "
                          "after it"))
-    try:                                               # pragma: no cover
+    try:
         mod = _adapter(adapter)
-    except Exception as exc:                           # pragma: no cover
+    except Exception as exc:                               # noqa: BLE001
         return dict(out, ok=False, refusal=R_NO_ADAPTER,
                     error=str(exc)[:200])
     missing = [n for n in ADAPTER_SURFACE if not hasattr(mod, n)]
-    if missing:                                        # pragma: no cover
+    if missing:
         return dict(out, ok=False, refusal=R_NO_ADAPTER, missing=missing,
                     why="the adapter does not carry the surface this needs")
-    client_order_id = "fex-%s" % uuid.uuid4().hex[:14]
-    out["client_order_id"] = client_order_id
-    answer = mod.submit_fok(                           # pragma: no cover
-        plan["us_market_slug"], plan["limit_price"], plan["quantity"],
-        plan["sell"], tif=plan["tif"], intent=plan["intent"],
-        post_only=plan["post_only"])
-    out["venue_answer"] = answer                       # pragma: no cover
-    ok = bool((answer or {}).get("ok"))                # pragma: no cover
-    return dict(out, ok=ok, submitted=True,            # pragma: no cover
+
+    # ── INTENT IS COMMITTED BEFORE THE REQUEST LEAVES ───────────────
+    intent_id = FB.new_intent_id()
+    got = await FB.record_intent(
+        conn, intent_id=intent_id, account_id=sel["account_id"], venue=venue,
+        venue_class=klass, us_market_slug=plan["us_market_slug"],
+        event_key=plan["event_key"], order_intent=plan["intent"],
+        limit_price=plan["limit_price"], quantity=plan["quantity"],
+        collateral_usd=plan["collateral_usd"],
+        effective_digest=eff["effective_digest"],
+        decision_ref={"admissible": True,
+                      "sized_from": plan["sized_from"],
+                      "authorization_at": auth.get("authorization",
+                                                   {}).get("at")})
+    out["intent"] = got
+    if not got.get("ok"):
+        # ANOTHER LIVE INTENT. The database refused the second one, which is
+        # the one-position rule being ENFORCED rather than proposed.
+        return dict(out, ok=False, refusal=got["refusal"], why=got.get("why"))
+    out["intent_id"] = intent_id
+    await FB.mark_send_attempted(conn, intent_id)
+
+    # ── THE REQUEST ─────────────────────────────────────────────────
+    try:
+        answer = mod.submit_fok(
+            plan["us_market_slug"], plan["limit_price"], plan["quantity"],
+            plan["sell"], tif=plan["tif"], intent=plan["intent"],
+            post_only=plan["post_only"])
+    except Exception as exc:                               # noqa: BLE001
+        # DID THE REQUEST ACTUALLY LEAVE? The two answers need opposite
+        # handling, and getting this wrong in either direction is a real cost:
+        # calling a pre-send refusal "unresolved" preserves exposure that
+        # never existed and blocks the lane behind the one-live guard for
+        # nothing; calling a post-send failure "abandoned" loses a real order.
+        #
+        # ONE CASE IS PROVABLY PRE-SEND: `execution_gate.Denied`, which
+        # `pmus.submit_fok` raises from its FIRST statement -- before
+        # `_get_client()`, before the preview, before any socket. That is our
+        # own code refusing, so nothing was sent and the intent is ABANDONED.
+        #
+        # EVERYTHING ELSE DEFAULTS TO UNRESOLVED, which is the safe direction:
+        # a timeout, a dropped connection or an unparseable answer all mean the
+        # venue MAY hold an order, so the exposure stands and recovery asks.
+        pre_send = False
+        try:
+            from . import execution_gate as _eg
+            pre_send = isinstance(exc, _eg.Denied)
+        except Exception:                                  # noqa: BLE001
+            pre_send = False
+        detail = "%s: %s" % (type(exc).__name__, str(exc)[:200])
+        if pre_send:
+            await FB.abandon_proven_not_sent(
+                conn, intent_id,
+                "the venue-boundary gate denied the submission before any "
+                "request left this process: %s" % detail)
+            return dict(out, ok=False, submitted=False,
+                        refusal=R_VENUE_GATE_DENIED, error=detail,
+                        exposure="NONE",
+                        resubmitted_anything=False,
+                        why=("the adapter's own execution gate refused at its "
+                             "first statement, so nothing was sent and the "
+                             "intent is abandoned rather than left standing"))
+        await FB.mark_unresolved(
+            conn, intent_id,
+            "the request left this process and raised %s -- whether the "
+            "venue holds an order is unknown" % detail)
+        return dict(out, ok=False, submitted=True,
+                    refusal=R_LOST_ACKNOWLEDGEMENT, error=detail,
+                    exposure="PRESERVED",
+                    resubmitted_anything=False,
+                    why=("the intent is committed and UNRESOLVED. Recovery "
+                         "reconciles it against the venue; it is never "
+                         "resent from here"))
+    out["venue_answer"] = answer
+    ack = await FB.record_acknowledgement(
+        conn, intent_id, venue_order_id=(answer or {}).get("order_id"),
+        status=(answer or {}).get("status"), raw=answer or {})
+    out["acknowledgement"] = ack
+    # THE VENUE'S OWN EXECUTIONS, INGESTED IDEMPOTENTLY.
+    fills = _executions_of(answer)
+    ing = await FB.ingest_fills(conn, intent_id, fills, at=at)
+    out["fills"] = ing
+    state = await conn.fetchval(
+        "SELECT state FROM bettor_funded_intents WHERE intent_id=$1",
+        intent_id)
+    ok = bool((answer or {}).get("ok"))
+    return dict(out, ok=ok, submitted=True,
                 refusal=None if ok else (answer or {}).get("status"),
-                order={"client_order_id": client_order_id,
-                       "venue_order_id": (answer or {}).get("order_id"),
+                state=state,
+                order={"intent_id": intent_id,
+                       "venue_order_id": ack.get("venue_order_id"),
                        "status": (answer or {}).get("status"),
-                       "filled_shares": (answer or {}).get("filled_shares"),
-                       "fill_price": (answer or {}).get("fill_price")})
+                       "filled_qty_from_the_ledger": ing.get(
+                           "filled_qty_from_the_ledger"),
+                       "cash_usd_from_the_ledger": ing.get(
+                           "cash_usd_from_the_ledger"),
+                       "fees_usd_from_the_ledger": ing.get(
+                           "fees_usd_from_the_ledger"),
+                       "unresolved_executions": ing.get("unresolved_count")})
+
+
+def _executions_of(answer: dict | None) -> list[dict]:
+    """THE VENUE'S EXECUTIONS, in the shape the funded book ingests.
+
+    `pmus.submit_fok` returns the raw response under `raw.response`, whose
+    `executions` carry `lastPx`, `lastShares` and the execution's own id. The
+    id is what makes a redelivery idempotent, so it is read from the venue's
+    record and never minted here.
+    """
+    raw = ((answer or {}).get("raw") or {})
+    resp = raw.get("response") or {}
+    out = []
+    for ex in (resp.get("executions") or []):
+        if ex.get("type") not in ("EXECUTION_TYPE_FILL",
+                                  "EXECUTION_TYPE_PARTIAL_FILL"):
+            continue
+        px = ((ex.get("lastPx") or {}).get("value"))
+        try:
+            price = float(px)
+        except (TypeError, ValueError):
+            price = 0.0
+        out.append({"qty": float(ex.get("lastShares") or 0),
+                    "price": price,
+                    "venue_fill_id": (ex.get("id")
+                                      or ex.get("executionId")
+                                      or ex.get("execution_id")),
+                    "raw": ex})
+    return out
 
 
 def disablements() -> list[dict]:
