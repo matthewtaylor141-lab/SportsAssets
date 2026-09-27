@@ -466,3 +466,108 @@ while another appeared and still report progress.
 **This is the part of A6 that "purging localStorage" does not touch**, and the
 instruction is right about that. Server-side authority for the provider key is
 still OPEN; so is this residue.
+
+---
+
+## Corrections to this register's own previous version
+
+**I over-reported the unauthenticated writes.** The earlier entry said six. Three
+of them — `/api/engine/manual-kalshi-result`, `/api/engine/kud-result`,
+`/api/engine/methodology` — **already call `check_engine_token` inside the
+handler**, and the edge-engine callers already send `X-Engine-Token`. My matrix
+read only the dependency table, so it reported authenticated routes as naked.
+That is a false positive in a security inventory, which is the failure that makes
+an inventory get ignored. The matrix now detects inline credential comparisons
+from the handler's own source, and the residue is **37 routes, 3 of them
+writes** — not 46 and 6.
+
+**The three genuine unauthenticated writes, traced to callers, effects and
+audience:**
+
+| route | caller | effect | audience |
+|---|---|---|---|
+| `POST /api/push/subscribe` | `frontend/src/lib/push.ts` | inserts a push endpoint under a client-named `user_key` | anonymous browser |
+| `POST /api/push/unsubscribe` | `frontend/src/lib/push.ts` | **was** `DELETE … WHERE endpoint=$1` — no ownership check | anonymous browser |
+| `PUT /api/prefs/{user_key}` | `frontend/src/pages/Alerts.tsx` | overwrites notification preferences for a UUID key | anonymous browser |
+
+**One of the three was fixed, and it was the one that mattered.**
+`push/unsubscribe` deleted by endpoint alone, so anybody who learned or guessed a
+push endpoint could silently switch off somebody else's alerts. It now requires
+the owning `user_key`, refuses a request without one rather than defaulting, and
+returns the same answer for a wrong key as for an already-removed row — telling
+them apart would confirm that an endpoint exists under another key. The frontend
+caller sends the key in the same change.
+
+**The residual, stated rather than papered over.** A client-generated UUID is not
+a strong credential: a caller holding both the endpoint and the key is
+indistinguishable from the owner, and `PUT /api/prefs/{user_key}` still has no
+authorization beyond knowing the key. These carry notification preferences, no
+capital and no market data. Proper per-user authentication for them is **OPEN**.
+
+**No coordinated release is required for any of this.** The engine routes were
+already authenticated end to end; the push change is compatible because the
+frontend holds the key already. The protected worker is untouched.
+
+---
+
+## A1 · M1 verified — and it does not hold on this feed
+
+Asked to show what M1 actually establishes, its primary source, and the
+production reader supplying its evidence. The answer is a refusal, and it is the
+right one.
+
+**Primary source: the shipped client**, `polymarket_us.websocket`, inspected —
+because the SDK the image installs is the contract this system is bound by,
+whatever any prose says. `bettor_stream_currency.FEED_CONTRACT` records it and
+`tests/test_m1_is_verified_not_asserted.py` **re-derives every field from the
+installed SDK**, so a contract change breaks a test instead of silently
+invalidating a verdict built on it.
+
+**M1 needs four preconditions. Two are absent:**
+
+| | precondition | status |
+|---|---|---|
+| P1 | full-replacement authority | **NOT ESTABLISHED** — nothing distinguishes a snapshot from an increment: no `type`, no `isSnapshot`, no `action`. The "full order book" claim is a *docstring*, and `obs/streamstate.DepthAuthority` already refuses that inference in this repository's own words |
+| P2 | connection liveness | available — a `Heartbeat` type exists |
+| P3 | gap-free continuity | **NOT AVAILABLE** — no sequence number, message id or continuity field of any kind. A dropped message leaves no trace, so a gap cannot be detected, only assumed absent. `transactTime` cannot substitute: its meaning is unresolved, and even a last-change stamp would not reveal a message missing *between* two changes |
+| P4 | instrument identity | available — `marketSlug`, compared not assumed |
+
+Also verified: `base._message_loop` emits `close` and **returns**. The client does
+not reconnect, resubscribe or resynchronise — all three are the caller's
+responsibility.
+
+**So M1 is `M1_NOT_AVAILABLE_ON_THIS_FEED`, and the refusal is not relieved by
+passing a `subscription` argument** — the missing preconditions are properties of
+the feed and a caller cannot supply them.
+
+**The production reader is real.** `bettor_stream_currency.evidence_for` is what
+`book_currency_evidence` calls; it returns `None` and names *which guarantee* is
+missing, which distinguishes "the feed cannot" from "nothing is wired" — different
+pieces of work.
+
+**Built anyway, and correct regardless:** connection-epoch invalidation. A book
+held across a drop has an undetectable number of missed updates in front of it, so
+every market's state is **discarded, not aged**. The verdict is **computed** from
+live state, not hard-coded: a test flips the two feed properties and the same code
+admits, on a number stricter than anything this lane has used.
+
+**Consequence, stated plainly:** the lane continues to refuse every candidate on
+`VENUE_BOOK_CURRENCY_NOT_ESTABLISHED`. M2 remains the nearer route and needs the
+book endpoint to emit `ETag` or `Last-Modified`, which the V3 clock probe reports
+per read and which has not been run yet.
+
+---
+
+## Gate safety (correction 4)
+
+`ops/gate/frozen_gate.sh`: a per-checkout **lock naming its PID** — a live lock is
+never pruned whatever its age, because "keep the newest two" would delete a
+concurrent baseline run underneath itself; `PROTECT_DIRS` for the baseline by
+name; busy databases skipped by `pg_stat_activity`; evidence copied out **before**
+any prune. Migrations now run with `ON_ERROR_STOP=1` and a failure **voids** the
+gate — the previous version sent migration errors to `/dev/null`, which is exactly
+how the PostgreSQL 18 rollback produced a suite full of plausible failures. The
+database and free space are **sampled every 15 s throughout the run**, not once at
+the end, and any outage, any drop below 500 MB, or an overall timeout **deletes the
+identity list and exits non-zero** — an invalid environment must not leave a
+usable failure count behind.

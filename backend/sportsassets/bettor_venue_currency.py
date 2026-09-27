@@ -36,11 +36,30 @@ SO WHAT ACTUALLY DECIDES IT. A mechanism with a published contract, not a
 sample. Three exist, and this module names which one carried a verdict:
 
   M1  LIVE_SUBSCRIPTION.  The venue publishes book updates on an authenticated
-      market-data socket. On a subscription proven alive -- a heartbeat or an
-      update received within the liveness bound -- the last update we received
-      for a market IS the venue's book state, because any change since would
-      have been pushed. This is the strongest mechanism and the repository
-      already speaks the protocol (`bettor_market_stream`, `obs/streamstate`).
+      market-data socket. The idea is that on a subscription proven alive, the
+      last update received for a market IS the venue's book, because any change
+      since would have been pushed.
+
+      M1 HAS NOW BEEN VERIFIED AGAINST THE SHIPPED CLIENT AND IT DOES NOT HOLD
+      ON THIS FEED. `bettor_stream_currency` records the inspection. The
+      mechanism needs four things and two are absent:
+
+        * no SEQUENCE NUMBER anywhere in the market-data payload, so a dropped
+          message leaves no trace and a gap cannot be detected -- only assumed
+          absent, which is the assumption this gate exists to refuse;
+        * nothing distinguishes a SNAPSHOT from an INCREMENT, so a received
+          message is not known to be a whole book. The "full order book" claim
+          is a docstring, and `obs/streamstate.DepthAuthority` already refuses
+          that inference in this repository's own words.
+
+      Liveness and instrument identity ARE available. They are not enough: a
+      heartbeat proves a socket is open and a `marketSlug` proves which market a
+      message was about. Neither proves the book we hold is the venue's.
+
+      SO M1 IS NOT GRANTED BY PASSING A `subscription` ARGUMENT. The missing
+      preconditions are properties of the feed and a caller cannot supply them.
+      `bettor_stream_currency.evidence_for` is the production reader and it
+      returns None, naming which guarantee is missing.
   M2  CONDITIONAL_REVALIDATION.  A `304 Not Modified` to an `If-None-Match` /
       `If-Modified-Since` on the book path is the origin affirming that the
       representation we hold is still the current one, as of that response's
@@ -82,6 +101,13 @@ M3_ORIGIN_GENERATION = "M3_ORIGIN_GENERATION_INSTANT"
 NO_MECHANISM = "NO_MECHANISM_AVAILABLE"
 
 #: M1 and M2 establish the BOOK STATE. M3 establishes the RESPONSE only.
+#:
+#: M1 REMAINS IN THIS TUPLE ON PURPOSE. It is the mechanism that WOULD establish
+#: currency, its verdict is computed from the live feed state rather than
+#: hard-coded, and `bettor_stream_currency` is what reports that the feed cannot
+#: currently satisfy it. Removing it here would hide the requirement instead of
+#: reporting the gap -- and if the venue publishes a sequence, the mechanism
+#: becomes available by MEASUREMENT rather than by someone deciding it has.
 ESTABLISHING_MECHANISMS = (M1_LIVE_SUBSCRIPTION, M2_REVALIDATION)
 PARTIAL_MECHANISMS = (M3_ORIGIN_GENERATION,)
 

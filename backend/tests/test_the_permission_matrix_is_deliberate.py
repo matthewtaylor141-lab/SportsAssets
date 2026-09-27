@@ -41,7 +41,10 @@ DELIBERATELY_PUBLIC = {
 #: only the three COMMAND-era guards would have mis-reported the older desk and
 #: engine routes as unguarded, and a matrix that cries wolf gets muted.
 GUARDS = ("require_admin", "require_command_control", "require_calibration_writes",
-          "require_command", "require_desk")
+          "require_command", "require_desk",
+          # inline comparisons, detected from the handler source
+          "check_engine_token", "desk_token_ok", "wall_token_ok",
+          "control_token_ok", "compare_digest")
 #: Routes that compare a credential INSIDE the handler rather than through a
 #: dependency. Each is named with the parameter it compares, because "it checks
 #: inside" is only checkable if someone wrote down which check.
@@ -62,6 +65,29 @@ INLINE_GUARDED = {
         "route, and it mints nothing",
     "/command/desk": "same shell",
 }
+
+
+#: Credential checks performed INSIDE a handler rather than as a dependency.
+#: Detected from the handler's own source, so the matrix stops mis-reporting an
+#: authenticated route as naked -- which it did for three engine routes, and
+#: which is the failure mode that makes a security inventory get ignored.
+INLINE_CHECK_CALLS = ("check_engine_token", "require_admin", "_require_admin",
+                      "check_desk_token", "desk_token_ok", "wall_token_ok",
+                      "control_token_ok", "compare_digest")
+
+
+def _inline_checks(route) -> set:
+    """Which credential comparisons the handler makes in its own body."""
+    import inspect
+
+    fn = getattr(route, "endpoint", None)
+    if fn is None:
+        return set()
+    try:
+        src = inspect.getsource(fn)
+    except (OSError, TypeError):
+        return set()
+    return {name for name in INLINE_CHECK_CALLS if (name + "(") in src}
 
 
 def _guard_names(route) -> set:
@@ -90,7 +116,8 @@ def _api_routes():
             continue
         if not methods - {"HEAD", "OPTIONS"}:
             continue
-        out.append((path, sorted(methods - {"HEAD", "OPTIONS"}), _guard_names(r)))
+        out.append((path, sorted(methods - {"HEAD", "OPTIONS"}),
+                    _guard_names(r) | _inline_checks(r)))
     return out
 
 
@@ -293,7 +320,7 @@ def test_a_tool_description_is_not_an_authorization_boundary():
 
 # -- SECTION 3 - THE RESIDUE, FROZEN AND NAMED -----------------------
 #
-# Building the matrix found 46 routes with no dependency guard and no
+# Building the matrix found 37 routes with no dependency guard and no
 # recorded inline check. THIS IS A FINDING, NOT A CONFIGURATION. It is frozen
 # here rather than allow-listed away, so that:
 #
@@ -319,15 +346,7 @@ UNGUARDED_RESIDUE_2026_09_27 = (
     ("/api/copy-report", ('GET',)),
     ("/api/copy-unmapped", ('GET',)),
     ("/api/daily-breakdown", ('GET',)),
-    ("/api/desk/stream", ('GET',)),
-    ("/api/engine/crypto-copy-candidates", ('GET',)),
-    ("/api/engine/held-assets", ('GET',)),
-    ("/api/engine/kud-queue", ('GET',)),
-    ("/api/engine/kud-result", ('POST',)),
-    ("/api/engine/manual-kalshi-queue", ('GET',)),
-    ("/api/engine/manual-kalshi-result", ('POST',)),
     ("/api/engine/methodology", ('GET',)),
-    ("/api/engine/methodology", ('POST',)),
     ("/api/engine/summary", ('GET',)),
     ("/api/events", ('GET',)),
     ("/api/feed", ('GET',)),
@@ -352,7 +371,6 @@ UNGUARDED_RESIDUE_2026_09_27 = (
     ("/api/venue-export", ('GET',)),
     ("/api/venue-export-raw", ('GET',)),
     ("/api/venue-truth", ('GET',)),
-    ("/api/whale-open-identities", ('GET',)),
     ("/api/whales", ('GET',)),
     ("/api/whales/{whale_id}", ('GET',)),
     ("/api/whales/{whale_id}/day/{day}", ('GET',)),
@@ -364,9 +382,6 @@ UNGUARDED_RESIDUE_2026_09_27 = (
 #: The subset that accepts a WRITE with no credential. This is the part of the
 #: residue that can change state, so it is counted on its own.
 UNGUARDED_WRITES = (
-    ("/api/engine/kud-result", ('POST',)),
-    ("/api/engine/manual-kalshi-result", ('POST',)),
-    ("/api/engine/methodology", ('POST',)),
     ("/api/prefs/{user_key}", ('PUT',)),
     ("/api/push/subscribe", ('POST',)),
     ("/api/push/unsubscribe", ('POST',)),
@@ -397,7 +412,7 @@ def test_the_unauthenticated_writes_are_enumerated():
               if {"POST", "PUT", "PATCH", "DELETE"} & set(mm)}
     assert writes == {(p, tuple(mm)) for p, mm in UNGUARDED_WRITES}, (
         "the write residue changed; update UNGUARDED_WRITES and the register")
-    assert len(writes) == 6
+    assert len(writes) == 3
 
 
 def test_the_account_read_is_no_longer_public():

@@ -16634,13 +16634,53 @@ async def push_subscribe(body: PushSubscribeBody) -> dict:
 
 class PushUnsubscribeBody(BaseModel):
     endpoint: str
+    #: THE OWNING KEY, required from now on. See the handler.
+    user_key: str = ""
 
 
 @app.post("/api/push/unsubscribe")
 async def push_unsubscribe(body: PushUnsubscribeBody) -> dict:
+    """Remove one push subscription, AND ONLY ITS OWNER'S.
+
+    THE DEFECT THIS CLOSES, found by the permission matrix. This deleted by
+    `endpoint` alone with no ownership check, so anybody who learned or guessed a
+    push endpoint could silently switch off somebody else's alerts. No capital is
+    involved and nothing is disclosed -- it is a denial of a notification -- and
+    it was still a write on another user's row with no authorization at all.
+
+    THE CHECK IS THE ROW'S OWN `user_key`, which is the client-generated identity
+    that created it. That is not a strong credential: it is a UUID the browser
+    keeps, and a caller who has both the endpoint and the key is indistinguishable
+    from the owner. It is what this endpoint's data model supports, it removes the
+    endpoint-only deletion, and the residual is recorded rather than papered over
+    -- proper per-user authentication for these routes is OPEN in the completion
+    register.
+
+    A MISSING KEY IS REFUSED rather than defaulted, so an old caller fails
+    visibly instead of deleting by endpoint again. `frontend/src/lib/push.ts`
+    sends it in the same change.
+    """
+    key = (body.user_key or "").strip()
+    if not key:
+        raise HTTPException(status_code=400, detail={
+            "reason": "USER_KEY_REQUIRED",
+            "what": ("this route deleted a subscription by endpoint alone, "
+                     "which let one caller switch off another's alerts. Send "
+                     "the user_key that owns the subscription")})
     pool = await get_pool()
-    await pool.execute("DELETE FROM push_subscriptions WHERE endpoint=$1", body.endpoint)
-    return {"ok": True}
+    got = await pool.execute(
+        "DELETE FROM push_subscriptions WHERE endpoint=$1 AND user_key=$2",
+        body.endpoint, key)
+    removed = 0
+    try:
+        removed = int(str(got).rsplit(" ", 1)[-1])
+    except (ValueError, AttributeError):
+        removed = 0
+    # NOT AN ERROR WHEN NOTHING MATCHED. A wrong key and an already-removed
+    # subscription are the same answer from here on purpose: telling a caller
+    # which one it was would confirm that an endpoint exists under another key.
+    return {"ok": True, "removed": removed,
+            "scoped_to_the_owning_user_key": True}
 
 
 class PrefsBody(BaseModel):

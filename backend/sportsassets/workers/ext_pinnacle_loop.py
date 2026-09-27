@@ -2836,18 +2836,32 @@ def book_currency_evidence(slug=None) -> dict:
     NOT A DEFAULT: nothing here invents an allowance, and wiring M1 means
     returning real instants from here rather than changing any gate.
     """
+    from .. import bettor_stream_currency as _sc
+
+    m1 = _sc.evidence_for(slug)
     return {
-        "subscription": None,
+        "subscription": m1.get("subscription"),
         "revalidation": None,
-        "why_none": ("no market-data subscription is held for this lane and no "
-                     "conditional revalidation is issued, so no mechanism with "
-                     "a published contract can establish that a venue book is "
-                     "current"),
-        "what_wiring_m1_requires": (
-            "subscribe the lane's mapped candidates to "
-            "SUBSCRIPTION_TYPE_MARKET_DATA through bettor_market_stream, keep "
-            "per-slug last-update and connection-liveness instants, and return "
-            "them from here"),
+        "m1": {"status": _sc.M1_STATUS,
+               "missing_from_the_feed": list(_sc.MISSING_PRECONDITIONS),
+               "refusal": m1.get("refusal"),
+               "why": m1.get("why"),
+               "state": m1.get("state")},
+        "why_none": (
+            "M1 was VERIFIED against the shipped market-data client and it "
+            "cannot establish currency on this feed: the payload carries no "
+            "sequence number (so a dropped message is undetectable) and nothing "
+            "distinguishes a snapshot from an increment (so a received message "
+            "is not known to be a whole book). Those are properties of the FEED "
+            "and subscribing does not supply them. M2 needs the book endpoint "
+            "to emit a validator, which the V3 clock probe reports per read and "
+            "which is not yet known"
+            if _sc.MISSING_PRECONDITIONS else m1.get("why")),
+        "what_would_change_it": (
+            "the venue publishing a per-market sequence, or documenting the "
+            "market-data message as a full replacement -- either makes M1 "
+            "available BY MEASUREMENT rather than by decision; or an ETag / "
+            "Last-Modified on the book path, which makes M2 available"),
         "consequence_today": ("every venue read reaches "
                               "BOOK_CURRENCY_NOT_ESTABLISHED and refuses. That "
                               "is missing evidence, not a stale book"),

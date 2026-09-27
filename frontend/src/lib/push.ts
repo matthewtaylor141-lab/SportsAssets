@@ -40,9 +40,13 @@ export async function enablePush(vapidPublicKey: string): Promise<void> {
 export async function disablePush(): Promise<void> {
   const sub = await currentSubscription()
   if (sub) {
+    // THE OWNING KEY TRAVELS WITH THE ENDPOINT. The server deleted by endpoint
+    // alone, so anybody who learned an endpoint could switch off somebody
+    // else's alerts; it now requires the user_key that created the row and
+    // refuses a request without one.
     await api('/api/push/unsubscribe', {
       method: 'POST',
-      body: JSON.stringify({ endpoint: sub.endpoint }),
+      body: JSON.stringify({ endpoint: sub.endpoint, user_key: userKey() }),
     })
     await sub.unsubscribe()
   }
