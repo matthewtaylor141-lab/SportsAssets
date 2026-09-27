@@ -100,11 +100,24 @@
    "gone_vs_baseline": [],
    "identical_to_baseline": true,
    "note": "170 more tests PASS than on the baseline (12,878 vs 12,708) and not one more fails. The added tests are the funded lifecycle set: order terminality vs inventory closure, the recovery correlation rule and its executions reader, the entry/partial-exit/restart/close lifecycle with the loss stop, and expected vs observed fees"
+  },
+  "release_eb599c5": {
+   "file": "FAILURES_RELEASE_eb599c5_2026-09-27.txt",
+   "failed": 177,
+   "passed": 12898,
+   "duration_s": 454.53,
+   "log": "GATE_E_REL",
+   "paired_with": "baseline 6d75275, run concurrently, 177 failed in 7:23",
+   "baseline_list_identical_to_the_recorded_one": true,
+   "new_vs_baseline": [],
+   "gone_vs_baseline": [],
+   "identical_to_baseline": true,
+   "note": "190 more tests PASS than on the baseline (12,898 vs 12,708) and not one more fails. The additions are the funded lifecycle corrections: servicing that outlives entry permission, the atomic exit reservation, recovery that never adopts without a durable identity, interruption-repairable accounting with late fee reconciliation, and exit selection through the deployed decision path. This baseline ran alone-in-the-hour conditions and reproduced the recorded 177-identity list byte for byte, which is now the fourth exact reproduction"
   }
  },
  "the_matched_pair": {
-  "baseline": "baseline_6d75275_confirming_0122",
-  "release": "release_acd7cae",
+  "baseline": "6d75275 (this run; identical to every recorded baseline list)",
+  "release": "release_eb599c5",
   "verdict": "ZERO NEW FAILURE IDENTITIES, ZERO GONE",
   "how_to_re_verify": "comm -13 on the two sorted identity files in this directory. Never compare the counts -- see baseline_count_drifts_identities_do_not"
  },
