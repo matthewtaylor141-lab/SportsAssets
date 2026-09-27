@@ -5625,6 +5625,11 @@ jobs:
     if: ${{ inputs.funded_readback != '' }}
     runs-on: ubuntu-latest
     steps:
+      # THE SOURCE IS ON DISK FOR ONE REASON: S6 reads the read-session
+      # password's DEFAULT out of `config.py` rather than retyping it here, so
+      # this step cannot drift from what the service would accept. Every other
+      # step in this job is an HTTP call and needs nothing checked out.
+      - uses: actions/checkout@v4
       - name: S1 · The serving build
         id: build
         env:
