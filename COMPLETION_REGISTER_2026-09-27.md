@@ -75,7 +75,7 @@ completed scheduled cycle whose candidate ledger shows
 
 ---
 
-## A2 · Monetary accounting — **PARTIALLY IMPLEMENTED / EXTERNAL DEPENDENCY**
+## A2 · Monetary accounting — **RECONCILED against the published page**
 
 **Audit finding.** Expected fees use half-up; current published policy uses
 half-even with cumulative taker-fill treatment. Independent counterexample
@@ -571,3 +571,62 @@ database and free space are **sampled every 15 s throughout the run**, not once 
 the end, and any outage, any drop below 500 MB, or an overall timeout **deletes the
 identity list and exits non-zero** — an invalid environment must not leave a
 usable failure count behind.
+
+---
+
+## A2 CLOSED — the fee policy was retrieved and implemented
+
+**Retrieved** 2026-09-27T15:59:54Z from `https://docs.polymarket.us/fees`, HTTP
+200, 460,049 bytes, `etag: W/"uw657j3lkx9unr"` — on the GitHub runner, which has
+the egress this container lacks. Quotes and response metadata preserved in
+`research/evidence/VENUE_FEE_POLICY_2026-09-27.md`.
+
+**The audit was right on both counts and this module was wrong.**
+
+> "All fees and rebates are rounded to the nearest $0.01 using **banker's
+> rounding (round half to even)**."
+
+> "When an aggressive order fills against multiple resting orders, **each fill is
+> charged its banker's-rounded fee, adjusted so that the total commission
+> collected across the order's fills never exceeds the banker's rounding of the
+> cumulative exact fee.**"
+
+> "**Maker rebates are computed per fill, independently.**"
+
+**Implemented:** `ROUND_HALF_EVEN`; `order_fees()` applies per-fill banker's
+rounding with a **running cumulative cap**; `maker_rebates()` is a separate
+function precisely so the cap cannot be generalised onto a side the page says is
+uncapped.
+
+Worked example of why neither shortcut is correct — three fills of 40 at $0.50:
+each fill's own rounding is $0.70, so summing them gives **$2.10**; the cumulative
+exact fee is $2.085 whose banker's rounding is **$2.08**, and that is what the
+order pays. The adjustment lands on the fills that would breach the cap, so a
+reconciliation can match the venue's **sequence**, not only its total.
+
+**Two things the audit did not name, both material:**
+
+- **Θ is per sport, and one changes in three days.** *"The Table Tennis taker fee
+  coefficient becomes 0.10, effective 11:59 PM ET, Wednesday September 30,
+  2026."* A single constant would have silently mispriced Table Tennis from that
+  instant. Now a per-sport schedule with effective instants, tested on both sides
+  of the boundary.
+- **Combos use a different curve** — `C × p × [0.0695 × (1−p) + 0.04 × (1−p)⁴]`.
+  Not implemented, and **refused by name** rather than priced with the standard
+  curve, which would understate the charge.
+
+**Independent verification.** 27 tests, including **all 13 rows of the venue's own
+published "Standard Fee Schedule by Price" table** (price, trade value, taker
+pays, maker receives for a 100-lot), both of the page's worked examples, and the
+Theta-Max row. These vectors were transcribed from the page, not computed by the
+module — which is the point: the `min(p, 1−p)` defect survived its first review
+because the tests computed their expectations with the code under test.
+
+**`FEE_ARITHMETIC_IS_EXACT` is now `True`, and bounded.** It covers the standard
+taker curve and maker rebate at a sport's coefficient for a given instant, with
+the published cumulative adjustment. It explicitly **excludes** combos, the tiered
+taker rebate (a *later* weekly payment that must never be netted into a charge),
+and any collected fee decoded without `price_scale` and
+`fractional_quantity_scale` — because *"execution reports carry … the collected
+fee in scaled notional units"*, so a collected fee read as dollars is wrong by the
+scale factor.

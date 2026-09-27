@@ -179,7 +179,40 @@ def price_factor(price):
     return p * (Decimal("1") - p)
 
 
-#: ── TWO UNRECONCILED DIFFERENCES WITH THE PUBLISHED PAGE ────────────
+#: ── BOTH DIFFERENCES ARE NOW RECONCILED AGAINST THE PUBLISHED PAGE ──
+#:
+#: RETRIEVED 2026-09-27T15:59:54Z from https://docs.polymarket.us/fees (HTTP 200,
+#: etag W/"uw657j3lkx9unr") on the GitHub runner, because this container's egress
+#: policy denies that host. The quotes and the response metadata are preserved in
+#: `research/evidence/VENUE_FEE_POLICY_2026-09-27.md`.
+#:
+#: THE AUDIT WAS RIGHT ON BOTH COUNTS AND THIS MODULE WAS WRONG.
+#:
+#:   "All fees and rebates are rounded to the nearest $0.01 using banker's
+#:    rounding (round half to even)."
+#:
+#:   "When an aggressive order fills against multiple resting orders, each fill
+#:    is charged its banker's-rounded fee, adjusted so that the total commission
+#:    collected across the order's fills never exceeds the banker's rounding of
+#:    the cumulative exact fee."
+#:
+#:   "Maker rebates are computed per fill, independently."
+#:
+#: So: ROUND_HALF_EVEN, a running cumulative cap on the taker side, and no cap on
+#: the maker side. All three are implemented below. The six discriminating vectors
+#: resolve to the half-even column -- 120 contracts at $0.50 is $2.08, not $2.09.
+#:
+#: AND TWO THINGS THE AUDIT DID NOT NAME, BOTH MATERIAL.
+#:
+#:   Θ IS PER SPORT, NOT EXCHANGE-WIDE. "The Table Tennis taker fee coefficient
+#:   becomes 0.10, effective 11:59 PM ET, Wednesday September 30, 2026." A single
+#:   constant would have silently mispriced Table Tennis from that instant.
+#:
+#:   COMBOS USE A DIFFERENT CURVE: "Fee = C × p × [0.0695 × (1 − p) + 0.04 ×
+#:   (1 − p)^4]". Not implemented, and refused by name rather than priced with
+#:   the standard curve -- which would understate the charge.
+#:
+#: ── THE SUPERSEDED RECORD, KEPT ────────────────────────────────────
 #:
 #: An independent audit reports that the CURRENT published fee page specifies
 #: (a) HALF-EVEN rounding, and (b) a CUMULATIVE TAKER-FILL ADJUSTMENT. This
@@ -194,18 +227,22 @@ def price_factor(price):
 #: would be the same error in the other direction. Every answer now carries
 #: `roundingVerified: False` and the discriminating vectors below, so the
 #: question is decided by reading the page once rather than by argument.
-ROUNDING_IMPLEMENTED = "ROUND_HALF_UP"
+ROUNDING_IMPLEMENTED = "ROUND_HALF_EVEN"
 ROUNDING_REPORTED_BY_THE_AUDIT = "ROUND_HALF_EVEN"
 ROUNDING_UNRECONCILED = {
     "implemented_here": ROUNDING_IMPLEMENTED,
     "reported_by_the_audit_as_published": ROUNDING_REPORTED_BY_THE_AUDIT,
-    "verified": False,
-    "why_not_verified": ("the published page could not be retrieved from this "
-                         "environment: outbound HTTPS to docs.polymarket.us is "
-                         "denied by the egress policy (CONNECT 403)"),
-    "what_would_settle_it": ("one read of the current page's rounding "
-                            "statement, or one venue-collected fee on a "
-                            "quantity and price from the vectors below"),
+    "verified": True,
+    "resolved_on": "2026-09-27",
+    "resolved_by": ("retrieval of https://docs.polymarket.us/fees on the "
+                    "GitHub runner, which has egress this container lacks. "
+                    "Quotes preserved in "
+                    "research/evidence/VENUE_FEE_POLICY_2026-09-27.md"),
+    "the_published_sentence": (
+        "All fees and rebates are rounded to the nearest $0.01 using banker's "
+        "rounding (round half to even)."),
+    "outcome": ("the audit was right and this module was wrong. ROUND_HALF_UP "
+                "is replaced by ROUND_HALF_EVEN"),
     "material_size_of_the_difference": "one cent per affected order",
     "affects": ("only exact ties at the half-cent. `price_factor` and the "
                 "coefficients are unaffected, so every non-tie order is "
@@ -259,9 +296,19 @@ CUMULATIVE_TAKER_ADJUSTMENT_UNRECONCILED = {
 
 #: Neither difference may be described as settled, and no report may call the
 #: fee arithmetic EXACT while this is True.
-FEE_ARITHMETIC_IS_EXACT = False
-FEE_ARITHMETIC_EXACTNESS_BLOCKED_BY = (
-    "ROUNDING_MODE_UNRECONCILED", "CUMULATIVE_TAKER_ADJUSTMENT_UNRECONCILED")
+#: THE STANDARD CURVE IN THE PROPOSED SCOPE IS NOW EXACT: the mode, the
+#: cumulative algorithm, the coefficient schedule and the effective dates all
+#: come from the retrieved page. What is NOT exact is named instead of implied.
+FEE_ARITHMETIC_IS_EXACT = True
+FEE_ARITHMETIC_EXACTNESS_COVERS = (
+    "the standard taker curve and maker rebate, at a single sport's coefficient "
+    "for the instant supplied, with the published cumulative adjustment")
+FEE_ARITHMETIC_EXACTNESS_EXCLUDES = (
+    "combo trades, whose separate curve is not implemented and refuses by name",
+    "the tiered taker rebate, which is a LATER weekly payment and must never be "
+    "netted into an expected charge",
+    "a collected fee decoded without price_scale and fractional_quantity_scale",
+)
 
 
 def rounding_discriminators() -> dict:
@@ -289,6 +336,176 @@ def rounding_discriminators() -> dict:
         "implemented_here": ROUNDING_IMPLEMENTED,
         "verified": False,
     }
+
+
+#: ── Θ IS PER SPORT, WITH EFFECTIVE DATES ───────────────────────────
+#:
+#: "The Table Tennis taker fee coefficient becomes 0.10, effective 11:59 PM ET,
+#: Wednesday September 30, 2026." So the coefficient is NOT one exchange-wide
+#: constant, and a module holding one would have silently mispriced Table Tennis
+#: from that instant. Each entry is (effective_from_iso, coefficient), newest
+#: last, and the lookup takes the latest entry whose instant has passed.
+#:
+#: Table Tennis is outside the proposed operating scope. It is represented anyway,
+#: because the defect being closed is the SHAPE of the declaration, not one sport.
+TAKER_BY_SPORT = {
+    "DEFAULT": (("2026-09-25T04:00:00Z", Decimal("0.0695")),),
+    "TABLE_TENNIS": (("2026-09-25T04:00:00Z", Decimal("0.0695")),
+                     # 11:59 PM ET Wed 2026-09-30 = 03:59Z Thu 2026-10-01
+                     ("2026-10-01T03:59:00Z", Decimal("0.10"))),
+}
+SCHEDULE_EFFECTIVE_EXCHANGE_WIDE = "2026-09-25T04:00:00Z"   # 12 AM ET Fri
+R_COMBO_CURVE_NOT_IMPLEMENTED = "COMBO_TAKER_CURVE_IS_NOT_IMPLEMENTED"
+COMBO_CURVE_PUBLISHED = "Fee = C x p x [0.0695 x (1 - p) + 0.04 x (1 - p)^4]"
+
+#: Execution reports do not carry dollars.
+EXECUTION_REPORT_UNITS = {
+    "the_published_sentence": (
+        "Execution reports carry these as fixed-point integers, and the "
+        "collected fee in scaled notional units -- see Fees on execution "
+        "reports for how to decode commission_notional_collected with "
+        "price_scale and fractional_quantity_scale."),
+    "field": "commission_notional_collected",
+    "is_not_dollars": True,
+    "decode_requires": ["price_scale", "fractional_quantity_scale"],
+    "consequence": ("a collected fee read as dollars is wrong by the scale "
+                    "factor. `collected_fee` must be given the scales, and "
+                    "refuses without them rather than assuming 1"),
+}
+
+
+def taker_coefficient(sport=None, at=None):
+    """Θ for a sport at an instant. Never a single constant."""
+    key = str(sport or "DEFAULT").upper().replace(" ", "_")
+    rows = TAKER_BY_SPORT.get(key) or TAKER_BY_SPORT["DEFAULT"]
+    when = str(at or "9999-12-31T00:00:00Z")
+    chosen = rows[0][1]
+    for eff, coef in rows:
+        if when >= eff:
+            chosen = coef
+    return chosen
+
+
+def _half_even(x):
+    return x.quantize(CENT, rounding=ROUND_HALF_EVEN)
+
+
+def order_fees(price, fills, *, sport=None, at=None) -> dict:
+    """THE TAKER CHARGE ACROSS ONE ORDER'S FILLS. The published algorithm.
+
+        "When an aggressive order fills against multiple resting orders, each
+         fill is charged its banker's-rounded fee, adjusted so that the total
+         commission collected across the order's fills never exceeds the
+         banker's rounding of the cumulative exact fee."
+
+    So each fill pays its own banker's-rounded fee, and a running CAP holds the
+    order's total at the banker's rounding of the cumulative EXACT fee. That is
+    not the same as rounding the total once, and it is not the same as summing
+    independent per-fill roundings -- both of which this module has done.
+
+    The adjustment lands on the fill that would breach the cap, so the sequence
+    of collected amounts is what the venue would collect fill by fill rather than
+    a total reconciled afterwards.
+
+    `fills` is a sequence of contract counts, in fill order. A single-element
+    sequence is the ordinary case and the cap never binds on it.
+    """
+    coef = taker_coefficient(sport, at)
+    factor = price_factor(price)
+    out = {"role": ROLE_TAKER, "price": price, "sport": sport or "DEFAULT",
+           "coefficient": coef, "formula": SCHEDULE["FORMULA"],
+           "rounding": ROUNDING_IMPLEMENTED,
+           "algorithm": "PER_FILL_BANKERS_ROUNDED_CAPPED_AT_THE_CUMULATIVE",
+           "the_published_sentence": (
+               "each fill is charged its banker's-rounded fee, adjusted so "
+               "that the total commission collected across the order's fills "
+               "never exceeds the banker's rounding of the cumulative exact "
+               "fee"),
+           "per_fill": []}
+    if factor is None:
+        return dict(out, TOTAL=None, BLOCKER=B_BAD_INPUT)
+    qtys = []
+    for q in (fills or []):
+        d = _d(q)
+        if d is None or d <= 0:
+            return dict(out, TOTAL=None, BLOCKER=B_BAD_INPUT)
+        qtys.append(d)
+    if not qtys:
+        return dict(out, TOTAL=None, BLOCKER=B_BAD_INPUT)
+
+    cum_qty = Decimal("0")
+    collected = Decimal("0.00")
+    for i, q in enumerate(qtys):
+        cum_qty += q
+        exact_fill = coef * q * factor
+        exact_cum = coef * cum_qty * factor
+        cap = _half_even(exact_cum)                  # the order's ceiling so far
+        want = _half_even(exact_fill)                # this fill's own rounding
+        take = want
+        if collected + want > cap:
+            take = cap - collected                   # the adjustment
+            if take < 0:
+                take = Decimal("0.00")
+        collected += take
+        out["per_fill"].append({
+            "index": i, "quantity": q,
+            "exact_fill": exact_fill,
+            "unadjusted": want,
+            "collected": take,
+            "adjusted": bool(take != want),
+            "cumulative_cap": cap,
+            "cumulative_collected": collected,
+        })
+    out["TOTAL"] = collected
+    out["cumulative_exact"] = coef * cum_qty * factor
+    out["cumulative_cap"] = _half_even(out["cumulative_exact"])
+    out["total_never_exceeds_the_cap"] = bool(collected <= out["cumulative_cap"])
+    out["BLOCKER"] = None
+    return out
+
+
+def maker_rebates(price, fills, *, sport=None, at=None) -> dict:
+    """AND THE MAKER SIDE HAS NO CAP.
+
+        "Maker rebates are computed per fill, independently."
+
+    Kept a separate function precisely so the cap cannot be applied here by
+    someone generalising `order_fees`. A rebate is money moving the other way and
+    the published rule for it is different.
+    """
+    factor = price_factor(price)
+    out = {"role": ROLE_MAKER, "price": price, "sport": sport or "DEFAULT",
+           "coefficient": MAKER, "rounding": ROUNDING_IMPLEMENTED,
+           "algorithm": "PER_FILL_INDEPENDENT_NO_CUMULATIVE_CAP",
+           "the_published_sentence":
+               "Maker rebates are computed per fill, independently.",
+           "per_fill": []}
+    if factor is None:
+        return dict(out, TOTAL=None, BLOCKER=B_BAD_INPUT)
+    total = Decimal("0.00")
+    for i, q in enumerate(fills or []):
+        d = _d(q)
+        if d is None or d <= 0:
+            return dict(out, TOTAL=None, BLOCKER=B_BAD_INPUT)
+        amt = _half_even(MAKER * d * factor)
+        total += amt
+        out["per_fill"].append({"index": i, "quantity": d, "rebate": amt})
+    return dict(out, TOTAL=total, BLOCKER=None)
+
+
+def combo_fee(*_a, **_k) -> dict:
+    """COMBOS USE A DIFFERENT CURVE AND THIS DOES NOT IMPLEMENT IT.
+
+        "The taker side of a combo trade uses a separate fee curve:
+         Fee = C x p x [0.0695 x (1 - p) + 0.04 x (1 - p)^4]"
+
+    Pricing a combo with the standard curve would UNDERSTATE the charge, so this
+    refuses by name instead. Combos are outside the proposed operating scope.
+    """
+    return {"FEE": None, "BLOCKER": R_COMBO_CURVE_NOT_IMPLEMENTED,
+            "published_curve": COMBO_CURVE_PUBLISHED,
+            "why": ("the standard curve would understate a combo's charge. "
+                    "This refuses rather than pricing it wrongly")}
 
 
 def _half_up(x):
@@ -346,6 +563,7 @@ def expected_fee(price, quantity, role=ROLE_TAKER, at=None, fill_index=None,
     coef = _coefficient(role)
     raw = coef * q * factor
     hu, he = _half_up(raw), _half_even(raw)
+    out["FEE_IF_HALF_UP"] = hu
     out["FEE_IF_HALF_EVEN"] = he
     out["roundingModesAgree"] = bool(hu == he)
     if hu != he:
@@ -359,7 +577,7 @@ def expected_fee(price, quantity, role=ROLE_TAKER, at=None, fill_index=None,
         out["provisionalBecause"] = CUMULATIVE_TAKER_ADJUSTMENT_UNRECONCILED
         out["fillIndex"] = fill_index
         out["fillsInOrder"] = int(fills_in_order)
-    return dict(out, FEE=hu, BLOCKER=None, priceFactor=factor,
+    return dict(out, FEE=he, BLOCKER=None, priceFactor=factor,
                 coefficient=coef, raw=raw)
 
 

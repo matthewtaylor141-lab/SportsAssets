@@ -223,22 +223,34 @@ def test_the_rounding_discriminators_really_differ_by_a_cent():
         assert abs(Decimal(hu) - Decimal(he)) == cent
 
 
-def test_every_expected_fee_says_its_rounding_is_unverified():
+def test_the_rounding_question_is_now_settled_against_the_published_page():
+    """WHAT THIS TEST USED TO ASSERT, AND WHY IT CHANGED.
+
+    It asserted that every expected fee carried `roundingVerified: False` and
+    that no report might call the arithmetic exact -- correct while the page
+    could not be read from this container. The page WAS read, on the GitHub
+    runner, on 2026-09-27: "All fees and rebates are rounded to the nearest $0.01
+    using banker's rounding (round half to even)."
+
+    So the audit was right, this module was wrong, and the mode is half-even. The
+    exactness claim is now made, and bounded to what was verified -- the detailed
+    checks live in `test_the_fee_policy_matches_the_published_page.py`.
+    """
     from sportsassets import calibration_fees as CF
 
     got = CF.expected_fee("0.39", 10)
     assert got["FEE"] is not None
-    assert got["rounding"] == "ROUND_HALF_UP"
-    assert got["roundingVerified"] is False
+    assert got["rounding"] == "ROUND_HALF_EVEN"
     u = got["roundingUnreconciled"]
-    assert u["reported_by_the_audit_as_published"] == "ROUND_HALF_EVEN"
-    assert "egress" in u["why_not_verified"]
-    # THE ALTERNATIVE ANSWER TRAVELS WITH THE ANSWER.
-    assert "FEE_IF_HALF_EVEN" in got
+    assert u["verified"] is True
+    assert "round half to even" in u["the_published_sentence"]
+    # BOTH ANSWERS STILL TRAVEL WITH THE ANSWER, so a reconciliation against an
+    # older collected fee can see which mode produced it.
+    assert "FEE_IF_HALF_EVEN" in got and "FEE_IF_HALF_UP" in got
     assert got["roundingModesAgree"] is True        # 0.39 is not a tie
-    # AND NO REPORT MAY CALL THIS EXACT.
-    assert CF.FEE_ARITHMETIC_IS_EXACT is False
-    assert "ROUNDING_MODE_UNRECONCILED" in CF.FEE_ARITHMETIC_EXACTNESS_BLOCKED_BY
+    # EXACTNESS IS CLAIMED, AND BOUNDED.
+    assert CF.FEE_ARITHMETIC_IS_EXACT is True
+    assert "combo" in " ".join(CF.FEE_ARITHMETIC_EXACTNESS_EXCLUDES)
 
 
 def test_a_tie_is_flagged_as_material_on_the_answer():
@@ -247,7 +259,10 @@ def test_a_tie_is_flagged_as_material_on_the_answer():
     from sportsassets import calibration_fees as CF
 
     got = CF.expected_fee("0.50", 120)
-    assert got["FEE"] == Decimal("2.09")
+    # THE PUBLISHED MODE'S ANSWER IS NOW THE ANSWER. It was 2.09 under half-up,
+    # which the retrieved page shows was wrong.
+    assert got["FEE"] == Decimal("2.08")
+    assert got["FEE_IF_HALF_UP"] == Decimal("2.09")
     assert got["FEE_IF_HALF_EVEN"] == Decimal("2.08")
     assert got["roundingModesAgree"] is False
     assert "exact half-cent tie" in got["roundingIsMaterialHere"]
@@ -360,8 +375,16 @@ def test_the_scheduler_supplies_no_mechanism_today_and_says_so():
     got = loop.book_currency_evidence("aec-anything")
     assert got["subscription"] is None
     assert got["revalidation"] is None
-    assert "no market-data subscription is held" in got["why_none"]
-    assert "SUBSCRIPTION_TYPE_MARKET_DATA" in got["what_wiring_m1_requires"]
+    # THE REASON IS NOW THE VERIFIED ONE: M1 was checked against the shipped
+    # client and the feed cannot supply two of its four preconditions.
+    assert "cannot establish currency on this feed" in got["why_none"]
+    assert "no sequence number" in got["why_none"]
+    assert got["m1"]["status"] == "M1_NOT_AVAILABLE_ON_THIS_FEED"
+    # WHAT WOULD CHANGE IT, and it is no longer "wire M1": M1 was verified and
+    # the feed cannot supply it. The route now named is the venue publishing a
+    # sequence, or the book path emitting a validator (M2).
+    assert "sequence" in got["what_would_change_it"]
+    assert "ETag" in got["what_would_change_it"]
     assert "not a stale book" in got["consequence_today"]
 
 
