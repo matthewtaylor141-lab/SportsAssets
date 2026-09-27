@@ -462,6 +462,6 @@ def test_the_matrix_defers_the_ownership_question_to_the_right_module():
     for path, methods in UNGUARDED_WRITES:
         for m in methods:
             assert "%s %s" % (m, path) in covered, (path, m)
-    # AND ITS VERDICT IS NOT "CLOSED".
-    assert NO.STATUS == "PARTIALLY_REPAIRED"
-    assert NO.OPEN_BYPASSES, "an empty open list here would be the wrong claim"
+    # AND ITS VERDICT STILL NAMES A LIMIT rather than claiming closure.
+    assert NO.STATUS == "REPAIRED_WITH_A_STATED_LIMIT"
+    assert NO.WHAT_IS_OPEN, "an empty open list here would be the wrong claim"

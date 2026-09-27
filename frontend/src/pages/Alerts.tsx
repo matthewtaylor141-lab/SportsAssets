@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react'
-import { api, userKey } from '../lib/api'
+import { api, notifyHeaders, userKey } from '../lib/api'
 import { currentSubscription, disablePush, enablePush, pushSupported } from '../lib/push'
 import type { Prefs, Whale } from '../lib/types'
 import { SPORTS } from '../sports'
@@ -15,7 +15,8 @@ export function Alerts() {
   useEffect(() => {
     api<any>('/api/config').then(setConfig).catch(() => {})
     api<Whale[]>('/api/whales').then(setWhales).catch(() => {})
-    api<Prefs>(`/api/prefs/${userKey()}`).then(setPrefs).catch(() => {})
+    api<Prefs>(`/api/prefs/${userKey()}`, { headers: notifyHeaders() })
+      .then(setPrefs).catch(() => {})
     pushSupported().then((ok) => {
       setSupported(ok)
       if (ok) currentSubscription().then((s) => setPushOn(!!s))
@@ -24,7 +25,12 @@ export function Alerts() {
 
   const savePrefs = async (next: Prefs) => {
     setPrefs(next)
-    await api(`/api/prefs/${userKey()}`, { method: 'PUT', body: JSON.stringify(next) })
+    // THE CAPABILITY, IN A HEADER. The user_key in the path identifies the row
+    // and authorises nothing -- it is in every access log between here and the
+    // server, which is exactly why it cannot be the credential.
+    await api(`/api/prefs/${userKey()}`, {
+      method: 'PUT', headers: notifyHeaders(), body: JSON.stringify(next),
+    })
     setStatus('Saved.')
     setTimeout(() => setStatus(''), 1500)
   }

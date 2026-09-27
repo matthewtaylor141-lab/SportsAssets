@@ -113,25 +113,48 @@ DEPENDENT_ROUTES = (
     },
     {
         "route": "GET /api/prefs/{user_key}",
-        "guard": "NONE",
+        "guard": "CAPABILITY_REQUIRED",
         "writes": None,
-        "effect": ("DISCLOSES one user's min_notional, muted whales and "
-                   "sports to anyone who names the key"),
-        "was": "no check",
-        "now": "STILL no check -- open, and the key is in the URL path",
+        "effect": ("would DISCLOSE one user's min_notional, muted whales and "
+                   "sports"),
+        "was": "no check at all",
+        "now": ("requires the server-issued capability in the "
+                "X-Notify-Capability header. The user_key stays in the PATH as "
+                "an identifier and authorises nothing"),
     },
     {
         "route": "PUT /api/prefs/{user_key}",
-        "guard": "NONE",
+        "guard": "CAPABILITY_REQUIRED",
         "writes": "user_prefs for the named key",
-        "effect": "OVERWRITES one user's alert preferences",
-        "was": "no check",
-        "now": "STILL no check -- open, and the key is in the URL path",
+        "effect": "would OVERWRITE one user's alert preferences",
+        "was": "no check at all",
+        "now": "requires the capability in the header",
     },
 )
 
 UNGUARDED_ROUTES = tuple(r["route"] for r in DEPENDENT_ROUTES
                          if r["guard"] == "NONE")
+
+#: THE CAPABILITY THAT REPLACED THE IDENTIFIER AS THE AUTHORITY.
+#:
+#: The identifier and the credential are now different values, which is what the
+#: three earlier repairs each stopped short of. See `notification_capability`.
+CAPABILITY = {
+    "module": "notification_capability",
+    "header": "X-Notify-Capability",
+    "never_a_path_segment": True,
+    "server_generated": True,
+    "issued": "exactly once, at first registration; never reissued",
+    "stored": "SHA-256 hash only, so a database read yields no control",
+    "user_key_remains": ("the PUBLIC identifier. It may appear in a path, a "
+                         "log or a screenshot and it authorises NOTHING"),
+    "why_not_a_login": (
+        "there is no per-user principal here -- the only server-established "
+        "identities are shared operator tokens, none of which identifies a "
+        "browser. Building accounts to protect alert preferences would be the "
+        "wrong size of change, so the other route the instruction allows -- a "
+        "deliberately designed protected capability -- is the one taken"),
+}
 
 #: THE BYPASSES, CHECKED RATHER THAN ASSUMED ABSENT. A boundary is only as good
 #: as the set of routes that can write the column it rests on.
@@ -183,17 +206,24 @@ BYPASSES = (
 OPEN_BYPASSES = tuple(b["id"] for b in BYPASSES if not b["closed"])
 
 #: The register's language for this finding, and its true size.
-STATUS = "PARTIALLY_REPAIRED"
+STATUS = "REPAIRED_WITH_A_STATED_LIMIT"
 WHAT_IS_REPAIRED = (
-    "the endpoint-only deletion, and the ownership reassignment that made the "
-    "deletion fix ineffective",
+    "the endpoint-only deletion",
+    "the ownership reassignment that made the deletion fix ineffective",
+    "the two prefs routes, which had no authorization at all -- one disclosed a "
+    "user's preferences, the other overwrote them",
+    "the credential being a value the CLIENT invented: it is now server-"
+    "generated, issued once, and stored only as a hash",
+    "the credential travelling in a URL PATH: it is header-only, so it is not "
+    "written to access logs, proxy logs, referrers or history by construction",
 )
 WHAT_IS_OPEN = (
-    "the two prefs routes have no authorization at all: one discloses a user's "
-    "preferences, the other overwrites them",
-    "the key travels as a URL path segment, so its confidentiality is not "
-    "maintained by the system that depends on it",
-    "there is no binding between the key and the browser that made it",
+    "it is a BEARER capability. Possession is authority, a copied secret works "
+    "from anywhere, and there is no binding to the browser that holds it. That "
+    "is inherent to the design rather than a defect in it, and closing it needs "
+    "a per-user principal this product does not have",
+    "a lost capability cannot be recovered, because recovery needs an identity "
+    "this system lacks. That is the correct trade and it is a real limitation",
 )
 BLAST_RADIUS = {
     "capital": "NONE. No order, position, balance or money is reachable",
@@ -228,8 +258,12 @@ def describe() -> dict:
         "what_is_repaired": list(WHAT_IS_REPAIRED),
         "what_is_open": list(WHAT_IS_OPEN),
         "blast_radius": dict(BLAST_RADIUS),
+        "capability": dict(CAPABILITY),
         "the_correction_to_me": (
-            "I added an identifier and reported a boundary. A client-supplied "
-            "identifier is proof of POSSESSION, and this one was reassignable "
-            "by another route of mine, so it was not even that"),
+            "THREE TIMES I FIXED THE ATTACK I HAD JUST LOOKED AT and reported "
+            "the boundary. First the endpoint-only deletion. Then the "
+            "reassignment that defeated that fix. Then the fact that a "
+            "client-chosen identifier travelling in URL paths is not a "
+            "credential at all, and that two routes had no check whatever. "
+            "Each fix was real and each claim was wider than it"),
     }

@@ -23,6 +23,7 @@ from pydantic import BaseModel, Field
 
 from .. import procmem as _procmem
 from .. import roster as roster_svc
+from .. import notification_capability as _NC
 from ..bus import CH_HEALTH, CH_TRADES_ENRICHED, CH_TRADES_NEW, get_redis
 from ..config import settings
 from ..db import close_pool, get_pool
@@ -16704,6 +16705,13 @@ async def push_subscribe(body: PushSubscribeBody) -> dict:
     which is the disclosure the unsubscribe route already refuses to make.
     """
     pool = await get_pool()
+    # FIRST REGISTRATION MINTS THE CAPABILITY, and only the first.
+    #
+    # THE SECRET IS RETURNED ONCE. Reissuing on a repeat registration would hand
+    # control to anyone holding the public `user_key` -- the reassignment attack
+    # with an extra step -- so `issue_if_first` returns None on a repeat and says
+    # why.
+    cap = await _NC.issue_if_first(pool, body.user_key)
     got = await pool.execute(
         """
         INSERT INTO push_subscriptions (user_key, endpoint, p256dh, auth)
@@ -16715,6 +16723,11 @@ async def push_subscribe(body: PushSubscribeBody) -> dict:
     )
     written = str(got).rsplit(" ", 1)[-1] == "1"
     return {"ok": True,
+            "capability": cap["capability"],
+            "capability_header": _NC.CAPABILITY_HEADER,
+            "capability_minted": cap["minted"],
+            "capability_note": cap["store_it"] if cap["minted"]
+                               else cap["why_not_reissued"],
             # WHETHER A ROW WAS WRITTEN, WITHOUT SAYING WHY IT WAS NOT.
             "stored": written,
             "owner_is_immutable": True,
@@ -16731,7 +16744,9 @@ class PushUnsubscribeBody(BaseModel):
 
 
 @app.post("/api/push/unsubscribe")
-async def push_unsubscribe(body: PushUnsubscribeBody) -> dict:
+async def push_unsubscribe(
+        body: PushUnsubscribeBody,
+        x_notify_capability: str = Header(default="")) -> dict:
     """Remove one push subscription, AND ONLY ITS OWNER'S.
 
     THE DEFECT THIS CLOSES, found by the permission matrix. This deleted by
@@ -16760,6 +16775,15 @@ async def push_unsubscribe(body: PushUnsubscribeBody) -> dict:
                      "which let one caller switch off another's alerts. Send "
                      "the user_key that owns the subscription")})
     pool = await get_pool()
+    # AND THE user_key IS NOT THE CREDENTIAL. It identifies the row; the
+    # capability authorises changing it. A caller holding only the public
+    # identifier -- which may have been logged, screenshotted or shared -- gets
+    # nothing.
+    ok = await _NC.check(pool, key, x_notify_capability)
+    if not ok["ok"]:
+        raise HTTPException(status_code=403, detail={
+            "reason": ok["refusal"], "what": ok["why"],
+            "header": _NC.CAPABILITY_HEADER})
     got = await pool.execute(
         "DELETE FROM push_subscriptions WHERE endpoint=$1 AND user_key=$2",
         body.endpoint, key)
@@ -16782,8 +16806,28 @@ class PrefsBody(BaseModel):
 
 
 @app.get("/api/prefs/{user_key}")
-async def get_prefs(user_key: str) -> dict:
+async def get_prefs(user_key: str,
+                    x_notify_capability: str = Header(default="")) -> dict:
+    """One user's alert preferences. REQUIRES THE CAPABILITY.
+
+    THIS ROUTE HAD NO CHECK AT ALL and disclosed a user's min_notional, muted
+    whales and sports to anyone who named the key -- a key that is in this
+    route's own URL PATH, and therefore in every access log between the browser
+    and here.
+
+    THE PATH SEGMENT STAYS AND STOPS AUTHORISING. `user_key` identifies which
+    row is wanted, which is a fine job for a path. Reading it requires the
+    capability, in a header. "Public identifiers in paths must not grant
+    control" is satisfied by separating the two, not by hiding the identifier.
+    """
     pool = await get_pool()
+    ok = await _NC.check(pool, user_key, x_notify_capability)
+    if not ok["ok"]:
+        raise HTTPException(status_code=403, detail={
+            "reason": ok["refusal"], "what": ok["why"],
+            "header": _NC.CAPABILITY_HEADER,
+            "the_path_segment_is_not_a_credential": (
+                "user_key identifies the row and authorises nothing")})
     row = await pool.fetchrow("SELECT * FROM user_prefs WHERE user_key=$1", user_key)
     if row is None:
         return {"user_key": user_key, "min_notional": 0, "muted_whales": [], "sports": []}
@@ -16796,8 +16840,20 @@ async def get_prefs(user_key: str) -> dict:
 
 
 @app.put("/api/prefs/{user_key}")
-async def put_prefs(user_key: str, body: PrefsBody) -> dict:
+async def put_prefs(user_key: str, body: PrefsBody,
+                    x_notify_capability: str = Header(default="")) -> dict:
+    """Overwrite one user's alert preferences. REQUIRES THE CAPABILITY.
+
+    THIS ROUTE HAD NO CHECK AT ALL, so anyone naming the key could rewrite
+    somebody else's alert settings -- mute a whale for them, raise their
+    threshold so nothing fires.
+    """
     pool = await get_pool()
+    ok = await _NC.check(pool, user_key, x_notify_capability)
+    if not ok["ok"]:
+        raise HTTPException(status_code=403, detail={
+            "reason": ok["refusal"], "what": ok["why"],
+            "header": _NC.CAPABILITY_HEADER})
     await pool.execute(
         """
         INSERT INTO user_prefs (user_key, min_notional, muted_whales, sports, updated_at)

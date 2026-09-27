@@ -177,18 +177,40 @@ def test_the_subscribe_bypass_is_recorded_as_found_and_closed():
         b["why_it_matters_beyond_this_route"])
 
 
-def test_the_two_prefs_routes_are_recorded_as_STILL_UNGUARDED():
-    """These are not closed and must not read as closed. One discloses a user's
-    preferences to anyone naming the key; the other overwrites them."""
-    assert set(NO.UNGUARDED_ROUTES) == {"GET /api/prefs/{user_key}",
-                                        "PUT /api/prefs/{user_key}"}
+def test_the_two_prefs_routes_ARE_NOW_GUARDED():
+    """THEY WERE THE REAL RESIDUE AND THEY ARE CLOSED.
+
+    This test used to assert they were STILL UNGUARDED, which was the honest
+    state then: one disclosed a user's preferences to anyone naming the key and
+    the other overwrote them, with no check at all. Both now require the
+    server-issued capability in a header.
+
+    THE PATH SEGMENT STAYS. `user_key` identifies which row is wanted, which is
+    a fine job for a path. What changed is that it no longer authorises -- which
+    is how "public identifiers in paths must not grant control" is satisfied
+    without pretending the identifier can be kept secret.
+    """
+    assert NO.UNGUARDED_ROUTES == ()
     get = NO.route("GET /api/prefs/{user_key}")
     put = NO.route("PUT /api/prefs/{user_key}")
-    assert get["guard"] == "NONE" and put["guard"] == "NONE"
-    assert "DISCLOSES" in get["effect"]
-    assert "OVERWRITES" in put["effect"]
-    for r in (get, put):
-        assert "STILL no check" in r["now"]
+    assert get["guard"] == put["guard"] == "CAPABILITY_REQUIRED"
+    assert "no check at all" in get["was"] and "no check at all" in put["was"]
+    assert "X-Notify-Capability" in get["now"]
+    assert "authorises nothing" in get["now"]
+
+
+def test_the_capability_replaced_the_identifier_as_the_authority():
+    """The three earlier repairs each stopped short of this: the identifier and
+    the credential are now DIFFERENT VALUES."""
+    c = NO.CAPABILITY
+    assert c["never_a_path_segment"] is True
+    assert c["server_generated"] is True
+    assert "never reissued" in c["issued"]
+    assert "yields no control" in c["stored"]
+    assert "authorises NOTHING" in c["user_key_remains"]
+    # AND WHY NOT A LOGIN IS ANSWERED, rather than the option being ignored.
+    assert "no per-user principal" in c["why_not_a_login"]
+    assert "wrong size of change" in c["why_not_a_login"]
 
 
 def test_the_remaining_bypasses_are_open_with_named_repairs():
@@ -199,11 +221,20 @@ def test_the_remaining_bypasses_are_open_with_named_repairs():
             assert b["what_would_close_it"], b["id"]
 
 
-def test_the_status_is_PARTIALLY_REPAIRED_not_closed():
-    assert NO.STATUS == "PARTIALLY_REPAIRED"
-    assert len(NO.WHAT_IS_OPEN) == 3
-    assert NO.describe()["the_correction_to_me"].startswith(
-        "I added an identifier and reported a boundary")
+def test_the_status_names_its_limit_rather_than_claiming_closure():
+    """"REPAIRED" alone would be the fourth overstatement in this one finding's
+    history. What remains open is inherent to a bearer capability and is said."""
+    assert NO.STATUS == "REPAIRED_WITH_A_STATED_LIMIT"
+    assert len(NO.WHAT_IS_REPAIRED) == 5
+    open_text = " ".join(NO.WHAT_IS_OPEN)
+    assert "BEARER capability" in open_text
+    assert "no binding to the browser" in open_text
+    assert "cannot be recovered" in open_text
+    assert "inherent to the design rather than a defect" in open_text
+    # AND THE SEQUENCE OF MY OWN OVERSTATEMENTS IS ON THE RECORD.
+    corr = NO.describe()["the_correction_to_me"]
+    assert "THREE TIMES" in corr
+    assert "each claim was wider than it" in corr
 
 
 def test_the_blast_radius_is_stated_at_its_actual_size():

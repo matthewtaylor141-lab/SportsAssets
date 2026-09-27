@@ -58,7 +58,14 @@ export function adminApi<T>(path: string, token: string, init?: RequestInit): Pr
   return api<T>(path, { ...init, headers: { 'X-Admin-Token': token, ...(init?.headers || {}) } })
 }
 
-/** Stable anonymous identity for prefs + push subscriptions. */
+/**
+ * The PUBLIC identifier for prefs + push subscriptions. It authorises NOTHING.
+ *
+ * It appears in URL paths (`/api/prefs/{user_key}`), so it is in access logs,
+ * proxy logs and browser history. That is fine for an identifier and
+ * disqualifying for a credential, which is why the two are now separate values.
+ * See `notifyCapability` below.
+ */
 export function userKey(): string {
   let key = localStorage.getItem('sa_user_key')
   if (!key) {
@@ -66,4 +73,32 @@ export function userKey(): string {
     localStorage.setItem('sa_user_key', key)
   }
   return key
+}
+
+/** The header the notification capability travels in. NEVER a path segment. */
+export const NOTIFY_CAPABILITY_HEADER = 'X-Notify-Capability'
+
+/**
+ * The capability that authorises changing THIS browser's notification state.
+ *
+ * Server-generated, returned exactly once by `POST /api/push/subscribe` on first
+ * registration, and never recoverable afterwards -- recovery would need an
+ * identity this product does not have. Empty until that first registration, in
+ * which case the guarded routes correctly refuse.
+ */
+export function notifyCapability(): string {
+  return localStorage.getItem('sa_notify_capability') || ''
+}
+
+export function rememberNotifyCapability(secret: string | null | undefined): void {
+  // ONLY EVER SET, NEVER OVERWRITTEN WITH NOTHING. A repeat registration returns
+  // null rather than reissuing, and clobbering the stored secret with that null
+  // would lock this browser out of its own subscription.
+  if (secret) localStorage.setItem('sa_notify_capability', secret)
+}
+
+/** The header block for a capability-guarded notification route. */
+export function notifyHeaders(): Record<string, string> {
+  const cap = notifyCapability()
+  return cap ? { [NOTIFY_CAPABILITY_HEADER]: cap } : {}
 }
