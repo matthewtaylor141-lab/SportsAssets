@@ -13,15 +13,20 @@
    "INFO:__main__:applying 125_funded_pilot_intents_and_fills.sql",
    "INFO:__main__:applying 126_funded_inventory_exits_and_fees.sql",
    "asyncpg.exceptions.UndefinedFunctionError: function bettor_funded_order_is_outstanding(text) does not exist",
-   "migrate failed — serving anyway; will apply on next boot"
+   "migrate failed \u2014 serving anyway; will apply on next boot"
   ],
   "cause": [
-   "production is PostgreSQL 18.6; every database the file had met (local, and every gate",
-   "checkout) is 16.13. PostgreSQL 17 and later run maintenance work -- an index BUILD",
-   "included -- under a safe search_path of 'pg_catalog, pg_temp', and a SQL function body is",
-   "re-parsed when the planner inlines it. The two partial indexes in 126 have a predicate",
-   "whose body called two other funded functions unqualified, so those names could not be",
-   "resolved at build time and the whole file rolled back."
+   "INCOMPATIBLE SQL IN OUR OWN RELEASE, exposed by production's PostgreSQL",
+   "version. Migration 126 creates a function used as the predicate of two partial",
+   "indexes, and its body called two other funded functions UNQUALIFIED -- a name",
+   "that resolves only through the session's search_path. PostgreSQL 17 and later",
+   "run maintenance work, an index BUILD included, under a deliberately safe",
+   "search_path of 'pg_catalog, pg_temp', and a SQL function body is re-parsed when",
+   "the planner inlines it. So the predicate could not be resolved at build time",
+   "and the whole file rolled back.",
+   "THE VERSION DID NOT CAUSE IT. Production runs 18.6 and every database this file",
+   "had met was 16.13, which is why it went unnoticed -- not why it was wrong. The",
+   "defect was ours and the fix is in the file."
   ],
   "reproduced_on_16": {
    "how": "SET search_path = pg_catalog, pg_temp, then evaluate the predicate",
@@ -36,9 +41,11 @@
   "both_tests_fail_against_the_unfixed_migrations_on_postgresql_16": true,
   "what_it_says_about_the_gate": [
    "a suite whose database is two major versions behind production cannot see a",
-   "version-dependent failure. The gate on 07c67f3 was green by identity and the schema still",
-   "did not apply. The two tests move the check into a form 16 can evaluate; they do not make",
-   "the gate a substitute for the production boot log."
+   "version-dependent defect. The gate on 07c67f3 was green by identity and the",
+   "schema still did not apply. Two things now address that: the tests below check",
+   "the CONDITION on 16 by setting the restricted search_path explicitly, and the",
+   "funded-pg18 job applies these migrations to PostgreSQL 18 with the production",
+   "runner as part of release validation."
   ],
   "what_it_says_about_the_panel": [
    "it reported the failure instead of rendering an empty book. A funded section that had shown",
@@ -75,7 +82,7 @@
   ],
   "the_funded_command_centre_section": {
    "section": "Funded book",
-   "label": "REAL MONEY — NEVER SUMMED WITH ANY MODELLED BOOK",
+   "label": "REAL MONEY \u2014 NEVER SUMMED WITH ANY MODELLED BOOK",
    "books": 0,
    "unresolved_discrepancies": 0,
    "error": "none",
@@ -168,14 +175,23 @@
    ]
   },
   "the_demonstration_is_separate_and_labelled": {
-   "label": "CONTROLLED DEMONSTRATION — SOFTWARE PROOF, NOT PERFORMANCE",
+   "label": "CONTROLLED DEMONSTRATION \u2014 SOFTWARE PROOF, NOT PERFORMANCE",
    "experiment_id": "CONTROLLED_DEMONSTRATION_EXTERNAL_VALUATION_V1",
    "counts_toward_strategy_performance": false,
    "inputs_are_chosen_not_observed": true,
    "every_position_book_and_its_flag": {
-    "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY": {"count": 4, "counts_toward_strategy_performance": false},
-    "CONTROLLED_DEMONSTRATION": {"count": 1, "counts_toward_strategy_performance": false},
-    "UNCLASSIFIED": {"count": 35, "counts_toward_strategy_performance": false}
+    "ACCEPTANCE_SYNTHETIC_MODELLED_ENTRY": {
+     "count": 4,
+     "counts_toward_strategy_performance": false
+    },
+    "CONTROLLED_DEMONSTRATION": {
+     "count": 1,
+     "counts_toward_strategy_performance": false
+    },
+    "UNCLASSIFIED": {
+     "count": 35,
+     "counts_toward_strategy_performance": false
+    }
    },
    "books_flagged_as_strategy_performance": "none"
   }
@@ -201,5 +217,6 @@
   "that a qualifying candidate exists. One valuation was written; nothing was admitted.",
   "that the gate establishes production behaviour. It runs on PostgreSQL 16.13 and production is 18.6.",
   "that any of this is authorization to trade."
- ]
+ ],
+ "superseded_by": "research/evidence/RELEASE_CONDITIONS_2026-09-27.json for the bounded corrections that followed this readback"
 }
