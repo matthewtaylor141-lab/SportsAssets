@@ -51,6 +51,25 @@ on:
         description: "API origin behind the proxy"
         required: false
         default: "https://sportsassets-api.onrender.com"
+      book_protocol:
+        description: >-
+          on|blank. `on` reads the venue's DOCUMENTED public endpoints directly
+          from the runner -- the Markets WebSocket documentation page and
+          GET https://gateway.polymarket.us/v1/markets/{slug}/book -- and prints
+          the raw response headers, the payload's own field names, and a
+          conditional revalidation exchange. It needs NO deployment: these are
+          public reads, and waiting for a backend release to inspect public
+          response headers was a dependency I invented. Production integration
+          still needs its own gated deploy; this only settles what the protocol
+          provides. Read-only, no credential, no account.
+        required: false
+        default: ""
+      book_protocol_slugs:
+        description: >-
+          Comma-separated venue market slugs for the book read. Blank lists
+          markets from the public catalogue first and takes the first few.
+        required: false
+        default: ""
       fee_docs:
         description: >-
           on|blank. `on` retrieves the venue's OFFICIAL published fee
@@ -6496,4 +6515,195 @@ jobs:
                        v['if_half_up'], v['if_half_even']))
           print('   implemented_here=%s verified=%s' % (d['implemented_here'], d['verified']))
           " | tee -a "$GITHUB_STEP_SUMMARY" || true
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+  # -- THE PUBLISHED BOOK PROTOCOL, READ FROM THE RUNNER -------------
+  #
+  # WHY THIS JOB NEEDS NO DEPLOY. I had concluded that settling mechanism M2
+  # required deploying the V3 probe, because that probe lives inside our API.
+  # That was a dependency I invented: the endpoint is PUBLIC and documented, the
+  # runner has egress, and a public response header does not need our backend to
+  # be readable. Production integration still needs its own gated deployment --
+  # this settles what the PROTOCOL provides, which is the question that was
+  # actually blocking.
+  #
+  # THREE THINGS, KEPT SEPARATE:
+  #   1  what the published Markets WebSocket documentation says about
+  #      SUBSCRIPTION_TYPE_MARKET_DATA. If the documented response is a full
+  #      order book, replacement authority rests on the PUBLISHED PROTOCOL and
+  #      not on an SDK docstring -- and a self-contained replacement does not
+  #      need delta reconstruction, so the continuity requirement imposed
+  #      earlier was the wrong shape for a snapshot feed;
+  #   2  the book endpoint's response contract: every header verbatim, whether a
+  #      validator is present, and what a conditional re-request returns;
+  #   3  what the payload carries about its own timing -- field names only.
+  #
+  # AND WHAT IT REFUSES TO CONCLUDE. A validator does NOT establish a numeric
+  # market-data age: an origin can validate a representation while its own
+  # market-data source is delayed. HTTP cache age, our observation age and any
+  # upstream market-data stamp are printed as THREE quantities with no equality
+  # drawn between them.
+  book-protocol:
+    if: ${{ inputs.book_protocol != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the documented protocol and the live book endpoint
+        env:
+          SLUGS: ${{ inputs.book_protocol_slugs }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### the published book protocol, read directly' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          say "retrieved_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          GW=https://gateway.polymarket.us
+          say "gateway=$GW  (the documented public base)"
+
+          say ""
+          say "== 1 . WHAT THE PUBLISHED WEBSOCKET DOCS SAY =="
+          WSDOC=https://docs.polymarket.us/api-reference/websocket/markets
+          code=$(curl -sS -L -o /tmp/ws.html -w '%{http_code}' --max-time 60 "$WSDOC" || echo 000)
+          say "GET $WSDOC  HTTP $code  bytes=$(wc -c < /tmp/ws.html 2>/dev/null || echo 0)"
+          if [ "$code" = "200" ]; then
+          python3 - <<'PYEOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import html, re
+          raw = open('/tmp/ws.html', encoding='utf-8', errors='replace').read()
+          raw = re.sub(r'(?is)<(script|style)[^>]*>.*?</\1>', ' ', raw)
+          txt = html.unescape(re.sub(r'(?s)<[^>]+>', ' ', raw))
+          flat = re.sub(r'\s+', ' ', txt)
+          WANT = {
+           'full_book_or_snapshot': r'full order book|full book|snapshot|entire book|replace',
+           'delta_or_incremental': r'delta|incremental|increment|diff|partial update',
+           'sequence_or_ordering': r'sequence|ordering|out of order|gap|missed message',
+           'market_data_subscription': r'SUBSCRIPTION_TYPE_MARKET_DATA',
+           'heartbeat_and_reconnect': r'heartbeat|reconnect|resubscribe|disconnect',
+           'timing_or_latency': r'latency|transactTime|timestamp|as of|delay',
+          }
+          for name, pat in WANT.items():
+              hits = [x.strip() for x in re.split(r'(?<=[.!?])\s+', flat)
+                      if re.search(pat, x, re.I)]
+              print()
+              print('[%s] %d matching sentence(s)' % (name, len(hits)))
+              for h in hits[:6]:
+                  print('   | ' + h[:360])
+              if not hits:
+                  print('   | NONE FOUND -- this question is not answered by this page')
+          PYEOF
+          else
+            say "NOT RETRIEVED. Replacement authority stays open on the"
+            say "published protocol and P1 keeps its current verdict."
+          fi
+
+          say ""
+          say "== 2 . THE BOOK ENDPOINT'S OWN RESPONSE CONTRACT =="
+          want="$SLUGS"
+          if [ -z "$want" ]; then
+            code=$(curl -sS -o /tmp/mk.json -w '%{http_code}' --max-time 60 \
+                   "$GW/v1/markets?limit=20" || echo 000)
+            say "GET $GW/v1/markets?limit=20  HTTP $code"
+          want=$(python3 - <<'PYEOF'
+          import json, sys
+          try:
+              d = json.load(open('/tmp/mk.json'))
+          except Exception:
+              raise SystemExit
+          ms = d.get('markets') or d.get('data') or []
+          sl = [m.get('slug') or m.get('marketSlug') for m in ms if isinstance(m, dict)]
+          print(','.join([x for x in sl if x][:3]))
+          PYEOF
+          )
+            say "slugs from the public catalogue: ${want:-NONE}"
+          fi
+          if [ -z "$want" ]; then
+            say "NO SLUG AVAILABLE, so the header question stays unanswered."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+
+          IFS=',' read -ra ARR <<< "$want"
+          for slug in "${ARR[@]}"; do
+            [ -n "$slug" ] || continue
+            say ""
+            say "-- $slug --"
+            t0=$(date -u +%s)
+            code=$(curl -sS -D /tmp/bk.hdr -o /tmp/bk.json -w '%{http_code}' \
+                   --max-time 30 "$GW/v1/markets/$slug/book" || echo 000)
+            t1=$(date -u +%s)
+            say "GET /v1/markets/$slug/book  HTTP $code  our_round_trip_s=$((t1-t0))"
+            say "   every response header, verbatim:"
+            sed -n '2,$p' /tmp/bk.hdr | sed 's/^/     /' | tee -a "$GITHUB_STEP_SUMMARY"
+          python3 - <<'PYEOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, sys, time, email.utils
+          hdr = {}
+          for line in open('/tmp/bk.hdr', encoding='utf-8', errors='replace'):
+              if ':' in line:
+                  k, _, v = line.partition(':')
+                  hdr[k.strip().lower()] = v.strip()
+          try:
+              body = json.load(open('/tmp/bk.json'))
+          except Exception as exc:
+              print('   payload unparseable: %s' % type(exc).__name__)
+              raise SystemExit
+          md = body.get('marketData') if isinstance(body, dict) else None
+          print('   payload top-level keys: %s' % (sorted(body)[:12] if isinstance(body, dict) else type(body).__name__))
+          if isinstance(md, dict):
+              print('   marketData field names: %s' % sorted(md))
+              for probe in ('seq', 'sequence', 'sequenceNumber', 'msgId', 'messageId',
+                            'isSnapshot', 'snapshot', 'action', 'type', 'updateId'):
+                  if probe in md:
+                      print('   *** %s IS PRESENT: %r' % (probe, md[probe]))
+              print('   bid levels=%s offer levels=%s'
+                    % (len(md.get('bids') or []), len(md.get('offers') or [])))
+              print('   transactTime=%r  state=%r' % (md.get('transactTime'), md.get('state')))
+          now = time.time()
+          def hd(v):
+              try:
+                  return email.utils.parsedate_to_datetime(v).timestamp()
+              except Exception:
+                  return None
+          d0 = hd(hdr.get('date', '')) if hdr.get('date') else None
+          age = hdr.get('age')
+          print('   -- THREE DIFFERENT QUANTITIES, kept apart --')
+          print('   HTTP cache age (Age header)        : %s' % (age if age is not None else 'ABSENT'))
+          print('   origin generation (Date - Age)     : %s'
+                % ('UNKNOWN' if d0 is None else '%.0f s ago' % (now - (d0 - float(age or 0)))))
+          print('   OUR observation age at this instant: ~0 s, we just received it')
+          print('   UPSTREAM MARKET-DATA age           : NOT STATED BY ANY HEADER')
+          print('      an origin can validate a representation while its own market-data')
+          print('      source is delayed, so neither a validator nor Date-Age is a')
+          print('      market-data age. transactTime is the only candidate and what it')
+          print('      denotes is unresolved.')
+          print('   validator: etag=%s last-modified=%s'
+                % (hdr.get('etag', 'ABSENT'), hdr.get('last-modified', 'ABSENT')))
+          open('/tmp/validator.txt', 'w').write('%s|%s' % (hdr.get('etag', ''), hdr.get('last-modified', '')))
+          PYEOF
+            ET=$(cut -d'|' -f1 /tmp/validator.txt 2>/dev/null)
+            LM=$(cut -d'|' -f2 /tmp/validator.txt 2>/dev/null)
+            if [ -n "$ET" ] || [ -n "$LM" ]; then
+              say "   -- the conditional re-request, which is the M2 exchange --"
+              ARGS=()
+              [ -n "$ET" ] && ARGS+=(-H "If-None-Match: $ET")
+              [ -n "$LM" ] && ARGS+=(-H "If-Modified-Since: $LM")
+              c2=$(curl -sS -D /tmp/bk2.hdr -o /tmp/bk2.json -w '%{http_code}' \
+                   --max-time 30 "${ARGS[@]}" "$GW/v1/markets/$slug/book" || echo 000)
+              say "   conditional GET -> HTTP $c2   (304 = the origin affirms the representation)"
+              grep -iE '^(date|age|etag|cache-control|x-cache|cf-cache-status):' \
+                /tmp/bk2.hdr | sed 's/^/     /' | tee -a "$GITHUB_STEP_SUMMARY" || true
+              say "   NOTE: a 304 affirms the REPRESENTATION. It is not a market-data age."
+            else
+              say "   no validator on this response, so the M2 exchange cannot be"
+              say "   made HERE. That does not prove no viable data path exists."
+            fi
+          done
+
+          say ""
+          say "== 3 . RUNNER VS PRODUCTION PATH, recorded not assumed =="
+          say "this job read $GW directly from a GitHub runner. Production reads"
+          say "the same host through polymarket_us from Render. Differences that"
+          say "could matter and are NOT settled here:"
+          say "  * egress IP and region, so a different CDN edge may answer;"
+          say "  * the SDK sends Authorization on authenticated paths and this"
+          say "    job sent none, so a validator could differ between them;"
+          say "  * Render's outbound path may add or strip hop headers."
+          say "SO production integration still needs its own gated deployment and"
+          say "its own readback. This settles the PROTOCOL, not our path."
           echo '```' >> "$GITHUB_STEP_SUMMARY"
