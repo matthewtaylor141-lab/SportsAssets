@@ -381,6 +381,27 @@ UNGUARDED_RESIDUE_2026_09_27 = (
 
 #: The subset that accepts a WRITE with no credential. This is the part of the
 #: residue that can change state, so it is counted on its own.
+#:
+#: THESE THREE ARE STILL HERE AND TWO OF THEM CHANGED ANYWAY, which is a
+#: distinction this matrix cannot see and `notification_ownership` records:
+#:
+#:   push/unsubscribe  now requires the row's owning user_key. No CREDENTIAL, so
+#:                     it stays in this list -- and it no longer deletes by
+#:                     endpoint alone.
+#:   push/subscribe    no longer reassigns an endpoint's owner. That mattered
+#:                     more than it looks: the reassignment DEFEATED the
+#:                     unsubscribe check, so the fix above was ineffective until
+#:                     this one landed.
+#:   prefs PUT         unchanged. Still overwrites any named user's preferences
+#:                     with no check at all.
+#:
+#: THE LESSON FOR THIS MATRIX. "Accepts a write with no credential" and "has no
+#: authority boundary" are different questions, and this file can only answer the
+#: first. A route can hold a real ownership check and still belong in this list,
+#: and a route in this list can have its check silently defeated by a DIFFERENT
+#: route -- which is what happened. `notification_ownership` carries the second
+#: question and `test_the_notification_authority_boundary` runs the bypass as an
+#: attack rather than asserting its absence.
 UNGUARDED_WRITES = (
     ("/api/prefs/{user_key}", ('PUT',)),
     ("/api/push/subscribe", ('POST',)),
@@ -422,3 +443,25 @@ def test_the_account_read_is_no_longer_public():
         "an unauthenticated caller could read the funded account's value, cash, "
         "positions and realised P&L")
     assert "/api/pmus-account" not in dict(UNGUARDED_RESIDUE_2026_09_27)
+
+
+# ── the ownership question this matrix cannot answer ────────────────
+
+def test_the_matrix_defers_the_ownership_question_to_the_right_module():
+    """A CREDENTIAL CHECK AND AN AUTHORITY BOUNDARY ARE DIFFERENT QUESTIONS.
+
+    This file asks "does the server require a credential". It cannot ask "can
+    one caller act on another's row", and treating the first as an answer to the
+    second is how I came to report the push finding closed while a second route
+    of mine was handing ownership away.
+    """
+    from sportsassets import notification_ownership as NO
+
+    # EVERY user_key-DEPENDENT WRITE IN THIS LIST IS COVERED THERE.
+    covered = {r["route"] for r in NO.DEPENDENT_ROUTES}
+    for path, methods in UNGUARDED_WRITES:
+        for m in methods:
+            assert "%s %s" % (m, path) in covered, (path, m)
+    # AND ITS VERDICT IS NOT "CLOSED".
+    assert NO.STATUS == "PARTIALLY_REPAIRED"
+    assert NO.OPEN_BYPASSES, "an empty open list here would be the wrong claim"

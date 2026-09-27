@@ -490,7 +490,7 @@ audience:**
 | `POST /api/push/unsubscribe` | `frontend/src/lib/push.ts` | **was** `DELETE … WHERE endpoint=$1` — no ownership check | anonymous browser |
 | `PUT /api/prefs/{user_key}` | `frontend/src/pages/Alerts.tsx` | overwrites notification preferences for a UUID key | anonymous browser |
 
-**One of the three was fixed, and it was the one that mattered.**
+**One of the three was fixed, and then the fix turned out not to hold.**
 `push/unsubscribe` deleted by endpoint alone, so anybody who learned or guessed a
 push endpoint could silently switch off somebody else's alerts. It now requires
 the owning `user_key`, refuses a request without one rather than defaulting, and
@@ -498,11 +498,63 @@ returns the same answer for a wrong key as for an already-removed row — tellin
 them apart would confirm that an endpoint exists under another key. The frontend
 caller sends the key in the same change.
 
-**The residual, stated rather than papered over.** A client-generated UUID is not
-a strong credential: a caller holding both the endpoint and the key is
-indistinguishable from the owner, and `PUT /api/prefs/{user_key}` still has no
-authorization beyond knowing the key. These carry notification preferences, no
-capital and no market data. Proper per-user authentication for them is **OPEN**.
+### The bypass that made that fix ineffective, and it was my own code
+
+`POST /api/push/subscribe` ran:
+
+```sql
+ON CONFLICT (endpoint) DO UPDATE SET user_key=$1, p256dh=$3, auth=$4
+```
+
+So a caller holding an endpoint could POST **their own** key, take ownership of
+the row, and *then* unsubscribe it legitimately. Two requests, the same outcome
+as before the fix, and **the ownership check I had just added was satisfied on
+the way through.**
+
+> **Adding an identifier to one handler is not a boundary while another handler
+> can write the column the check reads.** That is the general shape of the
+> mistake, and it is why "I added `user_key`" was not an answer to "test the
+> actual authority boundary".
+
+**Closed:** the conflict clause now carries
+`WHERE push_subscriptions.user_key = $1`, so an endpoint's owner is immutable. A
+mismatch answers exactly as a success, because distinguishing them would confirm
+the endpoint is registered under another key. The legitimate case — the same
+browser re-subscribing, which always presents the same key — still refreshes its
+own row.
+
+`test_the_notification_authority_boundary.py` runs the two-request attack **as
+an attack**, and it was verified to FAIL against the old SQL. A property test
+over the fixed code would have passed before the fix too.
+
+### What `user_key` actually is — the classification, since that was the question
+
+| | |
+|---|---|
+| an **authenticated identity**? | **No.** No server-side step establishes who the caller is; the value is whatever the request said it was |
+| a **protected capability**? | **No** — and not for want of entropy. `crypto.randomUUID()` is 122 random bits, so guessing it is not the threat and *"a UUID is weak"* would be the wrong finding. It fails because `GET`/`PUT /api/prefs/{user_key}` carry it as a **URL path segment**, where it lands in access logs, proxy logs, referrers and browser history. **The system that depends on its secrecy is the same system that writes it down.** |
+| so it is | an **unverified client-supplied identifier**. It establishes **possession**, which is useful and is not ownership |
+
+### Still OPEN, at its actual size
+
+| open item | what would close it |
+|---|---|
+| `GET /api/prefs/{user_key}` **discloses** one user's preferences to anyone naming the key; `PUT` **overwrites** them. **No check at all.** | guard both routes |
+| the key travels as a **URL path segment** | move it to a header or body — a caller-visible change needing the frontend released with it |
+| **no binding** between the key and the browser that made it | real per-user authentication, which is a product decision about whether this surface has accounts |
+
+**Blast radius, neither dropped nor inflated.** No capital, no order, no
+position, no money, no market data. The worst outcome is that someone's
+notifications are switched off or their alert preferences read and rewritten.
+That is a real authorization defect and a small one, and it stays on the register
+at that size.
+
+**And the permission matrix cannot see any of this.** It answers *"does the
+server require a credential"*; it cannot answer *"can one caller act on
+another's row"*. All three routes remain in `UNGUARDED_WRITES` because none of
+them requires a credential — two of them changed materially anyway.
+`notification_ownership` carries the second question, and a test pins the two
+files together so a route cannot depend on `user_key` without appearing in both.
 
 **No coordinated release is required for any of this.** The engine routes were
 already authenticated end to end; the push change is compatible because the
@@ -574,7 +626,13 @@ usable failure count behind.
 
 ---
 
-## A2 CLOSED — the fee policy was retrieved and implemented
+## A2 **IMPLEMENTED, NOT VERIFIED** — the fee policy was retrieved and implemented
+
+> **This heading read "A2 CLOSED" and that was wrong.** The module matched the
+> published page; the SYSTEM did not. `order_fees()` — the function carrying the
+> cumulative cap — had **zero production callers**, and the entry planner was not
+> using `calibration_fees` at all. A corrected module reached by nothing is a
+> corrected module, not corrected fees. See **A2 · the consumers** below.
 
 **Retrieved** 2026-09-27T15:59:54Z from `https://docs.polymarket.us/fees`, HTTP
 200, 460,049 bytes, `etag: W/"uw657j3lkx9unr"` — on the GitHub runner, which has
@@ -630,3 +688,95 @@ and any collected fee decoded without `price_scale` and
 `fractional_quantity_scale` — because *"execution reports carry … the collected
 fee in scaled notional units"*, so a collected fee read as dollars is wrong by the
 scale factor.
+
+---
+
+## A2 · the consumers — does the corrected schedule reach production?
+
+**This is the part I had not checked, and the answer was mostly no.**
+
+`order_fees()` implements the published cumulative algorithm and had **0
+production callers**. And there are **two fee modules**, not one:
+
+| module | what it has |
+|---|---|
+| `calibration_fees` | corrected today: banker's rounding, `order_fees()` with the running cumulative cap, per-sport Θ with effective dates, a combo refusal, execution-report units |
+| `bettor_fee_schedule` | the module the **entry planner and every shadow loop actually use**. `fill_fee()` is per-fill only; its `TakerAccrual` carries a cumulative rule and has no production caller; **no per-sport Θ at all** |
+
+They agree on the exchange-wide coefficient (0.0695) and on banker's rounding,
+**which is why no test caught this**. They disagree where it costs money:
+
+| | `calibration_fees` | `bettor_fee_schedule` | published |
+|---|---|---|---|
+| effective from | `2026-09-25T04:00:00Z` | **`2026-09-17`** | *"12 AM ET, Friday September 25, 2026"* |
+| per-sport Θ | yes — Table Tennis → 0.10 at `2026-10-01T03:59Z` | **none** | *"The Table Tennis taker fee coefficient becomes 0.10…"* |
+| multi-fill taker | `order_fees`: per-fill banker's rounding, running cap | `fill_fee`: per-fill, **no cap** | *"…adjusted so that the total commission collected across the order's fills never exceeds the banker's rounding of the cumulative exact fee"* |
+
+### Two paths repaired — the two that can see a fill sequence
+
+| path | was | now |
+|---|---|---|
+| **entry depth walk** (`bettor_entry_execution`) | `sum(fee_fn(level) for level in levels_taken)` — **a depth walk across three ladder levels IS a three-fill order**, and summing independent roundings is the calculation the cap replaces | `walk_fee()` → `order_fees()`. It first **checks** the caller's `fee_fn` against the published single-fill taker curve at every level taken, because the cap is a taker rule and one caller passes a **maker rebate**; a mismatch keeps the caller's own arithmetic and reports `schedule_reaches: False` |
+| **funded fill booking** (`bettor_funded_book`) | `expected_fee(qty, price)` per fill, so the cap never applied to an order that filled more than once | `reconcile_fee(prior_legs=…)`, with `_ingest_locked` supplying this order's **persisted** fills |
+
+**Measured:** 20 contracts at each of 0.35 / 0.50 / 0.55 pays **$1.00** under the
+cap against **$1.01** summed independently. The old figure is still reported as
+`fee_if_levels_were_priced_independently`, so the difference is in the record
+rather than something that has to be reconstructed.
+
+**Restart, redelivery and partial fills** fall out of reading the sequence from
+`bettor_funded_fills` instead of a batch variable:
+
+- **restart** — a worker that dies after three fills comes back and prices the fourth *as the fourth*;
+- **redelivery** — the fill being ingested is excluded from its own priors **by id**, without which re-delivering fill 2 would price it as leg 3 and change the money;
+- **partial fills** — an order filling in pieces minutes apart is one order to the venue and is now one order here.
+
+`order_fees()` also takes **per-fill prices** now. A marketable walk takes each
+level at its own price and a single-price signature could not express one — which
+is the concrete reason the planner had been summing per level. The cumulative
+exact fee is a running **sum**, not Θ × total_qty × one price factor; those agree
+only when every fill took the same price.
+
+**The observed charge stays authoritative.** The cap changes the *expectation*,
+never the cash: `booked_fee_usd` is still the venue's own commission wherever it
+exists.
+
+### Still open
+
+| open item | consequence |
+|---|---|
+| the entry planner and shadow loops resolve Θ through `bettor_fee_schedule.LATEST`, bypassing `for_date` | a fill is priced on today's schedule whatever its own date |
+| `bettor_fee_schedule.effective_from` is `2026-09-17` against the published `2026-09-25` | eight days of fills priced on a schedule not yet in force |
+| no production path passes a **sport** | per-sport Θ is inert; Table Tennis understated 31% from `2026-10-01T03:59Z` (outside the proposed scope, which limits the blast radius and does not make the schedule correct) |
+| the **exit planner** prices one hypothetical fill | an exit that fills in three pieces is reconciled against a single-fill expectation |
+| nothing compared against a real **observed charge** | so nothing is `VERIFIED_APPLIED` |
+
+**And why the lifecycle proofs never surfaced this.**
+`bettor_test_venue_executor` computes `expected_fees` as a per-fill sum and then
+asserts `fees_reconcile` **against its own sum**. Both sides come from the same
+arithmetic, so the check passes however wrong that arithmetic is. A proof that
+cannot fail is the reason a defect survives, not a detail.
+
+**A2 status: `IMPLEMENTED`.** Verification needs the corrected schedule observed
+in the **deployed** entry planner, exit planner, preview comparison and
+reconciliation, against a real multi-fill order with the venue's own charge.
+None of that has happened, and this lane has never had a real fill.
+
+---
+
+## The execution claim, corrected
+
+I wrote **"zero real orders have ever been sent."** Wrong, and wrong in the
+direction that flatters this lane.
+
+| | statement | basis |
+|---|---|---|
+| **this lane** | **zero verified real orders from the new autonomous EV lane.** Its writer `CHECK`s `order_submitted FALSE`; the three submission constants are `False`; no order-submission path is nameable from the shadow loop | tests + schema constraint |
+| **legacy** | **166,585 historical `live_orders` rows** from the earlier live beta (`008_live_orders_venue.sql`). Not reconciled into this lane's books and **not** this lane's track record | production row count |
+
+`bettor_desk_controls` already reported this correctly —
+`live_orders_rows_all_time` separate from `funded_orders_this_lane_submitted: 0`.
+My prose did not match my own instrumentation. Legacy activity must neither
+disappear nor become this lane's record, and nowhere in this register, the
+management report or the owner package is a legacy number summed with an
+autonomous one.

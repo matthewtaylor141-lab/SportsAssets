@@ -16675,16 +16675,53 @@ class PushSubscribeBody(BaseModel):
 
 @app.post("/api/push/subscribe")
 async def push_subscribe(body: PushSubscribeBody) -> dict:
+    """Create or refresh one push subscription, WITHOUT REASSIGNING ITS OWNER.
+
+    THE BYPASS THIS CLOSES, AND IT DEFEATED MY OWN FIX. I added a `user_key`
+    ownership check to `/api/push/unsubscribe` and reported the endpoint-only
+    deletion closed. It was not: this route ran
+
+        ON CONFLICT (endpoint) DO UPDATE SET user_key=$1
+
+    so anyone holding an endpoint could POST here with their OWN key, take
+    ownership of the row, and then unsubscribe it legitimately. Two requests,
+    same outcome as before, and the check I had added was satisfied on the way
+    through.
+
+    THAT IS WHAT "TEST THE ACTUAL AUTHORITY BOUNDARY" MEANS. Adding an
+    identifier to one handler is not a boundary if another handler will hand the
+    identifier over. The boundary has to hold across every route that can write
+    the column it depends on.
+
+    SO THE OWNER IS NOW IMMUTABLE. The conflict clause updates the keys and
+    refreshes the row only WHERE the existing `user_key` matches; a mismatch
+    updates nothing. A push endpoint is issued by the browser's push service and
+    is unique to one subscription, so the same browser re-subscribing always
+    matches and no legitimate caller is affected.
+
+    A MISMATCH ANSWERS EXACTLY AS A SUCCESS, on purpose. Distinguishing them
+    would confirm that an endpoint is already registered under another key,
+    which is the disclosure the unsubscribe route already refuses to make.
+    """
     pool = await get_pool()
-    await pool.execute(
+    got = await pool.execute(
         """
         INSERT INTO push_subscriptions (user_key, endpoint, p256dh, auth)
         VALUES ($1,$2,$3,$4)
-        ON CONFLICT (endpoint) DO UPDATE SET user_key=$1, p256dh=$3, auth=$4
+        ON CONFLICT (endpoint) DO UPDATE SET p256dh=$3, auth=$4
+          WHERE push_subscriptions.user_key = $1
         """,
         body.user_key, body.endpoint, body.p256dh, body.auth,
     )
-    return {"ok": True}
+    written = str(got).rsplit(" ", 1)[-1] == "1"
+    return {"ok": True,
+            # WHETHER A ROW WAS WRITTEN, WITHOUT SAYING WHY IT WAS NOT.
+            "stored": written,
+            "owner_is_immutable": True,
+            "the_owner_of_an_endpoint_cannot_be_reassigned": (
+                "an endpoint already held under a different user_key is left "
+                "untouched, and this answer does not distinguish that from a "
+                "fresh registration")}
 
 
 class PushUnsubscribeBody(BaseModel):
