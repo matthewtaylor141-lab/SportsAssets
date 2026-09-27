@@ -180,6 +180,45 @@ async def _record_and_approve_limits(conn, *, approved=True):
     return got
 
 
+async def _record_reconciliation_evidence(conn, *, account_id: str,
+                                          venue: str = "PMUS_TEST",
+                                          eligible: bool = True,
+                                          age_s: float = 5.0):
+    """THE RECONCILIATION READINESS NOW REQUIRES (audit finding A3).
+
+    `account_selected_and_clean` used to read the registry row alone, so
+    `accounting_status = 'CLEAN'` was the whole of the evidence -- a record of a
+    conclusion somebody reached at some past instant. It now also requires a
+    complete, passing venue reconciliation recorded for THIS account inside its
+    age bound, so a fixture that wants a ready panel has to supply one.
+
+    Written directly rather than by calling `record_reconciliation`, because no
+    venue adapter exists here: the four reads would all record UNREADABLE, which
+    is the reconciliation working and is not what these tests are about. Tests
+    that ARE about it live in `test_the_audit_findings_are_closed.py`.
+    """
+    from sportsassets import bettor_account_onboarding as ON
+
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        ON.RECONCILIATION_KEY,
+        json.dumps({"version": ON.VERSION,
+                    "recorded_at": time.time() - float(age_s),
+                    "recorded_by": "test", "account_id": account_id,
+                    "venue": venue, "source": "test_fixture",
+                    "ok": True, "eligible": bool(eligible),
+                    "verdicts": {c: ON.RECONCILED for c in ON.CHECKS},
+                    "blocking": [], "discrepancies": [],
+                    "completeness": {"complete": True,
+                                     "checks_expected": list(ON.CHECKS),
+                                     "checks_answered": list(ON.CHECKS),
+                                     "checks_missing": [],
+                                     "reads_not_fully_paged": [],
+                                     "why": "fixture"},
+                    "evidence_max_age_s": ON.EVIDENCE_MAX_AGE_S}))
+
+
 async def _seed_evidence(conn, *, waived: bool, basis: str | None = None,
                         age_at_read: float | None = 1.2,
                         settlement: str = "COMPATIBLE",
@@ -497,6 +536,8 @@ async def test_authorising_does_not_destroy_the_binding_it_read():
         bind = await CTL.set_account(conn, by="test", account={
             "account_id": CLEAN, "name": "Pilot One", "venue": "PMUS_TEST"})
         assert bind["ok"] is True
+        # A3: the account check also needs a current reconciliation.
+        await _record_reconciliation_evidence(conn, account_id=CLEAN)
 
         got = await CTL.activate(conn, by="test")
         assert got["ok"] is True, got
@@ -1397,17 +1438,39 @@ def test_the_event_rail_can_now_be_tightened_and_no_existing_digest_moved():
         assert got["frozen"]["MAX_EVENT_EXPOSURE"] == pytest.approx(1000.0)
 
 
-def test_tightening_the_event_rail_is_not_enforcing_it():
-    """AND THE HONEST HALF. The rail's measurement cannot see other positions
-    on the same event, so a tightened number is a smaller bound on a quantity
-    that is still measured incompletely. The mapping's own comment says so, and
-    the defect stays recorded rather than being treated as closed."""
+def test_the_event_rail_is_now_measured_as_well_as_tightenable():
+    """WHAT THIS TEST USED TO ASSERT, AND WHY IT CHANGED.
+
+    It asserted the HONEST HALF: the rail could be tightened by an approval and
+    its measurement still could not see other positions on the same event, so a
+    tightened number was a smaller bound on an incompletely measured quantity.
+    That was true and the comment saying so was load-bearing.
+
+    Audit finding A9 closed it. The shadow open book now carries the venue's own
+    event slug per row, the candidate's key comes from the same column, and a row
+    whose event cannot be resolved makes the rail NOT_EVALUABLE rather than
+    smaller. So the comment had to change too -- a comment that says a defect is
+    open after it is closed is the documentation debt the audit named.
+    """
     import pathlib
 
+    from sportsassets.workers import ext_pinnacle_loop as LOOP
+
     src = pathlib.Path(EX.__file__).read_text()
-    at = src.index('"event_exposure_usd"')
-    window = src[max(0, at - 1400):at]
-    assert "OPEN_BOOK_SQL selects" in window
-    assert "NOT THE SAME AS ENFORCING" in window
+    # THE APPROVED-LIMIT MAP's occurrence, not the typed schema's: the withdrawn
+    # claim lives beside the mapping it used to qualify.
+    block = src.index("APPROVED_LIMIT_TO_RAIL = {")
+    at = src.index('"event_exposure_usd"', block)
+    window = src[block:at]
+    # THE CLAIM IS RECORDED AS WITHDRAWN, not deleted.
+    flat = " ".join(window.replace("#", " ").split())
+    assert "false now" in flat
+    assert "OPEN_BOOK_SQL selects no event key" in flat, (
+        "the withdrawn claim is quoted so a reader can see what changed")
+    # AND THE REPAIR IS REAL, not just re-described.
+    assert "AS event_key" in LOOP.OPEN_BOOK_SQL
+    assert "event_key_resolved" in LOOP.OPEN_BOOK_SQL
+    assert "us_premap" in LOOP.OPEN_BOOK_SQL
     # the rail is still declared, so it is not silently dropped
     assert "MAX_EVENT_EXPOSURE" in EX.PREDECLARED_LIMITS
+    assert EX.RAIL_TYPES["MAX_EVENT_EXPOSURE"]["scope"] == EX.SCOPE_ONE_EVENT

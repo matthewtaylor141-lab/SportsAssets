@@ -703,11 +703,23 @@ APPROVED_LIMIT_TO_RAIL = {
     # that does not use it (effective_limits takes MIN over the rails, so an
     # absent name leaves that rail frozen exactly as before).
     #
-    # AND TIGHTENING IT IS NOT THE SAME AS ENFORCING IT: OPEN_BOOK_SQL selects
-    # no event key, so the event rail cannot see other positions on the same
-    # event. That defect is recorded separately and is NOT closed by this
-    # line. A pilot that wants a real event bound has to hold one position at
-    # a time until it is.
+    # TIGHTENING IT WAS NOT THE SAME AS ENFORCING IT, AND THAT SECOND HALF IS
+    # NOW CLOSED TOO (audit finding A9). This comment used to read "OPEN_BOOK_SQL
+    # selects no event key, so the event rail cannot see other positions on the
+    # same event" -- true when written, and false now:
+    #
+    #   * `workers/ext_pinnacle_loop.OPEN_BOOK_SQL` joins `us_premap` and selects
+    #     `event_slug AS event_key` with `event_key_resolved`;
+    #   * the candidate's key comes from the SAME column, via
+    #     `resolve_venue_identity`, so both sides are in the venue's namespace.
+    #     Passing the odds provider's `event_id` would have left this rail at
+    #     zero even on a repaired query;
+    #   * a row whose event does not resolve makes the rail NOT_EVALUABLE and
+    #     the plan refuses by name, rather than summing what it can and calling
+    #     the rail satisfied.
+    #
+    # The one-position-at-a-time workaround this comment used to require is no
+    # longer the only protection.
     "event_exposure_usd": "MAX_EVENT_EXPOSURE",
 }
 
