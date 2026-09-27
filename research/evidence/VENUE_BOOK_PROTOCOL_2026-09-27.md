@@ -106,55 +106,75 @@ market-data age. So a 304 on this endpoint affirms the **representation**, and
 **M2 must be recorded as CONTRADICTED for market-data currency**, with evidence,
 rather than unavailable for want of a validator.
 
-## 5 · `transactTime` — the discriminator, stated before it was run
+## 5 · `transactTime` — and the argument I used is WITHDRAWN
 
-Two readings have been open all day and they imply **opposite repairs**:
+**This section previously asserted a determination. The determination is
+withdrawn, and the withdrawal is recorded here rather than edited away.**
 
-* **RESPONSE-STAMP** — an old value means our read is old, and the 30 s bound is
-  measuring the right thing.
-* **MARKET-DATA** — an old value means the **book has not moved**, and the bound
-  is applied to the wrong quantity, which is a different repair.
+### What I argued
 
-**A response stamp cannot precede its own response.** So `transactTime`
-materially before `date` contradicts the response-stamp reading — one
-observation suffices in that direction, and no number of observations could
-establish the positive direction. *That is why this is not the resampling I
-withdrew:* nothing is being inferred from values that did not change.
+> "A response stamp cannot precede its own response. So `transactTime`
+> materially before `date` **contradicts** the response-stamp reading — one
+> observation suffices in that direction."
 
-**Result, on two independent markets:**
+### Why that premise is false — two ways, either sufficient
+
+1. **A timestamp can describe representation GENERATION**, which happens *before*
+   transmission. A stamp earlier than the `Date` on the wire is exactly what a
+   generation instant looks like. Nothing is contradicted.
+2. **A cached representation retains its original timestamp.** These very
+   responses carried `cf-cache-status: EXPIRED` then `HIT` under
+   `cache-control: public, max-age=30`, and §4 shows `last-modified` holding
+   still across the gap while `date` advanced — the mechanism in action.
+
+**So the representation-generation hypothesis was never excluded.** I ruled out a
+hypothesis the argument had no power to rule out. That is the same error as the
+resampling inference I withdrew earlier, wearing a more rigorous-looking sleeve.
+
+### The observations, which stand
 
 ```
-date − transactTime on read 1 = 18,969,408.2 s   (219.6 days)
-  => RESPONSE-STAMP READING IS CONTRADICTED.
-     A response stamp cannot precede its own response by 18,969,408 s.
-     transactTime is a MARKET-DATA instant.
-
-across the 8 s gap: date advanced 8.0 s, transactTime advanced 0.0 s
-  => transactTime HELD STILL while date advanced.
+read 1  date: 16:24:27   transactTime: 2026-02-20T03:07:30.947946180Z   levels 0/0
+read 2  date: 16:24:35   transactTime: 2026-02-20T03:07:30.947946180Z   levels 0/0
+        last-modified 16:24:27 on both      state: MARKET_STATE_EXPIRED
+        date − transactTime = 18,969,408.2 s (219.6 days)
+        across the 8 s gap: date +8.0 s, transactTime +0.0 s
 ```
 
-`last-modified` also held still across the gap while `date` advanced — so
-`last-modified` tracks the CDN's representation, not the response instant
-either, and still not the book.
+### What they establish
 
-### What this establishes, and exactly what it does not
+**The value was OLD IN THE RETURNED REPRESENTATION.** That is all. It is a fact
+about what came back, not about what the field denotes.
 
-**ESTABLISHED:** `transactTime` is a **market-data instant**, not a response
-stamp. This matters more than it may look: the dominant production refusal
-`VENUE_QUOTE_STALE` compares `transactTime` against a 30 s bound, and the
-question of whether that arithmetic measures anything at all turned on this.
+### The four hypotheses, all open, none preferred
 
-**NOT ESTABLISHED:** *which* market-data instant. Last book change, last trade
-and settlement all coincide on an expired, zero-depth book, so these
-observations cannot separate them. Recorded as unresolved rather than resolved
-in the convenient direction.
+| | |
+|---|---|
+| **H1** | last book change |
+| **H2** | last trade |
+| **H3** | settlement / market close |
+| **H4** | **representation generation** — precedes transmission, survives caching unchanged |
 
-**NOT ESTABLISHED:** any numeric market-data age for a **live** book. All reads
-landed on `MARKET_STATE_EXPIRED` markets with **0/0 levels** — the unfiltered
-catalogue's first entries are settled 2025 NFL games, and the state filter added
-in the second run did not move them, so the catalogue's list objects do not
-carry state under the names tried. A zero-depth expired market cannot
-characterise the currency of a live one.
+On an **expired, zero-depth, cached** market H1–H4 *all* predict an old value.
+These reads have **no discriminating power at all**.
+
+### What would resolve it, and what would not
+
+**WOULD:** the venue's contract for the field. Nothing on the pages read states it.
+
+**WOULD NOT, on its own:** a moving-book experiment. Correlation between a moving
+book and a moving stamp is *evidence* about H1 against H3/H4; it is **not a
+semantic guarantee**, and it must not become the next asserted certificate after
+transport latency, our receipt instant and an HTTP validator.
+
+### What turns on it, without presuming the answer
+
+Under **H1** an old value means a quiet money line, and a 30 s bound on it
+refuses every quiet market while calling it freshness — the bound applied to the
+wrong quantity, which is a **separate repair and not a loosening**. Under **H4**
+it is a property of the representation and bounds the response, like `Date − Age`.
+Under **H2/H3** it is neither. The repairs differ, so **the field is not gated on
+and nothing depends on it.**
 
 ## 6 · Runner versus production, recorded rather than assumed
 
@@ -174,36 +194,56 @@ its own gated deployment and its own readback.
 
 ## 7 · The supported market-data design, and its exact remaining assumptions
 
-| mechanism | verdict | basis |
+| mechanism / precondition | verdict | basis |
 |---|---|---|
-| **M1** live subscription — full-replacement authority | **ESTABLISHED** | the published subscription-types table |
-| **M1** — gap-free delta continuity | **WITHDRAWN AS A REQUIREMENT** | no delta mechanism is documented; the requirement was the wrong shape |
-| **M1** — instrument identity | **ESTABLISHED** | `marketSlug` on every payload, compared rather than assumed |
-| **M1** — liveness | **AVAILABLE** | a `Heartbeat` message type exists in the pinned SDK |
-| **M1** — documented timing | **NOT ESTABLISHED** | the page states no latency or as-of guarantee |
-| **M1** — reconnect / resynchronisation | **NOT ESTABLISHED** | undocumented, and `base._message_loop` emits `close` and RETURNS: the client does not reconnect or resubscribe |
-| **M2** conditional revalidation — the exchange | **AVAILABLE** | `Last-Modified` present, conditional GET → 304 |
-| **M2** — as a market-data clock | **CONTRADICTED** | `last-modified` = `date` over data 219 days old |
-| **M3** `Date − Age` | **AVAILABLE, and a PARTIAL** | bounds the origin's **response**, never the book |
-| **`transactTime`** as the upstream market-data clock | **IS a market-data instant** / **denotation unresolved** | §5 |
+| **M1 P1** full-replacement authority | **ESTABLISHED** | the published subscription-types table |
+| **M1 P2** liveness | **AVAILABLE** | a `Heartbeat` message type exists |
+| **M1 P3** connection continuity | **AVAILABLE** | connection epochs, bridged from the production stream. A drop DISCARDS every market's state |
+| **M1 P4** instrument identity | **AVAILABLE** | `marketSlug`, compared rather than assumed |
+| **M1 P5** documented timing | **NOT ESTABLISHED** | zero published sentences. **This is the only unmet precondition** |
+| **M1 P6** resynchronisation | **AVAILABLE** | corrected. See below |
+| ~~M1 gap-free delta continuity~~ | **WITHDRAWN AS A REQUIREMENT** | no delta mechanism is documented; the requirement was the wrong shape for a snapshot feed |
+| **M2** the conditional exchange | **AVAILABLE** | `Last-Modified` present, conditional GET → 304 |
+| **M2** as a market-data clock | **CONTRADICTED** | `last-modified` today over a book that cannot have moved since February |
+| **M3** `Date − Age` | **AVAILABLE, and a PARTIAL** | bounds the origin's response, never the book |
+| **`transactTime`** | **UNRESOLVED** — four open hypotheses | §5 |
 
-**The one remaining dependency, named precisely.** Everything now turns on what
-`transactTime` denotes on a **live** book. If it is the last book change, an old
-value means a quiet money line and a 30 s bound on it **refuses every quiet
-market while calling it freshness** — the bound would be applied to the wrong
-quantity, which is a separate repair and not a loosening. If it lags a moving
-book, it is a genuine delay and the bound is correct.
+### P6 was corrected, and it was two errors, not one
 
-**That question cannot be answered by more observation of quiet books** — which
-is the same trap as the inference I withdrew. It needs one of:
+I recorded resynchronisation as NOT ESTABLISHED because *"the client implements
+none"*. The SDK does not reconnect — **our wrapper does.** `RN1XMarketStream._main`
+reconnects with backoff, increments its epoch, and returns every known slug to
+`REQUESTED` so it is resubscribed.
 
-1. the venue documenting `transactTime`'s semantics (not on the pages read);
-2. a read of a market whose book is **demonstrably moving**, where last-change
-   and now diverge measurably. The catalogue read needs fixing first: the
-   listing's state field was not found under `state` or `marketState`, so live
-   markets have to be identified some other way.
+And on a **documented full-replacement feed** that *is* resynchronisation:
+discard, reconnect, resubscribe, await the next authoritative replacement. There
+is nothing to reconstruct, so no venue procedure is needed and none being
+published is **not a missing guarantee**.
 
-**Until then the lane's verdict stays `NOT_ESTABLISHED`, and that is not a claim
-that any book is stale.** What has changed is that
-*"our current M1 predicate cannot qualify this feed"* is now the accurate
-statement, and *"the venue has no engineering route"* — which I wrote — is not.
+> **Missing SDK convenience is not an unavailable venue capability**, and I had
+> reported it as the latter.
+
+**A clean recovery is still not an age.** It establishes that we are not holding a
+book across a drop. It says nothing about how current the replacement we then
+receive is — and that was the fifth candidate that nearly became a freshness
+certificate, after transport latency, our receipt instant and the 304.
+
+### The single blocking item
+
+**The venue publishes no timing guarantee for market data.** No as-of instant, no
+latency bound, no staleness contract; zero matching sentences. Everything that
+was ours to build is built; the one gap left is the one no engineering on our side
+can fill.
+
+**So four unmet preconditions became one — and the distance to a trade has not
+shortened.** That is a clearer position, not a nearer one.
+
+**And substituting an observable for it is the mistake to refuse.** Four
+predicates were proposed, found unsupported and replaced; a fifth was queued. All
+five are recorded in `backend/sportsassets/market_data_design.py` with why each
+failed, so a sixth is recognisable.
+
+**Until the venue documents it the lane's verdict stays `NOT_ESTABLISHED`, and
+that is not a claim that any book is stale.** What has changed is that *"our
+current M1 predicate cannot qualify this feed"* is the accurate statement, and
+*"the venue has no engineering route"* — which I wrote — is not.
