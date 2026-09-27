@@ -948,6 +948,75 @@ R_AUTH_BAD_EXPIRY = "THE_AUTHORIZATION_EXPIRY_IS_NOT_A_FINITE_TIMESTAMP"
 #: nothing establishing it was the digest of the limits in force NOW.
 R_AUTH_LIMITS_UNKNOWN = "THE_APPROVED_LIMIT_SET_WAS_NOT_SUPPLIED_TO_COMPARE"
 
+# ── ACCOUNT-WIDE EXPOSURE, AS A SUBMISSION PRECONDITION ─────────────
+#
+# WHY THESE EXIST. `bettor_account_exposure` measures exposure across every path
+# sharing the account. Building that reader was not closure: NOTHING CONSULTED
+# IT. This gate is the submission path, and it now demands the evidence the same
+# way it demands `approved_limits` -- absent evidence is a refusal, not a pass.
+#
+# THE FOUR WAYS IT REFUSES ARE DIFFERENT QUESTIONS, and collapsing them would
+# hide which one failed:
+R_ACCOUNT_EXPOSURE_UNKNOWN = "ACCOUNT_WIDE_EXPOSURE_WAS_NOT_SUPPLIED"
+R_ACCOUNT_EXPOSURE_UNREADABLE = "ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED"
+R_ACCOUNT_EXPOSURE_STALE = "THE_ACCOUNT_WIDE_EXPOSURE_EVIDENCE_IS_TOO_OLD"
+R_ACCOUNT_EXPOSURE_OTHER_ACCOUNT = "THE_EXPOSURE_EVIDENCE_IS_FOR_ANOTHER_ACCOUNT"
+R_ACCOUNT_EXPOSURE_EXCEEDED = "THE_ACCOUNT_WIDE_CAP_WOULD_BE_EXCEEDED"
+
+#: How old the exposure evidence may be at the moment of authorization.
+#:
+#: AN EXPLICIT POLICY ASSUMPTION, labelled as one. 60 s is chosen, not derived.
+#: It bounds how long ago we looked; it does NOT bound what another writer did
+#: since -- see `CONCURRENT_WRITER_LIMITATION`.
+MAX_EXPOSURE_EVIDENCE_AGE_S = 60.0
+
+#: WHAT THIS GATE CANNOT CONTROL, STATED RATHER THAN IMPLIED.
+#:
+#: The exposure read happens BEFORE the reservation. Between those two instants
+#: another writer can add exposure. Whether that is controllable depends on who
+#: the writer is, and the two cases have different answers:
+#:
+#:   ANOTHER LANE IN THIS DATABASE  controllable. `_ingest_locked` and
+#:       `_reserve_exit` take `FOR UPDATE` on the position row in the same order,
+#:       so our own lanes serialise. Extending that to cover the exposure read
+#:       and the reservation in ONE transaction is what makes the check binding
+#:       rather than advisory, and the caller is required to do it -- this gate
+#:       cannot verify it from here, so it says so and the test drives the real
+#:       transaction.
+#:
+#:   ANOTHER CREDENTIAL AT THE VENUE  NOT controllable. A different API key, or
+#:       a human on the account's web session, writes at the VENUE and takes no
+#:       lock of ours. No shared enforcement boundary exists, and none can be
+#:       built from our side. For that case the only sound answer is ISOLATION --
+#:       demonstrating that no such writer exists -- which is
+#:       `bettor_account_exposure.isolation_evidence` and is NOT_DEMONSTRATED.
+CONCURRENT_WRITER_LIMITATION = {
+    "another_lane_in_this_database": {
+        "controllable": True,
+        "how": ("take the exposure read and the intent insert in ONE "
+                "transaction holding FOR UPDATE on the account's row, in the "
+                "same lock order the fill ingest and exit reservation already "
+                "use"),
+        "who_must_do_it": ("the CALLER. This function is synchronous and holds "
+                           "no connection, so it cannot open the transaction "
+                           "itself -- it can only refuse without the evidence"),
+    },
+    "another_credential_at_the_venue": {
+        "controllable": False,
+        "why": ("a second API key or a human on the account's web session "
+                "writes at the VENUE and takes no lock in our database. There "
+                "is no shared enforcement boundary and none can be built from "
+                "our side"),
+        "the_only_sound_answer": ("ISOLATION -- demonstrating no such writer "
+                                  "exists. bettor_account_exposure."
+                                  "isolation_evidence, currently "
+                                  "NOT_DEMONSTRATED"),
+        "what_must_not_be_done": ("treat a measured total as a guarantee. It is "
+                                  "a measurement of the past, and against an "
+                                  "uncontrolled writer that is all it can be"),
+    },
+}
+
 #: The legacy shape this gate still accepts, named so it is a decision rather
 #: than an accident. A record predating `expires_at` carries `at` alone, and
 #: its window is `at + AUTHORIZATION_TTL_S`. `at` must itself be a finite
@@ -963,6 +1032,8 @@ AUTHORIZATION_TTL_S = 24 * 3600.0
 def authorize_submission(*, account_id: str, venue: str,
                          authorization: dict | None,
                          approved_limits: dict | None = None,
+                         account_exposure: dict | None = None,
+                         proposed_cost_usd: float | None = None,
                          now: float | None = None) -> dict:
     """MAY THIS ACCOUNT SUBMIT AT THIS VENUE? The execution side's answer.
 
@@ -1079,9 +1150,98 @@ def authorize_submission(*, account_id: str, venue: str,
                     why=("authorised against %s, the approved set now "
                          "digests to %s" % (got_digest[:12],
                                             now_digest[:12])))
-    # THE AUTHORIZATION HAS BEEN READ AND IT MATCHES. What stops the
-    # submission from here is the code constant, and nothing else.
+    # THE AUTHORIZATION HAS BEEN READ AND IT MATCHES.
     out["authorization_consumed"] = True
+
+    # ── ACCOUNT-WIDE EXPOSURE, CONSUMED HERE OR NOT AT ALL ──────────
+    #
+    # A reader nothing consults is not a control. This is the submission path, so
+    # the evidence is demanded here -- exactly as `approved_limits` is -- and its
+    # absence refuses.
+    #
+    # THE ORDER MATTERS. These checks sit AFTER the authorization has been
+    # matched, so a caller with no authorization is told that first; and BEFORE
+    # the code constant, so `R_SUBMISSION_DISABLED` cannot mask a cap breach. If
+    # submission were ever enabled, an exposure failure must already have
+    # refused.
+    from . import bettor_account_exposure as _AE
+    out["account_exposure_consumed"] = False
+    out["exposure_evidence_age_limit_s"] = MAX_EXPOSURE_EVIDENCE_AGE_S
+    out["concurrent_writer_limitation"] = CONCURRENT_WRITER_LIMITATION
+    if not isinstance(account_exposure, dict):
+        return dict(out, ok=False, refusal=R_ACCOUNT_EXPOSURE_UNKNOWN,
+                    why=("no account-wide exposure evidence was supplied. "
+                         "Every rail this lane enforces aggregates "
+                         "EVERY_OPEN_POSITION_IN_THIS_LANE, so without an "
+                         "account-wide measurement nothing here bounds what "
+                         "the ACCOUNT holds"))
+    ex = account_exposure
+    # 1 · IS IT FOR THIS ACCOUNT? Evidence for another account is not weaker
+    #     evidence, it is evidence about something else.
+    ex_acct = ex.get("account_id")
+    if str(ex_acct or "") != str(account_id or ""):
+        return dict(out, ok=False, refusal=R_ACCOUNT_EXPOSURE_OTHER_ACCOUNT,
+                    exposure_account_id=ex_acct,
+                    why=("the exposure evidence is for %r and this submission "
+                         "is for %r" % (ex_acct, account_id)))
+    # 2 · WAS IT MEASURABLE AT ALL? `UNREADABLE` is the fail-closed state, and it
+    #     must refuse rather than be read as a zero.
+    if ex.get("state") != _AE.TOTAL_MEASURED or ex.get("TOTAL_USD") is None:
+        return dict(out, ok=False, refusal=R_ACCOUNT_EXPOSURE_UNREADABLE,
+                    unreadable_paths=list(ex.get("unreadable_required_paths")
+                                          or []),
+                    why=("account-wide exposure could not be measured (%s). An "
+                         "unmeasured account is not an empty one, and the "
+                         "venue's own position read is the path that is "
+                         "normally missing" % (ex.get("state"),)))
+    # 3 · HOW OLD IS THE MEASUREMENT? A number from an hour ago is a number
+    #     about an hour ago.
+    at = ex.get("measured_at_epoch_s")
+    _now = float(now if now is not None else time.time())
+    if at is None:
+        return dict(out, ok=False, refusal=R_ACCOUNT_EXPOSURE_STALE,
+                    why=("the exposure evidence carries no measurement "
+                         "instant, so its age is unknown. An undated "
+                         "measurement cannot be shown to be current"))
+    age = _now - float(at)
+    out["exposure_evidence_age_s"] = round(age, 3)
+    if age > MAX_EXPOSURE_EVIDENCE_AGE_S or age < -1.0:
+        return dict(out, ok=False, refusal=R_ACCOUNT_EXPOSURE_STALE,
+                    why=("the exposure evidence is %.1f s old against a %.0f s "
+                         "limit%s" % (age, MAX_EXPOSURE_EVIDENCE_AGE_S,
+                                      "; a negative age means the clocks "
+                                      "disagree and it is refused rather than "
+                                      "trusted" if age < 0 else "")))
+    # 4 · WOULD THIS ORDER BREACH THE ACCOUNT-WIDE CAP?
+    #
+    #     The cap is the approved MAX_CAPITAL_DEPLOYED, applied to the ACCOUNT
+    #     rather than to this lane. That is the whole repair: the same number,
+    #     measured over every path instead of over our own rows.
+    eff = effective_limits(approved_limits)
+    cap = eff["effective"].get("MAX_CAPITAL_DEPLOYED")
+    total = float(ex["TOTAL_USD"])
+    cost = float(proposed_cost_usd or 0.0)
+    out["account_wide"] = {
+        "already_committed_usd": round(total, 6),
+        "proposed_usd": round(cost, 6),
+        "would_be_usd": round(total + cost, 6),
+        "cap_usd": cap,
+        "cap_is": "MAX_CAPITAL_DEPLOYED, applied ACCOUNT-WIDE",
+        "classes_counted": list(ex.get("by_class") or {}),
+        "and_this_is_not_the_lane_rail": (
+            "the lane's own MAX_CAPITAL_DEPLOYED aggregates "
+            "EVERY_OPEN_POSITION_IN_THIS_LANE and is checked elsewhere. This "
+            "check is the account, and both must pass"),
+    }
+    if cap is not None and (total + cost) > float(cap) + 1e-9:
+        return dict(out, ok=False, refusal=R_ACCOUNT_EXPOSURE_EXCEEDED,
+                    why=("the account already holds %.2f across every path and "
+                         "this order proposes %.2f, which would reach %.2f "
+                         "against an account-wide cap of %.2f"
+                         % (total, cost, total + cost, float(cap))))
+    out["account_exposure_consumed"] = True
+
+    # What stops the submission from here is the code constant, and nothing else.
     if not REAL_ORDER_SUBMISSION_ENABLED:
         return dict(out, ok=False, refusal=R_SUBMISSION_DISABLED,
                     why=("the authorization covers this account, venue and "

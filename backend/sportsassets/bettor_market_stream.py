@@ -119,6 +119,39 @@ FRAMES_DEFAULT = 0
 FRAMES_MAX = 200
 
 
+def _tell_currency(event: str, *, slug: str = None) -> None:
+    """Feed `bettor_stream_currency` from the PRODUCTION stream.
+
+    WHY THIS FUNCTION EXISTS, AND IT IS A GAP I HAD NOT NOTICED.
+    `bettor_stream_currency` implements connection-epoch invalidation, and
+    `RN1XMarketStream.book_at` implements it again, independently, on its own
+    `self.epoch`. Neither called the other. So the currency module's epoch only
+    ever moved when a TEST moved it: correct code, driven by nothing, whose P3
+    check could not have failed in production because it was never exercised
+    there. Two mechanisms that agree by coincidence are one mechanism and one
+    decoration.
+
+    NOTHING HERE MAY BREAK THE SOCKET LOOP. A currency bookkeeping failure must
+    not drop a market-data connection, so every call is swallowed and logged.
+    The consequence of a swallowed call is a MISSING invalidation, which is the
+    unsafe direction -- so `evidence_for` is fail-closed on its own account: it
+    returns None unless every precondition holds, and a stale epoch cannot make
+    it return something.
+    """
+    try:
+        from . import bettor_stream_currency as _SC
+        if event == "connection_opened":
+            _SC.connection_opened()
+        elif event == "connection_closed":
+            _SC.connection_closed()
+        elif event == "heartbeat":
+            _SC.heartbeat()
+        elif event == "message" and slug:
+            _SC.message_received(slug, payload_slug=slug)
+    except Exception as exc:  # noqa: BLE001 -- never stop the feed
+        log.debug("currency bookkeeping failed on %s: %s", event, exc)
+
+
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -663,6 +696,10 @@ class MarketStream:
                 sub["state"] = CONFIRMED
                 sub["confirmed_at"] = rec["received_at_iso"]
             cb = self._book_cb
+        # THE RECEIPT INSTANT, TO THE CURRENCY MODULE. Recording it is NOT a
+        # freshness claim: `bettor_stream_currency` needs a per-market receipt to
+        # answer P3 at all, and P5 still refuses every admission regardless.
+        _tell_currency("message", slug=slug)
         if cb:
             try:
                 cb(slug, rec)
@@ -720,6 +757,7 @@ class MarketStream:
             self.last_heartbeat_at = now
             self.last_heartbeat_at_iso = _now_iso()
             cb = self._heartbeat_cb
+        _tell_currency("heartbeat")
         if cb:
             try:
                 cb(message)
@@ -836,6 +874,19 @@ class MarketStream:
                     for s in self._subs.values():
                         s["state"] = REQUESTED
                     self._pending = list(self._subs)
+                # AND TELL THE CURRENCY MODULE, which kept its own epoch and was
+                # never fed by production.
+                #
+                # THE GAP THIS CLOSES. `bettor_stream_currency` implements
+                # connection-epoch invalidation and `book_at` above implements
+                # it again, independently. Neither called the other, so the
+                # currency module's epoch only ever moved in tests: its P3 check
+                # was correct code driven by nothing. Two mechanisms that agree
+                # by coincidence are one mechanism and one decoration.
+                #
+                # Outside the lock on purpose -- it takes its own -- and never
+                # allowed to break the socket loop.
+                _tell_currency("connection_opened")
                 backoff = 1.0
                 while open_flag["v"] and not self._stop:
                     with self._lock:
@@ -891,6 +942,13 @@ class MarketStream:
                 self.connected = False
                 self.connected_since = None
                 self.reconnects += 1
+            # EVERY CACHED BOOK IS DISCARDED, NOT AGED. A book held across a
+            # drop has an unknown number of unseen replacements in front of it,
+            # and on a full-replacement feed the recovery is exactly: discard,
+            # resubscribe, await the next authoritative replacement. That is
+            # implementable without any venue guarantee, and it is implemented
+            # -- the resubscribe is the `s["state"] = REQUESTED` loop above.
+            _tell_currency("connection_closed")
             if self._stop:
                 break
             await asyncio.sleep(backoff)

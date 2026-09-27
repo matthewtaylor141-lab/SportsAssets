@@ -91,27 +91,53 @@ THE PRECONDITIONS, CORRECTED
   P6  RESYNCHRONISATION      (Q2)  -- NOT ESTABLISHED. The protocol documents
       no resubscribe-and-resnapshot procedure, and the client implements none.
 
-WHAT IS KNOWN ABOUT `transactTime`, EXACTLY
--------------------------------------------
+WHAT IS KNOWN ABOUT `transactTime` -- AND MY "DISCRIMINATOR" IS WITHDRAWN
+------------------------------------------------------------------------
 
-Settled on the runner, 2026-09-27, with the discriminator stated before it ran:
-a response stamp cannot precede its own response, so `transactTime` materially
-before the response `Date` CONTRADICTS the response-stamp reading -- one
-observation suffices in that direction and none could establish the positive
-direction. Observed on two independent markets:
+I wrote that the question was settled in one direction by this argument:
 
-    date - transactTime = 18,969,408 s (219.6 days)
-    across an 8 s gap: date advanced 8.0 s, transactTime advanced 0.0 s
+    "A response stamp cannot precede its own response, so transactTime
+     materially before the response Date CONTRADICTS the response-stamp
+     reading."
 
-  ESTABLISHED      `transactTime` is a MARKET-DATA instant, not a response
-                   stamp.
-  NOT ESTABLISHED  WHICH market-data instant. Last book change, last trade and
-                   settlement all coincide on the expired zero-depth books these
-                   reads landed on, so the observation cannot separate them.
+THAT PREMISE IS FALSE and the conclusion built on it is withdrawn. Two ways it
+fails, either of which is enough:
 
-That remaining question is not answerable by more observation of quiet books --
-which is the trap of the inference I withdrew earlier. It needs the venue
-documenting the field, or a read of a market whose book is demonstrably moving.
+  * A TIMESTAMP CAN DESCRIBE REPRESENTATION GENERATION, which happens BEFORE
+    transmission. A stamp earlier than the `Date` on the wire is exactly what a
+    generation instant looks like. Nothing is contradicted.
+  * A CACHED REPRESENTATION RETAINS ITS OLD TIMESTAMP. The observed responses
+    carried `cf-cache-status: EXPIRED` then `HIT` and `cache-control: max-age=30`,
+    so a served representation may well be one generated earlier and stored --
+    with its original stamp intact.
+
+So a 219-day-old value is fully consistent with `transactTime` being a
+REPRESENTATION-GENERATION instant of a long-cached representation. My argument
+excluded a hypothesis it had no power to exclude, which is the same error as the
+resampling inference I withdrew earlier wearing a more rigorous-looking sleeve.
+
+WHAT THE OBSERVATIONS DO ESTABLISH, and it is narrow:
+
+    THE VALUE WAS OLD IN THE RETURNED REPRESENTATION. That is all. It is a fact
+    about what came back, not about what the field denotes.
+
+FOUR HYPOTHESES REMAIN OPEN AND NONE IS PREFERRED:
+
+    H1  last book change
+    H2  last trade
+    H3  settlement / market close
+    H4  representation generation
+
+On an expired, zero-depth, cached market H1-H4 all predict an old value, which is
+why these observations cannot separate them. They are recorded as observations in
+`TRANSACT_TIME["observed"]` and the interpretations are kept in a separate key so
+the two cannot be read as one.
+
+AND A MOVING-BOOK EXPERIMENT WOULD NOT CLOSE IT EITHER, on its own.
+Correlation between a moving book and a moving stamp is evidence about H1 versus
+H3/H4; it is not a semantic guarantee, and it must not become the third asserted
+one. What would close it is the venue's contract. Until then the field's meaning
+is UNRESOLVED and nothing is gated on it.
 
 THE CONCLUSION, NARROWED TO WHAT THE EVIDENCE SUPPORTS
 ------------------------------------------------------
@@ -269,40 +295,95 @@ FEED_CONTRACT = {
         "docstring alone, and that was wrong"),
 }
 
-#: WHAT `transactTime` DENOTES. Partly settled; the unsettled part named.
+#: WHAT `transactTime` DENOTES. UNRESOLVED -- and structured so an OBSERVATION
+#: can never be read as an INTERPRETATION.
+#:
+#: The previous version of this constant carried an "ESTABLISHED" key asserting
+#: the field was a market-data instant. That rested on "a response stamp cannot
+#: precede its own response", which is FALSE: a stamp can denote representation
+#: GENERATION, which precedes transmission, and a cached representation keeps its
+#: original stamp. The claim is withdrawn and the withdrawal is recorded here
+#: rather than edited away.
 TRANSACT_TIME = {
-    "determined_on": "2026-09-27",
-    "run": "36333087522",
-    "discriminator_stated_before_running": (
-        "a response stamp cannot precede its own response, so transactTime "
-        "materially before the response Date CONTRADICTS the response-stamp "
-        "reading. One observation suffices in that direction; none could "
-        "establish the positive direction -- which is why this is not the "
-        "resampling withdrawn earlier"),
+    "denotation": "UNRESOLVED",
+    "nothing_is_gated_on_it": True,
+
+    # ── OBSERVATIONS. Facts about what came back. No inference. ──────
     "observed": {
-        "date_minus_transact_time_s": 18969408.2,
-        "across_an_8s_gap": ("date advanced 8.0 s, transactTime advanced "
-                            "0.0 s, last-modified advanced 0.0 s"),
+        "determined_on": "2026-09-27",
+        "runs": ["36332797806", "36333087522"],
         "markets": 2,
         "market_state": "MARKET_STATE_EXPIRED",
         "book_levels": "0 bids / 0 offers on every read",
+        "cache_status": "cf-cache-status: EXPIRED on the 200, HIT on the 304",
+        "cache_control": "public, max-age=30",
+        "transact_time_value": "2026-02-20T03:07:30.947946180Z",
+        "response_date": "Sun, 27 Sep 2026 16:24:27 GMT",
+        "date_minus_transact_time_s": 18969408.2,
+        "across_an_8s_gap": ("date advanced 8.0 s; transactTime advanced "
+                             "0.0 s; last-modified advanced 0.0 s"),
     },
-    "ESTABLISHED": ("transactTime is a MARKET-DATA instant, not a response "
-                    "stamp"),
-    "NOT_ESTABLISHED": (
-        "WHICH market-data instant. Last book change, last trade and "
-        "settlement all coincide on an expired zero-depth book, so these "
-        "observations cannot separate them"),
-    "why_more_of_the_same_cannot_help": (
-        "a quiet book and a delayed feed predict the same unchanged value. "
-        "Separating them needs the venue documenting the field, or a read of a "
-        "market whose book is demonstrably MOVING"),
+
+    # ── WHAT THE OBSERVATIONS SUPPORT. Deliberately almost nothing. ──
+    "what_this_establishes": (
+        "the value was OLD IN THE RETURNED REPRESENTATION. That is a fact about "
+        "what came back, not about what the field denotes"),
+
+    # ── THE OPEN HYPOTHESES. None preferred. ────────────────────────
+    "hypotheses": {
+        "H1_LAST_BOOK_CHANGE": "the instant the book last changed",
+        "H2_LAST_TRADE": "the instant of the last execution",
+        "H3_SETTLEMENT_OR_CLOSE": "the instant the market closed or settled",
+        "H4_REPRESENTATION_GENERATION": (
+            "the instant this representation was generated, which PRECEDES "
+            "transmission and survives caching unchanged"),
+    },
+    "why_the_observations_cannot_separate_them": (
+        "on an expired, zero-depth, cached market H1 through H4 all predict an "
+        "old value. The reads have no discriminating power at all"),
+
+    # ── THE WITHDRAWN ARGUMENT, KEPT SO IT CANNOT RECUR. ────────────
+    "withdrawn_argument": {
+        "what_I_claimed": (
+            "a response stamp cannot precede its own response, so a 219-day lag "
+            "CONTRADICTS the response-stamp reading -- one observation suffices "
+            "in that direction"),
+        "why_it_is_false": (
+            "a timestamp can describe representation GENERATION, which happens "
+            "before transmission, so a stamp earlier than the wire `Date` is "
+            "exactly what a generation instant looks like. And a cached "
+            "representation retains its original timestamp -- these very "
+            "responses were served from a CDN under max-age=30 with "
+            "cache-status EXPIRED then HIT"),
+        "so": ("H4 was never excluded. The argument ruled out a hypothesis it "
+               "had no power to rule out"),
+        "the_pattern": (
+            "this is the resampling inference I withdrew earlier, wearing a "
+            "more rigorous-looking sleeve: a conclusion whose premise sounded "
+            "like a logical necessity and was a guess about the venue"),
+    },
+
+    # ── WHAT WOULD ACTUALLY RESOLVE IT, AND WHAT WOULD NOT. ─────────
+    "what_would_resolve_it": (
+        "the venue's own contract for the field. Nothing on the pages read "
+        "states it"),
+    "what_would_NOT_resolve_it": (
+        "a moving-book experiment on its own. Correlation between a moving book "
+        "and a moving stamp is EVIDENCE about H1 against H3/H4 and is not a "
+        "semantic guarantee. It must not become the third asserted certificate "
+        "after transport latency and our own receipt instant"),
+    "why_more_unchanged_samples_cannot_help": (
+        "a quiet book, a delayed feed and a cached representation all predict "
+        "the same unchanged value"),
+
+    # ── WHAT TURNS ON IT, stated without presuming the answer. ──────
     "what_turns_on_it": (
-        "if it is the last book change, an old value means a quiet money line "
-        "and a 30 s bound on it refuses every quiet market while calling it "
-        "freshness -- the bound applied to the wrong quantity, which is a "
-        "separate repair and NOT a loosening. If it lags a moving book, it is "
-        "a genuine delay and the bound is correct"),
+        "under H1 an old value means a quiet money line, and a 30 s bound on it "
+        "refuses every quiet market while calling it freshness -- the bound "
+        "applied to the wrong quantity, which is a separate repair and NOT a "
+        "loosening. Under H4 it is a property of the representation and bounds "
+        "the response, like Date-Age. Under H2/H3 it is neither. The repairs "
+        "differ, so the field cannot be gated on until the denotation is known"),
 }
 
 PRECONDITION_STATUS = {
@@ -360,20 +441,51 @@ PRECONDITION_STATUS = {
             "guarantee; or a read of a demonstrably MOVING book that "
             "separates last-change from now"),
         "this_is_the_binding_precondition": True,
+        "and_now_the_ONLY_one": (
+            "with P6 corrected, P5 is the single unmet precondition. That is a "
+            "cleaner and more useful statement than the four-way refusal I "
+            "started with: the one thing missing is a guarantee only the VENUE "
+            "can give, and no amount of engineering on our side manufactures "
+            "it. Everything that was ours to build is built"),
+        "what_we_must_NOT_do_about_it": (
+            "substitute another observable. Transport latency, our receipt "
+            "instant, an HTTP validator and a clean reconnect have each, at "
+            "some point in this file's history, been one step from standing in "
+            "for it"),
     },
     P6_RESYNCHRONISATION: {
-        "available": False,
+        "available": True,
         "serves": Q2_SUFFICIENTLY_CURRENT,
-        "why": ("the protocol documents no resubscribe-and-resnapshot "
-                "procedure and the client implements none -- "
-                "base._message_loop emits 'close' and returns"),
-        "what_would_establish_it": (
-            "a documented resynchronisation procedure, plus a client that "
-            "performs it. The second half is ours to build and the first is "
-            "not"),
-        "mitigated_not_solved_by": (
-            "P3's discard-on-drop, which makes the consequence safe -- no "
-            "stale book is used -- without making the mechanism available"),
+        "corrected_on": "2026-09-27",
+        "previously_said": (
+            "NOT ESTABLISHED, on the grounds that 'the protocol documents no "
+            "resubscribe-and-resnapshot procedure and the client implements "
+            "none'. The second half was wrong and the first half does not "
+            "matter -- which is two errors, not one"),
+        "why": (
+            "RESYNCHRONISATION ON A FULL-REPLACEMENT FEED IS: discard, "
+            "reconnect, resubscribe, await the next authoritative replacement. "
+            "There is nothing to reconstruct, so no venue procedure is needed "
+            "and none being documented is not a missing guarantee. And it is "
+            "IMPLEMENTED: RN1XMarketStream._main reconnects with backoff, "
+            "increments its epoch, returns every known slug to REQUESTED so it "
+            "is resubscribed, and bettor_market_stream._tell_currency drives "
+            "this module's own epoch from the same events"),
+        "what_the_SDK_does_not_do_and_why_that_is_not_a_venue_gap": (
+            "polymarket_us.websocket.base._message_loop emits 'close' and "
+            "RETURNS -- it does not reconnect. That is MISSING SDK CONVENIENCE, "
+            "not an unavailable venue capability, and I had reported it as the "
+            "latter. Our wrapper supplies it"),
+        "and_recovery_IS_NOT_AN_AGE": (
+            "a successful reconnect and resubscribe establishes CONNECTION "
+            "CONTINUITY -- that we are not holding a book across a drop. It "
+            "says nothing about how current the replacement we then receive "
+            "is. Treating a clean recovery as an upstream-age certificate "
+            "would be the same error as treating a fast response or a 304 as "
+            "one, and P5 still refuses every admission"),
+        "the_implementation_is_verified_in": (
+            "test_the_recovery_is_implemented_not_documented_away.py, driving "
+            "the production bridge rather than this module's API directly"),
     },
 }
 

@@ -264,7 +264,7 @@ async def _live_orders(conn) -> dict:
 
 
 async def account_exposure(conn, *, account_id=None,
-                           venue_positions=None) -> dict:
+                           venue_positions=None, now=None) -> dict:
     """TOTAL EXPOSURE ON THE ACCOUNT, or `UNREADABLE`. Never a partial sum.
 
     `venue_positions` is the venue's own answer, which the caller supplies
@@ -331,8 +331,13 @@ async def account_exposure(conn, *, account_id=None,
                   if per_path[n]["read"] not in (READ_OK, READ_ABSENT)]
     absent = [n for n in REQUIRED_PATHS
               if per_path[n]["read"] == READ_ABSENT]
+    import time as _time
     out = {
         "account_id": account_id,
+        # WHEN THIS WAS MEASURED, ALWAYS. A total with no instant cannot be
+        # shown to be current, and the submission gate refuses an undated one
+        # rather than trusting it -- so the stamp is not optional metadata.
+        "measured_at_epoch_s": float(now if now is not None else _time.time()),
         "paths": per_path,
         "required_paths": list(REQUIRED_PATHS),
         "unreadable_required_paths": unreadable,

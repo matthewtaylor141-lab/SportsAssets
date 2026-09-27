@@ -138,6 +138,39 @@ createdb "$DB" || fail "createdb $DB"
 # plausible-looking failures. Errors are captured and counted now.
 MIGLOG="$LOG.migrations"
 : > "$MIGLOG"
+
+# APP-MANAGED TABLES FIRST, AND THIS IS A BUG I INTRODUCED.
+#
+# Not every table in this schema comes from a migration. `us_premap` is created
+# by `workers.premap._ensure_table` at runtime, and TWO migrations -- 031 and
+# 055 -- ALTER it. Run the migrations against an empty database and those two
+# fail with "relation us_premap does not exist".
+#
+# That was harmless while migrations ran with ON_ERROR_STOP=0 and stderr to
+# /dev/null. I then hardened the gate so ANY migration failure voids the run --
+# turning a benign, expected, every-single-time condition into a gate that can
+# never produce a result. An invalid-environment detector that fires on a
+# HEALTHY environment is worse than none: the first person to see it concludes
+# the detector is noise and starts ignoring it.
+#
+# THE FIX IS TO MAKE THE ENVIRONMENT COMPLETE, NOT TO SOFTEN THE DETECTOR. The
+# app-managed DDL is extracted from the application source -- so the two cannot
+# drift -- and applied before the migrations that depend on it. If the
+# extraction finds nothing the gate VOIDS: a missing bootstrap is exactly the
+# invalid environment this check is for, and skipping it silently would
+# reintroduce the original defect from the other side.
+BOOTSTRAP="$LOG.bootstrap.sql"
+python3 "$REPO/ops/gate/extract_app_ddl.py" \
+        "$DIR/backend/sportsassets/workers/premap.py" > "$BOOTSTRAP" 2>>"$MIGLOG"
+BOOT_N=$(grep -c '^CREATE ' "$BOOTSTRAP" 2>/dev/null | tr -dc '0-9')
+echo "bootstrap: ${BOOT_N:-0} app-managed DDL statement(s) from premap.py"
+[ "${BOOT_N:-0}" -ge 1 ] \
+  || void "no app-managed DDL could be extracted. Two migrations ALTER a table
+  the application creates at runtime, so without it they fail and the schema is
+  incomplete" 92
+psql -q -d "$DB" -v ON_ERROR_STOP=1 -f "$BOOTSTRAP" >>"$MIGLOG" 2>&1 \
+  || void "the app-managed bootstrap DDL failed; see $MIGLOG" 92
+
 MIG_ERRORS=0
 for f in "$DIR"/backend/migrations/*.sql; do
   if ! psql -q -d "$DB" -v ON_ERROR_STOP=1 -f "$f" >>"$MIGLOG" 2>&1; then
@@ -149,6 +182,16 @@ if [ "$MIG_ERRORS" -gt 0 ]; then
   void "$MIG_ERRORS migration(s) failed; see $MIGLOG. A suite run against an
   incomplete schema measures the schema, not the release" 92
 fi
+
+# AND THE SCHEMA IS CHECKED FOR SHAPE, NOT ONLY FOR THE ABSENCE OF ERRORS.
+# A migration set can apply cleanly to the wrong starting point and still leave
+# the wrong schema, so a floor on the table count is asserted too.
+TABLES=$(psql -qtA -d "$DB" -c "SELECT count(*) FROM information_schema.tables
+         WHERE table_schema='public'" 2>/dev/null | tr -dc '0-9')
+echo "schema: ${TABLES:-0} tables"
+[ "${TABLES:-0}" -ge 100 ] \
+  || void "only ${TABLES:-0} tables after migrations; the schema is incomplete
+  and a suite run would measure the schema rather than the release" 92
 
 # ── 5 · MONITOR THE ENVIRONMENT WHILE THE SUITE RUNS ────────────────
 #

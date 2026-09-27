@@ -102,20 +102,33 @@ NO_MECHANISM = "NO_MECHANISM_AVAILABLE"
 
 #: WHICH MECHANISM ESTABLISHES THE BOOK STATE -- AND M2 NO LONGER DOES.
 #:
-#: M2 WAS IN THIS TUPLE AND IT IS NOW OUT, ON EVIDENCE. I had M2 as an
-#: establishing mechanism on the reasoning that a 304 affirms what we hold. It
-#: affirms the REPRESENTATION, and the venue's own responses show that is a
-#: different thing from the book:
+#: M2 WAS IN THIS TUPLE AND IT IS NOW OUT. I had M2 as an establishing mechanism
+#: on the reasoning that a 304 affirms what we hold. It affirms the
+#: REPRESENTATION, and the venue's own responses separate that from the book.
 #:
-#:     last-modified: Sun, 27 Sep 2026 16:24:27 GMT   <- equals `date`, exactly
-#:     transactTime:  2026-02-20T03:07:30.947946180Z  <- 219 days earlier
-#:     state:         MARKET_STATE_EXPIRED,  0 bids / 0 offers
+#: THE ARGUMENT, RESTATED CAREFULLY, because my first version of it was sloppy in
+#: the same way as the `transactTime` claim I withdrew.
 #:
-#: The origin stamped the representation "now" over market data 219 days old,
-#: on two independent markets, and `last-modified` held still across an 8 s gap
-#: while `date` advanced. So an origin here really does validate a
-#: representation while its own market-data source is arbitrarily delayed, and a
-#: 304 cannot be a market-data age. Recorded in
+#: I wrote "last-modified equals date, exactly". That is true of the FIRST read of
+#: each market and false of the second:
+#:
+#:     read 1   date: 16:24:27   last-modified: 16:24:27   cf-cache-status: EXPIRED
+#:     read 2   date: 16:24:35   last-modified: 16:24:27   cf-cache-status: HIT
+#:
+#: So `last-modified` does not track `Date`. It tracks REPRESENTATION GENERATION
+#: and survives caching unchanged -- which is ordinary, correct HTTP, and is also
+#: the exact mechanism that destroys the "a stamp cannot precede its response"
+#: argument I had built elsewhere.
+#:
+#: WHAT ACTUALLY RULES M2 OUT AS A BOOK CLOCK, and it does not need that argument:
+#: the markets read were `MARKET_STATE_EXPIRED` with ZERO book levels and a
+#: `transactTime` from 2026-02-20. Their books cannot have changed today. Yet
+#: `last-modified` was TODAY. A validator that moves while the book provably does
+#: not is not a book clock -- and that inference rests on the book being known
+#: static, not on any claim about what a timestamp may precede.
+#:
+#: So an origin here really does validate a representation while its own
+#: market-data source is arbitrarily delayed. Recorded in
 #: research/evidence/VENUE_BOOK_PROTOCOL_2026-09-27.md, runs 36332797806 and
 #: 36333087522.
 #:
@@ -147,13 +160,32 @@ M2_WITHDRAWN_AS_ESTABLISHING = {
         "that the stored REPRESENTATION is still the current representation "
         "(RFC 9110 §13, RFC 9111 §4.3). That is a statement about the "
         "response, not about the market data inside it"),
+    # THE OBSERVATION, AND THE INFERENCE, AS SEPARATE KEYS.
     "the_contradicting_observation": {
-        "last_modified_equals_date": True,
-        "transact_time_lag_s": 18969408.2,
+        "read_1": {"date": "16:24:27", "last_modified": "16:24:27",
+                   "cf_cache_status": "EXPIRED"},
+        "read_2": {"date": "16:24:35", "last_modified": "16:24:27",
+                   "cf_cache_status": "HIT"},
+        "market_state": "MARKET_STATE_EXPIRED",
+        "book_levels": "0 bids / 0 offers",
+        "transact_time": "2026-02-20T03:07:30.947946180Z",
         "markets": 2,
-        "across_an_8s_gap": "date +8.0 s, last-modified +0.0 s",
         "source": "research/evidence/VENUE_BOOK_PROTOCOL_2026-09-27.md",
     },
+    "the_inference": (
+        "an EXPIRED market with zero levels and a February transactTime cannot "
+        "have had its book change today, yet last-modified was TODAY. A "
+        "validator that moves while the book provably does not is not a book "
+        "clock"),
+    "what_this_inference_does_NOT_rely_on": (
+        "any claim about what a timestamp may or may not precede. That argument "
+        "was used elsewhere for transactTime and is withdrawn as false -- a "
+        "stamp CAN denote representation generation, which precedes "
+        "transmission, and read 2 above shows exactly that behaviour"),
+    "and_last_modified_does_not_track_Date": (
+        "read 2 has date 16:24:35 and last-modified 16:24:27 on a cache HIT. "
+        "My first statement of this finding said last-modified equals date "
+        "exactly; that holds only for the origin read"),
     "so": ("the exchange is AVAILABLE and it is a real signal about the "
            "representation. It is not a book clock, and it is no longer "
            "allowed to admit"),
