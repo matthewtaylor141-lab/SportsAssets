@@ -491,7 +491,24 @@ async def test_two_simultaneous_full_exits_cannot_both_sell(monkeypatch):
         assert len(reserved) == 1, [g.get("reservation") for g in got]
         assert len(refused) == 1
         assert refused[0]["refusal"] == FM.R_OVER_RESIDUAL
-        assert "Refused INSIDE the lock" in refused[0]["why"]
+        # EITHER OF THE TWO SIZING CHECKS MAY FIRE, AND BOTH ARE SAFE.
+        #
+        # This asserted the LOCKED check's wording specifically, which made the
+        # test depend on which check won a race: when the first caller's insert
+        # has already committed, the second is refused by the unlocked hint and
+        # never reaches the lock; when it has not, the locked check refuses it.
+        # Adding a read to the top of `submit_exit` was enough to flip which one
+        # got there first, and the test failed while the PROPERTY it exists for
+        # -- exactly one reservation, exactly one order, no oversell -- still
+        # held on both sides. The property is asserted; the refusal site is
+        # named but not pinned.
+        assert ("Refused INSIDE the lock" in refused[0]["why"]
+                or "already reserved by an exit" in refused[0]["why"]), \
+            refused[0]["why"]
+        # AND THE LOCKED CHECK IS NOT LEFT UNTESTED BY THAT: the retry-after-an-
+        # ambiguous-answer test below reaches it deterministically, because
+        # there the reserving exit is already UNRESOLVED when the second call
+        # starts.
         # EXACTLY ONE EXIT EXISTS, FOR EXACTLY THE INVENTORY HELD.
         rows = await a.fetch(
             "SELECT quantity FROM bettor_funded_intents WHERE kind='EXIT'")
