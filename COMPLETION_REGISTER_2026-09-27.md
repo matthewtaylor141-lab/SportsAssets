@@ -780,3 +780,63 @@ My prose did not match my own instrumentation. Legacy activity must neither
 disappear nor become this lane's record, and nowhere in this register, the
 management report or the owner package is a legacy number summed with an
 autonomous one.
+
+---
+
+## The five delivery states, applied to everything in this batch
+
+You asked the report to distinguish these. Every row below sits in exactly one.
+
+### 1 · Implemented code — written and unit-tested, callers not yet exercised
+
+| item | where |
+|---|---|
+| `market_data_design` — the four-column assessment | new module; no runtime caller, by design. It is a record, not a gate |
+| `order_fees` per-fill prices | `calibration_fees` |
+| `venue_order_fields`, `venue_execution_order`, `_insert_by_venue_order`, `order_fee_basis` | `bettor_funded_book` |
+| migration 129 (venue sequence / instant / basis), migration 130 (capability) | applied to a test database; **not** to production |
+
+### 2 · Exercised production callers — the real call sites run it, in tests
+
+| item | the caller that runs it |
+|---|---|
+| account-wide exposure as a submission precondition | `bettor_funded_execution.submit_for_decision` measures on its own connection; `bettor_funded_management` passes `adds_exposure=False`; `bettor_funded_activation.authorize` measures and reports; `bettor_test_venue_executor` supplies a measured zero |
+| the venue-ordered cumulative fee | `_ingest_locked` places each fill by its venue key and persists the basis |
+| the corrected fee at the entry depth walk | `bettor_entry_execution.estimate` → `walk_fee` → `order_fees` |
+| the notification capability | all four routes; the attack is run as an attack and was verified to fail against the old SQL |
+| the provider-key proxy | `build_request` on the cockpit's real system-block and `cache_control` shapes |
+| connection-epoch invalidation | `bettor_market_stream._tell_currency` drives it from the production stream — it previously moved only in tests |
+
+**Seventeen tests failed when the exposure gate first landed.** Every one was a real caller that began refusing. Each was fixed by *supplying the evidence*, never by relaxing the check — and where a test asserted `REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE` I checked per site which refusal is now first, because one site supplies the venue read and the code constant is still correct there. I had blanket-replaced it.
+
+### 3 · Verified deployed behaviour — **NOTHING IN THIS BATCH**
+
+Not one item above has been deployed. The exact-SHA gate, the API-only release and the serving-build readback are all outstanding. **This is the honest state and it is the gap between "the tests pass" and "it works."**
+
+### 4 · Credential-dependent reconciliation
+
+Named in `CREDENTIAL_PROVISIONING_REQUEST_2026-09-27.md`: account-wide exposure becoming a number, the submission gate's exposure precondition passing, account reconciliation, the readiness check, three of five isolation exhibits, and partial fee verification. **Two of the four verdicts cannot move on a credential at all.**
+
+### 5 · Unresolved market/source evidence
+
+| | |
+|---|---|
+| **the single blocking item** | the venue publishes **no timing guarantee** for market data. Zero matching sentences on the published WebSocket page |
+| `transactTime` | `UNRESOLVED`. Four hypotheses open — last book change, last trade, settlement, representation generation — and none preferred. My "a response stamp cannot precede its own response" argument is **withdrawn as false** |
+| runner vs production path | different egress region and CDN edge, the SDK sends `Authorization` where the probe sent none. The protocol findings hold; our path does not inherit them |
+
+---
+
+## "Refuses in more cases" is not an acceptance criterion
+
+You are right, and I had been leaning on it. So for each control added here, both directions are tested through the real caller:
+
+| control | a correct case that must PASS | an incorrect case that must REFUSE |
+|---|---|---|
+| account-wide exposure | $40 committed + $25 proposed against a $100 cap reaches `account_exposure_consumed: True`, and **only the code constant is left refusing**. Exactly at the cap passes | absent, unreadable, undated, stale, negative-age, wrong-account, and a cent over the cap — each by its own name |
+| the cumulative fee | a single-fill order pays exactly `expected_fee`, and the cap never binds | three fills of 40 at $0.50 pay $2.08, not the $2.10 an independent sum gives |
+| the notification capability | the owner's own re-registration still refreshes its row; the owner can still delete their own subscription | the public `user_key` presented as the credential; an unregistered key; a wrong secret; one user's capability against another's key; a revoked one |
+| the provider proxy | the cockpit's real system-block and `cache_control` shapes pass; a smaller `max_tokens` is honoured | an unknown field refused **by name**; an off-list model; a caller-supplied URL; nine malformed shapes |
+| the exit path | an exit is **not** blocked by an unreadable venue — `adds_exposure=False` | a caller that omits the flag gets the strict behaviour, so a new entry path written in ignorance is refused |
+
+**And one place the asymmetry is deliberate and stated:** an exit reduces exposure, so requiring an account-wide measurement before a sale would strand inventory exactly when the venue is unreadable. That is a *designed* exemption with its own test, not a gap.
