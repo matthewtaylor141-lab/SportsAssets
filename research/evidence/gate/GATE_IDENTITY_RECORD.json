@@ -75,9 +75,39 @@
    "gone_vs_baseline": [],
    "identical_to_baseline": true,
    "note": "148 more tests pass than on the baseline and not one more fails. The 36 funded-path, funded-book and onboarding tests were re-run inside the frozen checkout against that run's own migrated database to confirm they EXECUTED rather than skipping: 36 passed."
+  },
+  "baseline_6d75275_confirming_0122": {
+   "file": "FAILURES_BASELINE_6d75275_2026-09-27_confirming.txt",
+   "failed": 177,
+   "passed": 12708,
+   "duration_s": 434.74,
+   "log": "GATE_CONFIRM_BASE",
+   "run_alone": true,
+   "byte_identical_to_the_0025_baseline_list": true,
+   "why_it_was_needed": "the baseline side of the acd7cae pair reported 428 failures in 11:40 instead of the 177-182 range every other run produced, so that reading was NOT used. The cause was the instrument, not the code, and I caused part of it: I killed two earlier gate launches mid-flight so the gate would cover the exact final tree, the two surviving runs shared one Postgres, the baseline ran 4 minutes slower under that contention, and it straddled the top of the wall-clock hour -- which the mirror lane's PER-HOUR replace cap keys on. Sampling confirmed it: `_census(st, 'replace_capped') == 1` reading 0, `replaces_are_capped_per_hour`, and the rest of that recorded cluster. All 251 extras were baseline-only and none was in anything the release touched. This run was made ALONE, inside one hour, and reproduces 177 byte-for-byte"
+  },
+  "release_acd7cae": {
+   "file": "FAILURES_RELEASE_acd7cae_2026-09-27.txt",
+   "failed": 177,
+   "passed": 12878,
+   "duration_s": 450.84,
+   "log": "GATE_FINAL_REL",
+   "compared_against": [
+    "baseline_6d75275_confirming_0122 (run alone, same day)",
+    "the 00:25 baseline recording of the same SHA"
+   ],
+   "new_vs_baseline": [],
+   "gone_vs_baseline": [],
+   "identical_to_baseline": true,
+   "note": "170 more tests PASS than on the baseline (12,878 vs 12,708) and not one more fails. The added tests are the funded lifecycle set: order terminality vs inventory closure, the recovery correlation rule and its executions reader, the entry/partial-exit/restart/close lifecycle with the loss stop, and expected vs observed fees"
   }
  },
- "the_matched_pair": "8b04d41 against 6d75275, run concurrently from frozen git-archive checkouts on their own migrated lower-case databases: 177 and 177, identity sets IDENTICAL. Across the day five separate baseline runs printed 177, 178 or 182 failures -- the two recorded clock-sensitive defects move that count on a long-lived machine -- while every matched pair agreed on IDENTITIES. That is the whole reason a count is not used as a release signal here.",
+ "the_matched_pair": {
+  "baseline": "baseline_6d75275_confirming_0122",
+  "release": "release_acd7cae",
+  "verdict": "ZERO NEW FAILURE IDENTITIES, ZERO GONE",
+  "how_to_re_verify": "comm -13 on the two sorted identity files in this directory. Never compare the counts -- see baseline_count_drifts_identities_do_not"
+ },
  "clock_sensitive_defects_are_recorded_separately": "research/evidence/CLOCK_SENSITIVE_TEST_DEFECTS.json",
  "not_a_clean_gate": "178 pre-existing failures remain on the baseline itself. Nothing here claims otherwise.",
  "baseline_count_drifts_identities_do_not": {
