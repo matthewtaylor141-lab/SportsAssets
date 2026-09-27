@@ -287,8 +287,21 @@ def test_an_established_book_we_then_sat_on_refuses_on_our_own_delay(
     assert got["book_currency"]["verdict"] == vc.ESTABLISHED
 
 
-def test_a_304_revalidation_admits_on_the_scheduled_path(monkeypatch):
-    """MECHANISM M2, THROUGH THE SAME READ PATH."""
+def test_a_304_revalidation_DOES_NOT_admit_on_the_scheduled_path(monkeypatch):
+    """M2 WAS WITHDRAWN AS AN ESTABLISHING MECHANISM, and this test asserted the
+    opposite.
+
+    A 304 affirms the REPRESENTATION. On this venue `last-modified` read TODAY on
+    markets whose books cannot have moved since February -- EXPIRED, zero levels,
+    a February `transactTime`. A validator that moves while the book provably does
+    not is not a book clock.
+
+    THE EXCHANGE STILL HAPPENS AND IS STILL REPORTED. What changed is that it
+    cannot admit, which is the difference between a signal and a certificate --
+    and having found ETag absent I was one step from treating a validator's
+    PRESENCE as the qualifying condition, which would have been the third false
+    certificate after transport latency and our own receipt instant.
+    """
     now = time.time()
     _wire(monkeypatch, {"ETag": '"v7"'})
 
@@ -296,8 +309,15 @@ def test_a_304_revalidation_admits_on_the_scheduled_path(monkeypatch):
                  revalidation={"status": 304,
                                "headers": {"date": email.utils.formatdate(
                                    now - 2.0, usegmt=True)}})
-    assert got["ok"] is True, got.get("why")
-    assert got["book_currency"]["mechanism"] == vc.M2_REVALIDATION
+    assert got["ok"] is False
+    assert got["refusal"] == loop.R_BOOK_CURRENCY_NOT_ESTABLISHED
+    # AND M2 IS RECORDED AS AN EXCHANGE THAT SUCCEEDED, so this is not mistaken
+    # for a request that failed.
+    m2 = [m for m in got["book_currency"]["mechanisms_unavailable"]
+          if m["mechanism"] == vc.M2_REVALIDATION][0]
+    assert m2["exchange_succeeded"] is True
+    assert "affirms the representation rather than the book" in m2["why"]
+    assert vc.M2_REVALIDATION not in vc.ESTABLISHING_MECHANISMS
 
 
 def test_an_uncached_fresh_response_alone_still_refuses(monkeypatch):

@@ -49,6 +49,17 @@ from sportsassets import bettor_funded_book as FB
 from sportsassets import bettor_funded_execution as FX
 from sportsassets import bettor_funded_management as FM
 
+#: THE VENUE'S OWN POSITION READ, WHICH `submit_for_decision` NOW REQUIRES.
+#:
+#: Account-wide exposure is a submission precondition and the venue is the
+#: authority on what the account holds; without it the path refuses
+#: ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED, which is the CORRECT behaviour
+#: and is asserted on its own in `test_account_exposure_reaches_enforcement.py`.
+#: These tests are about rails against a FILLED order, so they supply an empty
+#: account and reach their own assertions.
+EMPTY_VENUE = {"held_usd": 0.0, "working_usd": 0.0, "unresolved_usd": 0.0}
+
+
 DSN = __import__("os").environ.get("RN1X_TEST_DSN", "")
 pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
 
@@ -375,7 +386,7 @@ async def test_a_completed_purchase_still_counts_against_every_rail(
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
 
         first = await FX.submit_for_decision(conn, _decision(),
-                                            account_id=ACCT, venue=VENUE)
+                                            account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert first["submitted"] is True, first
         assert first["state"] == "FILLED"
         assert first["order"]["filled_qty_from_the_ledger"] == \
@@ -409,7 +420,7 @@ async def test_a_completed_purchase_still_counts_against_every_rail(
         # THE SECOND SUBMISSION IS REFUSED AND NOTHING IS SENT.
         before = len([k for k, _ in sent if k == "create"])
         second = await FX.submit_for_decision(conn, _decision(),
-                                             account_id=ACCT, venue=VENUE)
+                                             account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert second["ok"] is False
         assert second["refusal"] in (FX.R_OVER_RAIL,
                                      FB.R_ANOTHER_INTENT_IS_LIVE), second
@@ -886,7 +897,7 @@ async def test_entry_partial_exit_restart_final_close_and_the_stop(
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         entry = await FX.submit_for_decision(conn, _decision(),
-                                            account_id=ACCT, venue=VENUE)
+                                            account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert entry["submitted"] is True, entry
         iid = entry["intent_id"]
 
@@ -961,7 +972,7 @@ async def test_entry_partial_exit_restart_final_close_and_the_stop(
         # SERVICING IS STILL AVAILABLE WITH ENTRIES OFF.
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", False)
         blocked = await FX.submit_for_decision(conn, _decision(),
-                                              account_id=ACCT, venue=VENUE)
+                                              account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert blocked["ok"] is False
         mg = await FM.manage(conn, account_id=ACCT, venue=VENUE,
                              adapter=pmus3, probe=lambda c, s: {

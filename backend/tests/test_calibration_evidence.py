@@ -451,7 +451,10 @@ class TestTheThreeQuantitiesAreDistinct:
         res = cf.reserve_allowance("0.39", 10)
         assert exp["kind"] == "EXPECTED_CHARGE"
         assert res["kind"] == "RESERVE_ALLOWANCE"
-        assert exp["rounding"] == "ROUND_HALF_UP"
+        # THE PUBLISHED MODE IS HALF-EVEN. This asserted ROUND_HALF_UP, which
+        # described the implementation rather than the venue -- the page says
+        # "banker's rounding (round half to even)".
+        assert exp["rounding"] == "ROUND_HALF_EVEN"
         assert res["rounding"] == "ROUND_CEILING"
         assert res["FEE"] >= exp["FEE"]
 

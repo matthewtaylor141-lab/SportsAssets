@@ -194,6 +194,27 @@ on:
         required: false
         default: ""
 
+# ONE VENUE-TOUCHING WORKFLOW AT A TIME, ACROSS THE WHOLE REPOSITORY.
+#
+# WHY THIS APPEARED, AND THE AUDIT CAUGHT IT RATHER THAN A REVIEW. Adding the
+# `book-protocol` job made this workflow NAME THE VENUE HOST
+# (gateway.polymarket.us), which puts it in the set of workflows that can reach
+# the venue -- and every member of that set must share ONE concurrency group so
+# two runs cannot read the venue at once. `venue_domain.workflow_groups` scans
+# for exactly this, and `test_the_venue_domain_audit_passes_honestly` failed the
+# moment the job landed.
+#
+# I ADDED A READ-ONLY JOB AND SILENTLY LEFT A CONCURRENCY DOMAIN. The job is
+# read-only, which bounds the consequence and does not make it correct: the point
+# of the group is that the venue sees one reader from us at a time, and
+# "read-only" is not "free".
+#
+# `cancel-in-progress: false` because a queued run must WAIT, not displace a run
+# already talking to the venue.
+concurrency:
+  group: pmus-public-read-global
+  cancel-in-progress: false
+
 jobs:
   verify:
     # A FUNDED READBACK IS NOT A REASON TO RE-RUN THE WHOLE ACCEPTANCE SUITE.
