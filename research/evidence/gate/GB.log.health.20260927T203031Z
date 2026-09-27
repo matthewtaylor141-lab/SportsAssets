@@ -1,0 +1,36 @@
+2026-09-27T17:57:24Z pg=up free_mb=16706
+2026-09-27T17:57:39Z pg=up free_mb=16683
+2026-09-27T17:57:54Z pg=up free_mb=16662
+2026-09-27T17:58:09Z pg=up free_mb=16642
+2026-09-27T17:58:25Z pg=up free_mb=16638
+2026-09-27T17:58:40Z pg=up free_mb=16635
+2026-09-27T17:58:55Z pg=up free_mb=16634
+2026-09-27T17:59:10Z pg=up free_mb=16634
+2026-09-27T17:59:25Z pg=up free_mb=16633
+2026-09-27T17:59:40Z pg=up free_mb=16633
+2026-09-27T17:59:55Z pg=up free_mb=16633
+2026-09-27T18:00:10Z pg=up free_mb=16632
+2026-09-27T18:00:25Z pg=up free_mb=16630
+2026-09-27T18:00:40Z pg=up free_mb=16629
+2026-09-27T18:00:55Z pg=up free_mb=16630
+2026-09-27T18:01:10Z pg=up free_mb=16629
+2026-09-27T18:01:25Z pg=up free_mb=16629
+2026-09-27T18:01:40Z pg=up free_mb=16629
+2026-09-27T18:01:55Z pg=up free_mb=16629
+2026-09-27T18:02:10Z pg=up free_mb=16629
+2026-09-27T18:02:25Z pg=up free_mb=16629
+2026-09-27T18:02:40Z pg=up free_mb=16628
+2026-09-27T18:02:55Z pg=up free_mb=16629
+2026-09-27T18:03:10Z pg=up free_mb=16629
+2026-09-27T18:03:25Z pg=up free_mb=16628
+2026-09-27T18:03:40Z pg=up free_mb=16628
+2026-09-27T18:03:55Z pg=up free_mb=16628
+2026-09-27T18:04:10Z pg=up free_mb=16628
+2026-09-27T18:04:26Z pg=up free_mb=16628
+2026-09-27T18:04:41Z pg=up free_mb=16628
+2026-09-27T18:04:56Z pg=up free_mb=16628
+2026-09-27T18:05:11Z pg=up free_mb=16628
+2026-09-27T18:05:26Z pg=up free_mb=16628
+GATE VOID: PostgreSQL was unreachable in 0
+0 sample(s) DURING the run.
+  The failure list measures the environment, not the release 91

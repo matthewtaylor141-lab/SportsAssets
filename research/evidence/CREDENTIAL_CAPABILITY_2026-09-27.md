@@ -68,14 +68,66 @@ appear at all.
 | | |
 |---|---|
 | **the claim is unsupported** | no retrieved page mentions a read-only scope |
-| **and the likely reality is worse than unsupported** | the documentation describes a **single key type whose first advertised group is "Place, modify, cancel"**. A provisioned credential should be assumed to carry **full order authority** until the provisioning screen shows otherwise |
+| **and PERMISSION GRANULARITY IS UNVERIFIED** | the word *scope* does not appear on either page, so we do not know what the provisioning screen offers |
 
-**What I must not do with this**, and would have before: conclude that no
-read-only option exists. These pages 404 on three plausible key-management paths,
-so the documentation is demonstrably incomplete, and a provisioning UI may offer
-choices no page describes. **The supportable statement is that we have no evidence
-for a read-only option, and one plain reading of what is published points the
-other way.** The remedy is to look at the actual provisioning screen.
+> **⚠ CORRECTED AGAIN, and this is my error in the opposite direction.** I first
+> wrote that the likely reality is *"worse than unsupported"* and that a key
+> should be **assumed to carry full order authority**. That inverts the same
+> mistake: **absence of documented scopes does not prove every issued key has
+> every permission.** A venue may issue narrow keys and simply not document them.
+>
+> **"Unverified" licenses exactly one action: look at the provisioning screen.**
+> It licenses no conclusion about what a key can do, in either direction — and I
+> made a conclusion in each direction within a day.
+
+### And "two constants are the only protection" was wrong in both directions too
+
+I wrote that if read-only onboarding cannot be separated from submission, our two
+code constants are the only thing between a provisioned credential and order
+authority. `backend/sportsassets/submission_surface.py` enumerates it instead:
+
+**It OVERSTATED the exposure. There are TEN independent gates**, any one of which
+refuses — four code constants, a process-bound gate, an authorization row, an
+eligible reconciled account, a fresh exposure measurement, the credential itself,
+and the funded schema. They are not all constants and they do not all clear the
+same way.
+
+**It UNDERSTATED the problem. One environment credential is visible to ELEVEN
+modules** — including `live_executor`, the legacy copier — and *neither constant
+guards those.* Only the process-bound `execution_gate` does, because it sits
+**inside** the adapter rather than at the call sites.
+
+### And the mutation surface is not one adapter — I got this wrong twice
+
+My first table listed two functions in `pmus`. Parsed properly, **five modules
+reach the venue mutation surface across TWO venues:**
+
+| module | how it reaches the venue |
+|---|---|
+| `bettor_funded_execution` | `submit_fok` |
+| `bettor_funded_management` | `submit_fok`, `cancel_order` |
+| `live_executor` | `create_order` + **`post_order` — a second path to polymarket-CLOB that does not pass through `pmus` at all**, plus three callable references |
+| `workers/mirror_live` | `submit_fok`, `cancel_order` **passed as callables** |
+| `workers/underdog` | `submit_fok` **passed as a callable** |
+
+Three of those pass the function to `asyncio.to_thread` rather than calling it, so
+**no call-site scan finds them** — and my first two scans did not.
+
+> This repository had already caught this exact class of error on 2026-09-21, by
+> walking the AST for venue-client constructors, and recorded that no
+> hand-written inventory had ever listed the CLOB path — *"including the one I
+> wrote the day before."* **I then wrote another hand inventory and repeated it.**
+> The enumeration is now a parse with a regression test, not a list.
+
+**What is genuinely reassuring, and it is structural rather than a promise:** the
+`execution_gate` is inside the adapter, so all four `pmus` routes are covered
+however they are invoked, and the CLOB path carries its own explicit
+`_gate.authorize("submit_clob")`.
+
+**What is genuinely missing:** a read-only diagnostic still calls the same `pmus`
+module the submitting lane calls. A flag that says *"do not submit"* is weaker
+than an object with no submit method, and the constrained read-only interface is
+recorded as **NOT IMPLEMENTED** rather than claimed.
 
 ### One more correction in passing
 
@@ -101,8 +153,16 @@ That is a better scheme than a bearer key, and it is not what I said it was.
 
 ## 5 · What this changes about provisioning
 
-* **Do not rely on a venue-side read-only scope.** Plan for a key with full order
-  authority and keep submission off in our code.
+* **Report what the provisioning screen offers, before creating a key.** Do not
+  plan around an assumed scope in either direction: a read-only option is not
+  established, and neither is its absence. The screen is the evidence.
+* **Do not rely on a venue-side scope as the control**, whichever it turns out to
+  be. Our side must refuse independently — and it does, through ten enumerated
+  gates rather than the two I claimed.
+* **The credential's blast radius is eleven modules**, including the legacy
+  copier. Provisioning for onboarding reads makes it available to the submitting
+  lane in the same process, so the separation comes from the gates and from a
+  constrained interface — the latter being **not yet implemented**.
 * **Revocation and rotation are barely documented** — one matching sentence, and it
   is a code sample. Before a key is issued, the revocation path must be
   established from the provisioning screen, because a credential we cannot revoke

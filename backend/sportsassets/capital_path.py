@@ -352,6 +352,38 @@ def account_writers(exposure_tables=None) -> dict:
             "Either every writer goes through one enforcement boundary, or the "
             "account is isolated to one writer and that isolation is verified. "
             "Counting writers is not controlling them"),
+
+        # ── AND A WRITER INVENTORY IS NOT A TRADER CENSUS ────────────
+        #
+        # THE CORRECTION. I reported "six modules write `live_orders`, and this
+        # lane's index constrains none of them" as though it described six lanes
+        # currently trading the account. It does not. It describes six modules
+        # that CONTAIN a write statement. Each would additionally need:
+        #
+        #   * an account binding -- which account its rows belong to;
+        #   * a credential reaching that account;
+        #   * an enabled control path that actually runs it.
+        #
+        # None of those was checked, and a source read cannot check them. So the
+        # honest verdict on isolation is UNKNOWN, which sounds worse than "six
+        # writers" and is more accurate than either "six lanes trade this
+        # account" or "only this lane does".
+        "is_this_a_census_of_modules_that_CURRENTLY_TRADE": False,
+        "what_each_writer_would_additionally_need": [
+            "an account binding: which account its rows belong to",
+            "a credential that reaches that account",
+            "an enabled control path that actually executes it",
+        ],
+        "exposure_and_writer_isolation_verdict": "UNKNOWN",
+        "why_UNKNOWN_and_not_a_number": (
+            "the bindings and control states above are runtime facts. Until they "
+            "are read against the real account, 'six writers can reach it' and "
+            "'only one does' are both unsupported -- and I asserted the first"),
+        "what_would_settle_it": [
+            "for each writer, the account_id its rows actually carry",
+            "whether its lane's control row or env flag is enabled right now",
+            "whether the credential in the environment reaches that account",
+        ],
     }
 
 
