@@ -70,6 +70,23 @@ on:
           markets from the public catalogue first and takes the first few.
         required: false
         default: ""
+      rotate_secret:
+        description: >-
+          Blank, or one of ADMIN_TOKEN | DESK_PASSWORD | OPERATOR_PASSWORD.
+          GENERATES the value on the runner from the OS CSPRNG and sets it on the
+          service. The value is NEVER an input, never printed, never logged --
+          read it from the Render dashboard. This lives here rather than in
+          `render-ops` for two reasons: render-ops.yml is 422 bytes from GitHub's
+          512,000-byte hard limit for a workflow file (adding it there took the
+          file OVER, which stops the authorized deploy route working), and a
+          brand-new workflow file is not dispatchable from a non-default branch.
+          Requires rotate_confirm=DO.
+        required: false
+        default: ""
+      rotate_confirm:
+        description: "Type DO to allow a secret rotation"
+        required: false
+        default: ""
       credential_capability:
         description: >-
           on|blank. `on` reads the venue's PUBLISHED AUTHENTICATION AND API-KEY
@@ -6494,6 +6511,88 @@ jobs:
   # NEVER TEST ORDER AUTHORITY BY SENDING AN ORDER. This job sends no credential
   # and places nothing; an unauthorized order is not a permission probe, it is an
   # unauthorized order. The only evidence it collects is what the venue publishes.
+  # ── ROTATE A SERVICE SECRET WITHOUT THE SECRET EVER BEING AN INPUT ──
+  #
+  # WHY NOT `render-ops` -> `env-set`. That action takes the value in its `arg`
+  # input, and workflow_dispatch inputs are RECORDED WITH THE RUN and readable
+  # through the API. Masking the log does not help -- the input is stored outside
+  # the log. A credential set that way is a credential written down.
+  #
+  # WHY IT LIVES IN THIS FILE. It belongs in `render-ops` on every other ground,
+  # and cannot go there: that file is 511,578 bytes against GitHub's 512,000-byte
+  # hard limit, and adding this took it OVER, at which point GitHub rejects the
+  # file and the authorized API-only deploy route stops working. Its own size
+  # guard caught that. A standalone workflow file was the next choice and is not
+  # dispatchable from a non-default branch, and the default branch is protected.
+  #
+  # THE VALUE IS GENERATED HERE from the OS CSPRNG, PUT straight to Render, then
+  # cleared. Never an input, never printed, never echoed, never written to a file.
+  # The operator reads it from the Render dashboard -- the private mechanism.
+  # Printed: the key name, the character count, the HTTP status. Not the value,
+  # not a hash, not a prefix; a prefix of a rotated credential is a head start.
+  rotate-secret:
+    if: ${{ inputs.rotate_secret != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Rotate
+        env:
+          RENDER_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE: ${{ inputs.service }}
+          WANT: ${{ inputs.rotate_secret }}
+          CONFIRM: ${{ inputs.rotate_confirm }}
+        run: |
+          set -uo pipefail
+          [ "$CONFIRM" = "DO" ] || { echo "::error::refused: rotate_confirm must be DO"; exit 1; }
+          [ -n "${RENDER_KEY:-}" ] || { echo "::error::no RENDER_API_KEY"; exit 1; }
+          SVC="${SERVICE:-sportsassets-api}"
+          API=https://api.render.com/v1
+          # THE KEY MUST BE ON THE ALLOW LIST. An open key name would let this
+          # overwrite DATABASE_URL or a venue credential with 48 random bytes --
+          # a data-loss button rather than a rotation.
+          case "$WANT" in
+            ADMIN_TOKEN|DESK_PASSWORD|OPERATOR_PASSWORD) : ;;
+            *) echo "::error::'$WANT' is not a rotatable authentication credential (allowed: ADMIN_TOKEN, DESK_PASSWORD, OPERATOR_PASSWORD)"; exit 1 ;;
+          esac
+          ID=$(curl -sS --max-time 45 -H "Authorization: Bearer $RENDER_KEY" \
+                 -H "Accept: application/json" "$API/services?name=$SVC&limit=20" \
+               | jq -r --arg n "$SVC" '.[]? | select(.service.name==$n) | .service.id' | head -1)
+          [ -n "$ID" ] || { echo "::error::no service named $SVC"; exit 1; }
+          echo "rotating $WANT on $SVC ($ID)"
+          V=$(python3 -c 'import secrets; print(secrets.token_urlsafe(48))')
+          echo "::add-mask::$V"
+          echo "  generated ${#V} characters from the OS CSPRNG on this runner"
+          CODE=$(curl -sS --max-time 45 -o /tmp/r.json -w '%{http_code}' -X PUT \
+                 -H "Authorization: Bearer $RENDER_KEY" -H "Accept: application/json" \
+                 -H "Content-Type: application/json" \
+                 -d "{\"value\":$(printf '%s' "$V" | jq -Rs .)}" \
+                 "$API/services/$ID/env-vars/$WANT")
+          V=""
+          echo "HTTP $CODE"
+          case "$CODE" in
+            200|201) : ;;
+            *) echo "::error::the rotation was REFUSED (HTTP $CODE). The OLD value still stands."
+               head -c 300 /tmp/r.json; rm -f /tmp/r.json; exit 1 ;;
+          esac
+          rm -f /tmp/r.json
+          {
+            echo "### rotated \`$WANT\` on \`$SVC\`"
+            echo
+            echo "The value is **not** in this log, **not** an input to this run,"
+            echo "and **not** in any file. Read it from:"
+            echo
+            echo "    Render -> $SVC -> Environment -> $WANT"
+            echo
+            if [ "$WANT" = "ADMIN_TOKEN" ]; then
+              echo "**WARNING:** \`ADMIN_TOKEN\` is also the credential these"
+              echo "verification workflows present, held as a GitHub secret."
+              echo "Rotating it here WITHOUT updating that secret breaks the"
+              echo "authorized readback route. To revoke sessions, prefer bumping"
+              echo "\`SESSION_EPOCH\`, which is a counter and not a secret."
+            fi
+            echo
+            echo "Render redeploys the service on an env change."
+          } >> "$GITHUB_STEP_SUMMARY"
+
   credential-capability:
     if: ${{ inputs.credential_capability != '' }}
     runs-on: ubuntu-latest
