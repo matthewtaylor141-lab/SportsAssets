@@ -464,10 +464,20 @@ class TestTheDecisionOnlyWorker:
         assert out["records"] == []
 
     def test_the_fee_schedule_is_published_not_verified(self):
+        """The SCHEDULE ID IS NOT RETYPED HERE.
+
+        This assertion previously pinned `PMUS_PUBLISHED_2026_09_17` -- a date I
+        had invented. The venue's published policy is effective 2026-09-25, so a
+        2026-09-21 fill is governed by the JULY schedule, and the id is taken
+        from `bettor_fee_schedule.for_date` rather than written out, so the two
+        cannot disagree again.
+        """
+        from sportsassets import bettor_fee_schedule as fs
         from sportsassets.workers import bettor_prospective as bp
 
         f = bp.fees("2026-09-21")
-        assert f.source == "PMUS_PUBLISHED_2026_09_17"
+        assert f.source == fs.for_date("2026-09-21").schedule_id
+        assert f.source == "PMUS_PUBLISHED_2026_07_01"
         assert f.verified is False
         assert f.status == "PUBLISHED"
 

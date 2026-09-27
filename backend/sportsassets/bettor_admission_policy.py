@@ -1,61 +1,58 @@
-"""THE ONE DECISION THAT COULD ADMIT A TRADE TODAY — and it is the owner's.
+"""A DISABLED POLICY EXCEPTION. Not a freshness repair, and not the only route.
 
-THE BLOCKING FACT, FIRST. Under the most favourable observation the venue can
-produce — an origin read with `Age: 0`, an in-bound 304, a live subscription with
-a heartbeat one second old and a full-book message one second old, and a venue
-timestamp equal to now — `bettor_venue_currency.evaluate` returns
-`BOOK_CURRENCY_NOT_ESTABLISHED` and `admits()` is `False`.
+WHAT THE EVIDENCE ACTUALLY SHOWS, STATED AT ITS REAL WIDTH.
 
-    SO ZERO CANDIDATES CAN BE ADMITTED TODAY ON THE EVIDENCE PATH. Not because a
-    market is stale, and not because our code is unfinished: because the venue
-    publishes no timing guarantee for market data, and an admitting rule may use
-    only what the venue documents and what we can observe.
+    UNDER THE CURRENT EVIDENCE REQUIREMENTS, THIS MARKET-DATA PATH DOES NOT
+    QUALIFY.
 
-There are exactly two ways past that, and only one of them exists today:
+That is what the test demonstrates: the admission predicate as it stands rejects
+the observations this path supplies. It is a fact about our predicate applied to
+this path.
 
-  1  THE VENUE DOCUMENTS ITS TIMING. Not available. Zero matching sentences on
-     the published WebSocket page. We cannot make this happen.
+WHAT IT DOES NOT SHOW, AND I CLAIMED BOTH:
 
-  2  THE OWNER ACCEPTS AN EXPLICIT POLICY ASSUMPTION IN ITS PLACE. That is this
-     module, and it is a DIFFERENT KIND OF THING from the mechanisms in
-     `bettor_venue_currency`. It does not measure anything. It records that a
-     named person, at a named time, accepted a named risk for a bounded scope.
+  * that nothing can be engineered. It does not. Other data paths, other
+    endpoints, a different subscription type, a vendor feed with its own
+    contract, or a predicate built on a quantity we have not yet identified are
+    all untested rather than excluded.
+  * that new venue documentation is the only possible future route. It is not.
+    Documentation is the route I can NAME; naming one route is not enumerating
+    them.
 
-WHY THIS IS NOT A WEAKENED EVIDENCE GATE, AND THE DISTINCTION IS THE WHOLE POINT.
+I wrote "nothing I can build unblocks today" and "the venue publishes no timing
+guarantee, so a credential does not unblock today". The first half of each was a
+statement about my current predicate presented as a statement about the world.
 
-A weakened gate would move `MAX_BOOK_STATE_AGE_S`, or add a token to
-`ESTABLISHING_MECHANISMS`, or quietly let a fast response stand in for a
-market-data age. None of that happens here. `evaluate` still returns
-`NOT_ESTABLISHED`; `admits()` still returns `False`; the currency module is
-untouched. What this adds is a SEPARATE, VISIBLE, SIGNED OVERRIDE that sits
-alongside the verdict and never replaces it:
+SO THIS MODULE IS A POLICY EXCEPTION, KEPT SEPARATE AND DISABLED. It is not
+listed as a mechanism, not a completed repair, and not the last word on market
+data. `market_data_design` holds the assessment; this holds one bounded exception
+the owner may or may not want, and the freshness work continues either way.
 
-    verdict:  BOOK_CURRENCY_NOT_ESTABLISHED     <- unchanged, always reported
-    basis:    OWNER_ACCEPTED_POLICY_ASSUMPTION  <- never "ESTABLISHED"
-    accepted_by / accepted_at / expires_at      <- who, when, until when
+AND THE LOCAL WINDOW IS NOT A BOUND ON UPSTREAM AGE -- WHICH I ALSO GOT WRONG.
 
-Every record of every decision taken under it carries that basis. Nothing in this
-system will ever say a book's currency was measured when it was assumed.
+I proposed tightening the window from 30 s to 5 s and described that as reducing
+"exposure to being wrong". It does not do that. `max_message_age_s` measures the
+gap between OUR RECEIPT of a message and OUR DECISION on it. Shortening it
+reduces the delay we add after receipt and bounds nothing at all about the age of
+the snapshot inside that message.
 
-AND IT IS OFF. `POLICY_ADMISSION_AVAILABLE` is False until an owner record exists
-AND the code constant below is turned on, which is a code change. Writing the
-record alone changes nothing. This module exists so that when the owner signs,
-the work is already done and reviewable -- not so that it takes effect quietly.
+    IF THE VENUE HANDS US A TEN-MINUTE-OLD BOOK, RECEIVING IT ONE SECOND AGO AND
+    DECIDING WITHIN FIVE SECONDS LEAVES IT TEN MINUTES OLD.
 
-WHAT THE OWNER IS ACCEPTING, IN PLAIN TERMS. That a full-replacement order-book
-message, received on a connection proven alive within the silence bound and not
-carried across a disconnect, is CURRENT ENOUGH to trade a bounded amount on --
-even though the venue states no guarantee to that effect, and even though the
-observed `transactTime` values on the markets we could read were old and their
-meaning is unresolved.
+That is the receipt-instant error I withdrew earlier in this repository, and I
+reintroduced it inside the very bounds meant to contain the risk. The window is
+kept because a processing delay is worth bounding on its own account, and it is
+now labelled for what it bounds. THE UPSTREAM AGE REMAINS ENTIRELY UNBOUNDED
+under this exception, and that is the whole of the risk being accepted.
 
-THE CONCRETE RISK THAT ACCEPTS. We buy at a displayed price that has already
-moved. The loss on any one order is bounded by the order's size; the loss across
-the pilot is bounded by the approved cap; and the failure is INVISIBLE in the
-sense that matters -- a stale book looks exactly like a fresh one, so this cannot
-be detected by watching. It is detected only by reconciling fills against the
-prices we expected, which is why the pilot's fill-versus-expectation comparison
-is a release condition and not a nice-to-have.
+WHAT THE OWNER WOULD BE ACCEPTING, THEREFORE. Not "a book at most five seconds
+old". A book of UNKNOWN AGE, with our own contribution to the delay bounded at
+five seconds. Those are very different propositions and the second is the true
+one.
+
+HOW THE RISK IS DETECTED. Not by watching -- a stale book is indistinguishable
+from a fresh one at decision time. Only by comparing fills against the prices we
+expected, afterwards, which is why that comparison is a release condition.
 """
 
 from __future__ import annotations
@@ -80,26 +77,48 @@ POLICY_ADMISSION_ENABLED = False
 #: text is what `accept()` requires to be echoed back, so a signature cannot be
 #: obtained against a summary.
 THE_ASSUMPTION = (
-    "I accept that the venue publishes no market-data timing guarantee, that "
-    "the meaning of its transactTime field is unresolved, and that no mechanism "
-    "in this system can establish how current an order book is. I accept that a "
-    "full-replacement order-book message received on a live, non-dropped "
-    "subscription may be treated as sufficiently current to trade on, as MY "
-    "POLICY DECISION and not as a measurement. I accept that a stale book is "
-    "indistinguishable from a fresh one at decision time, so the risk is "
+    "I accept that under the current evidence requirements this market-data path "
+    "does not qualify, that the meaning of the venue's transactTime field is "
+    "unresolved, and that THE AGE OF THE ORDER BOOK INSIDE ANY MESSAGE WE "
+    "RECEIVE IS ENTIRELY UNBOUNDED. I understand that the five-second bound in "
+    "this policy limits only the delay WE add between receiving a message and "
+    "acting on it, and bounds nothing whatever about how old the book was when "
+    "the venue sent it -- a ten-minute-old book received one second ago is still "
+    "ten minutes old. I accept that a full-replacement order-book message "
+    "received on a live, non-dropped subscription may be treated as tradeable, "
+    "as MY POLICY DECISION and not as a measurement. I accept that a stale book "
+    "is indistinguishable from a fresh one at decision time, so this risk is "
     "detected only afterwards by comparing fills against expected prices."
 )
+
+#: THE POLICY'S OWN VERSION. Bound into every acceptance, so a change to the
+#: terms invalidates signatures taken against the old ones rather than silently
+#: inheriting them.
+POLICY_VERSION = "ADMISSION_POLICY_V2_UPSTREAM_AGE_UNBOUNDED"
 
 #: THE BOUNDS THE ASSUMPTION IS OFFERED UNDER. Every one of these is enforced
 #: server-side and none of them is the caller's to widen.
 PROPOSED_BOUNDS = {
     "venue": "PMUS",
     "max_subscription_silence_s": 15.0,
-    "max_message_age_s": 5.0,
-    "why_5_not_30": (
-        "the 30 s bound was chosen for a MEASURED book-state age. Under an "
-        "assumption rather than a measurement the exposure to being wrong is "
-        "the whole risk, so the window is tightened, not kept"),
+    # RENAMED, BECAUSE THE OLD NAME LIED ABOUT WHAT IT MEASURES.
+    #
+    # It was `max_message_age_s`, which reads as "the book is at most this old".
+    # It is not. It is the gap between OUR RECEIPT of a message and OUR DECISION
+    # on it -- our own processing delay, and nothing else.
+    "max_our_processing_delay_s": 5.0,
+    "what_this_bounds": (
+        "the delay WE add after receiving a message. It bounds our contribution "
+        "and NOTHING about the age of the book inside the message"),
+    "what_this_does_NOT_bound": (
+        "the upstream age, which is ENTIRELY UNBOUNDED under this exception. A "
+        "ten-minute-old book received one second ago is still ten minutes old, "
+        "and tightening this number from 30 to 5 does not change that by one "
+        "second"),
+    "and_I_described_it_wrongly": (
+        "I called tightening it a reduction in 'exposure to being wrong'. That "
+        "was the receipt-instant error this repository already withdrew once, "
+        "reintroduced inside the bounds meant to contain the risk"),
     "max_single_order_usd": 25.0,
     "max_total_pilot_usd": 100.0,
     "max_concurrent_positions": 1,
@@ -117,7 +136,10 @@ R_REVOKED = "THE_OWNER_ACCEPTANCE_WAS_REVOKED"
 R_VENUE = "THE_ACCEPTANCE_IS_FOR_A_DIFFERENT_VENUE"
 R_NO_SUBSCRIPTION = "NO_LIVE_SUBSCRIPTION_FOR_THIS_MARKET"
 R_SILENT = "THE_SUBSCRIPTION_HAS_BEEN_SILENT_TOO_LONG"
-R_MESSAGE_TOO_OLD = "THE_LAST_FULL_BOOK_MESSAGE_IS_OLDER_THAN_THE_BOUND"
+R_OUR_DELAY_TOO_LONG = "OUR_OWN_PROCESSING_DELAY_SINCE_RECEIPT_IS_TOO_LONG"
+#: Kept so a stored refusal string still resolves. The old name said "the
+#: message is older than the bound", which described the book. It never did.
+R_MESSAGE_TOO_OLD = R_OUR_DELAY_TOO_LONG
 R_OVER_ORDER_CAP = "THE_ORDER_EXCEEDS_THE_POLICY_SINGLE_ORDER_CAP"
 R_OVER_PILOT_CAP = "THE_PILOT_TOTAL_EXCEEDS_THE_POLICY_CAP"
 
@@ -244,13 +266,17 @@ def admits(*, record, subscription, venue, proposed_cost_usd,
                          "%.0f s" % float(b["max_subscription_silence_s"])))
     last = subscription.get("last_update_at")
     age = None if last is None else at - float(last)
-    out["message_age_s"] = None if age is None else round(age, 3)
-    if age is None or age > float(b["max_message_age_s"]):
-        return dict(out, refusal=R_MESSAGE_TOO_OLD,
-                    why=("the last full-book message is %s against a %.0f s "
-                         "policy bound"
-                         % ("absent" if age is None else "%.1f s old" % age,
-                            float(b["max_message_age_s"]))))
+    # NAMED FOR WHAT IT IS: our own delay since receipt, not the book's age.
+    out["our_processing_delay_s"] = None if age is None else round(age, 3)
+    out["upstream_book_age_s"] = None
+    out["upstream_book_age_is"] = "UNBOUNDED_UNDER_THIS_EXCEPTION"
+    if age is None or age > float(b["max_our_processing_delay_s"]):
+        return dict(out, refusal=R_OUR_DELAY_TOO_LONG,
+                    why=("we received the last full-book message %s, against a "
+                         "%.0f s bound on OUR OWN processing delay. This says "
+                         "nothing about how old the book was when it arrived"
+                         % ("never" if age is None else "%.1f s ago" % age,
+                            float(b["max_our_processing_delay_s"]))))
     cost = float(proposed_cost_usd or 0.0)
     if cost > float(b["max_single_order_usd"]) + 1e-9:
         return dict(out, refusal=R_OVER_ORDER_CAP,

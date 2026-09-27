@@ -137,9 +137,17 @@ def test_the_verbatim_text_is_accepted_and_names_what_is_given_up():
     got = _accepted()
     assert got["ok"] is True
     a = got["assumption"]
-    assert "no market-data timing guarantee" in a
+    # THE CONCLUSION AT ITS REAL WIDTH: our predicate rejects this path. NOT
+    # "the venue has no route" and NOT "nothing can be engineered".
+    assert "under the current evidence requirements" in a
+    assert "does not qualify" in a
     assert "transactTime field is unresolved" in a
     assert "not as a measurement" in a
+    # AND THE UNBOUNDED UPSTREAM AGE, which is the whole of the risk and which
+    # the five-second window does not touch.
+    assert "ENTIRELY UNBOUNDED" in a
+    assert "limits only the delay WE add" in a
+    assert "ten-minute-old book received one second ago is still ten minutes" in a
     # AND THE UNDETECTABILITY, which is the part that is easy to leave out.
     assert "indistinguishable from a fresh one" in a
     assert "detected only afterwards" in a
@@ -183,23 +191,45 @@ def test_the_owner_may_tighten_and_never_widen():
     """Same rule the approved limits already use, so accepting with a LARGER
     number than proposed changes nothing."""
     loose = _accepted(bounds={"max_single_order_usd": 10_000.0,
-                              "max_message_age_s": 300.0})
+                              "max_our_processing_delay_s": 300.0})
     assert loose["bounds"]["max_single_order_usd"] == (
         AP.PROPOSED_BOUNDS["max_single_order_usd"])
-    assert loose["bounds"]["max_message_age_s"] == (
-        AP.PROPOSED_BOUNDS["max_message_age_s"])
+    assert loose["bounds"]["max_our_processing_delay_s"] == (
+        AP.PROPOSED_BOUNDS["max_our_processing_delay_s"])
     assert loose["tightened_by_the_owner"] == {}
     tight = _accepted(bounds={"max_single_order_usd": 5.0})
     assert tight["bounds"]["max_single_order_usd"] == 5.0
     assert tight["tightened_by_the_owner"] == {"max_single_order_usd": 5.0}
 
 
-def test_the_window_is_TIGHTER_than_the_measured_bound():
-    """Under an assumption rather than a measurement, exposure to being wrong is
-    the whole risk -- so the window is tightened, not kept."""
-    assert AP.PROPOSED_BOUNDS["max_message_age_s"] == 5.0
-    assert AP.PROPOSED_BOUNDS["max_message_age_s"] < VC.MAX_BOOK_STATE_AGE_S
-    assert "tightened, not kept" in AP.PROPOSED_BOUNDS["why_5_not_30"]
+def test_the_window_BOUNDS_OUR_DELAY_AND_NOT_THE_BOOKS_AGE():
+    """THE CORRECTION. I proposed tightening this window from 30 s to 5 s and
+    described it as reducing 'exposure to being wrong'. It does not. It measures
+    the gap between OUR RECEIPT of a message and OUR DECISION on it, so it bounds
+    our own contribution to the delay and NOTHING about the age of the snapshot
+    inside the message. The bound is kept -- a processing delay is worth bounding
+    on its own account -- and it is named for what it actually bounds."""
+    assert AP.PROPOSED_BOUNDS["max_our_processing_delay_s"] == 5.0
+    # The old name is GONE, so no caller can read it as a book age again.
+    assert "max_message_age_s" not in AP.PROPOSED_BOUNDS
+    assert "delay WE add after receiving" in AP.PROPOSED_BOUNDS["what_this_bounds"]
+    assert "NOTHING about the age of the book" in (
+        AP.PROPOSED_BOUNDS["what_this_bounds"])
+    # AND THE UPSTREAM AGE IS SAID TO BE UNBOUNDED, not merely left unmentioned.
+    nb = AP.PROPOSED_BOUNDS["what_this_does_NOT_bound"]
+    assert "ENTIRELY UNBOUNDED" in nb
+    assert "tightening this number from 30 to 5 does not change that" in nb
+    # The 30 s venue-currency bound is NOT the thing this is tighter than. It
+    # applies to a different quantity, so the comparison is not drawn.
+    assert VC.MAX_BOOK_STATE_AGE_S == 30.0
+
+
+def test_the_refusal_is_named_for_OUR_delay_with_the_old_name_kept_as_an_alias():
+    """Renaming a refusal silently would break readers of the old constant. The
+    new name is the truthful one; the old one remains as an alias to the SAME
+    string so nothing is now called a message-age refusal by mistake."""
+    assert AP.R_OUR_DELAY_TOO_LONG == AP.R_MESSAGE_TOO_OLD
+    assert "DELAY" in AP.R_OUR_DELAY_TOO_LONG
 
 
 @pytest.mark.parametrize("kw,expected", [

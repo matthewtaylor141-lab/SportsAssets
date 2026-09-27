@@ -269,22 +269,38 @@ gated and deployed.
 
 ## 8 · Realistic completion estimate and the next blocking dependency
 
-**Next blocking dependency: the M2 determination**, and it is a chain, not a
-task — gate the exact SHA → deploy API-only → run the V3 clock probe → read
-whether the book endpoint emits a validator.
+**The M2 determination has since RUN, and this section's two branches are both
+superseded.** It was read directly from a GitHub runner — see
+`research/evidence/VENUE_BOOK_PROTOCOL_2026-09-27.md`. The result was neither
+branch below:
 
-**If a validator is present:** currency becomes establishable, blocker 1 has an
-engineering route, and I estimate the remaining engineering at **2–4 working
-days** (M2 wiring, cross-lane aggregation, contract-identity checks, the
-provider-key proxy, fee implementation once the documentation is read).
+* a validator **is** present (`Last-Modified`), and the conditional GET returns
+  304 — so the *exchange* exists;
+* and the same read showed `last-modified` stamped **today** over a book that
+  cannot have moved since February, so **M2 is CONTRADICTED as a market-data
+  clock**, with evidence, rather than unavailable for want of a validator.
 
-**If no validator is present:** blocker 1 has **no engineering route on the
-current market-data path**. Neither M1 nor M2 can establish currency, and the
-only remaining options are a different venue interface that supplies sequencing,
-or an explicitly approved research admission policy — which would be a **policy
-decision with stated assumptions, not a measurement**, and I will not adopt one
-silently. In that case a funded pilot is **not reachable by engineering effort**
-and the estimate is not a number of days.
+**What the completed determination supports, at its real width:**
+
+> **Under the current evidence requirements, this market-data path does not
+> qualify.**
+
+**And the two things it does NOT support — both of which this section asserted:**
+
+| written below | why it overreaches |
+|---|---|
+| "blocker 1 has **no engineering route** on the current market-data path" | a predicate failing on one path does not establish that no predicate can succeed on any path. Other endpoints, another subscription type, a vendor feed with its own contract and a quantity we have not identified are **untested, not excluded**. |
+| "a funded pilot is **not reachable by engineering effort**" | that is a claim about the whole space of engineering, drawn from one negative test. It is withdrawn. |
+
+The options I can **name** are a venue timing contract, a different market-data
+interface, or an explicitly approved policy exception — which is a **policy
+decision with stated assumptions, not a measurement**, is kept `DISABLED` in
+`bettor_admission_policy`, and will not be adopted silently. **Naming three
+options is not enumerating them**, so no "only remaining options" claim is made
+here. The estimate for the remaining *identified* engineering (cross-lane
+aggregation, contract-identity checks, the provider-key proxy, fee integration)
+stands at **2–4 working days**; the market-data requirement is not in that number
+and has no schedule.
 
 **Capital readiness today: NO-GO.** Not because of missing approval — because
 blocker 1 is unresolved, blocker 7 has not run, and blocker 6 has never touched a

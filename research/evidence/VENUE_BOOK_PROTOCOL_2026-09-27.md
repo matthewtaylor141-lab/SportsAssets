@@ -228,22 +228,58 @@ book across a drop. It says nothing about how current the replacement we then
 receive is — and that was the fifth candidate that nearly became a freshness
 certificate, after transport latency, our receipt instant and the 304.
 
-### The single blocking item
+### The blocking item, stated at its real width
 
-**The venue publishes no timing guarantee for market data.** No as-of instant, no
-latency bound, no staleness contract; zero matching sentences. Everything that
-was ours to build is built; the one gap left is the one no engineering on our side
-can fill.
+**The observation:** the venue publishes no timing guarantee for market data on
+the pages read. No as-of instant, no latency bound, no staleness contract; zero
+matching sentences.
 
-**So four unmet preconditions became one — and the distance to a trade has not
-shortened.** That is a clearer position, not a nearer one.
+**The conclusion that follows:**
+
+> **Under the current evidence requirements, this market-data path does not
+> qualify.**
+
+That is a fact about our admission predicate applied to this path. It is what the
+test in `market_data_design` demonstrates and it is all of what it demonstrates.
+
+**The two conclusions that do NOT follow, and I asserted both:**
+
+| I wrote | why it overreaches |
+|---|---|
+| "the one gap left is the one no engineering on our side can fill" | **untested, not excluded.** Other endpoints, another subscription type, a vendor feed carrying its own contract, or a predicate over a quantity we have not yet identified are all unexamined. I tested one predicate against one path. |
+| "the venue has no engineering route" / "new venue documentation is the only future route" | documentation is the route I can **name**. Naming one route is not enumerating them, and the absence of a sentence on a page is not the absence of a mechanism in the world. |
+
+**Four unmet preconditions became one, and the distance to a trade has not
+shortened.** That is a clearer position, not a nearer one — and "clearer" does
+not extend to a claim about what is buildable.
 
 **And substituting an observable for it is the mistake to refuse.** Four
 predicates were proposed, found unsupported and replaced; a fifth was queued. All
 five are recorded in `backend/sportsassets/market_data_design.py` with why each
 failed, so a sixth is recognisable.
 
-**Until the venue documents it the lane's verdict stays `NOT_ESTABLISHED`, and
+**Until the requirement is met the lane's verdict stays `NOT_ESTABLISHED`, and
 that is not a claim that any book is stale.** What has changed is that *"our
 current M1 predicate cannot qualify this feed"* is the accurate statement, and
 *"the venue has no engineering route"* — which I wrote — is not.
+
+### And the proposed five-second window is NOT a freshness repair
+
+`bettor_admission_policy` proposes bounding the gap between our receipt of a
+message and our decision on it at 5 s, down from 30 s. I described that as
+reducing "exposure to being wrong". **It does not do that.**
+
+| quantity | what 5 s does to it |
+|---|---|
+| the delay **we** add after receipt | bounds it at 5 s |
+| the age of the **book inside the message** | **nothing at all** |
+
+> **A ten-minute-old book received one second ago and decided on within five
+> seconds is still a ten-minute-old book.**
+
+That is the receipt-instant predicate this document already records as withdrawn,
+reintroduced inside the bounds meant to contain the risk. The window is kept —
+a processing delay is worth bounding on its own account — and it is renamed
+`max_our_processing_delay_s` so no reader can take it for a book age.
+**The upstream age remains entirely unbounded under that exception, and that is
+the whole of the risk it asks the owner to accept.**

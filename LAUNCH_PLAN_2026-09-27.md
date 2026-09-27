@@ -233,9 +233,22 @@ changes nothing**.
 | pilot total | **$100** | policy bound (§2) |
 | assumption expiry | **24 h** | §2 — lapses and must be re-signed |
 
-**The §2 policy bounds tighten the freshness window from 30 s to 5 s.** Under an
-*assumption* rather than a measurement, exposure to being wrong is the whole
-risk, so the window is tightened, not kept.
+**The §2 policy bounds tighten OUR OWN PROCESSING WINDOW from 30 s to 5 s, and
+that is not a freshness bound — corrected.** I wrote that tightening it reduced
+"exposure to being wrong". It does not.
+
+| quantity | what the 5 s does to it |
+|---|---|
+| the delay **we** add between receiving a message and acting | bounds it at 5 s |
+| the age of the **book inside that message** | **nothing whatever** |
+
+> A ten-minute-old book received one second ago and decided on within five seconds
+> is still a ten-minute-old book.
+
+The bound is kept because a processing delay is worth bounding on its own account,
+and it is renamed `max_our_processing_delay_s` so no reader takes it for a book
+age. **Under this exception the upstream age is entirely unbounded, and that —
+not a five-second window — is what the §2 signature accepts.**
 
 ### Emergency controls
 

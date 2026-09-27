@@ -2802,6 +2802,44 @@ async def _venue_read_probe(EXT, *, limit: int = 3) -> dict:
     return probe
 
 
+@app.get("/api/command/rn1x/exception-assessment",
+         dependencies=[Depends(require_command)])
+async def command_rn1x_exception_assessment(
+        response: Response, hours: int = 24,
+        account_id: str | None = None) -> dict:
+    """WOULD THE PROPOSED TIMING EXCEPTION UNLOCK ANYTHING? READ-ONLY.
+
+    Reads the persisted per-candidate refusal sets and the independently-read
+    state of the requirements the shadow lane never reaches, and reports every
+    requirement SEPARATELY: settlement compatibility, qualified probability,
+    source calibration, contract identity, executable net edge, account
+    readiness and each risk rail.
+
+    THIS ENDPOINT ENABLES NOTHING. It is a GET, it issues SELECTs only, it never
+    assigns `POLICY_ADMISSION_ENABLED`, it submits no order, and it writes no
+    hypothetical admission to `external_valuations` or anywhere else. The
+    counterfactual it returns is a COUNT in a response body, not a decision.
+    """
+    from .. import candidate_assessment as CAS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    win = max(1, min(720, int(hours))) * 3600.0
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        rows = await CAS.census_rows(conn, window_s=win)
+        state = await CAS.unreached_state_from_db(conn, account_id=account_id)
+    out = CAS.assess(rows, source="external_valuations (production)",
+                     window_description="%d h" % (win / 3600.0),
+                     external_state=state)
+    out["waiver_scope_proof"] = CAS.proves_it_waives_nothing_else()
+    out["and_this_endpoint_is_read_only"] = {
+        "method": "GET", "writes": 0, "orders_submitted": 0,
+        "policy_enabled_here": False,
+    }
+    return out
+
+
 @app.get("/api/command/rn1x/external/census",
          dependencies=[Depends(require_command)])
 async def command_rn1x_external_census(response: Response,

@@ -109,11 +109,46 @@ def test_the_two_schedules_differ_on_the_taker_theta():
 
 
 def test_for_date_selects_the_schedule_in_force_on_that_day():
+    """THE BOUNDARY IS THE PUBLISHED ONE, AND IT IS NOT RETYPED HERE.
+
+    These assertions previously pinned 2026-09-17, which was a date I had
+    invented; the venue's published policy is effective 2026-09-25T04:00:00Z --
+    read and recorded in `research/evidence/VENUE_FEE_POLICY_2026-09-27.md`. The
+    boundary is taken from the schedule's own `effective_from` so this test
+    cannot drift away from the published evidence again, and the dates either
+    side are derived from it rather than written out.
+    """
+    from datetime import date, timedelta
+    boundary = date.fromisoformat(S09.effective_from)
+    assert boundary.isoformat() == "2026-09-25", (
+        "the published effective date changed; update the evidence file, not "
+        "this expectation")
+    day_before = (boundary - timedelta(days=1)).isoformat()
+
     assert fs.for_date("2026-07-01") is S07
     assert fs.for_date("2026-08-31") is S07
-    assert fs.for_date("2026-09-16") is S07
-    assert fs.for_date("2026-09-17") is S09      # inclusive of the day
+    assert fs.for_date(day_before) is S07
+    assert fs.for_date(boundary.isoformat()) is S09   # inclusive of the day
     assert fs.for_date("2027-01-01") is S09
+
+
+def test_the_old_invented_date_now_resolves_to_the_JULY_schedule():
+    """THE REGRESSION THIS CORRECTION CREATES, ASSERTED DELIBERATELY.
+
+    A fill on 2026-09-17 sits BEFORE the published boundary, so it is charged
+    the July theta. That is the correction working: the eight days between the
+    date I invented and the date the venue published were previously billed at
+    0.0695 and are billed at 0.06.
+    """
+    assert fs.for_date("2026-09-17") is S07
+    assert fs.for_date("2026-09-17").theta_taker == D("0.06")
+
+
+def test_the_old_constant_name_is_an_ALIAS_and_not_a_second_schedule():
+    """Readers of `PMUS_2026_09_17` must get the corrected schedule, not a stale
+    copy of the wrong one. Same object, so there is no second theta to drift."""
+    assert fs.PMUS_2026_09_17 is fs.PMUS_2026_09_25
+    assert fs.PMUS_2026_09_25.effective_from == "2026-09-25"
 
 
 def test_a_fill_before_the_first_published_schedule_is_refused():
@@ -151,12 +186,21 @@ def test_a_long_but_malformed_date_is_refused_not_ranked():
 
 
 def test_an_august_fill_is_charged_the_july_theta():
-    """The concrete consequence of the date being part of the schedule."""
+    """The concrete consequence of the date being part of the schedule.
+
+    The later date is taken from the schedule's published `effective_from`. It
+    used to read 2026-09-20 -- after the date I invented and BEFORE the one the
+    venue published, so it silently asserted the new theta on a day the old one
+    governs.
+    """
     aug = fs.for_date("2026-08-15").taker_fee(1000, D("0.5"))
-    sep = fs.for_date("2026-09-20").taker_fee(1000, D("0.5"))
+    sep = fs.for_date(S09.effective_from).taker_fee(1000, D("0.5"))
     assert aug == D("15.00")        # 0.06 x 1000 x 0.25
     assert sep == D("17.38")        # 0.0695 x 1000 x 0.25 = 17.375
     assert sep > aug
+    # AND THE DAY THE OLD TEST USED IS NOW THE JULY THETA, which is the
+    # behaviour change spelled out rather than hidden by moving the date.
+    assert fs.for_date("2026-09-20").taker_fee(1000, D("0.5")) == D("15.00")
 
 
 # ── rounding ─────────────────────────────────────────────────────────
