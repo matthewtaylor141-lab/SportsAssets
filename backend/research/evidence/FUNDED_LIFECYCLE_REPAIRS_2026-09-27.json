@@ -1,0 +1,167 @@
+{
+  "record": "FUNDED_LIFECYCLE_REPAIRS",
+  "at": "2026-09-27",
+  "reviewed_commit": "8b04d41",
+  "release_commit": "see GATE_IDENTITY_RECORD.json for the gated SHA",
+  "what_this_is": "the four defects the review of 8b04d41 found in the funded lane, what each one actually broke, what closes it, and the counterexample that proves it. Plus three defects my own tests and the order-route census found while closing them.",
+
+  "defects_from_the_review": [
+    {
+      "n": 1,
+      "as_reported": "a filled order is being confused with a closed position",
+      "what_it_broke": [
+        "FILLED is absent from the outstanding-order set -- correctly, a filled order is finished -- and every read treated that one predicate as 'where the exposure is'",
+        "the one-position index released its slot the instant an entry filled",
+        "the holding disappeared from per-event and per-market collateral",
+        "MAX_CORRELATED_EXPOSURE counted only outstanding orders",
+        "all three at the point of MAXIMUM exposure, because the contracts are then actually owned"
+      ],
+      "closed_by": [
+        "migration 126: bettor_funded_order_is_outstanding(state) and bettor_funded_holds_inventory(residual, closed) are separate predicates; bettor_funded_position_is_open is either",
+        "the unique index bettor_funded_one_open_position is over the OPEN-POSITION subset and applies to kind='ENTRY' alone -- an exit reduces exposure and must never be refused by it",
+        "residual_qty is recomputed from the fill ledger on every write, across the whole position (the entry plus every exit naming it as parent), and never incremented",
+        "closed_at requires one of four enumerated evidenced reasons (CHECK constraint), so nothing leaves exposure by inference",
+        "exposure() reserves an outstanding order's whole clip and a terminal order's residual pro rata"
+      ],
+      "counterexamples_proved": [
+        "a FILLED entry holding 10 contracts reads outstanding=false, holds_inventory=true, position_open=true at the database",
+        "a second ENTRY on the same event is refused with ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE and no venue call",
+        "the rails measure the holding: per-event, per-market and correlated all read $12.40 for a second $6.20 order against $6.20 held",
+        "an invented closure reason raises; an evidenced one releases the slot",
+        "the concurrency case: the second caller's rail check passes while the first order is resting, the first order FILLS in the window, and the second caller's insert is still refused by the database"
+      ]
+    },
+    {
+      "n": 2,
+      "as_reported": "recovery can adopt somebody else's order -- and misses the real adapter's executions",
+      "what_it_broke": [
+        "recover() took candidates[0] off a match on us_market_slug alone, so a manual desk order, a copy-lane order or another strategy's order on that market became ours -- with its fills, its cash and its place in the one-position index",
+        "recovery read st.get('fills'); pmus.order_status() has never returned that key, it returns 'executions'. So the production adapter could report a fill during downtime and recovery would ingest none of it"
+      ],
+      "closed_by": [
+        "correlate_venue_order: slug AND intent AND exact limit AND exact clip must all agree; exactly one survivor; an order another intent already claims is not a candidate; and a candidate created before our request left cannot be ours (120 s clock tolerance). Anything short of that stays UNRESOLVED with exposure preserved",
+        "executions_of: ONE reader for both adapter shapes -- the submit answer's raw.response.executions (lastPx/lastShares) and order_status's parsed executions (last_px/last_shares/commission_usd). The connector delegates to it, so three readers became one",
+        "a non-fill execution is reported in 'skipped' rather than dropped, and the filter is a denylist of non-fill types, because pmus's own reader says shares that executed ARE the fill",
+        "filled shares with no executions list is FILLED_SHARES_WITH_NO_EXECUTIONS -- 'the venue sent no list' is not 'the venue sent an empty one'",
+        "an adopted order is read back in the same pass, so adoption cannot leave an ACKNOWLEDGED row with no fills against a position that filled"
+      ],
+      "counterexamples_proved": [
+        "same market only -> refused",
+        "same market and side, different clip -> refused on quantity",
+        "same everything but the price -> refused on limit_price",
+        "the other side of our own market -> refused on order_intent",
+        "two orders both matching -> AMBIGUOUS, neither adopted",
+        "a match another intent already owns -> not a candidate",
+        "a match created before our send -> CANDIDATE_PREDATES_US",
+        "through the real pmus.open_orders with transport substituted: an unrelated same-market order is reported as an orphan and never adopted",
+        "through the real pmus.order_status: a fill during downtime is read from 'executions', written once, keyed on the venue's own execution id, and idempotent on redelivery",
+        "every timestamp shape the database and the venue can hand the clock check (datetime, naive datetime, ISO, epoch, garbage) is pinned, because a silent None there would quietly stop the check"
+      ]
+    },
+    {
+      "n": 3,
+      "as_reported": "funded management and P&L are not complete",
+      "what_it_broke": [
+        "pnl() hardcoded realised_pnl_usd = 0.0 and check_rails() hardcoded MAX_DRAWDOWN = 0.0. 'Nothing has settled yet' described the day; a constant cannot become nonzero, so the first settlement would still have read zero in the field a loss stop reads",
+        "the scheduled path ended at entry-fill ingestion: no exit, no settlement, no recurring management"
+      ],
+      "closed_by": [
+        "bettor_funded_economics: one signed row per cash movement (ENTRY_COST, EXIT_PROCEEDS, FEE, SETTLEMENT, FEE_ADJUSTMENT) with a provisional flag, idempotent on event_id",
+        "realised P&L is the SUM over closed positions' events; drawdown is the worst peak-to-trough of the realised equity curve in closure order",
+        "unrealised P&L is reported UNMEASURED by name, not zero, because marking funded inventory needs a mark this lane has no source for",
+        "bettor_funded_management: exits through the same pmus.submit_fok(..., sell=True) and _exit_intent derivation the desk uses, cancels, and settlement from bettor_venue_settlement_probe",
+        "only REPORTED_SETTLEMENT and EXPLICIT_VOID close a funded position. CONVERGED_PRICE_INFERENCE is our reading of prices at 1 and 0, not a payout the venue reported",
+        "the loss stop is MAX_DRAWDOWN in the owner's effective limit set, enforced by the same check_rails every entry passes -- not a second mechanism that could disagree",
+        "FUNDED_EXIT_SUBMISSION_ENABLED is SEPARATE from the entry switch, so stopping new exposure never strands inventory; the reconciliation and settlement reads are not gated at all",
+        "the scheduled worker calls _funded_service every cycle, whether or not a candidate was admitted"
+      ],
+      "counterexamples_proved": [
+        "entry 10 @ 0.62 -> partial exit 4 @ 0.30 -> RESTART on a fresh connection with state read from the database alone -> final exit 6 @ 0.30 -> closed EXITED_IN_THE_MARKET with residual 0",
+        "the adapter was asked for ORDER_INTENT_SELL_LONG, derived by pmus from the BUY intent we opened with",
+        "realised P&L is the measured loss; max_drawdown equals it; a tightened MAX_DRAWDOWN rail then reads EXCEEDED and refuses the next entry",
+        "with the entry switch off, manage() still runs, opens nothing, and reports the measured drawdown",
+        "a settlement reported twice does not book the payout twice",
+        "an exit is reached while the position rule refuses another entry; it is not checked against the entry rails; it refuses without a supplied price; and it refuses a quantity larger than the residual",
+        "structurally, on the parsed module: the servicing lane has exactly two order-capable calls, submit_fok with the literal True for sell and cancel_order, and manage() calls neither"
+      ]
+    },
+    {
+      "n": 4,
+      "as_reported": "estimated fees are being booked as actual fees",
+      "what_it_broke": [
+        "ingest_fills() always called expected_fee() and stored the result in fee_usd, and cash, P&L and the reconciliation all read that as what the venue charged"
+      ],
+      "closed_by": [
+        "expected_fee_usd and observed_fee_usd are separate columns with fee_state PROVISIONAL / RECONCILED / DISAGREES",
+        "the observed charge comes from the venue's own commission_usd on the execution record; None means the venue stated none, which is NOT zero",
+        "fee_usd is the number the accounting uses -- the observed charge when there is one, the expectation otherwise -- and fee_state says which",
+        "a PROVISIONAL fee inside a closed position makes the realised total explicitly incomplete rather than quietly exact",
+        "the comparison goes through the deployed calibration_fees.reconcile, in Decimal"
+      ],
+      "counterexamples_proved": [
+        "no stated commission -> PROVISIONAL, booked = expected, and the reason says the cash is not final",
+        "a matching commission -> RECONCILED",
+        "a commission $0.37 above the schedule -> DISAGREES; booked is the venue's number; fee_variance_usd is 0.37; cash_out_the_door uses the charge and not the estimate; the discrepancy is a row in the command centre",
+        "a closed position carrying a provisional fee reports realised_is_provisional true with a named note"
+      ]
+    }
+  ],
+
+  "defects_found_while_fixing_those": [
+    {
+      "what": "record_intent matched only the old index name",
+      "how_found": "the existing concurrency test in test_the_funded_book_is_durable.py",
+      "why_it_mattered": "migration 126 renamed the index, so a second concurrent submission raised UniqueViolationError out of the connector instead of returning ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE. The database still refused it -- the guarantee held -- but the caller saw an unhandled exception"
+    },
+    {
+      "what": "reconcile_fee handed calibration_fees.reconcile a float",
+      "how_found": "the new fee counterexample",
+      "why_it_mattered": "the deployed module keeps money in Decimal and subtracts the observed charge directly, so a float raised. The module is right to keep money out of binary floating point; the caller had to meet it there, via str() and never Decimal(float)"
+    },
+    {
+      "what": "the book's close_position shared a name with pmus.close_position, which PLACES AN ORDER",
+      "how_found": "test_order_route_census.py flagged bettor_funded_book as order-capable",
+      "why_it_mattered": "the census watches for two submitting entry points BY NAME. A census that cannot tell a venue submission from a bookkeeping UPDATE will one day miss a real one. Renamed mark_position_closed"
+    },
+    {
+      "what": "_recompute_residual summed only the intent's own fills",
+      "how_found": "the entry -> partial exit lifecycle test",
+      "why_it_mattered": "an exit is its own intent and its fills are written against ITS id, so the residual never moved off the full clip and the position could never close"
+    },
+    {
+      "what": "ingest_fills marked every exit FILLED on ingestion",
+      "how_found": "review of my own diff",
+      "why_it_mattered": "an exit that filled nothing read as complete, so inventory it was supposed to reduce looked serviced. Now the state follows the quantity the venue actually executed in that order's own direction"
+    },
+    {
+      "what": "migration 127: an exit commits no collateral",
+      "how_found": "the exit path could not persist its intent at all",
+      "why_it_mattered": "collateral_usd > 0 is exactly right for an ENTRY -- an order reserving nothing is one no rail measured -- and it refused the honest zero on an EXIT. The check is now kind-aware rather than relaxed"
+    }
+  ],
+
+  "what_remains_disabled": {
+    "entry": "bettor_funded_execution.FUNDED_SUBMISSION_ENABLED = False",
+    "servicing": "bettor_funded_management.FUNDED_EXIT_SUBMISSION_ENABLED = False",
+    "global_real_order": "bettor_entry_execution.REAL_ORDER_SUBMISSION_ENABLED = False",
+    "venue_boundary": "execution_gate.authorize('submit') inside pmus.submit_fok, unchanged, denies by raising",
+    "credentials": "PMUS_KEY_ID / PMUS_SECRET_KEY absent in this deployment",
+    "deliberately_available": "settlement and status reconciliation, because they submit nothing and a book that cannot be reconciled while the lane is paused is worse than one that cannot trade",
+    "no_order_was_sent": true
+  },
+
+  "not_disablement_and_not_claimed_as_such": [
+    "there is no eligible funded account",
+    "there is no owner-approved limit set",
+    "acct_fc2d773a2afa4851 stays paused; its accounting is not resolved",
+    "no funded mark source exists, so an exit price is an operator input",
+    "these are owner inputs and market evidence, not switches"
+  ],
+
+  "still_open_and_unchanged_by_this_work": [
+    "the SHADOW lane's MAX_EVENT_EXPOSURE blindness: OPEN_BOOK_SQL selects no event key. The funded lane carries a canonical event key on every intent and does not depend on it",
+    "two clock-sensitive test defects that move the gate's failure COUNT, recorded in CLOCK_SENSITIVE_TEST_DEFECTS.json",
+    "source calibration of the de-vigged Pinnacle probability: NOT ESTABLISHED. It is the source's number and is not relabelled",
+    "venue book freshness basis and settlement compatibility: both UNRESOLVED and both still refuse entries"
+  ]
+}

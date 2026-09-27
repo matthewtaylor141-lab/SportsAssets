@@ -111,6 +111,22 @@ def test_every_submitting_call_site_is_accounted_for():
         # It is the only route here that cannot reach the venue at all in the
         # shipped build.
         "sportsassets/bettor_funded_execution.py",
+        # ── ADDED 2026-09-27: THE FUNDED SERVICING LANE ────────────────────
+        #
+        # `bettor_funded_management` sends two things and only two: an EXIT
+        # (`pmus.submit_fok(..., sell=True)`) and a CANCEL. Both REDUCE
+        # exposure and neither can open a position -- `submit_exit` refuses
+        # anything larger than the residual inventory the book records, and it
+        # never invents an exit price.
+        #
+        # WHY IT IS A SEPARATE ROUTE FROM THE ENTRY CONNECTOR, which is the
+        # decision this census exists to make explicit: it has its OWN switch,
+        # `FUNDED_EXIT_SUBMISSION_ENABLED`, because stopping new exposure must
+        # never strand inventory. With the entry switch off and this one on the
+        # lane can only wind down. Both are False in the shipped build, and the
+        # settlement and status reconciliation beside them submit nothing at
+        # all, so they are reads and are never gated.
+        "sportsassets/bettor_funded_management.py",
     }
     assert set(modules) == expected, (
         "order-capable modules changed.\n  now: %s\n  was: %s"

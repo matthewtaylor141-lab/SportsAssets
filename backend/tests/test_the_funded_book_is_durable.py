@@ -149,6 +149,8 @@ async def _seed(conn, *, limits=None, expires_in=3600.0):
 
 
 async def _clean(conn):
+    # ECONOMICS FIRST: it carries a foreign key to the intents.
+    await conn.execute("DELETE FROM bettor_funded_economics")
     await conn.execute("DELETE FROM bettor_funded_fills")
     await conn.execute("DELETE FROM bettor_funded_intents")
     await conn.execute("DELETE FROM bettor_desk_accounts WHERE account_id=$1",
@@ -490,9 +492,17 @@ async def test_a_lost_acknowledgement_leaves_an_unresolved_intent_never_a_resend
 
 @pg
 @pytest.mark.asyncio
-async def test_recovery_adopts_what_the_venue_holds_and_never_resubmits():
+async def test_recovery_adopts_only_on_an_established_correlation():
     """COUNTEREXAMPLE 5b: RESTART. A fresh process finds the committed intent
-    and reconciles it against the venue. `recover` has no send path at all."""
+    and reconciles it against the venue. `recover` has no send path at all.
+
+    AND THE ADOPTION RULE CHANGED, because the old one was wrong. This test
+    used to hand recovery a venue order carrying nothing but a market slug and
+    assert that it was adopted. That is the defect: market coincidence is not
+    ownership, and a manual or another strategy's order on the same market
+    would have become ours. The same skeletal order is now REFUSED, and an
+    order agreeing with every term of the request we sent is adopted.
+    """
     asyncpg = pytest.importorskip("asyncpg")
     import inspect
     conn = await asyncpg.connect(DSN)
@@ -506,21 +516,50 @@ async def test_recovery_adopts_what_the_venue_holds_and_never_resubmits():
             quantity=15, collateral_usd=9.3, effective_digest="d")
         await FB.mark_send_attempted(conn, "fpi-lost")
 
-        class _Venue:
+        class _SlugOnly:
+            """What the old rule adopted, and the new rule must not."""
+
             def open_orders(self):
                 return [{"order_id": "venue-ord-9", "us_market_slug": SLUG}]
 
             def order_status(self, oid):
-                return {"status": "open", "fills": []}
+                return {"state": "open", "executions": []}
+
+        got = await FB.recover(conn, _SlugOnly(), account_id=ACCT, venue=VENUE)
+        assert got["ok"] is True
+        assert got["resubmitted_anything"] is False
+        assert got["reconciled"] == [], got
+        assert got["unresolved"][0]["exposure"] == "PRESERVED"
+        assert got["unresolved"][0]["correlation"]["refusal"] == \
+            FB.R_NO_CORRELATED_ORDER
+        assert await conn.fetchval(
+            "SELECT venue_order_id FROM bettor_funded_intents "
+            " WHERE intent_id='fpi-lost'") is None
+
+        class _Venue:
+            """Every term of the request we sent, present in the order."""
+
+            def open_orders(self):
+                return [{"order_id": "venue-ord-9", "us_market_slug": SLUG,
+                         "intent": FX.LONG, "price": {"value": "0.62"},
+                         "quantity": 15, "filled_shares": 0,
+                         "state": "new"}]
+
+            def order_status(self, oid):
+                return {"state": "open", "executions": [],
+                        "filled_shares": 0.0}
 
         got = await FB.recover(conn, _Venue(), account_id=ACCT, venue=VENUE)
         assert got["ok"] is True
         assert got["resubmitted_anything"] is False
         assert got["reconciled"][0]["case"] == \
-            "ADOPTED_AN_ORDER_THE_VENUE_HOLDS"
+            "ADOPTED_ON_AN_ESTABLISHED_CORRELATION"
         row = await conn.fetchrow(
             "SELECT state, venue_order_id FROM bettor_funded_intents")
         assert row["venue_order_id"] == "venue-ord-9"
+        # ACKNOWLEDGED, and then read back in the same pass: adopting an id
+        # without asking about the order would leave a row with no fills
+        # against a position that may have filled during the downtime.
         assert row["state"] == "ACKNOWLEDGED"
         # STRUCTURAL: recovery cannot submit
         src = inspect.getsource(FB.recover)
@@ -614,6 +653,21 @@ async def test_repeated_delivery_of_a_fill_cannot_double_the_accounting():
         assert cash1 == pytest.approx(9.3)
         assert fee1 > 0
 
+        # A FILLED ENTRY STILL HOLDS THE ONE-POSITION SLOT, and it should:
+        # 15 contracts are owned. Opening the next intent therefore needs an
+        # EVIDENCED closure first -- this test is about fill identity, not
+        # about the position rule, so the position is closed explicitly and
+        # the rule itself is proved in
+        # tests/test_a_filled_order_is_not_a_closed_position.py.
+        blocked = await FB.record_intent(
+            conn, intent_id="fpi-blocked", account_id=ACCT, venue=VENUE,
+            venue_class=FA.VENUE_FUNDED, us_market_slug="aec-second",
+            event_key="ev-2", order_intent=FX.LONG, limit_price=0.50,
+            quantity=4, collateral_usd=2.0, effective_digest="d")
+        assert blocked["ok"] is False
+        assert blocked["refusal"] == FB.R_ANOTHER_INTENT_IS_LIVE
+        await FB.mark_position_closed(conn, "fpi-fills", "EXITED_IN_THE_MARKET")
+
         # TWO DISTINCT UNNAMED EXECUTIONS ARE BOTH UNRESOLVED
         await FB.record_intent(
             conn, intent_id="fpi-unnamed2", account_id=ACCT, venue=VENUE,
@@ -655,7 +709,17 @@ async def test_the_funded_pnl_is_never_assembled_from_a_shadow_row():
         got = await FB.pnl(conn, account_id=ACCT, venue=VENUE)
         assert got["fills"] == 0
         assert got["cost_basis_usd"] == pytest.approx(0.0)
-        assert "empty set" in got["realised_basis"]
+        # REALISED P&L IS A SUM OVER RECORDED EVENTS, not a constant with a
+        # note attached. Over no closed position that sum is 0.0 -- and the
+        # basis says what was summed, so the first settlement changes the
+        # number instead of leaving a hardcoded zero in the field a loss stop
+        # reads.
+        assert got["realised_pnl_usd"] == pytest.approx(0.0)
+        assert got["closed_positions"] == 0
+        assert "realised equity curve" in got["realised_basis"]
+        # AND UNREALISED IS NAMED UNMEASURED RATHER THAN ZEROED.
+        assert got["unrealised_pnl_usd"] is None
+        assert "UNMEASURED" in got["unrealised_basis"]
 
         await FB.record_intent(
             conn, intent_id="fpi-pnl", account_id=ACCT, venue=VENUE,

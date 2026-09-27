@@ -108,13 +108,49 @@ BEYOND_READINESS = (
     {"id": "durable_funded_book",
      "category": ENGINEERING,
      "state": "BUILT_AND_TESTED",
-     "what": ("`bettor_funded_book` on migration 125: intent committed "
+     "what": ("`bettor_funded_book` on migrations 125-127: intent committed "
               "BEFORE the request leaves, venue order and fill identities "
               "retained, fills idempotent on the venue's own id, recovery "
               "that reconciles and cannot resubmit, and exposure preserved "
-              "when the venue cannot establish an outcome"),
+              "when the venue cannot establish an outcome. Migration 126 "
+              "separated ORDER TERMINALITY from INVENTORY CLOSURE, so a "
+              "FILLED entry keeps its holding in every rail until an "
+              "evidenced exit or an authoritative settlement removes it; "
+              "expected and observed fees are separate columns with a state; "
+              "and realised P&L and drawdown are sums over "
+              "`bettor_funded_economics` rather than constants"),
      "remaining": ("no funded fill exists yet, so the accounting is exercised "
                    "against substituted transport only")},
+    {"id": "funded_servicing_and_the_loss_stop",
+     "category": ENGINEERING,
+     "state": "BUILT_AND_TESTED_DISABLED",
+     "what": ("`bettor_funded_management` services what the lane holds: "
+              "exits through the same `pmus.submit_fok(..., sell=True)` the "
+              "desk uses, cancels, settlement from "
+              "`bettor_venue_settlement_probe` (only REPORTED and VOID are "
+              "authoritative -- a converged price inference is not), and one "
+              "recurring pass the scheduled worker runs every cycle. The loss "
+              "stop is MAX_DRAWDOWN in the owner\'s effective limit set, "
+              "measured over the economics ledger and enforced by the same "
+              "`check_rails` every entry passes"),
+     "remaining": ("`FUNDED_EXIT_SUBMISSION_ENABLED` is False, SEPARATELY "
+                   "from the entry switch, so stopping new exposure can never "
+                   "strand inventory. The reconciliation and settlement reads "
+                   "are not gated at all, because a book that cannot be "
+                   "reconciled while the lane is paused is worse than one "
+                   "that cannot trade. And with no closed funded position the "
+                   "measured drawdown is a sum over an empty set -- the "
+                   "measurement is real, the threshold is an owner input")},
+    {"id": "funded_exit_price_source",
+     "category": MARKET_EVIDENCE,
+     "state": "NOT_ESTABLISHED",
+     "what": ("an exit needs a limit, and this lane has no funded MARK it "
+              "would stand behind. `submit_exit` refuses without a supplied "
+              "price and invents none; `pnl()` reports unrealised P&L as "
+              "UNMEASURED by name rather than as zero"),
+     "remaining": ("until a mark source is established, an exit is an "
+                   "operator decision with an operator price. Inventing one "
+                   "would manufacture the very number the exit measures")},
     {"id": "venue_balance_read",
      "category": ENGINEERING,
      "state": "BUILT",
@@ -168,9 +204,15 @@ BEYOND_READINESS = (
     {"id": "one_position_at_a_time",
      "category": ENGINEERING,
      "state": "ENFORCED_BY_THE_DATABASE",
-     "what": ("a UNIQUE index over the live-intent subset "
-              "(`bettor_funded_one_live_intent`) makes a second concurrent "
-              "submission fail at the database, whatever the interleaving"),
+     "what": ("a UNIQUE index over the OPEN-POSITION subset "
+              "(`bettor_funded_one_open_position`, migration 126) makes a "
+              "second concurrent submission fail at the database, whatever "
+              "the interleaving -- including the case where the first order "
+              "FILLS between the second caller\'s rail check and its insert. "
+              "Its predecessor was over the OUTSTANDING-ORDER subset and so "
+              "released the slot at the moment a position was actually owned; "
+              "it applies to ENTRY alone, because refusing an exit on this "
+              "rule is what strands inventory"),
      "remaining": ("it was a sentence in a proposal until this index existed; "
                    "a SELECT-then-INSERT check could not have done it")},
 )

@@ -308,9 +308,22 @@ async def reconcile(conn, *, account_id: str, venue: str, adapter=None,
     out["checks"].append(ex)
 
     # WHAT WE BELIEVE WE HOLD, so a venue position nobody booked is a finding
-    ours = await _our_open_slugs(conn)
-    out["our_open_markets"] = sorted(ours)
-    unbooked = sorted(set(slugs) - ours)
+    ours, ours_err = await _our_open_slugs(conn)
+    out["our_open_markets"] = (None if ours is None else sorted(ours))
+    out["our_book_read_error"] = ours_err
+    if ours is None:
+        # OUR OWN BOOK IS UNREADABLE. Comparing the venue against an empty set
+        # would report every venue position as unbooked, which is noise, not a
+        # finding.
+        out["checks"].append({
+            "check": "positions", "verdict": UNREADABLE,
+            "error": ours_err,
+            "why": ("this system's own position book could not be read, so a "
+                    "venue position cannot be told from an unbooked one")})
+        ours = set()
+        unbooked = []
+    else:
+        unbooked = sorted(set(slugs) - ours)
     if unbooked:
         out["checks"].append({
             "check": "positions", "verdict": DISCREPANCY,
@@ -359,15 +372,32 @@ async def reconcile(conn, *, account_id: str, venue: str, adapter=None,
                      % (len(blocking), len(CHECKS))))
 
 
-async def _our_open_slugs(conn) -> set:
-    """The markets THIS system believes it holds, across every lane."""
+async def _our_open_slugs(conn):
+    """The markets THIS system believes it holds, across every lane.
+
+    THE DEFECT THIS CLOSES, and the Postgres log is what found it. The query
+    read `rn1x_positions.us_market_slug`, a column that does not exist -- the
+    table's venue identity is `venue_market_slug` (migration 119) and there is
+    no `qty`; the seeded size is `seed_qty`. Every call therefore raised, and a
+    bare `except: return set()` turned that into "this book holds nothing" --
+    so the cross-check that is supposed to find a venue position we never
+    booked would have flagged EVERY venue position as unbooked, and an operator
+    reading a wall of false discrepancies learns nothing from any of them.
+
+    IT NO LONGER SWALLOWS. The return is (slugs, error): an unreadable book is
+    reported as unreadable and BLOCKS, because "we could not read our own
+    positions" is not "we hold none" -- the same rule this module applies to
+    the venue's reads.
+    """
     try:
         rows = await conn.fetch(
-            "SELECT DISTINCT us_market_slug FROM rn1x_positions "
-            " WHERE us_market_slug IS NOT NULL AND coalesce(qty,0) <> 0")
-    except Exception:                                      # noqa: BLE001
-        return set()
-    return {str(r["us_market_slug"]) for r in rows if r["us_market_slug"]}
+            "SELECT DISTINCT venue_market_slug AS slug "
+            "  FROM rn1x_positions "
+            " WHERE venue_market_slug IS NOT NULL "
+            "   AND coalesce(seed_qty, 0) <> 0")
+    except Exception as exc:                               # noqa: BLE001
+        return None, "%s: %s" % (type(exc).__name__, str(exc)[:200])
+    return {str(r["slug"]) for r in rows if r["slug"]}, None
 
 
 # ── REGISTERING AND MARKING, EACH REFUSING TO FLATTER THE OTHER ──────

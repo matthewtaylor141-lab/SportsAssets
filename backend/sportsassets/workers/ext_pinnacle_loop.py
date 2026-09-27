@@ -2456,6 +2456,46 @@ async def _funded_attempt(conn, rec, *, now):
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
 
 
+async def _funded_service(conn, *, now):
+    """SERVICE WHAT THE FUNDED LANE HOLDS, once per cycle.
+
+    Returns None when the funded lane is not configured, like
+    `_funded_attempt`. Otherwise it returns one servicing pass:
+    reconciliation against the venue, settlement for anything still held,
+    the re-measured exposure and realised P&L, and the list of things that
+    need a decision.
+
+    IT RUNS WHETHER OR NOT AN ENTRY WAS OFFERED, and that is the point. Entry
+    is opportunistic -- no admitted candidate, no attempt. Servicing is not
+    optional: inventory the lane already owns has to be reconciled, settled and
+    measured on every cycle, or the loss stop is enforced against a stale
+    number and a position that settled while the lane was paused never leaves
+    the book.
+
+    IT SUBMITS NOTHING. `manage` opens no position at all, and its exits and
+    cancels sit behind their own switch, which is off. The reconciliation and
+    the settlement read are reads.
+    """
+    from .. import bettor_funded_activation as _FA
+    from .. import bettor_funded_management as _FM
+
+    try:
+        bound = _FA._obj(await _FA._state(conn, _FA.ACCOUNT_KEY)) or {}
+    except Exception:                                          # noqa: BLE001
+        return None
+    account_id = str(bound.get("account_id") or "").strip()
+    venue = str(bound.get("venue") or "").strip()
+    if not account_id or not venue:
+        return None
+    try:
+        return await _FM.manage(conn, account_id=account_id, venue=venue,
+                                now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        # SERVICING THAT RAISED IS NOT SERVICING THAT FOUND NOTHING.
+        return {"ok": False, "refusal": "FUNDED_SERVICING_RAISED",
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+
+
 async def cycle(conn) -> dict:
     """Never raises. Returns what it did and, mostly, why it did not."""
     started = time.time()
@@ -3121,9 +3161,17 @@ async def cycle(conn) -> dict:
     # remember to run a backfill is a calibration that never happens.
     joined = await join_outcomes(conn)
 
+    # THE FUNDED LANE IS SERVICED EVERY CYCLE, whether or not anything was
+    # offered to it. Inventory it already owns has to be reconciled against the
+    # venue, settled where the venue says so, and re-measured -- otherwise the
+    # drawdown the loss stop reads goes stale and a position that settled
+    # during a pause never leaves the book. It submits nothing.
+    funded_service = await _funded_service(conn, now=time.time())
+
     out = {"ran": True, "state": "LIVE",
            "experiment_id": ext.EXPERIMENT_ID,
            "outcome_join": joined,
+           "funded_servicing": funded_service,
            "evaluated": evaluated, "written": written,
            "refusals": tally, "credits": credits,
            "venue_errors": venue_errors,

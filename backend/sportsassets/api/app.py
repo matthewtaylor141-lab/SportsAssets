@@ -3927,6 +3927,41 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
         "audit": {"reader": "command_rn1x._pnl_status"},
     }
 
+    # ── THE FUNDED BOOK, APART FROM EVERY MODELLED ONE ───────────────
+    #
+    # IT IS SHOWN EVEN THOUGH IT IS EMPTY, and that is the point: a panel that
+    # only appears once money has moved cannot be trusted to appear then. The
+    # section carries the funded lane's own exposure and P&L -- realised summed
+    # over `bettor_funded_economics`, unrealised reported as UNMEASURED rather
+    # than zero -- and every UNRESOLVED DISCREPANCY as a first-class list: an
+    # intent the venue could not establish, a fee the venue charged differently
+    # from the schedule, a provisional economic event, and residual inventory
+    # still held. Totals alone would hide all four.
+    from .. import bettor_funded_book as FUNDED
+    from .. import bettor_funded_execution as FUNDEDX
+    from .. import bettor_funded_management as FUNDEDM
+
+    try:
+        async with pool.acquire() as _c:
+            funded = await FUNDED.command_center(_c)
+    except Exception as exc:                                    # noqa: BLE001
+        funded = {"section": "Funded book",
+                  "error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+                  "note": ("the funded book could not be read. That is "
+                           "reported rather than shown as an empty book")}
+    funded["entry_lane_disablements"] = FUNDEDX.disablements()
+    funded["servicing_lane_disablements"] = FUNDEDM.disablements()
+    funded["servicing_outlives_entry"] = (
+        "stopping new exposure must never strand inventory, so the servicing "
+        "switch (%s) is separate from the entry switch (%s) and settlement "
+        "and status reconciliation are reads that are never gated at all"
+        % ("bettor_funded_management.FUNDED_EXIT_SUBMISSION_ENABLED",
+           "bettor_funded_execution.FUNDED_SUBMISSION_ENABLED"))
+    funded["is_not_summed_with"] = [
+        "AUTONOMOUS_ENTRY_EXTERNAL_VALUATION_SHADOW", "CONTROLLED_DEMONSTRATION",
+        "the acceptance book", "UNCLASSIFIED"]
+    out["funded_book"] = funded
+
     # ── ACTIVATION: the controls, their live state, and the blockers ──
     #
     # THE PANEL'S STATE IS READ, NOT REMEMBERED. Every figure below comes

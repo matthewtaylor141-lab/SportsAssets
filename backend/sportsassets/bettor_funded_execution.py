@@ -284,6 +284,11 @@ async def check_rails(conn, plan: dict, effective: dict, *,
     with no measurement BLOCKS rather than passing quietly.
     """
     exp = await FB.exposure(conn, account_id=account_id, venue=venue)
+    # REALISED RESULTS AND THE WORST PEAK-TO-TROUGH, from the economics
+    # ledger. It was a hardcoded 0.0 with a note saying nothing had settled --
+    # true on the day and useless as a loss stop, because the constant stays
+    # zero after the first settlement too.
+    real = await FB.realised(conn, account_id=account_id, venue=venue)
     add = float(plan["collateral_usd"])
     ev = plan["event_key"]
     mk = plan["us_market_slug"]
@@ -314,10 +319,10 @@ async def check_rails(conn, plan: dict, effective: dict, *,
             "cash x hours held, integrated over the funded fills. A new "
             "order contributes nothing until it fills"),
         "MAX_DRAWDOWN": (
-            0.0,
-            "realised losses on settled funded positions. No funded position "
-            "has settled, so this is the sum over an empty set -- measured, "
-            "not assumed"),
+            real["max_drawdown_usd"],
+            "the worst peak-to-trough of the realised equity curve over %d "
+            "closed funded position(s), summed from bettor_funded_economics"
+            % real["closed_positions"]),
     }
     rails, over, unmeasured = [], [], []
     for rail, limit in sorted(effective.items()):
@@ -339,8 +344,10 @@ async def check_rails(conn, plan: dict, effective: dict, *,
         if not ok:
             over.append(rails[-1])
     return {"rails": rails, "over": over, "unmeasured": unmeasured,
-            "exposure": exp,
+            "exposure": exp, "realised": real,
             "counted_pending_and_in_flight": True,
+            "counted_residual_holdings": True,
+            "realised_is_provisional": real["realised_is_provisional"],
             "every_effective_rail_was_checked": not unmeasured}
 
 
@@ -553,32 +560,15 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
 
 
 def _executions_of(answer: dict | None) -> list[dict]:
-    """THE VENUE'S EXECUTIONS, in the shape the funded book ingests.
+    """THE VENUE'S EXECUTIONS, through the funded book's ONE reader.
 
-    `pmus.submit_fok` returns the raw response under `raw.response`, whose
-    `executions` carry `lastPx`, `lastShares` and the execution's own id. The
-    id is what makes a redelivery idempotent, so it is read from the venue's
-    record and never minted here.
+    This used to be a second reader with its own key names and its own
+    allowlist of execution types, and recovery had a third that read a `fills`
+    key `pmus.order_status` has never returned. Three readers for two venue
+    shapes is how a fill during downtime became invisible, so there is now one
+    -- `bettor_funded_book.executions_of` -- and this delegates to it.
     """
-    raw = ((answer or {}).get("raw") or {})
-    resp = raw.get("response") or {}
-    out = []
-    for ex in (resp.get("executions") or []):
-        if ex.get("type") not in ("EXECUTION_TYPE_FILL",
-                                  "EXECUTION_TYPE_PARTIAL_FILL"):
-            continue
-        px = ((ex.get("lastPx") or {}).get("value"))
-        try:
-            price = float(px)
-        except (TypeError, ValueError):
-            price = 0.0
-        out.append({"qty": float(ex.get("lastShares") or 0),
-                    "price": price,
-                    "venue_fill_id": (ex.get("id")
-                                      or ex.get("executionId")
-                                      or ex.get("execution_id")),
-                    "raw": ex})
-    return out
+    return FB.executions_of(answer)["executions"]
 
 
 def disablements() -> list[dict]:

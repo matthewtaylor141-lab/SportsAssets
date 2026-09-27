@@ -176,6 +176,8 @@ async def _seed(conn, *, approved=True, paused=False, accounting="CLEAN",
 
 
 async def _clean(conn):
+    # ECONOMICS FIRST: it carries a foreign key to the intents.
+    await conn.execute("DELETE FROM bettor_funded_economics")
     await conn.execute("DELETE FROM bettor_funded_fills")
     await conn.execute("DELETE FROM bettor_funded_intents")
     await conn.execute("DELETE FROM bettor_desk_accounts WHERE account_id=$1",
@@ -396,6 +398,7 @@ async def test_the_adapters_own_preview_guard_still_refuses_on_this_path(
         # AND A PREVIEW THAT STATES NOTHING IS NOT AGREEMENT
         pmus, sent2 = _substitute_transport(
             monkeypatch, preview_states_nothing=True)
+        await conn.execute("DELETE FROM bettor_funded_economics")
         await conn.execute("DELETE FROM bettor_funded_fills")
         await conn.execute("DELETE FROM bettor_funded_intents")
         got2 = await FX.submit_for_decision(
