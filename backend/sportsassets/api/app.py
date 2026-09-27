@@ -496,13 +496,36 @@ DESK_TOKEN_TTL_S = 12 * 3600
 DESK_WARM_S = max(120.0, float(os.environ.get("DESK_WARM_S", "120") or 120.0))
 
 
+#: THE ONE PLACE THE SIGNING KEY IS READ, AND IT REFUSES WHEN ABSENT.
+#
+# WHY A HELPER. Every desk, wall and control token is an HMAC keyed by
+# `admin_token`. When that setting was empty the minters happily signed with an
+# EMPTY KEY -- and a token forged with the empty key then verified. The two read
+# verifiers had an `if not key: return False` guard; `control_token_ok` did not,
+# and no minter had one at all. Reading the key through one function means the
+# guard cannot be forgotten at a fourth call site.
+#
+# IT RAISES 503 AND NOT 401. The caller's credential is not the problem: the
+# SERVICE is unconfigured, and saying "unauthorized" would send an operator to
+# check their password instead of the deployment.
+def _signing_key() -> bytes:
+    key = (settings().admin_token or "").strip().encode()
+    if not key:
+        raise HTTPException(
+            status_code=503,
+            detail=("token signing is not configured: ADMIN_TOKEN is unset on "
+                    "this service, so no session token can be issued. There is "
+                    "no default -- see config.credential_posture()"))
+    return key
+
+
 def mint_desk_token(now: float | None = None) -> tuple[str, int]:
     import hashlib
     import hmac as _hmac
     import time as _t
 
     exp = int(now if now is not None else _t.time()) + DESK_TOKEN_TTL_S
-    key = (settings().admin_token or "").strip().encode()
+    key = _signing_key()
     sig = _hmac.new(key, f"desk:{exp}".encode(), hashlib.sha256).hexdigest()
     return f"{exp}.{sig}", exp
 
@@ -530,7 +553,7 @@ def mint_control_token(now: float | None = None) -> tuple[str, int]:
 
     exp = int(now if now is not None else _t.time()) + int(
         CONTROL_TOKEN_TTL_S)
-    key = (settings().admin_token or "").strip().encode()
+    key = _signing_key()
     sig = _hmac.new(key, ("%s:%d" % (CONTROL_SCOPE, exp)).encode(),
                     hashlib.sha256).hexdigest()
     return "%s.%s.%s" % (CONTROL_SCOPE, exp, sig), exp
@@ -556,7 +579,12 @@ def control_token_ok(token: str, now: float | None = None) -> bool:
         return False
     if exp <= int(now if now is not None else _t.time()):
         return False
+    # THE GUARD THE OTHER TWO VERIFIERS HAD AND THIS ONE DID NOT. With an
+    # unset ADMIN_TOKEN the key is empty, and a token forged with the empty
+    # key would verify here -- granting the CONTROL scope, which is writes.
     key = (settings().admin_token or "").strip().encode()
+    if not key:
+        return False
     want = _hmac.new(key, ("%s:%d" % (CONTROL_SCOPE, exp)).encode(),
                      hashlib.sha256).hexdigest()
     return _hmac.compare_digest(parts[2], want)
@@ -602,7 +630,7 @@ def mint_wall_token(now: float | None = None) -> tuple[str, int]:
     import time as _t
 
     exp = int(now if now is not None else _t.time()) + WALL_TOKEN_TTL_S
-    key = (settings().admin_token or "").strip().encode()
+    key = _signing_key()
     sig = _hmac.new(key, f"wall:{exp}".encode(), hashlib.sha256).hexdigest()
     return f"{exp}.{sig}", exp
 
@@ -768,11 +796,27 @@ async def healthz() -> dict:
     except OSError:
         pass
     # Render injects the deployed commit — lets anyone confirm which build is live.
+    # AUTHENTICATION POSTURE, ON THE UNAUTHENTICATED HEALTH READ, AND ON PURPOSE.
+    #
+    # The published-default defect was invisible for as long as nothing said
+    # which credential was in force. `not_configured` names the credentials that
+    # are unset, so the gap is visible from the outside without anybody having to
+    # read a workflow log and notice one line.
+    #
+    # PUBLISHING WHICH CREDENTIALS ARE UNSET IS NOT A LEAK. The routes they guard
+    # already refuse -- an attacker learns that a door is locked, which they would
+    # learn from the 401 anyway. It returns no value, no length and no
+    # fingerprint. The alternative, silence, is what hid this for a day.
+    from ..config import credential_posture
+
+    _posture = credential_posture()
     return {"ok": True, "db_ok": db_ok,
             "pool": pool_stats,
             "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7],
             "rss_mb": rss_mb,
             "boot_id": _BOOT_ID,
+            "auth_not_configured": _posture["not_configured"],
+            "auth_all_configured": _posture["all_configured"],
             "uptime_s": round(max(0.0, time.time() - _BOOT_TS), 1)}
 
 
@@ -905,7 +949,11 @@ async def admin_ping(request: Request,
     expected = (settings().admin_token or "").strip()
     return {
         "received_chars": len(supplied),
-        "configured": bool(expected) and expected != "change-me",
+        # THE SENTINEL COMPARISON IS GONE. This read `expected != "change-me"`,
+        # which tolerated the published default as a configured state -- it only
+        # declined to CALL it configured. There is no default now, so `bool` is
+        # the whole test and the sentinel string no longer appears in the code.
+        "configured": bool(expected),
         "match": bool(expected) and hmac.compare_digest(supplied, expected),
     }
 

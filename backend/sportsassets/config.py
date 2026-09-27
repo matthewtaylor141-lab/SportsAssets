@@ -104,12 +104,41 @@ class Settings(BaseSettings):
     # API
     api_host: str = "0.0.0.0"
     api_port: int = 8000
-    admin_token: str = "change-me"
+    # ── NO PUBLISHED DEFAULT CREDENTIAL. FAIL CLOSED. ───────────────
+    #
+    # THE DEFECT THIS REPLACES, 2026-09-27. These two fields carried
+    # defaults -- `admin_token = "change-me"` and `desk_password = "bt"` --
+    # and both are published in this repository. A production readback then
+    # showed `DESK_PASSWORD` was NOT set on the service, so the credential
+    # actually in force for every protected Command Centre read WAS the
+    # published default. Anyone who read this file could mint a desk token,
+    # a wall token and a COMMAND cookie.
+    #
+    # THAT IS AN AUTHENTICATION DEFECT, NOT A CONFIGURATION TASK. I first
+    # reported it as "an owner decision to make", which is wrong on its own
+    # terms: the owner cannot decide their way out of a fallback the code
+    # offers. The code must not offer it.
+    #
+    # `admin_token` was the worse of the two. It is compared directly by
+    # `require_admin` AND `require_command`, so an unset environment would
+    # have granted the ADMIN role -- the whole admin API -- to the string
+    # "change-me". It is also the HMAC key every desk, wall and control
+    # token is signed with, so an empty key would let a token forged with an
+    # empty key verify.
+    #
+    # EMPTY MEANS NOT CONFIGURED, AND NOT CONFIGURED MEANS REFUSE. Every
+    # consumer checks `if not expected` before comparing, the token
+    # verifiers check `if not key`, and the minters raise rather than issue
+    # a token nobody can trust. `credential_posture()` below reports which
+    # are unset so the gap is visible instead of silent.
+    admin_token: str = ""
     # Trading-desk unlock password (owner directive 2026-08-22): the desk
     # gets its own credential so the admin token never has to live in a
     # phone browser. Compared constant-time; a successful unlock mints a
     # short-lived HMAC token derived from admin_token (see api/app.py).
-    desk_password: str = "bt"
+    #
+    # NO DEFAULT. See the block above.
+    desk_password: str = ""
     # OPERATOR CONTROL PASSWORD (2026-09-26). The desk's CONTROLS are
     # writes, and the first version made the browser carry the ADMIN
     # token to send them -- a service credential, with the whole admin
@@ -221,3 +250,62 @@ class Settings(BaseSettings):
 @lru_cache
 def settings() -> Settings:
     return Settings()
+
+
+# ── CREDENTIAL POSTURE, REPORTED RATHER THAN ASSUMED ─────────────────
+#
+# WHY THIS EXISTS. The published-default defect was invisible: the service ran,
+# every protected route answered 200, and nothing anywhere said which credential
+# was actually in force. The only reason it surfaced is that a readback happened
+# to print `DESK_PASSWORD present: NO` and someone read the line.
+#
+# So the posture is now a value the service can be ASKED for. A credential that
+# is not configured is reported as `NOT_CONFIGURED`, and the routes it guards are
+# reported as refusing -- which is what they now do.
+#
+# NO VALUE, LENGTH OR FINGERPRINT OF ANY SECRET IS RETURNED. A length is a
+# meaningful hint about a password and a fingerprint of a short secret is
+# brute-forceable, so this returns booleans and route consequences only.
+
+#: Credential -> what refuses when it is absent.
+CREDENTIAL_CONSEQUENCES = {
+    "admin_token": (
+        "every /api/admin route refuses 401; the `admin` role in "
+        "require_command is unreachable; NO desk, wall or control token can be "
+        "minted or verified, because it is the HMAC signing key"),
+    "desk_password": (
+        "/api/desk/unlock, /api/wall/unlock and /api/command/session all refuse, "
+        "so no COMMAND cookie can be obtained"),
+    "operator_password": (
+        "/api/command/session/control refuses, so no control token can be "
+        "minted and the desk's control actions are unreachable"),
+}
+
+
+def credential_posture() -> dict:
+    """Which authentication credentials are configured, and what refuses if not.
+
+    Returns no secret material -- not the value, not its length, not a hash.
+    """
+    s = settings()
+    out = {}
+    for name, consequence in CREDENTIAL_CONSEQUENCES.items():
+        configured = bool((getattr(s, name, "") or "").strip())
+        out[name] = {
+            "configured": configured,
+            "state": "CONFIGURED" if configured else "NOT_CONFIGURED",
+            "if_absent": consequence,
+        }
+    missing = sorted(k for k, v in out.items() if not v["configured"])
+    return {
+        "credentials": out,
+        "not_configured": missing,
+        "all_configured": not missing,
+        "there_is_no_default_for_any_of_these": (
+            "admin_token and desk_password previously defaulted to values "
+            "published in this repository. Both now default to empty, and every "
+            "consumer refuses on empty rather than falling back"),
+        "and_no_secret_material_is_returned_here": (
+            "not the value, not its length, not a fingerprint -- a length is a "
+            "hint about a password and a short secret's hash is brute-forceable"),
+    }

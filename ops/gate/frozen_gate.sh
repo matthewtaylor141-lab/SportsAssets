@@ -40,7 +40,9 @@ LOCK="$DIR/.gate_lock"
 HEALTH="$LOG.health"
 
 void() {                        # an invalid gate leaves NOTHING usable behind
-  rm -f "$LOG.ids"
+  # THE STRUCTURED RESULT GOES TOO. An XML from an invalid run is worse than a
+  # voided log: it looks machine-readable, so it would be trusted more.
+  rm -f "$LOG.ids" "$LOG.xml"
   echo "GATE VOID: $*" >&2
   echo "GATE VOID: $*" >> "$HEALTH" 2>/dev/null || true
   exit "${2:-91}"
@@ -209,13 +211,27 @@ echo "schema: ${TABLES:-0} tables"
 ) & MONITOR=$!
 trap 'kill "$MONITOR" 2>/dev/null; rm -f "$LOCK"' EXIT
 
+# NO STALE STRUCTURED RESULT. If the run dies before pytest writes the XML, a
+# leftover file from a previous run would be parsed as this run's result.
+rm -f "$LOG.xml" "$LOG.ids" "$LOG.pip"
 cd "$DIR/backend" || fail "no backend in the checkout"
 RN1X_TEST_DSN="postgresql://$(whoami)@/$DB" \
 DATABASE_URL="postgresql://$(whoami)@/$DB" \
 ADMIN_TOKEN=t \
 timeout 3000 python3 -m pytest tests -q -p no:randomly \
-    --timeout=120 --timeout-method=signal > "$LOG" 2>&1
+    --timeout=120 --timeout-method=signal \
+    --junitxml="$LOG.xml" > "$LOG" 2>&1
 RC=$?
+# THE DEPENDENCY MANIFEST, CAPTURED WITH THE RESULT.
+#
+# A baseline/release comparison is only a comparison if both ran against the same
+# installed packages. Installing `pycryptodome` mid-comparison closed 25 failures
+# -- a real fix, but it also meant the two runs were not the same experiment, and
+# nothing in the evidence said so. The manifest is now recorded next to the
+# result so a later reader can check that rather than assume it.
+python3 -m pip freeze > "$LOG.pip" 2>/dev/null || true
+python3 -V >> "$LOG.pip" 2>/dev/null || true
+python3 -m pytest --version >> "$LOG.pip" 2>&1 || true
 kill "$MONITOR" 2>/dev/null
 
 # ── 6 · WAS THE ENVIRONMENT VALID FOR THE WHOLE RUN? ────────────────
@@ -280,10 +296,57 @@ fi
 # That is exactly the kind of false positive that trains a reader to skim the
 # diff, which is the one thing this list must not do. A pytest node id always
 # contains `::` and starts at column 0 with a path, so the filter requires both.
-grep -E "^(FAILED|ERROR) " "$LOG" | sed -E 's/^(FAILED|ERROR) //; s/ - .*//' \
-    | grep -E '^[A-Za-z0-9_./-]+\.py::' \
-    | sort -u > "$LOG.ids"
+#
+# AND GREPPING THE LOG WAS STILL THE WRONG INSTRUMENT, corrected 2026-09-27.
+# Tightening the regex removed one false positive; it did not make a human-
+# readable log a structured result. pytest writes JUnit XML, which carries one
+# element per test with its outcome, so the identities are READ FROM THE
+# RESULT rather than reconstructed from prose. The grep path is kept only as a
+# fallback for a run that died before writing the XML -- and when it is used, the
+# list is stamped so nobody mistakes a reconstruction for a result.
+if [ -s "$LOG.xml" ] && python3 - "$LOG.xml" "$LOG.ids" <<'PYX'
+import sys
+import xml.etree.ElementTree as ET
+
+src, dst = sys.argv[1], sys.argv[2]
+try:
+    root = ET.parse(src).getroot()
+except Exception:
+    raise SystemExit(1)
+ids = set()
+for case in root.iter("testcase"):
+    # A test is a failure or an error; skipped and passed are neither.
+    if any(case.find(t) is not None for t in ("failure", "error")):
+        f = (case.get("file") or "").strip()
+        cls = (case.get("classname") or "").strip()
+        name = (case.get("name") or "").strip()
+        if not f:
+            # classname is dotted: tests.test_x.TestY -> tests/test_x.py::TestY
+            parts = cls.split(".")
+            mod = [p for p in parts if p.startswith("test")]
+            f = "/".join(parts[:parts.index(mod[0]) + 1]) + ".py" if mod else ""
+        klass = cls.split(".")[-1] if cls and cls.split(".")[-1][:1].isupper() \
+            else ""
+        ids.add("%s::%s%s" % (f, klass + "::" if klass else "", name))
+if not ids and root.get("failures") not in (None, "0"):
+    raise SystemExit(1)          # the XML disagrees with itself; fall back
+with open(dst, "w", encoding="utf-8") as fh:
+    for i in sorted(ids):
+        fh.write(i + "\n")
+PYX
+then
+    IDS_SOURCE="JUNIT_XML"
+else
+    IDS_SOURCE="GREPPED_FROM_THE_LOG_FALLBACK"
+    grep -E "^(FAILED|ERROR) " "$LOG" \
+        | sed -E 's/^(FAILED|ERROR) //; s/ - .*//' \
+        | grep -E '^[A-Za-z0-9_./-]+\.py::' \
+        | sort -u > "$LOG.ids"
+fi
+echo "identity source: $IDS_SOURCE"
 cp -f "$LOG.ids" "$EVIDENCE/$(basename "$LOG").ids.$STAMP" 2>/dev/null || true
+cp -f "$LOG.xml" "$EVIDENCE/$(basename "$LOG").xml.$STAMP" 2>/dev/null || true
+cp -f "$LOG.pip" "$EVIDENCE/$(basename "$LOG").pip.$STAMP" 2>/dev/null || true
 cp -f "$HEALTH" "$EVIDENCE/$(basename "$HEALTH").$STAMP" 2>/dev/null || true
 tail -1 "$LOG"
 echo "identities: $(wc -l < "$LOG.ids")"
