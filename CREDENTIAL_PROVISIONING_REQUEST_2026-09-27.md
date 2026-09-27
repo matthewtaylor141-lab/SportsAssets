@@ -12,23 +12,56 @@ verdicts stay **NO** regardless.
 
 ## 0 · The request, in one table
 
+> ## ⚠ CORRECTED 2026-09-27 — THE READ-ONLY SCOPE IS NOT ESTABLISHED
+>
+> This request asked for a **read-scoped** key and asserted that read scope was
+> sufficient, citing the venue's authentication page. **That page describes how a
+> key authenticates; it does not establish that a read-only scope is offered**, and
+> I ran the two together.
+>
+> The pages were then read directly —
+> `research/evidence/CREDENTIAL_CAPABILITY_2026-09-27.md`. Result:
+>
+> * **zero sentences** mention a read-only scope, on either retrieved page;
+> * **zero sentences** mention scopes or permissions **at all** — the word does not
+>   appear;
+> * key creation reads *"Create an API key — Click to create a new key. You'll get
+>   a Key ID and a Secret Key."* **One key, no scope choice described**;
+> * and the first group that key reaches is, verbatim, **"Orders — Place, modify,
+>   cancel, and query orders."**
+>
+> **So assume a provisioned credential carries FULL ORDER AUTHORITY** until the
+> provisioning screen shows otherwise. Three plausible key-management paths 404, so
+> the documentation is incomplete and the UI may offer choices no page describes —
+> which is why this is "not established" rather than "does not exist".
+>
+> **The consequence is load-bearing and must not be glossed:** the claim that no
+> order can be sent now rests on **our two code constants alone**, not on code *and*
+> a venue-side scope. The table below is amended accordingly.
+
 | | |
 |---|---|
-| **what** | a read-scoped API credential for one named Polymarket US account |
-| **scope needed** | **read only** — positions, open orders, order history, balances. **No trade, no transfer, no withdrawal permission.** |
+| **what** | an API credential for one named Polymarket US account |
+| **scope needed** | **the narrowest the provisioning screen actually offers.** A read-only option is **NOT ESTABLISHED** — see the correction above. If the screen offers no scope choice, say so and provision the only key available |
 | **who provisions it** | the account owner, in the venue's own API-key interface |
-| **where it goes** | the environment's secret store for the backend service — never a file in this repository, never a chat message, never a commit |
+| **where it goes** | the environment's secret store for the backend service — never a file in this repository, never a chat message, never a commit. **The secret is shown once** |
 | **variable names the code reads** | `PMUS_KEY_ID`, `PMUS_SECRET_KEY` |
+| **auth scheme** | **Ed25519 request signing** — `X-PM-Access-Key`, `X-PM-Timestamp`, and a signature over `timestamp + method + path`. The secret signs and is never transmitted. I had loosely called this "API-key authentication", which understates it |
 | **who can read it afterwards** | the backend process only. It is not exposed by any API route, is not sent to the browser, and `test_no_credential_reaches_the_browser` asserts that |
-| **what it must NOT be** | a key with trade permission. Read scope is sufficient for everything below, and a trade-scoped key would make the "no order can be sent" claim rest on code alone rather than on code *and* the credential's own scope |
+| **establish BEFORE the key is issued** | **the revocation path.** Revocation and rotation draw one matching sentence across both pages, and that sentence is a code sample. A credential we cannot revoke is not a credential we should hold |
+| **what keeps submission off** | `REAL_ORDER_SUBMISSION_ENABLED = False` and `POLICY_ADMISSION_ENABLED = False`, each needing a code change through the gate. **Never test order authority by sending an order** |
 
 ---
 
 ## 1 · The exact provisioning steps
 
-1. **In the venue's interface**, on the account named in §2, create an API key
-   with **read** permissions only. Do not enable trading, transfers or
-   withdrawals.
+1. **In the venue's interface**, on the account named in §2, open the API-key
+   screen and **report what scope choices it actually offers, before creating
+   anything.** If it offers a read-only option, take it and disable trading,
+   transfers and withdrawals. **If it offers no scope choice — which is what the
+   published documentation suggests — say so, and create the only key available
+   knowing it likely carries full order authority.** Do not create a key and then
+   describe its scope from memory; the screen is the evidence.
 2. **In the environment's secret store** for the backend service (not in the
    repository, not in a message, not in a ticket), set:
    - `PMUS_KEY_ID`
