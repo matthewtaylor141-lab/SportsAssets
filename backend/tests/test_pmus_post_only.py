@@ -29,7 +29,32 @@ from polymarket_us import (APIConnectionError, APIStatusError,
 
 from sportsassets import pmus
 
+from tests.gate_harness import authorized_gate
+
 SLUG = "aec-atp-a-b-2026-09-03"
+
+
+# THE GATE HAS TO BE SATISFIED, NOT SKIPPED, FOR THIS FILE TO COVER
+# ANYTHING.
+#
+# `execution_gate` sits inside `submit_fok`, and in a bare test process
+# it is unbound -- so it raised `authorization_unavailable` before either
+# of this file's two promises could be inspected. All 55 parametrisations
+# below were failing on that, which made them a statement about an
+# unbound gate rather than about the params dict or the refusal
+# semantics they were written to pin.
+#
+# `authorized_gate` binds a real loop on a background thread with a pool
+# double, exactly as production reaches the gate through
+# `asyncio.to_thread(submit_fok, ...)`. `read_state` and `_decide` run
+# unmodified: the kill switch is parsed from real JSON text and every
+# control is consulted. See tests/gate_harness.py, and
+# test_the_gate_harness_does_not_weaken_the_gate.py for the proof that
+# it still denies when any control says so.
+@pytest.fixture(autouse=True)
+def _gate(monkeypatch):
+    with authorized_gate(monkeypatch) as pool:
+        yield pool
 GTD = "2026-09-03T12:00:00Z"
 
 FOK = "TIME_IN_FORCE_FILL_OR_KILL"
