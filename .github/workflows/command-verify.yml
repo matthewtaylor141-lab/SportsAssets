@@ -6598,21 +6598,41 @@ jobs:
           say "== 2 . THE BOOK ENDPOINT'S OWN RESPONSE CONTRACT =="
           want="$SLUGS"
           if [ -z "$want" ]; then
+            # THE FIRST RUN OF THIS JOB READ THREE EXPIRED MARKETS, and that
+            # is not a defect in the venue -- `?limit=20` with no filter
+            # returns whatever the catalogue lists first, which happened to be
+            # settled 2025 NFL games with ZERO book levels. It still produced
+            # the decisive negative result (see section 2b), but a numeric
+            # market-data age can only be characterised on a market whose book
+            # actually moves. So the state is now a SELECTION CRITERION and a
+            # market with no levels is reported as unusable rather than
+            # silently standing in for a live one.
             code=$(curl -sS -o /tmp/mk.json -w '%{http_code}' --max-time 60 \
-                   "$GW/v1/markets?limit=20" || echo 000)
-            say "GET $GW/v1/markets?limit=20  HTTP $code"
+                   "$GW/v1/markets?limit=200" || echo 000)
+            say "GET $GW/v1/markets?limit=200  HTTP $code"
           want=$(python3 - <<'PYEOF'
-          import json, sys
+          import json
           try:
               d = json.load(open('/tmp/mk.json'))
           except Exception:
               raise SystemExit
           ms = d.get('markets') or d.get('data') or []
-          sl = [m.get('slug') or m.get('marketSlug') for m in ms if isinstance(m, dict)]
-          print(','.join([x for x in sl if x][:3]))
+          live, other = [], []
+          for m in ms:
+              if not isinstance(m, dict):
+                  continue
+              s = m.get('slug') or m.get('marketSlug')
+              if not s:
+                  continue
+              st = str(m.get('state') or m.get('marketState') or '')
+              (live if 'EXPIRED' not in st.upper()
+               and 'SETTLED' not in st.upper() else other).append(s)
+          # LIVE FIRST, and an expired market only as a last resort so the
+          # section still prints a contract rather than nothing.
+          print(','.join((live + other)[:4]))
           PYEOF
           )
-            say "slugs from the public catalogue: ${want:-NONE}"
+            say "slugs from the public catalogue (non-expired preferred): ${want:-NONE}"
           fi
           if [ -z "$want" ]; then
             say "NO SLUG AVAILABLE, so the header question stays unanswered."
@@ -6693,6 +6713,114 @@ jobs:
               say "   no validator on this response, so the M2 exchange cannot be"
               say "   made HERE. That does not prove no viable data path exists."
             fi
+            # THE DISCRIMINATOR, STATED BEFORE IT IS RUN so the conclusion
+            # cannot be fitted to whatever comes back.
+            #
+            # Two candidate readings of `transactTime` have been open all day
+            # and they imply opposite repairs:
+            #
+            #   RESPONSE-STAMP  -> an old value means our read is old, and the
+            #                      30 s bound is measuring the right thing.
+            #   MARKET-DATA     -> an old value means the BOOK has not moved,
+            #                      and the bound is applied to the wrong
+            #                      quantity, which is a different repair.
+            #
+            # A response stamp cannot precede its own response. So if
+            # transactTime sits materially BEFORE `date` on any read, the
+            # response-stamp reading is CONTRADICTED -- one observation is
+            # enough for that direction, and no number of observations could
+            # establish the positive direction, which is why this is not the
+            # resampling I withdrew earlier.
+            #
+            # A SECOND READ AFTER A GAP then separates two things this single
+            # read cannot: whether transactTime ADVANCES while `date` advances
+            # (which would put it back on the response) or HOLDS STILL while
+            # `date` advances (which places it on the data). Stated here in
+            # advance; the two reads are printed and compared, not narrated.
+            say "   -- 2b . THE PRESTATED DISCRIMINATOR --"
+            sleep 8
+            curl -sS -D /tmp/bk3.hdr -o /tmp/bk3.json --max-time 30 \
+                 "$GW/v1/markets/$slug/book" >/dev/null 2>&1 || true
+          python3 - <<'PYEOF' | tee -a "$GITHUB_STEP_SUMMARY"
+          import json, email.utils, datetime
+          def hdrs(p):
+              h = {}
+              for line in open(p, encoding='utf-8', errors='replace'):
+                  if ':' in line:
+                      k, _, v = line.partition(':')
+                      h[k.strip().lower()] = v.strip()
+              return h
+          def tt(p):
+              try:
+                  md = (json.load(open(p)) or {}).get('marketData') or {}
+              except Exception:
+                  return None, None, None
+              return (md.get('transactTime'), len(md.get('bids') or []),
+                      len(md.get('offers') or []))
+          def secs(iso):
+              if not iso:
+                  return None
+              s = iso.replace('Z', '+00:00')
+              # nanosecond precision: python takes at most 6 digits
+              if '.' in s:
+                  head, _, tail = s.partition('.')
+                  frac = ''.join(ch for ch in tail if ch.isdigit())[:6]
+                  off = tail[len(''.join(ch for ch in tail if ch.isdigit())):]
+                  s = '%s.%s%s' % (head, frac.ljust(6, '0'), off or '+00:00')
+              try:
+                  return datetime.datetime.fromisoformat(s).timestamp()
+              except Exception:
+                  return None
+          h1, h2 = hdrs('/tmp/bk.hdr'), hdrs('/tmp/bk3.hdr')
+          t1, b1, o1 = tt('/tmp/bk.json')
+          t2, b2, o2 = tt('/tmp/bk3.json')
+          def dsec(h):
+              try:
+                  return email.utils.parsedate_to_datetime(h.get('date', '')).timestamp()
+              except Exception:
+                  return None
+          d1, d2 = dsec(h1), dsec(h2)
+          print('   read 1: date=%s transactTime=%s levels=%s/%s'
+                % (h1.get('date'), t1, b1, o1))
+          print('   read 2: date=%s transactTime=%s levels=%s/%s'
+                % (h2.get('date'), t2, b2, o2))
+          print('   last-modified 1=%s' % h1.get('last-modified'))
+          print('   last-modified 2=%s' % h2.get('last-modified'))
+          s1, s2 = secs(t1), secs(t2)
+          if s1 is not None and d1 is not None:
+              lag = d1 - s1
+              print('   date - transactTime on read 1 = %.1f s' % lag)
+              if lag > 120:
+                  print('   => RESPONSE-STAMP READING IS CONTRADICTED. A response')
+                  print('      stamp cannot precede its own response by %.0f s.' % lag)
+                  print('      transactTime is a MARKET-DATA instant.')
+              elif lag < -5:
+                  print('   => transactTime is AHEAD of the response; neither')
+                  print('      reading is supported and this needs its own work.')
+              else:
+                  print('   => this read does not separate the two readings:')
+                  print('      transactTime and date agree to within 120 s, which')
+                  print('      is what BOTH readings predict on an active book.')
+          if s1 is not None and s2 is not None and d1 and d2:
+              print('   across the %.0f s gap: date advanced %.1f s, '
+                    'transactTime advanced %.1f s' % (d2 - d1, d2 - d1, s2 - s1))
+              if abs((d2 - d1) - (s2 - s1)) < 1.0 and (s2 - s1) > 1.0:
+                  print('   => transactTime TRACKS the response clock. That would')
+                  print('      make it a response stamp after all, and the 120 s')
+                  print('      test above governs -- report BOTH, do not choose.')
+              elif abs(s2 - s1) < 0.001:
+                  print('   => transactTime HELD STILL while date advanced.')
+                  print('      Consistent with a market-data instant. NOTE it does')
+                  print('      NOT distinguish "last book change" from any other')
+                  print('      data-side event (settlement, last trade): on a book')
+                  print('      that did not move in the gap those coincide.')
+              else:
+                  print('   => transactTime moved but not with the clock. Recorded')
+                  print('      as an observation; it settles neither reading.')
+          print('   LEVELS MATTER: a book with 0/0 levels cannot characterise a')
+          print('   numeric market-data age for a LIVE market. Levels above are')
+          print('   printed so a zero-depth read is not mistaken for one.')
+          PYEOF
           done
 
           say ""
