@@ -5985,7 +5985,34 @@ jobs:
             FAIL=1
           fi
 
-          # ── 2 . A READ SESSION, AND THE DESK READ WITH THE COOKIE ALONE ─
+          # ── 2 . THE READ CREDENTIAL ACTUALLY IN FORCE ────────────────
+          #
+          # `DESK_PASSWORD` unset does NOT mean the read sign-in is closed:
+          # `config.Settings.desk_password` carries a default, and
+          # `/api/command/session` accepts it. So when the env var is absent the
+          # credential in force is that default -- which is published in this
+          # repository -- and the honest readback is to sign in with it AND say
+          # so, rather than to report "not configured" and move on. It is read
+          # out of the checked-out source here instead of being retyped, so this
+          # step cannot drift from what the service would accept.
+          DEFAULTED=no
+          if [ -z "$DPW" ]; then
+            DPW=$(python3 - <<'PYX'
+          import re, pathlib
+          src = pathlib.Path("backend/sportsassets/config.py").read_text()
+          m = re.search(r'^\s*desk_password:\s*str\s*=\s*"([^"]*)"', src, re.M)
+          print(m.group(1) if m else "")
+          PYX
+          )
+            DEFAULTED=yes
+            say ""
+            say "  !! DESK_PASSWORD IS NOT SET ON THE SERVICE, so the read"
+            say "     sign-in is protected by the DEFAULT in config.py, which"
+            say "     is published in this repository. That is an owner"
+            say "     decision to make, not a defect this readback can fix,"
+            say "     and it is stated here rather than left implicit."
+            say "     (The value is not printed; it is in the source.)"
+          fi
           if [ -n "$DPW" ]; then
             code=$(curl -sS -o /tmp/sess.json -w '%{http_code}' --max-time 60 \
                    -c /tmp/desk.jar -X POST -H 'Content-Type: application/json' \
@@ -6015,8 +6042,8 @@ jobs:
                        "  demonstration.label            "
                          + ((.demonstration.label // "-")|tostring)' \
                   /tmp/dsk.json | tee -a "$GITHUB_STEP_SUMMARY"
-                say "  => AUTHENTICATED DESK ACCESS WORKS on the existing"
-                say "     credential, with no service token in the request."
+                say "  => AUTHENTICATED DESK ACCESS WORKS with no service"
+                say "     token in the request. Credential used: $([ "$DEFAULTED" = yes ] && echo "the config.py DEFAULT (DESK_PASSWORD unset)" || echo "DESK_PASSWORD from the service environment")"
               else
                 say "  => the cookie did not open the desk read"; FAIL=1
               fi
@@ -6029,14 +6056,27 @@ jobs:
             say "  => DESK_PASSWORD is not set."; FAIL=1
           fi
 
-          # ── 3 . AND THE CONTROL COOKIE OPENS WHAT IT IS SCOPED TO ────
+          # ── 3 . THE SCOPE BOUNDARY, ASSERTED ────────────────────────
+          #
+          # AND THE FIRST VERSION OF THIS STEP GOT IT BACKWARDS. It read the
+          # control cookie against a READ route, got 401, and narrated that as
+          # "confirms the session is live". It confirms the opposite and the
+          # right thing: `require_command` grants reads to the READ credential,
+          # and a CONTROL cookie is not one. The two credentials are separate on
+          # purpose -- whoever may halt the lane is not automatically whoever may
+          # look at the numbers, and the reverse -- so 401 here is the property,
+          # not a failure, and anything else would be the defect.
           if [ -s /tmp/ctl.jar ]; then
             ccode=$(curl -sS -o /tmp/ctlread.json -w '%{http_code}' --max-time 60 \
                     -b /tmp/ctl.jar "$API/api/command/bettor/control")
             say ""
-            say "GET /api/command/bettor/control (control cookie)      HTTP $ccode"
-            say "  (a read; the control cookie is for the WRITES, and this"
-            say "   confirms the session is live without sending one)"
+            say "GET a READ route with the CONTROL cookie alone         HTTP $ccode"
+            if [ "$ccode" = "401" ]; then
+              say "  => CORRECT: the control credential does not grant reads."
+            else
+              say "  => UNEXPECTED: a control cookie opened a read ($ccode)."
+              FAIL=1
+            fi
           fi
           rm -f /tmp/ctl.jar /tmp/desk.jar /tmp/sess.json /tmp/ctl.json
           say ""
