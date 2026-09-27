@@ -126,13 +126,27 @@
    "gone_vs_baseline": [],
    "identical_to_baseline": true,
    "note": "203 more tests PASS than on the baseline (12,911 vs 12,708) and not one more fails. The additions cover the funded exit's price space (proceeds vs the venue wire, both sides, through the real adapter), the venue-book admission policy, the ESTABLISHED settlement requirement for a funded action, one redelivery doing both repairs, and an interruption injected between the FILLED transition and the residual recompute. Fifth exact reproduction of the recorded baseline identity list"
+  },
+  "release_07c67f3": {
+   "file": "FAILURES_RELEASE_07c67f3_2026-09-27.txt",
+   "failed": 177,
+   "passed": 12917,
+   "duration_s": 448.16,
+   "log": "GATE_G_REL",
+   "paired_with": "baseline 6d75275, concurrent, 177 failed in 7:16",
+   "baseline_list_identical_to_the_recorded_one": true,
+   "new_vs_baseline": [],
+   "gone_vs_baseline": [],
+   "identical_to_baseline": true,
+   "is_the_deployed_sha": true,
+   "note": "209 more tests PASS than the baseline and not one more fails. Adds the clock correction: a future timestamp gets no fresh certificate, the three instants are separate, a slow acquisition ages the book against the unchanged bound, and a delayed submission cannot reuse an expired assessment. Sixth exact reproduction of the recorded baseline identity list. THIS IS THE SHA DEPLOYED TO sportsassets-api"
   }
  },
  "the_matched_pair": {
   "baseline": "6d75275 (this run; identical to every recorded baseline list)",
-  "release": "release_d0f2594",
+  "release": "release_07c67f3",
   "verdict": "ZERO NEW FAILURE IDENTITIES, ZERO GONE",
-  "how_to_re_verify": "comm -13 on the two sorted identity files in this directory. Never compare the counts -- see baseline_count_drifts_identities_do_not"
+  "how_to_re_verify": "comm -13 on the two sorted identity files here. Never compare counts"
  },
  "clock_sensitive_defects_are_recorded_separately": "research/evidence/CLOCK_SENSITIVE_TEST_DEFECTS.json",
  "not_a_clean_gate": "178 pre-existing failures remain on the baseline itself. Nothing here claims otherwise.",
