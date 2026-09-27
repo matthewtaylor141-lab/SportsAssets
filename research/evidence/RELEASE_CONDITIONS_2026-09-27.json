@@ -1,0 +1,143 @@
+{
+ "record": "TWO ENFORCED RELEASE CONDITIONS, AND THE VALIDATION THAT CAN SEE THEM",
+ "date": "2026-09-27",
+ "supersedes_nothing": "PRODUCTION_READBACK_2026-09-27.json still stands; this is the bounded work that followed it",
+ "1_the_inputs_own_remaining_lifetime": {
+  "the_defect": [
+   "`select_exit` set `assessment_expires_at = decision_at + 30` and `submit_exit`",
+   "checked the AGE OF THE ASSESSMENT. Selection therefore restarted both clocks:",
+   "a book observed 29 s ago under a 30 s bound bought a further 30 s by being",
+   "looked at, and an order could leave against an observation 59 s old with every",
+   "field in the trace reading 'within bound'. What expires is the OBSERVATION."
+  ],
+  "the_rule_now": {
+   "function": "bettor_funded_management.input_deadline",
+   "deadline": "min(book stamp + book bound, probability stamp + the bound its event state permits)",
+   "book_policy": "bettor_funded_activation.venue_book_age (parsed_epoch_s, bound_s)",
+   "probability_policy": "bettor_hold_value.bound_for via ev_hold freshness (observed_at, bound_s)",
+   "selection_restarts_neither_clock": true,
+   "a_missing_stamp_or_bound": "THE_INPUTS_OWN_EXPIRY_COULD_NOT_BE_ESTABLISHED -- refused, not treated as distant"
+  },
+  "checked_twice": [
+   "before anything is written, so an already-expired assessment reserves nothing",
+   "again at the last instant before the send, AFTER _reserve_exit's SELECT ... FOR UPDATE -- the wait that can consume what is left of it"
+  ],
+  "an_expired_reservation_is_released": {
+   "how": "FB.abandon_proven_not_sent, the same path the venue-boundary denial uses",
+   "consequence": "the exit row is ABANDONED, which bettor_funded_available_to_exit does not count, so the inventory returns for the re-assessment that should replace it",
+   "venue_calls": 0,
+   "counted_on_the_answer": "submit_exit returns venue_calls, so 'nothing was sent' is a readback rather than a reassurance"
+  },
+  "no_deadline_at_all": "refused with NO_INPUT_EXPIRY_WAS_CARRIED_TO_THIS_SUBMISSION on the path that could reach the venue",
+  "counterexamples_each_failing_before_and_passing_now": [
+   {
+    "case": "book already 29 s old; submit two seconds later",
+    "test": "tests/test_the_funded_lifecycle_is_complete.py::test_a_book_already_twenty_nine_seconds_old_expires_in_one",
+    "asserts": "remaining_lifetime_s < 2 at selection, governed_by VENUE_BOOK, then refusal at +2 s with venue_calls 0 and no create call"
+   },
+   {
+    "case": "probability expires before the book",
+    "test": "tests/test_the_funded_lifecycle_is_complete.py::test_the_probability_determines_the_deadline_when_it_expires_first",
+    "asserts": "governed_by PROBABILITY, probability_expires_at < book_expires_at, and the carried deadline equals the probability's"
+   },
+   {
+    "case": "reservation lock delays submission beyond the deadline",
+    "test": "tests/test_the_funded_lifecycle_is_complete.py::test_a_lock_wait_past_the_deadline_releases_and_sends_nothing",
+    "how": "a second connection genuinely holds SELECT ... FOR UPDATE on the position and releases it after the deadline passes",
+    "asserts": "venue_calls 0, no create call, reservation taken AND released, available_to_exit back to 10.0, the exit row ABANDONED and not outstanding"
+   }
+  ],
+  "and_the_automated_path_is_what_is_tested": {
+   "test": "tests/test_the_funded_lifecycle_is_complete.py::test_the_scheduled_path_carries_the_deadline_it_computed",
+   "why": "manage() must pass the selector's deadline into submit_exit; had it dropped it, the submission would refuse rather than send on an unbounded assessment"
+  },
+  "retired": "MAX_ASSESSMENT_AGE_S -- the constant that granted the window"
+ },
+ "2_schema_readiness_is_an_enforced_condition": {
+  "the_state_it_covers": [
+   "start.sh serves after a failed migration on purpose: the diagnostics are how",
+   "the failure gets found. On 2026-09-27 that left the API running with funded",
+   "code naming columns the database did not have. Availability was right and",
+   "CAPABILITY was not -- nothing stopped the funded lane."
+  ],
+  "module": "sportsassets.bettor_funded_schema",
+  "asked_of": "the catalogue: information_schema.tables, information_schema.columns, pg_proc",
+  "required": {
+   "tables": 4, "column_groups": 4, "functions": 4,
+   "migrations": "REPORTED, NOT ENFORCED -- schema_migrations records what the runner believes; the objects are what queries run against, and the two legitimately differ (the gate applies files with psql and records nothing). Production had both missing, so it would still have blocked"
+  },
+  "what_refuses": [
+   "bettor_funded_execution.submit_for_decision",
+   "bettor_funded_management.submit_exit",
+   "bettor_funded_management.cancel_outstanding"
+  ],
+  "what_reports_instead_of_raising": [
+   "bettor_funded_management.manage -> funded_capability BLOCKED, nothing reconciled settled or sent",
+   "bettor_funded_book.command_center -> BLOCKED with the missing objects named, and the counts WITHHELD rather than shown as zeros"
+  ],
+  "what_stays_available": "every non-funded route, the diagnostics, and the desk read itself",
+  "the_production_failure_state_is_tested": {
+   "how": "the tests drop `residual_qty` and the ledger rows inside a transaction that is rolled back, so the broken state is real and temporary",
+   "tests": [
+    "tests/test_the_funded_lifecycle_is_complete.py::test_the_funded_capability_is_blocked_when_the_schema_is_absent",
+    "tests/test_the_funded_lifecycle_is_complete.py::test_no_funded_submission_is_possible_without_the_schema",
+    "tests/test_the_funded_lifecycle_is_complete.py::test_the_general_reads_keep_working_while_funded_is_blocked"
+   ],
+   "the_second_one_flips_every_switch_ON": "FUNDED_SUBMISSION_ENABLED, FUNDED_EXIT_SUBMISSION_ENABLED and REAL_ORDER_SUBMISSION_ENABLED are all monkeypatched true, so the schema condition ALONE is what stops the venue being reached: zero create, preview or cancel calls",
+   "and_a_ledger_gap_alone_does_not_block": "asserted in the first test -- deleting the 126 row while every object is present reads AVAILABLE"
+  },
+  "start_sh": "unchanged in behaviour and now states the consequence where an operator reads it"
+ },
+ "3_the_migrations_are_exercised_on_postgresql_18": {
+  "why": [
+   "the release gate's database is PostgreSQL 16.13 and production is 18.6. A green",
+   "gate on the wrong major version established nothing about migration 126, and",
+   "saying so afterwards is not the same as testing it."
+  ],
+  "job": ".github/workflows/command-verify.yml -> funded-pg18 (input pg18_migrations=on)",
+  "what_it_does": [
+   "postgres:18 service container, asserts server_version_num >= 170000 or fails",
+   "applies every migration with `python -m sportsassets.scripts.migrate` -- the runner production boots with, asyncpg, whole file per transaction",
+   "a funded file that fails FAILS THE JOB; two pre-existing files that depend on a collector-built table are skipped by name and reported",
+   "asserts 125, 126, 127 and 128 recorded, the new columns present, the predicates present",
+   "asserts bettor_funded_one_open_position BUILT, evaluates the predicate under search_path = pg_catalog, pg_temp, and REINDEXes the index -- the real maintenance operation, which 17+ runs under that path itself",
+   "runs the five funded test files against that database"
+  ],
+  "result_on_this_release": "every step passed",
+  "what_it_still_does_not_do": "run the WHOLE suite on 18. It covers the funded lane's migrations and tests, which is where the defect was"
+ },
+ "4_operator_access_is_proven_not_merely_refused": {
+  "the_gap": "a wrong-password probe returning 401 establishes that the sign-in REJECTS. It says nothing about whether anybody can get in",
+  "step": ".github/workflows/command-verify.yml -> funded-readback S6",
+  "credentials": "read from the service environment through the Render API, masked before use, never printed, never rotated, never typed as a workflow input",
+  "results_against_the_serving_build": {
+   "POST /api/command/session/control (correct operator password)": "HTTP 200, scope control, cookie set, token_in_body false, ttl 1800 s",
+   "POST /api/command/session (correct read password)": "HTTP 200, cookie set",
+   "GET /api/command/bettor/desk with the session cookie ALONE": "HTTP 200, 15 sections, no admin token on the request",
+   "GET a read route with the CONTROL cookie alone": "HTTP 401 -- asserted as the correct scope boundary: the control credential does not grant reads"
+  },
+  "operator_url": "https://command.bettortoken.com/",
+  "a_finding_that_is_an_owner_decision": [
+   "DESK_PASSWORD is NOT SET on the service. That does not close the read sign-in:",
+   "config.Settings.desk_password carries a default and /api/command/session accepts",
+   "it, so the command centre's READ surface is currently protected by a value",
+   "published in this repository. The step signs in with it -- read out of the",
+   "checked-out source, never retyped, never printed -- to prove desk access",
+   "genuinely works, and reports the situation rather than hiding it or calling the",
+   "sign-in unconfigured. The CONTROL credential, which the write actions need, is a",
+   "real secret and is set."
+  ],
+  "two_defects_in_this_step_itself_found_and_fixed": [
+   "it read the CONTROL cookie against a READ route, got 401, and narrated that as 'confirms the session is live'. It confirms the opposite, and the opposite is correct",
+   "it reported 'not configured' when DESK_PASSWORD was absent, which would have been misleading in the other direction"
+  ]
+ },
+ "5_what_the_gate_actually_said": {
+  "note": "filled in after the final pair; the intermediate pair is kept because discarding an inconvenient reading is how an instrument stops being one"
+ },
+ "what_this_record_does_not_claim": [
+  "that funded readiness is complete. It is not: no account is bound, no credential is provisioned, no limits are approved, and section 3 of the handoff lists the market evidence that is still missing.",
+  "that these tests establish anything about a venue, a source or a fixture. They are software conditions.",
+  "that the PostgreSQL 18 job makes the 16 gate redundant. It covers the funded lane only."
+ ]
+}
