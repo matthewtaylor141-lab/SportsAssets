@@ -3555,6 +3555,94 @@ async def admin_pilot_prerequisites(response: Response,
             "funded_submission": "DISABLED"}
 
 
+@app.get("/api/admin/funded-account-eligibility",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_account_eligibility(
+        response: Response, account_id: str | None = None) -> dict:
+    """ACCOUNT SELECTION IS NOT ACCOUNT ELIGIBILITY. Read-only.
+
+    WHY THIS ROUTE EXISTS. An account can be NAMED for assessment, and naming it
+    changes nothing: it does not clear a paused status, it does not produce
+    reconciliation evidence, and confirming its id is not confirming that capital
+    may be committed to it. Three separate reads were already available, and the
+    one thing none of them showed was the question that actually decides
+    isolation -- WHO ELSE CAN WRITE THIS ACCOUNT'S EXPOSURE. So they are returned
+    together with that enumeration.
+
+    WHAT IT SHOWS, each read separately and each with its own failure mode:
+
+      * the registry row -- status, paused, reason. Identity and state only.
+      * the reconciliation evidence and ITS AGE, or the fact that none was ever
+        recorded. An absent reconciliation is not a passing one.
+      * account-wide exposure across every path, or `TOTAL_UNREADABLE`. A total
+        that cannot be read is never reported as zero.
+      * EVERY WRITER that can reach the exposure tables, by write statement --
+        because the lanes that share them have no import edge between them, so no
+        import analysis would find them.
+
+    It contacts no venue, reruns no reconciliation, and writes nothing. A read
+    that silently reached a venue would be a write-shaped action wearing a GET.
+    """
+    from .. import bettor_account_exposure as AE
+    from .. import bettor_account_onboarding as ON
+    from .. import bettor_funded_activation as FA
+    from .. import capital_path as CP
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        bound = FA._obj(await FA._state(conn, FA.ACCOUNT_KEY)) or {}
+        acct = (str(account_id or "").strip()
+                or str(bound.get("account_id") or "").strip() or None)
+        registry = [dict(r) for r in await conn.fetch(FA.REGISTRY_READ_SQL)]
+        row = next((r for r in registry
+                    if str(r.get("account_id")) == acct), None)
+        evidence = await ON.reconciliation_evidence(conn, account_id=acct)
+        try:
+            exposure = await AE.account_exposure(conn, account_id=acct,
+                                                 venue_positions=None)
+        except Exception as exc:
+            exposure = {"total": None, "refusal": "EXPOSURE_READ_RAISED",
+                        "why": type(exc).__name__}
+
+    writers = CP.account_writers()
+    eligible = bool(row and str(row.get("status", "")).upper() == "ACTIVE"
+                    and not row.get("paused")
+                    and evidence.get("ok") is True)
+    return {
+        "account_id": acct,
+        "selected_for_assessment": acct is not None,
+        "and_selection_is_not_eligibility": (
+            "naming an account does not clear its paused or unreconciled state. "
+            "This field says it was named; `eligible` says whether it may be "
+            "used, and they are different questions"),
+        "registry_row": row,
+        "registry_row_found": row is not None,
+        "reconciliation": evidence,
+        "account_wide_exposure": exposure,
+        "every_writer_that_can_reach_the_account": writers,
+        "eligible": eligible,
+        "why_not": (None if eligible else [
+            r for r in (
+                ("no registry row for this account"
+                 if row is None else None),
+                ("status=%s" % row.get("status")) if row is not None
+                and str(row.get("status", "")).upper() != "ACTIVE" else None,
+                "the account is PAUSED" if row is not None
+                and row.get("paused") else None,
+                ("reconciliation: %s" % evidence.get("refusal"))
+                if evidence.get("ok") is not True else None,
+            ) if r]),
+        "and_a_one_position_rule_does_not_isolate_this_account": (
+            "a limit of one concurrent position in THIS lane bounds what this "
+            "lane does. It does not bound what the other writers above do, and "
+            "counting them is not controlling them"),
+        "this_route_is_read_only": {"method": "GET", "writes": 0,
+                                    "venue_calls": 0},
+    }
+
+
 @app.get("/api/admin/funded-account-registry",
          dependencies=[Depends(require_admin)])
 async def admin_funded_account_registry(response: Response) -> dict:
