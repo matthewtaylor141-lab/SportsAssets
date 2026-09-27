@@ -9555,7 +9555,7 @@ async def api_venue_fixture_crossing(sport: str = Query("Soccer"),
 
 @app.get("/api/admin/venue-clock-probe",
          dependencies=[Depends(require_admin)])
-async def api_venue_clock_probe(slugs: str = Query(...),
+async def api_venue_clock_probe(slugs: str = Query(""),
                                 gap_s: float = Query(12.0, ge=1.0, le=60.0)
                                 ) -> dict:
     """WHAT `marketData.transactTime` ACTUALLY MEANS, established by reading
@@ -9678,6 +9678,39 @@ async def api_venue_clock_probe(slugs: str = Query(...),
         }
 
     want = [s.strip() for s in str(slugs or "").split(",") if s.strip()][:6]
+    # ── SELF-SELECTING WHEN NO SLUG IS NAMED ─────────────────────────
+    #
+    # WHY THIS MATTERS ON THE CRITICAL PATH. The one question that decides whether
+    # mechanism M2 is available -- does the book endpoint emit an ETag or a
+    # Last-Modified? -- can only be answered by reading a book. Requiring the
+    # caller to name a live slug meant the determination waited on somebody
+    # knowing one, and the slugs the LANE actually reads are the right sample
+    # anyway: a validator present on one contract family and absent on another is
+    # exactly the kind of thing a hand-picked slug hides.
+    #
+    # So with no `slugs`, this takes the most recent cycle's OWN mapped
+    # candidates. It reads the same ledger the operating view reads and invents
+    # nothing: an empty ledger produces an empty probe that says so.
+    slug_source = "CALLER_SUPPLIED"
+    if not want:
+        slug_source = "MAPPED_CANDIDATES_OF_THE_LAST_REPORTED_CYCLE"
+        try:
+            from ..db import get_pool as _gp
+
+            _pool = await _gp()
+            raw = await _pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key = $1",
+                "ext_pinnacle_last_cycle")
+            cyc = (json.loads(raw) if isinstance(raw, (str, bytes)) else raw) or {}
+            seen = []
+            for row in (cyc.get("mapped_candidate_ledger") or []):
+                sl = (row or {}).get("us_market_slug")
+                if sl and sl not in seen:
+                    seen.append(str(sl))
+            want = seen[:6]
+        except Exception as exc:                               # noqa: BLE001
+            want = []
+            slug_source = "LEDGER_UNREADABLE_%s" % type(exc).__name__
     pairs = []
     for slug in want:
         first = await _one(slug)
@@ -9731,6 +9764,28 @@ async def api_venue_clock_probe(slugs: str = Query(...),
 
     return {
         "version": "VENUE_CLOCK_OBSERVATIONS_V3_WITH_THE_RESPONSE_CONTRACT",
+        "slug_source": slug_source,
+        "slugs_probed": want,
+        "the_question_this_answers": (
+            "whether the book endpoint emits a validator (ETag or "
+            "Last-Modified). If it does, mechanism M2 -- a conditional "
+            "revalidation answered 304 -- becomes available and the lane can "
+            "establish book currency. If it does not, M2 is unavailable, M1 is "
+            "already verified unavailable on this feed, and no mechanism can "
+            "establish currency: that is a release blocker with no engineering "
+            "route around it"),
+        "m2_verdict": (
+            "NO_READ_SUCCEEDED" if not pairs else
+            "VALIDATOR_PRESENT_ON_EVERY_READ"
+            if all(((p.get("first") or {}).get("contract") or {}).get(
+                       "revalidation_possible") is True
+                   and ((p.get("second") or {}).get("contract") or {}).get(
+                       "revalidation_possible") is True
+                   for p in pairs) else
+            "VALIDATOR_PRESENT_ON_SOME_READS"
+            if any(((p.get("first") or {}).get("contract") or {}).get(
+                       "revalidation_possible") is True for p in pairs) else
+            "NO_VALIDATOR_ON_ANY_READ"),
         "reads_only": True, "submits_orders": False,
         "classifies_semantics": False,
         "changes_admission": False,
