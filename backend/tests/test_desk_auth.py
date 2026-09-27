@@ -13,7 +13,27 @@ from sportsassets.api import app as app_mod
 from sportsassets.api.app import (DeskUnlockBody, desk_token_ok,
                                   desk_unlock, mint_desk_token,
                                   require_desk)
+from sportsassets import config
 from sportsassets.config import settings
+
+#: THE TEST CONFIGURES ITS OWN CREDENTIALS, corrected 2026-09-27.
+#:
+#: This file used to sign in with `settings().desk_password`, which worked only
+#: because the shipped default was `"bt"` -- a password published in this
+#: repository. Removing that default correctly broke this test, and the repair is
+#: not to restore a default: it is for the test to configure a credential, which
+#: is exactly what the production fix now requires of every deployment.
+_TEST_DESK_PASSWORD = "a-test-desk-password"
+_TEST_ADMIN_TOKEN = "a-test-admin-token"
+
+
+@pytest.fixture(autouse=True)
+def _configured_credentials(monkeypatch):
+    monkeypatch.setenv("DESK_PASSWORD", _TEST_DESK_PASSWORD)
+    monkeypatch.setenv("ADMIN_TOKEN", _TEST_ADMIN_TOKEN)
+    config.settings.cache_clear()
+    yield
+    config.settings.cache_clear()
 
 
 def test_mint_verify_round_trip():

@@ -110,11 +110,39 @@ class TestTheBootMarker:
         assert app_mod._BOOT_TS <= time.time()
 
     def test_the_old_fields_are_still_there(self, monkeypatch):
+        """THE POINT OF THIS TEST IS THAT NOTHING WAS REMOVED, so it asserts a
+        SUBSET rather than equality -- corrected 2026-09-27.
+
+        Equality made it a change-detector for the whole payload: adding
+        `auth_not_configured` and `auth_all_configured` (which publish whether
+        each authentication credential is configured, after the published-default
+        defect) failed a test whose name and purpose are about the OLD fields
+        surviving. A test that fails on every addition stops being read.
+
+        The two new fields get their own assertions below, so nothing is merely
+        tolerated.
+        """
         _pool(monkeypatch, _FastPool())
         out = asyncio.run(app_mod.healthz())
-        assert set(out) == {"ok", "db_ok", "pool", "commit", "rss_mb",
-                            "boot_id", "uptime_s"}
+        assert {"ok", "db_ok", "pool", "commit", "rss_mb", "boot_id",
+                "uptime_s"} <= set(out)
         assert out["rss_mb"] is None or out["rss_mb"] > 0
+
+    def test_the_auth_posture_is_published_here(self, monkeypatch):
+        """ADDED WITH THE FIELDS, so the payload is asserted and not just
+        tolerated. The published-default credential defect survived a day because
+        nothing said which credential was in force; these two fields are how it
+        becomes visible from outside without authenticating."""
+        _pool(monkeypatch, _FastPool())
+        out = asyncio.run(app_mod.healthz())
+        assert isinstance(out["auth_not_configured"], list)
+        assert isinstance(out["auth_all_configured"], bool)
+        # Consistent with each other, in both directions.
+        assert out["auth_all_configured"] is (out["auth_not_configured"] == [])
+        # AND NO SECRET MATERIAL: names only, never values or lengths.
+        for name in out["auth_not_configured"]:
+            assert name in {"admin_token", "desk_password",
+                            "operator_password"}, name
 
 
 class TestTheDbProbeIsBounded:

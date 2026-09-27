@@ -20,7 +20,22 @@ from sportsassets.api.app import (CashOutBody, DeskUnlockBody,
                                   mint_wall_token, require_desk,
                                   wall_broadcast, wall_renew, wall_state,
                                   wall_token_ok, wall_unlock)
+from sportsassets import config
 from sportsassets.config import settings
+
+#: SAME CORRECTION AS test_desk_auth, and for the same reason: this file signed
+#: in with `settings().desk_password`, which only worked because the shipped
+#: default was a password published in this repository. The test configures its
+#: own credential now.
+
+
+@pytest.fixture(autouse=True)
+def _configured_credentials(monkeypatch):
+    monkeypatch.setenv("DESK_PASSWORD", "a-test-desk-password")
+    monkeypatch.setenv("ADMIN_TOKEN", "a-test-admin-token")
+    config.settings.cache_clear()
+    yield
+    config.settings.cache_clear()
 
 
 # ── Token scope discipline ───────────────────────────────────────────

@@ -321,10 +321,14 @@ for case in root.iter("testcase"):
         cls = (case.get("classname") or "").strip()
         name = (case.get("name") or "").strip()
         if not f:
-            # classname is dotted: tests.test_x.TestY -> tests/test_x.py::TestY
-            parts = cls.split(".")
-            mod = [p for p in parts if p.startswith("test")]
-            f = "/".join(parts[:parts.index(mod[0]) + 1]) + ".py" if mod else ""
+            # classname is dotted: `tests.test_x` or `tests.test_x.TestY`.
+            # THE FIRST VERSION TOOK THE FIRST DOTTED PART BEGINNING "test",
+            # which is `tests` itself -- so every identity came out as
+            # `tests.py::name` and the file was lost. The MODULE is the last
+            # part that is not a CapWords class name.
+            parts = [p for p in cls.split(".") if p]
+            mod_parts = [p for p in parts if not p[:1].isupper()]
+            f = "/".join(mod_parts) + ".py" if mod_parts else ""
         klass = cls.split(".")[-1] if cls and cls.split(".")[-1][:1].isupper() \
             else ""
         ids.add("%s::%s%s" % (f, klass + "::" if klass else "", name))
