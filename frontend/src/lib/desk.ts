@@ -104,6 +104,23 @@ export async function deskUnlock(password: string): Promise<UnlockResult> {
  * team members and the owner. A 401 means the session died server-side:
  * relock the UI and rethrow.
  */
+/**
+ * The desk headers alone, for callers that cannot use `deskApi` -- the provider
+ * proxy is a raw `fetch` because it streams and `deskApi` parses JSON.
+ *
+ * Returns an EMPTY OBJECT when no session exists rather than throwing, because
+ * its caller (`proxyAvailable`) treats any failure as "no proxy" and falls back.
+ * A throw here would take the cockpit down on a locked desk instead.
+ */
+export function deskHeaders(): Record<string, string> {
+  const h: Record<string, string> = {}
+  const dtok = deskToken()
+  const atok = deskAdminToken()
+  if (dtok) h['X-Desk-Token'] = dtok
+  if (atok) h['X-Admin-Token'] = atok
+  return h
+}
+
 export function deskApi<T>(path: string, init?: RequestInit): Promise<T> {
   const dtok = deskToken()
   const atok = deskAdminToken()

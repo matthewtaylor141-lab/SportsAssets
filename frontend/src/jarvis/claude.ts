@@ -1,30 +1,42 @@
 /* Streaming Claude client for the JARVIS cockpit.
  *
- * All calls are made CLIENT-SIDE with the owner's own Anthropic key (typed
- * once, held in sessionStorage) — the
- * `anthropic-dangerous-direct-browser-access` header opts this origin into CORS
- * on api.anthropic.com. Implements a small, robust SSE parser over fetch +
- * ReadableStream, and the multi-turn tool-use loop: stream → run tool_use blocks
- * locally → continue with a tool_result user message → stream again, until
- * stop_reason is end_turn.
+ * Implements a small, robust SSE parser over fetch + ReadableStream, and the
+ * multi-turn tool-use loop: stream → run tool_use blocks locally → continue with
+ * a tool_result user message → stream again, until stop_reason is end_turn.
  *
- * WHERE THE KEY LIVES, AND WHAT IS STILL WRONG WITH THAT (audit finding A6).
- * This said "kept in localStorage", and it was. It is now sessionStorage, and
- * `pages/Jarvis.tsx` purges any durable copy on load, so a credential typed
- * months ago no longer sits there waiting for one script injection.
+ * WHERE THE KEY LIVES — AUDIT FINDING A6, NOW REPAIRED.
  *
- * THAT IS A REDUCTION IN CONSEQUENCE, NOT A FIX. A provider key in the browser
- * at all is readable by anything running on this origin for as long as the tab
- * is open, and the header name the provider chose says so out loud. The real
- * repair is a server-side proxy holding the key and exposing a scoped streaming
- * endpoint; that is a backend change and it is NOT done. It is tracked as OPEN
- * in COMPLETION_REGISTER_2026-09-27.md rather than implied away here.
+ * It used to live in the BROWSER. Calls went straight to api.anthropic.com with
+ * the owner's key and the provider's own
+ * `anthropic-dangerous-direct-browser-access` header, whose name says what it
+ * is. I first moved that key from localStorage to sessionStorage and purged
+ * durable copies on load, and recorded honestly that this was "a REDUCTION IN
+ * CONSEQUENCE, NOT A FIX": a provider key in a browser is readable by anything
+ * on that origin for as long as the tab is open.
+ *
+ * THE FIX IS THE SERVER-SIDE PROXY, and it now exists.
+ * `POST /api/jarvis/messages` holds the key in the backend's environment,
+ * requires the desk credential, and REBUILDS the upstream request from validated
+ * fields — allow-listed model, clamped max_tokens, shape-checked messages,
+ * bounded system prompt — refusing an unknown field by name rather than relaying
+ * it. See `backend/sportsassets/provider_key_proxy.py`.
+ *
+ * THIS CLIENT PREFERS THE PROXY AND KEEPS THE DIRECT PATH AS A FALLBACK for a
+ * deployment where the server key is not configured. `proxyAvailable()` asks the
+ * server; when it answers yes, NO KEY IS READ FROM STORAGE AT ALL on that path.
+ *
+ * WHAT THE PROXY DOES NOT FIX, so it is not implied away: an operator with desk
+ * access can still spend the account through it — the proxy bounds WHAT can be
+ * asked and `require_desk` is the WHO — and nothing rate-limits that spend. Both
+ * are recorded in the proxy's own `describe()`.
  *
  * AND A TOOL DESCRIPTION IS NOT AN AUTHORIZATION BOUNDARY. Every tool in
  * `tools.ts` that can change state calls an admin- or desk-scoped API route, and
  * it is the SERVER's check on that route that decides. The confirmation flow in
  * this cockpit is an operator convenience, not the control.
  */
+
+import { deskHeaders } from '../lib/desk'
 
 /** Model fallback chain: Fable first, then Opus, then Sonnet. A model
  * the API won't serve (retired id, no access) or that is overloaded
@@ -33,6 +45,35 @@
 export const MODEL_CHAIN = ['claude-fable-5', 'claude-opus-5', 'claude-sonnet-5']
 const MODEL_LS_KEY = 'meridian_model'
 const API_URL = 'https://api.anthropic.com/v1/messages'
+/** The server-side proxy. It holds the key; the browser never sees it. */
+const PROXY_URL = '/api/jarvis/messages'
+const PROXY_STATUS_URL = '/api/jarvis/proxy-status'
+
+/** Cached once per page load: the answer cannot change without a redeploy. */
+let _proxyOk: boolean | null = null
+
+/**
+ * Does the server hold the provider key?
+ *
+ * FAILS TO THE DIRECT PATH RATHER THAN TO A BROKEN COCKPIT. A network blip on
+ * this probe must not take the cockpit down, so an error answers "no" and the
+ * fallback runs. That is the safe direction for AVAILABILITY and the unsafe one
+ * for the key, which is why the probe result is cached rather than retried per
+ * round: a cockpit that silently oscillated between paths would be worse than
+ * either.
+ */
+export async function proxyAvailable(): Promise<boolean> {
+  if (_proxyOk !== null) return _proxyOk
+  try {
+    const r = await fetch(PROXY_STATUS_URL, { headers: deskHeaders() })
+    if (!r.ok) { _proxyOk = false; return false }
+    const j = await r.json()
+    _proxyOk = j?.key_present === true
+  } catch {
+    _proxyOk = false
+  }
+  return _proxyOk
+}
 const MAX_TOOL_ROUNDS = 8
 /** Completion cap. Raised from 2048 for the on-screen outputs — a
  * show_markdown table or a 90-day show_chart spec is tool INPUT and
@@ -156,15 +197,22 @@ async function streamMessage(
   opts: StreamOptions & { model: string },
   handlers: StreamHandlers,
 ): Promise<StreamResult> {
-  const resp = await fetch(API_URL, {
+  // THE PROXY FIRST. When the server holds the key, `opts.apiKey` is never
+  // read — which is the point of the repair, not a detail of it.
+  const viaProxy = await proxyAvailable()
+  const resp = await fetch(viaProxy ? PROXY_URL : API_URL, {
     method: 'POST',
     signal: opts.signal,
-    headers: {
-      'x-api-key': opts.apiKey,
-      'anthropic-version': '2023-06-01',
-      'anthropic-dangerous-direct-browser-access': 'true',
-      'content-type': 'application/json',
-    },
+    headers: viaProxy
+      ? { 'content-type': 'application/json', ...deskHeaders() }
+      : {
+        // THE DIRECT PATH, KEPT ONLY AS A FALLBACK for a deployment with no
+        // server-side key. Everything wrong with it is in the file header.
+        'x-api-key': opts.apiKey,
+        'anthropic-version': '2023-06-01',
+        'anthropic-dangerous-direct-browser-access': 'true',
+        'content-type': 'application/json',
+      },
     body: JSON.stringify({
       model: opts.model,
       max_tokens: MAX_TOKENS,

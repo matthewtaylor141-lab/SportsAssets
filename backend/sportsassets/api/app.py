@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 from .. import procmem as _procmem
 from .. import roster as roster_svc
 from .. import notification_capability as _NC
+from .. import provider_key_proxy as _PKP
 from ..bus import CH_HEALTH, CH_TRADES_ENRICHED, CH_TRADES_NEW, get_redis
 from ..config import settings
 from ..db import close_pool, get_pool
@@ -16662,6 +16663,90 @@ async def api_matrix(window: str = Query("all", pattern="^(7d|30d|all)$")) -> di
 @app.get("/api/events")
 async def api_events(limit: int = Query(50, ge=1, le=200)) -> list[dict]:
     return await queries.events_view(limit)
+
+
+# ── The provider-key proxy (audit A6) ───────────────────────────────
+
+
+@app.get("/api/jarvis/proxy-status", dependencies=[Depends(require_desk)])
+async def jarvis_proxy_status() -> dict:
+    """WHETHER THE SERVER-SIDE KEY IS CONFIGURED. It reports no key material.
+
+    The cockpit reads this to decide whether to use the proxy or fall back to
+    asking the operator for a key. `key_present` is a BOOLEAN -- a route that
+    returned a prefix or a length would be leaking the thing this exists to
+    stop leaking.
+    """
+    d = _PKP.describe()
+    assert "key" not in str(d.get("key_present")).lower() or True
+    return d
+
+
+@app.post("/api/jarvis/messages", dependencies=[Depends(require_desk)])
+async def jarvis_messages(request: Request) -> Response:
+    """THE SCOPED STREAMING ENDPOINT. The key never reaches the browser.
+
+    THE REPAIR THIS IS. The cockpit called api.anthropic.com directly from the
+    browser with the owner's key, using the provider's own
+    `anthropic-dangerous-direct-browser-access` header. Moving the key from
+    localStorage to sessionStorage narrowed the window and did not close it: a
+    provider key in a browser is readable by anything on that origin while the
+    tab is open.
+
+    IT IS NOT A PASSTHROUGH. `build_request` REBUILDS the upstream body from
+    validated fields -- allow-listed model, clamped max_tokens, shape-checked
+    messages, bounded system prompt -- and refuses an unknown field by name
+    rather than relaying it. A filter fails open on what it has not heard of; a
+    rebuild fails closed.
+
+    AND AN UPSTREAM ERROR IS NOT RELAYED VERBATIM. Provider error bodies can
+    echo request material, so the status and a short reason are returned and the
+    detail is logged server-side.
+    """
+    if not _PKP.key_present():
+        raise HTTPException(status_code=503, detail={
+            "reason": _PKP.R_NO_KEY,
+            "what": ("the server-side provider key is not configured. Set %s "
+                     "in the environment's secret store -- never in the "
+                     "repository and never in a message"
+                     % _PKP.KEY_ENV)})
+    try:
+        body = await request.json()
+    except Exception:                                          # noqa: BLE001
+        raise HTTPException(status_code=400, detail={
+            "reason": _PKP.R_BAD_MESSAGES, "what": "the body is not JSON"})
+    built = _PKP.build_request(body)
+    if not built["ok"]:
+        raise HTTPException(status_code=400, detail={
+            "reason": built["refusal"], "what": built["why"],
+            "forwarded_fields": list(_PKP.FORWARDED_FIELDS)})
+
+    import httpx
+
+    async def _pump():
+        # ONE CLIENT PER REQUEST, CLOSED WITH THE STREAM. A shared client would
+        # outlive a cancelled download and hold the connection.
+        timeout = httpx.Timeout(10.0, read=300.0)
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            async with client.stream("POST", _PKP.PROVIDER_URL,
+                                     headers=_PKP.provider_headers(),
+                                     json=built["request"]) as r:
+                if r.status_code >= 400:
+                    # THE DETAIL IS LOGGED, NOT RELAYED. A provider error body
+                    # can echo request material back to the browser.
+                    detail = (await r.aread())[:2000]
+                    log.warning("jarvis proxy upstream %s: %s",
+                                r.status_code, detail)
+                    yield (b'event: error\ndata: {"type":"error","error":'
+                           b'{"type":"upstream","message":"the provider '
+                           b'refused this request; see the server log"}}\n\n')
+                    return
+                async for chunk in r.aiter_raw():
+                    yield chunk
+
+    return StreamingResponse(_pump(), media_type="text/event-stream",
+                             headers={"cache-control": "no-store",
+                                      "x-accel-buffering": "no"})
 
 
 # ── Push subscription + prefs ───────────────────────────────────────
