@@ -1892,6 +1892,41 @@ async def command_center(conn) -> dict:
     separate sections and the totals are not added, which is why this returns
     its own section rather than a row inside Positions.
     """
+    # ── CAPABILITY BEFORE CONTENT ───────────────────────────────────
+    #
+    # On 2026-09-27 this section served `UndefinedColumnError: column
+    # "residual_qty" does not exist` -- accurate, and only because the API
+    # happens to catch exceptions around this call. A reader could not tell from
+    # that whether the funded lane was BLOCKED or merely broken, and nothing in
+    # it said that submission was stopped. The schema is therefore asked FIRST
+    # and the answer is a capability statement, with the missing objects named.
+    from . import bettor_funded_schema as FS
+
+    schema = await FS.readiness(conn)
+    if not schema.get("ok"):
+        return {
+            "section": "Funded book",
+            "label": "REAL MONEY -- NEVER SUMMED WITH ANY MODELLED BOOK",
+            "funded_capability": FS.CAPABILITY_BLOCKED,
+            "refusal": schema.get("refusal"),
+            "schema_readiness": schema,
+            "books": [], "book_count": None,
+            "unresolved_discrepancies": [],
+            "unresolved_discrepancy_count": None,
+            "counts_toward_strategy_performance": None,
+            "why": schema.get("why"),
+            "what_this_is_not": (
+                "this is NOT an empty funded book. The book cannot be read at "
+                "all in this database, and the numbers are withheld rather "
+                "than shown as zeros -- a panel that reports 0 positions and "
+                "$0.00 over a schema it cannot query is the failure mode this "
+                "replaces"),
+            "submission_is_blocked_too": (
+                "bettor_funded_execution.submit_for_decision and "
+                "bettor_funded_management.submit_exit refuse with the same "
+                "refusal, so no order can be sent while this reads BLOCKED"),
+            "the_rest_of_the_service_is_unaffected": True,
+        }
     pairs = await conn.fetch(
         "SELECT account_id, venue, count(*) AS intents "
         "  FROM bettor_funded_intents GROUP BY account_id, venue "
@@ -1993,6 +2028,11 @@ async def command_center(conn) -> dict:
     return {
         "section": "Funded book",
         "label": "REAL MONEY — NEVER SUMMED WITH ANY MODELLED BOOK",
+        "funded_capability": FS.CAPABILITY_AVAILABLE,
+        "schema_readiness": {k: schema.get(k) for k in
+                             ("ok", "capability", "missing_migrations",
+                              "missing_tables", "missing_columns",
+                              "missing_functions")},
         "books": books,
         "book_count": len(books),
         "counts_toward_strategy_performance": None,

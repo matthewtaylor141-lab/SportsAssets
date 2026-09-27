@@ -3949,6 +3949,21 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
                   "error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
                   "note": ("the funded book could not be read. That is "
                            "reported rather than shown as an empty book")}
+    # THE CAPABILITY, STATED WHERE A READER LOOKS FIRST. `command_center`
+    # already answers BLOCKED with the missing objects named when the schema is
+    # absent; this lifts it to the top of the section so nobody has to infer it
+    # from a missing count.
+    funded.setdefault("funded_capability", "UNKNOWN")
+    funded["funded_capability_means"] = {
+        "AVAILABLE": ("the funded schema is present, so the lane's reads and "
+                      "writes can run. It says NOTHING about whether trading "
+                      "is authorised: every submission switch is separate and "
+                      "all of them are off"),
+        "BLOCKED": ("required migrations, columns or functions are missing "
+                    "from this database. Every funded submission path refuses "
+                    "with the same refusal, and the rest of the API is "
+                    "unaffected"),
+        "enforced_by": "sportsassets.bettor_funded_schema.require"}
     funded["entry_lane_disablements"] = FUNDEDX.disablements()
     funded["servicing_lane_disablements"] = FUNDEDM.disablements()
     funded["servicing_outlives_entry"] = (

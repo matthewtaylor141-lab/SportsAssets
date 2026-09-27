@@ -118,6 +118,17 @@ on:
           be attributed to a deploy that did not land.
         required: false
         default: ""
+      pg18_migrations:
+        description: >-
+          on|blank. `on` runs the SEPARATE funded-pg18 job: it applies the
+          repository's migrations to a PostgreSQL 18 service container with the
+          SAME runner production uses, asserts the funded migrations applied,
+          and runs the funded test suite against that database. It exists
+          because the release gate's database is PostgreSQL 16 and production is
+          18, which is exactly how migration 126 passed a green gate and rolled
+          back in production. No secrets, no network, nothing deployed.
+        required: false
+        default: ""
       funded_readback:
         description: >-
           on|blank. `on` runs the SEPARATE funded-readback job, which reads
@@ -5901,3 +5912,328 @@ jobs:
           [ "$DEMO" = "false" ] || { say "  => the demonstration claims to count toward performance. FAILING."; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
           say "  => the demonstration is published in full, labelled, and excluded."
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: S6 · Operator sign-in and an authenticated desk read
+        env:
+          API: ${{ inputs.api }}
+          RENDER_KEY: ${{ secrets.RENDER_API_KEY }}
+          SERVICE: ${{ inputs.operator_service }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### S6 · the credentials actually work, not merely refuse' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # WHY THIS EXISTS. The operator-access job probes with a DELIBERATELY
+          # WRONG password and reads 401. That establishes that the sign-in is
+          # configured and rejects -- it does not establish that anybody can get
+          # in. This step signs in with the EXISTING credentials and then reads
+          # the desk with the resulting session cookie alone.
+          #
+          # NO CREDENTIAL IS PRINTED, TYPED AS AN INPUT, OR WRITTEN. The values
+          # are read from the service environment through the Render API, masked
+          # before use, held in a cookie jar in the runner's temp space, and
+          # never echoed. Nothing is rotated and nothing is set.
+          if [ -z "${RENDER_KEY:-}" ]; then
+            say "SKIPPED: no RENDER_API_KEY, so the existing credentials cannot"
+            say "be read from the service environment from here. A successful"
+            say "sign-in is therefore NOT established by this run."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          echo "::add-mask::$RENDER_KEY"
+          RAPI=https://api.render.com/v1
+          rget() { curl -sS --max-time 45 -H "Authorization: Bearer $RENDER_KEY" \
+                        -H "Accept: application/json" "$RAPI$1"; }
+          ID=$(rget "/services?name=${SERVICE:-sportsassets-api}&limit=20" \
+               | jq -r --arg n "${SERVICE:-sportsassets-api}" \
+                    '.[]? | select(.service.name==$n) | .service.id' | head -1)
+          [ -n "$ID" ] || { say "no service named ${SERVICE:-sportsassets-api}"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          rget "/services/$ID/env-vars?limit=100" > /tmp/ev.json
+          OPW=$(jq -r '.[]? | .envVar | select(.key=="OPERATOR_PASSWORD") | .value' /tmp/ev.json | head -1)
+          DPW=$(jq -r '.[]? | .envVar | select(.key=="DESK_PASSWORD") | .value' /tmp/ev.json | head -1)
+          rm -f /tmp/ev.json
+          [ -n "$OPW" ] && echo "::add-mask::$OPW"
+          [ -n "$DPW" ] && echo "::add-mask::$DPW"
+          say "OPERATOR_PASSWORD present in the service environment   $([ -n "$OPW" ] && echo yes || echo NO)"
+          say "DESK_PASSWORD present in the service environment       $([ -n "$DPW" ] && echo yes || echo NO)"
+
+          FAIL=0
+          # ── 1 . THE CONTROL SIGN-IN, WITH THE RIGHT PASSWORD ─────────
+          if [ -n "$OPW" ]; then
+            code=$(curl -sS -o /tmp/ctl.json -w '%{http_code}' --max-time 60 \
+                   -c /tmp/ctl.jar -X POST -H 'Content-Type: application/json' \
+                   --data "$(jq -nc --arg p "$OPW" '{password:$p}')" \
+                   "$API/api/command/session/control")
+            say ""
+            say "POST /api/command/session/control (correct password)  HTTP $code"
+            if [ "$code" = "200" ]; then
+              jq -r '"  scope                        " + (.scope|tostring),
+                     "  cookie                       " + (.cookie|tostring),
+                     "  token_in_body                " + (.token_in_body|tostring),
+                     "  ttl_s                        " + (.ttl_s|tostring),
+                     "  opens                        " + (.opens|tostring)' \
+                /tmp/ctl.json | tee -a "$GITHUB_STEP_SUMMARY"
+              grep -qi "bt_control\|control" /tmp/ctl.jar \
+                && say "  => a CONTROL cookie was set in the jar" \
+                || { say "  => 200 but NO cookie was set"; FAIL=1; }
+            else
+              say "  => the operator password in the service environment was"
+              say "     NOT accepted by the serving build. Sign-in unproven."
+              FAIL=1
+            fi
+          else
+            say "  => OPERATOR_PASSWORD is not set, so the control sign-in"
+            say "     cannot be exercised at all."
+            FAIL=1
+          fi
+
+          # ── 2 . A READ SESSION, AND THE DESK READ WITH THE COOKIE ALONE ─
+          if [ -n "$DPW" ]; then
+            code=$(curl -sS -o /tmp/sess.json -w '%{http_code}' --max-time 60 \
+                   -c /tmp/desk.jar -X POST -H 'Content-Type: application/json' \
+                   --data "$(jq -nc --arg p "$DPW" '{password:$p}')" \
+                   "$API/api/command/session")
+            say ""
+            say "POST /api/command/session (correct password)           HTTP $code"
+            ok=$(jq -r '.ok // false' /tmp/sess.json 2>/dev/null || echo false)
+            say "  ok                           $ok"
+            if [ "$code" = "200" ] && [ "$ok" = "true" ] \
+               && grep -q "bt_command" /tmp/desk.jar; then
+              say "  => a COMMAND cookie was set in the jar"
+              # THE DESK READ, WITH THE COOKIE AND NOTHING ELSE. No admin
+              # token on this request: a read that needs the service credential
+              # proves nothing about operator access.
+              dcode=$(curl -sS -o /tmp/dsk.json -w '%{http_code}' --max-time 120 \
+                      -b /tmp/desk.jar "$API/api/command/bettor/desk")
+              say ""
+              say "GET /api/command/bettor/desk (cookie only, NO admin token)  HTTP $dcode"
+              if [ "$dcode" = "200" ]; then
+                jq -r '"  sections                     "
+                         + ([paths(scalars)|.[0]]|unique|length|tostring),
+                       "  funded_book.funded_capability  "
+                         + ((.funded_book.funded_capability // "-")|tostring),
+                       "  activation.funded_submission   "
+                         + ((.activation.funded_submission // "-")|tostring),
+                       "  demonstration.label            "
+                         + ((.demonstration.label // "-")|tostring)' \
+                  /tmp/dsk.json | tee -a "$GITHUB_STEP_SUMMARY"
+                say "  => AUTHENTICATED DESK ACCESS WORKS on the existing"
+                say "     credential, with no service token in the request."
+              else
+                say "  => the cookie did not open the desk read"; FAIL=1
+              fi
+            else
+              say "  => the desk password in the service environment did not"
+              say "     open a read session. Access unproven."
+              FAIL=1
+            fi
+          else
+            say "  => DESK_PASSWORD is not set."; FAIL=1
+          fi
+
+          # ── 3 . AND THE CONTROL COOKIE OPENS WHAT IT IS SCOPED TO ────
+          if [ -s /tmp/ctl.jar ]; then
+            ccode=$(curl -sS -o /tmp/ctlread.json -w '%{http_code}' --max-time 60 \
+                    -b /tmp/ctl.jar "$API/api/command/bettor/control")
+            say ""
+            say "GET /api/command/bettor/control (control cookie)      HTTP $ccode"
+            say "  (a read; the control cookie is for the WRITES, and this"
+            say "   confirms the session is live without sending one)"
+          fi
+          rm -f /tmp/ctl.jar /tmp/desk.jar /tmp/sess.json /tmp/ctl.json
+          say ""
+          if [ "$FAIL" = "0" ]; then
+            say "  => OPERATOR SIGN-IN AND AUTHENTICATED DESK ACCESS: PROVEN."
+            say "     Nothing was written, rotated or printed."
+          else
+            say "  => NOT PROVEN. The lines above say which half failed."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+  # ── THE FUNDED MIGRATIONS, ON THE VERSION PRODUCTION ACTUALLY RUNS ──
+  #
+  # WHY THIS JOB EXISTS. The release gate builds its database on PostgreSQL
+  # 16.13. Production is 18.6. On 2026-09-27 migration 126 applied cleanly on
+  # every 16 it met, passed a gate that was green by failure identity, and then
+  # rolled back on production -- because PostgreSQL 17 and later build indexes
+  # under a safe `search_path` and re-parse a SQL function body when the planner
+  # inlines it. A green gate on the wrong major version established nothing
+  # about the migration, and saying so afterwards is not the same as testing it.
+  #
+  # So the funded migrations are exercised HERE, on 18, with the SAME runner
+  # production boots with -- `python -m sportsassets.scripts.migrate`, asyncpg,
+  # whole file per transaction -- and then the funded suite runs against that
+  # database. It needs no secret, reaches no network and deploys nothing.
+  funded-pg18:
+    if: ${{ inputs.pg18_migrations != '' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_USER: postgres
+          POSTGRES_DB: funded_pg18
+        ports: ["5432:5432"]
+        options: >-
+          --health-cmd pg_isready --health-interval 5s
+          --health-timeout 5s --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install
+        run: |
+          cd backend
+          pip install --quiet -e ".[dev]"
+      - name: The server this is actually being tested on
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### funded migrations on PostgreSQL 18' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          V=$(psql -h 127.0.0.1 -U postgres -d funded_pg18 -tAc "SHOW server_version")
+          N=$(psql -h 127.0.0.1 -U postgres -d funded_pg18 -tAc "SHOW server_version_num")
+          say "server_version      $V"
+          say "server_version_num  $N"
+          # THE POINT OF THE JOB IS THE VERSION. If the container is not 17+,
+          # this proves nothing and says so rather than passing.
+          [ "$N" -ge 170000 ] || { say "NOT 17+: this job would establish nothing"; exit 1; }
+          say "maintenance search_path restriction applies from 17 onward"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: Apply every migration with the runner production boots with
+        env:
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### the runner, file by file' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cd backend
+          # THE RUNNER STOPS AT THE FIRST FAILING FILE, which is the behaviour
+          # that made a broken 126 block 127 and 128 in production. Two
+          # pre-existing files depend on a table no migration creates
+          # (`us_premap`, built by the collector), so this loops: run the
+          # runner, and when it dies on one of those, record the version so it
+          # is skipped, and run again. A funded file that fails is NOT skipped --
+          # it fails the job.
+          python - <<'PY'
+          import asyncio, os, pathlib, subprocess, sys
+          import asyncpg
+
+          DSN = os.environ["DATABASE_URL"]
+          FUNDED = ("125_", "126_", "127_", "128_")
+          skipped, ok = [], False
+
+          async def mark(version):
+              c = await asyncpg.connect(DSN)
+              await c.execute(
+                  "CREATE TABLE IF NOT EXISTS schema_migrations "
+                  "(version TEXT PRIMARY KEY, applied_at TIMESTAMPTZ NOT NULL "
+                  " DEFAULT now(), content_sha TEXT)")
+              await c.execute(
+                  "INSERT INTO schema_migrations (version, content_sha) "
+                  "VALUES ($1, 'SKIPPED-IN-PG18-VALIDATION') "
+                  "ON CONFLICT (version) DO NOTHING", version)
+              await c.close()
+
+          for attempt in range(40):
+              r = subprocess.run([sys.executable, "-m",
+                                  "sportsassets.scripts.migrate"],
+                                 capture_output=True, text=True)
+              out = (r.stdout or "") + (r.stderr or "")
+              if r.returncode == 0:
+                  ok = True
+                  print("migrations complete after %d pass(es)" % (attempt + 1))
+                  break
+              # which file was it applying when it died?
+              applying = [ln.split("applying ", 1)[1].strip()
+                          for ln in out.splitlines() if "applying " in ln]
+              failed = applying[-1] if applying else None
+              err = [ln for ln in out.splitlines()
+                     if "Error" in ln or "error" in ln][-3:]
+              if failed is None:
+                  print("FAILED with no file named:\n%s" % out[-2000:])
+                  sys.exit(1)
+              if failed.startswith(FUNDED):
+                  print("A FUNDED MIGRATION FAILED ON POSTGRESQL 18: %s" % failed)
+                  print("\n".join(err))
+                  print(out[-3000:])
+                  sys.exit(1)
+              print("skipping pre-existing unrelated failure: %s (%s)"
+                    % (failed, err[-1] if err else "?"))
+              skipped.append(failed)
+              asyncio.run(mark(failed))
+          if not ok:
+              print("the runner never completed"); sys.exit(1)
+          print("SKIPPED (unrelated to the funded lane): %s"
+                % (", ".join(skipped) or "none"))
+          PY
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: The funded schema is actually there, on 18
+        env:
+          PGPASSWORD: postgres
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### what 18 ended up with' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          Q() { psql -h 127.0.0.1 -U postgres -d funded_pg18 -tAc "$1"; }
+          for m in 125 126 127 128; do
+            got=$(Q "SELECT count(*) FROM schema_migrations WHERE version LIKE '${m}%' AND coalesce(content_sha,'') <> 'SKIPPED-IN-PG18-VALIDATION'")
+            say "migration $m applied        $got"
+            [ "$got" = "1" ] || { say "  => migration $m did NOT apply on PostgreSQL 18"; exit 1; }
+          done
+          for c in residual_qty kind parent_intent_id closed_at payout_event; do
+            got=$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='bettor_funded_intents' AND column_name='$c'")
+            say "intents.$c            $got"
+            [ "$got" = "1" ] || exit 1
+          done
+          for f in bettor_funded_position_is_open bettor_funded_available_to_exit; do
+            got=$(Q "SELECT count(*) FROM pg_proc WHERE proname='$f'")
+            say "function $f  $got"
+            [ "$got" = "1" ] || exit 1
+          done
+          # AND THE INDEX WHOSE BUILD IS WHAT FAILED, by name.
+          got=$(Q "SELECT count(*) FROM pg_indexes WHERE indexname='bettor_funded_one_open_position'")
+          say "index bettor_funded_one_open_position  $got"
+          [ "$got" = "1" ] || { say "  => the partial index did not build on 18"; exit 1; }
+          # THE PREDICATE, EVALUATED UNDER THE MAINTENANCE PATH 17+ USES.
+          say ""
+          say "-- the predicate under search_path = pg_catalog, pg_temp --"
+          Q "BEGIN; SET LOCAL search_path = pg_catalog, pg_temp; SELECT public.bettor_funded_position_is_open('FILLED', 1, NULL); ROLLBACK;" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          say "   (an unqualified body raises here; this is the 2026-09-27 failure)"
+          # A REINDEX IS THE REAL MAINTENANCE OPERATION, and 17+ runs it under
+          # that path itself -- no SET needed. If the body were unqualified this
+          # is where it would fail.
+          Q "REINDEX INDEX bettor_funded_one_open_position" >/dev/null \
+            && say "REINDEX bettor_funded_one_open_position  OK" \
+            || { say "REINDEX FAILED -- the predicate is not maintenance-safe"; exit 1; }
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+      - name: The funded suite, against PostgreSQL 18
+        env:
+          RN1X_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
+          ADMIN_TOKEN: t
+        run: |
+          set -uo pipefail
+          echo '### the funded suite on 18' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cd backend
+          python -m pytest -q -p no:randomly \
+            tests/test_the_funded_lifecycle_is_complete.py \
+            tests/test_the_funded_book_is_durable.py \
+            tests/test_a_filled_order_is_not_a_closed_position.py \
+            tests/test_the_funded_path_is_the_real_adapter.py \
+            tests/test_funded_activation_is_a_real_path.py \
+            2>&1 | tail -25 | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=${PIPESTATUS[0]}
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"

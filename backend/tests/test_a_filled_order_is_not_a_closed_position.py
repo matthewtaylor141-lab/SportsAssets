@@ -897,7 +897,12 @@ async def test_entry_partial_exit_restart_final_close_and_the_stop(
              "lastPx": {"value": "0.30"}, "lastShares": 4,
              "order": {"state": "ORDER_STATE_FILLED"}}])
         part = await FM.submit_exit(conn, intent_id=iid, limit_price=0.30,
-                                   quantity=4, adapter=pmus2, venue=VENUE)
+                                   quantity=4, adapter=pmus2, venue=VENUE,
+                                   # THE INPUTS' OWN DEADLINE. A submission
+                                   # without one is refused before the venue is
+                                   # reached, so this test says when its prices
+                                   # expire exactly as the scheduled path does.
+                                   inputs_expire_at=time.time() + 30.0)
         assert part["submitted"] is True, part
         assert part["position_after"]["residual_qty"] == pytest.approx(6.0)
         assert part["position_after"]["closed_at"] is None
@@ -922,7 +927,8 @@ async def test_entry_partial_exit_restart_final_close_and_the_stop(
              "lastPx": {"value": "0.30"}, "lastShares": 6,
              "order": {"state": "ORDER_STATE_FILLED"}}])
         final = await FM.submit_exit(conn, intent_id=iid, limit_price=0.30,
-                                    adapter=pmus3, venue=VENUE)
+                                    adapter=pmus3, venue=VENUE,
+                                    inputs_expire_at=time.time() + 30.0)
         assert final["submitted"] is True, final
         assert final["position_after"]["residual_qty"] == pytest.approx(0.0)
         assert final["position_after"]["closed_reason"] == \

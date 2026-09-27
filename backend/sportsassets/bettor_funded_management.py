@@ -97,17 +97,82 @@ R_EXIT_WIRE_UNREPRESENTABLE = \
     "THE_SELECTED_LEVEL_CANNOT_BE_SENT_WITHOUT_ACCEPTING_LESS"
 R_ASSESSMENT_EXPIRED = "THE_ASSESSMENT_THIS_EXIT_RESTS_ON_HAS_EXPIRED"
 
-#: HOW LONG A SELECTION MAY SIT BEFORE IT IS SENT.
+R_NO_INPUT_DEADLINE = "NO_INPUT_EXPIRY_WAS_CARRIED_TO_THIS_SUBMISSION"
+R_INPUT_EXPIRY_UNMEASURED = "THE_INPUTS_OWN_EXPIRY_COULD_NOT_BE_ESTABLISHED"
+
+#: WHEN THE INPUTS STOP BEING ADMISSIBLE -- computed, never granted.
 #:
-#: THE HOLE THIS CLOSES. `select_exit` ages the book and the probability at one
-#: decision instant, and then `submit_exit` runs -- resolving an account, a
-#: servicing gate, a reservation, an adapter. If that takes material time the
-#: order goes out against an assessment that has expired, and nothing noticed
-#: because the ageing happened in the other function.
+#: THE DEFECT THIS CLOSES, and it was a whole fresh window handed out for free.
+#: The first version set `assessment_expires_at = decision_at + 30` and checked
+#: the AGE OF THE ASSESSMENT at submission. Selecting therefore RESTARTED both
+#: clocks: a book already 29 s old under a 30 s bound bought another 30 s the
+#: moment it was looked at, and an order could go out against an observation
+#: 59 s old while every field in the trace read "fresh".
 #:
-#: It is the TIGHTER of the two bounds the assessment rests on, because an
-#: assessment is only as fresh as its stalest input.
-MAX_ASSESSMENT_AGE_S = min(FA.MAX_VENUE_BOOK_AGE_S, 30.0)
+#: An assessment cannot be fresher than the observations it rests on, and
+#: selection is not an observation. The deadline is therefore
+#:
+#:     min(book observation stamp + the book's own bound,
+#:         probability observation stamp + the bound its event state permits)
+#:
+#: -- both taken from the SOURCES' own instants under the SAME policies that
+#: admitted them, and neither restarted by anything this module does.
+def input_deadline(book_age, hold_value) -> dict:
+    """The earliest instant at which either input stops being admissible.
+
+    `book_age` is `bettor_funded_activation.venue_book_age`'s answer, which
+    carries the venue's parsed stamp and the bound it was admitted under.
+    `hold_value` is `bettor_hold_value.ev_hold`'s, whose `freshness` block
+    carries the bookmaker's own observation stamp and the bound the event state
+    permits -- 30 s from `bettor_pinnacle_devig.MAX_QUOTE_AGE_S` in play, or the
+    declared PRE_MATCH relaxation when one was applied.
+
+    A MISSING PIECE IS NOT A LONG LIFETIME. If either stamp or either bound is
+    absent the expiry is UNMEASURED and this says so, because the alternative is
+    a deadline invented out of the instant somebody happened to ask.
+    """
+    b = dict(book_age or {})
+    h = dict(hold_value or {})
+    fr = dict(h.get("freshness") or {})
+    b_at = b.get("parsed_epoch_s")
+    b_bound = b.get("bound_s")
+    p_at = fr.get("observed_at")
+    p_bound = fr.get("bound_s", h.get("age_bound_s"))
+    out = {
+        "book": {"observed_at": b_at, "bound_s": b_bound,
+                 "basis": b.get("basis"),
+                 "policy": "bettor_funded_activation.venue_book_age"},
+        "probability": {"observed_at": p_at, "bound_s": p_bound,
+                        "bound_from_event_state":
+                            fr.get("bound_from_event_state"),
+                        "relaxation_applied": fr.get("relaxation_applied"),
+                        "policy": "bettor_hold_value.bound_for"},
+        "rule": ("the earliest expiry of the two observations under their own "
+                 "policies. Selection restarts neither clock"),
+        "selection_does_not_extend_it": True,
+    }
+    missing = [n for n, v in (("book.parsed_epoch_s", b_at),
+                              ("book.bound_s", b_bound),
+                              ("probability.observed_at", p_at),
+                              ("probability.bound_s", p_bound))
+               if v is None]
+    if missing:
+        return dict(out, ok=False, refusal=R_INPUT_EXPIRY_UNMEASURED,
+                    missing=missing, expires_at=None,
+                    why=("%s is absent, so the moment these inputs stop being "
+                         "admissible cannot be established. An unknown expiry "
+                         "is not a distant one" % ", ".join(missing)))
+    book_expires = float(b_at) + float(b_bound)
+    prob_expires = float(p_at) + float(p_bound)
+    expires_at = min(book_expires, prob_expires)
+    return dict(out, ok=True, refusal=None, expires_at=expires_at,
+                book_expires_at=book_expires,
+                probability_expires_at=prob_expires,
+                governed_by=("VENUE_BOOK" if book_expires <= prob_expires
+                             else "PROBABILITY"),
+                why=("the %s observation expires first, at %.3f"
+                     % ("venue book" if book_expires <= prob_expires
+                        else "probability", expires_at)))
 R_NO_EXIT_SIDE = "THE_SIDE_A_CLOSE_WOULD_CONSUME_PUBLISHES_NO_EXECUTABLE_LEVEL"
 R_NO_PROBABILITY = "NO_ELIGIBLE_PROBABILITY_ROW_PRICES_THIS_CONTRACT"
 R_HOLD_NOT_PRICED = "EV_HOLD_IS_NOT_IDENTIFIED_SO_NO_ACTION_CAN_BEAT_HOLDING"
@@ -551,6 +616,24 @@ async def select_exit(conn, position, *, client=None, now=None,
                         "attestation. Conditional valuation is admissible for "
                         "the shadow book and is not admissible here"))
 
+    # ── WHAT REMAINS OF THE INPUTS' OWN LIFETIME ────────────────────
+    #
+    # Computed from the two OBSERVATION stamps under the policies that admitted
+    # them, so selecting cannot extend either. It is carried on the answer and
+    # re-checked immediately before anything is sent.
+    deadline = input_deadline(fresh, hv)
+    out["inputs_expiry"] = deadline
+    if not deadline.get("ok"):
+        return dict(out, ok=False, refusal=R_INPUT_EXPIRY_UNMEASURED,
+                    missing=deadline.get("missing"), why=deadline.get("why"),
+                    note=("both inputs passed their own freshness checks, so "
+                         "this is a reporting gap in one of them rather than a "
+                         "stale input -- and it is refused anyway, because a "
+                         "submission with no established deadline is the hole "
+                         "this replaced"))
+    out["remaining_lifetime_s"] = round(
+        float(deadline["expires_at"]) - decision_at, 3)
+
     # ── THE RANKING, AND ITS OWN GATES ─────────────────────────────
     sale = BS.as_sale_ladder(lad)
     ranked = MS.rank_with_hold(
@@ -615,8 +698,11 @@ async def select_exit(conn, position, *, client=None, now=None,
                     # WHEN THIS WAS ASSESSED, so a caller that sits on it can
                     # be refused rather than sending a stale bound.
                     assessed_at=decision_at,
-                    assessment_expires_at=decision_at + MAX_ASSESSMENT_AGE_S,
-                    assessment_max_age_s=MAX_ASSESSMENT_AGE_S,
+                    # THE INPUTS' OWN DEADLINE, not this instant plus a bound.
+                    inputs_expire_at=float(deadline["expires_at"]),
+                    inputs_expiry_governed_by=deadline.get("governed_by"),
+                    inputs_expiry=deadline,
+                    remaining_lifetime_s=out["remaining_lifetime_s"],
                     # WHAT IS SENT.
                     limit_price=rounded,
                     price_space="VENUE_WIRE_CONTRACT_PRICE",
@@ -633,6 +719,8 @@ async def select_exit(conn, position, *, client=None, now=None,
     return dict(out, ok=True, refusal=None, selected=sel,
                 selected_qty=(None if qty is None else float(qty)),
                 assessed_at=decision_at,
+                inputs_expire_at=float(deadline["expires_at"]),
+                inputs_expiry_governed_by=deadline.get("governed_by"),
                 is_an_evidenced_exit=False,
                 why=ranked.get("selection_reason"),
                 note=("this IS a decision. HOLD chosen by a named rule on "
@@ -725,6 +813,7 @@ async def _reserve_exit(conn, *, parent: str, row, venue: str,
 async def submit_exit(conn, *, intent_id: str, limit_price=None,
                       quantity=None, adapter=None, venue: str | None = None,
                       expect_proceeds_per_contract=None, assessed_at=None,
+                      inputs_expire_at=None,
                       now: float | None = None) -> dict:
     """SELL BACK SOME OR ALL OF A HELD FUNDED POSITION.
 
@@ -751,7 +840,22 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
     at = float(now if now is not None else time.time())
     out = {"version": VERSION, "at": at, "parent_intent_id": intent_id,
            "submitted": False, "exit_intent_id": None,
+           # COUNTED, so "no venue call happened" is a readback and not a
+           # reassurance. It becomes 1 at the one line that can make one.
+           "venue_calls": 0,
            "what_remains_disabled": disablements()}
+    # ── THE SCHEMA THIS EXIT WOULD BE RECORDED IN, FIRST ────────────
+    #
+    # The read below already names `residual_qty` and `kind`, so on an
+    # unmigrated database this function raises instead of refusing -- and an
+    # exception is not a refusal a caller can act on. Asked first, it becomes
+    # one, and the servicing lane reports its capability rather than its
+    # traceback.
+    from . import bettor_funded_schema as FS
+
+    blocked = await FS.require(conn)
+    if blocked is not None:
+        return dict(out, venue_calls=0, **blocked)
     row = await conn.fetchrow(
         "SELECT intent_id, account_id, venue, venue_class, us_market_slug, "
         "       event_key, order_intent, effective_digest, closed_at, "
@@ -811,24 +915,40 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
     ven = str(venue or row["venue"])
     proceeds = exit_proceeds(contracts, wire, opened_with)
     per_contract = exit_proceeds(1, wire, opened_with)
-    # ── THE ASSESSMENT MUST STILL BE CURRENT ────────────────────────
+    # ── THE INPUTS' REMAINING LIFETIME, CHECKED TWICE ───────────────
     #
-    # Checked BEFORE anything is reserved or sent. The book and the probability
-    # were aged at `assessed_at`; if material time has passed since, the prices
-    # this order rests on are no longer established and the correct action is to
-    # re-assess, not to send.
-    if assessed_at is not None:
-        stale = at - float(assessed_at)
-        out["assessment"] = {"assessed_at": float(assessed_at),
-                             "age_at_submission_s": round(stale, 3),
-                             "max_age_s": MAX_ASSESSMENT_AGE_S}
-        if stale > MAX_ASSESSMENT_AGE_S:
-            return dict(out, ok=False, refusal=R_ASSESSMENT_EXPIRED,
-                        why=("the book and probability behind this exit were "
-                             "assessed %.1f s ago against a %.0f s bound. The "
-                             "prices it rests on are no longer established, "
-                             "so it is re-assessed rather than sent"
-                             % (stale, MAX_ASSESSMENT_AGE_S)))
+    # THE DEFECT THIS CLOSES. This used to measure the AGE OF THE ASSESSMENT
+    # against a 30 s bound, and the selector handed out that bound fresh at the
+    # decision instant. So a book observed 29 s ago bought another 30 s by being
+    # looked at, and an order could leave against a 59-second-old observation
+    # with every field reading "within bound". What expires is the OBSERVATION,
+    # not the act of assessing it.
+    #
+    # `inputs_expire_at` is the earliest expiry of the book stamp and the
+    # probability stamp under their own policies, computed by `input_deadline`
+    # and carried here unchanged. It is checked HERE, before anything is
+    # written, and AGAIN immediately before the send -- after the reservation's
+    # row lock, which is the wait that can consume what is left of it.
+    out["inputs_expiry"] = {
+        "expires_at": (None if inputs_expire_at is None
+                       else float(inputs_expire_at)),
+        "checked_at": at,
+        "remaining_s": (None if inputs_expire_at is None
+                        else round(float(inputs_expire_at) - at, 3)),
+        "assessed_at_for_the_record": (None if assessed_at is None
+                                       else float(assessed_at)),
+        "rechecked_immediately_before_the_send": True,
+        "what_expires": ("the venue book observation and the probability "
+                         "observation, under the bounds that admitted them"),
+        "not": "an allowance granted at the moment of selection"}
+    if inputs_expire_at is not None and at > float(inputs_expire_at):
+        return dict(out, ok=False, refusal=R_ASSESSMENT_EXPIRED,
+                    venue_calls=0,
+                    why=("the observations behind this exit expired %.1f s ago "
+                         "under their own freshness policies. Nothing was "
+                         "reserved and nothing was sent: the correct action is "
+                         "to re-assess"
+                         % (at - float(inputs_expire_at))))
 
     # ── THE BOUND THE CALLER SELECTED ON, CHECKED AGAINST THE WIRE ───
     if expect_proceeds_per_contract is not None:
@@ -916,6 +1036,20 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
                          "and the adapter was NOT called. This switch is "
                          "separate from the entry switch precisely so that "
                          "stopping new exposure never strands inventory"))
+    # ── A SUBMISSION WITH NO ESTABLISHED DEADLINE IS REFUSED ────────
+    #
+    # Placed on the path that can actually reach the venue. Every refusal above
+    # happens whether or not a deadline was supplied; from here on a request
+    # could leave, and "no deadline" is not permission to send -- it is the
+    # absence of the only thing that says these prices still exist.
+    if inputs_expire_at is None:
+        return dict(out, ok=False, refusal=R_NO_INPUT_DEADLINE, venue_calls=0,
+                    why=("this submission carries no `inputs_expire_at`, so "
+                         "there is nothing to check the book and probability "
+                         "stamps against. The scheduled path computes it in "
+                         "`select_exit` and passes it through; a caller that "
+                         "cannot supply one has not established that its "
+                         "prices are current"))
     try:
         mod = _adapter(adapter)
     except Exception as exc:                               # noqa: BLE001
@@ -931,7 +1065,45 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
                     why=res.get("why"))
     xid = res["exit_intent_id"]
     out["exit_intent_id"] = xid
+
+    # ── AND AGAIN, AFTER THE LOCK, IMMEDIATELY BEFORE THE SEND ──────
+    #
+    # THE WINDOW THIS CLOSES. `_reserve_exit` takes `SELECT ... FOR UPDATE` on
+    # the position. Under contention that wait is unbounded, and the check above
+    # happened before it -- so a caller could pass a live deadline, block on the
+    # lock past it, and then send. The clock is read again HERE, at the last
+    # instant before the one line that can reach the venue.
+    #
+    # AN EXPIRED RESERVATION IS RELEASED, NOT SENT. `abandon_proven_not_sent` is
+    # the same path the venue-boundary denial uses: the exit row is closed as
+    # never held, so the inventory it reserved returns to
+    # `bettor_funded_available_to_exit` instead of sitting there blocking the
+    # re-assessment that should replace it.
+    send_at = time.time()
+    left = float(inputs_expire_at) - send_at
+    out["inputs_expiry"]["rechecked_at"] = send_at
+    out["inputs_expiry"]["remaining_at_send_s"] = round(left, 3)
+    out["inputs_expiry"]["waited_for_the_lock_s"] = round(send_at - at, 3)
+    if left < 0:
+        await FB.abandon_proven_not_sent(
+            conn, xid,
+            "the venue book and probability observations behind this exit "
+            "expired while it waited for the position lock: %.1f s past their "
+            "own deadline at the moment of sending. No request was made."
+            % (-left))
+        avail = await conn.fetchval(
+            "SELECT bettor_funded_available_to_exit($1)::float8", intent_id)
+        return dict(out, ok=False, submitted=False, venue_calls=0,
+                    refusal=R_ASSESSMENT_EXPIRED,
+                    reservation_released=True,
+                    available_to_exit_after_release=float(avail or 0.0),
+                    why=("the reservation was taken and then released without "
+                         "any venue call, because the prices it rests on "
+                         "expired during the wait. Sending here would have put "
+                         "an order on the venue at a level that no longer "
+                         "existed"))
     await FB.mark_send_attempted(conn, xid)
+    out["venue_calls"] = 1
     try:
         answer = mod.submit_fok(str(row["us_market_slug"]), wire, contracts,
                                 True, intent=opened_with)
@@ -987,7 +1159,16 @@ async def cancel_outstanding(conn, *, intent_id: str, adapter=None) -> dict:
     disappears from the book.
     """
     out = {"version": VERSION, "intent_id": intent_id, "cancelled": False,
+           "venue_calls": 0,
            "what_remains_disabled": disablements()}
+    # THE SAME CONDITION AS THE SUBMISSION. A cancel writes a state transition
+    # whose columns may not exist, and a cancel that cannot be recorded is
+    # indistinguishable afterwards from one that never happened.
+    from . import bettor_funded_schema as FS
+
+    blocked = await FS.require(conn)
+    if blocked is not None:
+        return dict(out, **blocked)
     row = await conn.fetchrow(
         "SELECT intent_id, us_market_slug, venue_order_id, state "
         "  FROM bettor_funded_intents WHERE intent_id=$1", intent_id)
@@ -1202,7 +1383,30 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
            "venue": venue, "opened_anything": False,
            "recovered": None, "settlement": [], "needs_a_decision": [],
            "selection": [], "decisions": [], "exits": [],
+           "funded_capability": None,
            "what_remains_disabled": disablements()}
+    # ── CAPABILITY FIRST, so a scheduled pass REPORTS a blocked schema ──
+    #
+    # Every read in this pass names a column migration 126 adds. On an
+    # unmigrated database this function used to raise, and the scheduled caller
+    # turned that into FUNDED_SERVICING_RAISED -- a traceback where the honest
+    # answer is "this database cannot carry the funded book yet". It is asked
+    # once, here, and reported.
+    from . import bettor_funded_schema as FS
+
+    schema = await FS.readiness(conn)
+    out["funded_capability"] = schema.get("capability")
+    out["schema_readiness"] = {k: schema.get(k) for k in
+                               ("ok", "capability", "refusal",
+                                "missing_migrations", "missing_tables",
+                                "missing_columns", "missing_functions", "why")}
+    if not schema.get("ok"):
+        return dict(out, ok=False, refusal=schema.get("refusal"),
+                    why=schema.get("why"),
+                    nothing_was_reconciled_settled_or_sent=True,
+                    note=("servicing reads are normally never gated -- this is "
+                         "not a policy gate but an absent schema: the rows this "
+                         "pass would read and write do not exist here"))
     try:
         mod = _adapter(adapter)
     except Exception as exc:                               # noqa: BLE001
@@ -1266,10 +1470,20 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
                               expect_proceeds_per_contract=pick[
                                   "proceeds_per_contract"],
                               assessed_at=pick.get("assessed_at"),
+                              # THE INPUTS' OWN DEADLINE, carried from the
+                              # selector unchanged. This is the automated path:
+                              # if it did not carry it, `submit_exit` would
+                              # refuse rather than send on an unbounded
+                              # assessment.
+                              inputs_expire_at=pick.get("inputs_expire_at"),
                               adapter=mod, venue=venue, now=time.time())
         out["exits"].append({"intent_id": p["intent_id"],
                              "selected": pick["selected"],
                              "selected_qty": pick["selected_qty"],
+                             "inputs_expire_at": pick.get("inputs_expire_at"),
+                             "inputs_expiry_governed_by":
+                                 pick.get("inputs_expiry_governed_by"),
+                             "venue_calls": ex.get("venue_calls"),
                              "wire_limit_price": pick["limit_price"],
                              "proceeds_per_contract": pick[
                                  "proceeds_per_contract"],
@@ -1345,6 +1559,23 @@ def disablements() -> list[dict]:
          "cleared_by": ("n/a. A book that cannot be reconciled while the "
                         "lane is paused is worse than one that cannot "
                         "trade, so servicing reads are never gated")},
+        {"n": 5, "what": "the funded schema must be present",
+         "where": "sportsassets.bettor_funded_schema",
+         "value": "ENFORCED per call, read from the catalogue",
+         "stops": ("every funded submission when a required migration, column "
+                   "or function is missing -- the state a failed migration "
+                   "leaves behind while the API keeps serving"),
+         "cleared_by": "applying the funded migrations to that database"},
+        {"n": 6, "what": "the inputs' own expiry",
+         "where": "%s.input_deadline" % __name__,
+         "value": ("ENFORCED twice: before anything is written and again "
+                   "immediately before the send, after the position lock"),
+         "stops": ("a submission whose book or probability observation has "
+                   "passed the bound that admitted it. An expired reservation "
+                   "is released without a venue call"),
+         "cleared_by": ("re-assessment. It is not clearable by waiting: the "
+                        "deadline comes from the observations, and selecting "
+                        "restarts neither clock")},
     ]
 
 

@@ -384,6 +384,19 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
            "adapter": ADAPTER_MODULE, "submitted": False,
            "order": None, "intent_id": None,
            "what_remains_disabled": disablements()}
+    # ── THE SCHEMA THIS RESULT WOULD BE RECORDED IN ─────────────────
+    #
+    # FIRST, before the venue class, the plan or any rail. `start.sh` serves
+    # after a failed migration on purpose, so this process can be running
+    # against a database that has none of the funded columns -- which is what
+    # happened on 2026-09-27. An order sent from a process that cannot record
+    # the fill is the one failure with no safe recovery, so the funded
+    # CAPABILITY is blocked while API availability is untouched.
+    from . import bettor_funded_schema as FS
+
+    blocked = await FS.require(conn)
+    if blocked is not None:
+        return dict(out, **blocked)
     if klass not in ALLOWED_VENUE_CLASSES:
         return dict(out, ok=False, refusal=R_VENUE_CLASS,
                     allowed=list(ALLOWED_VENUE_CLASSES),

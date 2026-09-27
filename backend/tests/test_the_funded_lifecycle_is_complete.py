@@ -477,8 +477,10 @@ async def test_two_simultaneous_full_exits_cannot_both_sell(monkeypatch):
                                    exec_by_call=[[], []])
         r1, r2 = await asyncio.gather(
             FM.submit_exit(a, intent_id="fpi-a", limit_price=0.70,
+                           inputs_expire_at=time.time() + 30.0,
                            adapter=pmus, venue=VENUE),
             FM.submit_exit(b, intent_id="fpi-a", limit_price=0.70,
+                           inputs_expire_at=time.time() + 30.0,
                            adapter=pmus, venue=VENUE),
             return_exceptions=True)
         got = [r for r in (r1, r2) if isinstance(r, dict)]
@@ -524,6 +526,7 @@ async def test_a_retry_after_an_ambiguous_answer_cannot_oversell(monkeypatch):
             monkeypatch, raise_on_create=TimeoutError("read timed out"))
         first = await FM.submit_exit(conn, intent_id="fpi-a",
                                     limit_price=0.70, adapter=pmus,
+                                    inputs_expire_at=time.time() + 30.0,
                                     venue=VENUE)
         assert first["refusal"] == FM.R_LOST_ACKNOWLEDGEMENT, first
         xid = first["exit_intent_id"]
@@ -541,6 +544,7 @@ async def test_a_retry_after_an_ambiguous_answer_cannot_oversell(monkeypatch):
         pmus2, sent2, _ = _transport(monkeypatch, order_id="vo-retry")
         retry = await FM.submit_exit(conn, intent_id="fpi-a",
                                     limit_price=0.70, adapter=pmus2,
+                                    inputs_expire_at=time.time() + 30.0,
                                     venue=VENUE)
         assert retry["ok"] is False
         assert retry["refusal"] == FM.R_OVER_RESIDUAL, retry
@@ -859,7 +863,8 @@ async def test_a_void_after_a_partial_exit_refunds_only_what_is_still_held(
              "lastPx": {"value": "0.50"}, "lastShares": 4,
              "order": {"state": "ORDER_STATE_FILLED"}}])
         part = await FM.submit_exit(conn, intent_id="fpi-a", limit_price=0.50,
-                                   quantity=4, adapter=pmus, venue=VENUE)
+                                   quantity=4, adapter=pmus, venue=VENUE,
+                                   inputs_expire_at=time.time() + 30.0)
         assert part["submitted"] is True, part
         assert part["position_after"]["residual_qty"] == pytest.approx(6.0)
 
@@ -1175,6 +1180,8 @@ async def test_the_submitted_limit_cannot_accept_less_than_the_selection(
             conn, intent_id=pos["intent_id"], limit_price=pick["limit_price"],
             quantity=pick["selected_qty"],
             expect_proceeds_per_contract=pick["proceeds_per_contract"],
+            # THE SELECTOR'S OWN DEADLINE, as the scheduled path passes it.
+            inputs_expire_at=pick["inputs_expire_at"],
             adapter=pmus, venue=VENUE)
         assert ex["submitted"] is True, ex
         create = [q for k, q in sent if k == "create"][-1]
@@ -1215,6 +1222,7 @@ async def test_submit_exit_refuses_a_wire_that_would_accept_less(monkeypatch):
             conn, intent_id="fpi-a",
             limit_price=0.80,                      # proceeds, not the wire
             expect_proceeds_per_contract=0.80,
+            inputs_expire_at=time.time() + 30.0,
             adapter=pmus, venue=VENUE)
         assert got["ok"] is False
         assert got["refusal"] == FM.R_EXIT_WIRE_UNREPRESENTABLE, got
@@ -1672,10 +1680,17 @@ async def test_the_selector_ages_both_clocks_at_the_decision_instant(
 @pytest.mark.asyncio
 async def test_a_delayed_submission_cannot_reuse_an_expired_assessment(
         monkeypatch):
-    """MATERIAL DELAY BETWEEN SELECTION AND SUBMISSION. The book and the
-    probability were aged at the selection's decision instant; if the order
-    goes out well after that, it rests on prices no longer established. The
-    submission refuses instead of sending."""
+    """MATERIAL DELAY BETWEEN SELECTION AND SUBMISSION, against the INPUTS'
+    OWN DEADLINE.
+
+    WHAT THIS TEST USED TO ASSERT, AND WHY THAT WAS WRONG. It checked that the
+    submission refused once the ASSESSMENT was older than 30 s -- a bound the
+    selector granted at its own decision instant. That let selection restart
+    both clocks: a book observed 29 s ago bought a further 30 s by being looked
+    at. The deadline now comes from the observations themselves, so what is
+    asserted here is that the order refuses after THEIR bound, not after a fresh
+    one handed out at selection.
+    """
     asyncpg = pytest.importorskip("asyncpg")
     conn = await asyncpg.connect(DSN)
     try:
@@ -1692,34 +1707,320 @@ async def test_a_delayed_submission_cannot_reuse_an_expired_assessment(
                                        exec_by_call=[[]])
         pick = await FM.select_exit(conn, pos, client=client)
         assert pick["ok"] is True
-        assert pick["assessment_max_age_s"] == pytest.approx(
-            FM.MAX_ASSESSMENT_AGE_S)
+        # THE DEADLINE IS THE EARLIER OBSERVATION'S, NOT decision_at + 30.
+        dl = pick["inputs_expiry"]
+        assert dl["ok"] is True, dl
+        assert pick["inputs_expire_at"] == pytest.approx(dl["expires_at"])
+        assert dl["expires_at"] == pytest.approx(
+            min(dl["book"]["observed_at"] + dl["book"]["bound_s"],
+                dl["probability"]["observed_at"]
+                + dl["probability"]["bound_s"]))
+        assert dl["expires_at"] < pick["assessed_at"] + 30.0 + 1e-6
 
-        # ── THE DELAY: submitted well past the assessment's bound ────
-        late = pick["assessed_at"] + FM.MAX_ASSESSMENT_AGE_S + 5.0
+        # ── PAST THE DEADLINE: refused, nothing reserved, nothing sent ─
+        late = pick["inputs_expire_at"] + 2.0
         stale = await FM.submit_exit(
             conn, intent_id=pos["intent_id"], limit_price=pick["limit_price"],
             quantity=pick["selected_qty"],
             expect_proceeds_per_contract=pick["proceeds_per_contract"],
-            assessed_at=pick["assessed_at"], adapter=pmus, venue=VENUE,
-            now=late)
+            assessed_at=pick["assessed_at"],
+            inputs_expire_at=pick["inputs_expire_at"], adapter=pmus,
+            venue=VENUE, now=late)
         assert stale["ok"] is False
         assert stale["refusal"] == FM.R_ASSESSMENT_EXPIRED, stale
-        assert stale["assessment"]["age_at_submission_s"] > \
-            FM.MAX_ASSESSMENT_AGE_S
-        # NOTHING WAS SENT AND NOTHING WAS RESERVED.
+        assert stale["venue_calls"] == 0
+        assert stale["inputs_expiry"]["remaining_s"] < 0
         assert [k for k, _ in sent if k == "create"] == []
         assert await conn.fetchval(
             "SELECT count(*) FROM bettor_funded_intents "
             " WHERE kind='EXIT'") == 0
 
-        # ── AND PROMPTLY, IT PROCEEDS ───────────────────────────────
+        # ── AND WITHIN IT, IT PROCEEDS ──────────────────────────────
         ok = await FM.submit_exit(
             conn, intent_id=pos["intent_id"], limit_price=pick["limit_price"],
             quantity=pick["selected_qty"],
             expect_proceeds_per_contract=pick["proceeds_per_contract"],
-            assessed_at=pick["assessed_at"], adapter=pmus, venue=VENUE)
+            assessed_at=pick["assessed_at"],
+            inputs_expire_at=pick["inputs_expire_at"], adapter=pmus,
+            venue=VENUE)
         assert ok["submitted"] is True, ok
+        assert ok["venue_calls"] == 1
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+# ── 11 · THE INPUTS' REMAINING LIFETIME IS WHAT EXPIRES ──────────────
+#
+# THE DEFECT THIS SECTION CLOSES. `select_exit` set
+# `assessment_expires_at = decision_at + 30` and `submit_exit` measured the age
+# of the ASSESSMENT. Both clocks therefore restarted at selection, and the three
+# counterexamples below all passed under that arrangement:
+#
+#   * a book already 29 s old under a 30 s bound, submitted 2 s later;
+#   * a probability that expires before the book, ignored in favour of the book;
+#   * a reservation that blocks on the position lock past the deadline and then
+#     sends anyway.
+#
+# What expires is the OBSERVATION. The deadline is computed from the two
+# observation stamps under the policies that admitted them, carried through the
+# automated path, and re-checked at the last instant before the send.
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_book_already_twenty_nine_seconds_old_expires_in_one(
+        monkeypatch):
+    """COUNTEREXAMPLE 1. The book is 29 s old at the decision instant, so a
+    submission two seconds later is past the 30 s bound that admitted it --
+    even though the assessment itself is two seconds old."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        await _probability(conn, p=0.55)
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+        pmus, sent, client = _transport(monkeypatch, bids=[_level(0.75, 40)],
+                                       book_age_s=29.0, exec_by_call=[[]])
+        pick = await FM.select_exit(conn, pos, client=client)
+        assert pick["ok"] is True, pick
+        # ADMITTED -- 29 s is inside the 30 s bound -- with ~1 s of life left.
+        assert pick["venue_book_age"]["ok"] is True
+        assert 0.0 < pick["remaining_lifetime_s"] < 2.0, pick
+        assert pick["inputs_expiry"]["governed_by"] == "VENUE_BOOK"
+
+        got = await FM.submit_exit(
+            conn, intent_id=pos["intent_id"], limit_price=pick["limit_price"],
+            quantity=pick["selected_qty"],
+            expect_proceeds_per_contract=pick["proceeds_per_contract"],
+            assessed_at=pick["assessed_at"],
+            inputs_expire_at=pick["inputs_expire_at"], adapter=pmus,
+            venue=VENUE, now=pick["assessed_at"] + 2.0)
+        assert got["ok"] is False
+        assert got["refusal"] == FM.R_ASSESSMENT_EXPIRED, got
+        assert got["venue_calls"] == 0
+        assert [k for k, _ in sent if k == "create"] == []
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_probability_determines_the_deadline_when_it_expires_first(
+        monkeypatch):
+    """COUNTEREXAMPLE 2. A fresh book and a nearly-expired probability: the
+    probability governs, because the assessment is only as fresh as its
+    stalest input."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        # OBSERVED 27 s AGO: inside `ev_hold`'s 30 s bound, and expiring before
+        # a book read a moment ago.
+        await _probability(conn, p=0.55, at=time.time() - 27.0)
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        _, _, client = _transport(monkeypatch, bids=[_level(0.75, 40)],
+                                  book_age_s=0.0)
+        pick = await FM.select_exit(conn, pos, client=client)
+        assert pick["ok"] is True, pick
+        dl = pick["inputs_expiry"]
+        assert dl["governed_by"] == "PROBABILITY", dl
+        assert dl["probability_expires_at"] < dl["book_expires_at"]
+        assert pick["inputs_expire_at"] == pytest.approx(
+            dl["probability_expires_at"])
+        assert 0.0 < pick["remaining_lifetime_s"] < 4.0, pick
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_lock_wait_past_the_deadline_releases_and_sends_nothing(
+        monkeypatch):
+    """COUNTEREXAMPLE 3, and the one the pre-reservation check cannot catch.
+
+    `_reserve_exit` takes `SELECT ... FOR UPDATE` on the position. Another
+    connection holds that lock here, so the submission genuinely waits -- past
+    the deadline. It must then release the reservation it took and make ZERO
+    venue calls, leaving the inventory available for the re-assessment that
+    should replace it.
+    """
+    import asyncio
+
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    other = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        await _probability(conn, p=0.55)
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+        pmus, sent, client = _transport(monkeypatch, bids=[_level(0.75, 40)],
+                                       exec_by_call=[[]])
+        pick = await FM.select_exit(conn, pos, client=client)
+        assert pick["ok"] is True
+
+        # THE LOCK, HELD BY SOMEBODY ELSE.
+        tx = other.transaction()
+        await tx.start()
+        await other.fetchrow(
+            "SELECT intent_id FROM bettor_funded_intents "
+            " WHERE intent_id=$1 AND kind='ENTRY' FOR UPDATE",
+            pos["intent_id"])
+
+        async def _release_after(delay):
+            await asyncio.sleep(delay)
+            await tx.rollback()
+
+        # A DEADLINE THAT PASSES DURING THE WAIT. It is live when the
+        # submission starts -- the pre-reservation check passes -- and expired by
+        # the time the lock is granted.
+        deadline = time.time() + 0.4
+        submit = FM.submit_exit(
+            conn, intent_id=pos["intent_id"], limit_price=pick["limit_price"],
+            quantity=pick["selected_qty"],
+            expect_proceeds_per_contract=pick["proceeds_per_contract"],
+            assessed_at=pick["assessed_at"], inputs_expire_at=deadline,
+            adapter=pmus, venue=VENUE)
+        got, _ = await asyncio.gather(submit, _release_after(1.0))
+
+        assert got["ok"] is False
+        assert got["refusal"] == FM.R_ASSESSMENT_EXPIRED, got
+        # ZERO VENUE CALLS. This is the assertion the whole test exists for.
+        assert got["venue_calls"] == 0
+        assert [k for k, _ in sent if k == "create"] == []
+        # THE RESERVATION WAS TAKEN AND RELEASED, so the inventory is free.
+        assert got["reservation"]["ok"] is True
+        assert got["reservation_released"] is True
+        assert got["inputs_expiry"]["waited_for_the_lock_s"] > 0.3
+        assert got["available_to_exit_after_release"] == pytest.approx(10.0)
+        assert await conn.fetchval(
+            "SELECT bettor_funded_available_to_exit($1)::float8",
+            pos["intent_id"]) == pytest.approx(10.0)
+        # AND THE ROW ITSELF IS NO LONGER OUTSTANDING, which is the reason
+        # the availability above came back: `abandon_proven_not_sent` is the
+        # same path the venue-boundary denial uses, and the reservation
+        # predicate subtracts only outstanding or unresolved exits.
+        row = await conn.fetchrow(
+            "SELECT state FROM bettor_funded_intents WHERE intent_id=$1",
+            got["exit_intent_id"])
+        assert row["state"] == "ABANDONED", dict(row)
+        assert await conn.fetchval(
+            "SELECT bettor_funded_order_is_outstanding($1)",
+            row["state"]) is False
+    finally:
+        try:
+            await other.close()
+        except Exception:                                      # noqa: BLE001
+            pass
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_submission_with_no_deadline_at_all_is_refused(monkeypatch):
+    """NO DEADLINE IS NOT PERMISSION TO SEND. A caller that cannot say when its
+    prices expire has not established that they are current, and the refusal
+    happens on the path that would otherwise reach the venue."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+        pmus, sent, _ = _transport(monkeypatch, exec_by_call=[[]])
+        got = await FM.submit_exit(conn, intent_id="fpi-a", limit_price=0.70,
+                                   quantity=5, adapter=pmus, venue=VENUE)
+        assert got["ok"] is False
+        assert got["refusal"] == FM.R_NO_INPUT_DEADLINE, got
+        assert got["venue_calls"] == 0
+        assert [k for k, _ in sent if k == "create"] == []
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_intents "
+            " WHERE kind='EXIT'") == 0
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+def test_a_missing_stamp_makes_the_expiry_unmeasured_not_distant():
+    """A PURE CHECK ON THE RULE. An absent stamp or bound cannot produce a
+    deadline, and the answer is UNMEASURED rather than a lifetime invented out
+    of the instant somebody happened to ask."""
+    ok = FM.input_deadline(
+        {"parsed_epoch_s": 1000.0, "bound_s": 30.0,
+         "basis": "VENUE_TRANSACT_TIME"},
+        {"freshness": {"observed_at": 1005.0, "bound_s": 30.0}})
+    assert ok["ok"] is True
+    assert ok["expires_at"] == pytest.approx(1030.0)
+    assert ok["governed_by"] == "VENUE_BOOK"
+
+    for book, hold in (
+            ({"bound_s": 30.0}, {"freshness": {"observed_at": 1.0,
+                                               "bound_s": 30.0}}),
+            ({"parsed_epoch_s": 1.0, "bound_s": 30.0},
+             {"freshness": {"bound_s": 30.0}}),
+            ({"parsed_epoch_s": 1.0}, {"freshness": {"observed_at": 1.0,
+                                                     "bound_s": 30.0}}),
+            ({"parsed_epoch_s": 1.0, "bound_s": 30.0},
+             {"freshness": {"observed_at": 1.0}})):
+        bad = FM.input_deadline(book, hold)
+        assert bad["ok"] is False, (book, hold)
+        assert bad["refusal"] == FM.R_INPUT_EXPIRY_UNMEASURED
+        assert bad["expires_at"] is None
+        assert bad["missing"]
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_scheduled_path_carries_the_deadline_it_computed(
+        monkeypatch):
+    """THE AUTOMATED PATH, not a hand-assembled call. `manage` must pass the
+    selector's deadline into the submission -- if it dropped it, `submit_exit`
+    would refuse with R_NO_INPUT_DEADLINE rather than send on an unbounded
+    assessment, and the exit record would say so."""
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        await _probability(conn, p=0.55)
+        monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+        monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+        pmus, sent, client = _transport(
+            monkeypatch, order_id="vo-sched", bids=[_level(0.75, 40)],
+            retrieve={"vo-1": {"order": {"state": "ORDER_STATE_FILLED"},
+                               "executions": []}})
+        got = await FM.manage(conn, account_id=ACCT, venue=VENUE,
+                              adapter=pmus, client=client)
+        assert got["exits"], got
+        ex = got["exits"][0]
+        assert ex["inputs_expire_at"] is not None, ex
+        assert ex["inputs_expiry_governed_by"] in ("VENUE_BOOK",
+                                                   "PROBABILITY")
+        # the pick and the submission agree on the same instant
+        pick = [s for s in got["selection"]
+                if s.get("intent_id") == "fpi-a"] or got["selection"]
+        assert ex["venue_calls"] == 1, ex
+        assert [k for k, _ in sent if k == "create"], sent
     finally:
         await _clean(conn)
         await conn.close()
@@ -1769,6 +2070,187 @@ async def test_the_evidence_says_which_row_it_actually_read(monkeypatch):
         import inspect
         doc = inspect.getdoc(FM._decision_evidence)
         assert "NOT necessarily the historical row that priced the entry" in doc
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+# ── 12 · SCHEMA READINESS IS AN ENFORCED RELEASE CONDITION ───────────
+#
+# THE PRODUCTION STATE THIS REPRODUCES. On 2026-09-27 migration 126 rolled back
+# on PostgreSQL 18, `start.sh` printed `migrate failed -- serving anyway`, and
+# the API served a build whose funded code named columns the database did not
+# have. Availability was correct and CAPABILITY was not: nothing stopped the
+# funded lane, and with the submission switches flipped an order would have gone
+# out from a process that could not record the fill.
+#
+# The three tests below put this database into that state -- inside a
+# transaction that is rolled back, so the drop is real and temporary -- and
+# assert what the release condition now requires: the general reads keep
+# working, the funded capability reads BLOCKED with the missing objects named,
+# and no funded submission path can reach a venue.
+
+
+async def _break_the_funded_schema(conn):
+    """Drop what migration 126 added, exactly as a rolled-back migration
+    leaves it: the table is there, the column is not."""
+    await conn.execute("ALTER TABLE bettor_funded_intents "
+                       "  DROP COLUMN residual_qty CASCADE")
+    await conn.execute("DELETE FROM schema_migrations "
+                       " WHERE version LIKE '126%' OR version LIKE '128%'")
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_funded_capability_is_blocked_when_the_schema_is_absent():
+    """THE READ SAYS BLOCKED AND NAMES WHAT IS MISSING -- and says it about the
+    objects, not about the migration ledger, because the objects are what the
+    queries run against."""
+    asyncpg = pytest.importorskip("asyncpg")
+    from sportsassets import bettor_funded_schema as FS
+
+    conn = await asyncpg.connect(DSN)
+    tx = conn.transaction()
+    await tx.start()
+    try:
+        before = await FS.readiness(conn)
+        assert before["ok"] is True, before
+        assert before["capability"] == FS.CAPABILITY_AVAILABLE
+
+        await _break_the_funded_schema(conn)
+        after = await FS.readiness(conn)
+        assert after["ok"] is False, after
+        assert after["capability"] == FS.CAPABILITY_BLOCKED
+        assert after["refusal"] == FS.R_SCHEMA_NOT_READY
+        assert "residual_qty" in after["missing_columns"][
+            "bettor_funded_intents"], after["missing_columns"]
+        # THE LEDGER GAP IS REPORTED, NOT THE REASON.
+        assert any(m.startswith("126") for m in after["missing_migrations"])
+        assert after["what_stays_available"]
+        # AND A LEDGER GAP ALONE DOES NOT BLOCK: the objects decide.
+        await tx.rollback()
+        tx = conn.transaction()
+        await tx.start()
+        await conn.execute("DELETE FROM schema_migrations "
+                           " WHERE version LIKE '126%'")
+        ledger_only = await FS.readiness(conn)
+        assert ledger_only["ok"] is True, ledger_only
+        assert ledger_only["capability"] == FS.CAPABILITY_AVAILABLE
+        assert any(m.startswith("126")
+                   for m in ledger_only["missing_migrations"])
+    finally:
+        await tx.rollback()
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_no_funded_submission_is_possible_without_the_schema(
+        monkeypatch):
+    """BOTH SUBMISSION PATHS REFUSE, WITH BOTH SWITCHES FLIPPED ON.
+
+    This is the test that matters: the switches are the release's other
+    protection, so they are deliberately turned OFF as protection here -- i.e.
+    turned ON -- to show the schema condition alone stops the venue being
+    reached.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    from sportsassets import bettor_funded_schema as FS
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            await _break_the_funded_schema(conn)
+            monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
+            monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
+            monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
+            pmus, sent, _ = _transport(monkeypatch)
+
+            entry = await FX.submit_for_decision(
+                conn, {"admissible": True, "us_market_slug": SLUG,
+                       "event_key": EVENT, "order_intent": FX.LONG,
+                       "payout_event": PAYS_ON,
+                       "execution_plan": {"execution": {
+                           "size": 5, "vwap": 0.62, "limit_price": 0.62}}},
+                account_id=ACCT, venue=VENUE, adapter=pmus)
+            assert entry["ok"] is False
+            assert entry["refusal"] == FS.R_SCHEMA_NOT_READY, entry
+            assert entry["funded_capability"] == FS.CAPABILITY_BLOCKED
+            assert entry["nothing_was_sent"] is True
+
+            ex = await FM.submit_exit(
+                conn, intent_id="fpi-a", limit_price=0.70, quantity=5,
+                inputs_expire_at=time.time() + 30.0, adapter=pmus,
+                venue=VENUE)
+            assert ex["ok"] is False
+            assert ex["refusal"] == FS.R_SCHEMA_NOT_READY, ex
+            assert ex["venue_calls"] == 0
+
+            cancel = await FM.cancel_outstanding(conn, intent_id="fpi-a",
+                                                 adapter=pmus)
+            assert cancel["ok"] is False
+            assert cancel["refusal"] == FS.R_SCHEMA_NOT_READY, cancel
+
+            # NOT ONE VENUE CALL OF ANY KIND.
+            assert [k for k, _ in sent
+                    if k in ("create", "preview", "cancel")] == [], sent
+        finally:
+            await tx.rollback()
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_general_reads_keep_working_while_funded_is_blocked(
+        monkeypatch):
+    """AVAILABILITY IS PRESERVED. The command centre's funded section reports
+    BLOCKED instead of raising -- which is what keeps the desk read serving --
+    the scheduled servicing pass reports it instead of a traceback, and ordinary
+    queries are untouched."""
+    asyncpg = pytest.importorskip("asyncpg")
+    from sportsassets import bettor_funded_schema as FS
+
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        tx = conn.transaction()
+        await tx.start()
+        try:
+            await _break_the_funded_schema(conn)
+
+            # 1 . THE SECTION THE DESK READ ASSEMBLES: a capability statement,
+            #     not an exception and not a book of zeros.
+            sec = await FB.command_center(conn)
+            assert sec["funded_capability"] == FS.CAPABILITY_BLOCKED, sec
+            assert sec["refusal"] == FS.R_SCHEMA_NOT_READY
+            assert sec["book_count"] is None, "zeros would be a lie here"
+            assert sec["unresolved_discrepancy_count"] is None
+            assert sec["schema_readiness"]["missing_columns"]
+            assert sec["the_rest_of_the_service_is_unaffected"] is True
+
+            # 2 . THE SCHEDULED PASS: reported, not raised.
+            pmus, sent, client = _transport(monkeypatch)
+            mg = await FM.manage(conn, account_id=ACCT, venue=VENUE,
+                                 adapter=pmus, client=client)
+            assert mg["ok"] is False
+            assert mg["funded_capability"] == FS.CAPABILITY_BLOCKED, mg
+            assert mg["nothing_was_reconciled_settled_or_sent"] is True
+            assert sent == [], sent
+
+            # 3 . AND THE DATABASE IS OTHERWISE FINE.
+            assert await conn.fetchval("SELECT 1") == 1
+            assert await conn.fetchval(
+                "SELECT count(*) FROM external_valuations") >= 0
+        finally:
+            await tx.rollback()
     finally:
         await _clean(conn)
         await conn.close()
