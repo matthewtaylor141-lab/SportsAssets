@@ -53,10 +53,46 @@ misstate money, or strand inventory.
 | **C4** | no approved typed limits exist | **exceed authority** | schema + enforcement done | your explicit acceptance of §6 | **immediate on approval** | **you** |
 | **C5** | account isolation `NOT_DEMONSTRATED` | **exceed authority** | five exhibits named | three come from the credential; two are yours to state | **30 min after the credential** | **you** |
 | **C6** | fee schedule not `VERIFIED_APPLIED` | **misstate money** | implemented, consumers traced, not verified | one real multi-fill order reconciled against the venue's own charge | **needs an authorized pilot** | **you** |
-| **C7** | nothing in this batch is deployed | all five | gate running | exact-SHA gate → API-only deploy → serving-build readback | **45 min, no dependency** | none |
-| **C8** | `bettor_fee_schedule` still resolves Θ via `LATEST`, effective date 2026-09-17 vs published 2026-09-25, no per-sport Θ | **misprice a trade** | open | derive from `calibration_fees`; pin equal by test | **60 min, no dependency** | none |
+| **C7** | nothing in this batch is deployed | all five | **gate PASSED, deploy outstanding** | API-only deploy → serving-build readback | **30 min, no dependency** | none |
+| **C8** | `bettor_fee_schedule` effective date 2026-09-17 vs published 2026-09-25; Θ resolved via `LATEST`; no per-sport Θ | **misprice a trade** | **CLOSED** | date and Θ now derived from `calibration_fees` and pinned by test; `LATEST` and the per-sport omission labelled at the constant | done | none |
 
-**C7 and C8 are the only two I can close without you.** Both are in progress.
+**C7 and C8 were the only two I could close without you.** C8 is closed. C7's
+gate has passed and the deploy is the remaining step.
+
+### The exact-SHA gate result — paired, same instrument, both runs VALID
+
+```
+baseline d9c3c41   179 identities   13012 passed
+final    6cb3609   177 identities   13169 passed
+NEW                none
+FIXED              two
+```
+
+**Zero new failures.** Two fixed: `test_the_scheduler_supplies_no_mechanism_today_and_says_so` and `test_two_concurrent_submissions_cannot_both_reach_the_venue`.
+
+**The 177 are pre-existing and shared with the baseline.** They are not this
+batch's, and they are not nothing — but "no new failures" is the acceptance
+criterion this gate is for, and it is met. The standing 177 are platform work
+recorded in §12.
+
+**Six regressions of mine were found and fixed before this ran**, one of them a
+safety defect: the `book-protocol` job made `command-verify` name the venue host
+without the global concurrency group, so two runs could have read the venue at
+once. Read-only bounds the consequence; it does not make it correct.
+
+**And the gate itself had three defects, all mine, all the same shape** — an
+instrument that reports a healthy environment as an invalid one, or a false
+positive that trains a reader to skim:
+
+| | defect | consequence |
+|---|---|---|
+| 1 | `ON_ERROR_STOP=1` against migrations that ALTER an app-created table | **would have voided every run** |
+| 2 | `grep -c \|\| echo 0` producing `"0\n0"` on a healthy run | **voided a run where PostgreSQL never went down** |
+| 3 | log lines counted as test identities | reported a **new identity that was a shifted log line** |
+
+All three fixed, plus a new check: **zero health samples now voids**, because "no
+DOWN samples" is vacuously true when the sampler never started — an absent
+witness is not a clean one.
 
 ---
 
@@ -255,8 +291,8 @@ lapsing in 24 hours.
 
 | | |
 |---|---|
-| **C7 deploy + readback** | 45 min, **no dependency** — starting now |
-| **C8 fee schedule unification** | 60 min, **no dependency** |
+| **C7 deploy + readback** | 30 min, **no dependency**. The gate has PASSED |
+| **C8 fee schedule unification** | **CLOSED** |
 | **C2 + C3 + C5** | **~60 min after the credential lands.** Not before |
 | **C1** | **not ours to estimate.** The venue's documentation, or your §2 signature |
 | **C6** | needs an authorized pilot with a real fill |
@@ -288,3 +324,30 @@ decision is yours, on §2, §3 and §6.
 
 **Any one of these missing means no funded order.** I am telling you now, not at
 the end.
+
+---
+
+## 12 · The standing 177, and what they are not
+
+The gate's acceptance criterion is **no new failures**, and that is met: zero new,
+two fixed. But 177 identities fail on both the baseline and the release, and
+saying "the gate passed" without saying that would be the kind of half-statement
+this document exists to avoid.
+
+**What they are.** Long-standing platform failures shared with the baseline —
+environmental (a missing `Crypto` module, event-loop binding in ad-hoc runs),
+plus accumulated assertions about tab inventories, migration ordering and
+ownership proofs that have drifted from the code.
+
+**What they are not.** They are not this batch's, and none of them is in the
+capital-critical path traced in §1: the entry gate, the exposure gate, the fee
+arithmetic, the submission authorization, the notification capability and the
+provider proxy are all covered by tests that pass, in both directions, through
+the real callers.
+
+**Why that is not a free pass.** A suite with 177 standing failures is a suite
+whose signal is degraded, and a new failure can hide among them — which is
+exactly why the gate compares exact identity SETS rather than counts, and why the
+log-line false positive was worth fixing. **Reducing that number is real platform
+work and it is not done.** It does not block the release scope in §8, and I am
+not claiming it is finished.
