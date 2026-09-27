@@ -247,18 +247,68 @@ PMUS_2026_07_01 = Schedule(
     taker_rounding=PER_FILL_INDEPENDENT,
 )
 
-PMUS_2026_09_17 = Schedule(
-    schedule_id="PMUS_PUBLISHED_2026_09_17",
-    effective_from="2026-09-17",
-    theta_taker=Decimal("0.0695"),
+# THE DATE WAS WRONG AND THE PAGE SAYS SO.
+#
+# This schedule carried `effective_from="2026-09-17"`, which had no quoted
+# source. The page retrieved on 2026-09-27 says "Effective exchange-wide from
+# 12 AM ET, Friday September 25, 2026" -- 2026-09-25T04:00Z. Eight days of fills
+# would have been priced on a schedule the venue had not yet put in force.
+#
+# `calibration_fees` is the AUTHORITY on the published schedule: it was built
+# against the retrieved page and its quotes are preserved in
+# research/evidence/VENUE_FEE_POLICY_2026-09-27.md. So the date and the
+# coefficient are DERIVED from it rather than restated here, and a test pins the
+# two equal -- two copies of a number that must agree is how they stop agreeing.
+def _published_effective_date() -> str:
+    from . import calibration_fees as _CF
+    return _CF.SCHEDULE_EFFECTIVE_EXCHANGE_WIDE[:10]
+
+
+def _published_theta_taker() -> Decimal:
+    from . import calibration_fees as _CF
+    return _CF.taker_coefficient(None, "2026-09-27")
+
+
+PMUS_2026_09_25 = Schedule(
+    schedule_id="PMUS_PUBLISHED_2026_09_25",
+    effective_from=_published_effective_date(),
+    theta_taker=_published_theta_taker(),
     theta_maker=Decimal("-0.0125"),
     taker_rounding=CUMULATIVE_PER_ORDER,
 )
 
-# Newest last. `for_date` walks it backwards.
-SCHEDULES = (PMUS_2026_07_01, PMUS_2026_09_17)
+#: KEPT UNDER ITS OLD NAME so a stored basis string still resolves. It is the
+#: SAME terms on the CORRECT date -- the coefficient never changed, only my
+#: belief about when it took effect.
+PMUS_2026_09_17 = PMUS_2026_09_25
 
-LATEST = PMUS_2026_09_17
+# Newest last. `for_date` walks it backwards.
+SCHEDULES = (PMUS_2026_07_01, PMUS_2026_09_25)
+
+#: `LATEST` EXISTS AND EVERY PRODUCTION CALLER USING IT IS A DEFECT.
+#:
+#: `for_date` exists because a fee is a fact about WHEN it was charged. Callers
+#: that reach for `LATEST` bypass that and price a July fill on today's terms.
+#: The entry planner, the shadow loops and the test executor all do this; they are
+#: listed in `fee_consumers.STILL_OPEN` and `LATEST_CALLERS_ARE_A_DEFECT` says so
+#: here, where someone reaching for it will read it.
+LATEST = PMUS_2026_09_25
+LATEST_CALLERS_ARE_A_DEFECT = (
+    "a fee is a fact about WHEN it was charged. Use for_date(iso_date). Callers "
+    "that use LATEST price every fill on today's schedule, which is wrong for "
+    "any fill that is not from today")
+
+#: PER-SPORT THETA LIVES IN `calibration_fees` AND NOT HERE.
+#:
+#: The page schedules Table Tennis to 0.10 at 11:59 PM ET 2026-09-30. A single
+#: `theta_taker` on a Schedule cannot represent that, and adding a second
+#: mechanism here would give this repository TWO per-sport tables to keep in
+#: step. So this module's coefficient is the exchange-wide default and a caller
+#: needing a sport must use `calibration_fees.taker_coefficient(sport, at)`.
+PER_SPORT_THETA_IS_NOT_HERE = (
+    "use calibration_fees.taker_coefficient(sport, at). This module carries the "
+    "exchange-wide default only, so Table Tennis from 2026-10-01T03:59Z is "
+    "understated by 31% if priced here")
 
 
 def for_date(iso_date: str) -> Schedule:

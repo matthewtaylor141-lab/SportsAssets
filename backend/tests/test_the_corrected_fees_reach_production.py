@@ -535,3 +535,66 @@ def test_a_late_observed_charge_does_not_cascade_into_other_expectations():
     assert with_obs["expected_fee_usd"] == without["expected_fee_usd"]
     assert with_obs["booked_fee_usd"] == 0.71
     assert without["booked_fee_usd"] == without["expected_fee_usd"]
+
+
+# ── 8 · the two fee modules are pinned, not merely compared ──────────
+
+def test_the_second_module_DERIVES_the_schedule_rather_than_restating_it():
+    """C8. `bettor_fee_schedule` carried effective_from="2026-09-17" with no
+    quoted source; the retrieved page says "12 AM ET, Friday September 25, 2026".
+    Eight days of fills would have been priced on a schedule the venue had not yet
+    put in force.
+
+    TWO COPIES OF A NUMBER THAT MUST AGREE IS HOW THEY STOP AGREEING, so the date
+    and the coefficient are now derived from `calibration_fees` -- which was built
+    against the retrieved page -- and this test pins them equal.
+    """
+    from decimal import Decimal
+
+    from sportsassets import bettor_fee_schedule as FS
+
+    assert FS.LATEST.effective_from == (
+        CF.SCHEDULE_EFFECTIVE_EXCHANGE_WIDE[:10]) == "2026-09-25"
+    assert FS.LATEST.theta_taker == CF.taker_coefficient(None, "2026-09-27")
+    assert FS.LATEST.theta_taker == Decimal("0.0695")
+    # AND THE OLD NAME STILL RESOLVES, so a stored basis string is not orphaned.
+    # Same terms, correct date -- the coefficient never changed, only my belief
+    # about when it took effect.
+    assert FS.PMUS_2026_09_17 is FS.PMUS_2026_09_25
+
+
+def test_dating_still_works_across_the_corrected_boundary():
+    from sportsassets import bettor_fee_schedule as FS
+
+    assert FS.for_date("2026-09-26").schedule_id == "PMUS_PUBLISHED_2026_09_25"
+    assert FS.for_date("2026-09-25").schedule_id == "PMUS_PUBLISHED_2026_09_25"
+    # THE DAY BEFORE IT TOOK EFFECT IS STILL THE JULY SCHEDULE -- which is the
+    # whole point of the correction: 09-20 used to resolve to the 0.0695 terms.
+    assert FS.for_date("2026-09-24").schedule_id == "PMUS_PUBLISHED_2026_07_01"
+    assert FS.for_date("2026-09-20").theta_taker == CF.Decimal("0.06") \
+        if hasattr(CF, "Decimal") else True
+
+
+def test_LATEST_is_labelled_as_a_defect_where_someone_will_read_it():
+    """A caller reaching for `LATEST` bypasses `for_date`, whose whole purpose is
+    that a fee is a fact about WHEN it was charged. The warning sits on the
+    constant rather than only in a register."""
+    from sportsassets import bettor_fee_schedule as FS
+
+    assert "fact about WHEN it was charged" in FS.LATEST_CALLERS_ARE_A_DEFECT
+    assert "for_date" in FS.LATEST_CALLERS_ARE_A_DEFECT
+    # AND THE CALLERS ARE STILL LISTED AS OPEN, so this is a label and not a fix.
+    assert "LATEST" in " ".join(FC.STILL_OPEN)
+
+
+def test_per_sport_theta_has_ONE_home_and_this_module_says_where():
+    """Adding a second per-sport table here would give this repository two to
+    keep in step. Table Tennis is understated 31% if priced on the exchange-wide
+    default from 2026-10-01T03:59Z."""
+    from sportsassets import bettor_fee_schedule as FS
+
+    assert "calibration_fees.taker_coefficient" in FS.PER_SPORT_THETA_IS_NOT_HERE
+    assert "31%" in FS.PER_SPORT_THETA_IS_NOT_HERE
+    # THE ONE HOME REALLY CARRIES IT.
+    assert CF.taker_coefficient("TABLE_TENNIS", "2026-10-02") == CF.Decimal("0.10")
+    assert CF.taker_coefficient(None, "2026-10-02") == CF.Decimal("0.0695")
