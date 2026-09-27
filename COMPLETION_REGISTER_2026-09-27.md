@@ -968,3 +968,72 @@ files** than HEAD, so the suite's collection order differs between the two runs
 and a different subset of the suite's order-dependent tests surfaces. That is a
 property of the suite, and it is a real debt — it means the identity comparison
 is not perfectly stable across SHAs that add test files.
+
+---
+
+# ADDENDUM 2 — the pairing directive, 2026-09-27 night
+
+The consolidated plan §1 asked for is `CONSOLIDATED_COMPLETION_AND_LAUNCH_PLAN_2026-09-27.md`.
+It carries every requirement with implementation, integration point, owner,
+acceptance criteria, evidence, dependencies and estimate, and the four states
+(implemented / tested / deployed / operationally verified) defined before
+anything is placed in them. This addendum records only what moved, and the two
+places where the register's own earlier numbers were wrong.
+
+## Two corrections to numbers this register published
+
+**1 · The 464 settlement refusals are C3, not C4.** The register reported
+`C1 = 0, C4 = 464` — "unresolved for a reason none of the above names" — and
+that was read as an external blocker. It was our own instrumentation:
+`classify_census` consumes refusal *code* counts, and
+`VOID_ABANDONMENT_RULE_NOT_ESTABLISHED` does not record which side was silent.
+`bettor_settlement_terms.compare` has decided this per condition all along, and
+its four verdicts map onto the four classes exactly. `decompose_census` now
+reads the comparisons. On the shape this register records for the 464 — seven
+applicable conditions for a baseball money line, the book side captured with
+citations, the venue's 380-character `description` stating one — the answer is
+**C3 = 464, C4 = 0**.
+
+This **admits nothing**: a C3 candidate is exactly as refused as a C4 one, and
+`compare` still returns `UNKNOWN`. It does not predict how the comparison
+resolves once the venue side is read — it may resolve compatible, or resolve
+into a **C1 conflict**, which would be decisive against and worse than the
+present state. What changes is the size of the work item: "the venue is
+incompatible" becomes "capture six named conditions, one sport family, one
+market type", against a publication this register already confirmed exists
+(618 sitemap URLs, `ai-train=yes`). Derived from the recorded shape, not from a
+live re-run, which needs egress this container denies.
+
+**2 · The 56 gate denials were one module, not the capital path.** Parsed out
+of the run's JUnit XML, the 56 `authorization_unavailable` failures are **55 in
+`tests/test_pmus_post_only.py` and 1 in `tests/test_mirror_live_worker.py`**.
+That module's two promises — a byte-identical params dict and a
+`post_only`-only refusal reading — were never reached, so all 55 were reporting
+that an unbound gate refuses. A gate that refuses because it is unbound is a
+coverage gap, not a safety result.
+
+## What moved
+
+| Item | Module | State | Tests |
+|---|---|---|---|
+| §5 indirect structures, incl. the Bears/Panthers both-win proof | `bettor_indirect_structures` | IMPLEMENTED · TESTED | 53 |
+| §4 completion policy, forward cash, cohort accounting | `bettor_completion_policy` | IMPLEMENTED · TESTED | 53 |
+| §3 eighth action | `bettor_ev_actions.FORM_INDIRECT_HEDGE` | IMPLEMENTED · TESTED | 6 |
+| §4 census decomposition | `settlement_taxonomy.decompose_census` | IMPLEMENTED · TESTED | 24 |
+| §9 gate coverage repair | `tests/gate_harness.py` | IMPLEMENTED · TESTED | 59 + 24 |
+| A6/R3 read-only diagnostic interface | `bettor_read_only_venue` | IMPLEMENTED · TESTED | 57 |
+| §7 learning cannot change its own gates | `bettor_learning_authority` | IMPLEMENTED · TESTED | 25 |
+
+`READ_ONLY_INTERFACE_REQUIREMENT["status"]` no longer reads NOT IMPLEMENTED. An
+existing test that asserted it did has been rewritten to assert the stronger
+properties, because the fact it described has changed.
+
+## What did not move
+
+Nothing in this batch is **DEPLOYED** or **OPERATIONALLY VERIFIED**. No cycle
+has yet been observed starting *and* finishing on a release SHA. The credential
+rotation is built and not run. Exposure and writer isolation remain **UNKNOWN**
+and the existing account stays paused. Zero candidates are admissible, so the
+system still has nothing to trade. Funded submission is disabled.
+
+All four verdicts in the plan are **NO**.
