@@ -63,9 +63,32 @@
    "gone_vs_baseline": [],
    "identical_to_baseline": true,
    "note": "102 more tests pass than on the baseline and not one more fails. The third independent baseline run of the day is again BYTE-IDENTICAL to the first, so three matched pairs now say the same thing about this instrument."
+  },
+  "release_8b04d41": {
+   "file": "FAILURES_RELEASE_8b04d41_2026-09-27.txt",
+   "failed": 177,
+   "passed": 12856,
+   "duration_s": 449.99,
+   "log": "GATE_Z_REL",
+   "paired_with": "a concurrent 6d75275 run: 177 failed, 12708 passed, 443.05s",
+   "new_vs_baseline": [],
+   "gone_vs_baseline": [],
+   "identical_to_baseline": true,
+   "note": "148 more tests pass than on the baseline and not one more fails. The 36 funded-path, funded-book and onboarding tests were re-run inside the frozen checkout against that run's own migrated database to confirm they EXECUTED rather than skipping: 36 passed."
   }
  },
- "the_matched_pair": "c6dbd89 against 6d75275, run concurrently: 178 and 178, identity sets IDENTICAL. Three separate baseline runs today (19:49, 21:37, 22:2x) produced BYTE-IDENTICAL 178-identity lists across different databases and load, which is what makes an identity diff here a signal. Along the way the instrument earned it: the 7dedc5a pair gave 188 against 178 and every one of the ten extra identities was a real defect -- two fixtures replaying migration 117 and stopping, narrowing `rn1x_provenance_declared` for whatever ran next.",
+ "the_matched_pair": "8b04d41 against 6d75275, run concurrently from frozen git-archive checkouts on their own migrated lower-case databases: 177 and 177, identity sets IDENTICAL. Across the day five separate baseline runs printed 177, 178 or 182 failures -- the two recorded clock-sensitive defects move that count on a long-lived machine -- while every matched pair agreed on IDENTITIES. That is the whole reason a count is not used as a release signal here.",
  "clock_sensitive_defects_are_recorded_separately": "research/evidence/CLOCK_SENSITIVE_TEST_DEFECTS.json",
- "not_a_clean_gate": "178 pre-existing failures remain on the baseline itself. Nothing here claims otherwise."
+ "not_a_clean_gate": "178 pre-existing failures remain on the baseline itself. Nothing here claims otherwise.",
+ "baseline_count_drifts_identities_do_not": {
+  "observed_baseline_counts": [
+   178,
+   178,
+   182,
+   177,
+   177
+  ],
+  "why": "tests/test_run834_retention_and_races.py's monotonic-ulp assertion and the PNL_L34 clock-gap pins both depend on container uptime and wall-clock elapse, not on any diff. They are recorded in CLOCK_SENSITIVE_TEST_DEFECTS.json and neither is fixed.",
+  "consequence": "only comm -23 / -13 over sorted FAILED node ids is read as a regression signal"
+ }
 }
