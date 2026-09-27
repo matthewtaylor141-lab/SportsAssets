@@ -140,6 +140,31 @@
    "identical_to_baseline": true,
    "is_the_deployed_sha": true,
    "note": "209 more tests PASS than the baseline and not one more fails. Adds the clock correction: a future timestamp gets no fresh certificate, the three instants are separate, a slow acquisition ages the book against the unchanged bound, and a delayed submission cannot reuse an expired assessment. Sixth exact reproduction of the recorded baseline identity list. THIS IS THE SHA DEPLOYED TO sportsassets-api"
+  },
+  "release_714680b": {
+   "file": "FAILURES_RELEASE_714680b_2026-09-27.txt",
+   "failed": 177,
+   "passed": 12919,
+   "duration_s": 444.69,
+   "log": "GATE_AC_REL",
+   "identical_to_the_recorded_177_list": true,
+   "extra_vs_recorded": [],
+   "absent_vs_recorded": [],
+   "paired_baseline": {
+    "file": "FAILURES_BASELINE_6d75275_2026-09-27_paired_with_714680b.txt",
+    "failed": 174,
+    "passed": 12711,
+    "duration_s": 429.93,
+    "log": "GATE_AC_BASE",
+    "three_recorded_identities_did_not_fail_this_time": [
+     "tests/test_pnl_l34_review_pins.py::test_r_defect_h1_the_venue_fresher_than_the_fills_is_refused_drift_not_sized",
+     "tests/test_pnl_l34_review_pins.py::test_r_defect_m1_the_deploy_seed_admits_the_landed_rules_unwitnessed_reduce",
+     "tests/test_pnl_l34_review_pins.py::test_r_the_fast_tick_explains_the_walks_drift_the_same_way"
+    ],
+    "why": "all three are the PNL_L34 clock-gap pins already recorded in CLOCK_SENSITIVE_TEST_DEFECTS.json. They depend on wall-clock elapse, not on any diff, and this baseline run happened not to trip them. Read against THIS baseline the release therefore shows three 'new' identities; read against the recorded 177-identity list -- the stable instrument, reproduced byte-identically seven times -- it shows none. The second reading is the signal, which is exactly why this record compares identities to the recorded list rather than to whichever baseline ran alongside."
+   },
+   "what_this_release_carries": "the PostgreSQL 17+ maintenance search_path repair: every funded SQL function body schema-qualifies the funded functions and tables it names, plus two tests that fail against the unqualified text on PostgreSQL 16",
+   "what_this_gate_cannot_establish": "that the migrations apply on production's server. The gate's database is PostgreSQL 16.13 and production is 18.6, which is how migration 126's index build failed on a build whose gate was green by identity. The two new tests set the restricted search_path explicitly so the CONDITION is checked on 16; only the production boot log establishes the outcome."
   }
  },
  "the_matched_pair": {
@@ -156,7 +181,8 @@
    178,
    182,
    177,
-   177
+   177,
+   174
   ],
   "why": "tests/test_run834_retention_and_races.py's monotonic-ulp assertion and the PNL_L34 clock-gap pins both depend on container uptime and wall-clock elapse, not on any diff. They are recorded in CLOCK_SENSITIVE_TEST_DEFECTS.json and neither is fixed.",
   "consequence": "only comm -23 / -13 over sorted FAILED node ids is read as a regression signal"
