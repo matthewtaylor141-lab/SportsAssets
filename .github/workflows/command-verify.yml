@@ -139,6 +139,11 @@ on:
 
 jobs:
   verify:
+    # A FUNDED READBACK IS NOT A REASON TO RE-RUN THE WHOLE ACCEPTANCE SUITE.
+    # This job is twenty-six steps, spends the odds and venue budgets, and
+    # drives the shadow lane's cycles. A dispatch whose only purpose is to
+    # read the serving build back must not do any of that, so it skips here.
+    if: ${{ inputs.funded_readback == '' }}
     runs-on: ubuntu-latest
     steps:
       - name: Settle
