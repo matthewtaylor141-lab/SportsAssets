@@ -3368,11 +3368,96 @@ async def admin_approve_funded_limits(response: Response,
                 "separate")}
 
 
+@app.post("/api/admin/funded-account-reconcile",
+          dependencies=[Depends(require_admin)])
+async def admin_funded_account_reconcile(response: Response,
+                                         account_id: str = "",
+                                         venue: str = "",
+                                         by: str = "operator") -> dict:
+    """THE DOCUMENTED OPERATOR RECONCILIATION (audit finding A3).
+
+    Runs the four venue reads -- balances, positions, open orders, executions --
+    against the live account, compares them with this system's own book, and
+    PERSISTS the result with its source, account identity, retrieval instant,
+    completeness, verdicts and discrepancies. `funded-activation-readiness` then
+    reads that record and its age.
+
+    WHAT IT DOES NOT DO. It submits no order, and it writes NOTHING to the
+    account row: eligibility is a separate act, so a read can never promote an
+    account. An unreadable or partially paged source is recorded as a failure,
+    not omitted. Without `PMUS_KEY_ID`/`PMUS_SECRET_KEY` no client can be built
+    and every read records UNREADABLE -- which is the reconciliation working,
+    not a gap in it.
+
+    A NEW ACCOUNT ID DOES NOT INHERIT ANOTHER ACCOUNT'S EVIDENCE: the record
+    carries the account it was taken against and readiness refuses a mismatch.
+    """
+    from .. import bettor_account_onboarding as ON
+    from .. import bettor_funded_activation as FA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        # THE BOUND ACCOUNT BY DEFAULT, so an operator cannot reconcile one
+        # account and read readiness against another by omitting an argument.
+        if not account_id or not venue:
+            bound = FA._obj(await FA._state(conn, FA.ACCOUNT_KEY)) or {}
+            account_id = account_id or str(bound.get("account_id") or "")
+            venue = venue or str(bound.get("venue") or "")
+        if not account_id or not venue:
+            response.status_code = 409
+            return {"ok": False,
+                    "refusal": "NO_ACCOUNT_IS_BOUND_AND_NONE_WAS_SUPPLIED",
+                    "why": ("name the account and venue, or bind one first. "
+                            "Reconciling an unnamed account is not a check")}
+        rec = await ON.record_reconciliation(conn, account_id=account_id,
+                                            venue=venue, by=str(by or ""))
+        return {"ok": True, "performed": "FOUR_VENUE_READS_AND_A_BOOK_COMPARE",
+                "submits_orders": False,
+                "writes_the_account_row": False,
+                "record": rec,
+                "readiness_reads_this": ON.RECONCILIATION_KEY,
+                "next": ("GET /api/admin/funded-activation-readiness now reads "
+                         "this record and its age. Eligibility still requires "
+                         "the separate mark_eligible act")}
+
+
+@app.get("/api/admin/funded-account-reconciliation",
+         dependencies=[Depends(require_admin)])
+async def admin_funded_account_reconciliation(response: Response) -> dict:
+    """The persisted reconciliation, its age and whether it still holds."""
+    from .. import bettor_account_onboarding as ON
+    from .. import bettor_funded_activation as FA
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    pool = await get_pool()
+    async with pool.acquire() as conn:
+        bound = FA._obj(await FA._state(conn, FA.ACCOUNT_KEY)) or {}
+        return await ON.reconciliation_evidence(
+            conn, account_id=str(bound.get("account_id") or "") or None)
+
+
 @app.get("/api/admin/funded-activation-readiness",
          dependencies=[Depends(require_admin)])
 async def admin_funded_activation_readiness(response: Response,
                                             hours: int = 168) -> dict:
-    """EVERY READINESS CHECK, WITH THE EVIDENCE IT READ. Read-only."""
+    """EVERY READINESS CHECK, WITH THE EVIDENCE IT READ. Read-only.
+
+    WHAT THIS ROUTE DOES NOT DO, stated because the activation package said it
+    did (audit finding A3). It does NOT contact the venue and it does NOT rerun
+    account reconciliation. It reads database state, including the
+    reconciliation evidence recorded by
+    `POST /api/admin/funded-account-reconcile`, and reports that evidence's AGE.
+
+    So the account check can fail for a reason that has nothing to do with the
+    registry row: no reconciliation recorded, one recorded too long ago, one
+    recorded for a different account, or one whose reads were incomplete. Each
+    is named on the check. Running the reconciliation is the other route's job,
+    deliberately, because a readiness read that silently reached a venue would
+    be a write-shaped action wearing a GET.
+    """
     from .. import bettor_funded_activation as FA
     from ..db import get_pool
 

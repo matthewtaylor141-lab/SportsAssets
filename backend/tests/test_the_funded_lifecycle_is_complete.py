@@ -1331,8 +1331,19 @@ def test_the_funded_book_age_policy_is_the_entry_lanes_own():
     different ages is exactly the drift a shared declaration prevents."""
     from sportsassets.workers import ext_pinnacle_loop as L
 
+    from sportsassets import bettor_venue_currency as VC
+
     assert FA.MAX_VENUE_BOOK_AGE_S == L.MAX_VENUE_QUOTE_AGE_S
-    assert "VENUE_TRANSACT_TIME" in FA.FRESHNESS_BASIS_ESTABLISHED
+    assert FA.MAX_VENUE_BOOK_AGE_S == VC.MAX_BOOK_STATE_AGE_S
+    # ONE RULE TOO, NOT ONLY ONE BOUND. Both lanes reach the same verdict
+    # function, so they cannot disagree about what admits a book either.
+    assert FA.FRESHNESS_BASIS_ESTABLISHED == tuple(VC.ESTABLISHING_MECHANISMS)
+    # AND `VENUE_TRANSACT_TIME` IS NO LONGER ON THAT LIST. This test used to
+    # assert it WAS an establishing basis. Parsing the stamp establishes that
+    # the value was readable; what it denotes is unresolved, and a cache
+    # replaying one representation yields a readable stamp too.
+    assert "VENUE_TRANSACT_TIME" not in FA.FRESHNESS_BASIS_ESTABLISHED
+    assert "VENUE_TRANSACT_TIME" in FA.FRESHNESS_BASIS_UNESTABLISHED
 
 
 @pg

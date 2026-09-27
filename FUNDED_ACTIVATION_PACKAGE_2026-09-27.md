@@ -23,9 +23,24 @@ contains no secret.
 | servicing outlives entry permission | exits gated on ownership, not on the entry grant |
 | the inputs' own expiry, checked pre-send | expired reservation released, zero venue calls |
 | PostgreSQL 18 migration validation | in CI, on the version production runs |
+| one shared freshness rule across entry, activation and exits | `bettor_venue_currency`, three verdicts, three mechanisms |
+| the shadow lane's event-exposure identity | `OPEN_BOOK_SQL` joins `us_premap.event_slug` (A9) |
+| one typed limit schema with units, windows and scopes | `EX.RAIL_TYPES` + `EX.typed_limits()` (A4) |
+| a real, persisted account reconciliation with an age | `POST /api/admin/funded-account-reconcile` (A3) |
 
-The remaining work in this section is **zero**. What follows needs a decision or
-a credential.
+### AND A SENTENCE THIS DOCUMENT USED TO GET WRONG
+
+An earlier version said "the remaining work in this section is **zero**". That was
+not true when it was written and it is not true now. The 2026-09-27 management
+audit named engineering that is mine and unfinished, and the honest list is kept
+in `COMPLETION_REGISTER_2026-09-27.md`. Open at the time of writing: contract
+identity element-by-element (A1), the published fee schedule and a defensible
+unrealised mark (A2), cross-lane rail aggregation (A4), the MERIDIAN browser
+credential review (A6), triage of the standing baseline failures (A7), and
+end-to-end capacity measurement (A8).
+
+**So funded readiness is NOT waiting only on a decision or a credential.** Those
+are necessary and they are not sufficient.
 
 ---
 
@@ -78,13 +93,40 @@ position is small enough that being wrong about anything costs little.
 | `MAX_EVENT_EXPOSURE` | $1,000 | **$25** | $25 |
 | `MAX_CAPITAL_DEPLOYED` | $3,000 | **$50** | $50 |
 | `MAX_CORRELATED_EXPOSURE` | $1,000 | **$25** | $25 |
-| `MAX_RESIDUAL_INVENTORY` | $2,000 | **$50** | $50 |
-| `MAX_DRAWDOWN` (daily loss stop) | $1,000 | **$20** | $20 |
-| `MAX_CAPITAL_HOURS` | 72,000 | **1,200** | 1,200 |
+| `MAX_RESIDUAL_INVENTORY` ⚠︎ | 2,000 contracts | — | 2,000 contracts |
+| `MAX_DRAWDOWN` (cumulative loss ceiling, **not** daily) | $1,000 | **$20** | $20 |
+| `MAX_CAPITAL_HOURS` ⚠︎ | 72,000 $·h | — | 72,000 $·h |
+
+### Two corrections to this table (audit finding A4)
+
+**⚠︎ marks a rail no owner field reaches.** `MAX_RESIDUAL_INVENTORY` and
+`MAX_CAPITAL_HOURS` have no name in `APPROVED_LIMIT_TO_RAIL`, so an approval
+cannot tighten them and an earlier version of this table was wrong to show a
+proposed value for them. They stay at their frozen amounts.
+
+**And `MAX_RESIDUAL_INVENTORY` is CONTRACTS, not dollars.** The rail is declared
+as `MAX_RESIDUAL_INVENTORY_CONTRACTS` and `exposure_from_rows` sums `qty`. An
+earlier version of this table showed "$2,000 / $50", so an owner reading it would
+have believed they were approving fifty dollars of residual inventory when the
+number the code compares is a contract count — at the observed 0.35–0.65 prices,
+roughly $18–$33. `MAX_CAPITAL_HOURS` is dollar-hours, not hours.
+
+**`MAX_DRAWDOWN` has no daily window.** The owner field is called
+`daily_loss_stop_usd` and the rail it maps to sums realised losses plus the entire
+cost basis of every unmarked open position, across the whole open book, with no
+date filter and **no reset**. A $20 approval means: refuse the next entry once
+worst-case exposed loss reaches $20, and keep refusing until positions settle or
+mark better. It does **not** lift tomorrow. `cumulative_loss_stop_usd` is accepted
+as the accurate synonym; the old key is kept because recorded approvals use it.
+
+Every unit, window and aggregation scope above is now declared once, in
+`bettor_entry_execution.RAIL_TYPES`, and `EX.typed_limits()` returns this table
+with the frozen, proposed and effective values side by side in their own units.
 
 Reading of the pilot set: **one position at a time, about $25 of exposure, and
-the lane stops for the day after $20 of realised loss.** At the observed
-per-contract prices (0.35–0.65) that is roughly 40–70 contracts.
+the lane refuses further entry once worst-case exposed loss reaches $20 — which
+does not reset overnight.** At the observed per-contract prices (0.35–0.65) that
+is roughly 40–70 contracts.
 
 These are numbers *I* propose. They are not approved, and nothing reads them as
 approved until step 4 records an owner approval.

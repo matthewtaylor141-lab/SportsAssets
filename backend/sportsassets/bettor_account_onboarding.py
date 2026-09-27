@@ -441,6 +441,169 @@ async def register(conn, *, account_id: str, venue: str, desk_id: str,
                      "mark_eligible if and only if it passes")}
 
 
+#: ── PERSISTED RECONCILIATION EVIDENCE AND ITS AGE (finding A3) ──────
+#:
+#: THE GAP THE AUDIT FOUND. Every read above existed and worked, and NOTHING
+#: CALLED IT. `GET /api/admin/funded-activation-readiness` was described in the
+#: activation package as rerunning venue reconciliation; it calls
+#: `funded_activation.readiness`, whose account check reads the canonical
+#: registry, and the prerequisites route returned this module's `describe()`.
+#: A described capability is not a performed check, and a registry flag saying
+#: RECONCILED is a record of a past conclusion, not evidence of a present one.
+#:
+#: SO THE EVIDENCE IS PERSISTED WITH ITS OWN CLOCK AND IT EXPIRES. A
+#: reconciliation is a statement about balances, positions, open orders and
+#: executions at ONE INSTANT. Six hours later it is a historical note: an order
+#: could have filled, a position could have settled. Readiness therefore requires
+#: evidence that is present, passing AND fresh, and reports the age either way.
+RECONCILIATION_KEY = "bettor_funded_account_reconciliation"
+#: How long a reconciliation remains admissible as CURRENT evidence. Chosen, not
+#: derived -- it is a policy allowance and is labelled as one. Short enough that
+#: an overnight fill cannot hide inside it.
+EVIDENCE_MAX_AGE_S = 2 * 3600.0
+R_NO_EVIDENCE = "NO_RECONCILIATION_EVIDENCE_HAS_EVER_BEEN_RECORDED"
+R_EVIDENCE_STALE = "THE_RECONCILIATION_EVIDENCE_IS_OLDER_THAN_ITS_BOUND"
+R_EVIDENCE_OTHER_ACCOUNT = "THE_RECORDED_EVIDENCE_IS_FOR_A_DIFFERENT_ACCOUNT"
+
+
+async def _put_state(conn, key, value) -> None:
+    await conn.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        key, json.dumps(value, default=str))
+
+
+async def _get_state(conn, key):
+    raw = await conn.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = $1", key)
+    if raw is None:
+        return None
+    if isinstance(raw, (dict, list)):
+        return raw
+    try:
+        return json.loads(raw)
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def _completeness(rec) -> dict:
+    """Whether all four reads answered, and whether each was fully paged.
+
+    A partially paged source is NOT a source that answered: a positions read
+    that stopped at the first page can miss the very position that makes the
+    account a discrepancy.
+    """
+    checks = list((rec or {}).get("checks") or [])
+    by = {}
+    for c in checks:
+        by.setdefault(c.get("check"), []).append(c)
+    missing = [c for c in CHECKS if c not in by]
+    partial = [c.get("check") for c in checks
+               if c.get("complete") is False or c.get("truncated") is True
+               or c.get("pages_exhausted") is False]
+    return {"checks_expected": list(CHECKS),
+            "checks_answered": sorted(by),
+            "checks_missing": missing,
+            "reads_not_fully_paged": sorted(set(partial)),
+            "complete": not missing and not partial,
+            "why": ("every one of the four reads answered and each exhausted "
+                    "its pages" if not missing and not partial else
+                    "an unanswered or partially paged read is not evidence")}
+
+
+async def record_reconciliation(conn, *, account_id: str, venue: str,
+                                by: str, adapter=None,
+                                now: float | None = None) -> dict:
+    """RUN THE FOUR READS AND PERSIST THE EVIDENCE. Closes A3's integration gap.
+
+    This is the documented operator path. It performs the venue reads, records
+    source, account identity, retrieval instant, completeness, verdicts and
+    discrepancies, and writes NOTHING to the account row -- eligibility is a
+    separate act (`mark_eligible`), so reading cannot promote.
+
+    IT IS NOT A READINESS ENDPOINT AND IT DOES NOT PRETEND TO BE ONE. It is the
+    thing a readiness endpoint may then READ, with an age attached.
+    """
+    at = float(now if now is not None else time.time())
+    rec = await reconcile(conn, account_id=account_id, venue=venue,
+                          adapter=adapter, now=at)
+    completeness = _completeness(rec)
+    record = {
+        "version": VERSION,
+        "recorded_at": at,
+        "recorded_by": by,
+        "account_id": str(account_id or "").strip(),
+        "venue": str(venue or "").strip(),
+        "source": rec.get("adapter"),
+        "ok": bool(rec.get("ok")),
+        "eligible": bool(rec.get("eligible")),
+        "refusal": rec.get("refusal"),
+        "verdicts": rec.get("verdicts"),
+        "blocking": rec.get("blocking"),
+        "discrepancies": [b for b in (rec.get("blocking") or [])
+                          if b.get("verdict") == DISCREPANCY],
+        "completeness": completeness,
+        "evidence_max_age_s": EVIDENCE_MAX_AGE_S,
+        "evidence_max_age_is_a_policy_allowance": (
+            "a chosen bound, not a derived one. A reconciliation describes one "
+            "instant; past this age it is a historical note"),
+        "wrote_account_row": False,
+        "checks": rec.get("checks"),
+        "our_open_markets": rec.get("our_open_markets"),
+    }
+    await _put_state(conn, RECONCILIATION_KEY, record)
+    return record
+
+
+async def reconciliation_evidence(conn, *, account_id: str | None = None,
+                                  now: float | None = None) -> dict:
+    """The persisted evidence, ITS AGE, and whether it may still be relied on.
+
+    Three separate failures, three names: never recorded, recorded for another
+    account, or recorded too long ago. An absent reconciliation is not a passing
+    one, and neither is an old one.
+    """
+    at = float(now if now is not None else time.time())
+    rec = await _get_state(conn, RECONCILIATION_KEY)
+    out = {"key": RECONCILIATION_KEY, "asked_at": at,
+           "max_age_s": EVIDENCE_MAX_AGE_S}
+    if not isinstance(rec, dict):
+        return dict(out, present=False, usable=False, refusal=R_NO_EVIDENCE,
+                    why=("no reconciliation has ever been recorded. The "
+                         "registry's accounting flag is a record of a past "
+                         "conclusion, not evidence of a present one"))
+    age = at - float(rec.get("recorded_at") or 0.0)
+    out.update(present=True, recorded_at=rec.get("recorded_at"),
+               age_s=round(age, 1), account_id=rec.get("account_id"),
+               venue=rec.get("venue"), source=rec.get("source"),
+               eligible=rec.get("eligible"), verdicts=rec.get("verdicts"),
+               discrepancies=rec.get("discrepancies"),
+               completeness=rec.get("completeness"),
+               recorded_by=rec.get("recorded_by"))
+    if account_id and str(rec.get("account_id")) != str(account_id).strip():
+        return dict(out, usable=False, refusal=R_EVIDENCE_OTHER_ACCOUNT,
+                    why=("the recorded evidence is for %s, and the bound "
+                         "account is %s. A new account id does not inherit "
+                         "another account's reconciliation"
+                         % (rec.get("account_id"), account_id)))
+    if age > EVIDENCE_MAX_AGE_S:
+        return dict(out, usable=False, refusal=R_EVIDENCE_STALE,
+                    why=("recorded %.0f s ago against a %.0f s bound. A "
+                         "reconciliation describes one instant and this one is "
+                         "no longer that instant" % (age, EVIDENCE_MAX_AGE_S)))
+    if not (rec.get("completeness") or {}).get("complete"):
+        return dict(out, usable=False, refusal=R_NOT_RECONCILED,
+                    why=("the recorded reads were incomplete: %s"
+                         % ((rec.get("completeness") or {}).get("why"))))
+    if not rec.get("eligible"):
+        return dict(out, usable=True, passes=False, refusal=R_NOT_RECONCILED,
+                    why=("the reconciliation is current and it did NOT pass. "
+                         "Unknown or contradictory evidence blocks"))
+    return dict(out, usable=True, passes=True, refusal=None,
+                why="a complete, passing reconciliation recorded %.0f s ago"
+                    % age)
+
+
 async def mark_eligible(conn, *, account_id: str, venue: str, by: str,
                         adapter=None, now: float | None = None) -> dict:
     """MAKE AN ACCOUNT ELIGIBLE, AND ONLY ON A CLEAN RECONCILIATION.

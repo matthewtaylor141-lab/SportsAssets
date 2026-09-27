@@ -507,6 +507,165 @@ PREDECLARED_LIMITS = {
 UNDECLARED_RAILS = tuple(
     n for n in risk.RAILS if n not in PREDECLARED_LIMITS)
 
+#: ── ONE TYPED LIMIT SCHEMA (audit finding A4) ───────────────────────
+#:
+#: THE DEFECT. The numbers were right and what they MEANT was declared in four
+#: places that disagreed. `MAX_RESIDUAL_INVENTORY` is counted in CONTRACTS here
+#: (`MAX_RESIDUAL_INVENTORY_CONTRACTS`, and `exposure_from_rows` sums `qty`) and
+#: the activation proposal presented it as dollars -- so an owner approving "$50"
+#: was approving fifty CONTRACTS, which at the observed 0.35-0.65 prices is
+#: roughly $18-$33 of exposure, not $50. `MAX_DRAWDOWN` is reached through an
+#: owner field called `daily_loss_stop_usd` and has no daily window at all.
+#: `MAX_CAPITAL_HOURS` is dollar-hours and reads like a duration.
+#:
+#: SO THE UNIT, THE WINDOW AND THE AGGREGATION SCOPE ARE DECLARED ONCE, HERE,
+#: beside the rail they describe, and every reader -- owner approval, activation,
+#: the authorization digest, sizing, enforcement and the Command Centre -- takes
+#: them from this one table. A display that formats a contract count with a
+#: dollar sign is then a bug in one place rather than a difference of opinion
+#: between four.
+UNIT_USD = "USD"
+UNIT_CONTRACTS = "CONTRACTS"
+UNIT_USD_HOURS = "USD_HOURS"
+
+WINDOW_OPEN_BOOK = "OPEN_BOOK_AT_THE_DECISION_INSTANT"
+WINDOW_CUMULATIVE = "CUMULATIVE_OVER_THE_OPEN_BOOK_NO_RESET"
+WINDOW_ACCRUED = "ACCRUED_TO_THE_DECISION_INSTANT"
+
+SCOPE_ONE_MARKET = "ONE_CONDITION_ID"
+SCOPE_ONE_EVENT = "ONE_VENUE_EVENT_SLUG"
+SCOPE_WHOLE_BOOK = "EVERY_OPEN_POSITION_IN_THIS_LANE"
+
+RAIL_TYPES = {
+    "MAX_MARKET_EXPOSURE": {
+        "unit": UNIT_USD, "window": WINDOW_OPEN_BOOK,
+        "scope": SCOPE_ONE_MARKET,
+        "measures": "cost basis of open positions on the same condition id",
+        "owner_field": "per_order_usd"},
+    "MAX_EVENT_EXPOSURE": {
+        "unit": UNIT_USD, "window": WINDOW_OPEN_BOOK,
+        "scope": SCOPE_ONE_EVENT,
+        "measures": ("cost basis of open positions sharing the VENUE's event "
+                     "slug. Requires a resolvable event identity on every open "
+                     "row; see A9"),
+        "owner_field": "event_exposure_usd"},
+    "MAX_CAPITAL_DEPLOYED": {
+        "unit": UNIT_USD, "window": WINDOW_OPEN_BOOK,
+        "scope": SCOPE_WHOLE_BOOK,
+        "measures": "cost basis of every open position in this lane",
+        "owner_field": "capital_usd"},
+    "MAX_CORRELATED_EXPOSURE": {
+        "unit": UNIT_USD, "window": WINDOW_OPEN_BOOK,
+        "scope": SCOPE_WHOLE_BOOK,
+        "measures": ("the same total, under the worst-case assumption that "
+                     "every open position moves together"),
+        "owner_field": "max_exposure_usd"},
+    "MAX_RESIDUAL_INVENTORY": {
+        "unit": UNIT_CONTRACTS, "window": WINDOW_OPEN_BOOK,
+        "scope": SCOPE_WHOLE_BOOK,
+        "measures": "unmatched contract count, NOT a dollar amount",
+        "owner_field": None,
+        "not_owner_approvable": ("no owner field maps to this rail, so an "
+                                 "approval cannot tighten it. It stays at its "
+                                 "frozen contract count"),
+        "a_dollar_sign_here_is_a_bug": True},
+    "MAX_CAPITAL_HOURS": {
+        "unit": UNIT_USD_HOURS, "window": WINDOW_ACCRUED,
+        "scope": SCOPE_WHOLE_BOOK,
+        "measures": ("dollars multiplied by hours ALREADY held. Not a holding "
+                     "period and not a forecast"),
+        "owner_field": None,
+        "not_owner_approvable": "no owner field maps to this rail"},
+    "MAX_DRAWDOWN": {
+        "unit": UNIT_USD, "window": WINDOW_CUMULATIVE,
+        "scope": SCOPE_WHOLE_BOOK,
+        "measures": ("realised losses in full, plus the entire cost basis of "
+                     "every unsettled position whose mark is unavailable, "
+                     "counted as a total loss"),
+        "owner_field": "daily_loss_stop_usd",
+        "the_owner_field_name_is_inaccurate": (
+            "it says daily. There is no daily window, no calendar boundary and "
+            "no reset: this is a CUMULATIVE worst-case loss ceiling on the open "
+            "book. The field name is kept because recorded approvals use it, "
+            "and `cumulative_loss_stop_usd` is accepted as the accurate "
+            "synonym"),
+        "a_real_daily_window_would_need": ("a date-bounded realised-loss query "
+                                           "and a declared reset boundary with "
+                                           "a timezone. Neither exists")},
+}
+
+#: Every rail declared, and every owner field mapped to exactly one rail.
+RAIL_TYPES_COVER_EVERY_DECLARED_RAIL = (
+    set(RAIL_TYPES) == set(PREDECLARED_LIMITS))
+
+
+def rail_type(name) -> dict:
+    """One rail's unit, window and scope. Never guessed by a display."""
+    return dict(RAIL_TYPES.get(str(name)) or {
+        "unit": None, "window": None, "scope": None,
+        "why": "this rail has no typed declaration, so no unit may be assumed"})
+
+
+def format_rail(name, value) -> str:
+    """A rail's value WITH its unit, for any reader that shows one.
+
+    A single function, so a contract count can never acquire a dollar sign on
+    its way to a screen -- which is the A4 defect in its simplest form.
+    """
+    t = rail_type(name)
+    if value is None:
+        return "—"
+    unit = t.get("unit")
+    if unit == UNIT_USD:
+        return "$%s" % ("%.2f" % float(value)).rstrip("0").rstrip(".")
+    if unit == UNIT_CONTRACTS:
+        return "%g contracts" % float(value)
+    if unit == UNIT_USD_HOURS:
+        return "%g $·h" % float(value)
+    return "%g (unit undeclared)" % float(value)
+
+
+def typed_limits(approved: dict | None = None) -> dict:
+    """The side-by-side readback A4 asks for: frozen, approved, effective --
+    each with its unit, window, aggregation scope and owner field."""
+    eff = effective_limits(approved)
+    rows = []
+    for name in sorted(PREDECLARED_LIMITS):
+        t = rail_type(name)
+        of = t.get("owner_field")
+        rows.append({
+            "rail": name,
+            "unit": t.get("unit"),
+            "window": t.get("window"),
+            "scope": t.get("scope"),
+            "measures": t.get("measures"),
+            "owner_field": of,
+            "owner_proposed": (None if not of
+                               else (approved or {}).get(of)),
+            "frozen": eff["frozen"].get(name),
+            "effective": eff["effective"].get(name),
+            "frozen_display": format_rail(name, eff["frozen"].get(name)),
+            "effective_display": format_rail(name,
+                                             eff["effective"].get(name)),
+            "tightened": name in (eff.get("tightened") or {}),
+            "owner_approvable": of is not None,
+            "note": (t.get("the_owner_field_name_is_inaccurate")
+                     or t.get("not_owner_approvable")),
+        })
+    return {
+        "rows": rows,
+        "frozen_digest": eff.get("frozen_digest"),
+        "effective_digest": eff.get("effective_digest"),
+        "an_approval_can_only_tighten": True,
+        "units_are_declared_not_inferred": (
+            "every value above carries the unit its rail is measured in. "
+            "MAX_RESIDUAL_INVENTORY is CONTRACTS and MAX_CAPITAL_HOURS is "
+            "dollar-hours; presenting either with a dollar sign is a bug"),
+        "loss_window": RAIL_TYPES["MAX_DRAWDOWN"]["window"],
+        "loss_window_means": RAIL_TYPES["MAX_DRAWDOWN"][
+            "the_owner_field_name_is_inaccurate"],
+    }
+
 
 def _sha(obj) -> str:
     return hashlib.sha256(

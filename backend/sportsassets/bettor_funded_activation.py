@@ -483,6 +483,24 @@ AGE_INSTANTS = {
 }
 
 
+async def _reconciliation_evidence(conn, account_id):
+    """The persisted reconciliation, its age and whether it still holds.
+
+    Imported lazily: `bettor_account_onboarding` imports this module, so a
+    top-level import here would be a cycle. A read that raises is reported as
+    unusable rather than allowed to pass.
+    """
+    try:
+        from . import bettor_account_onboarding as _ON
+        return await _ON.reconciliation_evidence(conn, account_id=account_id)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"present": None, "usable": False, "passes": False,
+                "refusal": "RECONCILIATION_EVIDENCE_UNREADABLE",
+                "error": type(exc).__name__,
+                "why": ("the reconciliation evidence could not be read, which "
+                        "is not evidence that the account is clean")}
+
+
 def _check(name, met, detail, evidence=None, basis=None) -> dict:
     return {"check": name, "met": met, "detail": detail,
             "evidence": evidence or {},
@@ -1099,18 +1117,39 @@ async def readiness(conn, *, experiment_id=None, hours: int = 168,
          "real_capital_at_risk": EX.REAL_CAPITAL_AT_RISK},
         "MODULE_CONSTANT_OF_THE_LANE_THAT_WOULD_SUBMIT"))
 
-    # 2 · the account, from the canonical registry
+    # 2 · the account: the canonical registry AND a current reconciliation
+    #
+    # A3'S GAP, CLOSED HERE. This check read the registry row and nothing else,
+    # so `accounting_status = 'RECONCILED'` -- a record of a conclusion somebody
+    # reached at some past instant -- was the whole of the evidence. The four
+    # venue reads existed in `bettor_account_onboarding` and NOTHING CALLED THEM.
+    # Now both are required: the row must be clean AND a complete, passing
+    # reconciliation must have been recorded for THIS account inside its age
+    # bound. Absent, stale, incomplete or for another account all block, each
+    # under its own name, and the age is reported either way.
     if account_id:
         sel = await account_selection(conn, account_id)
+        ev = await _reconciliation_evidence(conn, account_id)
+        met = bool(sel.get("ok")) and bool(ev.get("passes"))
         checks.append(_check(
-            "account_selected_and_clean", bool(sel.get("ok")),
-            sel.get("why") or ("account %s is ACTIVE, not paused and its "
-                               "accounting is %s"
-                               % (account_id, sel.get("accounting_status"))),
+            "account_selected_and_clean", met,
+            (sel.get("why") or ("account %s is ACTIVE, not paused and its "
+                                "accounting is %s"
+                                % (account_id, sel.get("accounting_status"))))
+            if bool(sel.get("ok")) else sel.get("why"),
             {k: sel.get(k) for k in ("requested_account_id", "matched",
                                      "refusal", "accounting_status",
                                      "pause_reason")},
             "CANONICAL_REGISTRY_ROW_bettor_desk_accounts"))
+        checks[-1]["reconciliation_evidence"] = ev
+        checks[-1]["registry_flag_is_not_evidence"] = (
+            "the registry's accounting_status records a past conclusion. This "
+            "check also requires a complete, passing venue reconciliation "
+            "recorded for this account within %s s"
+            % ev.get("max_age_s"))
+        if bool(sel.get("ok")) and not ev.get("passes"):
+            checks[-1]["detail"] = ev.get("why")
+            checks[-1]["refusal"] = ev.get("refusal")
     else:
         try:
             reg = [dict(r) for r in await conn.fetch(REGISTRY_SQL)]

@@ -798,6 +798,25 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
                       "GLOBAL id and the venue does not accept it")
         return out
     out["us_market_slug"] = str(got["market_slug"])
+    # ── THE VENUE'S OWN EVENT IDENTITY (audit finding A9) ────────────
+    #
+    # The event rail compares a candidate's event key against the open book's.
+    # The book's now comes from `us_premap.event_slug` (see OPEN_BOOK_SQL), so
+    # the candidate's must come from the SAME column or the two are in different
+    # namespaces and never compare equal -- which is how passing the odds
+    # provider's `event_id` here would silently keep the rail at zero even after
+    # the query was repaired. One table, one namespace, read by its slug.
+    try:
+        out["venue_event_key"] = await conn.fetchval(
+            "SELECT event_slug FROM us_premap WHERE market_slug = $1",
+            out["us_market_slug"])
+    except Exception as exc:                                   # noqa: BLE001
+        out["venue_event_key"] = None
+        out["venue_event_key_error"] = type(exc).__name__
+    out["venue_event_key_is"] = (
+        "us_premap.event_slug for this contract -- the VENUE's event, which two "
+        "contracts on one fixture share. Not the odds provider's event id, "
+        "which is a different namespace")
     intent = str(got.get("intent") or "")
     out["intent"] = got.get("intent")
     # BOTH INTENTS ARE VALID RESOLVED EXPOSURES.
@@ -2445,16 +2464,45 @@ async def source_calibration(conn, source_version) -> dict:
     return d
 
 
+#: ── THE SHADOW BOOK'S EVENT IDENTITY (audit finding A9) ─────────────
+#:
+#: THE DEFECT. This query selected `condition_id`, cost, quantity, the decision
+#: instant and the realised net -- and NO EVENT IDENTITY. `exposure_from_rows`
+#: sums a row into MAX_EVENT_EXPOSURE only when `r["event_key"]` equals the
+#: proposed position's event key; with the column absent, `.get("event_key")` is
+#: None on every row, the condition never holds, and the event rail measured
+#: ZERO however many positions this lane already held on the same fixture. It
+#: was not an unenforced rail; it was a rail reading a quantity that was never
+#: selected. The funded lane carries its own event key and was never affected,
+#: which is exactly why the funded repair did not fix this one.
+#:
+#: WHERE THE IDENTITY COMES FROM. `rn1x_positions.venue_market_slug` is the
+#: venue's own market slug, and `us_premap.market_slug -> event_slug` is the
+#: venue's own event. That is the join the copy path already trusts, and using
+#: the VENUE's event rather than the odds provider's matters: two contracts on
+#: one fixture share a venue event slug, and the provider's event id is a
+#: different namespace that would never compare equal.
+#:
+#: AND A ROW WHOSE EVENT CANNOT BE RESOLVED IS NOT A ROW ON A DIFFERENT EVENT.
+#: `event_key` stays NULL there and `event_key_resolved` says so, so the caller
+#: can refuse rather than quietly measure a smaller number. That distinction is
+#: the whole finding: the old behaviour was silently-None on every row.
 OPEN_BOOK_SQL = """
     SELECT p.condition_id,
            p.seed_basis_usd::float8 AS cost_usd,
            p.seed_qty::float8       AS qty,
            extract(epoch FROM p.decision_ts)::float8 AS opened_at,
-           o.net_usd::float8        AS realized_net_usd
+           o.net_usd::float8        AS realized_net_usd,
+           p.venue_market_slug,
+           m.event_slug             AS event_key,
+           (m.event_slug IS NOT NULL) AS event_key_resolved
       FROM rn1x_positions p
       LEFT JOIN rn1x_outcomes o ON o.position_id = p.position_id
+      LEFT JOIN us_premap m      ON m.market_slug = p.venue_market_slug
      WHERE p.experiment_id = $1
 """
+
+R_EVENT_IDENTITY_UNRESOLVED = "OPEN_BOOK_ROW_HAS_NO_RESOLVABLE_EVENT_IDENTITY"
 
 
 async def open_shadow_book(conn, experiment_id) -> list | None:
@@ -2464,12 +2512,48 @@ async def open_shadow_book(conn, experiment_id) -> list | None:
     NOT_EVALUABLE and blocks the entry; an empty book is a measurement
     that happens to be zero. Collapsing the two would permit a trade
     because the database was down.
+
+    EACH ROW NOW CARRIES ITS VENUE EVENT SLUG. A row whose slug does not resolve
+    keeps `event_key: None` and `event_key_resolved: False`, which the caller
+    must treat as an unmeasurable event rail rather than as a row belonging to
+    some other event.
     """
     try:
         rows = await conn.fetch(OPEN_BOOK_SQL, str(experiment_id))
     except Exception:                                          # noqa: BLE001
         return None
     return [dict(r) for r in rows]
+
+
+def event_exposure_is_measurable(open_book) -> dict:
+    """Can MAX_EVENT_EXPOSURE be measured over this book at all?
+
+    A9's real consequence was a rail that read zero and looked satisfied. So the
+    answer is explicit: every OPEN row must carry a resolved event identity, and
+    where one does not, the rail is NOT_EVALUABLE and the caller refuses. A
+    settled row is excluded because it occupies no exposure.
+    """
+    if open_book is None:
+        return {"measurable": None, "why": "the open book could not be read",
+                "refusal": entryx.R_BOOK_NOT_READ}
+    unresolved = [r for r in open_book
+                  if r.get("realized_net_usd") is None
+                  and not r.get("event_key_resolved")]
+    if unresolved:
+        return {"measurable": False,
+                "refusal": R_EVENT_IDENTITY_UNRESOLVED,
+                "rows_without_an_event_identity": len(unresolved),
+                "open_rows": len([r for r in open_book
+                                  if r.get("realized_net_usd") is None]),
+                "slugs": [r.get("venue_market_slug") for r in unresolved][:10],
+                "why": ("each of these open rows has no resolvable venue event "
+                        "slug, so exposure on its fixture cannot be summed. "
+                        "Measuring the rail without them would report a "
+                        "smaller number and call the rail satisfied")}
+    return {"measurable": True,
+            "open_rows": len([r for r in open_book
+                              if r.get("realized_net_usd") is None]),
+            "why": "every open row carries a resolved venue event identity"}
 
 
 def _settlement_compatibility(srule) -> dict:
@@ -2493,7 +2577,8 @@ def _settlement_compatibility(srule) -> dict:
 
 def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
                 event_key, open_book, settlement, freshness, calibration,
-                now, research_authorised=False):
+                now, research_authorised=False, provider_event_id=None,
+                event_exposure_measurable=None):
     """A callable `bettor_external_shadow.evaluate` invokes once.
 
     It receives the fair value that function computed -- so there is
@@ -2513,6 +2598,30 @@ def _entry_plan(*, ladder, fee_fn, observation_age_s, action, condition_id,
         head = entryx.headroom_from_rows(
             open_book, condition_id=condition_id, event_key=event_key,
             now=now)
+        # ── THE EVENT RAIL MUST BE MEASURABLE, NOT MERELY SMALL (A9) ──
+        #
+        # Until the open-book query carried an event identity, this rail summed
+        # nothing and reported zero exposure on every fixture -- a rail that
+        # looks satisfied because the quantity it reads was never selected. Both
+        # facts now travel with the headroom, and an unmeasurable rail refuses
+        # by name instead of passing quietly.
+        head["event_key_used"] = event_key
+        head["event_key_namespace"] = "us_premap.event_slug (the VENUE's event)"
+        head["provider_event_id_is_not_the_event_key"] = provider_event_id
+        head["event_exposure_measurable"] = event_exposure_measurable
+        if event_key in (None, ""):
+            refusals_pre = [R_EVENT_IDENTITY_UNRESOLVED]
+        elif (event_exposure_measurable or {}).get("measurable") is not True:
+            refusals_pre = [(event_exposure_measurable or {}).get("refusal")
+                            or R_EVENT_IDENTITY_UNRESOLVED]
+        else:
+            refusals_pre = []
+        if refusals_pre:
+            return {"ok": False, "refusals": refusals_pre,
+                    "detail": {"rail_headroom": head},
+                    "why": ("the event exposure rail cannot be measured over "
+                            "this book, so the rail cannot be shown to hold. "
+                            "It is refused rather than read as zero")}
         est = entryx.estimate(ladder=ladder, fair_value=fair_value,
                               fee_fn=fee_fn,
                               observation_age_s=observation_age_s,
@@ -2919,6 +3028,11 @@ async def cycle(conn) -> dict:
     open_book = await open_shadow_book(conn, ext.EXPERIMENT_ID)
     if open_book is None:
         tally[entryx.R_BOOK_NOT_READ] = 1
+    # WHETHER THE EVENT RAIL CAN BE MEASURED OVER THIS BOOK AT ALL (A9). Read
+    # once per cycle, carried onto every candidate's plan, and reported on the
+    # cycle so an operator sees a rail that is UNMEASURABLE rather than a rail
+    # that silently read zero.
+    _ev_measurable = event_exposure_is_measurable(open_book)
     #: What this cycle actually created, reported per entry so a reader
     #: never has to infer inventory from a refusal count.
     entries: list = []
@@ -3268,8 +3382,14 @@ async def cycle(conn) -> dict:
                     observation_age_s=vq.get("age_s"),
                     action=_risk_action(ident["intent"]),
                     condition_id=mapped["condition_id"],
-                    event_key=quote["event_id"],
+                    # THE VENUE'S EVENT, NOT THE PROVIDER'S (A9). The open book
+                    # now carries `us_premap.event_slug` per row; comparing the
+                    # provider's `event_id` against it would never match, so the
+                    # event rail would still read zero on a repaired query.
+                    event_key=ident.get("venue_event_key"),
+                    provider_event_id=quote["event_id"],
                     open_book=open_book,
+                    event_exposure_measurable=_ev_measurable,
                     settlement=srule,
                     freshness=_entry_freshness(quote, vq, now),
                     calibration=calibration,
