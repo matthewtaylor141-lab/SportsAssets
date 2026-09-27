@@ -375,3 +375,163 @@ def test_the_test_venue_executor_reconciles_against_itself():
     assert row is not None
     assert "RECONCILES AGAINST ITSELF" in " ".join(row["defects"])
     assert row["reaches"] == FC.NOT_REACHED
+
+
+# ── 6 · the ORDER the cumulative fee rests on ────────────────────────
+#
+# "Arrival order is not automatically venue execution order." The cap is applied
+# BY THE VENUE, in the venue's order, and `bettor_funded_fills.at` is OUR clock.
+
+def test_the_ordering_prefers_the_venues_own_sequence():
+    """A sequence cannot tie, so it is a total order. A timestamp can."""
+    seq = FB.venue_execution_order({"fill_id": "f1", "venue_sequence": 7,
+                                    "venue_executed_at": None, "at": 100.0})
+    assert seq[0] == FB.ORDER_BY_VENUE_SEQUENCE
+    ts = FB.venue_execution_order({"fill_id": "f2", "venue_sequence": None,
+                                   "venue_executed_at": 50.0, "at": 100.0})
+    assert ts[0] == FB.ORDER_BY_VENUE_TIME
+    arr = FB.venue_execution_order({"fill_id": "f3", "venue_sequence": None,
+                                    "venue_executed_at": None, "at": 100.0})
+    assert arr[0] == FB.ORDER_BY_ARRIVAL
+    # AND A SEQUENCED FILL SORTS BEFORE A MERELY-TIMED ONE, which sorts before
+    # an arrival-only one -- so a mixed order is grouped by how well it is known.
+    assert seq[1] < ts[1] < arr[1]
+
+
+def test_arrival_order_is_recorded_as_NOT_the_venues():
+    """A fee computed on arrival order must never be presented as the venue's.
+
+    I had ordered by `at, fill_id` and called it deterministic. It is -- and
+    deterministic is not correct.
+    """
+    b = FB.FEE_ORDER_BASES[FB.ORDER_BY_ARRIVAL]
+    assert b["is_the_venues_own_order"] is False
+    assert b["per_fill_attribution_matches_the_venue"] is False
+    assert "OUR clock" in b["why"]
+    assert "delivered out of order" in b["why"]
+    assert "stable wrong order is still a" in b["and_this_is_what_I_had"]
+    # THE TOTAL IS UNAFFECTED EITHER WAY, and saying so stops the finding being
+    # read as "the money is wrong".
+    assert "TOTAL is unaffected" in b["consequence"]
+
+
+def test_the_venues_ordering_fields_are_parsed_and_garbage_is_discarded():
+    """Guessing a sequence puts a fill in the wrong place in the cap, so an
+    unparseable value is dropped rather than coerced."""
+    got = FB.venue_order_fields({"sequence": 12,
+                                 "transactTime": "2026-09-27T16:00:00.123456789Z"})
+    assert got["venue_sequence"] == 12
+    assert got["venue_executed_at"] > 1_700_000_000
+    # BOTH ABSENT IS A REAL ANSWER, not a parse failure.
+    empty = FB.venue_order_fields({})
+    assert empty == {"venue_sequence": None, "venue_executed_at": None}
+    # AND GARBAGE IN ONE FIELD DOES NOT POISON THE OTHER.
+    mixed = FB.venue_order_fields({"seq": "not-a-number",
+                                   "executedAt": 1_790_000_000.0})
+    assert mixed["venue_sequence"] is None
+    assert mixed["venue_executed_at"] == 1_790_000_000.0
+
+
+def test_a_LATE_fill_is_placed_at_its_execution_position_not_appended():
+    """THE DEFECT I ALMOST SHIPPED. Appending is correct only when fills arrive
+    in execution order. A fill whose venue sequence puts it SECOND of four would
+    have been priced as the fourth, and the cap's adjustment attributed to the
+    wrong fill."""
+    keyed = [((0, 1.0, 0.0, "f1"), 40, 0.5, "f1"),
+             ((0, 3.0, 0.0, "f3"), 40, 0.5, "f3")]
+    _b, key = FB.venue_execution_order({"fill_id": "f2", "venue_sequence": 2})
+    placed = FB._insert_by_venue_order(keyed, key)
+    assert placed["index"] == 1
+    assert placed["placed_last"] is False
+    assert [x[2] for x in placed["before"]] == ["f1"]
+    assert [x[2] for x in placed["after"]] == ["f3"]
+    assert "priced at its execution position" in (
+        placed["and_a_late_fill_is_not_appended"])
+
+
+def test_inserting_a_fill_RESTATES_its_successors():
+    """The cap is RUNNING, so a fill inserted before existing ones changes THEIR
+    amounts. Pricing only `before + this` would give this fill the right number
+    and leave its successors holding figures computed as if it had never
+    executed."""
+    seq = [(30, 0.45)] * 4
+    whole = FB.order_expected_fees(seq)["per_fill"]
+    got = FB.reconcile_fee(30, 0.45, None, at="2026-09-27",
+                           prior_legs=[(30, 0.45, "f1")],
+                           following_legs=[(30, 0.45, "f3"), (30, 0.45, "f4")])
+    c = got["cumulative"]
+    assert c["this_leg_index"] == 1
+    assert c["order_legs"] == 4
+    assert c["legs_before"] == 1 and c["legs_after"] == 2
+    assert got["expected_fee_usd"] == whole[1]
+    restated = [x["expected_fee_usd"] for x in c["restates_following_fills"]]
+    assert restated == whole[2:], (
+        "the successors must hold the figures the whole order implies")
+    assert "cap is RUNNING" in c["why_they_need_restating"]
+
+
+def test_the_weakest_link_governs_the_orders_basis():
+    """One fill with no venue ordering makes the WHOLE order's per-fill
+    attribution unestablished, because where that fill sits changes its
+    neighbours' amounts. So the basis reported is the weakest, not the most
+    common."""
+    rank = {FB.ORDER_BY_VENUE_SEQUENCE: 0, FB.ORDER_BY_VENUE_TIME: 1,
+            FB.ORDER_BY_ARRIVAL: 2}
+    assert rank[FB.ORDER_BY_ARRIVAL] > rank[FB.ORDER_BY_VENUE_TIME]
+    src = (SRC / "bettor_funded_book.py").read_text()
+    assert "the_weakest_link_governs" in src
+    assert "max(bases, key=lambda b: rank[b])" in src
+
+
+def test_the_migration_persists_the_basis_per_fill():
+    """Without these columns the NEXT fill of this order would read the sequence
+    back and find only our arrival clock -- correct for one fill and lost for
+    every fill after it."""
+    mig = (SRC.parent / "migrations"
+           / "129_fill_execution_order.sql").read_text()
+    for col in ("venue_executed_at", "venue_sequence", "fee_order_basis"):
+        assert col in mig
+    assert "ARRIVAL_ORDER means" in mig
+    book = (SRC / "bettor_funded_book.py").read_text()
+    assert "fee.get(\"venue_sequence\")" in book
+    assert "fee.get(\"fee_order_basis\")" in book
+
+
+# ── 7 · the census covers every path that prices or shows a fee ──────
+
+def test_all_ten_consumers_are_traced_including_the_ones_that_price_nothing():
+    """A census that omitted the preview comparison or the display would leave
+    open whether those carry an uncorrected fee. Neither carries one at all, and
+    establishing that was worth the trace."""
+    paths = {c["path"] for c in FC.CONSUMERS}
+    assert {"ENTRY_PLANNER", "ENTRY_DEPTH_WALK", "FUNDED_FILL_BOOKING",
+            "EXIT_PLANNER", "PREVIEW_COMPARISON",
+            "FEE_ADJUSTMENTS_AND_LATE_CORRECTIONS", "DISPLAY",
+            "SHADOW_LOOP", "DESK_CORRECTION",
+            "TEST_VENUE_EXECUTOR"} == paths
+    prev = FC.by_path("PREVIEW_COMPARISON")
+    assert prev["reaches"] == "NOT_APPLICABLE"
+    assert "COLLATERAL, not fees" in prev["module"]
+    assert "does not carry one at all" in prev["and_this_is_why_it_is_listed"]
+    disp = FC.by_path("DISPLAY")
+    assert "recomputed a fee would be a" in disp["money_consequence"]
+
+
+def test_a_late_observed_charge_does_not_cascade_into_other_expectations():
+    """An observed charge is an input to the RECONCILIATION, never to the
+    expectation. So a correction on fill 2 cannot make fills 3 and 4
+    inconsistent -- only inserting a fill can, and that is restated."""
+    row = FC.by_path("FEE_ADJUSTMENTS_AND_LATE_CORRECTIONS")
+    assert row["reaches"] == FC.REACHED
+    assert "never to the expectation" in (
+        row["and_the_cumulative_expectations_stay_consistent"])
+    # AND THE BEHAVIOUR: the same sequence prices the same however the observed
+    # charges arrived, because expectations are derived from (qty, price).
+    priors = [(40, 0.50, "f0")]
+    with_obs = FB.reconcile_fee(40, 0.50, 0.71, at="2026-09-27",
+                               prior_legs=priors)
+    without = FB.reconcile_fee(40, 0.50, None, at="2026-09-27",
+                              prior_legs=priors)
+    assert with_obs["expected_fee_usd"] == without["expected_fee_usd"]
+    assert with_obs["booked_fee_usd"] == 0.71
+    assert without["booked_fee_usd"] == without["expected_fee_usd"]

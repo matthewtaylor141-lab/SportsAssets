@@ -1,0 +1,3 @@
+tests/test_mirror_live_worker.py::test_t1_the_turn_names_are_emitted_here_too
+tests/test_mirror_live_worker.py::test_w2_one_row_per_transition_and_a_restamp_after_900_s
+tests/test_shadow_v2.py::test_wall_is_dereference_free_and_v3_still_runs

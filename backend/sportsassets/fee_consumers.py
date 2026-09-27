@@ -184,20 +184,103 @@ CONSUMERS = (
     {
         "path": "EXIT_PLANNER",
         "component": "bettor_funded_management",
-        "symbol": "bettor_funded_book.fee_for(qty, price, at=time.time())",
+        "symbol": ("funded_fee_fn -> bettor_funded_book.fee_for(qty, price, "
+                   "at=time.time()), passed as `fee_fn` to the exit selector"),
         "module": "calibration_fees",
         "reaches": PARTIAL,
         "sequence": SINGLE_FILL_ONLY,
-        "what_it_prices": "the expected fee on a proposed exit",
+        "what_it_prices": ("the expected fee on a proposed exit, one "
+                           "hypothetical fill at the exit price"),
         "defects": (
-            "one hypothetical fill, so the cap is not applicable here -- but "
-            "an exit that fills in three pieces is then reconciled against a "
-            "single-fill expectation",
-            "no sport",
+            "one hypothetical fill, so the cap is not APPLICABLE at decision "
+            "time -- nothing has filled yet and there is no sequence to cap",
+            "but an exit that then fills in three pieces is BOOKED through "
+            "FUNDED_FILL_BOOKING, which does apply the cap. So the decision "
+            "and the booking use different arithmetic, and the difference is "
+            "the cap's adjustment",
+            "no sport passed",
         ),
         "money_consequence": (
-            "an exit's expected cost is understated whenever it fills in "
-            "more pieces than it was priced for"),
+            "the exit DECISION is priced slightly high -- the uncapped "
+            "per-fill sum exceeds the capped total -- which is conservative "
+            "on whether to exit and wrong in the preview that the booking is "
+            "later compared against"),
+        "why_this_is_not_the_same_defect_as_the_entry_walk": (
+            "the entry walk KNOWS its ladder levels, so it knows the fill "
+            "sequence before it acts and can price the order. An exit "
+            "selector is choosing a quantity against a single price and does "
+            "not know how the venue will break it up. Pricing it as one fill "
+            "is the best available estimate, not an omission"),
+    },
+    {
+        "path": "PREVIEW_COMPARISON",
+        "component": "bettor_funded_execution / pmus.submit_fok",
+        "symbol": "collateral_for(limit_price, quantity, intent)",
+        "module": "(none -- this is COLLATERAL, not fees)",
+        "reaches": "NOT_APPLICABLE",
+        "sequence": SINGLE_FILL_ONLY,
+        "what_it_prices": (
+            "the COLLATERAL the venue takes, compared against the venue's own "
+            "orders.preview cost. `(1 - p) x q` on a short, `p x q` on a long"),
+        "defects": (
+            "NONE OF THE FEE KIND, and tracing this was worth it to establish "
+            "that. The preview comparison is about collateral and does not "
+            "include a fee term at all -- the venue's preview states its own "
+            "cost and ours is compared to it",
+        ),
+        "money_consequence": (
+            "none from fees. The collateral formula had its own defect -- the "
+            "connector used the LONG formula on both sides, refusing correctly "
+            "sized shorts below 0.50 and overspending above it -- and that is "
+            "already fixed and shared with the adapter"),
+        "and_this_is_why_it_is_listed": (
+            "a census that omitted it would leave open whether the preview "
+            "path carries an uncorrected fee. It does not carry one at all"),
+    },
+    {
+        "path": "FEE_ADJUSTMENTS_AND_LATE_CORRECTIONS",
+        "component": "bettor_funded_book._repair_one_fill / reconcile_observed",
+        "symbol": "reconcile_fee(..., observed=...) on redelivery",
+        "module": "calibration_fees",
+        "reaches": REACHED,
+        "sequence": SEQUENCE_VISIBLE,
+        "what_it_prices": (
+            "a fill whose OBSERVED charge arrives after the fill was first "
+            "ingested -- the common case, because the venue often states a "
+            "commission only on a later delivery"),
+        "defects": (
+            "REPAIRED. The expectation is recomputed from the persisted "
+            "sequence, so a late correction lands on the right leg",
+        ),
+        "money_consequence": (
+            "the OBSERVED charge is what the account paid and is what gets "
+            "booked. A late correction changes `booked_fee_usd` and the "
+            "reconciliation verdict; it does NOT change the expectations of "
+            "other fills, because those are derived from (qty, price) and not "
+            "from anybody's observed charge. That is what keeps a late "
+            "arrival from cascading"),
+        "and_the_cumulative_expectations_stay_consistent": (
+            "an observed charge is an input to the reconciliation, never to "
+            "the expectation. So a correction on fill 2 cannot make fills 3 "
+            "and 4 inconsistent -- only inserting a fill can, and that is "
+            "handled by `restates_following_fills`"),
+    },
+    {
+        "path": "DISPLAY",
+        "component": "api/desk_page.py",
+        "symbol": "fees_usd, fee_per, realised_net_of_fees_usd -- READ ONLY",
+        "module": "(none -- it renders stored values)",
+        "reaches": "NOT_APPLICABLE",
+        "sequence": SINGLE_FILL_ONLY,
+        "what_it_prices": "nothing. It renders what the books already hold",
+        "defects": (
+            "NONE OF THE FEE KIND. The desk page computes no fee; every figure "
+            "it shows was computed by one of the paths above and stored",
+        ),
+        "money_consequence": (
+            "none directly -- and a display that recomputed a fee would be a "
+            "second implementation, which is the defect this census exists to "
+            "find. It does not"),
     },
     {
         "path": "SHADOW_LOOP",
@@ -307,8 +390,11 @@ STILL_OPEN = (
     "bettor_fee_schedule's effective_from is 2026-09-17 against the "
     "published 2026-09-25, and it has no per-sport theta at all",
     "no production path passes a sport, so per-sport theta is inert",
-    "the EXIT planner prices one hypothetical fill, so an exit that fills in "
-    "three pieces is reconciled against a single-fill expectation",
+    "the EXIT planner prices one hypothetical fill, so the exit DECISION and "
+    "the exit BOOKING use different arithmetic. That is inherent -- a selector "
+    "choosing a quantity against one price cannot know how the venue will "
+    "break it up -- and the gap is the cap's adjustment, which is small and "
+    "conservative in the decision's direction",
     "observed charges have never been compared against this schedule for a "
     "real account, so nothing here is VERIFIED_APPLIED",
 )
