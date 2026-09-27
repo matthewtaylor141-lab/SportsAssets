@@ -140,125 +140,336 @@ def test_the_lane_no_longer_calls_float_on_the_clock():
 
 
 def test_the_freshness_limits_are_unchanged_and_say_what_they_govern():
-    """THE NUMBERS ARE THE SAME. What each one is applied to is not.
+    """THE NUMBERS ARE THE SAME AND THE STAMP DETERMINATION IS WITHDRAWN.
 
-    30 s still governs the bookmaker's own observation instant. 30 s is still
-    the venue-book threshold -- but after the 2026-09-27 determination that
-    `transactTime` is a LAST-CHANGE stamp, it is a QUIET-BOOK threshold and an
-    observation, not an admission gate. The gate is our own read's age, which is
-    the only interval here whose both instants are ours.
+    30 s still governs the bookmaker's own observation instant. 30 s still
+    governs the venue book -- applied now to an ESTABLISHED book-state age
+    rather than to a field whose meaning is unresolved. Our own processing
+    delay has its own 10 s bound, and it is an ADDITIONAL requirement that on
+    its own establishes nothing about the payload's age.
+
+    WHAT THIS TEST USED TO ASSERT. That `VENUE_STAMP_SEMANTICS` is
+    "LAST_BOOK_CHANGE", determined from the 2026-09-27 probe. That inference is
+    invalid -- a cache replaying one representation to both reads predicts the
+    identical observation, and the probe captured no headers -- so the semantics
+    is UNRESOLVED and the stamp decides nothing in either direction.
     """
+    from sportsassets import bettor_venue_currency as vc
     from sportsassets.workers import ext_pinnacle_loop as loop
     assert loop.PINNACLE_MAX_AGE_S == 30.0
     assert loop.MAX_VENUE_QUOTE_AGE_S == 30.0
-    assert loop.QUIET_BOOK_CAUTION_S == loop.MAX_VENUE_QUOTE_AGE_S
-    assert loop.VENUE_STAMP_SEMANTICS == "LAST_BOOK_CHANGE"
-    assert loop.MAX_OUR_READ_AGE_S == 10.0
-    # AND THE DETERMINATION TRAVELS WITH THE CONSTANT, so nobody has to take
-    # the semantics on trust to read the code.
-    d = loop.STAMP_DETERMINATION
+    assert vc.MAX_BOOK_STATE_AGE_S == 30.0
+    assert loop.MAX_OUR_PROCESSING_DELAY_S == 10.0
+    # THE WITHDRAWAL, PINNED. If anyone reinstates the determination without
+    # the evidence, this fails.
+    assert loop.VENUE_STAMP_SEMANTICS == "UNRESOLVED"
+    assert vc.VENUE_STAMP_SEMANTICS == "UNRESOLVED"
+    # AND THE OBSERVATION IS STILL CARRIED, as an observation, with the list of
+    # what it does not establish attached to it.
+    d = loop.STAMP_OBSERVATION
     assert d["observed"]["contracts"] == 6
-    assert d["observed"]["stamp_identical_on_both_reads"] == 6
-    assert d["observed"]["stamp_tracked_our_request"] == 0
-    assert d["conclusion"] == "LAST_BOOK_CHANGE"
+    assert d["observed"]["transact_time_identical_across_the_two_reads"] == 6
+    assert d["observed"]["response_headers_captured"] == 0
+    assert "conclusion" not in d
+    assert any("cache" in s.lower()
+               for s in d["what_this_does_NOT_establish"])
+    assert "withdrawn" in d["superseded"]
+
+
+def test_the_three_currency_verdicts_and_their_default():
+    """NOT_ESTABLISHED is the default, and it is not the same as stale."""
+    from sportsassets import bettor_venue_currency as vc
+    assert vc.describe()["default"] == vc.NOT_ESTABLISHED
+    assert vc.admits({"verdict": vc.ESTABLISHED}) is True
+    assert vc.admits({"verdict": vc.NOT_ESTABLISHED}) is False
+    assert vc.admits({"verdict": vc.CONTRADICTED}) is False
+    # The three things that are never mechanisms, stated in the module so a
+    # reader does not have to reconstruct the argument.
+    never = " ".join(vc.describe()["never_a_mechanism"]).lower()
+    assert "latency" in never and "receipt instant" in never
+    assert "identical samples" in never
 
 
 # ── 4 · THE AGE IS RE-AGED AT THE DECISION, NOT AT THE READ ──────────
 
+def _subscribed(now, *, last_update_s, alive_s=1.0):
+    """A live market-data subscription, the mechanism that CAN establish
+    currency (M1). Supplied explicitly so a test that wants an admitted book
+    has to say which contract admitted it."""
+    return {"alive_at": now - alive_s, "last_update_at": now - last_update_s}
+
+
 def test_the_decision_instant_governs_not_the_receipt_time():
     """`_entry_freshness` re-ages at the DECISION, and that has not changed.
 
-    What changed is WHICH venue quantity is aged. The stamp is a last-change
-    stamp, so the admission arm ages OUR READ; the book's quiet time is still
-    re-aged at the decision and still reported.
+    Both quantities are re-aged: the established book-state age and our own
+    processing delay. Inheriting the age a book had when it was READ would
+    claim a freshness the decision never had.
     """
     from sportsassets.workers import ext_pinnacle_loop as loop
 
     read_at = 1_000_000.0
     decided_at = read_at + 9.0          # two more network reads happened
-    venue_epoch = read_at - 4.0         # the book last moved 4 s before the read
     got = loop._entry_freshness(
         quote={"observed_at": decided_at - 3.0,
                "received_at": decided_at - 1.0},
-        vq={"venue_ts": venue_epoch, "age_s": 4.0, "read_at": read_at,
-            "age_basis": "VENUE_TRANSACT_TIME"},
+        vq={"venue_ts": read_at - 4.0, "age_s": 4.0, "read_at": read_at,
+            "age_basis": "VENUE_TRANSACT_TIME",
+            # the subscription's last update was 4 s before OUR read, so at the
+            # decision the established book state is 13 s old, not 4.
+            "subscription": {"alive_at": decided_at - 1.0,
+                             "last_update_at": read_at - 4.0}},
         now=decided_at)
-    # OUR READ is 9 s old at the decision, not the 0 s it was when taken.
-    assert got["venue_age_s"] == pytest.approx(9.0, abs=1e-6)
-    assert got["venue_age_basis"] == (
-        "OUR_OWN_RECEIPT_INSTANT_REAGED_AT_THE_DECISION")
-    # AND THE QUIET TIME IS RE-AGED AT THE DECISION TOO: 13 s, not 4 s.
-    assert got["venue_book_last_moved_s"] == pytest.approx(13.0, abs=1e-6)
+    assert got["venue_currency_verdict"] == (
+        "BOOK_CURRENCY_ESTABLISHED"), got["why"]
+    assert got["venue_age_s"] == pytest.approx(13.0, abs=1e-3)
+    assert got["venue_age_basis"] == "M1_LIVE_MARKET_DATA_SUBSCRIPTION"
+    # OUR OWN DELAY IS THE OTHER NUMBER, and it is 9 s, not the 0 s it was
+    # when the read was taken.
+    assert got["our_processing_delay_s"] == pytest.approx(9.0, abs=1e-6)
     assert got["venue_age_at_read_s"] == 4.0
     assert got["both_reaged_at_the_decision"] is True
 
 
-def test_an_unmeasured_venue_clock_no_longer_blocks_but_is_reported():
-    """WHAT THIS TEST USED TO ASSERT AND WHY IT CHANGED.
+# ── 4a · THE DECISIVE REGRESSION ─────────────────────────────────────
+#
+# These two tests are the reason the receipt-only gate was withdrawn. They are
+# the cases it admitted, and each of them is a book of unknown or provably old
+# age being certified current.
 
-    It asserted that an unparseable `transactTime` left the verdict UNKNOWN and
-    blocked. That followed from the stamp being the currency instrument. It is
-    not: it is a last-change stamp, so its absence costs the QUIET-TIME
-    observation and tells us nothing about whether our read is current. Our own
-    receipt instant is the instrument, and THAT missing still blocks -- which
-    the next test pins.
+def test_a_minutes_old_cached_snapshot_received_one_second_ago_is_not_fresh():
+    """THE CASE THE RECEIPT-ONLY GATE PASSED, AND THE WHOLE REASON IT IS GONE.
+
+    A snapshot the origin generated 300 s ago, served from a cache, returned
+    fast, and received ONE SECOND before the decision. Every one of our own
+    clocks looks perfect: transport latency negligible, processing delay 1 s,
+    well inside 10 s. And the book is five minutes old.
+
+    The response's own headers say so -- Date minus Age is RFC 9111 §5.1's
+    generation instant for the stored representation -- so this is not merely
+    unestablished, it is CONTRADICTED, which refuses on evidence.
     """
-    from sportsassets.workers import ext_pinnacle_loop as loop
-    got = loop._entry_freshness(
-        quote={"observed_at": 1_000_000.0, "received_at": 1_000_000.0},
-        vq={"venue_ts": None, "age_s": None, "read_at": 1_000_000.5,
-            "age_basis": "VENUE_CLOCK_UNPARSEABLE"},
-        now=1_000_001.0)
-    assert got["fresh"] is True, got["why"]
-    assert got["venue_age_s"] == pytest.approx(0.5)
-    assert got["venue_book_last_moved_s"] is None
-    assert got["venue_book_is_quiet"] is None
+    import email.utils
 
-
-def test_an_unmeasured_read_instant_leaves_the_verdict_unknown():
-    """OURS, MISSING. An unknown age is not a fresh one, and this is the
-    quantity admission now depends on -- so it blocks."""
+    from sportsassets import bettor_venue_currency as vc
     from sportsassets.workers import ext_pinnacle_loop as loop
+
+    now = 1_700_000_000.0
+    cached = {"headers": {
+        # the edge answered 2 s ago, from a representation generated 302 s ago
+        "date": email.utils.formatdate(now - 2.0, usegmt=True),
+        "age": "300",
+        "x-cache": "HIT",
+        "cache-control": "public, max-age=600"}}
     got = loop._entry_freshness(
-        quote={"observed_at": 1_000_000.0, "received_at": 1_000_000.0},
-        vq={"venue_ts": 999_999.0, "age_s": 1.0,
-            "age_basis": "VENUE_TRANSACT_TIME"},
-        now=1_000_001.0)
-    assert got["fresh"] is None
+        quote={"observed_at": now - 3.0, "received_at": now - 2.0},
+        vq={"venue_ts": now - 1.0,      # a RECENT stamp: it must not rescue it
+            "age_s": 1.0, "read_at": now - 1.0,
+            "age_basis": "VENUE_TRANSACT_TIME",
+            "http_observation": cached},
+        now=now)
+    assert got["fresh"] is not True, got["why"]
+    assert got["venue_currency_verdict"] == vc.CONTRADICTED
     assert got["venue_age_s"] is None
-    assert got["venue_age_basis"] == "OUR_RECEIPT_INSTANT_NOT_RECORDED"
+    # OUR OWN NUMBERS ARE FINE, and that is precisely the point.
+    assert got["our_processing_delay_s"] == pytest.approx(1.0, abs=1e-6)
+    assert got["our_processing_delay_s"] < loop.MAX_OUR_PROCESSING_DELAY_S
+    # AND A RECENT STAMP DOES NOT MAKE IT FRESH EITHER.
+    assert got["venue_stamp_age_s"] == pytest.approx(1.0, abs=1e-6)
+    assert got["venue_stamp_semantics"] == "UNRESOLVED"
+
+    # THE SAME CASE AT THE GATE ITSELF, not only in the freshness report.
+    verdict = vc.evaluate(now=now, observation=cached,
+                          venue_ts=now - 1.0, our_receipt_at=now - 1.0,
+                          bound_s=loop.MAX_VENUE_QUOTE_AGE_S)
+    assert vc.admits(verdict) is False
+    assert verdict["verdict"] == vc.CONTRADICTED
+    assert verdict["contradicted_by"] == "DATE_MINUS_AGE_OUTSIDE_THE_BOUND"
+    assert verdict["origin_generation_age_s"] == pytest.approx(302.0, abs=0.1)
 
 
-def test_a_quiet_book_read_a_moment_ago_is_admitted():
-    """THE CASE THAT WAS REFUSING EVERY CANDIDATE. Two minutes since the market
-    last ticked, and our read is a second old: admitted, with the quiet time
-    reported."""
+def test_a_fast_read_with_no_venue_timestamp_and_no_headers_is_unestablished():
+    """AN ABSENT VENUE TIMESTAMP, COVERED. And absent headers with it.
+
+    Nothing says how old this book is. Our own processing delay is half a
+    second. The verdict must be UNKNOWN -- explicitly NOT_ESTABLISHED, and
+    explicitly NOT a claim that the book is stale -- and it must not be
+    `fresh: true`.
+
+    WHAT THIS TEST USED TO ASSERT. That this case is `fresh: True`, because the
+    receipt instant was the whole gate and an absent stamp "costs only the
+    quiet-time observation". It costs the only upstream evidence there was.
+    """
+    from sportsassets import bettor_venue_currency as vc
     from sportsassets.workers import ext_pinnacle_loop as loop
+
+    now = 1_000_001.0
+    got = loop._entry_freshness(
+        quote={"observed_at": now - 1.0, "received_at": now - 1.0},
+        vq={"venue_ts": None, "age_s": None, "read_at": now - 0.5,
+            "age_basis": "VENUE_CLOCK_UNPARSEABLE",
+            "http_observation": None},
+        now=now)
+    assert got["fresh"] is None, got["why"]
+    assert got["unknown_side"] == "venue"
+    assert got["venue_currency_verdict"] == vc.NOT_ESTABLISHED
+    assert got["venue_age_s"] is None
+    assert got["venue_stamp_age_s"] is None
+    # OUR DELAY IS MEASURED AND SMALL, and it does not carry the verdict.
+    assert got["our_processing_delay_s"] == pytest.approx(0.5, abs=1e-6)
+    # THE REFUSAL SAYS WHAT IS MISSING, BY MECHANISM.
+    named = {m["mechanism"] for m in got["mechanisms_unavailable"]}
+    assert vc.M1_LIVE_SUBSCRIPTION in named
+    assert vc.M2_REVALIDATION in named
+    assert vc.M3_ORIGIN_GENERATION in named
+    # AND IT DOES NOT CALL THE BOOK STALE.
+    assert got["venue_currency"]["not_established_is_not_stale"] is True
+
+
+def test_an_old_venue_timestamp_alone_does_not_prove_the_book_is_stale():
+    """THE OTHER DIRECTION, AND THE FIRST GATE'S ERROR.
+
+    A stamp two minutes old, with a live subscription establishing the book
+    state at 3 s. The old stamp must not refuse: what the field denotes is
+    unresolved, so it cannot be read as evidence of staleness any more than as
+    evidence of currency. The established mechanism governs.
+    """
+    from sportsassets import bettor_venue_currency as vc
+    from sportsassets.workers import ext_pinnacle_loop as loop
+
     now = 1_000_000.0
     got = loop._entry_freshness(
         quote={"observed_at": now - 5.0, "received_at": now - 1.0},
         vq={"venue_ts": now - 120.0, "age_s": 119.0, "read_at": now - 1.0,
-            "age_basis": "VENUE_TRANSACT_TIME"},
+            "age_basis": "VENUE_TRANSACT_TIME",
+            "subscription": _subscribed(now, last_update_s=3.0)},
         now=now)
     assert got["fresh"] is True, got["why"]
-    assert got["venue_age_s"] == pytest.approx(1.0)
-    assert got["venue_book_last_moved_s"] == pytest.approx(120.0)
-    assert got["venue_book_is_quiet"] is True
+    assert got["venue_currency_verdict"] == vc.ESTABLISHED
+    assert got["venue_age_s"] == pytest.approx(3.0, abs=1e-3)
+    assert got["venue_stamp_age_s"] == pytest.approx(120.0, abs=1e-6)
+    assert "not proof the book is stale" in got["venue_stamp_decides_nothing"]
     assert got["pinnacle_age_s"] == pytest.approx(5.0)
+
+
+def test_an_unmeasured_read_instant_leaves_the_verdict_unknown():
+    """OURS, MISSING. An unknown delay is not a permitted one, so it blocks
+    even when the book's currency IS established."""
+    from sportsassets.workers import ext_pinnacle_loop as loop
+    now = 1_000_001.0
+    got = loop._entry_freshness(
+        quote={"observed_at": now - 1.0, "received_at": now - 1.0},
+        vq={"venue_ts": now - 2.0, "age_s": 1.0,
+            "age_basis": "VENUE_TRANSACT_TIME",
+            "subscription": _subscribed(now, last_update_s=2.0)},
+        now=now)
+    assert got["fresh"] is None
+    assert got["unknown_side"] == "our_processing_delay"
+    assert got["our_processing_delay_s"] is None
+    assert got["our_processing_delay_basis"] == (
+        "OUR_RECEIPT_INSTANT_NOT_RECORDED")
 
 
 def test_a_read_we_sat_on_is_false_not_unknown():
     """The distinction the report has to make: false vs null. A read we held
-    for four minutes is measurably not current."""
+    for four minutes, on a book whose currency WAS established, is refused on
+    our own delay -- and the refusal says it is ours."""
     from sportsassets.workers import ext_pinnacle_loop as loop
     now = 1_000_000.0
     got = loop._entry_freshness(
         quote={"observed_at": now - 2.0, "received_at": now - 1.0},
         vq={"venue_ts": now - 121.0, "age_s": 1.0, "read_at": now - 240.0,
-            "age_basis": "VENUE_TRANSACT_TIME"},
+            "age_basis": "VENUE_TRANSACT_TIME",
+            "subscription": _subscribed(now, last_update_s=2.0)},
         now=now)
     assert got["fresh"] is False
-    assert got["venue_age_s"] == pytest.approx(240.0)
+    assert got["our_processing_delay_s"] == pytest.approx(240.0)
+    assert got["venue_age_s"] == pytest.approx(2.0, abs=1e-3)
+
+
+def test_a_subscription_gone_quiet_cannot_establish_anything():
+    """SILENCE ON A DEAD SOCKET LOOKS EXACTLY LIKE A QUIET MARKET.
+
+    Which is the same confusion as the cached-bytes case, one layer up. A
+    subscription that has not proven itself alive inside the liveness bound
+    establishes nothing, however recent its last update claims to be.
+    """
+    from sportsassets import bettor_venue_currency as vc
+
+    now = 1_000_000.0
+    verdict = vc.evaluate(
+        now=now,
+        subscription={"alive_at": now - 90.0, "last_update_at": now - 2.0})
+    assert vc.admits(verdict) is False
+    assert verdict["verdict"] == vc.NOT_ESTABLISHED
+    why = " ".join(m["why"] for m in verdict["mechanisms_unavailable"])
+    assert "alive" in why
+
+
+def test_origin_generation_alone_is_a_partial_and_never_admits():
+    """M3 BOUNDS THE RESPONSE, NOT THE BOOK.
+
+    An uncached response generated at this instant proves the HTTP response is
+    new. It does not prove the matching engine's book was true then: an origin
+    can build a fresh response out of an internal snapshot minutes old, and
+    admitting on M3 alone certifies exactly that. It is recorded as a partial.
+    """
+    import email.utils
+
+    from sportsassets import bettor_venue_currency as vc
+
+    now = 1_700_000_000.0
+    fresh_uncached = {"headers": {
+        "date": email.utils.formatdate(now - 1.0, usegmt=True),
+        "age": "0",
+        "cache-control": "no-store",
+        "etag": '"abc123"'}}
+    verdict = vc.evaluate(now=now, observation=fresh_uncached,
+                          our_receipt_at=now - 1.0)
+    assert verdict["verdict"] == vc.NOT_ESTABLISHED
+    assert vc.admits(verdict) is False
+    assert verdict["partial"]["mechanism"] == vc.M3_ORIGIN_GENERATION
+    assert "matching engine" in verdict["partial"]["does_not_establish"]
+    assert verdict["contract"]["served_from_cache"] is False
+    # AND THE VALIDATOR IT DID CARRY IS REPORTED, because that is the route to
+    # M2 and therefore to an actual admission.
+    assert verdict["contract"]["revalidation_possible"] is True
+
+
+def test_a_304_from_the_origin_establishes_currency():
+    """M2. The origin affirming the representation we hold is still current."""
+    import email.utils
+
+    from sportsassets import bettor_venue_currency as vc
+
+    now = 1_700_000_000.0
+    verdict = vc.evaluate(
+        now=now,
+        observation={"headers": {"etag": '"abc123"'}},
+        revalidation={"status": 304,
+                      "headers": {"date": email.utils.formatdate(
+                          now - 4.0, usegmt=True)}})
+    assert verdict["verdict"] == vc.ESTABLISHED
+    assert verdict["mechanism"] == vc.M2_REVALIDATION
+    assert verdict["book_state_age_s"] == pytest.approx(4.0, abs=1.0)
+
+
+def test_a_cache_hit_inside_the_bound_is_still_not_the_origin_speaking():
+    """A representation generated 5 s ago and served from a cache. Inside the
+    bound, and still not an establishment: the cache is not the origin, and a
+    cache hit is the hypothesis the whole correction exists to keep live."""
+    import email.utils
+
+    from sportsassets import bettor_venue_currency as vc
+
+    now = 1_700_000_000.0
+    verdict = vc.evaluate(now=now, observation={"headers": {
+        "date": email.utils.formatdate(now - 1.0, usegmt=True),
+        "age": "4",
+        "x-cache": "HIT"}})
+    assert verdict["verdict"] == vc.NOT_ESTABLISHED
+    assert verdict["contract"]["served_from_cache"] is True
+    assert verdict["partial"] is None
 
 
 # ── 5 · THE RAW VALUE TRAVELS WITH THE VERDICT ───────────────────────
@@ -292,22 +503,43 @@ def test_a_stale_refusal_is_only_reachable_once_the_age_is_measured():
 
     from sportsassets.workers import ext_pinnacle_loop as loop
     src = inspect.getsource(loop.venue_quote)
-    # THE GATE MOVED, ON PURPOSE, AND THE PROPERTY IS THE SAME ONE.
+    # THE PROPERTY, ACROSS BOTH REWRITES OF THIS GATE: an UNMEASURED age must
+    # never report itself as an OBSERVED stale book. There are now two refusals
+    # and the distinction between them is exactly that property.
     #
-    # `VENUE_QUOTE_STALE` fired on the venue's LAST-CHANGE age, which is not a
-    # statement about our read. The refusal that can fire now is
-    # `OUR_OWN_BOOK_READ_IS_STALE...`, it sits behind a comparison of two of OUR
-    # instants, and there is exactly one return of it -- so an unmeasured age
-    # still cannot report itself as an observed stale book.
-    hits = [m for m in re.finditer(
-        r"if our_read_age > MAX_OUR_READ_AGE_S:", src)]
-    assert len(hits) == 1, "the read-age gate moved or was duplicated"
-    after = src[hits[0].end():hits[0].end() + 400]
-    assert "R_OUR_READ_IS_STALE" in after
-    assert src.count("R_OUR_READ_IS_STALE") == 1
-    # AND THE OLD REFUSAL IS NO LONGER RETURNED FROM HERE AT ALL.
+    #   R_BOOK_CURRENCY_CONTRADICTED  fires only when the response's own
+    #       headers date the payload outside the bound. Evidence.
+    #   R_BOOK_CURRENCY_NOT_ESTABLISHED  fires when nothing established it, and
+    #       carries `unmeasured: True` plus an explicit statement that it is
+    #       not an observation of staleness.
+    #
+    # One return each, and the contradicted branch is reachable only through a
+    # verdict of CONTRADICTED -- which `bettor_venue_currency` sets only from a
+    # dated contract, never from an absence.
+    contra = [m for m in re.finditer(
+        r'if currency\["verdict"\] == vc\.CONTRADICTED:', src)]
+    assert len(contra) == 1, "the contradiction branch moved or was duplicated"
+    after = src[contra[0].end():contra[0].end() + 300]
+    assert "R_BOOK_CURRENCY_CONTRADICTED" in after
+    assert src.count("R_BOOK_CURRENCY_CONTRADICTED") == 1
+    # THE UNESTABLISHED BRANCH SAYS IT IS UNMEASURED AND SAYS IT IS NOT STALE.
+    unest = src[src.index("R_BOOK_CURRENCY_NOT_ESTABLISHED"):][:900]
+    assert '"unmeasured": True' in unest
+    assert "this_is_not_a_stale_book" in unest
+    assert "mechanisms_unavailable" in unest
+    # AND OUR OWN DELAY REFUSES UNDER ITS OWN NAME, exactly once, never as a
+    # statement about the book.
+    delay = [m for m in re.finditer(
+        r"if our_delay > MAX_OUR_PROCESSING_DELAY_S:", src)]
+    assert len(delay) == 1, "the processing-delay gate moved or was duplicated"
+    assert src.count("R_OUR_PROCESSING_DELAY") == 1
+    # THE TWO WITHDRAWN GATES ARE GONE FROM THIS FUNCTION.
     assert "R_VENUE_QUOTE_STALE" not in src, (
-        "the last-change age must not refuse a candidate any more")
+        "the venue stamp's age must not refuse a candidate: what it denotes "
+        "is unresolved")
+    assert "R_OUR_READ_IS_STALE" not in src, (
+        "our own receipt age must not be the whole gate: it admits a cached "
+        "snapshot returned quickly")
 
 
 def test_the_venue_error_projection_carries_the_age_limit_and_raw_value():

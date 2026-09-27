@@ -369,7 +369,8 @@ async def _decision_evidence(conn, probability_row) -> dict:
 
 
 async def select_exit(conn, position, *, client=None, now=None,
-                      fee_fn=None, book_reader=None) -> dict:
+                      fee_fn=None, book_reader=None,
+                      subscription=None, revalidation=None) -> dict:
     """WHAT TO DO WITH A FUNDED HOLDING, AND HOW MUCH OF IT.
 
     THE DEFECT THIS CLOSES. `manage()` reconciled, asked about settlement, and
@@ -530,10 +531,20 @@ async def select_exit(conn, position, *, client=None, now=None,
                 "began and is NOT the decision instant -- aging against it "
                 "was the defect: it understated every age by the whole "
                 "acquisition")}
+    # THE SHARED RULE, AND THE EVIDENCE IT NEEDS. `http_observation` is the
+    # response contract recorded by `venue_http_observer` on this very read;
+    # `subscription` is a live market-data subscription for this market when one
+    # exists. Passing neither is not a loophole -- the verdict is then the named
+    # unresolved one and the exit refuses.
     fresh = FA.venue_book_age(got.get("marketData"),
                              decision_at=decision_at,
                              received_at=received_at,
-                             requested_at=requested_at)
+                             requested_at=requested_at,
+                             observation=got.get("http_observation"),
+                             subscription=subscription
+                                          or got.get("subscription"),
+                             revalidation=revalidation
+                                          or got.get("revalidation"))
     out["venue_book_age"] = fresh
     if not fresh.get("ok"):
         return dict(out, ok=False, refusal=R_BOOK_NOT_FRESH,
@@ -1349,6 +1360,7 @@ async def _approved(conn) -> dict:
 
 async def manage(conn, *, account_id: str, venue: str, adapter=None,
                  client=None, probe=None, fee_fn=None, book_reader=None,
+                 subscription=None, revalidation=None,
                  now: float | None = None) -> dict:
     """ONE MANAGEMENT CYCLE over every open funded position.
 
@@ -1439,7 +1451,9 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
             continue
         # ── THE EXIT DECISION, TAKEN RATHER THAN DEFERRED ───────────
         pick = await select_exit(conn, p, client=client, now=at,
-                                fee_fn=fee_fn, book_reader=book_reader)
+                                fee_fn=fee_fn, book_reader=book_reader,
+                                subscription=subscription,
+                                revalidation=revalidation)
         out["selection"].append(pick)
         if not pick.get("ok"):
             # A NAMED MISSING INPUT, not "needs a decision". Each of these

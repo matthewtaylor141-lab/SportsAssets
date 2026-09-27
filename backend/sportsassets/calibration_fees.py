@@ -64,7 +64,8 @@ cap.
 """
 from __future__ import annotations
 
-from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal, InvalidOperation
+from decimal import (ROUND_CEILING, ROUND_HALF_EVEN, ROUND_HALF_UP, Decimal,
+                     InvalidOperation)
 
 # ── the published schedule, with its provenance ──────────────────────
 SCHEDULE = {
@@ -178,8 +179,126 @@ def price_factor(price):
     return p * (Decimal("1") - p)
 
 
+#: ── TWO UNRECONCILED DIFFERENCES WITH THE PUBLISHED PAGE ────────────
+#:
+#: An independent audit reports that the CURRENT published fee page specifies
+#: (a) HALF-EVEN rounding, and (b) a CUMULATIVE TAKER-FILL ADJUSTMENT. This
+#: module implements half-up, per order. Neither difference has been verified
+#: against the page, because this container's egress policy denies
+#: docs.polymarket.us -- so the page could not be read here, and a claim either
+#: way would be a guess of exactly the kind that produced the `min(p, 1-p)`
+#: defect recorded in the module docstring.
+#:
+#: SO THE STATE IS NAMED, NOT SPLIT THE DIFFERENCE. `expected_fee` still
+#: computes half-up, because changing a fee arithmetic to match an unread page
+#: would be the same error in the other direction. Every answer now carries
+#: `roundingVerified: False` and the discriminating vectors below, so the
+#: question is decided by reading the page once rather than by argument.
+ROUNDING_IMPLEMENTED = "ROUND_HALF_UP"
+ROUNDING_REPORTED_BY_THE_AUDIT = "ROUND_HALF_EVEN"
+ROUNDING_UNRECONCILED = {
+    "implemented_here": ROUNDING_IMPLEMENTED,
+    "reported_by_the_audit_as_published": ROUNDING_REPORTED_BY_THE_AUDIT,
+    "verified": False,
+    "why_not_verified": ("the published page could not be retrieved from this "
+                         "environment: outbound HTTPS to docs.polymarket.us is "
+                         "denied by the egress policy (CONNECT 403)"),
+    "what_would_settle_it": ("one read of the current page's rounding "
+                            "statement, or one venue-collected fee on a "
+                            "quantity and price from the vectors below"),
+    "material_size_of_the_difference": "one cent per affected order",
+    "affects": ("only exact ties at the half-cent. `price_factor` and the "
+                "coefficients are unaffected, so every non-tie order is "
+                "identical under both modes"),
+    "does_not_affect": ("`collected_fee`, which is read back from the "
+                        "execution and is the only figure that is money that "
+                        "has moved"),
+}
+
+#: EXACT TIES WHERE THE TWO MODES DISAGREE. Computed from the DOCUMENTED formula
+#: with both modes evaluated independently -- not from this module's output, for
+#: the reason the docstring gives: a vector produced by the implementation under
+#: test proves only self-consistency. Each row is (quantity, price, raw,
+#: half_up, half_even) and the last two differ by exactly one cent.
+ROUNDING_DISCRIMINATORS = (
+    (120, "0.50", "2.085000", "2.09", "2.08"),
+    (125, "0.40", "2.085000", "2.09", "2.08"),
+    (160, "0.25", "2.08500000", "2.09", "2.08"),
+    (280, "0.50", "4.865000", "4.87", "4.86"),
+    (600, "0.50", "10.425000", "10.43", "10.42"),
+    (800, "0.25", "10.42500000", "10.43", "10.42"),
+)
+
+#: ── (b) THE CUMULATIVE TAKER-FILL ADJUSTMENT ────────────────────────
+#:
+#: The audit reports that the taker charge is adjusted against the CUMULATIVE
+#: filled quantity of an order rather than computed per fill. If that is the
+#: effective schedule, then for an order that fills in parts the sum of
+#: per-fill `expected_fee` calls is NOT the charge: rounding is applied once to
+#: a cumulative total instead of once per part, and the two differ by up to a
+#: cent per fill.
+#:
+#: THIS MODULE DOES NOT IMPLEMENT A CUMULATIVE ADJUSTMENT, and does not pretend
+#: to. A single-fill expectation is unaffected. A MULTI-FILL expectation is
+#: PROVISIONAL and says so on the answer.
+CUMULATIVE_TAKER_ADJUSTMENT_UNRECONCILED = {
+    "reported_by_the_audit": ("the taker charge is adjusted against the "
+                             "order's cumulative filled quantity"),
+    "implemented_here": "per-fill, independently, with no cumulative term",
+    "verified": False,
+    "why_not_verified": "the published page could not be retrieved here",
+    "consequence_if_the_audit_is_right": (
+        "summing per-fill expectations across a partially filled order is not "
+        "the charge. The difference is bounded by one cent per fill and it "
+        "accumulates in one direction"),
+    "so_a_multi_fill_expectation_is": "PROVISIONAL, and labelled on the answer",
+    "unaffected": ["a single-fill order", "reserve_allowance, which rounds up "
+                                         "and is deliberately conservative",
+                   "collected_fee, which is read back"],
+}
+
+#: Neither difference may be described as settled, and no report may call the
+#: fee arithmetic EXACT while this is True.
+FEE_ARITHMETIC_IS_EXACT = False
+FEE_ARITHMETIC_EXACTNESS_BLOCKED_BY = (
+    "ROUNDING_MODE_UNRECONCILED", "CUMULATIVE_TAKER_ADJUSTMENT_UNRECONCILED")
+
+
+def rounding_discriminators() -> dict:
+    """The vectors that decide the rounding question, with both answers.
+
+    A caller with one venue-collected fee on any of these (quantity, price)
+    pairs can close the question by comparing it against the two columns. No
+    further modelling is required and no further argument is admissible.
+    """
+    return {
+        "formula": SCHEDULE["FORMULA"],
+        "coefficient": str(TAKER),
+        "role": ROLE_TAKER,
+        "vectors": [{"quantity": q, "price": p, "raw": raw,
+                     "if_half_up": hu, "if_half_even": he,
+                     "differ_by": "0.01"}
+                    for q, p, raw, hu, he in ROUNDING_DISCRIMINATORS],
+        "computed_from": ("the documented formula with both rounding modes "
+                          "evaluated independently, NOT from this module's "
+                          "own output"),
+        "how_to_close_it": ("submit or observe one taker fill at one of these "
+                            "(quantity, price) pairs and read the collected "
+                            "fee back. It equals exactly one of the two "
+                            "columns"),
+        "implemented_here": ROUNDING_IMPLEMENTED,
+        "verified": False,
+    }
+
+
 def _half_up(x):
     return x.quantize(CENT, rounding=ROUND_HALF_UP)
+
+
+def _half_even(x):
+    """The alternative mode, computed so a caller can see BOTH answers rather
+    than take this module's choice on trust."""
+    return x.quantize(CENT, rounding=ROUND_HALF_EVEN)
 
 
 def _ceil(x):
@@ -190,13 +309,21 @@ def _coefficient(role):
     return TAKER if role == ROLE_TAKER else MAKER
 
 
-def expected_fee(price, quantity, role=ROLE_TAKER, at=None):
+def expected_fee(price, quantity, role=ROLE_TAKER, at=None, fill_index=None,
+                 fills_in_order=None):
     """WHAT THE SCHEDULE SAYS THIS ORDER SHOULD COST.
 
-    Documented rounding: half-up to the cent. Positive for a taker
-    charge, negative for a maker rebate, because they are opposite
-    directions of money and collapsing them would let a rebate look like
-    a cost of zero.
+    Rounding: half-up to the cent, AND THAT IS UNRECONCILED. An independent
+    audit reports the current published page specifies half-even; the page could
+    not be read from this environment, so the answer carries
+    `roundingVerified: False`, the alternative figure, and the vectors that
+    decide it. Positive for a taker charge, negative for a maker rebate, because
+    they are opposite directions of money and collapsing them would let a rebate
+    look like a cost of zero.
+
+    `fills_in_order` > 1 marks the answer PROVISIONAL: the same audit reports a
+    cumulative taker-fill adjustment this module does not implement, so a sum of
+    per-fill expectations may be a cent per fill away from the charge.
 
     This is an EXPECTATION. It is not the reserve and it is not what the
     venue collected.
@@ -204,7 +331,9 @@ def expected_fee(price, quantity, role=ROLE_TAKER, at=None):
     out = {"role": role, "quantity": quantity, "price": price,
            "schedule": SCHEDULE["EFFECTIVE_DATE"],
            "formula": SCHEDULE["FORMULA"],
-           "rounding": "ROUND_HALF_UP",
+           "rounding": ROUNDING_IMPLEMENTED,
+           "roundingVerified": False,
+           "roundingUnreconciled": ROUNDING_UNRECONCILED,
            "kind": "EXPECTED_CHARGE",
            "retrievedHere": SCHEDULE["RETRIEVED_HERE"]}
     if role not in (ROLE_TAKER, ROLE_MAKER):
@@ -216,7 +345,21 @@ def expected_fee(price, quantity, role=ROLE_TAKER, at=None):
         return dict(out, FEE=None, BLOCKER=B_BAD_INPUT)
     coef = _coefficient(role)
     raw = coef * q * factor
-    return dict(out, FEE=_half_up(raw), BLOCKER=None, priceFactor=factor,
+    hu, he = _half_up(raw), _half_even(raw)
+    out["FEE_IF_HALF_EVEN"] = he
+    out["roundingModesAgree"] = bool(hu == he)
+    if hu != he:
+        # AN EXACT TIE, WHICH IS THE ONLY CASE THE QUESTION BITES. Say so on the
+        # answer rather than leaving a reader to discover it from the vectors.
+        out["roundingIsMaterialHere"] = (
+            "this is an exact half-cent tie: half-up gives %s and half-even "
+            "gives %s. Which is correct is UNRECONCILED" % (hu, he))
+    if fills_in_order is not None and int(fills_in_order) > 1:
+        out["PROVISIONAL"] = True
+        out["provisionalBecause"] = CUMULATIVE_TAKER_ADJUSTMENT_UNRECONCILED
+        out["fillIndex"] = fill_index
+        out["fillsInOrder"] = int(fills_in_order)
+    return dict(out, FEE=hu, BLOCKER=None, priceFactor=factor,
                 coefficient=coef, raw=raw)
 
 

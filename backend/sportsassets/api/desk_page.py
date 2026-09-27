@@ -489,6 +489,31 @@ window.BTCore = {
     }
     body += '<p class="muted">' + esc(opp.a_no_trade_is_a_result || '') +
             '</p>';
+
+    /* THE FUNNEL, PER MAPPED CANDIDATE. A census counts rule firings; this
+     * counts CANDIDATES and the step that ended each one. They are different
+     * numbers and the page says so rather than letting a reader assume. */
+    var fpc = opp.first_refusal_per_candidate || {};
+    var fk = Object.keys(fpc);
+    body += '<div class="h3">Candidate funnel — first refusal per candidate' +
+      '</div><div class="facts">' +
+      fact('Mapped candidates', esc(dash(opp.mapped_candidates))) +
+      '</div>';
+    if (fk.length) {
+      body += '<div class="tablewrap"><table class="dt"><thead><tr>' +
+        '<th>Step that ended the candidate</th><th class="num">Candidates' +
+        '</th></tr></thead><tbody>' + fk.sort(function (a, b) {
+          return Number(fpc[b]) - Number(fpc[a]);
+        }).map(function (k) {
+          return '<tr><td>' + esc(k) + '</td><td class="num">' +
+                 esc(fpc[k]) + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+    } else {
+      body += '<p class="warn">No mapped candidate ledger on the last ' +
+        'reported cycle.</p>';
+    }
+    body += '<p class="muted">' +
+      esc(opp.first_refusal_per_candidate_is || '') + '</p>';
     var fv = opp.fair_value_source || {};
     if (fv.name) {
       body += '<p class="why"><strong>' + esc(fv.name) + '</strong> — ' +
@@ -514,6 +539,27 @@ window.BTCore = {
     }
     body += '<p class="muted">Not counted here: ' +
       esc((sb.what_does_not_count_here || []).join(' · ')) + '</p>';
+
+    /* ORDERS AND FILLS, FROM THE ORDER TABLES. A valuation row is not an
+     * order, and the two counts are printed next to each other so that cannot
+     * be misread. UNKNOWN is printed as UNKNOWN, never as zero. */
+    var of = sb.orders_and_fills || {};
+    function cnt(v) {
+      return v == null ? '<span class="warn">UNKNOWN</span>' : esc(num(v));
+    }
+    body += '<div class="h3">Orders and fills</div><div class="facts">' +
+      fact('Valuations written (last cycle)', esc(dash(c.written))) +
+      fact('Strategy orders', cnt(of.orders),
+           Number(of.orders) > 0 ? 'good' : 'warn') +
+      fact('Orders with a fill', cnt(of.orders_with_a_fill)) +
+      fact('Filled quantity', cnt(of.filled_quantity)) +
+      '</div>' +
+      '<p class="why">' + esc(sb.a_valuation_row_is_not_an_order || '') +
+      '</p>';
+    if (of.unreadable) {
+      body += '<p class="warn">Order tables unreadable (' +
+        esc(of.unreadable) + '): ' + esc(of.why || '') + '</p>';
+    }
 
     /* THREE BOOKS, SIDE BY SIDE, NEVER ADDED. Each figure carries the field
      * name it came from, because a number whose provenance is unclear is what
@@ -566,6 +612,36 @@ window.BTCore = {
     }
     body += '<p class="muted">' +
       esc(ab.engineering_and_market_evidence_are_separate || '') + '</p>';
+
+    /* THE BINDING BLOCKERS ON AUTONOMOUS TRADING, separate from funded
+     * activation, each labelled by KIND and OWNER -- because "engineering has
+     * not finished" and "the two venues do not pay on the same event" are
+     * different situations and only one of them is ours to clear. */
+    var bb = o.binding_blockers_on_autonomous_trading || [];
+    if (bb.length) {
+      body += '<div class="h3">Binding blockers on autonomous trading</div>' +
+        '<div class="tablewrap"><table class="dt"><thead><tr>' +
+        '<th>Blocker</th><th>Kind</th><th>Owner</th><th>What clears it</th>' +
+        '</tr></thead><tbody>' + bb.map(function (b) {
+          var kind = String(b.kind || '');
+          var cls = kind.indexOf('ENGINEERING') >= 0 ? 'warn' : 'muted';
+          return '<tr><td><b>' + esc(b.blocker) + '</b></td>' +
+            '<td class="' + cls + '">' + esc(kind) + '</td>' +
+            '<td>' + esc(dash(b.owner)) + '</td><td>' +
+            esc(b.what_clears_it || (b.must_not_be_waived
+              ? 'not clearable — must not be waived' : '—')) + '</td></tr>';
+        }).join('') + '</tbody></table></div>';
+      bb.forEach(function (b) {
+        if (b.explicitly_not) {
+          body += '<p class="why"><b>' + esc(b.blocker) + '</b> is explicitly ' +
+            'not ' + esc(b.explicitly_not) + '</p>';
+        }
+        if (b.a_withdrawn_shortcut) {
+          body += '<p class="warn">Withdrawn shortcut — ' +
+            esc(b.a_withdrawn_shortcut) + '</p>';
+        }
+      });
+    }
     body += audit('Audit — the operating read, as assembled', o);
 
     return card('operating', 'Bettor EV Engine — operating',

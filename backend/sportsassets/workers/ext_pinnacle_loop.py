@@ -57,6 +57,7 @@ from .. import bettor_fixture_store as fstore
 # `float()`, which refused every real value the venue sends.
 from ..bettor_market_stream import _parse_ts as _stream_parse_ts
 from .. import bettor_pinnacle_devig as devig
+from .. import bettor_venue_currency as vc
 from .. import bettor_venue_mapping as vmap
 from .. import bettor_venue_settlement as vset
 
@@ -208,50 +209,55 @@ R_VENUE_READ_ERROR = "VENUE_BOOK_READ_RETURNED_ERROR"
 #: deliberately: the comparison is only as fresh as its stalest side.
 MAX_VENUE_QUOTE_AGE_S = 30.0
 
-#: ── WHAT `marketData.transactTime` TRACKS. MEASURED, 2026-09-27. ─────
+#: ── WHAT `marketData.transactTime` TRACKS: STILL UNRESOLVED. ────────
 #:
-#: The question above is no longer open. Six contracts were read TWICE, twenty
-#: seconds apart, through `/api/admin/venue-clock-probe` on the serving build:
+#: A WITHDRAWN CONCLUSION, RECORDED AS WITHDRAWN. An earlier version of this
+#: block asserted `VENUE_STAMP_SEMANTICS = "LAST_BOOK_CHANGE"` on the strength of
+#: the 2026-09-27 probe: six contracts read twice, twenty seconds apart,
+#: `transactTime` and the best ask identical on all six. That inference does not
+#: hold. A cache serving the same representation to both reads produces the
+#: identical observation -- the same bytes, therefore the same stamp and the same
+#: ask -- and no response header was captured on either read, so caching was
+#: neither shown nor excluded. Two hypotheses, one prediction; the sample cannot
+#: choose between them, and more samples cannot either.
 #:
-#:   contracts read                 6
-#:   stamp identical on both reads  6
-#:   stamp tracked our request      0
-#:   book content changed           0      (best ask identical on every pair)
-#:
-#: A response stamp would have advanced by the twenty seconds between our two
-#: receipts. It did not move at all, on any contract, while the book did not
-#: move either. THE STAMP TRACKS THE LAST BOOK CHANGE.
-VENUE_STAMP_SEMANTICS = "LAST_BOOK_CHANGE"
-STAMP_DETERMINATION = {
-    "established_on": "2026-09-27",
-    "method": ("two reads of the same contract 20 s apart, six contracts, "
-               "through the admin venue-clock probe against production"),
-    "observed": {"contracts": 6, "stamp_identical_on_both_reads": 6,
-                 "stamp_tracked_our_request": 0, "book_content_changed": 0},
-    "conclusion": VENUE_STAMP_SEMANTICS,
-    "evidence": "research/evidence/VENUE_STAMP_SEMANTICS_2026-09-27.json",
-    "what_it_changes": (
-        "`decision_instant - transactTime` measures HOW LONG SINCE THE BOOK "
-        "MOVED, not how current our read is. Refusing above 30 s therefore "
-        "refused every quiet money line and called it freshness -- which is "
-        "what the candidate ledger shows: ages of 42 s, 94 s, 287 s and 522 s "
-        "on markets whose ask was unchanged across our own two reads"),
-    "what_it_does_not_change": (
-        "the PROBABILITY side's 30 s bound, which is applied to the "
-        "bookmaker's own observation instant and is a different quantity; and "
-        "the funded lane's own gate, which still refuses on the last-change "
-        "age and is therefore strictly tighter than this one"),
-}
+#: The observation is kept, as an observation, in `bettor_venue_currency`
+#: (`PROBE_2026_09_27`) together with the list of what it does not establish.
+#: The stamp is carried as provenance, reported as an age, and DECIDES NOTHING:
+#: an old value is not read as proof the book is stale, and a recent value is not
+#: read as proof it is current.
+VENUE_STAMP_SEMANTICS = vc.VENUE_STAMP_SEMANTICS            # "UNRESOLVED"
+VENUE_STAMP_SEMANTICS_MEANS = vc.VENUE_STAMP_SEMANTICS_MEANS
+STAMP_OBSERVATION = vc.PROBE_2026_09_27
 
-#: HOW LONG OUR OWN READ MAY SIT BEFORE THE DECISION. This is the quantity that
-#: actually expires between reading a book and acting on it, both instants are
-#: OURS, and the subtraction is a real interval. It replaces the last-change age
-#: as the ADMISSION gate -- it does not replace it as an observation.
-MAX_OUR_READ_AGE_S = 10.0
-R_OUR_READ_IS_STALE = "OUR_OWN_BOOK_READ_IS_STALE_AT_THE_DECISION_INSTANT"
-#: A book that has not moved in a long time is a LIQUIDITY observation, not a
-#: currency one. It is reported on every quote and refuses nothing.
-QUIET_BOOK_CAUTION_S = MAX_VENUE_QUOTE_AGE_S
+#: ── WHAT ESTABLISHES THAT THE BOOK IS CURRENT ────────────────────────
+#:
+#: Not a sample and not one of our own clocks: a mechanism with a published
+#: contract. `bettor_venue_currency` names three -- a live market-data
+#: subscription (M1), a conditional revalidation answered 304 (M2), and the
+#: origin's own generation instant from `Date` minus `Age` (M3, which bounds the
+#: RESPONSE and not the book state, so it is a partial). Absent all three the
+#: verdict is NOT_ESTABLISHED, which refuses -- and which is NOT the claim that
+#: the book is stale, only that we cannot show it is current.
+R_BOOK_CURRENCY_NOT_ESTABLISHED = "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED"
+R_BOOK_CURRENCY_CONTRADICTED = "VENUE_BOOK_CURRENCY_CONTRADICTED_BY_CONTRACT"
+
+#: ── AND, SEPARATELY, OUR OWN PROCESSING DELAY ────────────────────────
+#:
+#: How long our own read may sit between arriving and being decided upon. Both
+#: instants are ours and the interval is real, so this is a genuine check and it
+#: is kept. It is ALSO, on its own, worth nothing as a freshness statement: a
+#: cached snapshot generated four minutes ago, returned in 20 ms and received one
+#: second before the decision passes this check comfortably and is not current.
+#: It is therefore an ADDITIONAL requirement, never a substitute for one, and it
+#: can never produce `fresh: true` by itself.
+MAX_OUR_PROCESSING_DELAY_S = 10.0
+R_OUR_PROCESSING_DELAY = "OUR_OWN_PROCESSING_DELAY_EXCEEDED_BEFORE_THE_DECISION"
+PROCESSING_DELAY_IS_NOT_FRESHNESS = (
+    "the interval between our receipt of a payload and the decision taken on "
+    "it. It bounds OUR contribution to staleness and nothing upstream: a "
+    "minutes-old cached snapshot received one second ago satisfies it. It is an "
+    "additional requirement and never evidence of currency")
 
 
 # ── control, fail closed ────────────────────────────────────────────
@@ -620,8 +626,20 @@ def _read_book_blocking(slug: str) -> dict:
 
     `venue_pace.pace` is called because this loop shares the venue budget
     with the collector, which must not be starved by it.
+
+    AND THE RESPONSE'S OWN METADATA IS COLLECTED HERE. The SDK ends its request
+    with `return response.json()`, discarding every header -- including the three
+    that bear on when the payload was generated and whether a cache served it
+    (`Date`, `Age`, `Cache-Control`) and the two that permit revalidation
+    (`ETag`, `Last-Modified`). Without them the loop has only its own receipt
+    instant and a stamp of unresolved meaning, and neither can tell a quiet book
+    from a cached one. `venue_http_observer` installs one httpx response hook on
+    the SDK's own client and records that whitelist. It changes no request and no
+    response; a failure to install is reported, not raised, because a missing
+    observation must refuse rather than crash a market-data read.
     """
     from .. import pmus
+    from .. import venue_http_observer as vho
     from ..venue_pace import pace
 
     pace()
@@ -631,12 +649,18 @@ def _read_book_blocking(slug: str) -> dict:
         return {"marketData": None, "error": type(exc).__name__,
                 "diagnostic": _venue_diagnostic(
                     slug, exc, stage="CLIENT_CONSTRUCTION")}
+    observer = vho.install(client)
+    path = vho.book_path(slug)
     try:
         out = pmus.book_read(client, slug)
     except Exception as exc:                                    # noqa: BLE001
         return {"marketData": None, "error": type(exc).__name__,
                 "diagnostic": _venue_diagnostic(
                     slug, exc, stage="BOOK_READ")}
+    # TAKEN, not peeked: a header set left behind and silently reused on a later
+    # read is precisely the failure this evidence exists to detect.
+    out["http_observation"] = vho.take(path)
+    out["http_observer"] = observer
     if out.get("error"):
         # book_read never raises: it NAMES the failure. Carry the name plus
         # the request context, because "the venue returned an error" is not
@@ -1133,7 +1157,8 @@ async def venue_settlement_evidence(conn, us_market_slug: str) -> dict:
     return out
 
 
-async def venue_quote(conn, *, us_slug, intent, now, size=None):
+async def venue_quote(conn, *, us_slug, intent, now, size=None,
+                      subscription=None, revalidation=None):
     """Contemporaneous ACQUISITION ladder for one venue contract.
 
     `intent` IS THE SIDE, AND IT IS REQUIRED. This used to take an
@@ -1156,10 +1181,21 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
     function transitively for one line of arithmetic. A test pins the two
     definitions equal so they cannot drift.
 
-    A quote older than MAX_VENUE_QUOTE_AGE_S is REFUSED rather than used:
-    the comparison is only as fresh as its stalest side, and pairing a 3 s
-    Pinnacle price against a five-minute-old venue ask manufactures an
-    edge out of the gap between them.
+    A quote whose CURRENCY IS NOT ESTABLISHED within MAX_VENUE_QUOTE_AGE_S
+    is REFUSED rather than used: the comparison is only as fresh as its
+    stalest side, and pairing a 3 s Pinnacle price against a venue ask of
+    unknown age manufactures an edge out of the gap between them. What may
+    establish it is a mechanism with a published contract, and the two
+    optional arguments are how a caller supplies one:
+
+      `subscription`  {"alive_at", "last_update_at"} from a live market-data
+                      subscription for this market (mechanism M1);
+      `revalidation`  the result of a conditional re-request on the book
+                      path, 304 meaning the origin affirms it (M2).
+
+    Supplying neither is not an error and not a loophole: the verdict is
+    then NOT_ESTABLISHED and the candidate refuses, with the mechanisms it
+    lacked named on the refusal.
 
     The depth returned is DISPLAYED depth, which is an observation and
     explicitly not a queue position -- the snapshot module says so in the
@@ -1318,54 +1354,81 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
     clock["parsed_epoch_s"] = vt
     clock["age_at_read_s"] = (None if age is None else round(age, 3))
     clock["basis"] = age_basis
-    # ── ADMISSION, ON THE QUANTITY THAT ACTUALLY EXPIRES ─────────────
+    # ── ADMISSION: TWO SEPARATE REQUIREMENTS, NEITHER SUFFICIENT ALONE ──
     #
-    # THE DEFECT THIS CLOSES, and it is why this lane has never opened a
-    # position. Until the measurement above, the gate refused whenever
-    # `decision_instant - transactTime` exceeded 30 s. The stamp is a
-    # LAST-CHANGE stamp, so that arithmetic asks "has this market ticked in the
-    # last thirty seconds" and refuses every quiet money line as though the
-    # data were stale. Production's candidate ledger is dominated by exactly
-    # that refusal, and the clock probe read the same asks unchanged across two
-    # reads twenty seconds apart -- so the prices were not stale, the market was
-    # quiet, and the lane was unevaluable by construction.
+    # (1) THE BOOK'S CURRENCY MUST BE ESTABLISHED BY A MECHANISM WITH A
+    #     PUBLISHED CONTRACT. `bettor_venue_currency` decides, from the
+    #     response's own headers, from a live subscription's liveness, or from a
+    #     conditional revalidation. Absent all three the verdict is
+    #     NOT_ESTABLISHED and this refuses -- which is not a claim the book is
+    #     stale, and is recorded as such.
     #
-    # WHAT IS NOT HAPPENING HERE. The 30 s number is not being loosened, and
-    # nothing is being waived. The bound is being applied to the quantity it can
-    # actually measure: OUR read's age at the decision instant, both instants
-    # ours. A book we received two seconds ago is current whether or not the
-    # market has ticked since the first pitch; a book we read four minutes ago
-    # and sat on is not, and that refuses.
+    # (2) OUR OWN PROCESSING DELAY MUST BE INSIDE ITS BOUND. A real interval
+    #     between two of our own instants, and a real check.
     #
-    # AND THE LAST-CHANGE AGE IS STILL REPORTED, because it is real information
-    # about liquidity -- a market that has not moved in ten minutes may be thin
-    # when we try to trade it. It informs the depth and sizing evidence
-    # downstream; it does not decide admission.
+    # WHY BOTH, AND WHY NEITHER ALONE. A previous version of this block made (2)
+    # the whole of admission, on the strength of a probe that was read as
+    # establishing that `transactTime` is a last-change stamp. It does not
+    # establish that -- a cache serving both reads the same bytes predicts the
+    # same observation -- and with (2) alone a snapshot generated four minutes
+    # ago, returned in 20 ms and decided on one second later passes the gate.
+    # That is the exact substitution this gate exists to refuse, so (1) is
+    # restored as its own requirement and (2) is kept as what it actually is.
     clock["stamp_semantics"] = VENUE_STAMP_SEMANTICS
-    clock["stamp_determination"] = STAMP_DETERMINATION
-    clock["book_last_moved_s"] = (None if age is None else round(age, 3))
-    clock["book_has_not_moved_within_s"] = QUIET_BOOK_CAUTION_S
-    clock["book_is_quiet"] = (None if age is None
-                              else bool(age > QUIET_BOOK_CAUTION_S))
-    clock["quiet_is_not_stale"] = (
-        "a quiet book and a stale read are different facts. This field is the "
-        "first; `our_read_age_at_decision_s` is the second, and only the "
-        "second decides admission")
-    our_read_age = float(now) - float(read_at)
-    clock["our_read_age_at_decision_s"] = round(our_read_age, 3)
-    clock["our_read_age_limit_s"] = MAX_OUR_READ_AGE_S
-    if our_read_age > MAX_OUR_READ_AGE_S:
-        return {"ok": False, "refusal": R_OUR_READ_IS_STALE,
-                "age_s": round(our_read_age, 3),
-                "limit_s": MAX_OUR_READ_AGE_S,
+    clock["stamp_semantics_means"] = VENUE_STAMP_SEMANTICS_MEANS
+    clock["stamp_observation"] = STAMP_OBSERVATION
+    clock["venue_stamp_age_s"] = (None if age is None else round(age, 3))
+    clock["venue_stamp_age_decides_nothing"] = (
+        "reported as provenance. An old value is not proof the book is stale "
+        "and a recent one is not proof it is current, because what the field "
+        "denotes is unresolved")
+    currency = vc.evaluate(now=now,
+                           observation=book.get("http_observation"),
+                           subscription=subscription,
+                           revalidation=revalidation,
+                           venue_ts=vt, our_receipt_at=read_at,
+                           bound_s=MAX_VENUE_QUOTE_AGE_S)
+    clock["book_currency"] = currency
+    clock["http_observer"] = book.get("http_observer")
+    our_delay = float(now) - float(read_at)
+    clock["our_processing_delay_s"] = round(our_delay, 3)
+    clock["our_processing_delay_limit_s"] = MAX_OUR_PROCESSING_DELAY_S
+    clock["our_processing_delay_is_not_freshness"] = \
+        PROCESSING_DELAY_IS_NOT_FRESHNESS
+    # THE CONTRADICTED CASE FIRST: it is the one backed by evidence.
+    if currency["verdict"] == vc.CONTRADICTED:
+        return {"ok": False, "refusal": R_BOOK_CURRENCY_CONTRADICTED,
+                "age_s": currency.get("origin_generation_age_s"),
+                "limit_s": MAX_VENUE_QUOTE_AGE_S,
+                "age_basis": currency["mechanism"],
+                "why": currency["why"],
+                "book_currency": currency, "venue_clock": clock}
+    if currency["verdict"] != vc.ESTABLISHED:
+        return {"ok": False, "refusal": R_BOOK_CURRENCY_NOT_ESTABLISHED,
+                "age_s": None,
+                "limit_s": MAX_VENUE_QUOTE_AGE_S,
+                "age_basis": vc.NO_MECHANISM,
+                "unmeasured": True,
+                "this_is_not_a_stale_book": (
+                    "no mechanism established that this book is current. That "
+                    "is missing evidence, not an observation that it is old"),
+                "mechanisms_unavailable": currency["mechanisms_unavailable"],
+                "partial": currency.get("partial"),
+                "why": currency["why"],
+                "book_currency": currency, "venue_clock": clock}
+    if our_delay > MAX_OUR_PROCESSING_DELAY_S:
+        return {"ok": False, "refusal": R_OUR_PROCESSING_DELAY,
+                "age_s": round(our_delay, 3),
+                "limit_s": MAX_OUR_PROCESSING_DELAY_S,
                 "age_basis": "OUR_OWN_RECEIPT_INSTANT",
-                "book_last_moved_s": clock["book_last_moved_s"],
                 "why": ("this book was received %.1f s before the decision "
                         "instant, past the %.0f s this lane allows a read to "
-                        "sit. Both instants are ours and the interval is real: "
-                        "the ladder below may no longer be the ladder"
-                        % (our_read_age, MAX_OUR_READ_AGE_S)),
-                "venue_clock": clock}
+                        "sit. Both instants are ours and the interval is real. "
+                        "Its currency WAS established (%s); this refusal is "
+                        "about our own delay and nothing upstream"
+                        % (our_delay, MAX_OUR_PROCESSING_DELAY_S,
+                           currency["mechanism"])),
+                "book_currency": currency, "venue_clock": clock}
 
     # THE SIDE THAT ACTUALLY PAYS ON OUR OUTCOME, in cost space.
     lad = bs.acquisition_ladder(book.get("marketData"), intent=intent)
@@ -1401,6 +1464,11 @@ async def venue_quote(conn, *, us_slug, intent, now, size=None):
             # one price with a number beside it.
             "acquisition_ladder": lad,
             "age_s": age, "age_basis": age_basis,
+            # THE CURRENCY VERDICT, CARRIED. `_entry_freshness` re-ages it at
+            # the decision instant rather than re-deriving it, so one module
+            # decides what establishes currency and one number is applied.
+            "book_currency": currency,
+            "http_observation": book.get("http_observation"),
             # THE CLOCK'S OWN EVIDENCE: field path, raw value, its type,
             # which parser was applied and what that parser accepts.
             "venue_clock": clock,
@@ -2185,16 +2253,40 @@ def _entry_freshness(quote, vq, now) -> dict:
     # re-age from, which stays unmeasured rather than falling back to our
     # read clock.
     #
-    # AND THE VENUE ARM NOW AGES THE RIGHT QUANTITY. Until the 2026-09-27
-    # determination this re-aged `transactTime` at the decision instant and
-    # required it under 30 s. That stamp is a LAST-CHANGE stamp (six contracts,
-    # two reads 20 s apart, stamp identical and ask identical on every one), so
-    # the test asked "has this market ticked recently" and refused every quiet
-    # money line -- which is the `QUOTE_STALE` that ends 344 of this lane's
-    # valuations. What expires between reading a book and deciding on it is OUR
-    # READ, and both instants are ours.
+    # THE VENUE ARM, AND WHAT IT IS ALLOWED TO CONCLUDE. This arm has now been
+    # wrong twice in opposite directions, so both errors are named here.
+    #
+    #   The FIRST version re-aged `transactTime` and required it under 30 s.
+    #   That treats an old stamp as proof the book is stale, which it is not:
+    #   what the field denotes is unresolved.
+    #
+    #   The SECOND version re-aged OUR RECEIPT INSTANT and required that under
+    #   10 s -- and returned `fresh: true` on it alone. That treats a fast
+    #   response as proof the book is current, which is worse: a snapshot
+    #   generated four minutes ago and delivered in 20 ms passes it, and the
+    #   faster the answer the stronger the false certificate.
+    #
+    # SO THE TWO QUANTITIES ARE NOW SEPARATE AND BOTH ARE REQUIRED. Currency is
+    # established by `bettor_venue_currency` from a published contract, or it is
+    # NOT ESTABLISHED and this verdict cannot be `fresh: true`. Our processing
+    # delay is checked as well, as OUR delay -- an additional requirement that
+    # on its own establishes nothing upstream.
     vt = vq.get("venue_ts")
-    v_moved = (None if vt is None else float(now) - float(vt))
+    stamp_age = (None if vt is None else float(now) - float(vt))
+    # THE CURRENCY VERDICT, RE-AGED AT THE DECISION INSTANT. The quote carries
+    # the verdict from the read; re-evaluating it here against `now` is what
+    # stops a book whose currency was established at the read from inheriting
+    # that establishment through two further network reads.
+    cur_at_read = vq.get("book_currency") or {}
+    currency = vc.evaluate(
+        now=now,
+        observation=vq.get("http_observation"),
+        subscription=cur_at_read.get("subscription_input")
+                     or vq.get("subscription"),
+        revalidation=cur_at_read.get("revalidation_input")
+                     or vq.get("revalidation"),
+        venue_ts=vt, our_receipt_at=vq.get("read_at"),
+        bound_s=MAX_VENUE_QUOTE_AGE_S)
     # OUR RECEIPT INSTANT, from either place the quote records it: the clock
     # block's `our_response_received_at` or the top-level `read_at`. The real
     # `venue_quote` sets both, and reading only one of them would make this gate
@@ -2203,11 +2295,14 @@ def _entry_freshness(quote, vq, now) -> dict:
              if (vq.get("venue_clock") or {}).get("our_response_received_at")
              is not None else vq.get("read_at"))
     if recvd is not None:
-        v_age = float(now) - float(recvd)
-        v_basis = "OUR_OWN_RECEIPT_INSTANT_REAGED_AT_THE_DECISION"
+        v_delay = float(now) - float(recvd)
+        v_basis = "OUR_OWN_PROCESSING_DELAY_REAGED_AT_THE_DECISION"
     else:
-        v_age = None
+        v_delay = None
         v_basis = "OUR_RECEIPT_INSTANT_NOT_RECORDED"
+    # The number the venue arm is JUDGED on is the established book-state age.
+    # None when nothing established it, which is UNKNOWN and blocks.
+    v_age = currency.get("book_state_age_s") if vc.admits(currency) else None
     # THE PROVIDER'S OWN STALENESS AND OUR PROCESSING DELAY, SEPARATED.
     #
     # `pinnacle_age_s` is the number the 30-second rule governs and it is
@@ -2229,41 +2324,75 @@ def _entry_freshness(quote, vq, now) -> dict:
                                  "our_processing, both from clocks on the "
                                  "record. The 30 s rule governs the SUM "
                                  "and is unchanged"),
+           # THE VENUE AGE IS THE ESTABLISHED BOOK-STATE AGE, or None.
            "venue_age_s": (None if v_age is None else round(float(v_age), 3)),
            "venue_age_at_read_s": vq.get("age_s"),
-           "venue_limit_s": MAX_OUR_READ_AGE_S,
-           "venue_age_basis": v_basis,
-           "venue_book_last_moved_s": (None if v_moved is None
-                                       else round(float(v_moved), 3)),
-           "venue_book_is_quiet": (None if v_moved is None
-                                   else bool(v_moved > QUIET_BOOK_CAUTION_S)),
-           "venue_book_quiet_threshold_s": QUIET_BOOK_CAUTION_S,
+           "venue_limit_s": MAX_VENUE_QUOTE_AGE_S,
+           "venue_age_basis": (currency["mechanism"] if vc.admits(currency)
+                               else vc.NO_MECHANISM),
+           "venue_currency_verdict": currency["verdict"],
+           "venue_currency": currency,
+           "venue_currency_is_required": (
+               "`fresh` cannot be true unless a mechanism with a published "
+               "contract established this book's state inside the bound. "
+               "NOT_ESTABLISHED is UNKNOWN, and UNKNOWN blocks"),
+           # OUR OWN DELAY, SEPARATE, AND NEVER SUFFICIENT.
+           "our_processing_delay_s": (None if v_delay is None
+                                      else round(float(v_delay), 3)),
+           "our_processing_delay_limit_s": MAX_OUR_PROCESSING_DELAY_S,
+           "our_processing_delay_basis": v_basis,
+           "our_processing_delay_is_not_freshness":
+               PROCESSING_DELAY_IS_NOT_FRESHNESS,
+           # THE STAMP, AS PROVENANCE ONLY.
+           "venue_stamp_age_s": (None if stamp_age is None
+                                 else round(float(stamp_age), 3)),
            "venue_stamp_semantics": VENUE_STAMP_SEMANTICS,
-           "quiet_does_not_refuse": (
-               "the last-change age is an observation about LIQUIDITY. A quiet "
-               "book may be thin when we try to trade it, which the depth and "
-               "sizing evidence downstream is what measures. It is not a "
-               "statement that our read is out of date"),
+           "venue_stamp_decides_nothing": (
+               "an old stamp is not proof the book is stale and a recent one "
+               "is not proof it is current, because what the field denotes is "
+               "unresolved. It is carried as provenance"),
            "venue_clock": vq.get("venue_clock"),
            "both_reaged_at_the_decision": True,
            "stalest_governs": True}
+    # UNKNOWN BLOCKS, AND SAYS WHICH SIDE IS UNKNOWN. The venue side is unknown
+    # whenever no mechanism established currency -- which is the state the lane
+    # is in today, and it is reported as missing evidence rather than as a
+    # stale book.
     if p_age is None or v_age is None:
         out["fresh"] = None
-        out["why"] = ("one of the two clocks is not measured (%s), so "
-                      "whether this pair is contemporaneous is unknown"
-                      % ("pinnacle" if p_age is None
-                         else vq.get("age_basis") or "venue"))
+        if v_age is None:
+            out["why"] = (
+                "the venue book's currency is %s, so whether this pair is "
+                "contemporaneous is UNKNOWN. %s"
+                % (currency["verdict"], currency.get("why") or ""))
+            out["unknown_side"] = "venue"
+            out["mechanisms_unavailable"] = currency["mechanisms_unavailable"]
+        else:
+            out["why"] = ("the bookmaker's own observation instant is not "
+                          "measured, so whether this pair is contemporaneous "
+                          "is unknown")
+            out["unknown_side"] = "pinnacle"
         return out
-    ok = p_age <= PINNACLE_MAX_AGE_S and float(v_age) <= MAX_OUR_READ_AGE_S
+    # A DELAY WE CANNOT MEASURE IS NOT A DELAY WE MAY IGNORE.
+    if v_delay is None:
+        out["fresh"] = None
+        out["why"] = ("our own receipt instant was not recorded, so our "
+                      "processing delay is unmeasured and cannot be checked")
+        out["unknown_side"] = "our_processing_delay"
+        return out
+    ok = (p_age <= PINNACLE_MAX_AGE_S
+          and float(v_age) <= MAX_VENUE_QUOTE_AGE_S
+          and float(v_delay) <= MAX_OUR_PROCESSING_DELAY_S)
     out["fresh"] = bool(ok)
     out["why"] = ("pinnacle %.2fs/%.0fs (the bookmaker's own observation "
-                  "instant) and our venue read %.2fs/%.0fs (our receipt "
-                  "instant). The venue book last moved %s"
+                  "instant); venue book state %.2fs/%.0fs ESTABLISHED by %s; "
+                  "our own processing delay %.2fs/%.0fs. The venue stamp reads "
+                  "%s and decides nothing"
                   % (p_age, PINNACLE_MAX_AGE_S, float(v_age),
-                     MAX_OUR_READ_AGE_S,
-                     ("at an unrecorded time" if v_moved is None
-                      else "%.0f s ago, which is reported and does not refuse"
-                           % float(v_moved))))
+                     MAX_VENUE_QUOTE_AGE_S, currency["mechanism"],
+                     float(v_delay), MAX_OUR_PROCESSING_DELAY_S,
+                     ("absent" if stamp_age is None
+                      else "%.0f s old" % float(stamp_age))))
     return out
 
 
@@ -2578,6 +2707,45 @@ async def _funded_attempt(conn, rec, *, now):
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
 
 
+def book_currency_evidence(slug=None) -> dict:
+    """THE ONE SEAM THROUGH WHICH A FRESHNESS MECHANISM REACHES EITHER LANE.
+
+    Both lanes admit a venue book only when a mechanism with a published
+    contract establishes that it is current. This function is where that
+    mechanism is supplied, and TODAY IT SUPPLIES NONE:
+
+      * M1 needs a live market-data subscription for the market, with per-slug
+        last-update and connection-liveness instants. `bettor_market_stream`
+        speaks the protocol and the EV lane does not subscribe.
+      * M2 needs a conditional re-request on the book path. Whether the endpoint
+        emits a validator is reported per read by the admin clock probe and is
+        not yet known.
+
+    So this returns `{"subscription": None, "revalidation": None}` with the
+    reason attached, every lane refuses on an unestablished currency, and that
+    refusal is the named blocker the operating view reports. IT IS A SEAM AND
+    NOT A DEFAULT: nothing here invents an allowance, and wiring M1 means
+    returning real instants from here rather than changing any gate.
+    """
+    return {
+        "subscription": None,
+        "revalidation": None,
+        "why_none": ("no market-data subscription is held for this lane and no "
+                     "conditional revalidation is issued, so no mechanism with "
+                     "a published contract can establish that a venue book is "
+                     "current"),
+        "what_wiring_m1_requires": (
+            "subscribe the lane's mapped candidates to "
+            "SUBSCRIPTION_TYPE_MARKET_DATA through bettor_market_stream, keep "
+            "per-slug last-update and connection-liveness instants, and return "
+            "them from here"),
+        "consequence_today": ("every venue read reaches "
+                              "BOOK_CURRENCY_NOT_ESTABLISHED and refuses. That "
+                              "is missing evidence, not a stale book"),
+        "slug": slug,
+    }
+
+
 async def _funded_service(conn, *, now):
     """SERVICE WHAT THE FUNDED LANE HOLDS, once per cycle.
 
@@ -2609,8 +2777,11 @@ async def _funded_service(conn, *, now):
     venue = str(bound.get("venue") or "").strip()
     if not account_id or not venue:
         return None
+    ev = book_currency_evidence()
     try:
         return await _FM.manage(conn, account_id=account_id, venue=venue,
+                                subscription=ev.get("subscription"),
+                                revalidation=ev.get("revalidation"),
                                 now=now)
     except Exception as exc:                                   # noqa: BLE001
         # SERVICING THAT RAISED IS NOT SERVICING THAT FOUND NOTHING.
@@ -2851,8 +3022,14 @@ async def cycle(conn) -> dict:
             read_at = time.time()
             # THE INTENT IS THE SIDE. Passing it is what makes this read
             # the ladder the contract actually trades on.
+            # THE SAME SEAM THE FUNDED LANE USES. It supplies no mechanism
+            # today, so this read refuses on an unestablished currency -- which
+            # is the named blocker, not a hidden one.
+            _cev = book_currency_evidence(ident["us_market_slug"])
             vq = await venue_quote(conn, us_slug=ident["us_market_slug"],
-                                   intent=ident["intent"], now=read_at)
+                                   intent=ident["intent"], now=read_at,
+                                   subscription=_cev.get("subscription"),
+                                   revalidation=_cev.get("revalidation"))
             if not vq.get("ok"):
                 code = vq.get("refusal") or R_NO_VENUE_QUOTE
                 tally[code] = tally.get(code, 0) + 1

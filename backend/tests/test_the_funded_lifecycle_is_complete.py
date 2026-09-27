@@ -188,6 +188,22 @@ def _transport(monkeypatch, **kw):
     return pmus, sent, client
 
 
+def _live(now=None):
+    """THE MECHANISM, SUPPLIED EXPLICITLY, and that is the point.
+
+    Since the freshness rule became shared, a venue book is admitted only when a
+    mechanism with a published contract establishes that it is current -- a live
+    market-data subscription (M1) or a conditional revalidation answered 304
+    (M2). A stub venue returning a payload establishes NOTHING, so every test
+    whose subject is the lifecycle downstream of admission has to say which
+    contract admitted the book. Passing this is that statement.
+
+    A test that omits it is testing the refusal, and several deliberately do.
+    """
+    at = time.time() if now is None else float(now)
+    return {"alive_at": at - 0.5, "last_update_at": at - 1.0}
+
+
 async def _seed(conn, *, limits=None, expires_in=3600.0, revoked=False,
                 paused=False, accounting="RECONCILED"):
     await conn.execute("DELETE FROM bettor_desk_accounts WHERE account_id=$1",
@@ -349,6 +365,43 @@ async def test_an_exit_survives_every_entry_side_lapse(monkeypatch, broken):
                        "size": 5, "vwap": 0.62, "limit_price": 0.62}}},
             account_id=ACCT, venue=VENUE)
         assert entry["ok"] is False, broken
+        assert [k for k, _ in sent if k == "create"] == []
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_an_old_stamp_with_a_live_subscription_is_admitted(monkeypatch):
+    """THE OTHER SIDE OF THE SAME CORRECTION, ON THE FUNDED LANE.
+
+    Ten minutes since the venue stamped this book, and a market-data
+    subscription proven alive one second ago reporting this market's last update
+    one second before that. The stamp is recorded as past the bound and it
+    refuses nothing: an unresolved field cannot be read as evidence of
+    staleness. The mechanism governs, and the exit proceeds to its economics.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _entry(conn, qty=10, price=0.60)
+        await _probability(conn, p=0.55)
+        pos = (await FM.open_positions(conn, account_id=ACCT,
+                                       venue=VENUE))[0]
+        _, sent, client = _transport(monkeypatch, bids=[_level(0.75, 40)],
+                                    book_age_s=600.0)
+        got = await FM.select_exit(conn, pos, client=client,
+                                   subscription=_live())
+        age = got["venue_book_age"]
+        assert age["ok"] is True, age
+        assert age["stamp_beyond_the_bound"] is True
+        assert age["book_currency"]["mechanism"] == (
+            "M1_LIVE_MARKET_DATA_SUBSCRIPTION")
+        assert got["refusal"] != FM.R_BOOK_NOT_FRESH, got
+        # AND NOTHING WAS SENT: submission stays disabled regardless.
         assert [k for k, _ in sent if k == "create"] == []
     finally:
         await _clean(conn)
@@ -932,7 +985,8 @@ async def test_every_missing_exit_input_is_named_one_at_a_time(monkeypatch):
         pos = (await FM.open_positions(conn, account_id=ACCT,
                                        venue=VENUE))[0]
         pmus, sent, client = _transport(monkeypatch, bids=[_level(0.70, 50)])
-        got = await FM.select_exit(conn, pos, client=client)
+        got = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert got["refusal"] == FM.R_NO_PAYOUT_EVENT
         assert got["missing_input"] == "bettor_funded_intents.payout_event"
         await FB.mark_position_closed(conn, "fpi-nopay",
@@ -944,23 +998,27 @@ async def test_every_missing_exit_input_is_named_one_at_a_time(monkeypatch):
                                                   venue=VENUE)
                if p["intent_id"] == "fpi-nobook"][0]
         _, _, broken = _transport(monkeypatch, raise_on_book=True)
-        got = await FM.select_exit(conn, pos, client=broken)
+        got = await FM.select_exit(conn, pos, client=broken,
+                                   subscription=_live())
         assert got["refusal"] == FM.R_BOOK_UNREADABLE
 
         # (c) A BOOK WITH NO EXIT SIDE.
         _, _, empty = _transport(monkeypatch, bids=[])
-        got = await FM.select_exit(conn, pos, client=empty)
+        got = await FM.select_exit(conn, pos, client=empty,
+                                   subscription=_live())
         assert got["refusal"] == FM.R_NO_EXIT_SIDE
 
         # (d) NO ELIGIBLE PROBABILITY ROW.
         _, _, ok_book = _transport(monkeypatch, bids=[_level(0.70, 50)])
-        got = await FM.select_exit(conn, pos, client=ok_book)
+        got = await FM.select_exit(conn, pos, client=ok_book,
+                                   subscription=_live())
         assert got["refusal"] == FM.R_NO_PROBABILITY
 
         # (e) A HELD ROW IS NEVER USED FOR A DECISION, and that is reported as
         #     a containment action rather than a missing feed.
         await _probability(conn, p=0.55, eligibility="HELD")
-        got = await FM.select_exit(conn, pos, client=ok_book)
+        got = await FM.select_exit(conn, pos, client=ok_book,
+                                   subscription=_live())
         assert got["refusal"] == FM.R_NO_PROBABILITY
         assert got["probability_read"]["eligibility"] == "HELD"
 
@@ -969,7 +1027,8 @@ async def test_every_missing_exit_input_is_named_one_at_a_time(monkeypatch):
         await conn.execute("DELETE FROM external_valuations WHERE venue=$1",
                            "PMUS_TEST_COMPLETE")
         await _probability(conn, p=0.55, at=time.time() - 86400)
-        got = await FM.select_exit(conn, pos, client=ok_book)
+        got = await FM.select_exit(conn, pos, client=ok_book,
+                                   subscription=_live())
         assert got["refusal"] == FM.R_HOLD_NOT_PRICED
         assert "ENGINEERING INPUT" in got["what_is_missing"]
         assert got["ev_hold"]["status"] == "NOT_IDENTIFIED"
@@ -995,7 +1054,8 @@ async def test_the_selector_holds_when_the_book_does_not_beat_holding(
         pos = (await FM.open_positions(conn, account_id=ACCT,
                                        venue=VENUE))[0]
         _, sent, client = _transport(monkeypatch, bids=[_level(0.50, 50)])
-        got = await FM.select_exit(conn, pos, client=client)
+        got = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert got["ok"] is True
         assert got["is_an_evidenced_exit"] is False
         assert got["selected"] == "HOLD"
@@ -1058,6 +1118,16 @@ async def test_the_scheduled_path_selects_executes_recovers_and_reports(
                                     "value": "0.1100"}}]}})
         monkeypatch.delenv("EDGE_ODDS_API_KEY", raising=False)
         monkeypatch.setattr(L, "_running", lambda c: _stopped())
+        # THE SCHEDULER'S FRESHNESS SEAM, SUPPLIED FOR THIS TEST.
+        # `book_currency_evidence` returns no mechanism in production, so the
+        # scheduled path refuses on an unestablished book currency -- correctly,
+        # and that is the named blocker the operating view reports. This test's
+        # subject is the lifecycle DOWNSTREAM of admission, so it states which
+        # published contract admitted the book rather than pretending none is
+        # needed. A separate test pins the production default refusing.
+        monkeypatch.setattr(
+            L, "book_currency_evidence",
+            lambda slug=None: {"subscription": _live(), "revalidation": None})
 
         # ── CYCLE 1: SELECT AND EXECUTE, through the scheduler ──────
         one = await L.cycle(conn)
@@ -1179,7 +1249,8 @@ async def test_the_submitted_limit_cannot_accept_less_than_the_selection(
         pmus, sent, client = _transport(monkeypatch, order_id="vo-x",
                                        bids=bids, offers=offers,
                                        exec_by_call=[[]])
-        pick = await FM.select_exit(conn, pos, client=client)
+        pick = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert pick["ok"] is True, pick
         assert pick["is_an_evidenced_exit"] is True, pick.get("why")
         # THE TWO NUMBERS ARE BOTH REPORTED AND THEY ARE THE RIGHT WAY ROUND.
@@ -1288,14 +1359,27 @@ async def test_a_book_whose_age_is_not_established_refuses_the_exit(
         else:
             kw["transact_time"] = "not-a-timestamp"
         _, sent, client = _transport(monkeypatch, **kw)
+        # NO MECHANISM IS SUPPLIED, DELIBERATELY. That is this lane's production
+        # state, and it is what makes all three of these refuse. A stamp past
+        # the bound WITH a live subscription is a different case, and the next
+        # test covers it.
         got = await FM.select_exit(conn, pos, client=client)
         assert got["ok"] is False
         assert got["refusal"] == FM.R_BOOK_NOT_FRESH, got
         age = got["venue_book_age"]
         if book == "STALE":
+            # THE CORRECTED READING. A `transactTime` ten minutes old is
+            # recorded and does NOT by itself say the book is stale -- what the
+            # field denotes is unresolved. The exit still refuses, under the
+            # accurate name: no mechanism established that this book is
+            # current. Nothing is loosened; the refusal is renamed to what it
+            # actually is, and `stamp_beyond_the_bound` keeps the observation.
             assert age["basis"] == "VENUE_TRANSACT_TIME"
-            assert age["refusal"] == FA.R_BOOK_STALE
+            assert age["refusal"] == FA.R_BOOK_CURRENCY_NOT_ESTABLISHED
             assert age["age_s"] > 30.0
+            assert age["stamp_beyond_the_bound"] is True
+            assert age["unmeasured"] is True
+            assert "missing evidence" in age["this_is_not_a_stale_book"]
         else:
             # UNMEASURED IS NOT STALE, and the two are not collapsed.
             assert age["refusal"] == FA.R_BOOK_AGE_UNMEASURED
@@ -1325,7 +1409,8 @@ async def test_an_unestablished_settlement_rule_restricts_the_funded_exit(
         pos = (await FM.open_positions(conn, account_id=ACCT,
                                        venue=VENUE))[0]
         _, sent, client = _transport(monkeypatch, bids=[_level(0.75, 40)])
-        got = await FM.select_exit(conn, pos, client=client)
+        got = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert got["ok"] is False
         assert got["refusal"] == FM.R_SETTLEMENT_NOT_ESTABLISHED, got
         # THE VALUATION ITSELF WAS IDENTIFIED -- that is the whole point.
@@ -1340,7 +1425,8 @@ async def test_an_unestablished_settlement_rule_restricts_the_funded_exit(
         await conn.execute("DELETE FROM external_valuations WHERE venue=$1",
                            "PMUS_TEST_COMPLETE")
         await _probability(conn, p=0.55, settled=True)
-        ok = await FM.select_exit(conn, pos, client=client)
+        ok = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert ok["ok"] is True, ok
         assert ok["terminal_rule"]["compatibility"] == "ESTABLISHED"
     finally:
@@ -1370,7 +1456,8 @@ async def test_the_evidence_comes_from_the_database_projection(monkeypatch):
         assert "settlement_rule" not in pos
         got = await FM.select_exit(
             conn, pos, client=_transport(monkeypatch,
-                                        bids=[_level(0.75, 40)])[2])
+                                        bids=[_level(0.75, 40)])[2],
+            subscription=_live())
         assert got["ok"] is True, got
         ev = got["decision_evidence"]
         assert ev["read"] is True
@@ -1622,18 +1709,38 @@ def test_slow_acquisition_ages_the_book_against_the_unchanged_bound():
     pre-request instant is what made acquisition free."""
     now = time.time()
     md = _md(-20)                       # 20 s old when it arrived
+    # A MECHANISM IS SUPPLIED SO THE PROPERTY UNDER TEST IS REACHABLE. Without
+    # one the currency is unestablished and the answer says so before any age
+    # arithmetic matters -- which is correct, and is not what this test is about.
+    def _sub(at):
+        return {"alive_at": at - 0.5, "last_update_at": at - 1.0}
+
     quick = FA.venue_book_age(md, decision_at=now + 0.2, received_at=now,
-                              requested_at=now - 0.3)
+                              requested_at=now - 0.3,
+                              subscription=_sub(now + 0.2))
     assert quick["ok"] is True
     assert 19.5 < quick["age_s"] < 21.5
+    # THE STAMP IS ALREADY PAST THE BOUND HERE AND IT DOES NOT REFUSE, because
+    # a mechanism established the state and the stamp's meaning is unresolved.
+    assert quick["stamp_beyond_the_bound"] is False
     slow = FA.venue_book_age(md, decision_at=now + 20.5, received_at=now,
-                             requested_at=now - 0.3)
-    assert slow["ok"] is False
-    assert slow["refusal"] == FA.R_BOOK_STALE
+                             requested_at=now - 0.3,
+                             subscription=_sub(now + 20.5))
+    # THE ACQUISITION DELAY IS STILL MEASURED AT THE DECISION INSTANT and still
+    # recorded against the unchanged bound. What changed is that the refusal for
+    # an old STAMP is now the accurate one -- and here a live subscription
+    # establishes the state, so the stamp's age is an observation.
     assert slow["age_s"] > FA.MAX_VENUE_BOOK_AGE_S
+    assert slow["stamp_beyond_the_bound"] is True
     assert slow["bound_s"] == pytest.approx(FA.MAX_VENUE_BOOK_AGE_S)
     assert slow["decision_lag_after_receipt_s"] > 20.0
     assert slow["age_evaluated_at"] == "decision_at"
+    # AND WITH NO MECHANISM -- the state the lane is actually in -- the same
+    # slow acquisition refuses, under the accurate name.
+    none_ = FA.venue_book_age(md, decision_at=now + 20.5, received_at=now,
+                              requested_at=now - 0.3)
+    assert none_["ok"] is False
+    assert none_["refusal"] == FA.R_BOOK_CURRENCY_NOT_ESTABLISHED
 
 
 def test_a_stamp_between_request_and_receipt_is_ordinary():
@@ -1642,9 +1749,17 @@ def test_a_stamp_between_request_and_receipt_is_ordinary():
     the ordinary case. It is assessed against the later decision instant, where
     it is legitimately in the past."""
     now = time.time()
+    md = {"transactTime": _stamp(0.05), "bids": [_level(0.75, 40)]}
+    # WITHOUT A MECHANISM the currency is unestablished and it refuses -- but the
+    # point of this test is WHICH refusal, and it must not be the skew one.
+    bare = FA.venue_book_age(md, decision_at=now + 0.4,
+                             received_at=now + 0.2, requested_at=now)
+    assert bare["refusal"] != FA.R_BOOK_CLOCK_INCONSISTENT, bare
+    assert bare["refusal"] == FA.R_BOOK_CURRENCY_NOT_ESTABLISHED
+    # WITH ONE, the ordinary stamp is admitted and the skew arm stays silent.
     got = FA.venue_book_age(
-        {"transactTime": _stamp(0.05), "bids": [_level(0.75, 40)]},
-        decision_at=now + 0.4, received_at=now + 0.2, requested_at=now)
+        md, decision_at=now + 0.4, received_at=now + 0.2, requested_at=now,
+        subscription={"alive_at": now + 0.3, "last_update_at": now + 0.1})
     assert got["ok"] is True, got
     assert got["refusal"] is None
     assert got["age_s"] > 0                      # past, at the decision
@@ -1675,7 +1790,8 @@ async def test_the_selector_ages_both_clocks_at_the_decision_instant(
         pos = (await FM.open_positions(conn, account_id=ACCT,
                                        venue=VENUE))[0]
         _, _, client = _transport(monkeypatch, bids=[_level(0.75, 40)])
-        got = await FM.select_exit(conn, pos, client=client)
+        got = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert got["ok"] is True, got
         ins = got["instants"]
         # THE ORDER OF THE FOUR INSTANTS IS THE WHOLE POINT.
@@ -1722,7 +1838,8 @@ async def test_a_delayed_submission_cannot_reuse_an_expired_assessment(
         pmus, sent, client = _transport(monkeypatch, order_id="vo-x",
                                        bids=[_level(0.75, 40)],
                                        exec_by_call=[[]])
-        pick = await FM.select_exit(conn, pos, client=client)
+        pick = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert pick["ok"] is True
         # THE DEADLINE IS THE EARLIER OBSERVATION'S, NOT decision_at + 30.
         dl = pick["inputs_expiry"]
@@ -1804,7 +1921,8 @@ async def test_a_book_already_twenty_nine_seconds_old_expires_in_one(
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         pmus, sent, client = _transport(monkeypatch, bids=[_level(0.75, 40)],
                                        book_age_s=29.0, exec_by_call=[[]])
-        pick = await FM.select_exit(conn, pos, client=client)
+        pick = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert pick["ok"] is True, pick
         # ADMITTED -- 29 s is inside the 30 s bound -- with ~1 s of life left.
         assert pick["venue_book_age"]["ok"] is True
@@ -1847,7 +1965,8 @@ async def test_the_probability_determines_the_deadline_when_it_expires_first(
                                        venue=VENUE))[0]
         _, _, client = _transport(monkeypatch, bids=[_level(0.75, 40)],
                                   book_age_s=0.0)
-        pick = await FM.select_exit(conn, pos, client=client)
+        pick = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert pick["ok"] is True, pick
         dl = pick["inputs_expiry"]
         assert dl["governed_by"] == "PROBABILITY", dl
@@ -1888,7 +2007,8 @@ async def test_a_lock_wait_past_the_deadline_releases_and_sends_nothing(
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         pmus, sent, client = _transport(monkeypatch, bids=[_level(0.75, 40)],
                                        exec_by_call=[[]])
-        pick = await FM.select_exit(conn, pos, client=client)
+        pick = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert pick["ok"] is True
 
         # THE LOCK, HELD BY SOMEBODY ELSE.
@@ -2027,6 +2147,7 @@ async def test_the_scheduled_path_carries_the_deadline_it_computed(
             retrieve={"vo-1": {"order": {"state": "ORDER_STATE_FILLED"},
                                "executions": []}})
         got = await FM.manage(conn, account_id=ACCT, venue=VENUE,
+                              subscription=_live(),
                               adapter=pmus, client=client)
         assert got["exits"], got
         ex = got["exits"][0]
@@ -2074,7 +2195,8 @@ async def test_the_evidence_says_which_row_it_actually_read(monkeypatch):
         pos = (await FM.open_positions(conn, account_id=ACCT,
                                        venue=VENUE))[0]
         _, _, client = _transport(monkeypatch, bids=[_level(0.75, 40)])
-        got = await FM.select_exit(conn, pos, client=client)
+        got = await FM.select_exit(conn, pos, client=client,
+                                    subscription=_live())
         assert got["ok"] is True, got
         ev = got["decision_evidence"]
         # IT IS THE CURRENT ROW, AND IT SAYS SO.
@@ -2256,6 +2378,7 @@ async def test_the_general_reads_keep_working_while_funded_is_blocked(
             # 2 . THE SCHEDULED PASS: reported, not raised.
             pmus, sent, client = _transport(monkeypatch)
             mg = await FM.manage(conn, account_id=ACCT, venue=VENUE,
+                              subscription=_live(),
                                  adapter=pmus, client=client)
             assert mg["ok"] is False
             assert mg["funded_capability"] == FS.CAPABILITY_BLOCKED, mg

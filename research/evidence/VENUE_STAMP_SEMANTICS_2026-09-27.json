@@ -1,101 +1,76 @@
 {
- "record": "WHAT marketData.transactTime TRACKS -- ESTABLISHED BY MEASUREMENT",
- "date": "2026-09-27",
- "why_it_mattered": [
-  "The entry lane refused any candidate whose `decision_instant - transactTime`",
-  "exceeded 30 s. 1,018 valuations have been written by this lane and every one",
-  "is NO_TRADE; the candidate ledger's dominant first refusal is VENUE_QUOTE_STALE",
-  "with ages of 42 s, 94 s, 287 s and 522 s. If the stamp tracks the RESPONSE those",
-  "are stale reads and the gate is right. If it tracks the LAST BOOK CHANGE they are",
-  "quiet markets and the gate refuses the entire catalogue while calling it",
-  "freshness. The repository recorded the question as open and both readings as",
-  "possible."
- ],
- "method": {
-  "route": "GET /api/admin/venue-clock-probe (already present, draws no verdict)",
-  "how": "each contract read TWICE, 20 s apart, against the serving build",
-  "contracts": [
-   "aec-mlb-nym-wsh-2026-09-27",
-   "aec-mlb-hou-ath-2026-09-27",
-   "aec-mlb-cle-kc-2026-09-27",
-   "aec-mlb-tb-phi-2026-09-27",
-   "aec-mlb-col-cws-2026-09-27",
-   "aec-mlb-cin-tor-2026-09-27"
+  "title": "WHAT THE 2026-09-27 VENUE CLOCK PROBE OBSERVED",
+  "status": "OBSERVATION_ONLY. NO DETERMINATION.",
+  "date": "2026-09-27",
+
+  "a_conclusion_this_file_previously_asserted_and_now_withdraws": {
+    "withdrawn_claim": "marketData.transactTime tracks the LAST BOOK CHANGE",
+    "why_it_was_not_valid": [
+      "At least two mechanisms predict the identical observation. (a) the stamp is a last-change stamp and the six markets were genuinely quiet. (b) an intermediary cache served the same stored representation to both reads, in which case the stamp and the book are identical because they are literally the same bytes and nothing about the live book was observed.",
+      "The probe captured NO response header on either read, so the presence of a cache in the path was neither shown nor excluded.",
+      "Two hypotheses making the same prediction cannot be separated by the observation that confirms both. No number of further unchanged samples helps: each additional identical pair is equally well explained by either."
+    ],
+    "what_was_changed_on_the_strength_of_it_and_has_been_reverted": "the admission gate was moved off the venue stamp onto our own receipt instant, with a 10 s bound, and returned fresh: true on that alone. That admits a snapshot generated four minutes ago, returned in 20 ms and decided on one second later.",
+    "reverted_in": "bettor_venue_currency.py + workers/ext_pinnacle_loop.py, same day"
+  },
+
+  "what_ran": {
+    "route": "/api/admin/venue-clock-probe (VENUE_CLOCK_OBSERVATIONS_V2)",
+    "target": "the serving production build",
+    "method": "each contract read twice, the two reads about twenty seconds apart",
+    "contracts": 6,
+    "sports": 1,
+    "windows": 1,
+    "response_headers_captured": 0
+  },
+
+  "what_was_observed": {
+    "our_receipt_delta_s": "about 20 on all six pairs",
+    "transact_time_delta_s": "0.0 on all six pairs",
+    "transact_time_readable_on_both_reads": 6,
+    "best_ask_identical_across_the_two_reads": 6,
+    "book_sha_changed": "false on all six pairs"
+  },
+
+  "what_this_establishes": "That on these six contracts, in this one window, two reads about twenty seconds apart returned the same transactTime value and the same order book. That is the whole of it.",
+
+  "what_this_does_NOT_establish": [
+    "What marketData.transactTime denotes. Unresolved.",
+    "Whether an intermediary cache is in the request path. Neither shown nor excluded, because no header was captured.",
+    "That the six markets were quiet. Unchanged bytes are consistent with a quiet market and with the same bytes being replayed.",
+    "That our own receipt instant is a sufficient freshness test. It is not: it cannot detect a cached payload, and the faster the response the stronger the false certificate it would issue.",
+    "That any freshness bound may be moved in any direction. It supports no policy change."
   ],
-  "the_discriminator": "a RESPONSE stamp advances by the gap between our two receipts; a LAST-CHANGE stamp does not move at all while the book does not move"
- },
- "observed": {
-  "contracts_read": 6,
-  "our_receipt_delta_s": [
-   20.015,
-   20.034,
-   20.089,
-   20.031,
-   20.049,
-   20.032
+
+  "why_more_samples_cannot_close_it": "The competing hypotheses make the same prediction for this experiment. Resolving it requires a mechanism with a published contract, not a larger sample.",
+
+  "the_mechanisms_that_can_close_it": {
+    "M1_LIVE_MARKET_DATA_SUBSCRIPTION": {
+      "what_it_establishes": "On a subscription proven alive within the liveness bound, the last update received for a market IS the venue's book state: any change since would have been pushed.",
+      "status": "AVAILABLE AND NOT YET WIRED INTO THIS LANE. The repository already speaks the protocol (bettor_market_stream, obs/streamstate, the SDK's markets websocket). The EV lane does not subscribe.",
+      "work_required": "subscribe the lane's mapped candidates to SUBSCRIPTION_TYPE_MARKET_DATA, keep per-slug last-update and connection-liveness instants, and pass them to venue_quote(subscription=...).",
+      "owner": "engineering"
+    },
+    "M2_CONDITIONAL_REVALIDATION": {
+      "what_it_establishes": "A 304 Not Modified to an If-None-Match / If-Modified-Since on the book path is the origin affirming that the representation we hold is still current, as of that response's Date. RFC 9110 §13, RFC 9111 §4.3.",
+      "status": "UNKNOWN UNTIL HEADERS ARE READ. Requires the book endpoint to emit ETag or Last-Modified.",
+      "work_required": "the v3 probe reports revalidation_possible per read. If a validator is emitted, issue the conditional request and pass the result to venue_quote(revalidation=...).",
+      "owner": "engineering"
+    },
+    "M3_ORIGIN_GENERATION_INSTANT": {
+      "what_it_establishes": "Date minus Age is when the origin generated the stored representation (RFC 9111 §5.1, §6.1). Inside the bound and not cache-served, it establishes that THIS RESPONSE is newly generated.",
+      "status": "PARTIAL BY CONSTRUCTION AND NEVER SUFFICIENT ALONE. It bounds the response, not the matching engine's book: an origin can generate a fresh response now from an internal snapshot computed minutes ago.",
+      "also_decisive_in_the_negative": "Date minus Age outside the bound, or Age past the response's own max-age, is the CONTRACT stating the payload is old. That refuses on evidence rather than on absence.",
+      "owner": "engineering"
+    }
+  },
+
+  "what_changed_in_the_code_because_of_this": [
+    "bettor_venue_currency.py: three verdicts (ESTABLISHED / NOT_ESTABLISHED / CONTRADICTED), three named mechanisms, and an explicit refusal to derive currency from transport latency, from our own receipt instant, or from repeated identical samples.",
+    "venue_http_observer.py: one httpx response hook on the SDK's own client recording a fixed whitelist of metadata headers, because the SDK ends its request with response.json() and discards all of them.",
+    "workers/ext_pinnacle_loop.py: VENUE_STAMP_SEMANTICS is UNRESOLVED; the stamp is carried as provenance and decides nothing in either direction; admission requires an established currency verdict AND our processing delay inside its bound, neither sufficient alone.",
+    "the admin probe is V3 and captures the response contract, which is the evidence that can actually decide the question."
   ],
-  "transact_time_delta_s": [
-   0.0,
-   0.0,
-   0.0,
-   0.0,
-   0.0,
-   0.0
-  ],
-  "book_content_changed": 0,
-  "best_ask_identical_on_both_reads": 6,
-  "last_change_age_at_first_read_s": [
-   17.01,
-   17.714,
-   522.551,
-   11.206,
-   286.656,
-   93.892
-  ],
-  "last_change_age_at_second_read_s": [
-   37.025,
-   37.747,
-   542.64,
-   31.237,
-   306.705,
-   113.924
-  ]
- },
- "conclusion": "LAST_BOOK_CHANGE",
- "the_decisive_detail": [
-  "Two of the six were inside the 30 s bound on the first read and outside it on",
-  "the second -- twenty seconds later, with the stamp unmoved, the book unchanged",
-  "and the best ask identical. The prices had not gone stale. Only the clock had",
-  "moved, and it was ours."
- ],
- "what_changed_in_the_code": {
-  "admission": "the venue arm of `_entry_freshness` and the gate in `venue_quote` now age OUR READ at the decision instant (MAX_OUR_READ_AGE_S = 10 s, both instants ours) and refuse with OUR_OWN_BOOK_READ_IS_STALE_AT_THE_DECISION_INSTANT",
-  "reported_not_enforced": "the last-change age is carried on every quote as `book_last_moved_s` with `book_is_quiet` against the unchanged 30 s threshold. It informs depth and sizing; it refuses nothing",
-  "untouched": [
-   "PINNACLE_MAX_AGE_S = 30 s on the bookmaker's own observation instant",
-   "MAX_VENUE_QUOTE_AGE_S = 30 s, now as the quiet-book threshold",
-   "the funded lane's own venue_book_age gate, which still refuses on the last-change age and is therefore strictly tighter than the shadow lane"
-  ],
-  "tests": [
-   "tests/test_the_venue_clock_is_parsed.py (section 4, rewritten)",
-   "tests/test_entry_execution_sizing_and_risk.py (the re-ageing pins)",
-   "tests/test_the_entry_lane_acquires_its_own_scope.py (the two-clock split)"
-  ]
- },
- "what_this_is_not": [
-  "NOT a loosening of a freshness bound. No number moved. The 30 s bound was being",
-  "applied to a quantity it cannot measure, and it is now applied to the quantity it",
-  "can, with a tighter limit (10 s) than the one it replaced.",
-  "NOT a claim that a quiet book is a good book. A market that has not moved in nine",
-  "minutes may be thin, and that is what the depth and sizing evidence is for.",
-  "NOT a claim that any candidate will now qualify. Two of the most recent priced",
-  "candidates carried NEGATIVE net edge and one carried a void-rule conflict; those",
-  "are economic and payout answers and this changes neither."
- ],
- "the_honest_limit_of_this_determination": [
-  "One window, six contracts, one sport. 6/6 is unanimous and the mechanism is not",
-  "subtle, but a second window on a different sport would strengthen it, and the",
-  "probe is a dispatch away. If a later window shows the stamp tracking our request,",
-  "this reading is wrong and the code has to go back."
- ]
+
+  "the_lane_still_refuses_and_this_is_the_honest_state": "With no subscription and no revalidation wired, every venue read reaches BOOK_CURRENCY_NOT_ESTABLISHED and the candidate refuses. That is missing evidence, named, and not a claim that any book was stale. It is also not a completed delivery: closing it is M1."
 }

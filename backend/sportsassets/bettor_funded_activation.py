@@ -91,15 +91,94 @@ R_OWNER_AUTH_ACCOUNT = "THE_OWNERS_AUTHORIZATION_NAMES_A_DIFFERENT_ACCOUNT"
 R_OWNER_AUTH_VENUE = "THE_OWNERS_AUTHORIZATION_NAMES_A_DIFFERENT_VENUE"
 R_OWNER_AUTH_LIMITS = "THE_OWNERS_AUTHORIZATION_COVERS_DIFFERENT_LIMITS"
 
-#: The owner's four limits, and the FROZEN RAIL each one tightens. A rail
-#: absent from this map is untouched by any approval.
+#: The owner's limits, and the FROZEN RAIL each one tightens. A rail absent from
+#: this map is untouched by any approval.
+#:
+#: A DEFECT THIS CLOSES, found by the independent audit. This map listed FOUR
+#: names while `bettor_entry_execution.APPROVED_LIMIT_TO_RAIL` -- the map
+#: enforcement actually applies -- listed FIVE, having gained
+#: `event_exposure_usd` when that rail was made reachable. The consequence was
+#: silent and one-directional: an owner approving a small pilot through this
+#: path tightened capital, per-order, correlated exposure and the loss stop, and
+#: left MAX_EVENT_EXPOSURE at its frozen $1,000 because there was no name here to
+#: tighten it by. The two maps are now the same five names, and a test pins them
+#: equal so they cannot drift again.
 LIMIT_TO_RAIL = {
     "capital_usd": "MAX_CAPITAL_DEPLOYED",
     "per_order_usd": "MAX_MARKET_EXPOSURE",
     "max_exposure_usd": "MAX_CORRELATED_EXPOSURE",
     "daily_loss_stop_usd": "MAX_DRAWDOWN",
+    "event_exposure_usd": "MAX_EVENT_EXPOSURE",
 }
 REQUIRED_LIMITS = tuple(LIMIT_TO_RAIL)
+
+#: ── WHAT `daily_loss_stop_usd` ACTUALLY GOVERNS. IT IS NOT DAILY. ────
+#:
+#: Also from the audit, and it is a naming defect with real consequences for what
+#: an owner thinks they approved. The key says "daily". The rail it maps to,
+#: MAX_DRAWDOWN, is computed in `bettor_entry_execution.exposure_from_rows` as
+#:
+#:     realised losses in full
+#:   + the ENTIRE cost basis of every unsettled position whose mark is
+#:     unavailable, counted as a total loss
+#:   + the proposed position's cost
+#:
+#: over the WHOLE OPEN BOOK. There is no date filter, no calendar boundary and
+#: no reset: nothing in that computation references a day. So the number is a
+#: CUMULATIVE WORST-CASE LOSS CEILING on the open book, and a $20 approval does
+#: not mean "stop after $20 of losses today and resume tomorrow" -- it means the
+#: lane refuses the next entry once worst-case exposed loss reaches $20 and keeps
+#: refusing until positions settle or mark better.
+#:
+#: THE KEY IS NOT RENAMED, because approvals already recorded use it and silently
+#: re-keying an owner's record is worse than an inaccurate label. The accurate
+#: label travels with it everywhere it is reported, and the accurate synonym is
+#: accepted on input.
+LIMIT_LABELS = {
+    "daily_loss_stop_usd": {
+        "rail": "MAX_DRAWDOWN",
+        "the_name_says": "a daily loss stop",
+        "what_it_actually_is": (
+            "a CUMULATIVE worst-case loss ceiling on the open book. No daily "
+            "window exists: exposure_from_rows applies no date filter and the "
+            "value "
+            "never resets"),
+        "computed_as": ("realised losses in full, plus the entire cost basis of "
+                        "every unsettled position whose mark is unavailable "
+                        "(counted as a total loss), plus the proposed "
+                        "position's cost"),
+        "what_an_owner_should_read_it_as": (
+            "refuse the next entry once worst-case exposed loss reaches this "
+            "number, and keep refusing until positions settle or mark better"),
+        "accurate_synonym_accepted_on_input": "cumulative_loss_stop_usd",
+        "a_real_daily_stop_would_need": (
+            "a date-bounded realised-loss query and a defined reset boundary "
+            "with a timezone. Neither exists, and neither is invented here"),
+    },
+    "event_exposure_usd": {
+        "rail": "MAX_EVENT_EXPOSURE",
+        "tightening_is_not_enforcing": (
+            "the rail can now be tightened by an approval, and "
+            "bettor_entry_execution records separately that OPEN_BOOK_SQL "
+            "selects no event key, so it cannot see other positions on the "
+            "same event. A pilot wanting a real event bound holds one position "
+            "at a time until that is closed"),
+    },
+}
+
+#: The accurate synonym, accepted so a future approval can be written correctly
+#: without breaking the ones already recorded.
+LIMIT_SYNONYMS = {"cumulative_loss_stop_usd": "daily_loss_stop_usd"}
+
+
+def normalise_limit_keys(proposed) -> dict:
+    """Accept the accurate synonym for the mislabelled key. Never silently
+    overwrite a value the owner actually supplied under the old name."""
+    got = dict(proposed or {})
+    for alias, canonical in LIMIT_SYNONYMS.items():
+        if alias in got and got.get(canonical) in (None, ""):
+            got[canonical] = got.pop(alias)
+    return got
 
 
 def _truthy(raw) -> bool:
@@ -352,6 +431,13 @@ MAX_VENUE_CLOCK_SKEW_AHEAD_S = 2.0
 
 R_BOOK_AGE_UNMEASURED = "THE_VENUE_BOOK_AGE_IS_UNMEASURED"
 R_BOOK_STALE = "THE_VENUE_BOOK_IS_OLDER_THAN_THE_ADMITTED_BOUND"
+#: THE NAMED UNRESOLVED RESULT. Distinct from R_BOOK_STALE on purpose: that one
+#: is an observation, this one is the absence of one, and a report that calls
+#: them the same thing tells an owner the market was slow when the truth is that
+#: we cannot see it.
+R_BOOK_CURRENCY_NOT_ESTABLISHED = "THE_VENUE_BOOK_CURRENCY_IS_NOT_ESTABLISHED"
+R_BOOK_CURRENCY_CONTRADICTED = \
+    "THE_RESPONSE_CONTRACT_DATES_THIS_BOOK_OUTSIDE_THE_BOUND"
 R_BOOK_CLOCK_INCONSISTENT = \
     "THE_VENUE_CLOCK_IS_AHEAD_OF_OUR_RECEIPT_BEYOND_THE_ALLOWED_SKEW"
 
@@ -378,8 +464,28 @@ def _check(name, met, detail, evidence=None, basis=None) -> dict:
 
 
 def venue_book_age(market_data, *, decision_at, received_at=None,
-                   requested_at=None, now=None) -> dict:
+                   requested_at=None, now=None, observation=None,
+                   subscription=None, revalidation=None) -> dict:
     """HOW OLD IS THIS BOOK AT THE DECISION INSTANT -- or UNMEASURED.
+
+    ONE SHARED ADMISSION RULE. The verdict on whether the book's currency is
+    ESTABLISHED comes from `bettor_venue_currency`, which is the same module the
+    scheduled entry lane consumes and the same module the funded exit path
+    consumes. Three lanes, one contract: two lanes admitting the same book on
+    two different rules is the drift this is built to prevent, and a test pins
+    the bound equal across them.
+
+    WHAT THIS FUNCTION STILL OWNS, and it is not freshness: the three instants,
+    the acquisition interval, the decision lag, and the CLOCK-CONSISTENCY check
+    (a stamp far after our receipt is skew, and an hour in the future is not an
+    hour fresh). Those are measured observations and bounded policy allowances,
+    reported under `measured` and `policy` so the two are never read as one.
+
+    WHAT IT NO LONGER DOES. It no longer returns ok=True because
+    `transactTime` is inside 30 s. What that field denotes is UNRESOLVED, so a
+    recent value is not an upstream-freshness certificate any more than an old
+    one is proof of staleness. A recent stamp with no establishing mechanism
+    now returns the named unresolved refusal.
 
     THE ONE PLACE THIS POLICY IS EXPRESSED FOR A FUNDED READ. The funded exit
     selector applied NO book freshness check at all: it read the payload and
@@ -475,14 +581,105 @@ def venue_book_age(market_data, *, decision_at, received_at=None,
                          % (-age, MAX_VENUE_CLOCK_SKEW_AHEAD_S)),
                     weaker_check=("no received_at was supplied, so the skew "
                                   "was measured against decision_at"))
-    if age > MAX_VENUE_BOOK_AGE_S:
+    # ── THE STAMP'S AGE IS RECORDED AND DOES NOT DECIDE ──────────────
+    #
+    # THE SECOND HALF OF THE SAME CORRECTION. This arm used to return
+    # R_BOOK_STALE whenever `decision_at - transactTime` exceeded the bound. That
+    # reads an old stamp as an OBSERVATION that the book is stale, and what the
+    # field denotes is UNRESOLVED -- so it cannot support that reading any more
+    # than a recent value can support the opposite one. Both directions were
+    # wrong and both are withdrawn.
+    #
+    # NOTHING IS LOOSENED BY THIS. A book whose stamp is beyond the bound and
+    # whose currency is unestablished still refuses -- under the accurate name,
+    # R_BOOK_CURRENCY_NOT_ESTABLISHED. R_BOOK_STALE is now returned only when a
+    # mechanism ESTABLISHED a book-state age and that age is past the bound,
+    # which is an observation and deserves the word.
+    out["stamp_beyond_the_bound"] = bool(age > MAX_VENUE_BOOK_AGE_S)
+    out["stamp_age_does_not_decide"] = (
+        "the venue stamp's age is reported. It refuses nothing and admits "
+        "nothing, because what marketData.transactTime denotes is unresolved")
+    # ── AND NOW THE SHARED RULE DECIDES, not the stamp's age ──────────
+    #
+    # Everything above is a measured observation or a bounded allowance. None of
+    # it establishes that the representation we hold is the venue's current
+    # book. That verdict is `bettor_venue_currency`'s, from the response's own
+    # contract, a live subscription, or a conditional revalidation -- and where
+    # it cannot be established the result is a NAMED UNRESOLVED one, which is
+    # not the claim that the book is stale.
+    return _apply_shared_currency_rule(
+        out, age=age, decision_at=d_at, stamped=stamped,
+        observation=observation, subscription=subscription,
+        revalidation=revalidation, received_at=received_at)
+
+
+def _apply_shared_currency_rule(out, *, age, decision_at, stamped,
+                                observation, subscription, revalidation,
+                                received_at) -> dict:
+    """The one gate all three lanes pass through. Separated so a reader can see
+    that the funded path adds requirements and removes none."""
+    from . import bettor_venue_currency as _vc
+
+    verdict = _vc.evaluate(now=decision_at, observation=observation,
+                           subscription=subscription,
+                           revalidation=revalidation, venue_ts=stamped,
+                           our_receipt_at=received_at,
+                           bound_s=MAX_VENUE_BOOK_AGE_S)
+    out = dict(out)
+    out["shared_admission_rule"] = "bettor_venue_currency.evaluate"
+    out["book_currency"] = verdict
+    # MEASURED OBSERVATIONS AND POLICY ALLOWANCES, SPLIT. The first are
+    # subtractions between recorded instants; the second are numbers we chose.
+    out["measured"] = {
+        "venue_stamp_age_at_decision_s": round(age, 3),
+        "acquisition_s": out.get("acquisition_s"),
+        "decision_lag_after_receipt_s": out.get("decision_lag_after_receipt_s"),
+        "stamp_after_our_receipt_s": out.get("stamp_after_our_receipt_s"),
+        "established_book_state_age_s": verdict.get("book_state_age_s"),
+        "what_none_of_these_establish": (
+            "the venue stamp's age is a subtraction involving a field whose "
+            "meaning is unresolved, and the other three are intervals between "
+            "two of OUR OWN instants. Only "
+            "`established_book_state_age_s` rests on a published contract"),
+    }
+    out["policy"] = {
+        "bound_s": MAX_VENUE_BOOK_AGE_S,
+        "skew_allowance_s": MAX_VENUE_CLOCK_SKEW_AHEAD_S,
+        "these_are_allowances_we_chose": True,
+        "shared_with": ["workers.ext_pinnacle_loop (entry)",
+                        "bettor_funded_management (exits)",
+                        "bettor_funded_activation (this)"],
+    }
+    if verdict["verdict"] == _vc.CONTRADICTED:
+        return dict(out, ok=False, refusal=R_BOOK_CURRENCY_CONTRADICTED,
+                    why=verdict["why"])
+    # R_BOOK_STALE, EARNED. A mechanism established a book-state age and that
+    # age is past the bound: an OBSERVATION that the book is old, which is what
+    # the word means and the only case that keeps it.
+    if any("past the" in (m.get("why") or "")
+           for m in verdict["mechanisms_unavailable"]
+           if m.get("mechanism") in _vc.ESTABLISHING_MECHANISMS):
         return dict(out, ok=False, refusal=R_BOOK_STALE,
-                    why=("at the decision instant the venue's own clock puts "
-                         "this book %.1f s old against a %.0f s bound"
-                         % (age, MAX_VENUE_BOOK_AGE_S)))
+                    why=("a mechanism reported this book's state and it is "
+                         "past the %.0f s bound. %s"
+                         % (MAX_VENUE_BOOK_AGE_S, verdict["why"])),
+                    mechanisms_unavailable=verdict["mechanisms_unavailable"])
+    if not _vc.admits(verdict):
+        return dict(out, ok=False, refusal=R_BOOK_CURRENCY_NOT_ESTABLISHED,
+                    unmeasured=True,
+                    this_is_not_a_stale_book=(
+                        "the venue stamp reads %.1f s old and that is reported, "
+                        "not relied on. No mechanism established that this is "
+                        "the current book, which is missing evidence rather "
+                        "than an observation of staleness" % age),
+                    mechanisms_unavailable=verdict["mechanisms_unavailable"],
+                    why=verdict["why"])
     return dict(out, ok=True, refusal=None,
-                why=("at the decision instant the venue's own clock puts "
-                     "this book %.1f s old" % age))
+                why=("the book's currency is ESTABLISHED by %s at %.1f s, "
+                     "inside the %.0f s bound. The venue stamp reads %.1f s "
+                     "old and is reported, not relied on"
+                     % (verdict["mechanism"], verdict["book_state_age_s"],
+                        MAX_VENUE_BOOK_AGE_S, age)))
 
 
 async def _freshness_check(conn) -> dict:
@@ -904,13 +1101,17 @@ async def readiness(conn, *, experiment_id=None, hours: int = 168,
     stored = await _state(conn, LIMITS_KEY) or {}
     approved = bool(stored.get("approved"))
     proposed = dict(stored.get("proposed") or {})
+    proposed = normalise_limit_keys(proposed)
     eff = EX.effective_limits(proposed)
     checks.append(_check(
         "limits_recorded_and_complete",
         bool(proposed) and not [k for k in REQUIRED_LIMITS
                                 if proposed.get(k) in (None, "")],
         ("recorded: %s" % (proposed or "nothing")),
-        {"proposed": proposed, "required": list(REQUIRED_LIMITS)},
+        {"proposed": proposed, "required": list(REQUIRED_LIMITS),
+         "labels": LIMIT_LABELS,
+         "required_matches_enforcement": (
+             sorted(LIMIT_TO_RAIL) == sorted(EX.APPROVED_LIMIT_TO_RAIL))},
         "STORED_APPROVAL_ROW"))
     checks.append(_check(
         "limits_approved_by_the_owner", approved,
@@ -1031,7 +1232,7 @@ async def authorize(conn, *, account_id: str, venue: str, by: str,
         return _stop(R_VENUE_UNKNOWN, known=sorted(VENUE_CLASS))
 
     stored = await _state(conn, LIMITS_KEY) or {}
-    proposed = dict(stored.get("proposed") or {})
+    proposed = normalise_limit_keys(dict(stored.get("proposed") or {}))
     missing = [k for k in REQUIRED_LIMITS if proposed.get(k) in (None, "")]
     if missing:
         return _stop(R_LIMITS_MISSING, missing=missing)

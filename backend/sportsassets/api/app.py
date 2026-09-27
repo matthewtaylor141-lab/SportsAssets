@@ -4097,6 +4097,52 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
 
     cyc = cycle or {}
     refus = {k: v for k, v in (cyc.get("refusals") or {}).items() if v}
+    # ── THE FUNNEL, PER CANDIDATE, WITH ITS FIRST REFUSAL ────────────
+    #
+    # A refusal census says how often each rule fired; it does not say what
+    # happened to any one candidate. The ledger does, and it is the row an owner
+    # asks for: this contract, mapped, and THIS is the step that ended it.
+    _ledger = [r for r in (cyc.get("mapped_candidate_ledger") or [])
+               if isinstance(r, dict)]
+
+    def _first_ref(r):
+        for k in ("first_refusal", "refusal", "stopped_at", "reason"):
+            if r.get(k):
+                return str(r[k])
+        return "NONE_RECORDED"
+
+    _funnel = {}
+    for _r in _ledger:
+        _funnel[_first_ref(_r)] = _funnel.get(_first_ref(_r), 0) + 1
+
+    # ── ACTUAL ORDERS AND FILLS. A VALUATION ROW IS NOT AN ORDER. ────
+    #
+    # `written` counts valuations -- rows recording what the source said and
+    # what we decided. Reading that number as activity is the single easiest way
+    # to mistake this lane for a trading one, so the order and fill counts are
+    # read from the order tables and reported beside it.
+    _orders = {"queried": False, "orders": None, "fills": None}
+    try:
+        _orows = await conn.fetch(
+            """
+            SELECT count(*)::int                                AS orders,
+                   count(*) FILTER (WHERE o.filled_qty > 0)::int AS filled,
+                   coalesce(sum(o.filled_qty), 0)::float         AS filled_qty
+              FROM rn1x_orders o
+              JOIN rn1x_positions p ON p.position_id = o.position_id
+             WHERE p.provenance LIKE 'AUTONOMOUS_ENTRY%'
+            """)
+        _o = dict(_orows[0]) if _orows else {}
+        _orders = {"queried": True,
+                   "orders": _o.get("orders"),
+                   "orders_with_a_fill": _o.get("filled"),
+                   "filled_quantity": _o.get("filled_qty")}
+    except Exception as exc:                                   # noqa: BLE001
+        _orders = {"queried": True, "orders": None, "fills": None,
+                   "unreadable": type(exc).__name__,
+                   "why": ("the order tables could not be read for this "
+                           "provenance; the count is UNKNOWN, not zero")}
+
     out["operating"] = {
         "section": "Bettor EV Engine — operating",
         "read_this_first": True,
@@ -4131,8 +4177,16 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
             "admissible_now": opps.get("admissible_count"),
             "refusals_that_fired": refus,
             "refusal_total": sum(int(v) for v in refus.values()),
-            "first_refusal_per_candidate":
-                "opportunities.first_refusal_per_mapped_candidate",
+            # THE PER-CANDIDATE FUNNEL, INLINE. Not a pointer: the whole point
+            # is that an owner reading this view sees which step ended each
+            # mapped contract without following a path somewhere else.
+            "mapped_candidates": len(_ledger),
+            "first_refusal_per_candidate": _funnel,
+            "first_refusal_per_candidate_rows": _ledger[:40],
+            "first_refusal_per_candidate_is": (
+                "one row per MAPPED candidate and the first step that ended "
+                "it. The census in `refusals_that_fired` counts rule firings "
+                "across all candidates and is a different number"),
             "a_no_trade_is_a_result": (
                 "a candidate refused by a named rule on observed inputs is a "
                 "DECISION. An engine that could not evaluate anything and an "
@@ -4153,6 +4207,15 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
             # truth is "not carried here".
             "held_inventory_rows": len((ev or {}).get("inventory") or []),
             "held_inventory": ((ev or {}).get("inventory") or [])[:10],
+            # ── ORDERS AND FILLS, READ FROM THE ORDER TABLES ──────────
+            "orders_and_fills": _orders,
+            "a_valuation_row_is_not_an_order": (
+                "`last_completed_cycle.written` counts VALUATIONS: rows saying "
+                "what the source priced and what this engine decided. A "
+                "valuation is not an order, an order is not a fill, and a fill "
+                "is not a closed position. The counts in `orders_and_fills` are "
+                "read from the order tables; where they are zero, the strategy "
+                "placed nothing"),
             "modelled_not_submitted": (
                 "every order and fill in this book is MODELLED against observed "
                 "depth. No order was submitted to any venue and no capital is "
@@ -4231,6 +4294,66 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
                 "`account_selected_and_clean`, `limits_recorded_and_complete` "
                 "and `limits_approved_by_the_owner` are owner decisions"),
         },
+
+        # 7 · THE BINDING BLOCKER ON AUTONOMOUS TRADING, NAMED AND OWNED.
+        #
+        # Separate from funded activation, and it is the reason the strategy's
+        # own book is empty. Two of the three are established facts about the
+        # market that must not be waived; the first is missing evidence and is
+        # engineering.
+        "binding_blockers_on_autonomous_trading": [
+            {
+                "blocker": "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED",
+                "kind": "MISSING_EVIDENCE_AND_UNFINISHED_ENGINEERING",
+                "owner": "engineering",
+                "what_it_is": (
+                    "no mechanism with a published contract establishes that a "
+                    "venue book we read is current within 30 s. Our own "
+                    "receipt instant cannot do it -- a cached snapshot "
+                    "returned in 20 ms passes any receipt-age check -- and "
+                    "what `marketData.transactTime` denotes is UNRESOLVED"),
+                "explicitly_not": (
+                    "a finding that any book was stale. It is the absence of "
+                    "evidence that one was current"),
+                "what_clears_it": (
+                    "M1: subscribe the lane's mapped candidates to the venue's "
+                    "market-data socket and pass per-slug liveness and "
+                    "last-update instants to venue_quote(subscription=...). "
+                    "The repository already speaks the protocol. M2: if the "
+                    "book endpoint emits ETag or Last-Modified, a conditional "
+                    "re-request answered 304 also clears it"),
+                "evidence_required": (
+                    "the admin venue-clock probe V3 reporting, per read, "
+                    "whether a cache is in the path and whether a validator "
+                    "is emitted"),
+                "a_withdrawn_shortcut": (
+                    "this was briefly closed by moving admission onto our own "
+                    "receipt instant, on a probe reading that six unchanged "
+                    "samples establish the stamp is a last-change stamp. A "
+                    "cache replaying one representation predicts the identical "
+                    "observation, so it establishes nothing, and the gate it "
+                    "produced would certify a four-minute-old snapshot. "
+                    "Withdrawn"),
+            },
+            {
+                "blocker": "VOID_ABANDONMENT_RULE_CONFLICTS_WITH_BOOK_RULE",
+                "kind": "ESTABLISHED_PAYOUT_CONFLICT",
+                "owner": "not clearable by engineering",
+                "what_it_is": ("the venue's void/abandonment rule and the "
+                               "bookmaker's disagree, so the two contracts do "
+                               "not pay on the same event"),
+                "must_not_be_waived": True,
+            },
+            {
+                "blocker": "NO_ACTION_HAS_POSITIVE_NET_EDGE",
+                "kind": "ESTABLISHED_ECONOMICS",
+                "owner": "not clearable by engineering",
+                "what_it_is": ("where a candidate is priced, p is close to the "
+                               "ask and the cost model closes the gap. A "
+                               "NO_TRADE here is a correct decision"),
+                "must_not_be_waived": True,
+            },
+        ],
     }
 
     out["open_limitations"] = {
@@ -4240,7 +4363,15 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
             "produce the same field and opposite readings -- so the "
             "explicit refusal is retained and the 30 s limits are unmoved. "
             "institutional_book's 5 s contract measures OUR CACHED COPY "
-            "and does not transfer to a read made at the decision"),
+            "and does not transfer to a read made at the decision. Nor does "
+            "our own receipt instant: a snapshot an intermediary cached "
+            "minutes ago and returned in 20 ms satisfies any receipt-age "
+            "check, and the faster the answer the stronger the false "
+            "certificate. Resampling cannot close it either -- a quiet market "
+            "and a cache predict the same unchanged bytes. What closes it is a "
+            "published mechanism: a live market-data subscription, or a "
+            "conditional revalidation the origin answers 304. See "
+            "bettor_venue_currency"),
         "settlement_compatibility": (
             "PER FIXTURE, at evaluation time, from the venue's own prose. "
             "Where a rule is not stated the comparison returns UNKNOWN and "
@@ -9397,6 +9528,7 @@ async def api_venue_clock_probe(slugs: str = Query(...),
     from ..workers import ext_pinnacle_loop as loop
     from .. import bettor_book_snapshot as bs
     from .. import bettor_market_stream as ms
+    from .. import bettor_venue_currency as vcur
 
     def _sha(md) -> str:
         blob = json.dumps(
@@ -9439,6 +9571,25 @@ async def api_venue_clock_probe(slugs: str = Query(...),
             "best_ask": snap.get("BEST_ASK"),
             "displayed_ask_depth": (
                 (snap.get("DISPLAYED_DEPTH_AT_T0") or {}).get("ask")),
+            # ── THE RESPONSE'S OWN CONTRACT. THIS IS THE DECISIVE PART.
+            #
+            # Two reads returning the same bytes is explained equally well by a
+            # quiet market and by a cache, and the first run of this probe
+            # captured no headers at all -- which is why its result was read as
+            # a determination it could not support. `Date`, `Age` and
+            # `Cache-Control` separate the two hypotheses directly: a cache hit
+            # says so, and Date minus Age dates the representation we hold.
+            "http_observation": (book or {}).get("http_observation"),
+            "http_observer": (book or {}).get("http_observer"),
+            "contract": vcur.read_contract((book or {}).get(
+                "http_observation")),
+            # And the verdict the gate would reach on this read, with no
+            # subscription and no revalidation supplied -- which is exactly the
+            # state the scheduled lane is in.
+            "currency_verdict_as_the_gate_sees_it": vcur.evaluate(
+                now=got, observation=(book or {}).get("http_observation"),
+                venue_ts=ep, our_receipt_at=got,
+                bound_s=loop.MAX_VENUE_QUOTE_AGE_S),
         }
 
     want = [s.strip() for s in str(slugs or "").split(",") if s.strip()][:6]
@@ -9465,14 +9616,41 @@ async def api_venue_clock_probe(slugs: str = Query(...),
                        - first["returned_at_epoch_s"], 6))
         row["book_sha_changed"] = (None if (s1 is None or s2 is None)
                                    else s1 != s2)
+        # ── THE QUESTION THE DELTAS CANNOT ANSWER, AND WHAT CAN.
+        #
+        # An identical stamp with an identical book is the prediction of BOTH
+        # live hypotheses -- a quiet market, and a cache replaying the same
+        # representation -- so the deltas above cannot choose between them. The
+        # headers can, and this row says which way they came down or that they
+        # were not there.
+        c1 = (first.get("contract") or {})
+        c2 = (second.get("contract") or {})
+        row["headers_were_captured"] = bool(c1.get("headers_present")
+                                            or c2.get("headers_present"))
+        row["served_from_cache"] = {"first": c1.get("served_from_cache"),
+                                    "second": c2.get("served_from_cache")}
+        row["origin_generated_at"] = {
+            "first": c1.get("origin_generated_at_epoch_s"),
+            "second": c2.get("origin_generated_at_epoch_s")}
+        row["revalidation_possible"] = {
+            "first": c1.get("revalidation_possible"),
+            "second": c2.get("revalidation_possible")}
+        row["what_the_identical_bytes_mean"] = (
+            "UNRESOLVED without headers: a quiet market and a cached "
+            "representation predict the same identical stamp and the same "
+            "identical book, so this pair cannot separate them"
+            if not row["headers_were_captured"] else
+            "the headers below, not the deltas above, are what separates a "
+            "quiet market from a cached representation")
         pairs.append(row)
 
     return {
-        "version": "VENUE_CLOCK_OBSERVATIONS_V2",
+        "version": "VENUE_CLOCK_OBSERVATIONS_V3_WITH_THE_RESPONSE_CONTRACT",
         "reads_only": True, "submits_orders": False,
         "classifies_semantics": False,
         "changes_admission": False,
         "configured_limit_s": loop.MAX_VENUE_QUOTE_AGE_S,
+        "currency_policy": vcur.describe(),
         "pairs": pairs,
         "reading": (
             "These are OBSERVATIONS. Two samples of a few contracts do not "
@@ -9480,6 +9658,16 @@ async def api_venue_clock_probe(slugs: str = Query(...),
             "book and a stalled feed look identical, a stamp can advance "
             "for reasons other than a response, and this is not a sample. "
             "No semantics is inferred here and no gate moves."),
+        "a_conclusion_drawn_from_v2_and_withdrawn": (
+            "the 2026-09-27 run of this probe returned six contracts whose "
+            "transactTime and best ask were identical across two reads twenty "
+            "seconds apart, and that was recorded as establishing that the "
+            "stamp is a LAST_BOOK_CHANGE stamp. It does not: a cache serving "
+            "both reads the same representation produces the identical "
+            "observation, and v2 captured no response header on either read, "
+            "so caching was neither shown nor excluded. The conclusion is "
+            "withdrawn; the observation is kept. v3 captures the headers, "
+            "which is the evidence that can actually decide it"),
         "what_the_repo_already_establishes": {
             "institutional_book.FRESHNESS_LIMIT_S": (
                 "5.0 s, measured from BETTOR_RECEIVED_TIMESTAMP -- the age "

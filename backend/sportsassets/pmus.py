@@ -921,11 +921,29 @@ def book_read(client, us_slug: str) -> dict:
     if fn is None:
         out["error"] = "NO_BOOK_FEED_ON_CLIENT"
         return out
+    # THE RESPONSE'S OWN METADATA, RECORDED HERE SO EVERY READER GETS IT. The
+    # SDK ends its request with `return response.json()` and discards `Date`,
+    # `Age`, `Cache-Control`, `ETag` and `Last-Modified` -- the only evidence
+    # that can distinguish a current book from a cached snapshot. Installing the
+    # recorder at THIS level means the entry lane and the funded exit path both
+    # collect it, rather than one of them having its own idea of freshness.
+    try:
+        from . import venue_http_observer as _vho
+        observer = _vho.install(client)
+        obs_path = _vho.book_path(us_slug)
+    except Exception as exc:  # noqa: BLE001 -- bookkeeping never breaks a read
+        observer, obs_path, _vho = {"installed": False,
+                                    "why": type(exc).__name__}, None, None
     try:
         payload = fn(us_slug) or {}
     except Exception as exc:  # noqa: BLE001 -- named, never swallowed
         out["error"] = type(exc).__name__
         return out
+    out["http_observer"] = observer
+    # TAKEN, not peeked: a header set reused on a later read is the exact
+    # failure this evidence exists to detect.
+    out["http_observation"] = (_vho.take(obs_path)
+                               if (_vho is not None and obs_path) else None)
     md = payload.get("marketData") if isinstance(payload, dict) else None
     out["feed"] = "book"
     if md is None:

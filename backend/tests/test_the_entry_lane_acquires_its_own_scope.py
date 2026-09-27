@@ -247,19 +247,25 @@ def test_one_writer_one_reader_one_table():
 def test_the_two_clocks_are_separated_and_the_rule_is_unchanged():
     """Provider staleness and our processing delay are different faults with
     different remedies. The 30-second bound is untouched and governs the
-    sum, exactly as before."""
+    sum, exactly as before.
+
+    The VENUE arm needs a mechanism, and a stub must supply one. Passing a
+    `subscription` is how this test says which published contract admitted the
+    book; without it the venue side is UNKNOWN and the probability arithmetic
+    this test is about could not be reached at all.
+    """
+    from sportsassets import bettor_venue_currency as vc
+
     q = {"observed_at": "2026-09-25T18:00:00Z", "received_at": 1790359215.0}
-    # `read_at` IS OUR RECEIPT INSTANT FOR THE BOOK, and the venue arm ages it
-    # rather than the venue's last-change stamp (established 2026-09-27: the
-    # stamp did not move across two reads twenty seconds apart). The real
-    # `venue_quote` always carries it; a stub without it leaves our read age
-    # unmeasured, which blocks -- correctly.
+    sub = {"alive_at": 1790359229.0, "last_update_at": 1790359228.0}
     f = LOOP._entry_freshness(q, {"venue_ts": 1790359220.0, "age_s": 1.0,
-                                  "read_at": 1790359228.0},
+                                  "read_at": 1790359228.0,
+                                  "subscription": sub},
                               1790359230.0)
+    assert f["venue_currency_verdict"] == vc.ESTABLISHED, f["why"]
     assert f["venue_age_s"] == 2.0
-    assert f["venue_age_basis"] == (
-        "OUR_OWN_RECEIPT_INSTANT_REAGED_AT_THE_DECISION")
+    assert f["venue_age_basis"] == vc.M1_LIVE_SUBSCRIPTION
+    assert f["our_processing_delay_s"] == 2.0
     assert f["pinnacle_age_s"] == 30.0
     assert f["pinnacle_provider_lag_s"] == 15.0
     assert f["pinnacle_our_processing_s"] == 15.0
@@ -269,7 +275,10 @@ def test_the_two_clocks_are_separated_and_the_rule_is_unchanged():
     assert f["fresh"] is True
     # One second more and it refuses, as it did before the split.
     f2 = LOOP._entry_freshness(q, {"venue_ts": 1790359220.0, "age_s": 1.0,
-                                   "read_at": 1790359229.0},
+                                   "read_at": 1790359229.0,
+                                   "subscription": {
+                                       "alive_at": 1790359230.0,
+                                       "last_update_at": 1790359229.0}},
                                1790359231.0)
     assert f2["fresh"] is False
     assert f2["pinnacle_age_s"] == 31.0, "the refusal is the PROBABILITY side"
