@@ -840,3 +840,131 @@ You are right, and I had been leaning on it. So for each control added here, bot
 | the exit path | an exit is **not** blocked by an unreadable venue — `adds_exposure=False` | a caller that omits the flag gets the strict behaviour, so a new entry path written in ignorance is refused |
 
 **And one place the asymmetry is deliberate and stated:** an exit reduces exposure, so requiring an account-wide measurement before a sale would strand inventory exactly when the venue is unreadable. That is a *designed* exemption with its own test, not a gap.
+
+---
+
+# ADDENDUM — the complete reconciliation, 2026-09-27 evening
+
+Built against `92a9ead` on `claude/command-center`. Every row names the
+implementation, the tests, the deployed evidence and the acceptance state. Where
+a row says **IMPLEMENTED** it is a claim about tests, never about production.
+
+## R1 · Fee consumers and accounting reconciliation — **IMPLEMENTED**
+
+| | |
+|---|---|
+| implementation | `bettor_fee_schedule` (θ, banker's rounding, cumulative taker cap), `bettor_funded_book.reconcile_fee` / `order_fee_basis` / `_insert_by_venue_order`, `bettor_entry_execution.walk_fee`, `fee_consumers` (ten consumers traced) |
+| tests | `test_the_corrected_fees_reach_production.py` (36), `test_bettor_fee_schedule.py` (29), `test_the_fee_policy_matches_the_published_page.py` |
+| deployed evidence | **none** |
+| acceptance | IMPLEMENTED. `CUMULATIVE_PRODUCTION_CALLERS = 2`; `SCHEDULE_DISAGREEMENTS` and `STILL_OPEN` are non-empty and listed in the module |
+
+**And a correction landed today.** `bettor_fee_schedule` carried an effective
+date of **2026-09-17 that I had invented**; the venue publishes
+**2026-09-25T04:00:00Z**. Four tests had the wrong date typed into them and were
+passing because they agreed with the defect. Each expectation now derives from the
+schedule's own `effective_from`, and a new test asserts the consequence outright:
+**a 2026-09-17 fill is charged the JULY θ.**
+
+## R2 · Cross-lane risk and concurrency — **IMPLEMENTED, with a named limitation**
+
+| | |
+|---|---|
+| implementation | `bettor_account_exposure.account_exposure` across five paths; `bettor_entry_execution.authorize_submission` refuses `_UNKNOWN/_UNREADABLE/_STALE/_OTHER_ACCOUNT/_EXCEEDED`; `MAX_EXPOSURE_EVIDENCE_AGE_S = 60` |
+| tests | `test_account_exposure_is_not_lane_exposure.py` (17), `test_account_exposure_reaches_enforcement.py` (17) |
+| deployed evidence | **none** |
+| acceptance | IMPLEMENTED — **and the limitation is the point of the row** |
+
+**`capital_path.account_writers()` counts the writers, and counting is not
+controlling.** `live_orders` — real exposure, legacy copier and manual desk alike
+— has **six writer modules** (`analytics/engine.py`, `api/app.py`,
+`live_executor.py`, `workers/copy_sweep.py`, `workers/mirror_live.py`,
+`workers/underdog.py`), and this lane's unique index constrains **none** of them.
+Reported as a **lower bound**: a human at a database prompt, or an operator in the
+venue's own app, is a writer that appears nowhere in this repository and can
+commit the account between our read and our order.
+
+## R3 · Credential isolation and permission enforcement — **OPEN**
+
+| | |
+|---|---|
+| implementation | `provider_key_proxy` keeps the odds key server-side; `REAL_ORDER_SUBMISSION_ENABLED = False`; `POLICY_ADMISSION_ENABLED = False` |
+| tests | `test_the_provider_key_leaves_the_browser.py` (26) |
+| deployed evidence | **none**; no venue account credential exists |
+| acceptance | **OPEN** |
+
+**And I asserted a read-only key option exists on evidence that does not support
+it.** The venue's retail page describes **API-key authentication**; that it
+describes how a key authenticates does not establish that a **read-only scope** is
+offered. The new `credential-capability` workflow job reads the published
+authentication and key pages from the runner and prints, per question, what they
+actually say — including `UNANSWERED BY THIS PAGE`. It sends no credential and
+places no order: **order authority is never tested by sending an order.**
+
+## R4 · Frontend build, typecheck and operator flows — **IMPLEMENTED (build/typecheck VERIFIED locally)**
+
+| | |
+|---|---|
+| implementation | `frontend/` — React 18 + Vite 5 + TypeScript 5.5, `build: tsc -b && vite build` |
+| evidence | `npm ci` installed 81 packages from the committed lockfile; `npm run build` → **`tsc -b` reports zero type errors**, 93 modules transformed, build succeeds in 2.98 s |
+| deployed evidence | the published Command Centre is verified by the `verify` job's tab inventory and guard steps; **not re-run for this build** |
+| acceptance | build and typecheck **pass**; operator-flow verification through the served bundle is still OPEN |
+
+**"No node_modules" was never evidence about the frontend.** It was an
+environment task, and the project's own supported installation resolves it. One
+build warning stands and is not an error: the `Terrain3D` chunk is 522 kB.
+
+## R5 · Contract eligibility and identity — **IMPLEMENTED**
+
+| | |
+|---|---|
+| implementation | stage `3_IDENTITY` in `bettor_external_shadow.STAGES` — fifteen named refusals covering period, market kind, slug decomposition, two-participant structure, title capture, market type and scope |
+| tests | `test_the_venue_response_contract_is_observed.py`, `test_bettor_sport_mapping.py`, the census's own stage tests |
+| deployed evidence | the 24-hour census shows identity refusals firing on real candidates; **all 464 carried both a venue-native slug and a global condition id** |
+| acceptance | IMPLEMENTED |
+
+## R6 · Monitoring, alerts, incident response, rollback, emergency controls — **PARTIALLY IMPLEMENTED**
+
+| | |
+|---|---|
+| implementation | `ops/gate/frozen_gate.sh` (PID locks, PROTECT_DIRS, 15 s health sampling, invalid-run voiding); the desk panel's pause / halt / cancel / revoke, all of which REMOVE authority and none of which grants it; two code constants each needing a release to change |
+| tests | `test_the_desk_controls_are_functional.py`, `test_the_operator_session_is_scoped.py`, `test_the_permission_matrix_is_deliberate.py` |
+| deployed evidence | rollback was executed and verified in an earlier cycle; **not for this build** |
+| acceptance | controls IMPLEMENTED; alerting and a written incident procedure are **OPEN** |
+
+## R7 · Learning, evaluation, capacity and the limits on the promised scope — **PARTIALLY IMPLEMENTED**
+
+| | |
+|---|---|
+| implementation | the pure-Python learning kernel; `bettor_capacity_harness` / `bettor_capacity_fingerprint`; the frozen evaluation protocol with a prespecified stopping rule |
+| tests | `test_the_capacity_probe_cannot_touch_a_strategy_book.py`, `test_the_capacity_probe_says_what_it_measured.py` |
+| deployed evidence | `model_fitting` reports its own status through the authorized readback |
+| acceptance | PARTIAL. `external_source_calibration` has **zero rows**, so `MODEL_TRUST_DRIFT` reads NOT_EVALUABLE and no calibrated claim is available |
+
+**The limit on the promised operating scope, stated plainly:** the autonomous EV
+lane can evaluate, refuse, record and display. It cannot yet produce a defensible
+funded entry, because settlement scope fails on **100%** of candidates,
+calibration has no rows, and the market-data requirement is unmet. Nothing in this
+addendum changes that.
+
+---
+
+## The gate on the release SHA
+
+| run | SHA | identities | new vs baseline | fixed | valid |
+|---|---|---|---|---|---|
+| baseline | `6d75275` | 177 | — | — | yes |
+| release | `02d728c` | 180 | 3 | 0 | yes |
+| release | `92a9ead` | **155** | **3** | **25** | yes |
+
+**The 25 fixed are the four `Crypto`-dependent files**, closed by installing
+`pycryptodome>=3.20` — a dependency **already declared** in `pyproject.toml` and
+simply absent from this container.
+
+**The 3 "new" identities are order-dependent, not release regressions**, and the
+evidence is in the register rather than asserted: all three PASS when their files
+run alone (`test_mirror_live_worker.py` alone gives exactly the 8 baseline
+failures, with `t1` and `w2` passing). The baseline SHA collects **29 fewer test
+files** than HEAD, so the suite's collection order differs between the two runs
+and a different subset of the suite's order-dependent tests surfaces. That is a
+property of the suite, and it is a real debt — it means the identity comparison
+is not perfectly stable across SHAs that add test files.

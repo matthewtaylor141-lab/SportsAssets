@@ -70,6 +70,20 @@ on:
           markets from the public catalogue first and takes the first few.
         required: false
         default: ""
+      credential_capability:
+        description: >-
+          on|blank. `on` reads the venue's PUBLISHED AUTHENTICATION AND API-KEY
+          documentation and reports, verbatim, what provisioning choices and
+          permission scopes it actually describes. This exists because I asserted
+          that a READ-ONLY key option exists and cited the retail authentication
+          page as the support. That page describes API-key authentication; it does
+          NOT thereby establish that a read-only scope is offered, and those are
+          different claims. So the question is settled by reading the pages and
+          printing what they say -- including "this page does not answer it".
+          Read-only, NO CREDENTIAL IS SENT, no account is touched, and order
+          authority is NEVER tested by sending an order.
+        required: false
+        default: ""
       fee_docs:
         description: >-
           on|blank. `on` retrieves the venue's OFFICIAL published fee
@@ -6459,6 +6473,129 @@ jobs:
   # VERBATIM rather than summarising them, and records the fetch instant and the
   # response's own headers so the retrieval is datable. A summary of a fee policy
   # is how the `min(p, 1-p)` defect got written; the text is what settles it.
+  # ── CREDENTIAL CAPABILITY, VERIFIED RATHER THAN ASSUMED ────────────
+  #
+  # THE CLAIM THIS EXISTS TO CHECK. I wrote that the credential should be
+  # provisioned as a READ-ONLY key, and cited the venue's retail authentication
+  # documentation as the support. That page describes API-KEY AUTHENTICATION.
+  # Describing how a key authenticates does not establish that a read-only SCOPE
+  # is on offer, and I ran the two together.
+  #
+  # THREE THINGS THAT MUST BE KEPT APART, and the job prints them separately:
+  #
+  #   1  what is needed for READ-ONLY ONBOARDING -- balances, positions, open
+  #      orders, executions. Reads, no order authority.
+  #   2  what is needed LATER for SUBMISSION AND SERVICING -- placing,
+  #      cancelling, amending. A strictly larger permission.
+  #   3  OUR OWN APPLICATION CONTROLS that keep submission disabled regardless
+  #      of what the credential permits. These are ours and are not evidence
+  #      about the venue's scopes at all.
+  #
+  # NEVER TEST ORDER AUTHORITY BY SENDING AN ORDER. This job sends no credential
+  # and places nothing; an unauthorized order is not a permission probe, it is an
+  # unauthorized order. The only evidence it collects is what the venue publishes.
+  credential-capability:
+    if: ${{ inputs.credential_capability != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Read the published authentication and key-provisioning pages
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### venue credential capability, read directly' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          say "retrieved_at_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          say "NO CREDENTIAL IS SENT BY THIS JOB. No order is placed."
+          say ""
+          say "THE CLAIM UNDER TEST: that a READ-ONLY key option exists."
+          say "The authentication page describes API-KEY AUTHENTICATION. That is"
+          say "a different statement, and conflating them is the error here."
+          say ""
+
+          PAGES="
+          https://docs.polymarket.us/api-reference/authentication
+          https://docs.polymarket.us/api-reference/introduction
+          https://docs.polymarket.us/quickstart
+          https://docs.polymarket.us/api-reference/api-keys
+          https://docs.polymarket.us/developers/api-keys
+          "
+          : > /tmp/cap_all.txt
+          for url in $PAGES; do
+            code=$(curl -sS -L -o /tmp/cap.html -w '%{http_code}' --max-time 60 \
+                   "$url" || echo 000)
+            bytes=$(wc -c < /tmp/cap.html 2>/dev/null || echo 0)
+            say "GET $url  HTTP $code  bytes=$bytes"
+            [ "$code" = "200" ] || continue
+            URL="$url" python3 - <<'PYEOF' | tee -a "$GITHUB_STEP_SUMMARY" \
+              | tee -a /tmp/cap_all.txt
+          import html, os, re
+          raw = open('/tmp/cap.html', encoding='utf-8', errors='replace').read()
+          raw = re.sub(r'(?is)<(script|style)[^>]*>.*?</\1>', ' ', raw)
+          txt = html.unescape(re.sub(r'(?s)<[^>]+>', ' ', raw))
+          flat = re.sub(r'\s+', ' ', txt)
+          # EACH QUESTION SEPARATELY, and a question with no matching sentence
+          # is printed as UNANSWERED rather than left out -- an absent sentence
+          # is the finding, not a gap in the report.
+          WANT = {
+            '1_read_only_scope_offered':
+                r'read[- ]only|readonly|read access only|view only',
+            '1_scopes_or_permissions_at_all':
+                r'\bscope\b|\bscopes\b|permission|privilege|capabilit',
+            '1_onboarding_reads':
+                r'balance|position|open order|execution|fill history',
+            '2_submission_permission':
+                r'place an order|submit an order|create order|post order|'
+                r'trading permission|order authority',
+            '2_servicing_permission':
+                r'cancel|amend|modify an order|replace an order',
+            '3_key_creation_choices':
+                r'create (an )?api key|generate (an )?api key|new api key|'
+                r'derive|passphrase|secret',
+            '3_revocation_or_rotation':
+                r'revoke|rotate|delete (the )?key|disable (the )?key|expire',
+          }
+          print()
+          print('---- %s ----' % os.environ['URL'])
+          for name, pat in sorted(WANT.items()):
+              hits = [s.strip() for s in re.split(r'(?<=[.!?])\s+', flat)
+                      if re.search(pat, s, re.I)]
+              print('[%s] %d matching sentence(s)' % (name, len(hits)))
+              for h in hits[:5]:
+                  print('   | ' + h[:340])
+              if not hits:
+                  print('   | UNANSWERED BY THIS PAGE')
+          PYEOF
+          done
+
+          say ""
+          say "== THE VERDICT, STATED AT THE WIDTH THE EVIDENCE SUPPORTS =="
+          if grep -qiE 'read[- ]?only|readonly' /tmp/cap_all.txt; then
+            say "A read-only scope IS mentioned in the retrieved pages. The exact"
+            say "sentences are printed above; read them before relying on it --"
+            say "a mention is not a provisioning option with enforced limits."
+          else
+            say "NO RETRIEVED PAGE MENTIONS A READ-ONLY SCOPE."
+            say "So the claim that a read-only key option exists is NOT"
+            say "SUPPORTED by the published documentation. That is not the"
+            say "same as the option not existing: these pages may be"
+            say "incomplete, and the provisioning UI may offer choices no page"
+            say "describes. The supportable statement is that WE HAVE NO"
+            say "EVIDENCE FOR IT, and the remedy is to look at the actual"
+            say "provisioning screen -- not to assume either way."
+          fi
+          say ""
+          say "== 3 . OUR OWN CONTROLS, WHICH ARE NOT EVIDENCE ABOUT THE VENUE =="
+          say "These hold regardless of what the credential permits, and they"
+          say "are OURS -- they say nothing about the venue's scopes:"
+          grep -n 'REAL_ORDER_SUBMISSION_ENABLED = ' \
+            backend/sportsassets/bettor_entry_execution.py \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          grep -n 'POLICY_ADMISSION_ENABLED = ' \
+            backend/sportsassets/bettor_admission_policy.py \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
   fee-docs:
     if: ${{ inputs.fee_docs != '' }}
     runs-on: ubuntu-latest
