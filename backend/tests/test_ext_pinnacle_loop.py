@@ -391,7 +391,12 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
 
         monkeypatch.setattr(_pm, "resolve", fake_resolve)
 
-        async def fake_quote(conn_, *, us_slug, intent, now, size=None):
+        async def fake_quote(conn_, *, us_slug, intent, now, size=None,
+                             # THE FRESHNESS MECHANISM the real `venue_quote` now
+                             # takes. A stub that refuses these kwargs cannot stand
+                             # in for it, and the TypeError was reported as an
+                             # entry-lane failure rather than as a stale stub.
+                             subscription=None, revalidation=None):
             assert us_slug.startswith("aec-"), (
                 "the read must get the VENUE's slug, not the global one")
             # THE INTENT IS THE SIDE. A reader that does not receive it
@@ -482,7 +487,12 @@ async def test_a_second_cycle_does_not_double_count(monkeypatch):
             return {"ok": True, "events": [_event()],
                         "received_at": time.time()}
 
-        async def fake_quote(conn_, *, us_slug, intent, now, size=None):
+        async def fake_quote(conn_, *, us_slug, intent, now, size=None,
+                             # THE FRESHNESS MECHANISM the real `venue_quote` now
+                             # takes. A stub that refuses these kwargs cannot stand
+                             # in for it, and the TypeError was reported as an
+                             # entry-lane failure rather than as a stale stub.
+                             subscription=None, revalidation=None):
             return {"ok": True, "ask": 0.52, "api_price": 0.52,
                     "acquisition_price": 0.52, "side_consumed": "ASK",
                     "pays_on": "THE_PRICED_OUTCOME", "intent": intent,

@@ -214,9 +214,19 @@ def test_the_page_reads_the_servers_readiness_not_its_own():
 
 def test_a_partial_limit_set_is_not_an_approved_limit_set():
     """Pure: the refusal does not need a database to be correct."""
+    # FIVE NAMES, AND DERIVED FROM ONE PLACE. This module used to declare its
+    # own four-name tuple beside activation's four and enforcement's five, which
+    # is how `event_exposure_usd` came to be enforceable but not requestable.
+    from sportsassets import bettor_entry_execution as EX
+    from sportsassets import bettor_funded_activation as FA
+
     assert set(CTL.REQUIRED_LIMITS) == {"capital_usd", "per_order_usd",
                                         "max_exposure_usd",
-                                        "daily_loss_stop_usd"}
+                                        "daily_loss_stop_usd",
+                                        "event_exposure_usd"}
+    # ONE POLICY, THREE READERS, AND A TEST THAT STOPS THEM DRIFTING AGAIN.
+    assert set(CTL.REQUIRED_LIMITS) == set(FA.LIMIT_TO_RAIL) \
+        == set(EX.APPROVED_LIMIT_TO_RAIL)
 
 
 # ── against a real database ─────────────────────────────────────────
@@ -273,18 +283,24 @@ async def test_every_control_action_takes_and_reads_back():
                                    proposed={"capital_usd": 250})
         assert bad["ok"] is False
         assert bad["refusal"] == CTL.R_LIMITS_INCOMPLETE
+        # FIVE REQUIRED NAMES, NOT FOUR. `event_exposure_usd` was added because
+        # enforcement already applied that rail and activation listed no name for
+        # it, so an owner's small pilot left MAX_EVENT_EXPOSURE frozen at $1,000.
         assert set(bad["missing"]) == {"per_order_usd", "max_exposure_usd",
-                                       "daily_loss_stop_usd"}
+                                       "daily_loss_stop_usd",
+                                       "event_exposure_usd"}
         assert await CTL._read_state(conn, CTL.LIMITS_KEY) is None
         # A per-order limit above the capital limit is refused too.
         worse = await CTL.set_limits(conn, by="test", proposed={
             "capital_usd": 100, "per_order_usd": 250,
-            "max_exposure_usd": 100, "daily_loss_stop_usd": 50})
+            "max_exposure_usd": 100, "daily_loss_stop_usd": 50,
+            "event_exposure_usd": 50})
         assert worse["ok"] is False, worse
         assert await CTL._read_state(conn, CTL.LIMITS_KEY) is None
         good = await CTL.set_limits(conn, by="test", proposed={
             "capital_usd": 250, "per_order_usd": 25,
-            "max_exposure_usd": 100, "daily_loss_stop_usd": 50})
+            "max_exposure_usd": 100, "daily_loss_stop_usd": 50,
+            "event_exposure_usd": 50})
         assert good["ok"] is True
         assert good["changes_an_enforced_limit"] is False
         assert good["activation_still_blocked"] is True

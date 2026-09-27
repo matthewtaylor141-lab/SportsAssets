@@ -396,7 +396,12 @@ def _stub(monkeypatch, *, ladder=LADDER, prose=VENUE_PROSE,
 
     monkeypatch.setattr(_pm, "resolve", fake_resolve)
 
-    async def fake_quote(conn_, *, us_slug, intent, now, size=None):
+    async def fake_quote(conn_, *, us_slug, intent, now, size=None,
+                         # THE FRESHNESS MECHANISM the real `venue_quote` now
+                         # takes. A stub that refuses these kwargs cannot stand
+                         # in for it, and the TypeError was reported as an
+                         # entry-lane failure rather than as a stale stub.
+                         subscription=None, revalidation=None):
         return {"ok": True, "ask": 0.62, "api_price": 0.62,
                 "acquisition_price": 0.62, "side_consumed": "ASK",
                 "pays_on": "THE_PRICED_OUTCOME", "intent": intent,
@@ -410,6 +415,22 @@ def _stub(monkeypatch, *, ladder=LADDER, prose=VENUE_PROSE,
                 # has to be supplied.
                 "venue_ts": now - 3.0,
                 "age_s": 3.0, "age_basis": "VENUE_TRANSACT_TIME",
+                # AND THE MECHANISM THAT ADMITS IT, STATED. Since freshness
+                # became a shared rule, `venue_ts` establishes nothing on its
+                # own -- what marketData.transactTime denotes is unresolved, so
+                # a recent value is not an upstream-freshness certificate any
+                # more than an old one is proof of staleness. A book is admitted
+                # only when a mechanism with a published contract places its
+                # state inside the bound, and a stub standing in for a real read
+                # has to say which one. Here: a live market-data subscription
+                # (M1), proven alive, whose last update for this market arrived
+                # two seconds ago.
+                #
+                # Omitting it is what the SCHEDULED lane does today, and the
+                # refusal that follows is pinned by its own tests. This test's
+                # subject is the lifecycle downstream of admission.
+                "subscription": {"alive_at": now - 0.5,
+                                 "last_update_at": now - 2.0},
                 "bid": None, "read_at": now, "slug": us_slug}
 
     monkeypatch.setattr(loop, "venue_quote", fake_quote)

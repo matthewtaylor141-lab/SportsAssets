@@ -67,9 +67,21 @@ def test_an_approval_can_only_tighten_a_rail():
                                       "MAX_MARKET_EXPOSURE",
                                       "MAX_CORRELATED_EXPOSURE",
                                       "MAX_DRAWDOWN"}
+    # AND THE RAIL THE FOUR-NAME SET COULD NOT REACH. With no
+    # `event_exposure_usd` in the proposal MAX_EVENT_EXPOSURE stays frozen at
+    # $1,000 beside a $25 per-order cap -- which was the defect. Naming it
+    # tightens it.
+    assert tight["effective"]["MAX_EVENT_EXPOSURE"] == 1000.0
+    five = EX.effective_limits({"capital_usd": 250, "per_order_usd": 25,
+                                "max_exposure_usd": 100,
+                                "daily_loss_stop_usd": 50,
+                                "event_exposure_usd": 25})
+    assert five["effective"]["MAX_EVENT_EXPOSURE"] == 25.0
+    assert "MAX_EVENT_EXPOSURE" in five["tightened"]
     loose = EX.effective_limits({"capital_usd": 9e9, "per_order_usd": 9e9,
                                  "max_exposure_usd": 9e9,
-                                 "daily_loss_stop_usd": 9e9})
+                                 "daily_loss_stop_usd": 9e9,
+                                 "event_exposure_usd": 9e9})
     assert loose["effective"] == loose["frozen"], "an approval never raises"
     assert set(loose["ignored_because_looser"]) == set(FA.REQUIRED_LIMITS)
     assert EX.effective_limits()["effective"] == dict(EX.PREDECLARED_LIMITS)
@@ -138,8 +150,14 @@ async def _seed_accounts(conn):
 
 #: The one limit set these fixtures record and approve. Named, so the
 #: authorization tests can digest exactly what was approved.
+# FIVE NAMES, NOT FOUR. `REQUIRED_LIMITS` gained `event_exposure_usd` because
+# enforcement already applied it and activation did not list it -- so an owner
+# approving this $250 pilot tightened capital, per-order, correlated exposure and
+# the loss stop, and left MAX_EVENT_EXPOSURE frozen at $1,000 beside a $25
+# per-order cap, with no name they could tighten it by.
 _LIMITS = {"capital_usd": 250, "per_order_usd": 25,
-           "max_exposure_usd": 100, "daily_loss_stop_usd": 50}
+           "max_exposure_usd": 100, "daily_loss_stop_usd": 50,
+           "event_exposure_usd": 50}
 
 
 async def _record_and_approve_limits(conn, *, approved=True):
@@ -174,7 +192,13 @@ async def _seed_evidence(conn, *, waived: bool, basis: str | None = None,
     The supported tokens are asserted against the writer's source elsewhere
     in this file.
     """
-    tok = basis or "VENUE_TRANSACT_TIME"
+    # THE DEFAULT MOVED WITH THE VOCABULARY. It was "VENUE_TRANSACT_TIME",
+    # which the freshness check treated as an ESTABLISHED basis. It is not one:
+    # parsing the stamp proves the value was readable, and what it denotes is
+    # unresolved. A fixture that wants readiness to see an established basis has
+    # to name a mechanism with a published contract, which is what the lane
+    # itself now records.
+    tok = basis or "M1_LIVE_MARKET_DATA_SUBSCRIPTION"
     # a cycle whose book reads recorded an ESTABLISHED age basis
     await conn.execute(
         "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
@@ -642,7 +666,17 @@ async def test_a_venue_clock_that_was_never_provided_is_not_a_basis():
     try:
         for tok, want in (("VENUE_CLOCK_NOT_PROVIDED", False),
                           ("VENUE_CLOCK_UNPARSEABLE", False),
-                          ("VENUE_TRANSACT_TIME", True),
+                          # A READABLE STAMP IS NO LONGER AN ESTABLISHMENT, and
+                          # that is the correction. Parsing `transactTime`
+                          # proves we could read a value; what the value denotes
+                          # is unresolved, and a cache replaying one
+                          # representation produces a readable stamp too.
+                          ("VENUE_TRANSACT_TIME", False),
+                          ("NO_MECHANISM_AVAILABLE", False),
+                          # WHAT DOES ESTABLISH IT: a mechanism with a published
+                          # contract.
+                          ("M1_LIVE_MARKET_DATA_SUBSCRIPTION", True),
+                          ("M2_CONDITIONAL_REVALIDATION_304", True),
                           # OUR OWN LATENCY IS NOT AN UPSTREAM AGE. It was
                           # briefly in the established list and it must not
                           # be: see the dedicated counterexample below.
@@ -667,8 +701,9 @@ async def test_a_venue_clock_that_was_never_provided_is_not_a_basis():
             "ext_pinnacle_last_cycle",
             json.dumps({"at": 1.0, "cycle_label": "X",
                         "mapped_candidate_ledger": [
-                            {"venue_clock": {"basis": "VENUE_TRANSACT_TIME",
-                                             "age_at_read_s": None}}]}))
+                            {"venue_clock": {
+                                "basis": "M1_LIVE_MARKET_DATA_SUBSCRIPTION",
+                                "age_at_read_s": None}}]}))
         got = await FA._freshness_check(conn)
         assert got["met"] is None, got
         assert "evidence for it is missing" in got["detail"]
@@ -700,15 +735,29 @@ def test_the_basis_vocabulary_is_the_writers_own():
 
     from sportsassets.workers import ext_pinnacle_loop as LOOP
 
+    from sportsassets import bettor_venue_currency as VC
+
     src = inspect.getsource(LOOP)
+    vsrc = inspect.getsource(VC)
+    # THE ESTABLISHING TOKENS ARE THE CURRENCY MODULE'S, because that is where
+    # the decision is made. One vocabulary, one owner.
     for tok in FA.FRESHNESS_BASIS_ESTABLISHED:
-        assert '"%s"' % tok in src, tok
+        assert '"%s"' % tok in vsrc, tok
+    # AND THE LOOP WRITES ITS BASIS FROM THAT VERDICT, so the two cannot drift.
+    assert 'currency["mechanism"]' in src
     for tok in FA.FRESHNESS_BASIS_UNESTABLISHED:
-        if tok == "NOT_RECORDED":
-            continue          # this check's own word for "no token at all"
-        assert '"%s"' % tok in src, tok
+        if tok in ("NOT_RECORDED",
+                   # this check's own word for "no token at all", and a basis
+                   # the loop no longer emits because the venue arm no longer
+                   # re-ages the stamp to decide anything. It is kept in the
+                   # UNESTABLISHED list so a cycle recorded by an older build
+                   # still reads as unestablished rather than as unknown.
+                   "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION"):
+            continue
+        assert ('"%s"' % tok in src) or ('"%s"' % tok in vsrc), tok
     # and the token an older fixture invented is emitted by nobody
     assert '"VENUE_TRANSACT_TIME_ESTABLISHED"' not in src
+    assert '"VENUE_TRANSACT_TIME_ESTABLISHED"' not in vsrc
 
 
 @pg
@@ -1088,7 +1137,15 @@ def test_transport_latency_is_never_an_upstream_freshness_basis():
         assert tok not in FA.FRESHNESS_BASIS_ESTABLISHED, tok
     # THE ESTABLISHED SET IS THE VENUE'S OWN CLOCK, and only that.
     assert set(FA.FRESHNESS_BASIS_ESTABLISHED) == {
+        "M1_LIVE_MARKET_DATA_SUBSCRIPTION", "M2_CONDITIONAL_REVALIDATION_304"}
+    # AND THE STAMP TOKENS ARE ON THE OTHER SIDE NOW. A readable value is not
+    # an establishment, so they sit with the unestablished set and are labelled
+    # readable-but-not-establishing.
+    assert set(FA.FRESHNESS_BASIS_READABLE_BUT_NOT_ESTABLISHING) == {
         "VENUE_TRANSACT_TIME", "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION"}
+    for tok in FA.FRESHNESS_BASIS_READABLE_BUT_NOT_ESTABLISHING:
+        assert tok in FA.FRESHNESS_BASIS_UNESTABLISHED, tok
+        assert tok not in FA.FRESHNESS_BASIS_ESTABLISHED, tok
     # AND THE POLICY SAYS SO, with the counterexample in it.
     pol = FA.FRESHNESS_ADMISSION_POLICY
     assert "cached minutes ago" in pol["why_transport_latency_is_not_an_age"]

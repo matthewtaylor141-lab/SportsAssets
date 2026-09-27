@@ -113,8 +113,17 @@ R_LIMITS_INCOMPLETE = "LIMIT_SET_INCOMPLETE"
 #: The limit names an activation proposal must carry. A partial set is
 #: refused: "approved limits" with a missing daily loss stop is not an
 #: approved limit set.
-REQUIRED_LIMITS = ("capital_usd", "per_order_usd", "max_exposure_usd",
-                   "daily_loss_stop_usd")
+#:
+#: NOT A THIRD COPY OF THE LIST. This was a literal tuple of four names, beside
+#: `bettor_funded_activation.LIMIT_TO_RAIL`'s four and
+#: `bettor_entry_execution.APPROVED_LIMIT_TO_RAIL`'s five -- which is how
+#: `event_exposure_usd` came to be enforceable but not requestable, leaving
+#: MAX_EVENT_EXPOSURE frozen at $1,000 beside a $25 per-order approval. Three
+#: declarations of one policy will drift again, so this one is DERIVED, and a
+#: test pins all three equal.
+from . import bettor_funded_activation as _FA_LIMITS        # noqa: E402
+
+REQUIRED_LIMITS = tuple(_FA_LIMITS.REQUIRED_LIMITS)
 
 
 def _truthy(raw) -> bool:

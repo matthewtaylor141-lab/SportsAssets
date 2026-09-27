@@ -38,6 +38,8 @@ from __future__ import annotations
 import json
 import time
 
+from . import bettor_venue_currency as _VC
+
 VERSION = "BETTOR_FUNDED_ACTIVATION_V1"
 
 # ── venues, by class ────────────────────────────────────────────────
@@ -341,7 +343,23 @@ async def account_selection(conn, account_id: str) -> dict:
 # The tokens are written by `workers/ext_pinnacle_loop` (see
 # `clock["basis"]` and `v_basis`), and a test asserts that this pair of
 # tuples still matches the ones that module emits.
-FRESHNESS_BASIS_ESTABLISHED = (
+#
+# AND THE LIST ITSELF WAS WRONG, WHICH MATTERS MORE THAN THE SUBSTRING BUG IT
+# REPLACED. It named `VENUE_TRANSACT_TIME` as a basis that ESTABLISHES an
+# upstream age. It does not. What that field denotes is UNRESOLVED -- a response
+# stamp and a last-book-change stamp produce the same value and opposite
+# readings, and an intermediary cache replaying one representation produces it
+# too. A readable stamp is a readable stamp; it is not evidence of currency.
+#
+# WHAT ESTABLISHES CURRENCY IS A MECHANISM WITH A PUBLISHED CONTRACT, and the
+# names are `bettor_venue_currency`'s, so there is one vocabulary rather than
+# two: a live market-data subscription (M1) or a conditional revalidation the
+# origin answered 304 (M2). `Date` minus `Age` (M3) bounds the RESPONSE and not
+# the book, so it is a partial and is deliberately absent from this list.
+FRESHNESS_BASIS_ESTABLISHED = tuple(_VC.ESTABLISHING_MECHANISMS)
+#: Kept because the recorded evidence of earlier cycles uses it, and it is now
+#: labelled for what it is: a stamp we could read, which is not an establishment.
+FRESHNESS_BASIS_READABLE_BUT_NOT_ESTABLISHING = (
     "VENUE_TRANSACT_TIME",
     "VENUE_TRANSACT_TIME_REAGED_AT_THE_DECISION",
 )
@@ -374,7 +392,11 @@ FRESHNESS_BASIS_UNESTABLISHED = (
     "VENUE_CLOCK_NOT_PROVIDED",
     "VENUE_CLOCK_UNPARSEABLE",
     "NOT_RECORDED",
-)
+    "NO_MECHANISM_AVAILABLE",
+    # A READABLE STAMP IS IN THIS LIST NOW, and that is the correction. A cycle
+    # that recorded VENUE_TRANSACT_TIME established that it could PARSE a value,
+    # not that the book was current.
+) + FRESHNESS_BASIS_READABLE_BUT_NOT_ESTABLISHING
 
 
 #: HOW UPSTREAM FRESHNESS IS ADMITTED, as a stated policy rather than a
@@ -405,7 +427,11 @@ FRESHNESS_BASIS_UNESTABLISHED = (
     "VENUE_CLOCK_NOT_PROVIDED",
     "VENUE_CLOCK_UNPARSEABLE",
     "NOT_RECORDED",
-)
+    "NO_MECHANISM_AVAILABLE",
+    # A READABLE STAMP IS IN THIS LIST NOW, and that is the correction. A cycle
+    # that recorded VENUE_TRANSACT_TIME established that it could PARSE a value,
+    # not that the book was current.
+) + FRESHNESS_BASIS_READABLE_BUT_NOT_ESTABLISHING
 
 #: THE BOUND, and it is the SAME NUMBER the scheduled entry lane admits on.
 #: `workers/ext_pinnacle_loop.MAX_VENUE_QUOTE_AGE_S` is the original; a test
