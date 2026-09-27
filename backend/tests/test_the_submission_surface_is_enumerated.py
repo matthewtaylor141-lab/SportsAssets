@@ -171,14 +171,42 @@ def test_unverified_scope_granularity_licenses_only_LOOKING(monkeypatch):
     assert "not one that it carries few" in lic
 
 
-def test_the_read_only_interface_is_a_REQUIREMENT_not_a_control():
-    """A flag saying "do not submit" is weaker than an object with no submit
-    method, and today the diagnostics call the same module the submitting lane
-    calls. Reported as NOT IMPLEMENTED rather than claimed."""
+def test_the_read_only_interface_is_now_a_CONTROL_and_still_not_adoption():
+    """This used to assert NOT IMPLEMENTED. The interface now exists.
+
+    `bettor_read_only_venue.ReadOnlyVenue` satisfies the requirement in the
+    form the requirement itself specified -- mutation names ABSENT rather
+    than guarded -- so asserting the old status would now be asserting a
+    gap that has been closed. What has NOT changed is that the diagnostic
+    call sites still have to be handed it, and the status says so rather
+    than reading as finished.
+    """
     r = SS.READ_ONLY_INTERFACE_REQUIREMENT
-    assert r["status"].startswith("NOT IMPLEMENTED")
+    assert "NOT IMPLEMENTED" not in r["status"]
+    assert r["status"].startswith("IMPLEMENTED")
+    assert "bettor_read_only_venue" in r["status"]
+    # The reasoning that motivated it is preserved, not deleted with the gap.
     assert "a flag is checked at one site" in r["why_a_flag_is_weaker"]
-    assert "same `pmus` module" in r["what_exists_today"]
+    # And adoption is still open, reported rather than claimed.
+    assert "ADOPTION at each diagnostic call site is separate work" in \
+        r["status"]
+    assert "adoption()" in r["status"]
+    assert "have not" in r["what_exists_today"]
+
+
+def test_the_interface_it_names_actually_refuses_the_enumerated_mutations():
+    """The status is only true if the object it names behaves that way."""
+    from sportsassets import bettor_read_only_venue as RO
+    v = RO.read_only_venue()
+    for name in sorted(SS.MUTATION_NAMES):
+        assert not hasattr(v, name), name
+
+
+def test_the_permission_granularity_is_still_unverified():
+    """Constraining our interface says nothing about the credential's scope."""
+    r = SS.READ_ONLY_INTERFACE_REQUIREMENT
+    assert "permission granularity" in r["still_unverified"]
+    assert "not the credential's scope" in r["still_unverified"]
 
 
 def test_the_enumeration_states_what_a_source_read_cannot_settle():

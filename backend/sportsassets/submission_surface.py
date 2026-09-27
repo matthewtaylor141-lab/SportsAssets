@@ -157,11 +157,24 @@ READ_ONLY_INTERFACE_REQUIREMENT = {
         "a flag is checked at one site and can be bypassed by a new call site "
         "written in ignorance. An object that has no submit method cannot be "
         "made to submit by any caller"),
-    "status": "NOT IMPLEMENTED -- stated as a requirement, not as a control",
+    "status": (
+        "IMPLEMENTED as `bettor_read_only_venue.ReadOnlyVenue`: an object "
+        "whose mutation names are ABSENT rather than guarded, so `hasattr` "
+        "is False and attribute lookup fails before any argument is "
+        "evaluated. It is an ALLOWLIST of reads, not a denylist of writes, "
+        "so a sixth mutation added later is unreachable until somebody "
+        "allowlists it by name -- the denylist failure mode this repository "
+        "has already shipped twice. ADOPTION at each diagnostic call site "
+        "is separate work and `bettor_read_only_venue.adoption()` reports "
+        "which still import `pmus` directly rather than claiming they were "
+        "converted"),
     "what_exists_today": (
-        "the diagnostics call the same `pmus` module the submitting lane calls. "
-        "The gates above stand in front of a funded order, but the module "
-        "boundary does not separate reading from writing"),
+        "the interface exists and refuses; the diagnostics that have not "
+        "yet been handed it still call the same `pmus` module the "
+        "submitting lane calls, and `adoption()` names them"),
+    "still_unverified": (
+        "the venue's own permission granularity. This constrains OUR "
+        "interface, not the credential's scope"),
 }
 
 #: WHAT STATIC READING CANNOT SETTLE. Named so the enumeration is not read as a
