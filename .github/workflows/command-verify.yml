@@ -118,6 +118,21 @@ on:
           be attributed to a deploy that did not land.
         required: false
         default: ""
+      clock_probe:
+        description: >-
+          Comma-separated venue slugs (max 6). Runs the SEPARATE venue-clock job:
+          it reads each contract TWICE through the admin probe and prints whether
+          `marketData.transactTime` advanced with our request, stood still, and
+          whether the book content changed. It exists to ESTABLISH what that
+          stamp means, because the lane's dominant refusal (VENUE_QUOTE_STALE)
+          is computed from it and the semantics are recorded as unestablished.
+          Read-only: it places no order and writes nothing.
+        required: false
+        default: ""
+      clock_probe_gap_s:
+        description: "seconds between the two reads of each contract (1-60)"
+        required: false
+        default: "12"
       pg18_migrations:
         description: >-
           on|blank. `on` runs the SEPARATE funded-pg18 job: it applies the
@@ -6282,3 +6297,97 @@ jobs:
           rc=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+
+  # ── WHAT `transactTime` MEANS, ESTABLISHED BY READING TWICE ─────────
+  #
+  # WHY THIS MATTERS MORE THAN IT LOOKS. The entry lane computes
+  # `age = decision_instant - transactTime` and refuses a book over 30 s old.
+  # That arithmetic is a STALENESS measurement only if the venue stamps the
+  # RESPONSE. If it stamps the LAST BOOK CHANGE, an old value means the book has
+  # not moved -- the ordinary condition of a quiet money line -- and refusing on
+  # it refuses every quiet market while calling it freshness. Production's
+  # candidate ledger is dominated by exactly that refusal, with stamps two to
+  # eight minutes old, so which semantics hold decides whether the lane can ever
+  # evaluate anything.
+  #
+  # THE OBSERVABLE. Two reads of the same contract, `gap_s` apart:
+  #   * transact_time_delta ~= our receipt delta, book unchanged  -> RESPONSE stamp
+  #   * transact_time_delta == 0, book unchanged                  -> LAST-CHANGE stamp
+  #   * transact_time advances AND the book hash changed          -> consistent with LAST-CHANGE
+  # The probe route itself draws no verdict and neither does this job: it prints
+  # the observations and the reading they support, and nothing downstream reads
+  # them.
+  venue-clock:
+    if: ${{ inputs.clock_probe != '' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read each contract twice and print the deltas
+        env:
+          API: ${{ inputs.api }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          SLUGS: ${{ inputs.clock_probe }}
+          GAP: ${{ inputs.clock_probe_gap_s }}
+        run: |
+          set -uo pipefail
+          say() { printf '%s\n' "$*"; printf '%s\n' "$*" >> "$GITHUB_STEP_SUMMARY"; }
+          echo '### what marketData.transactTime tracks' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            say "SKIPPED: no ADMIN_TOKEN"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          code=000
+          for attempt in 1 2 3; do
+            code=$(curl -sS -o /tmp/clk.json -w '%{http_code}' --max-time 300 \
+                   -H "X-Admin-Token: $ADMIN_TOKEN" \
+                   "$API/api/admin/venue-clock-probe?slugs=$SLUGS&gap_s=$GAP")
+            say "GET /api/admin/venue-clock-probe  HTTP $code  (attempt $attempt)"
+            case "$code" in
+              200) break ;;
+              401|403) say "  the admin role was refused"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1 ;;
+              *) say "  not served; waiting 20 s"; sleep 20 ;;
+            esac
+          done
+          [ "$code" = "200" ] || { say "not served after three attempts"; echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1; }
+          say ""
+          jq -r '.pairs[]?
+                 | "  " + (.slug|tostring),
+                   "     our receipt delta     " + ((.our_receipt_delta_s // "-")|tostring) + " s",
+                   "     transactTime delta    " + ((.transact_time_delta_s // "-")|tostring) + " s",
+                   "     book content changed  " + ((.book_sha_changed // "-")|tostring),
+                   "     age at 1st return     " + ((.first.age_at_return_s // "-")|tostring) + " s",
+                   "     age at 2nd return     " + ((.second.age_at_return_s // "-")|tostring) + " s",
+                   "     stamp 1st / 2nd       " + ((.first.raw_transact_time // "-")|tostring)
+                                                 + "  /  " + ((.second.raw_transact_time // "-")|tostring),
+                   "     best ask 1st / 2nd    " + ((.first.best_ask // "-")|tostring)
+                                                 + "  /  " + ((.second.best_ask // "-")|tostring)' \
+            /tmp/clk.json | tee -a "$GITHUB_STEP_SUMMARY"
+          say ""
+          # THE READING, DERIVED FROM THE NUMBERS ABOVE AND NAMED AS A READING.
+          ZERO=$(jq '[.pairs[]? | select(.transact_time_delta_s == 0)] | length' /tmp/clk.json)
+          TRACK=$(jq '[.pairs[]? | select(.transact_time_delta_s != null
+                        and .our_receipt_delta_s != null
+                        and ((.transact_time_delta_s - .our_receipt_delta_s) | fabs) < 3)] | length' /tmp/clk.json)
+          MOVED=$(jq '[.pairs[]? | select(.book_sha_changed == true)] | length' /tmp/clk.json)
+          N=$(jq '[.pairs[]?] | length' /tmp/clk.json)
+          say "contracts read                  $N"
+          say "  stamp identical on both reads  $ZERO"
+          say "  stamp tracked our request      $TRACK  (delta within 3 s of the receipt gap)"
+          say "  book content changed           $MOVED"
+          say ""
+          if [ "$N" -gt 0 ] && [ "$TRACK" = "$N" ]; then
+            say "  READING: the stamp tracks the RESPONSE on every contract read."
+            say "  An old stamp would then be a genuinely stale read, and the"
+            say "  30 s bound is measuring what it claims to."
+          elif [ "$N" -gt 0 ] && [ "$ZERO" -gt 0 ] && [ "$TRACK" = "0" ]; then
+            say "  READING: the stamp did NOT move while we read twice. That is"
+            say "  the LAST-CHANGE reading: the age measures how long since the"
+            say "  book moved, not how current our read is -- so the 30 s bound"
+            say "  refuses every quiet market and calls it freshness. The bound"
+            say "  is NOT loosened on this evidence; what it is applied to has"
+            say "  to change, and that is a separate, named repair."
+          else
+            say "  READING: mixed or insufficient. Nothing is concluded; the"
+            say "  numbers above are the record."
+          fi
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
