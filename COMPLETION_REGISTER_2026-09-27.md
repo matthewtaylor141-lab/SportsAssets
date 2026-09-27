@@ -234,16 +234,62 @@ so `MODEL_TRUST_DRIFT` reads `NOT_EVALUABLE`.
 
 ---
 
-## A6 · Frontend credential design — **OPEN**
+## A6 · Frontend credential design — **PARTIALLY IMPLEMENTED**
 
 **Audit finding.** Legacy MERIDIAN retains browser-readable provider/admin
 credentials in `localStorage` while newer command controls use scoped HttpOnly
 cookies.
 
-**Not yet inspected in this session.** I have not read the MERIDIAN frontend, so
-I am not crediting or challenging this finding. It stays **OPEN** with no work
-claimed. This is a security finding and it deserves its own pass rather than a
-paragraph at the end of a long one.
+**Inspected, confirmed, and worse than stated.** `frontend/src/pages/Jarvis.tsx`
+kept three long-lived secrets in `localStorage`:
+
+| key | what it grants |
+|---|---|
+| `meridian_anthropic_key` | billing-bearing access to the owner's Anthropic account, sent direct to `api.anthropic.com` under `anthropic-dangerous-direct-browser-access` |
+| `meridian_eleven_key` | the ElevenLabs provider account |
+| `meridian_admin_token` | **API-wide admin authority** |
+
+**The part the audit did not say, and it is the sharpest version of the finding:**
+`frontend/src/lib/desk.ts` states in its own header that tokens "live in
+sessionStorage only (never localStorage, never logged)". MERIDIAN then wrote the
+admin token to `localStorage` anyway. Not two designs coexisting — the newer
+one's stated invariant being broken by the older page beside it.
+
+**Why it matters without a demonstrated XSS.** `localStorage` is durable and
+origin-readable. It survives every tab close and reboot, so a single script
+injection at any future moment reads a credential typed months earlier.
+
+**Implemented.**
+
+- All three secrets moved to `sessionStorage`. Preferences (voice, speed, voice
+  id) stay durable — they carry no authority.
+- `purgeDurableSecrets()` runs on every load: an existing install's durable copy
+  is **moved** to `sessionStorage` and **deleted** from `localStorage`. An install
+  predating this change is repaired, not merely stopped from worsening.
+- Secret reads no longer fall back to `localStorage`, and every save removes the
+  durable key again — so a durable copy cannot be re-admitted through an older
+  tab, a stale bundle or a hand-edited value.
+- `claude.ts`'s header said "kept in localStorage". Corrected, with the residual
+  risk stated rather than implied away.
+- Reviewed and **acceptable as-is**: `sa_wall_token` is durable in `localStorage`
+  by deliberate design — scope `wall:`, read-only, 7-day, because an office TV
+  must survive a reboot without a keyboard. That is a scoped credential with a
+  documented reason, which is what the audit asks for.
+
+**Honest limit of this repair.** Session-scoping reduces the window from "forever"
+to "this tab". `sessionStorage` is **not** a security boundary: a provider key in
+the browser at all is readable by script on this origin while the tab is open.
+
+**OPEN.** The real repair is a server-side proxy holding the provider key behind a
+scoped streaming endpoint — a backend change, **not done**. Also OPEN: the
+cross-role test matrix the audit asks for (read vs control vs admin, session
+expiry, revocation, origin protections, direct unauthorized calls). The
+server-side checks exist — `require_admin`, `require_command`, the control-cookie
+split, and a readback asserting a read cookie is refused on a control route — but
+I have not assembled them into one deliberate matrix.
+
+**Not deployed.** The static frontend release is independent of the API release,
+so this ships only when the frontend is published, which remains separate.
 
 ---
 
@@ -346,7 +392,7 @@ this fix is the shadow lane's own.
 ## The three verdicts the instruction asks for
 
 **1 · Engineering ready — NO.** A1's contract-identity sub-item, A2's schedule
-verification and unrealised mark, A4's cross-lane aggregation, A6 entirely, A7's
+verification and unrealised mark, A4's cross-lane aggregation, A6's server-side proxy and role matrix, A7's
 baseline triage and A8's capacity measurement are open.
 
 **2 · Controlled funded qualification ready — NO.** No eligible reconciled

@@ -37,6 +37,39 @@ interface JarvisConfig {
 // v9 rename (owner order 2026-08-28): MERIDIAN is the product name.
 // Config lives under meridian_*; legacy jarvis_* values migrate on
 // first read and are cleaned up on the next save.
+//
+// ── SECRETS DO NOT LIVE IN localStorage (audit finding A6) ─────────────
+//
+// THE DEFECT, AND IT BROKE ANOTHER MODULE'S STATED INVARIANT. This file kept
+// three long-lived secrets in localStorage: the owner's Anthropic API key, the
+// ElevenLabs key, and — worst — the ADMIN TOKEN. `lib/desk.ts` says in its own
+// header that tokens "live in sessionStorage only (never localStorage, never
+// logged)", and then this page wrote the admin token to localStorage anyway, so
+// the newer scoped design was undone by the older page beside it.
+//
+// WHY IT MATTERS EVEN WITHOUT A KNOWN XSS. localStorage is durable and
+// origin-readable: it survives every tab close and reboot, so one script
+// injection at any time reads a credential typed months earlier. An admin token
+// there is API-wide authority; an Anthropic key there is billing-bearing
+// authority on the provider account. sessionStorage is not a security boundary
+// either, but it is scoped to the tab and dies with it, which turns "forever"
+// into "this session" — a real reduction in consequence for a one-line change.
+//
+// SO: SECRETS ARE SESSION-SCOPED AND PREFERENCES STAY DURABLE. Voice, speed and
+// voice id are preferences and are unaffected. On first load after this change,
+// any secret already sitting in localStorage is MOVED to sessionStorage and
+// REMOVED from localStorage, so an existing install is repaired rather than
+// merely stopped from getting worse.
+//
+// WHAT THIS DOES NOT FIX, and it is recorded rather than implied away: a
+// provider key held in the browser at all is still readable by script running on
+// this origin for as long as the tab is open, and
+// `anthropic-dangerous-direct-browser-access` is the header name the provider
+// chose for a reason. The real repair is a server-side proxy that holds the key
+// and exposes a scoped streaming endpoint. That is a backend change, it is NOT
+// done, and it stays OPEN in the completion register.
+const SECRET_KEYS = ['meridian_anthropic_key', 'meridian_eleven_key',
+                     'meridian_admin_token'] as const
 const LS = {
   anthropic: 'meridian_anthropic_key',
   eleven: 'meridian_eleven_key',
@@ -45,6 +78,7 @@ const LS = {
   admin: 'meridian_admin_token',
   speed: 'meridian_voice_speed',
 }
+const IS_SECRET = new Set<string>(SECRET_KEYS)
 const LS_LEGACY: Record<string, string> = {
   meridian_anthropic_key: 'jarvis_anthropic_key',
   meridian_eleven_key: 'jarvis_eleven_key',
@@ -54,9 +88,34 @@ const LS_LEGACY: Record<string, string> = {
   meridian_voice_speed: 'jarvis_voice_speed',
 }
 
+/** Move any secret already in localStorage into sessionStorage and delete the
+ *  durable copy. Runs once per load and is idempotent: an install that predates
+ *  A6 is REPAIRED, not merely prevented from getting worse. */
+function purgeDurableSecrets(): string[] {
+  const moved: string[] = []
+  for (const k of SECRET_KEYS) {
+    try {
+      const legacy = LS_LEGACY[k]
+      const v = localStorage.getItem(k)
+             || (legacy ? localStorage.getItem(legacy) : '') || ''
+      if (v && !sessionStorage.getItem(k)) sessionStorage.setItem(k, v)
+      if (v) moved.push(k)
+      localStorage.removeItem(k)
+      if (legacy) localStorage.removeItem(legacy)
+    } catch { /* private mode: nothing durable to purge */ }
+  }
+  return moved
+}
+
 function loadConfig(): JarvisConfig {
+  // THE PURGE RUNS BEFORE THE READ, so a value that was durable a moment ago is
+  // read from its new session-scoped home and no longer exists in the old one.
+  purgeDurableSecrets()
   const g = (k: string) => {
     try {
+      // A SECRET IS READ ONLY FROM sessionStorage. Falling back to localStorage
+      // here would quietly re-admit the durable copy this change removes.
+      if (IS_SECRET.has(k)) return sessionStorage.getItem(k) || ''
       const v = localStorage.getItem(k)
       if (v) return v
       const legacy = LS_LEGACY[k]
@@ -82,14 +141,28 @@ function loadConfig(): JarvisConfig {
 
 function saveConfig(c: JarvisConfig): void {
   try {
-    localStorage.setItem(LS.anthropic, c.anthropicKey)
-    localStorage.setItem(LS.eleven, c.elevenKey)
+    // PREFERENCES ARE DURABLE. Voice, speed and voice id carry no authority, so
+    // they stay in localStorage and survive a reboot as they always did.
     localStorage.setItem(LS.voice, c.voiceId)
     localStorage.setItem(LS.browserVoice, c.browserVoice)
     localStorage.setItem(LS.speed, String(c.voiceSpeed))
-    localStorage.setItem(LS.admin, c.adminToken)
-    // Mirror the admin token where the Desk/Ops pages already look for it.
+    // SECRETS ARE SESSION-SCOPED (A6). Written to sessionStorage, and REMOVED
+    // from localStorage on every save -- so a durable copy cannot reappear
+    // through an older tab, a stale bundle or a hand-edited value.
+    const secrets: Array<[string, string]> = [
+      [LS.anthropic, c.anthropicKey],
+      [LS.eleven, c.elevenKey],
+      [LS.admin, c.adminToken],
+    ]
+    for (const [k, v] of secrets) {
+      if (v) sessionStorage.setItem(k, v)
+      else sessionStorage.removeItem(k)
+      localStorage.removeItem(k)
+    }
+    // Mirror the admin token where the Desk/Ops pages already look for it --
+    // sessionStorage, which is where `lib/desk.ts` says tokens live.
     if (c.adminToken) sessionStorage.setItem('sa_admin_token', c.adminToken)
+    else { try { sessionStorage.removeItem('sa_admin_token') } catch { /* noop */ } }
     // The rename is complete once the legacy keys are gone.
     for (const legacy of Object.values(LS_LEGACY)) {
       localStorage.removeItem(legacy)

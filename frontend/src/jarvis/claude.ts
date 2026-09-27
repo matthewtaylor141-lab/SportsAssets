@@ -1,11 +1,29 @@
 /* Streaming Claude client for the JARVIS cockpit.
  *
  * All calls are made CLIENT-SIDE with the owner's own Anthropic key (typed
- * once, kept in localStorage) — the `anthropic-dangerous-direct-browser-access`
- * header opts this origin into CORS on api.anthropic.com. Implements a small,
- * robust SSE parser over fetch + ReadableStream, and the multi-turn tool-use
- * loop: stream → run tool_use blocks locally → continue with a tool_result
- * user message → stream again, until stop_reason is end_turn.
+ * once, held in sessionStorage) — the
+ * `anthropic-dangerous-direct-browser-access` header opts this origin into CORS
+ * on api.anthropic.com. Implements a small, robust SSE parser over fetch +
+ * ReadableStream, and the multi-turn tool-use loop: stream → run tool_use blocks
+ * locally → continue with a tool_result user message → stream again, until
+ * stop_reason is end_turn.
+ *
+ * WHERE THE KEY LIVES, AND WHAT IS STILL WRONG WITH THAT (audit finding A6).
+ * This said "kept in localStorage", and it was. It is now sessionStorage, and
+ * `pages/Jarvis.tsx` purges any durable copy on load, so a credential typed
+ * months ago no longer sits there waiting for one script injection.
+ *
+ * THAT IS A REDUCTION IN CONSEQUENCE, NOT A FIX. A provider key in the browser
+ * at all is readable by anything running on this origin for as long as the tab
+ * is open, and the header name the provider chose says so out loud. The real
+ * repair is a server-side proxy holding the key and exposing a scoped streaming
+ * endpoint; that is a backend change and it is NOT done. It is tracked as OPEN
+ * in COMPLETION_REGISTER_2026-09-27.md rather than implied away here.
+ *
+ * AND A TOOL DESCRIPTION IS NOT AN AUTHORIZATION BOUNDARY. Every tool in
+ * `tools.ts` that can change state calls an admin- or desk-scoped API route, and
+ * it is the SERVER's check on that route that decides. The confirmation flow in
+ * this cockpit is an operator convenience, not the control.
  */
 
 /** Model fallback chain: Fable first, then Opus, then Sonnet. A model
