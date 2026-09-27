@@ -1421,10 +1421,29 @@ async def authorize(conn, *, account_id: str, venue: str, by: str,
     # record, whether a submission may go out -- so the answer in this
     # response is the EXECUTOR'S, not the panel's. It consumes the record
     # and then refuses on the code constant, which is the whole design.
+    # ACCOUNT-WIDE EXPOSURE IS MEASURED HERE TOO, on this connection, because
+    # the boundary now requires it and an authorization record that reports
+    # "submission is off in code" while the account is unmeasured would be
+    # reporting the SECOND obstacle and hiding the first.
+    #
+    # `venue_positions=None`: the venue's own read needs the account credential,
+    # which this path does not hold. So the total is UNREADABLE and the boundary
+    # says so -- which is the honest answer and is why `submission_would_be` is
+    # an exposure refusal today rather than the code constant.
+    from . import bettor_account_exposure as _AE
+    exposure = await _AE.account_exposure(conn, account_id=sel["account_id"])
+    out["account_exposure"] = exposure
     consumed = EX.authorize_submission(
         account_id=sel["account_id"], venue=venue, authorization=record,
-        approved_limits=proposed)
+        approved_limits=proposed, account_exposure=exposure,
+        proposed_cost_usd=0.0)
     out["execution_boundary"] = consumed
+    # BOTH OBSTACLES, NAMED SEPARATELY. `submission_would_be` is whatever refuses
+    # FIRST; `submission_is_also_disabled_in_code` records that the code constant
+    # is still off regardless, so clearing the exposure gate cannot be mistaken
+    # for clearing the way to a live order.
+    out["submission_is_also_disabled_in_code"] = (
+        not EX.REAL_ORDER_SUBMISSION_ENABLED)
     out["authorization_is_consumed_by"] = ("bettor_entry_execution."
                                            "authorize_submission")
     return dict(out, ok=True, applied=record, failed=None,

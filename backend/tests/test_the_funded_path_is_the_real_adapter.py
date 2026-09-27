@@ -35,6 +35,18 @@ from sportsassets import bettor_funded_activation as FA
 from sportsassets import bettor_funded_book as FB
 from sportsassets import bettor_funded_execution as FX
 
+#: THE VENUE'S OWN POSITION READ, WHICH `submit_for_decision` NOW REQUIRES.
+#:
+#: Account-wide exposure is a submission precondition, and the venue is the
+#: authority on what the account holds. Without this the path refuses
+#: ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED -- which is the CORRECT behaviour
+#: and is asserted on its own in
+#: `test_account_exposure_reaches_enforcement.py`. The tests in this file are
+#: proving other properties, so they supply an empty account and reach their own
+#: assertions rather than stopping at the exposure gate.
+EMPTY_VENUE = {"held_usd": 0.0, "working_usd": 0.0, "unresolved_usd": 0.0}
+
+
 DSN = __import__("os").environ.get("RN1X_TEST_DSN", "")
 pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
 
@@ -290,7 +302,7 @@ async def test_the_funded_path_stops_at_the_code_switch_with_everything_else_met
         with _m.patch.object(pmus, "_get_client",
                              lambda: _Client(sent)):
             got = await FX.submit_for_decision(
-                conn, _decision(), account_id=ACCT, venue=VENUE)
+                conn, _decision(), account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert got["ok"] is False
         # SHIPPED SETTINGS: both switches are off and the EXECUTION GATE is
         # asked first, so its refusal is the one reported. Which of the two
@@ -333,7 +345,7 @@ async def test_with_the_switch_flipped_the_real_adapter_runs_and_places_it(
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         got = await FX.submit_for_decision(
-            conn, _decision(), account_id=ACCT, venue=VENUE)
+            conn, _decision(), account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
 
         assert got["submitted"] is True, got
         assert got["ok"] is True, got
@@ -389,7 +401,7 @@ async def test_the_adapters_own_preview_guard_still_refuses_on_this_path(
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         got = await FX.submit_for_decision(
-            conn, _decision(), account_id=ACCT, venue=VENUE)
+            conn, _decision(), account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert got["submitted"] is True          # the adapter WAS reached
         assert got["ok"] is False
         assert got["refusal"] == "preview_mismatch", got
@@ -402,7 +414,7 @@ async def test_the_adapters_own_preview_guard_still_refuses_on_this_path(
         await conn.execute("DELETE FROM bettor_funded_fills")
         await conn.execute("DELETE FROM bettor_funded_intents")
         got2 = await FX.submit_for_decision(
-            conn, _decision(), account_id=ACCT, venue=VENUE)
+            conn, _decision(), account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert got2["ok"] is False
         assert got2["refusal"] == "preview_unreadable", got2
         assert [k for k, _ in sent2] == ["preview"]
@@ -434,7 +446,7 @@ async def test_the_adapters_execution_gate_is_a_separate_boundary(monkeypatch):
         monkeypatch.setattr(pmus._gate, "authorize", _deny)
 
         got = await FX.submit_for_decision(
-            conn, _decision(), account_id=ACCT, venue=VENUE)
+            conn, _decision(), account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert got["refusal"] == FX.R_VENUE_GATE_DENIED, got
         assert got["submitted"] is False
         assert got["exposure"] == "NONE"
@@ -455,7 +467,7 @@ async def test_the_adapters_execution_gate_is_a_separate_boundary(monkeypatch):
             pmus, "_get_client",
             lambda: _Client(sent, raise_on_create=TimeoutError("lost")))
         lost = await FX.submit_for_decision(
-            conn, _decision(), account_id=ACCT, venue=VENUE)
+            conn, _decision(), account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert lost["refusal"] == FX.R_LOST_ACKNOWLEDGEMENT, lost
         assert lost["exposure"] == "PRESERVED"
         row = await conn.fetchrow("SELECT state FROM bettor_funded_intents")
@@ -483,28 +495,28 @@ async def test_each_owner_side_precondition_refuses_and_sends_nothing(
         # A PAUSED ACCOUNT
         await _seed(conn, paused=True)
         r = await FX.submit_for_decision(conn, _decision(),
-                                         account_id=ACCT, venue=VENUE)
+                                         account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert r["refusal"] == FA.R_ACCOUNT_PAUSED, r
         # UNCERTAIN ACCOUNTING
         await _seed(conn, accounting="UNCERTAIN")
         r = await FX.submit_for_decision(conn, _decision(),
-                                         account_id=ACCT, venue=VENUE)
+                                         account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert r["refusal"] == FA.R_ACCOUNTING_UNCERTAIN, r
         # LIMITS RECORDED BUT NOT APPROVED
         await _seed(conn, approved=False)
         r = await FX.submit_for_decision(conn, _decision(),
-                                         account_id=ACCT, venue=VENUE)
+                                         account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert r["refusal"] == FX.R_LIMITS_NOT_APPROVED, r
         # AN AUTHORIZATION GRANTED AGAINST DIFFERENT LIMITS
         await _seed(conn, digest_limits=dict(LIMITS, per_order_usd=99))
         r = await FX.submit_for_decision(conn, _decision(),
-                                         account_id=ACCT, venue=VENUE)
+                                         account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert r["refusal"] == FX.R_NOT_AUTHORIZED, r
         assert r["authorization"]["refusal"] == EX.R_AUTH_LIMITS
         # AN EXPIRED AUTHORIZATION
         await _seed(conn, expires_in=-60.0)
         r = await FX.submit_for_decision(conn, _decision(),
-                                         account_id=ACCT, venue=VENUE)
+                                         account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert r["refusal"] == FX.R_NOT_AUTHORIZED, r
         assert r["authorization"]["refusal"] == EX.R_AUTH_EXPIRED
 
@@ -514,14 +526,14 @@ async def test_each_owner_side_precondition_refuses_and_sends_nothing(
         big = _decision(execution_plan={"execution": {
             "size": 60, "vwap": 0.62, "limit_price": 0.63}})
         r = await FX.submit_for_decision(conn, big, account_id=ACCT,
-                                         venue=VENUE)
+                                         venue=VENUE, venue_positions=EMPTY_VENUE)
         assert r["refusal"] == FX.R_OVER_RAIL, r
         rails = {o["rail"] for o in r["over"]}
         assert "MAX_MARKET_EXPOSURE" in rails, r["over"]
 
         # A TEST-CLASS VENUE ON THE FUNDED PATH
         r = await FX.submit_for_decision(conn, _decision(), account_id=ACCT,
-                                         venue="PMUS_TEST")
+                                         venue="PMUS_TEST", venue_positions=EMPTY_VENUE)
         assert r["refusal"] == FX.R_VENUE_CLASS, r
 
         # NOT ONE OF THEM SPOKE TO THE VENUE

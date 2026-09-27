@@ -258,9 +258,11 @@ def test_a_duplicate_delivery_does_not_promote_a_fill_to_a_later_leg():
         "would be proving nothing")
     assert as_leg2["expected_fee_usd"] == FB.order_expected_fees(
         seq[:2])["per_fill"][-1]
-    # AND THE SOURCE REALLY EXCLUDES IT.
+    # AND THE SOURCE REALLY EXCLUDES IT. The exclusion moved to the KEYED read
+    # when the sequence started carrying its sort keys, so it is now t[3].
     book = (SRC / "bettor_funded_book.py").read_text()
-    assert "if t[2] != fid" in book
+    assert "if t[3] != fid" in book
+    assert "prior_taker_legs_keyed" in book
 
 
 def test_omitting_prior_legs_keeps_the_old_single_fill_behaviour():

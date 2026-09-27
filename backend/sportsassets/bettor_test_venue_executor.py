@@ -262,6 +262,45 @@ class InternalOrderLifecycleSimulator:
 
 # ── 2 · FEES, FROM THE DEPLOYED SCHEDULE ────────────────────────────
 
+def _test_venue_exposure(account_id: str, at=None) -> dict:
+    """A TEST VENUE COMMITS NO REAL EXPOSURE, and that is a MEASUREMENT here.
+
+    `authorize_submission` requires an account-wide exposure measurement before
+    it will authorise adding exposure. On a TEST venue the exposure being added
+    is zero real dollars -- the transport is substituted and no order reaches a
+    real account -- so the measurement is genuinely zero rather than being
+    waived.
+
+    WHY THIS IS NOT A BYPASS, AND WHY IT IS NOT IN THE GATE. The gate stays
+    ignorant of venue classes: a special case inside it would apply to any caller
+    that could name a test venue, and the value of that check is that it has no
+    exceptions. Here the claim is local, it is attached to
+    ALLOWED_VENUE_CLASSES -- which this module has already enforced -- and it is
+    labelled, so a reader can see exactly what is being asserted and by whom.
+
+    The funded path does NOT go through here. It calls
+    `bettor_funded_execution.submit_for_decision`, which measures the real
+    account on its own connection and refuses when the venue read is missing.
+    """
+    import time as _t
+    from . import bettor_account_exposure as _AE
+    return {
+        "account_id": account_id,
+        "state": _AE.TOTAL_MEASURED,
+        "TOTAL_USD": 0.0,
+        "by_class": {c: 0.0 for c in _AE.CLASSES},
+        "measured_at_epoch_s": float(_t.time() if at is None else at),
+        "basis": "TEST_VENUE_COMMITS_NO_REAL_EXPOSURE",
+        "why_zero_is_a_measurement_here": (
+            "the transport is substituted and no order reaches a real account, "
+            "so the real exposure added by this submission is zero. This module "
+            "has already refused any venue outside ALLOWED_VENUE_CLASSES"),
+        "and_the_funded_path_does_not_use_this": (
+            "bettor_funded_execution.submit_for_decision measures the real "
+            "account on its own connection and refuses without the venue read"),
+    }
+
+
 def fee_for(qty: float, price: float, *, maker: bool = False) -> float:
     """The lane's own fee hook. Not a local constant."""
     from decimal import Decimal
@@ -342,7 +381,8 @@ async def check_servicing(conn, *, account_id: str, venue: str) -> dict:
     rec = await _authorization(conn)
     gate = EX.authorize_submission(
         account_id=account_id, venue=venue, authorization=rec or None,
-        approved_limits=await _approved_limits(conn) or None)
+        approved_limits=await _approved_limits(conn) or None,
+        account_exposure=_test_venue_exposure(account_id))
     out["submission_authority"] = {
         "valid_for_new_exposure": bool(gate.get("authorization_consumed")),
         "refusal_if_any": gate.get("refusal"),
@@ -374,7 +414,9 @@ async def check_authorized(conn, *, account_id: str, venue: str) -> dict:
     limits = await _approved_limits(conn)
     gate = EX.authorize_submission(account_id=account_id, venue=venue,
                                    authorization=rec,
-                                   approved_limits=limits or None)
+                                   approved_limits=limits or None,
+                                   account_exposure=_test_venue_exposure(
+                                       account_id))
     out["gate"] = gate
     out["authorization_consumed"] = bool(gate.get("authorization_consumed"))
     # THE ONE REFUSAL THAT IS NOT A BLOCK. `REAL_ORDER_SUBMISSION_IS_

@@ -113,8 +113,11 @@ def test_the_verdict_is_unchanged_but_the_MISSING_PRECONDITIONS_ARE_NOT():
     """
     st = SC.mechanism_status()
     assert st["status"] == SC.M1_NOT_AVAILABLE, "the verdict does not move"
-    assert set(st["missing"]) == {SC.P5_DOCUMENTED_TIMING,
-                                  SC.P6_RESYNCHRONISATION}
+    # AND P6 IS NOW AVAILABLE TOO, which was a second correction. The SDK does
+    # not reconnect; OUR wrapper does, and on a documented full-replacement feed
+    # discard-reconnect-resubscribe-await IS resynchronisation. Missing SDK
+    # convenience is not an unavailable venue capability.
+    assert set(st["missing"]) == {SC.P5_DOCUMENTED_TIMING}
     assert st["preconditions"][SC.P1_REPLACEMENT_AUTHORITY]["available"] is True
     assert st["preconditions"][SC.P2_LIVENESS]["available"] is True
     assert st["preconditions"][SC.P3_CONNECTION_CONTINUITY]["available"] is True
@@ -136,8 +139,7 @@ def test_the_two_questions_are_answered_SEPARATELY():
     q2 = q[SC.Q2_SUFFICIENTLY_CURRENT]
     assert q1["answered"] is True and q1["missing"] == []
     assert q2["answered"] is False
-    assert set(q2["missing"]) == {SC.P5_DOCUMENTED_TIMING,
-                                  SC.P6_RESYNCHRONISATION}
+    assert set(q2["missing"]) == {SC.P5_DOCUMENTED_TIMING}
     # AND THE REASON A MISSING SEQUENCE DOES NOT TOUCH Q1 IS STATED.
     assert "DELTA stream" in q1["and_a_missing_sequence_does_not_change_it"]
     assert "does not build on the increments before it" in (
@@ -179,25 +181,73 @@ def test_the_binding_precondition_is_TIMING_and_it_names_its_exit():
     assert "MOVING book" in p5["what_would_establish_it"]
 
 
-def test_transact_time_is_a_market_data_instant_and_no_more_than_that():
-    """THE DISCRIMINATOR WAS STATED BEFORE IT RAN, and it settles one direction
-    only. A response stamp cannot precede its own response, so a 219-day lag
-    CONTRADICTS the response-stamp reading -- and no number of observations
-    could establish the positive direction, which is why this is not the
-    resampling withdrawn earlier."""
+def test_the_transact_time_DISCRIMINATOR_IS_WITHDRAWN():
+    """MY ARGUMENT WAS FALSE AND THIS TEST USED TO ASSERT ITS CONCLUSION.
+
+    It read `test_transact_time_is_a_market_data_instant_and_no_more_than_that`
+    and asserted the field WAS established as a market-data instant, on the
+    grounds that "a response stamp cannot precede its own response".
+
+    THE PREMISE IS FALSE, two ways, either sufficient: a timestamp can describe
+    representation GENERATION, which happens before transmission; and a cached
+    representation retains its original timestamp -- and these responses came
+    from a CDN under max-age=30 with cache-status EXPIRED then HIT. So the
+    representation-generation hypothesis was never excluded.
+    """
     t = SC.TRANSACT_TIME
-    assert "cannot precede its own response" in (
-        t["discriminator_stated_before_running"])
-    assert t["observed"]["date_minus_transact_time_s"] > 18_000_000
-    assert t["observed"]["book_levels"].startswith("0 bids")
-    assert "MARKET-DATA instant" in t["ESTABLISHED"]
-    # AND THE PART IT DOES NOT SETTLE IS NAMED, not resolved conveniently.
-    assert "WHICH market-data instant" in t["NOT_ESTABLISHED"]
-    assert "coincide on an expired zero-depth book" in t["NOT_ESTABLISHED"]
-    assert "quiet book and a delayed feed predict the same" in (
-        t["why_more_of_the_same_cannot_help"])
-    # WHAT TURNS ON IT, INCLUDING THAT THE ANSWER IS NOT A LOOSENING.
-    assert "NOT a loosening" in t["what_turns_on_it"]
+    assert t["denotation"] == "UNRESOLVED"
+    assert t["nothing_is_gated_on_it"] is True
+    assert "ESTABLISHED" not in t, (
+        "the old key asserted a denotation the evidence does not support")
+    w = t["withdrawn_argument"]
+    assert "cannot precede its own response" in w["what_I_claimed"]
+    assert "representation GENERATION" in w["why_it_is_false"]
+    assert "cached representation retains its original timestamp" in (
+        w["why_it_is_false"])
+    assert "never excluded" in w["so"]
+    assert "more rigorous-looking sleeve" in w["the_pattern"]
+
+
+def test_the_observations_and_the_interpretations_are_SEPARATE_KEYS():
+    """The instruction is to record observations separately from
+    interpretations, because the failure mode is one being read as the other."""
+    t = SC.TRANSACT_TIME
+    o = t["observed"]
+    # OBSERVATIONS: facts about what came back, and nothing else.
+    assert o["market_state"] == "MARKET_STATE_EXPIRED"
+    assert o["book_levels"].startswith("0 bids")
+    assert "EXPIRED" in o["cache_status"] and "HIT" in o["cache_status"]
+    assert o["date_minus_transact_time_s"] > 18_000_000
+    # AND WHAT THEY SUPPORT, WHICH IS ALMOST NOTHING.
+    assert "OLD IN THE RETURNED REPRESENTATION" in t["what_this_establishes"]
+    assert "not about what the field denotes" in t["what_this_establishes"]
+
+
+def test_all_four_hypotheses_stay_open_and_none_is_preferred():
+    h = SC.TRANSACT_TIME["hypotheses"]
+    assert set(h) == {"H1_LAST_BOOK_CHANGE", "H2_LAST_TRADE",
+                      "H3_SETTLEMENT_OR_CLOSE",
+                      "H4_REPRESENTATION_GENERATION"}
+    assert "PRECEDES" in h["H4_REPRESENTATION_GENERATION"]
+    assert "survives caching" in h["H4_REPRESENTATION_GENERATION"]
+    assert "no discriminating power" in (
+        SC.TRANSACT_TIME["why_the_observations_cannot_separate_them"])
+
+
+def test_a_moving_book_experiment_is_not_offered_as_the_answer():
+    """Correlation between a moving book and a moving stamp is evidence about
+    one hypothesis against another. It is not a semantic guarantee and must not
+    become the next asserted certificate."""
+    t = SC.TRANSACT_TIME
+    assert "venue's own contract" in t["what_would_resolve_it"]
+    nope = t["what_would_NOT_resolve_it"]
+    assert "moving-book experiment on its own" in nope
+    assert "not a semantic guarantee" in nope
+    assert "third asserted certificate" in nope
+    # AND WHAT TURNS ON IT IS STATED WITHOUT PRESUMING THE ANSWER.
+    turns = t["what_turns_on_it"]
+    assert "under H1" in turns and "Under H4" in turns
+    assert "NOT a loosening" in turns
 
 
 def test_the_conclusion_is_narrower_than_no_engineering_route():
@@ -229,8 +279,7 @@ def test_a_live_looking_subscription_does_not_make_this_book_current():
 
     state = SC.subscription_state("aec-x", now=now)
     assert state["usable_as_a_currency_mechanism"] is False
-    assert set(state["unmet"]) == {SC.P5_DOCUMENTED_TIMING,
-                                   SC.P6_RESYNCHRONISATION}
+    assert set(state["unmet"]) == {SC.P5_DOCUMENTED_TIMING}
     # EVERY LIVE CHECK PASSED, which is what makes the refusal informative --
     # and now includes P1, so the refusal is explicitly NOT a doubt about
     # whether the message is the whole book.
@@ -252,7 +301,7 @@ def test_the_refusal_is_not_relieved_by_passing_a_subscription_argument():
     assert got["subscription"] is None
     assert got["m1"]["status"] == SC.M1_NOT_AVAILABLE
     assert set(got["m1"]["missing_from_the_feed"]) == {
-        SC.P5_DOCUMENTED_TIMING, SC.P6_RESYNCHRONISATION}
+        SC.P5_DOCUMENTED_TIMING}
     assert "properties of the FEED" in got["why_none"]
 
 
@@ -370,8 +419,8 @@ def test_the_mechanism_works_once_the_feed_supplies_the_two_guarantees(
     """
     status = {k: dict(v) for k, v in SC.PRECONDITION_STATUS.items()}
     # THE TWO THAT ARE ACTUALLY MISSING NOW: timing and resynchronisation.
+    # ONLY P5 IS LEFT TO FLIP, since P6 was corrected to available.
     status[SC.P5_DOCUMENTED_TIMING]["available"] = True
-    status[SC.P6_RESYNCHRONISATION]["available"] = True
     monkeypatch.setattr(SC, "PRECONDITION_STATUS", status)
     monkeypatch.setattr(SC, "MISSING_PRECONDITIONS", ())
     monkeypatch.setattr(SC, "M1_STATUS", SC.M1_AVAILABLE)

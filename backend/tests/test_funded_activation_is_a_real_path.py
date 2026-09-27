@@ -47,6 +47,25 @@ from sportsassets import bettor_entry_inventory as inv
 from sportsassets import bettor_external_shadow as ext
 from sportsassets import bettor_funded_activation as FA
 
+#: AN ACCOUNT-WIDE EXPOSURE MEASUREMENT, WHICH `authorize_submission` NOW
+#: REQUIRES BEFORE IT WILL REACH THE CODE CONSTANT.
+#:
+#: The tests below prove things about the AUTHORIZATION -- expiry, digest,
+#: account, venue -- and each one used to end at
+#: REAL_ORDER_SUBMISSION_IS_DISABLED_IN_CODE. That is now preceded by the
+#: exposure checks, so a test asserting the code constant has to get past them.
+#: The exposure refusals are proven on their own in
+#: `test_account_exposure_reaches_enforcement.py`; supplying a measured empty
+#: account here keeps each test on the property it is actually about.
+def _measured_empty(account_id, at=None):
+    import time as _t
+    from sportsassets import bettor_account_exposure as _AE
+    return {"account_id": account_id, "state": _AE.TOTAL_MEASURED,
+            "TOTAL_USD": 0.0, "by_class": {},
+            "measured_at_epoch_s": _t.time() if at is None else at}
+MEASURED_EMPTY = _measured_empty
+
+
 DSN = os.environ.get("RN1X_TEST_DSN")
 pg = pytest.mark.skipif(not DSN, reason="RN1X_TEST_DSN is not set")
 
@@ -731,9 +750,17 @@ async def test_a_venue_clock_that_was_never_provided_is_not_a_basis():
                           ("VENUE_TRANSACT_TIME", False),
                           ("NO_MECHANISM_AVAILABLE", False),
                           # WHAT DOES ESTABLISH IT: a mechanism with a published
-                          # contract.
+                          # contract. M1 is the only one left.
                           ("M1_LIVE_MARKET_DATA_SUBSCRIPTION", True),
-                          ("M2_CONDITIONAL_REVALIDATION_304", True),
+                          # AND M2 IS NO LONGER ONE OF THEM. A 304 affirms the
+                          # REPRESENTATION, and this venue's `last-modified` read
+                          # TODAY on markets whose books had not moved since
+                          # February -- an EXPIRED market with zero levels
+                          # cannot have changed today. So the validator it
+                          # affirms is unconnected to the book. Same failure mode
+                          # as the round trip below: a real quantity, measured
+                          # correctly, about the wrong thing.
+                          ("M2_CONDITIONAL_REVALIDATION_304", False),
                           # OUR OWN LATENCY IS NOT AN UPSTREAM AGE. It was
                           # briefly in the established list and it must not
                           # be: see the dedicated counterexample below.
@@ -995,7 +1022,7 @@ def test_the_execution_boundary_consumes_the_authorization():
 
     # NO RECORD AT ALL
     none = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
-                                   authorization=None)
+                                   authorization=None, account_exposure=MEASURED_EMPTY(CLEAN))
     assert none["ok"] is False
     assert none["refusal"] == EX.R_NO_AUTHORIZATION
     assert none["authorization_consumed"] is False
@@ -1004,19 +1031,19 @@ def test_the_execution_boundary_consumes_the_authorization():
     # A RECORD FOR ANOTHER ACCOUNT, AND FOR ANOTHER VENUE
     other = EX.authorize_submission(account_id="someone-else",
                                     venue="PMUS_TEST", authorization=rec,
-                                    approved_limits=_LIMITS)
+                                    approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY("someone-else"))
     assert other["refusal"] == EX.R_AUTH_ACCOUNT
     assert other["authorization_consumed"] is False
     venue = EX.authorize_submission(account_id=CLEAN, venue="PMUS",
                                     authorization=rec,
-                                    approved_limits=_LIMITS)
+                                    approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
     assert venue["refusal"] == EX.R_AUTH_VENUE
     assert venue["authorization_consumed"] is False
 
     # A RECORD GRANTED AGAINST DIFFERENT LIMITS
     moved = dict(_LIMITS, per_order_usd=999)
     stale = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
-                                    authorization=rec, approved_limits=moved)
+                                    authorization=rec, approved_limits=moved, account_exposure=MEASURED_EMPTY(CLEAN))
     assert stale["refusal"] == EX.R_AUTH_LIMITS
     assert stale["authorization_consumed"] is False
 
@@ -1025,19 +1052,19 @@ def test_the_execution_boundary_consumes_the_authorization():
         account_id=CLEAN, venue="PMUS_TEST",
         authorization={k: v for k, v in rec.items()
                        if k != "effective_digest"},
-        approved_limits=_LIMITS)
+        approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
     assert nodig["refusal"] == EX.R_AUTH_NO_DIGEST
     # A DIGEST OF WHITESPACE IS NOT A DIGEST EITHER
     blank = EX.authorize_submission(
         account_id=CLEAN, venue="PMUS_TEST",
         authorization=dict(rec, effective_digest="   "),
-        approved_limits=_LIMITS)
+        approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
     assert blank["refusal"] == EX.R_AUTH_NO_DIGEST
 
     # AND THE MATCHING RECORD: CONSUMED, then refused on the CONSTANT.
     good = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
                                    authorization=rec,
-                                   approved_limits=_LIMITS)
+                                   approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
     assert good["authorization_consumed"] is True, good
     assert good["ok"] is False
     assert good["refusal"] == EX.R_SUBMISSION_DISABLED
@@ -1057,7 +1084,7 @@ def test_an_injected_test_venue_executor_still_submits_nothing():
         """The shape any future submitter must have: ask the gate FIRST."""
         gate = EX.authorize_submission(account_id=account_id, venue=venue,
                                        authorization=authorization,
-                                       approved_limits=limits)
+                                       approved_limits=limits, account_exposure=MEASURED_EMPTY(account_id))
         if gate.get("ok"):                             # pragma: no cover
             sent.append({"venue": venue, "account_id": account_id})
         return gate
@@ -1162,12 +1189,23 @@ async def test_the_funded_branch_validates_the_owners_record():
         assert e["funded_submission"] == "DISABLED"
         assert e["authorises_capital"] is False
         # AND THE EXECUTION BOUNDARY CONSUMED IT AND STILL REFUSED
+        #
+        # WHAT REFUSES FIRST CHANGED, AND THE CHANGE IS THE POINT. This asserted
+        # R_SUBMISSION_DISABLED -- "everything is approved and the code switch is
+        # off". Account-wide exposure is now a submission precondition, and
+        # without the venue's own position read it cannot be measured, so the
+        # FIRST refusal is the exposure one. Reporting the code constant here
+        # would name the second obstacle and hide the first.
         boundary = e["execution_boundary"]
         assert boundary["authorization_consumed"] is True, boundary
         assert boundary["ok"] is False
-        assert boundary["refusal"] == EX.R_SUBMISSION_DISABLED
+        assert boundary["refusal"] == EX.R_ACCOUNT_EXPOSURE_UNREADABLE, boundary
         assert boundary["submitted"] is False
-        assert e["submission_would_be"] == EX.R_SUBMISSION_DISABLED
+        assert e["submission_would_be"] == EX.R_ACCOUNT_EXPOSURE_UNREADABLE
+        # AND THE CODE CONSTANT IS STILL REPORTED, so clearing the exposure gate
+        # cannot be mistaken for clearing the way to a live order.
+        assert e["submission_is_also_disabled_in_code"] is True
+        assert EX.REAL_ORDER_SUBMISSION_ENABLED is False
     finally:
         await conn.execute("DELETE FROM ingestion_state WHERE key = ANY($1)",
                            [_ON.RECONCILIATION_KEY,
@@ -1306,7 +1344,7 @@ def test_an_authorization_with_no_usable_expiry_is_refused():
              if k not in ("expires_at", "at")}
     got = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
                                   authorization=naked,
-                                  approved_limits=_LIMITS)
+                                  approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
     assert got["refusal"] == EX.R_AUTH_NO_EXPIRY, got
     assert got["authorization_consumed"] is False
     assert got["submitted"] is False
@@ -1318,7 +1356,7 @@ def test_an_authorization_with_no_usable_expiry_is_refused():
     legacy = {k: v for k, v in _rec().items() if k != "expires_at"}
     ok = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
                                  authorization=legacy,
-                                 approved_limits=_LIMITS)
+                                 approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
     assert ok["authorization_consumed"] is True, ok
     assert ok["refusal"] == EX.R_SUBMISSION_DISABLED
     assert ok["expiry_basis"] == EX.LEGACY_EXPIRY_FALLBACK
@@ -1331,7 +1369,7 @@ def test_an_authorization_with_no_usable_expiry_is_refused():
            if k != "expires_at"}
     lapsed = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
                                      authorization=old,
-                                     approved_limits=_LIMITS)
+                                     approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
     assert lapsed["refusal"] == EX.R_AUTH_EXPIRED, lapsed
     assert lapsed["expiry_basis"] == EX.LEGACY_EXPIRY_FALLBACK
 
@@ -1343,7 +1381,7 @@ def test_an_authorization_with_no_usable_expiry_is_refused():
                 "not-a-timestamp", "", True, False, [], {}, object()):
         r = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
                                     authorization=_rec(expires_at=bad),
-                                    approved_limits=_LIMITS)
+                                    approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
         assert r["refusal"] == EX.R_AUTH_BAD_EXPIRY, (bad, r)
         assert r["authorization_consumed"] is False, bad
     # the same rule on the LEGACY field, so the fallback cannot smuggle one in
@@ -1352,7 +1390,7 @@ def test_an_authorization_with_no_usable_expiry_is_refused():
                      if k != "expires_at"}
         r = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
                                     authorization=naked_bad,
-                                    approved_limits=_LIMITS)
+                                    approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
         assert r["refusal"] == EX.R_AUTH_BAD_EXPIRY, (bad, r)
         assert r["authorization_consumed"] is False, bad
 
@@ -1368,7 +1406,7 @@ def test_the_approved_limit_digest_must_be_supplied_and_must_match():
 
     # NOT SUPPLIED -> refused, and not consumed. This is the hole.
     unknown = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
-                                      authorization=rec)
+                                      authorization=rec, account_exposure=MEASURED_EMPTY(CLEAN))
     assert unknown["refusal"] == EX.R_AUTH_LIMITS_UNKNOWN, unknown
     assert unknown["authorization_consumed"] is False
     assert unknown["submitted"] is False
@@ -1376,7 +1414,7 @@ def test_the_approved_limit_digest_must_be_supplied_and_must_match():
     # frozen rails untightened -- and it digests differently, so it is a
     # MISMATCH and must be named as one.
     empty = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
-                                    authorization=rec, approved_limits={})
+                                    authorization=rec, approved_limits={}, account_exposure=MEASURED_EMPTY(CLEAN))
     assert empty["refusal"] == EX.R_AUTH_LIMITS, empty
     assert empty["effective_digest_now"] == \
         EX.effective_limits({})["effective_digest"]
@@ -1384,14 +1422,14 @@ def test_the_approved_limit_digest_must_be_supplied_and_must_match():
     # A MOVED SET -> mismatch, named
     moved = EX.authorize_submission(
         account_id=CLEAN, venue="PMUS_TEST", authorization=rec,
-        approved_limits=dict(_LIMITS, per_order_usd=1))
+        approved_limits=dict(_LIMITS, per_order_usd=1), account_exposure=MEASURED_EMPTY(CLEAN))
     assert moved["refusal"] == EX.R_AUTH_LIMITS
 
     # AND THE MATCHING SET -> consumed, then the code constant and nothing
     # else. That difference is the whole point of the gate.
     good = EX.authorize_submission(account_id=CLEAN, venue="PMUS_TEST",
                                    authorization=rec,
-                                   approved_limits=_LIMITS)
+                                   approved_limits=_LIMITS, account_exposure=MEASURED_EMPTY(CLEAN))
     assert good["authorization_consumed"] is True, good
     assert good["refusal"] == EX.R_SUBMISSION_DISABLED
     assert good["real_order_submission_enabled"] is False

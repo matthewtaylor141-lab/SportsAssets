@@ -491,11 +491,25 @@ def test_the_withdrawal_of_M2_carries_its_evidence():
 
     w = vc.M2_WITHDRAWN_AS_ESTABLISHING
     assert w["withdrawn_on"] == "2026-09-27"
-    assert w["the_contradicting_observation"]["last_modified_equals_date"] is True
-    assert w["the_contradicting_observation"]["transact_time_lag_s"] > 18_000_000
-    assert "VENUE_BOOK_PROTOCOL_2026-09-27" in (
-        w["the_contradicting_observation"]["source"])
+    o = w["the_contradicting_observation"]
+    # THE OBSERVATION, AS OBSERVED. My first statement of this said
+    # "last-modified equals date, exactly" -- true of the ORIGIN read and false
+    # of the cache HIT, where date advanced 8 s and last-modified did not.
+    assert o["read_1"]["cf_cache_status"] == "EXPIRED"
+    assert o["read_2"]["cf_cache_status"] == "HIT"
+    assert o["read_1"]["last_modified"] == o["read_2"]["last_modified"]
+    assert o["read_1"]["date"] != o["read_2"]["date"]
+    assert o["market_state"] == "MARKET_STATE_EXPIRED"
+    assert o["book_levels"].startswith("0 bids")
+    assert "VENUE_BOOK_PROTOCOL_2026-09-27" in o["source"]
+    # AND THE INFERENCE, AS A SEPARATE KEY, resting on the book being KNOWN
+    # static rather than on any claim about what a timestamp may precede.
+    assert "cannot have had its book change today" in w["the_inference"]
+    assert "not a book clock" in w["the_inference"]
+    assert "withdrawn as false" in w["what_this_inference_does_NOT_rely_on"]
     assert "not a book clock" in w["so"]
+    assert "only for the origin read" in (
+        w["and_last_modified_does_not_track_Date"])
     # AND WHAT WOULD BRING IT BACK IS NAMED, because "withdrawn" must not mean
     # "closed": an absent route and an unproven one are different findings.
     assert "documenting that its validator changes" in (

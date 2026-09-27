@@ -38,6 +38,18 @@ from sportsassets import bettor_funded_activation as FA
 from sportsassets import bettor_funded_book as FB
 from sportsassets import bettor_funded_execution as FX
 
+#: THE VENUE'S OWN POSITION READ, WHICH `submit_for_decision` NOW REQUIRES.
+#:
+#: Account-wide exposure is a submission precondition, and the venue is the
+#: authority on what the account holds. Without this the path refuses
+#: ACCOUNT_WIDE_EXPOSURE_COULD_NOT_BE_MEASURED -- which is the CORRECT behaviour
+#: and is asserted on its own in
+#: `test_account_exposure_reaches_enforcement.py`. The tests in this file are
+#: proving other properties, so they supply an empty account and reach their own
+#: assertions rather than stopping at the exposure gate.
+EMPTY_VENUE = {"held_usd": 0.0, "working_usd": 0.0, "unresolved_usd": 0.0}
+
+
 DSN = __import__("os").environ.get("RN1X_TEST_DSN", "")
 pg = pytest.mark.skipif(not DSN, reason="needs RN1X_TEST_DSN")
 
@@ -182,12 +194,17 @@ async def test_the_connector_enabled_with_submission_off_calls_nothing(
         assert EX.REAL_ORDER_SUBMISSION_ENABLED is False
 
         got = await FX.submit_for_decision(conn, _decision(),
-                                           account_id=ACCT, venue=VENUE)
+                                           account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert got["ok"] is False
         assert got["refusal"] == FX.R_GATE_NOT_AFFIRMATIVE, got
         assert got["owner_side_satisfied"] is True
         assert got["execution_gate_affirmative"] is False
-        assert got["gate_refusal"] == EX.R_SUBMISSION_DISABLED
+        # THIS CALL SUPPLIES THE VENUE READ, so account-wide exposure IS
+        # measurable and passes -- and the code constant is what is left. That is
+        # the pair worth asserting here: the exposure gate is satisfied and
+        # submission is still off.
+        assert got["gate_refusal"] == EX.R_SUBMISSION_DISABLED, got
+        assert EX.REAL_ORDER_SUBMISSION_ENABLED is False
         # ZERO ADAPTER CALLS
         assert sent == [], sent
         # AND NO INTENT WAS WRITTEN, because the refusal came first
@@ -214,7 +231,7 @@ async def test_the_connectors_own_switch_gates_independently(monkeypatch):
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
         assert FX.FUNDED_SUBMISSION_ENABLED is False
         got = await FX.submit_for_decision(conn, _decision(),
-                                           account_id=ACCT, venue=VENUE)
+                                           account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert got["refusal"] == FX.R_FUNDED_DISABLED, got
         assert got["execution_gate_affirmative"] is True
         assert sent == []
@@ -293,7 +310,7 @@ async def test_a_short_at_a_longshot_price_is_admitted_on_the_right_number(
                               "size": 100, "vwap": 0.92,
                               "limit_price": 0.92}})
         got = await FX.submit_for_decision(conn, short, account_id=ACCT,
-                                           venue=VENUE)
+                                           venue=VENUE, venue_positions=EMPTY_VENUE)
         assert got["plan"]["collateral_usd"] == pytest.approx(8.0)
         assert got["submitted"] is True, got
         rail = {r["rail"]: r for r in got["rails"]["rails"]}
@@ -321,7 +338,7 @@ async def test_every_effective_rail_is_checked_at_submission(monkeypatch):
         pmus, sent = _transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
         got = await FX.submit_for_decision(conn, _decision(),
-                                           account_id=ACCT, venue=VENUE)
+                                           account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         checked = {r["rail"] for r in got["rails"]["rails"]}
         assert checked == set(got["effective_limits"]["effective"]), checked
         assert got["rails"]["unmeasured"] == []
@@ -363,7 +380,7 @@ async def test_pending_exposure_counts_and_the_event_key_is_carried(
         pmus, sent = _transport(monkeypatch)
         monkeypatch.setattr(FX, "FUNDED_SUBMISSION_ENABLED", True)
         got = await FX.submit_for_decision(conn, _decision(),
-                                           account_id=ACCT, venue=VENUE)
+                                           account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         # $9 pending + $9.30 new = $18.30 against the $10 EVENT rail
         assert got["refusal"] == FX.R_OVER_RAIL, got
         over = {o["rail"] for o in got["over"]}
@@ -401,9 +418,9 @@ async def test_two_concurrent_submissions_cannot_both_reach_the_venue(
 
         a, b = await asyncio.gather(
             FX.submit_for_decision(conn, _decision(), account_id=ACCT,
-                                   venue=VENUE),
+                                   venue=VENUE, venue_positions=EMPTY_VENUE),
             FX.submit_for_decision(other, _decision(), account_id=ACCT,
-                                   venue=VENUE),
+                                   venue=VENUE, venue_positions=EMPTY_VENUE),
             return_exceptions=True)
         results = [r for r in (a, b) if isinstance(r, dict)]
         assert len(results) == 2, (a, b)
@@ -443,7 +460,7 @@ async def test_a_lost_acknowledgement_leaves_an_unresolved_intent_never_a_resend
         monkeypatch.setattr(EX, "REAL_ORDER_SUBMISSION_ENABLED", True)
 
         got = await FX.submit_for_decision(conn, _decision(),
-                                           account_id=ACCT, venue=VENUE)
+                                           account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert got["refusal"] == FX.R_LOST_ACKNOWLEDGEMENT, got
         assert got["exposure"] == "PRESERVED"
         assert got["resubmitted_anything"] is False
@@ -466,7 +483,7 @@ async def test_a_lost_acknowledgement_leaves_an_unresolved_intent_never_a_resend
         # against a $10 event rail and the order never reaches the guard. The
         # guard is proved directly in the concurrency test above.
         again = await FX.submit_for_decision(conn, _decision(),
-                                             account_id=ACCT, venue=VENUE)
+                                             account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert again["refusal"] == FX.R_OVER_RAIL, again
         rails = {r["rail"]: r for r in again["rails"]["rails"]}
         assert rails["MAX_EVENT_EXPOSURE"]["measured"] == pytest.approx(18.6)
@@ -482,7 +499,7 @@ async def test_a_lost_acknowledgement_leaves_an_unresolved_intent_never_a_resend
                                       max_exposure_usd=100,
                                       capital_usd=100))
         third = await FX.submit_for_decision(conn, _decision(),
-                                             account_id=ACCT, venue=VENUE)
+                                             account_id=ACCT, venue=VENUE, venue_positions=EMPTY_VENUE)
         assert third["refusal"] == FB.R_ANOTHER_INTENT_IS_LIVE, third
         assert len([k for k, _ in sent if k == "create"]) == 1
     finally:
@@ -805,7 +822,14 @@ async def test_the_scheduler_hook_sends_nothing_with_the_switch_off(
         # asked FIRST -- so its refusal is the one reported. Which of the two
         # answers is a detail; that no adapter call happens is the property.
         assert got["refusal"] == FX.R_GATE_NOT_AFFIRMATIVE, got
-        assert got["gate_refusal"] == EX.R_SUBMISSION_DISABLED
+        # WHAT REFUSES FIRST MOVED, DELIBERATELY. Account-wide exposure is now a
+        # submission precondition, and without the venue's own position read it
+        # cannot be measured -- so that refuses before the code constant.
+        # Asserting the code constant here would require the exposure gate to be
+        # bypassable, which is the opposite of the point.
+        assert got["gate_refusal"] == EX.R_ACCOUNT_EXPOSURE_UNREADABLE, got
+        # AND THE CODE CONSTANT IS STILL OFF, so nothing was relaxed.
+        assert EX.REAL_ORDER_SUBMISSION_ENABLED is False
         assert sent == []
         assert await conn.fetchval(
             "SELECT count(*) FROM bettor_funded_intents") == 0

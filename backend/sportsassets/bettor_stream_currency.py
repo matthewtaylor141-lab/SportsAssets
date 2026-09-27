@@ -566,9 +566,13 @@ def mechanism_status() -> dict:
             "and I asserted it. The remaining gap is a documentation and "
             "timing question with named ways to close it, not a demonstrated "
             "impossibility"),
+        # DERIVED FROM WHAT IS ACTUALLY UNMET, not from a hard-coded pair. P6
+        # left the unmet set and this list followed it automatically -- a fixed
+        # list would have gone on naming a closed gap.
         "how_it_could_close": [
-            PRECONDITION_STATUS[P5_DOCUMENTED_TIMING]["what_would_establish_it"],
-            PRECONDITION_STATUS[P6_RESYNCHRONISATION]["what_would_establish_it"],
+            PRECONDITION_STATUS[n].get("what_would_establish_it")
+            for n in MISSING_PRECONDITIONS
+            if PRECONDITION_STATUS[n].get("what_would_establish_it")
         ],
         "bounds_unchanged": {"max_silence_s": MAX_SILENCE_S,
                              "max_snapshot_age_s": MAX_SNAPSHOT_AGE_S,

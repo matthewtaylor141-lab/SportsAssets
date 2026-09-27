@@ -1034,6 +1034,7 @@ def authorize_submission(*, account_id: str, venue: str,
                          approved_limits: dict | None = None,
                          account_exposure: dict | None = None,
                          proposed_cost_usd: float | None = None,
+                         adds_exposure: bool = True,
                          now: float | None = None) -> dict:
     """MAY THIS ACCOUNT SUBMIT AT THIS VENUE? The execution side's answer.
 
@@ -1168,6 +1169,33 @@ def authorize_submission(*, account_id: str, venue: str,
     out["account_exposure_consumed"] = False
     out["exposure_evidence_age_limit_s"] = MAX_EXPOSURE_EVIDENCE_AGE_S
     out["concurrent_writer_limitation"] = CONCURRENT_WRITER_LIMITATION
+    out["adds_exposure"] = bool(adds_exposure)
+    # AN EXIT REDUCES EXPOSURE, SO IT IS NOT GATED ON MEASURING IT.
+    #
+    # This is not a loophole and the asymmetry is the point. Requiring an
+    # account-wide measurement before an EXIT would mean that an unreadable venue
+    # -- the very condition most likely to coincide with wanting out -- strands
+    # inventory we already hold. The cap exists to stop exposure GROWING; a sale
+    # cannot breach it.
+    #
+    # THE CALLER DOES NOT GET TO DECIDE THIS LOOSELY. `adds_exposure=False` is
+    # passed by the exit path only, the record says which branch ran, and a
+    # caller that omits the flag gets the strict behaviour -- so a new entry path
+    # written without knowing about this is refused, not admitted.
+    if not adds_exposure:
+        out["account_exposure_consumed"] = True
+        out["account_exposure_not_required_because"] = (
+            "this submission REDUCES exposure. The account-wide cap bounds "
+            "growth, and a sale cannot breach it -- while requiring a venue "
+            "read before an exit would strand inventory exactly when the venue "
+            "is unreadable")
+        if not REAL_ORDER_SUBMISSION_ENABLED:
+            return dict(out, ok=False, refusal=R_SUBMISSION_DISABLED,
+                        why=("the authorization covers this account, venue and "
+                             "limit set, and real order submission is off in "
+                             "code"))
+        return dict(out, ok=True, refusal=None,            # pragma: no cover
+                    why="authorised to reduce exposure, and submission is on")
     if not isinstance(account_exposure, dict):
         return dict(out, ok=False, refusal=R_ACCOUNT_EXPOSURE_UNKNOWN,
                     why=("no account-wide exposure evidence was supplied. "

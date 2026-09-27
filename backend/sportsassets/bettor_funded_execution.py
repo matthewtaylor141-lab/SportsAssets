@@ -57,6 +57,7 @@ from __future__ import annotations
 import time
 import uuid
 
+from . import bettor_account_exposure as AE
 from . import bettor_entry_execution as EX
 from . import bettor_funded_activation as FA
 from . import bettor_funded_book as FB
@@ -369,6 +370,7 @@ async def check_rails(conn, plan: dict, effective: dict, *,
 
 async def submit_for_decision(conn, rec: dict, *, account_id: str,
                               venue: str, adapter=None,
+                              venue_positions: dict | None = None,
                               now: float | None = None) -> dict:
     """THE WHOLE PATH, refusing at the first thing that is not established.
 
@@ -435,10 +437,39 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                         "%s: $%.2f against a $%.2f rail"
                         % (o["rail"], o["measured"], o["limit"])
                         for o in rails["over"]))
+    # ── ACCOUNT-WIDE EXPOSURE, MEASURED HERE AND HANDED TO THE GATE ─
+    #
+    # THE DEFECT THIS CLOSES. Every rail checked above aggregates
+    # EVERY_OPEN_POSITION_IN_THIS_LANE. So an account shared with the legacy
+    # copier, the manual sleeve, or anything else cleared those rails on the
+    # strength of what OUR rows said, and nothing measured the account.
+    #
+    # THE MEASUREMENT IS TAKEN ON THIS CONNECTION, INSIDE THE CALLER'S
+    # TRANSACTION. That is what makes the check binding rather than advisory: the
+    # read and the intent insert are serialised against our other lanes. It does
+    # NOT serialise against another CREDENTIAL at the venue, which takes no lock
+    # of ours -- see EX.CONCURRENT_WRITER_LIMITATION and, for that case,
+    # bettor_account_exposure.isolation_evidence.
+    #
+    # `venue_positions=None` means the venue's own position read was not
+    # supplied, so the total is UNREADABLE and the gate REFUSES. That is the
+    # correct state without a credential, and it is why this returns a refusal
+    # today rather than a pass.
+    # THE PROPOSED COST IS THE PLAN'S COLLATERAL -- the RESERVATION, not the
+    # modelled cost. Exposure is measured on what the position could cost at
+    # most, which is the same basis the lane's own rails use.
+    proposed_cost_usd = float(plan["collateral_usd"])
+    exposure = await AE.account_exposure(
+        conn, account_id=sel["account_id"],
+        venue_positions=venue_positions, now=at)
+    out["account_exposure"] = exposure
     auth = EX.authorize_submission(
         account_id=sel["account_id"], venue=venue,
         authorization=FA._obj(await FA._state(conn, FA.AUTHORIZATION_KEY)),
-        approved_limits=approved, now=at)
+        approved_limits=approved,
+        account_exposure=exposure,
+        proposed_cost_usd=proposed_cost_usd,
+        now=at)
     out["authorization"] = auth
     out["owner_side_satisfied"] = bool(auth.get("authorization_consumed"))
     if not auth.get("authorization_consumed"):

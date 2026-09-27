@@ -755,41 +755,180 @@ def _observed_fee_of(f: dict):
     return None
 
 
-async def prior_taker_legs(conn, intent_id: str, direction: str) -> list:
-    """THIS ORDER'S ALREADY-INGESTED FILLS, in fill order, as (qty, price).
+#: WHICH ORDER THE CUMULATIVE FEE WAS COMPUTED ON. Recorded per fill, because a
+#: fee computed on arrival order must not be presented as one computed on the
+#: venue's execution order.
+ORDER_BY_VENUE_SEQUENCE = "VENUE_SEQUENCE"
+ORDER_BY_VENUE_TIME = "VENUE_EXECUTED_AT"
+ORDER_BY_ARRIVAL = "ARRIVAL_ORDER"
 
-    WHY THE EXPECTATION NEEDS THEM. The venue charges an order, not a fill:
-    each fill pays its banker's-rounded fee ADJUSTED so the order's total never
-    exceeds the banker's rounding of the cumulative exact fee. A fill's
-    expected fee therefore depends on what the order has already been charged,
-    which means it cannot be computed from the fill alone -- and `reconcile_fee`
-    was computing it from the fill alone.
+#: What each basis does and does not support.
+FEE_ORDER_BASES = {
+    ORDER_BY_VENUE_SEQUENCE: {
+        "is_the_venues_own_order": True,
+        "why_preferred": ("a sequence cannot tie, so it is a total order and "
+                          "two fills can never be ambiguous"),
+        "per_fill_attribution_matches_the_venue": True,
+    },
+    ORDER_BY_VENUE_TIME: {
+        "is_the_venues_own_order": True,
+        "caveat": ("two executions can share a timestamp. Where they do, "
+                   "fill_id breaks the tie -- deterministic, and not the "
+                   "venue's own tie-break, so the attribution between those "
+                   "two fills specifically is not established"),
+        "per_fill_attribution_matches_the_venue": "EXCEPT_ON_TIES",
+    },
+    ORDER_BY_ARRIVAL: {
+        "is_the_venues_own_order": False,
+        "why": ("`at` is written from OUR clock at ingest. Arrival order is "
+                "not execution order: executions can be delivered out of "
+                "order, redelivered, or arrive together after a reconnect"),
+        "consequence": ("the order TOTAL is unaffected -- the cap is a "
+                        "function of the multiset of (qty, price) -- but the "
+                        "PER-FILL amounts may differ from the venue's, so a "
+                        "fill-by-fill reconciliation can disagree while the "
+                        "total agrees"),
+        "per_fill_attribution_matches_the_venue": False,
+        "and_this_is_what_I_had": (
+            "I ordered by `at, fill_id` and called it deterministic. It is -- "
+            "and deterministic is not correct. A stable wrong order is still a "
+            "wrong order; stability only stops the number changing between "
+            "runs"),
+    },
+}
+
+
+def venue_execution_order(row) -> tuple:
+    """The venue's own stated position for one fill, and on what basis.
+
+    Returns `(basis, sort_key)`. The sort key always ends with `fill_id` so the
+    order is TOTAL -- two fills with no venue ordering at all still sort
+    reproducibly, which is what keeps a re-run from producing different per-fill
+    numbers for the same facts.
+    """
+    seq = row.get("venue_sequence")
+    vat = row.get("venue_executed_at")
+    fid = str(row.get("fill_id") or "")
+    if seq is not None:
+        return (ORDER_BY_VENUE_SEQUENCE, (0, float(seq), 0.0, fid))
+    if vat is not None:
+        ts = vat.timestamp() if hasattr(vat, "timestamp") else float(vat)
+        return (ORDER_BY_VENUE_TIME, (1, 0.0, ts, fid))
+    at = row.get("at")
+    ts = at.timestamp() if hasattr(at, "timestamp") else float(at or 0.0)
+    return (ORDER_BY_ARRIVAL, (2, 0.0, ts, fid))
+
+
+async def prior_taker_legs(conn, intent_id: str, direction: str) -> list:
+    """THIS ORDER'S ALREADY-INGESTED FILLS, IN THE VENUE'S OWN ORDER.
+
+    WHY THE EXPECTATION NEEDS THEM. The venue charges an order, not a fill: each
+    fill pays its banker's-rounded fee ADJUSTED so the order's total never
+    exceeds the banker's rounding of the cumulative exact fee. A fill's expected
+    fee therefore depends on what the order has already been charged, which means
+    it cannot be computed from the fill alone -- and `reconcile_fee` was computing
+    it from the fill alone.
+
+    WHOSE ORDER, AND THIS IS THE PART I HAD WRONG. The cap is applied by the
+    VENUE, in the venue's execution order. `bettor_funded_fills.at` is OUR clock,
+    written at ingest, so ordering by it gives ARRIVAL order -- and arrival order
+    is not execution order. So the sequence is built from, in preference:
+
+        venue_sequence      the venue's own sequence number. A total order.
+        venue_executed_at   the venue's own instant, with fill_id breaking ties.
+        at, fill_id         ARRIVAL ORDER, used only when the venue stated
+                            neither -- and REPORTED as such, so a fee computed
+                            this way is never presented as the venue's.
 
     READ FROM THE TABLE, NOT FROM MEMORY, AND THAT IS THE POINT. Three
-    properties fall out of deriving the sequence from persisted rows rather
-    than from a batch variable:
+    properties fall out of deriving the sequence from persisted rows:
 
-      RESTART        a worker that dies mid-order and comes back reads the
-                     same prior fills, so the fourth fill is priced as the
-                     fourth fill and not as the first.
-      REDELIVERY     a duplicate delivery of fill 2 finds fill 2 already
-                     present (it is excluded by id below), so it is priced
-                     against the same prior sequence and yields the same
-                     number rather than shifting the cap.
-      PARTIAL FILL   an order that fills in pieces minutes apart is one order
-                     to the venue and is now one order here too.
+      RESTART        a worker that dies mid-order and comes back reads the same
+                     prior fills, so the fourth fill is priced as the fourth.
+      REDELIVERY     a duplicate delivery of fill 2 finds fill 2 already present
+                     (excluded by id at the call site), so it is priced against
+                     the same prior sequence and yields the same number.
+      LATE ARRIVAL   a fill that arrives out of order takes its VENUE position in
+                     the sequence, not its arrival position -- which is the whole
+                     reason the basis matters.
 
-    Ordered by `at` then `fill_id` so the sequence is deterministic when two
-    fills share a timestamp -- the venue's own order is not recoverable in that
-    case, and an arbitrary but STABLE order is what keeps a re-run from
-    producing different per-fill numbers for the same facts.
+    Each element is `(qty, price, fill_id)`, ordered. The mixed basis for the
+    order as a whole is reported by `order_fee_basis` below.
     """
     rows = await conn.fetch(
-        "SELECT fill_id, qty::float8 AS q, price::float8 AS p "
+        "SELECT fill_id, qty::float8 AS q, price::float8 AS p, at, "
+        "       venue_sequence, venue_executed_at "
         "  FROM bettor_funded_fills "
-        " WHERE intent_id=$1 AND direction=$2 "
-        " ORDER BY at, fill_id", intent_id, direction)
-    return [(float(r["q"]), float(r["p"]), r["fill_id"]) for r in rows]
+        " WHERE intent_id=$1 AND direction=$2", intent_id, direction)
+    decorated = []
+    for r in rows:
+        row = dict(r)
+        basis, key = venue_execution_order(row)
+        decorated.append((key, basis, float(r["q"]), float(r["p"]),
+                          r["fill_id"]))
+    decorated.sort(key=lambda t: t[0])
+    return [(q, p, fid) for _k, _b, q, p, fid in decorated]
+
+
+async def prior_taker_legs_keyed(conn, intent_id: str, direction: str) -> list:
+    """The same sequence, CARRYING ITS SORT KEYS, for placement.
+
+    `prior_taker_legs` returns the caller-facing triple and is what every reader
+    wants. Placing a NEW fill among them needs the keys as well, and recomputing
+    them in the caller would be a second copy of the ordering rule -- which is
+    exactly how two mechanisms drift apart. So both come from here.
+    """
+    rows = await conn.fetch(
+        "SELECT fill_id, qty::float8 AS q, price::float8 AS p, at, "
+        "       venue_sequence, venue_executed_at "
+        "  FROM bettor_funded_fills "
+        " WHERE intent_id=$1 AND direction=$2", intent_id, direction)
+    out = []
+    for r in rows:
+        _basis, key = venue_execution_order(dict(r))
+        out.append((key, float(r["q"]), float(r["p"]), r["fill_id"]))
+    out.sort(key=lambda t: t[0])
+    return out
+
+
+async def order_fee_basis(conn, intent_id: str, direction: str) -> dict:
+    """WHICH ORDER THE WHOLE ORDER'S FEES REST ON, and whether it is the venue's.
+
+    THE WEAKEST LINK GOVERNS. An order whose fills are mostly sequenced by the
+    venue but which contains ONE fill with no venue ordering is an order whose
+    per-fill attribution is not established -- inserting that fill anywhere
+    changes its neighbours' amounts. So the basis reported for the order is the
+    weakest of its fills', not the most common.
+    """
+    rows = await conn.fetch(
+        "SELECT fill_id, at, venue_sequence, venue_executed_at "
+        "  FROM bettor_funded_fills "
+        " WHERE intent_id=$1 AND direction=$2", intent_id, direction)
+    bases = [venue_execution_order(dict(r))[0] for r in rows]
+    if not bases:
+        return {"basis": None, "fills": 0,
+                "is_the_venues_own_order": None,
+                "why": "no fills have been ingested for this order"}
+    rank = {ORDER_BY_VENUE_SEQUENCE: 0, ORDER_BY_VENUE_TIME: 1,
+            ORDER_BY_ARRIVAL: 2}
+    weakest = max(bases, key=lambda b: rank[b])
+    info = FEE_ORDER_BASES[weakest]
+    return {
+        "basis": weakest,
+        "fills": len(bases),
+        "per_fill_basis_counts": {b: bases.count(b) for b in set(bases)},
+        "is_the_venues_own_order": info["is_the_venues_own_order"],
+        "per_fill_attribution_matches_the_venue":
+            info["per_fill_attribution_matches_the_venue"],
+        "the_weakest_link_governs": (
+            "one fill with no venue ordering makes the whole order's per-fill "
+            "attribution unestablished, because where that fill sits changes "
+            "its neighbours' amounts"),
+        "the_total_is_unaffected": (
+            "the cap is a function of the multiset of (qty, price), so the "
+            "order TOTAL is the same under any ordering. Only the per-fill "
+            "split moves"),
+    }
 
 
 def order_expected_fees(legs) -> dict:
@@ -815,8 +954,86 @@ def order_expected_fees(legs) -> dict:
     }
 
 
+def _insert_by_venue_order(keyed, key) -> dict:
+    """WHERE THIS FILL SITS AMONG THE ONES ALREADY STORED, by the venue's order.
+
+    THE DEFECT THIS CLOSES, AND IT IS THE ONE I ALMOST SHIPPED. My first version
+    appended the new fill to the priors and priced it as the LAST leg. That is
+    correct only when fills arrive in execution order. A fill delivered late --
+    whose venue sequence puts it second of four -- would have been priced as the
+    fourth, and the cap's adjustment attributed to the wrong fill.
+
+    "Arrival order is not automatically venue execution order" cuts both ways: it
+    is not enough to SORT the stored legs correctly, the new fill has to be
+    PLACED correctly among them.
+
+    `keyed` is `[(sort_key, qty, price, fill_id), ...]` already in venue order.
+    Returns `before` -- what the order had been charged when this fill executed --
+    and `after`, the fills that execute AFTER it and whose own amounts therefore
+    change.
+    """
+    idx = 0
+    for k, _q, _p, _f in keyed:
+        if k > key:
+            break
+        idx += 1
+    trio = [(q, p, f) for _k, q, p, f in keyed]
+    return {"before": trio[:idx], "after": trio[idx:], "index": idx,
+            "placed_last": idx == len(trio),
+            "and_a_late_fill_is_not_appended": (
+                "placement is by the venue's own key, so a fill delivered out "
+                "of order is priced at its execution position")}
+
+
+def venue_order_fields(f: dict) -> dict:
+    """THE VENUE'S OWN SEQUENCE AND EXECUTION INSTANT, from its execution report.
+
+    Both are optional and BOTH ABSENT IS A REAL ANSWER, not a parse failure: it
+    means the venue told us neither, and the cumulative fee for that order then
+    rests on arrival order and says so.
+
+    Names are tried in the order the venue's own documentation and the pinned
+    SDK use. An unparseable value is discarded rather than coerced -- guessing a
+    sequence would put a fill in the wrong place in the cap.
+    """
+    out = {"venue_sequence": None, "venue_executed_at": None}
+    for key in ("sequence", "seq", "sequenceNumber", "execSeq",
+                "executionSequence"):
+        v = f.get(key)
+        if v is None:
+            continue
+        try:
+            out["venue_sequence"] = int(v)
+            break
+        except (TypeError, ValueError):
+            continue
+    for key in ("transactTime", "executedAt", "execTime", "executed_at",
+                "matchTime"):
+        v = f.get(key)
+        if v is None:
+            continue
+        if isinstance(v, (int, float)):
+            out["venue_executed_at"] = float(v)
+            break
+        try:
+            import datetime as _dt
+            txt = str(v).replace("Z", "+00:00")
+            if "." in txt:
+                head, _, tail = txt.partition(".")
+                digits = "".join(c for c in tail if c.isdigit())[:6]
+                off = tail[len("".join(c for c in tail if c.isdigit())):]
+                txt = "%s.%s%s" % (head, digits.ljust(6, "0"),
+                                   off or "+00:00")
+            out["venue_executed_at"] = _dt.datetime.fromisoformat(
+                txt).timestamp()
+            break
+        except (TypeError, ValueError):
+            continue
+    return out
+
+
 def reconcile_fee(qty: float, price: float, observed, *, at=None,
-                  prior_legs=None) -> dict:
+                  prior_legs=None, following_legs=None) -> dict:
     """EXPECTED AGAINST OBSERVED, through the deployed reconciler.
 
     THE DEFECT THIS CLOSES. `ingest_fills` called `expected_fee` and stored the
@@ -841,21 +1058,45 @@ def reconcile_fee(qty: float, price: float, observed, *, at=None,
     # that cannot see the order's history must not have a cap invented for it.
     cumulative = None
     if prior_legs is not None:
-        legs = [(q, p) for q, p, *_ in prior_legs] + [(qty, price)]
+        before = [(q, p) for q, p, *_ in prior_legs]
+        after = [(q, p) for q, p, *_ in (following_legs or [])]
+        # THE WHOLE ORDER, IN EXECUTION ORDER, WITH THIS FILL IN ITS PLACE.
+        # `after` is not cosmetic: the cap is running, so a fill inserted before
+        # existing ones changes THEIR amounts too. Pricing only `before + this`
+        # would give this fill the right number and leave its successors holding
+        # figures computed as if it had never executed.
+        idx = len(before)
+        legs = before + [(qty, price)] + after
         got = order_expected_fees(legs)
         if got["BLOCKER"] is None:
             cumulative = {
                 "expected_fee_usd_single_fill": expected,
                 "order_legs": len(legs),
-                "this_leg_index": len(legs) - 1,
+                "this_leg_index": idx,
+                "legs_before": len(before),
+                "legs_after": len(after),
                 "order_total_expected_usd": got["TOTAL"],
                 "cumulative_cap_usd": got["cumulative_cap"],
-                "cap_adjusted_this_leg": got["adjusted"][-1],
+                "cap_adjusted_this_leg": got["adjusted"][idx],
                 "algorithm": got["algorithm"],
             }
-            expected = got["per_fill"][-1]
+            expected = got["per_fill"][idx]
             basis = ("calibration_fees.order_fees(leg %d of %d, %s)"
-                     % (len(legs), len(legs), got["algorithm"]))
+                     % (idx + 1, len(legs), got["algorithm"]))
+            if after:
+                # THE SUCCESSORS WHOSE AMOUNTS THIS FILL CHANGED, named with
+                # their recomputed figures so the caller can restate them rather
+                # than discover the inconsistency later.
+                cumulative["restates_following_fills"] = [
+                    {"fill_id": fl[2] if len(fl) > 2 else None,
+                     "expected_fee_usd": got["per_fill"][idx + 1 + i],
+                     "cap_adjusted": got["adjusted"][idx + 1 + i]}
+                    for i, fl in enumerate(following_legs or [])]
+                cumulative["why_they_need_restating"] = (
+                    "the cap is RUNNING, so a fill inserted before existing "
+                    "ones changes their amounts. Leaving them as they were "
+                    "would make the order's per-fill figures inconsistent with "
+                    "its own total")
         else:
             # A SCHEDULE THAT WILL NOT PRICE THE SEQUENCE FALLS BACK TO THE
             # SINGLE-FILL NUMBER AND SAYS SO, rather than silently reporting a
@@ -1202,10 +1443,27 @@ async def _ingest_locked(conn, *, intent_id, fills, direction, now, row,
         # fill 2 would see fill 2 among the priors and price it as a third
         # leg -- a duplicate delivery would change the expectation, which is
         # the opposite of idempotent.
-        priors = [t for t in await prior_taker_legs(conn, intent_id, direction)
-                  if t[2] != fid]
+        keyed = [t for t in await prior_taker_legs_keyed(
+            conn, intent_id, direction) if t[3] != fid]
+        # THE VENUE'S OWN ORDERING, CAPTURED BEFORE THE FEE IS COMPUTED, so this
+        # fill takes its VENUE position in the sequence rather than its arrival
+        # position. Both absent is a real answer and produces ARRIVAL_ORDER.
+        vo = venue_order_fields(f)
+        _b, _k = venue_execution_order(
+            {"fill_id": fid, "at": now,
+             "venue_sequence": vo["venue_sequence"],
+             "venue_executed_at": vo["venue_executed_at"]})
+        # THIS FILL IS PLACED BY ITS OWN KEY, NOT APPENDED. A late-arriving fill
+        # whose venue sequence puts it SECOND of four must be priced as the
+        # second -- appending it would price it as the fourth and attribute the
+        # cap's adjustment to the wrong fill.
+        placed = _insert_by_venue_order(keyed, _k)
         fee = reconcile_fee(qty, px, _observed_fee_of(f), at=now,
-                            prior_legs=priors)
+                            prior_legs=placed["before"],
+                            following_legs=placed["after"])
+        fee["fee_order_basis"] = _b
+        fee["venue_sequence"] = vo["venue_sequence"]
+        fee["venue_executed_at"] = vo["venue_executed_at"]
         # ── ONE TRANSACTION: THE FILL, ITS EVENTS, AND THE FLAG ─────
         #
         # THE DEFECT THIS CLOSES. The fill went in, then the cash event, then
@@ -1229,16 +1487,26 @@ async def _ingest_locked(conn, *, intent_id, fills, direction, now, row,
                 "INSERT INTO bettor_funded_fills (fill_id, intent_id,"
                 " venue_order_id, venue_fill_id, at, qty, price, cash_usd,"
                 " fee_usd, fee_basis, raw, direction, expected_fee_usd,"
-                " observed_fee_usd, fee_state, fee_reconciliation) "
+                " observed_fee_usd, fee_state, fee_reconciliation,"
+                " venue_sequence, venue_executed_at, fee_order_basis) "
                 "VALUES ($1,$2,$3,$4,to_timestamp($5),$6,$7,$8,$9,$10,"
-                "        $11::jsonb,$12,$13,$14,$15,$16::jsonb)"
+                "        $11::jsonb,$12,$13,$14,$15,$16::jsonb,$17,"
+                "        CASE WHEN $18::float8 IS NULL THEN NULL"
+                "             ELSE to_timestamp($18::float8) END,$19)"
                 " ON CONFLICT (fill_id) DO NOTHING",
                 fid, intent_id, str(row["venue_order_id"] or ""), str(vfid),
                 now, qty, px, cash, fee["booked_fee_usd"], fee["fee_basis"],
                 json.dumps(f, default=str), direction,
                 fee["expected_fee_usd"], fee["observed_fee_usd"],
                 fee["fee_state"],
-                json.dumps(fee["reconciliation"], default=str))
+                json.dumps(fee["reconciliation"], default=str),
+                # THE VENUE'S OWN ORDERING, PERSISTED. Without these columns the
+                # next fill of this order would read the sequence back and find
+                # only our arrival clock, so the ordering would be correct for
+                # one fill and lost for every fill after it.
+                fee.get("venue_sequence"),
+                fee.get("venue_executed_at"),
+                fee.get("fee_order_basis"))
             fresh = res.endswith("1")
             if fresh:
                 await _write_fill_economics(

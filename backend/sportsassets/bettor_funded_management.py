@@ -1016,10 +1016,15 @@ async def submit_exit(conn, *, intent_id: str, limit_price=None,
                     why=gate.get("why"))
     # FOR THE RECORD ONLY. A lapsed grant is reported and does not refuse.
     approved = await _approved(conn)
+    # `adds_exposure=False`: THIS IS AN EXIT. The account-wide exposure check
+    # bounds exposure GROWING, and a sale cannot breach it -- so gating an exit
+    # on an account-wide measurement would strand inventory exactly when the
+    # venue is unreadable, which is the same failure the comment above describes
+    # for an expired grant.
     auth = EX.authorize_submission(
         account_id=str(row["account_id"]), venue=ven,
         authorization=FA._obj(await FA._state(conn, FA.AUTHORIZATION_KEY)),
-        approved_limits=approved, now=at)
+        approved_limits=approved, adds_exposure=False, now=at)
     out["submission_authority_for_the_record"] = {
         "valid_for_new_exposure": bool(auth.get("authorization_consumed")),
         "affirmative": bool(auth.get("ok")),
