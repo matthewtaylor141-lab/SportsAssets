@@ -195,6 +195,30 @@ CANONICAL_ACTIONS = {
                  "terminal value of carrying to settlement is not "
                  "identified"),
     },
+    # §5 of "COMPLETE THE AUTONOMOUS TRADING SYSTEM": the eighth
+    # eligible action. It was genuinely absent -- HEDGE above is the
+    # DIRECT complement of the held condition, and nothing in this table
+    # covered acquiring a leg on a DIFFERENT condition of the same
+    # fixture. Its absence meant the action could never appear in an
+    # audit as considered-and-rejected, which §5 forbids.
+    "FORM_INDIRECT_HEDGE": {
+        "leg": LEG_BOTH, "aggression": AGGRESSIVE,
+        "what": ("acquire a leg on a different condition of the same "
+                 "fixture whose payoff region overlaps the held leg's"),
+        "requires": ("VALUE_IF_FILL", "STRUCTURE_ESTABLISHED",
+                     "P_MIDDLE_LANDS"),
+        "evCore": NOT_REPRESENTED, "actionEv": NOT_REPRESENTED,
+        "positionState": NOT_REPRESENTED,
+        "note": ("`bettor_indirect_structures.classify` supplies "
+                 "STRUCTURE_ESTABLISHED, and it refuses whenever the "
+                 "grading variable is not shared (period, overtime, "
+                 "orientation, uncaptured push or void rule). MIDDLE is "
+                 "a payoff shape and not an authorisation: both case "
+                 "studies' middle books averaged ABOVE $1 ($1.2024 RN1, "
+                 "$1.1711 Ferrari), so a middle bought above par carries "
+                 "a guaranteed shortfall and needs P_MIDDLE_LANDS, which "
+                 "is not identified for BETTOR"),
+    },
     "NO_TRADE": {
         "leg": LEG_NONE, "aggression": NON_ORDER,
         "what": "take no action",
@@ -239,6 +263,13 @@ EXPOSURE_EFFECT = {
     # it off was a real omission.
     "COMPLETE_PAIR": (INCREASE, DECREASE),
     "HEDGE": (INCREASE, DECREASE),
+    # An indirect hedge buys a position on a SECOND condition, so gross
+    # exposure rises. Directional risk falls only in the region where
+    # the two payoffs overlap -- outside it the second leg is its own
+    # directional bet, which is why a MIDDLE can pay $2 at all. DECREASE
+    # is the honest single-axis reading of a partial reduction, and it
+    # keeps the action on the gated side of the table.
+    "FORM_INDIRECT_HEDGE": (INCREASE, DECREASE),
     "MERGE": (DECREASE, UNCHANGED),
     "DIRECT_EXIT": (DECREASE, DECREASE),
     "HOLD": (UNCHANGED, UNCHANGED),
