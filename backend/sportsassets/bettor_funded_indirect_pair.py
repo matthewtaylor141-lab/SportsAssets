@@ -1,271 +1,194 @@
-"""WHAT AN INDIRECT PAIR IS WORTH, VALUED ON THE FIXTURE'S OUTCOMES.
+"""WHAT AN INDIRECT PAIR IS WORTH NET, AND WHICH ACTION TO RANK FIRST.
 
-An INDIRECT pair is two DISTINCT contracts on the SAME fixture -- long the home
-moneyline and long the away moneyline, say. It is not the YES/NO pair
-`bettor_pair_engine` values: on this venue buying the opposite side of one market
-reduces the same book, so that is netting, and netting has no second settling
-holding to value. Two distinct contracts DO settle independently, which is the
-whole reason this structure exists and the whole reason it needs its own valuation.
+── A CORRECTION, RECORDED BECAUSE IT IS THE REASON THIS FILE IS SHORT ──
 
-── THE MISTAKE THIS MODULE IS BUILT AROUND ───────────────────────────
-Two legs covering "both teams" feels like a locked position, and on a two-outcome
-fixture with equal quantities it is: whichever side wins, one leg pays its
-quantity. So the worst case is `min(q_primary, q_hedge)` against the total cost,
-and if that is positive the structure cannot lose.
+The first version of this module built its own outcome partition, its own per-leg
+payout function and its own worst case. `bettor_indirect_structures` already does
+all three, and does them properly: it enumerates the fixture's outcome regions
+over MARGIN, TOTAL or the three-way categories, handles spreads and totals rather
+than only moneylines, models regulation ties, pushes on integer lines, voids and
+postponements as explicit states, refuses when a leg's overtime rule or
+orientation is unstated, and reads the taxonomy off the joint payoff table instead
+of matching names. It carries `min_payout_cents`, `cost_cents`,
+`guaranteed_gross_result_cents`, `undetermined_regions` and `missing_facts`.
 
-ON A THREE-OUTCOME FIXTURE IT IS NOT. A football match can be drawn, and two
-moneyline legs pay NOTHING on a draw. The same two legs that are locked on an
-NBA game are a total loss on a Premier League game. Nothing about the legs
-themselves distinguishes those cases -- only the FIXTURE'S OUTCOME SPACE does.
+Writing a second, weaker model of the same thing is the defect this session spent
+its morning removing from `bettor_funded_book`, where a duplicated block meant
+edits landed on the copy that never ran. So the duplicate is gone and this module
+CONSUMES that classifier.
 
-So this module REFUSES TO VALUE A STRUCTURE WHOSE OUTCOME SPACE IS NOT
-ESTABLISHED. Not "assumes two", not "defaults to the common case": refuses, by
-name, with the reason. An unestablished outcome space is the difference between a
-hedge and an unhedged double stake, and guessing it is how a strategy that
-believes it is locked discovers otherwise at settlement.
+── WHAT IS GENUINELY MISSING, AND IS WHAT REMAINS HERE ──────────────
 
-── WORST CASE IS THE DECISION VARIABLE, NOT EXPECTED VALUE ───────────
-The owner's standing rule is that historical or simulated results do not
-establish a forward outcome. So the number this module leads with is the one that
-does not depend on any probability at all: the payout in the WORST outcome the
-fixture admits, minus what the structure cost including fees. That is arithmetic
-on the venue's own settlement terms, not a forecast.
+`bettor_indirect_structures` says so itself, and `bettor_pair_engine` says it
+again: a locked GROSS structure is not a profitable position. Three things stand
+between the taxonomy and a decision, and none of them is a classification:
 
-Probabilities appear only where a caller supplies them, only labelled as the
-caller's own, and never blended into the worst case.
+  1 FEES, WHICH DECIDE THE SIGN AT THESE MARGINS. A structure with a ten-cent
+    gross surplus is loss-making at a twenty-five-cent round-trip fee. The
+    structures module reports `locks_gross_surplus` and is careful to call it
+    gross; turning it into a net worst case is arithmetic it deliberately leaves
+    out. A verdict is WITHHELD until the fee is priced, because an unpriced fee is
+    not a zero fee.
 
-── BUCKETS ARE NEVER SUMMED INTO ONE NUMBER ──────────────────────────
-Following `bettor_pair_engine` and for the reason the Ferrari result gave: its
-merge economics were +$3.84M and its settled residual was -$4.44M. An engine
-reporting only the total would have hidden both terms. Acquisition cost, fees,
-per-outcome payouts, incremental capital and depth are reported separately.
+  2 INCREMENTAL CAPITAL. The primary leg is already funded. Comparing the pair's
+    total cost against headroom that has already absorbed the first leg
+    double-counts it; only the new money is a decision.
 
-NOTHING HERE PLACES, SIZES OR FUNDS AN ORDER, and nothing here decides that a
-pair may be acquired. It values and it ranks; the reservation machine and the
-funded book are what would act, under authority this module does not grant.
+  3 DEPTH, AND THE PARTIAL FILL. A hedge sized against a depth never read fills
+    partly and leaves the primary leg naked for the remainder while the
+    accounting records a complete pair. An unknown depth is refused, not treated
+    as unlimited, and the same quantity is flagged as the one book the exit path
+    reads -- shared depth must not be counted as separately executable twice.
+
+And then the ranking: HOLD, ACQUIRE_HEDGE, REDUCE and EXIT compared on WORST CASE,
+which depends on no probability at all. An action whose inputs are not established
+is listed as unrankable with its refusal -- never scored at zero and never dropped,
+because a missing input that vanishes from a ranking becomes a decision made by
+omission.
+
+NOTHING HERE PLACES, SIZES OR FUNDS AN ORDER, and ACQUIRE_HEDGE ranking first is a
+recommendation, never an authorisation.
 """
 
 from __future__ import annotations
 
-VERSION = "FUNDED_INDIRECT_PAIR_V1"
+VERSION = "FUNDED_INDIRECT_PAIR_V2"
 
 NOT_ESTABLISHED = "NOT_ESTABLISHED"
 
-#: ── THE OUTCOME SPACE, WHICH MUST COME FROM EVIDENCE ─────────────────
-#: A fixture's settling outcomes are a property of the competition's rules and
-#: the venue's own settlement terms. They are supplied, with the source that
-#: established them, or the valuation is refused.
-OUTCOME_SPACE_ESTABLISHED_BY = (
-    "VENUE_SETTLEMENT_TERMS",       # the venue states how the market resolves
-    "COMPETITION_RULES_CAPTURED",   # the competition's own rules, captured
-)
-
-#: Every action the ranking may return. `ACQUIRE_HEDGE` is a RECOMMENDATION and
-#: never an authorisation: acting on it requires a reservation, a funded grant and
-#: the owner's approval, none of which this module can give.
 ACTION_HOLD = "HOLD"
 ACTION_ACQUIRE_HEDGE = "ACQUIRE_HEDGE"
 ACTION_REDUCE = "REDUCE"
 ACTION_EXIT = "EXIT"
 ACTIONS = (ACTION_HOLD, ACTION_ACQUIRE_HEDGE, ACTION_REDUCE, ACTION_EXIT)
 
-R_OUTCOME_SPACE_NOT_ESTABLISHED = "THE_FIXTURES_OUTCOME_SPACE_IS_NOT_ESTABLISHED"
-R_OUTCOME_SOURCE_NOT_RECOGNISED = "THAT_IS_NOT_AN_ESTABLISHED_OUTCOME_SOURCE"
-R_LEGS_ARE_THE_SAME_CONTRACT = "THE_TWO_LEGS_ARE_THE_SAME_CONTRACT"
-R_NO_PRIMARY_LEG = "THERE_IS_NO_PRIMARY_LEG_TO_PAIR"
-R_LEG_PAYS_ON_NO_OUTCOME = "A_LEG_PAYS_ON_NO_OUTCOME_THIS_FIXTURE_ADMITS"
+R_STRUCTURE_IS_UNESTABLISHABLE = "THE_STRUCTURE_ITSELF_IS_UNESTABLISHABLE"
+R_MIN_PAYOUT_NOT_DETERMINED = "THE_MINIMUM_PAYOUT_IS_NOT_DETERMINED"
+R_COST_NOT_STATED = "THE_STRUCTURES_COST_IS_NOT_STATED"
+R_FEES_NOT_PRICED = "THE_FEE_SCHEDULE_WOULD_NOT_PRICE_THIS"
 R_DEPTH_NOT_ESTABLISHED = "THE_BOOKS_DEPTH_AT_THAT_PRICE_IS_NOT_ESTABLISHED"
 R_PRICE_NOT_ESTABLISHED = "THE_COMPLEMENTS_PRICE_IS_NOT_ESTABLISHED"
-R_FEES_NOT_PRICED = "THE_FEE_SCHEDULE_WOULD_NOT_PRICE_THIS"
-
-#: WHY A STRUCTURE IS OR IS NOT LOCKED. Named values, because "hedged" is the
-#: word that hides the three-outcome case.
-COVER_ALL_OUTCOMES_PAY = "EVERY_SETTLING_OUTCOME_PAYS_AT_LEAST_ONE_LEG"
-COVER_SOME_OUTCOMES_PAY_NOTHING = "AT_LEAST_ONE_SETTLING_OUTCOME_PAYS_NOTHING"
 
 
 def describe() -> dict:
     return {
         "version": VERSION,
-        "structure": ("two DISTINCT contracts on one fixture, settling "
-                      "independently. NOT the YES/NO pair, which on this venue "
-                      "is netting on a single book"),
+        "classification_comes_from": "sportsassets.bettor_indirect_structures",
+        "why_not_here": (
+            "that module already enumerates the fixture's outcome regions, "
+            "handles spreads, totals, ties, pushes, voids and postponements, and "
+            "refuses on unstated overtime or orientation. A second model of the "
+            "same thing would drift from it"),
+        "what_this_adds": [
+            "the fee, which decides the sign at these margins",
+            "incremental capital -- the new money only",
+            "depth, and the refusal to treat a partial fill as the pair",
+            "the ranking of HOLD / ACQUIRE_HEDGE / REDUCE / EXIT on worst case",
+        ],
         "actions": list(ACTIONS),
-        "outcome_space_established_by": list(OUTCOME_SPACE_ESTABLISHED_BY),
-        "leads_with": ("the payout in the WORST outcome the fixture admits, "
-                       "minus total cost including fees -- arithmetic on the "
-                       "venue's settlement terms, not a forecast"),
-        "refuses_to": ("value a structure whose outcome space is not "
-                       "established. Two moneyline legs are locked on a "
-                       "two-outcome fixture and a total loss on a drawn one, "
-                       "and only the outcome space tells them apart"),
-        "never_blends": ("acquisition cost, fees, per-outcome payouts, "
-                         "incremental capital and depth stay separate"),
-        "acquire_hedge_is": ("a RECOMMENDATION. It is not an authorisation and "
-                             "this module cannot grant one"),
+        "leads_with": (
+            "the NET worst case: the structure's minimum payout minus its cost "
+            "minus fees. It depends on no probability at all"),
+        "gross_is_not_net": (
+            "`locks_gross_surplus` is a structural fact before fees, and this "
+            "module never reports it as an outcome"),
+        "acquire_hedge_is": (
+            "a RECOMMENDATION. It is not an authorisation and this module cannot "
+            "grant one"),
         "this_module_sends_nothing": True,
     }
 
 
-def outcome_space(*, fixture: str, outcomes, established_by: str,
-                  evidence: dict | None = None) -> dict:
-    """DECLARE THE SETTLING OUTCOMES OF A FIXTURE, with what established them.
+def net_worst_case(structure, *, fee_usd=None, fee_basis: str | None = None
+                   ) -> dict:
+    """THE NET WORST CASE, from a `bettor_indirect_structures.Structure`.
 
-    `outcomes` is the complete list of mutually exclusive settling results -- for
-    a two-way fixture `["HOME", "AWAY"]`, for a three-way `["HOME","DRAW","AWAY"]`.
-    A VOID is not listed here: it is not a settling outcome, it returns the
-    collateral on what is still held, and `bettor_funded_management` already
-    prices it from the remaining basis.
+    `structure` is that module's result -- its dataclass or its `to_dict()`. The
+    minimum payout and the cost are ITS arithmetic over the fixture's own outcome
+    regions, in cents; this function subtracts the fee and reports the result in
+    dollars with everything it relied on named.
 
-    Refused rather than defaulted, because a default is the bug.
+    THE REFUSALS COME FROM THE STRUCTURE FIRST. A structure with missing facts, an
+    undetermined region or no determined minimum has no worst case to net, and a
+    number produced anyway would be a fabricated hedge with a decimal point.
     """
-    out = {"version": VERSION, "fixture": str(fixture),
-           "established_by": established_by}
-    if established_by not in OUTCOME_SPACE_ESTABLISHED_BY:
-        return dict(out, ok=False, refusal=R_OUTCOME_SOURCE_NOT_RECOGNISED,
-                    recognised=list(OUTCOME_SPACE_ESTABLISHED_BY),
-                    why=("the outcome space decides whether two legs are a "
-                         "hedge or a double stake, so it is taken only from a "
-                         "source that states how the market resolves"))
-    named = [str(o) for o in (outcomes or []) if str(o).strip()]
-    if len(named) < 2 or len(set(named)) != len(named):
-        return dict(out, ok=False, refusal=R_OUTCOME_SPACE_NOT_ESTABLISHED,
-                    outcomes=named,
-                    why=("a settling outcome space needs at least two distinct "
-                         "outcomes; %r is not one" % (named,)))
-    return dict(out, ok=True, refusal=None, outcomes=named,
-                count=len(named), evidence=dict(evidence or {}),
-                void_is_not_listed=("a void is not a settling outcome; it "
-                                    "returns collateral on what is still held"))
+    d = structure if isinstance(structure, dict) else structure.to_dict()
+    out: dict = {"version": VERSION,
+                 "taxonomy": d.get("taxonomy"),
+                 "units": d.get("units"),
+                 "legs": list(d.get("legs") or ()),
+                 "classified_by": "bettor_indirect_structures"}
+    missing = list(d.get("missing_facts") or ())
+    undetermined = list(d.get("undetermined_regions") or ())
+    # ── THE TAXONOMY IS CHECKED FIRST, AND THIS WAS A REAL DEFECT ────
+    #
+    # An earlier version refused only on `missing_facts` and on a NULL
+    # `min_payout_cents`. Measured against the real classifier, an UNESTABLISHABLE
+    # structure can have NEITHER: a spread whose void rule was never captured
+    # gives `missing_facts=()`, `undetermined_regions=('fixture cancelled or
+    # abandoned',)` and `min_payout_cents=100` -- a minimum over the DETERMINED
+    # regions only. This module then reported `worst_case_usd = +0.01` and
+    # `cannot_lose = True` for a structure the classifier had explicitly refused.
+    #
+    # That is exactly the fabricated hedge with a decimal point on it. The floor
+    # would have been computed from a partition with a reachable cell nobody can
+    # price, and the one thing a worst case must not do is omit an outcome.
+    if str(d.get("taxonomy")) == "UNESTABLISHABLE" or missing or undetermined:
+        return dict(out, ok=False, refusal=R_STRUCTURE_IS_UNESTABLISHABLE,
+                    missing_facts=missing,
+                    undetermined_regions=undetermined,
+                    why=("the classifier did not establish this structure, so "
+                         "there is no minimum payout to net a fee against. A "
+                         "minimum taken over only the DETERMINED regions is not "
+                         "a floor: it omits an outcome that can actually happen"))
+    if d.get("min_payout_cents") is None:
+        return dict(out, ok=False, refusal=R_MIN_PAYOUT_NOT_DETERMINED,
+                    undetermined_regions=undetermined,
+                    why=("the minimum payout is not determined. An undetermined "
+                         "cell must not contribute zero to a minimum, which "
+                         "would report a floor the position does not have"))
+    if d.get("cost_cents") is None:
+        return dict(out, ok=False, refusal=R_COST_NOT_STATED,
+                    why="without the cost there is no result to report")
 
-
-def _leg(role, *, slug, qty, price_paid, pays_on):
-    return {"leg_role": role, "us_market_slug": str(slug),
-            "qty": float(qty), "price_paid": float(price_paid),
-            "pays_on": [str(o) for o in (pays_on or [])]}
-
-
-def leg(role, *, slug, qty, price_paid, pays_on):
-    """A LEG, AND THE OUTCOMES IT PAYS ON.
-
-    `pays_on` is the subset of the fixture's outcomes in which this contract
-    settles at 1. It is stated per leg rather than inferred from the slug,
-    because inferring it means parsing a market name -- and a mis-parse here
-    turns an unhedged position into one the system believes is covered.
-    """
-    return _leg(role, slug=slug, qty=qty, price_paid=price_paid,
-                pays_on=pays_on)
-
-
-def value_the_structure(*, space: dict, legs, fee_usd=None,
-                        fee_basis: str | None = None) -> dict:
-    """WHAT THE LEGS PAY IN EVERY OUTCOME, AND WHAT THE WORST ONE IS.
-
-    No probabilities. The payout in each settling outcome is the sum of the
-    quantities of the legs that pay in it; the cost is what was paid plus fees.
-    The worst case is the minimum over outcomes. That is arithmetic, and it is
-    the number a bounded real-money pilot can actually be sized against.
-    """
-    out: dict = {"version": VERSION}
-    if not space.get("ok"):
-        return dict(out, ok=False,
-                    refusal=space.get("refusal",
-                                      R_OUTCOME_SPACE_NOT_ESTABLISHED),
-                    why=space.get("why"))
-    outcomes = list(space["outcomes"])
-    legs = [dict(x) for x in (legs or [])]
-    if not legs:
-        return dict(out, ok=False, refusal=R_NO_PRIMARY_LEG,
-                    why="there are no legs to value")
-    slugs = [x["us_market_slug"] for x in legs]
-    if len(set(slugs)) != len(slugs):
-        return dict(out, ok=False, refusal=R_LEGS_ARE_THE_SAME_CONTRACT,
-                    slugs=slugs,
-                    why=("two legs on one contract is netting on a single book, "
-                         "not an indirect pair with two settling holdings"))
-    for x in legs:
-        unknown = [o for o in x["pays_on"] if o not in outcomes]
-        if unknown:
-            return dict(out, ok=False, refusal=R_LEG_PAYS_ON_NO_OUTCOME,
-                        leg=x["us_market_slug"], unknown_outcomes=unknown,
-                        fixture_outcomes=outcomes,
-                        why=("a leg that pays on an outcome the fixture does "
-                             "not admit is not described correctly, and its "
-                             "payout cannot be computed"))
-        if not x["pays_on"]:
-            return dict(out, ok=False, refusal=R_LEG_PAYS_ON_NO_OUTCOME,
-                        leg=x["us_market_slug"],
-                        why=("this leg pays in no outcome, so it is not a "
-                             "settling holding"))
-
-    acquisition_usd = round(sum(x["qty"] * x["price_paid"] for x in legs), 6)
-    fees = None if fee_usd is None else round(float(fee_usd), 6)
-    total_cost = (None if fees is None
-                  else round(acquisition_usd + fees, 6))
-
-    payouts = {}
-    for o in outcomes:
-        payouts[o] = round(sum(x["qty"] for x in legs if o in x["pays_on"]), 6)
-    worst_outcome = min(payouts, key=lambda o: payouts[o])
-    best_outcome = max(payouts, key=lambda o: payouts[o])
-
-    uncovered = [o for o in outcomes if payouts[o] <= 0]
-    coverage = (COVER_ALL_OUTCOMES_PAY if not uncovered
-                else COVER_SOME_OUTCOMES_PAY_NOTHING)
-
-    res: dict = dict(
-        out, ok=True, refusal=None,
-        fixture=space["fixture"],
-        outcomes=outcomes,
-        outcome_space_established_by=space["established_by"],
-        legs=[{"leg_role": x["leg_role"], "us_market_slug": x["us_market_slug"],
-               "qty": x["qty"], "price_paid": x["price_paid"],
-               "pays_on": x["pays_on"]} for x in legs],
-        acquisition_usd=acquisition_usd,
-        fees_usd=fees,
-        fee_basis=fee_basis or NOT_ESTABLISHED,
-        total_cost_usd=total_cost,
-        payout_by_outcome=payouts,
-        worst_outcome=worst_outcome,
-        worst_payout_usd=payouts[worst_outcome],
-        best_outcome=best_outcome,
-        best_payout_usd=payouts[best_outcome],
-        outcomes_paying_nothing=uncovered,
-        coverage=coverage,
-        buckets_are_not_summed=("acquisition, fees and per-outcome payouts are "
-                               "separate; no single figure stands for the "
-                               "structure"),
-    )
-    if total_cost is None:
-        # NO FEE, NO VERDICT. A worst case computed without fees is optimistic by
-        # exactly the fees, and this structure's whole claim is a small positive
-        # margin -- which is the size at which fees decide the sign.
-        return dict(res, worst_case_usd=None,
+    min_payout_usd = round(int(d["min_payout_cents"]) / 100.0, 6)
+    cost_usd = round(int(d["cost_cents"]) / 100.0, 6)
+    gross = round(min_payout_usd - cost_usd, 6)
+    res = dict(out, ok=True, refusal=None,
+               min_payout_usd=min_payout_usd,
+               cost_usd=cost_usd,
+               gross_worst_case_usd=gross,
+               locks_gross_surplus=d.get("locks_gross_surplus"),
+               both_lose_regions=list(d.get("both_lose_regions") or ()),
+               unresolved_states=list(d.get("unresolved_states") or ()),
+               fee_basis=fee_basis or NOT_ESTABLISHED)
+    # UNRESOLVED STATES ARE CARRIED, NOT SWALLOWED. A void or a postponement is
+    # not a payout, and the structures module lists them precisely so a consumer
+    # cannot quietly treat "conditional on resolution" as unconditional.
+    res["worst_case_is_conditional_on_resolution"] = bool(
+        res["unresolved_states"])
+    if fee_usd is None:
+        return dict(res, fees_usd=None, worst_case_usd=None,
                     verdict_is_withheld=R_FEES_NOT_PRICED,
-                    why=("the worst case is withheld until fees are priced: at "
-                         "this structure's margins the fee is what decides the "
-                         "sign"))
-    res["worst_case_usd"] = round(payouts[worst_outcome] - total_cost, 6)
-    res["best_case_usd"] = round(payouts[best_outcome] - total_cost, 6)
-    res["cannot_lose"] = bool(res["worst_case_usd"] > 0
-                              and coverage == COVER_ALL_OUTCOMES_PAY)
-    res["why_the_worst_case_is_the_headline"] = (
-        "it depends on no probability at all -- only on the venue's settlement "
-        "terms and what was paid")
-    if uncovered:
-        res["warning"] = (
-            "outcome(s) %r pay NOTHING. Two legs that look like a hedge are an "
-            "unhedged double stake on a fixture that admits an outcome neither "
-            "covers" % (uncovered,))
-    return res
+                    why=("the net worst case is withheld until the fee is "
+                         "priced. A structure with a ten-cent gross surplus is "
+                         "loss-making at a twenty-five-cent round trip, so the "
+                         "fee is what decides the sign -- and an unpriced fee is "
+                         "not a zero fee"))
+    fees = round(float(fee_usd), 6)
+    net = round(gross - fees, 6)
+    return dict(res, fees_usd=fees, worst_case_usd=net,
+                cannot_lose=bool(net > 0 and not res["unresolved_states"]),
+                why_the_worst_case_is_the_headline=(
+                    "it depends on no probability at all -- only on the "
+                    "fixture's own outcome regions, what was paid and the fee"))
 
 
 def incremental_capital_usd(*, hedge_qty, hedge_price, hedge_fee_usd=None
                             ) -> dict:
-    """WHAT ACQUIRING THE HEDGE WOULD ACTUALLY COST, which is not the pair's
-    total. The primary leg is already paid for; the decision in front of the
-    system is the NEW money, and comparing a total against a headroom that has
-    already absorbed the first leg double-counts it."""
+    """WHAT ACQUIRING THE HEDGE WOULD COST, which is not the pair's total. The
+    primary leg is already paid for; comparing the total against headroom that has
+    already absorbed it double-counts the first leg."""
     cash = round(float(hedge_qty) * float(hedge_price), 6)
     fee = None if hedge_fee_usd is None else round(float(hedge_fee_usd), 6)
     return {
@@ -283,10 +206,9 @@ def depth_supports(*, wanted_qty, depth_qty_at_price=None) -> dict:
     """CAN THE BOOK ACTUALLY SUPPLY THE HEDGE.
 
     ABSENT DEPTH IS NOT INFINITE DEPTH. A hedge that only half fills leaves the
-    primary leg naked for the unfilled part while the accounting believes the
-    pair is complete -- which is the specific way this structure fails. So an
-    unknown depth is refused rather than assumed, and a partial is reported as a
-    partial with the shortfall named.
+    primary leg naked for the unfilled part while the accounting believes the pair
+    is complete -- which is the specific way this structure fails. An unknown
+    depth is refused; a partial reports its shortfall.
     """
     if depth_qty_at_price is None:
         return {"version": VERSION, "ok": False,
@@ -309,27 +231,19 @@ def depth_supports(*, wanted_qty, depth_qty_at_price=None) -> dict:
 
 def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
                  exit_proceeds_usd=None, evidence: dict | None = None) -> dict:
-    """ORDER THE AVAILABLE ACTIONS BY THEIR WORST CASE, and say what is missing.
+    """ORDER THE AVAILABLE ACTIONS BY THEIR NET WORST CASE, and say what is
+    missing.
 
-    THE COMPARISON IS LIKE FOR LIKE. Every action is scored by the worst thing
-    that can happen to the account if it is taken: for HOLD, the primary leg
-    paying nothing; for ACQUIRE_HEDGE, the paired structure's worst outcome; for
-    EXIT, the proceeds actually available now. An action whose inputs are not
-    established is NOT scored as zero and is NOT silently dropped -- it is listed
-    as unrankable with the refusal that made it so, because a missing input that
-    disappears from a ranking becomes a decision made by omission.
-
-    `held` is a `value_the_structure` result for the legs currently held.
-    `hedge_candidate` carries the candidate hedge leg, its priced fee, its depth
-    and the outcome space, so the paired structure can be valued on the same
-    terms.
+    `held` and `hedge_candidate["paired_structure"]` are `net_worst_case` results.
+    Every action is scored by the worst thing that can happen to the account if it
+    is taken, so the comparison is like for like and no probability enters it.
     """
     out: dict = {"version": VERSION, "actions": [], "unrankable": [],
                  "evidence": dict(evidence or {})}
     if not held.get("ok"):
         return dict(out, ok=False, refusal=held.get("refusal"),
                     why=held.get("why"))
-    out["fixture"] = held["fixture"]
+    out["held_taxonomy"] = held.get("taxonomy")
     out["held_worst_case_usd"] = held.get("worst_case_usd")
 
     def _add(action, worst, detail):
@@ -346,20 +260,22 @@ def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
                 held.get("why"))
     else:
         _add(ACTION_HOLD, held["worst_case_usd"], {
-            "coverage": held["coverage"],
-            "outcomes_paying_nothing": held["outcomes_paying_nothing"],
+            "taxonomy": held.get("taxonomy"),
+            "both_lose_regions": held.get("both_lose_regions"),
+            "unresolved_states": held.get("unresolved_states"),
             "incremental_capital_usd": 0.0,
             "why": "keep exactly what is held; no new money, no new depth used"})
 
     # ── EXIT ─────────────────────────────────────────────────────────
     if exit_proceeds_usd is None:
         _cannot(ACTION_EXIT, R_PRICE_NOT_ESTABLISHED,
-                ("an exit is scored on proceeds actually available now. "
-                 "Without a read price there is no number, and using the "
-                 "entry price would score a sale at what we paid"))
+                ("an exit is scored on proceeds actually available now. Without "
+                 "a read price there is no number, and using the entry price "
+                 "would score a sale at what we paid"))
     else:
-        _add(ACTION_EXIT, round(float(exit_proceeds_usd)
-                                - (held.get("total_cost_usd") or 0.0), 6), {
+        _add(ACTION_EXIT,
+             round(float(exit_proceeds_usd) - (held.get("cost_usd") or 0.0)
+                   - (held.get("fees_usd") or 0.0), 6), {
             "proceeds_usd": round(float(exit_proceeds_usd), 6),
             "incremental_capital_usd": 0.0,
             "releases_the_capacity_slot": True,
@@ -367,9 +283,6 @@ def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
                     "forecast and no further capital")})
 
     # ── REDUCE ───────────────────────────────────────────────────────
-    # DELIBERATELY UNRANKABLE UNTIL A PRICE IS READ, for the same reason as EXIT
-    # and not as a placeholder: a partial sale is scored on the same read price,
-    # and a REDUCE ranked without one would be an exit priced at nothing.
     if exit_proceeds_usd is None:
         _cannot(ACTION_REDUCE, R_PRICE_NOT_ESTABLISHED,
                 "a partial sale is scored on the same read price an exit needs")
@@ -377,13 +290,13 @@ def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
         _add(ACTION_REDUCE, None, {
             "incremental_capital_usd": 0.0,
             "worst_case_is_between": [
-                round(float(exit_proceeds_usd)
-                      - (held.get("total_cost_usd") or 0.0), 6),
+                round(float(exit_proceeds_usd) - (held.get("cost_usd") or 0.0)
+                      - (held.get("fees_usd") or 0.0), 6),
                 held.get("worst_case_usd")],
-            "why": ("a partial sale lies between EXIT and HOLD by "
-                    "construction, so it is ranked only when a quantity is "
-                    "chosen -- and choosing it is a sizing decision this "
-                    "function does not make")})
+            "why": ("a partial sale lies between EXIT and HOLD by construction, "
+                    "so it is ranked only when a quantity is chosen -- and "
+                    "choosing it is a sizing decision this function does not "
+                    "make")})
 
     # ── ACQUIRE_HEDGE ────────────────────────────────────────────────
     if not hedge_candidate:
@@ -396,7 +309,8 @@ def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
         if not paired.get("ok"):
             _cannot(ACTION_ACQUIRE_HEDGE,
                     paired.get("refusal", R_PRICE_NOT_ESTABLISHED),
-                    paired.get("why"))
+                    paired.get("why"),
+                    {"missing_facts": paired.get("missing_facts")})
         elif paired.get("worst_case_usd") is None:
             _cannot(ACTION_ACQUIRE_HEDGE,
                     paired.get("verdict_is_withheld", R_FEES_NOT_PRICED),
@@ -406,9 +320,6 @@ def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
                     depth.get("refusal", R_DEPTH_NOT_ESTABLISHED),
                     depth.get("why"))
         elif not depth.get("fully_supported"):
-            # A PARTIAL HEDGE IS NOT THE STRUCTURE THAT WAS VALUED. Ranking it
-            # on the full pair's worst case would score a position the book
-            # cannot supply.
             _cannot(ACTION_ACQUIRE_HEDGE, R_DEPTH_NOT_ESTABLISHED,
                     ("the book supplies %s of the %s the hedge needs. A partial "
                      "hedge leaves the primary leg naked for the shortfall, and "
@@ -421,8 +332,9 @@ def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
                     "would take is not known")
         else:
             _add(ACTION_ACQUIRE_HEDGE, paired["worst_case_usd"], {
-                "coverage": paired["coverage"],
-                "outcomes_paying_nothing": paired["outcomes_paying_nothing"],
+                "taxonomy": paired.get("taxonomy"),
+                "both_lose_regions": paired.get("both_lose_regions"),
+                "unresolved_states": paired.get("unresolved_states"),
                 "cannot_lose": paired.get("cannot_lose"),
                 "incremental_capital_usd": incr["incremental_capital_usd"],
                 "depth": {k: depth.get(k) for k in
@@ -430,8 +342,8 @@ def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
                 "why": ("buy the complement. This is the only action that spends "
                         "NEW money, so its worst case must clear HOLD's by more "
                         "than the capital it consumes is worth elsewhere -- a "
-                        "judgement this function reports the inputs for and "
-                        "does not make")})
+                        "judgement this function reports the inputs for and does "
+                        "not make")})
 
     ranked = [a for a in out["actions"] if a["worst_case_usd"] is not None]
     ranked.sort(key=lambda a: (-a["worst_case_usd"],
@@ -441,12 +353,12 @@ def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
     out["ok"] = True
     out["refusal"] = None
     out["ranking_rule"] = (
-        "highest worst case first; ties broken by LESS new capital. No "
+        "highest NET worst case first; ties broken by LESS new capital. No "
         "probability enters the ranking")
     out["what_this_is_not"] = (
         "an authorisation. ACQUIRE_HEDGE appearing first means the structure's "
-        "worst case is the best available on these inputs -- not that capital "
-        "may be committed, which needs a funded grant and the owner's approval")
+        "worst case is the best available on these inputs -- not that capital may "
+        "be committed, which needs a funded grant and the owner's approval")
     if out["unrankable"]:
         out["unrankable_are_not_zero"] = (
             "an action whose inputs are not established is listed here rather "
