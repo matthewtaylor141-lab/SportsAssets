@@ -287,8 +287,13 @@ async def _approved(conn) -> dict:
     return (dict(rec.get("proposed") or {}) if rec.get("approved") else {})
 
 
+R_PLAN_MISMATCHES_RESERVATION = RSV.R_PLAN_DOES_NOT_MATCH_RESERVATION
+R_OPERATION_ALREADY_SUBMITTED = RSV.R_NOT_HELD_SO_ALREADY_SUBMITTED
+
+
 async def check_rails(conn, plan: dict, effective: dict, *,
-                      account_id: str, venue: str) -> dict:
+                      account_id: str, venue: str,
+                      operation_id: str | None = None) -> dict:
     """EVERY EFFECTIVE RAIL, MEASURED AGAINST THE FUNDED BOOK.
 
     THE DEFECT THIS CLOSES. The connector checked MAX_MARKET_EXPOSURE and
@@ -326,14 +331,47 @@ async def check_rails(conn, plan: dict, effective: dict, *,
     held_res = {"reserved_usd": 0.0, "reserved_by_market_usd": {},
                 "reserved_by_event_usd": {}, "schema": "ABSENT"}
     reservations_readable = True
+    # ── THE OPERATION BEING SUBMITTED IS COUNTED ONCE, BY THE PLAN ───
+    #
+    # `operation_id` carries the acquisition's identity INTO the risk
+    # calculation. Without it this function added every HELD reservation AND
+    # `plan["collateral_usd"]`, and for the operation being submitted those are
+    # the same $5: a $10 existing exposure plus a $5 hedge measured $20 instead
+    # of $15. The reading below validates that the reservation names the same
+    # instrument, quantity, price and collateral as the plan, and only then
+    # leaves it out -- every OTHER reservation is still summed.
     try:
-        got = await RSV.reserved_collateral_usd(conn, account_id=account_id)
+        got = await RSV.reserved_collateral_usd(
+            conn, account_id=account_id, excluding_operation_id=operation_id,
+            plan=({k: plan.get(k) for k in RSV.PLAN_FIELDS}
+                  if operation_id is not None else None))
         if got.get("ok"):
             held_res = dict(got, schema="PRESENT")
         elif got.get("refusal") == RSV.R_SCHEMA_UNAVAILABLE:
             # ABSENT is not the same as UNREADABLE. A database without migration
             # 131 has no reservations to count, and that is a complete answer.
             held_res["schema"] = "ABSENT"
+        elif got.get("refusal") in (RSV.R_PLAN_DOES_NOT_MATCH_RESERVATION,
+                                    RSV.R_NOT_HELD_SO_ALREADY_SUBMITTED,
+                                    RSV.R_NO_SUCH_OPERATION):
+            # ── A NAMED REFUSAL, NOT AN UNMEASURED RAIL ──────────────
+            #
+            # These three say something specific about THIS submission: the plan
+            # disagrees with its reservation, the operation has already been
+            # submitted, or there is no reservation to net against. Folding them
+            # into `unmeasured` would report "a rail has no measurement", which
+            # sends a reader to look at the rails instead of at the identity
+            # mismatch that actually stopped the order.
+            return {"version": VERSION, "ok": False,
+                    "refusal": got["refusal"],
+                    "operation_id": operation_id,
+                    "conflicts": got.get("conflicts"),
+                    "reservation_state": got.get("state"),
+                    "why": got.get("why"),
+                    "rails": [], "over": [], "unmeasured": [],
+                    "nothing_was_measured_because": (
+                        "the submission's own identity did not check out, so "
+                        "there is no meaningful exposure arithmetic to do")}
         else:
             reservations_readable = False
             held_res["schema"] = "UNREADABLE"
@@ -444,6 +482,12 @@ async def check_rails(conn, plan: dict, effective: dict, *,
         "by_market_usd": res_by_market,
         "by_event_usd": res_by_event,
         "counted_states": ["HELD"],
+        "excluded_because_the_plan_counts_it": held_res.get(
+            "excluded_because_the_plan_counts_it"),
+        "every_other_reservation_is_retained": (
+            "the exclusion is ONE operation -- the one being submitted. Every "
+            "other live claim on the account is still summed, which is the "
+            "whole point of reading them at all"),
         "why_only_held": ("from COMMITTED onward the acquisition has an intent "
                           "row, which pending_and_in_flight_collateral_usd "
                           "already counts. Counting both would double every "
@@ -491,7 +535,21 @@ async def check_rails(conn, plan: dict, effective: dict, *,
                       "verdict": "WITHIN" if ok else "EXCEEDED"})
         if not ok:
             over.append(rails[-1])
-    return {"rails": rails, "over": over, "unmeasured": unmeasured,
+    return {"ok": True, "refusal": None,
+            "rails": rails, "over": over, "unmeasured": unmeasured,
+            "operation_id": operation_id,
+            "the_submitted_operation_is_counted_once": (
+                held_res.get("excluded_because_the_plan_counts_it")),
+            "counted_once_how": (
+                "this order's collateral enters every rail through "
+                "plan['collateral_usd']. Its own HELD reservation is therefore "
+                "left out of the reservation sum, after checking that the two "
+                "name the same instrument, quantity, price and collateral. "
+                "Every OTHER live reservation is still counted"
+                if operation_id is not None else
+                "no operation id was supplied, so every HELD reservation is "
+                "summed and this order enters only through its plan. That is "
+                "correct for a submission that took no reservation"),
             "exposure": exp, "realised": real,
             "counted_pending_and_in_flight": True,
             "counted_residual_holdings": True,
@@ -681,8 +739,14 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
     eff = EX.effective_limits(approved)
     out["effective_limits"] = eff
     rails = await check_rails(conn, plan, eff["effective"],
-                              account_id=sel["account_id"], venue=venue)
+                              account_id=sel["account_id"], venue=venue,
+                              operation_id=operation_id)
     out["rails"] = rails
+    # ── AN IDENTITY REFUSAL FROM THE RAILS IS RETURNED AS ITSELF ─────
+    if not rails.get("ok", True) and rails.get("refusal"):
+        return dict(out, ok=False, refusal=rails["refusal"],
+                    why=rails.get("why"), conflicts=rails.get("conflicts"),
+                    nothing_was_written=True, exposure="NONE")
     if rails["unmeasured"]:
         return dict(out, ok=False, refusal=R_RAIL_NOT_MEASURED,
                     unmeasured=rails["unmeasured"],

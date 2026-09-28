@@ -801,8 +801,45 @@ async def live(conn, *, group_id: str | None = None,
                                              *args)]
 
 
+#: ── THE FIELDS A PLAN AND ITS RESERVATION MUST AGREE ON ─────────────
+#:
+#: A reservation the risk check is about to EXCLUDE from its sums, on the
+#: grounds that the plan already counts it, must actually be the same
+#: acquisition. These are the four facts that make it so. A mismatch is a
+#: REFUSAL, not an arithmetic adjustment: the plan and the claim disagree about
+#: what is being bought, and neither can be trusted to stand for the other.
+PLAN_FIELDS = ("us_market_slug", "quantity", "limit_price", "collateral_usd")
+R_PLAN_DOES_NOT_MATCH_RESERVATION = "THE_PLAN_AND_ITS_RESERVATION_DISAGREE"
+R_NOT_HELD_SO_ALREADY_SUBMITTED = "THAT_OPERATION_HAS_ALREADY_LEFT_HELD"
+
+
+def plan_matches(reservation: dict, plan: dict) -> dict:
+    """DOES THIS RESERVATION NAME THE SAME ACQUISITION AS THIS PLAN.
+
+    Used at the risk boundary, where the answer decides whether the plan's
+    collateral and the reservation's collateral are ONE number or TWO. Getting
+    that wrong in the permissive direction double-counts the acquisition and
+    refuses an affordable order; getting it wrong in the other direction lets a
+    plan for $50 hide behind a reservation for $5.
+    """
+    res, want = dict(reservation or {}), dict(plan or {})
+    clashes = []
+    for f in PLAN_FIELDS:
+        a, b = res.get(f), want.get(f)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            same = abs(float(a) - float(b)) < 1e-9
+        else:
+            same = a is not None and b is not None and str(a) == str(b)
+        if not same:
+            clashes.append({"field": f, "reservation": a, "plan": b})
+    return {"ok": not clashes, "conflicts": clashes,
+            "compared": list(PLAN_FIELDS)}
+
+
 async def reserved_collateral_usd(conn, *,
-                                  account_id: str | None = None) -> dict:
+                                  account_id: str | None = None,
+                                  excluding_operation_id: str | None = None,
+                                  plan: dict | None = None) -> dict:
     """COMMITTED CAPITAL HELD BY RESERVATIONS, COUNTED ONCE.
 
     ONLY `HELD` IS SUMMED. From COMMITTED onward the acquisition has an intent
@@ -844,6 +881,66 @@ async def reserved_collateral_usd(conn, *,
         args.append(str(account_id))
         sql += " AND g.account_id = $%d" % len(args)
     rows = [_row(r) for r in await conn.fetch(sql, *args)]
+    # ── THE OPERATION BEING SUBMITTED, COUNTED BY THE PLAN AND NOT HERE ──
+    #
+    # THE DEFECT THIS CLOSES, and it was reproduced. `acquire_second_leg` takes a
+    # HELD reservation and then calls `submit_for_decision`, whose `check_rails`
+    # adds EVERY HELD reservation *and* `plan["collateral_usd"]`. For the
+    # operation being submitted those are the same acquisition, so a $10 existing
+    # exposure plus a $5 hedge measured $20 instead of $15 -- and the rails
+    # refused affordable orders, which is a blind control in the direction that
+    # looks safe and is not: an operator would raise the limit to clear it.
+    #
+    # THE EXCLUSION IS EARNED, NOT ASSERTED. It applies only when the reservation
+    # is still HELD (past HELD it has an intent row and is not summed here at
+    # all) and only when the plan and the reservation agree on the instrument,
+    # the quantity, the price and the collateral. A disagreement REFUSES: if the
+    # plan is for $50 and the reservation claims $5, neither may stand for the
+    # other.
+    excluded = None
+    if excluding_operation_id is not None:
+        mine = [r for r in rows
+                if str(r["operation_id"]) == str(excluding_operation_id)]
+        if not mine:
+            return {"version": VERSION, "ok": False,
+                    "refusal": R_NO_SUCH_OPERATION,
+                    "operation_id": str(excluding_operation_id),
+                    "reserved_usd": None,
+                    "why": ("the risk check was told to count this operation "
+                            "through the plan instead of through its "
+                            "reservation, and there is no live reservation for "
+                            "it. Proceeding would count it NEITHER way")}
+        res = mine[0]
+        if res["state"] != HELD:
+            return {"version": VERSION, "ok": False,
+                    "refusal": R_NOT_HELD_SO_ALREADY_SUBMITTED,
+                    "operation_id": str(excluding_operation_id),
+                    "state": res["state"], "intent_id": res.get("intent_id"),
+                    "reserved_usd": None,
+                    "why": ("this operation is at %s, so an intent already "
+                            "carries its exposure and a plan for it would be "
+                            "the same acquisition a third time. A submission "
+                            "for it is a replay, not a new order" % res["state"])}
+        chk = plan_matches(res, plan or {})
+        if not chk["ok"]:
+            return {"version": VERSION, "ok": False,
+                    "refusal": R_PLAN_DOES_NOT_MATCH_RESERVATION,
+                    "operation_id": str(excluding_operation_id),
+                    "conflicts": chk["conflicts"], "reserved_usd": None,
+                    "why": ("the plan and the reservation disagree on %s. The "
+                            "exclusion below rests on them being ONE "
+                            "acquisition, so a mismatch is refused rather than "
+                            "netted" % ", ".join(
+                                c["field"] for c in chk["conflicts"]))}
+        excluded = {"operation_id": res["operation_id"],
+                    "collateral_usd": res["collateral_usd"],
+                    "us_market_slug": res["us_market_slug"],
+                    "event_key": res.get("event_key"),
+                    "state": res["state"],
+                    "counted_by": "THE_PLANS_OWN_COLLATERAL",
+                    "plan_check": chk}
+        rows = [r for r in rows
+                if str(r["operation_id"]) != str(excluding_operation_id)]
     counted = [r for r in rows
                if r["state"] in STATES_THAT_COUNT_AS_COMMITTED_CAPITAL]
     not_counted = [r for r in rows if r not in counted]
@@ -864,6 +961,10 @@ async def reserved_collateral_usd(conn, *,
     return {
         "ok": True,
         "refusal": None,
+        "excluded_because_the_plan_counts_it": excluded,
+        "every_other_reservation_is_retained": (
+            "the exclusion is one operation. Every other live claim on the "
+            "account is still summed, which is the whole point of the reading"),
         "reserved_by_market_usd": by_market,
         "reserved_by_event_usd": by_event,
         "version": VERSION,

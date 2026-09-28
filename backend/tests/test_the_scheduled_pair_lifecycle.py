@@ -1084,22 +1084,104 @@ async def test_a_conflicting_reservation_bind_leaves_no_intent_row(monkeypatch):
             venue_positions=EMPTY_VENUE, operation_id=OP_HEDGE,
             portfolio_group_id=GROUP, leg_role="HEDGE")
         assert got["ok"] is False, got
-        assert got["refusal"] in (RSV.R_ALREADY_COMMITTED_ELSEWHERE,
-                                 RSV.R_IDENTITY_REUSED_WITH_DIFFERENT_TERMS), got
+        # ── THE REFUSAL MOVED EARLIER, AND THAT IS THE IMPROVEMENT ───
+        #
+        # It used to come from `commit_to_intent` inside boundary 1's
+        # transaction, which rolled the intent insert back. It now comes from the
+        # RISK BOUNDARY, before any arithmetic: carrying the operation identity
+        # into `check_rails` meant the reading had to look the reservation up,
+        # and a reservation past HELD is a replay whatever else is true. Boundary
+        # 1's rollback is still there and still correct -- it is now
+        # belt-and-braces behind a guard that fires first, which is the right
+        # order for two checks of the same thing.
+        assert got["refusal"] == RSV.R_NOT_HELD_SO_ALREADY_SUBMITTED, got
         assert got["nothing_was_written"] is True
         assert got["intent_id"] is None
         assert got["exposure"] == "NONE"
         assert await conn.fetchval(
             "SELECT count(*) FROM bettor_funded_intents WHERE account_id=$1",
             ACCT) == intents_before, (
-            "the refused bind left an intent row behind, holding a position "
-            "slot no reservation names")
+            "the refusal left an intent row behind, holding a position slot no "
+            "reservation names")
         # AND THE FIRST BIND IS UNTOUCHED: the reservation still names the
-        # intent it was committed to, not the one that was rolled back.
+        # intent it was committed to.
         after = await RSV.get(conn, OP_HEDGE)
         assert after["reservation"]["intent_id"] == "fpi-pairlife-hedge-first"
         assert after["reservation"]["state"] == RSV.COMMITTED
+
+
+
     finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_boundary_one_rolls_the_intent_back_when_its_insert_fails(
+        monkeypatch):
+    """BOUNDARY 1, REACHED THE OTHER WAY.
+
+    With the replay guard now firing first, the way to exercise boundary 1's
+    rollback from this entry point is an intent insert that FAILS while the
+    reservation is legitimately HELD and matches the plan. A second live leg in
+    the same role does it -- 131 permits one open entry per role per group.
+
+    THE PROPERTY IS THE SAME EITHER WAY: the refusal leaves no intent row and no
+    committed reservation, so the lane is not left holding a position slot that
+    nothing names.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _primary(conn)
+        _, sent, client = _transport(
+            monkeypatch, order_id="venue-b1",
+            executions=[_fill(HEDGE_QTY, HEDGE_PX, vid="vf-b1")])
+        # A LIVE HEDGE LEG ALREADY OCCUPIES THE ROLE.
+        blocker = await FB.record_intent(
+            conn, intent_id="fpi-pairlife-b1-blocker", account_id=ACCT,
+            venue=VENUE, venue_class=FA.VENUE_FUNDED,
+            us_market_slug=SLUG_HEDGE, event_key=EVENT, order_intent=FX.LONG,
+            limit_price=HEDGE_PX, quantity=HEDGE_QTY,
+            collateral_usd=FX.collateral_for(HEDGE_PX, HEDGE_QTY, FX.LONG),
+            effective_digest="d", payout_event="CAROLINA_PANTHERS_PLUS_4_5",
+            held_is_long=True, portfolio_group_id=GROUP, leg_role="HEDGE")
+        assert blocker["ok"] is True, blocker
+        # AND A CLEAN, MATCHING, *HELD* RESERVATION for the same leg.
+        coll = FX.collateral_for(HEDGE_PX, HEDGE_QTY, FX.LONG)
+        h = await RSV.hold(conn, operation_id=OP_LOST, group_id=GROUP,
+                           leg_role="HEDGE", us_market_slug=SLUG_HEDGE,
+                           quantity=HEDGE_QTY, limit_price=HEDGE_PX,
+                           collateral_usd=coll)
+        assert h["ok"] is True, h
+        before = await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_intents WHERE account_id=$1",
+            ACCT)
+        got = await FX.submit_for_decision(
+            conn, _hedge_decision_record(), account_id=ACCT, venue=VENUE,
+            venue_positions=EMPTY_VENUE, operation_id=OP_LOST,
+            portfolio_group_id=GROUP, leg_role="HEDGE")
+        assert got["ok"] is False, got
+        assert got["refusal"] == FB.R_ANOTHER_INTENT_IS_LIVE, got
+        assert got["nothing_was_written"] is True
+        assert got["intent_id"] is None
+        assert got["exposure"] == "NONE"
+        assert await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_intents WHERE account_id=$1",
+            ACCT) == before
+        # THE RESERVATION IS STILL HELD AND NAMES NO INTENT: the bind did not
+        # half-happen.
+        after = await RSV.get(conn, OP_LOST)
+        assert after["reservation"]["state"] == RSV.HELD
+        assert after["reservation"]["intent_id"] is None
+        assert client.orders.creates == 0, "nothing may reach the venue"
+    finally:
+        await conn.execute(
+            "DELETE FROM bettor_funded_intents WHERE intent_id=$1",
+            "fpi-pairlife-b1-blocker")
         await _clean(conn)
         await conn.close()
 
