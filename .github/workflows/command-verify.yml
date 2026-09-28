@@ -6712,6 +6712,7 @@ jobs:
             tests/test_the_group_lifecycle_is_atomic_and_earned.py \
             tests/test_the_group_holds_under_concurrency.py \
             tests/test_the_reservation_reaches_submission.py \
+            tests/test_an_indirect_pair_is_valued_on_the_outcomes.py \
             2>&1 | tail -25 | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
