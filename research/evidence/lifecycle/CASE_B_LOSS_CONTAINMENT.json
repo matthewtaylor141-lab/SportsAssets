@@ -38,7 +38,7 @@
     },
     "exit_intents": [
      {
-      "intent_id": "fpi-b355a0a606464aa6",
+      "intent_id": "fpi-93741f5b142e4eea",
       "state": "FILLED",
       "qty": 9.0,
       "residual": 0.0,
@@ -56,7 +56,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-b355a0a606464aa6",
+      "intent_id": "fpi-93741f5b142e4eea",
       "direction": "EXIT",
       "qty": 9.0,
       "price": 0.41,
@@ -92,7 +92,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-b355a0a606464aa6",
+      "intent_id": "fpi-93741f5b142e4eea",
       "exp": 0.15,
       "obs": null,
       "fee_state": "PROVISIONAL",
@@ -195,7 +195,7 @@
     "filled_fees_usd": 0.4,
     "contracts_held": 6.0,
     "contracts_net_from_the_fill_ledger": 6.0,
-    "capital_hours_usd_h": 0.00012,
+    "capital_hours_usd_h": 0.000129,
     "per_event_collateral_usd": {
      "ev-bos-lal-2026-09-27": 3.6
     },
@@ -286,7 +286,7 @@
      "filled_fees_usd": 0.4,
      "contracts_held": 6.0,
      "contracts_net_from_the_fill_ledger": 6.0,
-     "capital_hours_usd_h": 0.000133,
+     "capital_hours_usd_h": 0.000149,
      "per_event_collateral_usd": {
       "ev-bos-lal-2026-09-27": 3.6
      },
@@ -326,7 +326,7 @@
       },
       {
        "fill_id": "fvf:vo-xl-1:vf-1",
-       "intent_id": "fpi-b355a0a606464aa6",
+       "intent_id": "fpi-93741f5b142e4eea",
        "exp": 0.15,
        "obs": null,
        "fee_state": "PROVISIONAL",
@@ -374,7 +374,7 @@
     "intent_id": "dem-loss",
     "residual_qty": 6.0,
     "us_market_slug": "aec-nba-bos-lal-2026-09-27",
-    "settlement": "{\"at\": 1790563778.0817735, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
+    "settlement": "{\"at\": 1790566409.8691401, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
     "what_it_means": "contracts this lane owns. They count against every rail until an evidenced exit or an authoritative settlement removes them"
    }
   }
