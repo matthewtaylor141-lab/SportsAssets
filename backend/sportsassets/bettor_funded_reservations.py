@@ -102,6 +102,28 @@ R_INTENT_IS_NOT_THIS_LEG = "THAT_INTENT_DOES_NOT_BELONG_TO_THIS_LEG"
 R_ALREADY_COMMITTED_ELSEWHERE = "THIS_RESERVATION_NAMES_A_DIFFERENT_INTENT"
 R_SCHEMA_UNAVAILABLE = "THE_RESERVATION_SCHEMA_IS_NOT_IN_THIS_DATABASE"
 R_ROLE_NOT_STATED = "LEG_ROLE_WAS_NOT_STATED"
+#: ── THE REFUSAL THAT WAS MISSING, AND THE BUG IT CLOSES ─────────────
+#: An independent review reproduced this directly. `op-1` was COMMITTED to
+#: `intent-A`; `commit_to_intent(op-1, intent-B)` returned ok=True/already=True --
+#: because the STATE already equalled COMMITTED -- and then reported
+#: `exposure_is_now_counted_on: intent-B` while the stored row still named
+#: `intent-A`. `hold()` had the same hole: replaying `op-1` with a different role,
+#: instrument, quantity, price and collateral was accepted as a retry and the
+#: caller was told its terms had been taken.
+#:
+#: IDEMPOTENCY IS A PROMISE ABOUT AN IDENTICAL REQUEST. Reusing one identity for
+#: different terms is a DIFFERENT economic action, and answering it with the first
+#: action's row while echoing the second action's arguments is worse than either
+#: refusing or accepting: the caller reads its own numbers back and believes they
+#: were stored.
+R_IDENTITY_REUSED_WITH_DIFFERENT_TERMS = \
+    "THAT_OPERATION_IDENTITY_ALREADY_NAMES_DIFFERENT_TERMS"
+
+#: What an `operation_id` FIXES. Any of these differing on a replay is a conflict,
+#: not a retry. `intent_id` is included: from COMMITTED onward the identity names a
+#: specific order.
+IDENTITY_FIXES = ("group_id", "leg_role", "us_market_slug", "quantity",
+                  "limit_price", "collateral_usd", "intent_id")
 
 #: Why a reservation resolved. Stored in `resolution`, so a later reader can tell
 #: an evidenced release from a guess.
@@ -167,6 +189,43 @@ async def _fetch(conn, operation_id: str) -> dict | None:
         str(operation_id)))
 
 
+def _conflicts(stored: dict, asserted: dict) -> list[dict]:
+    """Which of the caller's IMMUTABLE arguments disagree with the stored row.
+
+    A field the caller did not assert (None) is not compared -- a step that says
+    nothing about the quantity is not claiming one. Numbers are compared as
+    numbers, because `10` and `Decimal('10.0')` are the same reservation and a
+    string comparison would call them a conflict.
+
+    THIS IS CALLED BEFORE EVERY REPLAY-SUCCESS RETURN, including the raced path,
+    which is the whole point: a replay is only a replay if the request is the same
+    request.
+    """
+    out: list[dict] = []
+    for field in IDENTITY_FIXES:
+        want = asserted.get(field)
+        if want is None:
+            continue
+        have = stored.get(field)
+        if isinstance(want, (int, float)) and isinstance(have, (int, float)):
+            same = abs(float(have) - float(want)) < 1e-9
+        else:
+            same = have is not None and str(have) == str(want)
+        if not same:
+            out.append({"field": field, "stored": have, "requested": want})
+    return out
+
+
+def _refuse_conflict(out: dict, stored: dict, clashes: list[dict]) -> dict:
+    return dict(out, ok=False, already=True,
+                refusal=R_IDENTITY_REUSED_WITH_DIFFERENT_TERMS,
+                conflicts=clashes, reservation=stored,
+                why=("this operation identity already names different terms, so "
+                     "the request is not a retry of it. An identical retry gets "
+                     "the existing row; a different action needs its own "
+                     "operation_id"))
+
+
 async def get(conn, operation_id: str) -> dict:
     """READ ONE ACQUISITION ATTEMPT BY ITS IDENTITY. Used by recovery, which
     needs to know where a restarted operation had got to."""
@@ -190,15 +249,22 @@ async def hold(conn, *, operation_id: str, group_id: str, leg_role: str,
                collateral_usd: float) -> dict:
     """TAKE THE LEG, BEFORE ANY INTENT EXISTS.
 
-    IDEMPOTENT ON THE OPERATION. A replay reaches the row the first call made
-    and is reported as such, in whatever state it has since reached -- it is NOT
-    a new hold and NOT an error. That is what lets a caller retry after a
-    timeout without either duplicating an acquisition or having to remember
+    IDEMPOTENT ON AN IDENTICAL OPERATION. A replay of the SAME request reaches
+    the row the first call made and is reported as such, in whatever state it has
+    since reached -- not a new hold and not an error. That is what lets a caller
+    retry after a timeout without duplicating an acquisition or having to remember
     whether its first attempt landed.
 
-    THE TWO REFUSALS ARE DIFFERENT THINGS and are named separately: this
-    operation already has a row, versus this LEG is already claimed by a
-    different live operation. The first is a replay; the second is contention.
+    A CONFLICTING REUSE OF THE IDENTITY IS REFUSED. It used to be accepted: a
+    replay of `op-1` naming a different role, instrument, quantity, price and
+    collateral came back ok=True/already=True, and the caller was handed the FIRST
+    action's row while believing its own terms had been taken. The immutable
+    arguments are now compared against the stored row before any replay succeeds.
+
+    THREE REFUSALS, THREE DIFFERENT THINGS: this identity already names different
+    terms; this LEG is already claimed by another live operation; this group is
+    closed or absent. Conflating the first two would make contention look like a
+    retry.
     """
     out: dict[str, Any] = {"version": VERSION, "operation_id": str(operation_id),
                            "group_id": str(group_id), "leg_role": leg_role}
@@ -211,13 +277,20 @@ async def hold(conn, *, operation_id: str, group_id: str, leg_role: str,
     except SchemaUnavailable as exc:
         return dict(out, ok=False, refusal=R_SCHEMA_UNAVAILABLE, why=str(exc))
 
+    asserted = {"group_id": str(group_id), "leg_role": str(leg_role),
+                "us_market_slug": str(us_market_slug),
+                "quantity": float(quantity), "limit_price": float(limit_price),
+                "collateral_usd": float(collateral_usd)}
     existing = await _fetch(conn, operation_id)
     if existing is not None:
+        clashes = _conflicts(existing, asserted)
+        if clashes:
+            return _refuse_conflict(out, existing, clashes)
         return dict(out, ok=True, refusal=None, already=True,
                     reservation=existing,
-                    why=("this operation already has a reservation; a replay "
-                         "reaches the same row rather than taking the leg "
-                         "twice"))
+                    why=("this operation already has a reservation with exactly "
+                         "these terms; a replay reaches the same row rather than "
+                         "taking the leg twice"))
     rid = "res:%s" % str(operation_id)
     try:
         async with conn.transaction():
@@ -235,8 +308,16 @@ async def hold(conn, *, operation_id: str, group_id: str, leg_role: str,
         # a PostgresError does not undo an aborted transaction.
         msg = " ".join(str(exc).split())
         if "bettor_funded_reservation_operation_uniq" in msg:
+            # THE RACED INSERT IS STILL A REPLAY, AND STILL HAS TO MATCH. Another
+            # caller won the unique index; whether that is OUR operation retried
+            # or a different action reusing the identity is decided by the same
+            # comparison as the pre-check above, not by which insert lost.
+            raced = await _fetch(conn, operation_id)
+            clashes = _conflicts(raced or {}, asserted)
+            if clashes:
+                return _refuse_conflict(out, raced, clashes)
             return dict(out, ok=True, refusal=None, already=True,
-                        reservation=await _fetch(conn, operation_id),
+                        reservation=raced,
                         why="another caller inserted this same operation first")
         if "bettor_funded_one_live_reservation_per_leg" in msg:
             holder = _row(await conn.fetchrow(
@@ -271,9 +352,17 @@ async def _transition(conn, operation_id: str, *, to: str, expect: tuple,
     in the read above it. A read-then-write would let two callers racing the same
     step both pass the read; here the second matches no row, and the report then
     says where the row actually got to -- which is what a replay needs to hear.
+
+    AND EVERY REPLAY-SUCCESS RETURN VALIDATES THE CALLER'S IMMUTABLE ARGUMENTS
+    FIRST. This is the bug an independent review reproduced: `op-1` already
+    COMMITTED to `intent-A`, and `commit_to_intent(op-1, intent-B)` returned
+    ok=True/already=True purely because the STATE matched, so the caller was told
+    a different intent had been bound than the one stored. Matching the target
+    state is not the same as being the same request.
     """
     out: dict[str, Any] = {"version": VERSION, "operation_id": str(operation_id),
                            "to": to}
+    asserted = {"intent_id": None if intent_id is None else str(intent_id)}
     try:
         if not await _has_schema(conn):
             return dict(out, ok=False, refusal=R_SCHEMA_UNAVAILABLE)
@@ -284,8 +373,11 @@ async def _transition(conn, operation_id: str, *, to: str, expect: tuple,
         return dict(out, ok=False, refusal=R_NO_SUCH_OPERATION)
     out["from_state"] = row["state"]
     if row["state"] == to:
-        # ALREADY THERE. A replay of the same step is not an error; it is the
-        # normal shape of a retried operation.
+        # ALREADY THERE. A replay of the same step is not an error -- PROVIDED it
+        # is the same step. A different `intent_id` makes it a different action.
+        clashes = _conflicts(row, asserted)
+        if clashes:
+            return _refuse_conflict(out, row, clashes)
         return dict(out, ok=True, refusal=None, already=True, reservation=row)
     if to not in TRANSITIONS.get(row["state"], ()):
         return dict(out, ok=False, refusal=R_ILLEGAL_TRANSITION,
@@ -334,6 +426,14 @@ async def _transition(conn, operation_id: str, *, to: str, expect: tuple,
     if str(status).endswith(" 0"):
         # THE ROW MOVED UNDER US, which is a real answer rather than a failure:
         # another caller performed this step first, or a different one.
+        #
+        # THE RACED PATH IS A REPLAY-SUCCESS PATH TOO, so it validates the
+        # immutable arguments before reporting ok. Without this, losing the race
+        # to a caller that bound a DIFFERENT intent would be reported as this
+        # caller's own step having succeeded.
+        clashes = _conflicts(after or {}, asserted)
+        if clashes:
+            return _refuse_conflict(out, after, clashes)
         return dict(out, ok=(after or {}).get("state") == to,
                     refusal=None if (after or {}).get("state") == to
                     else R_ILLEGAL_TRANSITION,
@@ -359,7 +459,14 @@ async def commit_to_intent(conn, *, operation_id: str, intent_id: str) -> dict:
                             intent_id=str(intent_id))
     if got.get("ok") and got.get("reservation"):
         got["counts_as_committed_capital"] = False
-        got["exposure_is_now_counted_on"] = str(intent_id)
+        # ── READ BACK FROM THE ROW, NEVER ECHO THE ARGUMENT ──────────
+        # This line used to be `str(intent_id)`, which is how the reproduced bug
+        # became visible: a replay reported `exposure_is_now_counted_on:
+        # intent-B` while the stored reservation named `intent-A`. The conflict
+        # check above now refuses that case outright, and reporting the STORED
+        # value means even a future hole cannot make this field disagree with the
+        # database.
+        got["exposure_is_now_counted_on"] = got["reservation"]["intent_id"]
     return got
 
 

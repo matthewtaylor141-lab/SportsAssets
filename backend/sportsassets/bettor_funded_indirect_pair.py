@@ -229,14 +229,28 @@ def depth_supports(*, wanted_qty, depth_qty_at_price=None) -> dict:
                 "not be counted as separately executable in two places")}
 
 
-def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
-                 exit_proceeds_usd=None, evidence: dict | None = None) -> dict:
-    """ORDER THE AVAILABLE ACTIONS BY THEIR NET WORST CASE, and say what is
-    missing.
+def downside_only_view(*, held: dict, hedge_candidate: dict | None = None,
+                       exit_proceeds_usd=None, evidence: dict | None = None
+                       ) -> dict:
+    """THE DOWNSIDE ORDERING. **THIS IS NOT THE DECISION POLICY.**
+
+    ── RENAMED, BECAUSE THE OLD NAME WAS THE DEFECT ─────────────────
+    This was `rank_actions`, and an independent review was right that a function
+    with that name, sorting by worst case, silently stood in for a policy this
+    system already has. `bettor_mgmt_select.rank_with_hold` decides on EXPECTED
+    value; `bettor_funded_decision.decide` is where an indirect acquisition joins
+    that comparison. A holding can have positive expected value while its worst
+    case is losing the stake, so ordering by worst case makes immediate
+    liquidation win for the wrong reason -- the mirror image of the failure
+    `bettor_mgmt_select` names as liquidating the book for want of a settlement
+    model.
+
+    WHAT IT IS FOR. Reading the downside of each action side by side, and
+    supplying `downside_usd` to `bettor_funded_decision.decide`, which applies it
+    as a CONSTRAINT. No probability enters it, which is exactly why it cannot be
+    the ranking.
 
     `held` and `hedge_candidate["paired_structure"]` are `net_worst_case` results.
-    Every action is scored by the worst thing that can happen to the account if it
-    is taken, so the comparison is like for like and no probability enters it.
     """
     out: dict = {"version": VERSION, "actions": [], "unrankable": [],
                  "evidence": dict(evidence or {})}
@@ -352,13 +366,17 @@ def rank_actions(*, held: dict, hedge_candidate: dict | None = None,
     out["best"] = ranked[0] if ranked else None
     out["ok"] = True
     out["refusal"] = None
-    out["ranking_rule"] = (
+    out["ordering_rule"] = (
         "highest NET worst case first; ties broken by LESS new capital. No "
-        "probability enters the ranking")
+        "probability enters it, which is why this is a downside VIEW and not a "
+        "decision")
+    out["this_is_not_the_decision_policy"] = (
+        "the policy is EXPECTED net value -- see bettor_funded_decision.decide. "
+        "Selecting on worst case would make liquidation win for the wrong "
+        "reason")
     out["what_this_is_not"] = (
-        "an authorisation. ACQUIRE_HEDGE appearing first means the structure's "
-        "worst case is the best available on these inputs -- not that capital may "
-        "be committed, which needs a funded grant and the owner's approval")
+        "a decision, and not an authorisation. ACQUIRE_HEDGE appearing first here "
+        "means only that its worst case is the least bad on these inputs")
     if out["unrankable"]:
         out["unrankable_are_not_zero"] = (
             "an action whose inputs are not established is listed here rather "

@@ -310,7 +310,7 @@ def _candidate(*, hedge_cost_cents=50, depth=1, fee=0.0, hedge_fee=0.0):
 
 def test_a_naked_leg_is_ranked_below_the_pair_that_covers_it():
     """THE DECISION THE STRATEGY IS FOR, on worst case alone."""
-    got = IP.rank_actions(held=_held_naked(), hedge_candidate=_candidate(),
+    got = IP.downside_only_view(held=_held_naked(), hedge_candidate=_candidate(),
                           exit_proceeds_usd=0.47)
     assert got["ok"] is True, got
     assert got["best"]["action"] == IP.ACTION_ACQUIRE_HEDGE, got["ranked"]
@@ -318,20 +318,30 @@ def test_a_naked_leg_is_ranked_below_the_pair_that_covers_it():
     assert got["best"]["taxonomy"] == IS.DIRECT_COMPLEMENT
     hold = [a for a in got["ranked"] if a["action"] == IP.ACTION_HOLD][0]
     assert hold["worst_case_usd"] == pytest.approx(-0.49)
-    assert "No probability enters the ranking" in got["ranking_rule"]
+    assert "downside VIEW and not a" in got["ordering_rule"]
 
 
-def test_the_ranking_is_never_an_authorisation():
-    got = IP.rank_actions(held=_held_naked(), hedge_candidate=_candidate(),
-                          exit_proceeds_usd=0.47)
-    assert "not that capital may be committed" in got["what_this_is_not"]
-    assert IP.describe()["acquire_hedge_is"].startswith("a RECOMMENDATION")
+def test_the_downside_view_says_it_is_not_the_decision_policy():
+    """THE RENAME WAS THE FIX, AND THIS PINS IT. A function called `rank_actions`
+    that sorted by worst case stood in for a policy this system already has. The
+    name and the output now both say what it is: a downside VIEW that feeds
+    `bettor_funded_decision.decide` as a constraint."""
+    got = IP.downside_only_view(held=_held_naked(),
+                                hedge_candidate=_candidate(),
+                                exit_proceeds_usd=0.47)
+    assert "this_is_not_the_decision_policy" in got
+    assert "bettor_funded_decision.decide" in got[
+        "this_is_not_the_decision_policy"]
+    assert "not an authorisation" in got["what_this_is_not"]
+    assert not hasattr(IP, "rank_actions"), (
+        "the old name must be gone, not kept as an alias -- an alias is how the "
+        "wrong policy keeps being reachable")
 
 
 def test_an_expensive_hedge_loses_to_exiting():
     """THE PAIR IS NOT ALWAYS THE ANSWER, and the ranking must be able to say so
     or it is an argument for pairing rather than a comparison."""
-    got = IP.rank_actions(held=_held_naked(),
+    got = IP.downside_only_view(held=_held_naked(),
                           hedge_candidate=_candidate(hedge_cost_cents=70),
                           exit_proceeds_usd=0.47)
     acq = [a for a in got["ranked"]
@@ -348,7 +358,7 @@ def test_an_unreadable_price_makes_exit_unrankable_rather_than_worthless():
     """AN ABSENT PRICE IS NOT A ZERO PRICE. Scoring EXIT at nothing would rank it
     last and the system would hold by default -- a decision made by a missing
     input rather than by the comparison."""
-    got = IP.rank_actions(held=_held_naked(), hedge_candidate=_candidate(),
+    got = IP.downside_only_view(held=_held_naked(), hedge_candidate=_candidate(),
                           exit_proceeds_usd=None)
     assert IP.ACTION_EXIT not in [a["action"] for a in got["ranked"]]
     unrankable = {u["action"]: u for u in got["unrankable"]}
@@ -360,7 +370,7 @@ def test_an_unreadable_price_makes_exit_unrankable_rather_than_worthless():
 def test_a_hedge_the_book_cannot_fully_supply_is_not_ranked_on_the_full_pair():
     """THE PARTIAL-FILL TRAP. Ranking a half-available hedge on the complete
     pair's worst case scores a position the venue cannot supply."""
-    got = IP.rank_actions(held=_held_naked(),
+    got = IP.downside_only_view(held=_held_naked(),
                           hedge_candidate=_candidate(depth=0),
                           exit_proceeds_usd=0.47)
     assert IP.ACTION_ACQUIRE_HEDGE not in [a["action"] for a in got["ranked"]]
@@ -373,7 +383,7 @@ def test_an_unpriced_hedge_fee_makes_the_acquisition_unrankable():
     cand = _candidate()
     cand["incremental"] = IP.incremental_capital_usd(hedge_qty=1,
                                                      hedge_price=0.50)
-    got = IP.rank_actions(held=_held_naked(), hedge_candidate=cand,
+    got = IP.downside_only_view(held=_held_naked(), hedge_candidate=cand,
                           exit_proceeds_usd=0.47)
     u = {x["action"]: x for x in got["unrankable"]}[IP.ACTION_ACQUIRE_HEDGE]
     assert u["refusal"] == IP.R_FEES_NOT_PRICED
@@ -388,7 +398,7 @@ def test_an_unestablishable_candidate_is_unrankable_with_its_missing_facts():
                cost_cents_per_unit=49, tie_rule="t", void_rule="v",
                settlement_text_captured=True)
     s = _clean(a, _ml("B", cost=50))
-    got = IP.rank_actions(
+    got = IP.downside_only_view(
         held=_held_naked(),
         hedge_candidate={
             "paired_structure": IP.net_worst_case(s, fee_usd=0.0),
@@ -406,7 +416,7 @@ def test_a_withheld_verdict_on_the_pair_makes_it_unrankable_too():
     """A PAIR WHOSE FEE IS NOT PRICED IS NOT RANKED ON ITS GROSS NUMBER. That
     substitution is exactly how a fee-sensitive structure gets taken."""
     s = _clean(_ml("A", cost=49), _ml("B", cost=50))
-    got = IP.rank_actions(
+    got = IP.downside_only_view(
         held=_held_naked(),
         hedge_candidate={
             "paired_structure": IP.net_worst_case(s, fee_usd=None),

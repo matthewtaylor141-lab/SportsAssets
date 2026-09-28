@@ -308,6 +308,156 @@ async def test_a_replay_after_the_first_attempt_resolved_is_still_the_same_one()
 
 
 @pg
+async def test_an_identical_retry_of_every_step_returns_the_existing_result():
+    """THE HALF THAT MUST KEEP WORKING. A conflict check that also refused
+    identical retries would break the retry-safety the identity exists for, so
+    both halves are pinned: same request -> same row, ok=True, already=True."""
+    from sportsassets import bettor_funded_reservations as RS
+    c = await _conn()
+    try:
+        await _ready(c)
+        await _group(c, PFX + "gid1")
+        await _intent(c, PFX + "iid1", PFX + "gid1", "PRIMARY", SLUG_A)
+        op = PFX + "opid1"
+        terms = dict(operation_id=op, group_id=PFX + "gid1", leg_role="PRIMARY",
+                     us_market_slug=SLUG_A, quantity=10, limit_price=0.5,
+                     collateral_usd=5.0)
+        first = await RS.hold(c, **terms)
+        assert first["ok"] is True and first["already"] is False, first
+        # BYTE-FOR-BYTE THE SAME REQUEST, TWICE MORE.
+        for _ in range(2):
+            again = await RS.hold(c, **terms)
+            assert again["ok"] is True, again
+            assert again["already"] is True, again
+            assert again["reservation"]["reservation_id"] == \
+                first["reservation"]["reservation_id"]
+        # AND THE SAME FOR THE BOUND STEP.
+        a = await RS.commit_to_intent(c, operation_id=op,
+                                      intent_id=PFX + "iid1")
+        b = await RS.commit_to_intent(c, operation_id=op,
+                                      intent_id=PFX + "iid1")
+        assert a["ok"] is True and b["ok"] is True, (a, b)
+        assert b["already"] is True
+        assert b["exposure_is_now_counted_on"] == PFX + "iid1"
+        assert await c.fetchval(
+            "SELECT count(*) FROM bettor_funded_leg_reservations "
+            " WHERE group_id=$1", PFX + "gid1") == 1
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_committing_one_identity_to_a_second_intent_is_refused():
+    """THE COUNTEREXAMPLE AN INDEPENDENT REVIEW REPRODUCED.
+
+    `op-1` is COMMITTED to intent-A. `commit_to_intent(op-1, intent-B)` returned
+    ok=True/already=True -- because the STATE already equalled COMMITTED -- and
+    then reported `exposure_is_now_counted_on: intent-B` while the stored row
+    still named intent-A. The caller read its own argument back and believed the
+    binding had moved.
+
+    MATCHING THE TARGET STATE IS NOT BEING THE SAME REQUEST. The refusal names
+    the field, what is stored and what was asked for, so a caller can tell a
+    retry from a mistake.
+    """
+    from sportsassets import bettor_funded_reservations as RS
+    c = await _conn()
+    try:
+        await _ready(c)
+        await _group(c, PFX + "gid2")
+        await _intent(c, PFX + "iA", PFX + "gid2", "PRIMARY", SLUG_A)
+        await _intent(c, PFX + "iB", PFX + "gid2", "HEDGE", SLUG_B)
+        op = PFX + "opid2"
+        await RS.hold(c, operation_id=op, group_id=PFX + "gid2",
+                      leg_role="PRIMARY", us_market_slug=SLUG_A, quantity=10,
+                      limit_price=0.5, collateral_usd=5.0)
+        await RS.commit_to_intent(c, operation_id=op, intent_id=PFX + "iA")
+
+        bad = await RS.commit_to_intent(c, operation_id=op, intent_id=PFX + "iB")
+        assert bad["ok"] is False, bad
+        assert bad["refusal"] == RS.R_IDENTITY_REUSED_WITH_DIFFERENT_TERMS, bad
+        assert bad.get("exposure_is_now_counted_on") is None, (
+            "a refused call must not report an exposure binding at all")
+        clash = {k["field"]: k for k in bad["conflicts"]}
+        assert clash["intent_id"]["stored"] == PFX + "iA"
+        assert clash["intent_id"]["requested"] == PFX + "iB"
+        # AND THE DATABASE STILL NAMES THE FIRST INTENT.
+        assert await c.fetchval(
+            "SELECT intent_id FROM bettor_funded_leg_reservations "
+            " WHERE operation_id=$1", op) == PFX + "iA"
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_holding_one_identity_on_different_terms_is_refused_field_by_field():
+    """THE SAME HOLE IN `hold()`. Replaying an identity with a different role,
+    instrument, quantity, price and collateral was accepted as a retry and the
+    caller was handed the FIRST action's row -- while believing its own terms had
+    been taken. Every fixed field is exercised separately, because a check that
+    compared only one of them would pass a test that changed them all."""
+    from sportsassets import bettor_funded_reservations as RS
+    c = await _conn()
+    try:
+        await _ready(c)
+        await _group(c, PFX + "gid3")
+        op = PFX + "opid3"
+        base = dict(operation_id=op, group_id=PFX + "gid3", leg_role="PRIMARY",
+                    us_market_slug=SLUG_A, quantity=10, limit_price=0.5,
+                    collateral_usd=5.0)
+        assert (await RS.hold(c, **base))["ok"] is True
+        for field, value in (("leg_role", "HEDGE"),
+                             ("us_market_slug", SLUG_B),
+                             ("quantity", 999),
+                             ("limit_price", 0.9),
+                             ("collateral_usd", 900.0)):
+            bad = await RS.hold(c, **dict(base, **{field: value}))
+            assert bad["ok"] is False, (field, bad)
+            assert bad["refusal"] == \
+                RS.R_IDENTITY_REUSED_WITH_DIFFERENT_TERMS, (field, bad)
+            assert [k["field"] for k in bad["conflicts"]] == [field], (
+                "the refusal must name exactly the field that differs: %r"
+                % bad["conflicts"])
+        # NOTHING WAS MUTATED BY ANY OF THOSE REFUSALS.
+        row = dict(await c.fetchrow(
+            "SELECT leg_role, us_market_slug, quantity::float8 q, "
+            "       limit_price::float8 p, collateral_usd::float8 col "
+            "  FROM bettor_funded_leg_reservations WHERE operation_id=$1", op))
+        assert row == {"leg_role": "PRIMARY", "us_market_slug": SLUG_A,
+                       "q": 10.0, "p": 0.5, "col": 5.0}
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_a_group_change_under_one_identity_is_refused_too():
+    """A DIFFERENT GROUP IS A DIFFERENT POSITION. Reusing the identity across
+    groups would attach one acquisition attempt to two portfolios."""
+    from sportsassets import bettor_funded_reservations as RS
+    c = await _conn()
+    try:
+        await _ready(c)
+        await _group(c, PFX + "gid4")
+        op = PFX + "opid4"
+        assert (await RS.hold(c, operation_id=op, group_id=PFX + "gid4",
+                              leg_role="PRIMARY", us_market_slug=SLUG_A,
+                              quantity=10, limit_price=0.5,
+                              collateral_usd=5.0))["ok"] is True
+        bad = await RS.hold(c, operation_id=op, group_id=PFX + "gid-other",
+                            leg_role="PRIMARY", us_market_slug=SLUG_A,
+                            quantity=10, limit_price=0.5, collateral_usd=5.0)
+        assert bad["ok"] is False
+        assert bad["refusal"] == RS.R_IDENTITY_REUSED_WITH_DIFFERENT_TERMS, bad
+        assert [k["field"] for k in bad["conflicts"]] == ["group_id"]
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
 async def test_a_legitimate_top_up_is_a_new_operation_and_is_not_blocked():
     """IDEMPOTENCY MUST NOT BECOME A CEILING. Deciding to add to a position is a
     different economic action, so it carries a new identity and must proceed once
