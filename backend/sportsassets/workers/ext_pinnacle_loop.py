@@ -583,6 +583,41 @@ METERED_BUDGET_CHANGE = {
 SPORTS = SPORTS_CONFIRMED
 
 
+def provider_keys_for_family(family: str) -> list:
+    """Every provider key this lane might use for a sport family.
+
+    THE DEFECT THIS EXISTS FOR, AND IT REACHED PRODUCTION BEHAVIOUR, NOT JUST A
+    TEST. `rn1x_shadow.ManagedOdds.for_family` read the static `SPORTS` tuple.
+    When that tuple narrowed to `baseball_mlb` alone, a held SOCCER position's
+    managed-odds fetch began refusing with
+    THE_HELD_SPORT_IS_NOT_IN_THE_PROVIDER_SET -- so an existing soccer position
+    lost its fair-value input entirely, and the refusal named the wrong reason.
+    The full suite caught it; my own targeted selection did not, because its
+    `-k` filter covered neither `held_position` nor `budget`.
+
+    A HELD POSITION'S FAMILY IS NOT A BUDGET QUESTION. `SPORTS`/`select_sports`
+    answer "which competitions may this cycle SPEND ON for new entries", which is
+    bounded by a credit budget and by the venue's current board. Servicing
+    inventory already owned is a different question with a different answer: the
+    key is needed regardless of this cycle's budget, so this returns the
+    CONFIRMED keys plus every mapped candidate key, unfiltered by budget or by
+    today's board.
+    """
+    fam = str(family or "")
+    keys = [k for k, f in SPORTS_CONFIRMED if f == fam]
+    if fam == "soccer":
+        # Every key in the token map, whether or not the board carries the token
+        # today: a position held over a competition's off-day still needs its
+        # probability source.
+        for key in VENUE_TOKEN_TO_PROVIDER_KEY.values():
+            if key not in keys:
+                keys.append(key)
+    for cand in SPORTS_CANDIDATES:
+        if cand["family"] == fam and cand["key"] not in keys:
+            keys.append(cand["key"])
+    return keys
+
+
 def select_sports(catalogue, *, budget=MAX_METERED_SPORTS_PER_CYCLE,
                   candidates=None) -> dict:
     """Confirmed keys, plus candidates the PROVIDER ITSELF lists as active.

@@ -842,9 +842,14 @@ class ManagedOdds:
 
     async def for_family(self, family: str) -> dict:
         """Every payload this family's sport keys returned, newest first."""
-        from .ext_pinnacle_loop import SPORTS, fetch_odds
+        # NOT `SPORTS`. That tuple is "what may this cycle spend on for new
+        # entries", bounded by a credit budget and by the venue's board today.
+        # A HELD position needs its probability source regardless of either, and
+        # reading the budgeted set here made a held soccer position refuse with
+        # THE_HELD_SPORT_IS_NOT_IN_THE_PROVIDER_SET the moment that set narrowed.
+        from .ext_pinnacle_loop import fetch_odds, provider_keys_for_family
 
-        keys = [k for k, fam in SPORTS if fam == family]
+        keys = provider_keys_for_family(family)
         out = {"family": family, "sport_keys": keys, "payloads": [],
                "refusals": [], "calls_made": 0}
         if not keys:

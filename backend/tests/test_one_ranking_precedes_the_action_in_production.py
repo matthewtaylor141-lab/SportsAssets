@@ -496,3 +496,59 @@ def test_receipt_age_is_never_substituted_for_an_as_of_guarantee():
     import inspect
     src = inspect.getsource(vc)
     assert "our_processing_delay_is_not_currency" in src
+
+
+# ═════════════════════════════════════════════════════════════════════
+# SERVICING A HELD POSITION IS NOT A SPENDING DECISION
+# ═════════════════════════════════════════════════════════════════════
+
+def test_a_held_soccer_position_still_has_a_provider_key():
+    """THE COLLATERAL DAMAGE THE FULL SUITE CAUGHT AND MY SELECTION MISSED.
+
+    `rn1x_shadow.ManagedOdds.for_family` read the static `SPORTS` tuple. When
+    that narrowed to `baseball_mlb` alone, a held SOCCER position's
+    managed-odds fetch began refusing with
+    THE_HELD_SPORT_IS_NOT_IN_THE_PROVIDER_SET -- so an existing position lost
+    its fair-value input and the refusal named the wrong reason. My targeted
+    regression `-k` filter covered neither `held_position` nor `budget`, which
+    is why only the whole-suite diff found it.
+
+    `SPORTS` answers "what may this cycle SPEND ON for new entries", bounded by
+    a credit budget and by the venue's board today. A held position needs its
+    probability source regardless of either.
+    """
+    keys = loop.provider_keys_for_family("soccer")
+    assert keys, "a held soccer position must still resolve to provider keys"
+    assert "soccer_usa_mls" in keys
+    # AND IT IS NOT THE BUDGETED SET: more keys than a cycle may fetch.
+    assert len(keys) > loop.MAX_METERED_SPORTS_PER_CYCLE
+    assert len(keys) > len([k for k, _ in loop.SPORTS])
+
+
+def test_the_servicing_lookup_is_not_bounded_by_the_metered_budget():
+    """A competition dropped by the budget, or absent from today's board, is
+    still a competition a held position may sit in."""
+    keys = loop.provider_keys_for_family("soccer")
+    for token, key in loop.VENUE_TOKEN_TO_PROVIDER_KEY.items():
+        assert key in keys, (token, key)
+    # A family this lane does not carry stays empty, so the refusal is still
+    # available for the case it was written for.
+    assert loop.provider_keys_for_family("basketball") == []
+    assert loop.provider_keys_for_family("") == []
+
+
+def test_managed_odds_reads_the_servicing_lookup_not_the_budget():
+    import inspect
+
+    from sportsassets.workers import rn1x_shadow as W
+
+    src = inspect.getsource(W.ManagedOdds.for_family)
+    assert "provider_keys_for_family" in src
+    # THE CODE, NOT THE PROSE. "SPORTS" appears in the comment explaining why
+    # it must not be read here, so a bare substring check fails on its own
+    # explanation. The import and the key derivation are what matter.
+    code = "\n".join(ln for ln in src.split("\n")
+                     if not ln.lstrip().startswith("#"))
+    assert "import SPORTS" not in code
+    assert "for k, fam in SPORTS" not in code
+    assert "keys = provider_keys_for_family(family)" in code
