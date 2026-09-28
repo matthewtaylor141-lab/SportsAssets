@@ -82,7 +82,11 @@ def test_one_refusal_out_of_a_hundred_is_not_complete_accounting():
     assert v["verdict"] != CR.V_ALL_REFUSED_ACCOUNTED, (
         "one refusal was read as accounting for a hundred candidates")
     assert v["reconciled"] is False
-    assert v["unexplained"] == 99
+    # NO `unexplained` NUMBER IS PUBLISHED. It would be a catalogue count minus
+    # a candidate count, which is the incomparable subtraction this file's
+    # last test exists to forbid.
+    assert v.get("unexplained") is None
+    assert v["distinct_candidates"] == 0
 
 
 def test_a_blank_ledger_row_accounts_for_nothing():
@@ -192,36 +196,53 @@ def test_the_live_82_vs_33_cycle_is_unestablished_not_accounted_for():
 
 
 def test_a_cycle_that_does_reconcile_is_accounted_for():
-    """The good case still exists: considered == evaluated + refused."""
-    v = CR.verdict(_statuses(at=1_790_000_000.0, state="LIVE",
-                             markets_considered=5, evaluated=0,
-                             refusals={"A": 3, "B": 2}))
+    """The good case: every counted refusal names a DISTINCT candidate.
+
+    Five refusals, five ledger rows, five distinct identities, none evaluated.
+    Coverage is then established over the candidates the cycle named -- which
+    is a different and weaker claim than "every venue market was accounted
+    for", and deliberately so.
+    """
+    v = CR.verdict(_statuses(
+        at=1_790_000_000.0, state="LIVE", markets_considered=5, evaluated=0,
+        refusals={"A": 3, "B": 2},
+        mapped_candidate_ledger=[{"slug": "c%d" % i, "refusal": "A"}
+                                 for i in range(3)]
+                                + [{"slug": "c%d" % i, "refusal": "B"}
+                                   for i in range(3, 5)]))
     assert v["verdict"] == CR.V_ALL_REFUSED_ACCOUNTED
     assert v["reconciled"] is True
+    assert v["distinct_candidates"] == 5
     assert v["ok"] is True
 
 
 def test_a_reconciling_cycle_with_evaluations_passes():
-    v = CR.verdict(_statuses(at=1_790_000_000.0, state="LIVE",
-                             markets_considered=5, evaluated=2,
-                             refusals={"A": 3}))
+    v = CR.verdict(_statuses(
+        at=1_790_000_000.0, state="LIVE", markets_considered=5, evaluated=2,
+        refusals={"A": 3},
+        mapped_candidate_ledger=[{"slug": "c%d" % i, "refusal": "A"}
+                                 for i in range(3)]))
     assert v["verdict"] == CR.V_EVALUATED
     assert v["reconciled"] is True
     assert v["ok"] is True
 
 
-def test_refusals_exceeding_the_population_is_not_silently_accepted():
-    """More refusals than candidates means the counters overlap or double.
+def test_more_refusals_than_ledger_rows_is_not_silently_accepted():
+    """Counted refusals that name no candidate leave coverage unestablished.
 
-    Summing overlapping refusal reasons would manufacture a reconciliation;
-    an over-count is evidence the sum is not a partition of the population.
+    Five refusals with three named outcomes means two belong to candidates
+    this cycle never identified -- and `markets_considered` cannot supply
+    them, because it counts a different population.
     """
-    v = CR.verdict(_statuses(at=1_790_000_000.0, state="LIVE",
-                             markets_considered=3, evaluated=0,
-                             refusals={"A": 3, "B": 2}))
+    v = CR.verdict(_statuses(
+        at=1_790_000_000.0, state="LIVE", markets_considered=3, evaluated=0,
+        refusals={"A": 3, "B": 2},
+        mapped_candidate_ledger=[{"slug": "c%d" % i, "refusal": "A"}
+                                 for i in range(3)]))
     assert v["reconciled"] is False
-    assert v["unexplained"] == -2
     assert v["verdict"] == CR.V_REFUSALS_NAMED_NOT_RECONCILED
+    assert "belong to candidates this cycle did not identify" \
+        in v["why_not_reconciled"]
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -248,9 +269,11 @@ def test_an_older_build_missing_a_field_is_not_missing_heartbeat_data():
     present and that field is not. That must not read as "no heartbeat", and
     it must not read as "the SDK is unpinned" either.
     """
-    v = CR.verdict(_statuses(at=1_790_000_000.0, state="LIVE",
-                             markets_considered=2, evaluated=0,
-                             refusals={"A": 2}))
+    v = CR.verdict(_statuses(
+        at=1_790_000_000.0, state="LIVE", markets_considered=2, evaluated=0,
+        refusals={"A": 2},
+        mapped_candidate_ledger=[{"slug": "c1", "refusal": "A"},
+                                 {"slug": "c2", "refusal": "A"}]))
     assert v["verdict"] != CR.V_NO_HEARTBEAT
     assert v["cycle_row_present"] is True
     assert v["venue_sdk_is_absent"] is True
@@ -262,3 +285,92 @@ def test_an_unreadable_cycle_row_is_not_an_empty_one():
     v = CR.verdict(_statuses(unreadable="UndefinedTableError"))
     assert v["ok"] is False
     assert v["verdict"] in CR.FAILING
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · ARITHMETIC EQUALITY IS NOT COVERAGE
+# ═════════════════════════════════════════════════════════════════════
+#
+# Reproduced on be9fde8: markets_considered=2, evaluated=0,
+# refusals={A:1, B:1}, and a ledger holding the SAME candidate twice -- once
+# under each reason. The totals met (2 = 0 + 2) and the verdict read
+# EVERY_CANDIDATE_REFUSED_AND_ACCOUNTED_FOR, reconciled=True.
+#
+# One candidate was accounted for. The second was a duplicate of the first.
+# Two numbers agreeing is not a partition of a population, and the agreement
+# was produced by counting one candidate twice.
+
+def test_the_same_candidate_twice_does_not_account_for_two():
+    """The sum matched and the coverage did not exist."""
+    v = CR.verdict(_statuses(
+        at=1_790_000_000.0, state="LIVE", markets_considered=2, evaluated=0,
+        refusals={"A": 1, "B": 1},
+        mapped_candidate_ledger=[
+            {"slug": "aec-mlb-chc-sd-2026-09-30", "refusal": "A"},
+            {"slug": "aec-mlb-chc-sd-2026-09-30", "refusal": "B"}]))
+    assert v["verdict"] != CR.V_ALL_REFUSED_ACCOUNTED, (
+        "the same candidate counted twice was read as complete coverage")
+    assert v["reconciled"] is False
+    assert v["distinct_candidates"] == 1
+    assert v["ledger_rows_usable"] == 2
+    assert v["duplicate_candidate_identities"] == 1
+
+
+def test_distinct_candidates_with_one_reason_each_can_reconcile():
+    """The good case needs DISTINCT identities, and this one has them."""
+    v = CR.verdict(_statuses(
+        at=1_790_000_000.0, state="LIVE", markets_considered=2, evaluated=0,
+        refusals={"A": 1, "B": 1},
+        mapped_candidate_ledger=[{"slug": "one", "refusal": "A"},
+                                 {"slug": "two", "refusal": "B"}]))
+    assert v["distinct_candidates"] == 2
+    assert v["duplicate_candidate_identities"] == 0
+    assert v["reconciled"] is True
+    assert v["verdict"] == CR.V_ALL_REFUSED_ACCOUNTED
+
+
+def test_a_venue_catalogue_count_is_never_the_candidate_population():
+    """MY OWN PUBLISHED ERROR, pinned so it cannot be repeated.
+
+    I reported "49 unexplained candidates" from `82 considered - 0 evaluated -
+    33 refused`. `markets_considered` counts VENUE MARKETS the cycle examined;
+    the refusal counters fire per PROVIDER CANDIDATE. Subtracting one from the
+    other produces a number with no referent, and I published it in the same
+    breath as saying the populations may not be comparable.
+
+    The reconciliation is now performed over the CANDIDATE population only,
+    and `markets_considered` is carried as catalogue context that is explicitly
+    not that population.
+    """
+    v = CR.verdict(_statuses(
+        at=1_790_613_300.4, state="LIVE", markets_considered=82, evaluated=0,
+        refusals={"NO_PINNACLE_ON_EVENT": 9, "VENUE_MAPPING_AMBIGUOUS": 1,
+                  "NO_VENUE_CONTRACT_FOR_EVENT": 21,
+                  "VENUE_BOOK_CURRENCY_NOT_ESTABLISHED": 1,
+                  "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE": 1},
+        mapped_candidate_ledger=[{"slug": "aec-mlb-chc-sd-2026-09-30",
+                                  "refusal": "VENUE_BOOK_READ_RETURNED_ERROR"}]))
+    # NO SUBTRACTION ACROSS THE TWO POPULATIONS.
+    assert v.get("unexplained") is None, (
+        "a difference between a catalogue count and a candidate count was "
+        "published as a candidate shortfall")
+    assert v["markets_considered"] == 82
+    assert v["markets_considered_is_not_the_candidate_population"] is True
+    assert v["verdict"] == CR.V_REFUSALS_NAMED_NOT_RECONCILED
+    assert "not the candidate population" in v["why_not_reconciled"]
+
+
+def test_coverage_needs_a_ledger_not_just_counters():
+    """Refusal totals alone cannot establish which candidates they covered.
+
+    A refusal histogram with no ledger says how many refusals happened, not
+    how many DISTINCT candidates they account for -- two reasons can fire on
+    one candidate. Without identities, coverage is unestablished.
+    """
+    v = CR.verdict(_statuses(at=1_790_000_000.0, state="LIVE",
+                             markets_considered=5, evaluated=0,
+                             refusals={"A": 3, "B": 2},
+                             mapped_candidate_ledger=[]))
+    assert v["reconciled"] is False
+    assert v["verdict"] == CR.V_REFUSALS_NAMED_NOT_RECONCILED
+    assert v["distinct_candidates"] == 0

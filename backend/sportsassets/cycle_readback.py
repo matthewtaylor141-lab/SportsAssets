@@ -408,28 +408,39 @@ def _refusal_total(refusals):
 
 
 def _ledger_quality(ledger):
-    """How many ledger rows actually identify a candidate AND an outcome.
+    """Usable rows AND DISTINCT CANDIDATE IDENTITIES.
 
     A BLANK ROW IS NOT COVERAGE. `[{}]` was read as "this candidate is
-    accounted for", which counted the existence of a row as the content of
-    one. A usable row names WHICH candidate hit WHICH blocker; anything less
-    is a row, not an account.
+    accounted for", which counted the existence of a row as the content of one.
+    A usable row names WHICH candidate hit WHICH blocker.
+
+    AND A REPEATED CANDIDATE IS NOT TWO CANDIDATES. Reproduced on be9fde8: a
+    ledger holding one candidate twice, once per reason, made the totals agree
+    (2 considered = 0 evaluated + 2 refused) and produced
+    EVERY_CANDIDATE_REFUSED_AND_ACCOUNTED_FOR. One candidate was accounted
+    for; the other row was the same candidate again. Two reasons can fire on
+    one candidate, so the refusal TOTAL is not a count of candidates and
+    coverage must be counted over identities.
     """
     if not isinstance(ledger, list):
-        return {"rows": 0, "usable": 0, "blank": 0,
-                "not_a_list": ledger is not None}
+        return {"rows": 0, "usable": 0, "blank": 0, "distinct": 0,
+                "duplicates": 0, "not_a_list": ledger is not None}
     usable = blank = 0
+    seen = []
     for r in ledger:
         if not isinstance(r, dict):
             blank += 1
             continue
-        has_id = any(r.get(k) for k in LEDGER_ID_KEYS)
+        ident = next((str(r[k]) for k in LEDGER_ID_KEYS if r.get(k)), None)
         has_outcome = any(r.get(k) for k in LEDGER_OUTCOME_KEYS)
-        if has_id and has_outcome:
+        if ident and has_outcome:
             usable += 1
+            seen.append(ident)
         else:
             blank += 1
+    distinct = len(set(seen))
     return {"rows": len(ledger), "usable": usable, "blank": blank,
+            "distinct": distinct, "duplicates": usable - distinct,
             "not_a_list": False}
 
 
@@ -486,33 +497,73 @@ def verdict(payload: dict) -> dict:
              ledger_rows_blank=lq["blank"])
 
     considered, evaluated = c["markets_considered"], c["evaluated"]
+    # ── THE CATALOGUE COUNT IS NOT THE CANDIDATE POPULATION ──────────
+    #
+    # MY OWN PUBLISHED ERROR. I reported "49 unexplained candidates" from
+    # `82 considered - 0 evaluated - 33 refused`, in the same output that said
+    # the populations may not be comparable. `markets_considered` counts VENUE
+    # MARKETS the cycle examined; the refusal counters fire per PROVIDER
+    # CANDIDATE. Subtracting one from the other yields a number with no
+    # referent, and no amount of hedging prose makes it mean something.
+    #
+    # The reconciliation below is performed over the CANDIDATE population
+    # ONLY -- distinct identities from the ledger -- and `markets_considered`
+    # is carried as context that is explicitly labelled as not that
+    # population.
+    c["markets_considered_is_not_the_candidate_population"] = True
+    c["what_markets_considered_counts"] = (
+        "venue markets this cycle examined. It is NOT the provider-candidate "
+        "population the refusal counters describe, and the two are never "
+        "subtracted from one another")
+    c.update(distinct_candidates=lq["distinct"],
+             duplicate_candidate_identities=lq["duplicates"])
 
-    # ── THE RECONCILIATION ───────────────────────────────────────────
+    # ── THE RECONCILIATION, OVER CANDIDATES ──────────────────────────
     reconciled = False
-    unexplained = None
     why_not = None
-    if considered is None:
-        why_not = ("`markets_considered` is absent on this build, so the "
-                   "population the refusals should cover is unknown")
-    elif evaluated is None:
-        why_not = ("`evaluated` is absent on this build, so considered minus "
-                   "refused cannot be closed: the remainder could be "
-                   "evaluations or could be unaccounted candidates")
-    elif refused is None:
-        why_not = "the refusal census is unreadable"
+    if evaluated is None:
+        why_not = ("`evaluated` is absent on this build, so the candidate "
+                   "population cannot be partitioned into evaluated and "
+                   "refused")
+    elif lq["not_a_list"] or lq["rows"] == 0:
+        why_not = ("there is no candidate ledger, so the refusal totals cannot "
+                   "be attributed to DISTINCT candidates -- two reasons can "
+                   "fire on one candidate, which makes a refusal total a count "
+                   "of reasons rather than of candidates. `markets_considered` "
+                   "(%s) is a venue-catalogue figure and is NOT the candidate "
+                   "population, so it cannot stand in for one either"
+                   % considered)
+    elif lq["blank"]:
+        why_not = ("%d ledger row(s) name no candidate or no outcome, so those "
+                   "candidates have no stated result" % lq["blank"])
+    elif lq["duplicates"]:
+        why_not = ("%d ledger row(s) repeat a candidate already listed, so the "
+                   "row count overstates the candidates covered: %d rows for "
+                   "%d distinct candidates. Arithmetic equality reached this "
+                   "way is not a partition of the population"
+                   % (lq["duplicates"], lq["usable"], lq["distinct"]))
+    elif refused is not None and refused != lq["usable"]:
+        # EVERY COUNTED REFUSAL MUST NAME A CANDIDATE. A ledger holding one row
+        # cannot account for thirty-three refusals, and that is exactly the
+        # live shape: 33 refusals with a single ledger entry. Without a row per
+        # counted refusal there is no way to know WHICH candidates the other
+        # thirty-two describe -- and `markets_considered` cannot supply them,
+        # because it is a venue-catalogue figure and not the candidate
+        # population.
+        why_not = ("%d refusal(s) are counted and the ledger names only %d "
+                   "candidate outcome(s), so %d refusal(s) belong to "
+                   "candidates this cycle did not identify. "
+                   "`markets_considered` (%s) counts venue markets examined "
+                   "and is not the candidate population, so it cannot supply "
+                   "the missing identities either"
+                   % (refused, lq["usable"], refused - lq["usable"],
+                      considered))
     else:
-        unexplained = considered - evaluated - refused
-        reconciled = (unexplained == 0)
-        if not reconciled:
-            why_not = (
-                "%d considered - %d evaluated - %d refused = %d unexplained. "
-                "These may also be DIFFERENT POPULATIONS: "
-                "`markets_considered` counts venue markets examined while the "
-                "refusal counters fire per candidate, mostly before scoring. "
-                "So this is UNESTABLISHED coverage rather than a proven gap, "
-                "and it is not closed by summing overlapping reasons"
-                % (considered, evaluated, refused, unexplained))
-    c.update(reconciled=reconciled, unexplained=unexplained,
+        # EVERY DISTINCT CANDIDATE HAS AN OUTCOME, and the refusal reasons are
+        # attributed to identities rather than summed. Coverage is established
+        # over the candidates the cycle actually named.
+        reconciled = True
+    c.update(reconciled=reconciled, unexplained=None,
              why_not_reconciled=why_not)
 
     # ── NOTHING AT ALL ENTERED THE FUNNEL ────────────────────────────
@@ -536,18 +587,21 @@ def verdict(payload: dict) -> dict:
     # ── ZERO EVALUATED, SOMETHING IN THE FUNNEL ──────────────────────
     if reconciled:
         return dict(c, verdict=V_ALL_REFUSED_ACCOUNTED, ok=True,
-                    why=("every candidate was refused for a NAMED reason and "
-                         "the counts reconcile (%d considered = 0 evaluated + "
-                         "%d refused). The named reasons are the finding"
-                         % (considered, refused)))
+                    why=("every one of the %d DISTINCT candidate(s) the cycle "
+                         "named has a stated outcome, none was evaluated, and "
+                         "no identity is repeated. The named reasons are the "
+                         "finding. (%s venue markets were examined; that is "
+                         "catalogue context, not this population)"
+                         % (lq["distinct"], considered)))
     if refused or lq["usable"]:
         # NAMED, BUT NOT COMPLETE. Reported as unestablished coverage, which
         # is the honest middle the old code collapsed into a green.
         return dict(c, verdict=V_REFUSALS_NAMED_NOT_RECONCILED, ok=False,
-                    why=("refusals are named (%s refused, %d usable ledger "
-                         "row(s)) but coverage of the candidate population is "
-                         "NOT established: %s"
-                         % (refused, lq["usable"], why_not)))
+                    why=("refusals are named (%s refusal(s) recorded, %d "
+                         "usable ledger row(s), %d distinct candidate(s)) but "
+                         "coverage of the candidate population is NOT "
+                         "established: %s"
+                         % (refused, lq["usable"], lq["distinct"], why_not)))
     return dict(c, verdict=V_UNACCOUNTED, ok=False,
                 why=("%s market(s) were considered, none was evaluated, and "
                      "the census names no refusal and carries no usable "
@@ -603,7 +657,10 @@ def _main(argv=None) -> int:
         "verdict", "ok", "why", "cycle_at", "cycle_state", "cycle_label",
         "writer", "markets_considered", "evaluated", "written",
         "refusal_total", "ledger_rows", "ledger_rows_usable",
-        "ledger_rows_blank", "reconciled", "unexplained",
+        "ledger_rows_blank", "distinct_candidates",
+        "duplicate_candidate_identities", "reconciled",
+        "markets_considered_is_not_the_candidate_population",
+        "what_markets_considered_counts",
         "why_not_reconciled", "invalid_fields", "paths_absent")}
     print(json.dumps(show, indent=2, default=str))
     print("\n-- the refusal census, verbatim --")

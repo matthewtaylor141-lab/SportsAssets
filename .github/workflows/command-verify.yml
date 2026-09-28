@@ -6524,7 +6524,7 @@ jobs:
           import asyncpg
 
           DSN = os.environ["DATABASE_URL"]
-          FUNDED = ("125_", "126_", "127_", "128_")
+          FUNDED = ("125_", "126_", "127_", "128_", "131_")
           skipped, ok = [], False
 
           async def mark(version):
@@ -6649,6 +6649,7 @@ jobs:
             tests/test_partial_exit_pnl_is_separable.py \
             tests/test_a_partial_loss_actually_stops_new_exposure.py \
             tests/test_the_audit_drawdown_reproduction.py \
+            tests/test_the_portfolio_group_bound_is_one_bound.py \
             2>&1 | tail -25 | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -6681,6 +6682,7 @@ jobs:
           python -m pytest -q -p no:randomly \
             tests/test_a_partial_loss_actually_stops_new_exposure.py \
             tests/test_the_audit_drawdown_reproduction.py \
+            tests/test_the_portfolio_group_bound_is_one_bound.py \
             --junitxml=/tmp/risk.xml 2>&1 | tail -15
           rc=${PIPESTATUS[0]}
           # THE GUARD IS A MODULE, NOT A HEREDOC. A `<<'PYX'` body at column
