@@ -59,9 +59,31 @@ import urllib.error
 import urllib.request
 
 DESK_PATH = "/api/command/bettor/desk"
+HEALTH_PATH = "/healthz"
+
+#: ── THE TIMEOUTS, AND WHY THEY DIFFER ───────────────────────────────
+#:
+#: FOUND BY RUNNING IT (2026-09-28). The first live run of this job returned
+#: `TimeoutError reading /api/command/bettor/desk` at exactly the 60 s limit
+#: it was given. The module reported that correctly -- as the diagnostic being
+#: unable to ask rather than as a healthy lane -- but a diagnostic that always
+#: times out establishes nothing, so the limit was the defect.
+#:
+#: The desk assembles sixteen sections, each doing database work, on a service
+#: that may be cold. `/healthz` is cheap and answers immediately, so it is
+#: asked FIRST and with a short limit: that separates "the service is not
+#: answering at all" from "the desk is slower than we allowed", which are
+#: different facts and previously collapsed into one timeout.
+HEALTH_TIMEOUT_S = 25.0
+DESK_TIMEOUT_S = 150.0
+#: One retry, because a cold start is the common cause and the second attempt
+#: is warm. Bounded at two total: a diagnostic that hammers our own API while
+#: reporting on rate control would be self-refuting.
+DESK_ATTEMPTS = 2
 
 V_NO_HEARTBEAT = "NO_SCHEDULED_CYCLE_HEARTBEAT"
 V_UNREADABLE = "THE_DESK_COULD_NOT_BE_READ"
+V_SERVICE_UNREACHABLE = "THE_SERVICE_ITSELF_DID_NOT_ANSWER"
 V_NOTHING_TO_EVALUATE = "NOTHING_TO_EVALUATE_THIS_CYCLE"
 V_ALL_REFUSED_ACCOUNTED = "EVERY_CANDIDATE_REFUSED_AND_ACCOUNTED_FOR"
 V_UNACCOUNTED = "CANDIDATES_ENTERED_THE_FUNNEL_AND_ARE_UNACCOUNTED_FOR"
@@ -69,7 +91,8 @@ V_EVALUATED = "CANDIDATES_WERE_EVALUATED"
 
 #: Only these verdicts fail the job. A world with no fixtures is not a
 #: broken system, and failing on it would train the reader to ignore the job.
-FAILING = frozenset({V_NO_HEARTBEAT, V_UNREADABLE, V_UNACCOUNTED})
+FAILING = frozenset({V_NO_HEARTBEAT, V_UNREADABLE, V_UNACCOUNTED,
+                     V_SERVICE_UNREACHABLE})
 
 ABSENT = "PATH_ABSENT"
 
@@ -90,24 +113,69 @@ def _dig(obj, *path):
     return cur, None
 
 
-def fetch(api: str, token: str, *, timeout: float = 60.0) -> dict:
-    """One authenticated GET. Never writes, never retries into the venue."""
-    url = api.rstrip("/") + DESK_PATH
-    req = urllib.request.Request(url, method="GET")
-    req.add_header("X-Admin-Token", token)
+def _get(api: str, path: str, *, token: str = None, timeout: float,
+         parse_json: bool = True) -> dict:
+    """One GET. Never writes; the only HTTP method this module names."""
+    req = urllib.request.Request(api.rstrip("/") + path, method="GET")
+    if token:
+        req.add_header("X-Admin-Token", token)
     req.add_header("Accept", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
+            raw = r.read().decode() or ""
             return {"ok": True, "status": r.status,
-                    "body": json.loads(r.read().decode() or "{}")}
+                    "body": (json.loads(raw or "{}") if parse_json else raw)}
     except urllib.error.HTTPError as exc:
         return {"ok": False, "status": exc.code,
-                "why": "HTTP %s from %s" % (exc.code, DESK_PATH)}
+                "why": "HTTP %s from %s" % (exc.code, path)}
     except Exception as exc:                                   # noqa: BLE001
         # THE EXCEPTION CLASS, NOT ITS MESSAGE. A message can carry a URL
         # with a query string; the class cannot.
         return {"ok": False, "status": None,
-                "why": "%s reading %s" % (type(exc).__name__, DESK_PATH)}
+                "why": "%s reading %s" % (type(exc).__name__, path)}
+
+
+def reachable(api: str, *, timeout: float = None) -> dict:
+    """Is the service answering at all? Asked before the expensive read.
+
+    WHY SEPARATELY. The first live run reported only
+    `TimeoutError reading /api/command/bettor/desk`, which cannot distinguish
+    a service that is down from a desk that is merely slower than the limit
+    allowed. `/healthz` is cheap, so a fast answer here means the timeout
+    below is about the DESK and not about the service.
+    """
+    return _get(api, HEALTH_PATH,
+                timeout=HEALTH_TIMEOUT_S if timeout is None else timeout,
+                parse_json=False)
+
+
+def fetch(api: str, token: str, *, timeout: float = None,
+          attempts: int = None, sleep=None) -> dict:
+    """The desk, authenticated, with ONE bounded retry.
+
+    RETRIED BECAUSE A COLD START IS THE COMMON CAUSE and the second attempt
+    is warm. Bounded at DESK_ATTEMPTS: a diagnostic that hammered our own API
+    while reporting on rate control would be self-refuting. The venue is not
+    touched by this at all -- this is our own service.
+    """
+    import time as _t
+
+    limit = DESK_TIMEOUT_S if timeout is None else timeout
+    tries = DESK_ATTEMPTS if attempts is None else max(1, int(attempts))
+    last = None
+    for i in range(tries):
+        last = _get(api, DESK_PATH, token=token, timeout=limit)
+        if last.get("ok"):
+            return dict(last, attempts=i + 1)
+        # A 4xx will not change on a retry -- it is an answer about our
+        # credential or the route, not a cold service.
+        st = last.get("status")
+        if st is not None and 400 <= int(st) < 500:
+            return dict(last, attempts=i + 1,
+                        why_not_retried="a 4xx is an answer, not a cold start")
+        if i + 1 < tries:
+            (sleep or _t.sleep)(2.0)
+    return dict(last or {"ok": False}, attempts=tries)
 
 
 def census(desk: dict) -> dict:
@@ -226,11 +294,34 @@ def _main(argv=None) -> int:
                                   "lane being healthy")}, indent=2))
         return 1
 
+    # THE CHEAP QUESTION FIRST, so a slow desk and a dead service are two
+    # different verdicts rather than one indistinguishable timeout.
+    health = reachable(api)
+    if not health.get("ok"):
+        print(json.dumps({"verdict": V_SERVICE_UNREACHABLE, "ok": False,
+                          "status": health.get("status"),
+                          "why": health.get("why"),
+                          "what_this_means": (
+                              "the service did not answer %s within %.0fs, so "
+                              "nothing downstream of it was asked. This is "
+                              "about the SERVICE, not about the evaluation "
+                              "lane" % (HEALTH_PATH, HEALTH_TIMEOUT_S))},
+                         indent=2))
+        return 1
+
     got = fetch(api, token)
     if not got.get("ok"):
         print(json.dumps({"verdict": V_UNREADABLE, "ok": False,
                           "status": got.get("status"),
-                          "why": got.get("why")}, indent=2))
+                          "attempts": got.get("attempts"),
+                          "why": got.get("why"),
+                          "why_not_retried": got.get("why_not_retried"),
+                          "what_this_means": (
+                              "%s answered but %s did not, within %.0fs x %s "
+                              "attempt(s). The service is up; this read is "
+                              "the thing that failed"
+                              % (HEALTH_PATH, DESK_PATH, DESK_TIMEOUT_S,
+                                 got.get("attempts")))}, indent=2))
         return 1
 
     v = verdict(got["body"] or {})
@@ -266,6 +357,8 @@ if __name__ == "__main__":                                     # pragma: no cove
     sys.exit(_main(sys.argv[1:]))
 
 
-__all__ = ["fetch", "census", "verdict", "DESK_PATH", "FAILING",
-           "V_NO_HEARTBEAT", "V_UNREADABLE", "V_NOTHING_TO_EVALUATE",
+__all__ = ["fetch", "reachable", "census", "verdict", "DESK_PATH",
+           "HEALTH_PATH", "FAILING", "DESK_TIMEOUT_S", "HEALTH_TIMEOUT_S",
+           "DESK_ATTEMPTS", "V_NO_HEARTBEAT", "V_UNREADABLE",
+           "V_SERVICE_UNREACHABLE", "V_NOTHING_TO_EVALUATE",
            "V_ALL_REFUSED_ACCOUNTED", "V_UNACCOUNTED", "V_EVALUATED"]

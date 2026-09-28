@@ -184,12 +184,74 @@ def test_a_failed_read_is_unreadable_rather_than_a_healthy_lane():
 
 
 def test_only_measurement_failures_fail_the_job():
-    """The failing set is exactly the three that mean 'we cannot tell'."""
+    """The failing set is exactly those that mean 'we cannot tell'."""
     assert CR.FAILING == {CR.V_NO_HEARTBEAT, CR.V_UNREADABLE,
-                          CR.V_UNACCOUNTED}
+                          CR.V_UNACCOUNTED, CR.V_SERVICE_UNREACHABLE}
     for ok_verdict in (CR.V_NOTHING_TO_EVALUATE, CR.V_ALL_REFUSED_ACCOUNTED,
                        CR.V_EVALUATED):
         assert ok_verdict not in CR.FAILING
+
+
+def test_a_dead_service_and_a_slow_desk_are_different_verdicts():
+    """FOUND BY RUNNING IT: one timeout message could not tell them apart.
+
+    The first live run printed only `TimeoutError reading
+    /api/command/bettor/desk` at exactly the 60 s limit it was given. That
+    cannot distinguish a service that is down from a desk slower than the
+    limit allowed -- and the two send a reader to different places. `/healthz`
+    is asked first and cheaply so the expensive read's timeout is a statement
+    about the DESK.
+    """
+    assert CR.V_SERVICE_UNREACHABLE != CR.V_UNREADABLE
+    assert CR.HEALTH_TIMEOUT_S < CR.DESK_TIMEOUT_S
+    assert CR.DESK_TIMEOUT_S >= 120, (
+        "the desk assembles sixteen sections on a possibly-cold service; a "
+        "limit that always trips makes this job establish nothing")
+    assert CR.HEALTH_PATH == "/healthz"
+
+
+def test_the_desk_read_is_retried_once_but_a_4xx_is_not():
+    """Bounded, and it does not retry an answer.
+
+    A cold start is the common cause of a first-attempt failure, so one
+    retry is worth it. A 4xx is an answer about our credential or the route
+    and will not change -- retrying it would spend time to be told the same
+    thing, the same reasoning as not retrying a 404 book read.
+    """
+    calls = []
+
+    def fake_get(api, path, *, token=None, timeout, parse_json=True):
+        calls.append(path)
+        return {"ok": False, "status": 401, "why": "HTTP 401"}
+
+    import sportsassets.cycle_readback as mod
+    real = mod._get
+    try:
+        mod._get = fake_get
+        got = mod.fetch("https://api.test", "t", sleep=lambda _s: None)
+    finally:
+        mod._get = real
+    assert got["attempts"] == 1, "a 401 must not be retried"
+    assert got["why_not_retried"]
+    assert CR.DESK_ATTEMPTS == 2
+
+
+def test_a_cold_first_attempt_is_retried_and_succeeds():
+    seq = [{"ok": False, "status": None, "why": "TimeoutError"},
+           {"ok": True, "status": 200, "body": {"ok": True}}]
+
+    def fake_get(api, path, *, token=None, timeout, parse_json=True):
+        return seq.pop(0)
+
+    import sportsassets.cycle_readback as mod
+    real = mod._get
+    try:
+        mod._get = fake_get
+        got = mod.fetch("https://api.test", "t", sleep=lambda _s: None)
+    finally:
+        mod._get = real
+    assert got["ok"] is True
+    assert got["attempts"] == 2
 
 
 def test_the_verdict_is_serialisable_for_a_step_summary():
