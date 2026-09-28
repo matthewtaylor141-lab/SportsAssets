@@ -1,0 +1,409 @@
+{
+ "label": "CONTROLLED DEMONSTRATION \u2014 SOFTWARE PROOF, NOT PERFORMANCE",
+ "counts_toward_strategy_performance": false,
+ "what_this_establishes": "that the deployed scheduled lane carries a held position through a depth-limited partial exit, a partial fill, a redelivered execution, a restart, a late execution on recovery and a completing exit, and that the ledger adds up at each step",
+ "what_this_does_not_establish": "anything about opportunity or profitability. The prices, the depth and the probability are CHOSEN. No funded order was sent; FUNDED_EXIT_SUBMISSION_ENABLED ships False and was patched inside this test",
+ "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+ "venue": "PMUS",
+ "position": "dem-win",
+ "steps": [
+  {
+   "step": 0,
+   "what": "ENTRY HELD",
+   "ledger": {
+    "position": {
+     "intent_id": "dem-win",
+     "state": "FILLED",
+     "kind": "ENTRY",
+     "qty": 20.0,
+     "residual": 20.0,
+     "closed_reason": null,
+     "closed": false
+    },
+    "exit_intents": [],
+    "fills": [
+     {
+      "fill_id": "fvf:vo-dem-win:vf-entry-dem-win",
+      "intent_id": "dem-win",
+      "direction": "ENTRY",
+      "qty": 20.0,
+      "price": 0.55,
+      "fee_state": "PROVISIONAL"
+     }
+    ],
+    "available_to_exit": 20.0
+   }
+  },
+  {
+   "step": 1,
+   "what": "PARTIAL EXIT, PARTIALLY FILLED",
+   "selected": "DIRECT_EXIT",
+   "selected_qty": 8.0,
+   "limit_price": 0.72,
+   "venue_create_payload": {
+    "marketSlug": "aec-nba-bos-lal-2026-09-27",
+    "intent": "ORDER_INTENT_SELL_LONG",
+    "type": "ORDER_TYPE_LIMIT",
+    "price": {
+     "value": "0.72",
+     "currency": "USD"
+    },
+    "quantity": 8,
+    "tif": "TIME_IN_FORCE_FILL_OR_KILL",
+    "synchronousExecution": true
+   },
+   "ledger": {
+    "position": {
+     "intent_id": "dem-win",
+     "state": "FILLED",
+     "kind": "ENTRY",
+     "qty": 20.0,
+     "residual": 15.0,
+     "closed_reason": null,
+     "closed": false
+    },
+    "exit_intents": [
+     {
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "state": "PARTIALLY_FILLED",
+      "qty": 8.0,
+      "residual": 0.0,
+      "unresolved_reason": null
+     }
+    ],
+    "fills": [
+     {
+      "fill_id": "fvf:vo-dem-win:vf-entry-dem-win",
+      "intent_id": "dem-win",
+      "direction": "ENTRY",
+      "qty": 20.0,
+      "price": 0.55,
+      "fee_state": "PROVISIONAL"
+     },
+     {
+      "fill_id": "fvf:vo-xa-1:vx-a1",
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "direction": "EXIT",
+      "qty": 5.0,
+      "price": 0.72,
+      "fee_state": "PROVISIONAL"
+     }
+    ],
+    "available_to_exit": 12.0
+   }
+  },
+  {
+   "step": 2,
+   "what": "DUPLICATE DELIVERY IGNORED",
+   "ingest_result": {
+    "ok": true,
+    "written": [],
+    "already_held": [
+     {
+      "fill_id": "fvf:vo-xa-1:vx-a1",
+      "qty": 5.0,
+      "price": 0.72,
+      "repaired_economics": false,
+      "fee_reconciled_late": false
+     }
+    ],
+    "unresolved": [],
+    "unresolved_count": 0,
+    "direction": "ENTRY",
+    "filled_qty_from_the_ledger": 0.0,
+    "residual_qty": 15.0,
+    "cash_usd_from_the_ledger": 3.6,
+    "fees_usd_from_the_ledger": 0.07,
+    "idempotent_on": "the venue's own fill id"
+   },
+   "ledger": {
+    "position": {
+     "intent_id": "dem-win",
+     "state": "FILLED",
+     "kind": "ENTRY",
+     "qty": 20.0,
+     "residual": 15.0,
+     "closed_reason": null,
+     "closed": false
+    },
+    "exit_intents": [
+     {
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "state": "PARTIALLY_FILLED",
+      "qty": 8.0,
+      "residual": 0.0,
+      "unresolved_reason": null
+     }
+    ],
+    "fills": [
+     {
+      "fill_id": "fvf:vo-dem-win:vf-entry-dem-win",
+      "intent_id": "dem-win",
+      "direction": "ENTRY",
+      "qty": 20.0,
+      "price": 0.55,
+      "fee_state": "PROVISIONAL"
+     },
+     {
+      "fill_id": "fvf:vo-xa-1:vx-a1",
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "direction": "EXIT",
+      "qty": 5.0,
+      "price": 0.72,
+      "fee_state": "PROVISIONAL"
+     }
+    ],
+    "available_to_exit": 12.0
+   }
+  },
+  {
+   "step": 3,
+   "what": "RESTART, LATE EXECUTION INGESTED ON RECOVERY",
+   "reconciled": {
+    "intent_id": "fpi-115b7d3dbdc54cca",
+    "state_was": "PARTIALLY_FILLED",
+    "venue_order_id": "vo-xa-1",
+    "direction": "EXIT",
+    "case": "READ_FROM_THE_VENUE",
+    "venue_state": "filled",
+    "state_now": "FILLED",
+    "executions_read": 2,
+    "executions_skipped": [],
+    "venue_filled_shares": 8.0,
+    "fills_written": 1,
+    "fills_already_held": 1,
+    "unresolved_executions": 0,
+    "residual_qty": 12.0,
+    "filled_qty_from_the_ledger": 8.0
+   },
+   "same_pass_sold_nothing_because": "THE_SIDE_A_CLOSE_WOULD_CONSUME_PUBLISHES_NO_EXECUTABLE_LEVEL",
+   "ledger": {
+    "position": {
+     "intent_id": "dem-win",
+     "state": "FILLED",
+     "kind": "ENTRY",
+     "qty": 20.0,
+     "residual": 12.0,
+     "closed_reason": null,
+     "closed": false
+    },
+    "exit_intents": [
+     {
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "state": "FILLED",
+      "qty": 8.0,
+      "residual": 0.0,
+      "unresolved_reason": null
+     }
+    ],
+    "fills": [
+     {
+      "fill_id": "fvf:vo-dem-win:vf-entry-dem-win",
+      "intent_id": "dem-win",
+      "direction": "ENTRY",
+      "qty": 20.0,
+      "price": 0.55,
+      "fee_state": "PROVISIONAL"
+     },
+     {
+      "fill_id": "fvf:vo-xa-1:vx-a1",
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "direction": "EXIT",
+      "qty": 5.0,
+      "price": 0.72,
+      "fee_state": "PROVISIONAL"
+     },
+     {
+      "fill_id": "fvf:vo-xa-1:vx-a2",
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "direction": "EXIT",
+      "qty": 3.0,
+      "price": 0.72,
+      "fee_state": "RECONCILED"
+     }
+    ],
+    "available_to_exit": 12.0
+   }
+  },
+  {
+   "step": 4,
+   "what": "COMPLETING EXIT, POSITION CLOSED",
+   "selected_qty": 12.0,
+   "limit_price": 0.7,
+   "ledger": {
+    "position": {
+     "intent_id": "dem-win",
+     "state": "FILLED",
+     "kind": "ENTRY",
+     "qty": 20.0,
+     "residual": 0.0,
+     "closed_reason": "EXITED_IN_THE_MARKET",
+     "closed": true
+    },
+    "exit_intents": [
+     {
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "state": "FILLED",
+      "qty": 8.0,
+      "residual": 0.0,
+      "unresolved_reason": null
+     },
+     {
+      "intent_id": "fpi-fce56baf95884e37",
+      "state": "FILLED",
+      "qty": 12.0,
+      "residual": 0.0,
+      "unresolved_reason": null
+     }
+    ],
+    "fills": [
+     {
+      "fill_id": "fvf:vo-dem-win:vf-entry-dem-win",
+      "intent_id": "dem-win",
+      "direction": "ENTRY",
+      "qty": 20.0,
+      "price": 0.55,
+      "fee_state": "PROVISIONAL"
+     },
+     {
+      "fill_id": "fvf:vo-xa-1:vx-a1",
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "direction": "EXIT",
+      "qty": 5.0,
+      "price": 0.72,
+      "fee_state": "PROVISIONAL"
+     },
+     {
+      "fill_id": "fvf:vo-xa-1:vx-a2",
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "direction": "EXIT",
+      "qty": 3.0,
+      "price": 0.72,
+      "fee_state": "RECONCILED"
+     },
+     {
+      "fill_id": "fvf:vo-xb-1:vf-1",
+      "intent_id": "fpi-fce56baf95884e37",
+      "direction": "EXIT",
+      "qty": 12.0,
+      "price": 0.7,
+      "fee_state": "PROVISIONAL"
+     }
+    ],
+    "available_to_exit": 0.0
+   }
+  },
+  {
+   "step": 5,
+   "what": "FINAL ACCOUNTING (PROFITABLE)",
+   "pnl": {
+    "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+    "venue": "PMUS",
+    "fills": 4,
+    "contracts": 0.0,
+    "cost_basis_usd": 11.0,
+    "exit_proceeds_usd": 14.16,
+    "fees_usd": 0.638,
+    "expected_fees_usd": 0.63,
+    "fee_variance_usd": 0.008,
+    "fills_with_provisional_fees": 3,
+    "fills_where_the_venue_charged_something_else": 0,
+    "fee_discrepancies": [
+     {
+      "fill_id": "fvf:vo-dem-win:vf-entry-dem-win",
+      "intent_id": "dem-win",
+      "exp": 0.34,
+      "obs": null,
+      "fee_state": "PROVISIONAL",
+      "fee_reconciliation": "{\"why\": \"the venue stated no commission on this execution, so the booked fee is the schedule's EXPECTATION and the cash is not final\", \"AGREED\": null}"
+     },
+     {
+      "fill_id": "fvf:vo-xa-1:vx-a1",
+      "intent_id": "fpi-115b7d3dbdc54cca",
+      "exp": 0.07,
+      "obs": null,
+      "fee_state": "PROVISIONAL",
+      "fee_reconciliation": "{\"why\": \"the venue stated no commission on this execution, so the booked fee is the schedule's EXPECTATION and the cash is not final\", \"AGREED\": null}"
+     },
+     {
+      "fill_id": "fvf:vo-xb-1:vf-1",
+      "intent_id": "fpi-fce56baf95884e37",
+      "exp": 0.18,
+      "obs": null,
+      "fee_state": "PROVISIONAL",
+      "fee_reconciliation": "{\"why\": \"the venue stated no commission on this execution, so the booked fee is the schedule's EXPECTATION and the cash is not final\", \"AGREED\": null}"
+     }
+    ],
+    "cash_out_the_door_usd": -2.522,
+    "realised_pnl_usd": 2.522,
+    "realised_basis": "the realised equity curve: each CLOSED position's net economic events, in closure order. An open position contributes nothing -- its cost is an asset, not a loss",
+    "realised_is_provisional": true,
+    "realised_provisional_note": "3 economic event(s) inside the realised total are PROVISIONAL -- the venue has not stated a fee it was charged -- so this number is explicitly incomplete rather than quietly exact",
+    "max_drawdown_usd": 0.0,
+    "peak_realised_usd": 2.522,
+    "realised_curve": [
+     {
+      "intent_id": "dem-win",
+      "at": 1790563778.042896,
+      "net_usd": 2.522,
+      "cumulative_realised_usd": 2.522,
+      "peak_usd": 2.522,
+      "drawdown_usd": 0.0
+     }
+    ],
+    "closed_positions": 1,
+    "open_position_net_cash_usd": 0.0,
+    "open_position_provisional_events": 0,
+    "unrealised_pnl_usd": null,
+    "unrealised_basis": "UNMEASURED. Marking residual funded inventory needs a funded mark, and this lane has no mark source it would stand behind, so this is reported as unmeasured rather than as zero",
+    "economics_by_kind": [
+     {
+      "kind": "ENTRY_COST",
+      "amt": -11.0,
+      "n": 1
+     },
+     {
+      "kind": "EXIT_PROCEEDS",
+      "amt": 14.16,
+      "n": 3
+     },
+     {
+      "kind": "FEE",
+      "amt": -0.638,
+      "n": 4
+     }
+    ],
+    "unresolved_intents": [],
+    "is_not_summed_with": "the shadow, acceptance, demonstration or UNCLASSIFIED books. This is the funded lane alone"
+   },
+   "exposure": {
+    "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+    "venue": "PMUS",
+    "open_positions": [],
+    "live_intents": [],
+    "outstanding_orders": [],
+    "residual_holdings": [],
+    "pending_and_in_flight_collateral_usd": 0.0,
+    "collateral_of_outstanding_orders_usd": 0.0,
+    "collateral_of_residual_holdings_usd": 0.0,
+    "filled_cash_usd": 11.0,
+    "exit_proceeds_usd": 14.16,
+    "filled_fees_usd": 0.638,
+    "contracts_held": 0.0,
+    "contracts_net_from_the_fill_ledger": 0.0,
+    "capital_hours_usd_h": 0.000476,
+    "per_event_collateral_usd": {},
+    "per_market_collateral_usd": {},
+    "counts_pending_at_full_size": true,
+    "counts_residual_holdings_after_the_order_is_terminal": true,
+    "leaves_exposure_only_on": [
+     "EXITED_IN_THE_MARKET",
+     "SETTLED_BY_THE_VENUE",
+     "VOIDED_BY_THE_VENUE",
+     "NEVER_HELD_ANY_INVENTORY"
+    ],
+    "scope": "bettor_funded_* only. No modelled row and no shadow lane contributes to any number here"
+   }
+  }
+ ]
+}

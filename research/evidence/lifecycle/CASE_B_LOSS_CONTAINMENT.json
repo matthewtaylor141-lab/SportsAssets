@@ -1,0 +1,382 @@
+{
+ "label": "CONTROLLED DEMONSTRATION \u2014 SOFTWARE PROOF, NOT PERFORMANCE",
+ "counts_toward_strategy_performance": false,
+ "what_this_establishes": "that the lane exits at a LOSS when holding is worth less, that the chosen action is marked as locking a loss rather than presented as a gain, that a depth-limited exit leaves the balance held rather than stranding or oversells it, and that the residual appears in the operator view as something to act on",
+ "what_this_does_not_establish": "that a 0.41 bid existed for 9 contracts. It is a CHOSEN input. And note what the ledger does NOT say: the \u2212$1.71 on the 9 sold is not booked as realised, because the position is still open and this lane realises on CLOSURE. The visible figure is \u2212$5.71 of net cash on an open position",
+ "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+ "venue": "PMUS",
+ "position": "dem-loss",
+ "steps": [
+  {
+   "step": 1,
+   "what": "LOSS-CONTAINING PARTIAL EXIT",
+   "selected": "DIRECT_EXIT",
+   "selected_qty": 9.0,
+   "limit_price": 0.41,
+   "locks_a_loss": true,
+   "venue_create_payload": {
+    "marketSlug": "aec-nba-bos-lal-2026-09-27",
+    "intent": "ORDER_INTENT_SELL_LONG",
+    "type": "ORDER_TYPE_LIMIT",
+    "price": {
+     "value": "0.41",
+     "currency": "USD"
+    },
+    "quantity": 9,
+    "tif": "TIME_IN_FORCE_FILL_OR_KILL",
+    "synchronousExecution": true
+   },
+   "ledger": {
+    "position": {
+     "intent_id": "dem-loss",
+     "state": "FILLED",
+     "kind": "ENTRY",
+     "qty": 15.0,
+     "residual": 6.0,
+     "closed_reason": null,
+     "closed": false
+    },
+    "exit_intents": [
+     {
+      "intent_id": "fpi-b355a0a606464aa6",
+      "state": "FILLED",
+      "qty": 9.0,
+      "residual": 0.0,
+      "unresolved_reason": null
+     }
+    ],
+    "fills": [
+     {
+      "fill_id": "fvf:vo-dem-loss:vf-entry-dem-loss",
+      "intent_id": "dem-loss",
+      "direction": "ENTRY",
+      "qty": 15.0,
+      "price": 0.6,
+      "fee_state": "PROVISIONAL"
+     },
+     {
+      "fill_id": "fvf:vo-xl-1:vf-1",
+      "intent_id": "fpi-b355a0a606464aa6",
+      "direction": "EXIT",
+      "qty": 9.0,
+      "price": 0.41,
+      "fee_state": "PROVISIONAL"
+     }
+    ],
+    "available_to_exit": 6.0
+   }
+  },
+  {
+   "step": 2,
+   "what": "FINAL ACCOUNTING (LOSS CONTAINED)",
+   "pnl": {
+    "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+    "venue": "PMUS",
+    "fills": 2,
+    "contracts": 6.0,
+    "cost_basis_usd": 9.0,
+    "exit_proceeds_usd": 3.69,
+    "fees_usd": 0.4,
+    "expected_fees_usd": 0.4,
+    "fee_variance_usd": 0.0,
+    "fills_with_provisional_fees": 2,
+    "fills_where_the_venue_charged_something_else": 0,
+    "fee_discrepancies": [
+     {
+      "fill_id": "fvf:vo-dem-loss:vf-entry-dem-loss",
+      "intent_id": "dem-loss",
+      "exp": 0.25,
+      "obs": null,
+      "fee_state": "PROVISIONAL",
+      "fee_reconciliation": "{\"why\": \"the venue stated no commission on this execution, so the booked fee is the schedule's EXPECTATION and the cash is not final\", \"AGREED\": null}"
+     },
+     {
+      "fill_id": "fvf:vo-xl-1:vf-1",
+      "intent_id": "fpi-b355a0a606464aa6",
+      "exp": 0.15,
+      "obs": null,
+      "fee_state": "PROVISIONAL",
+      "fee_reconciliation": "{\"why\": \"the venue stated no commission on this execution, so the booked fee is the schedule's EXPECTATION and the cash is not final\", \"AGREED\": null}"
+     }
+    ],
+    "cash_out_the_door_usd": 5.71,
+    "realised_pnl_usd": 0.0,
+    "realised_basis": "the realised equity curve: each CLOSED position's net economic events, in closure order. An open position contributes nothing -- its cost is an asset, not a loss",
+    "realised_is_provisional": false,
+    "realised_provisional_note": null,
+    "max_drawdown_usd": 0.0,
+    "peak_realised_usd": 0.0,
+    "realised_curve": [],
+    "closed_positions": 0,
+    "open_position_net_cash_usd": -5.71,
+    "open_position_provisional_events": 2,
+    "unrealised_pnl_usd": null,
+    "unrealised_basis": "UNMEASURED. Marking residual funded inventory needs a funded mark, and this lane has no mark source it would stand behind, so this is reported as unmeasured rather than as zero",
+    "economics_by_kind": [
+     {
+      "kind": "ENTRY_COST",
+      "amt": -9.0,
+      "n": 1
+     },
+     {
+      "kind": "EXIT_PROCEEDS",
+      "amt": 3.69,
+      "n": 1
+     },
+     {
+      "kind": "FEE",
+      "amt": -0.4,
+      "n": 2
+     }
+    ],
+    "unresolved_intents": [],
+    "is_not_summed_with": "the shadow, acceptance, demonstration or UNCLASSIFIED books. This is the funded lane alone"
+   },
+   "exposure": {
+    "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+    "venue": "PMUS",
+    "open_positions": [
+     {
+      "intent_id": "dem-loss",
+      "event_key": "ev-bos-lal-2026-09-27",
+      "us_market_slug": "aec-nba-bos-lal-2026-09-27",
+      "kind": "ENTRY",
+      "state": "FILLED",
+      "collateral": 9.0,
+      "quantity": 15.0,
+      "residual": 6.0,
+      "closed_at": null,
+      "outstanding": false,
+      "holding": true,
+      "at_risk_usd": 3.6,
+      "why": "the order is terminal and 6.0 of 15.0 contracts are still held"
+     }
+    ],
+    "live_intents": [
+     {
+      "intent_id": "dem-loss",
+      "event_key": "ev-bos-lal-2026-09-27",
+      "us_market_slug": "aec-nba-bos-lal-2026-09-27",
+      "kind": "ENTRY",
+      "state": "FILLED",
+      "collateral": 9.0,
+      "quantity": 15.0,
+      "residual": 6.0,
+      "closed_at": null,
+      "outstanding": false,
+      "holding": true,
+      "at_risk_usd": 3.6,
+      "why": "the order is terminal and 6.0 of 15.0 contracts are still held"
+     }
+    ],
+    "outstanding_orders": [],
+    "residual_holdings": [
+     {
+      "intent_id": "dem-loss",
+      "event_key": "ev-bos-lal-2026-09-27",
+      "us_market_slug": "aec-nba-bos-lal-2026-09-27",
+      "kind": "ENTRY",
+      "state": "FILLED",
+      "collateral": 9.0,
+      "quantity": 15.0,
+      "residual": 6.0,
+      "closed_at": null,
+      "outstanding": false,
+      "holding": true,
+      "at_risk_usd": 3.6,
+      "why": "the order is terminal and 6.0 of 15.0 contracts are still held"
+     }
+    ],
+    "pending_and_in_flight_collateral_usd": 3.6,
+    "collateral_of_outstanding_orders_usd": 0.0,
+    "collateral_of_residual_holdings_usd": 3.6,
+    "filled_cash_usd": 9.0,
+    "exit_proceeds_usd": 3.69,
+    "filled_fees_usd": 0.4,
+    "contracts_held": 6.0,
+    "contracts_net_from_the_fill_ledger": 6.0,
+    "capital_hours_usd_h": 0.00012,
+    "per_event_collateral_usd": {
+     "ev-bos-lal-2026-09-27": 3.6
+    },
+    "per_market_collateral_usd": {
+     "aec-nba-bos-lal-2026-09-27": 3.6
+    },
+    "counts_pending_at_full_size": true,
+    "counts_residual_holdings_after_the_order_is_terminal": true,
+    "leaves_exposure_only_on": [
+     "EXITED_IN_THE_MARKET",
+     "SETTLED_BY_THE_VENUE",
+     "VOIDED_BY_THE_VENUE",
+     "NEVER_HELD_ANY_INVENTORY"
+    ],
+    "scope": "bettor_funded_* only. No modelled row and no shadow lane contributes to any number here"
+   }
+  },
+  {
+   "step": 3,
+   "what": "OPERATOR VIEW",
+   "book": {
+    "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+    "venue": "PMUS",
+    "intents": 2,
+    "book_class": "CONTROLLED_DEMONSTRATION",
+    "counts_toward_strategy_performance": false,
+    "classification_why": "its prices, depth, fills and probability are CHOSEN inputs supplied to the deployed functions. It establishes that the software carries a position through its lifecycle and that the ledger adds up. It establishes NOTHING about opportunity: not that such a contract existed, not that it was priced this way, and not that it would have filled. So it is never summed into a result and never read as performance",
+    "exposure": {
+     "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+     "venue": "PMUS",
+     "open_positions": [
+      {
+       "intent_id": "dem-loss",
+       "event_key": "ev-bos-lal-2026-09-27",
+       "us_market_slug": "aec-nba-bos-lal-2026-09-27",
+       "kind": "ENTRY",
+       "state": "FILLED",
+       "collateral": 9.0,
+       "quantity": 15.0,
+       "residual": 6.0,
+       "closed_at": null,
+       "outstanding": false,
+       "holding": true,
+       "at_risk_usd": 3.6,
+       "why": "the order is terminal and 6.0 of 15.0 contracts are still held"
+      }
+     ],
+     "live_intents": [
+      {
+       "intent_id": "dem-loss",
+       "event_key": "ev-bos-lal-2026-09-27",
+       "us_market_slug": "aec-nba-bos-lal-2026-09-27",
+       "kind": "ENTRY",
+       "state": "FILLED",
+       "collateral": 9.0,
+       "quantity": 15.0,
+       "residual": 6.0,
+       "closed_at": null,
+       "outstanding": false,
+       "holding": true,
+       "at_risk_usd": 3.6,
+       "why": "the order is terminal and 6.0 of 15.0 contracts are still held"
+      }
+     ],
+     "outstanding_orders": [],
+     "residual_holdings": [
+      {
+       "intent_id": "dem-loss",
+       "event_key": "ev-bos-lal-2026-09-27",
+       "us_market_slug": "aec-nba-bos-lal-2026-09-27",
+       "kind": "ENTRY",
+       "state": "FILLED",
+       "collateral": 9.0,
+       "quantity": 15.0,
+       "residual": 6.0,
+       "closed_at": null,
+       "outstanding": false,
+       "holding": true,
+       "at_risk_usd": 3.6,
+       "why": "the order is terminal and 6.0 of 15.0 contracts are still held"
+      }
+     ],
+     "pending_and_in_flight_collateral_usd": 3.6,
+     "collateral_of_outstanding_orders_usd": 0.0,
+     "collateral_of_residual_holdings_usd": 3.6,
+     "filled_cash_usd": 9.0,
+     "exit_proceeds_usd": 3.69,
+     "filled_fees_usd": 0.4,
+     "contracts_held": 6.0,
+     "contracts_net_from_the_fill_ledger": 6.0,
+     "capital_hours_usd_h": 0.000133,
+     "per_event_collateral_usd": {
+      "ev-bos-lal-2026-09-27": 3.6
+     },
+     "per_market_collateral_usd": {
+      "aec-nba-bos-lal-2026-09-27": 3.6
+     },
+     "counts_pending_at_full_size": true,
+     "counts_residual_holdings_after_the_order_is_terminal": true,
+     "leaves_exposure_only_on": [
+      "EXITED_IN_THE_MARKET",
+      "SETTLED_BY_THE_VENUE",
+      "VOIDED_BY_THE_VENUE",
+      "NEVER_HELD_ANY_INVENTORY"
+     ],
+     "scope": "bettor_funded_* only. No modelled row and no shadow lane contributes to any number here"
+    },
+    "pnl": {
+     "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+     "venue": "PMUS",
+     "fills": 2,
+     "contracts": 6.0,
+     "cost_basis_usd": 9.0,
+     "exit_proceeds_usd": 3.69,
+     "fees_usd": 0.4,
+     "expected_fees_usd": 0.4,
+     "fee_variance_usd": 0.0,
+     "fills_with_provisional_fees": 2,
+     "fills_where_the_venue_charged_something_else": 0,
+     "fee_discrepancies": [
+      {
+       "fill_id": "fvf:vo-dem-loss:vf-entry-dem-loss",
+       "intent_id": "dem-loss",
+       "exp": 0.25,
+       "obs": null,
+       "fee_state": "PROVISIONAL",
+       "fee_reconciliation": "{\"why\": \"the venue stated no commission on this execution, so the booked fee is the schedule's EXPECTATION and the cash is not final\", \"AGREED\": null}"
+      },
+      {
+       "fill_id": "fvf:vo-xl-1:vf-1",
+       "intent_id": "fpi-b355a0a606464aa6",
+       "exp": 0.15,
+       "obs": null,
+       "fee_state": "PROVISIONAL",
+       "fee_reconciliation": "{\"why\": \"the venue stated no commission on this execution, so the booked fee is the schedule's EXPECTATION and the cash is not final\", \"AGREED\": null}"
+      }
+     ],
+     "cash_out_the_door_usd": 5.71,
+     "realised_pnl_usd": 0.0,
+     "realised_basis": "the realised equity curve: each CLOSED position's net economic events, in closure order. An open position contributes nothing -- its cost is an asset, not a loss",
+     "realised_is_provisional": false,
+     "realised_provisional_note": null,
+     "max_drawdown_usd": 0.0,
+     "peak_realised_usd": 0.0,
+     "realised_curve": [],
+     "closed_positions": 0,
+     "open_position_net_cash_usd": -5.71,
+     "open_position_provisional_events": 2,
+     "unrealised_pnl_usd": null,
+     "unrealised_basis": "UNMEASURED. Marking residual funded inventory needs a funded mark, and this lane has no mark source it would stand behind, so this is reported as unmeasured rather than as zero",
+     "economics_by_kind": [
+      {
+       "kind": "ENTRY_COST",
+       "amt": -9.0,
+       "n": 1
+      },
+      {
+       "kind": "EXIT_PROCEEDS",
+       "amt": 3.69,
+       "n": 1
+      },
+      {
+       "kind": "FEE",
+       "amt": -0.4,
+       "n": 2
+      }
+     ],
+     "unresolved_intents": [],
+     "is_not_summed_with": "the shadow, acceptance, demonstration or UNCLASSIFIED books. This is the funded lane alone"
+    }
+   },
+   "demonstration_book_count": 1,
+   "funded_book_count": 0,
+   "residual_discrepancy": {
+    "kind": "RESIDUAL_INVENTORY_STILL_HELD",
+    "intent_id": "dem-loss",
+    "residual_qty": 6.0,
+    "us_market_slug": "aec-nba-bos-lal-2026-09-27",
+    "settlement": "{\"at\": 1790563778.0817735, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
+    "what_it_means": "contracts this lane owns. They count against every rail until an evidenced exit or an authoritative settlement removes them"
+   }
+  }
+ ]
+}

@@ -703,7 +703,29 @@ async def select_exit(conn, position, *, client=None, now=None,
                       ("selected", "selected_qty", "selection_reason",
                        "operating_state", "governing_rule", "runner_up",
                        "improvement_over_hold_per_contract",
-                       "is_a_deliberate_hold")}
+                       "is_a_deliberate_hold",
+                       # ── THE TABLE ITSELF, NOT JUST ITS WINNER ──────
+                       #
+                       # The projection listed the outcome and dropped the
+                       # reasoning, so a servicing pass could exit at a
+                       # LOSS -- correctly, because holding was worth less
+                       # -- and no operator-visible field said so. The
+                       # candidate carries `locks_a_loss`, `depth_limited`
+                       # and `fees_usd`; the ineligible ones carry the code
+                       # that disqualified them. Both are what "the exact
+                       # reason an action could not proceed" means, so both
+                       # travel with the decision.
+                       "candidates", "unqualified")}
+    # AND THE CHOSEN ROW, RESOLVED, so a reader does not rescan the table
+    # to learn whether the action it is looking at realises a loss.
+    _sel_name = ranked.get("selected")
+    _chosen = next((c for c in (ranked.get("candidates") or [])
+                    if c.get("action") == _sel_name), None)
+    out["ranking"]["selected_candidate"] = _chosen
+    out["ranking"]["selected_locks_a_loss"] = (
+        None if _chosen is None else bool(_chosen.get("locks_a_loss")))
+    out["ranking"]["selected_is_depth_limited"] = (
+        None if _chosen is None else bool(_chosen.get("depth_limited")))
     out["not_rankable"] = ranked.get("not_rankable")
     sel = ranked.get("selected")
     qty = ranked.get("selected_qty")

@@ -73,6 +73,67 @@ FEE_DISAGREES = "DISAGREES"
 
 PROVENANCE = "FUNDED_PILOT_EXECUTION"
 
+# ─────────────────────────────────────────────────────────────────────
+# A CONTROLLED DEMONSTRATION IN THE FUNDED SCHEMA IS NOT A FUNDED RESULT
+# ─────────────────────────────────────────────────────────────────────
+#
+# `bettor_demonstration` already runs a controlled scenario through the
+# SHADOW components, and it is kept out of performance by its experiment
+# id at the consuming queries. The funded tables have no experiment
+# column -- a funded book is keyed by (account_id, venue) -- so the same
+# discipline needs the same enforcement point HERE, on the account.
+#
+# WHY THIS IS NOT A LABEL ON A SCREEN. `command_center` classifies every
+# book it returns, so the number itself is tagged at the reader every
+# consumer uses, not annotated once in a panel a later panel forgets. A
+# demonstration book's `counts_toward_strategy_performance` is False --
+# not None, which means "unknown" and is what a real funded book with no
+# closed position reports.
+#
+# AND IT IS A CONVENTION, NOT A PERMISSION, exactly like the rest of the
+# lane separation: nothing stops a caller writing a demonstration row
+# under a production account id. What it does is make an unlabelled
+# demonstration VISIBLE -- see the UNCLASSIFIED case below.
+DEMONSTRATION_ACCOUNT_MARK = "DEMONSTRATION"
+
+BOOK_CLASS_FUNDED = "FUNDED_REAL_MONEY"
+BOOK_CLASS_DEMONSTRATION = "CONTROLLED_DEMONSTRATION"
+
+WHY_A_DEMONSTRATION_BOOK_IS_SEPARATE = (
+    "its prices, depth, fills and probability are CHOSEN inputs supplied "
+    "to the deployed functions. It establishes that the software carries a "
+    "position through its lifecycle and that the ledger adds up. It "
+    "establishes NOTHING about opportunity: not that such a contract "
+    "existed, not that it was priced this way, and not that it would have "
+    "filled. So it is never summed into a result and never read as "
+    "performance")
+
+
+def is_demonstration_account(account_id) -> bool:
+    """Whether a funded book is a controlled demonstration, BY ITS ID.
+
+    The mark must appear in the account id itself, so the classification
+    travels with every row rather than living in a side table that a
+    later reader might not join.
+    """
+    return DEMONSTRATION_ACCOUNT_MARK in str(account_id or "").upper()
+
+
+def classify_book(account_id) -> dict:
+    """One book's class and whether it may count as performance."""
+    demo = is_demonstration_account(account_id)
+    return {
+        "book_class": (BOOK_CLASS_DEMONSTRATION if demo
+                       else BOOK_CLASS_FUNDED),
+        "counts_toward_strategy_performance": False if demo else None,
+        "why": (WHY_A_DEMONSTRATION_BOOK_IS_SEPARATE if demo else
+                "a funded book's realised results COULD count. None means "
+                "not established here -- this reader does not know whether "
+                "a closed funded position exists yet, and reporting False "
+                "would claim a finding it has not made"),
+    }
+
+
 R_ANOTHER_INTENT_IS_LIVE = "ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE"
 R_NO_EXECUTION_IDENTITY = "THE_VENUE_SUPPLIED_NO_DURABLE_EXECUTION_IDENTITY"
 R_NO_SUCH_INTENT = "NO_SUCH_FUNDED_INTENT"
@@ -2313,13 +2374,24 @@ async def command_center(conn) -> dict:
         " ORDER BY account_id, venue")
     books = []
     for p in pairs:
+        cls = classify_book(p["account_id"])
         books.append({
             "account_id": p["account_id"], "venue": p["venue"],
             "intents": int(p["intents"]),
+            # THE CLASSIFICATION TRAVELS WITH THE NUMBERS, so a consumer
+            # cannot read this book's P&L without also reading whether it
+            # is allowed to be performance.
+            "book_class": cls["book_class"],
+            "counts_toward_strategy_performance": cls[
+                "counts_toward_strategy_performance"],
+            "classification_why": cls["why"],
             "exposure": await exposure(conn, account_id=p["account_id"],
                                       venue=p["venue"]),
             "pnl": await pnl(conn, account_id=p["account_id"],
                             venue=p["venue"])})
+    demo_books = [b for b in books
+                  if b["book_class"] == BOOK_CLASS_DEMONSTRATION]
+    real_books = [b for b in books if b["book_class"] == BOOK_CLASS_FUNDED]
     unres = await conn.fetch(
         "SELECT intent_id, account_id, venue, us_market_slug, state, "
         "       unresolved_reason, venue_order_id, "
@@ -2415,12 +2487,42 @@ async def command_center(conn) -> dict:
                               "missing_functions")},
         "books": books,
         "book_count": len(books),
+        # ── PER-CLASS, because this section can now hold both ──────
+        #
+        # It reported one value for the whole section, which was right
+        # while every book in it was real money. A controlled
+        # demonstration written into the funded SCHEMA is not a funded
+        # RESULT, and a single section-wide None would let its P&L be
+        # read as an unclassified funded number.
+        "funded_books": real_books,
+        "funded_book_count": len(real_books),
+        "demonstration_books": demo_books,
+        "demonstration_book_count": len(demo_books),
         "counts_toward_strategy_performance": None,
-        "counts_note": ("this is the only book that could, and it is empty "
-                       "of realised results until a funded position closes. "
-                       "It is reported apart from the shadow, acceptance, "
-                       "demonstration and UNCLASSIFIED books and the totals "
-                       "are not added"),
+        "counts_note": ("PER BOOK, in each book's own "
+                       "`counts_toward_strategy_performance`. A funded book "
+                       "reads None -- not established here, because this "
+                       "reader does not know whether a closed funded "
+                       "position exists. A demonstration book reads False. "
+                       "The section-wide value stays None because the "
+                       "section now holds both kinds and one answer for "
+                       "both would be wrong for one of them"),
+        "demonstration_note": (
+            "%d of %d books in this section are controlled demonstrations, "
+            "classified by `%s` in the account id. %s"
+            % (len(demo_books), len(books), DEMONSTRATION_ACCOUNT_MARK,
+               WHY_A_DEMONSTRATION_BOOK_IS_SEPARATE)),
+        "demonstration_realised_usd": round(sum(
+            float((b["pnl"] or {}).get("realised_pnl_usd") or 0.0)
+            for b in demo_books), 6),
+        "demonstration_is_never_added_to_funded": (
+            "the two lists are returned separately and no total spans them. "
+            "`demonstration_realised_usd` is reported so it can be SEEN, "
+            "and it is not performance"),
+        "classification_is_a_convention_not_a_permission": (
+            "nothing stops a caller writing a demonstration row under a "
+            "production account id. What this does is make an unlabelled "
+            "demonstration visible rather than silently countable"),
         "unresolved_discrepancies": discrepancies,
         "unresolved_discrepancy_count": len(discrepancies),
         "discrepancies_note": ("each row is something an operator must act "

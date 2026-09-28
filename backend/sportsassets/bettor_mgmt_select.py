@@ -989,12 +989,27 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
             kept = q - sz
             kept_val = (None if hold_per is None
                         else float(hold_per) * kept - basis_per * kept)
-            total = float(bid) * sz - f - rel + (kept_val or 0.0)
+            slice_val = float(bid) * sz - f - rel
+            total = slice_val + (kept_val or 0.0)
             out["candidates"].append({
                 "action": "DIRECT_EXIT", "qty": sz,
                 "value_usd": total,
                 "value_per_contract": (total / q) if q else None,
-                "slice_value_usd": float(bid) * sz - f - rel,
+                "slice_value_usd": slice_val,
+                # ── ON THE SLICE, WHICH IS THE PART THAT REALISES ──────
+                #
+                # THE GAP THIS CLOSES. `locks_a_loss` was set only on
+                # TAKE_COMPLEMENT, so `_choose` could never append its
+                # "THIS LOCKS A LOSS and is selected anyway" sentence to a
+                # DIRECT_EXIT or a REDUCE -- the two actions this lane can
+                # actually execute. A servicing pass could sell at 0.41 on
+                # a 0.60 basis, correctly, because holding scored worse,
+                # and no operator-readable field said a loss was realised.
+                #
+                # It is the SLICE, not `value_usd`. `value_usd` carries the
+                # retained inventory's value too, which is unrealised and
+                # therefore not locked by this action.
+                "locks_a_loss": slice_val < 0,
                 "retained_value_usd": kept_val,
                 "retained_value_status": ("IDENTIFIED" if kept_val is not None
                                           else NOT_IDENTIFIED),
@@ -1023,13 +1038,15 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
             rel = basis * (sz / q)
             kept = q - sz
             kept_val = float(hold_per) * kept - basis_per * kept
-            total = marg["proceeds_usd"] - marg["fees_usd"] - rel + kept_val
+            slice_val = marg["proceeds_usd"] - marg["fees_usd"] - rel
+            total = slice_val + kept_val
             out["candidates"].append({
                 "action": "REDUCE", "qty": sz,
                 "value_usd": total,
                 "value_per_contract": (total / q) if q else None,
-                "slice_value_usd": (marg["proceeds_usd"] - marg["fees_usd"]
-                                    - rel),
+                "slice_value_usd": slice_val,
+                # THE SLICE, for the same reason as DIRECT_EXIT above.
+                "locks_a_loss": slice_val < 0,
                 "retained_value_usd": kept_val,
                 "retained_value_status": "IDENTIFIED",
                 "execution_secured": False, "fees_usd": marg["fees_usd"],
