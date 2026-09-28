@@ -887,7 +887,21 @@ async def test_the_complete_scheduled_pair_lifecycle(monkeypatch):
         assert view["last_decision"]["decision_id"] == DECISION
         assert view["last_decision"]["action"] == "ACQUIRE_HEDGE"
         assert view["reserved"]["ok"] is True
+        # ── THE UNPAIRED REMAINDER IS ON THE PANEL, BY QUANTITY ─────
+        #
+        # SIX OF TEN HEDGED, so four contracts are naked -- and this risk used to
+        # be keyed on `count(legs) = 1`, which made a group with a partially
+        # filled hedge read as PAIRED and produced no risk at all. That is how
+        # this was caught: the trace printed `risk_count: 0` here.
+        naked = [r for r in view["risks"] if r["risk"] == PC.RISK_UNPAIRED]
+        assert naked, view["risks"]
+        assert naked[0]["group_id"] == GROUP
+        assert naked[0]["primary_filled_qty"] == pytest.approx(10.0)
+        assert naked[0]["hedge_filled_qty"] == pytest.approx(6.0)
+        assert naked[0]["unpaired_qty"] == pytest.approx(4.0)
+        assert "MATCHED units" in naked[0]["what_it_means"]
         _stage("operator_view", risk_count=view["risk_count"],
+               unpaired_qty=naked[0]["unpaired_qty"],
                risks=sorted({r["risk"] for r in view["risks"]}),
                last_decision=view["last_decision"]["action"])
 

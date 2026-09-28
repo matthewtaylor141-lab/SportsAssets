@@ -619,31 +619,58 @@ async def operator_view(conn, *, account_id: str | None = None,
                 "collateral_usd": res["collateral_usd"],
                 "counted_as_committed_capital": (
                     res["state"] in RSV.STATES_THAT_COUNT_AS_COMMITTED_CAPITAL)})
-    # ── GROUPS HOLDING ONE LEG ──────────────────────────────────────
+    # ── UNPAIRED INVENTORY, BY QUANTITY AND NOT BY LEG COUNT ────────
+    #
+    # THE DEFECT THIS REPLACES, FOUND BY READING THE LIFECYCLE'S OWN TRACE. This
+    # asked `HAVING count(intent_id) = 1`, so a group whose hedge leg filled SIX
+    # of the TEN units the structure was valued on counted as paired and produced
+    # no risk at all -- while four contracts sat naked and the claimed floor
+    # described a position that no longer existed. The lifecycle run printed
+    # `risk_count: 0` at exactly that moment, which is how this was caught.
+    #
+    # THE MEASURE IS THE MATCHED QUANTITY: filled PRIMARY minus filled HEDGE. A
+    # single-leg group is the same risk with the hedge at zero, so the two
+    # collapse into one entry rather than two spellings of one problem.
     try:
         unpaired = await conn.fetch(
             "SELECT g.group_id, g.event_key, g.structure, g.hedge_intent, "
-            "       count(i.intent_id) AS legs "
+            "       count(DISTINCT i.intent_id) AS legs, "
+            "       coalesce(sum(q.filled) FILTER "
+            "         (WHERE i.leg_role = 'PRIMARY'), 0)::float8 AS primary_qty,"
+            "       coalesce(sum(q.filled) FILTER "
+            "         (WHERE i.leg_role = 'HEDGE'), 0)::float8 AS hedge_qty "
             "  FROM bettor_funded_portfolio_groups g "
             "  JOIN bettor_funded_intents i "
-            "    ON i.portfolio_group_id = g.group_id "
+            "    ON i.portfolio_group_id = g.group_id AND i.kind = 'ENTRY' "
+            "  LEFT JOIN LATERAL ("
+            "    SELECT coalesce(sum(f.qty) FILTER "
+            "             (WHERE f.direction = 'ENTRY'), 0) AS filled "
+            "      FROM bettor_funded_fills f WHERE f.intent_id = i.intent_id"
+            "  ) q ON TRUE "
             " WHERE g.closed_at IS NULL "
             + ("  AND g.account_id = $1 " if account_id else "")
-            + " GROUP BY g.group_id, g.event_key, g.structure, g.hedge_intent "
-              " HAVING count(i.intent_id) = 1",
+            + " GROUP BY g.group_id, g.event_key, g.structure, g.hedge_intent",
             *([account_id] if account_id else []))
-    except Exception:                                          # noqa: BLE001
+    except Exception as exc:                                   # noqa: BLE001
         unpaired = []
+        out["unpaired_read_error"] = "%s: %s" % (type(exc).__name__,
+                                                 str(exc)[:200])
     for row in unpaired:
+        naked = round(float(row["primary_qty"]) - float(row["hedge_qty"]), 6)
+        if naked <= 0:
+            continue
         out["risks"].append({
             "risk": RISK_UNPAIRED, "group_id": row["group_id"],
             "fixture": row["event_key"], "legs": int(row["legs"]),
             "structure": row["structure"], "hedge_intent": row["hedge_intent"],
+            "primary_filled_qty": float(row["primary_qty"]),
+            "hedge_filled_qty": float(row["hedge_qty"]),
+            "unpaired_qty": naked,
             "what_it_means": (
-                "the group is open with a single leg. That is the ordinary "
-                "state of an unpaired holding and it is listed rather than "
-                "flagged as an error -- but it is the capital the one-open-"
-                "group bound is being spent on")})
+                "%s of %s primary contract(s) carry no second leg. The claimed "
+                "floor was computed over the MATCHED units, so it does not "
+                "describe the naked part at all"
+                % (naked, row["primary_qty"]))})
     # ── THE DECISIONS, AND WHETHER THEIR CLAIMED BOUND HELD ─────────
     try:
         rows = await conn.fetch(
