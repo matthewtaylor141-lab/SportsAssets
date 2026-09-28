@@ -178,11 +178,44 @@ def fetch(api: str, token: str, *, timeout: float = None,
     return dict(last or {"ok": False}, attempts=tries)
 
 
+#: ── THE DESK'S ACTUAL SHAPE, READ OUT OF THE ROUTE ──────────────────
+#:
+#: FOUND BY RUNNING IT, AGAIN. The first working run returned
+#: `NO_SCHEDULED_CYCLE_HEARTBEAT` with an empty census, and it was not
+#: production's answer -- it was my path. I assumed the desk embedded
+#: `bettor_funded_book.command_center`, which does carry
+#: `last_scheduled_decision`. It does not: `/api/command/bettor/desk` has its
+#: own shape, loads the heartbeat row itself, and spreads it across `controls`
+#: and `opportunities`.
+#:
+#: This is the SECOND time a readback of mine used paths that do not exist.
+#: The first printed empty columns and I could not tell. This one named the
+#: key it could not find and the mistake took one run to see, which is the
+#: whole reason `PATH_ABSENT` exists.
+#:
+#: The paths are listed here, once, so a route change breaks them in one
+#: visible place instead of silently emptying a census.
+P_CYCLE_AT = ("controls", "last_cycle_at")
+P_CYCLE_STATE = ("controls", "cycle_state")
+P_CYCLE_LABEL = ("controls", "cycle_label")
+P_WRITER = ("controls", "build_identity")
+P_CONSIDERED = ("opportunities", "markets_considered")
+P_EVALUATED = ("opportunities", "evaluated")
+P_REFUSALS = ("opportunities", "refusals")
+P_LEDGER = ("opportunities", "first_refusal_per_mapped_candidate")
+P_FUNNEL = ("opportunities", "funnel")
+P_VENUE_ERRORS = ("opportunities", "venue_errors")
+P_LATENCY = ("opportunities", "odds_freshness")
+P_VENUE_SDK = ("controls", "venue_sdk")
+P_RATE_CONTROLS = ("controls", "venue_rate_controls")
+P_PACER_LANES = ("controls", "pacer_lanes")
+
+
 def census(desk: dict) -> dict:
     """The evaluation lane's own numbers, with every absent path named."""
     out = {"paths_absent": []}
 
-    def take(name, *path):
+    def take(name, path):
         val, missing = _dig(desk, *path)
         if val is ABSENT:
             out["paths_absent"].append(missing)
@@ -191,55 +224,59 @@ def census(desk: dict) -> dict:
         else:
             out[name] = val
             out[name + "_is_absent"] = False
-        return val
+        return out[name]
 
-    dec = take("decision", "last_scheduled_decision")
-    d = dec if isinstance(dec, dict) else {}
-    out["cycle_at"] = _dig(d, "at")[0]
-    out["cycle_state"] = _dig(d, "cycle_state")[0]
-    out["cycle_label"] = _dig(d, "cycle_label")[0]
-    out["writer"] = _dig(d, "writer")[0]
-    out["servicing_available"] = _dig(d, "available")[0]
-    out["latency"] = _dig(d, "latency")[0]
+    # THE CYCLE ROW ITSELF. Its presence is established by whether the desk
+    # carries a cycle INSTANT -- not by whether any one field is non-null,
+    # because a cycle that ran and refused everything legitimately has nulls.
+    take("cycle_at", P_CYCLE_AT)
+    take("cycle_state", P_CYCLE_STATE)
+    take("cycle_label", P_CYCLE_LABEL)
+    take("writer", P_WRITER)
+    take("markets_considered", P_CONSIDERED)
+    take("evaluated", P_EVALUATED)
+    take("refusals", P_REFUSALS)
+    take("ledger", P_LEDGER)
+    take("funnel", P_FUNNEL)
+    take("venue_errors", P_VENUE_ERRORS)
+    take("latency", P_LATENCY)
 
     # ── THE REPAIRS OF THIS BATCH, READ BACK FROM THE RUNNING PROCESS ──
     # Which venue SDK the deployed image resolved, and whether both rate
-    # controls are armed. These exist precisely so this question does not
-    # have to be answered from a build log.
-    for nm, key in (("venue_sdk", "venue_sdk"),
-                    ("venue_rate_controls", "venue_rate_controls"),
-                    ("pacer_lanes", "pacer_lanes")):
-        v, missing = _dig(d, key)
-        if v is ABSENT:
-            # ON THE DECISION BLOCK OR NOWHERE. A build older than the one
-            # that persists these writes the heartbeat without them, so
-            # absent means THE SERVING BUILD -- not that the controls are off.
-            out[nm] = None
-            out[nm + "_is_absent"] = True
-            out["paths_absent"].append("last_scheduled_decision." + key)
-        else:
-            out[nm] = v
-            out[nm + "_is_absent"] = False
+    # controls are armed. Absent means THE SERVING BUILD does not report
+    # them -- not that the SDK is unpinned or the cooldown off.
+    take("venue_sdk", P_VENUE_SDK)
+    take("venue_rate_controls", P_RATE_CONTROLS)
+    take("pacer_lanes", P_PACER_LANES)
+
+    # A CYCLE EXISTS IF THE DESK GAVE US ITS INSTANT. `cycle_at` absent means
+    # the desk has no cycle section at all; `cycle_at` present-but-null means
+    # no cycle has completed, which is a different fact and says so.
+    out["cycle_row_present"] = bool(not out["cycle_at_is_absent"]
+                                    and out["cycle_at"] is not None)
+    out["desk_has_a_cycle_section"] = not out["cycle_at_is_absent"]
     return out
 
 
 def verdict(desk: dict) -> dict:
     """What the cycle establishes, and whether that should fail a job."""
     c = census(desk)
-    if c["decision_is_absent"] or not isinstance(c["decision"], dict):
+    if not c["desk_has_a_cycle_section"]:
         return dict(c, verdict=V_NO_HEARTBEAT, ok=False,
-                    why=("the desk carries no `last_scheduled_decision`, so "
-                         "this run establishes nothing about the evaluation "
-                         "lane. That is an unanswered question, not an idle "
-                         "lane -- reported as unanswered"))
+                    why=("the desk carries no cycle section at %s, so this "
+                         "run establishes nothing about the evaluation lane. "
+                         "That is an unanswered question, not an idle lane -- "
+                         "and if this route changed shape, the absent path is "
+                         "named above rather than shown as an empty census"
+                         % ".".join(P_CYCLE_AT)))
+    if not c["cycle_row_present"]:
+        return dict(c, verdict=V_NO_HEARTBEAT, ok=False,
+                    why=("the desk has a cycle section but no cycle instant, "
+                         "so no cycle has completed on this build. Reported "
+                         "as unanswered rather than as an idle lane"))
 
-    d = c["decision"]
-    refusals = _dig(d, "refusals")[0]
-    refusals = refusals if isinstance(refusals, dict) else {}
-    ledger = _dig(d, "mapped_candidate_ledger")[0]
-    ledger = ledger if isinstance(ledger, list) else []
-    considered = _dig(d, "markets_considered")[0]
-    evaluated = _dig(d, "evaluated")[0]
+    refusals = c["refusals"] if isinstance(c["refusals"], dict) else {}
+    ledger = c["ledger"] if isinstance(c["ledger"], list) else []
 
     def num(x):
         try:
@@ -247,7 +284,7 @@ def verdict(desk: dict) -> dict:
         except (TypeError, ValueError):
             return None
 
-    considered, evaluated = num(considered), num(evaluated)
+    considered, evaluated = num(c["markets_considered"]), num(c["evaluated"])
     refused_total = sum(v for v in (num(x) for x in refusals.values())
                         if v is not None)
     c.update(refusals=refusals, refusal_total=refused_total,
@@ -327,8 +364,8 @@ def _main(argv=None) -> int:
     v = verdict(got["body"] or {})
     show = {k: v.get(k) for k in (
         "verdict", "ok", "why", "cycle_at", "cycle_state", "cycle_label",
-        "markets_considered", "evaluated", "refusal_total",
-        "mapped_candidates", "servicing_available", "paths_absent")}
+        "writer", "markets_considered", "evaluated", "refusal_total",
+        "mapped_candidates", "paths_absent")}
     print(json.dumps(show, indent=2, default=str))
     print("\n-- the refusal census, verbatim --")
     print(json.dumps(v.get("refusals") or {}, indent=2, default=str))
@@ -358,6 +395,8 @@ if __name__ == "__main__":                                     # pragma: no cove
 
 
 __all__ = ["fetch", "reachable", "census", "verdict", "DESK_PATH",
+           "P_CYCLE_AT", "P_CONSIDERED", "P_EVALUATED", "P_REFUSALS",
+           "P_LEDGER", "P_VENUE_SDK", "P_RATE_CONTROLS", "P_PACER_LANES",
            "HEALTH_PATH", "FAILING", "DESK_TIMEOUT_S", "HEALTH_TIMEOUT_S",
            "DESK_ATTEMPTS", "V_NO_HEARTBEAT", "V_UNREADABLE",
            "V_SERVICE_UNREACHABLE", "V_NOTHING_TO_EVALUATE",

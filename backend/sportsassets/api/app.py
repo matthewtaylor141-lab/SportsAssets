@@ -4036,6 +4036,25 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
     controls["last_cycle_at"] = (cycle or {}).get("at")
     controls["cycle_state"] = (cycle or {}).get("state")
     controls["cycle_label"] = (cycle or {}).get("cycle_label")
+    # ── WHICH VENUE CLIENT IS RUNNING, AND THE TWO RATE CONTROLS ─────
+    #
+    # The image resolved `polymarket-us>=0.1.2` at build time, so the deployed
+    # retry behaviour was whatever PyPI had latest that minute -- and nothing
+    # an operator can read said which. The version is now pinned and the
+    # running process reports it; these three lines are what make that
+    # reportable rather than merely reported into a row nobody projects.
+    #
+    # ABSENT IS A STATEMENT ABOUT THE BUILD. A serving build older than the
+    # one that writes these keys produces nulls here, and that means "this
+    # build does not report it" -- NOT "the SDK is unpinned" and NOT "the
+    # cooldown is off". Inferring a fact about the system from a fact about
+    # the projection is the error that produced "the read never returned".
+    controls["venue_sdk"] = (cycle or {}).get("venue_sdk")
+    controls["venue_rate_controls"] = (cycle or {}).get("venue_rate_controls")
+    controls["pacer_lanes"] = (cycle or {}).get("pacer_lanes")
+    controls["venue_sdk_absent_means"] = (
+        "the SERVING BUILD does not persist it, not that the dependency is "
+        "unpinned or that rate control is off")
     controls["audit"] = {"heartbeat_key": "ext_pinnacle_last_cycle",
                          "control_key_module": "bettor_external_shadow"}
     out["controls"] = controls
@@ -4045,11 +4064,36 @@ async def bettor_desk(response: Response, hours: int = Query(24, ge=1, le=168),
                   "universe": (cycle or {}).get("venue_universe_by_label"),
                   "markets_considered": (cycle or {}).get(
                       "markets_considered"),
+                  # ── EVALUATED, WHICH THIS SECTION DID NOT CARRY ──────
+                  #
+                  # THE DEFECT. Every other number in this section describes
+                  # candidates that did NOT proceed, and the one that says how
+                  # many DID was absent -- so "markets_considered 4, refusals
+                  # {...}" could not be reconciled against an outcome, and a
+                  # reader could not tell "all refused" from "some evaluated
+                  # and the rest refused". The unsuppressible readback needs
+                  # exactly this figure to distinguish a state of the world
+                  # from a defect in the instrument, and it was not projected.
+                  #
+                  # This is the third time on this path that a value was
+                  # computed by the cycle and dropped by its reader (the
+                  # servicing digest, then `odds_freshness`, now this).
+                  "evaluated": (cycle or {}).get("evaluated"),
+                  "written": (cycle or {}).get("written"),
                   "funnel": (cycle or {}).get("funnel_by_provider_sport"),
                   "refusals": (cycle or {}).get("refusals"),
                   "first_refusal_per_mapped_candidate": (cycle or {}).get(
                       "mapped_candidate_ledger"),
-                  "venue_errors": (cycle or {}).get("venue_errors")}
+                  "venue_errors": (cycle or {}).get("venue_errors"),
+                  # The latency measurement the cycle computes. Carried here
+                  # for the same reason: a figure nobody projects is a figure
+                  # nobody can act on.
+                  "odds_freshness": (cycle or {}).get("odds_freshness"),
+                  "reconciles_as": (
+                      "markets_considered = evaluated + the refusals below. "
+                      "A gap between them means the cycle is not accounting "
+                      "for every candidate, which is a defect in the "
+                      "measurement rather than a fact about the venue")}
     try:
         ev = await RN.entry_evidence(pool, hours=int(hours),
                                      limit=int(limit))
