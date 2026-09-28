@@ -1,4 +1,26 @@
 {
+ "normalisation": {
+  "what": "fields whose value is a RUN rather than a RESULT are replaced by a named placeholder, so this tracked file does not change on every execution and its diff can be inspected",
+  "time_keys": [
+   "at",
+   "recorded_at",
+   "created_at",
+   "updated_at",
+   "resolved_at",
+   "closed_at",
+   "sent_at",
+   "settlement_read_at",
+   "outcome_at",
+   "predicted_at",
+   "opened_at",
+   "venue_executed_at"
+  ],
+  "derived_keys": [
+   "capital_hours_usd_h"
+  ],
+  "generated_ids": "fpi-<hex> becomes 'fpi-<GENERATED-PER-RUN>'",
+  "what_is_NOT_normalised": "every economic quantity and every refusal: prices, quantities, cash, fees, residuals, drawdown, states and reasons are exact, so a behaviour change still shows up"
+ },
  "label": "CONTROLLED DEMONSTRATION \u2014 SOFTWARE PROOF, NOT PERFORMANCE",
  "counts_toward_strategy_performance": false,
  "what_this_establishes": "that the lane exits at a LOSS when holding is worth less, that the chosen action is marked as locking a loss rather than presented as a gain, that a depth-limited exit leaves the balance held rather than stranding or oversells it, and that the residual appears in the operator view as something to act on",
@@ -42,7 +64,7 @@
     },
     "exit_intents": [
      {
-      "intent_id": "fpi-6376daab752845f3",
+      "intent_id": "fpi-<GENERATED-PER-RUN>",
       "state": "FILLED",
       "qty": 9.0,
       "residual": 0.0,
@@ -60,7 +82,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-6376daab752845f3",
+      "intent_id": "fpi-<GENERATED-PER-RUN>",
       "direction": "EXIT",
       "qty": 9.0,
       "price": 0.41,
@@ -133,7 +155,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-6376daab752845f3",
+      "intent_id": "fpi-<GENERATED-PER-RUN>",
       "exp": 0.15,
       "obs": null,
       "fee_state": "PROVISIONAL",
@@ -150,7 +172,7 @@
     "realised_curve": [
      {
       "intent_id": "dem-loss",
-      "at": 1790622245.865594,
+      "at": "<NORMALISED: a wall clock, not a result>",
       "component": "EXIT_FILL",
       "net_usd": -2.01,
       "cumulative_realised_usd": -2.01,
@@ -251,7 +273,7 @@
     "filled_fees_usd": 0.4,
     "contracts_held": 6.0,
     "contracts_net_from_the_fill_ledger": 6.0,
-    "capital_hours_usd_h": 0.000188,
+    "capital_hours_usd_h": "<NORMALISED: derived from test elapsed time>",
     "per_event_collateral_usd": {
      "ev-bos-lal-2026-09-27": 3.6
     },
@@ -342,7 +364,7 @@
      "filled_fees_usd": 0.4,
      "contracts_held": 6.0,
      "contracts_net_from_the_fill_ledger": 6.0,
-     "capital_hours_usd_h": 0.000203,
+     "capital_hours_usd_h": "<NORMALISED: derived from test elapsed time>",
      "per_event_collateral_usd": {
       "ev-bos-lal-2026-09-27": 3.6
      },
@@ -382,7 +404,7 @@
       },
       {
        "fill_id": "fvf:vo-xl-1:vf-1",
-       "intent_id": "fpi-6376daab752845f3",
+       "intent_id": "fpi-<GENERATED-PER-RUN>",
        "exp": 0.15,
        "obs": null,
        "fee_state": "PROVISIONAL",
@@ -399,7 +421,7 @@
      "realised_curve": [
       {
        "intent_id": "dem-loss",
-       "at": 1790622245.865594,
+       "at": "<NORMALISED: a wall clock, not a result>",
        "component": "EXIT_FILL",
        "net_usd": -2.01,
        "cumulative_realised_usd": -2.01,
@@ -512,7 +534,7 @@
     "intent_id": "dem-loss",
     "residual_qty": 6.0,
     "us_market_slug": "aec-nba-bos-lal-2026-09-27",
-    "settlement": "{\"at\": 1790622245.8459213, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
+    "settlement": "{\"at\": 0, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
     "partial_exit_result": {
      "sold_qty": 9.0,
      "exit_proceeds_usd": 3.69,

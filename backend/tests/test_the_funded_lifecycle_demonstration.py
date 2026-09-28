@@ -56,6 +56,7 @@ the shipped constant is still False.
 
 import json
 import os
+import re
 import time
 
 import pytest
@@ -88,11 +89,91 @@ TRACE_DIR = os.path.join(
         os.path.abspath(__file__)))), "research", "evidence", "lifecycle")
 
 
+#: FIELDS WHOSE VALUE IS A RUN, NOT A RESULT. See `_stable`.
+_VOLATILE_TIME_KEYS = ("at", "recorded_at", "created_at", "updated_at",
+                       "resolved_at", "closed_at", "sent_at",
+                       "settlement_read_at", "outcome_at", "predicted_at",
+                       "opened_at", "venue_executed_at")
+#: Derived from elapsed WALL TIME during the test, so in this artifact it
+#: measures how long pytest took and nothing about the position.
+_VOLATILE_DERIVED_KEYS = ("capital_hours_usd_h",)
+_GENERATED_ID = re.compile(r"\bfpi-[0-9a-f]{8,}\b")
+#: A WALL CLOCK NESTED INSIDE AN EMBEDDED JSON STRING. The `settlement` column is
+#: jsonb rendered as text, so its `"at"` is not a dict key this walk can see -- it
+#: is characters inside a value. Normalising only the keys left exactly one line
+#: churning per run, which is how this pattern got added: the first version of
+#: this fix was measured, not assumed, and it was incomplete.
+_EMBEDDED_EPOCH = re.compile(r'(\\?"(?:at|_at|[a-z_]*_at)\\?"\s*:\s*)'
+                             r'\d{9,}\.\d+')
+
+_NORMALISED_TIME = "<NORMALISED: a wall clock, not a result>"
+_NORMALISED_DERIVED = "<NORMALISED: derived from test elapsed time>"
+_NORMALISED_ID = "fpi-<GENERATED-PER-RUN>"
+
+
+def _stable(value):
+    """Replace the fields that change on every run, and nothing else.
+
+    ── WHY THIS EXISTS ──────────────────────────────────────────────
+    These traces are tracked in the repository so they can be read back, and
+    they were NON-DETERMINISTIC: a uuid-generated exit `intent_id`, wall-clock
+    timestamps, and `capital_hours_usd_h` computed from elapsed time during the
+    test. So every run rewrote them, and the rewrite rode along in whatever
+    commit happened next -- which is exactly what happened here: a `git add -A`
+    swept a regenerated trace into a commit about something else, unreviewed and
+    unmentioned. Inspecting that diff then showed 175 changed lines, and
+    separating the real content from the noise took a measurement rather than a
+    glance.
+
+    A DIFF THAT ALWAYS CHANGES CANNOT BE INSPECTED, and inspecting the release
+    diff is a standing requirement here. So the volatile fields are normalised
+    to named placeholders -- the KEY is kept, so a reader still sees that the
+    trace carried a timestamp -- and everything that is actually evidence is left
+    exact: prices, quantities, cash, fees, residuals, drawdown, refusals and
+    reasons all still differ byte for byte if the behaviour changes.
+
+    It is normalisation, not redaction: nothing true is removed, and the file
+    says what was replaced and why.
+    """
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            if k in _VOLATILE_TIME_KEYS and not isinstance(v, (dict, list)):
+                out[k] = _NORMALISED_TIME if v is not None else None
+            elif k in _VOLATILE_DERIVED_KEYS and not isinstance(v, (dict, list)):
+                out[k] = _NORMALISED_DERIVED if v is not None else None
+            else:
+                out[k] = _stable(v)
+        return out
+    if isinstance(value, list):
+        return [_stable(v) for v in value]
+    if isinstance(value, str):
+        return _EMBEDDED_EPOCH.sub(r"\g<1>0",
+                                   _GENERATED_ID.sub(_NORMALISED_ID, value))
+    return value
+
+
 def _write_trace(name: str, payload: dict) -> str:
     os.makedirs(TRACE_DIR, exist_ok=True)
     path = os.path.join(TRACE_DIR, name)
+    body = {
+        "normalisation": {
+            "what": ("fields whose value is a RUN rather than a RESULT are "
+                     "replaced by a named placeholder, so this tracked file "
+                     "does not change on every execution and its diff can be "
+                     "inspected"),
+            "time_keys": list(_VOLATILE_TIME_KEYS),
+            "derived_keys": list(_VOLATILE_DERIVED_KEYS),
+            "generated_ids": "fpi-<hex> becomes %r" % _NORMALISED_ID,
+            "what_is_NOT_normalised": (
+                "every economic quantity and every refusal: prices, "
+                "quantities, cash, fees, residuals, drawdown, states and "
+                "reasons are exact, so a behaviour change still shows up"),
+        },
+    }
+    body.update(_stable(payload))
     with open(path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=1, default=str, sort_keys=False)
+        json.dump(body, fh, indent=1, default=str, sort_keys=False)
     return path
 
 
