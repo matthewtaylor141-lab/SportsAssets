@@ -2459,7 +2459,7 @@ def drawdown_from(closed: list[dict]) -> dict:
                       "peak_usd": round(peak, 6),
                       "drawdown_usd": round(dd, 6)})
     n_closed = sum(1 for c in seq
-                   if c.get("component") != "REALISED_ON_SOLD_WHILE_OPEN")
+                   if c.get("component") == "POSITION_TERMINAL")
     return {"realised_pnl_usd": round(cum, 6),
             "peak_realised_usd": round(peak, 6),
             "max_drawdown_usd": round(worst, 6),
@@ -2531,7 +2531,120 @@ async def realised(conn, *, account_id: str, venue: str) -> dict:
     the caller -- `loss_controls` below. It is NEVER read as zero, and
     this realised figure is NEVER presented as a maximum possible loss.
     """
-    rows = await conn.fetch(
+    # ── A · EVERY EXIT FILL IS ITS OWN INCREMENT, AT ITS OWN INSTANT ──
+    #
+    # THE DEFECT THIS REPLACES WAS MINE, AND IT WAS IN a41ef9f.
+    # That version computed ONE figure per open position from its CURRENT
+    # aggregate totals and booked it at the LAST exit fill. Summing current
+    # totals does not produce a historical curve, and it failed in two ways
+    # that matter:
+    #
+    #   * MULTIPLE EXITS COLLAPSED. Three exits over an hour became one
+    #     point at the third, so the curve could not show a trough that
+    #     existed between them.
+    #   * AND A LATER CLOSURE ERASED THE TROUGH. On closure the position
+    #     left the open set and its whole net was booked at `closed_at`
+    #     instead -- so a drawdown that HAD happened at T1 silently
+    #     disappeared from the history. A curve whose past changes is not
+    #     an audit record, and `max_drawdown_usd` is a maximum OVER that
+    #     past.
+    #
+    # SO THE UNIT IS THE INCREMENT, KEYED ON THE FILL. `fill_id` is the
+    # VENUE'S own fill identity (the table is keyed on it so redelivery
+    # cannot double-count), which gives idempotence for free: replay,
+    # restart and re-ingestion produce the same increment set, and a later
+    # fee correction changes an increment's VALUE without changing its
+    # identity or the number of them.
+    #
+    # BASIS IS POINT-IN-TIME. The per-contract basis for an exit fill is
+    # the average entry cost over entry fills AT OR BEFORE that fill's
+    # instant -- not the final average. If entries continue after an exit,
+    # using the final average would rewrite an increment already booked,
+    # which is the same "changing past" defect in a subtler place. The
+    # LATERAL subquery is what makes it as-of.
+    inc_rows = await conn.fetch(
+        "SELECT x.fill_id, p.intent_id AS parent, "
+        "       EXTRACT(EPOCH FROM x.at)::float8 AS at, "
+        "       x.qty::float8 AS qty, x.cash_usd::float8 AS proceeds, "
+        "       x.fee_usd::float8 AS exit_fee, "
+        "       (x.fee_state=$3) AS provisional, "
+        "       e.entry_qty, e.entry_cash, e.entry_fees "
+        "  FROM bettor_funded_intents p "
+        "  JOIN bettor_funded_intents k "
+        "    ON k.intent_id=p.intent_id OR k.parent_intent_id=p.intent_id "
+        "  JOIN bettor_funded_fills x ON x.intent_id=k.intent_id "
+        " CROSS JOIN LATERAL ( "
+        "   SELECT coalesce(sum(f2.qty),0)::float8      AS entry_qty, "
+        "          coalesce(sum(f2.cash_usd),0)::float8 AS entry_cash, "
+        "          coalesce(sum(f2.fee_usd),0)::float8  AS entry_fees "
+        "     FROM bettor_funded_intents k2 "
+        "     JOIN bettor_funded_fills f2 ON f2.intent_id=k2.intent_id "
+        "    WHERE (k2.intent_id=p.intent_id "
+        "           OR k2.parent_intent_id=p.intent_id) "
+        "      AND f2.direction='ENTRY' AND f2.at <= x.at) e "
+        " WHERE p.kind='ENTRY' AND x.direction='EXIT' "
+        "   AND p.account_id=$1 AND upper(p.venue)=upper($2) "
+        " ORDER BY x.at, x.fill_id",
+        str(account_id), str(venue), FEE_PROVISIONAL)
+
+    increments = []
+    booked_by_parent: dict = {}
+    unbookable = []
+    for r in inc_rows:
+        eq = float(r["entry_qty"] or 0.0)
+        if eq <= 0:
+            # NO BASIS AS OF THIS INSTANT means an exit fill that precedes
+            # every entry fill of its own position. That is a
+            # reconciliation problem, not a zero, and it is carried out
+            # rather than dropped -- an omission here would understate the
+            # loss silently.
+            unbookable.append({
+                "fill_id": r["fill_id"], "intent_id": r["parent"],
+                "component": "EXIT_FILL",
+                "why": ("no entry fill at or before this exit fill, so "
+                        "there is no point-in-time per-contract basis")})
+            continue
+        per = float(r["entry_cash"]) / eq
+        q = float(r["qty"])
+        # THE SAME THREE TERMS `partial_realisation` USES, per fill: the
+        # proceeds of THIS fill, the basis of the quantity IT sold, and the
+        # fees attributable to it -- its own exit fee in full plus this
+        # quantity's share of the entry fee paid on the whole clip.
+        entry_fee_share = float(r["entry_fees"]) * (q / eq)
+        net = float(r["proceeds"]) - (per * q) - float(r["exit_fee"]) \
+            - entry_fee_share
+        increments.append({
+            "key": r["fill_id"], "intent_id": r["parent"],
+            "at": float(r["at"]), "net": round(net, 6),
+            "component": "EXIT_FILL",
+            "qty": round(q, 6),
+            "proceeds_usd": round(float(r["proceeds"]), 6),
+            "basis_per_contract": round(per, 8),
+            "allocated_basis_usd": round(per * q, 6),
+            "exit_fee_usd": round(float(r["exit_fee"]), 6),
+            "entry_fee_share_usd": round(entry_fee_share, 6),
+            "provisional_events": 1 if r["provisional"] else 0,
+        })
+        booked_by_parent[r["parent"]] = \
+            booked_by_parent.get(r["parent"], 0.0) + net
+
+    # ── B · CLOSURE ADDS ONLY WHAT IS NOT ALREADY BOOKED ──────────────
+    #
+    # THE ANTI-DOUBLE-COUNT, AND IT IS ARITHMETIC RATHER THAN A FLAG.
+    # `bettor_funded_economics` holds the authoritative total for a closed
+    # position. Booking that total at closure would count every exit fill
+    # a second time, because those fills are already increments above. So
+    # the terminal increment is the REMAINDER:
+    #
+    #     terminal = economics_net - sum(exit-fill increments for it)
+    #
+    # which is what closure actually added: the settlement or void outcome
+    # of the inventory still held, plus its share of the entry fee. On the
+    # demonstration's figures that is -5.71 - (-2.01) = -3.70, and -3.70 is
+    # exactly the remaining basis 3.60 plus the residual's 0.10 entry-fee
+    # share -- the net-cash identity, reached independently. The two
+    # agreeing is the check that this is a decomposition and not a guess.
+    crows = await conn.fetch(
         "SELECT i.intent_id, "
         "       EXTRACT(EPOCH FROM i.closed_at)::float8 AS closed_epoch, "
         "       i.closed_reason, "
@@ -2544,110 +2657,80 @@ async def realised(conn, *, account_id: str, venue: str) -> dict:
         "   AND i.account_id=$1 AND upper(i.venue)=upper($2) "
         " GROUP BY i.intent_id, i.closed_at, i.closed_reason",
         str(account_id), str(venue))
-    closed = [{"intent_id": r["intent_id"], "at": float(r["closed_epoch"]),
-               "net": float(r["net"]), "closed_reason": r["closed_reason"],
-               "events": int(r["events"]),
-               "provisional_events": int(r["provisional"]),
-               "component": "CLOSED_POSITION_NET"} for r in rows]
-
-    # ── B · THE OPEN POSITIONS THAT HAVE ALREADY SOLD SOMETHING ─────
-    #
-    # ONE QUERY, aggregated per parent intent, rather than N calls to
-    # `realised_on_sold`. The arithmetic is still that function's --
-    # `partial_realisation` is applied below -- so the two cannot diverge.
-    #
-    # THE JOIN IS `f.intent_id=i.intent_id OR i.parent_intent_id`. An exit
-    # is its own intent with the entry as parent, so fills must be gathered
-    # across the family exactly as `realised_on_sold` gathers them. Reading
-    # only the entry's own fills would find no exits at all and this whole
-    # component would silently be zero -- the same failure in a new place.
-    prows = await conn.fetch(
-        "SELECT p.intent_id, "
-        "       p.residual_qty::float8 AS residual, "
-        "       coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.cash_usd "
-        "                       ELSE 0 END),0)::float8 AS entry_cash, "
-        "       coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.qty "
-        "                       ELSE 0 END),0)::float8 AS entry_qty, "
-        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.cash_usd "
-        "                       ELSE 0 END),0)::float8 AS exit_cash, "
-        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.qty "
-        "                       ELSE 0 END),0)::float8 AS exit_qty, "
-        "       coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.fee_usd "
-        "                       ELSE 0 END),0)::float8 AS entry_fees, "
-        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.fee_usd "
-        "                       ELSE 0 END),0)::float8 AS exit_fees, "
-        "       EXTRACT(EPOCH FROM max(f.at) FILTER "
-        "               (WHERE f.direction='EXIT'))::float8 AS last_exit, "
-        "       count(*) FILTER (WHERE f.fee_state=$3) AS provisional "
-        "  FROM bettor_funded_intents p "
-        "  JOIN bettor_funded_intents k "
-        "    ON k.intent_id=p.intent_id OR k.parent_intent_id=p.intent_id "
-        "  JOIN bettor_funded_fills f ON f.intent_id=k.intent_id "
-        " WHERE p.kind='ENTRY' AND p.closed_at IS NULL "
-        "   AND p.account_id=$1 AND upper(p.venue)=upper($2) "
-        " GROUP BY p.intent_id, p.residual_qty "
-        "HAVING coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.qty "
-        "                        ELSE 0 END),0) > 0",
-        str(account_id), str(venue), FEE_PROVISIONAL)
-    partial = []
-    for r in prows:
-        m = partial_realisation(
-            entry_qty=r["entry_qty"], entry_cash=r["entry_cash"],
-            entry_fees=r["entry_fees"], exit_qty=r["exit_qty"],
-            exit_cash=r["exit_cash"], exit_fees=r["exit_fees"],
-            residual=r["residual"])
-        net = m["realised_on_sold_usd"]
-        # NO PER-CONTRACT BASIS MEANS NO RESULT TO BOOK, and a position with
-        # exit fills but no entry fills is a reconciliation problem, not a
-        # zero. It is carried with `net: None` so it appears in the ledger
-        # and is excluded from the curve rather than counted as flat.
-        partial.append({
+    closed = []
+    for r in crows:
+        already = booked_by_parent.get(r["intent_id"], 0.0)
+        terminal = float(r["net"]) - already
+        closed.append({
+            "key": "terminal:%s" % r["intent_id"],
             "intent_id": r["intent_id"],
-            "at": (None if r["last_exit"] is None
-                   else float(r["last_exit"])),
-            "net": net,
-            "closed_reason": None,
-            "events": None,
-            "provisional_events": int(r["provisional"] or 0),
-            "component": "REALISED_ON_SOLD_WHILE_OPEN",
-            "residual_qty": m["residual_qty"],
-            "remaining_basis_usd": m["remaining_basis_usd"],
-            "sold_qty": m["sold_qty"],
-            "components": m,
+            "at": float(r["closed_epoch"]), "net": round(terminal, 6),
+            "component": "POSITION_TERMINAL",
+            "closed_reason": r["closed_reason"],
+            "economics_net_usd": round(float(r["net"]), 6),
+            "already_booked_as_exit_fills_usd": round(already, 6),
+            "events": int(r["events"]),
+            "provisional_events": int(r["provisional"]),
         })
 
-    # THE CURVE IS OVER BOTH, and rows with no bookable result or no
-    # instant to book it at are excluded from the ORDERING rather than
-    # given a default -- `drawdown_from` sorts on `at` and a None there
-    # would place a real result at the start of time.
-    bookable = [c for c in (closed + partial)
+    # ── THE CURVE, OVER EVERY INCREMENT, CHRONOLOGICALLY ──────────────
+    #
+    # DETERMINISTIC ORDERING: `at` then `key`. Two fills stamped in the
+    # same second must not reorder between reads, or the same data would
+    # yield two different drawdowns.
+    bookable = [c for c in (increments + closed)
                 if c.get("net") is not None and c.get("at") is not None]
-    unbookable = [c for c in (closed + partial)
-                  if c.get("net") is None or c.get("at") is None]
+    bookable.sort(key=lambda c: (c["at"], str(c["key"])))
+    unbookable += [c for c in closed
+                   if c.get("net") is None or c.get("at") is None]
     dd = drawdown_from(bookable)
-    prov = sum(int(c.get("provisional_events") or 0)
-               for c in (closed + partial))
-    partial_sum = sum(float(c["net"]) for c in partial
-                      if c.get("net") is not None)
+
+    open_partial = sorted({i["intent_id"] for i in increments}
+                          - {c["intent_id"] for c in closed})
+    partial_sum = sum(i["net"] for i in increments
+                      if i["intent_id"] in set(open_partial))
+    prov = (sum(int(i["provisional_events"]) for i in increments)
+            + sum(int(c["provisional_events"]) for c in closed))
     return dict(
-        dd, closed=closed,
-        # ── THE SECOND COMPONENT, NAMED AND SEPARABLE ───────────────
-        partially_realised_open=partial,
-        partially_realised_open_positions=len(partial),
+        dd,
+        # ── THE LEDGER ITSELF, so the curve can be recomputed ─────────
+        increments=bookable,
+        exit_fill_increments=len(increments),
+        terminal_increments=len(closed),
+        closed=closed,
+        # ── THE OPEN, PARTIALLY EXITED POSITIONS ─────────────────────
+        partially_realised_open=open_partial,
+        partially_realised_open_positions=len(open_partial),
         partially_realised_usd=round(partial_sum, 6),
-        realised_components=("CLOSED_POSITION_NET + "
-                             "REALISED_ON_SOLD_WHILE_OPEN"),
+        realised_components="EXIT_FILL + POSITION_TERMINAL",
         includes_open_position_partial_results=True,
-        # WHAT COULD NOT BE BOOKED AND WHY, rather than a quiet omission.
-        not_bookable=[{"intent_id": c.get("intent_id"),
-                       "component": c.get("component"),
-                       "why": ("no per-contract basis (no entry fills)"
-                               if c.get("net") is None
-                               else "no exit fill instant to book it at")}
-                      for c in unbookable],
+        # ── THE PROPERTIES THIS DESIGN GUARANTEES, NAMED ──────────────
+        increment_key_is=("the venue's own fill_id for an exit, and "
+                          "terminal:<intent_id> for a closure"),
+        is_idempotent_under_replay=(
+            "increments are keyed on the venue's fill identity, so replay, "
+            "restart and re-ingestion produce the same set. A later fee "
+            "correction changes an increment's VALUE, never its identity "
+            "or the count"),
+        closure_does_not_double_count=(
+            "the terminal increment is economics_net MINUS the exit-fill "
+            "increments already booked for that position, so a closure "
+            "adds only the settlement or void outcome of inventory still "
+            "held"),
+        the_past_does_not_change=(
+            "an increment is booked at the instant it occurred and is "
+            "never rewritten. A drawdown that happened stays in the "
+            "curve after the position closes -- the previous version "
+            "replaced it with the position's whole net at closed_at and "
+            "silently erased the trough"),
+        basis_is_point_in_time=(
+            "an exit fill's per-contract basis is the average entry cost "
+            "over entry fills AT OR BEFORE that fill. Using the final "
+            "average would rewrite an increment already booked"),
+        not_bookable=unbookable,
         provisional_events_in_realised=prov,
         realised_is_provisional=bool(prov),
-        # ── AND WHAT THIS NUMBER IS NOT ─────────────────────────────
+        # ── AND WHAT THIS NUMBER IS NOT ──────────────────────────────
         unrealised_on_open_inventory=NOT_IDENTIFIED,
         why_unrealised_is_not_identified=(
             "marking open inventory needs a funded mark and this lane has "
@@ -2656,7 +2739,7 @@ async def realised(conn, *, account_id: str, venue: str) -> dict:
             "`loss_controls`, which applies the declared policy for an "
             "unavailable mark"),
         provisional_note=(
-            "%d economic event(s) inside the realised total are "
+            "%d economic event(s) or fill(s) inside the realised total are "
             "PROVISIONAL -- the venue has not stated a fee it was "
             "charged -- so this number is explicitly incomplete "
             "rather than quietly exact" % prov) if prov else None)
@@ -2840,10 +2923,19 @@ async def loss_controls(conn, *, account_id: str, venue: str,
     # anything still outstanding. Under UNMARKED_POLICY the holdings are
     # counted as a total loss; this lane has no funded mark source, so that
     # is every holding, and `unmarked_holdings` says how many.
+    # READ PER POSITION, from `realised_on_sold`, which is the one reader
+    # that reports a residual's remaining basis on the declared convention.
+    # `realised()` no longer carries it: its unit is now the INCREMENT
+    # (one per exit fill), and an increment has no residual -- the residual
+    # belongs to the position, not to any one fill. Deriving it from the
+    # increment ledger would be rebuilding a position-level figure out of
+    # fill-level parts for no reason, and it is exactly the kind of
+    # re-derivation that lets two readers disagree.
     remaining_basis = 0.0
     unmarked = 0
-    for p in (real.get("partially_realised_open") or []):
-        rb = p.get("remaining_basis_usd")
+    for iid in (real.get("partially_realised_open") or []):
+        one = await realised_on_sold(conn, iid)
+        rb = one.get("remaining_basis_usd") if one.get("ok") else None
         if rb is not None:
             remaining_basis += float(rb)
             unmarked += 1

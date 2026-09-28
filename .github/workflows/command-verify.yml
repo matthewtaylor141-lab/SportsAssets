@@ -5614,20 +5614,44 @@ jobs:
             fi
             sleep 10
           done
-          # AND IT NO LONGER FALLS THROUGH IN SILENCE. A loop that cannot
-          # confirm the serving SHA must say so, because "nothing printed"
-          # read as success for as long as this defect existed. It is a
-          # WARNING rather than a hard stop: S3b independently establishes
-          # the live commit from Render's own deploy list, and that check
-          # does fail closed. So this reports an unconfirmed readback
-          # without blocking a release S3b can still prove.
+          # ── THE TERMINAL CONDITION. IT FAILS THE JOB. ───────────────
+          #
+          # A WARNING WAS NOT ENOUGH, AND THAT WAS MY ERROR (2026-09-28).
+          # My first repair printed a warning here and let the job continue,
+          # on the reasoning that S3b independently reads the live commit
+          # from Render and fails closed. The reasoning was true and the
+          # conclusion was wrong: a step whose stated purpose is to prove
+          # serving-SHA identity must not report SUCCESS when it has
+          # proved nothing. Leaving it non-fatal keeps the exact property
+          # that made the original defect invisible -- the job's exit
+          # status stops depending on whether this check worked.
+          #
+          # THE TWO SOURCES ARE NOT INTERCHANGEABLE, WHICH IS WHY BOTH
+          # MUST PASS. Render's deploy list says what the platform believes
+          # it LAUNCHED. `/healthz` says what the process actually
+          # IMPORTED. A container serving stale code under a live deploy
+          # satisfies the first and fails the second, and that is precisely
+          # the condition a release check exists to catch. So an expired
+          # wait is a FAILURE here, independently of S3b.
+          #
+          # The comparison itself is `sportsassets.serving_sha`, which
+          # validates the format explicitly and returns a NAMED refusal for
+          # a 404, an unreadable body, a truncated value, a wrong build and
+          # an expired wait. Those five are distinct conditions and its
+          # tests hold them apart; a `case` statement in a 400 KB workflow
+          # could not be tested at all.
           if [ "${SHA_CONFIRMED:-no}" != "yes" ]; then
-            say "  ⚠ /healthz never reported the reviewed SHA within $((60*10))s."
-            say "    Last value read: '${SERVING:-<empty>}'."
-            say "    This does NOT by itself mean the build is wrong -- S3b"
-            say "    below reads the live commit from Render and fails closed."
-            say "    It does mean the service-side readback is unconfirmed,"
-            say "    which is reported rather than left as silence."
+            say "  ✗ /healthz never reported the reviewed SHA within $((60*10))s."
+            say "    Last value read: '${SERVING:-<empty>}'"
+            say "    Expected:        $OPERATOR_COMMIT"
+            PYTHONPATH=backend python3 -m sportsassets.serving_sha \
+              "$OPERATOR_COMMIT" "${SERVING:-}" "${LIVE_FULL_SHA:-}" || true
+            say "    THIS FAILS THE JOB. The process-side readback is the"
+            say "    only check that can see a container serving stale code"
+            say "    under a live deploy, so an unconfirmed result here is"
+            say "    not covered by S3b and must not be reported as a"
+            say "    verified release."
+            exit 1
           fi
           # The wrong-password probe flipping 503 -> 401 is the signal, and
           # it needs no secret. Bounded wait.

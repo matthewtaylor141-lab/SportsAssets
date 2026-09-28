@@ -165,6 +165,48 @@ R_VENUE_RULE_UNKNOWN = "VENUE_SETTLEMENT_RULE_NOT_ESTABLISHED"
 R_NO_VENUE_QUOTE = "NO_CONTEMPORANEOUS_VENUE_QUOTE"
 R_VENUE_QUOTE_STALE = "VENUE_QUOTE_STALE"
 
+def _evidence_key(obj):
+    """A stable, hashable digest of a currency-evidence object.
+
+    WHY THIS IS NOT `str(obj)`. Dict ordering would make the key depend on
+    construction order, so the same evidence could produce two keys and the
+    deduplication would silently stop deduplicating. `sort_keys=True` makes
+    it canonical.
+
+    AND WHY NOT `hash(obj)`. Dicts are unhashable, and Python's string hash
+    is salted per process -- a key that changes between restarts is not a
+    key. This is content-addressed and reproducible.
+
+    None maps to None rather than to a digest of "null", so "no evidence"
+    stays visibly distinct from "some evidence" when a key is read back.
+    """
+    if obj is None:
+        return None
+    import hashlib
+    import json as _json
+    try:
+        blob = _json.dumps(obj, sort_keys=True, default=str)
+    except Exception:                                          # noqa: BLE001
+        # UNDIGESTIBLE EVIDENCE MEANS DO NOT DEDUPLICATE AT ALL.
+        #
+        # TWO WRONG ANSWERS I WROTE AND REJECTED. A shared constant would
+        # make every undigestible candidate look equivalent to every other
+        # -- the worst outcome, since it deduplicates precisely the cases
+        # we understand least. And `id(obj)` is unsound: CPython reuses the
+        # address of a freed object, so two different evidence objects
+        # built in sequence can share an id and COLLIDE. That was
+        # demonstrated, not theorised -- two distinct dicts returned the
+        # same fallback key.
+        #
+        # A fresh `object()` is unique and never equal to anything else, so
+        # the tuple containing it can never hit the cache. The candidate
+        # gets its own real read, which is the conservative direction: we
+        # spend a request rather than risk answering one instrument with
+        # another's book.
+        return object()
+    return hashlib.sha256(blob.encode()).hexdigest()[:16]
+
+
 def _median(xs):
     """The middle value, or None on an empty sample.
 
@@ -200,6 +242,35 @@ def _maxof(xs):
 #: saved it. Counting them together would make the levers look effective
 #: by moving cases from one bucket into an indistinguishable one.
 R_QUOTE_STALE_ON_ARRIVAL = "QUOTE_STALE_ON_ARRIVAL"
+
+#: How many deferred candidates are named on the cycle. Bounded because a
+#: heartbeat is overwritten every cycle and must not grow without bound;
+#: `deferred_total` carries the full count beside the sample so the bound
+#: cannot understate the coverage that was not examined.
+MAX_DEFERRED_REPORTED = 40
+
+WHY_DEFERRED = (
+    "MAX_PER_CYCLE was reached before this candidate came up. It was NOT "
+    "judged and nothing about it was decided -- deferred is not refused. "
+    "It is named because lever B reorders the queue, so which candidates "
+    "fall past the cap is now decided by the freshest-first sort rather "
+    "than by the provider's sequence: a change that consistently pushed "
+    "the same markets past the cutoff would otherwise read as a better "
+    "stale rate with no trace of the coverage it cost")
+
+#: LEVER C's refusal. The duplicate is REFUSED rather than served a cached
+#: book, because a shared `acquisition_ladder` becomes two independent
+#: executable quantities at sizing -- see the comment at the cache.
+R_INSTRUMENT_ALREADY_EVALUATED = "INSTRUMENT_ALREADY_EVALUATED_THIS_FETCH"
+
+WHY_DUPLICATE_INSTRUMENT = (
+    "another provider event in this same fetch already resolved to this "
+    "venue contract and side, and its book read succeeded. Two provider "
+    "events on one instrument are ONE opportunity, so the duplicate is "
+    "refused rather than priced again. It is refused rather than served "
+    "the cached book because a shared acquisition ladder sized twice "
+    "becomes two independent executable quantities against one book's "
+    "depth -- and because a book that is never reused can never be stale")
 
 WHY_SKIPPED_ON_ARRIVAL = (
     "the provider's quote was already older than the 30 s rule at the "
@@ -3198,6 +3269,11 @@ async def cycle(conn) -> dict:
     # where the provider handed us a quote that was INSIDE the limit and
     # our own accumulated processing pushed it outside. Counted at the
     # decision, from clocks on the record, never estimated.
+    # WHAT PRIORITISATION PUSHED PAST THE CAP. Bounded, because a heartbeat
+    # is not a log; `deferred_total` counts every one so the bound cannot
+    # hide the scale.
+    deferred: list = []
+    deferred_total = 0
     lat = {"provider_lag_samples": [], "our_delay_samples": [],
            "age_samples": [], "valid_evaluations": 0, "stale_refusals": 0,
            "self_inflicted_stale": 0, "provider_stale_on_arrival": 0,
@@ -3288,9 +3364,18 @@ async def cycle(conn) -> dict:
             q = pinnacle_h2h(e, received_at=received_at)
             return _quote_epoch(q) if q is not None else None
 
+        # A TOTAL ORDER, so the same input always yields the same order.
+        # The event id is the final tiebreak: without it two events sharing
+        # a `last_update` would be ordered by whatever sequence the
+        # provider happened to send, and a rerun on the same payload could
+        # evaluate a different subset once MAX_PER_CYCLE bites. A
+        # measurement that moves when the data did not is not a
+        # measurement, and this is the same clock-dependence that made four
+        # test identities appear to vanish between two gate runs.
         _ages = {id(e): _prov_epoch(e) for e in events}
         events.sort(key=lambda e: (_ages[id(e)] is None,
-                                   -(_ages[id(e)] or 0.0)))
+                                   -(_ages[id(e)] or 0.0),
+                                   str((e or {}).get("id") or "")))
 
         # ── LEVER C · WITHIN-CYCLE DEDUPLICATION ────────────────────
         #
@@ -3315,6 +3400,39 @@ async def cycle(conn) -> dict:
         vq_cache: dict = {}
         for _i in range(len(events)):
             if evaluated >= MAX_PER_CYCLE:
+                # ── WHAT PRIORITISATION DEFERRED, REPORTED BY IDENTITY ──
+                #
+                # Owner requirement: "report which candidates were
+                # deferred, so improved throughput is not confused with
+                # quietly dropping difficult cases."
+                #
+                # THE FAILURE THIS MAKES IMPOSSIBLE. Lever B reorders, so
+                # the candidates that fall past MAX_PER_CYCLE are now
+                # chosen BY THE SORT rather than by the provider's
+                # sequence. If the deferred set were invisible, a change
+                # that consistently pushed the same hard markets past the
+                # cutoff would show up as a better stale rate and a better
+                # evaluation count with no trace of the coverage it lost.
+                # Naming them turns that into something a reader can see.
+                #
+                # DEFERRED, NOT REFUSED, and the distinction is kept: these
+                # were not judged and nothing about them was decided. The
+                # cap is the reason and it is stated.
+                for _k in range(_i, len(events)):
+                    _e = events[_k] or {}
+                    if len(deferred) >= MAX_DEFERRED_REPORTED:
+                        break
+                    deferred.append({
+                        "event_id": _e.get("id"),
+                        "sport_key": sport_key,
+                        "home": _e.get("home_team"),
+                        "away": _e.get("away_team"),
+                        "provider_observed_at_epoch_s": (
+                            None if _ages.get(id(events[_k])) is None
+                            else round(float(_ages[id(events[_k])]), 6)),
+                        "queue_position": _k,
+                        "why": WHY_DEFERRED})
+                deferred_total += max(0, len(events) - _i)
                 break
             # ── REFRESH THE QUOTE BEFORE IT GOES STALE ON OUR CLOCK ────
             #
@@ -3489,24 +3607,88 @@ async def cycle(conn) -> dict:
             # actually is when IT decides, which is strictly older. That is
             # the whole reason this is safe, and it is the reason the
             # freshness recheck was left exactly where it was.
-            _ck = (ident["us_market_slug"], ident["intent"])
+            # THE KEY IS THE COMPLETE REQUEST IDENTITY, not a subset of it.
+            # `venue_quote` is a function of exactly these arguments, so two
+            # calls agreeing on all of them are the same request and two
+            # differing anywhere are not. Naming them individually rather
+            # than keying on (slug, intent) alone: the currency evidence
+            # decides whether the read can be admitted at all, so two
+            # candidates with different subscription or revalidation
+            # evidence must NOT share an answer even on one instrument.
+            #
+            # THE EVIDENCE IS DIGESTED, NOT NAMED BY A FIELD I ASSUMED
+            # EXISTS. My first version keyed on `_cev["subscription_key"]`
+            # and `_cev["revalidation_key"]` -- neither of which
+            # `book_currency_evidence` returns. Both read None for every
+            # candidate, so the key silently degraded to (slug, intent) and
+            # two candidates with DIFFERENT currency evidence would have
+            # collided. `_evidence_key` digests the real objects, so the key
+            # cannot quietly lose a component the way a wrong field name
+            # does.
+            _ck = (ident["us_market_slug"], ident["intent"],
+                   _evidence_key(_cev.get("subscription")),
+                   _evidence_key(_cev.get("revalidation")))
             if _ck in vq_cache:
-                vq = vq_cache[_ck]
+                # ── REFUSED, NOT REUSED, AND THIS IS THE SAFE DIRECTION ──
+                #
+                # THE BUG THIS AVOIDS, which my first version had. Handing
+                # the cached `vq` to a second candidate gives it the same
+                # `acquisition_ladder` and `depth`. Each candidate then
+                # sizes independently against that ladder as though it
+                # owned all of it, so two candidates on ONE instrument
+                # could together claim twice the quantity the book can
+                # actually fill. Shared depth silently becoming two
+                # independent executable quantities is a sizing error that
+                # reaches the wire, and it is strictly worse than the
+                # duplicate read it was meant to save.
+                #
+                # AND IT ALSO DISPOSES OF THE STALE-CACHE QUESTION. A
+                # cached book is never re-aged, re-admitted or consulted
+                # again, so there is no entry that can expire during
+                # processing and no path by which an old read lends its
+                # freshness to a later decision. The saving -- the paced
+                # venue read -- is kept in full.
+                #
+                # TWO PROVIDER EVENTS ON ONE INSTRUMENT ARE ONE
+                # OPPORTUNITY. We would act at most once on it in any
+                # case, so refusing the duplicate loses no reachable
+                # trade; it only stops us pricing the same book twice.
                 lat["deduplicated_requests"] += 1
-            else:
-                vq = await venue_quote(
-                    conn, us_slug=ident["us_market_slug"],
-                    intent=ident["intent"], now=read_at,
-                    subscription=_cev.get("subscription"),
-                    revalidation=_cev.get("revalidation"))
-                lat["venue_requests"] += 1
-                # ONLY A SUCCESSFUL READ IS CACHED. Caching a refusal would
-                # turn one transient venue error into a refusal for every
-                # candidate on that instrument for the rest of the cycle --
-                # a retry suppressed by an optimisation, which is the kind
-                # of silent coupling this module refuses elsewhere.
-                if vq.get("ok"):
-                    vq_cache[_ck] = vq
+                code = R_INSTRUMENT_ALREADY_EVALUATED
+                tally[code] = tally.get(code, 0) + 1
+                _step_refuse(code)
+                _ledger({"global_slug": mapped.get("global_slug")
+                         or (mapped.get("market_row") or {}).get("slug"),
+                         "us_market_slug": ident.get("us_market_slug"),
+                         "priced_outcome": quote.get("home"),
+                         "stage": "3_IDENTITY",
+                         "first_refusal": code,
+                         "already_evaluated_from_event":
+                             vq_cache[_ck].get("first_event_id"),
+                         "this_event": quote.get("event_id"),
+                         "observed_at_epoch_s": (
+                             None if _pe is None else round(float(_pe), 6)),
+                         "why": WHY_DUPLICATE_INSTRUMENT})
+                continue
+            vq = await venue_quote(
+                conn, us_slug=ident["us_market_slug"],
+                intent=ident["intent"], now=read_at,
+                subscription=_cev.get("subscription"),
+                revalidation=_cev.get("revalidation"))
+            lat["venue_requests"] += 1
+            # ONLY A SUCCESSFUL READ CLAIMS THE INSTRUMENT. Recording a
+            # refusal would suppress every retry on that instrument for the
+            # rest of the cycle, so one transient venue error would refuse
+            # every candidate on that contract with an optimisation as the
+            # cause rather than the venue.
+            #
+            # WHAT IS STORED IS A CLAIM, NOT A BOOK TO REUSE. Only the
+            # identity of the event that claimed it is ever read back, for
+            # the ledger line above -- the payload is never handed to a
+            # second candidate.
+            if vq.get("ok"):
+                vq_cache[_ck] = {"first_event_id": quote.get("event_id"),
+                                 "claimed_at": read_at}
             if not vq.get("ok"):
                 code = vq.get("refusal") or R_NO_VENUE_QUOTE
                 tally[code] = tally.get(code, 0) + 1
@@ -4046,6 +4228,15 @@ async def cycle(conn) -> dict:
                "skipped_stale_on_arrival": lat["skipped_stale_on_arrival"],
                "deduplicated_requests": lat["deduplicated_requests"],
                "venue_requests": lat["venue_requests"],
+               # WHAT WAS NOT EXAMINED, so throughput cannot be confused
+               # with quietly dropping the difficult cases.
+               "deferred_candidates": deferred_total,
+               "deferred_sample": deferred,
+               "deferred_sample_bounded_at": MAX_DEFERRED_REPORTED,
+               "deferred_is_not_refused": (
+                   "a deferred candidate was never judged. MAX_PER_CYCLE "
+                   "was reached first, and the reordering means the sort "
+                   "chooses who is deferred -- so they are named"),
                "what_self_inflicted_means": (
                    "the provider handed us a quote INSIDE the 30 s rule and "
                    "our own accumulated processing pushed it outside. 296 of "
@@ -4321,6 +4512,12 @@ def _freshness_digest(out: dict) -> dict | None:
             "skipped_stale_on_arrival": lat.get("skipped_stale_on_arrival"),
             "deduplicated_requests": lat.get("deduplicated_requests"),
             "venue_requests": lat.get("venue_requests"),
+            # DEFERRALS REACH THE OPERATOR SURFACE TOO. A count and a
+            # bounded sample: without them a rising evaluation count and a
+            # falling stale rate could both be produced by examining fewer,
+            # easier candidates.
+            "deferred_candidates": lat.get("deferred_candidates"),
+            "deferred_sample": (lat.get("deferred_sample") or [])[:10],
             "measured_on": "THE_DEPLOYED_PATH_NOT_A_FIXTURE",
         }
     except Exception as exc:                                    # noqa: BLE001
