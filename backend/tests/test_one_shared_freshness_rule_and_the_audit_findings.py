@@ -375,16 +375,60 @@ def test_the_scheduler_supplies_no_mechanism_today_and_says_so():
     got = loop.book_currency_evidence("aec-anything")
     assert got["subscription"] is None
     assert got["revalidation"] is None
-    # THE REASON IS NOW THE VERIFIED ONE: M1 was checked against the shipped
-    # client and the feed cannot supply two of its four preconditions.
-    assert "cannot establish currency on this feed" in got["why_none"]
-    assert "no sequence number" in got["why_none"]
-    assert got["m1"]["status"] == "M1_NOT_AVAILABLE_ON_THIS_FEED"
-    # WHAT WOULD CHANGE IT, and it is no longer "wire M1": M1 was verified and
-    # the feed cannot supply it. The route now named is the venue publishing a
-    # sequence, or the book path emitting a validator (M2).
-    assert "sequence" in got["what_would_change_it"]
-    assert "ETag" in got["what_would_change_it"]
+    # ── THE REASON IS THE OWNING MODULE'S, NOT A PARALLEL ACCOUNT ────
+    #
+    # THIS ASSERTION WAS STALE, and the independent audit predicted it:
+    # "the same stale explanation-string assertions on both sides". It
+    # required the phrase "cannot establish currency on this feed", which
+    # came with a claim this repository has since WITHDRAWN -- that the feed
+    # is structurally incapable of supplying the preconditions. There was no
+    # evidence for that, and `book_currency_evidence.why_none` now delegates
+    # to `bettor_stream_currency`, the module that actually owns the
+    # predicate, instead of restating a second version of it.
+    #
+    # Pinning the old phrase would re-pin the withdrawn premise, which is
+    # how a mistake becomes a requirement. So the assertions below are on
+    # the STRUCTURE of an honest refusal -- it names which preconditions are
+    # missing, and it comes from the owner -- rather than on wording that
+    # will and should keep changing as the evidence changes.
+    why = got["why_none"]
+    assert why, got
+    assert "M1" in why, why
+    # IT NAMES THE MISSING PRECONDITIONS, so the blocker has an owner.
+    assert any(p in why for p in ("P2_", "P3_", "P4_", "P5_")), why
+    # AND IT DOES NOT ASSERT A PERMANENT VENUE LIMITATION.
+    for withdrawn in ("cannot establish currency on this feed",
+                      "no sequence number", "impossible on this feed"):
+        assert withdrawn not in why, (withdrawn, why)
+    # THE MISSING PRECONDITIONS ARE ENUMERATED, not summarised.
+    assert got["missing_preconditions"], got
+    assert "P5_DOCUMENTED_TIMING" in why, why
+    # AND THE SHAPE OF THE GAP IS STATED: replacement authority (P1) IS
+    # established, so this is a TIMING refusal. That distinction is the
+    # whole reason the withdrawn wording was wrong -- it implied doubt
+    # about whether a message is the whole book, which P1 settles.
+    assert "TIMING refusal" in why, why
+    assert got["and_what_the_gap_is_NOT"], got
+    # THE EXPLANATION COMES FROM THE MODULE THAT OWNS THE PREDICATE.
+    assert got["why_source"], got
+
+    # WHAT WOULD CHANGE IT NAMES WORK WITH OWNERS, including OURS.
+    #
+    # The old assertions here required "sequence" and "ETag" only -- both
+    # venue-side, which fitted the withdrawn story that nothing on our side
+    # could help. The current text names a published TIMING contract, an M2
+    # validator, AND connection continuity as ours to fix. Asserting only
+    # the venue-side routes would quietly restore "there is nothing we can
+    # do".
+    change = got["what_would_change_it"]
+    assert "TIMING" in change, change
+    assert "M2" in change, change
+    assert "OURS to fix" in change, change
+
+    # THE CONSEQUENCE IS MISSING EVIDENCE, NOT A STALE BOOK. Unchanged, and
+    # still the right distinction: we refuse for want of proof, not because
+    # the book is known to be old.
+    assert "BOOK_CURRENCY_NOT_ESTABLISHED" in got["consequence_today"]
     assert "not a stale book" in got["consequence_today"]
 
 

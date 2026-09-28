@@ -312,6 +312,31 @@ def _int(value):
         return None
 
 
+def _num(value):
+    """An epoch-seconds instant as a float, or None.
+
+    SEPARATE FROM `_int` BECAUSE THESE ARE INSTANTS, not header counts.
+    `Age` is an integer by RFC 9111; a response/request instant is a float
+    and truncating it to whole seconds would quantise the response-delay
+    correction to the same granularity as the bound it feeds.
+
+    A non-numeric or absent value is None, never 0.0 -- a missing instant
+    must not become the epoch, which would report an age of decades and
+    look like a refusal for the wrong reason.
+    """
+    if value is None or isinstance(value, bool):
+        return None
+    try:
+        out = float(value)
+    except (TypeError, ValueError):
+        return None
+    # NaN and infinities are not instants. `out != out` is the NaN test
+    # without importing math into a header parser.
+    if out != out or out in (float("inf"), float("-inf")):
+        return None
+    return out
+
+
 def _cache_control(value) -> dict:
     """`Cache-Control` as directives. Values kept where they are numeric."""
     out = {}
@@ -341,8 +366,92 @@ def read_contract(observation) -> dict:
     # RFC 9111 §5.1: `Age` is the time since the origin generated the stored
     # response. `Date` is the origin's own generation instant. With both, the
     # generation instant of what we hold is Date - Age.
+    # ── RFC 9111 §4.2.3, NOT `Date` MINUS `Age` ──────────────────────
+    #
+    # INDEPENDENT AUDIT FINDING (28 Sep 2026). This computed
+    # `generated_at = Date - Age`, and the caller then aged it against now:
+    #
+    #     current_age = now - (Date - Age) = (now - Date) + Age
+    #
+    # which ADDS the two estimates. With `Date` 20 s ago and `Age: 20` it
+    # reported 40 s and contradicted a 30 s bound on a response that was
+    # 20 s old. The production refusal captured in the audit used exactly
+    # this arithmetic.
+    #
+    # RFC 9111 §4.2.3 keeps them as TWO INDEPENDENT ESTIMATES of the same
+    # quantity and takes their MAXIMUM, then adds local residence:
+    #
+    #     apparent_age           = max(0, response_time - date_value)
+    #     corrected_age_value    = age_value + response_delay
+    #     corrected_initial_age  = max(apparent_age, corrected_age_value)
+    #     resident_time          = now - response_time
+    #     current_age            = corrected_initial_age + resident_time
+    #
+    # `apparent_age` covers a cache that omits `Age`; `corrected_age_value`
+    # covers a clock skewed against ours. The max is right because each is
+    # a lower bound on the true age and neither dominates.
+    #
+    # WHAT THIS DOES NOT DO, and the audit is explicit about it: correcting
+    # the arithmetic does NOT establish upstream book currency. A fresh
+    # HTTP response says the transport was quick, not that the order book
+    # behind it is current. This makes the number honest; it does not make
+    # a trade admissible.
+    req_at = _num(obs.get("request_at") or obs.get("requested_at")
+                  or obs.get("request_started_at"))
+    resp_at = _num(obs.get("received_at") or obs.get("response_at")
+                   or obs.get("our_response_received_at"))
+    age_parts = {}
+    corrected_initial_age = None
+    if resp_at is not None:
+        apparent = (None if date_epoch is None
+                    else max(0.0, float(resp_at) - float(date_epoch)))
+        # RESPONSE DELAY NEEDS THE REQUEST INSTANT. Without it the delay is
+        # UNKNOWN, and RFC 9111's correction cannot be completed -- so the
+        # Age header is used uncorrected and the result is reported as a
+        # LOWER BOUND rather than passed off as a complete measurement.
+        delay = (None if req_at is None
+                 else max(0.0, float(resp_at) - float(req_at)))
+        corrected_age = (None if age_s is None
+                         else float(age_s) + (delay or 0.0))
+        cands = [c for c in (apparent, corrected_age) if c is not None]
+        corrected_initial_age = (max(cands) if cands else None)
+        age_parts = {
+            "apparent_age_s": (None if apparent is None
+                               else round(apparent, 3)),
+            "response_delay_s": (None if delay is None else round(delay, 3)),
+            "corrected_age_value_s": (None if corrected_age is None
+                                      else round(corrected_age, 3)),
+            "corrected_initial_age_s": (None if corrected_initial_age is None
+                                        else round(corrected_initial_age, 3)),
+            "response_time_epoch_s": float(resp_at),
+            "request_time_epoch_s": (None if req_at is None
+                                     else float(req_at)),
+            "is_a_lower_bound": req_at is None,
+            "why_a_lower_bound": (
+                None if req_at is not None else
+                "the request instant was not recorded, so RFC 9111's "
+                "response_delay correction cannot be applied. The Age "
+                "header is used uncorrected, which can only UNDERSTATE "
+                "the age -- reported as a lower bound, never as a "
+                "complete measurement"),
+            "method": "RFC_9111_SECTION_4_2_3",
+            "this_is_transport_age_not_book_currency": (
+                "the age of the HTTP representation. A fresh response says "
+                "the transport was quick; it does not establish that the "
+                "order book behind it is current"),
+        }
+    # `generated_at` IS DERIVED FROM THE CORRECTED AGE, so the caller's
+    # `now - generated_at` reproduces RFC 9111's `current_age` instead of
+    # summing the two estimates. Falls back to the response instant when
+    # neither estimate exists, and stays None when we have no instant at
+    # all -- an unknown age must not become a favourable one.
     generated_at = None
-    if date_epoch is not None:
+    if resp_at is not None and corrected_initial_age is not None:
+        generated_at = float(resp_at) - float(corrected_initial_age)
+    elif date_epoch is not None and resp_at is None:
+        # NO RESPONSE INSTANT. Date alone is the only evidence; `Age` cannot
+        # be corrected against anything, so it is applied as-is. This is the
+        # old behaviour, kept ONLY for this degenerate case and labelled.
         generated_at = date_epoch - float(age_s or 0)
     xc = str(hdrs.get("x-cache") or hdrs.get("cf-cache-status") or "").lower()
     cache_hit = None
@@ -363,8 +472,15 @@ def read_contract(observation) -> dict:
         "served_from_cache": cache_hit,
         "origin_generated_at_epoch_s": generated_at,
         "origin_generated_at_is": (
-            "Date minus Age: the instant the origin generated the stored "
-            "representation (RFC 9111 §5.1, §6.1)"),
+            "response_time minus RFC 9111 4.2.3 corrected_initial_age, so "
+            "that re-ageing it against `now` reproduces `current_age`. It "
+            "is NOT `Date` minus `Age` -- that summed two independent "
+            "estimates of one quantity and double-counted, reporting 40 s "
+            "for a 20-s-old response carrying `Age: 20`"),
+        # THE COMPONENTS, so a refusal can be checked rather than believed.
+        "http_age": age_parts or None,
+        "http_age_method": (age_parts.get("method") if age_parts
+                            else "NO_RESPONSE_INSTANT_RECORDED"),
         "revalidation_possible": bool(hdrs.get("etag")
                                       or hdrs.get("last-modified")),
         "max_age_s": cc.get("max-age") if isinstance(cc.get("max-age"), int)

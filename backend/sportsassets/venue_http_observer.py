@@ -135,23 +135,64 @@ def install(client) -> dict:
                 "why": "the SDK client exposes no underlying httpx client, so "
                        "response metadata cannot be observed without "
                        "reimplementing its request path"}
+    # ── THE INSTALLATION IS CHECKED ON THE CLIENT, NOT REMEMBERED ────
+    #
+    # INDEPENDENT AUDIT FINDING (28 Sep 2026). This function used to key a
+    # module-level `set[int]` on `id(http)` and return early on a hit. CPython
+    # reuses the address of a freed object, so a REPLACEMENT client can be
+    # handed the same id as a collected one -- and then this reported
+    # `installed: True, already: True` about a client that has no response
+    # hook at all. The observation channel would be silently absent while
+    # claiming to exist, and every downstream currency verdict would read
+    # "no headers" and refuse for the wrong reason.
+    #
+    # THE FIX IS TO ASK THE OBJECT. `_record in hooks["response"]` is the
+    # actual property we care about -- this client, right now, calls our
+    # recorder -- and it cannot go stale or collide. Idempotence is
+    # preserved because appending is guarded by that same membership test,
+    # which is what the id cache was really for.
+    #
+    # `id()` IS STILL USED, but only as a HINT for the returned verdict, so
+    # a caller can tell a fresh install from a repeat. Nothing is decided
+    # on it.
     key = id(http)
-    with _LOCK:
-        if key in _INSTALLED:
-            return {"installed": True, "already": True}
     try:
         hooks = http.event_hooks
         existing = list(hooks.get("response") or [])
-        if _record not in existing:
+        already_hooked = _record in existing
+        if not already_hooked:
             existing.append(_record)
-        hooks["response"] = existing
-        http.event_hooks = hooks
+            hooks["response"] = existing
+            http.event_hooks = hooks
+            # RE-READ AND VERIFY. Some clients copy or validate the mapping
+            # on assignment, so "we appended" is not "it is installed".
+            # Reporting installed without checking is the same class of
+            # error as the id cache: a claim that outran its evidence.
+            try:
+                back = list((http.event_hooks or {}).get("response") or [])
+            except Exception:                                  # noqa: BLE001
+                back = []
+            if _record not in back:
+                return {"installed": False,
+                        "why": ("the hook was appended but the client did "
+                                "not retain it, so no response metadata "
+                                "will be observed"),
+                        "hooks_after_assignment": len(back)}
     except Exception as exc:                                   # noqa: BLE001
         return {"installed": False, "why": "event hook rejected: %s"
                                           % type(exc).__name__}
     with _LOCK:
+        seen_before = key in _INSTALLED
         _INSTALLED.add(key)
-    return {"installed": True, "already": False}
+    return {"installed": True,
+            "already": bool(already_hooked),
+            # WHY BOTH. `already` is the truth, read from the client.
+            # `id_was_seen_before` is the cache's opinion, and a
+            # disagreement is precisely the identity reuse this repair
+            # exists for -- worth surfacing rather than hiding.
+            "id_was_seen_before": seen_before,
+            "identity_reuse_detected": bool(seen_before and not already_hooked),
+            "verified_on_the_client": True}
 
 
 def book_path(slug: str) -> str:
