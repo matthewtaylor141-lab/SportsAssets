@@ -177,7 +177,12 @@ async def record_decision(conn, *, decision_id: str, account_id: str,
                           inputs_present=(), inputs_missing=(),
                           bound_action: str | None = None,
                           bound_filled_qty=None,
-                          bound_holding_policy: str | None = None) -> dict:
+                          bound_holding_policy: str | None = None,
+                          model_key: str | None = None,
+                          model_version: str | None = None,
+                          features: dict | None = None,
+                          feature_sha: str | None = None,
+                          predicted: dict | None = None) -> dict:
     """WRITE THE DECISION BEFORE ITS OUTCOME EXISTS.
 
     IDEMPOTENT ON `decision_id`, which the caller chooses -- so a cycle that
@@ -188,6 +193,20 @@ async def record_decision(conn, *, decision_id: str, account_id: str,
     `worst_case_usd` MAY BE None, and that is a real answer: the valuation
     withholds its verdict when fees are not priced, and "no bound was claimed" is
     not a bound of zero. A NULL is never scored as one.
+
+    ── AND THE PREDICTION IT WAS MADE FROM, ON THIS SAME IMMUTABLE ROW ──
+
+    `model_key`, `model_version`, `features`, `feature_sha` and `predicted` are
+    what turn this ledger from a record of decisions into something a model can be
+    evaluated against. They live HERE, on a row a trigger already forbids
+    rewriting, because a prediction that can be edited once its outcome is known
+    is not a prediction.
+
+    They are all optional and all default to NULL. A decision taken without a
+    model records none of them, and `bettor_funded_model.labelled` then excludes
+    it from every evaluation -- a row with no recorded vector cannot be scored,
+    and scoring it against whatever the current model would say today would be
+    scoring the model on its own present output.
     """
     import json
     out: dict[str, Any] = {"version": VERSION, "decision_id": str(decision_id)}
@@ -231,6 +250,21 @@ async def record_decision(conn, *, decision_id: str, account_id: str,
                  None if bound_filled_qty is None else float(bound_filled_qty),
                  None if bound_holding_policy is None
                  else str(bound_holding_policy)]
+    has_model = await conn.fetchval(
+        "SELECT count(*) FROM information_schema.columns "
+        " WHERE table_name='bettor_funded_decisions' "
+        "   AND column_name='model_version'")
+    if has_model:
+        n = len(args)
+        cols += ", model_key, model_version, features, feature_sha, predicted"
+        vals += ",$%d,$%d,$%d::jsonb,$%d,$%d::jsonb" % (
+            n + 1, n + 2, n + 3, n + 4, n + 5)
+        args += [
+            (None if model_key is None else str(model_key)),
+            (None if model_version is None else str(model_version)),
+            (None if features is None else json.dumps(features, default=str)),
+            (None if feature_sha is None else str(feature_sha)),
+            (None if predicted is None else json.dumps(predicted, default=str))]
     row_id = await conn.fetchval(
         "INSERT INTO bettor_funded_decisions (" + cols + ") VALUES (" + vals
         + ") ON CONFLICT (decision_id) DO NOTHING RETURNING decision_id", *args)

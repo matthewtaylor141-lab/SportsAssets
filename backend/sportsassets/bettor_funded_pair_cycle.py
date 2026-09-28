@@ -81,6 +81,7 @@ from . import bettor_funded_decision as FD
 from . import bettor_funded_execution as FX
 from . import bettor_funded_indirect_pair as FIP
 from . import bettor_funded_learning as FL
+from . import bettor_funded_model as FMD
 from . import bettor_funded_reservations as RSV
 from . import bettor_indirect_structures as IS
 
@@ -289,13 +290,15 @@ def discover(*, held_leg, candidate_legs, sport_permits_tie: bool,
 async def decide_and_record(conn, *, decision_id: str, account_id: str,
                             venue: str, fixture: str, group_id: str | None,
                             hold_ranking: dict, admitted: dict | None,
-                            region_probabilities: dict | None,
-                            evidence_quality: str,
+                            region_probabilities: dict | None = None,
+                            evidence_quality: str = FD.EVIDENCE_NOT_ESTABLISHED,
                             limits: dict | None = None,
                             fee_usd=None, depth=None, incremental=None,
                             capital_duration_h=None,
                             holding_policy: str = FL.POLICY_MAY_EXIT_EARLY,
                             filled_qty=None,
+                            use_approved_model: bool = False,
+                            model_inputs: dict | None = None,
                             now: float | None = None) -> dict:
     """ONE COMPARISON, THEN WRITE IT DOWN BEFORE THE OUTCOME EXISTS.
 
@@ -315,6 +318,36 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
     at = float(now if now is not None else time.time())
     out: dict[str, Any] = {"version": VERSION, "at": at,
                            "decision_id": decision_id, "group_id": group_id}
+    # ── THE APPROVED MODEL, WHEN THIS LANE IS ASKED TO DECIDE FROM ONE ──
+    #
+    # `use_approved_model` is what makes the registry load-bearing instead of
+    # decorative: the probability comes from the ONE approved version, and the
+    # version, the exact feature vector and its sha go onto the decision row so
+    # the estimate is falsifiable afterwards.
+    #
+    # WITH NO APPROVED MODEL THIS REFUSES RATHER THAN FALLS BACK. The lane then
+    # has no estimate it is permitted to decide from, `region_probabilities` stays
+    # absent, and `bettor_funded_decision` declines the indirect candidate by
+    # name. A fallback to an unregistered number would mean the promotion gate
+    # governed nothing.
+    prediction = None
+    if use_approved_model and admitted is not None:
+        mi = dict(model_inputs or {})
+        prediction = await FMD.predict_for(
+            conn, structure=admitted["structure"],
+            primary_cost_cents=mi.get("primary_cost_cents"),
+            hedge_cost_cents=mi.get("hedge_cost_cents"),
+            overtime_included=mi.get("overtime_included"),
+            outside_split=mi.get("outside_split"))
+        out["prediction"] = prediction
+        if not prediction.get("ok"):
+            out["region_probabilities_came_from"] = "NOTHING_APPROVED"
+            region_probabilities = None
+        else:
+            region_probabilities = prediction["region_probabilities"]
+            evidence_quality = FD.EVIDENCE_EXTERNAL_LABELLED
+            out["region_probabilities_came_from"] = (
+                "APPROVED_MODEL:%s" % prediction["model_version"])
     cand = None
     if admitted is not None:
         # ── THE WORST CASE IS COMPUTED AND PASSED IN, NOT LEFT NULL ──
@@ -363,7 +396,17 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
             c.get("blocker") for c in (verdict.get("not_rankable") or [])
             if c.get("blocker")),
         bound_action=action, bound_filled_qty=filled_qty,
-        bound_holding_policy=holding_policy)
+        bound_holding_policy=holding_policy,
+        # ── WHAT THIS DECISION WAS PREDICTED FROM ────────────────────
+        # All NULL when no model was used, and `bettor_funded_model.labelled`
+        # then excludes the row from every evaluation: a decision with no
+        # recorded vector cannot be scored, and scoring it against whatever the
+        # model says today would be scoring the model on its own output.
+        model_key=(prediction or {}).get("model_key"),
+        model_version=(prediction or {}).get("model_version"),
+        features=(prediction or {}).get("features"),
+        feature_sha=(prediction or {}).get("feature_sha"),
+        predicted=(prediction or {}).get("predicted"))
     out["ledger"] = rec
     return dict(out, ok=bool(rec.get("ok")),
                 refusal=None if rec.get("ok") else rec.get("refusal"),
