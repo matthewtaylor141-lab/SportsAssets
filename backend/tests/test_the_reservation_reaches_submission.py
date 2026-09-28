@@ -59,6 +59,13 @@ async def _conn():
     return c
 
 
+async def _has_evidence(c) -> bool:
+    return bool(await c.fetchval(
+        "SELECT count(*) FROM information_schema.tables "
+        " WHERE table_schema='public' "
+        "   AND table_name='bettor_funded_operation_evidence'"))
+
+
 async def _has_131(c) -> bool:
     return bool(await c.fetchval(
         "SELECT count(*) FROM information_schema.tables "
@@ -67,6 +74,9 @@ async def _has_131(c) -> bool:
 
 
 async def _clean(c):
+    if await _has_evidence(c):
+        await c.execute("DELETE FROM bettor_funded_operation_evidence "
+                        "WHERE operation_id LIKE $1", PFX + "%")
     if await _has_131(c):
         await c.execute("DELETE FROM bettor_funded_leg_reservations "
                         "WHERE operation_id LIKE $1 OR group_id LIKE $1",
@@ -123,6 +133,26 @@ async def _intent(c, iid, gid, role, slug, *, qty=10, state="INTENT_RECORDED",
         " 'ENTRY',$9,$10,$11)",
         iid, ACCT, slug, FIXTURE, int(qty), float(qty) * 0.5, iid + "-d", state,
         float(residual), gid, role)
+
+
+async def _named(c, op, intent_id, slug, vo, *, at=1790000100.0):
+    """Record NAMED evidence for `op`, so `record_the_venue_named_it` can consume.
+
+    THE TESTS HAD TO CHANGE, AND THAT IS THE POINT. Consuming a reservation now
+    requires durable evidence bound to the operation's account, instrument and
+    intent -- so a test that previously just asserted CONSUMED must now say where
+    the venue's answer came from, exactly as the production path must.
+    """
+    from sportsassets import bettor_funded_reservations as RS
+    got = await RS.record_venue_evidence(
+        c, evidence_id="ev:%s" % op, operation_id=op, account_id=ACCT,
+        venue="PMUS", us_market_slug=slug, intent_id=intent_id,
+        kind=RS.EV_NAMED, venue_order_id=vo,
+        search_endpoint="GET /v1/orders/%s" % vo, read_at=at,
+        covered_terminal_orders=True, results_returned=1,
+        raw={"id": vo, "status": "open"})
+    assert got["ok"] is True, got
+    return got
 
 
 def _why(exc) -> str:
@@ -287,6 +317,7 @@ async def test_a_replay_after_the_first_attempt_resolved_is_still_the_same_one()
                       limit_price=0.5, collateral_usd=5.0)
         await RS.commit_to_intent(c, operation_id=op, intent_id=PFX + "i2")
         await RS.mark_send_attempted(c, operation_id=op)
+        await _named(c, op, PFX + "i2", SLUG_A, "vo-2")
         await RS.record_the_venue_named_it(c, operation_id=op,
                                           venue_order_id="vo-2")
         assert (await RS.get(c, op))["reservation"]["state"] == RS.CONSUMED
@@ -475,7 +506,9 @@ async def test_a_legitimate_top_up_is_a_new_operation_and_is_not_blocked():
         await RS.commit_to_intent(c, operation_id=PFX + "op3a",
                                   intent_id=PFX + "i3")
         await RS.mark_send_attempted(c, operation_id=PFX + "op3a")
-        await RS.record_the_venue_named_it(c, operation_id=PFX + "op3a")
+        await _named(c, PFX + "op3a", PFX + "i3", SLUG_A, "vo-3a")
+        await RS.record_the_venue_named_it(c, operation_id=PFX + "op3a",
+                                          venue_order_id="vo-3a")
 
         top_up = await RS.hold(c, operation_id=PFX + "op3b",
                                group_id=PFX + "g3", leg_role="PRIMARY",
@@ -776,19 +809,22 @@ async def test_a_lost_acknowledgement_becomes_ambiguous_and_stays_exposure():
 
 
 @pg
-async def test_recovery_resolves_an_ambiguity_from_the_venues_own_answer():
-    """BOTH ANSWERS, AND NEITHER IS A RESEND.
+async def test_recovery_resolves_an_ambiguity_only_from_recorded_evidence():
+    """BOTH ANSWERS, AND NEITHER IS A BOOLEAN.
 
-    The venue saying the order exists CONSUMES the reservation; the venue saying
-    it does not RELEASES it, and the stored resolution names the venue as the
-    source so a later reader can tell that release from a guess. There is no code
-    path that resolves an ambiguity by sending again.
+    `resolve_from_the_venue` used to take `the_venue_has_the_order: bool`, so a
+    caller could clear an AMBIGUOUS send -- the state that exists precisely
+    because nobody knows whether a live order sits at the venue -- by passing
+    False. A parameter named for what the caller is "asserting" is a comment, not
+    evidence.
     """
     from sportsassets import bettor_funded_reservations as RS
     c = await _conn()
     try:
         await _ready(c)
-        # (a) THE VENUE HAS THE ORDER.
+        if not await _has_evidence(c):
+            pytest.skip("migration 133 not applied to this database")
+        # (a) THE VENUE NAMES THE ORDER.
         await _group(c, PFX + "gc")
         await _intent(c, PFX + "ic", PFX + "gc", "PRIMARY", SLUG_A)
         op = PFX + "opc"
@@ -798,14 +834,30 @@ async def test_recovery_resolves_an_ambiguity_from_the_venues_own_answer():
         await RS.commit_to_intent(c, operation_id=op, intent_id=PFX + "ic")
         await RS.mark_send_attempted(c, operation_id=op)
         await RS.mark_ambiguous(c, operation_id=op, why="no answer")
-        yes = await RS.resolve_from_the_venue(
-            c, operation_id=op, the_venue_has_the_order=True)
+
+        # WITH NO EVIDENCE AT ALL, IT STAYS AMBIGUOUS.
+        nothing = await RS.resolve_from_the_venue(c, operation_id=op)
+        assert nothing["ok"] is False
+        assert nothing["refusal"] == RS.R_NO_EVIDENCE, nothing
+        assert nothing["exposure"] == "PRESERVED"
+        assert (await RS.get(c, op))["reservation"]["state"] == RS.AMBIGUOUS
+
+        wrote = await RS.record_venue_evidence(
+            c, evidence_id=PFX + "evc", operation_id=op, account_id=ACCT,
+            venue="PMUS", us_market_slug=SLUG_A, intent_id=PFX + "ic",
+            kind=RS.EV_NAMED, venue_order_id="vo-c",
+            search_endpoint="GET /v1/orders/vo-c", read_at=1790000000.0,
+            covered_terminal_orders=True, results_returned=1,
+            raw={"status": "filled"})
+        assert wrote["ok"] is True, wrote
+        yes = await RS.resolve_from_the_venue(c, operation_id=op)
         assert yes["ok"] is True, yes
         assert yes["reservation"]["state"] == RS.CONSUMED
+        assert yes["evidence_id"] == PFX + "evc"
         assert RS.WHY_VENUE_NAMED_THE_ORDER in yes["reservation"]["resolution"]
         await _clean(c)
 
-        # (b) THE VENUE HAS NO SUCH ORDER.
+        # (b) AN EMPTY *OPEN ORDERS* SEARCH DOES NOT CLEAR IT.
         await _group(c, PFX + "gd")
         await _intent(c, PFX + "id", PFX + "gd", "PRIMARY", SLUG_A)
         op2 = PFX + "opd"
@@ -815,13 +867,134 @@ async def test_recovery_resolves_an_ambiguity_from_the_venues_own_answer():
         await RS.commit_to_intent(c, operation_id=op2, intent_id=PFX + "id")
         await RS.mark_send_attempted(c, operation_id=op2)
         await RS.mark_ambiguous(c, operation_id=op2, why="no answer")
-        no = await RS.resolve_from_the_venue(
-            c, operation_id=op2, the_venue_has_the_order=False)
+
+        # THE DATABASE ITSELF REFUSES TO STORE THAT AS AN ABSENCE CLAIM.
+        weak = await RS.record_venue_evidence(
+            c, evidence_id=PFX + "evd-open", operation_id=op2, account_id=ACCT,
+            venue="PMUS", us_market_slug=SLUG_A, intent_id=PFX + "id",
+            kind=RS.EV_NO_SUCH_ORDER,
+            search_endpoint="GET /v1/orders?status=open", read_at=1790000001.0,
+            covered_terminal_orders=False, results_returned=0)
+        assert weak["ok"] is False
+        assert weak["refusal"] == \
+            RS.R_EVIDENCE_SEARCH_COULD_NOT_HAVE_FOUND_IT, weak
+        assert "filled immediately is not open" in weak["why"]
+
+        # RECORDED AS "ESTABLISHED NOTHING", it is kept and still does not resolve.
+        kept = await RS.record_venue_evidence(
+            c, evidence_id=PFX + "evd-nil", operation_id=op2, account_id=ACCT,
+            venue="PMUS", us_market_slug=SLUG_A, intent_id=PFX + "id",
+            kind=RS.EV_ESTABLISHED_NOTHING,
+            search_endpoint="GET /v1/orders?status=open", read_at=1790000002.0,
+            covered_terminal_orders=False, results_returned=0)
+        assert kept["ok"] is True, kept
+        still = await RS.resolve_from_the_venue(c, operation_id=op2)
+        assert still["ok"] is False, still
+        assert still["exposure"] == "PRESERVED"
+        assert "TERMINAL orders" in still["what_would_resolve_it"]
+        assert (await RS.get(c, op2))["reservation"]["state"] == RS.AMBIGUOUS
+
+        # (c) A SEARCH THAT COVERED TERMINAL ORDERS AND FOUND NOTHING DOES.
+        good = await RS.record_venue_evidence(
+            c, evidence_id=PFX + "evd-all", operation_id=op2, account_id=ACCT,
+            venue="PMUS", us_market_slug=SLUG_A, intent_id=PFX + "id",
+            kind=RS.EV_NO_SUCH_ORDER,
+            search_endpoint="GET /v1/orders?status=all",
+            search_scope={"account": ACCT, "market": SLUG_A,
+                          "includes": ["open", "filled", "cancelled",
+                                       "rejected"]},
+            read_at=1790000003.0, covered_terminal_orders=True,
+            window_from_epoch_s=1789999000.0, window_to_epoch_s=1790000003.0,
+            results_returned=0)
+        assert good["ok"] is True, good
+        no = await RS.resolve_from_the_venue(c, operation_id=op2)
         assert no["ok"] is True, no
         assert no["reservation"]["state"] == RS.RELEASED
-        assert no["reservation"]["resolution"] == \
-            RS.WHY_VENUE_HAS_NO_SUCH_ORDER, no["reservation"]
-        assert no["reservation"]["resolution"] in RS.EVIDENCED_RELEASES
+        assert no["reservation"]["resolution"] == RS.WHY_VENUE_HAS_NO_SUCH_ORDER
+        assert no["searched"]["covered_terminal_orders"] is True
+        assert no["evidence_id"] == PFX + "evd-all"
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_a_consumed_reservation_must_name_the_venues_order():
+    """CONSUMED ASSERTS A REAL ORDER EXISTS. `venue_order_id` used to default to
+    None, so that assertion could be written naming nothing."""
+    from sportsassets import bettor_funded_reservations as RS
+    c = await _conn()
+    try:
+        await _ready(c)
+        if not await _has_evidence(c):
+            pytest.skip("migration 133 not applied to this database")
+        await _group(c, PFX + "ge2")
+        await _intent(c, PFX + "ie2", PFX + "ge2", "PRIMARY", SLUG_A)
+        op = PFX + "ope2"
+        await RS.hold(c, operation_id=op, group_id=PFX + "ge2",
+                      leg_role="PRIMARY", us_market_slug=SLUG_A, quantity=10,
+                      limit_price=0.5, collateral_usd=5.0)
+        await RS.commit_to_intent(c, operation_id=op, intent_id=PFX + "ie2")
+        await RS.mark_send_attempted(c, operation_id=op)
+
+        blank = await RS.record_the_venue_named_it(c, operation_id=op,
+                                                  venue_order_id="")
+        assert blank["ok"] is False
+        assert blank["refusal"] == RS.R_ORDER_ID_REQUIRED, blank
+
+        # AND WITH AN ID BUT NO RECORDED EVIDENCE, still refused.
+        unevidenced = await RS.record_the_venue_named_it(
+            c, operation_id=op, venue_order_id="vo-e2")
+        assert unevidenced["ok"] is False
+        assert unevidenced["refusal"] == RS.R_NO_EVIDENCE, unevidenced
+        assert (await RS.get(c, op))["reservation"]["state"] == \
+            RS.SEND_ATTEMPTED
+
+        # EVIDENCE FOR A DIFFERENT ORDER ID DOES NOT AUTHORISE THIS ONE.
+        await RS.record_venue_evidence(
+            c, evidence_id=PFX + "eve2", operation_id=op, account_id=ACCT,
+            venue="PMUS", us_market_slug=SLUG_A, intent_id=PFX + "ie2",
+            kind=RS.EV_NAMED, venue_order_id="vo-SOMEONE-ELSE",
+            search_endpoint="GET /v1/orders", read_at=1790000010.0,
+            covered_terminal_orders=True, results_returned=1)
+        mismatched = await RS.record_the_venue_named_it(
+            c, operation_id=op, venue_order_id="vo-e2")
+        assert mismatched["ok"] is False
+        assert mismatched["refusal"] == RS.R_EVIDENCE_NOT_BOUND, mismatched
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_evidence_for_another_instrument_does_not_resolve_this_operation():
+    """BOUND MEANS THE SAME INSTRUMENT. A read of a different market says nothing
+    about this acquisition, however true it is in itself."""
+    from sportsassets import bettor_funded_reservations as RS
+    c = await _conn()
+    try:
+        await _ready(c)
+        if not await _has_evidence(c):
+            pytest.skip("migration 133 not applied to this database")
+        await _group(c, PFX + "gf2")
+        await _intent(c, PFX + "if2", PFX + "gf2", "PRIMARY", SLUG_A)
+        op = PFX + "opf2"
+        await RS.hold(c, operation_id=op, group_id=PFX + "gf2",
+                      leg_role="PRIMARY", us_market_slug=SLUG_A, quantity=10,
+                      limit_price=0.5, collateral_usd=5.0)
+        await RS.commit_to_intent(c, operation_id=op, intent_id=PFX + "if2")
+        await RS.mark_send_attempted(c, operation_id=op)
+        await RS.mark_ambiguous(c, operation_id=op, why="no answer")
+        await RS.record_venue_evidence(
+            c, evidence_id=PFX + "evf2", operation_id=op, account_id=ACCT,
+            venue="PMUS", us_market_slug=SLUG_B,      # <- the OTHER market
+            intent_id=PFX + "if2", kind=RS.EV_NO_SUCH_ORDER,
+            search_endpoint="GET /v1/orders?status=all", read_at=1790000020.0,
+            covered_terminal_orders=True, results_returned=0)
+        got = await RS.resolve_from_the_venue(c, operation_id=op)
+        assert got["ok"] is False, got
+        assert got["exposure"] == "PRESERVED"
+        assert (await RS.get(c, op))["reservation"]["state"] == RS.AMBIGUOUS
     finally:
         await _clean(c)
         await c.close()
@@ -889,6 +1062,7 @@ async def test_a_duplicate_delivery_of_each_step_is_harmless():
             ("commit", lambda: RS.commit_to_intent(
                 c, operation_id=op, intent_id=PFX + "if")),
             ("send", lambda: RS.mark_send_attempted(c, operation_id=op)),
+            ("evidence", lambda: _named(c, op, PFX + "if", SLUG_A, "vo-f")),
             ("consume", lambda: RS.record_the_venue_named_it(
                 c, operation_id=op, venue_order_id="vo-f")),
         ]
@@ -932,6 +1106,7 @@ async def test_the_whole_path_carries_one_identity_end_to_end():
         await RS.mark_send_attempted(c, operation_id=op)
         await FB.record_acknowledgement(c, PFX + "ig", venue_order_id="vo-g",
                                        status="open")
+        await _named(c, op, PFX + "ig", SLUG_A, "vo-g")
         await RS.record_the_venue_named_it(c, operation_id=op,
                                           venue_order_id="vo-g")
         await FB.ingest_fills(

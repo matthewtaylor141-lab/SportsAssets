@@ -477,16 +477,221 @@ async def mark_send_attempted(conn, *, operation_id: str) -> dict:
                              expect=(COMMITTED,))
 
 
+#: ── EVIDENCE KINDS, matching migration 133's CHECK ──────────────────
+EV_NAMED = "VENUE_NAMED_THE_ORDER"
+EV_NO_SUCH_ORDER = "VENUE_HAS_NO_SUCH_ORDER"
+EV_ESTABLISHED_NOTHING = "READ_ESTABLISHED_NOTHING"
+EVIDENCE_KINDS = (EV_NAMED, EV_NO_SUCH_ORDER, EV_ESTABLISHED_NOTHING)
+
+R_NO_EVIDENCE = "NO_DURABLE_EVIDENCE_IS_BOUND_TO_THIS_OPERATION"
+R_EVIDENCE_NOT_BOUND = "THE_EVIDENCE_IS_NOT_BOUND_TO_THIS_OPERATIONS_FACTS"
+R_EVIDENCE_SEARCH_COULD_NOT_HAVE_FOUND_IT = \
+    "THAT_SEARCH_COULD_NOT_HAVE_FOUND_THE_ORDER"
+R_EVIDENCE_SCHEMA_UNAVAILABLE = "THE_EVIDENCE_TABLE_IS_NOT_IN_THIS_DATABASE"
+R_ORDER_ID_REQUIRED = "A_CONSUMED_RESERVATION_MUST_NAME_THE_VENUES_ORDER"
+
+
+async def _has_evidence_schema(conn) -> bool:
+    try:
+        return bool(await conn.fetchval(
+            "SELECT count(*) FROM information_schema.tables "
+            " WHERE table_schema='public' "
+            "   AND table_name='bettor_funded_operation_evidence'"))
+    except Exception as exc:                                # noqa: BLE001
+        raise SchemaUnavailable(
+            "the catalogue could not be read (%s)" % type(exc).__name__) from exc
+
+
+async def record_venue_evidence(conn, *, evidence_id: str, operation_id: str,
+                                account_id: str, venue: str,
+                                us_market_slug: str, kind: str,
+                                search_endpoint: str, read_at,
+                                covered_terminal_orders: bool,
+                                intent_id: str | None = None,
+                                venue_order_id: str | None = None,
+                                search_scope: dict | None = None,
+                                window_from_epoch_s=None,
+                                window_to_epoch_s=None,
+                                results_returned: int = 0,
+                                raw: dict | None = None) -> dict:
+    """WRITE DOWN WHAT THE VENUE ANSWERED, bound to one operation.
+
+    A PARAMETER IS NOT EVIDENCE. `resolve_from_the_venue` used to take a boolean
+    and treat it as proof of absence; this is the row that replaces it. It records
+    not only the answer but WHAT WAS ASKED -- endpoint, scope, window, whether
+    terminal orders were covered, how many results came back -- so a later reader
+    who was not there can tell whether the question could have produced the
+    answer.
+    """
+    import json as _json
+    out: dict[str, Any] = {"version": VERSION, "evidence_id": str(evidence_id),
+                           "operation_id": str(operation_id), "kind": kind}
+    if kind not in EVIDENCE_KINDS:
+        return dict(out, ok=False, refusal="THAT_IS_NOT_AN_EVIDENCE_KIND",
+                    recognised=list(EVIDENCE_KINDS))
+    try:
+        if not await _has_evidence_schema(conn):
+            return dict(out, ok=False, refusal=R_EVIDENCE_SCHEMA_UNAVAILABLE)
+    except SchemaUnavailable as exc:
+        return dict(out, ok=False, refusal=R_EVIDENCE_SCHEMA_UNAVAILABLE,
+                    why=str(exc))
+    if kind == EV_NAMED and not venue_order_id:
+        return dict(out, ok=False, refusal=R_ORDER_ID_REQUIRED,
+                    why=("a record that the venue named an order must carry the "
+                         "id it named. Without one it names nothing"))
+    try:
+        async with conn.transaction():
+            await conn.execute(
+                "INSERT INTO bettor_funded_operation_evidence "
+                "(evidence_id, operation_id, account_id, venue, us_market_slug,"
+                " intent_id, kind, venue_order_id, search_endpoint,"
+                " search_scope, covered_terminal_orders, window_from_epoch_s,"
+                " window_to_epoch_s, results_returned, raw, read_at) VALUES "
+                "($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb,$11,$12,$13,$14,"
+                " $15::jsonb,to_timestamp($16))",
+                str(evidence_id), str(operation_id), str(account_id),
+                str(venue), str(us_market_slug),
+                None if intent_id is None else str(intent_id), kind,
+                None if venue_order_id is None else str(venue_order_id),
+                str(search_endpoint),
+                _json.dumps(search_scope or {}, default=str),
+                bool(covered_terminal_orders),
+                None if window_from_epoch_s is None
+                else float(window_from_epoch_s),
+                None if window_to_epoch_s is None else float(window_to_epoch_s),
+                int(results_returned), _json.dumps(raw or {}, default=str),
+                float(read_at))
+    except Exception as exc:                                # noqa: BLE001
+        msg = " ".join(str(exc).split())
+        if "bettor_funded_evidence_read_uniq" in msg \
+                or "operation_evidence_pkey" in msg:
+            # AN EVIDENCE ID IS CALLER-CHOSEN, so a replayed recovery pass reaches
+            # the same row. But a collision is only a replay if the CONTENT
+            # matches -- the same lesson as the reservation identity fix, which is
+            # why it is applied here rather than swallowing the violation.
+            have = dict(await conn.fetchrow(
+                "SELECT * FROM bettor_funded_operation_evidence "
+                " WHERE evidence_id = $1", str(evidence_id)) or {})
+            differs = [f for f, want in (
+                ("operation_id", str(operation_id)), ("kind", kind),
+                ("us_market_slug", str(us_market_slug)),
+                ("venue_order_id",
+                 None if venue_order_id is None else str(venue_order_id)),
+                ("covered_terminal_orders", bool(covered_terminal_orders)),
+                ("results_returned", int(results_returned)))
+                if f in have and have[f] != want]
+            if differs:
+                return dict(out, ok=False, refusal=R_EVIDENCE_NOT_BOUND,
+                            conflicts=differs, stored=have,
+                            why=("evidence id %r already records a DIFFERENT "
+                                 "read. Evidence is never rewritten, and reusing "
+                                 "its id for another answer would overwrite what "
+                                 "the venue actually said" % evidence_id))
+            return dict(out, ok=True, written=False, already=True,
+                        why="this exact read is already recorded")
+        if "absence_searched_terminal" in msg:
+            return dict(out, ok=False,
+                        refusal=R_EVIDENCE_SEARCH_COULD_NOT_HAVE_FOUND_IT,
+                        why=("an absence claim from a search that did not cover "
+                             "TERMINAL orders is a contradiction: an order that "
+                             "filled immediately is not open, so it had already "
+                             "left the set that was searched"))
+        if "absence_found_nothing" in msg:
+            return dict(out, ok=False, refusal=R_EVIDENCE_NOT_BOUND,
+                        why=("an absence claim cannot be recorded from a search "
+                             "that RETURNED results"))
+        if "named_has_id" in msg:
+            return dict(out, ok=False, refusal=R_ORDER_ID_REQUIRED,
+                        why=msg[:200])
+        raise
+    return dict(out, ok=True, written=True, already=False)
+
+
+async def _usable_evidence(conn, *, operation_id, kind, reservation) -> dict:
+    """The evidence for this operation that is actually BOUND to its facts.
+
+    BOUND MEANS THE SAME ACCOUNT, THE SAME INSTRUMENT AND THE SAME INTENT. A read
+    of a different market, or of another account, says nothing about this
+    acquisition however true it is in itself. And for an ABSENCE claim it must
+    also have covered terminal orders.
+    """
+    out: dict = {"kind": kind, "operation_id": str(operation_id)}
+    try:
+        if not await _has_evidence_schema(conn):
+            return dict(out, ok=False, refusal=R_EVIDENCE_SCHEMA_UNAVAILABLE)
+    except SchemaUnavailable as exc:
+        return dict(out, ok=False, refusal=R_EVIDENCE_SCHEMA_UNAVAILABLE,
+                    why=str(exc))
+    rows = [dict(r) for r in await conn.fetch(
+        "SELECT e.*, g.account_id AS group_account FROM "
+        "  bettor_funded_operation_evidence e "
+        "  JOIN bettor_funded_leg_reservations r "
+        "       ON r.operation_id = e.operation_id "
+        "  JOIN bettor_funded_portfolio_groups g ON g.group_id = r.group_id "
+        " WHERE e.operation_id = $1 AND e.kind = $2 "
+        " ORDER BY e.read_at DESC", str(operation_id), kind)]
+    if not rows:
+        return dict(out, ok=False, refusal=R_NO_EVIDENCE,
+                    why=("no %s evidence is recorded against this operation. A "
+                         "caller's assertion is not a substitute" % kind))
+    for r in rows:
+        if str(r["us_market_slug"]) != str(reservation["us_market_slug"]):
+            continue
+        if str(r["account_id"]) != str(r["group_account"]):
+            continue
+        if reservation.get("intent_id") and r.get("intent_id") \
+                and str(r["intent_id"]) != str(reservation["intent_id"]):
+            continue
+        if kind == EV_NO_SUCH_ORDER and not r["covered_terminal_orders"]:
+            continue
+        return dict(out, ok=True, refusal=None, evidence=r)
+    return dict(out, ok=False,
+                refusal=(R_EVIDENCE_SEARCH_COULD_NOT_HAVE_FOUND_IT
+                         if kind == EV_NO_SUCH_ORDER else R_EVIDENCE_NOT_BOUND),
+                candidates=len(rows),
+                why=("%d %s row(s) exist for this operation but none is bound to "
+                     "its account, instrument and intent%s"
+                     % (len(rows), kind,
+                        " AND searched terminal orders"
+                        if kind == EV_NO_SUCH_ORDER else "")))
+
+
 async def record_the_venue_named_it(conn, *, operation_id: str,
-                                    venue_order_id: str | None = None) -> dict:
-    """THE VENUE NAMED AN ORDER, so the acquisition happened and the reservation
-    is CONSUMED. Reachable from SEND_ATTEMPTED and from AMBIGUOUS -- the second
-    is recovery learning, from the venue itself, that the order it could not see
-    does exist."""
-    return await _transition(
+                                    venue_order_id: str) -> dict:
+    """THE VENUE NAMED AN ORDER, so the acquisition happened: CONSUMED.
+
+    `venue_order_id` IS NO LONGER OPTIONAL. It used to default to None, so a
+    reservation could reach CONSUMED claiming the venue had named an order while
+    naming none -- and CONSUMED is the state that says a real order exists.
+
+    AND DURABLE EVIDENCE IS REQUIRED, bound to this operation's account,
+    instrument and intent, naming this very order id.
+    """
+    out: dict[str, Any] = {"version": VERSION,
+                           "operation_id": str(operation_id), "to": CONSUMED}
+    if not venue_order_id:
+        return dict(out, ok=False, refusal=R_ORDER_ID_REQUIRED,
+                    why=("CONSUMED asserts a real order exists at the venue. "
+                         "That assertion must carry the venue's own id for it"))
+    res = await _fetch(conn, operation_id)
+    if res is None:
+        return dict(out, ok=False, refusal=R_NO_SUCH_OPERATION)
+    ev = await _usable_evidence(conn, operation_id=operation_id, kind=EV_NAMED,
+                                reservation=res)
+    if not ev.get("ok"):
+        return dict(out, ok=False, refusal=ev["refusal"], why=ev.get("why"),
+                    evidence_check=ev)
+    if str(ev["evidence"]["venue_order_id"]) != str(venue_order_id):
+        return dict(out, ok=False, refusal=R_EVIDENCE_NOT_BOUND,
+                    why=("the recorded evidence names order %r, not %r"
+                         % (ev["evidence"]["venue_order_id"], venue_order_id)))
+    got = await _transition(
         conn, operation_id, to=CONSUMED, expect=(SEND_ATTEMPTED, AMBIGUOUS),
-        note=("%s:%s" % (WHY_VENUE_NAMED_THE_ORDER, venue_order_id)
-              if venue_order_id else WHY_VENUE_NAMED_THE_ORDER))
+        note="%s:%s" % (WHY_VENUE_NAMED_THE_ORDER, venue_order_id))
+    if got.get("ok"):
+        got["evidence_id"] = ev["evidence"]["evidence_id"]
+        got["venue_order_id"] = str(venue_order_id)
+    return got
 
 
 async def mark_ambiguous(conn, *, operation_id: str, why: str) -> dict:
@@ -506,19 +711,61 @@ async def mark_ambiguous(conn, *, operation_id: str, why: str) -> dict:
 
 
 async def resolve_from_the_venue(conn, *, operation_id: str,
-                                the_venue_has_the_order: bool,
-                                why: str | None = None) -> dict:
-    """RESOLVE AN AMBIGUOUS ACQUISITION ON THE VENUE'S OWN ANSWER.
+                                venue_order_id: str | None = None) -> dict:
+    """RESOLVE AN AMBIGUOUS ACQUISITION FROM RECORDED EVIDENCE, never a boolean.
 
-    The boolean is named for what the CALLER IS ASSERTING, so a future caller
-    that does not actually have the venue's answer has to notice that it is
-    claiming to. There is no code path that resolves an ambiguity by resending.
+    ── WHAT THIS USED TO BE, AND WHY IT WAS WRONG ───────────────────
+    It took `the_venue_has_the_order: bool`. A caller could clear an AMBIGUOUS
+    send -- the state that exists precisely because nobody knows whether a live
+    order is sitting at the venue -- by passing False. The parameter was named
+    for what the caller was "asserting", which is not evidence; it is a comment.
+
+    NOW THE DECISION COMES FROM WHAT WAS WRITTEN DOWN. `record_venue_evidence`
+    stores the venue's answer with the endpoint, scope, window, whether terminal
+    orders were covered and how many results came back. This function looks for
+    evidence BOUND to this operation's account, instrument and intent:
+
+      * a NAMED order, carrying its id      -> CONSUMED
+      * searched-and-empty, TERMINAL covered -> RELEASED
+      * anything less                        -> refused, and it stays AMBIGUOUS
+
+    AN EMPTY OPEN-ORDERS LIST DOES NOT CLEAR AN AMBIGUOUS SEND. An order that
+    filled immediately is not open: it had already left the set that was
+    searched, so "nothing found" was never capable of meaning "nothing exists".
     """
-    if the_venue_has_the_order:
-        return await record_the_venue_named_it(conn, operation_id=operation_id)
-    return await _transition(
+    out: dict[str, Any] = {"version": VERSION,
+                           "operation_id": str(operation_id)}
+    res = await _fetch(conn, operation_id)
+    if res is None:
+        return dict(out, ok=False, refusal=R_NO_SUCH_OPERATION)
+    named = await _usable_evidence(conn, operation_id=operation_id,
+                                   kind=EV_NAMED, reservation=res)
+    if named.get("ok"):
+        return await record_the_venue_named_it(
+            conn, operation_id=operation_id,
+            venue_order_id=(venue_order_id
+                            or named["evidence"]["venue_order_id"]))
+    absent = await _usable_evidence(conn, operation_id=operation_id,
+                                    kind=EV_NO_SUCH_ORDER, reservation=res)
+    if not absent.get("ok"):
+        return dict(out, ok=False, refusal=absent["refusal"],
+                    why=absent.get("why"), exposure="PRESERVED",
+                    named_check=named, absence_check=absent,
+                    what_would_resolve_it=(
+                        "either a VENUE_NAMED_THE_ORDER row carrying the order "
+                        "id, or a VENUE_HAS_NO_SUCH_ORDER row from a search that "
+                        "covered TERMINAL orders for this account and "
+                        "instrument"))
+    got = await _transition(
         conn, operation_id, to=RELEASED, expect=(AMBIGUOUS,),
-        note=why or WHY_VENUE_HAS_NO_SUCH_ORDER)
+        note=WHY_VENUE_HAS_NO_SUCH_ORDER)
+    if got.get("ok"):
+        got["evidence_id"] = absent["evidence"]["evidence_id"]
+        got["searched"] = {k: absent["evidence"].get(k) for k in
+                           ("search_endpoint", "covered_terminal_orders",
+                            "results_returned", "window_from_epoch_s",
+                            "window_to_epoch_s")}
+    return got
 
 
 async def release(conn, *, operation_id: str, why: str) -> dict:
@@ -570,7 +817,26 @@ async def reserved_collateral_usd(conn, *,
     with the intent that carries each one, so a reader can check the claim
     instead of taking it.
     """
-    sql = ("SELECT r.*, g.account_id FROM bettor_funded_leg_reservations r "
+    # ── AN EXPLICIT ok/refusal, BECAUSE A CONSUMER MUST FAIL CLOSED ──
+    # This function had NO `ok` field, so `bettor_funded_execution.check_rails`
+    # read every successful call as unreadable and put four capital rails into
+    # `unmeasured`. Fail-closed is right, but only when the signal is real; a
+    # consumer cannot distinguish an outage from a helper with no contract.
+    try:
+        if not await _has_schema(conn):
+            return {"version": VERSION, "ok": False,
+                    "refusal": R_SCHEMA_UNAVAILABLE,
+                    "reserved_usd": 0.0, "reserved_by_market_usd": {},
+                    "reserved_by_event_usd": {},
+                    "why": ("this database has no reservation tables, so there "
+                            "are no reservations to count. That is a complete "
+                            "answer, not an outage")}
+    except SchemaUnavailable as exc:
+        return {"version": VERSION, "ok": False,
+                "refusal": "THE_RESERVATION_TABLES_COULD_NOT_BE_READ",
+                "reserved_usd": None, "why": str(exc)}
+    sql = ("SELECT r.*, g.account_id, g.event_key "
+           "  FROM bettor_funded_leg_reservations r "
            "  JOIN bettor_funded_portfolio_groups g ON g.group_id = r.group_id "
            " WHERE r.state = ANY($1::text[])")
     args: list = [list(LIVE_STATES)]
@@ -581,7 +847,25 @@ async def reserved_collateral_usd(conn, *,
     counted = [r for r in rows
                if r["state"] in STATES_THAT_COUNT_AS_COMMITTED_CAPITAL]
     not_counted = [r for r in rows if r not in counted]
+    # ── PER MARKET AND PER EVENT, for the rails that are scoped that way ──
+    # The account-wide total is not enough for `MAX_MARKET_EXPOSURE` or
+    # `MAX_EVENT_EXPOSURE`: a reservation on one instrument must not raise the
+    # measured exposure of another. `event_key` comes from the reservation's
+    # GROUP, which is the only place it is recorded.
+    by_market: dict[str, float] = {}
+    by_event: dict[str, float] = {}
+    for r in counted:
+        mk = str(r["us_market_slug"])
+        by_market[mk] = round(by_market.get(mk, 0.0) + r["collateral_usd"], 6)
+        ev = r.get("event_key")
+        if ev:
+            by_event[str(ev)] = round(by_event.get(str(ev), 0.0)
+                                      + r["collateral_usd"], 6)
     return {
+        "ok": True,
+        "refusal": None,
+        "reserved_by_market_usd": by_market,
+        "reserved_by_event_usd": by_event,
         "version": VERSION,
         "account_id": account_id,
         "reserved_usd": round(sum(r["collateral_usd"] for r in counted), 6),

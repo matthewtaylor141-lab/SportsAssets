@@ -301,6 +301,62 @@ async def check_rails(conn, plan: dict, effective: dict, *,
     with no measurement BLOCKS rather than passing quietly.
     """
     exp = await FB.exposure(conn, account_id=account_id, venue=venue)
+    # ── HELD RESERVATIONS, COUNTED HERE AND NOWHERE ELSE ─────────────
+    #
+    # THE GAP THIS CLOSES. `exposure()` counts live INTENT rows. A reservation in
+    # HELD has NO intent yet -- that is the whole point of it: it claims the leg
+    # and the collateral in the window BEFORE an intent exists, which is exactly
+    # the window a second decision does damage in. So until now the rails could
+    # not see it, and `reserved_collateral_usd` was a helper nobody called rather
+    # than an enforced limit.
+    #
+    # AND IT IS COUNTED EXACTLY ONCE. Only HELD is added. From COMMITTED onward
+    # the reservation HAS an intent row, and that intent is already inside
+    # `pending_and_in_flight_collateral_usd`; adding the reservation too would
+    # double every in-flight acquisition at the moment the system is deciding
+    # whether it can afford another. `reserved_collateral_usd` sums HELD alone and
+    # lists what it did not count, with the intent carrying each one, so the claim
+    # can be checked rather than taken.
+    #
+    # FAIL-CLOSED. If the reservation tables exist but cannot be read, the rails
+    # that depend on them go UNMEASURED and this function's existing
+    # unmeasured-blocks path refuses the order. A risk check that silently treats
+    # an unreadable claim as zero is how capital gets committed twice.
+    held_res = {"reserved_usd": 0.0, "reserved_by_market_usd": {},
+                "reserved_by_event_usd": {}, "schema": "ABSENT"}
+    reservations_readable = True
+    try:
+        from . import bettor_funded_reservations as RSV
+        got = await RSV.reserved_collateral_usd(conn, account_id=account_id)
+        if got.get("ok"):
+            held_res = dict(got, schema="PRESENT")
+        elif got.get("refusal") == RSV.R_SCHEMA_UNAVAILABLE:
+            # ABSENT is not the same as UNREADABLE. A database without migration
+            # 131 has no reservations to count, and that is a complete answer.
+            held_res["schema"] = "ABSENT"
+        else:
+            reservations_readable = False
+            held_res["schema"] = "UNREADABLE"
+            held_res["refusal"] = got.get("refusal")
+    except Exception as exc:                                # noqa: BLE001
+        reservations_readable = False
+        held_res = {"reserved_usd": None, "schema": "UNREADABLE",
+                    "error": type(exc).__name__}
+    res_add = (None if not reservations_readable
+               else float(held_res.get("reserved_usd") or 0.0))
+    res_by_market = dict(held_res.get("reserved_by_market_usd") or {})
+    res_by_event = dict(held_res.get("reserved_by_event_usd") or {})
+
+    def _plus_res(value, market=None, event=None):
+        """Add the HELD reservation collateral, or make the rail unmeasured."""
+        if res_add is None:
+            return None
+        extra = res_add
+        if market is not None:
+            extra = float(res_by_market.get(market, 0.0))
+        elif event is not None:
+            extra = float(res_by_event.get(event, 0.0))
+        return value + extra
     # REALISED RESULTS AND THE WORST PEAK-TO-TROUGH, from the economics
     # ledger. It was a hardcoded 0.0 with a note saying nothing had settled --
     # true on the day and useless as a loss stop, because the constant stays
@@ -314,20 +370,23 @@ async def check_rails(conn, plan: dict, effective: dict, *,
     measured = {
         # the per-order rail bounds THIS order plus anything already committed
         # on the same market
-        "MAX_MARKET_EXPOSURE": (per_market.get(mk, 0.0) + add,
+        "MAX_MARKET_EXPOSURE": (_plus_res(per_market.get(mk, 0.0) + add,
+                                         market=mk),
                                 "this order's collateral plus live collateral "
-                                "on the same market"),
-        "MAX_EVENT_EXPOSURE": (per_event.get(ev, 0.0) + add,
-                               "live collateral on event %r plus this order"
-                               % ev),
+                                "plus HELD reservations on the same market"),
+        "MAX_EVENT_EXPOSURE": (_plus_res(per_event.get(ev, 0.0) + add,
+                                        event=ev),
+                               "live collateral on event %r plus this order "
+                               "plus HELD reservations on it" % ev),
         "MAX_CORRELATED_EXPOSURE": (
-            exp["pending_and_in_flight_collateral_usd"] + add,
-            "every live intent in this lane plus this order, under the "
-            "worst-case correlation assumption"),
+            _plus_res(exp["pending_and_in_flight_collateral_usd"] + add),
+            "every live intent in this lane plus this order plus every HELD "
+            "reservation, under the worst-case correlation assumption"),
         "MAX_CAPITAL_DEPLOYED": (
-            exp["filled_cash_usd"] + exp["filled_fees_usd"]
-            + exp["pending_and_in_flight_collateral_usd"] + add,
-            "cash and fees already out plus live collateral plus this order"),
+            _plus_res(exp["filled_cash_usd"] + exp["filled_fees_usd"]
+                      + exp["pending_and_in_flight_collateral_usd"] + add),
+            "cash and fees already out plus live collateral plus HELD "
+            "reservations plus this order"),
         "MAX_RESIDUAL_INVENTORY": (
             exp["contracts_held"] + float(plan["quantity"]),
             "contracts the funded book holds plus this order's contracts"),
@@ -379,6 +438,18 @@ async def check_rails(conn, plan: dict, effective: dict, *,
                real.get("partially_realised_results", 0))),
     }
     rails, over, unmeasured = [], [], []
+    reservation_reading = {
+        "schema": held_res.get("schema"),
+        "held_reserved_usd": held_res.get("reserved_usd"),
+        "by_market_usd": res_by_market,
+        "by_event_usd": res_by_event,
+        "counted_states": ["HELD"],
+        "why_only_held": ("from COMMITTED onward the acquisition has an intent "
+                          "row, which pending_and_in_flight_collateral_usd "
+                          "already counts. Counting both would double every "
+                          "in-flight acquisition"),
+        "live_but_not_counted": held_res.get("live_but_not_counted") or [],
+    }
     for rail, limit in sorted(effective.items()):
         got = measured.get(rail)
         if got is None:
@@ -424,6 +495,13 @@ async def check_rails(conn, plan: dict, effective: dict, *,
             "exposure": exp, "realised": real,
             "counted_pending_and_in_flight": True,
             "counted_residual_holdings": True,
+            # ── VISIBLE, SO THE OPERATOR CAN CHECK THE CLAIM ──────────
+            # "counted exactly once" is a claim about arithmetic, and a claim
+            # nobody can see is a claim nobody can falsify. This reports what was
+            # counted, what was deliberately NOT, and which intent carries each
+            # uncounted one.
+            "counted_held_reservations": True,
+            "reservation_reading": reservation_reading,
             "realised_is_provisional": real["realised_is_provisional"],
             "every_effective_rail_was_checked": not unmeasured}
 
