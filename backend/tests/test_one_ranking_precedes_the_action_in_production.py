@@ -422,3 +422,77 @@ async def test_a_held_position_is_serviced_with_manage_still_sending_nothing(
             "DELETE FROM ingestion_state WHERE key = ANY($1::text[])",
             [FA.ACCOUNT_KEY, loop.CONTROL_KEY, loop.HEARTBEAT_KEY])
         await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# M1 IS NOT A SOCKET AWAY, AND THE PRECONDITION MUST NOT BE FLIPPED
+# ═════════════════════════════════════════════════════════════════════
+#
+# Codex executed the module and reported: status M1_NOT_AVAILABLE_ON_THIS_FEED,
+# missing precondition P5_DOCUMENTED_TIMING, production reader carrying no
+# qualifying subscription evidence. All three are confirmed below against the
+# deployed code rather than described.
+#
+# THE SHAPE OF THE GAP MATTERS. P1 (replacement authority), P2 (liveness), P3
+# (continuity), P4 (identity) and P6 (resynchronisation) are available or ours
+# and built. P5 is a property of the PUBLISHED PROTOCOL: the venue documents no
+# as-of instant, no latency bound and no staleness contract, so no amount of
+# subscribing supplies it. Connection engineering is complete; it is not the
+# blocker, and describing this as a socket away from done would be wrong.
+#
+# These tests exist to stop the three shortcuts by which it could be made to
+# look done: flipping the precondition, passing a fabricated subscription, or
+# substituting receipt age for an as-of guarantee.
+
+def test_the_production_reader_supplies_no_qualifying_subscription():
+    got = loop.book_currency_evidence()
+    assert got["subscription"] is None
+    assert got["revalidation"] is None
+    assert got["m1"]["status"] == "M1_NOT_AVAILABLE_ON_THIS_FEED"
+    assert got["m1"]["missing_from_the_feed"] == ["P5_DOCUMENTED_TIMING"], (
+        "P5 must be the ONLY unmet precondition; anything else means the "
+        "connection engineering regressed")
+
+
+def test_p5_is_unavailable_and_says_what_would_establish_it():
+    from sportsassets import bettor_stream_currency as SC
+
+    p5 = SC.PRECONDITION_STATUS[SC.P5_DOCUMENTED_TIMING]
+    assert p5["available"] is False
+    assert p5["this_is_the_binding_precondition"] is True
+    # THE TWO SUPPORTED ALTERNATIVES, from the module rather than from me. The
+    # second is ours to perform and is a MEASUREMENT, not a documentation
+    # change: a read of a demonstrably moving book that separates last-change
+    # from now.
+    assert "transactTime" in p5["what_would_establish_it"]
+    assert "MOVING book" in p5["what_would_establish_it"]
+
+
+def test_every_other_precondition_is_available_so_the_gap_is_not_ours():
+    """Connection engineering being complete is the point: it means the
+    remaining requirement cannot be closed by more of it."""
+    from sportsassets import bettor_stream_currency as SC
+
+    for name, rec in SC.PRECONDITION_STATUS.items():
+        if name == SC.P5_DOCUMENTED_TIMING:
+            continue
+        assert rec["available"] is True, (name, rec.get("why"))
+
+
+def test_receipt_age_is_never_substituted_for_an_as_of_guarantee():
+    """The named forbidden move, and each of these has been one step from
+    standing in for P5 at some point in this file's history."""
+    from sportsassets import bettor_stream_currency as SC
+
+    forbidden = SC.PRECONDITION_STATUS[SC.P5_DOCUMENTED_TIMING][
+        "what_we_must_NOT_do_about_it"]
+    for phrase in ("Transport latency", "receipt instant", "HTTP validator",
+                   "clean reconnect"):
+        assert phrase in forbidden, phrase
+    # AND THE CURRENCY MODULE ITSELF SAYS SO, on the processing-delay field it
+    # does compute: a real interval that cannot establish currency.
+    from sportsassets import bettor_venue_currency as vc
+
+    import inspect
+    src = inspect.getsource(vc)
+    assert "our_processing_delay_is_not_currency" in src
