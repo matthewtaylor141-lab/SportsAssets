@@ -60,6 +60,44 @@ VERSION = "BETTOR_FUNDED_MANAGEMENT_V1"
 #: new -- which is the configuration a pilot winds down in.
 FUNDED_EXIT_SUBMISSION_ENABLED = False
 
+#: THE ACTIONS THIS MODULE'S DISPATCH CAN ACTUALLY SEND.
+#:
+#: `select_exit` has exactly one dispatch branch --
+#: `if sel in ("DIRECT_EXIT", "REDUCE")` -- which computes the wire price,
+#: reserves inventory and reaches `submit_exit`. Every other selectable
+#: action fell straight through it to a `return ok=True, refusal=None`
+#: whose note reads "HOLD chosen by a named rule on observed inputs", so a
+#: TAKE_COMPLEMENT selection was reported as a SUCCESSFUL servicing pass,
+#: mislabelled as HOLD, with no order planned and nothing saying so.
+#:
+#: TAKE_COMPLEMENT, POST_COMPLEMENT, COMPLETE_PAIR and MERGE appear
+#: nowhere else in this module. They are not implemented here, and until
+#: their planner, reservation, wire instruction and reconciliation exist
+#: they must not be selectable on the funded path. This tuple is passed to
+#: `rank_with_hold` so they are ranked, shown and marked ineligible rather
+#: than silently dropped, and `R_ACTION_NOT_EXECUTABLE` below catches any
+#: that reach the dispatch anyway.
+EXECUTABLE_ACTIONS = ("DIRECT_EXIT", "REDUCE")
+
+#: Selected, priced, and not sendable by this module. A REFUSAL, because
+#: ok=True on an action that produced no order is how the gap hid.
+R_ACTION_NOT_EXECUTABLE = "SELECTED_ACTION_HAS_NO_DISPATCH_IN_THIS_MODULE"
+
+#: Still open management-report requirements, named so the absence is a
+#: tracked gap rather than an implicit capability.
+UNIMPLEMENTED_ROUTES = {
+    "TAKE_COMPLEMENT": ("cross to buy the complement. Needs a planner, an "
+                        "inventory reservation, a wire instruction and "
+                        "two-leg reconciliation; and on a netting venue "
+                        "whether it is a second route at all is "
+                        "NOT_ESTABLISHED"),
+    "POST_COMPLEMENT": "rest a complement bid. Needs resting-order lifecycle",
+    "COMPLETE_PAIR": "needs the complement route first",
+    "MERGE": "PMUS_NATIVE_MERGE_AVAILABLE is NOT_IDENTIFIED",
+    "FORM_INDIRECT_HEDGE": ("cross-market structure. Planner, reservations, "
+                            "execution and reconciliation all absent"),
+}
+
 #: Reads. They submit nothing and they stay available whatever the switches say,
 #: because a book that cannot be reconciled is worse than one that cannot trade.
 SETTLEMENT_RECONCILIATION_IS_A_READ = True
@@ -655,7 +693,12 @@ async def select_exit(conn, position, *, client=None, now=None,
         fee_fn=(fee_fn or funded_fee_fn),
         venue=position.get("venue"), us_market_slug=slug,
         held_is_long=(opened_with != SHORT),
-        sale_ladder=sale)
+        sale_ladder=sale,
+        # WHAT THIS FUNCTION CAN ACTUALLY SEND. The dispatch below has one
+        # branch, for DIRECT_EXIT and REDUCE. Declaring it here stops an
+        # action becoming selectable before its execution semantics are
+        # supported -- see EXECUTABLE_ACTIONS.
+        executable_actions=EXECUTABLE_ACTIONS)
     out["ranking"] = {k: ranked.get(k) for k in
                       ("selected", "selected_qty", "selection_reason",
                        "operating_state", "governing_rule", "runner_up",
@@ -727,6 +770,29 @@ async def select_exit(conn, position, *, client=None, now=None,
                     price_source=("the best level of the venue's own exit "
                                   "ladder at the moment of the decision"),
                     why=ranked.get("selection_reason"))
+    # ── THE DISPATCH IS TOTAL, and it was not ────────────────────────
+    #
+    # Anything selected that is not HOLD and not in EXECUTABLE_ACTIONS
+    # reached this return and was reported ok=True with a note claiming
+    # HOLD had been chosen. That is an unexecuted action recorded as a
+    # successful servicing pass. It is now a named refusal.
+    if sel is not None and sel != "HOLD" and sel not in EXECUTABLE_ACTIONS:
+        return dict(out, ok=False, refusal=R_ACTION_NOT_EXECUTABLE,
+                    selected=sel,
+                    selected_qty=(None if qty is None else float(qty)),
+                    assessed_at=decision_at,
+                    is_an_evidenced_exit=False,
+                    executable_actions=list(EXECUTABLE_ACTIONS),
+                    unimplemented_route=UNIMPLEMENTED_ROUTES.get(sel),
+                    why=("the ranking selected %s and this module dispatches "
+                         "only %s. No order was planned, no inventory was "
+                         "reserved and nothing was sent. Reporting this as a "
+                         "completed servicing pass is what hid the gap, so "
+                         "it is a refusal. The position is unchanged and is "
+                         "still held"
+                         % (sel, ", ".join(EXECUTABLE_ACTIONS))),
+                    inventory_untouched=True)
+
     return dict(out, ok=True, refusal=None, selected=sel,
                 selected_qty=(None if qty is None else float(qty)),
                 assessed_at=decision_at,

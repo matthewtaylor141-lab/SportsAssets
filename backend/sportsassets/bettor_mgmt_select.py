@@ -706,7 +706,8 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
                    complement_ask_size=None, fee_fn=None,
                    venue=None, us_market_slug=None, held_is_long=True,
                    sale_ladder=None, resting_order=None,
-                   settlement_semantics=None, fallback_trigger=None) -> dict:
+                   settlement_semantics=None, fallback_trigger=None,
+                   executable_actions=None) -> dict:
     """THE CHALLENGER'S FULL DECISION: what to do, and how much of it.
 
     Every action §2 names is evaluated and the selected field is filled
@@ -1222,7 +1223,8 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
     out["fallback_trigger"] = fallback_trigger
 
     return _choose(out, q, hold_priced=hold_priced,
-                   fallback_trigger=fallback_trigger)
+                   fallback_trigger=fallback_trigger,
+                   executable_actions=executable_actions)
 
 
 def _resting_decision(resting_order, out) -> dict:
@@ -1284,7 +1286,8 @@ FALLBACK_DECLARATION = {
 }
 
 
-def _choose(out, q, *, hold_priced=True, fallback_trigger=None) -> dict:
+def _choose(out, q, *, hold_priced=True, fallback_trigger=None,
+            executable_actions=None) -> dict:
     """Rank, apply the declared tie-breaks, and fill `selected`."""
     # ── the fallback path, taken before anything is ranked ───────────
     if not hold_priced:
@@ -1361,16 +1364,75 @@ def _choose(out, q, *, hold_priced=True, fallback_trigger=None) -> dict:
         # The trigger fired: rank the priced subset, and say so.
         out["fallback_fired"] = True
 
-    cands = [c for c in out["candidates"] if c.get("value_usd") is not None]
+    # ── SELECTION ELIGIBILITY, SEPARATE FROM PRICING ─────────────────
+    #
+    # A candidate may be priced and still be ineligible to WIN. Two
+    # reasons, and both must leave it VISIBLE rather than deleting it:
+    #
+    #  1. NO EXECUTION PATH. `executable_actions`, when the caller
+    #     supplies it, is what the caller's dispatch can actually send.
+    #     `bettor_funded_management.select_exit` dispatches only
+    #     DIRECT_EXIT and REDUCE; a TAKE_COMPLEMENT selection fell
+    #     through its branch and returned ok=True with a note reading
+    #     "HOLD chosen by a named rule", so an unexecutable action was
+    #     reported as a successful servicing pass. An action must not be
+    #     selectable before its execution semantics are supported.
+    #
+    #  2. THE ADVANTAGE RESTS ON UNESTABLISHED LIQUIDITY. A candidate
+    #     carrying `same_liquidity_risk` claims an edge over DIRECT_EXIT
+    #     that depends on the two supplied prices being two executable
+    #     routes -- which is NOT_ESTABLISHED on a netting venue. It may
+    #     not win on that basis. It stays priced and annotated.
+    #
+    # Callers that pass no `executable_actions` are unchanged: the shadow
+    # challenger ranks the full table on purpose.
+    for _c in out["candidates"]:
+        _why = None
+        if (executable_actions is not None
+                and _c["action"] not in executable_actions
+                and _c["action"] != "HOLD"):
+            _why = {
+                "code": "NO_EXECUTION_PATH_IN_THIS_CALLER",
+                "detail": ("this caller's dispatch sends %s; %s has no "
+                           "branch, so selecting it would produce no order "
+                           "and no refusal"
+                           % (", ".join(sorted(executable_actions)) or "nothing",
+                              _c["action"]))}
+        elif _c.get("same_liquidity_risk"):
+            _why = {
+                "code": "ADVANTAGE_RESTS_ON_UNESTABLISHED_LIQUIDITY",
+                "detail": SAME_LIQUIDITY_QUESTION,
+                "missing_evidence": ("that the complement's ask and the long "
+                                     "leg's bid are two executable routes "
+                                     "rather than one book in two notations"),
+                "compare_against": "DIRECT_EXIT"}
+        if _why is not None:
+            _c["selection_eligible"] = False
+            _c["selection_ineligible_because"] = _why
+        else:
+            _c.setdefault("selection_eligible", True)
+
+    out["unqualified"] = [
+        {"action": c["action"], "value_usd": c.get("value_usd"),
+         "because": c["selection_ineligible_because"]}
+        for c in out["candidates"] if c.get("selection_eligible") is False]
+
+    cands = [c for c in out["candidates"]
+             if c.get("value_usd") is not None
+             and c.get("selection_eligible") is not False]
     if not cands:
         out.update(selected=None, selected_qty=None,
                    governing_rule=CHALLENGER_ID,
                    selection_reason=(
-                       "NO ACTION IS PRICED AT ALL. Every candidate is "
-                       "refused with a named blocker: %s. This is a "
-                       "REFUSAL, not an empty selection"
-                       % "; ".join("%s (%s)" % (r["action"], r["blocker"])
-                                   for r in out["not_rankable"])),
+                       "NO ACTION IS BOTH PRICED AND ELIGIBLE. Refused "
+                       "with a named blocker: %s. Priced but ineligible "
+                       "to win: %s. This is a REFUSAL, not an empty "
+                       "selection"
+                       % ("; ".join("%s (%s)" % (r["action"], r["blocker"])
+                                    for r in out["not_rankable"]) or "none",
+                          "; ".join("%s (%s)"
+                                    % (u["action"], u["because"]["code"])
+                                    for u in out["unqualified"]) or "none")),
                    is_a_deliberate_hold=False,
                    operating_state="HOLD_FOR_MISSING_INPUT")
         return out

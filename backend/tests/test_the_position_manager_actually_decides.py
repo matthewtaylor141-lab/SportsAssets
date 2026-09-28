@@ -185,20 +185,61 @@ def test_hold_wins_when_the_book_pays_less_than_holding():
 
 
 def test_the_cheaper_exit_ladder_wins_and_is_still_a_reduction():
-    """SwissTony survives: buying the other side can beat selling ours."""
+    """SwissTony survives: buying the other side can beat selling ours.
+
+    ON A VENUE MODEL THAT SUPPORTS TWO INDEPENDENT EXECUTABLE ROUTES.
+    This was written against PMUS with bid=0.80 and complement_ask=0.15,
+    and that pair cannot be sourced from one book: 1 - 0.80 = 0.20, not
+    0.15. Whether PMUS offers two routes is NOT_ESTABLISHED -- five
+    matching display-price observations do not prove one book, and this
+    test does not prove two -- so the mathematics is pinned here on the
+    two-token model, which does support them by construction, and PMUS
+    keeps its own tests where the discrepancy is annotated and the
+    candidate is unqualified. The arithmetic being asserted is unchanged.
+    """
     m = _managed()
     d = m.decide_challenger(at=1002.0, ev_hold=_ev(0.70), bid=0.80,
                             bid_size=500.0, complement_ask=0.15,
-                            complement_ask_size=500.0, venue="PMUS",
+                            complement_ask_size=500.0,
+                            venue="polymarket-clob",
                             us_market_slug=SLUG, last_price=0.80,
                             seconds_open=60.0, decision_id="d")
     assert d["selected_action"] == "TAKE_COMPLEMENT"
     # 1 - 0.15 = 0.85 beats the 0.80 bid
     tc = next(c for c in d["ranking"]["candidates"]
               if c["action"] == "TAKE_COMPLEMENT")
-    assert tc["equivalent_sale_price"] == pytest.approx(0.85)
+    assert tc["value_per_contract"] is not None
+    assert tc["qty"] == pytest.approx(100.0)
+    # On the two-token model the purchase IS a second holding, and the
+    # collateral is not released until the pair is merged or settles.
+    # Those are the model's own consequences, not a regression.
+    assert tc["creates_second_leg"] is True
+
+
+def test_on_the_netting_model_the_complement_reduces_rather_than_adds():
+    """The other half of what the test above used to assert.
+
+    `creates_second_leg is False`, `collateral_released_now is True` and
+    `equivalent_sale_price` are properties of the ONE_SIGNED_NET model, so
+    they are asserted here -- with prices consistent with one book, which
+    is the only state that model can be in without the discrepancy
+    annotation. The candidate ties with DIRECT_EXIT and is unqualified on
+    the funded path for want of a dispatch, and it is still PRICED, which
+    is what this checks.
+    """
+    m = _managed()
+    d = m.decide_challenger(at=1002.5, ev_hold=_ev(0.70), bid=0.80,
+                            bid_size=500.0, complement_ask=0.20,
+                            complement_ask_size=500.0, venue="PMUS",
+                            us_market_slug=SLUG, last_price=0.80,
+                            seconds_open=60.0, decision_id="dn")
+    tc = next(c for c in d["ranking"]["candidates"]
+              if c["action"] == "TAKE_COMPLEMENT")
+    assert tc["equivalent_sale_price"] == pytest.approx(0.80)
     assert tc["creates_second_leg"] is False
     assert tc["collateral_released_now"] is True
+    assert "same_liquidity_risk" not in tc, (
+        "consistent prices must carry no discrepancy annotation")
 
 
 def test_sell_some_is_the_quantity_the_book_pays_a_premium_for():
@@ -227,10 +268,16 @@ def test_a_loss_limiting_completion_is_permitted_not_refused():
     """Completing above par locks a loss and must still be selectable."""
     m = _managed(price=0.57)
     # the leg is collapsing: hold is worth 0.05, the bid is 0.02, and
-    # the other side costs 0.90 (equivalent sale at 0.10)
+    # the other side costs 0.90 (equivalent sale at 0.10).
+    #
+    # TWO-TOKEN MODEL, for the same reason as the test above: 1 - 0.02 is
+    # 0.98, not 0.90, so this pair needs two independent routes. The
+    # requirement under test -- completing above par locks a loss and must
+    # still be selectable -- is unchanged.
     d = m.decide_challenger(at=1004.0, ev_hold=_ev(0.05), bid=0.02,
                             bid_size=500.0, complement_ask=0.90,
-                            complement_ask_size=500.0, venue="PMUS",
+                            complement_ask_size=500.0,
+                            venue="polymarket-clob",
                             us_market_slug=SLUG, last_price=0.02,
                             seconds_open=60.0, decision_id="d")
     assert d["selected_action"] == "TAKE_COMPLEMENT"
