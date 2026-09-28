@@ -77,16 +77,51 @@ NOT_IDENTIFIED = "NOT_IDENTIFIED"
 #: two different reads of one book.
 NETTING_PRICE_TOLERANCE = 0.001
 
-#: The open question the tolerance above detects. Stated once so every
-#: consumer quotes the same words and nobody resolves it in passing.
-SAME_LIQUIDITY_QUESTION = (
-    "on a ONE_SIGNED_NET venue, are the long leg's bid and the "
-    "complement's ask two executable opportunities or two representations "
-    "of one book? pmus.slug_bid's five-market measurement (short.price == "
-    "1 - bestBid, 5/5) points at one book; bettor_hedge_tax and "
-    "test_the_cheaper_exit_ladder_wins_and_is_still_a_reduction assert the "
-    "complement can genuinely beat the bid. NOT ESTABLISHED. Until it is, "
-    "a discrepancy is REPORTED on the candidate and nothing is refused")
+#: THE QUESTION, NOW ANSWERED BY THE VENUE ITSELF.
+#:
+#: It stood as NOT_ESTABLISHED because neither side had authority: five
+#: matching display-price observations do not prove one book, and the two
+#: tests asserting the complement can beat the bid preserve a design
+#: assumption rather than establishing it. The venue's own documentation
+#: settles it, and settles it in the direction the measurement pointed.
+#:
+#: `docs.polymarket.us/concepts/orders`, retrieved 2026-09-28, sha256
+#: ebe5d70c6820a175e761dbc2a7b88798a292bd45e6dd9397b8a6c78e41299635:
+#:
+#:   "You don't trade YES and NO as separate things. There's only ONE
+#:    INSTRUMENT per market -- the YES side. To trade against an outcome,
+#:    you SELL YES (which is the same as buying NO)."
+#:
+#:   "when you place an order, the price always refers to the YES side.
+#:    If you want to buy NO at $0.40, you're really selling YES at $0.60
+#:    -- the system handles this"
+#:
+#: So on this venue "take the complement" and "sell our long" are not two
+#: routes to compare. THEY ARE THE SAME ORDER ON THE SAME BOOK, quoted in
+#: complementary units. There is exactly one book: the YES book.
+SAME_LIQUIDITY_ESTABLISHED = (
+    "ESTABLISHED, from the venue's own documentation: there is ONE "
+    "instrument per market (the YES side), and buying NO at a is the same "
+    "operation as selling YES at 1-a. So on a ONE_SIGNED_NET venue the "
+    "long leg's bid and the complement's ask are one book quoted two "
+    "ways, not two executable opportunities. A price difference between "
+    "them is not an opportunity -- it is an inconsistency in the inputs")
+
+#: Kept under its old name because callers and stored rows quote it. It no
+#: longer poses a question, and saying it still did would be false.
+SAME_LIQUIDITY_QUESTION = SAME_LIQUIDITY_ESTABLISHED
+
+#: WHY THE TWO TESTS THAT SAID OTHERWISE ARE NOT WRONG, JUST NOT ABOUT
+#: PMUS. `bettor_hedge_tax` and
+#: `test_the_cheaper_exit_ladder_wins_and_is_still_a_reduction` are valid
+#: arithmetic for a venue that DOES publish two independently executable
+#: books -- a TWO_TOKEN venue, where YES and NO are separate instruments.
+#: They are not evidence that PMUS supports them, and on PMUS they do not
+#: apply.
+WHERE_TWO_ROUTES_ARE_REAL = (
+    "a TWO_TOKEN venue, where YES and NO are separate instruments with "
+    "their own books. The unequal-price arithmetic belongs there and is "
+    "kept as a test for that model. It is not evidence about PMUS")
 
 # Actions that need one of OUR orders to rest before they pay anything.
 # Listed here rather than inferred from the name, because POST_COMPLEMENT
@@ -1126,16 +1161,41 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
                 "implied_by_the_bid": _implied,
                 "discrepancy": round(float(complement_ask) - _implied, 6),
                 "tolerance": NETTING_PRICE_TOLERANCE,
-                "question": SAME_LIQUIDITY_QUESTION,
-                "status": "NOT_ESTABLISHED",
+                "question": SAME_LIQUIDITY_ESTABLISHED,
+                "status": "ESTABLISHED_ONE_BOOK",
+                # The two readings are kept, with the resolution stated,
+                # because a row written while this was open is still read
+                # by the same fields and a reader needs to know which way
+                # it went rather than finding the alternatives deleted.
+                "it_is_one_book": ("this candidate and DIRECT_EXIT are the "
+                                   "SAME depth and the difference between "
+                                   "them is not executable. ESTABLISHED"),
+                "it_is_not_two_books": ("the reading in which both prices "
+                                        "are real and the difference is a "
+                                        "genuine opportunity. REFUTED for "
+                                        "this venue"),
+                # Kept under the old keys too: stored rows and readers
+                # matching on them must not break.
                 "if_one_book": ("this candidate and DIRECT_EXIT are the "
                                 "same depth and the difference between "
-                                "them is not executable"),
+                                "them is not executable -- ESTABLISHED, "
+                                "this is the case"),
                 "if_two_books": ("both prices are real and the difference "
-                                 "is a genuine opportunity"),
-                "settled_by": ("reading both marketSides' books in one "
-                               "venue snapshot and comparing; needs venue "
-                               "access")}
+                                 "is a genuine opportunity -- REFUTED for "
+                                 "this venue, which has one instrument per "
+                                 "market"),
+                "settled_by": (
+                    "the venue's own documentation, docs.polymarket.us/"
+                    "concepts/orders retrieved 2026-09-28 (sha256 "
+                    "ebe5d70c6820a175e761dbc2a7b88798a292bd45e6dd9397b8a6c"
+                    "78e41299635): one instrument per market, and buying "
+                    "NO at a is selling YES at 1-a. It did NOT need venue "
+                    "access, which is what I had said it would need"),
+                "what_the_discrepancy_now_means": (
+                    "the two supplied prices are inconsistent. One of the "
+                    "inputs is wrong, stale, or read from a different "
+                    "instant -- and that is worth surfacing, because it is "
+                    "a data defect rather than an opportunity")}
 
     if complement_ask is None:
         out["not_rankable"].append({
@@ -1404,11 +1464,15 @@ def _choose(out, q, *, hold_priced=True, fallback_trigger=None,
     #     reported as a successful servicing pass. An action must not be
     #     selectable before its execution semantics are supported.
     #
-    #  2. THE ADVANTAGE RESTS ON UNESTABLISHED LIQUIDITY. A candidate
-    #     carrying `same_liquidity_risk` claims an edge over DIRECT_EXIT
-    #     that depends on the two supplied prices being two executable
-    #     routes -- which is NOT_ESTABLISHED on a netting venue. It may
-    #     not win on that basis. It stays priced and annotated.
+    #  2. THE ADVANTAGE IS NOT EXECUTABLE, and that is now ESTABLISHED
+    #     rather than unestablished. A candidate carrying
+    #     `same_liquidity_risk` claims an edge over DIRECT_EXIT that
+    #     depends on the two supplied prices being two executable routes.
+    #     The venue documents one instrument per market -- buying NO at
+    #     `a` IS selling YES at `1-a` -- so on a ONE_SIGNED_NET venue they
+    #     are one book quoted two ways and the difference between them is
+    #     an input inconsistency, not an opportunity. It stays priced and
+    #     annotated so the inconsistency is visible.
     #
     # Callers that pass no `executable_actions` are unchanged: the shadow
     # challenger ranks the full table on purpose.
@@ -1426,11 +1490,23 @@ def _choose(out, q, *, hold_priced=True, fallback_trigger=None,
                               _c["action"]))}
         elif _c.get("same_liquidity_risk"):
             _why = {
-                "code": "ADVANTAGE_RESTS_ON_UNESTABLISHED_LIQUIDITY",
-                "detail": SAME_LIQUIDITY_QUESTION,
-                "missing_evidence": ("that the complement's ask and the long "
-                                     "leg's bid are two executable routes "
-                                     "rather than one book in two notations"),
+                # RENAMED, because the basis changed. It was ineligible on
+                # ABSENT evidence; it is now ineligible on PRESENT
+                # evidence, which is a stronger and different claim. The
+                # old code is kept beside it so stored rows and readers
+                # that match on it keep working.
+                "code": "ADVANTAGE_IS_THE_SAME_BOOK_QUOTED_TWICE",
+                "supersedes_code": "ADVANTAGE_RESTS_ON_UNESTABLISHED_LIQUIDITY",
+                "detail": SAME_LIQUIDITY_ESTABLISHED,
+                "established_by": (
+                    "the venue's documentation: 'There's only one "
+                    "instrument per market -- the YES side… If you want to "
+                    "buy NO at $0.40, you're really selling YES at $0.60'"),
+                "so_the_difference_is": (
+                    "an inconsistency between the two supplied prices, not "
+                    "an executable edge. Acting on it would count one piece "
+                    "of depth twice"),
+                "where_two_routes_are_real": WHERE_TWO_ROUTES_ARE_REAL,
                 "compare_against": "DIRECT_EXIT"}
         if _why is not None:
             _c["selection_eligible"] = False

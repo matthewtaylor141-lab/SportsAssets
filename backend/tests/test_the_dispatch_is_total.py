@@ -97,18 +97,40 @@ def test_a_caller_that_declares_nothing_is_unchanged():
 
 # ── 3 · THE UNESTABLISHED ADVANTAGE CANNOT WIN EITHER ────────────────
 
-def test_an_advantage_resting_on_unestablished_liquidity_is_unqualified():
+def test_an_advantage_that_is_one_book_quoted_twice_is_unqualified():
+    """The code changed with its basis: absence of evidence -> evidence.
+
+    It read ADVANTAGE_RESTS_ON_UNESTABLISHED_LIQUIDITY, which was accurate
+    while neither reading had authority. The venue documents one
+    instrument per market, so the claim is now refuted rather than
+    unestablished -- a stronger and different statement, and it gets its
+    own code.
+    """
     r = _rank(executable=None, venue="polymarket-us", ask=0.50)
     assert _unq(r)["TAKE_COMPLEMENT"] == \
-        "ADVANTAGE_RESTS_ON_UNESTABLISHED_LIQUIDITY"
+        "ADVANTAGE_IS_THE_SAME_BOOK_QUOTED_TWICE"
+    # THE DIRECT EXIT STILL WINS. Containment must not strand inventory.
     assert r["selected"] == "DIRECT_EXIT"
 
 
-def test_the_ineligibility_names_the_exact_missing_evidence():
+def test_the_old_code_is_still_discoverable_for_stored_rows():
+    """Rows written before this change carry the old code."""
     r = _rank(executable=None, venue="polymarket-us", ask=0.50)
     why = next(u for u in r["unqualified"]
                if u["action"] == "TAKE_COMPLEMENT")["because"]
-    assert "two executable routes" in why["missing_evidence"]
+    assert why["supersedes_code"] == \
+        "ADVANTAGE_RESTS_ON_UNESTABLISHED_LIQUIDITY"
+
+
+def test_the_ineligibility_names_what_established_it():
+    r = _rank(executable=None, venue="polymarket-us", ask=0.50)
+    why = next(u for u in r["unqualified"]
+               if u["action"] == "TAKE_COMPLEMENT")["because"]
+    # NOT "missing evidence" any more -- there is no evidence missing.
+    assert "missing_evidence" not in why
+    assert "one instrument per market" in why["established_by"]
+    assert "count one piece of depth twice" in why["so_the_difference_is"]
+    assert "TWO_TOKEN" in why["where_two_routes_are_real"]
     assert why["compare_against"] == "DIRECT_EXIT"
 
 

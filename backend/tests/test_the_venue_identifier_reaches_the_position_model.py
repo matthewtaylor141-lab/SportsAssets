@@ -375,34 +375,66 @@ def test_the_tie_is_broken_toward_the_plain_sale_not_the_complement():
     (0.50, "6c better than one book would allow"),
     (0.60, "4c worse than one book would allow"),
 ])
-def test_an_inconsistent_complement_price_is_annotated_not_refused(ask, label):
-    """NOT refused. My one-book inference does not reach far enough.
+def test_an_inconsistent_complement_price_is_annotated_and_ineligible(
+        ask, label):
+    """STILL PRICED AND ANNOTATED -- and now ineligible on EVIDENCE.
 
-    `bettor_hedge_tax` states, and
-    test_the_cheaper_exit_ladder_wins_and_is_still_a_reduction pins on
-    PMUS, that buying the complement can genuinely beat selling. That is a
-    tested requirement. The five-market measurement behind the one-book
-    reading shows what the market RECORD's display fields contain, not
-    whether the two sides rest on independent books -- so the discrepancy
-    is reported and nothing is blocked.
+    This test's docstring used to say my one-book inference did not reach
+    far enough, and cited the two tests asserting the complement can beat
+    the bid. That was the right call on the evidence then: a measurement
+    of display fields does not establish the matching model, and neither
+    do tests that encode a design assumption.
+
+    The venue's documentation does establish it -- one instrument per
+    market, buying NO at a is selling YES at 1-a -- so a gap between the
+    bid and the complement's ask on a netting venue is an INPUT
+    INCONSISTENCY. The candidate is still computed and still annotated,
+    because a visible inconsistency is how the bad input gets found; it is
+    simply not allowed to win on a difference that cannot be executed.
     """
     r = _rank(bid=0.44, ask=ask, venue=NETTING)
     got = _by_action(r)
     assert "TAKE_COMPLEMENT" in got, label
-    risk = got["TAKE_COMPLEMENT"]["same_liquidity_risk"]
-    assert risk["status"] == "NOT_ESTABLISHED"
+    c = got["TAKE_COMPLEMENT"]
+    risk = c["same_liquidity_risk"]
+    assert risk["status"] == "ESTABLISHED_ONE_BOOK"
     assert risk["implied_by_the_bid"] == pytest.approx(0.56)
     assert risk["supplied_complement_ask"] == pytest.approx(ask)
-    assert got["TAKE_COMPLEMENT"]["compare_against"] == "DIRECT_EXIT"
+    assert c["compare_against"] == "DIRECT_EXIT"
+    # PRICED, not dropped -- the value is still there to compare.
+    assert c.get("value_usd") is not None
+    # AND INELIGIBLE, on the venue's mechanics rather than on absence.
+    assert c["selection_eligible"] is False
+    why = c["selection_ineligible_because"]
+    assert why["code"] == "ADVANTAGE_IS_THE_SAME_BOOK_QUOTED_TWICE"
+    assert why["supersedes_code"] == \
+        "ADVANTAGE_RESTS_ON_UNESTABLISHED_LIQUIDITY"
+    assert "one instrument per market" in why["established_by"]
 
 
-def test_the_annotation_states_both_readings_and_how_to_settle_it():
+def test_the_annotation_records_which_reading_the_venue_settled_it_as():
+    """THE QUESTION IS CLOSED, and this test moved with the evidence.
+
+    It used to assert `NOT ESTABLISHED` and `venue access` in
+    `settled_by`, and both were right when neither side had authority.
+    `docs.polymarket.us/concepts/orders` settles it -- one instrument per
+    market, buying NO at a is selling YES at 1-a -- WITHOUT venue access,
+    which is the specific thing I had said would be needed.
+    """
     got = _by_action(_rank(bid=0.44, ask=0.50, venue=NETTING))
     risk = got["TAKE_COMPLEMENT"]["same_liquidity_risk"]
-    assert "same depth" in risk["if_one_book"]
-    assert "genuine opportunity" in risk["if_two_books"]
-    assert "venue access" in risk["settled_by"]
-    assert "NOT ESTABLISHED" in risk["question"]
+    assert risk["status"] == "ESTABLISHED_ONE_BOOK"
+    assert "ESTABLISHED" in risk["it_is_one_book"]
+    assert "REFUTED" in risk["it_is_not_two_books"]
+    assert "concepts/orders" in risk["settled_by"]
+    assert "did NOT need venue access" in risk["settled_by"]
+    # AND BOTH READINGS SURVIVE UNDER THEIR OLD KEYS, so a row written
+    # while this was open is still readable by the same fields.
+    assert "ESTABLISHED" in risk["if_one_book"]
+    assert "REFUTED" in risk["if_two_books"]
+    # The discrepancy is now a DATA DEFECT, which is still worth seeing.
+    assert "data defect rather than an opportunity" in risk[
+        "what_the_discrepancy_now_means"]
 
 
 def test_a_consistent_pair_carries_no_annotation():
@@ -416,12 +448,27 @@ def test_the_two_token_venue_is_never_annotated():
     assert "same_liquidity_risk" not in got["TAKE_COMPLEMENT"]
 
 
-def test_the_open_question_is_stated_once_for_every_consumer():
+def test_the_settled_finding_is_stated_once_for_every_consumer():
     from sportsassets import bettor_mgmt_select as _MS
-    q = _MS.SAME_LIQUIDITY_QUESTION
-    assert "NOT ESTABLISHED" in q
-    assert "nothing is refused" in q
-    assert "bettor_hedge_tax" in q
+    q = _MS.SAME_LIQUIDITY_ESTABLISHED
+    assert q.startswith("ESTABLISHED")
+    assert "one book quoted two ways" in q
+    assert "not an opportunity" in q
+    # The old name still resolves, because callers quote it.
+    assert _MS.SAME_LIQUIDITY_QUESTION is q
+
+
+def test_the_two_tests_that_said_otherwise_are_placed_not_deleted():
+    """They are valid arithmetic -- for a venue that has two books.
+
+    Owner instruction: "Keep the unequal-price example as a mathematical
+    test for a venue model that explicitly supports independent executable
+    routes. It is not evidence that PMUS supports them."
+    """
+    from sportsassets import bettor_mgmt_select as _MS
+    w = _MS.WHERE_TWO_ROUTES_ARE_REAL
+    assert "TWO_TOKEN" in w
+    assert "not evidence about PMUS" in w
 
 
 def test_the_guard_does_not_fire_when_only_one_price_is_present():
