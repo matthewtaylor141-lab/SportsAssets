@@ -22,7 +22,41 @@ My execution environment **cannot remain active unattended.** This session runs 
 | Deploy id | `dep-dastvnojo6nc73de4csg`, `HTTP 201`, by commit id |
 | Route | `render-ops → deploy-api-commit` — API-only by construction |
 | **Protected worker** | `f5d1c05` live **before and after**, verified in the deploy log |
-| Serving SHA readback | *§7 — the build was still compiling at last read* |
+| **Serving SHA readback** | `commit: "f9f63d8"`, new `boot_id: 37184746`, `db_ok: true`, `uptime_s: 115.7` |
+| **Completed cycle on that build** | **`2026-09-28 03:36:51.026033+00`** |
+
+### The readback surfaced a blocker for the Command Centre itself
+
+`/healthz` on the new build returns:
+
+```
+"auth_not_configured": ["desk_password"], "auth_all_configured": false
+```
+
+**The desk password is not configured on the service, so nobody can sign in.** The page serves, it is correctly gated, and the sign-in will reject every attempt. That makes the Command Centre URL reachable but **not yet usable**, and it is one command to fix with a value only you should choose:
+
+```
+render-ops → action: env-set → service: sportsassets-api
+             arg: BETTOR_DESK_PASSWORD=<value you choose>   confirm: DO
+```
+
+*(Confirm the exact key name with `render-ops → env-keys` first — `healthz` names the setting `desk_password`, and I have not verified the environment variable's spelling.)*
+
+I did not set it: it is a credential, and choosing one on your behalf is not a routine reversible engineering decision.
+
+### The scheduled cycle, read back on the serving build
+
+| | |
+|---|---|
+| Cycle completed at | **2026-09-28 03:36:51.026033+00** |
+| Writer build | **`f9f63d8dce19f384598cd43ef62b1a74de5eaaf6`** — the exact deployed SHA |
+| Loop source hash | `b74d2fb91b75` (was `1ccd667f5aac` on `ad95d69`) |
+| State | `LIVE` |
+| Label | `ZERO_EVALUATED__INPUT_PATH_BLOCKED` |
+| `carries_a_servicing_decision` | **`t`** — the new field is present, which it was not on `ad95d69` |
+| `servicing` | `null` |
+
+**A cycle started and finished on the exact build that was gated and deployed.** The servicing digest is `null` and that is correct rather than missing: `_funded_service` returns `None` when no funded account is bound, and the digest maps `None → None` instead of inventing an empty decision set. The field's *presence* is what proves the new persistence took effect.
 
 **I cannot verify the authenticated operator page's data.** It requires the desk token, which I do not hold and will not ask for in chat. What I verified is that the page is reachable, gated, and separates read from control credentials.
 
