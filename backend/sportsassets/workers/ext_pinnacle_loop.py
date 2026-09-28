@@ -4414,9 +4414,25 @@ def _venue_sdk_digest() -> dict:
 
 
 def _max_dispatches():
+    """The per-read dispatch budget, READ FROM `venue_sdk`, NOT FROM `pmus`.
+
+    THE CONTAINMENT THIS RESPECTS. Two tests walk this module's AST and
+    assert that the only attributes taken off `pmus` are `book_read` and
+    `_get_client` -- because `pmus` also defines the funded order submitter,
+    and an entry lane that can reach it is one careless refactor from
+    submitting. Reading a constant off it broke that, and the failing tests
+    were right: the rule is about the reachable surface, not about intent.
+
+    AND THE SUBMITTER IS NOT NAMED IN THIS COMMENT, deliberately. A sibling
+    test asserts by plain string search that this module's source contains
+    none of the funded call names, precisely because an AST check can be
+    fooled by a call built from a string. Writing the name in prose to
+    explain the rule set off the rule -- correctly. The reasoning is the
+    useful part; the token is not.
+    """
     try:
-        from .. import pmus
-        return pmus.BOOK_READ_MAX_DISPATCHES
+        from .. import venue_sdk
+        return venue_sdk.BOOK_READ_MAX_DISPATCHES
     except Exception:                                          # noqa: BLE001
         return None
 

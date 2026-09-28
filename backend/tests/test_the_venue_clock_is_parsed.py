@@ -287,7 +287,84 @@ def test_a_minutes_old_cached_snapshot_received_one_second_ago_is_not_fresh():
     # RENAMED with the RFC 9111 4.2.3 repair: the label named the
     # arithmetic that was removed.
     assert verdict["contradicted_by"] == "HTTP_AGE_OUTSIDE_THE_BOUND"
-    assert verdict["origin_generation_age_s"] == pytest.approx(302.0, abs=0.1)
+    # ── 301, NOT 302: THIS ASSERTION WAS STALE ───────────────────────
+    #
+    # It read 302.0 = the Date-based estimate (2 s) PLUS the `Age` header
+    # (300 s) -- the double-count the RFC 9111 4.2.3 repair removed. Those
+    # are two independent lower bounds on the SAME interval, and the
+    # evaluator now takes the larger of them and never their sum. The line
+    # above was updated by that repair (the label was renamed) and this
+    # number was not, so the test went on pinning the arithmetic the repair
+    # deleted. A test may record an open question; it must not keep a
+    # corrected defect alive.
+    #
+    # 301 rather than 300 because the `Age` value is re-aged to `now`:
+    # `Age` is the payload's age when the response LEFT THE CACHE, and it
+    # kept ageing for the 1 s it sat with us. That residency is RFC 9111
+    # 4.2.3's `resident_time`, it is a DIFFERENT interval from the one
+    # `Age` measures, and adding it is not the double-count -- the
+    # intervals are disjoint (origin -> cache-exit, then receipt -> now).
+    assert verdict["origin_generation_age_s"] == pytest.approx(301.0, abs=0.1)
+    assert verdict["origin_generation_age_from"] == "AGE_HEADER_LOWER_BOUND"
+    assert verdict["age_header_resident_time_s"] == pytest.approx(1.0, abs=0.1)
+    assert verdict["age_header_was_re_aged"] is True
+
+
+def test_the_age_header_is_re_aged_to_the_decision_instant():
+    """A cached book just inside the bound, plus our residency, is outside it.
+
+    `Age: 29` against a 30 s bound looks admissible. The response left the
+    cache 5 s before this decision, so the payload is 34 s old and the
+    response's own headers say so.
+
+    WHAT THIS DOES AND DOES NOT CHANGE, measured against 4ef37a7 rather
+    than reasoned about. Before: 29 s, NOT_ESTABLISHED, `admits: False`.
+    After: 34 s, CONTRADICTED, `admits: False`. So this is NOT an admission
+    being closed -- the partial path admits nothing either way. It is the
+    reported AGE becoming right and the refusal moving from "we cannot
+    tell" to "the contract says it is too old", which are different facts
+    about the venue and decide different investigations.
+    """
+    import email.utils
+
+    from sportsassets import bettor_venue_currency as vc
+
+    now = 1_700_000_000.0
+    cached = {"headers": {
+        "date": email.utils.formatdate(now - 1.0, usegmt=True),
+        "age": "29",
+        "x-cache": "HIT"}}
+    v = vc.evaluate(now=now, observation=cached, venue_ts=now - 1.0,
+                    our_receipt_at=now - 5.0, bound_s=30.0)
+    assert v["origin_generation_age_s"] == pytest.approx(34.0, abs=0.1), (
+        "the Age header was not re-aged by our residency")
+    assert v["verdict"] == vc.CONTRADICTED
+    assert vc.admits(v) is False
+    assert v["age_header_resident_time_s"] == pytest.approx(5.0, abs=0.1)
+
+
+def test_an_age_header_with_no_receipt_instant_says_it_understates():
+    """No receipt instant means the residency is unmeasured, and it is named.
+
+    The figure is then a lower bound known to be short by an unknown
+    amount. Reporting it as though it were the age is the same class of
+    error as reporting a reduced rate as a prohibition: a number that is
+    not what its name says.
+    """
+    import email.utils
+
+    from sportsassets import bettor_venue_currency as vc
+
+    now = 1_700_000_000.0
+    cached = {"headers": {
+        "date": email.utils.formatdate(now - 1.0, usegmt=True),
+        "age": "29", "x-cache": "HIT"}}
+    v = vc.evaluate(now=now, observation=cached, venue_ts=now - 1.0,
+                    our_receipt_at=None, bound_s=30.0)
+    assert v["origin_generation_age_s"] == pytest.approx(29.0, abs=0.1)
+    assert v["age_header_was_re_aged"] is False
+    assert "unknown residency" in v["origin_generation_age_understates_by"]
+    assert vc.admits(v) is False
 
 
 def test_a_fast_read_with_no_venue_timestamp_and_no_headers_is_unestablished():

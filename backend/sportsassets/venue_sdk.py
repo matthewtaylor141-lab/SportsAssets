@@ -84,6 +84,24 @@ PINNED = "1.0.2"
 #: Retries we ask the SDK NOT to perform, because we perform them.
 OUR_MAX_RETRIES_KWARG = {"max_retries": 0}
 
+#: How many actual dispatches ONE logical book read may make, ours included.
+#:
+#: Two, not three: the second exists because a single 429 or a dropped
+#: connection is often transient and a decision deadline usually has room
+#: for one more try; a third mostly spends the deadline to learn the same
+#: thing. The SDK's own default (3) is disabled above, so this is the whole
+#: budget rather than a multiplier on top of it.
+#:
+#: IT LIVES HERE RATHER THAN IN `pmus`, for a containment reason that is not
+#: cosmetic. `ext_pinnacle_loop` may take ONLY `book_read` and `_get_client`
+#: off `pmus` -- two tests assert it by walking the loop's AST -- because the
+#: same module defines `submit_fok`, and an entry lane that can reach the
+#: order submitter is one refactor away from submitting. Reading a constant
+#: was a harmless-looking way to widen exactly that surface. The retry budget
+#: is part of the retry policy, which is what this module is, so this is also
+#: where it belongs.
+BOOK_READ_MAX_DISPATCHES = 2
+
 #: Read out of 1.0.2's `_retry` module. Recorded so a version bump that
 #: changes them shows up as a disagreement rather than as behaviour.
 EXPECTED_RETRYABLE_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})

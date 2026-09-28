@@ -590,14 +590,66 @@ def evaluate(*, now, observation=None, subscription=None, revalidation=None,
         # the max is a no-op there rather than a second application.
         _alb = contract.get("age_lower_bound_s")
         if contract.get("http_age_is_partial") and _alb is not None:
-            if float(_alb) > gen_age:
+            # ── AND THE `Age` VALUE IS RE-AGED TO `now` ───────────────
+            #
+            # A DEFECT FOUND BY MEASURING THIS BRANCH (2026-09-28). `Age`
+            # states how old the payload was WHEN THE RESPONSE LEFT THE
+            # CACHE. It keeps ageing after that, and using the raw header
+            # value silently treats our own residency as zero.
+            #
+            # WHAT THIS DOES *NOT* FIX, stated because I first wrote that it
+            # did. It does not close an admission. Measured against
+            # 4ef37a7: `Age: 29` with 5 s of residency and a 30 s bound
+            # reported 29 s and returned NOT_ESTABLISHED with
+            # `admits: False` -- this partial path does not admit anything,
+            # so no stale book was reaching a decision through it.
+            #
+            # WHAT IT DOES FIX. Two things an operator reads. The AGE is now
+            # right (34 s, not 29 s), and the REFUSAL REASON changes from
+            # NOT_ESTABLISHED to CONTRADICTED -- from "we cannot tell" to
+            # "the response's own headers say it is too old". Those are
+            # different facts about the venue, and the candidate ledger is
+            # the place where that difference decides what gets
+            # investigated.
+            #
+            # THIS IS NOT THE DOUBLE-COUNT THE EARLIER REPAIR REMOVED, and
+            # the distinction is the whole point. That one added `Age` to the
+            # DATE-BASED ESTIMATE -- two measurements of the SAME interval
+            # (origin -> now), so their sum counted it twice. This adds the
+            # interval from OUR RECEIPT to now, which `Age` does not cover at
+            # all: origin -> cache-exit, then receipt -> now. Disjoint
+            # intervals, so the sum is the age. It is RFC 9111 4.2.3's
+            # `resident_time`, and leaving it out was the omission.
+            _resident = (None if our_receipt_at is None
+                         else max(0.0, float(now) - float(our_receipt_at)))
+            _alb_now = float(_alb) + (_resident or 0.0)
+            if _alb_now > gen_age:
                 out["origin_generation_age_from"] = "AGE_HEADER_LOWER_BOUND"
                 out["origin_generation_age_why"] = (
-                    "the `Age` header (%.0f s) exceeds the Date-based "
-                    "estimate (%.1f s), so the two clocks disagree and the "
-                    "LARGER lower bound is used. They are never added"
-                    % (float(_alb), gen_age))
-                gen_age = float(_alb)
+                    "the `Age` header (%.0f s) re-aged by our residency "
+                    "(%s s) gives %.1f s, which exceeds the Date-based "
+                    "estimate (%.1f s). The two clocks disagree, so the "
+                    "LARGER lower bound is used. The two ESTIMATES of the "
+                    "same interval are never added; the residency is a "
+                    "different interval and is"
+                    % (float(_alb),
+                       "unknown" if _resident is None
+                       else "%.1f" % _resident,
+                       _alb_now, gen_age))
+                out["age_header_resident_time_s"] = (
+                    None if _resident is None else round(_resident, 3))
+                out["age_header_was_re_aged"] = bool(_resident is not None)
+                if _resident is None:
+                    # NO RECEIPT INSTANT MEANS NO RESIDENCY, and the figure
+                    # is then a lower bound that is known to be short by an
+                    # unmeasured amount. Said, rather than presented as the
+                    # age.
+                    out["origin_generation_age_understates_by"] = (
+                        "an unknown residency: no receipt instant was "
+                        "supplied, so the interval between the response "
+                        "leaving the cache and this decision is not "
+                        "measured and could not be added")
+                gen_age = _alb_now
             else:
                 out["origin_generation_age_from"] = "DATE_BASED_ESTIMATE"
         out["origin_generation_age_is_partial"] = bool(

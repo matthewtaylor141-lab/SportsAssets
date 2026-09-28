@@ -975,13 +975,17 @@ def bbo_read(client, us_slug: str) -> dict:
     return out
 
 
-#: How many actual dispatches ONE logical book read may make, ours
-#: included. Two, not three: the second exists because a single 429 or a
-#: dropped connection is often transient and a decision deadline usually
-#: has room for one more try; a third mostly spends the deadline to learn
-#: the same thing. The SDK's own default (3) is disabled in `_get_client`,
-#: so this is the whole budget rather than a multiplier on top of it.
-BOOK_READ_MAX_DISPATCHES = 2
+#: The dispatch budget for one logical book read. DEFINED IN `venue_sdk`,
+#: re-exported here so the existing call site and its tests keep reading it
+#: from the module that uses it.
+#:
+#: WHY IT MOVED. `ext_pinnacle_loop` needs this number for its heartbeat, and
+#: reading `pmus.BOOK_READ_MAX_DISPATCHES` broke a containment two tests
+#: assert by walking the loop's AST: the loop may take ONLY `book_read` and
+#: `_get_client` off this module, because this module also defines
+#: `submit_fok`. A constant is a harmless-looking way to widen exactly the
+#: surface that containment exists to keep narrow.
+from .venue_sdk import BOOK_READ_MAX_DISPATCHES  # noqa: E402
 
 #: HTTP statuses where a second dispatch can plausibly answer differently.
 #: 404 and 400 are answers about the market, not transient conditions, and
