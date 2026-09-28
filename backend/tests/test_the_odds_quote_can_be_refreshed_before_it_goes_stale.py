@@ -19,10 +19,26 @@ paced reads before its decision instant and `received_at` is stamped once
 per sport, so event N carries a quote aged by every preceding event's
 reads. Concurrency cannot fix that; the gate would serialise it anyway.
 
-SO THE ONLY LEVER IS HOW MANY EVENTS SHARE ONE FETCH, AND IT IS PAID FOR
-IN CREDITS. These tests pin both halves of that: the default must spend
-nothing extra, and a lowered setting must actually refresh the prices --
-not just the timestamp, which would be a false freshness certificate.
+THIS FILE ONCE CLAIMED THIS WAS THE ONLY LEVER. WITHDRAWN (2026-09-28).
+It read "SO THE ONLY LEVER IS HOW MANY EVENTS SHARE ONE FETCH, AND IT IS
+PAID FOR IN CREDITS", and both halves were overstated:
+
+  * NOT THE ONLY LEVER. Three others exist and none of them costs a
+    credit: skipping candidates already past the limit before spending
+    their venue read (so they stop making their successors stale),
+    ordering events freshest-first, and sharing one venue read between
+    two provider events that resolve to the same instrument. All three
+    are implemented and measured -- see
+    `test_the_latency_levers_are_wired_and_measured`.
+  * AND THE CREDIT COST WAS MATERIALLY OVERSTATED. Production reports
+    `credits_remaining 6,438,238` against ~5,760/day of use: roughly
+    1,100 days of headroom. Presenting the re-fetch as a resource
+    decision the owner had to weigh was wrong.
+
+What remains true is the mechanism: at the default this knob spends
+nothing extra, and a lowered setting must refresh the PRICES and not
+merely the timestamp -- which would be a false freshness certificate.
+Those two halves are what this file pins.
 """
 
 import pytest

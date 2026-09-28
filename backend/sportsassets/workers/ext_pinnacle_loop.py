@@ -164,6 +164,51 @@ R_NO_TABLE = "EXTERNAL_VALUATIONS_TABLE_ABSENT"
 R_VENUE_RULE_UNKNOWN = "VENUE_SETTLEMENT_RULE_NOT_ESTABLISHED"
 R_NO_VENUE_QUOTE = "NO_CONTEMPORANEOUS_VENUE_QUOTE"
 R_VENUE_QUOTE_STALE = "VENUE_QUOTE_STALE"
+
+def _median(xs):
+    """The middle value, or None on an empty sample.
+
+    None RATHER THAN 0.0, and the distinction is the whole point: a cycle
+    that evaluated nothing has NO measured delay, and 0.0 would read as
+    instant -- the best-looking figure in the table, produced by measuring
+    nothing at all.
+    """
+    v = sorted(float(x) for x in (xs or ()) if x is not None)
+    if not v:
+        return None
+    m = len(v) // 2
+    return round(v[m] if len(v) % 2 else (v[m - 1] + v[m]) / 2.0, 3)
+
+
+def _maxof(xs):
+    """The worst sample, or None if there are none.
+
+    Carried beside the median so a single large outlier stays VISIBLE. A
+    median alone would let one 400-second stall disappear, and that stall
+    is exactly the kind of event an operator needs to see.
+    """
+    v = [float(x) for x in (xs or ()) if x is not None]
+    return round(max(v), 3) if v else None
+
+
+#: LEVER A's refusal. Its own code, deliberately NOT folded into
+#: `QUOTE_STALE`: the two say different things. `QUOTE_STALE` means the
+#: quote aged out somewhere between arrival and the decision -- which is
+#: the case our own delay can cause and the case the latency work has to
+#: reduce. This one means it was ALREADY outside the limit before we spent
+#: a single venue read on it, so no amount of speed on our side would have
+#: saved it. Counting them together would make the levers look effective
+#: by moving cases from one bucket into an indistinguishable one.
+R_QUOTE_STALE_ON_ARRIVAL = "QUOTE_STALE_ON_ARRIVAL"
+
+WHY_SKIPPED_ON_ARRIVAL = (
+    "the provider's quote was already older than the 30 s rule at the "
+    "moment this candidate came up, before any venue read. The venue read "
+    "and its pacing gap were not spent, because the decision gate could "
+    "not have admitted the candidate and the read would have added its "
+    "delay to every candidate after this one. The LIMIT IS UNCHANGED -- "
+    "this is the same PINNACLE_MAX_AGE_S the decision gate applies, "
+    "checked earlier, not a tighter bound")
 #: WHAT `marketData.transactTime` MEANS -- AND THIS IS NOT YET ESTABLISHED.
 #:
 #: The gate below computes `decision_instant - transactTime` and refuses
@@ -3138,6 +3183,27 @@ async def cycle(conn) -> dict:
     odds_refetches = 0
     odds_refetch_failures = 0
 
+    # ── THE LATENCY MEASUREMENT, ACCUMULATED OVER THE WHOLE CYCLE ──────
+    #
+    # Owner requirement: "Measure provider age, our added delay, request
+    # counts, valid evaluations and refusals on the deployed path. Show
+    # whether the previously self-inflicted stale cases decrease."
+    #
+    # PROVIDER LAG AND OUR OWN DELAY STAY APART. `pinnacle_age_s` is their
+    # SUM and the 30 s rule governs the sum -- unchanged by any of this.
+    # But the remedies differ and only the second is ours, so a single
+    # aggregate age would hide whether the levers below did anything.
+    #
+    # `self_inflicted_stale` is the number that has to move: a refusal
+    # where the provider handed us a quote that was INSIDE the limit and
+    # our own accumulated processing pushed it outside. Counted at the
+    # decision, from clocks on the record, never estimated.
+    lat = {"provider_lag_samples": [], "our_delay_samples": [],
+           "age_samples": [], "valid_evaluations": 0, "stale_refusals": 0,
+           "self_inflicted_stale": 0, "provider_stale_on_arrival": 0,
+           "skipped_stale_on_arrival": 0, "deduplicated_requests": 0,
+           "venue_requests": 0}
+
     # THE OPEN BOOK, READ ONCE PER CYCLE. The risk rails are measured
     # against it plus the position being proposed, so it has to be read
     # before any candidate is evaluated. None means the read FAILED, and
@@ -3200,6 +3266,53 @@ async def cycle(conn) -> dict:
         # a fresh payload would have been fetched, paid for, and then
         # ignored for every event but the current one.
         events = list(got["events"] or [])
+
+        # ── LEVER B · FRESHEST FIRST ────────────────────────────────
+        #
+        # The accumulated delay falls on whoever is evaluated LAST, so the
+        # order decides which candidates survive it. Sorting by the
+        # PROVIDER'S own `last_update` -- newest first -- spends the early,
+        # low-delay slots on the quotes with the most headroom.
+        #
+        # THIS MOVES NO LIMIT AND DROPS NOTHING. The same events are
+        # considered; only the order changes. An event with no readable
+        # timestamp sorts LAST rather than first, because an unknown age
+        # must not be handed the freshest slot -- that would be the
+        # favourable assumption.
+        #
+        # AND IT IS NOT A SELECTION RULE. It does not prefer better
+        # candidates, richer markets or anything economic. It prefers
+        # FRESHER DATA, which is a property of the observation and not of
+        # the opportunity.
+        def _prov_epoch(e):
+            q = pinnacle_h2h(e, received_at=received_at)
+            return _quote_epoch(q) if q is not None else None
+
+        _ages = {id(e): _prov_epoch(e) for e in events}
+        events.sort(key=lambda e: (_ages[id(e)] is None,
+                                   -(_ages[id(e)] or 0.0)))
+
+        # ── LEVER C · WITHIN-CYCLE DEDUPLICATION ────────────────────
+        #
+        # WHAT COUNTS AS EQUIVALENT, and it is narrow on purpose: the same
+        # `(us_market_slug, intent)`. That pair IS the instrument -- one
+        # venue contract, one side of it. Two provider events that resolve
+        # to it would issue two identical paced venue reads for one book.
+        #
+        # WHAT IS *NOT* DEDUPLICATED, because the owner's instruction is
+        # exact ("Deduplicate only equivalent requests; retain correct
+        # instrument identity and observation times"):
+        #   * NOT by condition_id alone -- that is the market, and the two
+        #     sides of it are two different ladders.
+        #   * NOT by event -- one event carries several markets.
+        #   * NOT the PROVIDER quote. Each event keeps its own
+        #     `observed_at`, and the reused venue book is re-aged against
+        #     the SECOND candidate's own decision instant, so a shared read
+        #     cannot lend its freshness to a later decision.
+        #
+        # The cache is per SPORT FETCH, not per cycle, because
+        # `received_at` is stamped per fetch.
+        vq_cache: dict = {}
         for _i in range(len(events)):
             if evaluated >= MAX_PER_CYCLE:
                 break
@@ -3288,6 +3401,64 @@ async def cycle(conn) -> dict:
                         "why": _sanitize(ident.get("why") or "", limit=200)})
                 continue
 
+            # ── LEVER A · SKIP WHAT IS ALREADY PAST THE LIMIT ───────
+            #
+            # Checked HERE: after the free work (parse, map, identity) and
+            # BEFORE the paced venue read, which is the expensive step and
+            # the one that adds most of our own delay.
+            #
+            # THE LIMIT IS UNCHANGED. This is `PINNACLE_MAX_AGE_S`, the
+            # odds source's own 30 s rule, compared against the same
+            # provider epoch the decision gate will compare. No tighter
+            # bound, no margin, no forecast of how long the read will take
+            # -- a candidate is skipped only when it is ALREADY outside the
+            # limit at this instant, so the decision gate could not
+            # possibly admit it.
+            #
+            # WHY THIS IS NOT A REFUSAL BEING HIDDEN. The refusal still
+            # happens and is still counted: `QUOTE_STALE_ON_ARRIVAL` is
+            # tallied by name and the candidate is written to the ledger
+            # exactly as a late-stage staleness refusal would be. What is
+            # saved is the venue read, the pacing gap it costs, and -- the
+            # point -- the delay that read would have added to every
+            # candidate AFTER this one. A doomed candidate currently makes
+            # its successors stale too.
+            #
+            # AND IT IS PROVIDER STALENESS, NOT OURS. At this instant our
+            # own contribution is whatever the cycle has accumulated so
+            # far, so `provider_stale_on_arrival` is only incremented when
+            # the PROVIDER's lag alone already exceeded the limit; the
+            # combined case is `skipped_stale_on_arrival`.
+            _pe = _quote_epoch(quote)
+            _arr = time.time()
+            if _pe is not None and (_arr - _pe) > PINNACLE_MAX_AGE_S:
+                lat["skipped_stale_on_arrival"] += 1
+                if (received_at is not None
+                        and (float(received_at) - _pe) > PINNACLE_MAX_AGE_S):
+                    lat["provider_stale_on_arrival"] += 1
+                code = R_QUOTE_STALE_ON_ARRIVAL
+                tally[code] = tally.get(code, 0) + 1
+                _step_refuse(code)
+                _ledger({"global_slug": mapped.get("global_slug")
+                         or (mapped.get("market_row") or {}).get("slug"),
+                         "us_market_slug": ident.get("us_market_slug"),
+                         "priced_outcome": quote.get("home"),
+                         "stage": "2_FRESHNESS",
+                         "first_refusal": code,
+                         "observed_at_epoch_s": round(float(_pe), 6),
+                         "decision_instant_epoch_s": round(_arr, 6),
+                         "age_s": round(_arr - _pe, 3),
+                         "limit_s": PINNACLE_MAX_AGE_S,
+                         "provider_lag_s": (
+                             None if received_at is None
+                             else round(float(received_at) - _pe, 3)),
+                         "our_processing_s": (
+                             None if received_at is None
+                             else round(_arr - float(received_at), 3)),
+                         "age_basis": "PROVIDER_LAST_UPDATE_AT_ARRIVAL",
+                         "why": WHY_SKIPPED_ON_ARRIVAL})
+                continue
+
             # THE READ CLOCK, WHICH IS NOT THE DECISION CLOCK. This
             # instant ages the book at the moment it was read. The
             # DECISION instant is taken after the venue read, the rules
@@ -3303,10 +3474,39 @@ async def cycle(conn) -> dict:
             # today, so this read refuses on an unestablished currency -- which
             # is the named blocker, not a hidden one.
             _cev = book_currency_evidence(ident["us_market_slug"])
-            vq = await venue_quote(conn, us_slug=ident["us_market_slug"],
-                                   intent=ident["intent"], now=read_at,
-                                   subscription=_cev.get("subscription"),
-                                   revalidation=_cev.get("revalidation"))
+            # ── LEVER C, APPLIED ────────────────────────────────────
+            #
+            # THE KEY IS THE INSTRUMENT: this venue contract, this side.
+            # A second provider event resolving to the same pair would
+            # otherwise issue an identical paced read for the same book.
+            #
+            # WHAT IS REUSED IS THE VENUE'S BOOK PAYLOAD, NOTHING ELSE.
+            # `read_at` for THIS candidate is its own instant (taken above),
+            # the provider quote is its own, and `_entry_freshness` re-ages
+            # BOTH against this candidate's own decision instant further
+            # down. So a reused read cannot lend its freshness to a later
+            # decision: the second candidate is judged on how old the book
+            # actually is when IT decides, which is strictly older. That is
+            # the whole reason this is safe, and it is the reason the
+            # freshness recheck was left exactly where it was.
+            _ck = (ident["us_market_slug"], ident["intent"])
+            if _ck in vq_cache:
+                vq = vq_cache[_ck]
+                lat["deduplicated_requests"] += 1
+            else:
+                vq = await venue_quote(
+                    conn, us_slug=ident["us_market_slug"],
+                    intent=ident["intent"], now=read_at,
+                    subscription=_cev.get("subscription"),
+                    revalidation=_cev.get("revalidation"))
+                lat["venue_requests"] += 1
+                # ONLY A SUCCESSFUL READ IS CACHED. Caching a refusal would
+                # turn one transient venue error into a refusal for every
+                # candidate on that instrument for the rest of the cycle --
+                # a retry suppressed by an optimisation, which is the kind
+                # of silent coupling this module refuses elsewhere.
+                if vq.get("ok"):
+                    vq_cache[_ck] = vq
             if not vq.get("ok"):
                 code = vq.get("refusal") or R_NO_VENUE_QUOTE
                 tally[code] = tally.get(code, 0) + 1
@@ -3578,6 +3778,44 @@ async def cycle(conn) -> dict:
                 extra_refusals=extra)
             evaluated += 1
             step["evaluated"] += 1
+
+            # ── THE MEASUREMENT, TAKEN AT THE DECISION ──────────────
+            #
+            # HERE, not earlier, because `now` is the decision instant and
+            # the whole question is how old the inputs were WHEN THE
+            # DECISION WAS MADE. Every figure comes from `_entry_freshness`,
+            # which computed them from clocks already on the record -- the
+            # provider's `last_update` and the receipt stamp taken at the
+            # fetch. Nothing here is estimated or re-derived.
+            #
+            # `self_inflicted_stale` IS THE NUMBER THE LEVERS HAVE TO MOVE:
+            # the provider handed us a quote INSIDE the limit and our own
+            # accumulated processing pushed it outside. The 296-of-399
+            # finding was exactly this population. It is computed as a
+            # conjunction of two measured quantities, not inferred from the
+            # refusal code, so a change in refusal naming cannot move it.
+            _fr = _entry_freshness(quote, vq, now)
+            _pl = _fr.get("pinnacle_provider_lag_s")
+            _od = _fr.get("pinnacle_our_processing_s")
+            _ag = _fr.get("pinnacle_age_s")
+            if _pl is not None:
+                lat["provider_lag_samples"].append(float(_pl))
+            if _od is not None:
+                lat["our_delay_samples"].append(float(_od))
+            if _ag is not None:
+                lat["age_samples"].append(float(_ag))
+                if _ag > PINNACLE_MAX_AGE_S:
+                    lat["stale_refusals"] += 1
+                    if _pl is not None and _pl <= PINNACLE_MAX_AGE_S:
+                        lat["self_inflicted_stale"] += 1
+                else:
+                    # A VALID EVALUATION IS ONE WHOSE PROBABILITY INPUT WAS
+                    # INSIDE THE RULE. Not one that produced a BUY -- that
+                    # is an economic outcome and belongs to a different
+                    # question. Conflating them would let a cycle with no
+                    # edge look like a cycle with no data.
+                    lat["valid_evaluations"] += 1
+
             rec["venue_quote"] = vq
             rec["mapping"] = mapped
             rec["settlement"] = srule
@@ -3781,6 +4019,63 @@ async def cycle(conn) -> dict:
            # Both counters are 0 at the default setting, where no extra
            # fetch is ever issued. Reported unconditionally so that a
            # change in credit spend can be attributed rather than guessed.
+           # ── THE MEASURED LATENCY PATH ────────────────────────────
+           #
+           # MEDIANS, NOT MEANS. One 400-second outlier -- a provider
+           # hiccup, a venue timeout -- drags a mean far enough to make a
+           # real improvement invisible, and the question here is what a
+           # TYPICAL candidate experienced. The max is carried alongside so
+           # the outlier is still visible rather than smoothed away.
+           #
+           # AN EMPTY SAMPLE IS None, NEVER 0. A cycle that evaluated
+           # nothing has no measured delay; reporting 0.0 would read as
+           # "instant" and would be the best-looking number in the table.
+           "latency": {
+               "provider_lag_s": _median(lat["provider_lag_samples"]),
+               "provider_lag_max_s": _maxof(lat["provider_lag_samples"]),
+               "our_processing_s": _median(lat["our_delay_samples"]),
+               "our_processing_max_s": _maxof(lat["our_delay_samples"]),
+               "pinnacle_age_s": _median(lat["age_samples"]),
+               "pinnacle_age_max_s": _maxof(lat["age_samples"]),
+               "limit_s": PINNACLE_MAX_AGE_S,
+               "samples": len(lat["age_samples"]),
+               "valid_evaluations": lat["valid_evaluations"],
+               "stale_refusals": lat["stale_refusals"],
+               "self_inflicted_stale": lat["self_inflicted_stale"],
+               "provider_stale_on_arrival": lat["provider_stale_on_arrival"],
+               "skipped_stale_on_arrival": lat["skipped_stale_on_arrival"],
+               "deduplicated_requests": lat["deduplicated_requests"],
+               "venue_requests": lat["venue_requests"],
+               "what_self_inflicted_means": (
+                   "the provider handed us a quote INSIDE the 30 s rule and "
+                   "our own accumulated processing pushed it outside. 296 of "
+                   "399 fair-value failures were this population. It is the "
+                   "number the levers have to move"),
+               "the_limit_did_not_move": (
+                   "every figure here is measured against the same "
+                   "PINNACLE_MAX_AGE_S the decision gate applies. Levers A, "
+                   "B and C change which candidates get the freshest slots "
+                   "and stop spending reads on candidates already outside "
+                   "the limit. None of them relaxes it"),
+               "levers": {
+                   "A_skip_stale_on_arrival": (
+                       "a candidate already past the limit before any venue "
+                       "read is refused by name (QUOTE_STALE_ON_ARRIVAL) "
+                       "and its read is not spent -- so it stops making its "
+                       "successors stale too"),
+                   "B_freshest_first": (
+                       "events are ordered by the provider's own "
+                       "last_update, newest first, so the low-delay slots "
+                       "go to the quotes with the most headroom. Nothing is "
+                       "dropped and no limit moves"),
+                   "C_dedupe_equivalent_only": (
+                       "two provider events resolving to the same "
+                       "(us_market_slug, intent) share one venue read. Each "
+                       "keeps its own observation time and is re-aged "
+                       "against its OWN decision instant, so a shared read "
+                       "cannot lend freshness to a later decision"),
+               },
+           },
            "odds_freshness": {
                "events_per_odds_fetch": EVENTS_PER_ODDS_FETCH,
                "max_per_cycle": MAX_PER_CYCLE,

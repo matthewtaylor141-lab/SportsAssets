@@ -380,12 +380,53 @@ def test_it_names_the_attribution_and_does_not_invent_one():
     assert "Not invented here" in src
 
 
-def test_it_states_that_neither_substitute_is_the_number():
+def test_it_states_that_net_cash_is_not_the_number():
+    """Open-position net cash is still not this figure, and says so.
+
+    THIS TEST LOST HALF ITS CONTENT ON PURPOSE (2026-09-28), and the
+    reason is worth recording where the next reader will find it.
+
+    It used to also require `this_is_not_realised_pnl` -- a field whose
+    text read "`realised()` books on POSITION CLOSURE and is what the
+    drawdown and the loss stop read ... both are correct for their own
+    question". The first clause was a true description of the code. The
+    second was a WRONG CONCLUSION about it: a loss stop whose measurement
+    omits a loss already taken is not correct for its own question, it is
+    a stop that cannot trip. `realised()` now folds this result into the
+    equity curve, so the field was replaced rather than kept.
+
+    Asserting on that field would now pin the withdrawn claim in place --
+    which is how a mistake becomes a requirement, and it has already
+    happened once in this repository with the M1 sequencing premise. The
+    replacement assertion is below and `test_the_withdrawn_claim_is_gone`
+    guards the direction.
+    """
     import inspect
     src = inspect.getsource(FB.realised_on_sold)
-    assert "this_is_not_realised_pnl" in src
     assert "this_is_not_open_position_net_cash" in src
     assert "overstates a" in src
+    # THE FIELD THAT REPLACED IT, asserting the corrected relationship.
+    assert "this_is_now_inside_realised_pnl" in src
+
+
+def test_the_withdrawn_claim_is_gone_from_the_module():
+    """The loss stop must never again be documented as blind by design.
+
+    A DIRECTIONAL GUARD, not a spelling check. The specific failure this
+    prevents: someone reads `realised()`'s closure filter, concludes it is
+    intentional, and restores the old note -- at which point the code and
+    its documentation agree again and the control is quietly disarmed for
+    a second time. The phrasings banned here are the exact ones that
+    carried the wrong conclusion.
+    """
+    import inspect
+    src = inspect.getsource(FB)
+    assert "this_is_not_realised_pnl" not in src
+    assert "Both\n            are correct for their own question" not in src
+    # AND THE CORRECTED BASIS MUST BE PRESENT, so deleting the note is not
+    # a way to pass this test.
+    assert "REALISED_ON_SOLD_WHILE_OPEN" in src
+    assert "includes_open_position_partial_results" in src
 
 
 @pg
