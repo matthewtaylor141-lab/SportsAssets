@@ -172,12 +172,35 @@ def test_the_dispatcher_sends_exactly_what_was_selected():
 
 # ── the supplier names what it cannot read, and invents nothing ───────
 
-async def test_the_supplier_refuses_by_name_with_no_management_selection():
-    got = await loop.funded_pair_inputs(
-        None, {"intent_id": "nope"}, at=time.time(), deferred={})
-    assert got["ok"] is False
-    assert got["refusal"] == loop.R_NO_DEFERRED_SELECTION
-    assert "hold_ranking.DIRECT_EXIT" in got["missing"]
+async def test_no_exit_plan_does_not_stop_the_hedge_being_considered():
+    """THE DEFECT THIS TEST USED TO ASSERT AS CORRECT BEHAVIOUR.
+
+    It required `ok is False` with R_NO_DEFERRED_SELECTION whenever `manage`
+    deferred no exit -- which is exactly what happens when the original selector
+    chose HOLD. So the case that matters most for pairing (HOLD beats selling,
+    and acquiring a hedge beats HOLD) could never be reached: the supplier
+    refused before the hedge was looked at, defeating the point of the reorder.
+
+    An absent exit plan means ONE candidate is missing, not that the position
+    has no evidence. The pass proceeds, NAMES the absent plan, and says what it
+    costs.
+    """
+    pos = {"intent_id": "fpi-1", "us_market_slug": "s", "residual_qty": 10.0,
+           "management_ranking": {
+               "version": "T", "not_rankable": [], "candidates": [
+                   {"action": "HOLD", "qty": 10, "value_usd": 0.05,
+                    "expected_net_usd": 0.05, "downside_usd": -5.0,
+                    "incremental_capital_usd": 0.0, "capital_duration_h": 20.0,
+                    "evidence_quality": "EXTERNAL_LABELLED",
+                    "execution_secured": True}]}}
+    got = await loop.funded_pair_inputs(None, pos, at=1790000000.0,
+                                        deferred={})
+    assert got["ok"] is True, got
+    assert got["exit_plan_absent"] == loop.R_NO_DEFERRED_SELECTION
+    assert got["deferred_selection"] is None
+    # THE HOLD IS STILL A CANDIDATE, so a hedge has something to beat.
+    assert [c["action"] for c in got["hold_ranking"]["candidates"]] == ["HOLD"]
+    assert "hedge that wins is still dispatched" in got["what_that_costs"]
 
 
 async def test_the_supplier_carries_the_exit_at_its_own_numbers():
@@ -406,8 +429,19 @@ async def test_a_held_position_is_serviced_with_manage_still_sending_nothing(
             pc = svc.get("pair_cycle") or {}
             considered = pc.get("considered") or []
             assert considered, pc
-            assert considered[0].get("refusal") == loop.R_NO_DEFERRED_SELECTION, (
-                considered)
+            # ── THE CHAIN NOW REACHES A DECISION, which it did not before ──
+            #
+            # This asserted R_NO_DEFERRED_SELECTION -- the supplier refusing
+            # because `manage` deferred no exit. Codex identified that refusal
+            # as a defect: it is exactly what happens when the selector chose
+            # HOLD, so a hedge could never be considered. The supplier now
+            # proceeds, a decision is taken, and HOLD sends nothing.
+            step = considered[0]
+            assert step["refusal"] == PC.R_DECISION_IS_NOT_ACQUIRE, step
+            assert step["what_was_selected_instead"] in ("HOLD", None,
+                                                         PC.ACTION_NOTHING_RANKABLE)
+            assert step["dispatched"] is None
+            assert "absence of an order" in step["why_nothing_was_sent"]
         # NOTHING REACHED THE ORDER SURFACE FROM `manage`.
         assert rec.order_calls == [], rec.calls
     finally:

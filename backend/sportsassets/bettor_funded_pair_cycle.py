@@ -999,7 +999,30 @@ async def pass_once(conn, *, account_id: str, venue: str,
         step["discovery"] = {k: found.get(k) for k in
                              ("ok", "refusal", "examined", "rejected",
                               "distinct_settlement_compatible_contracts")}
-        best = (found.get("admitted") or [None])[0]
+        # ── FIRST ADMITTED, AND THAT IS A STATED LIMITATION ──────────
+        #
+        # Codex: "Rank eligible candidates rather than selecting the first
+        # admitted contract." Correct, and it is not fixed here, because ranking
+        # them requires what ranking anything requires -- a region-probability
+        # source, a fee reading and a depth reading PER CONTRACT -- and none of
+        # those is wired on this lane (`PAIR_INPUT_READINESS` names them).
+        # Scoring several contracts on inputs nobody read would be worse than
+        # taking one deterministically.
+        #
+        # So the limitation is recorded on the step rather than left to be
+        # inferred from the absence of a ranking, and `discover`'s full admitted
+        # list travels with it so a reader can see what was not compared.
+        admitted_all = list(found.get("admitted") or [])
+        best = (admitted_all or [None])[0]
+        if len(admitted_all) > 1:
+            step["hedge_candidates_not_ranked"] = {
+                "admitted": len(admitted_all),
+                "taken": "the first",
+                "why": ("ranking them needs a region probability, a fee and a "
+                        "depth reading per contract, none of which is wired on "
+                        "this lane. Scoring on inputs nobody read would be "
+                        "worse than one deterministic choice"),
+                "contracts": [c.get("condition_id") for c in admitted_all][:8]}
         step["admitted_contract"] = None if best is None else best["condition_id"]
         gid = pos.get("portfolio_group_id")
         if gid is None and best is not None:

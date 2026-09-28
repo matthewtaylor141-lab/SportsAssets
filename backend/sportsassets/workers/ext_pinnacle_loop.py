@@ -4156,15 +4156,40 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None):
     out: dict = {"ok": False, "readiness": dict(PAIR_INPUT_READINESS)}
     intent_id = str(pos.get("intent_id") or "")
     sel = dict(deferred or {}).get(intent_id)
-    if not sel:
-        return dict(out, refusal=R_NO_DEFERRED_SELECTION,
-                    missing=["hold_ranking.DIRECT_EXIT"],
-                    why=("management produced no selection for this position, "
-                         "so there is no exit to rank the hedge against and no "
-                         "priced order to send if one won"))
+    # ── POSITION EVIDENCE DOES NOT DEPEND ON THE OLD SELECTOR'S CHOICE ──
+    #
+    # THE DEFECT, AND IT DEFEATED THE WHOLE POINT OF THE REORDER. This returned
+    # R_NO_DEFERRED_SELECTION whenever `manage` had no deferred exit -- which is
+    # exactly what happens when the original selector chose HOLD. So the case
+    # that matters most for pairing (HOLD beats selling, and acquiring a hedge
+    # beats HOLD) could never be considered: the supplier refused before the
+    # hedge was looked at.
+    #
+    # An absent exit plan means ONE candidate is missing, not that the position
+    # has no evidence. The HOLD the selector priced is still a candidate, the
+    # hedge can still be ranked against it, and a hedge that wins can still be
+    # dispatched -- its plan comes from the acquisition path, not from `manage`.
+    # So the pass proceeds with what exists and NAMES the absent exit plan.
+    #
+    # A HOLD-ONLY RANKING IS STILL A RANKING. `bettor_funded_decision` requires
+    # a priced HOLD and refuses otherwise, so the guard that matters is still
+    # there and is not weakened here.
+    hold_ranking_source = {}
+    if sel:
+        hold_ranking_source = dict(sel.get("ranking") or {})
+    else:
+        # The selector's own ranking, taken from the position's recorded
+        # management selection where one exists. Without it there is no priced
+        # HOLD, and the decision module refuses on its own account.
+        hold_ranking_source = dict(pos.get("management_ranking") or {})
+        out["exit_plan_absent"] = R_NO_DEFERRED_SELECTION
+        out["what_that_costs"] = (
+            "no exit candidate and no exit order. HOLD and any hedge are still "
+            "ranked, and a hedge that wins is still dispatched through the "
+            "acquisition path")
     residual = pos.get("residual_qty") or pos.get("filled_qty")
-    exit_cand = _exit_candidate_from(sel, residual=residual)
-    hold_from_selector = (sel.get("ranking") or {})
+    exit_cand = _exit_candidate_from(sel, residual=residual) if sel else None
+    hold_from_selector = hold_ranking_source
     candidates = []
     # THE SELECTOR'S OWN HOLD, unchanged. Where it did not price one, the
     # ranking's HOLD_NOT_PRICED refusal fires and nothing is selected -- which
@@ -4207,7 +4232,7 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None):
     # as EXIT, both are rankable and each is bound to its own plan; that is what
     # `plans_by_action` is for and why it is keyed rather than a single slot.
     plans_by_action = {}
-    if sel.get("selected_qty") is not None:
+    if sel and sel.get("selected_qty") is not None:
         plans_by_action[str(sel.get("selected") or "DIRECT_EXIT")] = sel
 
     dispatchable = set(_PCD.DISPATCHABLE) | {"HOLD"}
@@ -4225,7 +4250,7 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None):
                      "a decision nothing can carry out, which is worse than "
                      "not ranking it"
                      % (cand.get("value_usd"),
-                        sel.get("selected")))))
+                        (sel or {}).get("selected")))))
             continue
         if action not in dispatchable:
             not_rankable.append(dict(
@@ -4245,9 +4270,10 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None):
         "not_rankable": not_rankable,
     }
     out["hold_ranking"] = hold_ranking
-    out["deferred_selection"] = {k: sel.get(k) for k in
-                                ("selected", "selected_qty", "limit_price",
-                                 "proceeds_per_contract", "expected_net_usd")}
+    out["deferred_selection"] = ({k: sel.get(k) for k in
+                                  ("selected", "selected_qty", "limit_price",
+                                   "proceeds_per_contract",
+                                   "expected_net_usd")} if sel else None)
     # ── THE TWO READINGS THIS LANE CANNOT YET SUPPLY ──────────────────
     #
     # Named individually, because "pairing inputs missing" sent a reader to look
