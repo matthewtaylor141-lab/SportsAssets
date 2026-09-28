@@ -18,7 +18,10 @@ All functions here are sync (the SDK is httpx-based); callers run them in a
 thread. No function is reachable unless PMUS_KEY_ID/PMUS_SECRET_KEY are set.
 """
 
+
 from __future__ import annotations
+
+import time as _time
 
 import logging
 import math
@@ -934,10 +937,56 @@ def book_read(client, us_slug: str) -> dict:
     except Exception as exc:  # noqa: BLE001 -- bookkeeping never breaks a read
         observer, obs_path, _vho = {"installed": False,
                                     "why": type(exc).__name__}, None, None
+    # ── EVERY ATTEMPT COUNTED, AND THE ERROR PRESERVED ──────────────
+    #
+    # REPRODUCED BY AN INDEPENDENT REVIEW: one call to the outer pacer
+    # produced THREE HTTP attempts (SDK `max_retries: 2`), all three 429,
+    # and `venue_pace.penalty_left()` stayed 0.0. Two separate defects:
+    # the retries happen INSIDE the paced region so the pacer never sees
+    # them, and this handler reduced the exception to its class name --
+    # discarding the status, the `Retry-After` and the response entirely.
+    #
+    # ATTEMPTS ARE COUNTED AT THE RESPONSE BOUNDARY, not here. The
+    # observer's hook fires per RESPONSE, so it sees internal retries that
+    # this frame cannot -- which makes the count correct whatever the
+    # installed SDK does. That matters: the SDK version is not pinned
+    # (`polymarket-us>=0.1.2`), 0.1.2 has no retry logic at all while 1.0.2
+    # retries twice, so the amplification depends on a build-time
+    # resolution the repository does not fix.
+    _t0 = _time.time()
     try:
         payload = fn(us_slug) or {}
     except Exception as exc:  # noqa: BLE001 -- named, never swallowed
-        out["error"] = type(exc).__name__
+        try:
+            from . import venue_http_error as _vhe
+            attempts = (_vho.attempts_for(obs_path)
+                        if (_vho is not None and obs_path) else None)
+            diag = _vhe.describe(exc, endpoint="markets.book",
+                                 attempts=attempts,
+                                 elapsed_s=_time.time() - _t0)
+        except Exception:                                      # noqa: BLE001
+            diag = {"error_type": type(exc).__name__,
+                    "diagnostic_failed": True}
+        out["error"] = diag.get("error_type") or type(exc).__name__
+        out["error_detail"] = diag
+        out["http_observer"] = observer
+        # ── THE COOLDOWN, ACTIVATED FROM THE OBSERVED STATUS ─────────
+        #
+        # It was never activated on this path at all. `penalize()` existed
+        # and nothing on the scheduled read called it, so an observed 429
+        # changed nothing and the next candidate read on the ordinary gap.
+        # `Retry-After` is honoured when the venue supplies one -- a
+        # cooldown shorter than the venue asked for is a guess dressed as
+        # a policy.
+        if diag.get("is_rate_limited"):
+            try:
+                from . import venue_pace as _vp
+                out["cooldown"] = _vp.penalize_observed(
+                    retry_after_s=diag.get("retry_after_s"),
+                    reason="VENUE_429_ON_BOOK_READ")
+            except Exception as pexc:                          # noqa: BLE001
+                out["cooldown"] = {"applied": False,
+                                   "why": type(pexc).__name__}
         return out
     out["http_observer"] = observer
     # TAKEN, not peeked: a header set reused on a later read is the exact

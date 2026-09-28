@@ -232,6 +232,125 @@ def penalize(now: float | None = None) -> float:
         return _penalty_until
 
 
+#: THE COOLDOWN'S EXPIRY AS A WALL-CLOCK EPOCH, beside the monotonic one.
+#:
+#: `_penalty_until` is `time.monotonic()`-based, and monotonic is only
+#: comparable WITHIN one process and one boot. Persisting it and reading it
+#: back in another process -- which is what "cooldown survives restart"
+#: requires -- compares two unrelated number lines, and the result is
+#: arbitrary: the cooldown either never expires or is already expired.
+#:
+#: So a PORTABLE expiry is kept separately, in epoch seconds, and that is
+#: the only one fit to leave the process.
+_penalty_until_epoch = 0.0
+_penalty_reason = None
+_penalty_retry_after_s = None
+
+
+def penalize_observed(*, retry_after_s=None, reason=None,
+                      now: float | None = None) -> dict:
+    """Apply the cooldown for an OBSERVED rate-limit response.
+
+    ── WHY THIS EXISTS ALONGSIDE `penalize()` ───────────────────────
+    `penalize()` was never called on the scheduled book-read path. It
+    existed, it worked in isolation, and an observed 429 changed nothing --
+    so the next candidate read on the ordinary gap and collected another
+    429. A control nothing invokes is not a control.
+
+    ── `Retry-After` IS HONOURED WHEN THE VENUE SUPPLIES ONE ────────
+    The venue telling us how long to wait is better evidence than our
+    fixed PENALTY_S. The LONGER of the two is taken: a cooldown shorter
+    than the venue asked for is a guess wearing a policy's clothes, and a
+    venue asking for less than our own floor does not entitle us to
+    abandon the floor.
+
+    Returns what was applied, so a caller can record it rather than
+    assert it.
+    """
+    global _penalty_until, _penalty_until_epoch, _penalty_reason
+    global _penalty_retry_after_s
+    import time as _t
+
+    wall = _t.time() if now is None else float(now)
+    mono = _t.monotonic()
+    try:
+        ra = None if retry_after_s is None else max(0.0, float(retry_after_s))
+    except (TypeError, ValueError):
+        ra = None
+    hold = PENALTY_S if ra is None else max(float(PENALTY_S), ra)
+    with _penalty_lock:
+        _penalty_until = mono + hold
+        _penalty_until_epoch = wall + hold
+        _penalty_reason = reason
+        _penalty_retry_after_s = ra
+    return {"applied": True, "hold_s": hold,
+            "retry_after_s": ra,
+            "floor_s": PENALTY_S,
+            "hold_is": ("RETRY_AFTER" if ra is not None and ra > PENALTY_S
+                        else "OUR_FLOOR"),
+            "expires_at_epoch_s": wall + hold,
+            "reason": reason,
+            "portable_expiry_is_epoch_not_monotonic": (
+                "monotonic is comparable only within one process and one "
+                "boot, so the epoch value is the one fit to persist")}
+
+
+def cooldown_state(now: float | None = None) -> dict:
+    """The cooldown, in a form safe to persist and to read back."""
+    import time as _t
+
+    wall = _t.time() if now is None else float(now)
+    with _penalty_lock:
+        exp, reason, ra = (_penalty_until_epoch, _penalty_reason,
+                           _penalty_retry_after_s)
+    return {"active": bool(exp > wall),
+            "expires_at_epoch_s": exp or None,
+            "seconds_left": max(0.0, exp - wall) if exp else 0.0,
+            "reason": reason,
+            "retry_after_s": ra,
+            "multiplier_while_active": PENALTY_MULT}
+
+
+def resume_cooldown(expires_at_epoch_s, *, reason=None,
+                    now: float | None = None) -> dict:
+    """Re-arm a cooldown read back from durable storage after a restart.
+
+    THE FAIL-OPEN THIS CLOSES: the penalty lived in a module global and
+    died with the process, so a crash-looping process resumed at full rate
+    immediately after the account was rate limited -- the worst possible
+    moment. An epoch expiry can be stored and honoured across that.
+    """
+    global _penalty_until, _penalty_until_epoch, _penalty_reason
+    import time as _t
+
+    wall = _t.time() if now is None else float(now)
+    try:
+        exp = float(expires_at_epoch_s)
+    except (TypeError, ValueError):
+        return {"resumed": False, "why": "expiry is not a number"}
+    # ── NaN AND INFINITY ARE NOT INSTANTS, AND NaN IS THE DANGEROUS ONE ──
+    #
+    # Found by the test, and it was a real bug: `float('nan')` passes
+    # `float()`, and EVERY comparison with NaN is False -- so `left <= 0`
+    # was False and a NaN expiry "resumed" successfully. That arms a
+    # cooldown whose remaining time is NaN, which then makes
+    # `penalty_left()` and every gap decision behave arbitrarily. A
+    # corrupted stored value would have been worse than no stored value.
+    if exp != exp or exp in (float("inf"), float("-inf")):
+        return {"resumed": False,
+                "why": "expiry is NaN or infinite, which is not an instant"}
+    left = exp - wall
+    if left <= 0:
+        return {"resumed": False, "why": "the stored cooldown had expired",
+                "expired_s_ago": round(-left, 3)}
+    with _penalty_lock:
+        _penalty_until = _t.monotonic() + left
+        _penalty_until_epoch = exp
+        _penalty_reason = reason or "RESUMED_AFTER_RESTART"
+    return {"resumed": True, "seconds_left": round(left, 3),
+            "expires_at_epoch_s": exp}
+
+
 def penalty_left(now: float | None = None) -> float:
     """Seconds of 429 penalty left, 0.0 when none."""
     return max(0.0, _penalty_until - (time.monotonic() if now is None else float(now)))
@@ -243,4 +362,5 @@ def effective_gap(min_gap_s: float = MIN_GAP_S) -> float:
 
 
 __all__ = ["pace", "priority_claims", "waiting", "lane_stats", "penalize", "penalty_left",
+           "penalize_observed", "cooldown_state", "resume_cooldown",
            "effective_gap", "MIN_GAP_S", "PENALTY_MULT", "PENALTY_S", "PACE_PRIORITY_BURST"]

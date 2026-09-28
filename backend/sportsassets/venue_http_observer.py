@@ -75,6 +75,12 @@ KEEP_PER_PATH = 4
 _LOCK = threading.Lock()
 _SEEN: dict[str, list] = {}
 _INSTALLED: set[int] = set()
+#: HTTP attempts per path since the last `reset_attempts`, and how many of
+#: them were 429s. Kept separately from `_SEEN` because `take()` consumes
+#: observations and the attempt count must survive that -- the failure path
+#: needs the count exactly when there is no observation left to read.
+_ATTEMPTS: dict[str, int] = {}
+_RATE_LIMITED: dict[str, int] = {}
 #: Every path we have ever observed, whether or not its observations were taken.
 #: A probe needs to know that a header set was NEVER seen, which is different
 #: from seen-and-consumed.
@@ -111,11 +117,25 @@ def _record(response) -> None:
             "received_at": time.time(),
             "received_monotonic": time.monotonic(),
         }
+        # ── EVERY ATTEMPT, INCLUDING THE SDK'S INTERNAL RETRIES ──────
+        #
+        # This hook fires per RESPONSE, so it is the only place in our code
+        # that sees a retry the SDK performs inside one logical call. An
+        # independent review reproduced 1 paced call -> 3 HTTP attempts,
+        # and nothing upstream could have known.
+        #
+        # COUNTED PER PATH AND NEVER RESET BY A READ, because `take()`
+        # clears observations and the attempt count must outlive that: the
+        # failure path needs it precisely when no observation survives.
+        row["status_is_rate_limit"] = (row.get("status") == 429)
         with _LOCK:
             _EVER.add(path)
             rows = _SEEN.setdefault(path, [])
             rows.append(row)
             del rows[:-KEEP_PER_PATH]
+            _ATTEMPTS[path] = _ATTEMPTS.get(path, 0) + 1
+            if row["status_is_rate_limit"]:
+                _RATE_LIMITED[path] = _RATE_LIMITED.get(path, 0) + 1
     except Exception:                                          # noqa: BLE001
         # A recorder that can break a read is worse than no recorder.
         return
@@ -242,3 +262,42 @@ def describe() -> dict:
         "verdict_lives_in": "bettor_venue_currency.evaluate",
         "keep_per_path": KEEP_PER_PATH,
     }
+
+
+def attempts_for(path) -> int | None:
+    """HTTP attempts recorded for `path`, or None if it was never observed.
+
+    None AND 0 ARE DIFFERENT. None means the observer was never installed
+    or the path never produced a response -- so the count is unknown.
+    0 would claim we know no attempt happened. A failure diagnostic that
+    confuses the two invites the reader to conclude the request was never
+    sent, which was exactly the wrong inference I drew from null book
+    timestamps.
+    """
+    if not path:
+        return None
+    with _LOCK:
+        return _ATTEMPTS.get(str(path))
+
+
+def rate_limited_for(path) -> int | None:
+    """How many of `path`'s attempts returned 429."""
+    if not path:
+        return None
+    with _LOCK:
+        return _RATE_LIMITED.get(str(path))
+
+
+def reset_attempts(path=None) -> None:
+    """Clear the attempt counters, for one path or all of them.
+
+    The scheduled reader calls this before a logical read so the count
+    describes THAT read rather than the life of the process.
+    """
+    with _LOCK:
+        if path is None:
+            _ATTEMPTS.clear()
+            _RATE_LIMITED.clear()
+        else:
+            _ATTEMPTS.pop(str(path), None)
+            _RATE_LIMITED.pop(str(path), None)
