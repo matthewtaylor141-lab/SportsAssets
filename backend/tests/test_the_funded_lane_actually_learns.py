@@ -818,3 +818,149 @@ async def test_the_scheduled_pass_forwards_the_model_request_to_the_decision():
     step_src = inspect.getsource(PC.decide_and_record)
     assert "NOTHING_APPROVED" in step_src
     assert "APPROVED_MODEL:%s" in step_src
+
+
+# ════════════════════════════════════════════════════════════════════
+# 7 · THE LABEL ONLY EXISTS FOR A TWO-ROLE GROUP
+# ════════════════════════════════════════════════════════════════════
+
+@pg
+@pytest.mark.asyncio
+async def test_a_single_leg_group_is_not_labelled_as_a_middle_that_occurred():
+    """THE DEFECT THIS PINS, CAUGHT BY RE-READING THE QUERY RATHER THAN BY A
+    FAILING TEST.
+
+    `bool_and(paid)` over a SINGLE-LEG group is just "did that one leg pay". A
+    moneyline that won would have been labelled `middle_occurred = true` for a
+    structure never acquired -- so the model would learn the PRIMARY LEG'S WIN
+    RATE while every consumer reads its output as p(both legs pay).
+
+    THE ERROR IS IN THE DIRECTION THAT BUYS HEDGES: the primary leg wins more
+    often than the middle lands, so the mislabel inflates p(middle), inflates
+    `expected_net_usd` on the acquisition, and makes the lane pay for structures
+    it should have declined.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        rows, _ = _synthetic(10)
+        # ── A ONE-LEG GROUP WHOSE ONLY LEG PAID ─────────────────────
+        gid = "grp:learns-solo"
+        await conn.execute(
+            "INSERT INTO bettor_funded_portfolio_groups "
+            "(group_id, account_id, venue, event_key, structure, hedge_intent) "
+            "VALUES ($1,$2,$3,'ev-solo','SINGLE_LEG','NOT_APPLICABLE')",
+            gid, ACCT, VENUE)
+        await conn.execute(
+            "INSERT INTO bettor_funded_intents "
+            "(intent_id, account_id, venue, venue_class, us_market_slug, "
+            " event_key, order_intent, limit_price, quantity, collateral_usd, "
+            " effective_digest, state, kind, residual_qty, closed_at, "
+            " closed_reason, settlement, portfolio_group_id, leg_role) VALUES "
+            "('fpi-solo',$1,$2,'FUNDED','slug-solo','ev-solo',"
+            " 'ORDER_INTENT_BUY_LONG',0.5,10,5.0,'d','FILLED','ENTRY',0,now(),"
+            " 'SETTLED_BY_THE_VENUE',$3::jsonb,$4,'PRIMARY')",
+            ACCT, VENUE, json.dumps({"payout_usd": 10.0}), gid)
+        await conn.execute(
+            "UPDATE bettor_funded_portfolio_groups SET closed_at=now(), "
+            "  closure='ALL_LEGS_EXITED' WHERE group_id=$1", gid)
+        got = await FL.record_decision(
+            conn, decision_id="dec:learns-solo", account_id=ACCT, venue=VENUE,
+            fixture="fx-solo", action="HOLD", decided_at=time.time(),
+            group_id=gid, model_key=KEY, model_version="v0",
+            features=rows[0], feature_sha=FMD.feature_sha(rows[0]),
+            predicted={"target": FMD.TARGET, "p_middle": 0.5})
+        assert got.get("ok"), got
+
+        lab = await FMD.labelled(conn, account_id=ACCT)
+        assert lab["ok"] is True, lab
+        assert "dec:learns-solo" not in (lab.get("decision_ids") or []), (
+            "a one-leg group has no both-win region, so 'did both legs pay' is "
+            "not a question about it and it must not become a label")
+        assert lab["n"] == 0
+        assert "primary leg's win rate" in lab["only_two_role_groups"]
+
+        # ── AND A TWO-ROLE GROUP IS LABELLED ────────────────────────
+        await _resolved_decision(conn, i=99, decided_at=datetime.now(
+            timezone.utc), middle_occurred=True, features=rows[1])
+        both = await FMD.labelled(conn, account_id=ACCT)
+        assert both["decision_ids"] == ["dec:learns-99"], both
+        assert both["labels"] == [1.0]
+    finally:
+        await conn.execute("DELETE FROM bettor_funded_intents "
+                          " WHERE intent_id='fpi-solo'")
+        await _clean(conn)
+        await conn.execute(
+            "DELETE FROM bettor_funded_portfolio_groups WHERE group_id=$1",
+            "grp:learns-solo")
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_a_group_with_one_leg_unsettled_is_not_labelled_either():
+    """TWO MISTAKES IN ONE CONDITION, and the second was worse.
+
+    `bool_or(settled)` was the first: a group with one leg settled and one still
+    open would have been labelled from a fixture that had not finished for the
+    other leg. `bool_and` fixes that.
+
+    AND `settlement IS NOT NULL` CONSTRAINED NOTHING. The column is NOT NULL
+    with a `'{}'::jsonb` default, so it was true for every row -- including one
+    whose fixture had never been read. It read like a settlement check. The
+    condition is now `settlement ? 'payout_usd'`, which is the same key the
+    label itself reads, so a row cannot pass the check and then contribute a
+    coalesce'd zero as though the leg had lost.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        rows, _ = _synthetic(4)
+        gid = "grp:learns-half"
+        await conn.execute(
+            "INSERT INTO bettor_funded_portfolio_groups "
+            "(group_id, account_id, venue, event_key, structure, hedge_intent) "
+            "VALUES ($1,$2,$3,'ev-half','INDIRECT_MIDDLE','ACQUIRED')",
+            gid, ACCT, VENUE)
+        for role, settled in (("PRIMARY", True), ("HEDGE", False)):
+            await conn.execute(
+                "INSERT INTO bettor_funded_intents "
+                "(intent_id, account_id, venue, venue_class, us_market_slug, "
+                " event_key, order_intent, limit_price, quantity, "
+                " collateral_usd, effective_digest, state, kind, residual_qty, "
+                " closed_at, closed_reason, settlement, portfolio_group_id, "
+                " leg_role) VALUES "
+                "($1,$2,$3,'FUNDED',$4,'ev-half','ORDER_INTENT_BUY_LONG',"
+                " 0.5,10,5.0,'d','FILLED','ENTRY',$5,$6,$7,$8::jsonb,$9,$10)",
+                "fpi-half-%s" % role[:1].lower(), ACCT, VENUE,
+                "slug-half-%s" % role,
+                0 if settled else 10,
+                None if not settled else __import__("datetime").datetime.now(
+                    timezone.utc),
+                "SETTLED_BY_THE_VENUE" if settled else None,
+                # NOT None: the column is NOT NULL with a '{}' default, which
+                # is how `settlement IS NOT NULL` came to be a vacuous test in
+                # the label query. An unsettled leg carries the empty record,
+                # exactly as production writes it.
+                json.dumps({"payout_usd": 10.0} if settled else {}),
+                gid, role)
+        got = await FL.record_decision(
+            conn, decision_id="dec:learns-half", account_id=ACCT, venue=VENUE,
+            fixture="fx-half", action="ACQUIRE_HEDGE", decided_at=time.time(),
+            group_id=gid, model_key=KEY, model_version="v0",
+            features=rows[0], feature_sha=FMD.feature_sha(rows[0]),
+            predicted={"target": FMD.TARGET, "p_middle": 0.5})
+        assert got.get("ok"), got
+        lab = await FMD.labelled(conn, account_id=ACCT)
+        assert lab["n"] == 0, lab
+        assert "dec:learns-half" not in (lab.get("decision_ids") or [])
+    finally:
+        await conn.execute("DELETE FROM bettor_funded_intents "
+                          " WHERE intent_id LIKE 'fpi-half-%'")
+        await _clean(conn)
+        await conn.execute(
+            "DELETE FROM bettor_funded_portfolio_groups WHERE group_id=$1",
+            "grp:learns-half")
+        await conn.close()

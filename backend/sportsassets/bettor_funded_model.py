@@ -312,11 +312,24 @@ LABEL_SQL = """
            d.model_version, d.predicted,
            extract(epoch FROM d.decided_at) AS decided_epoch,
            d.decided_at,
-           g.middle_occurred
+           g.middle_occurred, g.roles, g.legs
       FROM bettor_funded_decisions d
       JOIN LATERAL (
-        SELECT bool_or(i.closed_reason IS NOT NULL
-                       AND i.settlement IS NOT NULL) AS settled,
+        SELECT count(*) AS legs,
+               count(DISTINCT i.leg_role) AS roles,
+               -- ── `settlement IS NOT NULL` WAS A VACUOUS CONDITION ──
+               --
+               -- MEASURED, not reasoned about: the column is NOT NULL with a
+               -- `'{}'::jsonb` default, so that test was true for every row
+               -- including one whose fixture had never been read. It looked
+               -- like a settlement check and constrained nothing.
+               --
+               -- The condition that means what was intended is that the
+               -- settlement record STATES A PAYOUT. `? 'payout_usd'` is that,
+               -- and it is also exactly the key the label below reads -- so a
+               -- row cannot pass this and then contribute a coalesce'd zero.
+               bool_and(i.closed_reason IS NOT NULL
+                        AND i.settlement ? 'payout_usd') AS settled,
                -- THE LABEL: did BOTH legs pay? That is the both-win region, and
                -- it is read from each leg's own settlement payout rather than
                -- from a score this lane never sees.
@@ -327,6 +340,22 @@ LABEL_SQL = """
       ) g ON TRUE
      WHERE d.group_id IS NOT NULL
        AND d.features IS NOT NULL
+       -- ── BOTH ROLES, OR THERE IS NO MIDDLE TO HAVE OCCURRED ──────
+       --
+       -- A REAL DEFECT, CAUGHT BY RE-READING THIS QUERY. `bool_and(paid)` over
+       -- a SINGLE-LEG group is just "did that one leg pay" -- and a moneyline
+       -- that won would have been labelled `middle_occurred = true` for a
+       -- structure that was never acquired. Those labels would then train the
+       -- model to predict the primary leg's win rate while every consumer read
+       -- the output as p(both legs pay), and the error is in the direction that
+       -- buys hedges: the primary leg wins more often than the middle lands.
+       AND g.roles = 2
+       -- ── AND EVERY LEG SETTLED, not merely one of them ────────────
+       --
+       -- `bool_or` here was wrong for the same reason: a group with one leg
+       -- settled and one still open would have been labelled from a fixture
+       -- that had not finished for the other leg. `bool_and` requires all of
+       -- them.
        AND g.settled
 """
 
@@ -373,6 +402,11 @@ async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
     return dict(out, ok=True, refusal=None, n=len(out["labels"]),
                 label_basis=("BOTH LEGS PAID, from each leg's own venue "
                              "settlement payout. Not a score, not a model"),
+                only_two_role_groups=(
+                    "a group carrying one role has no both-win region, so "
+                    "'did both legs pay' is not a question about it. Labelling "
+                    "one would train the model on the primary leg's win rate "
+                    "while every consumer reads p(both legs pay)"),
                 prospective_filter=("decided_at > %r" % (after,)
                                     if after is not None
                                     else "NONE -- every resolved decision"))
@@ -501,7 +535,13 @@ async def promote(conn, *, model_id: str, approved_by: str,
     inc = _row(await conn.fetchrow(
         "SELECT * FROM bettor_funded_models "
         " WHERE model_key=$1 AND state=$2", cand["model_key"], STATE_APPROVED))
-    cand_metric = float(ev.get(PROMOTION_METRIC))
+    if ev.get(PROMOTION_METRIC) is None:
+        return dict(out, ok=False, refusal=R_NOT_EVALUATED,
+                    why=("this candidate's evaluation carries no %r, so there "
+                         "is no number to compare. An evaluation missing the "
+                         "promotion metric is not an evaluation"
+                         % PROMOTION_METRIC))
+    cand_metric = float(ev[PROMOTION_METRIC])
     if inc is None:
         # NO INCUMBENT. The bar is the candidate's own declared baseline, which
         # is the TRAINING base rate and was fixed before this evaluation existed.
