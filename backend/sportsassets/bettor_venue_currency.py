@@ -64,7 +64,7 @@ sample. Three exist, and this module names which one carried a verdict:
       `If-Modified-Since` on the book path is the origin affirming that the
       representation we hold is still the current one, as of that response's
       own `Date`. RFC 9110 §13, RFC 9111 §4.3.
-  M3  ORIGIN_GENERATION.  `Date` minus `Age` is the instant the origin generated
+  M3  ORIGIN_GENERATION.  RFC 9111 4.2.3 dates the instant the origin generated
       the stored representation (RFC 9111 §5.1, §6.1). Inside the bound, and
       with the response shown not to be cache-served, this establishes that THE
       RESPONSE is newly generated.
@@ -449,10 +449,24 @@ def read_contract(observation) -> dict:
     if resp_at is not None and corrected_initial_age is not None:
         generated_at = float(resp_at) - float(corrected_initial_age)
     elif date_epoch is not None and resp_at is None:
-        # NO RESPONSE INSTANT. Date alone is the only evidence; `Age` cannot
-        # be corrected against anything, so it is applied as-is. This is the
-        # old behaviour, kept ONLY for this degenerate case and labelled.
-        generated_at = date_epoch - float(age_s or 0)
+        # ── NO RESPONSE INSTANT: `Date` ALONE, NEVER `Date` MINUS `Age` ──
+        #
+        # SECOND AUDIT FINDING, AND MY REPAIR HAD LEFT THE BUG HERE. The
+        # main path was corrected to RFC 9111 4.2.3 but this fallback still
+        # read `Date - Age`, so the audit's own observation reported 20 s
+        # WITH a receipt time and 40 s WITHOUT one. One arithmetic, two
+        # answers, and the worse answer on the poorer evidence.
+        #
+        # WHY ADDING THEM IS WRONG, stated once so it is not reintroduced:
+        # `Date` IS the origin's generation instant. `now - Date` therefore
+        # ALREADY CONTAINS the cache residency that `Age` measures. Adding
+        # `Age` counts that residency a second time.
+        #
+        # So the Date-based estimate stands alone here, and `Age` is carried
+        # as an INDEPENDENT LOWER BOUND for the evaluator to take the
+        # maximum of -- which is conservative, because a lower bound can
+        # only ever support a refusal and never an admission.
+        generated_at = date_epoch
     xc = str(hdrs.get("x-cache") or hdrs.get("cf-cache-status") or "").lower()
     cache_hit = None
     if xc:
@@ -477,6 +491,25 @@ def read_contract(observation) -> dict:
             "is NOT `Date` minus `Age` -- that summed two independent "
             "estimates of one quantity and double-counted, reporting 40 s "
             "for a 20-s-old response carrying `Age: 20`"),
+        # ── WHEN THE TIMING EVIDENCE IS ONLY PARTIAL, SAY SO ─────────
+        #
+        # "Missing timing evidence must have an explicit partial or unknown
+        # result; it must never become a freshness certificate." With no
+        # response instant there is no apparent-age/corrected-age pair and
+        # no residence term, so this is a PARTIAL reading -- usable to
+        # refuse, never to admit.
+        "http_age_is_partial": bool(resp_at is None and date_epoch is not None),
+        "http_age_is_unknown": bool(resp_at is None and date_epoch is None),
+        # `Age` AS AN INDEPENDENT LOWER BOUND, for the evaluator to max
+        # against the Date-based estimate. Never added to it.
+        "age_lower_bound_s": (None if age_s is None else float(age_s)),
+        "why_partial": (
+            None if resp_at is not None else
+            "no response instant was observed, so RFC 9111 4.2.3 cannot be "
+            "applied: there is no apparent-age/corrected-age pair and no "
+            "residence term. The Date-based estimate stands alone and `Age` "
+            "is carried as a separate lower bound. This is PARTIAL timing "
+            "evidence and cannot certify freshness"),
         # THE COMPONENTS, so a refusal can be checked rather than believed.
         "http_age": age_parts or None,
         "http_age_method": (age_parts.get("method") if age_parts
@@ -547,6 +580,28 @@ def evaluate(*, now, observation=None, subscription=None, revalidation=None,
     gen = contract.get("origin_generated_at_epoch_s")
     if gen is not None:
         gen_age = float(now) - float(gen)
+        # ── THE MAXIMUM OF TWO LOWER BOUNDS, NOT THEIR SUM ───────────
+        #
+        # On the partial path (no response instant) the Date-based estimate
+        # and the `Age` header are two INDEPENDENT lower bounds on the same
+        # age. Taking the larger is conservative and correct; adding them is
+        # the double-count this repair removed. On the complete path
+        # `age_lower_bound_s` is already inside `corrected_age_value`, so
+        # the max is a no-op there rather than a second application.
+        _alb = contract.get("age_lower_bound_s")
+        if contract.get("http_age_is_partial") and _alb is not None:
+            if float(_alb) > gen_age:
+                out["origin_generation_age_from"] = "AGE_HEADER_LOWER_BOUND"
+                out["origin_generation_age_why"] = (
+                    "the `Age` header (%.0f s) exceeds the Date-based "
+                    "estimate (%.1f s), so the two clocks disagree and the "
+                    "LARGER lower bound is used. They are never added"
+                    % (float(_alb), gen_age))
+                gen_age = float(_alb)
+            else:
+                out["origin_generation_age_from"] = "DATE_BASED_ESTIMATE"
+        out["origin_generation_age_is_partial"] = bool(
+            contract.get("http_age_is_partial"))
         out["origin_generation_age_s"] = round(gen_age, 3)
         if gen_age > float(bound_s):
             out["verdict"] = CONTRADICTED

@@ -2990,13 +2990,40 @@ async def loss_controls(conn, *, account_id: str, venue: str,
         # evaluate. A risk field's provenance has to be legible.
         "realised_drawdown_is_unmeasured_because": (
             ("%d realised result(s) could not be booked, so a "
-             "peak-to-trough would be over a PARTIAL history. Every "
-             "omission is a result that HAPPENED, so an incomplete total "
-             "can only understate the drawdown -- reported as unmeasured "
-             "rather than as a smaller number, and MAX_DRAWDOWN blocks "
-             "new exposure" % len(unbookable))
+             "peak-to-trough would be over a PARTIAL history. The "
+             "drawdown is UNCERTAIN in an unknown direction -- see "
+             "`why_not_merely_understated` -- so it is reported as "
+             "unmeasured rather than as a number, and MAX_DRAWDOWN "
+             "blocks new exposure" % len(unbookable))
             if dd is None else None),
         "realised_not_bookable": unbookable,
+        # ── WHY "IT CAN ONLY UNDERSTATE" WAS WRONG (audit correction) ──
+        #
+        # I claimed an incomplete ledger can only UNDERSTATE the drawdown,
+        # reasoning that every omitted result happened and inserting it can
+        # only deepen a trough or raise a peak. That reasoning treats the
+        # omission as a clean missing row, and the real cause is not clean.
+        #
+        # THE ACTUAL CAUSE INVALIDATES THE ROWS THAT *WERE* BOOKED. An exit
+        # fill becomes unbookable because no entry fill precedes it -- and
+        # the per-contract basis of every OTHER exit on that position is
+        # computed from those same entry fills. So the increments that did
+        # book are themselves wrong, by an unknown amount, in an unknown
+        # direction. The curve is not a true curve with a gap in it; it is a
+        # curve computed from a corrupted basis.
+        #
+        # UNCERTAIN, THEREFORE, NOT MERELY UNDERSTATED -- and the response
+        # is the same either way (block), which is why the wrong reasoning
+        # produced the right behaviour and was still worth correcting: the
+        # next person to read it would have trusted the direction.
+        "why_not_merely_understated": (
+            "an exit fill is unbookable when no entry fill precedes it, and "
+            "the per-contract basis of every other exit on that position "
+            "comes from those same entry fills. The increments that DID "
+            "book are therefore also wrong, by an unknown amount in an "
+            "unknown direction. This is a corrupted basis, not a true curve "
+            "with a gap, so the drawdown is UNCERTAIN rather than "
+            "understated"),
         "realised_pnl_usd": real["realised_pnl_usd"],
         "realised_basis": real["basis"],
         "realised_includes_partial_exits": True,
@@ -3059,11 +3086,36 @@ async def loss_controls(conn, *, account_id: str, venue: str,
                 "measured_usd": (NOT_IDENTIFIED if dd is None
                                  else round(dd, 6)),
                 "tripped": tripped,
-                "why_no_verdict": (None if tripped is not None else
-                                   "no owner-approved MAX_DRAWDOWN exists, "
-                                   "so there is no threshold to compare "
-                                   "against. The measurement is real; the "
-                                   "threshold is an owner input"),
+                # ── WHY THERE IS NO VERDICT, AND IT IS TWO DIFFERENT
+                #    REASONS (audit correction, 2026-09-28) ────────────
+                #
+                # `tripped is None` became reachable two ways when the
+                # incomplete-ledger containment landed, and this string
+                # still described only the first. With an approved $10
+                # limit and a broken ledger it asserted "no
+                # owner-approved MAX_DRAWDOWN exists" -- false -- and
+                # "the measurement is real" -- also false, because the
+                # measurement is exactly what is missing. The operator
+                # was told to go get an approval they already had.
+                "why_no_verdict": (
+                    None if tripped is not None
+                    else ("%d realised result(s) could not be booked, so "
+                          "there is no drawdown measurement to compare "
+                          "against the approved limit of %s. The THRESHOLD "
+                          "exists; the ACCOUNTING does not. Fix the "
+                          "reconciliation named in "
+                          "`realised_not_bookable`"
+                          % (len(unbookable),
+                             ("%.2f" % limit) if limit else "(unset)"))
+                    if dd is None
+                    else ("no owner-approved MAX_DRAWDOWN exists, so there "
+                          "is no threshold to compare against. The "
+                          "measurement is real; the threshold is an owner "
+                          "input")),
+                "no_verdict_because": (
+                    None if tripped is not None
+                    else ("ACCOUNTING_INCOMPLETE" if dd is None
+                          else "NO_APPROVED_THRESHOLD")),
                 "is_not_a_maximum_loss": (
                     "this is a TRIGGER on realised results. It refuses new "
                     "exposure; it cannot liquidate inventory at a price, so "
