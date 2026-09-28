@@ -48,6 +48,10 @@ async def _entry(conn, *, intent_id, qty, price, fee=None):
     return got
 
 
+#: Monotonic per-process counter for venue order / execution ids.
+_SELL_N = [0]
+
+
 async def _sell(conn, monkeypatch, *, parent, qty, price, fee=None):
     """Sell through the PRODUCTION path: submit_exit reserves and books.
 
@@ -61,14 +65,26 @@ async def _sell(conn, monkeypatch, *, parent, qty, price, fee=None):
 
     from tests.test_the_funded_lifecycle_is_complete import _level, _transport
 
-    execs = [{"id": "vx-%s-%s" % (parent, qty),
+    # ── A UNIQUE VENUE ORDER ID PER CALL ────────────────────────────
+    #
+    # `bettor_funded_intents_venue_order_idx` is UNIQUE on
+    # `venue_order_id`, so keying it on the parent alone made a SECOND
+    # exit on the same position collide. That only surfaced when a test
+    # needed two exits -- the audit's loss-then-recovery case -- and it is
+    # the schema correctly refusing two intents claiming one venue order.
+    #
+    # The counter is module-level so ids stay unique across tests in a
+    # session as well as within one.
+    _SELL_N[0] += 1
+    _nonce = _SELL_N[0]
+    execs = [{"id": "vx-%s-%s-%d" % (parent, qty, _nonce),
               "type": "EXECUTION_TYPE_FILL",
               "lastPx": {"value": "%.2f" % price},
               "lastShares": int(qty),
               "order": {"state": "ORDER_STATE_FILLED"}}]
     if fee is not None:
         execs[0]["commissionNotionalTotalCollected"] = {"value": "%.4f" % fee}
-    _transport(monkeypatch, order_id="vo-x-%s" % parent,
+    _transport(monkeypatch, order_id="vo-x-%s-%d" % (parent, _nonce),
                bids=[_level(price, int(qty))], exec_by_call=[execs])
     monkeypatch.setattr(FM, "FUNDED_EXIT_SUBMISSION_ENABLED", True)
     import time as _t

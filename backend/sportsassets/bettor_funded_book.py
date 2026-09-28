@@ -2953,19 +2953,50 @@ async def loss_controls(conn, *, account_id: str, venue: str,
     worst_case = round(max(remaining_basis, holdings_collateral)
                        + outstanding_collateral, 6)
 
-    dd = float(real["max_drawdown_usd"])
+    # ── A07 · AN INCOMPLETE LEDGER MAKES THE DRAWDOWN UNMEASURED ─────
+    #
+    # The same containment `check_rails` applies, applied here, because
+    # this is the OPERATOR-FACING reader and the two must not disagree
+    # about whether a number exists. If `realised()` could not book a
+    # result, the peak-to-trough it reports is over a partial history --
+    # and every omission is a result that HAPPENED, so the omission can
+    # only understate the drawdown.
+    #
+    # Reported as NOT_IDENTIFIED rather than as a smaller number, with the
+    # unbookable rows carried so an operator can see exactly what is
+    # missing and go fix the reconciliation.
+    unbookable = real.get("not_bookable") or []
+    dd = (None if unbookable else float(real["max_drawdown_usd"]))
     limit = None
     if approved_limits:
         try:
             limit = float(approved_limits.get("MAX_DRAWDOWN"))
         except (TypeError, ValueError):
             limit = None
-    tripped = (None if not limit or limit <= 0 else bool(dd > limit + 1e-9))
+    # AN UNMEASURED DRAWDOWN CANNOT TRIP, AND CANNOT CLEAR EITHER. The
+    # verdict is None with a named reason -- never False, which would read
+    # as "checked and within limit" on a book we could not fully read.
+    tripped = (None if (dd is None or not limit or limit <= 0)
+               else bool(dd > limit + 1e-9))
 
     return {
         "account_id": account_id, "venue": venue,
         # ── 1 · REALISED DRAWDOWN ───────────────────────────────────
-        "realised_drawdown_usd": round(dd, 6),
+        "realised_drawdown_usd": (NOT_IDENTIFIED if dd is None
+                                  else round(dd, 6)),
+        # WHY IT IS UNMEASURED, or None when it is measured. Written as a
+        # plain conditional: my first attempt chained `dd is None is False`
+        # with two more tests and was unreadable nonsense that happened to
+        # evaluate. A risk field's provenance has to be legible.
+        "realised_drawdown_is_unmeasured_because": (
+            ("%d realised result(s) could not be booked, so a "
+             "peak-to-trough would be over a PARTIAL history. Every "
+             "omission is a result that HAPPENED, so an incomplete total "
+             "can only understate the drawdown -- reported as unmeasured "
+             "rather than as a smaller number, and MAX_DRAWDOWN blocks "
+             "new exposure" % len(unbookable))
+            if dd is None else None),
+        "realised_not_bookable": unbookable,
         "realised_pnl_usd": real["realised_pnl_usd"],
         "realised_basis": real["basis"],
         "realised_includes_partial_exits": True,
@@ -3021,7 +3052,12 @@ async def loss_controls(conn, *, account_id: str, venue: str,
                              "not by submission authority -- and neither is "
                              "reconciliation"),
                 "limit_usd": limit,
-                "measured_usd": round(dd, 6),
+                # None-SAFE, like every other reader of `dd`. I patched the
+                # first two and missed this one; the test caught it as a
+                # TypeError from round(None). Three readers of one
+                # nullable value is three chances to forget.
+                "measured_usd": (NOT_IDENTIFIED if dd is None
+                                 else round(dd, 6)),
                 "tripped": tripped,
                 "why_no_verdict": (None if tripped is not None else
                                    "no owner-approved MAX_DRAWDOWN exists, "

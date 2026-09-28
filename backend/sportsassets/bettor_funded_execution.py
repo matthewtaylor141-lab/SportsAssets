@@ -335,6 +335,30 @@ async def check_rails(conn, plan: dict, effective: dict, *,
             exp["capital_hours_usd_h"],
             "cash x hours held, integrated over the funded fills. A new "
             "order contributes nothing until it fills"),
+        # ── A07 · AN INCOMPLETE REALISED TOTAL IS NOT A MEASUREMENT ──
+        #
+        # FOUND BY AN INDEPENDENT AUDIT, IN CODE I WROTE THIS SESSION.
+        # `realised()` reports `not_bookable`: results it could NOT book --
+        # an exit fill with no entry fill before it, so no point-in-time
+        # per-contract basis, or a fill with no instant to order it by. I
+        # added that list precisely so an omission would be visible, and
+        # then read `max_drawdown_usd` beside it without ever looking. The
+        # subtotal of a partial ledger was being handed to the loss stop as
+        # though it were the whole history.
+        #
+        # THE DIRECTION OF THE ERROR IS THE BAD ONE. Every omitted result
+        # is a result that HAPPENED; excluding it can only understate the
+        # drawdown, so the rail would pass on a book whose true peak-to-
+        # trough is larger than anything it can see.
+        #
+        # NO NEW MECHANISM IS NEEDED, and that is the point. This function
+        # already blocks on a rail with no measurement -- `None` goes into
+        # `unmeasured` and the caller refuses. So an incomplete ledger makes
+        # MAX_DRAWDOWN *unmeasured* rather than reporting a smaller number,
+        # and the existing fail-closed path does the rest.
+        #
+        # THIS DOES NOT FIX THE CHRONOLOGY WORK; it contains a different
+        # failure. The per-fill increment redesign stands on its own.
         # THE BASIS LINE NOW STATES WHAT IS ACTUALLY MEASURED (2026-09-28).
         # It read "over %d closed funded position(s)", which was true of the
         # count and false as a description of the rail: the curve omitted
@@ -343,8 +367,8 @@ async def check_rails(conn, plan: dict, effective: dict, *,
         # those too, and the basis names both components -- a rail whose
         # stated basis is narrower than its measurement is how a blind
         # control keeps looking complete.
-        "MAX_DRAWDOWN": (
-            real["max_drawdown_usd"],
+        "MAX_DRAWDOWN": (None if (real.get("not_bookable") or []) else
+                         real["max_drawdown_usd"],
             "the worst peak-to-trough of the realised equity curve over %d "
             "closed funded position(s) and %d partial exit(s) on positions "
             "still open, in the order each result was taken. Closures from "
@@ -366,6 +390,29 @@ async def check_rails(conn, plan: dict, effective: dict, *,
                                   "blocks rather than passing quietly")})
             continue
         value, basis = got
+        # ── A MEASUREMENT THAT IS None BLOCKS, LIKE A MISSING ONE ────
+        #
+        # The branch above catches a rail with NO ENTRY. This catches a
+        # rail whose entry exists but whose VALUE could not be computed --
+        # MAX_DRAWDOWN over an incomplete realised ledger is the case that
+        # brought this about. Without it, `float(None)` raises TypeError
+        # and a risk check turns into a 500: the request fails, which is
+        # at least not a silent pass, but the operator learns nothing and
+        # the rail's own reason is lost.
+        #
+        # The basis string is KEPT here, because the reason a rail cannot
+        # be measured is the useful half of the refusal.
+        if value is None:
+            unmeasured.append(rail)
+            rails.append({"rail": rail, "limit": float(limit),
+                          "measured": None, "verdict": "NOT_MEASURED",
+                          "basis": basis,
+                          "why": ("this rail has a measurement PATH but the "
+                                  "value could not be computed from the "
+                                  "available records, so it blocks. An "
+                                  "incomplete total is not a smaller "
+                                  "total")})
+            continue
         ok = float(value) <= float(limit) + 1e-9
         rails.append({"rail": rail, "limit": float(limit),
                       "measured": round(float(value), 6),
