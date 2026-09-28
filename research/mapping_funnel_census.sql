@@ -68,42 +68,67 @@ SELECT (e ->> 'stage')                            AS stage,
 -- 4 · IS THE MAPPING MISSING BECAUSE THE VENUE HAS NO CONTRACT, OR
 --     BECAUSE WE CANNOT RESOLVE ONE? Two different owners, and the
 --     refusal code alone does not distinguish them.
+--
+--     TABLE NAMES CORRECTED. My first version queried `us_markets`, which
+--     does not exist -- the loop's own MARKETS_SQL reads `markets`, and
+--     `us_premap` keys on `market_slug`, not `us_market_slug`. The SQL
+--     died at section 4 and sections 1-3 had already returned, which is
+--     the right failure order but was avoidable by reading the producer.
 -- ─────────────────────────────────────────────────────────────────────
-SELECT count(*)                                            AS venue_markets_total,
-       count(*) FILTER (WHERE closed_at IS NULL)            AS open_markets,
-       count(DISTINCT sport)                                AS sports,
-       count(*) FILTER (WHERE condition_id IS NOT NULL)      AS with_condition_id
-  FROM us_markets;
+SELECT count(*)                                              AS markets_total,
+       count(*) FILTER (WHERE NOT closed AND NOT resolved)     AS open_markets,
+       count(DISTINCT sport)                                  AS sports,
+       count(*) FILTER (WHERE condition_id IS NOT NULL)        AS with_condition_id,
+       count(*) FILTER (WHERE NOT closed AND NOT resolved
+                        AND updated_at >= now() - INTERVAL '2 days')
+                                                              AS open_and_fresh
+  FROM markets;
 
--- WHICH SPORTS THE VENUE ACTUALLY LISTS, against the sports we ASK for.
--- A sport the venue does not carry is a universe fact, not a mapper bug.
+-- WHICH SPORTS THE VENUE ACTUALLY LISTS. A sport the venue does not carry
+-- is a universe fact, not a mapper bug. THE DECISIVE QUESTION for the 20
+-- EPL refusals: the loop saw 70 open soccer markets and mapped NONE of
+-- them, so either those 70 are not EPL, or the mapper cannot match them.
 SELECT sport,
-       count(*)                                   AS markets,
-       count(*) FILTER (WHERE closed_at IS NULL)   AS open_now,
-       min(slug)                                  AS example
-  FROM us_markets
+       count(*)                                     AS markets,
+       count(*) FILTER (WHERE NOT closed AND NOT resolved) AS open_now,
+       count(*) FILTER (WHERE NOT closed AND NOT resolved
+                        AND updated_at >= now() - INTERVAL '2 days')
+                                                    AS open_and_fresh,
+       min(slug)                                    AS example_slug,
+       min(event_title)                             AS example_event
+  FROM markets
  GROUP BY sport
- ORDER BY open_now DESC NULLS LAST, markets DESC;
+ ORDER BY open_and_fresh DESC NULLS LAST, markets DESC;
+
+-- THE OPEN SOCCER MARKETS BY EVENT TITLE. If these are not EPL fixtures,
+-- the 20 refusals are honest coverage and no mapper change helps.
+SELECT slug, event_title, title, updated_at
+  FROM markets
+ WHERE sport = 'soccer' AND NOT closed AND NOT resolved
+   AND updated_at >= now() - INTERVAL '2 days'
+ ORDER BY updated_at DESC
+ LIMIT 40;
 
 -- ─────────────────────────────────────────────────────────────────────
--- 5 · THE PREMAP: the resolver's own binding table. A market with no
---     premap row cannot be resolved to an instrument regardless of what
---     the catalogue carries, and that is OUR gap rather than the venue's.
+-- 5 · THE PREMAP: the resolver's own binding table, keyed on
+--     `market_slug`. A market with no premap row cannot be resolved to an
+--     instrument regardless of what the catalogue carries -- OUR gap.
 -- ─────────────────────────────────────────────────────────────────────
-SELECT count(*)                                            AS premap_rows,
-       count(DISTINCT us_market_slug)                       AS distinct_slugs,
-       count(*) FILTER (WHERE event_slug IS NOT NULL)        AS with_event_slug
+SELECT count(*)                                              AS premap_rows,
+       count(DISTINCT market_slug)                            AS distinct_slugs,
+       count(*) FILTER (WHERE event_slug IS NOT NULL)          AS with_event_slug
   FROM us_premap;
 
--- OPEN VENUE MARKETS WITH NO PREMAP ROW -- the actionable gap.
 SELECT m.sport,
-       count(*)                                   AS open_without_premap,
-       min(m.slug)                                AS example
-  FROM us_markets m
-  LEFT JOIN us_premap p ON p.us_market_slug = m.slug
- WHERE m.closed_at IS NULL AND p.us_market_slug IS NULL
+       count(*)                                     AS open_fresh_without_premap,
+       min(m.slug)                                  AS example
+  FROM markets m
+  LEFT JOIN us_premap p ON p.market_slug = m.slug
+ WHERE NOT m.closed AND NOT m.resolved
+   AND m.updated_at >= now() - INTERVAL '2 days'
+   AND p.market_slug IS NULL
  GROUP BY m.sport
- ORDER BY open_without_premap DESC;
+ ORDER BY open_fresh_without_premap DESC;
 
 -- ─────────────────────────────────────────────────────────────────────
 -- 6 · THE 1,126-ROW HISTORY's first failing link, so the CURRENT funnel
