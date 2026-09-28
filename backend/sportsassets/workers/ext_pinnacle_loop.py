@@ -4461,6 +4461,42 @@ def _rate_control_digest() -> dict:
         out["process_request_totals"] = grt.totals()
     except Exception as exc:                                   # noqa: BLE001
         out["not_before"] = {"unavailable": type(exc).__name__}
+    # ── WHETHER RESEARCH TRAFFIC IS ACTUALLY STARVING SERVICING ──────
+    #
+    # THE QUESTION THIS MAKES ANSWERABLE, AND THE CHANGE IT REPLACES.
+    # The instruction is to throttle lower-priority research traffic first
+    # and preserve capacity for reconciliation and servicing. The obvious
+    # implementation is to promote the servicing reads into the pacer's
+    # existing PRIORITY lane -- and that lane currently has exactly one
+    # claimant, the frozen mirror tick. Adding claimants to it changes the
+    # scheduling that frozen lane sees.
+    #
+    # There is no evidence yet that it should be changed. The measured
+    # blocker was ONE 429 on ONE candidate's book read, not a servicing read
+    # starved behind research. Re-scheduling a frozen lane on the strength
+    # of a plausible story is the same error as reporting a control that
+    # does not control.
+    #
+    # So the contention is MEASURED instead. `lane_stats()` already counts
+    # the seconds each lane's claims spent waiting and how many there were;
+    # it simply had no reader. With it on the heartbeat, "research is
+    # starving servicing" becomes a claim production can settle, and the
+    # scheduling change can follow evidence instead of preceding it.
+    try:
+        from .. import venue_pace as vp2
+        out["pacer_lanes"] = dict(
+            vp2.lane_stats(),
+            scope="PROCESS_SINCE_IMPORT",
+            read_as="deltas between heartbeats, not absolutes",
+            what_is_in_each_lane={
+                "priority": "the frozen mirror tick only",
+                "normal": ("this lane's candidate book reads AND its "
+                           "reconciliation and servicing reads -- they "
+                           "currently compete equally, which is the thing "
+                           "these numbers exist to test"),
+            })
+    except Exception as exc:                                   # noqa: BLE001
+        out["pacer_lanes"] = {"unavailable": type(exc).__name__}
     try:
         from .. import venue_pace as vp
         c = vp.cooldown_state()
