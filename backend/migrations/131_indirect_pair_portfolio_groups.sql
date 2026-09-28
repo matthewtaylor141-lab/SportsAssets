@@ -424,6 +424,104 @@ CREATE TRIGGER bettor_funded_reservation_matches_group_trg
     BEFORE INSERT OR UPDATE ON bettor_funded_leg_reservations
     FOR EACH ROW EXECUTE FUNCTION bettor_funded_reservation_matches_group();
 
+-- ── 8b · THE TRANSITIONS ARE A MACHINE, NOT A FREE TEXT COLUMN ───────
+--
+-- The CHECK constraint above enumerates the six legal STATES. It says nothing
+-- about which state may follow which, so `state` could go straight from HELD to
+-- CONSUMED -- claiming an order was placed with no send ever attempted -- or
+-- back from CONSUMED to HELD, un-resolving a resolved acquisition. In a path
+-- that decides whether a real order exists at a venue, "what happened before
+-- this" is the whole content.
+--
+-- WHY IN THE DATABASE. The Python module is the only intended caller, but it is
+-- not the only possible writer: a repair script, a future caller, a hand UPDATE
+-- at a prompt. A state machine enforced only in application code is a
+-- convention, and the one rule that must not be a convention is the one that
+-- decides whether we believe an order was sent.
+--
+-- THE MACHINE:
+--     HELD            -> COMMITTED | RELEASED
+--     COMMITTED       -> SEND_ATTEMPTED | RELEASED
+--     SEND_ATTEMPTED  -> CONSUMED | AMBIGUOUS
+--     AMBIGUOUS       -> CONSUMED | RELEASED
+--     CONSUMED        -> (terminal)
+--     RELEASED        -> (terminal)
+--
+-- NOTE WHAT IS ABSENT. `SEND_ATTEMPTED -> RELEASED` is NOT allowed: once a
+-- request may have left, nothing may declare that it did not. The only route out
+-- is CONSUMED (the venue named the order) or AMBIGUOUS (we do not know), and
+-- AMBIGUOUS is released only on the venue's own answer -- which is what makes
+-- that release evidence rather than an assumption.
+--
+-- AND THE IDENTITY IS FIXED FROM CREATION. A different quantity, price,
+-- contract, role or group is a DIFFERENT acquisition attempt and needs its own
+-- `operation_id`; editing those on an existing row would let one identity stand
+-- for two economic actions, which is exactly what `operation_id` exists to
+-- prevent. `intent_id` may be set once, when the reservation is committed to its
+-- intent, and not changed afterwards.
+CREATE OR REPLACE FUNCTION bettor_funded_reservation_transitions_are_legal()
+RETURNS trigger AS $$
+DECLARE legal boolean;
+BEGIN
+    IF NEW.state = OLD.state THEN
+        legal := true;
+    ELSE
+        legal := CASE OLD.state
+            WHEN 'HELD'           THEN NEW.state IN ('COMMITTED', 'RELEASED')
+            WHEN 'COMMITTED'      THEN NEW.state IN ('SEND_ATTEMPTED',
+                                                     'RELEASED')
+            WHEN 'SEND_ATTEMPTED' THEN NEW.state IN ('CONSUMED', 'AMBIGUOUS')
+            WHEN 'AMBIGUOUS'      THEN NEW.state IN ('CONSUMED', 'RELEASED')
+            ELSE false
+        END;
+    END IF;
+    IF NOT legal THEN
+        RAISE EXCEPTION 'reservation % cannot go from % to %: %',
+            OLD.reservation_id, OLD.state, NEW.state,
+            CASE
+              WHEN OLD.state IN ('CONSUMED','RELEASED')
+                THEN 'it is already resolved, and a resolved acquisition is '
+                     'not re-opened'
+              WHEN OLD.state = 'SEND_ATTEMPTED' AND NEW.state = 'RELEASED'
+                THEN 'a request that may have left cannot be declared not to '
+                     'have left; resolve it through AMBIGUOUS on the venue''s '
+                     'own answer'
+              WHEN OLD.state = 'HELD' AND NEW.state IN ('SEND_ATTEMPTED',
+                                                        'AMBIGUOUS','CONSUMED')
+                THEN 'nothing has been committed to an intent yet, so there is '
+                     'no order for this to refer to'
+              ELSE 'that is not a transition this machine has'
+            END;
+    END IF;
+    IF NEW.operation_id IS DISTINCT FROM OLD.operation_id
+       OR NEW.group_id IS DISTINCT FROM OLD.group_id
+       OR NEW.leg_role IS DISTINCT FROM OLD.leg_role
+       OR NEW.us_market_slug IS DISTINCT FROM OLD.us_market_slug
+       OR NEW.quantity IS DISTINCT FROM OLD.quantity
+       OR NEW.limit_price IS DISTINCT FROM OLD.limit_price
+       OR NEW.collateral_usd IS DISTINCT FROM OLD.collateral_usd THEN
+        RAISE EXCEPTION 'reservation % identity is fixed: a different group, '
+                        'role, contract, quantity, price or collateral is a '
+                        'DIFFERENT acquisition and needs its own operation_id',
+            OLD.reservation_id;
+    END IF;
+    IF OLD.intent_id IS NOT NULL
+       AND NEW.intent_id IS DISTINCT FROM OLD.intent_id THEN
+        RAISE EXCEPTION 'reservation % is already committed to intent %; it '
+                        'cannot be re-pointed at %',
+            OLD.reservation_id, OLD.intent_id, NEW.intent_id;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS bettor_funded_reservation_transitions_are_legal_trg
+    ON bettor_funded_leg_reservations;
+CREATE TRIGGER bettor_funded_reservation_transitions_are_legal_trg
+    BEFORE UPDATE ON bettor_funded_leg_reservations
+    FOR EACH ROW EXECUTE FUNCTION
+        bettor_funded_reservation_transitions_are_legal();
+
 -- ── 9 · CURRENTLY PAIRED INVENTORY, NOT HISTORICAL VOLUME ───────────
 --
 -- THE DEFECT THIS REPLACES. The first version summed ENTRY fills only, so
