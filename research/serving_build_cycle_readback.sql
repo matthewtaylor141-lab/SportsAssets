@@ -22,15 +22,30 @@
 --     is not the SHA that was just deployed, nothing below is evidence
 --     for it and that must be visible first.
 -- ─────────────────────────────────────────────────────────────────────
+-- ── FOUR PATHS IN THIS SECTION WERE WRONG AND RETURNED EMPTY ────────
+-- The first run of this file printed `writer_build` NULL and I nearly
+-- reported "the cycle cannot be attributed to the deployed SHA". The
+-- cycle WAS attributable; my query was reading keys the writer does not
+-- emit. `_heartbeat` nests the code identity under `writer`
+-- (`_code_identity()` returns {module, source_sha256_12, build, pid}),
+-- names the label `cycle_label`, and names the servicing projection
+-- `funded_servicing`. An empty column from a wrong path looks exactly
+-- like an absent field, which is the failure mode that makes a readback
+-- worse than no readback -- so each path below is written against the
+-- producer, not against what I assumed it was called.
 SELECT key,
-       (value::jsonb ->> 'at')                        AS cycle_at,
-       (value::jsonb ->> 'build')                     AS writer_build,
+       to_timestamp((value::jsonb ->> 'at')::float8)  AS cycle_at,
+       (value::jsonb -> 'writer' ->> 'build')         AS writer_build,
+       (value::jsonb -> 'writer' ->> 'source_sha256_12')
+                                                      AS loop_source_hash,
+       (value::jsonb -> 'writer' ->> 'pid')           AS writer_pid,
        (value::jsonb ->> 'state')                     AS state,
-       (value::jsonb ->> 'label')                     AS label,
-       (value::jsonb ->> 'loop_source_hash')          AS loop_source_hash,
-       ((value::jsonb -> 'servicing') IS NOT NULL)    AS carries_a_servicing_decision,
+       (value::jsonb ->> 'cycle_label')               AS cycle_label,
+       ((value::jsonb -> 'funded_servicing') IS NOT NULL)
+                                                      AS carries_a_servicing_decision,
        (value::jsonb ->> 'evaluated')                 AS evaluated,
-       (value::jsonb ->> 'written')                   AS written
+       (value::jsonb ->> 'written')                   AS written,
+       (value::jsonb ->> 'markets_considered')        AS markets_considered
   FROM ingestion_state
  WHERE key LIKE '%ext_pinnacle%'
     OR key LIKE '%cycle%'
@@ -39,8 +54,14 @@ SELECT key,
 
 -- ─────────────────────────────────────────────────────────────────────
 -- 2 · THE FRESHNESS KNOB, read back from the cycle the new build wrote.
---     Both counters must be 0 at the default. If `odds_freshness` is
---     ABSENT the serving build predates it, which is itself the answer.
+--     Both counters must be 0 at the default.
+--
+--     AN ABSENT `odds_freshness` DOES NOT MEAN THE BUILD PREDATES IT.
+--     That is what this file claimed, and it was wrong twice over: the
+--     serving build c3d0cfc DOES carry the knob, and the field was
+--     absent because `_heartbeat` persisted an explicit key subset that
+--     `odds_freshness` was never added to. Read `writer.build` in
+--     section 1 to date the build; this section reports the knob only.
 -- ─────────────────────────────────────────────────────────────────────
 SELECT key,
        ((value::jsonb -> 'odds_freshness') IS NOT NULL) AS field_present,
@@ -52,6 +73,22 @@ SELECT key,
                                                         AS refetches,
        (value::jsonb -> 'odds_freshness' ->> 'odds_refetch_failures')
                                                         AS refetch_failures,
+       -- THE MEASURED PATH. provider lag and our own delay stay apart:
+       -- the 30 s rule governs their SUM, but only the second is ours.
+       (value::jsonb -> 'odds_freshness' ->> 'provider_lag_s')
+                                                        AS provider_lag_s,
+       (value::jsonb -> 'odds_freshness' ->> 'our_processing_s')
+                                                        AS our_processing_s,
+       (value::jsonb -> 'odds_freshness' ->> 'valid_evaluations')
+                                                        AS valid_evaluations,
+       (value::jsonb -> 'odds_freshness' ->> 'stale_refusals')
+                                                        AS stale_refusals,
+       (value::jsonb -> 'odds_freshness' ->> 'self_inflicted_stale')
+                                                        AS self_inflicted_stale,
+       (value::jsonb -> 'odds_freshness' ->> 'skipped_stale_on_arrival')
+                                                        AS skipped_on_arrival,
+       (value::jsonb -> 'odds_freshness' ->> 'deduplicated_requests')
+                                                        AS deduped,
        (value::jsonb -> 'credits' ->> 'remaining')      AS credits_remaining,
        (value::jsonb -> 'credits' ->> 'used')           AS credits_used
   FROM ingestion_state

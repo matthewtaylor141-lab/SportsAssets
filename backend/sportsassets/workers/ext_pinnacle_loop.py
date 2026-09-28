@@ -3968,6 +3968,71 @@ def _servicing_digest(svc) -> dict | None:
                     "projection of it failed. Read the funded book itself")}
 
 
+def _freshness_digest(out: dict) -> dict | None:
+    """THE MEASURED LATENCY NUMBERS, projected onto the heartbeat.
+
+    ── THE DEFECT THIS FIXES, WHICH WAS MINE ─────────────────────────
+    `_cycle` returned an `odds_freshness` block carrying the knob's
+    configuration and its two counters. `_heartbeat` persists an EXPLICIT
+    SUBSET of the cycle return, and `odds_freshness` was not in it. So the
+    telemetry for the latency work existed for the duration of one
+    function call and was never readable afterwards -- exactly the fault
+    `_servicing_digest` was written to fix, reintroduced by me in the very
+    change that was supposed to make the latency behaviour observable.
+    A readback asking whether the knob was in force got `field_present f`
+    and I nearly read that as "the serving build predates it".
+
+    ── WHY A DIGEST AND NOT THE BLOCK ────────────────────────────────
+    The cycle block carries four paragraphs of prose explaining what the
+    knob is for. A heartbeat is overwritten every cycle and read by an
+    operator surface; it carries the NUMBERS. The prose stays on the cycle
+    return, where the explanation belongs.
+
+    ── WHAT IS MEASURED HERE, AND WHAT EACH ONE MEANS ────────────────
+    `provider_lag_s` is how old the price already was when the provider
+    handed it to us. `our_processing_s` is how long we then took to reach
+    a decision. Their sum is `pinnacle_age_s`, the quantity the 30-second
+    rule governs -- and the rule is UNCHANGED by any of this. The split
+    matters because the remedies differ and only one of them is ours.
+
+    `self_inflicted_stale` counts the refusals where our own delay ALONE
+    exceeded the limit: cases that would have been valid had we been
+    faster. That is the number the latency work has to move, and it is
+    counted rather than inferred.
+
+    NEVER RAISES, for the same reason `_servicing_digest` does not.
+    """
+    fr = out.get("odds_freshness")
+    if not isinstance(fr, dict):
+        return None
+    try:
+        lat = out.get("latency") or {}
+        return {
+            # ── THE KNOB'S STATE ──────────────────────────────────
+            "events_per_odds_fetch": fr.get("events_per_odds_fetch"),
+            "max_per_cycle": fr.get("max_per_cycle"),
+            "is_the_default": fr.get("is_the_default"),
+            "odds_refetches": fr.get("odds_refetches"),
+            "odds_refetch_failures": fr.get("odds_refetch_failures"),
+            # ── THE MEASURED PATH ─────────────────────────────────
+            "provider_lag_s": lat.get("provider_lag_s"),
+            "our_processing_s": lat.get("our_processing_s"),
+            "pinnacle_age_s": lat.get("pinnacle_age_s"),
+            "limit_s": PINNACLE_MAX_AGE_S,
+            "valid_evaluations": lat.get("valid_evaluations"),
+            "stale_refusals": lat.get("stale_refusals"),
+            "self_inflicted_stale": lat.get("self_inflicted_stale"),
+            "provider_stale_on_arrival": lat.get("provider_stale_on_arrival"),
+            "skipped_stale_on_arrival": lat.get("skipped_stale_on_arrival"),
+            "deduplicated_requests": lat.get("deduplicated_requests"),
+            "venue_requests": lat.get("venue_requests"),
+            "measured_on": "THE_DEPLOYED_PATH_NOT_A_FIXTURE",
+        }
+    except Exception as exc:                                    # noqa: BLE001
+        return {"digest_failed": "%s: %s"
+                % (type(exc).__name__, str(exc)[:160])}
+
+
 async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
     """PERSIST THE CYCLE SUMMARY, because most refusals never reach a row.
 
@@ -4031,6 +4096,11 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                     out.get("mapped_candidate_ledger") or [],
                 "cycle_label": out.get("cycle_label"),
                 "cycle_label_note": out.get("cycle_label_note"),
+                # THE LATENCY MEASUREMENT, PERSISTED. See
+                # `_freshness_digest`: the cycle computed these and the
+                # heartbeat dropped them, so the one change made to reduce
+                # self-inflicted staleness was unobservable in production.
+                "odds_freshness": _freshness_digest(out),
                 # THE SERVICING DECISION, PERSISTED.
                 #
                 # THE GAP THIS CLOSES. `_funded_service` ran on every

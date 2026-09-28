@@ -5577,14 +5577,58 @@ jobs:
           say "  answers /api/health, AND the control sign-in must refuse a"
           say "  wrong password with 401 rather than 503."
           for i in $(seq 1 60); do
-            SERVING=$(curl -sS --max-time 20 "$A/api/health" 2>/dev/null \
-                      | jq -r '.build // .commit // .sha // "?"' 2>/dev/null \
-                      || echo "?")
-            case "$SERVING" in
-              "$OPERATOR_COMMIT"*) say "  serving ${OPERATOR_COMMIT:0:7} after $((i*10))s"; break ;;
-            esac
+            # ── TWO DEFECTS FIXED HERE (2026-09-28) ────────────────────
+            #
+            # FOUND BY INVESTIGATING WHY THIS LOOP COST 10 MINUTES AND
+            # CONFIRMED NOTHING on the c3d0cfc release. It ran its full 60
+            # iterations, never matched, and fell through SILENTLY -- there
+            # is no failure branch. The release was confirmed by S3b's
+            # Render deploy list and by the sign-in actually working, so the
+            # one step whose job is to prove serving-SHA identity was inert.
+            #
+            #   1 IT POLLED AN ENDPOINT THAT DOES NOT EXIST. The service
+            #     publishes `/healthz` and `/api/health/services`. There is
+            #     no `/api/health`, so every poll took a 404 and `jq` read
+            #     "?" sixty times.
+            #
+            #   2 THE COMPARISON WAS INVERTED. `/healthz` reports
+            #     `commit: RENDER_GIT_COMMIT[:7]` -- SEVEN characters --
+            #     while `case "$SERVING" in "$OPERATOR_COMMIT"*)` requires
+            #     the SERVED value to begin with the full 40-hex SHA. A
+            #     7-char prefix can never satisfy that, so the check would
+            #     have failed even against the right URL.
+            #
+            # Now: the real endpoint, and the full SHA must begin with the
+            # served prefix -- the direction that is true when a short
+            # commit identifies a long one. The served value is required to
+            # be non-empty and at least 7 characters, so "?" or "" cannot
+            # accidentally prefix-match.
+            SERVING=$(curl -sS --max-time 20 "$A/healthz" 2>/dev/null \
+                      | jq -r '.commit // .build // .sha // ""' 2>/dev/null \
+                      || echo "")
+            if [ "${#SERVING}" -ge 7 ]; then
+              case "$OPERATOR_COMMIT" in
+                "$SERVING"*) say "  serving $SERVING after $((i*10))s (matches ${OPERATOR_COMMIT:0:7})"
+                             SHA_CONFIRMED=yes; break ;;
+              esac
+            fi
             sleep 10
           done
+          # AND IT NO LONGER FALLS THROUGH IN SILENCE. A loop that cannot
+          # confirm the serving SHA must say so, because "nothing printed"
+          # read as success for as long as this defect existed. It is a
+          # WARNING rather than a hard stop: S3b independently establishes
+          # the live commit from Render's own deploy list, and that check
+          # does fail closed. So this reports an unconfirmed readback
+          # without blocking a release S3b can still prove.
+          if [ "${SHA_CONFIRMED:-no}" != "yes" ]; then
+            say "  ⚠ /healthz never reported the reviewed SHA within $((60*10))s."
+            say "    Last value read: '${SERVING:-<empty>}'."
+            say "    This does NOT by itself mean the build is wrong -- S3b"
+            say "    below reads the live commit from Render and fails closed."
+            say "    It does mean the service-side readback is unconfirmed,"
+            say "    which is reported rather than left as silence."
+          fi
           # The wrong-password probe flipping 503 -> 401 is the signal, and
           # it needs no secret. Bounded wait.
           OK=no
