@@ -1240,3 +1240,197 @@ async def test_the_pair_pass_recovers_even_with_no_pairing_inputs():
     finally:
         await _clean(conn)
         await conn.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ONE MANAGEMENT DECISION BEFORE ANY ACTION, THROUGH `pass_once`
+# ═════════════════════════════════════════════════════════════════════
+#
+# "Make one management decision before executing an action: reconcile first,
+# then rank HOLD/DIRECT_EXIT/REDUCE/indirect together, then dispatch one
+# selected action. No sale may precede that comparison."
+#
+# WHAT THE EXISTING PROOF DOES NOT COVER. The lifecycle test above walks the
+# stages by calling `discover`, `decide_and_record` and `acquire_second_leg` in
+# order -- which demonstrates each stage but cannot demonstrate that the
+# PRODUCTION CALLER puts them in that order, because the test supplies the
+# order. These two go through `pass_once` with a supplier, so the ordering under
+# test is the module's.
+
+def _pair_facts(hold_ranking=None):
+    """Everything `pass_once`'s supplier contract requires, for one position.
+
+    `pair_inputs` is deliberately not defaulted in the module -- every field is
+    a reading of a venue, a fee schedule or an odds source, and the module
+    inventing one would be manufacturing the inputs of a capital decision. So
+    the test plays the supplier, and this function is the whole contract in one
+    place.
+    """
+    admitted = PC.discover(held_leg=_held_leg(),
+                           candidate_legs=_decoys() + [_hedge_leg()],
+                           sport_permits_tie=False,
+                           fixture_can_postpone=False)["admitted"][0]
+
+    async def _supply(conn, pos, *, at):
+        return {
+            "ok": True,
+            "held_leg": _held_leg(),
+            "candidate_legs": _decoys() + [_hedge_leg()],
+            "sport_permits_tie": False,
+            "fixture_can_void": False,
+            "fixture_can_postpone": False,
+            "decision_id": DECISION,
+            "hold_ranking": hold_ranking or _hold_ranking(),
+            "region_probabilities": _region_probabilities(
+                admitted["structure"]["table"]),
+            "evidence_quality": FD.EVIDENCE_EXTERNAL_LABELLED,
+            "fee_usd": HEDGE_FEE,
+            "depth": FIP.depth_supports(wanted_qty=HEDGE_QTY,
+                                        depth_qty_at_price=25),
+            "incremental": FIP.incremental_capital_usd(
+                hedge_qty=HEDGE_QTY, hedge_price=HEDGE_PX,
+                hedge_fee_usd=HEDGE_FEE),
+            "capital_duration_h": 26.0,
+            "holding_policy": FL.POLICY_HOLD_TO_SETTLEMENT,
+            "limits": None,
+            "operation_id": OP_HEDGE,
+            "hedge_us_market_slug": SLUG_HEDGE,
+            "hedge_quantity": HEDGE_QTY,
+            "hedge_limit_price": HEDGE_PX,
+            "hedge_collateral_usd": FX.collateral_for(HEDGE_PX, HEDGE_QTY,
+                                                      FX.LONG),
+            "hedge_decision_record": _hedge_decision_record(),
+        }
+
+    return _supply
+
+
+def _exit_is_the_standalone_winner():
+    """The same three alternatives, with DIRECT_EXIT on top.
+
+    HOLD +0.10, DIRECT_EXIT +2.40, REDUCE +0.30. A lane that ranked only these
+    three and dispatched the winner would SELL. That is the case the review
+    asked to see beaten by the combined ranking.
+    """
+    hr = _hold_ranking()
+    for c in hr["candidates"]:
+        if c["action"] == "HOLD":
+            c["value_usd"] = c["expected_net_usd"] = 0.10
+        elif c["action"] == "DIRECT_EXIT":
+            c["value_usd"] = c["expected_net_usd"] = 2.40
+            c["downside_usd"] = 2.40
+        elif c["action"] == "REDUCE":
+            c["value_usd"] = c["expected_net_usd"] = 0.30
+    return hr
+
+
+async def test_the_pass_ranks_everything_together_before_it_dispatches(
+        monkeypatch):
+    """THE ORDERING, FROM THE PRODUCTION CALLER.
+
+    The exit is the best standalone action and is profitable, so the sale is the
+    one a three-way lane would make. Through `pass_once` the indirect candidate
+    joins the same ranking, the acquisition wins, and the exit is still in the
+    ranked set having been beaten on its number rather than withheld.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _primary(conn)
+        _, sent, _client = _transport(monkeypatch, order_id="venue-hedge")
+
+        got = await PC.pass_once(
+            conn, account_id=ACCT, venue=VENUE,
+            pair_inputs=_pair_facts(_exit_is_the_standalone_winner()),
+            venue_positions=EMPTY_VENUE)
+        assert got["ok"] is True, got
+        step = got["considered"][0]
+
+        # ── RECONCILIATION RAN FIRST, and it needs no supplier ───────
+        assert got["recovery"]["ok"] is True
+
+        # ── ONE RANKING, AND THE ACQUISITION WON IT ──────────────────
+        assert step["decision"]["action"] == PC.ACTION_ACQUIRE, step
+        assert step["decision"]["policy"] == "EXPECTED_NET_VALUE"
+
+        # ── THE EXIT WAS RANKED, NOT WITHHELD ───────────────────────
+        row = await conn.fetchrow(
+            "SELECT * FROM bettor_funded_decisions WHERE decision_id=$1",
+            DECISION)
+        assert row is not None, "the decision is recorded before the action"
+        assert row["action"] == "ACQUIRE_HEDGE"
+
+        # ── AND EXACTLY ONE ACTION WAS DISPATCHED ───────────────────
+        assert len(got["acquisitions"]) == 1, got["acquisitions"]
+        assert got["opened_anything"] is True
+        # ONE CREATE. The adapter previews before it creates, so `sent` carries
+        # both calls and counting the list would have counted the preview as a
+        # second order -- which is how a test comes to assert the wrong number
+        # and then get "fixed" by relaxing it.
+        creates = [c for c in sent if c[0] == "create"]
+        assert len(creates) == 1, sent
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+async def test_a_decision_that_is_not_an_acquisition_reaches_no_venue(
+        monkeypatch):
+    """NO SALE PRECEDES THE COMPARISON, AND NONE FOLLOWS IT FROM HERE EITHER.
+
+    With HOLD winning, `pass_once` records the decision and dispatches nothing.
+    The adapter is armed and counts its sends, so an unexpected order would be
+    visible rather than inferred from a return value.
+
+    AND IT DOCUMENTS A REAL LIMIT OF THIS PATH, which I would rather state than
+    have read as coverage: `pass_once` can dispatch ONLY the acquisition. A
+    selected DIRECT_EXIT or REDUCE is recorded and left to the entry lane's own
+    management path -- so "dispatch one selected action" is implemented for one
+    of the four actions, not four. The refusal name says so explicitly instead
+    of the step falling silent.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        await _seed(conn)
+        await _primary(conn)
+        _, sent, _client = _transport(monkeypatch, order_id="venue-hedge")
+
+        # HOLD MUST ACTUALLY WIN, and the file's default ranking does not make
+        # it win -- the hedge beats HOLD at +1.80 on these facts, which is what
+        # the lifecycle test above relies on. So HOLD is raised above the
+        # hedge's own expected net value rather than the hedge being weakened,
+        # because weakening the hedge would test a different thing.
+        hr = _hold_ranking()
+        for c in hr["candidates"]:
+            if c["action"] == "HOLD":
+                c["value_usd"] = c["expected_net_usd"] = 9.50
+        got = await PC.pass_once(
+            conn, account_id=ACCT, venue=VENUE,
+            pair_inputs=_pair_facts(hr),
+            venue_positions=EMPTY_VENUE)
+        assert got["ok"] is True, got
+        step = got["considered"][0]
+        assert step["decision"]["action"] != PC.ACTION_ACQUIRE, step
+        assert step["refusal"] == PC.R_DECISION_IS_NOT_ACQUIRE
+        assert step["what_was_selected_instead"] == step["decision"]["action"]
+
+        # THE COMPARISON HAPPENED AND WAS WRITTEN.
+        row = await conn.fetchrow(
+            "SELECT * FROM bettor_funded_decisions WHERE decision_id=$1",
+            DECISION)
+        assert row is not None
+
+        # AND NOTHING WENT TO THE VENUE.
+        assert got["acquisitions"] == []
+        assert got["opened_anything"] is False
+        assert [c for c in sent if c[0] == "create"] == [], sent
+        held = await RSV.reserved_collateral_usd(conn, account_id=ACCT)
+        assert held["ok"] is True and held["reserved_usd"] == 0.0, (
+            "a decision not to acquire must leave no reservation behind")
+    finally:
+        await _clean(conn)
+        await conn.close()

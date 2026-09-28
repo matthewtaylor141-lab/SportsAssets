@@ -513,3 +513,73 @@ def test_one_unit_structures_are_unchanged_by_the_scale_repair():
     assert wc["min_payout_usd"] == pytest.approx(wc["min_payout_usd_per_unit"])
     assert wc["cost_usd"] == pytest.approx(wc["cost_usd_per_unit"])
     assert wc["gross_worst_case_usd"] == pytest.approx(0.01)
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 5 · THE CASE THE REVIEW ASKED FOR: A SALE THAT WOULD HAVE HAPPENED
+# ═════════════════════════════════════════════════════════════════════
+#
+# "Prove a case where the standalone exit WOULD EXECUTE but the combined
+# ranking selects the hedge."
+#
+# WHY THE EXISTING COVERAGE DOES NOT PROVE IT.
+# `test_an_eligible_indirect_middle_is_preferred_when_the_economics_justify_it`
+# has the hedge win -- against `exit_value_usd=-0.20`, an exit that loses money
+# and would never have been dispatched. The hedge beating an action nobody would
+# take is not evidence that the combined comparison changes an OUTCOME.
+#
+# The case that matters is the one where the exit is PROFITABLE and is the best
+# of the standalone set, so a lane that ranked HOLD/EXIT/REDUCE and dispatched
+# the winner would sell -- and the same facts with the indirect candidate in the
+# ranking select the hedge instead. That is the difference between a comparison
+# that reorders a report and one that prevents a sale.
+
+def test_an_exit_that_would_have_executed_loses_to_the_hedge_in_one_ranking():
+    """THE PROOF. Same facts, two rankings, different actions.
+
+    HOLD +0.05, DIRECT_EXIT +0.08, REDUCE +0.02 -- the exit is positive and the
+    best of the three, so the standalone decision is SELL. Add the indirect
+    candidate at +0.11 and the selected action becomes the hedge.
+    """
+    hr = _hold_ranking(hold_value_usd=0.05, exit_value_usd=0.08,
+                       reduce_value_usd=0.02)
+
+    # ── 1. WITHOUT THE HEDGE IN THE RANKING, THE LANE SELLS ──────────
+    standalone = FD.decide(hold_ranking=hr, indirect=None)
+    assert standalone["selected"] == "DIRECT_EXIT", standalone
+    assert standalone["candidates"][0]["value_usd"] == pytest.approx(0.08)
+
+    # ── 2. THE SAME FACTS, ONE RANKING, WITH THE CANDIDATE PRESENT ───
+    cand = _indirect(p_a_wins=0.5, cost_b=40, fee=0.0, hedge_fee=0.0)
+    assert cand["expected_net_usd"] == pytest.approx(0.11)
+    combined = FD.decide(hold_ranking=hr, indirect=cand)
+    assert combined["selected"] == FD.ACTION_ACQUIRE_INDIRECT_HEDGE, combined
+
+    # ── 3. AND THE EXIT IS STILL THERE, RANKED AND BEATEN ────────────
+    #
+    # Not filtered, not withheld: the hedge has to WIN on the number. An exit
+    # that vanished from the comparison would make this test pass for the wrong
+    # reason, and the hedge would be preferred by construction rather than on
+    # its economics -- which is the thing I was told not to do.
+    actions = [c["action"] for c in combined["candidates"]]
+    assert "DIRECT_EXIT" in actions, actions
+    ranked = {c["action"]: c["value_usd"] for c in combined["candidates"]}
+    assert ranked["DIRECT_EXIT"] == pytest.approx(0.08)
+    assert combined["candidates"][0]["value_usd"] > ranked["DIRECT_EXIT"]
+    assert [c["action"] for c in combined["not_rankable"]] == []
+
+
+def test_the_hedge_does_not_win_when_it_does_not_earn_it():
+    """THE OTHER HALF, and the reason the test above is not rigged.
+
+    Move the exit above the hedge on the same scale and the exit is selected
+    again. If the hedge won here too, the comparison would be a preference
+    dressed as arithmetic.
+    """
+    cand = _indirect(p_a_wins=0.5, cost_b=40, fee=0.0, hedge_fee=0.0)
+    assert cand["expected_net_usd"] == pytest.approx(0.11)
+    got = FD.decide(hold_ranking=_hold_ranking(hold_value_usd=0.05,
+                                               exit_value_usd=0.20,
+                                               reduce_value_usd=0.02),
+                    indirect=cand)
+    assert got["selected"] == "DIRECT_EXIT", got
