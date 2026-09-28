@@ -131,6 +131,18 @@ V_EVALUATED = "CANDIDATES_WERE_EVALUATED"
 
 #: Only these verdicts fail the job. A world with no fixtures is not a
 #: broken system, and failing on it would train the reader to ignore the job.
+#:
+#: `ok` AND THE EXIT CODE ARE DIFFERENT QUESTIONS, and the live run showed why
+#: saying so matters: it printed `ok: false` beside "does not fail this job",
+#: which reads as a contradiction.
+#:
+#:   ok        did this run ESTABLISH what it set out to establish?
+#:   exit      should this job STOP the pipeline?
+#:
+#: Unreconciled coverage answers no to the first and no to the second: it is
+#: UNESTABLISHED, not proven broken, so it must be visible without blocking a
+#: release forever on what may be a population mismatch. The printed line now
+#: states both, so neither can be read as the other.
 FAILING = frozenset({V_NO_HEARTBEAT, V_UNREADABLE, V_UNACCOUNTED,
                      V_SERVICE_UNREACHABLE})
 
@@ -610,10 +622,16 @@ def _main(argv=None) -> int:
                   "that rate control is off.")
         else:
             print(json.dumps(v.get(key), indent=2, default=str))
-    print("\nVERDICT %s (%s)" % (v["verdict"],
-                                 "fails this job" if v["verdict"] in FAILING
-                                 else "does not fail this job"))
-    return 1 if v["verdict"] in FAILING else 0
+    fails = v["verdict"] in FAILING
+    print("\nVERDICT %s" % v["verdict"])
+    print("  establishes what it set out to establish : %s" % bool(v["ok"]))
+    print("  stops this job                           : %s" % fails)
+    if not v["ok"] and not fails:
+        print("  the two differ on purpose: coverage is UNESTABLISHED rather "
+              "than proven broken, so it is reported and not used to block a "
+              "release on what may be a population mismatch. A green job here "
+              "is NOT trading acceptance and does not become one by repeating.")
+    return 1 if fails else 0
 
 
 if __name__ == "__main__":                                     # pragma: no cover
