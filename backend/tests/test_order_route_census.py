@@ -196,9 +196,21 @@ def test_no_order_path_bypasses_the_adapter():
     # The two api modules build read-only clients: neither contains a
     # post_order, create_order or close_position call, asserted here
     # rather than assumed.
+    # `venue_sdk.py` NAMES THE CLASS WITHOUT CONSTRUCTING ONE. It exists to
+    # report what the installed SDK does -- its pinned version, whether our
+    # retry setting took, which methods it retries -- and it reads that from
+    # `inspect.signature(PolymarketUS.__init__)`. Reading a constructor's
+    # signature is not building a client and cannot send anything.
+    #
+    # THIS TEST WAS FAILING ON IT, and the failure was real in the sense that
+    # the census had not been told about a module that names a venue class.
+    # Allowing it silently would be the wrong repair, so it is allowed HERE and
+    # then held to the same positive assertions as the read-only api modules
+    # below: no submitting verb, and no actual construction.
     allowed = {"sportsassets/pmus.py", "sportsassets/live_executor.py",
                "sportsassets/api/pmus_account.py",
-               "sportsassets/api/track_record.py"}
+               "sportsassets/api/track_record.py",
+               "sportsassets/venue_sdk.py"}
     offenders = {s[0] for s in sites} - allowed
     assert not offenders, (
         "venue client constructed outside the known adapters: %s"
@@ -210,6 +222,39 @@ def test_no_order_path_bypasses_the_adapter():
         for verb in ("post_order", "create_order", "orders.create",
                      "close_position"):
             assert verb not in src, "%s can submit: %s" % (mod, verb)
+
+    # ── `venue_sdk` IS CHECKED ON ITS AST, NOT ITS TEXT ──────────────
+    #
+    # A text search is the right check for the two api modules: they have no
+    # reason to name a submitting verb at all. It is the WRONG check here,
+    # because this module's job is to DOCUMENT the installed SDK's surface --
+    # its docstring lists `orders.{cancel,close_position,create,...}` and its
+    # code reads `inspect.signature(PolymarketUS.__init__)`. A text search
+    # cannot tell a documented method name from a called one, and the first
+    # attempt at this repair failed on exactly that: it flagged a docstring.
+    #
+    # So the assertion is that no such NAME IS CALLED and no venue client is
+    # CONSTRUCTED. Naming a thing is not doing it; calling it is.
+    tree = ast.parse(open(os.path.join(BACKEND,
+                                       "sportsassets/venue_sdk.py")).read())
+    submitting = ("post_order", "create_order", "close_position",
+                  "submit_fok", "preview")
+    called = sorted({
+        "%s:%d" % (getattr(n.func, "attr", None) or getattr(n.func, "id", ""),
+                   n.lineno)
+        for n in ast.walk(tree) if isinstance(n, ast.Call)
+        and (getattr(n.func, "attr", None) in submitting
+             or getattr(n.func, "id", None) in submitting)})
+    assert not called, (
+        "venue_sdk CALLS a submitting method: %s. It is a reporter" % called)
+    built = sorted({
+        "%s:%d" % (getattr(n.func, "id", ""), n.lineno)
+        for n in ast.walk(tree) if isinstance(n, ast.Call)
+        and getattr(n.func, "id", None) in ("PolymarketUS", "AsyncPolymarketUS",
+                                            "ClobClient")})
+    assert not built, (
+        "venue_sdk constructs a venue client at %s; it must only read the "
+        "signature" % built)
 
 
 def test_the_clob_submission_path_is_gated_too():
