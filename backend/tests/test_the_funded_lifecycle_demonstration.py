@@ -399,7 +399,11 @@ async def test_case_a_partial_exit_duplicate_delivery_restart_and_late_fill(
         assert svc["exits"] == [], "manage submitted before the ranking ran"
         assert svc["defer_dispatch"] is True
         _pcx = (svc.get("pair_cycle") or {}).get("exits") or []
-        assert _pcx and _pcx[0]["submitted"] is True, svc.get("pair_cycle")
+        import json as _j
+        assert _pcx and _pcx[0]["submitted"] is True, _j.dumps(
+            [c.get("order_binding") or c.get("refusal")
+             for c in ((svc.get("pair_cycle") or {}).get("considered") or [])],
+            default=str)[:1800]
         assert _pcx[0]["quantity"] == pick["selected_qty"]
         assert _pcx[0]["limit_price"] == pick["limit_price"]
         create = [p for k, p in sent if k == "create"][-1]
@@ -602,7 +606,11 @@ async def test_case_b_a_loss_is_contained_and_inventory_remains(monkeypatch):
         assert svc["exits"] == [], "manage submitted before the ranking ran"
         assert svc["defer_dispatch"] is True
         _pcx = (svc.get("pair_cycle") or {}).get("exits") or []
-        assert _pcx and _pcx[0]["submitted"] is True, svc.get("pair_cycle")
+        import json as _j
+        assert _pcx and _pcx[0]["submitted"] is True, _j.dumps(
+            [c.get("order_binding") or c.get("refusal")
+             for c in ((svc.get("pair_cycle") or {}).get("considered") or [])],
+            default=str)[:1800]
         assert _pcx[0]["quantity"] == pick["selected_qty"]
         assert _pcx[0]["limit_price"] == pick["limit_price"]
 

@@ -149,7 +149,8 @@ def test_every_selectable_action_has_a_dispatch_and_hold_sends_nothing():
     assert "NOTHING" in PC.DISPATCHABLE["HOLD"]
     import inspect
     src = inspect.getsource(PC.pass_once)
-    assert "ACTION_DIRECT_EXIT, ACTION_REDUCE" in src
+    assert "LEDGER_EXIT_ACTIONS" in src, (
+        "the exit branch must key on the ledger's own vocabulary")
     assert "dispatch_selection" in src
 
 
@@ -454,53 +455,87 @@ def test_the_production_reader_supplies_no_qualifying_subscription():
         "connection engineering regressed")
 
 
-def test_p5_is_unavailable_and_says_what_would_establish_it():
+def test_p5_is_unavailable_and_a_movement_reading_does_not_promote_it():
+    """THE CORRECTION. My earlier test asserted the string "MOVING book"
+    appeared in the module's prose -- which proves a sentence exists and no
+    timing property at all, and it was on its way to becoming a second false
+    certificate.
+
+    A MOVING BOOK CAN STILL BE DELAYED: a sixty-second-late stream of a moving
+    book shows exactly the same movement as a current one. Movement separates
+    live from frozen, not current from late, and P5 is about the second. What a
+    movement experiment could distinguish -- whether transactTime advances with
+    observed changes, and its lag against OUR receipt -- leaves the interval
+    between the matching engine and the venue's egress unmeasured, and that is
+    the interval P5 asks about.
+    """
     from sportsassets import bettor_stream_currency as SC
 
     p5 = SC.PRECONDITION_STATUS[SC.P5_DOCUMENTED_TIMING]
     assert p5["available"] is False
     assert p5["this_is_the_binding_precondition"] is True
-    # THE TWO SUPPORTED ALTERNATIVES, from the module rather than from me. The
-    # second is ours to perform and is a MEASUREMENT, not a documentation
-    # change: a read of a demonstrably moving book that separates last-change
-    # from now.
-    assert "transactTime" in p5["what_would_establish_it"]
-    assert "MOVING book" in p5["what_would_establish_it"]
+    # THE ONLY THING THAT ESTABLISHES IT IS THE VENUE'S OWN DOCUMENTATION.
+    assert "documenting" in p5["what_would_establish_it"]
+    assert "MOVING" not in p5["what_would_establish_it"], (
+        "movement is not a route to establishing P5 and must not be offered "
+        "as one")
+    # AND THE SCOPE OF A MOVEMENT EXPERIMENT IS PREDECLARED, including what it
+    # leaves uncertain.
+    assert "unmeasured" in p5["what_a_movement_experiment_could_distinguish"]
 
 
-def test_every_other_precondition_is_available_so_the_gap_is_not_ours():
-    """Connection engineering being complete is the point: it means the
-    remaining requirement cannot be closed by more of it."""
-    from sportsassets import bettor_stream_currency as SC
+def test_no_configuration_makes_the_currency_verdict_admit(monkeypatch):
+    """ACCEPTANCE BEHAVIOUR, NOT PROSE. The question is whether anything
+    reachable from a caller turns NOT_ESTABLISHED into an admission.
 
-    for name, rec in SC.PRECONDITION_STATUS.items():
-        if name == SC.P5_DOCUMENTED_TIMING:
-            continue
-        assert rec["available"] is True, (name, rec.get("why"))
+    A fabricated subscription, a stale-but-moving payload and a fresh receipt
+    instant are each passed in, and the verdict must still refuse. This is the
+    test my string checks should have been.
+    """
+    import time as _t
 
-
-def test_receipt_age_is_never_substituted_for_an_as_of_guarantee():
-    """The named forbidden move, and each of these has been one step from
-    standing in for P5 at some point in this file's history."""
-    from sportsassets import bettor_stream_currency as SC
-
-    forbidden = SC.PRECONDITION_STATUS[SC.P5_DOCUMENTED_TIMING][
-        "what_we_must_NOT_do_about_it"]
-    for phrase in ("Transport latency", "receipt instant", "HTTP validator",
-                   "clean reconnect"):
-        assert phrase in forbidden, phrase
-    # AND THE CURRENCY MODULE ITSELF SAYS SO, on the processing-delay field it
-    # does compute: a real interval that cannot establish currency.
     from sportsassets import bettor_venue_currency as vc
 
-    import inspect
-    src = inspect.getsource(vc)
-    assert "our_processing_delay_is_not_currency" in src
+    now = _t.time()
+    # A SUBSCRIPTION DICTIONARY THAT CLAIMS EVERYTHING, hand-built: the shape a
+    # caller could most easily fabricate.
+    fabricated = {"connected": True, "alive": True, "last_message_at": now,
+                  "slug": "aec-nfl-chi-car-2026-09-13-chi",
+                  "connection_epoch": 1, "full_replacement": True,
+                  "documented_timing": True, "as_of": now}
+    got = vc.evaluate(
+        now=now, bound_s=30.0, subscription=fabricated,
+        our_receipt_at=now - 0.5, venue_ts=now - 1.0,
+        observation={"date_header_seen": True})
+    assert not vc.admits(got), got.get("verdict")
+    assert got["verdict"] != vc.ESTABLISHED
+    # AND THE REASON IS THE MECHANISM, not the freshness of the numbers.
+    assert got["mechanism"] in (vc.NO_MECHANISM, vc.M3_ORIGIN_GENERATION), got
+    # THE VENUE'S OWN STAMP DECIDES NOTHING, whatever it says.
+    assert got["venue_stamp"]["decides_nothing"] is True
+    # OUR PROCESSING DELAY IS NOT CURRENCY, and the field says so in the result
+    # rather than only in a comment.
+    assert "cannot establish currency" in got[
+        "our_processing_delay_is_not_currency"]
 
 
-# ═════════════════════════════════════════════════════════════════════
-# SERVICING A HELD POSITION IS NOT A SPENDING DECISION
-# ═════════════════════════════════════════════════════════════════════
+def test_the_production_reader_cannot_be_talked_into_a_subscription():
+    """`book_currency_evidence` is what the scheduled path actually passes.
+    Whatever the module's prose says, this is the value that reaches the
+    admission check, and it carries no mechanism."""
+    got = loop.book_currency_evidence()
+    assert got["subscription"] is None
+    assert got["revalidation"] is None
+    from sportsassets import bettor_venue_currency as vc
+
+    import time as _t
+
+    verdict = vc.evaluate(now=_t.time(), bound_s=30.0,
+                          subscription=got["subscription"],
+                          revalidation=got["revalidation"])
+    assert not vc.admits(verdict)
+    assert verdict["not_established_is_not_stale"] is True
+
 
 def test_a_held_soccer_position_still_has_a_provider_key():
     """THE COLLATERAL DAMAGE THE FULL SUITE CAUGHT AND MY SELECTION MISSED.

@@ -384,6 +384,18 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
         # action its own way, and the translation happens HERE, once, rather
         # than in every reader.
         action = ACTION_ACQUIRE
+    elif action in LEDGER_ACTION_FOR_SELECTION:
+        # AND THE EXIT NEEDED THE SAME TRANSLATION, WHICH IT DID NOT HAVE. The
+        # selector says DIRECT_EXIT; `bettor_funded_learning.ACTIONS` says EXIT.
+        # So `record_decision` refused every exit decision with
+        # THAT_IS_NOT_AN_ACTION_THIS_LANE_TAKES -- harmless while `manage`
+        # dispatched exits itself and the decision row was decoration, and NOT
+        # harmless the moment dispatch required a persisted decision: the new
+        # gate correctly refused to send an exit that could not be recorded.
+        #
+        # The gate found a real gap rather than creating one. One map, here,
+        # beside the hedge's translation.
+        action = LEDGER_ACTION_FOR_SELECTION[action]
     out["action"] = action
     rec = await FL.record_decision(
         conn, decision_id=decision_id, account_id=account_id, venue=venue,
@@ -744,6 +756,22 @@ ACTION_DIRECT_EXIT = "DIRECT_EXIT"
 ACTION_REDUCE = "REDUCE"
 ACTION_HOLD = "HOLD"
 
+#: ── TWO VOCABULARIES, ONE TRANSLATION, DECLARED ONCE ─────────────────
+#:
+#: `bettor_mgmt_select` and `bettor_funded_decision` say DIRECT_EXIT. The
+#: decision ledger (`bettor_funded_learning.ACTIONS`) says EXIT. The hedge
+#: already had its translation in `decide_and_record`; the exit did not, so
+#: every exit decision was refused by the ledger as an unrecognised action.
+#: That was invisible while exits were dispatched by `manage` and the decision
+#: row was decoration, and it became a refusal the instant dispatch required a
+#: persisted decision.
+LEDGER_ACTION_FOR_SELECTION = {ACTION_DIRECT_EXIT: "EXIT"}
+SELECTION_ACTION_FOR_LEDGER = {v: k for k, v
+                               in LEDGER_ACTION_FOR_SELECTION.items()}
+#: The ledger spelling of every action this pass can dispatch as an exit-type
+#: order. `REDUCE` is spelled the same in both vocabularies.
+LEDGER_EXIT_ACTIONS = ("EXIT", ACTION_REDUCE)
+
 #: Actions this pass can DISPATCH, and what dispatching each one means.
 #:
 #: IT USED TO BE ONE. `pass_once` dispatched only the acquisition; a selected
@@ -766,6 +794,113 @@ DISPATCHABLE = {
 
 R_NO_DEFERRED_EXIT_TO_DISPATCH = (
     "THE_RANKING_SELECTED_AN_EXIT_AND_NO_DEFERRED_SELECTION_WAS_SUPPLIED")
+R_DECISION_NOT_PERSISTED = "THE_DECISION_DID_NOT_PERSIST_SO_NOTHING_IS_SENT"
+
+#: Every field that must agree between the ranking's winning candidate and the
+#: order about to be sent. Named rather than compared ad hoc, so adding a field
+#: to the plan cannot silently escape the binding.
+BOUND_FIELDS = ("action", "quantity", "limit_price", "proceeds_per_contract",
+                "us_market_slug", "inputs_expire_at")
+R_ORDER_DOES_NOT_MATCH_THE_DECISION = (
+    "THE_ORDER_DOES_NOT_MATCH_THE_CANDIDATE_THE_RANKING_SELECTED")
+
+
+def _num(v):
+    try:
+        return None if v is None else round(float(v), 6)
+    except (TypeError, ValueError):
+        return None
+
+
+def bind_selection_to_candidate(*, selection, candidate, action,
+                                position=None) -> dict:
+    """Is this order the one the ranking selected? Pure; never raises.
+
+    THE DEFECT THIS CLOSES. The exit branch fetched a deferred selection by
+    POSITION ID and sent it. A position id says which position an order concerns;
+    it says nothing about which ACTION or SIZE was decided. Codex supplied a
+    ranking selecting REDUCE for 2 contracts against a deferred selection
+    holding DIRECT_EXIT for 10, and the ten-contract exit was sent while the
+    pass reported REDUCE.
+
+    Every field in `BOUND_FIELDS` is compared. A quantity that differs is a
+    different order; an action that differs is a different decision; an expiry
+    that differs means the order would be sent on an assessment other than the
+    one that was ranked. Any mismatch refuses BEFORE the adapter, naming the
+    field, both values and which side each came from -- so the report cannot say
+    "dispatched REDUCE" while an exit went out.
+    """
+    sel = dict(selection or {})
+    cand = dict(candidate or {})
+    out: dict = {"ok": False, "fields": BOUND_FIELDS, "compared": {},
+                 "refusal": R_ORDER_DOES_NOT_MATCH_THE_DECISION}
+    if not cand:
+        out["why"] = ("the ranking reported no selected candidate, so there is "
+                      "nothing for the order to be bound to. An order sent now "
+                      "would be bound to nothing")
+        return out
+    pos = dict(position or {})
+    # THE TWO VOCABULARIES ARE RECONCILED BEFORE COMPARISON, not papered over:
+    # the ledger's EXIT and the selector's DIRECT_EXIT are the same action, and
+    # comparing the raw strings would refuse every legitimate exit while a
+    # genuine action mismatch -- REDUCE decided, DIRECT_EXIT in the order --
+    # still has to fail.
+    want_action = SELECTION_ACTION_FOR_LEDGER.get(str(action or ""),
+                                                  str(action or ""))
+    got_action = str(sel.get("selected") or "")
+    pairs = {
+        "action": (want_action, got_action),
+        "quantity": (_num(cand.get("qty")), _num(sel.get("selected_qty"))),
+        "limit_price": (_num(cand.get("limit_price")),
+                        _num(sel.get("limit_price"))),
+        "proceeds_per_contract": (_num(cand.get("proceeds_per_contract")),
+                                  _num(sel.get("proceeds_per_contract"))),
+        "us_market_slug": (str(pos.get("us_market_slug") or ""),
+                           str(sel.get("us_market_slug")
+                               or pos.get("us_market_slug") or "")),
+        "inputs_expire_at": (_num(cand.get("inputs_expire_at")),
+                             _num(sel.get("inputs_expire_at"))),
+    }
+    mismatched = []
+    for field in BOUND_FIELDS:
+        want, got = pairs[field]
+        out["compared"][field] = {"ranking": want, "order": got}
+        if want is None and field in ("limit_price", "proceeds_per_contract",
+                                      "inputs_expire_at"):
+            # THE CANDIDATE DOES NOT CARRY IT, so there is nothing to disagree
+            # with. Recorded as unbound rather than silently treated as equal:
+            # the operator can see which fields the binding actually covered.
+            out["compared"][field]["bound"] = False
+            continue
+        out["compared"][field]["bound"] = True
+        if want != got:
+            mismatched.append(field)
+    if mismatched:
+        out["mismatched"] = mismatched
+        out["why"] = ("the order disagrees with the selected candidate on %s. "
+                      "%s. A position id is not a binding: it says which "
+                      "position an order concerns and nothing about which "
+                      "action or size was decided"
+                      % (", ".join(mismatched),
+                         "; ".join("%s ranking=%r order=%r"
+                                   % (f, out["compared"][f]["ranking"],
+                                      out["compared"][f]["order"])
+                                   for f in mismatched)))
+        return out
+    out.update(ok=True, refusal=None,
+               why=("every bound field agrees between the candidate the "
+                    "ranking selected and the order to be sent"))
+    return out
+
+
+async def _decide_or_refuse(fn, conn, **kw):
+    """Call `decide_and_record` with its keywords. A seam, not a wrapper.
+
+    It exists so the `try` around the call has a single statement to guard and
+    the long keyword list does not have to be re-indented -- which is how a
+    keyword gets dropped during a mechanical edit.
+    """
+    return await fn(conn, **kw)
 
 
 async def pass_once(conn, *, account_id: str, venue: str,
@@ -875,7 +1010,17 @@ async def pass_once(conn, *, account_id: str, venue: str,
             # all. It refuses only the acquisition now.
             step["refusal"] = R_NO_GROUP
             continue
-        dec = await decide_and_record(
+        # ── A DECISION WRITE THAT RAISES IS THIS POSITION'S PROBLEM ──
+        #
+        # `pass_once` says "never raises" and did not honour it here: an
+        # exception out of `decide_and_record` propagated to `_funded_service`,
+        # which turned it into FUNDED_PAIR_CYCLE_RAISED -- taking the whole pass
+        # down, including the recovery and every OTHER position's decision,
+        # because one position's ledger write failed. An exception is the same
+        # ANSWER as a persistence refusal (no durable record, so nothing is
+        # sent) and it is contained to the position it happened on.
+        try:
+            dec = await _decide_or_refuse(decide_and_record,
             conn, decision_id=facts["decision_id"], account_id=account_id,
             venue=venue,
             # THE FIXTURE, FROM WHICHEVER SOURCE HAS IT. The held leg is the
@@ -907,6 +1052,17 @@ async def pass_once(conn, *, account_id: str, venue: str,
             # `region_probabilities_came_from`.
             use_approved_model=bool(facts.get("use_approved_model")),
             model_inputs=facts.get("model_inputs"), now=at)
+        except Exception as exc:                               # noqa: BLE001
+            step["refusal"] = R_DECISION_NOT_PERSISTED
+            step["decision_refusal"] = "%s: %s" % (type(exc).__name__,
+                                                   str(exc)[:160])
+            step["dispatched"] = None
+            step["why_nothing_was_sent"] = (
+                "the decision write raised (%s), so there is no durable record "
+                "for an order to refer to. Contained to this position: the "
+                "recovery and every other position's decision still ran"
+                % type(exc).__name__)
+            continue
         step["decision"] = {k: dec.get(k) for k in
                             ("ok", "action", "refusal", "policy", "selected",
                              "region_probabilities_came_from")}
@@ -919,6 +1075,38 @@ async def pass_once(conn, *, account_id: str, venue: str,
         # one of the four rather than a gap.
         action = dec.get("action")
         step["dispatchable"] = sorted(DISPATCHABLE)
+        # ── NO DURABLE DECISION, NO ORDINARY DISPATCH ────────────────
+        #
+        # THE DEFECT, REPRODUCED BY CODEX. `decide_and_record` can return
+        # ok=False while still carrying an action -- a persistence refusal, or a
+        # write that raised -- and this branch read `action` and dispatched
+        # without ever looking at `ok`. So an order could go to the venue with
+        # NO durable record of the decision that authorised it: the one state in
+        # which nobody can afterwards say why the position was taken, and the
+        # one the decision ledger exists to prevent.
+        #
+        # An ordinary action now requires a decision that was recorded. The
+        # refusal is separate from "the decision was not to acquire", because a
+        # failed write and a deliberate hold are opposite situations and only
+        # one of them needs an operator.
+        #
+        # EMERGENCY AND MANDATORY CONTROLS ARE NOT ROUTED THROUGH HERE and are
+        # unaffected: `bettor_funded_execution`'s own risk gates and the
+        # reconciliation path in `manage` act on their own authority, and this
+        # gate is on the ORDINARY ranked-action path only. That separation is
+        # stated rather than assumed, so a future emergency route has to be
+        # explicit about being one.
+        if not dec.get("ok"):
+            step["refusal"] = R_DECISION_NOT_PERSISTED
+            step["what_was_selected_instead"] = action
+            step["decision_refusal"] = dec.get("refusal") or dec.get("error")
+            step["dispatched"] = None
+            step["why_nothing_was_sent"] = (
+                "the decision did not persist (%s), so there is no durable "
+                "record for an order to refer to. An action dispatched now "
+                "would exist at the venue and nowhere in our own ledger"
+                % (dec.get("refusal") or dec.get("error") or "no reason given"))
+            continue
         if action in (ACTION_HOLD, None, ACTION_NOTHING_RANKABLE):
             step["dispatched"] = None
             step["refusal"] = R_DECISION_IS_NOT_ACQUIRE
@@ -927,7 +1115,7 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 "holding is the absence of an order. The decision is recorded "
                 "and no venue call is made, which is the action being taken")
             continue
-        if action in (ACTION_DIRECT_EXIT, ACTION_REDUCE):
+        if action in LEDGER_EXIT_ACTIONS:
             # THE EXIT `manage` SELECTED AND DID NOT SEND. It is dispatched
             # exactly as selected -- nothing here recomputes a price, a
             # quantity or a proceeds figure, because a dispatcher with its own
@@ -943,6 +1131,29 @@ async def pass_once(conn, *, account_id: str, venue: str,
                     "inventing the order the decision was not made on"
                     % (action,))
                 continue
+            # ── THE SELECTION MUST BE THE WINNING CANDIDATE ──────────
+            #
+            # THE DEFECT, REPRODUCED BY CODEX. This looked the selection up by
+            # POSITION ID and sent it. Given a ranking that selected REDUCE for
+            # 2 contracts and a deferred selection holding DIRECT_EXIT for 10,
+            # the dispatcher received the ten-contract exit while the pass
+            # reported REDUCE -- an order labelled with one action carrying
+            # another action's payload, at five times the decided size.
+            #
+            # A position id is not a binding. Action, instrument, quantity,
+            # limit, proceeds basis and evidence expiry are all compared against
+            # the candidate the ranking actually selected, BEFORE the adapter is
+            # reached, and a mismatch on any of them refuses.
+            bound = bind_selection_to_candidate(
+                selection=sel, candidate=dec.get("selected"),
+                action=action, position=pos)
+            step["order_binding"] = bound
+            if not bound["ok"]:
+                step["refusal"] = bound["refusal"]
+                step["what_was_selected_instead"] = action
+                step["dispatched"] = None
+                step["why_nothing_was_sent"] = bound["why"]
+                continue
             dispatcher = exit_dispatcher
             if dispatcher is None:
                 from . import bettor_funded_management as _FM
@@ -954,7 +1165,15 @@ async def pass_once(conn, *, account_id: str, venue: str,
                 k: sent.get(k) for k in
                 ("ok", "submitted", "refusal", "exit_intent_id", "quantity",
                  "limit_price", "why")}
-            out.setdefault("exits", []).append(dict(sent, action=action))
+            # BOTH SPELLINGS ON THE RECORD. `action` is the LEDGER's (EXIT),
+            # `selection_action` the selector's (DIRECT_EXIT). A reader
+            # comparing this row against either module should not have to know
+            # the translation exists.
+            out.setdefault("exits", []).append(dict(
+                sent, action=action,
+                selection_action=SELECTION_ACTION_FOR_LEDGER.get(action,
+                                                                 action),
+                order_binding=bound))
             out["resubmitted_anything"] = bool(
                 out["resubmitted_anything"] or sent.get("submitted"))
             continue

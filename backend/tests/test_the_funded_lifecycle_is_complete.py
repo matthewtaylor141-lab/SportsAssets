@@ -42,6 +42,8 @@ import time
 
 import pytest
 
+from sportsassets import bettor_funded_pair_cycle as PC
+
 from sportsassets import bettor_entry_execution as EX
 from sportsassets import bettor_funded_activation as FA
 from sportsassets import bettor_funded_book as FB
@@ -1159,7 +1161,11 @@ async def test_the_scheduled_path_selects_executes_recovers_and_reports(
         import json as _j
         assert pcx and pcx[0]["submitted"] is True, _j.dumps(
             svc.get("pair_cycle"), default=str, indent=1)[:2500]
-        assert pcx[0]["action"] in ("DIRECT_EXIT", "REDUCE")
+        assert pcx[0]["action"] in PC.LEDGER_EXIT_ACTIONS, pcx[0]
+        assert pcx[0]["selection_action"] in ("DIRECT_EXIT", "REDUCE")
+        # AND THE ORDER WAS BOUND TO THE CANDIDATE THE RANKING CHOSE,
+        # not merely fetched by position id.
+        assert pcx[0]["order_binding"]["ok"] is True, pcx[0]
         # AND IT WAS DISPATCHED AT THE SELECTION'S OWN NUMBERS, not at
         # anything the dispatcher recomputed.
         assert pcx[0]["limit_price"] == pick["limit_price"]

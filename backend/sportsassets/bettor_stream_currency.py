@@ -438,8 +438,38 @@ PRECONDITION_STATUS = {
                 "partly resolved"),
         "what_would_establish_it": (
             "the venue documenting transactTime's semantics or any as-of "
-            "guarantee; or a read of a demonstrably MOVING book that "
-            "separates last-change from now"),
+            "guarantee. That is the only thing that ESTABLISHES P5, because P5 "
+            "is a property of the published protocol"),
+        # ── AND THE CORRECTION TO WHAT I SAID NEXT ───────────────────
+        #
+        # This entry used to offer a second route: "or a read of a demonstrably
+        # MOVING book that separates last-change from now". I then reported that
+        # as the concrete next step for M1, which overstated it, and a test of
+        # mine asserted the phrase "MOVING book" appeared in this string -- a
+        # test that proves a sentence exists and no timing property whatever.
+        #
+        # A MOVING BOOK CAN STILL BE DELAYED. Observing prices and timestamps
+        # change tells you the feed is not frozen. It does not bound how old any
+        # message was when it arrived, because a delayed feed moves too: a
+        # sixty-second-late stream of a moving book shows exactly the same
+        # movement as a current one. Movement separates LIVE from STALE-FROZEN.
+        # It does not separate CURRENT from LATE, and P5 is about the second.
+        "movement_does_not_establish_it": (
+            "a delayed feed of a moving book shows the same movement as a "
+            "current one, so movement distinguishes live from frozen and not "
+            "current from late. P5 is about the second"),
+        "what_a_movement_experiment_could_distinguish": (
+            "whether transactTime advances with observed book changes, and by "
+            "how much it lags OUR receipt of them -- which is evidence about "
+            "the field's denotation and about OUR path, both within the scope "
+            "of an independent reference clock. It leaves the UPSTREAM interval "
+            "between the matching engine and the venue's egress unmeasured, and "
+            "that interval is what P5 asks about"),
+        "so_it_is_evidence_not_a_promotion": (
+            "the result would be recorded as an empirical finding inside its "
+            "stated scope. P5 stays unavailable on it: promoting on movement "
+            "alone would be a false certificate of exactly the kind this "
+            "module's history is a list of"),
         "this_is_the_binding_precondition": True,
         "and_now_the_ONLY_one": (
             "with P6 corrected, P5 is the single unmet precondition. That is a "

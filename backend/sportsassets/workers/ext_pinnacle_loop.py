@@ -217,36 +217,131 @@ R_MAPPING_UNCONFIRMABLE = (
     "THE_MAPPING_COULD_NOT_BE_CONFIRMED_AGAINST_ANY_FIXTURE")
 
 
-def _participants(text) -> set:
-    """The side names in an event title, lowercased and stripped of noise.
-
-    Deliberately crude and deliberately NOT a team-alias resolver: the question
-    is whether the provider's competition is the SAME COMPETITION as the
-    venue's, and for that a handful of overlapping surnames or city names across
-    a dozen fixtures is decisive. A near-match on one fixture is not, which is
-    why `confirm_mapping_by_fixtures` needs several.
-    """
-    t = str(text or "").lower()
-    for sep in (" vs. ", " vs ", " v ", " @ ", " - "):
-        t = t.replace(sep, "|")
-    out: set = set()
-    for side in t.split("|"):
-        for word in side.replace(".", " ").replace(",", " ").split():
-            w = word.strip()
-            # Club-form noise carries no discriminating power and matches
-            # across every league, so it is dropped rather than counted.
-            if len(w) < 4 or w in _CLUB_FORM_NOISE:
-                continue
-            out.add(w)
-    return out
-
-
-_CLUB_FORM_NOISE = frozenset((
-    "club", "town", "city", "united", "athletic", "atletico", "sporting",
-    "real", "deportivo", "wanderers", "rovers", "county", "albion",
-    "fútbol", "futbol", "football", "soccer", "association", "asociacion",
-    "clube", "sport", "sports", "the", "and", "de", "del", "la", "le",
+#: ── AFFILIATION MARKERS, THE ONLY SAFE THING TO DROP ─────────────────
+#:
+#: THE DEFECT THAT TAUGHT THIS, AND IT WAS MINE. The first version dropped
+#: "United", "City", "Town", "Athletic" and "Rovers" as club-form noise, on the
+#: reasoning that they appear across every division and so discriminate nothing.
+#: Codex's counterexample:
+#:
+#:     provider  Manchester United vs Manchester City
+#:     venue     Manchester United vs Liverpool
+#:     -> ok=True, strong_matches=1, shared=["manchester"]
+#:
+#: Both provider teams normalised to {manchester}, and ONE venue token satisfied
+#: BOTH sides: a two-sided match that is one shared token counted twice,
+#: confirming a mapping between two DIFFERENT fixtures on a shared city name --
+#: the exact inference this module forbids elsewhere.
+#:
+#: "United" and "City" are not noise; they are the entire difference between two
+#: clubs in one city. What IS safe to drop is an AFFILIATION MARKER: the legal
+#: form and society suffixes that appear on one source's rendering and not the
+#: other's (Inter Miami CF / Inter Miami). Dropping those is a rendering
+#: difference. Dropping a discriminating word is a different team.
+#:
+#: Every drop is REPORTED on the result, so a match can be checked against what
+#: was normalised away rather than trusted.
+AFFILIATION_MARKERS = frozenset((
+    "fc", "afc", "cf", "sc", "ac", "as", "ss", "ssc", "sv", "vfb", "vfl",
+    "bsc", "tsg", "fsv", "cd", "ca", "cr", "ec", "sd", "ud", "ad", "aa",
+    "csd", "club", "clube", "futbol", "football", "soccer", "calcio",
+    "the", "de", "del", "da", "do", "of",
 ))
+
+#: One calendar day of tolerance: the venue dates some fixtures a day either
+#: side of the provider -- the C9 board carries the bookmaker's 2026-09-10
+#: against the venue's 2026-09-09. The same allowance `premap.resolve` makes.
+FIXTURE_DATE_TOLERANCE_DAYS = 1
+
+R_SIDES_NOT_TWO = "AN_EVENT_TITLE_DID_NOT_NAME_TWO_DISTINCT_SIDES"
+
+
+def _fold(text) -> str:
+    """Lowercase, strip accents and punctuation. Nothing else."""
+    import re as _re
+    import unicodedata
+
+    t = unicodedata.normalize("NFKD", str(text or ""))
+    t = "".join(c for c in t if not unicodedata.combining(c))
+    return _re.sub(r"[^a-z0-9 ]+", " ", t.lower())
+
+
+def _team_tokens(name):
+    """One team's DISTINGUISHING tokens, and what was dropped.
+
+    Affiliation markers are dropped only when something remains: a team whose
+    whole rendered name is a marker keeps it, because an empty token set would
+    match every other team.
+    """
+    raw = [w for w in _fold(name).split() if w]
+    kept = [w for w in raw if w not in AFFILIATION_MARKERS and len(w) > 1]
+    dropped = [w for w in raw if w not in kept]
+    if not kept:
+        kept, dropped = raw, []
+    return frozenset(kept), dropped
+
+
+def _sides_of(title):
+    """The two sides of an event title, or None when it does not name two.
+
+    A title yielding anything but exactly two non-empty sides cannot support a
+    one-to-one match, and guessing which half is which is how a shared city
+    name became a confirmation.
+    """
+    t = _fold(title)
+    for sep in (" vs ", " v ", " at ", " versus "):
+        if sep in t:
+            parts = [x.strip() for x in t.split(sep) if x.strip()]
+            if len(parts) == 2:
+                return parts
+    return None
+
+
+def _same_team(a_tokens, b_tokens) -> bool:
+    """Are these two renderings the SAME team?
+
+    Equality after normalisation, or one token set contained in the other --
+    which covers "Inter Miami" against "Inter Miami CF". It does NOT cover
+    "Manchester United" against "Manchester City": neither contains the other,
+    because `united` and `city` both survive.
+    """
+    if not a_tokens or not b_tokens:
+        return False
+    return (a_tokens == b_tokens or a_tokens <= b_tokens
+            or b_tokens <= a_tokens)
+
+
+def _same_fixture_day(provider_at, venue_at) -> dict:
+    """Do these datings refer to the same meeting?
+
+    A verdict rather than a bool: "no dating supplied" is not the same answer as
+    "the datings disagree", and only the second may refuse a return leg while
+    the first must be reported as a limit of the confirmation.
+    """
+    import datetime as _dt
+
+    def _day(v):
+        if v is None:
+            return None
+        if isinstance(v, _dt.datetime):
+            return v.date()
+        if isinstance(v, _dt.date):
+            return v
+        try:
+            return _dt.date.fromisoformat(str(v)[:10])
+        except ValueError:
+            return None
+
+    a, b = _day(provider_at), _day(venue_at)
+    if a is None or b is None:
+        return {"comparable": False, "same": None,
+                "why": ("no dating on one side, so a repeated meeting between "
+                        "these teams is not distinguished from this one")}
+    gap = abs((a - b).days)
+    return {"comparable": True, "same": gap <= FIXTURE_DATE_TOLERANCE_DAYS,
+            "provider_day": a.isoformat(), "venue_day": b.isoformat(),
+            "gap_days": gap, "tolerance_days": FIXTURE_DATE_TOLERANCE_DAYS}
+
 
 #: ── WHAT ACTUALLY CONFIRMS A COMPETITION MAPPING ─────────────────────
 #:
@@ -273,34 +368,155 @@ MIN_STRONG_FIXTURE_MATCHES = 1
 MIN_FIXTURE_MATCHES = 1
 
 
-def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles) -> dict:
+def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles,
+                                venue_event_days=None) -> dict:
     """Does the provider's competition name the SAME FIXTURES as the venue's?
 
-    THE HOLE THIS CLOSES, AND IT WAS A REAL ONE. `select_sports` confirmed that
-    a provider key EXISTS and is ACTIVE, and reported it under
-    `confirmed_by_provider`. Existence is not identity: `soccer_england_league2`
-    exists, is active, and is not the competition the venue lists under `engnl`.
-    A mismatched key would have been fetched, its events would have failed to
-    resolve, and the funnel would have read as a mapping defect.
+    THE HOLE THIS CLOSES. `select_sports` established that a provider key EXISTS
+    and is ACTIVE and reported it as confirmed. Existence is not identity:
+    `soccer_england_league2` exists, is active, and is not the competition the
+    venue lists under `engnl`.
 
-    So the mapping is confirmed against the fixtures themselves: the provider's
-    event participants must be recognizable among the venue's event titles for
-    that token, at least `MIN_FIXTURE_MATCHES` times. A key naming a different
-    tier of the same country produces zero matches and is refused by name.
+    A ONE-TO-ONE MATCH OF BOTH TEAMS, AND THAT WORDING IS THE REPAIR. The first
+    version matched sets of words and counted a side matched on ANY overlap, so:
 
-    Pure. Never raises. An empty provider list is UNCONFIRMABLE, not confirmed:
-    a competition between rounds legitimately has no fixtures, and admitting it
-    on that basis would be admitting on absence again.
+        provider  Manchester United vs Manchester City
+        venue     Manchester United vs Liverpool
+
+    both provider teams reduced to {manchester}, the SAME venue token satisfied
+    both sides, and a shared city name confirmed a mapping between two different
+    fixtures.
+
+    Now the provider's home must match ONE venue side and the provider's away
+    THE OTHER, as distinct positions. Reversed sides count -- the two sources do
+    not agree on home/away ordering -- but one venue side cannot serve twice.
+
+    AND THE DATE, WHERE BOTH SIDES SUPPLY ONE. Two teams meet more than once a
+    season, so names alone cannot separate a fixture from its return leg.
+    `venue_event_days` maps a venue title to its `game_start`; where both
+    datings exist they must agree within a calendar day, and where one is
+    absent that is REPORTED as a limit of the confirmation rather than passed
+    over.
+
+    CANDIDATE DISCOVERY IS NOT CONFIRMED IDENTITY. This function answers only
+    "are these the same competition". It selects no contract and admits nothing.
+
+    Pure. Never raises. An empty provider list is UNCONFIRMABLE, not confirmed.
     """
     out: dict = {"ok": False, "matches": 0, "strong_matches": 0, "examined": 0,
-                 "min_required": MIN_FIXTURE_MATCHES, "matched_fixtures": [],
+                 "min_required": MIN_STRONG_FIXTURE_MATCHES,
+                 "matched_fixtures": [], "normalisation": [],
+                 "rejected_fixtures": [],
+                 "requires": ("a one-to-one match of BOTH teams as distinct "
+                              "sides; a shared token is not a match"),
+                 "this_confirms_identity_not_a_candidate": True,
                  "refusal": R_MAPPING_UNCONFIRMABLE}
-    venue_sets = [(_participants(t), str(t or "")[:60])
-                  for t in (venue_event_titles or ())]
-    if not venue_sets:
-        out["why"] = ("the venue lists no event titles for this competition, so "
-                      "there is nothing to confirm the mapping against")
+    days = dict(venue_event_days or {})
+    venue = []
+    for title in (venue_event_titles or ()):
+        sides = _sides_of(title)
+        if sides is None:
+            out["rejected_fixtures"].append(
+                {"venue": str(title)[:60], "refusal": R_SIDES_NOT_TWO})
+            continue
+        a_tok, a_drop = _team_tokens(sides[0])
+        b_tok, b_drop = _team_tokens(sides[1])
+        if a_tok == b_tok or not a_tok or not b_tok:
+            # Two sides that normalise identically cannot support a one-to-one
+            # match either, and it is the shape the old defect produced.
+            out["rejected_fixtures"].append(
+                {"venue": str(title)[:60], "refusal": R_SIDES_NOT_TWO,
+                 "why": "both sides normalise to the same team"})
+            continue
+        venue.append({"title": str(title)[:70], "a": a_tok, "b": b_tok,
+                      "day": days.get(title)})
+        if a_drop or b_drop:
+            out["normalisation"].append(
+                {"venue": str(title)[:60],
+                 "dropped": sorted(set(a_drop + b_drop)),
+                 "why": ("affiliation markers only; a discriminating word is "
+                         "never dropped")})
+    if not venue:
+        out["why"] = ("the venue lists no event title naming two distinct "
+                      "sides for this competition, so there is nothing a "
+                      "one-to-one match could be made against")
         return out
+    events = list(provider_events or ())
+    out["examined"] = len(events)
+    if not events:
+        out["why"] = ("the provider returned no events for this key. That is "
+                      "consistent with a competition between rounds AND with a "
+                      "key that is not this competition; it confirms neither")
+        return out
+
+    for ev in events:
+        ev = ev or {}
+        home, h_drop = _team_tokens(ev.get("home_team"))
+        away, a_drop = _team_tokens(ev.get("away_team"))
+        if not home or not away or home == away:
+            out["rejected_fixtures"].append(
+                {"provider": "%s vs %s" % (ev.get("home_team"),
+                                           ev.get("away_team")),
+                 "refusal": R_SIDES_NOT_TWO,
+                 "why": "the provider event does not name two distinct sides"})
+            continue
+        if h_drop or a_drop:
+            out["normalisation"].append(
+                {"provider": "%s vs %s" % (ev.get("home_team"),
+                                           ev.get("away_team")),
+                 "dropped": sorted(set(h_drop + a_drop)),
+                 "why": "affiliation markers only"})
+        for v in venue:
+            # ── THE ONE-TO-ONE ASSIGNMENT, BOTH ORIENTATIONS ─────────
+            same_order = _same_team(home, v["a"]) and _same_team(away, v["b"])
+            swapped = _same_team(home, v["b"]) and _same_team(away, v["a"])
+            if not (same_order or swapped):
+                continue
+            day = _same_fixture_day(ev.get("commence_time"), v["day"])
+            if day["comparable"] and not day["same"]:
+                out["rejected_fixtures"].append(
+                    {"provider": "%s vs %s" % (ev.get("home_team"),
+                                               ev.get("away_team")),
+                     "venue": v["title"],
+                     "refusal": R_MAPPING_FIXTURES_DO_NOT_MATCH,
+                     "why": ("the same two teams on different days (%s against "
+                             "%s): a different meeting, not this one"
+                             % (day["provider_day"], day["venue_day"]))})
+                continue
+            out["matches"] += 1
+            out["strong_matches"] += 1
+            if len(out["matched_fixtures"]) < 4:
+                out["matched_fixtures"].append(
+                    {"provider": "%s vs %s" % (ev.get("home_team"),
+                                               ev.get("away_team")),
+                     "venue": v["title"],
+                     "orientation": "SAME" if same_order else "SIDES_SWAPPED",
+                     "strong": True,
+                     "home_matched": sorted(home),
+                     "away_matched": sorted(away),
+                     "date_check": day})
+            break
+
+    if out["strong_matches"] >= MIN_STRONG_FIXTURE_MATCHES:
+        undated = [m for m in out["matched_fixtures"]
+                   if not (m["date_check"] or {}).get("comparable")]
+        out.update(ok=True, refusal=None,
+                   dating_incomplete=bool(undated),
+                   why=("%d of the provider's %d fixtures match a venue "
+                        "fixture one-to-one on both sides%s"
+                        % (out["strong_matches"], out["examined"],
+                           (" -- but with no dating on one side, so a repeated "
+                            "meeting between the same teams is not excluded"
+                            if undated else " and on the date"))))
+        return out
+    out.update(refusal=R_MAPPING_FIXTURES_DO_NOT_MATCH,
+               why=("none of the provider's %d fixtures matches any of the "
+                    "venue's %d one-to-one on both sides. A shared city name "
+                    "is not a match: `Manchester United vs Manchester City` "
+                    "against `Manchester United vs Liverpool` shares only "
+                    "'manchester' and is a different fixture"
+                    % (out["examined"], len(venue))))
+    return out
     events = list(provider_events or ())
     out["examined"] = len(events)
     if not events:
@@ -3840,6 +4056,7 @@ R_NO_DEFERRED_SELECTION = "NO_MANAGEMENT_SELECTION_FOR_THIS_POSITION"
 R_NO_HEDGE_CANDIDATE_READER = "NO_SECOND_LEG_CANDIDATE_READER_IS_WIRED"
 R_NO_REGION_PROBABILITY_SOURCE = "NO_REGION_PROBABILITY_SOURCE_IS_WIRED"
 R_ACTION_NOT_DISPATCHABLE_HERE = "THIS_LANE_HAS_NO_ORDER_FOR_THAT_ACTION"
+R_NO_EXECUTABLE_PLAN = "NO_EXECUTABLE_PLAN_WAS_DEFERRED_FOR_THAT_ACTION"
 
 #: The inputs a pairing decision needs, and which of them this lane can read
 #: today. Declared rather than discovered so the gap is a list, not a surprise.
@@ -3970,12 +4187,46 @@ async def funded_pair_inputs(conn, pos, *, at, deferred=None):
     # for it, which is a scope fact and is reported as one.
     from .. import bettor_funded_pair_cycle as _PCD
 
+    # ── AND ONLY AN ACTION WITH AN EXECUTABLE PLAN MAY WIN ───────────
+    #
+    # THE SECOND HALF OF THE SAME RULE, and the order-binding check found it.
+    # `select_exit` VALUES several actions -- DIRECT_EXIT, REDUCE, and the
+    # complement family -- but `manage` defers an executable plan for exactly
+    # ONE of them: the action it selected, with its price, quantity, proceeds
+    # basis and evidence expiry.
+    #
+    # On the loss-containment fixture the combined ranking selected a REDUCE
+    # candidate at 9 contracts while the only plan in hand was a DIRECT_EXIT at
+    # 9. The binding refused -- correctly, an order labelled REDUCE carrying an
+    # exit payload is the defect -- but the refusal came at the venue boundary,
+    # after the decision had been persisted as REDUCE. A candidate that cannot
+    # be executed must not win the ranking in the first place.
+    #
+    # So an action with no executable plan is NOT RANKABLE with its own blocker,
+    # exactly like a non-dispatchable one. When a plan exists for REDUCE as well
+    # as EXIT, both are rankable and each is bound to its own plan; that is what
+    # `plans_by_action` is for and why it is keyed rather than a single slot.
+    plans_by_action = {}
+    if sel.get("selected_qty") is not None:
+        plans_by_action[str(sel.get("selected") or "DIRECT_EXIT")] = sel
+
     dispatchable = set(_PCD.DISPATCHABLE) | {"HOLD"}
     not_rankable = list(hold_from_selector.get("not_rankable") or [])
     for cand in (hold_from_selector.get("candidates") or []):
         action = str(cand.get("action"))
         if action == "DIRECT_EXIT":
             continue                     # replaced by the deferred selection
+        if action != "HOLD" and action not in plans_by_action:
+            not_rankable.append(dict(
+                cand, value_usd=None, blocker=R_NO_EXECUTABLE_PLAN,
+                why=("scored %s by the selector and no executable plan was "
+                     "deferred for it: management produced a priced, bounded "
+                     "order for %r only. Winning without a plan would persist "
+                     "a decision nothing can carry out, which is worse than "
+                     "not ranking it"
+                     % (cand.get("value_usd"),
+                        sel.get("selected")))))
+            continue
         if action not in dispatchable:
             not_rankable.append(dict(
                 cand, value_usd=None, blocker=R_ACTION_NOT_DISPATCHABLE_HERE,
