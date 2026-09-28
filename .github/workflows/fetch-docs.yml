@@ -12,6 +12,20 @@ on:
         description: "public https URL to fetch (docs pages only)"
         required: true
         type: string
+      # A DCM's settlement rules live in its rulebook, which is a PDF, so an
+      # HTML-only reader cannot read the one document that matters most. The
+      # filter keeps a 200-page rulebook usable: without it the extract is
+      # truncated to the first pages and the settlement section is never
+      # reached.
+      filter:
+        description: "optional grep -E pattern; prints matching lines with context instead of the head"
+        required: false
+        type: string
+      context:
+        description: "lines of context around each filter match (default 4)"
+        required: false
+        default: "4"
+        type: string
 
 concurrency:
   group: fetch-docs
@@ -25,6 +39,8 @@ jobs:
       - name: Fetch
         env:
           URL: ${{ inputs.url }}
+          FILTER: ${{ inputs.filter }}
+          CTX: ${{ inputs.context }}
         run: |
           set -euo pipefail
           case "$URL" in
@@ -34,6 +50,26 @@ jobs:
           echo "== fetch $URL at $(date -u +%FT%TZ) =="
           curl -sSL --max-time 60 -A "sportsassets-docs-reader" "$URL" -o /tmp/page.html
           echo "== bytes: $(wc -c < /tmp/page.html) =="
+          echo "== sha256: $(sha256sum /tmp/page.html | cut -d' ' -f1) =="
+          # PDF BRANCH. Detected by magic bytes, not by the URL's extension:
+          # the rulebook is served from a path with no .pdf suffix.
+          if head -c 5 /tmp/page.html | grep -q '%PDF'; then
+            echo "== content: PDF =="
+            sudo apt-get install -y -qq poppler-utils >/dev/null 2>&1
+            pdftotext -layout /tmp/page.html /tmp/page.txt
+            echo "== pages: $(pdfinfo /tmp/page.html 2>/dev/null | awk '/^Pages/{print $2}') =="
+            echo "== chars: $(wc -c < /tmp/page.txt) =="
+            if [ -n "${FILTER:-}" ]; then
+              echo "== FILTERED on /$FILTER/ with ${CTX:-4} lines of context =="
+              grep -nEi -C "${CTX:-4}" -- "$FILTER" /tmp/page.txt | head -c 200000 || \
+                echo "(no line matched)"
+            else
+              echo "== TEXT (head) =="
+              head -c 60000 /tmp/page.txt
+            fi
+            exit 0
+          fi
+          echo "== content: HTML =="
           python3 - <<'PY'
           import html, re
           s = open('/tmp/page.html', encoding='utf-8', errors='ignore').read()
