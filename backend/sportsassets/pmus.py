@@ -86,9 +86,11 @@ def position_side(us_market_slug: str) -> float | None:
         client = _get_client()
         cursor = ""
         for _ in range(5):
-            resp = client.portfolio.positions(
-                {"limit": 100,
-                 **({"cursor": cursor} if cursor else {})}) or {}
+            resp = paced_read(
+                lambda: client.portfolio.positions(
+                    {"limit": 100,
+                     **({"cursor": cursor} if cursor else {})}),
+                endpoint="portfolio.positions") or {}
             for slug, p in (resp.get("positions") or {}).items():
                 if str(slug).lower() == us_market_slug.lower():
                     try:
@@ -119,9 +121,11 @@ def account_holds(us_market_slug: str) -> bool:
             held: set[str] = set()
             cursor = ""
             for _ in range(5):  # bounded paging
-                resp = client.portfolio.positions(
-                    {"limit": 100,
-                     **({"cursor": cursor} if cursor else {})}) or {}
+                resp = paced_read(
+                    lambda: client.portfolio.positions(
+                        {"limit": 100,
+                         **({"cursor": cursor} if cursor else {})}),
+                    endpoint="portfolio.positions") or {}
                 for slug, p in (resp.get("positions") or {}).items():
                     try:
                         if float((p or {}).get("netPosition") or 0) > 0:
@@ -992,6 +996,106 @@ from .venue_sdk import BOOK_READ_MAX_DISPATCHES  # noqa: E402
 #: retrying them spends a deadline to be told the same thing again. 401/403
 #: are about our credential and a retry cannot change it.
 BOOK_READ_RETRYABLE_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
+
+
+def _arm_cooldown_from(diag: dict) -> dict:
+    """Arm both rate controls from a measured rate-limit response, and queue.
+
+    SHARED BY EVERY READ PATH, not just the book read. A 429 on
+    `portfolio.positions` counts against the same limiter as a 429 on
+    `markets.book`, so a cooldown armed by one and not the other is a
+    control with a hole in it.
+
+    Never raises: arming is bookkeeping around a failure that is already
+    being reported, and a failure to arm must not replace the diagnostic
+    the caller is about to return.
+    """
+    if not (isinstance(diag, dict) and diag.get("is_rate_limited")):
+        return {"applied": False, "why": "not a rate-limit response"}
+    try:
+        from . import venue_pace as _vp
+        out = _vp.penalize_observed(
+            retry_after_s=diag.get("retry_after_s"),
+            reason="VENUE_429_ON_%s" % (
+                str(diag.get("endpoint") or "UNKNOWN_ENDPOINT")
+                .upper().replace(".", "_")))
+    except Exception as exc:                                   # noqa: BLE001
+        return {"applied": False, "why": type(exc).__name__}
+    try:
+        from . import venue_cooldown_store as _vcs
+        nb = out.get("not_before") if isinstance(
+            out.get("not_before"), dict) else {}
+        out["persistence"] = _vcs.queue_save({
+            "not_before_epoch_s": nb.get("not_before_epoch_s"),
+            "reduced_rate_until_epoch_s": out.get("expires_at_epoch_s"),
+            "retry_after_s": out.get("retry_after_s"),
+            "reason": out.get("reason"),
+        })
+    except Exception as exc:                                   # noqa: BLE001
+        out["persistence"] = {"queued": False, "why": type(exc).__name__}
+    return out
+
+
+def paced_read(call, *, endpoint: str, max_dispatches: int = None):
+    """Run an IDEMPOTENT venue read with our bounded retry. Re-raises on failure.
+
+    ── WHY THIS EXISTS ──────────────────────────────────────────────
+    `_get_client` passes `max_retries=0`, which removes the SDK's own two
+    retries from EVERY call on the shared client -- not only from the book
+    read that has a retry of its own. Without this helper, `portfolio.positions`,
+    `account.balances` and the order reads would each have gone from three
+    attempts to one, quietly. Those are the reconciliation and servicing
+    reads: the ones that must keep working while the entry lane is being
+    throttled, because a venue we cannot read is a position we cannot
+    manage. Turning off the SDK's retry without replacing it there would
+    have traded a request-count problem for a servicing problem.
+
+    ── IT RE-RAISES, DELIBERATELY ───────────────────────────────────
+    Every call site already wraps its read in `try/except` with a considered
+    fallback -- a stale positions snapshot, a fail-CLOSED hold, a None that
+    makes the caller refuse. Returning a sentinel instead would require
+    changing all of them and would put this function in charge of decisions
+    they already make better. So behaviour is identical to before except
+    that a transient failure now gets one more chance.
+
+    ── NEVER FOR AN ORDER SUBMISSION ────────────────────────────────
+    `call` must be idempotent. Nothing that creates, modifies or cancels an
+    order may pass through here: the venue has no idempotency key, so a
+    retry after an ambiguous failure can duplicate the order. The pinned
+    SDK independently refuses to retry POST for that reason, and this
+    function adds no retry of its own to any submission path -- there is no
+    call site on one, and there must not be.
+    """
+    budget = int(max_dispatches or BOOK_READ_MAX_DISPATCHES)
+    last = None
+    for attempt in range(max(1, budget)):
+        try:
+            return call()
+        except Exception as exc:                               # noqa: BLE001
+            last = exc
+            try:
+                from . import venue_request_gate as _grt
+            except Exception:                                  # noqa: BLE001
+                _grt = None
+            # OUR OWN REFUSAL IS NOT RETRYABLE: the gate refused precisely
+            # because there is no time in which a send would still be
+            # useful. Re-raised unchanged so the caller can name it as ours.
+            if _grt is not None and isinstance(exc, _grt.VenueGateRefusal):
+                raise
+            try:
+                from . import venue_http_error as _vhe
+                diag = _vhe.describe(exc, endpoint=endpoint)
+            except Exception:                                  # noqa: BLE001
+                diag = {"error_type": type(exc).__name__}
+            _arm_cooldown_from(diag)
+            if (attempt + 1) >= budget or not _book_read_worth_retrying(diag):
+                raise
+            # THROUGH THE GATE, which holds the venue's own window and knows
+            # the caller's deadline -- so a wait that would outlive the
+            # decision raises instead of sleeping.
+            _grt.check_before_dispatch(read_id=_grt.current_read())
+    if last is not None:                                       # pragma: no cover
+        raise last
 
 
 def _book_read_worth_retrying(diag: dict) -> bool:
@@ -3614,7 +3718,8 @@ def open_orders(slugs: list[str] | None = None) -> list[dict]:
     orders the venue app would). Read-only; raises to the caller."""
     client = _get_client()
     params = {"slugs": slugs} if slugs else None
-    resp = client.orders.list(params) or {}
+    resp = paced_read(lambda: client.orders.list(params),
+                      endpoint="orders.list") or {}
     return [_norm_order(o) for o in (resp.get("orders") or [])
             if isinstance(o, dict)]
 
@@ -3908,7 +4013,8 @@ def balances() -> dict:
     `unsettledFunds` as zero is the same class of error as a fee schedule that
     answers 0 when it cannot price.
     """
-    resp = _get_client().account.balances() or {}
+    resp = paced_read(lambda: _get_client().account.balances(),
+                      endpoint="account.balances") or {}
     rows = [b for b in (resp.get("balances") or []) if isinstance(b, dict)]
     fields = ("currentBalance", "currency", "lastUpdated", "buyingPower",
               "assetNotional", "assetAvailable", "pendingCredit",

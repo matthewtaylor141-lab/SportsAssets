@@ -35,6 +35,7 @@ NO TEST HERE SUBMITS AN ORDER. The path under test reads a book.
 
 from __future__ import annotations
 
+import base64
 import threading
 import time
 
@@ -102,7 +103,20 @@ class Venue:
             return len(self.dispatches)
 
 
-def _install(venue: Venue, monkeypatch) -> object:
+#: A THROWAWAY Ed25519 seed, generated here and never stored anywhere.
+#:
+#: WHY ANY CREDENTIAL AT ALL. The authenticated endpoints -- positions,
+#: balances, the order reads -- are refused by the SDK LOCALLY when no key is
+#: set, before a request is built, so a test of their retry behaviour would
+#: measure nothing. This is 32 zero bytes base64-encoded: a syntactically
+#: valid seed the signing code accepts, with no relationship to any real key,
+#: and the mock transport never checks a signature. It is not a secret and
+#: could not authenticate against anything.
+_FAKE_KEY_ID = "00000000-0000-0000-0000-000000000000"
+_FAKE_SECRET = base64.b64encode(bytes(32)).decode()
+
+
+def _install(venue: Venue, monkeypatch, *, authenticated=True) -> object:
     """Build the REAL SDK client over a mock socket, then gate it.
 
     This is `pmus._get_client`'s own construction with `client_kwargs()`
@@ -112,8 +126,11 @@ def _install(venue: Venue, monkeypatch) -> object:
     """
     from polymarket_us import PolymarketUS
 
+    creds = ({"key_id": _FAKE_KEY_ID, "secret_key": _FAKE_SECRET}
+             if authenticated else {})
     client = PolymarketUS(gateway_base_url="https://gateway.test",
                           api_base_url="https://api.test",
+                          **creds,
                           **venue_sdk.client_kwargs())
     # Replace only the socket. Everything above it is the shipped code.
     client._http = httpx.Client(
@@ -657,3 +674,114 @@ def test_a_storage_read_that_fails_is_unknown_and_not_permission():
     assert "relation does not exist" in res["why"]
     assert "stored" not in res, (
         "a failed read must not report on whether a row exists")
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 8 · THE SERVICING AND RECONCILIATION READS KEEP THEIR RETRY
+# ═════════════════════════════════════════════════════════════════════
+#
+# `max_retries=0` removes the SDK's two retries from EVERY call on the
+# shared client, not only from the book read that has a retry of its own.
+# Without `pmus.paced_read` those reads would have gone from three attempts
+# to one, silently -- and they are the reconciliation and servicing reads,
+# the ones that must keep working while the entry lane is being throttled,
+# because a venue we cannot read is a position we cannot manage.
+
+def test_a_servicing_read_retries_a_transient_failure(monkeypatch):
+    """`account.balances` survives one dropped connection, as it did before.
+
+    Asserted through `balances()` itself rather than through `paced_read`,
+    because the question is whether the CALL SITE has the retry, not whether
+    the helper works in isolation.
+    """
+    venue = Venue([("raise", httpx.ConnectError("reset")),
+                   ("ok", 200, {"balances": [{"asset": "USDC",
+                                              "available": "0"}]})])
+    _install(venue, monkeypatch)
+
+    got = pmus.balances()
+
+    assert venue.count == 2, (
+        "the servicing read made %d attempt(s); turning off the SDK's retry "
+        "without replacing it here would have left it at 1" % venue.count)
+    assert venue.exhausted == 0
+    assert got is not None
+
+
+def test_a_servicing_read_still_gives_up_and_re_raises(monkeypatch):
+    """Bounded, and the caller's own fallback still decides.
+
+    `paced_read` re-raises rather than returning a sentinel, so every
+    existing `try/except` fallback -- a stale snapshot, a fail-CLOSED hold,
+    a None that makes the caller refuse -- keeps deciding exactly as before.
+    A helper that swallowed the error would have quietly taken those
+    decisions over.
+    """
+    venue = Venue([("raise", httpx.ConnectError("reset")),
+                   ("raise", httpx.ConnectError("reset"))])
+    _install(venue, monkeypatch)
+
+    with pytest.raises(Exception) as caught:
+        pmus.paced_read(lambda: pmus._get_client().account.balances(),
+                        endpoint="account.balances")
+    assert "APIConnectionError" in type(caught.value).__name__ or \
+           isinstance(caught.value, httpx.ConnectError)
+    assert venue.count == 2
+
+
+def test_a_429_on_a_servicing_read_arms_the_same_cooldown(monkeypatch):
+    """One limiter, one cooldown. A hole in either path is a hole in both.
+
+    A 429 on `portfolio.positions` counts against the same venue limiter as
+    a 429 on `markets.book`, so a cooldown armed by one and not the other is
+    a control with a gap exactly where the traffic is.
+    """
+    venue = Venue([("ok", 429, {"e": 1}, {"retry-after": "3"}),
+                   ("ok", 429, {"e": 1}, {"retry-after": "3"})])
+    _install(venue, monkeypatch)
+
+    # `account_holds` fails CLOSED on an unreadable venue, which is its own
+    # correct behaviour and not what is under test here.
+    pmus.account_holds(SLUG)
+
+    g = GRT.gate_state()
+    assert g["blocking"] is True, (
+        "a 429 on a servicing read armed no prohibition")
+    assert g["seconds_left"] >= 2.5
+    assert VP.penalty_left() > 0.0, "the reduced rate was not armed either"
+    pend = VCS.pending()
+    assert pend is not None and pend["retry_after_s"] == 3.0
+    assert "PORTFOLIO_POSITIONS" in (pend["reason"] or ""), pend
+
+
+def test_no_order_submission_path_can_reach_the_retry_helper():
+    """CONTAINMENT, read from the AST rather than from intent.
+
+    The venue has no idempotency key, so retrying an ambiguous order
+    submission can duplicate it. `paced_read` is for IDEMPOTENT reads only,
+    and this pins the set of functions that may call it -- so a later edit
+    that wires it into a submission path fails here instead of in
+    production.
+    """
+    import ast
+    import inspect
+
+    tree = ast.parse(inspect.getsource(pmus))
+    callers = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            for n in ast.walk(node):
+                if (isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+                        and n.func.id == "paced_read"):
+                    callers.add(node.name)
+                    break
+    assert callers == {"position_side", "account_holds", "open_orders",
+                       "balances"}, (
+        "only idempotent reads may use the paced retry; got %r"
+        % (sorted(callers),))
+    # And none of them is a submission path, by name and by what they call.
+    for name in callers:
+        src = inspect.getsource(getattr(pmus, name))
+        for forbidden in ("orders.create", "orders.cancel", "orders.modify",
+                          "close_position"):
+            assert forbidden not in src, "%s reaches %s" % (name, forbidden)
