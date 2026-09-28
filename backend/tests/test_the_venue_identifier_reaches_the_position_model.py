@@ -181,14 +181,27 @@ def _free(qty=None, price=None, maker=False, **kw):
     return 0.0
 
 
+# THE DIRECTIVE'S NUMBERS DESCRIBE A TWO-TOKEN VENUE, and that matters.
+#
+# 0.55 for the complement and 0.44 for the long leg can BOTH be real only
+# where YES and NO are distinct instruments with independent books --
+# Polymarket's global CLOB. On the netting venue there is one book per
+# market, the complement's ask is 1 - bid by construction, and 0.55
+# alongside 0.44 is not a state the venue can be in. So the worked
+# example runs on the CLOB, and the netting venue gets its own tests
+# below where completing and selling must TIE.
+CLOB = "polymarket-clob"
+NETTING = "polymarket-us"
+
+
 def _rank(qty=100.0, basis=0.60, bid=0.44, ask=0.55, fee_fn=None,
-          bid_size=None, ask_size=None):
+          bid_size=None, ask_size=None, venue=CLOB):
     return MS.rank_with_hold(
         qty, basis, ev_hold=dict(HOLD_RECORD),
         bid=bid, bid_size=bid_size if bid_size is not None else qty,
         complement_ask=ask,
         complement_ask_size=ask_size if ask_size is not None else qty,
-        fee_fn=fee_fn or _free, venue="polymarket-us",
+        fee_fn=fee_fn or _free, venue=venue,
         us_market_slug="mlb-cle-det-2026-05-21", held_is_long=True)
 
 
@@ -326,3 +339,96 @@ def test_an_established_settlement_conflict_still_disqualifies_hold():
     got = _by_action(r)
     assert got.get("HOLD", {}).get("value_usd") is None or \
         r["selected"] != "HOLD" or r.get("fallback_trigger") is not None
+
+
+# ═════════════════════════════════════════════════════════════════════
+# ON THE NETTING VENUE, COMPLETING AND SELLING ARE ONE PIECE OF LIQUIDITY
+# ═════════════════════════════════════════════════════════════════════
+#
+# `pmus.slug_bid` settled the quote shape against five live markets, exact
+# to the cent on all five:
+#
+#     long.price == bestAsk        short.price == 1 - bestBid
+#     sell a LONG leg -> bestBid   sell a SHORT leg -> 1 - bestAsk
+#
+# One book per market; the two marketSides are views on it. Buying the
+# complement at (1 - bestBid) nets bestBid at settlement, which is exactly
+# what selling the long leg pays. The two actions are different WIRE
+# INSTRUCTIONS for the same depth, so their values must tie -- and a
+# supplied pair that does not tie is two reads of one book, not two
+# opportunities.
+
+def test_on_the_netting_venue_consistent_prices_make_the_two_actions_tie():
+    got = _by_action(_rank(bid=0.44, ask=0.56, venue=NETTING))
+    assert got["DIRECT_EXIT"]["value_usd"] == pytest.approx(-16.0)
+    assert got["TAKE_COMPLEMENT"]["value_usd"] == pytest.approx(-16.0)
+
+
+def test_the_tie_is_broken_toward_the_plain_sale_not_the_complement():
+    """Same money, fewer moving parts, no second instrument involved."""
+    assert _rank(bid=0.44, ask=0.56, venue=NETTING)["selected"] == \
+        "DIRECT_EXIT"
+
+
+@pytest.mark.parametrize("ask,label", [
+    (0.55, "1c better than one book would allow"),
+    (0.50, "6c better than one book would allow"),
+    (0.60, "4c worse than one book would allow"),
+])
+def test_an_inconsistent_complement_price_is_annotated_not_refused(ask, label):
+    """NOT refused. My one-book inference does not reach far enough.
+
+    `bettor_hedge_tax` states, and
+    test_the_cheaper_exit_ladder_wins_and_is_still_a_reduction pins on
+    PMUS, that buying the complement can genuinely beat selling. That is a
+    tested requirement. The five-market measurement behind the one-book
+    reading shows what the market RECORD's display fields contain, not
+    whether the two sides rest on independent books -- so the discrepancy
+    is reported and nothing is blocked.
+    """
+    r = _rank(bid=0.44, ask=ask, venue=NETTING)
+    got = _by_action(r)
+    assert "TAKE_COMPLEMENT" in got, label
+    risk = got["TAKE_COMPLEMENT"]["same_liquidity_risk"]
+    assert risk["status"] == "NOT_ESTABLISHED"
+    assert risk["implied_by_the_bid"] == pytest.approx(0.56)
+    assert risk["supplied_complement_ask"] == pytest.approx(ask)
+    assert got["TAKE_COMPLEMENT"]["compare_against"] == "DIRECT_EXIT"
+
+
+def test_the_annotation_states_both_readings_and_how_to_settle_it():
+    got = _by_action(_rank(bid=0.44, ask=0.50, venue=NETTING))
+    risk = got["TAKE_COMPLEMENT"]["same_liquidity_risk"]
+    assert "same depth" in risk["if_one_book"]
+    assert "genuine opportunity" in risk["if_two_books"]
+    assert "venue access" in risk["settled_by"]
+    assert "NOT ESTABLISHED" in risk["question"]
+
+
+def test_a_consistent_pair_carries_no_annotation():
+    got = _by_action(_rank(bid=0.44, ask=0.56, venue=NETTING))
+    assert "same_liquidity_risk" not in got["TAKE_COMPLEMENT"]
+
+
+def test_the_two_token_venue_is_never_annotated():
+    """Independent instruments; the identity does not apply at all."""
+    got = _by_action(_rank(bid=0.44, ask=0.50, venue=CLOB))
+    assert "same_liquidity_risk" not in got["TAKE_COMPLEMENT"]
+
+
+def test_the_open_question_is_stated_once_for_every_consumer():
+    from sportsassets import bettor_mgmt_select as _MS
+    q = _MS.SAME_LIQUIDITY_QUESTION
+    assert "NOT ESTABLISHED" in q
+    assert "nothing is refused" in q
+    assert "bettor_hedge_tax" in q
+
+
+def test_the_guard_does_not_fire_when_only_one_price_is_present():
+    """A missing price has its own refusal; do not mask it with this one."""
+    r = MS.rank_with_hold(
+        100.0, 0.60, ev_hold=dict(HOLD_RECORD), bid=0.44, bid_size=100.0,
+        complement_ask=None, complement_ask_size=None, fee_fn=_free,
+        venue=NETTING, us_market_slug="x", held_is_long=True)
+    blocked = {x["action"]: x["blocker"] for x in r["not_rankable"]}
+    assert blocked["TAKE_COMPLEMENT"] == "COMPLEMENT_ASK_NOT_OBSERVED"

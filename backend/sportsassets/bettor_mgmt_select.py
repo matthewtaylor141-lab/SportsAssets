@@ -69,6 +69,25 @@ VERSION = "BETTOR_MGMT_SELECT_V1"
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 
+#: One venue tick. On a ONE_SIGNED_NET venue the complement's ask and the
+#: long leg's bid are two views of one book, so `ask` must equal `1 - bid`.
+#: The rulebook sets the minimum quote increment at $0.001 per Contract
+#: ("unless otherwise specified in the Contract's terms and conditions"),
+#: so a disagreement inside one tick is rounding and anything larger is
+#: two different reads of one book.
+NETTING_PRICE_TOLERANCE = 0.001
+
+#: The open question the tolerance above detects. Stated once so every
+#: consumer quotes the same words and nobody resolves it in passing.
+SAME_LIQUIDITY_QUESTION = (
+    "on a ONE_SIGNED_NET venue, are the long leg's bid and the "
+    "complement's ask two executable opportunities or two representations "
+    "of one book? pmus.slug_bid's five-market measurement (short.price == "
+    "1 - bestBid, 5/5) points at one book; bettor_hedge_tax and "
+    "test_the_cheaper_exit_ladder_wins_and_is_still_a_reduction assert the "
+    "complement can genuinely beat the bid. NOT ESTABLISHED. Until it is, "
+    "a discrepancy is REPORTED on the candidate and nothing is refused")
+
 # Actions that need one of OUR orders to rest before they pay anything.
 # Listed here rather than inferred from the name, because POST_COMPLEMENT
 # and WAIT_REQUOTE do not share a prefix and a name test would miss one.
@@ -1037,6 +1056,60 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
             "value_usd": None})
 
     # ── TAKE_COMPLEMENT, including loss-limiting completion ──────────
+    #
+    # IS THE COMPLEMENT A SECOND OPPORTUNITY, OR THE SAME LIQUIDITY TWICE?
+    # OPEN QUESTION, MEASURED AND REPORTED, NOT DECIDED HERE.
+    #
+    # THE CASE FOR ONE BOOK. `pmus.slug_bid` settled the quote shape
+    # against five live markets, exact to the cent on all five:
+    #
+    #     long.price == bestAsk       short.price == 1 - bestBid
+    #
+    # Both marketSides' `price` fields are derived from ONE BBO pair for
+    # the market, and `live_executor.classify_exit` says buying the
+    # complementary leg "retires the first, share for share". If that is
+    # the whole truth then the complement's ask IS 1 - bid, completing and
+    # selling are one piece of depth, and ranking them as two
+    # manufactures an edge -- feeding bid=0.44 with complement_ask=0.50
+    # produces a $6.00 advantage on 100 contracts and the selector takes
+    # it, which on a funded account is crossing the spread for nothing.
+    #
+    # THE CASE FOR TWO. `bettor_hedge_tax` states as a design principle
+    # that "the best way to exit YES is NOT always to sell YES. Buying NO
+    # neutralises the same exposure and is sometimes cheaper", and
+    # `test_the_cheaper_exit_ladder_wins_and_is_still_a_reduction` pins it
+    # on PMUS with bid=0.80 against complement_ask=0.15 -- "1 - 0.15 =
+    # 0.85 beats the 0.80 bid". That is a tested requirement, not an
+    # oversight.
+    #
+    # I CANNOT SETTLE THIS FROM THE SOURCE. The five-market measurement
+    # shows what the MARKET RECORD's display fields contain; it does not
+    # show whether the two sides rest on independent order books. So this
+    # records the discrepancy on the candidate and refuses NOTHING. Acting
+    # on my inference would have overruled a documented requirement on
+    # evidence that does not reach it. Settling it needs both sides' books
+    # read live from one venue snapshot, which needs venue access.
+    _netting = (vpm.model_for(venue).get("model") == vpm.ONE_SIGNED_NET)
+    _inconsistent = None
+    if (_netting and complement_ask is not None and bid is not None):
+        _implied = 1.0 - float(bid)
+        if abs(float(complement_ask) - _implied) > NETTING_PRICE_TOLERANCE:
+            _inconsistent = {
+                "supplied_complement_ask": float(complement_ask),
+                "implied_by_the_bid": _implied,
+                "discrepancy": round(float(complement_ask) - _implied, 6),
+                "tolerance": NETTING_PRICE_TOLERANCE,
+                "question": SAME_LIQUIDITY_QUESTION,
+                "status": "NOT_ESTABLISHED",
+                "if_one_book": ("this candidate and DIRECT_EXIT are the "
+                                "same depth and the difference between "
+                                "them is not executable"),
+                "if_two_books": ("both prices are real and the difference "
+                                 "is a genuine opportunity"),
+                "settled_by": ("reading both marketSides' books in one "
+                               "venue snapshot and comparing; needs venue "
+                               "access")}
+
     if complement_ask is None:
         out["not_rankable"].append({
             "action": "TAKE_COMPLEMENT",
@@ -1088,6 +1161,14 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
                     "ranked, because holding a leg that may settle at "
                     "zero risks the whole basis"),
             }
+            # THE DISCREPANCY TRAVELS WITH THE CANDIDATE, unrefused.
+            # A reader comparing this against DIRECT_EXIT can see that on
+            # a netting venue the two may be one piece of depth, and that
+            # whether they are is NOT ESTABLISHED. Absent this field the
+            # difference reads as a free edge.
+            if _inconsistent is not None:
+                cand["same_liquidity_risk"] = dict(_inconsistent)
+                cand["compare_against"] = "DIRECT_EXIT"
             # ON A NETTING VENUE THIS IS THE SAME REDUCTION AS A SALE,
             # reached through the other ladder. The economics are
             # identical to selling at (1 - ask); what differs is which
