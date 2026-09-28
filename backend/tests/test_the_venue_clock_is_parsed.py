@@ -284,7 +284,9 @@ def test_a_minutes_old_cached_snapshot_received_one_second_ago_is_not_fresh():
                           bound_s=loop.MAX_VENUE_QUOTE_AGE_S)
     assert vc.admits(verdict) is False
     assert verdict["verdict"] == vc.CONTRADICTED
-    assert verdict["contradicted_by"] == "DATE_MINUS_AGE_OUTSIDE_THE_BOUND"
+    # RENAMED with the RFC 9111 4.2.3 repair: the label named the
+    # arithmetic that was removed.
+    assert verdict["contradicted_by"] == "HTTP_AGE_OUTSIDE_THE_BOUND"
     assert verdict["origin_generation_age_s"] == pytest.approx(302.0, abs=0.1)
 
 

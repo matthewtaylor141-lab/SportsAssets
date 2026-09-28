@@ -557,7 +557,16 @@ def evaluate(*, now, observation=None, subscription=None, revalidation=None,
                 "instant for the representation we are holding, so this is the "
                 "contract stating the payload is old -- not an absence of "
                 "evidence. It refuses." % (gen_age, float(bound_s)))
-            out["contradicted_by"] = "DATE_MINUS_AGE_OUTSIDE_THE_BOUND"
+            # RENAMED (2026-09-28). It read DATE_MINUS_AGE_OUTSIDE_THE_BOUND,
+            # which named the arithmetic the RFC 9111 §4.2.3 repair removed.
+            # A refusal label that names a superseded algorithm sends the
+            # next reader to the wrong place; the quantity is now the
+            # representation's current age.
+            out["contradicted_by"] = "HTTP_AGE_OUTSIDE_THE_BOUND"
+            out["contradicted_by_was_called"] = (
+                "DATE_MINUS_AGE_OUTSIDE_THE_BOUND until the RFC 9111 "
+                "4.2.3 correction; the old name described a computation "
+                "that double-counted Date offset against the Age header")
             return out
     max_age = contract.get("max_age_s")
     age_h = contract.get("age_header_s")

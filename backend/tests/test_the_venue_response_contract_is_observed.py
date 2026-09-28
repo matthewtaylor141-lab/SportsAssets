@@ -210,8 +210,23 @@ def test_the_scheduled_read_refuses_a_minutes_old_cached_snapshot(monkeypatch):
     assert got["refusal"] == loop.R_BOOK_CURRENCY_CONTRADICTED
     assert got["book_currency"]["verdict"] == vc.CONTRADICTED
     assert got["book_currency"]["contradicted_by"] == (
-        "DATE_MINUS_AGE_OUTSIDE_THE_BOUND")
-    assert got["age_s"] == pytest.approx(302.5, abs=2.0)
+        "HTTP_AGE_OUTSIDE_THE_BOUND")
+    # ── 300.5, NOT 302.5, AND THE OLD NUMBER WAS THE DOUBLE-COUNT ────
+    #
+    # This fixture is `Date` = now-2, `Age: 300`, decision at now+0.5, and
+    # the docstring above says the representation is 300 s old. The old
+    # arithmetic reported 302.5 for it: `now+0.5 - (Date - Age)` =
+    # 0.5 + 2.0 + 300, adding the 2 s of Date offset to the 300 s of Age.
+    # The test's own prose and its own number disagreed.
+    #
+    # RFC 9111 4.2.3: apparent_age 2.0, corrected_age_value 300, their
+    # MAXIMUM 300, plus 0.5 s residence = 300.5.
+    #
+    # THE REFUSAL IS UNCHANGED and that is the point -- 300 s is far
+    # outside a 30 s bound either way. What changed is that the reported
+    # age is now the true one, so a borderline case lands on the right
+    # side of the line instead of being inflated over it.
+    assert got["age_s"] == pytest.approx(300.5, abs=1.0)
     # AND THE HEADERS REALLY TRAVELLED THROUGH THE LOOP'S OWN READ PATH.
     contract = got["book_currency"]["contract"]
     assert contract["age_header_s"] == 300
