@@ -394,3 +394,122 @@ def test_the_module_states_that_it_calls_rather_than_replaces_the_selector():
         "sportsassets.bettor_mgmt_select.rank_with_hold"
     assert d["ranks_on"] == "expected_net_usd"
     assert "liquidation win for the wrong reason" in d["why_not_minimax"]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 7 · THE SCALE. ONE COMPARISON MEANS ONE UNIT, AND IT DID NOT
+# ═════════════════════════════════════════════════════════════════════
+#
+# FOUND BY BUILDING THE CANDIDATE, NOT BY READING THE CODE. Driving the
+# Bears/Panthers middle at TEN units through `indirect_candidate` for the
+# lifecycle demonstration produced `expected_net_usd = 0.17` beside an
+# `incremental_capital_usd` of 4.40 -- two numbers from the same dict that
+# cannot both be right. `bettor_indirect_structures` reports `min_payout_cents`
+# and `cost_cents` PER UNIT; `rank_with_hold` scores over the WHOLE POSITION;
+# and the fee argument was already whole-position. So the indirect acquisition
+# entered the one comparison understated by a factor of its own size.
+#
+# THIS IS THE SAME FAILURE FINDING 3 NAMED, pointed at a different input: "do
+# not manufacture a preference by omitting the value of HOLD, treating REDUCE
+# as an unscored placeholder, or excluding fees and depth from an alternative."
+# Dividing an alternative by its quantity is another way to exclude most of it.
+#
+# EVERY EARLIER TEST IN THIS FILE HOLDS ONE UNIT, which is exactly why the
+# mismatch survived: at units=1 the two scales agree. The counterexample below
+# is the same structure at ten.
+
+def _ten_unit_middle():
+    """The module's OWN fixture contracts at ten units -- a real MIDDLE."""
+    a = dataclasses.replace(IS.BEARS_MONEYLINE, quantity=10,
+                            cost_cents_per_unit=62)
+    b = dataclasses.replace(IS.PANTHERS_PLUS_4_5, quantity=10,
+                            cost_cents_per_unit=41)
+    s = IS.classify(a, b, sport_permits_tie=False, fixture_can_postpone=False)
+    assert s.taxonomy == IS.MIDDLE, s.why
+    assert s.units == 10
+    return s
+
+
+def _ten_unit_candidate(*, fee_usd=0.30, p_middle=0.50):
+    s = _ten_unit_middle()
+    regions = [r["region"] for r in s.table]
+    probs = {r: 0.0 for r in regions}
+    # The both-win region is margins 1..4, split across the classifier's own
+    # cells; the rest of the mass sits on a single-leg region.
+    probs["margin in (0, 4)"] = p_middle
+    probs["margin > 5"] = 1.0 - p_middle
+    wc = IP.net_worst_case(s, fee_usd=fee_usd, fee_basis="test")
+    return s, wc, FD.indirect_candidate(
+        structure=s, region_probabilities=probs,
+        evidence_quality=FD.EVIDENCE_EXTERNAL_LABELLED, fee_usd=fee_usd,
+        depth=IP.depth_supports(wanted_qty=10, depth_qty_at_price=25),
+        incremental=IP.incremental_capital_usd(hedge_qty=10, hedge_price=0.41,
+                                               hedge_fee_usd=fee_usd),
+        capital_duration_h=3.0, worst_case=wc)
+
+
+def test_the_counterexample_a_ten_unit_middle_is_not_valued_as_one():
+    """THE DEFECT, AS ARITHMETIC. Ten units paying $2.00 in the middle region and
+    $1.00 outside it, bought for $1.03 a unit. At a 50% middle the expected
+    payout is $15.00 over the position, not $1.50."""
+    s, wc, cand = _ten_unit_candidate()
+    assert cand["rankable"] is True, cand
+    assert cand["scale"] == IP.SCALE_WHOLE_POSITION
+    assert cand["units_valued"] == 10
+    # PER UNIT AND PER POSITION ARE BOTH REPORTED, and they differ by 10x.
+    assert cand["expected_payout_usd_per_unit"] == pytest.approx(1.50)
+    assert cand["expected_payout_usd"] == pytest.approx(15.00)
+    assert cand["cost_usd_per_unit"] == pytest.approx(1.03)
+    assert cand["cost_usd"] == pytest.approx(10.30)
+    # $15.00 - $10.30 - $0.30 = $4.40. The OLD arithmetic gave
+    # $1.50 - $1.03 - $0.30 = $0.17, understated by a factor of ten.
+    assert cand["expected_net_usd"] == pytest.approx(4.40)
+    assert cand["expected_net_usd"] != pytest.approx(0.17)
+
+
+def test_the_worst_case_is_at_the_position_scale_too():
+    """AND IT HAS TO BE THE SAME SCALE AS THE LIMIT IT IS CHECKED AGAINST. A
+    per-unit floor compared with an approved dollar downside limit would clear a
+    limit ten times over."""
+    s, wc, cand = _ten_unit_candidate()
+    assert wc["scale"] == IP.SCALE_WHOLE_POSITION
+    assert wc["units_valued"] == 10
+    assert wc["min_payout_usd_per_unit"] == pytest.approx(1.00)
+    assert wc["min_payout_usd"] == pytest.approx(10.00)
+    assert wc["cost_usd"] == pytest.approx(10.30)
+    # -$0.30 gross, minus the $0.30 fee.
+    assert wc["gross_worst_case_usd"] == pytest.approx(-0.30)
+    assert wc["worst_case_usd"] == pytest.approx(-0.60)
+    assert cand["downside_usd"] == pytest.approx(-0.60)
+
+
+def test_the_capital_downside_limit_now_bites_at_the_right_size():
+    """THE CONSEQUENCE THAT COSTS MONEY. A $0.50 downside limit must REMOVE this
+    candidate: the position can lose $0.60. Under the per-unit arithmetic its
+    floor read -$0.33 and it cleared."""
+    _s, _wc, cand = _ten_unit_candidate()
+    got = FD.decide(hold_ranking=_hold_ranking(hold_value_usd=0.05,
+                                               exit_value_usd=-0.20),
+                    indirect=cand, limits={"max_downside_usd": 0.50})
+    blocked = {b["action"]: b for b in got["not_rankable"]}
+    assert blocked[FD.ACTION_ACQUIRE_INDIRECT_HEDGE]["blocker"] == \
+        FD.R_DOWNSIDE_LIMIT_BREACHED
+    assert got["selected"] == "HOLD", (
+        "a candidate breaching the downside limit is removed before the choice, "
+        "not out-ranked after it")
+    # AND AT A LIMIT THAT GENUINELY COVERS IT, it is selected on expected value.
+    wide = FD.decide(hold_ranking=_hold_ranking(hold_value_usd=0.05,
+                                                exit_value_usd=-0.20),
+                     indirect=cand, limits={"max_downside_usd": 1.00})
+    assert wide["selected"] == FD.ACTION_ACQUIRE_INDIRECT_HEDGE
+
+
+def test_one_unit_structures_are_unchanged_by_the_scale_repair():
+    """THE REGRESSION GUARD. Every other test in this file holds one unit, and
+    the repair must be a no-op there -- which is also why the defect survived."""
+    s = _structure(cost_b=50)
+    assert s.units == 1
+    wc = IP.net_worst_case(s, fee_usd=0.0, fee_basis="test")
+    assert wc["min_payout_usd"] == pytest.approx(wc["min_payout_usd_per_unit"])
+    assert wc["cost_usd"] == pytest.approx(wc["cost_usd_per_unit"])
+    assert wc["gross_worst_case_usd"] == pytest.approx(0.01)

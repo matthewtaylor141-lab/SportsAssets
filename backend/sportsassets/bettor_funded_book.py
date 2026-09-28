@@ -3695,6 +3695,23 @@ async def command_center(conn) -> dict:
     # book. The two answers differ, and only the first one explains the
     # state the book is in.
     decision = await last_scheduled_decision(conn)
+    # ── THE PAIR LANE'S OWN READ, IMPORTED LOCALLY ──────────────────
+    #
+    # LOCAL because `bettor_funded_pair_cycle` imports this module: a top-level
+    # import here would be a cycle. And guarded, because this panel must still
+    # render on a database that has no reservation schema -- the reader itself
+    # distinguishes ABSENT from UNREADABLE, and an exception escaping into the
+    # command centre is the failure mode the capability check above exists to
+    # replace.
+    try:
+        from . import bettor_funded_pair_cycle as _PC
+
+        pair_lane = await _PC.operator_view(conn)
+    except Exception as exc:                                   # noqa: BLE001
+        pair_lane = {"ok": False, "refusal": "THE_PAIR_LANE_COULD_NOT_BE_READ",
+                     "error": "%s: %s" % (type(exc).__name__, str(exc)[:200]),
+                     "why": ("unreadable is not empty: no claim is made here "
+                             "about how much capital is reserved")}
     pairs = await conn.fetch(
         "SELECT account_id, venue, count(*) AS intents "
         "  FROM bettor_funded_intents GROUP BY account_id, venue "
@@ -3873,6 +3890,23 @@ async def command_center(conn) -> dict:
             "not proceed, as the last scheduled servicing pass recorded "
             "them. A book without its decision cannot answer 'why is this "
             "still held?'"),
+        # ── THE PAIR LANE: THE DECISION LEDGER AND THE CLAIMED CAPITAL ──
+        #
+        # A SECOND SECTION BECAUSE IT ANSWERS A SECOND QUESTION. The book above
+        # is what the lane HOLDS. This is what it DECIDED and what is claimed but
+        # not yet held: a reservation whose send may be live at the venue is
+        # exposure that appears in no position row, and an operator reading only
+        # the book would not see it at all.
+        #
+        # ABSENT ON A DATABASE WITHOUT THE PAIR SCHEMA, and it says so rather
+        # than reading as an empty lane.
+        "pair_lane": pair_lane,
+        "pair_lane_note": (
+            "the decision the lane recorded BEFORE its outcome existed, and "
+            "every outstanding risk listed individually -- an acquisition that "
+            "may be live at the venue, capital claimed by a reservation, a "
+            "group holding one leg, and a claimed worst case that did not hold "
+            "or whose scope was invalidated. None of them is summed"),
         "counts_toward_strategy_performance": None,
         "counts_note": ("PER BOOK, in each book's own "
                        "`counts_toward_strategy_performance`. A funded book "

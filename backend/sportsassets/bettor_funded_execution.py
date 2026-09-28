@@ -61,6 +61,7 @@ from . import bettor_account_exposure as AE
 from . import bettor_entry_execution as EX
 from . import bettor_funded_activation as FA
 from . import bettor_funded_book as FB
+from . import bettor_funded_reservations as RSV
 
 VERSION = "BETTOR_FUNDED_EXECUTION_CONNECTION_V1"
 
@@ -326,7 +327,6 @@ async def check_rails(conn, plan: dict, effective: dict, *,
                 "reserved_by_event_usd": {}, "schema": "ABSENT"}
     reservations_readable = True
     try:
-        from . import bettor_funded_reservations as RSV
         got = await RSV.reserved_collateral_usd(conn, account_id=account_id)
         if got.get("ok"):
             held_res = dict(got, schema="PRESENT")
@@ -506,9 +506,112 @@ async def check_rails(conn, plan: dict, effective: dict, *,
             "every_effective_rail_was_checked": not unmeasured}
 
 
+class _BindFailed(Exception):
+    """Carries a refusal OUT of the atomic block so the block rolls back.
+
+    asyncpg's `transaction()` commits on a clean exit, so a `return` from inside
+    it commits -- which is the opposite of what a refusal means here. Raising is
+    what rolls the intent insert back, and this type carries the refusal through.
+    """
+
+    def __init__(self, refusal, why, intent, bind):
+        super().__init__(str(refusal))
+        self.refusal, self.why, self.intent, self.bind = refusal, why, intent, bind
+
+
+#: ── WHERE THE TRANSACTION BOUNDARIES ARE, AND WHY EACH ONE IS THERE ──
+#:
+#: Named here rather than left implicit in four `async with` blocks, because the
+#: whole point of the reservation machine is that a crash at any instant leaves a
+#: state that recovery can read correctly. Each boundary closes one interleaving
+#: that would otherwise either double-count capital or double-submit an order.
+RESERVATION_ATOMICITY = (
+    {"boundary": "1 · INTENT + COMMIT_TO_INTENT",
+     "together": ("bettor_funded_book.record_intent",
+                  "bettor_funded_reservations.commit_to_intent"),
+     "what_a_crash_between_them_would_leave": (
+         "an intent occupying the one-open-position slot with no reservation "
+         "naming it, while the reservation stayed HELD and went on counting "
+         "its collateral -- the same money counted twice, on the intent and on "
+         "the reservation, at the moment the lane decides what it can afford"),
+     "and_the_refusal_this_makes_safe": (
+         "the reservation already names a DIFFERENT intent. That is the "
+         "replayed-acquisition case, and it must leave no intent row at all")},
+    {"boundary": "2 · SEND ELIGIBILITY ON BOTH ROWS",
+     "together": ("bettor_funded_book.mark_send_attempted",
+                  "bettor_funded_reservations.mark_send_attempted"),
+     "what_a_crash_between_them_would_leave": (
+         "an intent at SEND_ATTEMPTED beside a reservation still at COMMITTED. "
+         "Recovery reads the reservation, sees a pre-send state, releases the "
+         "leg as never-sent -- and the next cycle acquires the same leg again "
+         "while the first order may be live at the venue. A DOUBLE SUBMISSION")},
+    {"boundary": "3 · THE SEND'S OUTCOME ON BOTH ROWS",
+     "together": ("mark_unresolved / abandon_proven_not_sent",
+                  "mark_ambiguous / release(NEVER_SENT)"),
+     "what_a_crash_between_them_would_leave": (
+         "UNRESOLVED on the intent and SEND_ATTEMPTED on the reservation, or "
+         "the reverse: two rows disagreeing about whether an order may exist, "
+         "which is the one question recovery has to answer")},
+    {"boundary": "4 · ACKNOWLEDGEMENT + EXECUTIONS + CONSUMED",
+     "together": ("record_acknowledgement", "ingest_fills",
+                  "record_venue_evidence", "record_the_venue_named_it"),
+     "what_a_crash_between_them_would_leave": (
+         "fills in the book AND a live reservation still holding collateral "
+         "for the acquisition those fills are -- the account's exposure "
+         "counted twice, once as inventory and once as reserved capital")},
+)
+
+
+async def _consume_on_acknowledgement(conn, *, operation_id, intent_id,
+                                      account_id, venue, plan, answer, ack,
+                                      at) -> dict:
+    """THE VENUE NAMED AN ORDER, so record that as EVIDENCE and consume the leg.
+
+    NOT a boolean handed to the reservation machine -- that was the defect
+    migration 133 exists to close. The venue's acknowledgement is written down
+    with the endpoint that produced it, bound to this operation's account,
+    instrument and intent, and `record_the_venue_named_it` then reads it back and
+    checks the binding itself. So the claim "a real order exists" is supported by
+    a row a later reader can inspect, not by an argument this function passed.
+    """
+    order_id = (answer or {}).get("order_id") or ack.get("venue_order_id")
+    if not order_id:
+        # NO ID MEANS THE VENUE NAMED NOTHING, whatever else it said. The
+        # acquisition is AMBIGUOUS, not consumed, and the leg stays claimed.
+        return await RSV.mark_ambiguous(
+            conn, operation_id=operation_id,
+            why=("the venue answered without an order id (status %r), so no "
+                 "order has been named" % ((answer or {}).get("status"),)))
+    ev = await RSV.record_venue_evidence(
+        conn, evidence_id="ev:%s:%s" % (operation_id, order_id),
+        operation_id=operation_id, account_id=account_id, venue=venue,
+        us_market_slug=plan["us_market_slug"], intent_id=intent_id,
+        kind=RSV.EV_NAMED, venue_order_id=str(order_id),
+        search_endpoint="%s.submit_fok" % ADAPTER_MODULE,
+        search_scope={"account_id": account_id,
+                      "us_market_slug": plan["us_market_slug"],
+                      "intent_id": intent_id},
+        covered_terminal_orders=True, results_returned=1,
+        window_from_epoch_s=at, window_to_epoch_s=at,
+        raw={"status": (answer or {}).get("status"),
+             "order_id": str(order_id)},
+        read_at=at)
+    if not ev.get("ok"):
+        return dict(ev, consumed=False,
+                    why_it_matters=("without durable evidence the reservation "
+                                    "cannot be consumed, so the leg stays "
+                                    "claimed rather than silently released"))
+    got = await RSV.record_the_venue_named_it(
+        conn, operation_id=operation_id, venue_order_id=str(order_id))
+    return dict(got, evidence=ev)
+
+
 async def submit_for_decision(conn, rec: dict, *, account_id: str,
                               venue: str, adapter=None,
                               venue_positions: dict | None = None,
+                              operation_id: str | None = None,
+                              portfolio_group_id: str | None = None,
+                              leg_role: str | None = None,
                               now: float | None = None) -> dict:
     """THE WHOLE PATH, refusing at the first thing that is not established.
 
@@ -516,6 +619,22 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
     BEFORE any intent is written, so a refusal leaves no row; the intent is
     then committed BEFORE the request leaves; and a lost answer leaves that
     row for recovery rather than being retried here.
+
+    ── `operation_id` IS WHAT MAKES THE RESERVATION MACHINE PRODUCTION ──
+
+    `bettor_funded_reservations` had no production importer at all: a caller
+    could take a reservation and this function would never know, so nothing
+    connected the claimed leg to the order that claimed it. Pass the operation id
+    of a HELD reservation and the four transitions this function drives --
+    commit, send eligibility, the send's outcome, the acknowledgement -- move the
+    reservation and the intent TOGETHER, inside one transaction each. See
+    `RESERVATION_ATOMICITY` for what each boundary closes.
+
+    WITHOUT IT, NOTHING CHANGES. Every existing call site passes no operation id
+    and takes exactly the path it took before, which is why this is additive.
+    `portfolio_group_id` and `leg_role` likewise default to the SINGLE_LEG group
+    `record_intent` has always created for them; a second leg joining an existing
+    group passes both.
     """
     at = float(now if now is not None else time.time())
     klass = FA.venue_class(venue)
@@ -658,28 +777,91 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                     why="the adapter does not carry the surface this needs")
 
     # ── INTENT IS COMMITTED BEFORE THE REQUEST LEAVES ───────────────
+    #
+    # AND WHEN A RESERVATION IS BOUND, THE TWO WRITES ARE ONE WRITE. See
+    # `RESERVATION_ATOMICITY` below for why each boundary is where it is.
     intent_id = FB.new_intent_id()
-    got = await FB.record_intent(
-        conn, intent_id=intent_id, account_id=sel["account_id"], venue=venue,
-        venue_class=klass, us_market_slug=plan["us_market_slug"],
-        event_key=plan["event_key"], order_intent=plan["intent"],
-        limit_price=plan["limit_price"], quantity=plan["quantity"],
-        collateral_usd=plan["collateral_usd"],
-        effective_digest=eff["effective_digest"],
-        payout_event=plan.get("payout_event"),
-        held_is_long=plan.get("held_is_long"),
-        decision_ref={"admissible": True,
-                      "sized_from": plan["sized_from"],
-                      "payout_event": plan.get("payout_event"),
-                      "authorization_at": auth.get("authorization",
-                                                   {}).get("at")})
-    out["intent"] = got
-    if not got.get("ok"):
-        # ANOTHER LIVE INTENT. The database refused the second one, which is
-        # the one-position rule being ENFORCED rather than proposed.
-        return dict(out, ok=False, refusal=got["refusal"], why=got.get("why"))
-    out["intent_id"] = intent_id
-    await FB.mark_send_attempted(conn, intent_id)
+
+    async def _write_intent():
+        return await FB.record_intent(
+            conn, intent_id=intent_id, account_id=sel["account_id"],
+            venue=venue,
+            venue_class=klass, us_market_slug=plan["us_market_slug"],
+            event_key=plan["event_key"], order_intent=plan["intent"],
+            limit_price=plan["limit_price"], quantity=plan["quantity"],
+            collateral_usd=plan["collateral_usd"],
+            effective_digest=eff["effective_digest"],
+            payout_event=plan.get("payout_event"),
+            held_is_long=plan.get("held_is_long"),
+            portfolio_group_id=portfolio_group_id, leg_role=leg_role,
+            decision_ref={"admissible": True,
+                          "sized_from": plan["sized_from"],
+                          "payout_event": plan.get("payout_event"),
+                          "reservation_operation_id": operation_id,
+                          "authorization_at": auth.get("authorization",
+                                                       {}).get("at")})
+
+    if operation_id is None:
+        got = await _write_intent()
+        out["intent"] = got
+        if not got.get("ok"):
+            # ANOTHER LIVE INTENT. The database refused the second one, which
+            # is the one-position rule being ENFORCED rather than proposed.
+            return dict(out, ok=False, refusal=got["refusal"],
+                        why=got.get("why"))
+        out["intent_id"] = intent_id
+        await FB.mark_send_attempted(conn, intent_id)
+    else:
+        # ── BOUNDARY 1 · THE INTENT AND ITS RESERVATION, TOGETHER ────
+        #
+        # If the intent row committed and the bind then refused, the lane would
+        # hold an intent occupying the one-position slot with no reservation
+        # naming it -- and the reservation, still HELD, would go on counting its
+        # collateral as committed capital while the intent counted the same
+        # money again. The refusal that matters here is the real one: the
+        # reservation already names a DIFFERENT intent, which is precisely the
+        # replayed-acquisition case. Both writes land or neither does.
+        bind = None
+        try:
+            async with conn.transaction():
+                got = await _write_intent()
+                if not got.get("ok"):
+                    raise _BindFailed(got["refusal"], got.get("why"), got, None)
+                bind = await RSV.commit_to_intent(
+                    conn, operation_id=operation_id, intent_id=intent_id)
+                if not bind.get("ok"):
+                    raise _BindFailed(bind["refusal"], bind.get("why"),
+                                      got, bind)
+        except _BindFailed as f:
+            out["intent"] = f.intent
+            out["reservation_bind"] = f.bind
+            return dict(out, ok=False, refusal=f.refusal, why=f.why,
+                        intent_id=None, nothing_was_written=True,
+                        exposure="NONE",
+                        atomicity=("the intent insert and the reservation bind "
+                                   "are one transaction: this refusal left no "
+                                   "intent row and no committed reservation"))
+        out["intent"] = got
+        out["reservation_bind"] = bind
+        out["intent_id"] = intent_id
+        # ── BOUNDARY 2 · SEND ELIGIBILITY, ON BOTH ROWS AT ONCE ──────
+        #
+        # After this the request may leave, so the two rows must agree about
+        # that. An intent at SEND_ATTEMPTED beside a reservation still at
+        # COMMITTED is the shape that causes a DOUBLE SUBMISSION: recovery
+        # reads the reservation, sees a pre-send state, releases it as
+        # never-sent, and the next cycle acquires the same leg again while the
+        # first order may be live at the venue.
+        async with conn.transaction():
+            await FB.mark_send_attempted(conn, intent_id)
+            sent = await RSV.mark_send_attempted(
+                conn, operation_id=operation_id)
+            if not sent.get("ok"):
+                raise RuntimeError(
+                    "the reservation would not move to SEND_ATTEMPTED (%s); "
+                    "nothing has been sent and this transaction is rolled back"
+                    % sent.get("refusal"))
+        out["reservation_send_eligible"] = sent
 
     # ── THE REQUEST ─────────────────────────────────────────────────
     try:
@@ -710,10 +892,20 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
             pre_send = False
         detail = "%s: %s" % (type(exc).__name__, str(exc)[:200])
         if pre_send:
-            await FB.abandon_proven_not_sent(
-                conn, intent_id,
-                "the venue-boundary gate denied the submission before any "
-                "request left this process: %s" % detail)
+            # ── BOUNDARY 3a · PROVEN PRE-SEND, SO BOTH ROWS GO BACK ──
+            # The reservation is released as NEVER SENT, which is the one
+            # release that needs no venue evidence -- our own gate refused
+            # before a socket existed. Together with the abandonment, so the
+            # leg cannot stay claimed by an intent that no longer exists.
+            async with conn.transaction():
+                await FB.abandon_proven_not_sent(
+                    conn, intent_id,
+                    "the venue-boundary gate denied the submission before any "
+                    "request left this process: %s" % detail)
+                if operation_id is not None:
+                    out["reservation_released"] = await RSV.release(
+                        conn, operation_id=operation_id,
+                        why=RSV.WHY_NEVER_SENT)
             return dict(out, ok=False, submitted=False,
                         refusal=R_VENUE_GATE_DENIED, error=detail,
                         exposure="NONE",
@@ -721,10 +913,23 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                         why=("the adapter's own execution gate refused at its "
                              "first statement, so nothing was sent and the "
                              "intent is abandoned rather than left standing"))
-        await FB.mark_unresolved(
-            conn, intent_id,
-            "the request left this process and raised %s -- whether the "
-            "venue holds an order is unknown" % detail)
+        # ── BOUNDARY 3b · THE ANSWER WAS LOST, SO BOTH ROWS SAY SO ───
+        #
+        # UNRESOLVED on the intent and AMBIGUOUS on the reservation are the same
+        # fact about the same order. AMBIGUOUS is deliberately still LIVE: the
+        # leg stays claimed, so no cycle acquires it again, and only the venue's
+        # own recorded answer can resolve it. This is the state that makes
+        # "restart without duplicate submission" a property of the data rather
+        # than of whether the process happened to remember.
+        async with conn.transaction():
+            await FB.mark_unresolved(
+                conn, intent_id,
+                "the request left this process and raised %s -- whether the "
+                "venue holds an order is unknown" % detail)
+            if operation_id is not None:
+                out["reservation_ambiguous"] = await RSV.mark_ambiguous(
+                    conn, operation_id=operation_id,
+                    why="the send raised %s and no answer came back" % detail)
         return dict(out, ok=False, submitted=True,
                     refusal=R_LOST_ACKNOWLEDGEMENT, error=detail,
                     exposure="PRESERVED",
@@ -733,14 +938,33 @@ async def submit_for_decision(conn, rec: dict, *, account_id: str,
                          "reconciles it against the venue; it is never "
                          "resent from here"))
     out["venue_answer"] = answer
-    ack = await FB.record_acknowledgement(
-        conn, intent_id, venue_order_id=(answer or {}).get("order_id"),
-        status=(answer or {}).get("status"), raw=answer or {})
-    out["acknowledgement"] = ack
-    # THE VENUE'S OWN EXECUTIONS, INGESTED IDEMPOTENTLY.
-    fills = _executions_of(answer)
-    ing = await FB.ingest_fills(conn, intent_id, fills, at=at)
-    out["fills"] = ing
+    # ── BOUNDARY 4 · THE ACKNOWLEDGEMENT AND WHAT IT PROVES ─────────
+    #
+    # The venue named an order, so three things are now true at once and are
+    # written at once: the book holds the acknowledgement, the book holds the
+    # executions, and the reservation is CONSUMED rather than still counting its
+    # collateral as uncommitted capital. A crash between them is the case where
+    # the account's exposure is counted TWICE -- once on the intent's fills and
+    # once on a reservation nobody closed.
+    #
+    # `record_the_venue_named_it` will not take our word for it: it requires a
+    # durable `bettor_funded_operation_evidence` row bound to this operation's
+    # account, instrument and intent, naming this very order id. The venue's own
+    # answer is what we record as that evidence.
+    async with conn.transaction():
+        ack = await FB.record_acknowledgement(
+            conn, intent_id, venue_order_id=(answer or {}).get("order_id"),
+            status=(answer or {}).get("status"), raw=answer or {})
+        out["acknowledgement"] = ack
+        # THE VENUE'S OWN EXECUTIONS, INGESTED IDEMPOTENTLY.
+        fills = _executions_of(answer)
+        ing = await FB.ingest_fills(conn, intent_id, fills, at=at)
+        out["fills"] = ing
+        if operation_id is not None:
+            out["reservation_consumed"] = await _consume_on_acknowledgement(
+                conn, operation_id=operation_id, intent_id=intent_id,
+                account_id=sel["account_id"], venue=venue, plan=plan,
+                answer=answer, ack=ack, at=at)
     state = await conn.fetchval(
         "SELECT state FROM bettor_funded_intents WHERE intent_id=$1",
         intent_id)

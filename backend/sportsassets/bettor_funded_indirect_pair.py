@@ -69,6 +69,16 @@ R_FEES_NOT_PRICED = "THE_FEE_SCHEDULE_WOULD_NOT_PRICE_THIS"
 R_DEPTH_NOT_ESTABLISHED = "THE_BOOKS_DEPTH_AT_THAT_PRICE_IS_NOT_ESTABLISHED"
 R_PRICE_NOT_ESTABLISHED = "THE_COMPLEMENTS_PRICE_IS_NOT_ESTABLISHED"
 
+#: ── THE SCALE EVERY DOLLAR FIGURE IN THIS MODULE IS AT ──────────────
+#:
+#: NAMED, because an unnamed scale was a real defect here. The classifier's
+#: `min_payout_cents` and `cost_cents` are PER UNIT; a fee is for the whole
+#: acquisition. Reporting one against the other produced a figure at neither
+#: scale, and it survived because every unit test in this module's suite holds
+#: exactly one contract, where the two agree.
+SCALE_WHOLE_POSITION = "WHOLE_POSITION"
+SCALE_PER_UNIT = "PER_UNIT"
+
 
 def describe() -> dict:
     return {
@@ -151,13 +161,39 @@ def net_worst_case(structure, *, fee_usd=None, fee_basis: str | None = None
         return dict(out, ok=False, refusal=R_COST_NOT_STATED,
                     why="without the cost there is no result to report")
 
-    min_payout_usd = round(int(d["min_payout_cents"]) / 100.0, 6)
-    cost_usd = round(int(d["cost_cents"]) / 100.0, 6)
+    # ── UNITS. THE SCALE WAS THE DEFECT, AND IT WAS MEASURED ─────────
+    #
+    # `bettor_indirect_structures` reports `min_payout_cents` and `cost_cents`
+    # PER UNIT -- `cost_cents` is literally `leg_a.cost_cents_per_unit +
+    # leg_b.cost_cents_per_unit`. This function divided by 100 and stopped, so a
+    # ten-contract middle reported a gross worst case of -$0.03 where the
+    # position's was -$0.30. Every existing test in this module's suite holds ONE
+    # unit, which is exactly why the mismatch survived: at units=1 the two scales
+    # agree, and every assertion still passes after this repair.
+    #
+    # THE FEE WAS ALREADY WHOLE-POSITION, which is what made the result
+    # incoherent rather than merely small: a per-unit payout minus a
+    # whole-position fee is a quantity at neither scale. Both halves are now at
+    # the POSITION scale and the scale is NAMED in the output, because a number
+    # whose scale is not stated is how this got through.
+    units = int(d.get("units") or 0)
+    per_unit_min = round(int(d["min_payout_cents"]) / 100.0, 6)
+    per_unit_cost = round(int(d["cost_cents"]) / 100.0, 6)
+    min_payout_usd = round(per_unit_min * units, 6)
+    cost_usd = round(per_unit_cost * units, 6)
     gross = round(min_payout_usd - cost_usd, 6)
     res = dict(out, ok=True, refusal=None,
+               scale=SCALE_WHOLE_POSITION,
+               units_valued=units,
+               min_payout_usd_per_unit=per_unit_min,
+               cost_usd_per_unit=per_unit_cost,
                min_payout_usd=min_payout_usd,
                cost_usd=cost_usd,
                gross_worst_case_usd=gross,
+               scale_note=("every dollar figure here is for the WHOLE matched "
+                           "position of %d unit(s). The classifier's cents are "
+                           "per unit; the fee is for the whole acquisition"
+                           % units),
                locks_gross_surplus=d.get("locks_gross_surplus"),
                both_lose_regions=list(d.get("both_lose_regions") or ()),
                unresolved_states=list(d.get("unresolved_states") or ()),

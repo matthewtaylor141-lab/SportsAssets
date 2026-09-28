@@ -3151,14 +3151,38 @@ async def _funded_service(conn, *, now):
         return None
     ev = book_currency_evidence()
     try:
-        return await _FM.manage(conn, account_id=account_id, venue=venue,
-                                subscription=ev.get("subscription"),
-                                revalidation=ev.get("revalidation"),
-                                now=now)
+        got = await _FM.manage(conn, account_id=account_id, venue=venue,
+                               subscription=ev.get("subscription"),
+                               revalidation=ev.get("revalidation"),
+                               now=now)
     except Exception as exc:                                   # noqa: BLE001
         # SERVICING THAT RAISED IS NOT SERVICING THAT FOUND NOTHING.
         return {"ok": False, "refusal": "FUNDED_SERVICING_RAISED",
                 "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    # ── AND THE PAIR PASS, WHOSE FIRST STEP IS RESERVATION RECOVERY ──
+    #
+    # WHY IT RUNS ON EVERY CYCLE THAT REACHES HERE, held position or not: its
+    # first step resolves reservations left live by a lost acknowledgement. A
+    # reservation nobody resolves keeps claiming its leg forever; a reservation
+    # resolved WITHOUT the venue's own recorded evidence is how the same leg gets
+    # acquired twice. Neither is a state to leave until the next deploy.
+    #
+    # `pair_inputs=None` IS THE SHIPPED CONFIGURATION, and it is honest rather
+    # than inert. The pairing decision needs a venue catalogue read, a fee
+    # reading, a depth reading and a region-probability source with stated
+    # evidence quality; none of those is wired to a live supplier on this lane.
+    # So the pass recovers, NAMES the absent input, and acquires nothing.
+    try:
+        from .. import bettor_funded_pair_cycle as _PC
+
+        got["pair_cycle"] = await _PC.pass_once(
+            conn, account_id=account_id, venue=venue, pair_inputs=None,
+            now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        got["pair_cycle"] = {
+            "ok": False, "refusal": "FUNDED_PAIR_CYCLE_RAISED",
+            "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    return got
 
 
 async def cycle(conn) -> dict:

@@ -176,6 +176,7 @@ def indirect_candidate(*, structure, region_probabilities,
     candidate NOT RANKABLE with its own reason -- because an alternative scored
     without its fees or its depth is a preference manufactured by omission.
     """
+    from . import bettor_funded_indirect_pair as FIP
     from . import bettor_indirect_structures as IS
 
     d = structure if isinstance(structure, dict) else structure.to_dict()
@@ -225,15 +226,43 @@ def indirect_candidate(*, structure, region_probabilities,
                       if k in ("unpriced_regions", "sums_to",
                                "undetermined_regions")})
 
-    cost_usd = round(int(d["cost_cents"]) / 100.0, 6)
+    # ── THE SCALE, REPAIRED BEFORE THE FIRST RANKING EVER RAN ────────
+    #
+    # `rank_with_hold` scores HOLD, EXIT and REDUCE over the WHOLE position.
+    # `bettor_indirect_structures` reports its payouts and costs PER UNIT --
+    # `cost_cents` is literally the two legs' `cost_cents_per_unit` added. This
+    # function divided those cents by 100 and ranked the result directly against
+    # whole-position candidates, so a ten-contract middle worth $1.70 entered the
+    # comparison at $0.17: an alternative understated by a factor of its own size,
+    # which is exactly the "preference manufactured by omission" this module
+    # exists to prevent. A structure whose per-unit figure happened to be larger
+    # would have been overstated instead.
+    #
+    # MEASURED, NOT REASONED ABOUT: found by building the candidate for the
+    # Bears/Panthers middle at ten units and reading the two numbers side by side.
+    # The fee argument is already whole-position, so the old arithmetic produced a
+    # figure at neither scale. Everything below is WHOLE_POSITION and says so.
+    units = int(d.get("units") or 0)
+    cost_usd_per_unit = round(int(d["cost_cents"]) / 100.0, 6)
+    cost_usd = round(cost_usd_per_unit * units, 6)
+    payout_per_unit = round(exp["expected_joint_cents"] / 100.0, 6)
+    expected_payout = round(payout_per_unit * units, 6)
     fees = round(float(fee_usd), 6)
-    expected_net = round(exp["expected_joint_cents"] / 100.0 - cost_usd - fees, 6)
+    expected_net = round(expected_payout - cost_usd - fees, 6)
     wc = (worst_case or {}).get("worst_case_usd")
     return dict(out, rankable=True, blocker=None,
+                scale=FIP.SCALE_WHOLE_POSITION,
+                units_valued=units,
                 value_usd=expected_net,
                 expected_net_usd=expected_net,
-                expected_payout_usd=round(exp["expected_joint_cents"] / 100.0, 6),
+                expected_payout_usd=expected_payout,
+                expected_payout_usd_per_unit=payout_per_unit,
+                cost_usd_per_unit=cost_usd_per_unit,
                 cost_usd=cost_usd, fees_usd=fees,
+                scale_note=("comparable with `rank_with_hold`'s candidates, "
+                            "which are scored over the whole position. The "
+                            "classifier's cents are per unit and are multiplied "
+                            "by the %d matched unit(s) here" % units),
                 downside_usd=wc,
                 incremental_capital_usd=incremental["incremental_capital_usd"],
                 capital_duration_h=capital_duration_h,
