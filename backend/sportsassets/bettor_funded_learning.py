@@ -84,6 +84,10 @@ CHECK_NO_BOUND = "NO_BOUND_WAS_CLAIMED"
 CHECK_NO_RESULT = "NO_REALISED_NET_YET"
 CHECK_INVALIDATED = "INVALIDATED_BY_A_LATER_DIVERGENCE"
 CHECK_NOT_FINAL = "WITHHELD_UNTIL_THE_RESULT_IS_FINAL"
+#: THE GROUP'S LEGS COULD NOT BE READ, so the bound's scope is unestablished and
+#: nothing is scored against it. Distinct from CHECK_HELD on purpose: a check
+#: that quietly passed because its input was missing is the worst of the five.
+CHECK_SCOPE_UNMEASURED = "SCOPE_COULD_NOT_BE_MEASURED"
 
 #: HOW A WORST-CASE CLAIM CAN BE WRONG. Named so a violation points somewhere
 #: rather than just reporting a number.
@@ -462,6 +466,74 @@ async def _has_outcome_versions(conn) -> bool:
         "   AND table_name='bettor_funded_decision_outcomes'"))
 
 
+async def observed_scope(conn, *, group_id: str) -> dict:
+    """WHAT THE POSITION ACTUALLY TURNED OUT TO BE, read from the book.
+
+    ── WHY THIS EXISTS, AND IT WAS A REAL GAP ───────────────────────
+
+    `check_the_worst_case` takes an `observed` dict and, without one, CANNOT FIND
+    A SINGLE DIVERGENCE: every scope comparison is guarded on the observed field
+    being present. So `bound_action`, `bound_filled_qty` and
+    `bound_holding_policy` were recorded on every decision and then never
+    compared against anything, and `score` reported zero invalidations no matter
+    what the position did. Recorded-but-unread is the same defect as a helper no
+    consumer calls.
+
+    Measured on the pair lifecycle: a floor claimed for TEN matched units against
+    a position that acquired SIX was scored as HELD.
+
+    ── WHAT `filled_qty` MEANS HERE, PRECISELY ──────────────────────
+
+    THE MATCHED UNITS, which is `min(primary filled, hedge filled)` for a group
+    that carries both roles -- because that is the quantity a two-leg structure's
+    floor is computed over. A partially acquired hedge leaves the uncovered part
+    of the primary leg naked, and its payoff is NOT the structure's. For a
+    single-role group it is that role's filled quantity.
+
+    `action` IS DELIBERATELY ABSENT. What the lane actually did is not recoverable
+    from the book in general -- an exit and a settlement both leave a closed
+    position -- so this reader does not guess one. A field it cannot establish is
+    left out, and `check_the_worst_case` then makes no claim about it, rather than
+    reporting a divergence or an agreement it has not measured.
+    """
+    out: dict[str, Any] = {"version": VERSION, "group_id": str(group_id)}
+    rows = await conn.fetch(
+        "SELECT i.leg_role, i.closed_reason, "
+        "       coalesce(sum(f.qty) FILTER (WHERE f.direction='ENTRY'), 0)"
+        "         ::float8 AS filled "
+        "  FROM bettor_funded_intents i "
+        "  LEFT JOIN bettor_funded_fills f ON f.intent_id = i.intent_id "
+        " WHERE i.portfolio_group_id = $1 AND i.kind = 'ENTRY' "
+        " GROUP BY i.intent_id, i.leg_role, i.closed_reason", str(group_id))
+    if not rows:
+        return dict(out, ok=False, refusal="NO_LEGS_IN_THAT_GROUP",
+                    why=("without the group's legs there is nothing to compare "
+                         "a bound's scope against, and no divergence is claimed"))
+    by_role: dict[str, float] = {}
+    for r in rows:
+        role = str(r["leg_role"] or "PRIMARY")
+        by_role[role] = round(by_role.get(role, 0.0) + float(r["filled"]), 6)
+    #: AN EARLY EXIT IS THE VENUE-SIDE SALE, not a settlement and not a cancel.
+    exited_early = any(str(r["closed_reason"] or "") == "EXITED_IN_THE_MARKET"
+                       for r in rows)
+    roles = [x for x in ("PRIMARY", "HEDGE") if x in by_role]
+    matched = (min(by_role[x] for x in roles) if len(roles) > 1
+               else (by_role[roles[0]] if roles else 0.0))
+    return dict(out, ok=True, refusal=None,
+                filled_qty=matched, exited_early=exited_early,
+                filled_by_role=by_role, roles_present=roles,
+                matched_units_rule=(
+                    "min(primary filled, hedge filled) for a two-role group: "
+                    "that is the quantity a two-leg structure's floor is "
+                    "computed over, and the uncovered part of the primary leg "
+                    "does not have the structure's payoff"),
+                action_is_not_reported=(
+                    "what the lane actually did is not recoverable from the "
+                    "book -- an exit and a settlement both leave a closed "
+                    "position -- so no action is claimed and no divergence or "
+                    "agreement is asserted about it"))
+
+
 def check_the_worst_case(decision: dict, *, observed=None,
                         require_final: bool = True) -> dict:
     """THE FALSIFIABLE TEST, AND THE THREE THINGS THAT MAKE IT MEANINGLESS.
@@ -610,6 +682,28 @@ async def score(conn, *, account_id: str | None = None,
                 [r["decision_id"] for r in rows]):
             latest[r["decision_id"]] = dict(r)
 
+    # ── THE OBSERVED SCOPE PER GROUP, READ ONCE ──────────────────────
+    #
+    # WITHOUT THIS THE SCOPE CHECK WAS DEAD CODE. Every comparison in
+    # `check_the_worst_case` is guarded on the observed field being present, so a
+    # call with no `observed` could never report a divergence -- and the three
+    # `bound_*` columns were written on every decision and read by nothing.
+    seen: dict = {}
+    for r in rows:
+        gid = r.get("group_id")
+        if gid and gid not in seen:
+            try:
+                seen[gid] = await observed_scope(conn, group_id=gid)
+            except Exception as exc:                            # noqa: BLE001
+                # UNREADABLE IS NOT "NO DIVERGENCE". An absent observation makes
+                # the scope check silent, which would report a bound as HELD on
+                # a position nobody measured, so it is recorded as a read failure
+                # and the decision's check is withheld below.
+                seen[gid] = {"ok": False,
+                             "refusal": "THE_GROUPS_LEGS_COULD_NOT_BE_READ",
+                             "error": "%s: %s" % (type(exc).__name__,
+                                                  str(exc)[:200])}
+
     checks = []
     for r in rows:
         lv = latest.get(r["decision_id"])
@@ -623,9 +717,24 @@ async def score(conn, *, account_id: str | None = None,
             scored["outcome_is_final"] = None
         if scored.get("realised_net_usd") is None:
             continue
-        checks.append(dict(scored,
-                           **check_the_worst_case(scored,
-                                                  require_final=require_final)))
+        obs = seen.get(r.get("group_id")) or {}
+        if obs and not obs.get("ok"):
+            # THE OBSERVATION FAILED, so the scope cannot be established and no
+            # bound is scored against it. Reported as UNMEASURED_SCOPE rather
+            # than silently becoming HELD.
+            checks.append(dict(scored, worst_case_check=CHECK_SCOPE_UNMEASURED,
+                               observed_scope=obs,
+                               why=("the group's legs could not be read, so "
+                                    "whether this bound still describes the "
+                                    "position is unknown. An unread scope is "
+                                    "not an unchanged one")))
+            continue
+        checks.append(dict(
+            scored, observed_scope=obs,
+            **check_the_worst_case(
+                scored, require_final=require_final,
+                observed=({k: obs[k] for k in ("filled_qty", "exited_early")}
+                          if obs.get("ok") else None))))
 
     violations = [c for c in checks
                   if c["worst_case_check"] == CHECK_VIOLATED]
@@ -682,6 +791,9 @@ async def score(conn, *, account_id: str | None = None,
         bounds_violated=len(violations),
         bounds_invalidated_by_a_later_divergence=len(invalidated),
         bounds_withheld_until_final=len(withheld),
+        bounds_with_an_unmeasured_scope=len(
+            [c for c in checks
+             if c["worst_case_check"] == CHECK_SCOPE_UNMEASURED]),
         no_bound_was_claimed=len(no_bound),
         violations=[{"decision_id": c["decision_id"], "fixture": c["fixture"],
                      "action": c["action"],

@@ -317,17 +317,34 @@ async def decide_and_record(conn, *, decision_id: str, account_id: str,
                            "decision_id": decision_id, "group_id": group_id}
     cand = None
     if admitted is not None:
+        # ── THE WORST CASE IS COMPUTED AND PASSED IN, NOT LEFT NULL ──
+        #
+        # `indirect_candidate` takes `worst_case` and reports its
+        # `worst_case_usd` as the candidate's `downside_usd`. Omitting it leaves
+        # `downside_usd` None -- and a None downside is not a downside of zero,
+        # but `decide`'s `max_downside_usd` constraint has nothing to compare, so
+        # the approved downside limit would never bite on the one action it
+        # exists to bound. The floor comes from `bettor_funded_indirect_pair`,
+        # which refuses it outright for a structure the classifier did not
+        # establish.
+        out["worst_case"] = FIP.net_worst_case(
+            admitted["structure"], fee_usd=fee_usd,
+            fee_basis=(None if fee_usd is None else "SUPPLIED_BY_THE_CALLER"))
         cand = FD.indirect_candidate(
             structure=admitted["structure"],
             region_probabilities=region_probabilities,
             evidence_quality=evidence_quality, fee_usd=fee_usd, depth=depth,
-            incremental=incremental, capital_duration_h=capital_duration_h)
+            incremental=incremental, capital_duration_h=capital_duration_h,
+            worst_case=out["worst_case"])
     out["indirect_candidate"] = cand
     verdict = FD.decide(hold_ranking=hold_ranking, indirect=cand,
                         limits=limits, capital_duration_h=capital_duration_h)
     out["decision"] = verdict
-    sel = verdict.get("selected") or {}
-    action = sel.get("action") or ACTION_NOTHING_RANKABLE
+    # `selected` IS THE ACTION NAME; `selected_candidate` IS THE ROW. Reading
+    # `selected` as a dict silently produced no action at all -- caught by the
+    # lifecycle run, which raised `'str' object has no attribute 'get'`.
+    sel = dict(verdict.get("selected_candidate") or {})
+    action = verdict.get("selected") or ACTION_NOTHING_RANKABLE
     if action == FD.ACTION_ACQUIRE_INDIRECT_HEDGE:
         # ONE SPELLING PER DECISION. The ledger's vocabulary is
         # `bettor_funded_learning.ACTIONS`; the decision module names the same
@@ -567,25 +584,44 @@ async def operator_view(conn, *, account_id: str | None = None,
             *([account_id] if account_id else []))
     except Exception:                                          # noqa: BLE001
         rows = []
+    scopes: dict = {}
     for r in rows:
         dec = FL._row(r)
-        chk = FL.check_the_worst_case(dec)
+        # ── THE OBSERVED SCOPE, OR NO SCOPE CLAIM AT ALL ─────────────
+        #
+        # `check_the_worst_case` guards every scope comparison on the observed
+        # field being present, so calling it without one can never report a
+        # divergence -- the panel would show a bound as HELD on a position whose
+        # quantity or holding policy had changed. Read once per group.
+        gid = dec.get("group_id")
+        if gid and gid not in scopes:
+            try:
+                scopes[gid] = await FL.observed_scope(conn, group_id=gid)
+            except Exception as exc:                            # noqa: BLE001
+                scopes[gid] = {"ok": False, "error": "%s: %s" % (
+                    type(exc).__name__, str(exc)[:200])}
+        obs = scopes.get(gid) or {}
+        chk = FL.check_the_worst_case(
+            dec, observed=({k: obs[k] for k in ("filled_qty", "exited_early")}
+                           if obs.get("ok") else None))
         item = {"decision_id": dec["decision_id"], "action": dec["action"],
                 "group_id": dec.get("group_id"),
                 "fixture": dec.get("fixture"),
                 "worst_case_usd": dec.get("worst_case_usd"),
                 "realised_net_usd": dec.get("realised_net_usd"),
-                "bound_check": chk.get("verdict"),
+                "bound_check": chk.get("worst_case_check"),
+                "observed_scope": {k: obs.get(k) for k in
+                                   ("ok", "filled_qty", "exited_early")},
                 "bound_scope": {"action": dec.get("bound_action"),
                                 "filled_qty": dec.get("bound_filled_qty"),
                                 "holding_policy": dec.get(
                                     "bound_holding_policy")},
                 "inputs_missing": list(dec.get("inputs_missing") or ())}
         out["recent_decisions"].append(item)
-        if chk.get("verdict") == FL.CHECK_VIOLATED:
+        if chk.get("worst_case_check") == FL.CHECK_VIOLATED:
             out["risks"].append(dict(item, risk=RISK_BOUND_NOT_HELD,
                                      why=chk.get("why")))
-        elif chk.get("verdict") == FL.CHECK_INVALIDATED:
+        elif chk.get("worst_case_check") == FL.CHECK_INVALIDATED:
             out["risks"].append(dict(item, risk=RISK_BOUND_INVALIDATED,
                                      why=chk.get("why"),
                                      and_it_is_not_a_modelling_error=(
