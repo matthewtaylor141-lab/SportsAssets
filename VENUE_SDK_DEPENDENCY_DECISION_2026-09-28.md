@@ -153,6 +153,39 @@ the 17**, and the amplification is visible directly: one logical read made
 **3 HTTP attempts against a declared budget of 2**. The tests gate the
 decision rather than describing it.
 
+## 6b · The base-versus-release comparison, against an immutable base
+
+Owner requirement: *"Passing alone does not prove a failure is unrelated to
+your changes."* The same `-k` selection, run twice — once in a frozen
+worktree at `4ef37a7` (never edited while a process was reading it, and not
+removed until its run had finished), once at `2b008a4`:
+
+| | base `4ef37a7` | release `2b008a4` |
+|---|---|---|
+| failed | 13 | **12** |
+| passed | 1715 | **1770** |
+| skipped | 112 | 112 |
+
+**New failures at HEAD: none.** Fixed: one —
+`test_a_minutes_old_cached_snapshot_received_one_second_ago_is_not_fresh`,
+the stale `302.0` assertion. The +55 passing are the new counterexamples.
+
+The 12 that remain all reproduce at base:
+
+| Failure | Classification |
+|---|---|
+| `test_calibration_claim` × 7 | order-dependent; 37/37 pass in isolation at HEAD (known event-loop leak) |
+| `test_fill_c7_clock::test_c7_no_rail_…` | asserts the newest migration file is `064`; there are now 130. Stale, unrelated |
+| `test_e19_smaller_reading` | pre-existing, established earlier at `18fb67b` |
+| `test_render_ops_exits_paired` | pre-existing, established earlier at `18fb67b` |
+| `test_mirror_shadow` | pre-existing; passes in isolation |
+| `test_pmus_account::test_a_position_we_sold_…` | pre-existing, confirmed earlier by stashing |
+
+One name in an earlier run — `test_the_adapter_still_retains_the_field_for_inspection`
+— was an artifact of that run overlapping an edit to `pmus.py`. It appears in
+neither of these two runs and passes in isolation. Recorded rather than
+quietly dropped, because "it went away" is not a diagnosis.
+
 ## 7 · What the four earlier points now stand at
 
 1. **The cooldown prevents requests.** `penalize_observed` arms a hard
