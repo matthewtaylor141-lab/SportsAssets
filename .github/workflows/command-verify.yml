@@ -5742,6 +5742,82 @@ jobs:
           esac
 
           say ""
+          say "== S4b . THE READ CREDENTIAL, VERIFIED THE SAME WAY =="
+          say "  S4 proves the OPERATOR password mints a control session."
+          say "  It says nothing about the DESK password, which is what"
+          say "  gates every Command Centre READ -- and a production"
+          say "  readback showed /healthz reporting"
+          say "    auth_not_configured: [\"desk_password\"]"
+          say "  so the page served, was correctly gated, and would have"
+          say "  rejected every sign-in. Writing the value is not the same"
+          say "  as verifying it, so this step signs in with it."
+          DJ=/tmp/deskjar.txt; rm -f "$DJ"
+          DS=$(curl -sS -o /tmp/du.json -c "$DJ" -w '%{http_code}' -X POST \
+                 -H 'Content-Type: application/json' \
+                 -d "{\"password\":$(printf '%s' "$DPW" | jq -Rs .)}" \
+                 "$A/api/desk/unlock" || echo 000)
+          say "  desk password sign-in          HTTP $DS (expect 200)"
+          # THE BODY'S VERDICT, NEVER ITS TOKEN. `/api/desk/unlock` answers
+          # 200 with {"ok": false} on a wrong password, so the status code
+          # alone would pass on a rejection.
+          DOK=$(jq -r '(.ok // false) | tostring' /tmp/du.json 2>/dev/null \
+                || echo "unreadable")
+          DTOK=$(jq -r '.token // ""' /tmp/du.json 2>/dev/null || echo "")
+          [ -n "$DTOK" ] && echo "::add-mask::$DTOK"
+          say "  body ok                        $DOK (expect true)"
+          say "  token returned                 ${#DTOK} characters, masked"
+          jq -r '"  expires_at                     "
+                 + ((.expires_at // 0) | tostring)' /tmp/du.json \
+            2>&1 | tee -a "$GITHUB_STEP_SUMMARY" || true
+          if [ "$DS" != "200" ] || [ "$DOK" != "true" ] || [ -z "$DTOK" ]; then
+            say "  THE DESK SIGN-IN DID NOT SUCCEED. The value is written but"
+            say "  the read route did not accept it, so Command Centre access"
+            say "  is NOT verified. Note /api/desk/unlock answers 200 with"
+            say "  ok:false on a wrong password, which is why the body is"
+            say "  checked and not only the status."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          # AND THE TOKEN MUST ACTUALLY OPEN A DESK-GATED READ. A mint that
+          # authorises nothing is not access.
+          DR=$(curl -sS -o /dev/null -w '%{http_code}' \
+                 -H "X-Desk-Token: $DTOK" "$A/api/wall/state" || echo 000)
+          say "  the token on a desk-gated read HTTP $DR (expect 200)"
+          if [ "$DR" != "200" ]; then
+            say "  THE MINTED DESK TOKEN DID NOT AUTHORISE A DESK-GATED"
+            say "  READ. A token that opens nothing is not access."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          # A WRONG PASSWORD MUST STILL BE REFUSED. Otherwise the two checks
+          # above would also pass on a route that accepts anything.
+          DW=$(curl -sS -o /tmp/dw.json -w '%{http_code}' -X POST \
+                 -H 'Content-Type: application/json' \
+                 -d '{"password":"deliberately-not-the-desk-password"}' \
+                 "$A/api/desk/unlock" || echo 000)
+          DWOK=$(jq -r '(.ok // false) | tostring' /tmp/dw.json 2>/dev/null \
+                 || echo "unreadable")
+          say "  a WRONG desk password          HTTP $DW ok=$DWOK (expect ok=false)"
+          if [ "$DWOK" != "false" ]; then
+            say "  A WRONG PASSWORD WAS NOT REFUSED. The sign-in above"
+            say "  therefore proves nothing about the credential."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          # AND THE SERVICE'S OWN POSTURE MUST NOW AGREE. This is the field
+          # that reported the problem in the first place.
+          PH=$(curl -sS --max-time 20 "$A/healthz" 2>/dev/null || echo '{}')
+          say "  healthz auth_all_configured    $(printf '%s' "$PH" | jq -r '.auth_all_configured // "?"') (expect true)"
+          say "  healthz auth_not_configured    $(printf '%s' "$PH" | jq -c '.auth_not_configured // "?"')"
+          ALLC=$(printf '%s' "$PH" | jq -r '(.auth_all_configured // false) | tostring' 2>/dev/null || echo "unreadable")
+          if [ "$ALLC" != "true" ]; then
+            say "  THE SERVICE STILL REPORTS A CREDENTIAL UNCONFIGURED."
+            say "  The sign-ins above succeeded, so this is a DIFFERENT"
+            say "  setting than the two rotated here. Named, not skipped."
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 1
+          fi
+          say "  => the Command Centre is USABLE: the read sign-in works,"
+          say "     the minted token opens a gated read, a wrong password is"
+          say "     refused, and the service agrees nothing is unconfigured."
+
+          say ""
           say "== S5 . DELIVERY =="
           printf 'OPERATOR_PASSWORD=%s\n' "$PW" > /tmp/operator-password.txt
           printf 'DESK_PASSWORD=%s\n' "$DPW" >> /tmp/operator-password.txt
