@@ -2318,6 +2318,84 @@ async def pnl(conn, *, account_id: str, venue: str) -> dict:
     }
 
 
+#: The scheduled cycle's heartbeat row. Named here rather than imported
+#: so this reader does not pull a worker module into the API's request
+#: path; a test cross-checks it against the loop's own constant.
+SCHEDULED_CYCLE_KEY = "ext_pinnacle_last_cycle"
+
+
+async def last_scheduled_decision(conn) -> dict:
+    """WHAT THE LAST SCHEDULED SERVICING PASS DECIDED, as it recorded it.
+
+    THE GAP THIS CLOSES. The command centre could show the funded BOOK --
+    what is held, what filled, what is unresolved -- and not the
+    DECISION. So an operator looking at 6 held contracts had no way to
+    learn whether the lane had chosen to hold them, tried to sell them
+    and been refused, or never considered them. The three are different
+    situations with the same row.
+
+    IT IS THE LAST PASS, NOT A HISTORY, and says so. One row per position,
+    overwritten every cycle. A decision log is a table and this is a
+    heartbeat; promising more than one pass here would be inventing
+    durability the write does not have.
+
+    NEVER RAISES ON A MISSING OR MALFORMED ROW. "No cycle has recorded a
+    decision" is a legitimate state -- a fresh database, a loop that has
+    not run -- and it is reported as that rather than as an error or, worse,
+    as an empty decision set that reads like "nothing to do".
+    """
+    try:
+        raw = await conn.fetchval(
+            "SELECT value::text FROM ingestion_state WHERE key=$1",
+            SCHEDULED_CYCLE_KEY)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"available": False,
+                "why": "the cycle heartbeat could not be read: %s"
+                       % type(exc).__name__}
+    if not raw:
+        return {"available": False,
+                "why": ("no scheduled cycle has recorded a decision in this "
+                        "database. This is not an empty decision set -- "
+                        "nothing has run"),
+                "key": SCHEDULED_CYCLE_KEY}
+    try:
+        beat = json.loads(raw)
+    except (TypeError, ValueError):
+        return {"available": False,
+                "why": "the cycle heartbeat is not readable JSON",
+                "key": SCHEDULED_CYCLE_KEY}
+    if not isinstance(beat, dict):
+        # VALID jsonb IS NOT NECESSARILY AN OBJECT. A scalar string or a
+        # list parses cleanly and then raises AttributeError on `.get`,
+        # inside a reader whose contract is not to raise.
+        return {"available": False,
+                "why": ("the cycle heartbeat holds a %s rather than an "
+                        "object" % type(beat).__name__),
+                "key": SCHEDULED_CYCLE_KEY}
+    svc = beat.get("funded_servicing")
+    if svc is None:
+        return {"available": False,
+                "at": beat.get("at"), "cycle_state": beat.get("state"),
+                "writer": beat.get("writer"),
+                "why": ("the last cycle recorded no servicing decision. A "
+                        "build older than the one that persists it writes "
+                        "this row without the field, so an absent decision "
+                        "here means the SERVING BUILD, not an idle lane"),
+                "key": SCHEDULED_CYCLE_KEY}
+    return {
+        "available": True,
+        "at": beat.get("at"),
+        "cycle_state": beat.get("state"),
+        "cycle_label": beat.get("cycle_label"),
+        "writer": beat.get("writer"),
+        "servicing": svc,
+        "is_the_last_pass_not_a_history": (
+            "one row per position, overwritten each cycle. For the sequence "
+            "of what happened, read the fills and the discrepancies"),
+        "key": SCHEDULED_CYCLE_KEY,
+    }
+
+
 async def command_center(conn) -> dict:
     """THE WHOLE FUNDED BOOK AND EVERY UNRESOLVED DISCREPANCY IN IT.
 
@@ -2368,6 +2446,14 @@ async def command_center(conn) -> dict:
                 "refusal, so no order can be sent while this reads BLOCKED"),
             "the_rest_of_the_service_is_unaffected": True,
         }
+    # ── THE LAST SCHEDULED DECISION, BESIDE THE BOOK IT ACTED ON ────
+    #
+    # Read from the cycle's own heartbeat row rather than recomputed, so
+    # the panel shows WHAT THE LANE ACTUALLY DECIDED on its last pass --
+    # not what a fresh evaluation would decide now against a different
+    # book. The two answers differ, and only the first one explains the
+    # state the book is in.
+    decision = await last_scheduled_decision(conn)
     pairs = await conn.fetch(
         "SELECT account_id, venue, count(*) AS intents "
         "  FROM bettor_funded_intents GROUP BY account_id, venue "
@@ -2498,6 +2584,14 @@ async def command_center(conn) -> dict:
         "funded_book_count": len(real_books),
         "demonstration_books": demo_books,
         "demonstration_book_count": len(demo_books),
+        # ── THE DECISION, BESIDE THE BOOK ─────────────────────────
+        "last_scheduled_decision": decision,
+        "decision_note": (
+            "the selected action, its execution eligibility, the order and "
+            "fill outcome and the NAMED reason each other candidate could "
+            "not proceed, as the last scheduled servicing pass recorded "
+            "them. A book without its decision cannot answer 'why is this "
+            "still held?'"),
         "counts_toward_strategy_performance": None,
         "counts_note": ("PER BOOK, in each book's own "
                        "`counts_toward_strategy_performance`. A funded book "

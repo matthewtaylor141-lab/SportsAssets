@@ -2935,28 +2935,46 @@ async def cycle(conn) -> dict:
     # submits nothing that the servicing switch does not permit.
     funded_service = await _funded_service(conn, now=time.time())
 
+    # ── A CYCLE THAT ENTERS NOTHING STILL SERVICED, SO IT STILL BEATS ──
+    #
+    # THE GAP THIS CLOSES. Servicing runs above the entry gates on
+    # purpose: a stopped entry loop is a reason to add nothing, not a
+    # reason to stop managing an open position. But each of these three
+    # early returns went straight back to the caller WITHOUT writing the
+    # heartbeat, so the decision the pass had just made about every held
+    # position was discarded -- and the command centre's tile went stale
+    # in exactly the states an operator most needs it: the lane stopped,
+    # the table missing, the credential absent. `_beat` writes what was
+    # decided and then returns the same dict.
+    async def _beat(payload: dict) -> dict:
+        await _heartbeat(conn, payload)
+        return payload
+
     running, why = await _running(conn)
     if not running:
-        return {"ran": False, "state": "STOPPED", "why": why,
-                "funded_servicing": funded_service,
-                "servicing_ran_anyway": ("a stopped entry loop is a reason to "
-                                         "add nothing, not a reason to stop "
-                                         "managing an open position")}
+        return await _beat({
+            "ran": False, "state": "STOPPED", "why": why,
+            "funded_servicing": funded_service,
+            "servicing_ran_anyway": ("a stopped entry loop is a reason to "
+                                     "add nothing, not a reason to stop "
+                                     "managing an open position")})
     if not await _table_ready(conn):
-        return {"ran": False, "state": "BLOCKED", "why": R_NO_TABLE,
-                "funded_servicing": funded_service,
-                "servicing_ran_anyway": True}
+        return await _beat({
+            "ran": False, "state": "BLOCKED", "why": R_NO_TABLE,
+            "funded_servicing": funded_service,
+            "servicing_ran_anyway": True})
 
     cred = ext.credential_present()
     if not cred["present"]:
-        return {"ran": False, "state": "BLOCKED",
-                "why": cred["refusal"], "credential": cred,
-                "funded_servicing": funded_service,
-                "servicing_ran_anyway": ("the odds provider prices NEW "
-                                         "candidates. An open funded position "
-                                         "is managed from the VENUE's book "
-                                         "and the venue's settlement, neither "
-                                         "of which needs this credential")}
+        return await _beat({
+            "ran": False, "state": "BLOCKED",
+            "why": cred["refusal"], "credential": cred,
+            "funded_servicing": funded_service,
+            "servicing_ran_anyway": ("the odds provider prices NEW "
+                                     "candidates. An open funded position "
+                                     "is managed from the VENUE's book "
+                                     "and the venue's settlement, neither "
+                                     "of which needs this credential")})
     api_key = os.environ["EDGE_ODDS_API_KEY"]
 
     from .. import bettor_fee_schedule as FEES
@@ -3695,6 +3713,108 @@ def _code_identity() -> dict:
             "pid": os.getpid()}
 
 
+#: How many positions' decisions the heartbeat carries. The funded lane
+#: holds one open ENTRY at a time by unique index, so this is headroom,
+#: not a cap anyone should hit -- and it is bounded because a heartbeat
+#: row that grows with the book is a heartbeat that eventually fails to
+#: write, silently, taking the whole tile with it.
+SERVICING_DIGEST_LIMIT = 8
+
+
+def _servicing_digest(svc) -> dict | None:
+    """ONE ROW PER POSITION: the decision, and why it could not proceed.
+
+    Reads what `bettor_funded_management.manage` returns and keeps the
+    fields an operator needs to answer "what did the scheduled lane decide
+    about this holding, and did anything happen?" -- selected action,
+    execution eligibility, order status, and the named blocker.
+
+    NEVER RAISES. A digest that threw would take down a heartbeat whose
+    whole job is to survive, so an unexpected shape is reported as such.
+    """
+    if svc is None:
+        return None
+    try:
+        rows = []
+        for pick in (svc.get("selection") or [])[:SERVICING_DIGEST_LIMIT]:
+            rank = pick.get("ranking") or {}
+            rows.append({
+                "intent_id": pick.get("intent_id"),
+                "us_market_slug": pick.get("us_market_slug"),
+                "residual_qty": pick.get("residual_qty"),
+                # ── THE DECISION ──────────────────────────────────
+                "ok": pick.get("ok"),
+                "selected": rank.get("selected"),
+                "selected_qty": rank.get("selected_qty"),
+                "limit_price": pick.get("limit_price"),
+                "proceeds_per_contract": pick.get("proceeds_per_contract"),
+                "is_a_deliberate_hold": rank.get("is_a_deliberate_hold"),
+                "locks_a_loss": rank.get("selected_locks_a_loss"),
+                "depth_limited": rank.get("selected_is_depth_limited"),
+                "operating_state": rank.get("operating_state"),
+                # ── WHY SOMETHING ELSE COULD NOT PROCEED ──────────
+                #
+                # Both halves, because they are different facts: an action
+                # ruled INELIGIBLE (no execution path in this caller, or
+                # an advantage resting on unestablished liquidity) is not
+                # the same as one that could not be PRICED at all.
+                "refusal": pick.get("refusal"),
+                "ineligible": [
+                    {"action": c.get("action"),
+                     "code": (c.get("selection_ineligible_because") or {})
+                     .get("code")}
+                    for c in (rank.get("candidates") or [])
+                    if c.get("selection_eligible") is False],
+                "not_rankable": [
+                    {"action": r.get("action"), "blocker": r.get("blocker")}
+                    for r in (pick.get("not_rankable") or [])],
+            })
+        # `manage` keys these by the PARENT's `intent_id` and carries the
+        # wire price under `wire_limit_price` and the post-exit holding
+        # under `position_after`. My first version read
+        # `parent_intent_id`/`limit_price`/`residual_qty` and persisted
+        # three nulls -- a digest that reads keys the producer does not
+        # emit is worse than no digest, because it looks populated.
+        exits = [{"parent_intent_id": x.get("intent_id"),
+                  "exit_intent_id": x.get("exit_intent_id"),
+                  "selected": x.get("selected"),
+                  "selected_qty": x.get("selected_qty"),
+                  "wire_limit_price": x.get("wire_limit_price"),
+                  "submitted": x.get("submitted"),
+                  "refusal": x.get("refusal"),
+                  "venue_calls": x.get("venue_calls"),
+                  "position_after": x.get("position_after")}
+                 for x in (svc.get("exits") or [])[:SERVICING_DIGEST_LIMIT]]
+        rec = svc.get("recovered") or {}
+        return {
+            "ok": svc.get("ok"),
+            "refusal": svc.get("refusal"),
+            "positions_serviced": len(svc.get("selection") or []),
+            "decisions": rows,
+            "decisions_truncated_at": (
+                SERVICING_DIGEST_LIMIT
+                if len(svc.get("selection") or []) > SERVICING_DIGEST_LIMIT
+                else None),
+            "exits": exits,
+            "recovered": {
+                "ok": rec.get("ok"),
+                "reconciled": len(rec.get("reconciled") or []),
+                "unresolved": len(rec.get("unresolved") or []),
+            } if rec else None,
+            "settlement": (svc.get("settlement") or {}).get("ok")
+            if isinstance(svc.get("settlement"), dict) else None,
+            "what_this_is": (
+                "the LAST scheduled servicing decision, not a history. One "
+                "row per held position, overwritten each cycle"),
+        }
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": None, "digest_failed": "%s: %s"
+                % (type(exc).__name__, str(exc)[:160]),
+                "why_this_matters": (
+                    "the servicing pass may well have succeeded; only this "
+                    "projection of it failed. Read the funded book itself")}
+
+
 async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
     """PERSIST THE CYCLE SUMMARY, because most refusals never reach a row.
 
@@ -3758,6 +3878,25 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                     out.get("mapped_candidate_ledger") or [],
                 "cycle_label": out.get("cycle_label"),
                 "cycle_label_note": out.get("cycle_label_note"),
+                # THE SERVICING DECISION, PERSISTED.
+                #
+                # THE GAP THIS CLOSES. `_funded_service` ran on every
+                # cycle, decided an action for every held position, and its
+                # answer was returned to a caller that dropped it. So the
+                # selected action, its execution eligibility and the exact
+                # reason a candidate could not proceed existed for the
+                # duration of one function call and were never readable
+                # afterwards -- the command centre could show the BOOK but
+                # not the DECISION, and an operator asking "why is this
+                # still held?" had nothing to read.
+                #
+                # PROJECTED, NOT DUMPED. The full ranking carries candidate
+                # tables and evidence rows; a heartbeat is not a decision
+                # log and must not grow without bound. This keeps one row
+                # per position: what was chosen, at what size and price,
+                # whether it was sent, and the named blocker otherwise.
+                "funded_servicing": _servicing_digest(
+                    out.get("funded_servicing")),
             }, default=str))
     except Exception:                                          # noqa: BLE001
         # A heartbeat that cannot be written must not take the cycle down.

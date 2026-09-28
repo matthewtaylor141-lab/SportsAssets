@@ -954,7 +954,16 @@ def rank_with_hold(qty, own_basis_per_contract, *, ev_hold=None,
     else:
         out["not_rankable"].append({
             "action": "HOLD_TO_SETTLEMENT",
-            "blocker": "SETTLEMENT_SEMANTICS_%s" % sem,
+            # NOT DOUBLE-PREFIXED. The default `sem` above is already
+            # "SETTLEMENT_SEMANTICS_NOT_SUPPLIED", so the unconditional
+            # prefix produced the blocker
+            # `SETTLEMENT_SEMANTICS_SETTLEMENT_SEMANTICS_NOT_SUPPLIED`.
+            # Harmless until the operating view began carrying blockers to
+            # a reader, which is where a stuttered code stops being
+            # cosmetic and starts being something an operator has to
+            # decode.
+            "blocker": (sem if sem.startswith("SETTLEMENT_SEMANTICS_")
+                        else "SETTLEMENT_SEMANTICS_%s" % sem),
             "why": ("the terminal value of carrying to settlement needs "
                     "the venue's settlement terms and this venue's "
                     "prose is %s. A priced probability does not settle "
