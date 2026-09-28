@@ -25,6 +25,7 @@ from .. import procmem as _procmem
 from .. import roster as roster_svc
 from .. import notification_capability as _NC
 from .. import provider_key_proxy as _PKP
+from .. import bettor_venue_realism as _vreal
 from ..bus import CH_HEALTH, CH_TRADES_ENRICHED, CH_TRADES_NEW, get_redis
 from ..config import settings
 from ..db import close_pool, get_pool
@@ -9360,8 +9361,14 @@ async def api_price_truth(price: float = 0.30, qty: int = 10,
 #: Words the VENUE ITSELF uses to say a competition is simulated. Matched
 #: against the venue's own titles and market labels, never against a league
 #: token -- a token is a guess, a label is the publisher's statement.
-_SIMULATED_MARKERS = ("ebattles", "esoccer", "ebasketball", "efootball",
-                      "simulated", "cyber", "virtual", "e-battles")
+#:
+#: ONE DEFINITION, TWO CONSUMERS (2026-09-28). This list used to be declared
+#: here, in a diagnostic route, and NOWHERE in the entry lane -- which is how the
+#: lane came to have no realism check at all while the route that reports the
+#: problem had one. `bettor_venue_realism` now owns it and enforces it at
+#: `resolve_venue_identity`, so the route and the lane cannot disagree about what
+#: the venue called something.
+_SIMULATED_MARKERS = _vreal.SIMULATED_MARKERS
 
 
 @app.get("/api/admin/venue-competitions",

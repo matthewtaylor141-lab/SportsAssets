@@ -59,6 +59,7 @@ from ..bettor_market_stream import _parse_ts as _stream_parse_ts
 from .. import bettor_pinnacle_devig as devig
 from .. import bettor_venue_currency as vc
 from .. import bettor_venue_mapping as vmap
+from .. import bettor_venue_realism as vreal
 from .. import bettor_venue_settlement as vset
 
 log = logging.getLogger(__name__)
@@ -66,13 +67,282 @@ log = logging.getLogger(__name__)
 CONTROL_KEY = ext.CONTROL_KEY
 ENV_FLAG = "EXT_PINNACLE_SHADOW"
 
-#: Sports this loop asks the provider for, with the family the valuation
-#: source knows. Basketball and hockey are absent BECAUSE THE BOOK DOES
-#: NOT QUOTE THEM on our plan (NBA 0/41, NHL 0/33, measured run
-#: 35933793563) -- asking anyway would spend credits to be refused.
-SPORTS = (("soccer_epl", "soccer"),
-          ("soccer_mexico_ligamx", "soccer"),
-          ("baseball_mlb", "baseball"))
+#: ── WHICH COMPETITIONS THIS LOOP ASKS THE PROVIDER FOR ───────────────
+#:
+#: Basketball and hockey are absent BECAUSE THE BOOK DOES NOT QUOTE THEM on our
+#: plan (NBA 0/41, NHL 0/33, measured run 35933793563) -- asking anyway would
+#: spend credits to be refused.
+#:
+#: AND `soccer_epl` IS NOW ABSENT FOR THE SAME KIND OF REASON, MEASURED ON THE
+#: OTHER SIDE (2026-09-28, research-sql run 258). The cycle on build c3d0cfc
+#: reported `soccer_epl: provider_events 20, with_pinnacle_h2h 20,
+#: mapped_to_a_venue_contract 0`, and I spent a session treating that as a
+#: resolver defect. It is not. Our leading token against the US venue's own
+#: catalogue:
+#:
+#:     our token   our open markets   us_premap rows carrying it
+#:     lal                      468                            0
+#:     epl                      387                            0
+#:     sea                      321                         1812
+#:     mls                      316                          460
+#:     col                      268                         1256
+#:     por                      166                          726
+#:     tur                      161                          570
+#:     bra                      225                          412
+#:     arg                      210                          390
+#:
+#: The US venue does not list the English Premier League. What it lists is 420
+#: rows across 70 events titled "eBattles: Arsenal vs. Chelsea", classified
+#: `efootball_team_full_time_winner` -- simulations bearing real club names,
+#: which `bettor_venue_realism` now refuses at the resolver precisely because
+#: every other check the lane makes would pass on one.
+#:
+#: So the twenty EPL events were never reachable, and the ~20 credits a cycle
+#: spent fetching them bought a refusal. The competitions with real US coverage
+#: are in the right-hand column, and they are what this set now names.
+#:
+#: THE PROVIDER'S KEY NAMES ARE CANDIDATES, NOT FACTS. I have not read the
+#: provider's catalogue from this container -- it has no egress and no key -- so
+#: every soccer key below is a CANDIDATE confirmed at cycle start against
+#: `/v4/sports`, which is UNMETERED and therefore free to check. A candidate the
+#: provider does not list is reported as PROVIDER_DOES_NOT_LIST_THIS_COMPETITION
+#: and never fetched. Writing a guessed key straight into a metered fetch is how
+#: the EPL spend happened; confirming first costs nothing.
+#:
+#: `baseball_mlb` is CONFIRMED: it is the only key that has ever produced a
+#: valuation row here (all 1,126 of them, sport_family `baseball`).
+SPORTS_CONFIRMED = (("baseball_mlb", "baseball"),)
+
+#: ── WHY THIS IS A TOKEN MAP AND NOT A LIST OF COMPETITIONS ───────────
+#:
+#: MY FIRST ATTEMPT AT THIS LIST WAS WRONG AND THE MEASUREMENT CAUGHT IT. I
+#: ordered seven soccer competitions by `us_premap` rows matching
+#: `'%-<token>-%'`: Serie A 1812, Conference League 1256, Primeira Liga 726,
+#: Turkey 570. Run 259 asked for the same counts with the token in the slug's
+#: LEAGUE POSITION instead of anywhere in it:
+#:
+#:     token   anywhere   in the league position   what it matched
+#:     col         1244                        0   aec-mlb-col-cws  (Colorado)
+#:     sea         1080                        0   aec-mlb-laa-sea  (Seattle)
+#:     por          712                        0   asc-unl-den-por  (Portugal, UNL)
+#:     tur          570                        0   asc-unl-bel-tur  (Turkey, UNL)
+#:     arg          378                        0   atc-ebfwca-arg-bra (eBattles)
+#:     lmx          576                      576   real Liga MX
+#:     mls          460                      460   real MLS
+#:
+#: Six of the seven had ZERO coverage. A team abbreviation and a league token
+#: share a slug and the pattern could not tell them apart, so I nearly pointed a
+#: metered credit budget at Serie A on the strength of Seattle Mariners rows.
+#:
+#: AND THE REAL BOARD IS SEASONAL, WHICH IS THE ARCHITECTURAL POINT. What the
+#: venue actually lists, by league position and event count, is almost entirely
+#: NATIONAL-TEAM football: unl 39 events, intf 15, cnl 10, uwcl 9, then club
+#: competitions in single figures (arg2 8, lco 7, brb 6, uslc 5, irl1 5, par2 4,
+#: mls 3, lmx 3). Late September is an international window. A hard-coded list
+#: of club competitions would have been wrong in a fortnight even if I had
+#: measured it correctly, so the set is DERIVED from the venue's own board at
+#: cycle time (`venue_soccer_competitions`) and this map only says which
+#: provider key corresponds to a venue league token.
+#:
+#: The provider's key names are still MINE TO GUESS -- this container has no
+#: provider egress -- so each is confirmed against the provider's own unmetered
+#: catalogue before a metered call is made on it.
+VENUE_TOKEN_TO_PROVIDER_KEY = {
+    "unl": "soccer_uefa_nations_league",
+    "mls": "soccer_usa_mls",
+    "lmx": "soccer_mexico_ligamx",
+    "uwcl": "soccer_uefa_champs_league_women",
+    "cnl": "soccer_concacaf_nations_league",
+    "engnl": "soccer_england_league2",
+    "uslc": "soccer_usa_usl_championship",
+    "arg2": "soccer_argentina_primera_nacional",
+    "brb": "soccer_brazil_serie_b",
+    "lco": "soccer_colombia_primera_a",
+    "uru1": "soccer_uruguay_primera_division",
+    "irl1": "soccer_league_of_ireland",
+    "nwsl": "soccer_usa_nwsl",
+}
+
+#: `intf` (international friendlies, 15 events) is deliberately ABSENT. The
+#: provider does list friendlies, but a friendly's settlement and team-selection
+#: conventions are not the ones `bettor_venue_settlement` has established, and
+#: this lane already refuses on VOID_ABANDONMENT_RULE_NOT_ESTABLISHED and
+#: OVERTIME_RULE_NOT_ESTABLISHED for exactly that class of gap. Spending credits
+#: to reach a refusal is the mistake this whole change is undoing.
+VENUE_TOKENS_DELIBERATELY_EXCLUDED = {
+    "intf": ("international friendlies: settlement and team-selection "
+             "conventions are not established for this lane, so a candidate "
+             "would reach a rule refusal, not a trade"),
+}
+
+#: The measured board, 2026-09-28 (research-sql run 259), as
+#: `venue_soccer_competitions` would return it. Kept as the FALLBACK ordering
+#: when the live read fails, and as the record of what the numbers above mean.
+VENUE_SOCCER_BOARD_MEASURED_2026_09_28 = (
+    ("unl", 39), ("intf", 15), ("engnl", 12), ("cnl", 10), ("uwcl", 9),
+    ("arg2", 8), ("lco", 7), ("brb", 6), ("uslc", 5), ("irl1", 5),
+    ("par2", 4), ("mls", 3), ("lmx", 3), ("uru1", 3), ("nwsl", 2),
+)
+
+#: The venue's REAL soccer board, by its own league token, newest first. The
+#: simulated exclusion is `bettor_venue_realism`'s, applied in SQL so a
+#: competition of 168 eBattles events cannot outrank a real one.
+VENUE_SOCCER_BOARD_SQL = """
+    SELECT split_part(market_slug, '-', 2)  AS token,
+           count(DISTINCT event_slug)        AS events
+      FROM us_premap
+     WHERE sports_type LIKE 'soccer%'
+       AND lower(coalesce(event_title, '') || ' ' || coalesce(question, ''))
+           NOT LIKE '%ebattles%'
+       AND lower(coalesce(event_title, '')) NOT LIKE '%esoccer%'
+       AND game_start > now() - interval '6 hours'
+     GROUP BY 1
+     ORDER BY 2 DESC
+     LIMIT 30
+"""
+
+
+async def venue_soccer_competitions(conn) -> dict:
+    """What the VENUE lists right now, by its own league token.
+
+    Read-only, one bounded query, no venue network call -- `us_premap` is the
+    catalogue the collector already maintains. A read failure falls back to the
+    2026-09-28 measurement and says so, because an unread board is not an empty
+    board and the confirmed sport must still run.
+    """
+    out: dict = {"read": False, "board": [], "source": "us_premap"}
+    try:
+        rows = await conn.fetch(VENUE_SOCCER_BOARD_SQL)
+    except Exception as exc:                                   # noqa: BLE001
+        out["error"] = type(exc).__name__
+        out["board"] = list(VENUE_SOCCER_BOARD_MEASURED_2026_09_28)
+        out["why"] = ("the venue board could not be read (%s), so the "
+                      "2026-09-28 measurement is used and marked as such"
+                      % type(exc).__name__)
+        return out
+    out["read"] = True
+    out["board"] = [(str(r["token"]), int(r["events"])) for r in rows]
+    out["why"] = ("the venue's own league tokens for REAL soccer events "
+                  "starting within the last 6 hours or later, simulated "
+                  "competitions excluded by the venue's own words")
+    return out
+
+
+def candidates_from_board(board) -> list:
+    """Venue board -> provider-key candidates, in the board's own order."""
+    got = []
+    for token, events in (board or ()):
+        if token in VENUE_TOKENS_DELIBERATELY_EXCLUDED:
+            continue
+        key = VENUE_TOKEN_TO_PROVIDER_KEY.get(token)
+        if not key:
+            continue
+        got.append({"key": key, "family": "soccer", "our_token": token,
+                    "venue_events": int(events)})
+    return got
+
+#: The board as measured, for the tests and for a caller with no connection.
+SPORTS_CANDIDATES = tuple(
+    candidates_from_board(VENUE_SOCCER_BOARD_MEASURED_2026_09_28))
+
+R_PROVIDER_DOES_NOT_LIST = "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"
+R_PROVIDER_LISTS_IT_INACTIVE = "PROVIDER_LISTS_THIS_COMPETITION_AS_INACTIVE"
+
+#: How many METERED competition fetches one cycle may make. The provider bills
+#: per request x market x region, so this IS the budget: at roughly 18-21
+#: credits each, four keys is ~80 a cycle and ~7.7k/day at 15 minutes. It was
+#: three before; the ceiling is stated as a number rather than left to the
+#: length of a tuple so adding a candidate cannot silently raise the spend.
+MAX_METERED_SPORTS_PER_CYCLE = 4
+
+#: The set used when the unmetered catalogue read FAILS. It carries only what is
+#: already confirmed: a failed confirmation must not be a licence to spend on
+#: candidates, and it must never reinstate `soccer_epl`.
+SPORTS = SPORTS_CONFIRMED
+
+
+def select_sports(catalogue, *, budget=MAX_METERED_SPORTS_PER_CYCLE,
+                  candidates=None) -> dict:
+    """Confirmed keys, plus candidates the PROVIDER ITSELF lists as active.
+
+    Pure. `catalogue` is `fetch_sport_catalogue`'s result -- the unmetered
+    `/v4/sports` read -- and a failed or empty read yields the confirmed set
+    alone, with the reason. Never raises: a cycle that cannot confirm still
+    trades the sport it has always traded.
+
+    `candidates` is the venue board's own candidate list, from
+    `candidates_from_board(await venue_soccer_competitions(conn))`. It defaults
+    to the 2026-09-28 measurement so a caller with no connection -- a test, a
+    describe -- still gets a defensible set, but the CYCLE passes the live board
+    because the venue's soccer board is seasonal.
+
+    Returns `sports` in the shape the cycle iterates ((key, family) pairs),
+    `rejected` naming each candidate and why, and `budget_*` so an operator can
+    see what the cap dropped rather than inferring it from a short list.
+    """
+    out: dict = {"sports": list(SPORTS_CONFIRMED),
+                 "rejected": [], "confirmed_by_provider": [],
+                 "budget": int(budget),
+                 "budget_dropped": [],
+                 "catalogue_read": bool((catalogue or {}).get("ok")),
+                 "never_requested": ["soccer_epl"],
+                 "why_epl_is_never_requested": (
+                     "the US venue lists zero contracts carrying the token "
+                     "`epl` (research-sql run 258). Its English top-flight "
+                     "rows are eBattles simulations, which the realism guard "
+                     "refuses at the resolver")}
+    cands = list(SPORTS_CANDIDATES if candidates is None else candidates)
+    out["candidates_considered"] = [c["our_token"] for c in cands]
+    if not (catalogue or {}).get("ok"):
+        out["why"] = ("the unmetered sport catalogue could not be read, so no "
+                      "candidate is confirmed and none is fetched. The "
+                      "confirmed set still runs")
+        out["rejected"] = [{"key": c["key"], "refusal": R_PROVIDER_DOES_NOT_LIST,
+                            "why": "catalogue unread; not confirmable"}
+                           for c in cands]
+        return out
+    listed = {}
+    for row in (catalogue.get("sports") or []):
+        key = str((row or {}).get("key") or "")
+        if key:
+            listed[key] = row
+    for cand in cands:
+        row = listed.get(cand["key"])
+        if row is None:
+            out["rejected"].append(
+                {"key": cand["key"], "our_token": cand["our_token"],
+                 "refusal": R_PROVIDER_DOES_NOT_LIST,
+                 "why": ("the provider's own catalogue does not carry this "
+                         "key, so the name was a guess of mine and no "
+                         "metered call is made on it")})
+            continue
+        if row.get("active") is False:
+            out["rejected"].append(
+                {"key": cand["key"], "our_token": cand["our_token"],
+                 "refusal": R_PROVIDER_LISTS_IT_INACTIVE,
+                 "why": "the provider lists it with active=false"})
+            continue
+        out["confirmed_by_provider"].append(
+            {"key": cand["key"], "our_token": cand["our_token"],
+             "venue_events": cand["venue_events"],
+             "provider_title": row.get("title")})
+    # ORDER IS MEASURED COVERAGE, and the cap is applied after confirmation so
+    # a candidate the provider does not list cannot consume a budget slot.
+    room = max(0, int(budget) - len(out["sports"]))
+    for i, ok in enumerate(out["confirmed_by_provider"]):
+        fam = next(c["family"] for c in cands
+                   if c["key"] == ok["key"])
+        if i < room:
+            out["sports"].append((ok["key"], fam))
+        else:
+            out["budget_dropped"].append(
+                {"key": ok["key"], "venue_events": ok["venue_events"],
+                 "why": ("confirmed and active, but the cycle's metered "
+                         "budget of %d keys is already spent" % int(budget))})
+    out["why"] = ("the confirmed set, plus every candidate the provider's own "
+                  "unmetered catalogue lists as active, ordered by measured US "
+                  "venue coverage and capped at the metered budget")
+    return out
 
 #: One cycle per this many seconds. The provider bills per request x
 #: market x region, so the cadence IS the budget: three sports at roughly
@@ -579,24 +849,45 @@ async def fetch_sport_catalogue(*, api_key: str, timeout=20.0) -> dict:
     sport needs that distinction before anyone argues about extending the
     set: the first is a choice we can revisit, the second is not.
     """
+    # IT MUST NOT RAISE, because `pass_once` now calls it on every cycle to
+    # confirm a competition before spending a metered credit on it. This
+    # function previously had no caller inside the cycle, so a transport error
+    # propagating out of it was harmless; the moment it moved onto the cycle's
+    # path, an unwrapped httpx error became "a provider outage kills the whole
+    # cycle, including the funded servicing that does not need this provider at
+    # all". The first run against a proxied test environment failed exactly
+    # that way (httpx.ProxyError, three cycle tests), which is how it was found.
+    #
+    # A transport failure is the same ANSWER as a non-200: the catalogue is
+    # unread, so nothing is confirmed and only the confirmed set runs.
     import httpx
 
     url = "https://api.the-odds-api.com/v4/sports/"
-    async with httpx.AsyncClient(timeout=timeout) as client:
-        r = await client.get(url, params={"apiKey": api_key, "all": "true"})
-        used = r.headers.get("x-requests-used")
-        remaining = r.headers.get("x-requests-remaining")
-        if r.status_code != 200:
-            return {"ok": False, "status": r.status_code,
-                    "refusal": R_PROVIDER_ERROR, "sports": [],
-                    "credits_used": used, "credits_remaining": remaining}
-        rows = r.json() or []
-        return {"ok": True, "status": 200,
-                "sports": [{"key": x.get("key"), "group": x.get("group"),
-                            "title": x.get("title"),
-                            "active": x.get("active")} for x in rows],
-                "metered": False,
-                "credits_used": used, "credits_remaining": remaining,
+    try:
+        async with httpx.AsyncClient(timeout=timeout) as client:
+            r = await client.get(url, params={"apiKey": api_key,
+                                              "all": "true"})
+            used = r.headers.get("x-requests-used")
+            remaining = r.headers.get("x-requests-remaining")
+            if r.status_code != 200:
+                return {"ok": False, "status": r.status_code,
+                        "refusal": R_PROVIDER_ERROR, "sports": [],
+                        "credits_used": used, "credits_remaining": remaining}
+            rows = r.json() or []
+            return {"ok": True, "status": 200,
+                    "sports": [{"key": x.get("key"), "group": x.get("group"),
+                                "title": x.get("title"),
+                                "active": x.get("active")} for x in rows],
+                    "metered": False,
+                    "credits_used": used, "credits_remaining": remaining,
+                    "received_at": time.time()}
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "status": None, "refusal": R_PROVIDER_ERROR,
+                "sports": [], "error": type(exc).__name__,
+                "why": ("the unmetered catalogue read failed at the transport "
+                        "(%s). Unread is not empty: no candidate is confirmed "
+                        "and none is fetched" % type(exc).__name__),
+                "credits_used": None, "credits_remaining": None,
                 "received_at": time.time()}
 
 
@@ -1023,17 +1314,50 @@ async def resolve_venue_identity(conn, *, market_row, priced_outcome):
     # namespaces and never compare equal -- which is how passing the odds
     # provider's `event_id` here would silently keep the rail at zero even after
     # the query was repaired. One table, one namespace, read by its slug.
+    #
+    # ── AND WHETHER THAT CONTRACT IS THE FIXTURE AT ALL (2026-09-28) ──
+    #
+    # ONE ROUND TRIP, TWO QUESTIONS. This read used to select `event_slug`
+    # alone. It now takes the whole catalogue row, because the row answers a
+    # second question that was not being asked and is the more dangerous of the
+    # two: does this contract settle on the real fixture, or on a SIMULATION of
+    # it bearing the same club names?
+    #
+    # THE MEASURED REASON (research-sql run 258). The US venue lists ZERO
+    # contracts carrying the token `epl` -- the English Premier League is not on
+    # its board. What it does list is 420 rows across 70 events titled
+    # "eBattles: Arsenal vs. Chelsea" and the like, classified
+    # `efootball_team_full_time_winner`: video game matches between real club
+    # names. Every check this lane makes would pass on one of those. The clubs
+    # match, the date matches, the market type matches, the money line exists.
+    # The event is not the one occurring.
+    #
+    # So realism is established from the VENUE'S OWN WORDS before the intent is
+    # even looked at, and an unreadable or silent row refuses rather than
+    # proceeds. `bettor_venue_realism` carries the full finding and the reason a
+    # league-token pattern is never used to decide it.
+    row = None
     try:
-        out["venue_event_key"] = await conn.fetchval(
-            "SELECT event_slug FROM us_premap WHERE market_slug = $1",
-            out["us_market_slug"])
+        row = await conn.fetchrow(vreal.CATALOGUE_SQL, out["us_market_slug"])
+        out["venue_event_key"] = (row or {}).get("event_slug")
     except Exception as exc:                                   # noqa: BLE001
         out["venue_event_key"] = None
         out["venue_event_key_error"] = type(exc).__name__
+        out["venue_catalogue_read_error"] = type(exc).__name__
     out["venue_event_key_is"] = (
         "us_premap.event_slug for this contract -- the VENUE's event, which two "
         "contracts on one fixture share. Not the odds provider's event id, "
         "which is a different namespace")
+    realism = vreal.classify(row)
+    if out.get("venue_catalogue_read_error"):
+        realism = vreal.classify(None)
+        realism["read_error"] = out["venue_catalogue_read_error"]
+    out["realism"] = {k: realism.get(k) for k in
+                      ("verdict", "evidence", "why", "read_error")}
+    if realism.get("verdict") != vreal.REAL:
+        out["refusal"] = realism["refusal"]
+        out["why"] = realism.get("why") or "venue contract realism not REAL"
+        return out
     intent = str(got.get("intent") or "")
     out["intent"] = got.get("intent")
     # BOTH INTENTS ARE VALID RESOLVED EXPOSURES.
@@ -3299,7 +3623,24 @@ async def cycle(conn) -> dict:
     def _ledger(entry: dict) -> None:
         if len(ledger) < MAX_PER_CYCLE + 8:
             ledger.append(entry)
-    labels = sorted({lbl for _, fam in SPORTS
+    # ── WHICH COMPETITIONS THIS CYCLE MAY SPEND ON ───────────────────
+    #
+    # CONFIRM BEFORE SPENDING. `/v4/sports` is unmetered, so every candidate key
+    # is checked against the provider's own catalogue before a metered fetch is
+    # made on it. A key I guessed wrong is then a named refusal in the report
+    # rather than ~20 credits and a 422. The confirmed set runs either way, so a
+    # catalogue outage cannot stop the sport that has always worked.
+    # AND WHICH COMPETITIONS THE VENUE IS LISTING TODAY. The board is seasonal:
+    # on 2026-09-28 it was almost entirely national-team football, because late
+    # September is an international window. A candidate list frozen in source
+    # would be wrong within a fortnight, so it is read.
+    _cat = await fetch_sport_catalogue(api_key=api_key)
+    _board = await venue_soccer_competitions(conn)
+    sports_selection = select_sports(
+        _cat, candidates=candidates_from_board(_board["board"]))
+    sports_selection["venue_board"] = _board
+    sports_for_cycle = tuple(sports_selection["sports"])
+    labels = sorted({lbl for _, fam in sports_for_cycle
                      for lbl in VENUE_SPORT_LABELS.get(fam, ())})
     markets = [dict(r) for r in await conn.fetch(MARKETS_SQL, labels, MARKET_STALE_AFTER_S)]
     # ── THE OBSERVED UNIVERSE, AND WHERE IT NARROWS ──────────────────
@@ -3380,7 +3721,7 @@ async def cycle(conn) -> dict:
     # MODEL_TRUST_DRIFT and nothing else; see bettor_research_shadow.
     research = await rsh.authorised(conn)
 
-    for sport_key, family in SPORTS:
+    for sport_key, family in sports_for_cycle:
         if evaluated >= MAX_PER_CYCLE:
             break
         step = funnel.setdefault(sport_key, {
@@ -4366,6 +4707,10 @@ async def cycle(conn) -> dict:
            # comment at `universe` above: one aggregate count could not say
            # whether a supported sport contributed anything.
            "venue_universe_by_label": universe,
+           # WHICH COMPETITIONS THIS CYCLE WAS ALLOWED TO SPEND ON, and every
+           # candidate it refused with the reason. A short funnel used to be
+           # indistinguishable from a narrow sport set.
+           "sports_selection": sports_selection,
            "funnel_by_provider_sport": funnel,
            # EVERY MAPPED CANDIDATE, RECONCILED TO ITS FIRST REFUSAL.
            "mapped_candidate_ledger": ledger,

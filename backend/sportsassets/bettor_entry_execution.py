@@ -710,9 +710,22 @@ RAIL_TYPES = {
     "MAX_DRAWDOWN": {
         "unit": UNIT_USD, "window": WINDOW_CUMULATIVE,
         "scope": SCOPE_WHOLE_BOOK,
-        "measures": ("realised losses in full, plus the entire cost basis of "
-                     "every unsettled position whose mark is unavailable, "
-                     "counted as a total loss"),
+        # ── THE THREE TERMS, EXACTLY AS `exposure_from_rows` SUMS THEM ──
+        #
+        # This entry used to name two terms and the summary in the activation
+        # package named the same two, which UNDERSTATED the rail: a marked
+        # unsettled position contributes its mark-to-market loss, and only an
+        # UNMARKED one contributes its whole basis. An owner reading the old
+        # text would expect a marked position to contribute nothing until it
+        # settled. It contributes as soon as its mark falls below its cost.
+        "measures": ("three terms summed over the lane's whole book: (1) for "
+                     "each SETTLED position, max(0, -realised_net) -- realised "
+                     "losses in full, and realised GAINS do not offset them; "
+                     "(2) for each unsettled position WITH a mark, max(0, cost "
+                     "- mark); (3) for each unsettled position WITHOUT a mark, "
+                     "the entire cost basis, counted as a total loss. The "
+                     "proposed position is unsettled and unmarked by "
+                     "construction, so its full cost is added too"),
         "owner_field": "daily_loss_stop_usd",
         "the_owner_field_name_is_inaccurate": (
             "it says daily. There is no daily window, no calendar boundary and "
@@ -720,6 +733,24 @@ RAIL_TYPES = {
             "book. The field name is kept because recorded approvals use it, "
             "and `cumulative_loss_stop_usd` is accepted as the accurate "
             "synonym"),
+        # ── WHAT ACTUALLY CLEARS IT, WHICH IS NOT A CLOCK ────────────────
+        #
+        # `ext_pinnacle_loop.OPEN_BOOK_SQL` is `WHERE p.experiment_id = $1`
+        # with no time bound at all, so every position the lane has ever taken
+        # stays in the row set. Terms (2) and (3) fall as positions mark better
+        # or settle. Term (1) never falls: once a position settles at a loss it
+        # contributes that loss for as long as the experiment id does. So the
+        # rail is monotonically non-decreasing in realised losses, and the only
+        # thing that clears accumulated realised loss is CHANGING THE
+        # EXPERIMENT ID -- which starts a new book, and is an operator act, not
+        # a reset.
+        "what_reduces_it": ("terms 2 and 3 fall when a position marks better "
+                            "or settles. Term 1 never falls"),
+        "what_clears_it": ("nothing on a schedule. Accumulated realised loss "
+                           "is cleared only by changing the experiment id, "
+                           "because OPEN_BOOK_SQL selects on experiment_id "
+                           "with no time bound. That starts a new book and is "
+                           "an operator act"),
         "a_real_daily_window_would_need": ("a date-bounded realised-loss query "
                                            "and a declared reset boundary with "
                                            "a timezone. Neither exists")},
