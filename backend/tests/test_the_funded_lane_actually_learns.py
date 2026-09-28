@@ -755,3 +755,66 @@ def test_the_module_says_what_a_good_score_cannot_say():
     assert "would have made money" in d["what_a_good_score_does_not_say"]
     assert d["promotion_bar"]["metric"] == "log_loss"
     assert "measuring its memory" in d["prospective_rule"]
+
+
+# ════════════════════════════════════════════════════════════════════
+# 6 · THE SCHEDULED PASS AND THE OPERATOR SURFACE
+# ════════════════════════════════════════════════════════════════════
+
+@pg
+@pytest.mark.asyncio
+async def test_the_operator_can_see_which_model_is_deciding():
+    """AN ACTION WITHOUT ITS MODEL VERSION IS UNREADABLE.
+
+    "Acquire the hedge" means something different under a model approved this
+    morning than under the one it replaced. And with NOTHING approved the panel
+    must say so, because that is the state in which this lane declines every
+    indirect acquisition -- an omission would look like an ordinary quiet lane.
+    """
+    asyncpg = pytest.importorskip("asyncpg")
+    conn = await asyncpg.connect(DSN)
+    try:
+        await _clean(conn)
+        view = await PC.operator_view(conn, account_id=ACCT)
+        assert view["ok"] is True, view
+        assert view["deciding_model"]["refusal"] == FMD.R_NO_APPROVED_MODEL
+        assert "declined" in view["deciding_model"]["consequence"]
+
+        rows, labels = _synthetic(50)
+        await FMD.register(conn, model_id="mdl:view", model_version="v9-view",
+                           fitted=FMD.fit(rows, labels, estimator="BASE_RATE"),
+                           fit_through=datetime.now(timezone.utc))
+        # A CANDIDATE IS STILL NOT THE DECIDING MODEL.
+        mid = await PC.operator_view(conn, account_id=ACCT)
+        assert mid["deciding_model"]["refusal"] == FMD.R_NO_APPROVED_MODEL
+        await conn.execute(
+            "UPDATE bettor_funded_models SET state='APPROVED', "
+            "  approved_at=now(), approved_by='owner@test', "
+            "  evaluation='{}'::jsonb WHERE model_id=$1", "mdl:view")
+        after = await PC.operator_view(conn, account_id=ACCT)
+        assert after["deciding_model"]["model_version"] == "v9-view"
+        assert after["deciding_model"]["approved_by"] == "owner@test"
+        assert after["deciding_model"]["estimator"] == "BASE_RATE"
+    finally:
+        await _clean(conn)
+        await conn.close()
+
+
+@pg
+@pytest.mark.asyncio
+async def test_the_scheduled_pass_forwards_the_model_request_to_the_decision():
+    """THE SUPPLIER DECIDES WHETHER TO USE THE MODEL, AND THE STEP SAYS WHICH.
+
+    A lane with no approved model has to be able to run the rest of the pass,
+    and a lane with one must not have its estimate silently replaced by
+    whatever a supplier computed itself. Both states are visible in the step's
+    own `region_probabilities_came_from`, so a reader never has to infer it.
+    """
+    import inspect
+
+    src = inspect.getsource(PC.pass_once)
+    assert "use_approved_model" in src
+    assert 'facts.get("model_inputs")' in src
+    step_src = inspect.getsource(PC.decide_and_record)
+    assert "NOTHING_APPROVED" in step_src
+    assert "APPROVED_MODEL:%s" in step_src

@@ -574,6 +574,32 @@ async def operator_view(conn, *, account_id: str | None = None,
     # ── RESERVED CAPITAL, THE SAME READING THE RAILS ENFORCE ─────────
     out["reserved"] = await RSV.reserved_collateral_usd(conn,
                                                         account_id=account_id)
+    # ── AND WHICH MODEL IS DECIDING ──────────────────────────────────
+    #
+    # AN OPERATOR CANNOT READ A DECISION WITHOUT IT. "Acquire the hedge" means
+    # something different under a model approved this morning than under the one
+    # it replaced, and a panel that shows the action without the version leaves
+    # a reader unable to tell which. `NO_APPROVED_MODEL` is reported as what it
+    # is -- the state in which this lane declines every indirect acquisition --
+    # rather than omitted.
+    try:
+        appr = await FMD.approved(conn)
+        out["deciding_model"] = (
+            {"model_key": appr["model"]["model_key"],
+             "model_version": appr["model"]["model_version"],
+             "estimator": appr["model"]["estimator"],
+             "approved_by": appr["model"]["approved_by"],
+             "approved_at": appr["model"]["approved_at"]}
+            if appr.get("ok") else
+            {"refusal": appr.get("refusal"),
+             "consequence": ("with no approved model this lane has no estimate "
+                             "it may decide from, so every indirect "
+                             "acquisition is declined for want of region "
+                             "probabilities")})
+    except Exception as exc:                                   # noqa: BLE001
+        out["deciding_model"] = {
+            "refusal": "THE_MODEL_REGISTRY_COULD_NOT_BE_READ",
+            "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
     for res in await RSV.live(conn, account_id=account_id):
         if res["state"] in (RSV.SEND_ATTEMPTED, RSV.AMBIGUOUS):
             out["risks"].append({
@@ -764,9 +790,19 @@ async def pass_once(conn, *, account_id: str, venue: str,
             capital_duration_h=facts.get("capital_duration_h"),
             holding_policy=facts.get("holding_policy",
                                      FL.POLICY_MAY_EXIT_EARLY),
-            filled_qty=pos.get("filled_qty"), now=at)
+            filled_qty=pos.get("filled_qty"),
+            # ── THE APPROVED MODEL, WHEN THE SUPPLIER ASKS FOR IT ────
+            #
+            # The supplier decides, not this function: a lane with no approved
+            # model must be able to run the rest of the pass, and a lane with
+            # one must not have its estimate silently replaced by whatever the
+            # supplier computed itself. Both are visible in the step's own
+            # `region_probabilities_came_from`.
+            use_approved_model=bool(facts.get("use_approved_model")),
+            model_inputs=facts.get("model_inputs"), now=at)
         step["decision"] = {k: dec.get(k) for k in
-                            ("ok", "action", "refusal", "policy", "selected")}
+                            ("ok", "action", "refusal", "policy", "selected",
+                             "region_probabilities_came_from")}
         if dec.get("action") != ACTION_ACQUIRE:
             step["refusal"] = R_DECISION_IS_NOT_ACQUIRE
             step["what_was_selected_instead"] = dec.get("action")
