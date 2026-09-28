@@ -312,3 +312,45 @@ def test_the_count_of_unfinished_capabilities_is_still_four():
     assert len(AI.unfinished_actions()) == 4
     assert AI.describe()["unfinished_count"] == 4
     assert "NOT complete" in AI.describe()["so_the_honest_summary"]
+
+
+def test_a_combo_is_recorded_as_not_a_substitute_for_the_hedge():
+    """THE SECOND CORRECTION TO THIS ENTRY, and the more serious one.
+
+    I recorded `POST /v1/combos` as removing the second-venue premise for
+    FORM_INDIRECT_HEDGE -- which it does -- and left the impression that a
+    combo could therefore serve as the hedge. It cannot. The combos FAQ:
+
+        "Every leg has to resolve the way you took it for the combo to pay."
+        payout = potential x PRODUCT of every leg's value
+        "[one leg against] and the combo pays $0.00. This holds however the
+         other legs turn out."
+
+    A combo is MULTIPLICATIVE; separate holdings are ADDITIVE with a floor.
+    On Bears ML + Panthers +4.5 the separate pair never returns zero and the
+    combo returns zero in three of four margin scenarios. Substituting it
+    would INVERT the risk in a lane authorized only to reduce exposure.
+    """
+    a = AI.ACTIONS["FORM_INDIRECT_HEDGE"]
+    note = a["it_is_not_a_substitute_for_the_hedge"]
+    assert "MULTIPLICATIVE" in note
+    assert "ADDITIVE" in note
+    assert "inverts the risk" in note
+    # The void treatment has no additive analogue and must be recorded.
+    void = a["and_a_void_leg_scales_the_whole_position"]
+    assert "LFMP" in void
+    assert "not" in void.lower() and "removed" in void
+    assert "Settlement Committee" in void
+    assert a["payoff_source"].startswith("docs.polymarket.us/faqs/combos-faqs")
+    # AND THE CAPABILITY STAYS OPEN. A payoff analysis is not an integration.
+    assert a["status"] == AI.REQUIRED_BUT_UNAVAILABLE
+
+
+def test_the_capability_discovery_did_not_promote_anything():
+    """Documentation discovery is evidence, not completed integration.
+
+    Two venue capabilities were found and one payoff was refuted. None of
+    that implements anything, so the count must be unchanged at four.
+    """
+    assert len(AI.unfinished_actions()) == 4
+    assert AI.describe()["unfinished_count"] == 4

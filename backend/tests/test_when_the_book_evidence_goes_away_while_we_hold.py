@@ -406,28 +406,77 @@ async def test_the_operator_view_shows_held_inventory_it_cannot_act_on(monkeypat
 # 5 · WHY THIS IS THE VENUE'S FEED AND NOT OUR WIRING
 # ═════════════════════════════════════════════════════════════════════
 
-def test_the_seam_supplies_no_mechanism_and_says_why_verifiably():
-    """M1 is UNAVAILABLE BY MEASUREMENT, which is not the same as unwired.
+def test_the_seam_supplies_no_mechanism_and_cannot_drift_from_the_owner():
+    """THIS TEST USED TO PIN AN ERROR IN PLACE, and that is the worst kind.
 
-    The distinction decides who owns the blocker. "We have not subscribed
-    yet" is engineering. "The feed carries no sequence number and does not
-    distinguish a snapshot from an increment" is the venue, and
-    subscribing cannot supply either.
+    It asserted that `why_none` contained "sequence number" and "snapshot
+    from an increment" -- a premise `bettor_stream_currency` had already
+    EXAMINED AND WITHDRAWN. P1 replacement authority is ESTABLISHED from
+    the venue's published subscription table, and the delta-continuity
+    requirement was withdrawn because a full-replacement feed has no
+    increments for a sequence to order. The one unmet feed-level
+    precondition is P5_DOCUMENTED_TIMING.
+
+    So the test was requiring the loop's explanation to state the wrong
+    reason, which is how the wrong reason survived into a report. A test
+    that asserts a false claim makes the claim harder to remove, not
+    easier -- it converts a mistake into a requirement.
+
+    What it checks now is that the loop CANNOT DRIFT from the module that
+    owns the question, rather than that it repeats a particular sentence.
     """
+    from sportsassets import bettor_stream_currency as SC
     from sportsassets.workers import ext_pinnacle_loop as L
 
     ev = L.book_currency_evidence(SLUG)
     assert ev["subscription"] is None
     assert ev["revalidation"] is None
-    why = ev["why_none"] or ""
-    assert "sequence number" in why
-    assert "snapshot from an increment" in why
-    assert "properties of the FEED" in why
-    # And it names what would change the verdict, so it is a blocker with
-    # an exit rather than a permanent excuse.
-    assert ev["what_would_change_it"]
-    assert ("ETag" in ev["what_would_change_it"]
-            or "Last-Modified" in ev["what_would_change_it"])
+
+    # THE VERDICT COMES FROM THE OWNER, not from a parallel account here.
+    assert ev["missing_preconditions"] == list(SC.MISSING_PRECONDITIONS)
+    assert ev["missing_preconditions"] == ["P5_DOCUMENTED_TIMING"], (
+        "the one unmet FEED-LEVEL precondition is documented timing. If this "
+        "changes, the reason must change with it -- not be restated by hand")
+    assert ev["why_none"] == SC.evidence_for(SLUG).get("why"), (
+        "the explanation must BE the owning module's, so it cannot go stale")
+
+    # AND THE WITHDRAWN PREMISES MUST NOT COME BACK.
+    assert "P1 IS established" in ev["and_what_the_gap_is_NOT"]
+    assert "withdrawn" in ev["and_what_the_gap_is_NOT"]
+
+    # WHAT WOULD CHANGE IT must not ask for something already published.
+    w = ev["what_would_change_it"]
+    assert "TIMING" in w
+    assert "already published" in w, (
+        "this used to ask the venue to document the message as a full "
+        "replacement, WHICH IT ALREADY DOES -- making the blocker look "
+        "permanent when the real gap is narrower")
+    assert "ETag" in w or "Last-Modified" in w
+    # And it must name the part that is OURS.
+    assert "OURS to fix" in w
+
+
+def test_the_loops_explanation_never_reinstates_delta_sequencing():
+    """A guard against the specific regression, by name.
+
+    `bettor_stream_currency` withdrew gap-free delta continuity as a
+    precondition: "my P3 was requiring gap-free delta continuity OF A FEED
+    THAT HAS NO DELTAS." Any future text that reintroduces sequencing or a
+    snapshot/increment distinction as the REASON is that withdrawal being
+    undone silently.
+    """
+    from sportsassets.workers import ext_pinnacle_loop as L
+
+    ev = L.book_currency_evidence(SLUG)
+    blob = " ".join(str(ev.get(k) or "") for k in
+                    ("why_none", "what_would_change_it")).lower()
+    for banned in ("no sequence number",
+                   "carries no sequence",
+                   "distinguishes a snapshot from an increment",
+                   "snapshot from an increment"):
+        assert banned not in blob, (
+            "the loop's explanation reinstates a withdrawn premise: %r"
+            % banned)
 
 
 def test_funded_entry_is_still_disabled():

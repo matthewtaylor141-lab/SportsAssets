@@ -2897,21 +2897,53 @@ def book_currency_evidence(slug=None) -> dict:
                "refusal": m1.get("refusal"),
                "why": m1.get("why"),
                "state": m1.get("state")},
-        "why_none": (
-            "M1 was VERIFIED against the shipped market-data client and it "
-            "cannot establish currency on this feed: the payload carries no "
-            "sequence number (so a dropped message is undetectable) and nothing "
-            "distinguishes a snapshot from an increment (so a received message "
-            "is not known to be a whole book). Those are properties of the FEED "
-            "and subscribing does not supply them. M2 needs the book endpoint "
-            "to emit a validator, which the V3 clock probe reports per read and "
-            "which is not yet known"
-            if _sc.MISSING_PRECONDITIONS else m1.get("why")),
+        # ── WHY, FROM THE MODULE THAT OWNS THE QUESTION ────────────────
+        #
+        # THE DEFECT THIS REPLACES (2026-09-28). This key used to carry a
+        # HAND-WRITTEN PARALLEL ACCOUNT of why M1 is unavailable, and that
+        # account had gone stale: it said the payload "carries no sequence
+        # number (so a dropped message is undetectable) and nothing
+        # distinguishes a snapshot from an increment". `bettor_stream_currency`
+        # had already EXAMINED AND WITHDRAWN both of those as preconditions --
+        # P1 replacement authority is ESTABLISHED from the venue's published
+        # subscription table (MARKET_DATA is documented as the full order
+        # book), and the delta-continuity requirement was withdrawn because
+        # this feed has no deltas for a sequence to order.
+        #
+        # So two modules disagreed and THE ONE AN OPERATOR READS WAS THE
+        # STALE ONE. It is the immediate reason a report asserted the feed
+        # could never support M1, which is a stronger claim than the evidence
+        # carries and not the one the owning module makes.
+        #
+        # The fix is structural rather than a better paragraph: this hands
+        # back the OWNING MODULE'S OWN `why` plus its machine-readable
+        # missing-precondition list, so the explanation cannot drift from the
+        # verdict again. A test asserts the two agree.
+        "why_none": (m1.get("why") if _sc.MISSING_PRECONDITIONS
+                     else m1.get("why")),
+        "missing_preconditions": list(_sc.MISSING_PRECONDITIONS),
+        "why_source": ("bettor_stream_currency.evidence_for(), which owns this "
+                       "question. Not restated here, because a parallel "
+                       "account is what went stale"),
+        "and_what_the_gap_is_NOT": (
+            "not missing replacement authority. P1 IS established from the "
+            "venue's published subscription-types table, which documents "
+            "SUBSCRIPTION_TYPE_MARKET_DATA as the full order book, so the "
+            "feed is fit to hold a displayed book. And not delta sequencing: "
+            "that requirement was withdrawn because a full-replacement feed "
+            "has no increments for a sequence to order"),
         "what_would_change_it": (
-            "the venue publishing a per-market sequence, or documenting the "
-            "market-data message as a full replacement -- either makes M1 "
-            "available BY MEASUREMENT rather than by decision; or an ETag / "
-            "Last-Modified on the book path, which makes M2 available"),
+            # ALSO CORRECTED. This used to ask the venue to document "the
+            # market-data message as a full replacement" -- WHICH IT ALREADY
+            # DOES. Asking for something already supplied made the blocker
+            # look permanent when the real gap is narrower.
+            "a published TIMING contract -- an as-of instant, a latency bound, "
+            "or a documented meaning for transactTime -- which closes P5, the "
+            "one unmet feed-level precondition; or an ETag / Last-Modified on "
+            "the book path, which makes M2 available. Replacement authority is "
+            "already published and does not need to change. And CONNECTION "
+            "CONTINUITY is OURS to fix: the client emits 'close' and returns "
+            "rather than reconnecting, resubscribing and resynchronising"),
         "consequence_today": ("every venue read reaches "
                               "BOOK_CURRENCY_NOT_ESTABLISHED and refuses. That "
                               "is missing evidence, not a stale book"),

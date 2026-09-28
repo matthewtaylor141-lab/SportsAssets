@@ -278,12 +278,49 @@ ACTIONS = {
                              "{symbol, side} with side SIDE_BUY or SIDE_SELL"),
             "why_it_matters_here": (
                 "independent sides on different markets is the indirect-pair "
-                "shape. It removes the second-venue premise entirely"),
+                "SHAPE. It removes the second-venue premise"),
             "and_it_is_traded_how": (
                 "the page's See Also points at the RFQ API for 'combo RFQs "
                 "and quotes', so a combo is quoted rather than necessarily "
                 "resting on the CLOB"),
         },
+        # ── AND WHY THE SHAPE IS NOT THE TRADE (2026-09-28) ────────
+        #
+        # A SECOND CORRECTION, from reading the combos FAQ that I should
+        # have read before writing the entry above. A COMBO IS NOT A
+        # SUBSTITUTE FOR THE HEDGE -- IT INVERTS IT.
+        #
+        #   "Every leg has to resolve the way you took it for the combo
+        #    to pay." "A combo is a single position that settles once."
+        #   payout = potential x PRODUCT of every leg's value
+        #   "[one leg against] and the combo pays $0.00. This holds
+        #    however the other legs turn out."
+        #
+        # A combo is MULTIPLICATIVE; separate holdings are ADDITIVE. On
+        # Bears ML + Panthers +4.5, separate holdings pay $1 / $2 / $1 /
+        # $1 across the four margin scenarios -- a FLOOR of $1, never
+        # zero, which is exactly what makes it a hedge. The combo pays
+        # $0.00 in THREE of those four. Substituting it would replace a
+        # position with a guaranteed floor by a leveraged bet on the
+        # conjunction, in a lane authorized only to REDUCE exposure.
+        "it_is_not_a_substitute_for_the_hedge": (
+            "the combo payoff is MULTIPLICATIVE (potential x product of "
+            "leg values, and one losing leg pays 0.00 however the others "
+            "turn out) while separate holdings are ADDITIVE with a floor. "
+            "On Bears ML + Panthers +4.5 the separate pair never returns "
+            "zero and the combo returns zero in three of four scenarios. "
+            "It inverts the risk rather than replicating it"),
+        "and_a_void_leg_scales_the_whole_position": (
+            "a leg that cannot resolve settles at LFMP and is NOT "
+            "removed -- the payout is multiplied by that price, so the "
+            "venue's own example takes an $80 combo to $48 with one leg "
+            "at 0.60 and to $12 with two at 0.60 and 0.25. A "
+            "multiplicative void haircut has no analogue in additive "
+            "holdings. LFMP is set by the Settlement Committee and its "
+            "decisions are final, so it is a discretionary input"),
+        "payoff_source": ("docs.polymarket.us/faqs/combos-faqs, retrieved "
+                          "2026-09-28; tables in "
+                          "COMBO_IS_NOT_A_HEDGE_2026-09-28.md"),
         "specific_remaining_dependencies": [
             "WHETHER CROSS-EVENT LEGS ARE A VALID COMBINATION. The page says "
             "legs must be open, tradable, supported instruments and that "
