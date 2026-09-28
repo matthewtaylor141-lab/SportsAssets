@@ -76,12 +76,33 @@ The exit realises **−0.19 a contract** and is chosen anyway, because holding i
 | Residual after | **6.0**, `closed_reason: null` |
 | Cost basis | $9.0000 |
 | Exit proceeds | $3.6900 |
-| **Realised** | **$0.0000** |
+| **Realised** (`realised_pnl_usd`, books on closure) | **$0.0000** |
 | Open-position net cash | **−$5.7100** |
+| **Realised on the 9 already sold** | **−$2.0100** |
 
 **Realised is 0 and that is the convention, not a bug.** `FB.realised` filters `closed_at IS NOT NULL`: a result is realised when the *position* closes, not when an exit fill lands. I expected a negative number here and was wrong about the code.
 
-**The slice-level −$1.71 is deliberately not split out.** Doing so needs a cost-attribution convention (FIFO or average) between the 9 sold and the 6 held, and this lane declares none. So the containment is evidenced by the *decision* (`locks_a_loss`) and by the cash, not by a realised figure the lane has not earned.
+### Two things I published here wrongly, now corrected
+
+This section previously said: *"The slice-level −$1.71 is deliberately not split out. Doing so needs a cost-attribution convention (FIFO or average) between the 9 sold and the 6 held, and this lane declares none."* **Both halves of that were wrong.**
+
+**1 · The lane does declare a convention.** `remaining_basis` already used *average entry cost per contract* to size a void refund. I asserted none existed without checking. `realised_on_sold` now uses that same convention, because a second one on the same position would make the two disagree.
+
+**2 · −$1.71 was the wrong number.** It is the *fee-free* arithmetic, 3.69 − 5.40. The sold quantity carries **$0.30** of fees — all $0.15 of the exit fee, plus 9/15 of the $0.25 entry fee — so the result on the 9 sold is **−$2.01**. My figure understated the loss by exactly the fees I had left out.
+
+### The three figures, separated
+
+| | | |
+|---|---:|---|
+| Exit proceeds on 9 sold | $3.6900 | what came back |
+| Allocated basis (9 × $0.60) | $5.4000 | average entry cost |
+| Fees on the sold quantity | $0.3000 | $0.15 exit fee + $0.15 entry-fee share (9/15 of $0.25) |
+| **Realised on sold** | **−$2.0100** | proceeds − basis − fees |
+| Remaining basis (6 × $0.60) | $3.6000 | still at risk |
+| Entry fee on the residual | $0.1000 | paid, not yet attributed to a result |
+| Unrealised on the residual | `NOT_IDENTIFIED` | no funded mark source — **not** 0 |
+
+**Net cash is not the partial result, and the gap is arithmetic.** −$5.71 exceeds −$2.01 by **$3.70** = the $3.60 of basis still held **plus** the $0.10 of entry fee sitting on the 6 residual contracts. That is a *two*-term difference; I first wrote it as the remaining basis alone, which misses by that $0.10. `test_net_cash_differs_by_two_terms_not_one_when_fees_exist` exists so it cannot be written that way again.
 
 **Operator view:** the book reads `book_class: CONTROLLED_DEMONSTRATION`, `counts_toward_strategy_performance: false`, and the 6 residual contracts appear as a `RESIDUAL_INVENTORY_STILL_HELD` discrepancy — something to act on, not a rounding error.
 

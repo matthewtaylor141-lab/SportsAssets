@@ -2,7 +2,11 @@
  "label": "CONTROLLED DEMONSTRATION \u2014 SOFTWARE PROOF, NOT PERFORMANCE",
  "counts_toward_strategy_performance": false,
  "what_this_establishes": "that the lane exits at a LOSS when holding is worth less, that the chosen action is marked as locking a loss rather than presented as a gain, that a depth-limited exit leaves the balance held rather than stranding or oversells it, and that the residual appears in the operator view as something to act on",
- "what_this_does_not_establish": "that a 0.41 bid existed for 9 contracts. It is a CHOSEN input. And note what the ledger does NOT say: the \u2212$1.71 on the 9 sold is not booked as realised, because the position is still open and this lane realises on CLOSURE. The visible figure is \u2212$5.71 of net cash on an open position",
+ "what_this_does_not_establish": "that a 0.41 bid existed for 9 contracts. It is a CHOSEN input. And note what the ledger does NOT say: the \u2212$2.01 realised on the 9 sold is not booked as `realised_pnl_usd`, because the position is still open and that figure books on CLOSURE. Net cash on the open position is \u2212$5.71, which is NOT the partial result: it exceeds it by the 3.60 of basis still held plus the 0.10 of entry fee sitting on the 6 residual contracts",
+ "two_figures_i_published_wrongly_and_have_corrected": [
+  "\u2212$1.71 as the sold slice. That is the FEE-FREE arithmetic (3.69 \u2212 5.40). The sold quantity carries 0.30 of fees, so the result is \u2212$2.01. The understatement was the fees.",
+  "that this lane declares no cost-attribution convention. `remaining_basis` already declared average entry cost per contract for void refunds; `realised_on_sold` uses it."
+ ],
  "account_id": "acct-funded-DEMONSTRATION-lifecycle",
  "venue": "PMUS",
  "position": "dem-loss",
@@ -38,7 +42,7 @@
     },
     "exit_intents": [
      {
-      "intent_id": "fpi-93741f5b142e4eea",
+      "intent_id": "fpi-3c10334c0eeb4ebc",
       "state": "FILLED",
       "qty": 9.0,
       "residual": 0.0,
@@ -56,7 +60,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-93741f5b142e4eea",
+      "intent_id": "fpi-3c10334c0eeb4ebc",
       "direction": "EXIT",
       "qty": 9.0,
       "price": 0.41,
@@ -65,6 +69,43 @@
     ],
     "available_to_exit": 6.0
    }
+  },
+  {
+   "step": 2.5,
+   "what": "THE PARTIAL RESULT, SEPARATED",
+   "realised_on_sold": {
+    "ok": true,
+    "intent_id": "dem-loss",
+    "sold_qty": 9.0,
+    "exit_proceeds_usd": 3.69,
+    "basis_per_contract": 0.6,
+    "allocated_basis_usd": 5.4,
+    "entry_fees_total_usd": 0.25,
+    "entry_fees_allocated_to_sold_usd": 0.15,
+    "entry_fees_allocated_to_residual_usd": 0.1,
+    "exit_fees_usd": 0.15,
+    "fees_on_sold_usd": 0.3,
+    "realised_on_sold_usd": -2.01,
+    "residual_qty": 6.0,
+    "remaining_basis_usd": 3.6,
+    "position_closed": false,
+    "closed_reason": null,
+    "attribution": "AVERAGE_ENTRY_COST_PER_CONTRACT",
+    "attribution_is_the_lanes_own": "the same per-contract basis `remaining_basis` uses for a void refund. Not invented here; a second convention on one position would make the two disagree",
+    "identity": "realised_on_sold = exit_proceeds - allocated_basis - fees_on_sold",
+    "this_is_not_realised_pnl": "`realised()` books on POSITION CLOSURE and is what the drawdown and the loss stop read. This is the result on the quantity already sold while the position is still open. Both are correct for their own question and they are not interchangeable",
+    "this_is_not_open_position_net_cash": "net cash is (basis out - proceeds back + fees) over the WHOLE clip, so it mixes the realised result on what was sold with the cost still tied up in what is held. It overstates a partial loss by the remaining basis AND by the residual's share of the entry fee -- TWO terms. A correction: I first wrote that it differed by the remaining basis alone, and on the demonstration's own figures (fees 0.25 entry, 0.15 exit) that identity misses by exactly the 0.10 of entry fee sitting on the 6 contracts still held",
+    "net_cash_exceeds_this_by_usd": 3.7,
+    "net_cash_identity": "open_position_net_cash = realised_on_sold - remaining_basis - entry_fees_allocated_to_residual",
+    "unrealised_on_the_residual": "NOT_IDENTIFIED",
+    "why_unrealised_is_not_identified": "marking the residual needs a funded mark, and this lane has no funded mark source. Reported NOT_IDENTIFIED rather than 0",
+    "fees_are_provisional_on": 2,
+    "realised_on_sold_is_provisional": true
+   },
+   "two_corrections": [
+    "I said the lane declared no cost-attribution convention. `remaining_basis` already declared average entry cost per contract.",
+    "I said the sold slice was \u2212$1.71. That figure is fee-free. With 0.30 of fees on the sold quantity it is \u2212$2.01."
+   ]
   },
   {
    "step": 2,
@@ -92,7 +133,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-93741f5b142e4eea",
+      "intent_id": "fpi-3c10334c0eeb4ebc",
       "exp": 0.15,
       "obs": null,
       "fee_state": "PROVISIONAL",
@@ -195,7 +236,7 @@
     "filled_fees_usd": 0.4,
     "contracts_held": 6.0,
     "contracts_net_from_the_fill_ledger": 6.0,
-    "capital_hours_usd_h": 0.000129,
+    "capital_hours_usd_h": 0.000186,
     "per_event_collateral_usd": {
      "ev-bos-lal-2026-09-27": 3.6
     },
@@ -286,7 +327,7 @@
      "filled_fees_usd": 0.4,
      "contracts_held": 6.0,
      "contracts_net_from_the_fill_ledger": 6.0,
-     "capital_hours_usd_h": 0.000149,
+     "capital_hours_usd_h": 0.000208,
      "per_event_collateral_usd": {
       "ev-bos-lal-2026-09-27": 3.6
      },
@@ -326,7 +367,7 @@
       },
       {
        "fill_id": "fvf:vo-xl-1:vf-1",
-       "intent_id": "fpi-93741f5b142e4eea",
+       "intent_id": "fpi-3c10334c0eeb4ebc",
        "exp": 0.15,
        "obs": null,
        "fee_state": "PROVISIONAL",
@@ -374,8 +415,20 @@
     "intent_id": "dem-loss",
     "residual_qty": 6.0,
     "us_market_slug": "aec-nba-bos-lal-2026-09-27",
-    "settlement": "{\"at\": 1790566409.8691401, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
-    "what_it_means": "contracts this lane owns. They count against every rail until an evidenced exit or an authoritative settlement removes them"
+    "settlement": "{\"at\": 1790597239.6409483, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
+    "partial_exit_result": {
+     "sold_qty": 9.0,
+     "exit_proceeds_usd": 3.69,
+     "basis_per_contract": 0.6,
+     "allocated_basis_usd": 5.4,
+     "fees_on_sold_usd": 0.3,
+     "realised_on_sold_usd": -2.01,
+     "remaining_basis_usd": 3.6,
+     "attribution": "AVERAGE_ENTRY_COST_PER_CONTRACT",
+     "realised_on_sold_is_provisional": true
+    },
+    "what_it_means": "contracts this lane owns. They count against every rail until an evidenced exit or an authoritative settlement removes them",
+    "and_what_is_already_realised": "`partial_exit_result` is the result on the quantity ALREADY SOLD out of this position, on the lane's own average-entry-cost basis. It is NOT `realised_pnl_usd` (which books on closure) and NOT open-position net cash (which mixes the sold result with the basis still held)"
    }
   }
  ]

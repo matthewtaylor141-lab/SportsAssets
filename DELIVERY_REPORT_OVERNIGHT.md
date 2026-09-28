@@ -108,7 +108,9 @@ Read at 03:26:11Z, `psql exit=0`:
 
 Basis \$11.0000 · proceeds \$14.1600 · fees \$0.6380 · **realised \$2.5220**, with `realised == proceeds − basis − fees` to 1e-6.
 
-**Case B — loss containment:** `DIRECT_EXIT` 9 @ 0.41 on a 0.60 basis, `locks_a_loss: true`, chosen because holding was worth 0.30. **6 contracts remain held.** Realised \$0.0000 (this lane realises on *closure*), open-position net cash **−\$5.7100**.
+**Case B — loss containment:** `DIRECT_EXIT` 9 @ 0.41 on a 0.60 basis, `locks_a_loss: true`, chosen because holding was worth 0.30. **6 contracts remain held.** `realised_pnl_usd` \$0.0000 (this lane books on *closure*), open-position net cash **−\$5.7100**, and the result on the 9 already sold is **−\$2.0100**.
+
+> **Correction to this report.** I first wrote the sold slice as **−\$1.71** and said the lane "declares none" for cost attribution. Both were wrong. `remaining_basis` already declared *average entry cost per contract*; and −\$1.71 is the fee-free arithmetic — the 9 sold carry \$0.30 of fees, so the figure is **−\$2.01**. See `LIFECYCLE_DEMONSTRATION_2026-09-28.md` for the component-by-component breakdown.
 
 ## 5 · Reconciled results, with the three books kept apart
 

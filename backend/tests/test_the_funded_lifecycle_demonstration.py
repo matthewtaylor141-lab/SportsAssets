@@ -536,13 +536,44 @@ async def test_case_b_a_loss_is_contained_and_inventory_remains(monkeypatch):
         assert pl["open_position_net_cash_usd"] == pytest.approx(
             -5.71, abs=1e-6)
         assert pl["cash_out_the_door_usd"] == pytest.approx(5.71, abs=1e-6)
-        # AND THE SLICE-LEVEL LOSS IS NOT SPLIT OUT, deliberately: doing so
-        # needs a cost-attribution convention (FIFO or average) between the
-        # 9 sold and the 6 held, and this lane declares none. So the
-        # containment is evidenced by the DECISION -- `locks_a_loss` above
-        # -- and by the cash, not by a realised figure it has not earned.
         assert "realised_pnl_usd" in pl and pl[
             "realised_is_provisional"] is False
+        # ── AND THE SLICE-LEVEL RESULT, WHICH I FIRST DECLINED TO SPLIT ──
+        #
+        # I wrote here that splitting it "needs a cost-attribution convention
+        # (FIFO or average) ... and this lane declares none". THAT WAS WRONG
+        # on the facts: `remaining_basis` already declares average entry cost
+        # per contract for a void refund, so the convention existed and I had
+        # not looked. `realised_on_sold` uses that same one.
+        #
+        # I ALSO GAVE THE WRONG NUMBER. I said the sold slice was −$1.71.
+        # That is 3.69 − 5.40 with NO fees. This clip pays 0.25 of entry fee
+        # and 0.15 of exit fee, and 9/15 of the entry fee belongs to the sold
+        # side, so the fees on the sold quantity are 0.30 and the result is
+        # −$2.01. −$1.71 understated the loss by exactly those fees.
+        sold = await FB.realised_on_sold(conn, "dem-loss")
+        assert sold["sold_qty"] == pytest.approx(9.0)
+        assert sold["exit_proceeds_usd"] == pytest.approx(3.69, abs=1e-6)
+        assert sold["allocated_basis_usd"] == pytest.approx(5.40, abs=1e-6)
+        assert sold["fees_on_sold_usd"] == pytest.approx(0.30, abs=1e-6)
+        assert sold["realised_on_sold_usd"] == pytest.approx(-2.01, abs=1e-6)
+        assert sold["remaining_basis_usd"] == pytest.approx(3.60, abs=1e-6)
+        assert sold["attribution"] == "AVERAGE_ENTRY_COST_PER_CONTRACT"
+        # NET CASH IS NOT THAT NUMBER, and the gap is arithmetic: the basis
+        # still held (3.60) plus the residual's share of the entry fee (0.10).
+        assert pl["open_position_net_cash_usd"] == pytest.approx(
+            sold["realised_on_sold_usd"] - sold["remaining_basis_usd"]
+            - sold["entry_fees_allocated_to_residual_usd"], abs=1e-6)
+        trace.append({"step": 2.5,
+                      "what": "THE PARTIAL RESULT, SEPARATED",
+                      "realised_on_sold": sold,
+                      "two_corrections": [
+                          "I said the lane declared no cost-attribution "
+                          "convention. `remaining_basis` already declared "
+                          "average entry cost per contract.",
+                          "I said the sold slice was −$1.71. That figure is "
+                          "fee-free. With 0.30 of fees on the sold quantity "
+                          "it is −$2.01."]})
         # The 6 still held are NOT marked. Unrealised is UNMEASURED, not 0.
         exp = await FB.exposure(conn, account_id=ACCT, venue=VENUE)
         assert exp["contracts_held"] == pytest.approx(6.0)
@@ -580,10 +611,19 @@ async def test_case_b_a_loss_is_contained_and_inventory_remains(monkeypatch):
             "what_this_does_not_establish": (
                 "that a 0.41 bid existed for 9 contracts. It is a "
                 "CHOSEN input. And note what the ledger does NOT say: the "
-                "−$1.71 on the 9 sold is not booked as realised, because "
-                "the position is still open and this lane realises on "
-                "CLOSURE. The visible figure is −$5.71 of net cash on an "
-                "open position"),
+                "−$2.01 realised on the 9 sold is not booked as "
+                "`realised_pnl_usd`, because the position is still open and "
+                "that figure books on CLOSURE. Net cash on the open "
+                "position is −$5.71, which is NOT the partial result: it "
+                "exceeds it by the 3.60 of basis still held plus the 0.10 "
+                "of entry fee sitting on the 6 residual contracts"),
+            "two_figures_i_published_wrongly_and_have_corrected": [
+                "−$1.71 as the sold slice. That is the FEE-FREE arithmetic "
+                "(3.69 − 5.40). The sold quantity carries 0.30 of fees, so "
+                "the result is −$2.01. The understatement was the fees.",
+                "that this lane declares no cost-attribution convention. "
+                "`remaining_basis` already declared average entry cost per "
+                "contract for void refunds; `realised_on_sold` uses it."],
             "account_id": ACCT, "venue": VENUE, "position": "dem-loss",
             "steps": trace})
         assert os.path.exists(path)

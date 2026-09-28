@@ -73,6 +73,12 @@ FEE_DISAGREES = "DISAGREES"
 
 PROVENANCE = "FUNDED_PILOT_EXECUTION"
 
+#: What a figure reads when it cannot be established. Spelled here rather
+#: than imported from `bettor_mgmt_select`, so this module's readers do not
+#: pull the ranker in, and stated as a constant so "not identified" and 0
+#: can never be confused by a caller matching on a string literal.
+NOT_IDENTIFIED = "NOT_IDENTIFIED"
+
 # ─────────────────────────────────────────────────────────────────────
 # A CONTROLLED DEMONSTRATION IN THE FUNDED SCHEMA IS NOT A FUNDED RESULT
 # ─────────────────────────────────────────────────────────────────────
@@ -219,6 +225,54 @@ def _px(v):
         return 0.0
 
 
+#: The venue's own commission keys on one execution, in the order the
+#: adapter reads them: the per-execution amount first, the per-order total
+#: second. Named here so a test can assert the reader covers both rather
+#: than restating the strings.
+VENUE_COMMISSION_KEYS = ("commissionNotionalCollected",
+                         "commissionNotionalTotalCollected")
+
+
+def _venue_commission(ex: dict):
+    """`(usd, which_key)` when the venue stated a commission on this raw
+    execution, else None -- NEVER a guessed zero.
+
+    A stated 0.00 and an absent commission are different facts. The first
+    is an observation the fee reconciler can compare against the schedule;
+    the second leaves the booked fee provisional. Returning 0.0 for the
+    absent case would silently turn "unknown" into "free".
+
+    The amount is parsed by `pmus._commission_fields`, the adapter's own
+    reader, so the bool and non-finite refusals it already enforces apply
+    here too and cannot drift. If the adapter is unavailable -- which no
+    production path is, but an import-light caller might be -- the
+    commission is reported ABSENT rather than parsed by a second
+    implementation.
+    """
+    if not isinstance(ex, dict):
+        return None
+    which = None
+    for k in VENUE_COMMISSION_KEYS:
+        if ex.get(k) is not None:
+            which = k
+            break
+    if which is None:
+        return None
+    try:
+        from . import pmus as _pmus
+    except Exception:  # noqa: BLE001 — absent adapter, not a bad amount
+        return None
+    try:
+        usd, _spread = _pmus._commission_fields(ex)
+    except Exception:  # noqa: BLE001
+        return None
+    if usd is None:
+        # The key was present and the adapter REFUSED its value (a bool, a
+        # non-finite). That is not an observation, so it stays absent.
+        return None
+    return float(usd), which
+
+
 def executions_of(payload) -> dict:
     """THE VENUE'S EXECUTIONS, in the one shape the funded book ingests.
 
@@ -234,6 +288,29 @@ def executions_of(payload) -> dict:
     which is the fill-during-downtime case: the money moved and the book did
     not know. Two readers for two shapes is how that happened, so there is now
     one, and both call sites use it.
+
+    A SECOND DEFECT OF THE SAME KIND, found while separating partial-exit
+    P&L. This reader took the commission from `commission_usd` /
+    `commissionUsd` only -- keys that exist in the ALREADY-PARSED
+    `order_status` shape. The venue's own executions name it
+    `commissionNotionalCollected` (per execution) or
+    `commissionNotionalTotalCollected` (per order), and `submit_fok`
+    attaches parsed records ONLY on the post-only mirror path; the funded
+    exit path gets `raw.response.executions` untouched. So on every funded
+    submit the venue's stated commission was DROPPED, `observed_fee_usd`
+    came back None, and the fee was booked as the schedule's EXPECTATION in
+    state PROVISIONAL -- with no discrepancy raised, because from the
+    book's side the venue had simply said nothing. A venue charge that
+    disagreed with the schedule could therefore never be detected on a
+    funded exit. That is what `FEE_DISAGREES` exists to catch.
+
+    THE VALUE IS PARSED BY THE ADAPTER'S OWN READER, not re-implemented
+    here. `pmus._commission_fields` already refuses a bool (True is not one
+    dollar) and a non-finite reading (which would fail the jsonb write),
+    and a second parser would drift from it. `commission_read_from` records
+    which key answered, so a caller can tell "the venue stated 0.00" from
+    "the venue stated nothing" -- they are different facts and only the
+    first can reconcile.
     """
     if isinstance(payload, list):
         raw = list(payload)
@@ -292,7 +369,14 @@ def executions_of(payload) -> dict:
         for k in ("commission_usd", "commissionUsd"):
             if ex.get(k) is not None:
                 rec["commission_usd"] = ex[k]
+                rec["commission_read_from"] = k
                 break
+        else:
+            # THE RAW VENUE SHAPE, through the adapter's own reader.
+            v = _venue_commission(ex)
+            if v is not None:
+                rec["commission_usd"] = v[0]
+                rec["commission_read_from"] = v[1]
         out.append(rec)
     return {"executions": out, "skipped": skipped,
             "read_from": ("the venue's executions list, in either the "
@@ -1687,6 +1771,146 @@ R_NOT_OUR_ROW = "THIS_POSITION_BELONGS_TO_ANOTHER_ACCOUNT_OR_VENUE"
 R_NO_ROW = "NO_SUCH_FUNDED_POSITION"
 
 
+async def realised_on_sold(conn, intent_id: str) -> dict:
+    """WHAT THE QUANTITY ALREADY SOLD ACTUALLY MADE OR LOST.
+
+    THE GAP THIS CLOSES. `realised()` books a result when the POSITION
+    closes -- it filters `closed_at IS NOT NULL` -- which is the right
+    basis for drawdown and the loss stop, because an open position's
+    outcome is not yet determined. But it means an open position that has
+    already sold part of its inventory reports `realised_pnl_usd` 0.00
+    while a real gain or loss sits inside it. The controlled demonstration
+    made that visible: 9 of 15 contracts sold at 0.41 on a 0.60 basis, a
+    -$1.71 result on the sold portion, and the lane reported 0.00 realised
+    with -$5.71 of open-position net cash.
+
+    Open-position net cash is NOT that number. It is
+    (basis out - proceeds back + fees) over the WHOLE clip, so it mixes
+    the realised result on what was sold with the cost still tied up in
+    what is held. Reporting it as the partial result overstates the loss
+    by the remaining basis.
+
+    THE ATTRIBUTION CONVENTION IS THE ONE THE LANE ALREADY DECLARES:
+    average entry cost per contract, exactly as `remaining_basis` uses it
+    for a void refund. It is not invented here, and using a second
+    convention for the same position would make the two disagree.
+
+        allocated_basis = (entry_cash / entry_qty) * sold_qty
+        realised_on_sold = exit_proceeds - allocated_basis - fees_on_both
+
+    EVERY COMPONENT IS RETURNED SEPARATELY, because a single net figure
+    cannot be checked. Proceeds, allocated basis, fees and the remaining
+    inventory each stand on their own line.
+    """
+    f = await conn.fetchrow(
+        "SELECT coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.cash_usd "
+        "                       ELSE 0 END),0)::float8 AS entry_cash, "
+        "       coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.qty "
+        "                       ELSE 0 END),0)::float8 AS entry_qty, "
+        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.cash_usd "
+        "                       ELSE 0 END),0)::float8 AS exit_cash, "
+        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.qty "
+        "                       ELSE 0 END),0)::float8 AS exit_qty, "
+        "       coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.fee_usd "
+        "                       ELSE 0 END),0)::float8 AS entry_fees, "
+        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.fee_usd "
+        "                       ELSE 0 END),0)::float8 AS exit_fees, "
+        "       count(*) FILTER (WHERE f.fee_state=$2) AS provisional_fills "
+        "  FROM bettor_funded_fills f JOIN bettor_funded_intents i "
+        "    ON i.intent_id=f.intent_id "
+        " WHERE i.intent_id=$1 OR i.parent_intent_id=$1",
+        intent_id, FEE_PROVISIONAL)
+    pos = await conn.fetchrow(
+        "SELECT residual_qty::float8 AS residual, "
+        "       closed_at IS NOT NULL AS closed, closed_reason "
+        "  FROM bettor_funded_intents WHERE intent_id=$1 AND kind='ENTRY'",
+        intent_id)
+    if pos is None:
+        return {"ok": False, "refusal": R_NO_SUCH_INTENT,
+                "intent_id": intent_id}
+
+    eq, ec = float(f["entry_qty"]), float(f["entry_cash"])
+    sold, proceeds = float(f["exit_qty"]), float(f["exit_cash"])
+    e_fee, x_fee = float(f["entry_fees"]), float(f["exit_fees"])
+    residual = float(pos["residual"] or 0.0)
+    per = (ec / eq) if eq > 0 else None
+
+    # FEES ARE ALLOCATED THE SAME WAY THE BASIS IS. An entry fee was paid
+    # on the whole clip, so only the sold fraction of it belongs to the
+    # sold result; every exit fee was paid to sell, so all of it does.
+    entry_fee_on_sold = (0.0 if eq <= 0 else e_fee * (sold / eq))
+    entry_fee_on_residual = (0.0 if eq <= 0 else e_fee * (residual / eq))
+    fees_on_sold = entry_fee_on_sold + x_fee
+    allocated = (None if per is None else per * sold)
+    realised = (None if allocated is None
+                else proceeds - allocated - fees_on_sold)
+    remaining_basis_usd = (None if per is None else per * residual)
+    # WHAT OPEN-POSITION NET CASH CARRIES THAT THIS DOES NOT, to the cent.
+    # Net cash is short of the sold result by the residual's basis AND by
+    # the residual's share of the entry fee -- two terms, not one. Reported
+    # so the difference is arithmetic a reader can check, not an assertion.
+    excess = (None if remaining_basis_usd is None
+              else remaining_basis_usd + entry_fee_on_residual)
+
+    return {
+        "ok": True, "intent_id": intent_id,
+        # ── THE SOLD SIDE, COMPONENT BY COMPONENT ──────────────────
+        "sold_qty": round(sold, 6),
+        "exit_proceeds_usd": round(proceeds, 6),
+        "basis_per_contract": (None if per is None else round(per, 8)),
+        "allocated_basis_usd": (None if allocated is None
+                                else round(allocated, 6)),
+        "entry_fees_total_usd": round(e_fee, 6),
+        "entry_fees_allocated_to_sold_usd": round(entry_fee_on_sold, 6),
+        "entry_fees_allocated_to_residual_usd": round(entry_fee_on_residual, 6),
+        "exit_fees_usd": round(x_fee, 6),
+        "fees_on_sold_usd": round(fees_on_sold, 6),
+        "realised_on_sold_usd": (None if realised is None
+                                 else round(realised, 6)),
+        # ── AND THE SIDE STILL AT RISK, KEPT APART ─────────────────
+        "residual_qty": round(residual, 6),
+        "remaining_basis_usd": (None if remaining_basis_usd is None
+                                else round(remaining_basis_usd, 6)),
+        "position_closed": bool(pos["closed"]),
+        "closed_reason": pos["closed_reason"],
+        # ── WHAT THIS IS AND IS NOT ────────────────────────────────
+        "attribution": "AVERAGE_ENTRY_COST_PER_CONTRACT",
+        "attribution_is_the_lanes_own": (
+            "the same per-contract basis `remaining_basis` uses for a void "
+            "refund. Not invented here; a second convention on one position "
+            "would make the two disagree"),
+        "identity": ("realised_on_sold = exit_proceeds - allocated_basis - "
+                     "fees_on_sold"),
+        "this_is_not_realised_pnl": (
+            "`realised()` books on POSITION CLOSURE and is what the "
+            "drawdown and the loss stop read. This is the result on the "
+            "quantity already sold while the position is still open. Both "
+            "are correct for their own question and they are not "
+            "interchangeable"),
+        "this_is_not_open_position_net_cash": (
+            "net cash is (basis out - proceeds back + fees) over the WHOLE "
+            "clip, so it mixes the realised result on what was sold with "
+            "the cost still tied up in what is held. It overstates a "
+            "partial loss by the remaining basis AND by the residual's "
+            "share of the entry fee -- TWO terms. A correction: I first "
+            "wrote that it differed by the remaining basis alone, and on "
+            "the demonstration's own figures (fees 0.25 entry, 0.15 exit) "
+            "that identity misses by exactly the 0.10 of entry fee sitting "
+            "on the 6 contracts still held"),
+        "net_cash_exceeds_this_by_usd": (None if excess is None
+                                         else round(excess, 6)),
+        "net_cash_identity": (
+            "open_position_net_cash = realised_on_sold - remaining_basis - "
+            "entry_fees_allocated_to_residual"),
+        "unrealised_on_the_residual": NOT_IDENTIFIED,
+        "why_unrealised_is_not_identified": (
+            "marking the residual needs a funded mark, and this lane has no "
+            "funded mark source. Reported NOT_IDENTIFIED rather than 0"),
+        "fees_are_provisional_on": int(f["provisional_fills"] or 0),
+        "realised_on_sold_is_provisional": bool(f["provisional_fills"]),
+    }
+
+
 async def check_servicing(conn, *, intent_id: str, account_id: str,
                           venue: str) -> dict:
     """MAY WE SERVICE A POSITION WE ALREADY HOLD? OWNERSHIP, NOT PERMISSION.
@@ -2555,14 +2779,35 @@ async def command_center(conn) -> dict:
                 "what_it_means",
                 "a recorded discrepancy an operator must close")})
     for r in stranded:
+        # ── THE PARTIAL RESULT ALREADY INSIDE THIS OPEN POSITION ──────
+        #
+        # An open position can already contain a realised gain or loss on
+        # quantity it has sold. Showing only "residual 6" told an operator
+        # nothing about the -$1.71 sitting inside it, and `realised()`
+        # reports 0.00 here because it books on closure. So each held
+        # position carries its own partial breakdown, component by
+        # component, beside the residual.
+        _sold = await realised_on_sold(conn, r["intent_id"])
         discrepancies.append({
             "kind": "RESIDUAL_INVENTORY_STILL_HELD",
             "intent_id": r["intent_id"], "residual_qty": r["residual"],
             "us_market_slug": r["us_market_slug"],
             "settlement": r["settlement"],
+            "partial_exit_result": (None if not _sold.get("ok") else {
+                k: _sold[k] for k in (
+                    "sold_qty", "exit_proceeds_usd", "basis_per_contract",
+                    "allocated_basis_usd", "fees_on_sold_usd",
+                    "realised_on_sold_usd", "remaining_basis_usd",
+                    "attribution", "realised_on_sold_is_provisional")}),
             "what_it_means": ("contracts this lane owns. They count against "
                              "every rail until an evidenced exit or an "
-                             "authoritative settlement removes them")})
+                             "authoritative settlement removes them"),
+            "and_what_is_already_realised": (
+                "`partial_exit_result` is the result on the quantity ALREADY "
+                "SOLD out of this position, on the lane's own average-entry-"
+                "cost basis. It is NOT `realised_pnl_usd` (which books on "
+                "closure) and NOT open-position net cash (which mixes the "
+                "sold result with the basis still held)")})
     return {
         "section": "Funded book",
         "label": "REAL MONEY — NEVER SUMMED WITH ANY MODELLED BOOK",
