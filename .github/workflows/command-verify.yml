@@ -6710,6 +6710,7 @@ jobs:
             tests/test_the_audit_drawdown_reproduction.py \
             tests/test_the_portfolio_group_bound_is_one_bound.py \
             tests/test_the_group_lifecycle_is_atomic_and_earned.py \
+            tests/test_the_group_holds_under_concurrency.py \
             2>&1 | tail -25 | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -6745,6 +6746,7 @@ jobs:
             tests/test_the_audit_drawdown_reproduction.py \
             tests/test_the_portfolio_group_bound_is_one_bound.py \
             tests/test_the_group_lifecycle_is_atomic_and_earned.py \
+            tests/test_the_group_holds_under_concurrency.py \
             --junitxml=/tmp/risk.xml 2>&1 | tail -15
           rc=${PIPESTATUS[0]}
           # THE GUARD IS A MODULE, NOT A HEREDOC. A `<<'PYX'` body at column

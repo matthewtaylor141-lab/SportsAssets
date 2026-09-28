@@ -197,8 +197,24 @@ BEGIN
     IF NEW.portfolio_group_id IS NULL THEN
         RETURN NEW;
     END IF;
+    -- ── `FOR NO KEY UPDATE`, NOT `FOR SHARE`. THIS IS A SERIALISATION
+    -- FIX, AND THE RACE WAS REPRODUCED BEFORE IT WAS MADE.
+    --
+    -- Two connections can both hold a SHARE lock on the same group row. Each
+    -- then runs the same-contract check below and sees no sibling, because the
+    -- other's leg is uncommitted and therefore invisible. Both commit. Measured
+    -- with two asyncpg connections on a real database: a PRIMARY and a HEDGE
+    -- both committed on `aec-race-ml` -- ONE CONTRACT, which is same-contract
+    -- netting and precisely what this strategy is not. The check read as
+    -- enforcement and enforced nothing under concurrency.
+    --
+    -- `FOR NO KEY UPDATE` is exclusive against itself, so the second inserter
+    -- WAITS, then sees the first's committed leg and is refused. It is chosen
+    -- over `FOR UPDATE` because it does not conflict with the `FOR KEY SHARE`
+    -- lock that the intents table's own foreign key takes on this row, so
+    -- unrelated inserts elsewhere are not blocked behind pair assembly.
     SELECT * INTO g FROM public.bettor_funded_portfolio_groups
-     WHERE group_id = NEW.portfolio_group_id FOR SHARE;
+     WHERE group_id = NEW.portfolio_group_id FOR NO KEY UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'leg % names group % which does not exist',
             NEW.intent_id, NEW.portfolio_group_id;
@@ -247,6 +263,50 @@ CREATE TRIGGER bettor_funded_leg_matches_group_trg
                                venue, event_key, us_market_slug
     ON bettor_funded_intents
     FOR EACH ROW EXECUTE FUNCTION bettor_funded_leg_matches_group();
+
+-- ── 7b · AND THE GROUP CANNOT MOVE OUT FROM UNDER ITS LEGS ──────────
+--
+-- The trigger above re-checks a leg whenever the leg changes. It cannot see a
+-- change to the GROUP: setting the group's `event_key` to a different fixture
+-- after two legs joined it would leave both bindings quietly false, and every
+-- check that had passed would have been validated against a value no longer
+-- there. `bettor_funded_group_matched_volume` and the combined economics read
+-- those fields, so the damage is not cosmetic.
+--
+-- A GROUP'S IDENTITY IS WHAT IT IS. Account, venue and fixture are fixed at
+-- creation; a different fixture is a different group. Structure may still be
+-- refined (SINGLE_LEG becoming INDIRECT_MIDDLE when a hedge is sought), and
+-- `closed_at`/`closure`/`hedge_intent` are the group's own lifecycle.
+--
+-- AND A CLOSED GROUP IS HISTORY. Re-opening one would make its recorded closure
+-- reason a lie and hand back a capacity slot whose release was already
+-- accounted for.
+CREATE OR REPLACE FUNCTION bettor_funded_group_identity_is_fixed()
+RETURNS trigger AS $$
+BEGIN
+    IF NEW.group_id IS DISTINCT FROM OLD.group_id
+       OR NEW.account_id IS DISTINCT FROM OLD.account_id
+       OR NEW.venue IS DISTINCT FROM OLD.venue
+       OR NEW.event_key IS DISTINCT FROM OLD.event_key THEN
+        RAISE EXCEPTION 'group identity is fixed: (%,%,%,%) cannot become '
+                        '(%,%,%,%) -- its legs were validated against the first',
+            OLD.group_id, OLD.account_id, OLD.venue, OLD.event_key,
+            NEW.group_id, NEW.account_id, NEW.venue, NEW.event_key;
+    END IF;
+    IF OLD.closed_at IS NOT NULL AND NEW.closed_at IS NULL THEN
+        RAISE EXCEPTION 'group % closed as % and is not re-opened: its closure '
+                        'is recorded history and its capacity was released',
+            OLD.group_id, OLD.closure;
+    END IF;
+    RETURN NEW;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS bettor_funded_group_identity_is_fixed_trg
+    ON bettor_funded_portfolio_groups;
+CREATE TRIGGER bettor_funded_group_identity_is_fixed_trg
+    BEFORE UPDATE ON bettor_funded_portfolio_groups
+    FOR EACH ROW EXECUTE FUNCTION bettor_funded_group_identity_is_fixed();
 
 -- ── 8 · RESERVATIONS ────────────────────────────────────────────────
 CREATE TABLE IF NOT EXISTS bettor_funded_leg_reservations (
@@ -316,8 +376,11 @@ CREATE OR REPLACE FUNCTION bettor_funded_reservation_matches_group()
 RETURNS trigger AS $$
 DECLARE g record; i record;
 BEGIN
+    -- `FOR NO KEY UPDATE` FOR THE SAME REASON AS THE LEG TRIGGER: a SHARE lock
+    -- lets two connections reserve the same leg role of the same group
+    -- concurrently, each blind to the other's uncommitted row.
     SELECT * INTO g FROM public.bettor_funded_portfolio_groups
-     WHERE group_id = NEW.group_id FOR SHARE;
+     WHERE group_id = NEW.group_id FOR NO KEY UPDATE;
     IF NOT FOUND THEN
         RAISE EXCEPTION 'reservation % names group % which does not exist',
             NEW.reservation_id, NEW.group_id;
