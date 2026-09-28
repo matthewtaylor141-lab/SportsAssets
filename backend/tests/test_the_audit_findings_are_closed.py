@@ -124,8 +124,26 @@ def test_a9_the_candidate_uses_the_venues_event_namespace_not_the_providers():
     assert 'event_key=ident.get("venue_event_key")' in src
     assert 'provider_event_id=quote["event_id"]' in src, (
         "the provider's id is still recorded -- it is just not the key")
+    # THE QUERY MOVED; THE GUARANTEE DID NOT (2026-09-28). This asserted the
+    # literal `SELECT event_slug FROM us_premap` inside `resolve_venue_identity`.
+    # That read now also has to answer whether the contract is the real fixture
+    # or an eBattles simulation of it, so it takes the whole catalogue row from
+    # `bettor_venue_realism.CATALOGUE_SQL` -- one round trip, because
+    # `venue_pace` is a process-wide serial gate.
+    #
+    # The property A9 is about is unchanged and is asserted in two halves: the
+    # resolver takes its key from THAT query's row, and THAT query reads
+    # `event_slug` from `us_premap`. Chasing the query to its new home keeps the
+    # namespace guarantee; asserting only the first half would let the query
+    # start selecting the provider's id without this test noticing.
+    from sportsassets import bettor_venue_realism as _vreal
+
     ident_src = inspect.getsource(L.resolve_venue_identity)
-    assert "SELECT event_slug FROM us_premap" in ident_src
+    assert "vreal.CATALOGUE_SQL" in ident_src
+    assert 'out["venue_event_key"] = (row or {}).get("event_slug")' in ident_src
+    assert "event_slug" in _vreal.CATALOGUE_SQL
+    assert "FROM us_premap" in _vreal.CATALOGUE_SQL
+    assert "event_slug" in _vreal.CATALOGUE_FIELDS
 
 
 def test_a9_the_plan_refuses_when_the_event_rail_cannot_be_measured():

@@ -1,0 +1,135 @@
+# THE FUNDED LANE'S PRODUCTION STATE. READ-ONLY. ITS OWN FILE ON PURPOSE.
+#
+# WHY NOT IN render-ops.yml, WHICH IS WHERE EVERY OTHER READ LIVES:
+#
+# GitHub caps a workflow at 512,000 bytes. `render-ops.yml` stands at 511,578 --
+# 422 bytes of headroom -- and `scripts/check_workflows.py` already FAILS it for
+# being under the 32,768-byte minimum, with the reason spelled out: "close enough
+# to the ceiling that an ordinary comment can disable it."
+#
+# I added a 1,824-byte statement to it anyway and took it over the ceiling. Every
+# dispatch then returned `startup_failure`, which is exactly the 2026-09-21
+# incident the guard was written for, and `yaml.safe_load` passed throughout --
+# also exactly as that guard's docstring warns. Two dispatches went out before I
+# looked at the checker that was sitting in the repo.
+#
+# render-ops.yml holds the trading kill switch and the only production database
+# read. It must not carry another byte. So this read lives here, where it has a
+# whole file of headroom and cannot disable anything.
+#
+# WHAT THIS DOES AND DOES NOT TOUCH. Every statement is a SELECT. There is no
+# `confirm` input and no write path, so this workflow cannot change production
+# even by mistake. No secret is selected: the authorization and limit rows are
+# read for their KEY NAMES and VALUE LENGTHS only.
+name: funded-readback
+
+on:
+  workflow_dispatch:
+    inputs:
+      section:
+        description: 'Which read'
+        required: true
+        type: choice
+        options:
+          - all             # every section below, in order
+          - schema          # which funded migrations and objects exist here
+          - book            # the funded book by state, and its totals
+          - account         # the account registry and its reconciliation status
+          - authorization   # the funded keys by NAME and LENGTH only, never values
+          - pairs           # groups, reservations, decisions, models (needs 131+)
+          - heartbeat       # the scheduled lane's own last word
+      database:
+        description: 'Render Postgres name'
+        required: false
+        default: 'sportsassets-db'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: funded-readback
+  cancel-in-progress: false
+
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Read
+        env:
+          SECTION: ${{ inputs.section }}
+          DB: ${{ inputs.database }}
+          KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          set -uo pipefail
+          API=https://api.render.com/v1
+          [ -n "${KEY_SECRET:-}" ] || { echo "no RENDER_API_KEY secret on this runner"; exit 1; }
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY_SECRET" \
+                    -H "Accept: application/json" "$API$1"; }
+          PG=$(get "/postgres?name=$DB&limit=20" \
+               | jq -r --arg n "$DB" '.[]? | select(.postgres.name==$n) | .postgres.id' \
+               | head -1)
+          [ -n "$PG" ] || { echo "no database named $DB"; exit 1; }
+          command -v psql >/dev/null 2>&1 || {
+            sudo apt-get update -qq >/dev/null 2>&1
+            sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+          get "/postgres/$PG/connection-info" > /tmp/ci.json
+          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
+          PW=$(jq -r '.password // empty' /tmp/ci.json)
+          [ -n "$EXT" ] || { echo "no external connection string"; exit 1; }
+          echo "::add-mask::$PW"
+          # ── EVERY SECTION IS ITS OWN psql CALL ──────────────────────
+          #
+          # NOT one multi-statement string. Two reasons, and the second is the
+          # one that matters: a missing table makes psql fail at PARSE time, so
+          # one absent object in a combined read destroys every answer in it --
+          # including the answers that would have told us WHICH objects are
+          # missing. Separate calls fail independently and the rest still report.
+          run_sql() {
+            local label="$1"; shift
+            echo; echo "════ $label ════"
+            PGOPTIONS="-c statement_timeout=60000" timeout 120 \
+              psql "$EXT" -X -v ON_ERROR_STOP=0 -c "$1" 2>&1 \
+              | grep -v -F "$PW" | head -120
+          }
+          want() { [ "$SECTION" = "all" ] || [ "$SECTION" = "$1" ]; }
+
+          if want schema; then
+            run_sql "funded migrations applied here" \
+              "SELECT version, applied_at::timestamptz(0) applied FROM schema_migrations WHERE substring(version,1,3) IN ('125','126','127','128','131','132','133','134','135') ORDER BY version"
+            run_sql "which funded objects exist" \
+              "SELECT table_name, 'present' state FROM information_schema.tables WHERE table_schema='public' AND table_name LIKE 'bettor_funded%' ORDER BY table_name"
+          fi
+          if want book; then
+            run_sql "the funded book by state and kind" \
+              "SELECT coalesce(state,'none') state, coalesce(kind,'none') kind, count(*) n, round(sum(collateral_usd),2) collateral, round(sum(residual_qty),2) residual FROM bettor_funded_intents GROUP BY 1,2 ORDER BY 1,2"
+            run_sql "funded totals -- an empty book is a result" \
+              "SELECT (SELECT count(*) FROM bettor_funded_intents) intents, (SELECT count(*) FROM bettor_funded_fills) fills, (SELECT count(*) FROM bettor_funded_economics) econ_events, (SELECT round(coalesce(sum(amount_usd),0),2) FROM bettor_funded_economics) net_signed_usd"
+          fi
+          if want account; then
+            run_sql "the account registry and its reconciliation status" \
+              "SELECT account_id, status, paused, accounting_status, paused_at::timestamptz(0) paused_at, last_verified_at::timestamptz(0) verified, left(coalesce(pause_reason,''),100) reason FROM bettor_desk_accounts ORDER BY opened_at"
+            run_sql "the accounting incident, if any" \
+              "SELECT incident_id, pnl_reliability, measured->>'identity_drift_usd' drift_usd, preserved_counts FROM bettor_desk_incidents ORDER BY incident_id"
+          fi
+          if want authorization; then
+            # NAMES AND LENGTHS ONLY. No secret is selected and none is printed.
+            run_sql "funded authorization keys -- name and size, never value" \
+              "SELECT key, length(value::text) value_chars FROM ingestion_state WHERE key LIKE 'bettor_funded%' ORDER BY key"
+          fi
+          if want pairs; then
+            # 131+ ONLY. Each runs alone so an unmigrated database reports the
+            # absence per table instead of losing the whole section.
+            run_sql "portfolio groups" \
+              "SELECT coalesce(structure,'none') structure, count(*) n, count(*) FILTER (WHERE closed_at IS NULL) open FROM bettor_funded_portfolio_groups GROUP BY 1"
+            run_sql "leg reservations by state" \
+              "SELECT state, count(*) n, round(sum(collateral_usd),2) collateral FROM bettor_funded_leg_reservations GROUP BY 1 ORDER BY 1"
+            run_sql "decisions by action" \
+              "SELECT action, count(*) n, count(*) FILTER (WHERE realised_known) realised FROM bettor_funded_decisions GROUP BY 1 ORDER BY 1"
+            run_sql "the model registry and which version is approved" \
+              "SELECT model_key, model_version, state, estimator, approved_at::timestamptz(0) approved, approved_by FROM bettor_funded_models ORDER BY created_at DESC LIMIT 10"
+          fi
+          if want heartbeat; then
+            run_sql "every lane's last word, newest first" \
+              "SELECT service, status, beat_at::timestamptz(0) beat_at, extract(epoch FROM (now()-beat_at))::int age_s FROM service_heartbeats ORDER BY beat_at DESC LIMIT 15"
+          fi
+          echo; echo "read complete; every statement above was a SELECT"

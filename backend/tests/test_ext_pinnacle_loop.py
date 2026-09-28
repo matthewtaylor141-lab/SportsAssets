@@ -253,6 +253,58 @@ def _fresh_iso(offset_s: float = -2.0) -> str:
     return at.strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+#: THE SOCCER COMPETITION THESE CYCLE FIXTURES USE.
+#:
+#: It was `soccer_epl` until 2026-09-28, when research-sql run 258 established
+#: that the US venue lists ZERO contracts carrying the token `epl` -- its
+#: English top-flight rows are eBattles simulations -- and the loop stopped
+#: requesting it. These fixtures were keyed on it, so they went quiet: the
+#: cycle no longer iterated the sport whose events they supplied, which reads
+#: exactly like a cycle that found nothing.
+#:
+#: The SUBJECT of each test is unchanged, and it is not the competition: it is
+#: the two-vocabulary split (`markets.sport` = 'Soccer' against the family
+#: 'soccer'), the completeness of the refusal record, and the pre-scoring
+#: refusal tally. So the key moves to a competition the venue actually lists
+#: and everything else stands.
+SOCCER_KEY = "soccer_uefa_nations_league"
+
+
+def _stub_venue_board(monkeypatch, *tokens):
+    """The venue's soccer board, without depending on us_premap fixture rows.
+
+    `pass_once` derives its soccer candidates from the board the venue is
+    listing NOW, because that board is seasonal -- on 2026-09-28 it was almost
+    entirely national-team football. A cycle test that does not stub it gets
+    whatever `us_premap` happens to hold in the test database, which is not the
+    subject of any test here.
+    """
+    async def _board(conn):
+        return {"read": True, "source": "stub",
+                "board": [(t, 9) for t in tokens], "why": "stubbed"}
+
+    monkeypatch.setattr(loop, "venue_soccer_competitions", _board)
+
+
+def _stub_sport_catalogue(monkeypatch, *keys):
+    """Confirm these provider keys without a network call.
+
+    `pass_once` now reads the provider's UNMETERED catalogue and fetches only
+    the competitions the provider itself lists, so a cycle test that does not
+    stub this runs on the confirmed set alone (`baseball_mlb`) and never
+    reaches the soccer fixture. Leaving it unstubbed was also how
+    `fetch_sport_catalogue`'s missing error handling surfaced: it raised
+    httpx.ProxyError straight out of the cycle.
+    """
+    async def _cat(*, api_key, timeout=20.0):
+        assert api_key, "the catalogue read must pass the credential through"
+        return {"ok": True, "status": 200, "metered": False,
+                "sports": [{"key": k, "title": k, "group": "x",
+                            "active": True} for k in keys]}
+
+    monkeypatch.setattr(loop, "fetch_sport_catalogue", _cat)
+
+
 def _event(stamp=None):
     stamp = stamp or _fresh_iso()
     return {
@@ -358,9 +410,12 @@ async def test_one_cycle_writes_a_complete_refusal_record(monkeypatch):
 
         monkeypatch.setenv("EDGE_ODDS_API_KEY", "x" * 32)
 
+        _stub_venue_board(monkeypatch, "unl")
+        _stub_sport_catalogue(monkeypatch, "baseball_mlb", SOCCER_KEY)
+
         async def fake_fetch(sport_key, *, api_key, timeout=20.0):
             assert api_key, "the loop must pass the credential through"
-            if sport_key != "soccer_epl":
+            if sport_key != SOCCER_KEY:
                 return {"ok": True, "events": [],
                         "received_at": time.time(),
                         "credits_used": "1", "credits_remaining": "9"}
@@ -480,8 +535,11 @@ async def test_a_second_cycle_does_not_double_count(monkeypatch):
             ext.EXPERIMENT_ID)
         monkeypatch.setenv("EDGE_ODDS_API_KEY", "x" * 32)
 
+        _stub_venue_board(monkeypatch, "unl")
+        _stub_sport_catalogue(monkeypatch, "baseball_mlb", SOCCER_KEY)
+
         async def fake_fetch(sport_key, *, api_key, timeout=20.0):
-            if sport_key != "soccer_epl":
+            if sport_key != SOCCER_KEY:
                 return {"ok": True, "events": [],
                         "received_at": time.time()}
             return {"ok": True, "events": [_event()],
@@ -549,8 +607,11 @@ async def test_refusals_before_scoring_are_still_counted(monkeypatch):
             {"name": "Barcelona", "price": 3.6},
             {"name": "Draw", "price": 3.5}]
 
+        _stub_venue_board(monkeypatch, "unl")
+        _stub_sport_catalogue(monkeypatch, "baseball_mlb", SOCCER_KEY)
+
         async def fake_fetch(sport_key, *, api_key, timeout=20.0):
-            if sport_key != "soccer_epl":
+            if sport_key != SOCCER_KEY:
                 return {"ok": True, "events": [], "received_at": time.time()}
             return {"ok": True, "events": [unmapped],
                     "received_at": time.time()}
