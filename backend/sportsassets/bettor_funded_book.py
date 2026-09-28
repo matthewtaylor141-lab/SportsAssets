@@ -3120,15 +3120,58 @@ async def last_scheduled_decision(conn) -> dict:
                 "why": ("the cycle heartbeat holds a %s rather than an "
                         "object" % type(beat).__name__),
                 "key": SCHEDULED_CYCLE_KEY}
+    # ── THE LATENCY MEASUREMENT, READ OUT HERE ──────────────────────
+    #
+    # Owner requirement: "Persist the latency measurements through the
+    # actual heartbeat writer and operator reader -- not only in the
+    # cycle's returned dictionary."
+    #
+    # AND IT IS DELIBERATELY NOT GATED ON `funded_servicing`. Latency is a
+    # property of the EVALUATION lane; servicing is a property of the
+    # FUNDED BOOK. With an empty funded book there is no servicing
+    # decision, so gating the two together would make the latency
+    # measurement disappear in exactly the state production is in right
+    # now -- and it would have looked like the build lacked the field
+    # rather than like the reader dropped it. That is the same class of
+    # error as the heartbeat writer omitting `odds_freshness` from its key
+    # subset, one layer further out.
+    freshness = beat.get("odds_freshness")
+    latency = {
+        "available": freshness is not None,
+        "measurements": freshness,
+        "why_absent": (None if freshness is not None else
+                       "the serving build does not persist `odds_freshness` "
+                       "on the heartbeat, or no cycle has completed since "
+                       "it began to. An absent block is NOT a measurement "
+                       "of zero delay"),
+        "reading": (
+            "`provider_lag_s` is how old the quote already was on arrival; "
+            "`our_processing_s` is the delay we added. The 30 s rule "
+            "governs their SUM and is unchanged. `self_inflicted_stale` "
+            "counts refusals the provider left us room to avoid -- that is "
+            "the figure the latency work has to move. "
+            "`deferred_candidates` is coverage that was never judged, "
+            "reported so a better stale rate cannot be produced by "
+            "examining fewer candidates"),
+    }
+
     svc = beat.get("funded_servicing")
     if svc is None:
         return {"available": False,
                 "at": beat.get("at"), "cycle_state": beat.get("state"),
+                "cycle_label": beat.get("cycle_label"),
                 "writer": beat.get("writer"),
+                # CARRIED EVEN HERE. The cycle DID run and DID measure; only
+                # the servicing projection is missing, and an operator asking
+                # "is the evaluation lane healthy?" must not be told nothing
+                # because the funded book happens to be empty.
+                "latency": latency,
                 "why": ("the last cycle recorded no servicing decision. A "
                         "build older than the one that persists it writes "
                         "this row without the field, so an absent decision "
-                        "here means the SERVING BUILD, not an idle lane"),
+                        "here means the SERVING BUILD, not an idle lane. It "
+                        "is ALSO what an empty funded book looks like: there "
+                        "are no positions to service"),
                 "key": SCHEDULED_CYCLE_KEY}
     return {
         "available": True,
@@ -3137,6 +3180,7 @@ async def last_scheduled_decision(conn) -> dict:
         "cycle_label": beat.get("cycle_label"),
         "writer": beat.get("writer"),
         "servicing": svc,
+        "latency": latency,
         "is_the_last_pass_not_a_history": (
             "one row per position, overwritten each cycle. For the sequence "
             "of what happened, read the fills and the discrepancies"),

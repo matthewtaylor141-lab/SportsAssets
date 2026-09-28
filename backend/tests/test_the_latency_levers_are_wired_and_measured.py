@@ -126,7 +126,13 @@ def test_lever_b_orders_by_the_providers_own_timestamp():
     those events sort to the end.
     """
     assert "events.sort(key=lambda e: (_ages[id(e)] is None," in CYCLE_SRC
-    assert "-(_ages[id(e)] or 0.0)))" in CYCLE_SRC
+    assert "-(_ages[id(e)] or 0.0)," in CYCLE_SRC
+    # AND A TOTAL ORDER. The event id is the final tiebreak: two events
+    # sharing a `last_update` would otherwise be ordered by the provider's
+    # sequence, so a rerun on the same payload could evaluate a different
+    # subset once MAX_PER_CYCLE bites. A measurement that moves when the
+    # data did not is not a measurement.
+    assert 'str((e or {}).get("id") or "")))' in CYCLE_SRC
 
 
 def test_lever_b_drops_nothing():
@@ -174,24 +180,57 @@ def test_lever_c_keys_on_the_instrument_and_the_side():
     markets. Either would return one book as the answer for a different
     instrument, which is not deduplication -- it is a wrong read.
     """
-    assert '_ck = (ident["us_market_slug"], ident["intent"])' in CYCLE_SRC
+    assert '_ck = (ident["us_market_slug"], ident["intent"],' in CYCLE_SRC
+    # AND THE CURRENCY EVIDENCE IS PART OF THE REQUEST IDENTITY, digested
+    # rather than named by a field: my first version keyed on
+    # `_cev["subscription_key"]`, which `book_currency_evidence` does not
+    # return, so it read None for every candidate and the key silently
+    # degraded to (slug, intent).
+    assert '_evidence_key(_cev.get("subscription"))' in CYCLE_SRC
+    assert '_evidence_key(_cev.get("revalidation"))' in CYCLE_SRC
     # AND NOT THE BROADER KEYS.
     for wrong in ('_ck = (ident["condition_id"]',
                   '_ck = ident["condition_id"]',
-                  '_ck = (quote["event_id"]'):
+                  '_ck = (quote["event_id"]',
+                  '_cev.get("subscription_key")'):
         assert wrong not in CYCLE_SRC, wrong
 
 
 def test_lever_c_does_not_cache_a_refusal():
     """A transient venue error must not become the cycle's answer.
 
-    Caching a failed read would suppress every retry on that instrument
+    Recording a failed read would suppress every retry on that instrument
     for the rest of the cycle: one timeout would refuse every candidate on
     that contract, and the cause would be an optimisation rather than the
-    venue. So only `ok` reads enter the cache.
+    venue. So only `ok` reads claim the instrument.
     """
-    assert "if vq.get(\"ok\"):\n                    vq_cache[_ck] = vq" \
-        in CYCLE_SRC
+    assert 'if vq.get("ok"):' in CYCLE_SRC
+    assert 'vq_cache[_ck] = {"first_event_id"' in CYCLE_SRC
+
+
+def test_lever_c_refuses_the_duplicate_rather_than_sharing_the_book():
+    """SHARED DEPTH MUST NOT BECOME TWO EXECUTABLE QUANTITIES.
+
+    THE BUG THIS ASSERTS AGAINST, which my first version had. Handing the
+    cached `vq` to a second candidate gives it the same
+    `acquisition_ladder` and `depth`; each then sizes independently as
+    though it owned all of it, so two candidates on ONE instrument could
+    together claim twice the quantity the book can fill. That is a sizing
+    error that reaches the wire, and it is strictly worse than the
+    duplicate read it was meant to save.
+
+    The cache therefore stores a CLAIM -- the id of the event that got
+    there first -- and never a payload that could be handed on.
+    """
+    assert L.R_INSTRUMENT_ALREADY_EVALUATED == \
+        "INSTRUMENT_ALREADY_EVALUATED_THIS_FETCH"
+    # THE DUPLICATE TAKES THE REFUSAL PATH AND DOES NOT REACH A DECISION.
+    seg = CYCLE_SRC[CYCLE_SRC.index("if _ck in vq_cache:"):]
+    assert "R_INSTRUMENT_ALREADY_EVALUATED" in seg.split("continue")[0]
+    # AND NO PAYLOAD IS EVER SERVED FROM THE CACHE.
+    assert "vq = vq_cache[_ck]" not in CYCLE_SRC
+    assert "executable" in L.WHY_DUPLICATE_INSTRUMENT
+    assert "never reused can never be stale" in L.WHY_DUPLICATE_INSTRUMENT
 
 
 def test_lever_c_rechecks_freshness_at_the_actual_decision():
@@ -222,9 +261,10 @@ def test_lever_c_retains_each_candidates_own_observation_time():
     observation times" requires.
     """
     assert "quote = pinnacle_h2h(event, received_at=received_at)" in CYCLE_SRC
-    # The cache holds venue quotes only -- never the provider quote.
-    assert "vq_cache[_ck] = vq" in CYCLE_SRC
+    # The claim holds an event id and an instant -- never a provider quote,
+    # and never a book payload.
     assert "vq_cache[_ck] = quote" not in CYCLE_SRC
+    assert '"first_event_id": quote.get("event_id")' in CYCLE_SRC
 
 
 # ═════════════════════════════════════════════════════════════════════
@@ -361,3 +401,54 @@ def test_the_levers_do_not_increase_venue_requests():
     # The counter increments in exactly one place: the real read.
     assert CYCLE_SRC.count("lat[\"venue_requests\"] += 1") == 1
     assert "lat[\"deduplicated_requests\"] += 1" in CYCLE_SRC
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 7 · THE OPERATOR READER SURFACES IT, NOT ONLY THE WRITER
+# ═════════════════════════════════════════════════════════════════════
+
+def test_the_operator_reader_surfaces_the_latency_block():
+    """Owner requirement: through the heartbeat writer AND operator reader.
+
+    A measurement that reaches the database and stops there is not
+    observable by an operator, which is the whole point of measuring it.
+    """
+    from sportsassets import bettor_funded_book as FB
+    src = inspect.getsource(FB.last_scheduled_decision)
+    assert 'beat.get("odds_freshness")' in src
+    assert '"latency": latency' in src
+
+
+def test_latency_is_not_gated_on_a_servicing_decision():
+    """An empty funded book must not hide the evaluation lane's health.
+
+    THE BUG THIS PREVENTS, AND IT IS THE CURRENT PRODUCTION STATE. The
+    reader returns `available: False` when `funded_servicing` is absent,
+    and the funded book IS empty -- so gating the latency block on that key
+    would make the measurement vanish in exactly the situation it is needed,
+    and the absence would read as "the build lacks the field" rather than
+    "the reader dropped it". That is the same class of error as the
+    heartbeat writer omitting `odds_freshness` from its key subset, one
+    layer further out.
+
+    So the assertion is positional: the latency block must be BUILT before
+    the `svc is None` branch and RETURNED from it.
+    """
+    from sportsassets import bettor_funded_book as FB
+    src = inspect.getsource(FB.last_scheduled_decision)
+    built = src.index('freshness = beat.get("odds_freshness")')
+    branch = src.index('svc = beat.get("funded_servicing")')
+    assert built < branch, "latency must be measured before the svc branch"
+    # AND THE UNAVAILABLE BRANCH MUST STILL CARRY IT.
+    tail = src[branch:]
+    early = tail.index('"available": False')
+    ret = tail.index('"available": True')
+    assert '"latency": latency' in tail[early:ret], (
+        "the no-servicing branch must still return the latency block")
+
+
+def test_an_absent_latency_block_is_not_a_measurement_of_zero():
+    """Absence says so by name rather than reading as a fast cycle."""
+    from sportsassets import bettor_funded_book as FB
+    src = inspect.getsource(FB.last_scheduled_decision)
+    assert "NOT a measurement" in src and "zero delay" in src
