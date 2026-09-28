@@ -335,11 +335,24 @@ async def check_rails(conn, plan: dict, effective: dict, *,
             exp["capital_hours_usd_h"],
             "cash x hours held, integrated over the funded fills. A new "
             "order contributes nothing until it fills"),
+        # THE BASIS LINE NOW STATES WHAT IS ACTUALLY MEASURED (2026-09-28).
+        # It read "over %d closed funded position(s)", which was true of the
+        # count and false as a description of the rail: the curve omitted
+        # every loss realised on a PARTIAL exit while inventory stayed open,
+        # so a stop could be breached without tripping. `realised` now books
+        # those too, and the basis names both components -- a rail whose
+        # stated basis is narrower than its measurement is how a blind
+        # control keeps looking complete.
         "MAX_DRAWDOWN": (
             real["max_drawdown_usd"],
             "the worst peak-to-trough of the realised equity curve over %d "
-            "closed funded position(s), summed from bettor_funded_economics"
-            % real["closed_positions"]),
+            "closed funded position(s) and %d partial exit(s) on positions "
+            "still open, in the order each result was taken. Closures from "
+            "bettor_funded_economics; partial results from the fill ledger "
+            "at average entry cost. Inventory still HELD contributes "
+            "nothing -- it is an asset at cost, not a loss"
+            % (real["closed_positions"],
+               real.get("partially_realised_results", 0))),
     }
     rails, over, unmeasured = [], [], []
     for rail, limit in sorted(effective.items()):

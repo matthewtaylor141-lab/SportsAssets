@@ -1675,9 +1675,21 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
                                        venue=venue)
     out["pnl"] = await FB.pnl(conn, account_id=account_id, venue=venue)
     approved = await _approved(conn)
+    # THE FOUR QUANTITIES, FROM THE ONE PLACE THAT KEEPS THEM APART.
+    # `loss_controls` reports realised drawdown, unrealised P&L (unknown
+    # here, never zero), cash usage and worst-case outstanding exposure as
+    # four separate measurements, with each control's scope, trigger and
+    # response. It is read BEFORE the loss stop below so the stop is stated
+    # beside its bound rather than alone -- a trigger read on its own gets
+    # mistaken for a maximum loss, which is exactly what happened when the
+    # $40 stop was presented as the worst case on a $100 position.
+    eff_limits = (EX.effective_limits(approved)["effective"]
+                  if approved else None)
+    out["loss_controls"] = await FB.loss_controls(
+        conn, account_id=account_id, venue=venue,
+        approved_limits=eff_limits)
     if approved:
-        eff = EX.effective_limits(approved)
-        stop = float(eff["effective"].get("MAX_DRAWDOWN") or 0.0)
+        stop = float(eff_limits.get("MAX_DRAWDOWN") or 0.0)
         dd = float(out["pnl"]["max_drawdown_usd"])
         out["loss_stop"] = {
             "rail": "MAX_DRAWDOWN", "limit_usd": stop,
@@ -1686,12 +1698,30 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
             "enforced_by": ("bettor_funded_execution.check_rails, on every "
                             "entry. A tripped stop refuses new exposure and "
                             "leaves servicing available"),
+            # THE MEASUREMENT NOW INCLUDES PARTIAL EXITS, and the counts say
+            # so, because "over N closed positions" was the wording that made
+            # a blind measurement look complete.
+            "includes_partial_exits": True,
+            "partially_realised_usd":
+                out["pnl"].get("partially_realised_usd"),
+            "partially_realised_open_positions":
+                out["pnl"].get("partially_realised_open_positions"),
+            # AND IT IS NOT THE MAXIMUM LOSS.
+            "is_not_a_maximum_loss": (
+                "a trigger on realised results. It refuses new exposure; it "
+                "cannot liquidate inventory at a price, so the loss on what "
+                "is already held can exceed it"),
+            "worst_case_total_loss_usd":
+                out["loss_controls"]["worst_case_total_loss_usd"],
             "basis": out["pnl"]["realised_basis"]}
     else:
         out["loss_stop"] = {
             "rail": "MAX_DRAWDOWN", "limit_usd": None,
             "measured_usd": out["pnl"]["max_drawdown_usd"],
             "tripped": None,
+            "includes_partial_exits": True,
+            "worst_case_total_loss_usd":
+                out["loss_controls"]["worst_case_total_loss_usd"],
             "why": ("no owner-approved limit set exists, so there is no "
                     "configured stop to compare the measured drawdown "
                     "against. The measurement is real; the threshold is an "

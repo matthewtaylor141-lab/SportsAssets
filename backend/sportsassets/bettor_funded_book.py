@@ -1771,6 +1771,68 @@ R_NOT_OUR_ROW = "THIS_POSITION_BELONGS_TO_ANOTHER_ACCOUNT_OR_VENUE"
 R_NO_ROW = "NO_SUCH_FUNDED_POSITION"
 
 
+def partial_realisation(*, entry_qty, entry_cash, entry_fees,
+                        exit_qty, exit_cash, exit_fees, residual) -> dict:
+    """THE ARITHMETIC OF A PARTIAL EXIT, PURE AND IN ONE PLACE.
+
+    ── WHY THIS IS FACTORED OUT ──────────────────────────────────────
+    Two callers need it now: `realised_on_sold`, which answers it for one
+    position on the operator surface, and `realised`, which must fold the
+    SAME result into the realised equity curve the loss stop reads. Two
+    copies of this would be two conventions on one position, and the
+    docstring below already warns that a second convention makes the two
+    disagree. So there is exactly one, and it is pure -- testable without
+    a database, and identical wherever it is called.
+
+        allocated_basis   = (entry_cash / entry_qty) * sold_qty
+        realised_on_sold  = exit_proceeds - allocated_basis - fees_on_sold
+
+    Returns None for every derived figure when `entry_qty` is 0 -- there
+    is then no per-contract basis, and inventing one would be the
+    favourable assumption this system refuses.
+    """
+    eq, ec = float(entry_qty or 0.0), float(entry_cash or 0.0)
+    sold, proceeds = float(exit_qty or 0.0), float(exit_cash or 0.0)
+    e_fee, x_fee = float(entry_fees or 0.0), float(exit_fees or 0.0)
+    resid = float(residual or 0.0)
+    per = (ec / eq) if eq > 0 else None
+    # FEES ARE ALLOCATED THE SAME WAY THE BASIS IS. An entry fee was paid
+    # on the whole clip, so only the sold fraction of it belongs to the
+    # sold result; every exit fee was paid to sell, so all of it does.
+    entry_fee_on_sold = (0.0 if eq <= 0 else e_fee * (sold / eq))
+    entry_fee_on_residual = (0.0 if eq <= 0 else e_fee * (resid / eq))
+    fees_on_sold = entry_fee_on_sold + x_fee
+    allocated = (None if per is None else per * sold)
+    realised = (None if allocated is None
+                else proceeds - allocated - fees_on_sold)
+    remaining_basis_usd = (None if per is None else per * resid)
+    # WHAT OPEN-POSITION NET CASH CARRIES THAT THIS DOES NOT, to the cent.
+    # Net cash is short of the sold result by the residual's basis AND by
+    # the residual's share of the entry fee -- two terms, not one.
+    excess = (None if remaining_basis_usd is None
+              else remaining_basis_usd + entry_fee_on_residual)
+    return {
+        "sold_qty": round(sold, 6),
+        "exit_proceeds_usd": round(proceeds, 6),
+        "basis_per_contract": (None if per is None else round(per, 8)),
+        "allocated_basis_usd": (None if allocated is None
+                                else round(allocated, 6)),
+        "entry_fees_total_usd": round(e_fee, 6),
+        "entry_fees_allocated_to_sold_usd": round(entry_fee_on_sold, 6),
+        "entry_fees_allocated_to_residual_usd": round(entry_fee_on_residual,
+                                                      6),
+        "exit_fees_usd": round(x_fee, 6),
+        "fees_on_sold_usd": round(fees_on_sold, 6),
+        "realised_on_sold_usd": (None if realised is None
+                                 else round(realised, 6)),
+        "residual_qty": round(resid, 6),
+        "remaining_basis_usd": (None if remaining_basis_usd is None
+                                else round(remaining_basis_usd, 6)),
+        "net_cash_exceeds_this_by_usd": (None if excess is None
+                                         else round(excess, 6)),
+    }
+
+
 async def realised_on_sold(conn, intent_id: str) -> dict:
     """WHAT THE QUANTITY ALREADY SOLD ACTUALLY MADE OR LOST.
 
@@ -1829,48 +1891,19 @@ async def realised_on_sold(conn, intent_id: str) -> dict:
         return {"ok": False, "refusal": R_NO_SUCH_INTENT,
                 "intent_id": intent_id}
 
-    eq, ec = float(f["entry_qty"]), float(f["entry_cash"])
-    sold, proceeds = float(f["exit_qty"]), float(f["exit_cash"])
-    e_fee, x_fee = float(f["entry_fees"]), float(f["exit_fees"])
-    residual = float(pos["residual"] or 0.0)
-    per = (ec / eq) if eq > 0 else None
-
-    # FEES ARE ALLOCATED THE SAME WAY THE BASIS IS. An entry fee was paid
-    # on the whole clip, so only the sold fraction of it belongs to the
-    # sold result; every exit fee was paid to sell, so all of it does.
-    entry_fee_on_sold = (0.0 if eq <= 0 else e_fee * (sold / eq))
-    entry_fee_on_residual = (0.0 if eq <= 0 else e_fee * (residual / eq))
-    fees_on_sold = entry_fee_on_sold + x_fee
-    allocated = (None if per is None else per * sold)
-    realised = (None if allocated is None
-                else proceeds - allocated - fees_on_sold)
-    remaining_basis_usd = (None if per is None else per * residual)
-    # WHAT OPEN-POSITION NET CASH CARRIES THAT THIS DOES NOT, to the cent.
-    # Net cash is short of the sold result by the residual's basis AND by
-    # the residual's share of the entry fee -- two terms, not one. Reported
-    # so the difference is arithmetic a reader can check, not an assertion.
-    excess = (None if remaining_basis_usd is None
-              else remaining_basis_usd + entry_fee_on_residual)
+    # THE ARITHMETIC IS `partial_realisation`'s, not repeated here. See its
+    # docstring: `realised` folds the same result into the equity curve the
+    # loss stop reads, and two copies would be two conventions.
+    m = partial_realisation(
+        entry_qty=f["entry_qty"], entry_cash=f["entry_cash"],
+        entry_fees=f["entry_fees"], exit_qty=f["exit_qty"],
+        exit_cash=f["exit_cash"], exit_fees=f["exit_fees"],
+        residual=(pos["residual"] or 0.0))
 
     return {
         "ok": True, "intent_id": intent_id,
         # ── THE SOLD SIDE, COMPONENT BY COMPONENT ──────────────────
-        "sold_qty": round(sold, 6),
-        "exit_proceeds_usd": round(proceeds, 6),
-        "basis_per_contract": (None if per is None else round(per, 8)),
-        "allocated_basis_usd": (None if allocated is None
-                                else round(allocated, 6)),
-        "entry_fees_total_usd": round(e_fee, 6),
-        "entry_fees_allocated_to_sold_usd": round(entry_fee_on_sold, 6),
-        "entry_fees_allocated_to_residual_usd": round(entry_fee_on_residual, 6),
-        "exit_fees_usd": round(x_fee, 6),
-        "fees_on_sold_usd": round(fees_on_sold, 6),
-        "realised_on_sold_usd": (None if realised is None
-                                 else round(realised, 6)),
-        # ── AND THE SIDE STILL AT RISK, KEPT APART ─────────────────
-        "residual_qty": round(residual, 6),
-        "remaining_basis_usd": (None if remaining_basis_usd is None
-                                else round(remaining_basis_usd, 6)),
+        **m,
         "position_closed": bool(pos["closed"]),
         "closed_reason": pos["closed_reason"],
         # ── WHAT THIS IS AND IS NOT ────────────────────────────────
@@ -1881,12 +1914,17 @@ async def realised_on_sold(conn, intent_id: str) -> dict:
             "would make the two disagree"),
         "identity": ("realised_on_sold = exit_proceeds - allocated_basis - "
                      "fees_on_sold"),
-        "this_is_not_realised_pnl": (
-            "`realised()` books on POSITION CLOSURE and is what the "
-            "drawdown and the loss stop read. This is the result on the "
-            "quantity already sold while the position is still open. Both "
-            "are correct for their own question and they are not "
-            "interchangeable"),
+        "this_is_now_inside_realised_pnl": (
+            "CORRECTED 2026-09-28. This field previously read '`realised()` "
+            "books on POSITION CLOSURE and is what the drawdown and the "
+            "loss stop read ... both are correct for their own question'. "
+            "The first half was true and the second was wrong. A loss stop "
+            "whose measurement omits a loss that has ALREADY BEEN TAKEN is "
+            "not correct for its own question -- it is a stop that does not "
+            "stop. `realised()` now folds this result into the realised "
+            "equity curve at the instant the last exit filled, so the same "
+            "number the operator reads here is the number MAX_DRAWDOWN is "
+            "measured against"),
         "this_is_not_open_position_net_cash": (
             "net cash is (basis out - proceeds back + fees) over the WHOLE "
             "clip, so it mixes the realised result on what was sold with "
@@ -2375,16 +2413,29 @@ def drawdown_from(closed: list[dict]) -> dict:
 
     Pure, so the loss stop can be tested without a database.
 
-    `closed` is one entry per CLOSED position -- `{"intent_id", "at", "net"}`
-    -- ordered here by closure time. Each contributes its net once, when it
-    closed, which is what a realised curve is: a position's entry cost is not a
-    loss while the contracts are still owned, and a round trip that came back
-    flat is not a drawdown just because cash left in between.
+    `closed` is one entry per BOOKED RESULT -- `{"intent_id", "at", "net"}` --
+    ordered here by the instant the result was taken. A position's entry cost
+    is not a loss while the contracts are still owned, and a round trip that
+    came back flat is not a drawdown just because cash left in between.
 
-    THE DEFECT THIS CLOSES. `check_rails` hardcoded MAX_DRAWDOWN to 0.0 on the
-    grounds that nothing had settled. That describes today. It cannot implement
-    a loss stop tomorrow, because the moment something DOES settle the rail
-    still reads zero and the stop never trips.
+    THE ARGUMENT NAME IS HISTORICAL AND NARROWER THAN THE INPUT (2026-09-28).
+    It is no longer only closures. `realised` now also passes the
+    `realised_on_sold` result of every OPEN position that has sold some of its
+    inventory, booked at its last exit fill. This function needed no change --
+    it was always "a sequence of booked results" -- but the previous wording
+    ("one entry per CLOSED position", "an open position contributes nothing")
+    described the CALLER'S filter as though it were this function's rule, and
+    that is how a caller's defect ends up looking like a design decision.
+
+    WHAT THIS FUNCTION DOES NOT DECIDE. Which results are bookable. That is
+    `realised`'s job and it is where the defect was: it booked only closures,
+    so a loss already taken on a partial exit was absent from the number the
+    loss stop compares against.
+
+    THE ORIGINAL DEFECT THIS CLOSES. `check_rails` hardcoded MAX_DRAWDOWN to
+    0.0 on the grounds that nothing had settled. That describes today. It
+    cannot implement a loss stop tomorrow, because the moment something DOES
+    settle the rail still reads zero and the stop never trips.
     """
     seq = sorted(list(closed or ()), key=lambda c: (c.get("at") or 0))
     cum = 0.0
@@ -2399,24 +2450,87 @@ def drawdown_from(closed: list[dict]) -> dict:
         if dd > worst:
             worst, at_worst = dd, c.get("intent_id")
         curve.append({"intent_id": c.get("intent_id"), "at": c.get("at"),
+                      # WHICH KIND OF RESULT THIS POINT IS. Without it a
+                      # reader cannot tell a closure from a partial exit,
+                      # and the whole correction becomes invisible again.
+                      "component": c.get("component"),
                       "net_usd": round(float(c.get("net") or 0.0), 6),
                       "cumulative_realised_usd": round(cum, 6),
                       "peak_usd": round(peak, 6),
                       "drawdown_usd": round(dd, 6)})
+    n_closed = sum(1 for c in seq
+                   if c.get("component") != "REALISED_ON_SOLD_WHILE_OPEN")
     return {"realised_pnl_usd": round(cum, 6),
             "peak_realised_usd": round(peak, 6),
             "max_drawdown_usd": round(worst, 6),
             "worst_at_intent": at_worst,
-            "closed_positions": len(seq),
+            # `closed_positions` KEPT AT ITS TRUE MEANING. `check_rails`
+            # prints it as "over %d closed funded position(s)", so letting
+            # it become a count of all booked results would have made that
+            # basis line assert a closure that did not happen.
+            "closed_positions": n_closed,
+            "booked_results": len(seq),
+            "partially_realised_results": len(seq) - n_closed,
             "curve": curve,
-            "basis": ("the realised equity curve: each CLOSED position's net "
-                      "economic events, in closure order. An open position "
-                      "contributes nothing -- its cost is an asset, not a "
-                      "loss")}
+            "basis": ("the realised equity curve over every result already "
+                      "TAKEN, in the order it was taken: each closed "
+                      "position's net economic events, AND the "
+                      "realised-on-sold result of each open position that "
+                      "has sold inventory, booked at its last exit fill. "
+                      "The cost of inventory still HELD is not in here -- "
+                      "that is an asset at cost. A loss already realised on "
+                      "a partial exit IS, because the contracts are gone "
+                      "and the cash came back short")}
 
 
 async def realised(conn, *, account_id: str, venue: str) -> dict:
-    """REALISED P&L AND DRAWDOWN, summed over recorded economic events."""
+    """REALISED P&L AND DRAWDOWN, over EVERY result that has been taken.
+
+    ── THE DEFECT THIS CLOSES, AND IT DISARMED THE LOSS STOP ─────────
+    This function filtered `closed_at IS NOT NULL`. Every consumer of
+    MAX_DRAWDOWN reads its `max_drawdown_usd`:
+    `bettor_funded_execution.check_rails` (which refuses new exposure),
+    `bettor_funded_management`'s `loss_stop`, and `pnl`. So a position
+    that had sold part of its inventory at a loss -- cash gone, contracts
+    gone, result determined -- contributed NOTHING to the measurement, and
+    the stop could be breached without ever tripping.
+
+    The controlled demonstration showed it exactly: 9 of 15 contracts sold
+    at 0.41 on a 0.60 basis, a -$2.01 realised result including fees, and
+    `max_drawdown_usd` read 0.00. Under a $40 stop that is a rounding
+    error; under a stop the position could actually reach it is the
+    difference between a control that works and a control that reports.
+
+    ── WHY "ONLY AT CLOSURE" WAS EVER DEFENSIBLE, AND WHY IT IS NOT ──
+    The original reasoning is on `drawdown_from`: "a position's entry cost
+    is not a loss while the contracts are still owned". That is TRUE and it
+    is still respected -- the remaining basis is an asset at cost and is
+    NOT booked here. What was wrong is the inference that therefore nothing
+    about an open position is realised. Selling 9 contracts below cost
+    realises a loss on those 9. The contracts are gone; the cash came back
+    short. No later event can undo it. It is realised in the only sense the
+    word has.
+
+    ── THE TWO COMPONENTS, AND THEY ARE LABELLED ─────────────────────
+      A · CLOSED positions   the whole net, booked at `closed_at`.
+      B · OPEN positions that have sold some inventory: their
+          `partial_realisation` result, booked at the LAST EXIT FILL --
+          the instant the result was actually taken, which is what an
+          equity curve orders by. Not `now`, which would make the curve
+          move when nothing happened.
+
+    Both go into ONE time-ordered curve, because a drawdown is peak-to-
+    trough over the sequence of results and two separate curves cannot be
+    combined afterwards: the worst trough may lie between a closure and a
+    partial exit, and summing two maxima would miss it.
+
+    ── WHAT IS STILL NOT IN HERE, DELIBERATELY ───────────────────────
+    UNREALISED movement on the residual. That needs a funded mark and this
+    lane has no funded mark source, so it is reported as unknown by name
+    (`unrealised_on_open_inventory`) and the declared policy is applied by
+    the caller -- `loss_controls` below. It is NEVER read as zero, and
+    this realised figure is NEVER presented as a maximum possible loss.
+    """
     rows = await conn.fetch(
         "SELECT i.intent_id, "
         "       EXTRACT(EPOCH FROM i.closed_at)::float8 AS closed_epoch, "
@@ -2433,16 +2547,119 @@ async def realised(conn, *, account_id: str, venue: str) -> dict:
     closed = [{"intent_id": r["intent_id"], "at": float(r["closed_epoch"]),
                "net": float(r["net"]), "closed_reason": r["closed_reason"],
                "events": int(r["events"]),
-               "provisional_events": int(r["provisional"])} for r in rows]
-    dd = drawdown_from(closed)
-    prov = sum(c["provisional_events"] for c in closed)
-    return dict(dd, closed=closed, provisional_events_in_realised=prov,
-                realised_is_provisional=bool(prov),
-                provisional_note=(
-                    "%d economic event(s) inside the realised total are "
-                    "PROVISIONAL -- the venue has not stated a fee it was "
-                    "charged -- so this number is explicitly incomplete "
-                    "rather than quietly exact" % prov) if prov else None)
+               "provisional_events": int(r["provisional"]),
+               "component": "CLOSED_POSITION_NET"} for r in rows]
+
+    # ── B · THE OPEN POSITIONS THAT HAVE ALREADY SOLD SOMETHING ─────
+    #
+    # ONE QUERY, aggregated per parent intent, rather than N calls to
+    # `realised_on_sold`. The arithmetic is still that function's --
+    # `partial_realisation` is applied below -- so the two cannot diverge.
+    #
+    # THE JOIN IS `f.intent_id=i.intent_id OR i.parent_intent_id`. An exit
+    # is its own intent with the entry as parent, so fills must be gathered
+    # across the family exactly as `realised_on_sold` gathers them. Reading
+    # only the entry's own fills would find no exits at all and this whole
+    # component would silently be zero -- the same failure in a new place.
+    prows = await conn.fetch(
+        "SELECT p.intent_id, "
+        "       p.residual_qty::float8 AS residual, "
+        "       coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.cash_usd "
+        "                       ELSE 0 END),0)::float8 AS entry_cash, "
+        "       coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.qty "
+        "                       ELSE 0 END),0)::float8 AS entry_qty, "
+        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.cash_usd "
+        "                       ELSE 0 END),0)::float8 AS exit_cash, "
+        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.qty "
+        "                       ELSE 0 END),0)::float8 AS exit_qty, "
+        "       coalesce(sum(CASE WHEN f.direction='ENTRY' THEN f.fee_usd "
+        "                       ELSE 0 END),0)::float8 AS entry_fees, "
+        "       coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.fee_usd "
+        "                       ELSE 0 END),0)::float8 AS exit_fees, "
+        "       EXTRACT(EPOCH FROM max(f.at) FILTER "
+        "               (WHERE f.direction='EXIT'))::float8 AS last_exit, "
+        "       count(*) FILTER (WHERE f.fee_state=$3) AS provisional "
+        "  FROM bettor_funded_intents p "
+        "  JOIN bettor_funded_intents k "
+        "    ON k.intent_id=p.intent_id OR k.parent_intent_id=p.intent_id "
+        "  JOIN bettor_funded_fills f ON f.intent_id=k.intent_id "
+        " WHERE p.kind='ENTRY' AND p.closed_at IS NULL "
+        "   AND p.account_id=$1 AND upper(p.venue)=upper($2) "
+        " GROUP BY p.intent_id, p.residual_qty "
+        "HAVING coalesce(sum(CASE WHEN f.direction='EXIT' THEN f.qty "
+        "                        ELSE 0 END),0) > 0",
+        str(account_id), str(venue), FEE_PROVISIONAL)
+    partial = []
+    for r in prows:
+        m = partial_realisation(
+            entry_qty=r["entry_qty"], entry_cash=r["entry_cash"],
+            entry_fees=r["entry_fees"], exit_qty=r["exit_qty"],
+            exit_cash=r["exit_cash"], exit_fees=r["exit_fees"],
+            residual=r["residual"])
+        net = m["realised_on_sold_usd"]
+        # NO PER-CONTRACT BASIS MEANS NO RESULT TO BOOK, and a position with
+        # exit fills but no entry fills is a reconciliation problem, not a
+        # zero. It is carried with `net: None` so it appears in the ledger
+        # and is excluded from the curve rather than counted as flat.
+        partial.append({
+            "intent_id": r["intent_id"],
+            "at": (None if r["last_exit"] is None
+                   else float(r["last_exit"])),
+            "net": net,
+            "closed_reason": None,
+            "events": None,
+            "provisional_events": int(r["provisional"] or 0),
+            "component": "REALISED_ON_SOLD_WHILE_OPEN",
+            "residual_qty": m["residual_qty"],
+            "remaining_basis_usd": m["remaining_basis_usd"],
+            "sold_qty": m["sold_qty"],
+            "components": m,
+        })
+
+    # THE CURVE IS OVER BOTH, and rows with no bookable result or no
+    # instant to book it at are excluded from the ORDERING rather than
+    # given a default -- `drawdown_from` sorts on `at` and a None there
+    # would place a real result at the start of time.
+    bookable = [c for c in (closed + partial)
+                if c.get("net") is not None and c.get("at") is not None]
+    unbookable = [c for c in (closed + partial)
+                  if c.get("net") is None or c.get("at") is None]
+    dd = drawdown_from(bookable)
+    prov = sum(int(c.get("provisional_events") or 0)
+               for c in (closed + partial))
+    partial_sum = sum(float(c["net"]) for c in partial
+                      if c.get("net") is not None)
+    return dict(
+        dd, closed=closed,
+        # ── THE SECOND COMPONENT, NAMED AND SEPARABLE ───────────────
+        partially_realised_open=partial,
+        partially_realised_open_positions=len(partial),
+        partially_realised_usd=round(partial_sum, 6),
+        realised_components=("CLOSED_POSITION_NET + "
+                             "REALISED_ON_SOLD_WHILE_OPEN"),
+        includes_open_position_partial_results=True,
+        # WHAT COULD NOT BE BOOKED AND WHY, rather than a quiet omission.
+        not_bookable=[{"intent_id": c.get("intent_id"),
+                       "component": c.get("component"),
+                       "why": ("no per-contract basis (no entry fills)"
+                               if c.get("net") is None
+                               else "no exit fill instant to book it at")}
+                      for c in unbookable],
+        provisional_events_in_realised=prov,
+        realised_is_provisional=bool(prov),
+        # ── AND WHAT THIS NUMBER IS NOT ─────────────────────────────
+        unrealised_on_open_inventory=NOT_IDENTIFIED,
+        why_unrealised_is_not_identified=(
+            "marking open inventory needs a funded mark and this lane has "
+            "no funded mark source. Reported NOT_IDENTIFIED, never 0, and "
+            "this realised figure is NOT a maximum possible loss -- see "
+            "`loss_controls`, which applies the declared policy for an "
+            "unavailable mark"),
+        provisional_note=(
+            "%d economic event(s) inside the realised total are "
+            "PROVISIONAL -- the venue has not stated a fee it was "
+            "charged -- so this number is explicitly incomplete "
+            "rather than quietly exact" % prov) if prov else None)
 
 
 async def pnl(conn, *, account_id: str, venue: str) -> dict:
@@ -2526,10 +2743,23 @@ async def pnl(conn, *, account_id: str, venue: str) -> dict:
         "peak_realised_usd": real["peak_realised_usd"],
         "realised_curve": real["curve"],
         "closed_positions": real["closed_positions"],
+        # THE PARTIAL COMPONENT, SURFACED HERE TOO. `max_drawdown_usd` above
+        # now includes it, so a reader who cannot see the component would be
+        # unable to reconcile the drawdown against the closed positions.
+        "booked_results": real["booked_results"],
+        "partially_realised_usd": real["partially_realised_usd"],
+        "partially_realised_open_positions":
+            real["partially_realised_open_positions"],
+        "realised_not_bookable": real["not_bookable"],
         "open_position_net_cash_usd": round(float(openside["net"]), 6),
         "open_position_provisional_events": int(openside["provisional"]),
+        "open_position_net_cash_is_not_a_result": (
+            "it is (basis out - proceeds back + fees) over the whole clip, "
+            "so it mixes the realised result on what was sold with the cost "
+            "still tied up in what is held. `partially_realised_usd` is the "
+            "result; this is cash"),
         # NAMED, NOT ZEROED.
-        "unrealised_pnl_usd": None,
+        "unrealised_pnl_usd": NOT_IDENTIFIED,
         "unrealised_basis": (
             "UNMEASURED. Marking residual funded inventory needs a funded "
             "mark, and this lane has no mark source it would stand behind, so "
@@ -2539,6 +2769,203 @@ async def pnl(conn, *, account_id: str, venue: str) -> dict:
         "is_not_summed_with": ("the shadow, acceptance, demonstration or "
                               "UNCLASSIFIED books. This is the funded lane "
                               "alone"),
+    }
+
+
+#: WHAT WE DO WHEN AN OPEN POSITION CANNOT BE MARKED. Declared as a named
+#: policy rather than decided inside a formula, so it can be read, tested
+#: and argued with. The two candidates were:
+#:
+#:   TREAT_AS_ZERO     the unmarked position is assumed to be worth what
+#:                     it cost. Never. This is the favourable assumption,
+#:                     and it is the one that makes a blown position look
+#:                     like a flat one.
+#:   WORST_CASE_TOTAL_LOSS  the whole remaining basis is treated as
+#:                     potentially lost for the purpose of stating
+#:                     WORST-CASE OUTSTANDING EXPOSURE -- and NOT booked
+#:                     into realised drawdown, because it has not happened.
+#:
+#: The second is the policy. It is already what `exposure_from_rows` does
+#: for the shadow rails (`DRAWDOWN_IS_WORST_CASE`); this states it for the
+#: funded book and, critically, keeps it in a DIFFERENT FIELD from the
+#: realised number, so a worst case can never be reported as a result.
+UNMARKED_POLICY = "WORST_CASE_TOTAL_LOSS_FOR_EXPOSURE_NOT_FOR_REALISED"
+
+
+async def loss_controls(conn, *, account_id: str, venue: str,
+                        approved_limits: dict | None = None) -> dict:
+    """THE FOUR QUANTITIES, KEPT APART, AND WHAT EACH CONTROL DOES WITH THEM.
+
+    ── WHY THIS FUNCTION EXISTS ──────────────────────────────────────
+    Because four different numbers were being reached for through one
+    another, and each substitution is a specific wrong answer:
+
+      1 · REALISED DRAWDOWN            worst peak-to-trough of results
+                                       already TAKEN. Governs the loss
+                                       stop. Was blind to partial exits.
+      2 · UNREALISED P&L               movement on inventory still HELD.
+                                       Needs a mark. UNKNOWN here, and
+                                       unknown is not zero.
+      3 · CASH USAGE                   money actually out of the account.
+                                       Not a loss: most of it is an asset
+                                       at cost.
+      4 · WORST-CASE OUTSTANDING       what could still be lost if every
+          EXPOSURE                     unmarked holding settled worthless.
+                                       A bound, not an expectation, and
+                                       never a result.
+
+    Reporting 1 as 4 understates risk. Reporting 4 as 1 fabricates a loss.
+    Reporting 3 as 1 overstates the loss by the remaining basis -- which is
+    exactly the -$5.71-versus--$2.01 error the demonstration surfaced.
+    Reporting 2 as 0 is the one that lets a blown position look flat.
+
+    ── AND WHAT THIS IS NOT ──────────────────────────────────────────
+    `loss_stop_limit_usd` is a TRIGGER, not a maximum possible loss. Once
+    tripped it refuses new exposure; it does not and cannot liquidate
+    inventory at a price, so the loss on what is already held can exceed
+    it. `worst_case_total_loss_usd` is the figure that bounds that, and the
+    two are reported side by side so the trigger is never read as the bound.
+    """
+    real = await realised(conn, account_id=account_id, venue=venue)
+    exp = await exposure(conn, account_id=account_id, venue=venue)
+
+    # ── 3 · CASH USAGE. Out the door, net of what came back. Stated as
+    # cash, never as a result: the remaining basis inside it is inventory.
+    cash_out = round(float(exp["filled_cash_usd"])
+                     + float(exp["filled_fees_usd"])
+                     - float(exp["exit_proceeds_usd"]), 6)
+
+    # ── 4 · WORST-CASE OUTSTANDING EXPOSURE. The remaining basis of every
+    # open position that has no mark, plus collateral the venue may take on
+    # anything still outstanding. Under UNMARKED_POLICY the holdings are
+    # counted as a total loss; this lane has no funded mark source, so that
+    # is every holding, and `unmarked_holdings` says how many.
+    remaining_basis = 0.0
+    unmarked = 0
+    for p in (real.get("partially_realised_open") or []):
+        rb = p.get("remaining_basis_usd")
+        if rb is not None:
+            remaining_basis += float(rb)
+            unmarked += 1
+    # Positions that have sold NOTHING are not in `partially_realised_open`,
+    # so their basis has to come from the exposure read -- otherwise the
+    # worst case would cover only the positions that happened to be
+    # partially exited, which is the narrower set and the wrong bound.
+    holdings_collateral = float(exp["collateral_of_residual_holdings_usd"])
+    outstanding_collateral = float(exp["collateral_of_outstanding_orders_usd"])
+    worst_case = round(max(remaining_basis, holdings_collateral)
+                       + outstanding_collateral, 6)
+
+    dd = float(real["max_drawdown_usd"])
+    limit = None
+    if approved_limits:
+        try:
+            limit = float(approved_limits.get("MAX_DRAWDOWN"))
+        except (TypeError, ValueError):
+            limit = None
+    tripped = (None if not limit or limit <= 0 else bool(dd > limit + 1e-9))
+
+    return {
+        "account_id": account_id, "venue": venue,
+        # ── 1 · REALISED DRAWDOWN ───────────────────────────────────
+        "realised_drawdown_usd": round(dd, 6),
+        "realised_pnl_usd": real["realised_pnl_usd"],
+        "realised_basis": real["basis"],
+        "realised_includes_partial_exits": True,
+        "realised_components": real["realised_components"],
+        "partially_realised_usd": real["partially_realised_usd"],
+        "partially_realised_open_positions":
+            real["partially_realised_open_positions"],
+        "realised_is_provisional": real["realised_is_provisional"],
+        # ── 2 · UNREALISED P&L ──────────────────────────────────────
+        "unrealised_pnl_usd": NOT_IDENTIFIED,
+        "unrealised_why": (
+            "marking open funded inventory needs a funded mark source and "
+            "this lane has none it would stand behind. UNKNOWN, not 0 -- "
+            "a zero here would assert that inventory is worth its cost"),
+        "unmarked_policy": UNMARKED_POLICY,
+        "unmarked_holdings": unmarked,
+        # ── 3 · CASH USAGE ──────────────────────────────────────────
+        "cash_used_usd": cash_out,
+        "cash_used_is_not_a_loss": (
+            "cash out minus proceeds back. The remaining basis inside it is "
+            "INVENTORY, an asset at cost. Reading this as the loss "
+            "overstates it by exactly that basis plus the residual's share "
+            "of the entry fee"),
+        "entry_cash_usd": exp["filled_cash_usd"],
+        "entry_fees_usd": exp["filled_fees_usd"],
+        "exit_proceeds_usd": exp["exit_proceeds_usd"],
+        # ── 4 · WORST-CASE OUTSTANDING EXPOSURE ─────────────────────
+        "worst_case_total_loss_usd": worst_case,
+        "worst_case_basis": (
+            "every unmarked holding settles worthless (%s), plus collateral "
+            "the venue may take on orders still outstanding. A BOUND on "
+            "what is still at risk, not a forecast and not a result"
+            % UNMARKED_POLICY),
+        "residual_holdings_collateral_usd": round(holdings_collateral, 6),
+        "outstanding_orders_collateral_usd": round(outstanding_collateral, 6),
+        "remaining_basis_of_partially_exited_usd": round(remaining_basis, 6),
+        "contracts_held": exp["contracts_held"],
+        # ── THE CONTROLS: SCOPE, TRIGGER, RESPONSE ──────────────────
+        "controls": [
+            {
+                "control": "MAX_DRAWDOWN",
+                "scope": ("the funded lane's realised equity curve for this "
+                          "account and venue. Not the shadow, acceptance or "
+                          "demonstration books"),
+                "measures": "realised_drawdown_usd",
+                "trigger": ("measured realised drawdown exceeds the "
+                            "owner-approved MAX_DRAWDOWN"),
+                "response": ("REFUSES NEW EXPOSURE. Every entry goes through "
+                             "bettor_funded_execution.check_rails, which "
+                             "blocks on an EXCEEDED rail. Servicing an "
+                             "existing position is NOT blocked -- that is "
+                             "ownership-bound and gated by check_servicing, "
+                             "not by submission authority -- and neither is "
+                             "reconciliation"),
+                "limit_usd": limit,
+                "measured_usd": round(dd, 6),
+                "tripped": tripped,
+                "why_no_verdict": (None if tripped is not None else
+                                   "no owner-approved MAX_DRAWDOWN exists, "
+                                   "so there is no threshold to compare "
+                                   "against. The measurement is real; the "
+                                   "threshold is an owner input"),
+                "is_not_a_maximum_loss": (
+                    "this is a TRIGGER on realised results. It refuses new "
+                    "exposure; it cannot liquidate inventory at a price, so "
+                    "the loss on what is already held can exceed it. "
+                    "worst_case_total_loss_usd is the bound"),
+            },
+            {
+                "control": "MAX_RESIDUAL_INVENTORY",
+                "scope": "contracts the funded book holds, net of exits",
+                "measures": "contracts_held",
+                "trigger": "held contracts plus the proposed order exceed it",
+                "response": "refuses the new order; holdings untouched",
+            },
+            {
+                "control": "MAX_CAPITAL_DEPLOYED",
+                "scope": "cash and fees out plus live collateral",
+                "measures": "cash_used_usd and live collateral",
+                "trigger": "the sum plus this order exceeds the limit",
+                "response": "refuses the new order",
+            },
+            {
+                "control": "FUNDED_EXIT_SUBMISSION_ENABLED",
+                "scope": "whether a funded exit may actually be sent",
+                "measures": "not a measurement -- a shipped constant",
+                "trigger": "n/a",
+                "response": ("ships False, so an exit is decided, priced and "
+                             "recorded but never submitted. This is "
+                             "CONTAINMENT and it is not one of the four "
+                             "quantities"),
+            },
+        ],
+        "four_quantities_are_distinct": (
+            "realised_drawdown_usd, unrealised_pnl_usd, cash_used_usd and "
+            "worst_case_total_loss_usd are four different measurements of "
+            "four different things. None is defined as another"),
     }
 
 
