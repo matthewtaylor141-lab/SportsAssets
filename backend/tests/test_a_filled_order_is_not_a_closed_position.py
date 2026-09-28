@@ -360,7 +360,38 @@ async def test_the_database_itself_keeps_the_slot_after_a_fill():
         # AND ONLY AN EVIDENCED CLOSURE RELEASES THE SLOT.
         with pytest.raises(ValueError):
             await FB.mark_position_closed(conn, "fpi-a", "I_ASSUMED_IT_WAS_GONE")
-        await FB.mark_position_closed(conn, "fpi-a", "EXITED_IN_THE_MARKET")
+        closed = await FB.mark_position_closed(
+            conn, "fpi-a", "EXITED_IN_THE_MARKET")
+
+        # ── AN EVIDENCED CLOSURE IS NOT ENOUGH ON ITS OWN ───────────
+        #
+        # WHY THIS HALF WAS ADDED RATHER THAN THE ASSERTION BELOW RELAXED.
+        # This test used to close `fpi-a` and immediately expect the slot back.
+        # It could, because the one-position index counts only ENTRY rows, and
+        # the EXIT row inserted above is kind='EXIT'. But the test left that
+        # EXIT at INTENT_RECORDED -- an order the system still believes it may
+        # send. Migration 131 refuses to release the group while any order on a
+        # leg OR ITS CHILDREN is outstanding, and that refusal is right: a
+        # released slot plus a live exit order on the same contract is how a
+        # new entry and an unsent exit end up pointed at each other.
+        #
+        # So the property the assertion protects -- an evidenced closure
+        # releases the slot -- is UNCHANGED and still asserted below. What is
+        # added is its precondition: the position's own orders must have
+        # resolved first. Both halves are pinned so neither can be lost.
+        if closed.get("group_release", {}).get("group_id"):
+            assert closed["group_release"]["released"] is False
+            assert "outstanding or ambiguous order" in \
+                closed["group_release"]["why"]
+            blocked = await _entry(conn, intent_id="fpi-blocked", vo="vo-9",
+                                   fill_id="vf-9")
+            assert blocked["ok"] is False
+            # AND THE REFUSAL DID NOT ABORT THE TRANSACTION. A decline is an
+            # answer, not a database error.
+            assert await conn.fetchval("SELECT 42") == 42
+            await FB.abandon_before_send(conn, "fpi-x",
+                                         "THE_EXIT_ORDER_NEVER_LEFT")
+
         third = await _entry(conn, intent_id="fpi-c", vo="vo-3",
                              fill_id="vf-3")
         assert third["ok"] is True

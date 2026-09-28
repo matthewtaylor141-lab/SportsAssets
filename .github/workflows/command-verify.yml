@@ -6598,10 +6598,33 @@ jobs:
           echo '### what 18 ended up with' >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           Q() { psql -h 127.0.0.1 -U postgres -d funded_pg18 -tAc "$1"; }
-          for m in 125 126 127 128; do
+          # 131 IS IN THIS LIST BECAUSE IT IS IN `FUNDED` ABOVE. This job is
+          # where 131 is proved; it is deliberately NOT in production until it
+          # does. Leaving it out of the assertion let the suite run against a
+          # database that might not have it, which is the schema-only pass the
+          # owner ruled out.
+          for m in 125 126 127 128 131; do
             got=$(Q "SELECT count(*) FROM schema_migrations WHERE version LIKE '${m}%' AND coalesce(content_sha,'') <> 'SKIPPED-IN-PG18-VALIDATION'")
             say "migration $m applied        $got"
             [ "$got" = "1" ] || { say "  => migration $m did NOT apply on PostgreSQL 18"; exit 1; }
+          done
+          # AND 131'S OWN OBJECTS, so a half-applied migration cannot read as
+          # applied. The schema probe refuses this state at runtime; the gate
+          # must refuse it too.
+          for o in bettor_funded_portfolio_groups bettor_funded_leg_reservations; do
+            got=$(Q "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='$o'")
+            say "table $o  $got"
+            [ "$got" = "1" ] || exit 1
+          done
+          for c in portfolio_group_id leg_role; do
+            got=$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='bettor_funded_intents' AND column_name='$c'")
+            say "intents.$c        $got"
+            [ "$got" = "1" ] || exit 1
+          done
+          for f in bettor_funded_group_blocker bettor_funded_group_release; do
+            got=$(Q "SELECT count(*) FROM pg_proc WHERE proname='$f'")
+            say "function $f  $got"
+            [ "$got" = "1" ] || { say "  => the single closure authority is missing"; exit 1; }
           done
           for c in residual_qty kind parent_intent_id closed_at payout_event; do
             got=$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='bettor_funded_intents' AND column_name='$c'")
@@ -6613,10 +6636,20 @@ jobs:
             say "function $f  $got"
             [ "$got" = "1" ] || exit 1
           done
-          # AND THE INDEX WHOSE BUILD IS WHAT FAILED, by name.
-          got=$(Q "SELECT count(*) FROM pg_indexes WHERE indexname='bettor_funded_one_open_position'")
-          say "index bettor_funded_one_open_position  $got"
-          [ "$got" = "1" ] || { say "  => the partial index did not build on 18"; exit 1; }
+          # ── THE CAPACITY BOUND, UNDER WHICHEVER NAME THIS SCHEMA USES ──
+          #
+          # THIS USED TO NAME `bettor_funded_one_open_position` LITERALLY, and
+          # that broke the moment 131 entered this job's migration list:
+          # migration 131 DROPS that index and replaces the bound with
+          # `bettor_funded_one_open_group`, so a hard-coded name asserted the
+          # absence of the thing it was checking for and failed the step.
+          # Asserting that SOME capacity bound exists, by either name, is both
+          # correct across the change and what the step was ever really for.
+          got=$(Q "SELECT count(*) FROM pg_indexes WHERE indexname IN ('bettor_funded_one_open_position','bettor_funded_one_open_group')")
+          say "the capacity bound exists            $got"
+          [ "$got" -ge 1 ] || { say "  => NO capacity bound in this schema"; exit 1; }
+          Q "SELECT '  named: '||indexname FROM pg_indexes WHERE indexname IN ('bettor_funded_one_open_position','bettor_funded_one_open_group')" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
           # THE PREDICATE, EVALUATED UNDER THE MAINTENANCE PATH 17+ USES.
           say ""
           say "-- the predicate under search_path = pg_catalog, pg_temp --"
@@ -6626,15 +6659,41 @@ jobs:
           # A REINDEX IS THE REAL MAINTENANCE OPERATION, and 17+ runs it under
           # that path itself -- no SET needed. If the body were unqualified this
           # is where it would fail.
-          Q "REINDEX INDEX bettor_funded_one_open_position" >/dev/null \
-            && say "REINDEX bettor_funded_one_open_position  OK" \
-            || { say "REINDEX FAILED -- the predicate is not maintenance-safe"; exit 1; }
+          #
+          # EVERY INDEX WHOSE PREDICATE CALLS THE FUNCTION, discovered from the
+          # catalogue rather than listed here. A hard-coded list silently stops
+          # covering an index a later migration adds -- and 131 adds one
+          # (`bettor_funded_one_open_leg_per_role`), which is exactly the kind of
+          # index the 2026-09-27 failure was about.
+          idx=$(Q "SELECT indexname FROM pg_indexes WHERE indexdef LIKE '%bettor_funded_position_is_open%' ORDER BY indexname")
+          [ -n "$idx" ] || { say "NO index uses the predicate -- the maintenance check would prove nothing"; exit 1; }
+          for i in $idx; do
+            Q "REINDEX INDEX $i" >/dev/null \
+              && say "REINDEX $i  OK" \
+              || { say "REINDEX $i FAILED -- the predicate is not maintenance-safe"; exit 1; }
+          done
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: The funded suite, against PostgreSQL 18
         env:
           RN1X_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
           ADMIN_TOKEN: t
+          # ── A CAPACITY-SLOT SKIP IS AN ENVIRONMENT FAILURE HERE ──────
+          #
+          # Migration 131 admits ONE open portfolio group, so the group tests
+          # are mutually exclusive and skip -- rather than delete another
+          # owner's row -- when something already holds the slot. On a
+          # development database that is right. In this job it is not: the
+          # database is built fresh and migrated in the steps above, so nothing
+          # can legitimately hold the slot, and a skip would turn the
+          # capital-critical group assertions into a green tick that ran
+          # nothing. An independent review named this exactly: "Skipping
+          # because another test owns the capacity slot is an environment
+          # failure that the gate must reject, not evidence of correctness."
+          #
+          # The rule lives in the test helpers, keyed on this variable, so it
+          # cannot be lost when a job step is edited.
+          RN1X_CAPACITY_SLOT_MUST_BE_FREE: "1"
         run: |
           set -uo pipefail
           echo '### the funded suite on 18' >> "$GITHUB_STEP_SUMMARY"
@@ -6650,6 +6709,7 @@ jobs:
             tests/test_a_partial_loss_actually_stops_new_exposure.py \
             tests/test_the_audit_drawdown_reproduction.py \
             tests/test_the_portfolio_group_bound_is_one_bound.py \
+            tests/test_the_group_lifecycle_is_atomic_and_earned.py \
             2>&1 | tail -25 | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -6659,6 +6719,7 @@ jobs:
           RN1X_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
           ADMIN_TOKEN: t
+          RN1X_CAPACITY_SLOT_MUST_BE_FREE: "1"
         run: |
           set -uo pipefail
           # ── A SKIP IS NOT A PASS, AND THIS STEP EXISTS TO SAY SO ────
@@ -6683,6 +6744,7 @@ jobs:
             tests/test_a_partial_loss_actually_stops_new_exposure.py \
             tests/test_the_audit_drawdown_reproduction.py \
             tests/test_the_portfolio_group_bound_is_one_bound.py \
+            tests/test_the_group_lifecycle_is_atomic_and_earned.py \
             --junitxml=/tmp/risk.xml 2>&1 | tail -15
           rc=${PIPESTATUS[0]}
           # THE GUARD IS A MODULE, NOT A HEREDOC. A `<<'PYX'` body at column

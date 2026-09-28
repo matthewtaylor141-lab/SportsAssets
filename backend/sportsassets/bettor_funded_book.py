@@ -147,6 +147,15 @@ R_ANOTHER_INTENT_IS_LIVE = "ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE"
 #: mistake from an outage, and each of these is a different mistake.
 R_LEG_ROLE_NOT_STATED = "LEG_ROLE_WAS_NOT_STATED"
 R_GROUPS_NOT_IN_THIS_SCHEMA = "PORTFOLIO_GROUPS_ARE_NOT_IN_THIS_SCHEMA"
+R_SCHEMA_UNAVAILABLE = "THE_SCHEMA_COULD_NOT_BE_ESTABLISHED"
+#: DISTINCT FROM `R_ANOTHER_INTENT_IS_LIVE`, and the distinction is the point.
+#: The one-position index is over open ENTRY POSITIONS; the one-group index is
+#: over open GROUPS. A group can outlive every live intent in it -- an exit
+#: order that resolved, a leg awaiting settlement evidence -- and reporting that
+#: as "another intent is already live" published an occupant list that was
+#: EMPTY. A refusal whose stated cause contradicts its own evidence is worse
+#: than no refusal reason, because it sends the reader to the wrong table.
+R_ANOTHER_GROUP_IS_OPEN = "ANOTHER_PORTFOLIO_GROUP_IS_STILL_OPEN"
 R_GROUP_IS_CLOSED = "THE_PORTFOLIO_GROUP_IS_CLOSED"
 R_GROUP_DOES_NOT_EXIST = "THE_PORTFOLIO_GROUP_DOES_NOT_EXIST"
 R_LEG_DOES_NOT_MATCH_ITS_GROUP = "LEG_DOES_NOT_MATCH_ITS_GROUP"
@@ -630,38 +639,73 @@ def fee_for(qty: float, price: float, *, at=None) -> tuple[float, str]:
 
 # ── 1 · INTENT, COMMITTED BEFORE ANYTHING IS SENT ───────────────────
 
-#: Whether this database has migration 131's group tables. Determined by
-#: ASKING, once, and cached per process.
+#: Whether this database has migration 131's group tables.
 #:
-#: WHY THIS EXISTS. Setting the group columns unconditionally made the code
-#: REQUIRE 131 -- measured: every funded suite failed with `relation
-#: "bettor_funded_portfolio_groups" does not exist` against a pre-131 schema.
-#: Code and migration do not land at the same instant, and a build that is
-#: live for even a moment before its migration applies would reject every
-#: funded entry. So the schema is asked rather than assumed, and the legacy
-#: path is taken verbatim when the tables are absent.
-_HAS_GROUPS: bool | None = None
+#: ── ONLY THE POSITIVE IS CACHED, AND NEVER AN ERROR ─────────────────
+#: A process-wide boolean was wrong in two ways. A process that started before
+#: 131 landed would keep using the legacy insert forever -- the very rolling
+#: compatibility it was meant to provide, absent. And a transient catalogue
+#: error was cached as "schema absent", so one blip permanently demoted the
+#: process.
+#:
+#: 131 CANNOT BE UNAPPLIED, so True is safe to remember. False is not: it means
+#: "not yet", and it is re-checked every time. An unreadable catalogue is
+#: neither -- it RAISES, because a database we cannot interrogate is an outage
+#: and guessing either way writes the wrong rows.
+_GROUPS_CONFIRMED = False
+
+#: The columns an entry needs, not merely the table. A half-applied migration
+#: that created the table without the columns would otherwise pass the probe.
+_GROUP_REQUIREMENTS = (
+    ("bettor_funded_portfolio_groups", None),
+    ("bettor_funded_intents", "portfolio_group_id"),
+    ("bettor_funded_intents", "leg_role"),
+)
+
+
+class SchemaUnavailable(RuntimeError):
+    """The catalogue could not be read. Not the same as a missing migration."""
 
 
 async def _schema_has_groups(conn) -> bool:
-    global _HAS_GROUPS
-    if _HAS_GROUPS is None:
-        try:
-            _HAS_GROUPS = bool(await conn.fetchval(
-                "SELECT count(*) FROM information_schema.tables "
-                "WHERE table_name = 'bettor_funded_portfolio_groups'"))
-        except Exception:                                   # noqa: BLE001
-            # AN UNREADABLE CATALOGUE IS NOT A PRESENT TABLE. Assuming the
-            # columns exist would break the entry path; assuming they do not
-            # is the behaviour that worked before 131.
-            _HAS_GROUPS = False
-    return bool(_HAS_GROUPS)
+    global _GROUPS_CONFIRMED
+    if _GROUPS_CONFIRMED:
+        return True
+    try:
+        present = 0
+        for table, column in _GROUP_REQUIREMENTS:
+            if column is None:
+                present += int(bool(await conn.fetchval(
+                    "SELECT count(*) FROM information_schema.tables "
+                    "WHERE table_schema = 'public' AND table_name = $1",
+                    table)))
+            else:
+                present += int(bool(await conn.fetchval(
+                    "SELECT count(*) FROM information_schema.columns "
+                    "WHERE table_schema = 'public' AND table_name = $1 "
+                    "  AND column_name = $2", table, column)))
+    except Exception as exc:                                # noqa: BLE001
+        raise SchemaUnavailable(
+            "the catalogue could not be read (%s), so whether migration 131 "
+            "is applied is UNKNOWN. Treating it as absent would write rows "
+            "the schema may reject; treating it as present would reject "
+            "every entry" % type(exc).__name__) from exc
+    if present == len(_GROUP_REQUIREMENTS):
+        _GROUPS_CONFIRMED = True
+        return True
+    if present:
+        # A HALF-APPLIED MIGRATION IS NOT A SCHEMA TO WRITE AGAINST.
+        raise SchemaUnavailable(
+            "migration 131 is PARTIALLY present (%d of %d required objects). "
+            "Neither path is safe on a half-applied schema"
+            % (present, len(_GROUP_REQUIREMENTS)))
+    return False
 
 
 def _forget_schema_probe() -> None:
-    """Tests only: the probe is per process and a test may switch databases."""
-    global _HAS_GROUPS
-    _HAS_GROUPS = None
+    """Tests only: a test may point the same process at another database."""
+    global _GROUPS_CONFIRMED
+    _GROUPS_CONFIRMED = False
 
 
 async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
@@ -721,11 +765,15 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
     if role not in ("PRIMARY", "HEDGE"):
         return dict(out, ok=False, refusal=R_LEG_ROLE_NOT_STATED,
                     why="leg role %r is not PRIMARY or HEDGE" % (role,))
-    has_groups = await _schema_has_groups(conn)
+    try:
+        has_groups = await _schema_has_groups(conn)
+    except SchemaUnavailable as exc:
+        # AN OUTAGE IS NOT A SCHEMA VERDICT. Refused by name rather than
+        # guessing a path, because one guess rejects every entry and the other
+        # writes rows the schema will not take.
+        return dict(out, ok=False, refusal=R_SCHEMA_UNAVAILABLE, why=str(exc))
     if not has_groups:
         if portfolio_group_id is not None or leg_role is not None:
-            # A CALLER ASKING FOR A PAIR ON A SCHEMA THAT CANNOT HOLD ONE must
-            # be refused by name, not silently given a single leg.
             return dict(out, ok=False, refusal=R_GROUPS_NOT_IN_THIS_SCHEMA,
                         why=("this database has no portfolio-group tables "
                              "(migration 131 has not been applied), so a "
@@ -733,91 +781,114 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
                              "entry still works"))
         role = None
         portfolio_group_id = None
+
+    # ── ONE TRANSACTION FOR BOTH WRITES, AND THE CATCH IS OUTSIDE IT ──
+    #
+    # TWO DEFECTS THIS CLOSES, both measured on c92d268:
+    #
+    #  1 · THE DOCSTRING CLAIMED ATOMICITY THAT WAS NOT THERE. The group INSERT
+    #      and the intent INSERT were two autocommitted statements, so a failure
+    #      between them left an EMPTY GROUP holding the one capacity slot --
+    #      capacity consumed by nothing, which is the failure this whole design
+    #      exists to prevent.
+    #
+    #  2 · CATCHING A PostgresError DOES NOT UNDO AN ABORTED TRANSACTION.
+    #      Reproduced: a competing entry inside a caller's transaction returned
+    #      no refusal at all -- `open_entry_positions()` in the handler itself
+    #      raised `InFailedSQLTransactionError`, and every later statement in
+    #      that transaction failed. A "clean refusal" that poisons its caller's
+    #      transaction is worse than an exception, because the caller believes
+    #      it was handled.
+    #
+    # `conn.transaction()` nests as a SAVEPOINT when one is already open, so
+    # this works for a standalone call and inside a caller's transaction alike:
+    # the rollback undoes only our two writes, and the outer transaction stays
+    # usable. The `except` is OUTSIDE the block, so by the time it runs the
+    # rollback has happened and the connection can be queried again -- which is
+    # exactly what the refusal paths below need.
     try:
-        if has_groups and portfolio_group_id is None:
-            # ── AN ORDINARY ENTRY: ITS OWN SINGLE_LEG GROUP ──────────
-            #
-            # The id is DERIVED FROM THE INTENT, so a retry of the same
-            # intent cannot create a second group, and the group is
-            # traceable to the decision that made it.
-            portfolio_group_id = "grp:" + str(intent_id)
-            # ── A CLOSED GROUP CANNOT BE REUSED, SO TAKE A FRESH ID ──
-            #
-            # The id is derived from the intent so a retry does not create a
-            # second group. But an intent id can legitimately reappear after
-            # its group closed -- a replayed lifecycle, a reset fixture -- and
-            # the derived id then points at a CLOSED group, which refuses the
-            # leg with THE_PORTFOLIO_GROUP_IS_CLOSED. Measured: six funded
-            # tests failed exactly that way.
-            #
-            # A NEW ATTEMPT GETS A NEW GROUP, suffixed, because a finished
-            # group is history and must not be reopened -- reopening it would
-            # attach new exposure to a closed record and make its closure
-            # reason a lie.
-            if await conn.fetchval(
-                    "SELECT closed_at IS NOT NULL FROM "
-                    "bettor_funded_portfolio_groups WHERE group_id = $1",
-                    portfolio_group_id):
-                portfolio_group_id = "grp:%s:%s" % (
-                    intent_id, uuid.uuid4().hex[:8])
+        async with conn.transaction():
+            if has_groups and portfolio_group_id is None:
+                portfolio_group_id = "grp:" + str(intent_id)
+                if await conn.fetchval(
+                        "SELECT closed_at IS NOT NULL FROM "
+                        "bettor_funded_portfolio_groups WHERE group_id = $1",
+                        portfolio_group_id):
+                    # A CLOSED GROUP IS HISTORY AND IS NOT REOPENED: attaching
+                    # new exposure to it would make its closure reason a lie.
+                    portfolio_group_id = "grp:%s:%s" % (
+                        intent_id, uuid.uuid4().hex[:8])
+                await conn.execute(
+                    "INSERT INTO bettor_funded_portfolio_groups "
+                    "(group_id, account_id, venue, event_key, structure, "
+                    " hedge_intent, decision_ref) "
+                    "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) "
+                    "ON CONFLICT (group_id) DO NOTHING",
+                    portfolio_group_id, str(account_id), str(venue),
+                    str(event_key), str(group_structure or "SINGLE_LEG"),
+                    ("SOUGHT" if group_structure in ("INDIRECT_MIDDLE",
+                                                     "INDIRECT_GAP")
+                     else "NOT_APPLICABLE"),
+                    json.dumps(decision_ref or {}))
             await conn.execute(
-                "INSERT INTO bettor_funded_portfolio_groups "
-                "(group_id, account_id, venue, event_key, structure, "
-                " hedge_intent, decision_ref) "
-                "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) "
-                "ON CONFLICT (group_id) DO NOTHING",
-                portfolio_group_id, str(account_id), str(venue),
-                str(event_key), str(group_structure or "SINGLE_LEG"),
-                ("SOUGHT" if group_structure in ("INDIRECT_MIDDLE",
-                                                 "INDIRECT_GAP")
-                 else "NOT_APPLICABLE"),
-                json.dumps(decision_ref or {}))
-        await conn.execute(
-            "INSERT INTO bettor_funded_intents (intent_id, account_id, venue,"
-            " venue_class, us_market_slug, event_key, order_intent,"
-            " limit_price, quantity, collateral_usd, effective_digest,"
-            " decision_ref, state, provenance, payout_event, held_is_long,"
-            " client_identity_supported"
-            + (", portfolio_group_id, leg_role) " if has_groups else ") ")
-            + "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,"
-            "        'INTENT_RECORDED',$13,$14,$15,$16"
-            + (",$17,$18)" if has_groups else ")"),
-            intent_id, str(account_id), str(venue), str(venue_class),
-            str(us_market_slug), str(event_key), str(order_intent),
-            float(limit_price), int(quantity), float(collateral_usd),
-            str(effective_digest), json.dumps(decision_ref or {}),
-            PROVENANCE,
-            # THE EVENT THIS CONTRACT PAYS ON, carried from the decision. An
-            # intent written without it cannot be valued later and says so
-            # rather than being valued against a derived guess.
-            (None if payout_event is None else str(payout_event)),
-            (None if held_is_long is None else bool(held_is_long)),
-            CLIENT_ORDER_IDENTITY_SUPPORTED,
-            *(( portfolio_group_id, role) if has_groups else ()))
+                "INSERT INTO bettor_funded_intents (intent_id, account_id,"
+                " venue, venue_class, us_market_slug, event_key, order_intent,"
+                " limit_price, quantity, collateral_usd, effective_digest,"
+                " decision_ref, state, provenance, payout_event, held_is_long,"
+                " client_identity_supported"
+                + (", portfolio_group_id, leg_role) " if has_groups else ") ")
+                + "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,"
+                "        'INTENT_RECORDED',$13,$14,$15,$16"
+                + (",$17,$18)" if has_groups else ")"),
+                intent_id, str(account_id), str(venue), str(venue_class),
+                str(us_market_slug), str(event_key), str(order_intent),
+                float(limit_price), int(quantity), float(collateral_usd),
+                str(effective_digest), json.dumps(decision_ref or {}),
+                PROVENANCE,
+                (None if payout_event is None else str(payout_event)),
+                (None if held_is_long is None else bool(held_is_long)),
+                CLIENT_ORDER_IDENTITY_SUPPORTED,
+                *((portfolio_group_id, role) if has_groups else ()))
     except Exception as exc:                                # noqa: BLE001
+        # THE SAVEPOINT IS ALREADY ROLLED BACK HERE, so the connection is
+        # usable and the queries below are safe. That ordering is the fix.
         msg = str(exc)
-        # BOTH INDEX NAMES ARE MATCHED, and that is not belt-and-braces.
-        # Migration 126 replaced `bettor_funded_one_live_intent` with
-        # `bettor_funded_one_open_position`, and this refusal keyed off the old
-        # name alone -- so after the migration a second concurrent submission
-        # RAISED out of here instead of returning a clean refusal. The database
-        # still refused it, which is the guarantee, but the caller saw an
-        # unhandled UniqueViolationError rather than
-        # ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE. The existing concurrency test
-        # is what caught it.
-        # ── THE CAPACITY BOUND, WHEREVER IT NOW LIVES ────────────────
-        #
-        # 131 moved it from a row index to `bettor_funded_one_open_group`, and
-        # a competing acquisition must still get a NAMED refusal rather than an
-        # unhandled UniqueViolationError -- which is exactly the regression 126
-        # caused when it renamed the index and this handler was not updated.
-        # All three names are matched so a future move is a failed test rather
-        # than a raised exception in a caller.
         if ("bettor_funded_one_open_group" in msg
                 or "bettor_funded_one_open_leg_per_role" in msg
                 or "bettor_funded_one_open_position" in msg
                 or "bettor_funded_one_live_intent" in msg):
             open_now = await open_entry_positions(conn)
+            if not open_now and "bettor_funded_one_open_group" in msg:
+                # THE GROUP BOUND WITH NO LIVE POSITION BEHIND IT.
+                #
+                # WHY THIS IS CHOSEN BY THE EVIDENCE AND NOT BY THE INDEX NAME.
+                # The group index usually fires first even when a position IS
+                # live, because a live position always has an open group. Keying
+                # the refusal on the index name therefore renamed every ordinary
+                # refusal and said nothing new. Keying it on whether an open
+                # position EXISTS is what the reader needs: the position rule
+                # when there is an occupant to name, and the group rule when
+                # there is not -- which happens when a group outlives its
+                # orders, e.g. a leg awaiting settlement evidence. Previously
+                # that case reported the position rule with an EMPTY occupant
+                # list, a refusal contradicted by its own evidence.
+                held = await conn.fetchrow(
+                    "SELECT group_id FROM bettor_funded_portfolio_groups "
+                    " WHERE closed_at IS NULL ORDER BY opened_at LIMIT 1")
+                gid = None if held is None else held["group_id"]
+                return dict(out, ok=False, refusal=R_ANOTHER_GROUP_IS_OPEN,
+                            open_group_id=gid, live=[], open_positions=[],
+                            group_is_open_because=(
+                                None if gid is None else await conn.fetchval(
+                                    "SELECT bettor_funded_group_blocker($1)",
+                                    gid)),
+                            why=("this lane holds one OPEN PORTFOLIO GROUP at "
+                                 "a time, and this group has no open ENTRY "
+                                 "position left in it. It stays open while any "
+                                 "order on a leg or its children is "
+                                 "outstanding or any reservation is "
+                                 "unresolved; `group_is_open_because` names "
+                                 "which"))
             return dict(out, ok=False, refusal=R_ANOTHER_INTENT_IS_LIVE,
                         live=[r["intent_id"] for r in open_now],
                         open_positions=[
@@ -830,13 +901,6 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
                              "holds contracts, so a filled entry keeps the "
                              "slot until an evidenced exit or settlement "
                              "closes it"))
-        # ── A LEG THAT DOES NOT BELONG TO ITS GROUP ──────────────────
-        #
-        # The group triggers refuse a mismatched account, venue or fixture, a
-        # closed group, and two roles on the same contract. Those are CALLER
-        # ERRORS with specific causes, and a caller that receives a raw
-        # PostgresError cannot distinguish them from an outage -- so they are
-        # returned as named refusals carrying the database's own message.
         for needle, refusal in (
                 ("is closed", R_GROUP_IS_CLOSED),
                 ("netting", R_LEGS_ARE_THE_SAME_CONTRACT),
@@ -851,6 +915,37 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
     return dict(out, ok=True, refusal=None,
                 portfolio_group_id=portfolio_group_id, leg_role=role,
                 committed_before_any_request_left=True)
+
+
+async def release_group_if_earned(conn, intent_id: str) -> dict | None:
+    """CALL THE ONE CLOSURE AUTHORITY at the end of a completed operation.
+
+    ── WHY THIS IS A CALL AND NOT A TRIGGER ON `UPDATE OF state` ──────
+    It WAS a trigger on the intent's state, and that was wrong for a reason
+    worth keeping written down. `ingest_fills` writes an order's outcome in two
+    statements: first `state='FILLED'`, then the recomputed `residual_qty`.
+    Between them the row reads "the order is finished and no contracts are
+    held" -- which is precisely the shape of a releasable position. A
+    statement-level trigger fired in that gap and released the capacity of a
+    position that was in the middle of being filled. Two existing tests caught
+    it by admitting a second entry that must be refused. They were right; the
+    trigger was wrong.
+
+    So the release now happens where a caller KNOWS its work is complete. Each
+    terminal transition ends with this one call, and every call reaches the same
+    SQL authority -- `bettor_funded_group_release`, which consults
+    `bettor_funded_group_blocker` and declines without raising. Nothing here
+    derives a closure label, and nothing here can abort a transaction.
+
+    DELETE and reservation transitions keep their database triggers, because no
+    code of ours necessarily runs on those paths.
+    """
+    try:
+        if not await _schema_has_groups(conn):
+            return None
+    except SchemaUnavailable:
+        return None
+    return await try_release_group(conn, intent_id)
 
 
 async def mark_send_attempted(conn, intent_id: str) -> None:
@@ -870,6 +965,9 @@ async def abandon_before_send(conn, intent_id: str, reason: str) -> None:
         "  unresolved_reason=$2, resolved_at=now(), updated_at=now() "
         " WHERE intent_id=$1 AND state='INTENT_RECORDED'",
         intent_id, str(reason)[:500])
+    # AN ABANDONED ORDER NO LONGER HOLDS ITS GROUP. Without this the slot stayed
+    # consumed by an order that never left the process.
+    await release_group_if_earned(conn, intent_id)
 
 
 async def abandon_proven_not_sent(conn, intent_id: str, reason: str) -> dict:
@@ -895,8 +993,9 @@ async def abandon_proven_not_sent(conn, intent_id: str, reason: str) -> dict:
     st = await conn.fetchval(
         "SELECT state FROM bettor_funded_intents WHERE intent_id=$1",
         intent_id)
+    rel = await release_group_if_earned(conn, intent_id)
     return {"intent_id": intent_id, "state": st, "exposure": "NONE",
-            "asserted": "nothing left this process"}
+            "asserted": "nothing left this process", "group_release": rel}
 
 
 async def record_acknowledgement(conn, intent_id: str, *,
@@ -918,7 +1017,11 @@ async def record_acknowledgement(conn, intent_id: str, *,
         "  resolved_at=CASE WHEN $3='REJECTED' THEN now() ELSE resolved_at END"
         " WHERE intent_id=$1", intent_id, vid, state,
         json.dumps(raw or {}, default=str))
-    return {"intent_id": intent_id, "state": state, "venue_order_id": vid}
+    out = {"intent_id": intent_id, "state": state, "venue_order_id": vid}
+    if state == "REJECTED":
+        # A REFUSAL IS NOT EXPOSURE, so it must not keep holding the slot.
+        out["group_release"] = await release_group_if_earned(conn, intent_id)
+    return out
 
 
 async def mark_unresolved(conn, intent_id: str, reason: str) -> dict:
@@ -1877,6 +1980,14 @@ async def _ingest_locked(conn, *, intent_id, fills, direction, now, row,
     if direction == "EXIT" and residual <= 0:
         await mark_position_closed(conn, econ_intent,
                                    "EXITED_IN_THE_MARKET")
+    else:
+        # ONLY NOW IS THE ROW CONSISTENT. `state` and `residual_qty` are both
+        # written, so the group may be asked whether anything is left. This is
+        # the instant the old trigger fired BEFORE, when the row still read
+        # "finished and holding nothing". A partial exit reaches here with
+        # residual > 0 and the release correctly declines, which is the
+        # behaviour the paired-leg case depends on.
+        await release_group_if_earned(conn, econ_intent)
     return {"ok": True, "written": written, "already_held": already,
             "unresolved": unresolved, "unresolved_count": len(unresolved),
             "direction": direction,
@@ -2206,76 +2317,81 @@ async def mark_position_closed(conn, intent_id: str,
     # that is never released is worse than no bound -- it stops the system
     # permanently, on a success.
     #
-    # THE GROUP IS NOT FORCED CLOSED. The attempt is made and the database's
-    # own `closure_is_earned` trigger decides: if any leg still holds
-    # inventory, any order is outstanding or ambiguous, or any reservation is
-    # unresolved, the UPDATE raises and the group stays open -- which is
-    # exactly right, because the other leg of a pair is still exposure. The
-    # outcome is reported rather than assumed.
+    # THE GROUP IS NOT FORCED CLOSED. `bettor_funded_group_release` decides,
+    # and it declines -- silently and without raising -- while any leg holds
+    # inventory, any order on a leg or its children is outstanding, or any
+    # reservation is unresolved. A decline is exactly right when the other leg
+    # of a pair is still exposure. The outcome is reported, never assumed.
     try:
         if await _schema_has_groups(conn):
             out["group_release"] = await try_release_group(conn, intent_id)
     except Exception as exc:                                # noqa: BLE001
-        out["group_release"] = {"attempted": False,
+        out["group_release"] = {"released": None,
                                 "why": type(exc).__name__}
     return out
 
 
-#: What a group's closure is called, derived from why its legs closed. A
-#: group whose legs settled did not "exit", and the distinction survives into
-#: the combined economics.
-_GROUP_CLOSURE_FROM_LEGS = {
-    frozenset({"SETTLED_BY_THE_VENUE"}): "BOTH_LEGS_SETTLED",
-    frozenset({"VOIDED_BY_THE_VENUE"}): "BOTH_LEGS_SETTLED",
-    frozenset({"EXITED_IN_THE_MARKET"}): "ALL_LEGS_EXITED",
-    frozenset({"NEVER_HELD_ANY_INVENTORY"}): "NEVER_HELD_ANY_INVENTORY",
-}
-
-
 async def try_release_group(conn, intent_id: str) -> dict:
-    """Close this intent's group IF the database agrees nothing is left.
+    """ASK THE DATABASE TO RELEASE this intent's group, and report the answer.
 
-    NEVER FORCES IT. The trigger from migration 131 refuses closure while any
-    exposure, outstanding order or unresolved reservation remains, and a
-    refusal here is a correct outcome rather than an error -- the commonest
-    case being the OTHER leg of a pair still being held.
+    ── WHY THIS DERIVES NOTHING ITSELF ──────────────────────────────
+    It used to compute the closure label in Python and then attempt its own
+    UPDATE, catching the trigger's deliberate refusal. Two problems, and the
+    second is a correctness bug:
+
+      * TWO MECHANISMS COMPETED for the closure. A Python label table and the
+        database both decided, and whichever ran first won. A settlement test
+        then overwrote the row with corrective SQL, which masked what
+        production actually persists.
+      * CATCHING THE REFUSAL DOES NOT UNDO AN ABORTED TRANSACTION. Inside the
+        fill-ingestion transaction, a raise from `closure_is_earned` aborts it;
+        returning a tidy dict afterwards leaves the caller believing its
+        execution, fees, residual and leg closure are intact when the next
+        statement will fail. Valid accounting was put at risk by a bookkeeping
+        nicety.
+
+    THERE IS NOW ONE AUTHORITY: `bettor_funded_group_release(gid)`. It derives
+    the label from the legs' own `closed_reason` values, consults
+    `bettor_funded_group_blocker` first so it RAISES NOTHING, and returns the
+    label it wrote or NULL. This function calls it and reports; when the answer
+    is NULL it asks the same predicate WHY, so the report names the real holder
+    rather than guessing.
     """
+    # AN EXIT CHILD CARRIES NO GROUP OF ITS OWN, so its group is its parent's.
+    # Without the COALESCE, resolving an abandoned or rejected EXIT order found
+    # no group and the parent's slot stayed consumed by an order that had
+    # already finished.
     gid = await conn.fetchval(
-        "SELECT portfolio_group_id FROM bettor_funded_intents "
-        "WHERE intent_id = $1", intent_id)
+        "SELECT COALESCE(i.portfolio_group_id, p.portfolio_group_id) "
+        "  FROM bettor_funded_intents i "
+        "  LEFT JOIN bettor_funded_intents p ON p.intent_id = i.parent_intent_id"
+        " WHERE i.intent_id = $1", intent_id)
     if not gid:
-        return {"attempted": False, "why": "this intent has no group"}
+        return {"released": False, "why": "this intent has no group"}
+    if await conn.fetchval(
+            "SELECT count(*) FROM bettor_funded_portfolio_groups "
+            "WHERE group_id = $1", gid) == 0:
+        return {"released": False, "group_id": gid,
+                "why": "the group row is gone"}
     already = await conn.fetchval(
         "SELECT closed_at IS NOT NULL FROM bettor_funded_portfolio_groups "
         "WHERE group_id = $1", gid)
+    label = await conn.fetchval(
+        "SELECT bettor_funded_group_release($1)", gid)
+    if label is not None:
+        return {"released": True, "group_id": gid, "closure": label,
+                "decided_by": "BETTOR_FUNDED_GROUP_RELEASE"}
     if already:
-        return {"attempted": False, "group_id": gid, "why": "already closed"}
-    reasons = {r["closed_reason"] for r in await conn.fetch(
-        "SELECT DISTINCT closed_reason FROM bettor_funded_intents "
-        "WHERE portfolio_group_id = $1 AND kind = 'ENTRY' "
-        "  AND closed_reason IS NOT NULL", gid)}
-    closure = _GROUP_CLOSURE_FROM_LEGS.get(frozenset(reasons))
-    if closure is None:
-        # MIXED OR UNKNOWN LEG REASONS. A group whose legs ended differently
-        # has ended, and "ALL_LEGS_EXITED" is the honest umbrella only when
-        # every one exited. Otherwise the settled label governs, because a
-        # settlement is authoritative and an exit is not more final than it.
-        closure = ("BOTH_LEGS_SETTLED"
-                   if reasons & {"SETTLED_BY_THE_VENUE", "VOIDED_BY_THE_VENUE"}
-                   else "ALL_LEGS_EXITED" if reasons
-                   else "NEVER_HELD_ANY_INVENTORY")
-    try:
-        await conn.execute(
-            "UPDATE bettor_funded_portfolio_groups "
-            "SET closed_at = now(), closure = $2 WHERE group_id = $1 "
-            "  AND closed_at IS NULL", gid, closure)
-        return {"attempted": True, "released": True, "group_id": gid,
-                "closure": closure, "leg_reasons": sorted(reasons)}
-    except Exception as exc:                                # noqa: BLE001
-        # THE DATABASE REFUSED, WHICH IS AN ANSWER. Something is still live.
-        return {"attempted": True, "released": False, "group_id": gid,
-                "closure_would_have_been": closure,
-                "why": " ".join(str(exc).split())[:300]}
+        closure = await conn.fetchval(
+            "SELECT closure FROM bettor_funded_portfolio_groups "
+            "WHERE group_id = $1", gid)
+        return {"released": False, "group_id": gid, "closure": closure,
+                "why": "the group was already closed",
+                "decided_by": "BETTOR_FUNDED_GROUP_RELEASE"}
+    return {"released": False, "group_id": gid,
+            "why": await conn.fetchval(
+                "SELECT bettor_funded_group_blocker($1)", gid),
+            "decided_by": "BETTOR_FUNDED_GROUP_RELEASE"}
 
 
 # ── 3 · RECOVERY: ASK THE VENUE, NEVER RESEND ───────────────────────

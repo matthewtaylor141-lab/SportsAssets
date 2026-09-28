@@ -50,25 +50,46 @@ async def _has_131(c) -> bool:
         "WHERE table_name = 'bettor_funded_portfolio_groups'"))
 
 
+#: CI SETS THIS. See `_require_free_capacity`.
+CAPACITY_MUST_BE_FREE = os.environ.get(
+    "RN1X_CAPACITY_SLOT_MUST_BE_FREE", "") not in ("", "0", "false", "FALSE")
+
+
 async def _require_free_capacity(c):
     """Skip -- do not delete -- when something else holds the one open group.
+    In the GATE the same condition is a FAILURE.
 
     THE BOUND MAKES THESE TESTS EXCLUSIVE. There is exactly one open-group slot
     in the system, so a test cannot open its own while anything else holds it.
     That is the invariant working, not a defect, and it surfaced immediately:
     a leftover group from development failed all nineteen tests at once.
 
-    The response is to SKIP with the holder named, never to delete it. A test
+    THE RESPONSE IS TO SKIP WITH THE HOLDER NAMED, never to delete it. A test
     that clears somebody else's open position to make room for itself is
     destroying the very state a funded system exists to protect -- and on a
     shared database that row could be real.
+
+    BUT A SKIP IN THE GATE IS NOT A PASS. The gate builds a freshly migrated,
+    isolated database, so nothing can legitimately hold the slot; a skip there
+    means the acceptance database was dirty or another test leaked a group, and
+    it would turn these capital-critical assertions into a green tick that
+    proved nothing. The gate exports `RN1X_CAPACITY_SLOT_MUST_BE_FREE=1` and
+    this fails instead.
     """
     holder = await c.fetchval(
         "SELECT group_id FROM bettor_funded_portfolio_groups "
-        "WHERE closed_at IS NULL AND group_id NOT LIKE 't131-%' LIMIT 1")
-    if holder:
-        pytest.skip("group %r holds the one open-group slot; these tests need "
-                    "it free and will not delete another owner's row" % holder)
+        "WHERE closed_at IS NULL AND group_id NOT LIKE 't131-%' "
+        "  AND group_id NOT LIKE 'grp:t131-%' LIMIT 1")
+    if not holder:
+        return
+    msg = ("group %r holds the one open-group slot; these tests need it free "
+           "and will not delete another owner's row" % holder)
+    if CAPACITY_MUST_BE_FREE:
+        pytest.fail(
+            msg + ". RN1X_CAPACITY_SLOT_MUST_BE_FREE is set, so this is an "
+            "ENVIRONMENT FAILURE, not a pass: the acceptance database must be "
+            "freshly migrated and isolated and these assertions must run")
+    pytest.skip(msg)
 
 
 async def _clean(c):
@@ -77,16 +98,31 @@ async def _clean(c):
     NOT a TRUNCATE. This may run against a database holding other fixtures,
     and wiping the funded tables to make room for a test is how a test starts
     destroying evidence.
+
+    IT RUNS IN `finally`, INCLUDING AFTER A SKIP. On a database without 131 the
+    skip fires first and this still runs, so it must not assume 131's tables
+    exist -- otherwise every test in this file reported FAILED (an
+    `UndefinedTableError` from the cleanup) where the honest outcome is SKIPPED.
+    A suite that fails for the absence of the schema it tests hides whether it
+    would have passed with it.
     """
-    await c.execute("DELETE FROM bettor_funded_leg_reservations "
-                    "WHERE group_id LIKE 't131-%'")
+    if await _has_131(c):
+        await c.execute("DELETE FROM bettor_funded_leg_reservations "
+                        "WHERE group_id LIKE 't131-%'")
     await c.execute("DELETE FROM bettor_funded_fills WHERE intent_id IN "
                     "(SELECT intent_id FROM bettor_funded_intents "
                     " WHERE intent_id LIKE 't131-%')")
     await c.execute("DELETE FROM bettor_funded_intents "
                     "WHERE intent_id LIKE 't131-%'")
-    await c.execute("DELETE FROM bettor_funded_portfolio_groups "
-                    "WHERE group_id LIKE 't131-%'")
+    if await _has_131(c):
+        # BOTH PREFIXES. Groups this suite names start 't131-'; groups
+        # `record_intent` mints for an ordinary entry are 'grp:<intent_id>', so
+        # an entry called 't131-e1' leaves 'grp:t131-e1'. Missing the second
+        # prefix left real open groups behind, and the next test then skipped
+        # with THIS suite named as the holder of the one open-group slot.
+        await c.execute("DELETE FROM bettor_funded_portfolio_groups "
+                        "WHERE group_id LIKE 't131-%' "
+                        "   OR group_id LIKE 'grp:t131-%'")
 
 
 async def _group(c, gid, *, structure="INDIRECT_MIDDLE", event=FIXTURE):
@@ -754,8 +790,6 @@ async def test_an_ordinary_entry_still_works_and_gets_its_own_group():
     finally:
         await c.execute("DELETE FROM bettor_funded_intents "
                         "WHERE intent_id LIKE 't131-%'")
-        await c.execute("DELETE FROM bettor_funded_portfolio_groups "
-                        "WHERE group_id LIKE 'grp:t131-%'")
         await _clean(c)
         await c.close()
 
@@ -791,8 +825,6 @@ async def test_a_hedge_acquisition_joins_the_open_group():
     finally:
         await c.execute("DELETE FROM bettor_funded_intents "
                         "WHERE intent_id LIKE 't131-%'")
-        await c.execute("DELETE FROM bettor_funded_portfolio_groups "
-                        "WHERE group_id LIKE 'grp:t131-%'")
         await _clean(c)
         await c.close()
 
@@ -830,8 +862,6 @@ async def test_a_competing_acquisition_gets_a_named_refusal_not_an_exception():
     finally:
         await c.execute("DELETE FROM bettor_funded_intents "
                         "WHERE intent_id LIKE 't131-%'")
-        await c.execute("DELETE FROM bettor_funded_portfolio_groups "
-                        "WHERE group_id LIKE 'grp:t131-%'")
         await _clean(c)
         await c.close()
 
@@ -861,8 +891,6 @@ async def test_a_hedge_on_the_primarys_own_contract_is_refused_by_name():
     finally:
         await c.execute("DELETE FROM bettor_funded_intents "
                         "WHERE intent_id LIKE 't131-%'")
-        await c.execute("DELETE FROM bettor_funded_portfolio_groups "
-                        "WHERE group_id LIKE 'grp:t131-%'")
         await _clean(c)
         await c.close()
 

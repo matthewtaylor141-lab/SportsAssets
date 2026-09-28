@@ -84,6 +84,13 @@ CREATE TABLE IF NOT EXISTS bettor_funded_portfolio_groups (
         closure IS NULL OR closure IN (
             'BOTH_LEGS_SETTLED',
             'ALL_LEGS_EXITED',
+            -- ONE LEG SOLD, THE OTHER SETTLED. Both happened; neither single
+            -- label is true of the group, and choosing the tidier one would
+            -- record a history that did not occur.
+            'MIXED_EXIT_AND_SETTLEMENT',
+            -- The legs stopped being live with no evidenced disposal on any of
+            -- them. Named rather than dressed as an exit.
+            'CLOSED_WITHOUT_LEG_REASONS',
             'NEVER_HELD_ANY_INVENTORY')),
     CONSTRAINT bettor_funded_group_closed_has_reason_ck CHECK (
         (closed_at IS NULL) = (closure IS NULL))
@@ -464,45 +471,20 @@ $$ LANGUAGE sql STABLE;
 -- consuming capacity, which means it cannot be expressed by closing the group.
 CREATE OR REPLACE FUNCTION bettor_funded_group_closure_is_earned()
 RETURNS trigger AS $$
-DECLARE
-    inv numeric;
-    live_orders int;
-    live_res int;
+DECLARE blocker text;
 BEGIN
     IF NEW.closed_at IS NULL OR OLD.closed_at IS NOT NULL THEN
         RETURN NEW;
     END IF;
-    -- ANY residual inventory on ANY leg, entry or exit child.
-    SELECT COALESCE(SUM(GREATEST(0,
-               public.bettor_funded_group_leg_inventory(NEW.group_id, r))), 0)
-      INTO inv
-      FROM (VALUES ('PRIMARY'), ('HEDGE')) AS t(r);
-    IF inv > 0 THEN
-        RAISE EXCEPTION 'group % still holds % contract(s); closure would '
-                        'release capacity while exposure remains',
-            NEW.group_id, inv;
-    END IF;
-    -- ANY outstanding or ambiguous order on any leg or its children.
-    SELECT count(*) INTO live_orders
-      FROM public.bettor_funded_intents i
-     WHERE (i.portfolio_group_id = NEW.group_id
-            OR i.parent_intent_id IN (
-                 SELECT intent_id FROM public.bettor_funded_intents
-                  WHERE portfolio_group_id = NEW.group_id))
-       AND public.bettor_funded_order_is_outstanding(i.state);
-    IF live_orders > 0 THEN
-        RAISE EXCEPTION 'group % has % outstanding or ambiguous order(s); '
-                        'closure would abandon them', NEW.group_id, live_orders;
-    END IF;
-    -- ANY unresolved reservation.
-    SELECT count(*) INTO live_res
-      FROM public.bettor_funded_leg_reservations r
-     WHERE r.group_id = NEW.group_id
-       AND r.state IN ('HELD', 'COMMITTED', 'SEND_ATTEMPTED', 'AMBIGUOUS');
-    IF live_res > 0 THEN
-        RAISE EXCEPTION 'group % has % unresolved reservation(s); closure '
-                        'would release capacity an acquisition still claims',
-            NEW.group_id, live_res;
+    -- THE SAME PREDICATE THE RELEASE USES. This is the backstop for a closure
+    -- written by any route that did NOT go through
+    -- `bettor_funded_group_release` -- hand SQL, a future caller, a repair
+    -- script. Because the release consults this predicate first, this raise is
+    -- not reachable from the release, and a caller's transaction is never
+    -- aborted by an ordinary declined closure.
+    blocker := public.bettor_funded_group_blocker(NEW.group_id);
+    IF blocker IS NOT NULL THEN
+        RAISE EXCEPTION '%', blocker;
     END IF;
     RETURN NEW;
 END;
@@ -532,49 +514,180 @@ CREATE TRIGGER bettor_funded_group_closure_is_earned_trg
 -- IT STILL DOES NOT FORCE ANYTHING OPEN CLOSED. The conditions are the same
 -- ones `closure_is_earned` checks; this only fires when they are all met, and
 -- it closes with NEVER_HELD_ANY_INVENTORY only when that is literally true.
-CREATE OR REPLACE FUNCTION bettor_funded_group_follows_its_legs()
-RETURNS trigger AS $$
+-- ── ONE PREDICATE, TWO CONSUMERS ────────────────────────────────────
+--
+-- WHY THIS FUNCTION EXISTS AT ALL. `closure_is_earned` (the trigger that
+-- REFUSES a premature closure) and `bettor_funded_group_release` (the function
+-- that PERFORMS an earned one) have to agree exactly. They did not: the release
+-- checked the group's own ENTRY legs and its reservations, while the trigger
+-- also counted outstanding orders on the legs' CHILDREN -- an EXIT order still
+-- working at the venue. So the release would attempt an UPDATE the trigger
+-- raises on, and that raise aborts the caller's transaction. That is the same
+-- defect as catching a refusal in Python, moved into SQL.
+--
+-- Now there is ONE predicate. It returns NULL when the group may close, or the
+-- reason it may not. The trigger RAISES on a non-NULL answer; the release
+-- DECLINES on one. They cannot drift, because there is only one of them.
+CREATE OR REPLACE FUNCTION bettor_funded_group_blocker(gid text)
+RETURNS text AS $$
+DECLARE inv numeric; n int;
+BEGIN
+    -- ANY residual inventory on ANY leg. Capacity must not be released while
+    -- contracts are owned.
+    SELECT COALESCE(SUM(GREATEST(0,
+               public.bettor_funded_group_leg_inventory(gid, r))), 0)
+      INTO inv
+      FROM (VALUES ('PRIMARY'), ('HEDGE')) AS t(r);
+    IF inv > 0 THEN
+        RETURN format('group %s still holds %s contract(s); closure would '
+                      'release capacity while exposure remains', gid, inv);
+    END IF;
+    -- ANY outstanding or ambiguous order on a leg OR ON A LEG'S CHILD. An exit
+    -- order that has not resolved is an order the system may still send, and
+    -- sending one against a released slot is an unauthorised order.
+    SELECT count(*) INTO n
+      FROM public.bettor_funded_intents i
+     WHERE (i.portfolio_group_id = gid
+            OR i.parent_intent_id IN (
+                 SELECT intent_id FROM public.bettor_funded_intents
+                  WHERE portfolio_group_id = gid))
+       AND public.bettor_funded_order_is_outstanding(i.state);
+    IF n > 0 THEN
+        RETURN format('group %s has %s outstanding or ambiguous order(s); '
+                      'closure would abandon them', gid, n);
+    END IF;
+    -- ANY unresolved reservation. An acquisition still claims the capacity.
+    SELECT count(*) INTO n
+      FROM public.bettor_funded_leg_reservations r
+     WHERE r.group_id = gid
+       AND r.state IN ('HELD','COMMITTED','SEND_ATTEMPTED','AMBIGUOUS');
+    IF n > 0 THEN
+        RETURN format('group %s has %s unresolved reservation(s); closure '
+                      'would release capacity an acquisition still claims',
+                      gid, n);
+    END IF;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ── ONE RELEASE IMPLEMENTATION, CALLED FROM EVERY CLOSURE PATH ──────
+--
+-- Releases `gid` if and only if nothing is live, deriving the closure label
+-- from the legs' OWN reasons. Returns the label it wrote, or NULL if it did
+-- not write one -- so a caller learns the outcome without catching anything.
+--
+-- IT RAISES NOTHING, because it asks `bettor_funded_group_blocker` first. That
+-- is what makes it safe to call from inside fill ingestion, where a raise would
+-- abort a transaction holding a valid execution, its fees and its residual.
+CREATE OR REPLACE FUNCTION bettor_funded_group_release(gid text)
+RETURNS text AS $$
 DECLARE
-    gid text;
-    live_legs int;
-    live_res int;
-    ever_filled numeric;
+    reasons text[];
+    ever_filled numeric; label text;
+BEGIN
+    IF NOT EXISTS (SELECT 1 FROM public.bettor_funded_portfolio_groups
+                    WHERE group_id = gid AND closed_at IS NULL) THEN
+        RETURN NULL;
+    END IF;
+    IF public.bettor_funded_group_blocker(gid) IS NOT NULL THEN
+        RETURN NULL;
+    END IF;
+
+    SELECT array_agg(DISTINCT i.closed_reason) INTO reasons
+      FROM public.bettor_funded_intents i
+     WHERE i.portfolio_group_id = gid AND i.kind = 'ENTRY'
+       AND i.closed_reason IS NOT NULL;
+    SELECT COALESCE(SUM(f.qty) FILTER (WHERE f.direction = 'ENTRY'), 0)
+      INTO ever_filled
+      FROM public.bettor_funded_fills f
+      JOIN public.bettor_funded_intents i ON i.intent_id = f.intent_id
+     WHERE i.portfolio_group_id = gid;
+
+    label := CASE
+        WHEN COALESCE(ever_filled, 0) = 0 THEN 'NEVER_HELD_ANY_INVENTORY'
+        WHEN reasons IS NOT NULL
+             AND NOT ('EXITED_IN_THE_MARKET' = ANY(reasons))
+             AND ('SETTLED_BY_THE_VENUE' = ANY(reasons)
+                  OR 'VOIDED_BY_THE_VENUE' = ANY(reasons))
+             THEN 'BOTH_LEGS_SETTLED'
+        WHEN reasons IS NOT NULL
+             AND 'EXITED_IN_THE_MARKET' = ANY(reasons)
+             AND NOT ('SETTLED_BY_THE_VENUE' = ANY(reasons))
+             AND NOT ('VOIDED_BY_THE_VENUE' = ANY(reasons))
+             THEN 'ALL_LEGS_EXITED'
+        WHEN reasons IS NOT NULL THEN 'MIXED_EXIT_AND_SETTLEMENT'
+        ELSE 'CLOSED_WITHOUT_LEG_REASONS'
+    END;
+    UPDATE public.bettor_funded_portfolio_groups
+       SET closed_at = now(), closure = label
+     WHERE group_id = gid AND closed_at IS NULL;
+    RETURN label;
+END;
+$$ LANGUAGE plpgsql;
+
+-- ── THE TWO PATHS NO CODE OF OURS NECESSARILY TRAVELS ───────────────
+--
+-- Every release from application code goes through
+-- `bettor_funded_book.release_group_if_earned` at the end of a completed
+-- operation. These two triggers exist for the events that reach the database
+-- without passing through it: rows deleted by a repair or a fixture, and a
+-- reservation resolving after its legs have already closed.
+--
+-- DELETE ONLY ON INTENTS. THIS WAS THE DEFECT THAT MADE IT UNSAFE ON UPDATE.
+-- It used to fire on `UPDATE OF state, residual_qty, closed_at` too, and that
+-- is not safe: inside `ingest_fills` there is a moment where the order is no
+-- longer OUTSTANDING and `residual_qty` has not yet been written. At that
+-- instant a leg looks not-open, so the trigger closed the group and RELEASED
+-- THE CAPACITY OF A POSITION THAT WAS BEING FILLED. Two existing tests caught
+-- it by admitting a second entry that must be refused --
+-- `test_the_database_itself_keeps_the_slot_after_a_fill` and
+-- `test_an_exit_is_never_refused_by_the_one_position_rule`. Those tests are
+-- protecting a real economic invariant and were right; the trigger was wrong.
+-- A DELETE has no such intermediate state: the rows are gone.
+--
+-- AND ONLY THE GROUPS THE CHANGED ROWS BELONGED TO. A second defect, found by
+-- testing the gate rule rather than the schema: the trigger looped over EVERY
+-- open group. So deleting one account's intent rows offered a release to a
+-- DIFFERENT account's group, and a group that momentarily satisfied the
+-- predicate was closed by an event that had nothing to do with it. It showed up
+-- as a deliberately planted foreign group vanishing during another test's
+-- cleanup. A transition table names exactly which groups the statement touched,
+-- so the release is offered to those and no others; the blocker still decides
+-- each one.
+--
+-- TWO FUNCTIONS, because the tables name their group differently: an intent
+-- carries `portfolio_group_id` (or inherits its parent's), a reservation carries
+-- `group_id`.
+DROP TRIGGER IF EXISTS bettor_funded_group_follows_its_legs_trg
+    ON bettor_funded_intents;
+DROP TRIGGER IF EXISTS bettor_funded_group_follows_reservations_trg
+    ON bettor_funded_leg_reservations;
+DROP FUNCTION IF EXISTS bettor_funded_group_follows_its_legs();
+CREATE OR REPLACE FUNCTION bettor_funded_group_follows_deleted_legs()
+RETURNS trigger AS $$
+DECLARE gid text;
 BEGIN
     FOR gid IN
-        SELECT DISTINCT g.group_id
-          FROM public.bettor_funded_portfolio_groups g
-         WHERE g.closed_at IS NULL
+        SELECT DISTINCT COALESCE(o.portfolio_group_id, p.portfolio_group_id)
+          FROM old_intents o
+          LEFT JOIN public.bettor_funded_intents p
+                 ON p.intent_id = o.parent_intent_id
+         WHERE COALESCE(o.portfolio_group_id, p.portfolio_group_id) IS NOT NULL
     LOOP
-        SELECT count(*) INTO live_legs
-          FROM public.bettor_funded_intents i
-         WHERE i.portfolio_group_id = gid
-           AND i.kind = 'ENTRY'
-           AND public.bettor_funded_position_is_open(i.state, i.residual_qty,
-                                                    i.closed_at);
-        IF live_legs > 0 THEN
-            CONTINUE;
-        END IF;
-        SELECT count(*) INTO live_res
-          FROM public.bettor_funded_leg_reservations r
-         WHERE r.group_id = gid
-           AND r.state IN ('HELD','COMMITTED','SEND_ATTEMPTED','AMBIGUOUS');
-        IF live_res > 0 THEN
-            CONTINUE;
-        END IF;
-        -- WHAT TO CALL IT. If any leg ever filled, the group held inventory
-        -- and ended by exit or settlement; if none did, it truly never held
-        -- any. Deriving this wrongly would put a false history on the row.
-        SELECT COALESCE(SUM(f.qty) FILTER (WHERE f.direction = 'ENTRY'), 0)
-          INTO ever_filled
-          FROM public.bettor_funded_fills f
-          JOIN public.bettor_funded_intents i ON i.intent_id = f.intent_id
-         WHERE i.portfolio_group_id = gid;
-        UPDATE public.bettor_funded_portfolio_groups
-           SET closed_at = now(),
-               closure = CASE
-                   WHEN ever_filled > 0 THEN 'ALL_LEGS_EXITED'
-                   ELSE 'NEVER_HELD_ANY_INVENTORY' END
-         WHERE group_id = gid AND closed_at IS NULL;
+        PERFORM public.bettor_funded_group_release(gid);
+    END LOOP;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+CREATE OR REPLACE FUNCTION bettor_funded_group_follows_reservations()
+RETURNS trigger AS $$
+DECLARE gid text;
+BEGIN
+    FOR gid IN SELECT DISTINCT group_id FROM changed_reservations
+                WHERE group_id IS NOT NULL
+    LOOP
+        PERFORM public.bettor_funded_group_release(gid);
     END LOOP;
     RETURN NULL;
 END;
@@ -583,9 +696,44 @@ $$ LANGUAGE plpgsql;
 DROP TRIGGER IF EXISTS bettor_funded_group_follows_its_legs_trg
     ON bettor_funded_intents;
 CREATE TRIGGER bettor_funded_group_follows_its_legs_trg
-    AFTER DELETE OR UPDATE OF state, residual_qty, closed_at
-    ON bettor_funded_intents
+    AFTER DELETE ON bettor_funded_intents
+    REFERENCING OLD TABLE AS old_intents
     FOR EACH STATEMENT
-    EXECUTE FUNCTION bettor_funded_group_follows_its_legs();
+    EXECUTE FUNCTION bettor_funded_group_follows_deleted_legs();
+
+-- AND ON RESERVATIONS TOO. The last reservation can become terminal AFTER the
+-- legs have closed, and the trigger above never fires then -- so the group
+-- would sit open with nothing live in it, holding the capacity slot with no
+-- event left to release it. That sequence needs its own path and now has one.
+--
+-- RESERVATIONS ARE SAFE ON UPDATE TOO: a reservation reaching a terminal state
+-- is a complete event, not an intermediate one, unlike the two-statement
+-- state-then-residual write that made the intent UPDATE trigger unsafe.
+--
+-- TWO TRIGGERS, NOT ONE, because a statement-level trigger may declare only the
+-- transition tables its own event provides: an UPDATE has NEW, a DELETE has OLD.
+-- A reservation row keeps its `group_id` through either, so both read the same
+-- named set.
+--
+-- AND NO `OF state` COLUMN LIST: PostgreSQL refuses a transition table on a
+-- trigger with one ("transition tables cannot be specified for triggers with
+-- column lists"). Firing on any reservation UPDATE is harmless here -- unlike
+-- the intent case -- because the release is blocker-gated and idempotent, and a
+-- reservation has no two-statement write whose midpoint misreads as releasable.
+DROP TRIGGER IF EXISTS bettor_funded_group_follows_reservations_trg
+    ON bettor_funded_leg_reservations;
+CREATE TRIGGER bettor_funded_group_follows_reservations_trg
+    AFTER UPDATE ON bettor_funded_leg_reservations
+    REFERENCING NEW TABLE AS changed_reservations
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION bettor_funded_group_follows_reservations();
+
+DROP TRIGGER IF EXISTS bettor_funded_group_follows_dropped_reservations_trg
+    ON bettor_funded_leg_reservations;
+CREATE TRIGGER bettor_funded_group_follows_dropped_reservations_trg
+    AFTER DELETE ON bettor_funded_leg_reservations
+    REFERENCING OLD TABLE AS changed_reservations
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION bettor_funded_group_follows_reservations();
 
 COMMIT;
