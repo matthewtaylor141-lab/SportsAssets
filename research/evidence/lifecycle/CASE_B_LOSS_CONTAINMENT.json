@@ -42,7 +42,7 @@
     },
     "exit_intents": [
      {
-      "intent_id": "fpi-3c10334c0eeb4ebc",
+      "intent_id": "fpi-8afcecd326d448e4",
       "state": "FILLED",
       "qty": 9.0,
       "residual": 0.0,
@@ -60,7 +60,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-3c10334c0eeb4ebc",
+      "intent_id": "fpi-8afcecd326d448e4",
       "direction": "EXIT",
       "qty": 9.0,
       "price": 0.41,
@@ -133,7 +133,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-3c10334c0eeb4ebc",
+      "intent_id": "fpi-8afcecd326d448e4",
       "exp": 0.15,
       "obs": null,
       "fee_state": "PROVISIONAL",
@@ -236,7 +236,7 @@
     "filled_fees_usd": 0.4,
     "contracts_held": 6.0,
     "contracts_net_from_the_fill_ledger": 6.0,
-    "capital_hours_usd_h": 0.000186,
+    "capital_hours_usd_h": 0.000178,
     "per_event_collateral_usd": {
      "ev-bos-lal-2026-09-27": 3.6
     },
@@ -327,7 +327,7 @@
      "filled_fees_usd": 0.4,
      "contracts_held": 6.0,
      "contracts_net_from_the_fill_ledger": 6.0,
-     "capital_hours_usd_h": 0.000208,
+     "capital_hours_usd_h": 0.000195,
      "per_event_collateral_usd": {
       "ev-bos-lal-2026-09-27": 3.6
      },
@@ -367,7 +367,7 @@
       },
       {
        "fill_id": "fvf:vo-xl-1:vf-1",
-       "intent_id": "fpi-3c10334c0eeb4ebc",
+       "intent_id": "fpi-8afcecd326d448e4",
        "exp": 0.15,
        "obs": null,
        "fee_state": "PROVISIONAL",
@@ -415,7 +415,7 @@
     "intent_id": "dem-loss",
     "residual_qty": 6.0,
     "us_market_slug": "aec-nba-bos-lal-2026-09-27",
-    "settlement": "{\"at\": 1790597239.6409483, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
+    "settlement": "{\"at\": 1790600043.3326185, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
     "partial_exit_result": {
      "sold_qty": 9.0,
      "exit_proceeds_usd": 3.69,
