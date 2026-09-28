@@ -1935,8 +1935,13 @@ async def realised_on_sold(conn, intent_id: str) -> dict:
             "the demonstration's own figures (fees 0.25 entry, 0.15 exit) "
             "that identity misses by exactly the 0.10 of entry fee sitting "
             "on the 6 contracts still held"),
-        "net_cash_exceeds_this_by_usd": (None if excess is None
-                                         else round(excess, 6)),
+        # `net_cash_exceeds_this_by_usd` COMES FROM `partial_realisation`
+        # via `**m` above. It was restated here as well, still reading the
+        # local `excess` that the refactor deleted -- a NameError on every
+        # call, on the operator surface, found by running the tests against
+        # a real database rather than reasoning about them. Two copies of
+        # one field is what made it possible to delete the value and keep
+        # the reader.
         "net_cash_identity": (
             "open_position_net_cash = realised_on_sold - remaining_basis - "
             "entry_fees_allocated_to_residual"),

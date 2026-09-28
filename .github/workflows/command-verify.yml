@@ -6578,10 +6578,72 @@ jobs:
             tests/test_a_filled_order_is_not_a_closed_position.py \
             tests/test_the_funded_path_is_the_real_adapter.py \
             tests/test_funded_activation_is_a_real_path.py \
+            tests/test_partial_exit_pnl_is_separable.py \
+            tests/test_a_partial_loss_actually_stops_new_exposure.py \
             2>&1 | tail -25 | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           exit "$rc"
+      - name: The risk tests RAN rather than skipped
+        env:
+          RN1X_TEST_DSN: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
+          DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
+          ADMIN_TOKEN: t
+        run: |
+          set -uo pipefail
+          # ── A SKIP IS NOT A PASS, AND THIS STEP EXISTS TO SAY SO ────
+          #
+          # Owner requirement: "'No local DSN' is an execution dependency,
+          # not acceptance evidence. Use the available authorized test
+          # environment and show that the tests ran rather than skipped."
+          #
+          # THE FAILURE MODE THIS CLOSES. Every one of these tests is
+          # guarded by `@pg`, which skips when RN1X_TEST_DSN is unset. A
+          # typo in the env block, a service container that never came up,
+          # or a renamed variable would make them ALL skip -- and pytest
+          # reports `N skipped` with exit 0, which the job reads as green.
+          # The capital-critical risk tests would then be "passing" while
+          # never executing, which is worse than not having them: their
+          # presence is cited as evidence.
+          #
+          # So the count of PASSED tests in the risk file is asserted to be
+          # non-zero, and any skip in it fails the step.
+          cd backend
+          python -m pytest -q -p no:randomly \
+            tests/test_a_partial_loss_actually_stops_new_exposure.py \
+            --junitxml=/tmp/risk.xml 2>&1 | tail -15
+          rc=${PIPESTATUS[0]}
+          python3 - <<'PYX'
+import sys
+import xml.etree.ElementTree as ET
+t = ET.parse("/tmp/risk.xml").getroot()
+suites = t.findall(".//testsuite") or [t]
+tests = skipped = failures = errors = 0
+for s in suites:
+    tests += int(s.get("tests") or 0)
+    skipped += int(s.get("skipped") or 0)
+    failures += int(s.get("failures") or 0)
+    errors += int(s.get("errors") or 0)
+ran = tests - skipped
+print("risk tests: collected=%d ran=%d skipped=%d failures=%d errors=%d"
+      % (tests, ran, skipped, failures, errors))
+bad = []
+if ran == 0:
+    bad.append("NOT ONE RISK TEST EXECUTED -- the DSN did not reach pytest, "
+               "so these tests are not evidence of anything")
+if skipped:
+    bad.append("%d risk test(s) SKIPPED; a skip is not a pass" % skipped)
+if failures or errors:
+    bad.append("%d failure(s)/%d error(s)" % (failures, errors))
+if bad:
+    for b in bad:
+        print("REFUSED: " + b)
+    sys.exit(1)
+print("every risk test ran against the migrated database")
+PYX
+          pyrc=$?
+          echo "risk-gate rc=$pyrc pytest rc=$rc"
+          [ "$pyrc" = "0" ] && [ "$rc" = "0" ]
 
   # ── WHAT `transactTime` MEANS, ESTABLISHED BY READING TWICE ─────────
   #

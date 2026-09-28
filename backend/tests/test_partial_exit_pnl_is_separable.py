@@ -124,8 +124,28 @@ async def test_a_partial_loss_is_reported_on_the_sold_quantity(monkeypatch):
 
 @pg
 @pytest.mark.asyncio
-async def test_closure_based_realised_still_reads_zero_and_that_is_correct(monkeypatch):
-    """Both numbers coexist; neither replaces the other."""
+async def test_realised_now_books_the_partial_while_the_position_is_open(monkeypatch):
+    """The partial result IS realised P&L. This test used to deny that.
+
+    ── WHAT THIS TEST USED TO ASSERT, AND WHY IT WAS WRONG ───────────
+    It was named `test_closure_based_realised_still_reads_zero_and_that_is
+    _correct` and it required `pnl()["realised_pnl_usd"] == 0.00` on a
+    position that had already sold 9 of 15 contracts at a loss. The
+    docstring said "both numbers coexist; neither replaces the other".
+
+    The coexistence was real. The word "correct" was not. Every consumer of
+    MAX_DRAWDOWN reads that zero -- `check_rails`, which refuses new
+    exposure, the management surface's loss stop, and this very function --
+    so the approved stop could be breached by any amount without tripping.
+    A test asserting that a control cannot see the loss it exists to stop
+    had turned the defect into a requirement, which is the second time this
+    repository has done that (the first was the M1 sequencing premise).
+
+    `realised()` now books each exit fill as an increment at its own
+    instant, so the loss appears here while the position is still open, and
+    `closed_positions` still correctly reads 0 -- nothing HAS closed. Those
+    two facts were never in tension; only the inference was.
+    """
     asyncpg = pytest.importorskip("asyncpg")
     conn = await asyncpg.connect(DSN)
     try:
@@ -140,11 +160,16 @@ async def test_closure_based_realised_still_reads_zero_and_that_is_correct(monke
 
         pl = await FB.pnl(conn, account_id=ACCT, venue=VENUE)
         sold = await FB.realised_on_sold(conn, "pe-2")
-        # CLOSURE-BASED: nothing has closed, so 0.00 -- correct for the
-        # drawdown and the loss stop.
-        assert pl["realised_pnl_usd"] == pytest.approx(0.0)
+        # THE LOSS IS BOOKED, while the position is open.
+        assert pl["realised_pnl_usd"] == pytest.approx(-1.71, abs=1e-6)
+        assert pl["max_drawdown_usd"] == pytest.approx(1.71, abs=1e-6)
+        # AND NOTHING HAS CLOSED. Both are true at once; the old test read
+        # the second as licence to report the first as zero.
         assert pl["closed_positions"] == 0
-        # SOLD-QUANTITY-BASED: the real -1.71.
+        assert pl["partially_realised_open_positions"] == 1
+        assert pl["partially_realised_usd"] == pytest.approx(-1.71, abs=1e-6)
+        # THE SINGLE-POSITION READER AGREES, because both use
+        # `partial_realisation`.
         assert sold["realised_on_sold_usd"] == pytest.approx(-1.71, abs=1e-6)
         # AND NET CASH IS NEITHER. -9.00 out, 3.69 back, no fees = -5.31.
         net = pl["open_position_net_cash_usd"]
@@ -425,8 +450,16 @@ def test_the_withdrawn_claim_is_gone_from_the_module():
     assert "Both\n            are correct for their own question" not in src
     # AND THE CORRECTED BASIS MUST BE PRESENT, so deleting the note is not
     # a way to pass this test.
-    assert "REALISED_ON_SOLD_WHILE_OPEN" in src
+    # THE COMPONENT NAMES OF THE INCREMENT LEDGER. These replaced the
+    # short-lived `REALISED_ON_SOLD_WHILE_OPEN` label when the unit became
+    # the per-fill increment rather than a per-position aggregate.
+    assert "EXIT_FILL" in src
+    assert "POSITION_TERMINAL" in src
     assert "includes_open_position_partial_results" in src
+    # AND THE AGGREGATE APPROACH MUST NOT COME BACK: a terminal increment
+    # that books the whole economics net would double-count every exit.
+    assert "closure_does_not_double_count" in src
+    assert "the_past_does_not_change" in src
 
 
 @pg

@@ -743,7 +743,15 @@ async def test_the_funded_pnl_is_never_assembled_from_a_shadow_row():
         assert got["closed_positions"] == 0
         assert "realised equity curve" in got["realised_basis"]
         # AND UNREALISED IS NAMED UNMEASURED RATHER THAN ZEROED.
-        assert got["unrealised_pnl_usd"] is None
+        # NOT_IDENTIFIED RATHER THAN None (2026-09-28). `None` serialises
+        # to JSON `null`, which a display layer renders as blank or 0 -- and
+        # "never treat an unavailable mark as zero" is the whole rule here.
+        # An explicit sentinel cannot be mistaken for a number, and it is
+        # what `loss_controls` and `realised_on_sold` already use, so the
+        # three readers now agree on how they say "unknown".
+        assert got["unrealised_pnl_usd"] == FB.NOT_IDENTIFIED
+        assert got["unrealised_pnl_usd"] != 0
+        assert got["unrealised_pnl_usd"] is not None
         assert "UNMEASURED" in got["unrealised_basis"]
 
         await FB.record_intent(
