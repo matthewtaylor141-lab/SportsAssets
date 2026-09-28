@@ -219,7 +219,61 @@ def report() -> dict:
     }
 
 
+def verdict() -> dict:
+    """The report plus a pass/fail, for a gate step to act on.
+
+    FAILS ON "WE COULD NOT TELL" AS WELL AS ON "IT IS WRONG". An unreadable
+    version and a mismatched one are different facts, and neither is
+    permission to proceed -- so both appear in `refusals` and both fail.
+    The POST check is separate because it is the one retry property whose
+    silent change could duplicate an order.
+    """
+    r = report()
+    refusals = list(r["refusals"])
+    facts = r["sdk_retry_facts"]
+    if facts.get("post_is_retried") is not False:
+        refusals.append("SDK_WOULD_RETRY_POST")
+    if facts.get("matches_expected") is not True:
+        refusals.append("SDK_RETRY_SET_IS_NOT_THE_ONE_WE_DESIGNED_AGAINST")
+    return dict(r, refusals=refusals, ok=not refusals)
+
+
+def _main(argv=None) -> int:
+    """`python -m sportsassets.venue_sdk` -- the gate step's whole body.
+
+    A MODULE RATHER THAN INLINE WORKFLOW PYTHON, deliberately. A multi-line
+    `python3 -c` body inside a YAML block scalar puts lines at column 0,
+    which ends the scalar; GitHub then reports a missing `workflow_dispatch`
+    trigger, which names nothing about indentation. This file is also
+    testable, which inline script is not.
+    """
+    import json
+
+    v = verdict()
+    keep = ("pinned", "installed", "pinned_matches_installed",
+            "sdk_retries_disabled", "max_retries_kwarg_accepted",
+            "refusals", "ok")
+    print(json.dumps({k: v[k] for k in keep}, indent=2))
+    f = v["sdk_retry_facts"]
+    print("sdk default_max_retries: %s" % f.get("default_max_retries"))
+    print("sdk post_is_retried:     %s" % f.get("post_is_retried"))
+    print("sdk retryable_statuses:  %s" % (f.get("retryable_statuses"),))
+    if not v["ok"]:
+        print("REFUSED: %s" % ", ".join(v["refusals"]))
+        return 1
+    print("OK: the installed venue SDK is the pinned one and its own "
+          "retries are off")
+    return 0
+
+
+if __name__ == "__main__":                                     # pragma: no cover
+    import sys
+
+    sys.exit(_main(sys.argv[1:]))
+
+
 __all__ = ["PINNED", "installed", "client_kwargs", "retry_facts", "report",
+           "verdict",
            "R_NOT_INSTALLED", "R_VERSION_UNKNOWN", "R_VERSION_DIFFERS",
            "R_RETRY_NOT_SETTABLE", "EXPECTED_RETRYABLE_STATUSES",
            "EXPECTED_IDEMPOTENT_METHODS"]

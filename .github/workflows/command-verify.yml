@@ -6626,6 +6626,71 @@ jobs:
           pyrc=$?
           echo "risk-gate rc=$pyrc pytest rc=$rc"
           [ "$pyrc" = "0" ] && [ "$rc" = "0" ]
+      - name: The venue SDK CI installs is the pinned one
+        run: |
+          set -uo pipefail
+          # ── WHY THIS IS A GATE STEP AND NOT ONLY A TEST ─────────────
+          #
+          # CI installs with `pip install -e ".[dev]"` from the same
+          # `pyproject.toml` the image builds from, so an exact pin makes
+          # the two resolve the same client BY CONSTRUCTION. That is the
+          # reproducibility; this step is the evidence.
+          #
+          # THE DEFECT IT WOULD HAVE CAUGHT. With `polymarket-us>=0.1.2`,
+          # this runner and the deployed image each took whatever PyPI had
+          # latest at their own moment -- and they disagreed: 0.1.2 has no
+          # retry logic, 1.0.2 retries twice, so one logical read made 1
+          # request here and 3 in production. Nothing was wrong with the
+          # tests; they were testing a different dependency. A silent
+          # divergence like that has to fail a job, not be discovered in a
+          # reproduction weeks later.
+          #
+          # `report()["refusals"]` is non-empty when the installed build is
+          # not the pinned one, when the version cannot be read, or when the
+          # constructor did not accept `max_retries` -- so the step fails on
+          # "we could not tell" as well as on "it is wrong".
+          # A MODULE, NOT INLINE PYTHON. The same trap as the risk step
+          # below documents: a continuation line at column 0 inside this
+          # block scalar ENDS the scalar, and GitHub then reports
+          # "Workflow does not have 'workflow_dispatch' trigger" -- a
+          # message that names nothing about indentation. `python3 -c` with
+          # a multi-line body is that trap wearing a different hat. The
+          # module also has its own tests, which inline script never does.
+          echo '### the venue SDK this job installed' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cd backend
+          PYTHONPATH=. python3 -m sportsassets.venue_sdk 2>&1 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=${PIPESTATUS[0]}
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+      - name: Rate control end to end, and it RAN
+        run: |
+          set -uo pipefail
+          # The counterexamples for Codex's five points, through the real
+          # scheduled reader against the pinned SDK. Needs no database, but
+          # it is placed in this job because it is the same class of
+          # evidence: a control that is asserted rather than described.
+          #
+          # ASSERT_TESTS_RAN AGAIN, for the same reason as the risk step. A
+          # collection error in this file would report 0 tests and exit 0 on
+          # some invocations, and "no rate-control test ran" must not read
+          # as green.
+          echo '### rate control, end to end' >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cd backend
+          python -m pytest -q -p no:randomly \
+            tests/test_the_scheduled_read_is_rate_controlled_end_to_end.py \
+            tests/test_every_venue_http_attempt_is_accounted_for.py \
+            --junitxml=/tmp/rate.xml 2>&1 | tail -20 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=${PIPESTATUS[0]}
+          PYTHONPATH=. python3 -m sportsassets.assert_tests_ran /tmp/rate.xml \
+            2>&1 | tee -a "$GITHUB_STEP_SUMMARY"
+          pyrc=$?
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          echo "rate-gate rc=$pyrc pytest rc=$rc"
+          [ "$pyrc" = "0" ] && [ "$rc" = "0" ]
 
   # ── WHAT `transactTime` MEANS, ESTABLISHED BY READING TWICE ─────────
   #
