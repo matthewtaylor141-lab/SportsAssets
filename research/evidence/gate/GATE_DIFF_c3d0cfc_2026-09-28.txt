@@ -1,0 +1,25 @@
+== TOTALS ==
+               BASE     HEAD
+collected     14065    14103
+tests         14065    14103
+failures        374      373
+errors            0        0
+skipped           8        8
+seconds      1743.9   1670.6
+bad ids         374      373
+
+== COLLECTION RECONCILED ==
+identities added in HEAD   : 38
+identities removed in HEAD : 0
+added identities FAILING   : 0
+
+delta explained by add/remove: yes
+
+== NEW IN HEAD (regressions) : 0 ==
+
+== RESOLVED BY HEAD : 1 ==
+  - tests.test_pnl_l34_review_pins::test_r_kill_a_stale_flip_witness_reopens_flow_only
+
+== VERDICT ==
+NO NEW FAILURES -- the HEAD failure set is a subset of BASE.
+And 1 were resolved.
