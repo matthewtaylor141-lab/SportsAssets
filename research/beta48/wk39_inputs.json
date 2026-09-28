@@ -1,0 +1,210 @@
+{
+  "_what_this_is": "EVERY FIGURE IN THE WEEK 39 EDITION, WITH ITS PROVENANCE. The builder refuses to render a figure that has no `src`, so a number cannot reach the page by being typed into the template. Owner requirement: 'Commit the replacement report pipeline and its dependencies to the repository so it is reproducible.'",
+  "_provenance_keys": {
+    "src": "the committed query file and its section number",
+    "sha256": "the sha256 research-sql printed for that file, so the run is identifiable",
+    "run": "the research-sql run number",
+    "read_at": "when the query ran, UTC"
+  },
+
+  "edition": {
+    "series": "BettorToken Weekly Management Report",
+    "number": 39,
+    "window_et": "Mon 2026-09-21 - Sun 2026-09-27",
+    "version": 3,
+    "version_note": "Version 3 replaces versions 1 and 2. It corrects the attribution of the headline figure, relabels it a subtotal, establishes what the two missing days mean instead of inferring it from crawl freshness, preserves Week 38 as originally published alongside its restatement, and reports the probe export as an unresolved failure.",
+    "built_by": "research/beta48/weekly_report_build.py"
+  },
+
+  "attribution": {
+    "_why_this_block_exists": "Owner correction: 'attribute figures to actual account/lane/strategy keeping legacy separate from the new autonomous EV engine'. Versions 1 and 2 led with a P&L figure and never said whose it was.",
+    "what_venue_truth_is": {
+      "value": "our own real-money account's realized P&L, rebuilt from the VENUE'S OWN activities feed rather than from internal bookkeeping",
+      "src": "backend/sportsassets/api/venue_truth.py module docstring: 'the site's record rebuilt from the venues' own ledgers ... Two sources, zero internal bookkeeping' and 'the methodology the corrected 2026-08-17 weekly report reconciled to the account balance'"
+    },
+    "orders_opened_in_the_week": {
+      "value": 0,
+      "src": "research/wk39_coverage_and_attribution.sql section 4 returned 0 rows",
+      "sha256": "73979f54ffabbfd01eab9f878cadf000803e73defa0cb5cf7adc8dae892dcba1",
+      "run": 246,
+      "read_at": "2026-09-28T12:36:09Z"
+    },
+    "last_order_any_lane": {
+      "value": "2026-09-11",
+      "detail": "mirror lane last settled 2026-09-11T03:21:15Z; ioc and the null lane last settled 2026-09-06",
+      "src": "research/wk39_coverage_and_attribution.sql section 5",
+      "sha256": "73979f54ffabbfd01eab9f878cadf000803e73defa0cb5cf7adc8dae892dcba1",
+      "run": 246,
+      "read_at": "2026-09-28T12:36:09Z"
+    },
+    "lanes_all_time": {
+      "value": [
+        {"lane": "(null lane)", "orders": 163444, "settled": 3882, "realized_usd": -6354.10, "first": "2026-08-04", "last": "2026-09-06"},
+        {"lane": "mirror", "orders": 1631, "settled": 1243, "realized_usd": -24089.44, "first": "2026-09-06", "last": "2026-09-11"},
+        {"lane": "ioc", "orders": 1497, "settled": 600, "realized_usd": -828.12, "first": "2026-09-02", "last": "2026-09-06"},
+        {"lane": "rest", "orders": 13, "settled": 3, "realized_usd": -20.40, "first": "2026-09-02", "last": "2026-09-02"}
+      ],
+      "src": "research/wk39_coverage_and_attribution.sql section 5",
+      "sha256": "73979f54ffabbfd01eab9f878cadf000803e73defa0cb5cf7adc8dae892dcba1",
+      "run": 246,
+      "read_at": "2026-09-28T12:36:09Z",
+      "basis_warning": "this is live_orders, our INTERNAL bookkeeping. venue_truth_days is the VENUE's ledger. The two are different bases and must not be summed or differenced."
+    },
+    "funded_book": {
+      "value": {"intents": 0, "entries": 0, "closed": 0, "residual_contracts": 0},
+      "src": "research/wk39_coverage_and_attribution.sql section 6",
+      "sha256": "73979f54ffabbfd01eab9f878cadf000803e73defa0cb5cf7adc8dae892dcba1",
+      "run": 246,
+      "read_at": "2026-09-28T12:36:09Z"
+    },
+    "conclusion": {
+      "value": "The week's realized P&L is entirely the RUN-OFF of inventory opened on or before 2026-09-11 by the legacy lanes. No order was opened in the week by any lane. None of it is attributable to the autonomous EV engine, whose own ledger holds zero intents and which has never sent an order.",
+      "src": "sections 4, 5 and 6 together"
+    }
+  },
+
+  "subtotal": {
+    "_why_this_block_exists": "Owner correction: 'label -$794.01 as a subtotal for the five observed dates while Sep 21-22 remain unresolved'.",
+    "label": "FIVE-DAY SUBTOTAL (Wed Sep 23 - Sun Sep 27)",
+    "is_not": "a week total. Two of the week's seven days are not in it.",
+    "realized_usd": -794.01,
+    "settled_markets": 20,
+    "wins": 13,
+    "losses": 7,
+    "cost_usd": 43150.12,
+    "roi_pct": -1.8401,
+    "venue": "polymarket-us",
+    "per_day": [
+      {"day": "2026-09-23", "venue": "polymarket-us", "settled": 1, "wins": 1, "losses": 0, "cost": 3124.64, "realized": 124.65},
+      {"day": "2026-09-24", "venue": "polymarket-us", "settled": 3, "wins": 2, "losses": 1, "cost": 3719.97, "realized": -1048.09},
+      {"day": "2026-09-25", "venue": "polymarket-us", "settled": 2, "wins": 2, "losses": 0, "cost": 7392.00, "realized": 621.92},
+      {"day": "2026-09-26", "venue": "polymarket-us", "settled": 7, "wins": 3, "losses": 4, "cost": 19837.17, "realized": -314.58},
+      {"day": "2026-09-27", "venue": "polymarket-us", "settled": 7, "wins": 5, "losses": 2, "cost": 9076.34, "realized": -177.91}
+    ],
+    "src": "research/wk39_coverage_and_attribution.sql section 8",
+    "sha256": "73979f54ffabbfd01eab9f878cadf000803e73defa0cb5cf7adc8dae892dcba1",
+    "run": 246,
+    "read_at": "2026-09-28T12:36:09Z",
+    "recompute_check": "the five per-day realized figures sum to -794.01 and the five settled counts to 20; a reader can add the rows above."
+  },
+
+  "coverage": {
+    "_why_this_block_exists": "Owner correction: 'Do not infer complete coverage from a recent crawl or the newest date being present. Check pagination, historical coverage and whether missing dates represent no activity or unavailable records.' Versions 1 and 2 said Sep 21-22 were 'absent after a fresh crawl' and called that 'Absent, not zero, and not stale' -- a claim about WHY that crawl freshness cannot support.",
+    "span": {
+      "earliest_day": "2026-08-06",
+      "latest_day": "2026-09-27",
+      "distinct_days_present": 51,
+      "days_in_span": 53,
+      "days_missing": 2,
+      "rows_total": 76,
+      "venues": 2,
+      "crawl_last_wrote": "2026-09-28T12:13:28Z",
+      "src": "research/wk39_coverage_and_attribution.sql section 1",
+      "sha256": "73979f54ffabbfd01eab9f878cadf000803e73defa0cb5cf7adc8dae892dcba1",
+      "run": 246,
+      "read_at": "2026-09-28T12:36:09Z"
+    },
+    "missing_days_in_the_whole_span": {
+      "value": [{"day": "2026-09-21", "weekday": "Mon"}, {"day": "2026-09-22", "weekday": "Tue"}],
+      "note": "These are the ONLY two missing days in 53. The history is otherwise dense, and both neighbours -- Sun Sep 20 and Wed Sep 23 -- are present.",
+      "src": "research/wk39_coverage_and_attribution.sql section 2",
+      "sha256": "73979f54ffabbfd01eab9f878cadf000803e73defa0cb5cf7adc8dae892dcba1",
+      "run": 246,
+      "read_at": "2026-09-28T12:36:09Z"
+    },
+    "what_absence_means_from_the_writer": {
+      "value": "A row exists only for a day that HAD settlements. `persistable_day_rows` builds its tuples from `daily_series(rows)`, so a day with no settlement rows produces no tuple and therefore no row. Absence is therefore 'no settlements', NOT 'not looked at' -- provided the day fell inside a written range.",
+      "src": "backend/sportsassets/api/venue_truth.py:618 persistable_day_rows, and :680 the upsert, which also states 'A venue that failed to fetch must not overwrite its rows with zeros -- only venues that actually produced data write.'"
+    },
+    "the_pagination_guard_that_does_exist": {
+      "value": "`pm_persist_bounds` returns the ET days the crawl PROVABLY holds in full as a (first_day, before_day) pair, 'or None when no day is provable and the ledger must not be written', and a capped crawl's partial edge day is excluded. So the writer already refuses to record days it cannot prove it covered.",
+      "src": "backend/sportsassets/api/venue_truth.py:644 pm_persist_bounds"
+    },
+    "the_residual_uncertainty_i_could_not_close": {
+      "value": "The crawl does NOT persist its provable range. Section 7 looked for any crawl cursor, page or coverage row and found only `bettor_live_probe_state` and three `rn1x_*` cursors -- nothing for venue truth. So `pm_persist_bounds`'s answer is computed per run and discarded, and WHETHER A GIVEN PAST DAY WAS INSIDE A WRITTEN RANGE CANNOT BE VERIFIED AFTER THE FACT.",
+      "consequence": "Sep 21-22 are therefore UNRESOLVED, not explained. The writer's semantics make 'no settlements' the most likely reading, and it is consistent with the account opening no orders after Sep 11 and holding fewer positions to resolve. But a pair of days that no crawl provably covered would look identical, and nothing on file distinguishes them.",
+      "what_would_close_it": "persist pm_persist_bounds' (first_day, before_day) per crawl run. Then a missing day inside a recorded range is 'no settlements' and one outside it is 'never covered', and the question stops recurring every week.",
+      "src": "research/wk39_coverage_and_attribution.sql section 7",
+      "sha256": "73979f54ffabbfd01eab9f878cadf000803e73defa0cb5cf7adc8dae892dcba1",
+      "run": 246,
+      "read_at": "2026-09-28T12:36:09Z"
+    },
+    "a_discriminator_that_did_not_work": {
+      "value": "I intended to settle it with a second, independent source: orders WE settled on a missing day. Section 3 returned 0 orders for both days -- but live_orders is silent for the ENTIRE week (no lane wrote after Sep 11), so it returns 0 for Sep 23-27 as well, which DO have venue-truth rows. The discriminator is vacuous over this window and I am reporting it as such rather than quoting its answer.",
+      "src": "research/wk39_coverage_and_attribution.sql sections 3 and 5"
+    }
+  },
+
+  "sleeves": {
+    "value": {"settled": 0, "realized_usd": 0.0, "note": "second consecutive week with nothing settled"},
+    "src": "research/wk39_report.sql sections 5 and 6, run 244",
+    "read_at": "2026-09-28T10:19:43Z"
+  },
+
+  "week_38": {
+    "_why_this_block_exists": "Owner correction: 'preserve Week 38 original AND restated figures with an explicit revision record'.",
+    "as_originally_published": {
+      "label": "Week 38 as published on 2026-09-21 (six-day basis)",
+      "note": "Sunday Sep 20 was absent at the time and the edition labelled every figure six-day.",
+      "days": 6
+    },
+    "as_restated": {
+      "label": "Week 38 restated (full seven-day ET week, Sep 14-20)",
+      "days": 7,
+      "settled_markets": 70,
+      "cost_usd": 155136.78,
+      "realized_usd": 2382.22,
+      "src": "research/wk39_report.sql section 8, run 244",
+      "read_at": "2026-09-28T10:19:43Z"
+    },
+    "revision_record": {
+      "what_changed": "Sunday 2026-09-20 arrived in the ledger after Week 38 went out, so the week that was published on a six-day basis now has a seventh day.",
+      "why_the_original_is_kept": "a restatement that silently replaces the published figure removes the reader's ability to see that a number moved. Both are shown, labelled, with the reason.",
+      "who_restated_it": "this edition (Week 39, version 3)",
+      "basis_of_both": "venue truth, polymarket-us, ET calendar days"
+    }
+  },
+
+  "week_over_week": {
+    "_caution": "Week 39's figure covers FIVE days and Week 38's restated figure covers SEVEN. The comparison is therefore not like-for-like and is presented as counts and cost rather than as a rate of change.",
+    "wk38_restated": {"days": 7, "settled": 70, "cost_usd": 155136.78, "realized_usd": 2382.22},
+    "wk39_subtotal": {"days": 5, "settled": 20, "cost_usd": 43150.12, "realized_usd": -794.01},
+    "settled_ratio_pct": 28.6,
+    "cost_ratio_pct": 27.8,
+    "src": "research/wk39_report.sql section 8, run 244"
+  },
+
+  "unresolved": {
+    "_why_this_block_exists": "Owner correction: 'Report the probe watchdog failure as an unresolved export failure until its cause is established.'",
+    "items": [
+      {
+        "title": "Probe export failure - UNRESOLVED",
+        "status": "UNRESOLVED_EXPORT_FAILURE",
+        "what": "The engine-diagnostic probe dispatched for this edition (run 2513) had its blob-emitting step cancelled at its 32-minute watchdog. The export blobs (SLBLOB, LOBLOB, RRBLOB, WDBLOB) were never emitted.",
+        "consequence": "Every section that folds from those blobs -- sleeve detail, ladders, equity curves, account balances -- is OMITTED rather than estimated.",
+        "cause": "NOT ESTABLISHED. The step reached its watchdog; why it took longer than 32 minutes is unknown. It is recorded as an unresolved export failure and not as a timing note, and it stays unresolved until the cause is established.",
+        "not_claimed": "that this is a runner-wide problem, and not that it is confined to the probe. Neither has been shown."
+      },
+      {
+        "title": "Sep 21 and Sep 22 - UNRESOLVED",
+        "status": "UNRESOLVED_COVERAGE",
+        "what": "No venue-truth rows for either day, in an otherwise dense 51-of-53-day history.",
+        "cause": "NOT ESTABLISHED. See the coverage block: the writer's semantics make 'no settlements' the most likely reading, but the crawl does not persist its provable range, so whether those days were ever inside a written range cannot be verified after the fact."
+      },
+      {
+        "title": "No trading since 2026-09-11",
+        "status": "OPERATING_STATE",
+        "what": "No lane has written an order since 2026-09-11. The week's realized P&L is run-off of earlier inventory, not the result of activity in the week.",
+        "cause": "the autonomous lane runs continuously and admits nothing; the funded book is empty and funded submission ships disabled. This is reported as the operating state, not as a performance result."
+      }
+    ]
+  },
+
+  "what_this_edition_does_not_claim": [
+    "that -$794.01 is a week total. It is a five-day subtotal and two days are unresolved.",
+    "that any part of it belongs to the autonomous EV engine. That engine's ledger holds zero intents and it has never sent an order.",
+    "that the two missing days are explained. The most likely reading is named and so is the reason it cannot be confirmed.",
+    "that the probe export failure is understood. Its cause is not established.",
+    "that internal bookkeeping and venue truth can be compared directly. They are different bases and are kept apart."
+  ]
+}

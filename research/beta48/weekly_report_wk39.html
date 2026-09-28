@@ -3,9 +3,9 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
-<title>BettorToken Weekly Report</title>
+<title>Week 39 Management Report</title>
 <style>
-  /* Single-theme edition, continuing the series' dark ledger look: every colour painted explicitly. */
+/* Single-theme edition, continuing the series' dark ledger look: every colour painted explicitly. */
   :root{
     --bg:#0A1428; --panel:#101E36; --panel2:#0D1930; --line:#1E3050; --line2:#294067;
     --ink:#F2F5FA; --ink2:#9FB0C9; --ink3:#64748B;
@@ -73,253 +73,87 @@
   footer{margin-top:70px;padding-top:16px;border-top:1px solid var(--line2);color:var(--ink3);
          font-size:12px;font-family:var(--mono);letter-spacing:.06em;line-height:1.8}
   @media (prefers-reduced-motion: reduce){*{animation:none!important;transition:none!important}}
+
 </style>
 </head>
 <body>
 <div class="wrap">
-<header class="mast">
-  <div class="brand"><div><div class="word">BETTORTOKEN</div><div class="tag">WEEKLY MANAGEMENT REPORT</div></div></div>
-  <div class="stamp"><b>WEEK 39 · 2026</b>MON SEP 21 — SUN SEP 27 (ET)<br>ISSUED MON SEP 28 · 06:40 ET</div>
-</header>
-
-<div class="hero">
-  <p class="eyebrow">The book kept shrinking</p>
-  <h1>Five measured days settled <span class="neg">−$794.01</span> on twenty markets. The sleeves settled nothing for a second week.</h1>
-  <p class="dek">Venue truth for Wed&nbsp;Sep&nbsp;23 – Sun&nbsp;Sep&nbsp;27 is <b>−$794.01</b> realized on
-  <b>$43,150.12</b> of settled cost, 13&nbsp;wins to 7&nbsp;losses, ROI <b>−1.84%</b>. Volume fell again: 20 settled
-  markets against 70 the week before, on 28% of the cost. The copy sleeves settled <b>nothing at all</b> for the
-  second consecutive week, and the mirror switch still reads <b>false</b>.</p>
-
-  <div class="halt"><div class="dot"></div>
-    <p><b>MONDAY SEP 21 AND TUESDAY SEP 22 HAVE NO ROWS — AND THIS IS NOT STALENESS.</b> The venue-truth crawl ran
-    <b>41 seconds</b> before this week's figures were read (<span class="mono">updated_at</span>
-    2026-09-28&nbsp;10:19:15&nbsp;UTC), and <span class="mono">max(day)</span> is <b>2026-09-27</b> — Sunday is
-    present. The two missing days are missing <i>after</i> a fresh crawl, so they are a genuine gap in the source,
-    not a report that ran too early. Every figure here is a <b>five-day</b> figure and is labelled as such.</p></div>
-
-  <div class="halt"><div class="dot"></div>
-    <p><b>LAST WEEK'S PUBLISHED FIGURE HAS SINCE CHANGED.</b> Week&nbsp;38 was issued as <b>−$58.18</b> over six
-    measured days, with Sunday&nbsp;Sep&nbsp;20 absent. That Sunday has since been backfilled. On the same table today,
-    Week&nbsp;38 reads <b>seven days, 70 settled, $155,136.78 of cost and +$2,382.22 realized</b> — so the
-    backfilled Sunday alone contributed <b>+$2,440.40</b> on 12 settled markets and $25,657.96 of cost. Week&nbsp;38
-    was a <b>winning</b> week, not a flat one. The correction is stated here rather than quietly absorbed.</p></div>
-</div>
-
-<div class="kpis">
-  <div class="kpi"><div class="lbl">Five-day P&amp;L · venue truth</div><div class="v neg">−$794.01</div><div class="d">uncapped · 13W–7L · Sep 23–27</div></div>
-  <div class="kpi"><div class="lbl">Settled markets</div><div class="v">20</div><div class="d">vs 70 in Week 38 · −71%</div></div>
-  <div class="kpi"><div class="lbl">Settled cost</div><div class="v">$43,150.12</div><div class="d">ROI −1.8401%</div></div>
-  <div class="kpi"><div class="lbl">Win rate</div><div class="v pos">65.0%</div><div class="d">13 of 20 · still a losing week</div></div>
-  <div class="kpi"><div class="lbl">Copy sleeves</div><div class="v muted">$0.00</div><div class="d">0 settled · 0 staked · 2nd week dormant</div></div>
-  <div class="kpi"><div class="lbl">Sep 21 &amp; Sep 22</div><div class="v warn">NO ROWS</div><div class="d">absent after a fresh crawl</div></div>
-</div>
-
-<section>
-  <h2>The week, day by day</h2>
-  <p class="sub">Venue truth dated by the venue's own convention — the event day carried in the market slug (ET).
-  Read directly from <span class="mono">venue_truth_days</span>, the table that serves
-  <span class="mono">/api/venue-truth</span>. Every row this week carries venue
-  <span class="mono">polymarket-us</span>; no other venue appears, so no figure below spans venues.</p>
-  <div class="panel">
-    <div class="lbl">Daily realized P&amp;L · USD · venue truth</div>
-    <div class="chart" style="overflow-x:auto">
-<svg viewBox="0 0 760 300" width="100%" style="max-width:760px;display:block" role="img" aria-label="Daily realized P and L, venue truth, Wednesday September 23 to Sunday September 27, with Monday 21 and Tuesday 22 absent from the source">
-<line x1="70" y1="50" x2="744" y2="50" stroke="#1E3050" stroke-width="1" stroke-dasharray="3 4"/>
-<text x="62" y="54" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">1,000</text>
-<line x1="70" y1="100" x2="744" y2="100" stroke="#1E3050" stroke-width="1" stroke-dasharray="3 4"/>
-<text x="62" y="104" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">500</text>
-<line x1="70" y1="150" x2="744" y2="150" stroke="#294067" stroke-width="1"/>
-<text x="62" y="154" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">0</text>
-<line x1="70" y1="200" x2="744" y2="200" stroke="#1E3050" stroke-width="1" stroke-dasharray="3 4"/>
-<text x="62" y="204" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">−500</text>
-<line x1="70" y1="250" x2="744" y2="250" stroke="#1E3050" stroke-width="1" stroke-dasharray="3 4"/>
-<text x="62" y="254" fill="#64748B" font-size="10" font-family="monospace" text-anchor="end">−1,000</text>
-
-<rect x="88" y="130" width="44" height="40" rx="3" fill="none" stroke="#E8A33D" stroke-width="1.5" stroke-dasharray="4 4"/>
-<text x="110" y="124" fill="#E8A33D" font-size="10" font-family="monospace" text-anchor="middle">no row</text>
-<text x="110" y="282" fill="#E8A33D" font-size="11" font-family="monospace" text-anchor="middle">Mon 21</text>
-
-<rect x="178" y="130" width="44" height="40" rx="3" fill="none" stroke="#E8A33D" stroke-width="1.5" stroke-dasharray="4 4"/>
-<text x="200" y="124" fill="#E8A33D" font-size="10" font-family="monospace" text-anchor="middle">no row</text>
-<text x="200" y="282" fill="#E8A33D" font-size="11" font-family="monospace" text-anchor="middle">Tue 22</text>
-
-<rect x="268" y="137.5" width="44" height="12.5" rx="3" fill="#2EE6A8" opacity=".85"><title>Wed Sep 23 · +$124.65 · 1 settled · 1W–0L · cost $3,124.64</title></rect>
-<text x="290" y="131" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">+125</text>
-<text x="290" y="282" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Wed 23</text>
-
-<rect x="358" y="150" width="44" height="104.8" rx="3" fill="#F06D6D" opacity=".85"><title>Thu Sep 24 · −$1,048.09 · 3 settled · 2W–1L · cost $3,719.97</title></rect>
-<text x="380" y="268" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">−1,048</text>
-<text x="380" y="282" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Thu 24</text>
-
-<rect x="448" y="87.8" width="44" height="62.2" rx="3" fill="#2EE6A8" opacity=".85"><title>Fri Sep 25 · +$621.92 · 2 settled · 2W–0L · cost $7,392.00</title></rect>
-<text x="470" y="81" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">+622</text>
-<text x="470" y="282" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Fri 25</text>
-
-<rect x="538" y="150" width="44" height="31.5" rx="3" fill="#F06D6D" opacity=".85"><title>Sat Sep 26 · −$314.58 · 7 settled · 3W–4L · cost $19,837.17</title></rect>
-<text x="560" y="195" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">−315</text>
-<text x="560" y="282" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Sat 26</text>
-
-<rect x="628" y="150" width="44" height="17.8" rx="3" fill="#F06D6D" opacity=".85"><title>Sun Sep 27 · −$177.91 · 7 settled · 5W–2L · cost $9,076.34</title></rect>
-<text x="650" y="181" fill="#9FB0C9" font-size="10" font-family="monospace" text-anchor="middle">−178</text>
-<text x="650" y="282" fill="#9FB0C9" font-size="11" font-family="monospace" text-anchor="middle">Sun 27</text>
-</svg>
-    </div>
-    <div class="legend">
-      <span><span class="sw" style="background:#2EE6A8"></span>Gain</span>
-      <span><span class="sw" style="background:#F06D6D"></span>Loss</span>
-      <span><span class="sw" style="border:1.5px dashed #E8A33D;background:transparent"></span>Absent from the venue-truth table after a fresh crawl</span>
-    </div>
-    <div class="tbl-wrap"><table>
-      <tr><th>Day (ET)</th><th>Realized</th><th>Settled</th><th>W–L</th><th>Cost</th><th>Row written</th></tr>
-      <tr class="gap"><td class="name">Mon Sep 21</td><td>—</td><td>—</td><td>—</td><td>—</td><td>no row</td></tr>
-      <tr class="gap"><td class="name">Tue Sep 22</td><td>—</td><td>—</td><td>—</td><td>—</td><td>no row</td></tr>
-      <tr><td class="name">Wed Sep 23</td><td class="pos">124.65</td><td>1</td><td>1–0</td><td>3,124.64</td><td class="muted">09-28 10:19</td></tr>
-      <tr><td class="name">Thu Sep 24</td><td class="neg">−1,048.09</td><td>3</td><td>2–1</td><td>3,719.97</td><td class="muted">09-28 10:19</td></tr>
-      <tr><td class="name">Fri Sep 25</td><td class="pos">621.92</td><td>2</td><td>2–0</td><td>7,392.00</td><td class="muted">09-28 10:19</td></tr>
-      <tr><td class="name">Sat Sep 26</td><td class="neg">−314.58</td><td>7</td><td>3–4</td><td>19,837.17</td><td class="muted">09-28 10:19</td></tr>
-      <tr><td class="name">Sun Sep 27</td><td class="neg">−177.91</td><td>7</td><td>5–2</td><td>9,076.34</td><td class="muted">09-28 10:19</td></tr>
-      <tr class="total"><td class="name">Five days</td><td class="neg">−794.01</td><td>20</td><td>13–7</td><td>43,150.12</td><td class="muted">ROI −1.8401%</td></tr>
-    </table></div>
-    <p class="sub" style="margin:12px 0 0;font-size:12.5px">Thursday's −$1,048.09 on a 2–1 card is the whole week's
-    loss and more: the other four measured days net <b>+$254.08</b> between them. A single settled market moving
-    against the book on a $3,719.97 day outweighs four days of otherwise-positive trading, which is the same
-    larger-losses-than-wins shape Week&nbsp;38 showed at a 79% win rate.</p>
-  </div>
+<header class="mast"><div class="brand"><div class="word">BETTORTOKEN</div><div class="tag">WEEKLY MANAGEMENT REPORT</div></div><div class="stamp"><b>NO.&nbsp;39 &middot; VERSION&nbsp;3</b>Mon 2026-09-21 - Sun 2026-09-27</div></header>
+<section class="hero">
+<p class="eyebrow">Five of seven days &middot; run-off of earlier inventory</p>
+<h1>A five-day subtotal of <span class="neg">−$794.01</span> on 20 settled markets — none of it from the autonomous engine, and none of it from activity this week.</h1>
+<p class="dek">The week&#x27;s realized P&amp;L is entirely the RUN-OFF of inventory opened on or before 2026-09-11 by the legacy lanes. No order was opened in the week by any lane. None of it is attributable to the autonomous EV engine, whose own ledger holds zero intents and which has never sent an order.</p>
+<div class="halt"><div class="dot"></div><p><b>This is a subtotal, not a week total.</b> a week total. Two of the week&#x27;s seven days are not in it. Mon&nbsp;Sep&nbsp;21 and Tue&nbsp;Sep&nbsp;22 carry no venue-truth rows and remain <b>unresolved</b> — the most likely reading is named below, together with the reason it cannot be confirmed.</p></div>
 </section>
-
-<section>
-  <h2>Copy sleeves</h2>
-  <p class="sub">Settled copy orders on the audit table, by whale, for the full ET week including both absent days.</p>
-  <div class="panel">
-    <div class="tbl-wrap"><table>
-      <tr><th>Sleeve</th><th>Settled</th><th>W–L</th><th>Staked</th><th>P&amp;L</th></tr>
-      <tr class="total"><td class="name">All sleeves · Sep 21–27</td><td>0</td><td>0–0</td><td>0.00</td><td class="muted">0.00</td></tr>
-    </table></div>
-    <p class="sub" style="margin:12px 0 0">The by-whale query returned <b>zero rows</b> and the total query returned
-    <b>0 settled, $0.00 staked, $0.00 P&amp;L</b>. The window is the whole ET week
-    (2026-09-21T04:00Z → 2026-09-28T04:00Z) against <span class="mono">live_orders.settled_at</span>. This is the
-    second consecutive dormant week and it is consistent with the switch: <span class="mono">mirror_live</span> reads
-    <b>false</b>, read from the database rather than inferred.</p>
-  </div>
+<section class="sec"><h2>Version 3 replaces versions 1 and 2</h2><p class="dek">Version 3 replaces versions 1 and 2. It corrects the attribution of the headline figure, relabels it a subtotal, establishes what the two missing days mean instead of inferring it from crawl freshness, preserves Week 38 as originally published alongside its restatement, and reports the probe export as an unresolved failure.</p></section>
+<section class="sec"><div class="kpis">
+<div class="kpi"><div class="lbl">FIVE-DAY SUBTOTAL (Wed Sep 23 - Sun Sep 27)</div><div class="v neg">−$794.01</div><div class="d">20 settled · 13W–7L · ROI -1.8401%</div></div>
+<div class="kpi"><div class="lbl">Orders opened this week</div><div class="v warn">0</div><div class="d">by any lane · last order 2026-09-11</div></div>
+<div class="kpi"><div class="lbl">Autonomous EV engine</div><div class="v warn">0 intents</div><div class="d">has never sent an order</div></div>
+<div class="kpi"><div class="lbl">Sep 21 &amp; Sep 22</div><div class="v warn">UNRESOLVED</div><div class="d">no rows in 51-of-53-day history</div></div>
+</div></section>
+<section class="sec"><h2>Whose figure this is</h2>
+<p class="dek">Versions 1 and 2 led with a P&amp;L figure and never said which account, lane or strategy produced it. It is <b>our own real-money account&#x27;s realized P&amp;L, rebuilt from the VENUE&#x27;S OWN activities feed rather than from internal bookkeeping</b>.</p>
+<table><thead><tr><th class="name">Lane</th><th>Orders</th><th>Settled</th><th>Realized</th><th>First</th><th>Last</th></tr></thead><tbody>
+<tr><td class="name">(null lane)</td><td>163,444</td><td>3,882</td><td class="neg">−$6,354.10</td><td class="muted">2026-08-04</td><td class="muted">2026-09-06</td></tr>
+<tr><td class="name">mirror</td><td>1,631</td><td>1,243</td><td class="neg">−$24,089.44</td><td class="muted">2026-09-06</td><td class="muted">2026-09-11</td></tr>
+<tr><td class="name">ioc</td><td>1,497</td><td>600</td><td class="neg">−$828.12</td><td class="muted">2026-09-02</td><td class="muted">2026-09-06</td></tr>
+<tr><td class="name">rest</td><td>13</td><td>3</td><td class="neg">−$20.40</td><td class="muted">2026-09-02</td><td class="muted">2026-09-02</td></tr>
+</tbody></table>
+<p class="dek"><b>Two bases, never mixed.</b> this is live_orders, our INTERNAL bookkeeping. venue_truth_days is the VENUE&#x27;s ledger. The two are different bases and must not be summed or differenced.</p>
 </section>
-
-<section>
-  <h2>Reconciliation anchors</h2>
-  <p class="sub">The exact figures a reader can check, and where each came from. One read-only SQL run against the
-  production replica: <span class="mono">research/wk39_report.sql</span>, run 244, <span class="mono">psql exit=0</span>,
-  query sha256 <span class="mono">e0988c3d…</span>.</p>
-  <div class="panel"><ul class="anchors">
-    <li><b>Venue-truth daily lines</b> (<span class="mono">venue_truth_days</span>, venue
-      <span class="mono">polymarket-us</span>): Sep 23 <b>+$124.65</b> 1W–0L of 1, cost $3,124.64;
-      Sep 24 <b>−$1,048.09</b> 2W–1L of 3, cost $3,719.97; Sep 25 <b>+$621.92</b> 2W–0L of 2, cost $7,392.00;
-      Sep 26 <b>−$314.58</b> 3W–4L of 7, cost $19,837.17; Sep 27 <b>−$177.91</b> 5W–2L of 7, cost $9,076.34.</li>
-    <li><b>Five-day fold</b>: realized <b>−$794.01</b>, settled <b>20</b>, <b>13W–7L</b>, cost <b>$43,150.12</b>,
-      ROI <b>−1.8401%</b>. The database's own aggregate and an independent recompute grouped per day and re-added
-      agree to the cent on all five figures — 20, 13, 7, $43,150.12, −$794.01.</li>
-    <li><b>Mon Sep 21 and Tue Sep 22</b>: no rows. <span class="mono">max(day)</span> = <b>2026-09-27</b>,
-      <span class="mono">max(updated_at)</span> = <b>2026-09-28 10:19:15 UTC</b>, staleness
-      <b>41 seconds</b> at read time, <b>76</b> rows in the table. Absent after a fresh crawl, therefore a source gap
-      rather than a stale report. Reported absent, not zero.</li>
-    <li><b>Copy sleeves</b> (<span class="mono">live_orders</span>, <span class="mono">settled_at</span> in
-      2026-09-21T04:00Z → 2026-09-28T04:00Z): by-whale query <b>0 rows</b>; total settled <b>0</b>,
-      staked <b>$0.00</b>, P&amp;L <b>$0.00</b>.</li>
-    <li><b>Control rows</b> (<span class="mono">ingestion_state</span>): <span class="mono">mirror_live</span>
-      <b>false</b>, <span class="mono">live_trading_paused</span> <b>true</b>,
-      <span class="mono">ext_pinnacle_shadow</span> <b>true</b>.
-      <span class="mono">mirror_loss_stop</span> and <span class="mono">copy_overspend_halt</span> rows are
-      <b>absent</b> — they have not fired, and an absent breaker row is not the same as a breaker reading false.</li>
-    <li><b>Week over week, same table and basis</b>: Week 38 (Sep 14–20) now reads <b>7 days, 70 settled,
-      $155,136.78 cost, +$2,382.22 realized</b>. Week 39 (Sep 21–27) reads <b>5 days, 20 settled, $43,150.12 cost,
-      −$794.01 realized</b> — <b>28.6%</b> of the market count on <b>27.8%</b> of the cost, and a swing of
-      <b>−$3,176.23</b> in realized.</li>
-    <li><b>Correction to Week 38 as published</b>: that edition reported <b>−$58.18</b> across six days because
-      Sunday Sep 20 had no row. With Sunday now backfilled, Week 38's full-week figure is <b>+$2,382.22</b>;
-      the Sunday contributed <b>+$2,440.40</b> on 12 settled markets and $25,657.96 of cost. Week 38 was a winning
-      week. Its six-day caveat was correct at the time and this restates the total rather than overwriting it.</li>
-  </ul></div>
+<section class="sec"><h2>FIVE-DAY SUBTOTAL (Wed Sep 23 - Sun Sep 27)</h2>
+<table><thead><tr><th class="name">Day</th><th>Realized</th><th>Settled</th><th>W–L</th><th>Cost</th></tr></thead><tbody>
+<tr class="gap"><td class="name">Mon Sep 21</td><td colspan="4" class="muted">no row — unresolved</td></tr>
+<tr class="gap"><td class="name">Tue Sep 22</td><td colspan="4" class="muted">no row — unresolved</td></tr>
+<tr><td class="name">2026-09-23</td><td class="pos">+$124.65</td><td>1</td><td>1–0</td><td>$3,124.64</td></tr>
+<tr><td class="name">2026-09-24</td><td class="neg">−$1,048.09</td><td>3</td><td>2–1</td><td>$3,719.97</td></tr>
+<tr><td class="name">2026-09-25</td><td class="pos">+$621.92</td><td>2</td><td>2–0</td><td>$7,392.00</td></tr>
+<tr><td class="name">2026-09-26</td><td class="neg">−$314.58</td><td>7</td><td>3–4</td><td>$19,837.17</td></tr>
+<tr><td class="name">2026-09-27</td><td class="neg">−$177.91</td><td>7</td><td>5–2</td><td>$9,076.34</td></tr>
+<tr class="total"><td class="name">Five-day subtotal</td><td class="neg">−$794.01</td><td>20</td><td>13–7</td><td>$43,150.12</td></tr>
+</tbody></table>
+<p class="dek">the five per-day realized figures sum to -794.01 and the five settled counts to 20; a reader can add the rows above.</p>
 </section>
-
-<section>
-  <h2>Operational and safety notes</h2>
-  <p class="sub">Material to management. Engineering findings, not P&amp;L, reported because they bear on what the
-  account can do unattended.</p>
-  <div class="panel"><ul class="plain">
-    <li><b>The global execution gate Week 38 recommended now exists and is deployed.</b>
-      <span class="mono">execution_gate</span> is invoked <i>inside</i> <span class="mono">pmus.submit_fok</span> and
-      <span class="mono">pmus.close_position</span> rather than at the call sites, so it covers callers that pass the
-      function as a callable — which no call-site check caught. Its denial <b>raises</b> rather than returning, and an
-      unreadable control row <b>fails closed</b>. Week 38's finding that "no single switch reaches all of them" has
-      been acted on.</li>
-    <li><b>The kill switch is engaged.</b> <span class="mono">live_trading_paused</span> reads <b>true</b> in the
-      database this week. Week 38 reported that row <b>absent</b>, with the code treating absent as <i>not paused</i>.
-      That specific exposure is closed for the routes behind the gate.</li>
-    <li><b>Funded submission ships disabled and no funded order has ever been sent.</b>
-      <span class="mono">FUNDED_EXIT_SUBMISSION_ENABLED</span> is <span class="mono">False</span> in the shipped code.
-      The funded book holds <b>0</b> intents and <b>0</b> residual contracts.</li>
-    <li><b>The scheduled engine is running and qualifying nothing.</b> Its last cycle completed
-      2026-09-28 at 03:36:51 UTC on the deployed build, state <span class="mono">LIVE</span>, label
-      <span class="mono">ZERO_EVALUATED__INPUT_PATH_BLOCKED</span>. Measured cause, this week: the execution estimate
-      is produced on <b>5.2%</b> of evaluations, and the largest single reason is
-      <span class="mono">NO_OBSERVED_DEPTH_INSIDE_THE_BREAK_EVEN_LIMIT</span> on <b>488</b> rows — the venue offering
-      no affordable depth, which is an economic finding and not a software fault. The largest <i>actionable</i> cause
-      is an absent independent fair value on <b>399</b> rows.</li>
-    <li><b>Venue mechanics established from the venue's own documentation.</b> Polymarket US runs <b>one instrument
-      per market</b> (the YES side) on <b>one central limit order book</b>: buying NO at <i>a</i> is selling YES at
-      <i>1−a</i>. Its two published collateral-return mechanisms are portfolio-margin optimisations, stated by the
-      venue as "not a reduction in actual risk", and neither releases capital on a completed pair. This narrows the
-      pairing programme rather than widening it.</li>
-  </ul></div>
+<section class="sec"><h2>What the two missing days mean</h2>
+<p class="dek">History runs <b>2026-08-06</b> to <b>2026-09-27</b>: <b>51</b> of <b>53</b> days present, <b>2</b> missing, and the two missing days are the only gaps in the whole span. Both neighbours are present.</p>
+<p class="dek"><b>What absence means, from the writer rather than from the crawl clock.</b> A row exists only for a day that HAD settlements. `persistable_day_rows` builds its tuples from `daily_series(rows)`, so a day with no settlement rows produces no tuple and therefore no row. Absence is therefore &#x27;no settlements&#x27;, NOT &#x27;not looked at&#x27; -- provided the day fell inside a written range.</p>
+<p class="dek"><b>A pagination guard does exist.</b> `pm_persist_bounds` returns the ET days the crawl PROVABLY holds in full as a (first_day, before_day) pair, &#x27;or None when no day is provable and the ledger must not be written&#x27;, and a capped crawl&#x27;s partial edge day is excluded. So the writer already refuses to record days it cannot prove it covered.</p>
+<div class="halt"><div class="dot"></div><p><b>And here is what I could not close.</b> The crawl does NOT persist its provable range. Section 7 looked for any crawl cursor, page or coverage row and found only `bettor_live_probe_state` and three `rn1x_*` cursors -- nothing for venue truth. So `pm_persist_bounds`&#x27;s answer is computed per run and discarded, and WHETHER A GIVEN PAST DAY WAS INSIDE A WRITTEN RANGE CANNOT BE VERIFIED AFTER THE FACT.<br><br>Sep 21-22 are therefore UNRESOLVED, not explained. The writer&#x27;s semantics make &#x27;no settlements&#x27; the most likely reading, and it is consistent with the account opening no orders after Sep 11 and holding fewer positions to resolve. But a pair of days that no crawl provably covered would look identical, and nothing on file distinguishes them.<br><br><b>What would close it:</b> persist pm_persist_bounds&#x27; (first_day, before_day) per crawl run. Then a missing day inside a recorded range is &#x27;no settlements&#x27; and one outside it is &#x27;never covered&#x27;, and the question stops recurring every week.</p></div>
+<p class="dek"><b>A discriminator that did not work.</b> I intended to settle it with a second, independent source: orders WE settled on a missing day. Section 3 returned 0 orders for both days -- but live_orders is silent for the ENTIRE week (no lane wrote after Sep 11), so it returns 0 for Sep 23-27 as well, which DO have venue-truth rows. The discriminator is vacuous over this window and I am reporting it as such rather than quoting its answer.</p>
 </section>
-
-<section>
-  <h2>What this edition could not verify</h2>
-  <div class="panel"><ul class="plain">
-    <li><b>Mon Sep 21 and Tue Sep 22</b> — no venue-truth rows after a fresh crawl. Absent, not zero, and not stale.</li>
-    <li><b>By-sport split, position-size buckets, largest wins and losses, per-whale sleeve detail, whale upstream
-      curves and account balances</b> — all fold from the engine-diagnostic probe's export blobs
-      (<span class="mono">PXBLOB</span>, <span class="mono">KXBLOB</span>, <span class="mono">TRBLOB</span>,
-      <span class="mono">RRBLOB</span>, <span class="mono">WDBLOB</span>). A fresh probe was dispatched for this
-      edition (run <b>2513</b>) and <b>its blob-emitting step was cancelled at its 32-minute watchdog</b>
-      (10:17:23 → 10:49:28 UTC) before reaching them. <b>This is a different failure from Week 38's.</b> That edition
-      could not reach the log <i>archive</i> host; this one has the log and the blobs were never written to it,
-      because the step did not finish. Those sections are <b>omitted rather than estimated</b>, and the probe timing
-      out is itself an operational item — see below.</li>
-    <li><b>The probe's own completion</b> — worth management attention in its own right. The blob step ran the full
-      32 minutes and was cut off, so the weekly export path is currently unreliable rather than merely unreachable.
-      The four sibling jobs in the same run (<span class="mono">btc-calibration</span>,
-      <span class="mono">tennis-desk-census</span>, <span class="mono">mirror-cover</span>,
-      <span class="mono">side-truth</span>) all completed successfully, so this is specific to the long live-engine
-      probe and not a runner-wide problem.</li>
-    <li><b>Kalshi</b> — no figures.</li>
-    <li><b>The site-cap comparison</b> — normally shown beside venue truth, it is served from the homepage rather
-      than the database. The venue-truth basis is therefore presented alone, <b>uncapped</b>, as in Week 38.</li>
-  </ul></div>
+<section class="sec"><h2>Week 38, as published and as restated</h2>
+<table><thead><tr><th class="name">Basis</th><th>Days</th><th>Settled</th><th>Cost</th><th>Realized</th></tr></thead><tbody>
+<tr><td class="name">Week 38 as published on 2026-09-21 (six-day basis)</td><td>6</td><td colspan="3" class="muted">Sunday Sep 20 was absent at the time and the edition labelled every figure six-day.</td></tr>
+<tr><td class="name">Week 38 restated (full seven-day ET week, Sep 14-20)</td><td>7</td><td>70</td><td>$155,136.78</td><td class="pos">+$2,382.22</td></tr>
+</tbody></table>
+<p class="dek"><b>Revision record.</b> Sunday 2026-09-20 arrived in the ledger after Week 38 went out, so the week that was published on a six-day basis now has a seventh day. a restatement that silently replaces the published figure removes the reader&#x27;s ability to see that a number moved. Both are shown, labelled, with the reason. <span class="muted">Restated by: this edition (Week 39, version 3). Basis of both: venue truth, polymarket-us, ET calendar days.</span></p>
+<p class="dek"><b>Week over week, not like-for-like.</b> Week 39&#x27;s figure covers FIVE days and Week 38&#x27;s restated figure covers SEVEN. The comparison is therefore not like-for-like and is presented as counts and cost rather than as a rate of change. Week&nbsp;39 is <b>28.6%</b> of the settled count on <b>27.8%</b> of the cost.</p>
 </section>
-
-<section>
-  <h2>Method</h2>
-  <div class="grid2">
-    <div class="panel"><h3>Sources</h3>
-      <p class="sub" style="margin:6px 0 0">One read-only SQL run against the production replica via the
-      <span class="mono">research-sql</span> workflow — run <b>244</b>, eight SELECTs, <span class="mono">psql
-      exit=0</span> — preceded by a schema-discovery run (<b>243</b>) that established
-      <span class="mono">venue_truth_days.day</span> is <span class="mono">TEXT</span>. A fresh engine-diagnostic
-      probe (run <b>2513</b>) was dispatched first and refreshed the crawl, which is why staleness at read time was
-      41 seconds. No figure in this edition comes from a probe-log blob, and none was carried forward.</p></div>
-    <div class="panel"><h3>Verification</h3>
-      <p class="sub" style="margin:6px 0 0">The five daily lines were re-added independently of the database's own
-      aggregate: settled, wins, losses, cost and realized all agree to the cent. The week's rows were printed per
-      (day, venue) before folding, confirming a single venue and no cross-venue sum. Where a figure could not be
-      verified it is marked absent rather than estimated, and the week is labelled five days throughout.</p></div>
-  </div>
+<section class="sec"><h2>Unresolved</h2>
+<div class="halt"><div class="dot"></div><p><b>Probe export failure - UNRESOLVED</b> <span class="mono muted">[UNRESOLVED_EXPORT_FAILURE]</span><br>The engine-diagnostic probe dispatched for this edition (run 2513) had its blob-emitting step cancelled at its 32-minute watchdog. The export blobs (SLBLOB, LOBLOB, RRBLOB, WDBLOB) were never emitted.<br><br><b>Consequence:</b> Every section that folds from those blobs -- sleeve detail, ladders, equity curves, account balances -- is OMITTED rather than estimated.<br><b>Cause:</b> NOT ESTABLISHED. The step reached its watchdog; why it took longer than 32 minutes is unknown. It is recorded as an unresolved export failure and not as a timing note, and it stays unresolved until the cause is established.<br><b>Not claimed:</b> that this is a runner-wide problem, and not that it is confined to the probe. Neither has been shown.</p></div>
+<div class="halt"><div class="dot"></div><p><b>Sep 21 and Sep 22 - UNRESOLVED</b> <span class="mono muted">[UNRESOLVED_COVERAGE]</span><br>No venue-truth rows for either day, in an otherwise dense 51-of-53-day history.<br><br><b>Consequence:</b> —<br><b>Cause:</b> NOT ESTABLISHED. See the coverage block: the writer&#x27;s semantics make &#x27;no settlements&#x27; the most likely reading, but the crawl does not persist its provable range, so whether those days were ever inside a written range cannot be verified after the fact.</p></div>
+<div class="halt"><div class="dot"></div><p><b>No trading since 2026-09-11</b> <span class="mono muted">[OPERATING_STATE]</span><br>No lane has written an order since 2026-09-11. The week&#x27;s realized P&amp;L is run-off of earlier inventory, not the result of activity in the week.<br><br><b>Consequence:</b> —<br><b>Cause:</b> the autonomous lane runs continuously and admits nothing; the funded book is empty and funded submission ships disabled. This is reported as the operating state, not as a performance result.</p></div>
 </section>
-
-<footer>
-  BETTORTOKEN · WEEKLY MANAGEMENT REPORT · WEEK 39 (SEP 21 – SEP 27, 2026) · VENUE-TRUTH BASIS · FIVE DAYS MEASURED<br>
-  Settled figures from venue_truth_days, the table serving /api/venue-truth. Sleeve figures from live_orders.
-  Mon Sep 21 and Tue Sep 22 absent from the source after a fresh crawl. Week 38's published six-day total restated
-  above following its Sunday backfill. Issued Mon Sep 28, 06:40 ET.
-</footer>
+<section class="sec"><h2>What this edition does not claim</h2><ul>
+<li>that -$794.01 is a week total. It is a five-day subtotal and two days are unresolved.</li>
+<li>that any part of it belongs to the autonomous EV engine. That engine&#x27;s ledger holds zero intents and it has never sent an order.</li>
+<li>that the two missing days are explained. The most likely reading is named and so is the reason it cannot be confirmed.</li>
+<li>that the probe export failure is understood. Its cause is not established.</li>
+<li>that internal bookkeeping and venue truth can be compared directly. They are different bases and are kept apart.</li>
+</ul></section>
+<section class="sec"><h2>Provenance</h2><p class="dek">Built by <span class="mono">research/beta48/weekly_report_build.py</span> from <span class="mono">wk39_inputs.json</span>. The builder refuses to render a measured block with no source, so every figure below named one. Re-run the query at the stated sha256 to check a figure.</p>
+<table><thead><tr><th class="name">Block</th><th>Query sha256</th><th>Run</th></tr></thead><tbody>
+<tr><td class="name mono">attribution.orders_opened_in_the_week</td><td class="mono muted">73979f54ffabbfd0</td><td class="muted">246</td></tr>
+<tr><td class="name mono">attribution.last_order_any_lane</td><td class="mono muted">73979f54ffabbfd0</td><td class="muted">246</td></tr>
+<tr><td class="name mono">attribution.lanes_all_time</td><td class="mono muted">73979f54ffabbfd0</td><td class="muted">246</td></tr>
+<tr><td class="name mono">attribution.funded_book</td><td class="mono muted">73979f54ffabbfd0</td><td class="muted">246</td></tr>
+<tr><td class="name mono">subtotal</td><td class="mono muted">73979f54ffabbfd0</td><td class="muted">246</td></tr>
+<tr><td class="name mono">coverage.span</td><td class="mono muted">73979f54ffabbfd0</td><td class="muted">246</td></tr>
+<tr><td class="name mono">coverage.missing_days_in_the_whole_span</td><td class="mono muted">73979f54ffabbfd0</td><td class="muted">246</td></tr>
+<tr><td class="name mono">coverage.the_residual_uncertainty_i_could_not_close</td><td class="mono muted">73979f54ffabbfd0</td><td class="muted">246</td></tr>
+<tr><td class="name mono">sleeves</td><td class="mono muted">—</td><td class="muted">—</td></tr>
+</tbody></table></section>
 </div>
 </body>
 </html>
