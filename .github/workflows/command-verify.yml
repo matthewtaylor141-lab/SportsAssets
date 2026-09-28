@@ -6408,6 +6408,57 @@ jobs:
   # production boots with -- `python -m sportsassets.scripts.migrate`, asyncpg,
   # whole file per transaction -- and then the funded suite runs against that
   # database. It needs no secret, reaches no network and deploys nothing.
+  # ── THE EVALUATION LANE'S OWN CENSUS, WHICH NOTHING CAN SUPPRESS ────
+  #
+  # NO `needs:`, NO `if:`. It runs on every dispatch of this workflow,
+  # whatever any other job does.
+  #
+  # WHY IT IS A SEPARATE JOB AND NOT A STEP WITH `always()`. Owner
+  # requirement: independent production evidence must stop being coupled to
+  # the RN1X acceptance fixture, and NOT by wrapping `always()` around a step
+  # that also arms or mutates the system. The 2026-09-28 run showed the
+  # coupling exactly: `verify` step 20 exited 1 with
+  # `NO_COVERED_MARKET_COULD_SUPPLY_A_COMPLETE_ENTRY` -- the acceptance
+  # harness could not seed a subject -- and every later step in that job went
+  # unrun, taking the evidence about the EVALUATION LANE with it. A fixture
+  # and the lane are different subjects and must not share a fate.
+  #
+  # AND IT IS SAFE TO RUN UNCONDITIONALLY because it is one authenticated
+  # GET. `sportsassets.cycle_readback` has a test that walks its own AST and
+  # asserts the only HTTP method it names is GET and that no arming or
+  # submission vocabulary appears in it. An `always()` step that armed
+  # something would run the arming on a failed run; this cannot arm anything.
+  #
+  # IT FAILS ONLY ON A MEASUREMENT FAILURE -- an absent heartbeat, an
+  # unreadable desk, or candidates that entered the funnel and are
+  # unaccounted for. A world with no fixtures, or one where every candidate
+  # was refused for a NAMED reason, is a state and passes: failing on those
+  # would train the reader to ignore the job, which would make an
+  # unsuppressible diagnostic useless.
+  cycle-readback:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: The scheduled cycle, read back through the authorized route
+        env:
+          API_URL: ${{ inputs.api }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set -uo pipefail
+          echo '### the scheduled cycle, read back (unsuppressible)' \
+            >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cd backend
+          PYTHONPATH=. python3 -m sportsassets.cycle_readback 2>&1 \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          rc=${PIPESTATUS[0]}
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit "$rc"
+
   funded-pg18:
     if: ${{ inputs.pg18_migrations != '' }}
     runs-on: ubuntu-latest
