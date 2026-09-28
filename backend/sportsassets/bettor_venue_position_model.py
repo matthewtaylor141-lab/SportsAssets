@@ -91,8 +91,58 @@ VENUE_MODEL = {
     "PMX": ONE_SIGNED_NET,
     "POLYMARKET": TWO_TOKEN,
     "CLOB": TWO_TOKEN,
+    # THE CLOB VENUE UNDER THE IDENTIFIER THE LANE ACTUALLY USES.
+    # `live_executor.active_venue()` returns 'polymarket-clob'; the table
+    # held only the bare 'CLOB', so the global venue was as unresolvable
+    # as polymarket-us was. Same defect, same evidence (below).
+    "POLYMARKET_CLOB": TWO_TOKEN,
+    # `bettor_desk.SOURCE_VENUE`, and the venue `rn1x_shadow` persists on
+    # every cohort row. It IS Polymarket's global CLOB on Polygon -- the
+    # venue the RN1 and Ferrari studies observe -- so it holds YES and NO
+    # as distinct ERC-1155 tokens and takes the same model and the same
+    # evidence as CLOB. It was absent, so cohort-sourced inventory could
+    # not have a reducing action ranked either.
+    "POLYMARKET_GLOBAL_POLYGON": TWO_TOKEN,
     "CHAIN": TWO_TOKEN,
 }
+
+#: VENUE LABELS THAT ARE NOT TRADING VENUES FOR US.
+#:
+#: `kalshi` appears in `api/app.py` and `api/venue_truth.py` as the
+#: data-source label on catalogue and coverage rows -- "this market also
+#: exists at Kalshi" -- and never as a venue we hold inventory on. It has
+#: no position model because we take no positions there, and that refusal
+#: is correct rather than drift. Listed so the drift guard can tell a
+#: missing model apart from a venue we deliberately do not trade.
+NOT_A_TRADING_VENUE_FOR_US = ("KALSHI",)
+
+#: SEPARATOR DRIFT WAS SILENTLY DISABLING EVERY REDUCING ACTION.
+#:
+#: `model_for` upper-cased and looked up, so the identifier the whole lane
+#: actually uses -- 'polymarket-us', which `live_executor.active_venue()`
+#: returns and which appears 39 times in this package against one use of
+#: the underscore form -- became 'POLYMARKET-US' and missed the table.
+#: The refusal is correct and loud in isolation, and its CONSEQUENCE was
+#: silent: `bettor_mgmt_select.rank_with_hold` marks DIRECT_EXIT,
+#: TAKE_COMPLEMENT, COMPLETE_PAIR and MERGE `not_rankable` when no model
+#: is established, so HOLD was the only candidate left and was selected
+#: on every servicing pass, for every funded position, forever.
+#:
+#: Normalising the separator is not widening the table: '-', '_' and ' '
+#: are spellings of ONE venue identifier, and no venue is distinguished
+#: from another by that character. A venue genuinely absent from the
+#: table still refuses.
+_SEPARATORS = "-_ ."
+
+
+def canonical_venue(venue) -> str:
+    """One spelling of a venue identifier, for table lookup only."""
+    s = str(venue or "").strip().upper()
+    for ch in _SEPARATORS:
+        s = s.replace(ch, "_")
+    while "__" in s:
+        s = s.replace("__", "_")
+    return s.strip("_")
 
 EVIDENCE = {
     ONE_SIGNED_NET: (
@@ -149,7 +199,7 @@ NON_ORDER = ("HOLD", "HOLD_TO_SETTLEMENT", "WAIT_REQUOTE", "MERGE")
 
 def model_for(venue) -> dict:
     """Which position model this venue uses, or a named refusal."""
-    key = str(venue or "").strip().upper()
+    key = canonical_venue(venue)
     mdl = VENUE_MODEL.get(key)
     if mdl is None:
         return {"ok": False, "venue": key or None,
