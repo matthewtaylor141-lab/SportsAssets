@@ -211,10 +211,26 @@ submission attempt. I am stating the gap rather than implying coverage.
 - Whether a Nations League fixture resolves through `premap.resolve` once the
   competition is requested. The resolver was never the defect for EPL, and that
   does not establish it bridges UNL.
-- The two book-currency refusals in the live cycle remain: one candidate at
-  `age_s 950.556` on `M3_ORIGIN_GENERATION_INSTANT` against a `venue_clock`
-  reading of 32.776 s — two clocks disagreeing by 30×, and 32.776 exceeds the
-  30 s bound regardless. The other is `NO_MECHANISM_AVAILABLE`. Not repaired.
+- **The two book-currency refusals are not a defect, and I had this wrong too.**
+  I described them as "two clocks disagreeing by 30×", pairing a 950 s figure
+  with a 32.776 s one. Those are different quantities: the first is the
+  *Pinnacle quote's* age, the second is the venue's own `transactTime` stamp,
+  which `bettor_venue_currency` records with `decides_nothing: True` and reads
+  as evidence of nothing. There is no contradiction between them to repair.
+
+  What the refusals actually say: only **M1, a live market-data subscription**,
+  establishes book currency. M2 (conditional revalidation) was withdrawn as
+  establishing, and M3 (origin generation instant) is explicitly a *partial*
+  that never admits alone — an origin can generate a response now from a
+  snapshot it computed minutes ago, and admitting on M3 would certify exactly
+  that. So `NO_MECHANISM_AVAILABLE` is the designed verdict when the lane holds
+  no live subscription for a market, and the module says so in terms:
+  *this is not a finding that the book is stale — it is the absence of evidence
+  that it is current.*
+
+  The work this names is therefore **establishing M1** for candidate markets: a
+  market-data subscription wired into the entry path. That is real engineering,
+  not a bug fix, and it is not done.
 - No order has been sent. Order authority has not been tested and will not be
   tested by sending an unauthorized order.
 
