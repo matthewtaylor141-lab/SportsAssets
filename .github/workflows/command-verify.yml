@@ -6443,7 +6443,7 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-      - name: The scheduled cycle, read back through the authorized route
+      - name: The scheduled cycle, read back from /api/command/rn1x/statuses
         env:
           API_URL: ${{ inputs.api }}
           ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
@@ -6503,7 +6503,7 @@ jobs:
           [ "$N" -ge 170000 ] || { say "NOT 17+: this job would establish nothing"; exit 1; }
           say "maintenance search_path restriction applies from 17 onward"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-      - name: Apply every migration with the runner production boots with
+      - name: Run the migration runner; NOT every file applies, and which are named
         env:
           DATABASE_URL: postgresql://postgres:postgres@127.0.0.1:5432/funded_pg18
         run: |
@@ -6568,8 +6568,25 @@ jobs:
               asyncio.run(mark(failed))
           if not ok:
               print("the runner never completed"); sys.exit(1)
-          print("SKIPPED (unrelated to the funded lane): %s"
-                % (", ".join(skipped) or "none"))
+          # ── THE SKIPS ARE THE HEADLINE, NOT A FOOTNOTE ───────────
+          #
+          # An independent review was right to object to calling this step
+          # "apply every migration": it does not, and describing it that way
+          # turns a known bootstrap dependency into an unnoticed gap. The
+          # files it marks SKIPPED-IN-PG18-VALIDATION depend on `us_premap`,
+          # a table the COLLECTOR builds and no migration creates -- so this
+          # job cannot apply them and does not pretend to.
+          #
+          # WHAT THIS STEP THEREFORE ESTABLISHES: the FUNDED migrations
+          # (125-128) apply on PostgreSQL 18, which the next step asserts by
+          # name. It does NOT establish that the schema is complete.
+          print("SKIPPED (could not apply here -- bootstrap dependency on "
+                "`us_premap`, which the collector builds and no migration "
+                "creates): %s" % (", ".join(skipped) or "none"))
+          print("THIS STEP DOES NOT ESTABLISH THAT EVERY MIGRATION APPLIED. "
+                "It establishes that the runner completed and that the files "
+                "above are the only ones it could not apply. The funded "
+                "migrations are asserted BY NAME in the next step.")
           PY
           echo '```' >> "$GITHUB_STEP_SUMMARY"
       - name: The funded schema is actually there, on 18

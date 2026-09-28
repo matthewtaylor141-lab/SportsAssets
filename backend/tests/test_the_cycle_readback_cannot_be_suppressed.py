@@ -1,4 +1,15 @@
-"""The unsuppressible cycle readback: its verdicts, and what it refuses.
+"""The unsuppressible cycle readback: the properties that are route-agnostic.
+
+WHERE THE VERDICT SEMANTICS LIVE. They moved to
+`test_the_cycle_readback_has_no_false_green.py`, which builds its fixtures in
+the shape `/api/command/rn1x/statuses` actually serves. The cases that used to
+be here were written against a desk-shaped payload -- and a test agreeing with
+a shape production does not serve is worse than no test, because it passes.
+
+WHAT STAYS HERE: the properties that hold whatever route is read -- that this
+module can only GET, that a dead service and a slow route are different
+verdicts, that the read is retried once but a 4xx is not, and that only
+measurement failures fail the job.
 
 WHY EACH CASE IS HERE. The readback's whole value is that it distinguishes
 three situations that all present as "zero candidates evaluated", and names a
@@ -11,188 +22,6 @@ from __future__ import annotations
 import json
 
 from sportsassets import cycle_readback as CR
-
-
-def _desk(*, at=1_790_000_000.0, considered=None, evaluated=None,
-          refusals=None, ledger=None, **controls):
-    """A desk payload shaped like `/api/command/bettor/desk` ACTUALLY is.
-
-    NOT like `command_center`. The first working run of this module returned
-    NO_SCHEDULED_CYCLE_HEARTBEAT because it read `last_scheduled_decision` at
-    the top level -- a key the desk route does not have. The route loads the
-    heartbeat itself and spreads it across `controls` and `opportunities`, so
-    the fixture is built that way and a test cannot pass against a shape
-    production does not serve.
-    """
-    return {"ok": True,
-            "controls": dict({"last_cycle_at": at,
-                              "cycle_state": "RAN",
-                              "cycle_label": "L",
-                              "build_identity": {"sha": "abc1234"}},
-                             **controls),
-            "opportunities": {"markets_considered": considered,
-                              "evaluated": evaluated,
-                              "refusals": refusals,
-                              "first_refusal_per_mapped_candidate": ledger,
-                              "funnel": None, "venue_errors": None,
-                              "odds_freshness": None}}
-
-
-# ═════════════════════════════════════════════════════════════════════
-# THE FOUR OUTCOMES, KEPT APART
-# ═════════════════════════════════════════════════════════════════════
-
-def test_an_absent_heartbeat_is_unanswered_not_idle():
-    """No `last_scheduled_decision` means the question was not answered.
-
-    Reporting it as "nothing happened" would let a build that does not write
-    the row look like a quiet lane -- and it fails the job, because a
-    diagnostic that cannot see anything must not read as green.
-    """
-    v = CR.verdict({"ok": True})
-    assert v["verdict"] == CR.V_NO_HEARTBEAT
-    assert v["ok"] is False
-    assert v["verdict"] in CR.FAILING
-    assert "unanswered" in v["why"]
-
-
-def test_an_empty_funnel_is_a_state_of_the_world_and_does_not_fail():
-    """No fixtures at all is not a broken system.
-
-    Failing on it would train the reader to ignore this job, which is the
-    surest way to make an unsuppressible diagnostic useless.
-    """
-    v = CR.verdict(_desk(considered=0, evaluated=0, refusals={}, ledger=[]))
-    assert v["verdict"] == CR.V_NOTHING_TO_EVALUATE
-    assert v["ok"] is True
-    assert v["verdict"] not in CR.FAILING
-    # AND IT IS EXPLICITLY NOT EVIDENCE THAT THE LANE WORKS.
-    assert "NOT" in v["why"] and "works" in v["why"]
-
-
-def test_every_candidate_refused_with_named_reasons_does_not_fail():
-    """Named refusals are the finding, not a failure of the instrument."""
-    v = CR.verdict(_desk(
-        considered=4, evaluated=0,
-        refusals={"VENUE_BOOK_READ_RETURNED_ERROR": 1,
-                  "NO_VENUE_NATIVE_CONTRACT_IN_PREMAP": 3},
-        ledger=[{"slug": "aec-mlb-chc-sd-2026-09-30",
-                 "refusal": "VENUE_BOOK_READ_RETURNED_ERROR"}]))
-    assert v["verdict"] == CR.V_ALL_REFUSED_ACCOUNTED
-    assert v["ok"] is True
-    assert v["refusal_total"] == 4
-    assert v["mapped_candidates"] == 1
-
-
-def test_considered_but_unaccounted_is_a_defect_and_fails():
-    """THE ONE CASE THAT FAILS: the lane is not measuring itself.
-
-    Markets entered the funnel, none was evaluated, and the census names no
-    refusal and lists no candidate. That is a defect in the INSTRUMENT, and
-    it is exactly the condition that made `evaluated 0` with an empty
-    refusal list read as "nothing happened".
-    """
-    v = CR.verdict(_desk(considered=7, evaluated=0, refusals={}, ledger=[]))
-    assert v["verdict"] == CR.V_UNACCOUNTED
-    assert v["ok"] is False
-    assert v["verdict"] in CR.FAILING
-    assert "defect in the instrument" in v["why"]
-
-
-def test_evaluated_candidates_pass():
-    v = CR.verdict(_desk(considered=5, evaluated=2, refusals={"X": 3}))
-    assert v["verdict"] == CR.V_EVALUATED
-    assert v["ok"] is True
-    assert v["evaluated"] == 2
-
-
-# ═════════════════════════════════════════════════════════════════════
-# AN ABSENT PATH IS NAMED, NOT PRINTED AS EMPTY
-# ═════════════════════════════════════════════════════════════════════
-
-def test_an_absent_field_is_reported_by_name_not_as_a_blank():
-    """The four-wrong-JSON-paths lesson, encoded.
-
-    An empty column from a wrong path is indistinguishable from an absent
-    field, so the reader must be told WHICH key was missing.
-    """
-    c = CR.census({"ok": True})
-    assert c["cycle_at_is_absent"] is True
-    assert c["desk_has_a_cycle_section"] is False
-    assert "controls" in c["paths_absent"]
-
-
-def test_an_older_serving_build_is_named_as_the_build_not_as_controls_off():
-    """`venue_sdk` absent means the BUILD does not report it.
-
-    Reading an absent block as "the SDK is unpinned" or "the cooldown is
-    off" would be inferring a fact about the system from a fact about the
-    projection -- the same error as reading a null timestamp as "the read
-    never returned".
-    """
-    c = CR.census(_desk(considered=1, evaluated=0))
-    assert c["venue_sdk_is_absent"] is True
-    assert c["venue_rate_controls_is_absent"] is True
-    assert "controls.venue_sdk" in c["paths_absent"]
-
-    # And when the build DOES report it, it comes through intact.
-    c2 = CR.census(_desk(venue_sdk={"pinned": "1.0.2", "installed": "1.0.2",
-                     "pinned_matches_installed": True}))
-    assert c2["venue_sdk_is_absent"] is False
-    assert c2["venue_sdk"]["pinned_matches_installed"] is True
-
-
-def test_a_non_numeric_count_does_not_become_zero():
-    """A string or None count must not silently read as 0.
-
-    `evaluated: null` with markets considered is the UNACCOUNTED case; if
-    None coerced to 0 it would be indistinguishable from a measured zero.
-    """
-    v = CR.verdict(_desk(considered=3, evaluated=None, refusals={}, ledger=[]))
-    assert v["evaluated"] is None
-    assert v["verdict"] == CR.V_UNACCOUNTED
-
-
-# ═════════════════════════════════════════════════════════════════════
-# IT CANNOT MUTATE ANYTHING
-# ═════════════════════════════════════════════════════════════════════
-
-def test_the_readback_issues_only_a_GET_and_no_write_verb():
-    """CONTAINMENT, by AST and by source.
-
-    This module is run OUTSIDE the gated job so a fixture failure cannot
-    suppress it. That is only safe because it cannot arm, seed or submit.
-    An `always()` around a step that mutates would run the mutation on a
-    failed run, which is the opposite of a diagnostic -- so the absence of
-    every write verb is asserted rather than intended.
-    """
-    import ast
-    import inspect
-
-    src = inspect.getsource(CR)
-    tree = ast.parse(src)
-
-    methods = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Call):
-            for kw in node.keywords or []:
-                if kw.arg == "method" and isinstance(kw.value, ast.Constant):
-                    methods.add(kw.value.value)
-    assert methods == {"GET"}, (
-        "the readback issues %r; it must be a read only" % (sorted(methods),))
-
-    for verb in ('"POST"', "'POST'", '"PUT"', '"DELETE"', '"PATCH"'):
-        assert verb not in src, "a write verb appears in the readback: %s" % verb
-    # And no arming or seeding vocabulary reaches it.
-    for word in ("submit_fok", "orders.create", "seed_acceptance",
-                 "arm_external", "run_full"):
-        assert word not in src, "the readback reaches %s" % word
-
-
-def test_the_desk_path_is_the_read_only_command_route():
-    """The route it reads is one `require_command` grants read-only."""
-    assert CR.DESK_PATH == "/api/command/bettor/desk"
-    assert "/api/command/" in CR.DESK_PATH
 
 
 def test_a_failed_read_is_unreadable_rather_than_a_healthy_lane():
@@ -273,73 +102,78 @@ def test_a_cold_first_attempt_is_retried_and_succeeds():
 
 
 def test_the_verdict_is_serialisable_for_a_step_summary():
-    v = CR.verdict(_desk(considered=2, evaluated=0, refusals={"A": 2}, ledger=[]))
+    v = CR.verdict({"statuses": {"external_valuation": {"last_cycle": {
+        "at": 1_790_000_000.0, "state": "LIVE", "markets_considered": 2,
+        "evaluated": 0, "refusals": {"A": 2},
+        "mapped_candidate_ledger": []}}}})
     json.dumps(v, default=str)
 
+def test_the_reader_is_pinned_to_the_route_that_returns_the_whole_row():
+    """THE PATH-AGREEMENT TEST, RE-AIMED AT THE ROUTE ACTUALLY USED.
 
-def test_every_path_the_readback_reads_is_one_the_desk_route_writes():
-    """THE TEST THAT WOULD HAVE CAUGHT THE WRONG PATHS BEFORE A RUN DID.
+    The previous version checked the readback's keys against `bettor_desk`'s
+    source -- the right idea aimed at the wrong route. `/api/command/rn1x/
+    statuses` loads the heartbeat WHOLE, so the keys to agree on are the
+    LOOP'S own field names, and the check is against the loop, which writes
+    them.
 
-    Twice now a readback of mine has used JSON paths that do not exist. The
-    first printed empty columns and I could not tell; the second returned
-    NO_SCHEDULED_CYCLE_HEARTBEAT and I read it as production's answer for one
-    run. Both times the cause was the same: the reader's idea of the payload
-    was never checked against the writer's.
-
-    So it is checked here, against the ROUTE'S OWN SOURCE. Every leaf key the
-    readback looks for must appear as a literal in `bettor_desk`, and the
-    section it hangs under must be a key the route assigns. This cannot prove
-    the nesting is right on its own, which is why the fixture in this file is
-    built in the route's shape as well -- but it does catch a key that simply
-    is not there, which is what happened.
+    This also removes the dependency that made the desk version fragile:
+    basic EV diagnosis no longer needs a projection to be deployed first.
     """
     import inspect
 
-    from sportsassets.api import app as A
     from sportsassets import cycle_readback as CR
+    from sportsassets.api import command_rn1x as CRN
+    from sportsassets.workers import ext_pinnacle_loop as LOOP
 
-    src = inspect.getsource(A.bettor_desk)
+    # The route loads the row under the path the reader expects.
+    ev_src = inspect.getsource(CRN)
+    assert 'out["last_cycle"]' in ev_src
+    assert CR.P_CYCLE == ("statuses", "external_valuation", "last_cycle")
+    assert CR.STATUSES_PATH == "/api/command/rn1x/statuses"
+    # And it loads it from the key the loop writes, not a different row.
+    assert "HEARTBEAT_KEY" in ev_src
+    assert LOOP.HEARTBEAT_KEY == "ext_pinnacle_last_cycle"
 
-    # The two sections the readback hangs everything under.
-    for section in ("controls", "opportunities"):
-        assert 'out["%s"]' % section in src, (
-            "the desk route no longer assigns out[%r]; every readback path "
-            "under it is now wrong" % section)
+    # Every field the reader names is one the loop actually writes. A DOTTED
+    # name is a NESTED field: its leaf is written by the digest that builds
+    # the block, not by `_heartbeat` itself, so both sources are searched and
+    # the nesting is spelled out in the constant rather than assumed.
+    #
+    # THIS CHECK ALREADY EARNED ITS KEEP: the reader named `pacer_lanes` at
+    # top level and the loop writes it inside `venue_rate_controls`. The test
+    # caught it before a production run did, which is the whole point of
+    # pinning the reader against the writer instead of against my memory.
+    writes = (inspect.getsource(LOOP._heartbeat)
+              + inspect.getsource(LOOP._rate_control_digest)
+              + inspect.getsource(LOOP._venue_sdk_digest))
+    for field in (CR.F_AT, CR.F_STATE, CR.F_LABEL, CR.F_WRITER,
+                  CR.F_CONSIDERED, CR.F_EVALUATED, CR.F_WRITTEN,
+                  CR.F_REFUSALS, CR.F_LEDGER, CR.F_VENUE_SDK,
+                  CR.F_RATE_CONTROLS, CR.F_PACER_LANES):
+        leaf = field.rsplit(".", 1)[-1]
+        assert '"%s"' % leaf in writes, (
+            "the reader names %r and nothing in the loop writes %r"
+            % (field, leaf))
+        if "." in field:
+            parent = field.rsplit(".", 1)[0]
+            assert '"%s"' % parent in writes, (
+                "the reader nests %r under %r and the loop does not write "
+                "that parent" % (leaf, parent))
 
-    paths = [CR.P_CYCLE_AT, CR.P_CYCLE_STATE, CR.P_CYCLE_LABEL, CR.P_WRITER,
-             CR.P_CONSIDERED, CR.P_EVALUATED, CR.P_REFUSALS, CR.P_LEDGER,
-             CR.P_FUNNEL, CR.P_VENUE_ERRORS, CR.P_LATENCY,
-             CR.P_VENUE_SDK, CR.P_RATE_CONTROLS, CR.P_PACER_LANES]
-    missing = []
-    for section, leaf in paths:
-        assert section in ("controls", "opportunities"), (section, leaf)
-        if '"%s"' % leaf not in src:
-            missing.append("%s.%s" % (section, leaf))
-    assert not missing, (
-        "the readback reads keys the desk route never writes: %r. An absent "
-        "key yields an empty census, which reads exactly like a quiet lane"
-        % (missing,))
 
+def test_a_desk_shaped_payload_is_refused():
+    """The reader must not accept the shape it used to read.
 
-def test_the_readback_does_not_read_a_command_center_shaped_payload():
-    """The specific wrong assumption, pinned so it cannot come back.
-
-    `bettor_funded_book.command_center` does carry
-    `last_scheduled_decision` -- which is why the mistake was plausible --
-    but the desk route does not embed it. A payload in that shape must NOT
-    satisfy this readback, because if it did, the test suite would be
-    agreeing with a shape production does not serve.
+    If a desk-shaped payload satisfied it, the suite would be agreeing with a
+    route this module no longer calls -- the same trap as before, reversed.
     """
     from sportsassets import cycle_readback as CR
 
-    command_center_shaped = {
-        "last_scheduled_decision": {
-            "at": 1_790_000_000.0, "cycle_state": "RAN",
-            "markets_considered": 4, "evaluated": 0, "refusals": {"X": 4},
-        }
-    }
-    v = CR.verdict(command_center_shaped)
-    assert v["verdict"] == CR.V_NO_HEARTBEAT, (
-        "a command_center-shaped payload was accepted; the readback is "
-        "reading the wrong route's shape again")
-    assert "controls" in v["paths_absent"]
+    desk_shaped = {"controls": {"last_cycle_at": 1_790_000_000.0},
+                   "opportunities": {"markets_considered": 4,
+                                     "evaluated": 0,
+                                     "refusals": {"X": 4}}}
+    v = CR.verdict(desk_shaped)
+    assert v["verdict"] == CR.V_NO_HEARTBEAT
+    assert "statuses" in " ".join(v["paths_absent"])

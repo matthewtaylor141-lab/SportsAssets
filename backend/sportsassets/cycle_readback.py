@@ -58,6 +58,22 @@ import os
 import urllib.error
 import urllib.request
 
+#: ── THE ROUTE THAT ALREADY WORKS ────────────────────────────────────
+#:
+#: `/api/command/rn1x/statuses` returns the persisted heartbeat WHOLE at
+#: `statuses.external_valuation.last_cycle` -- the raw row the loop wrote, not
+#: a projection of it. An independent run confirmed that route answering
+#: against the deployed build.
+#:
+#: WHY NOT THE DESK. The first version of this module read
+#: `/api/command/bettor/desk`, whose Opportunities section did not carry
+#: `evaluated` at all -- so basic EV diagnosis would have depended on
+#: deploying a new projection, which is exactly when a diagnostic is least
+#: able to wait. Reading the row whole removes that dependency: a field this
+#: module wants and an older build does not write is then a MISSING FIELD on a
+#: PRESENT heartbeat, which is a different fact from a missing heartbeat and
+#: is reported as such.
+STATUSES_PATH = "/api/command/rn1x/statuses"
 DESK_PATH = "/api/command/bettor/desk"
 HEALTH_PATH = "/healthz"
 
@@ -76,6 +92,9 @@ HEALTH_PATH = "/healthz"
 #: different facts and previously collapsed into one timeout.
 HEALTH_TIMEOUT_S = 25.0
 DESK_TIMEOUT_S = 150.0
+#: The statuses route does far less work than the desk, but it still touches
+#: the database on a possibly-cold service.
+STATUSES_TIMEOUT_S = 90.0
 #: One retry, because a cold start is the common cause and the second attempt
 #: is warm. Bounded at two total: a diagnostic that hammers our own API while
 #: reporting on rate control would be self-refuting.
@@ -86,6 +105,27 @@ V_UNREADABLE = "THE_DESK_COULD_NOT_BE_READ"
 V_SERVICE_UNREACHABLE = "THE_SERVICE_ITSELF_DID_NOT_ANSWER"
 V_NOTHING_TO_EVALUATE = "NOTHING_TO_EVALUATE_THIS_CYCLE"
 V_ALL_REFUSED_ACCOUNTED = "EVERY_CANDIDATE_REFUSED_AND_ACCOUNTED_FOR"
+#: ── A VERDICT I HAD TO ADD AFTER READING MY OWN OUTPUT ──────────────
+#:
+#: The first successful live run reported
+#: `EVERY_CANDIDATE_REFUSED_AND_ACCOUNTED_FOR` on a cycle with
+#: `markets_considered: 82` and `refusal_total: 33`. Those do not add up, and
+#: the verdict asserted accounting it had never performed -- it fired whenever
+#: ANY refusal was recorded, without comparing the totals.
+#:
+#: That is the same error as every other one in this batch: a name that claims
+#: more than the measurement supports. So the reconciliation is now computed,
+#: and when it cannot be closed the verdict says exactly that instead of
+#: claiming completeness.
+#:
+#: IT IS NOT AUTOMATICALLY A DEFECT. `markets_considered` counts venue markets
+#: examined; the refusal counters fire per CANDIDATE at various stages, and the
+#: loop's own documentation says most of them fire before anything is
+#: evaluated. The two may be different populations -- which is precisely why
+#: "they differ" must be reported as NOT ESTABLISHED rather than as either a
+#: clean account or a broken one.
+V_REFUSALS_NAMED_NOT_RECONCILED = (
+    "REFUSALS_ARE_NAMED_BUT_THE_CENSUS_DOES_NOT_RECONCILE")
 V_UNACCOUNTED = "CANDIDATES_ENTERED_THE_FUNNEL_AND_ARE_UNACCOUNTED_FOR"
 V_EVALUATED = "CANDIDATES_WERE_EVALUATED"
 
@@ -149,9 +189,11 @@ def reachable(api: str, *, timeout: float = None) -> dict:
                 parse_json=False)
 
 
+
+
 def fetch(api: str, token: str, *, timeout: float = None,
-          attempts: int = None, sleep=None) -> dict:
-    """The desk, authenticated, with ONE bounded retry.
+          attempts: int = None, sleep=None, path: str = None) -> dict:
+    """The statuses route, authenticated, with ONE bounded retry.
 
     RETRIED BECAUSE A COLD START IS THE COMMON CAUSE and the second attempt
     is warm. Bounded at DESK_ATTEMPTS: a diagnostic that hammered our own API
@@ -160,160 +202,347 @@ def fetch(api: str, token: str, *, timeout: float = None,
     """
     import time as _t
 
-    limit = DESK_TIMEOUT_S if timeout is None else timeout
+    where = path or STATUSES_PATH
+    limit = STATUSES_TIMEOUT_S if timeout is None else timeout
     tries = DESK_ATTEMPTS if attempts is None else max(1, int(attempts))
     last = None
     for i in range(tries):
-        last = _get(api, DESK_PATH, token=token, timeout=limit)
+        last = _get(api, where, token=token, timeout=limit)
         if last.get("ok"):
-            return dict(last, attempts=i + 1)
+            return dict(last, attempts=i + 1, path=where)
         # A 4xx will not change on a retry -- it is an answer about our
         # credential or the route, not a cold service.
         st = last.get("status")
         if st is not None and 400 <= int(st) < 500:
-            return dict(last, attempts=i + 1,
+            return dict(last, attempts=i + 1, path=where,
                         why_not_retried="a 4xx is an answer, not a cold start")
         if i + 1 < tries:
             (sleep or _t.sleep)(2.0)
-    return dict(last or {"ok": False}, attempts=tries)
+    return dict(last or {"ok": False}, attempts=tries, path=where)
 
 
-#: ── THE DESK'S ACTUAL SHAPE, READ OUT OF THE ROUTE ──────────────────
-#:
-#: FOUND BY RUNNING IT, AGAIN. The first working run returned
-#: `NO_SCHEDULED_CYCLE_HEARTBEAT` with an empty census, and it was not
-#: production's answer -- it was my path. I assumed the desk embedded
-#: `bettor_funded_book.command_center`, which does carry
-#: `last_scheduled_decision`. It does not: `/api/command/bettor/desk` has its
-#: own shape, loads the heartbeat row itself, and spreads it across `controls`
-#: and `opportunities`.
-#:
-#: This is the SECOND time a readback of mine used paths that do not exist.
-#: The first printed empty columns and I could not tell. This one named the
-#: key it could not find and the mistake took one run to see, which is the
-#: whole reason `PATH_ABSENT` exists.
-#:
-#: The paths are listed here, once, so a route change breaks them in one
-#: visible place instead of silently emptying a census.
-P_CYCLE_AT = ("controls", "last_cycle_at")
-P_CYCLE_STATE = ("controls", "cycle_state")
-P_CYCLE_LABEL = ("controls", "cycle_label")
-P_WRITER = ("controls", "build_identity")
-P_CONSIDERED = ("opportunities", "markets_considered")
-P_EVALUATED = ("opportunities", "evaluated")
-P_REFUSALS = ("opportunities", "refusals")
-P_LEDGER = ("opportunities", "first_refusal_per_mapped_candidate")
-P_FUNNEL = ("opportunities", "funnel")
-P_VENUE_ERRORS = ("opportunities", "venue_errors")
-P_LATENCY = ("opportunities", "odds_freshness")
-P_VENUE_SDK = ("controls", "venue_sdk")
-P_RATE_CONTROLS = ("controls", "venue_rate_controls")
-P_PACER_LANES = ("controls", "pacer_lanes")
+#: ── WHERE THE HEARTBEAT LIVES ON THE STATUSES ROUTE ─────────────────
+#: The row WHOLE, so every field the loop wrote is reachable by its own name.
+P_CYCLE = ("statuses", "external_valuation", "last_cycle")
+
+#: Fields read off that row. Names are the loop's own, not a projection's.
+F_AT = "at"
+F_STATE = "state"
+F_LABEL = "cycle_label"
+F_WRITER = "writer"
+F_CONSIDERED = "markets_considered"
+F_EVALUATED = "evaluated"
+F_WRITTEN = "written"
+F_REFUSALS = "refusals"
+F_LEDGER = "mapped_candidate_ledger"
+F_VENUE_SDK = "venue_sdk"
+F_RATE_CONTROLS = "venue_rate_controls"
+#: NESTED, not top level. `pacer_lanes` is written INSIDE
+#: `venue_rate_controls` by `_rate_control_digest`, and naming it as a
+#: top-level field made the reader look somewhere the loop never writes. The
+#: path-agreement test caught it before a run did, which is what it is for.
+F_PACER_LANES = "venue_rate_controls.pacer_lanes"
+
+#: A ledger row must IDENTIFY a candidate and STATE an outcome. A row with
+#: neither names nothing, and counting it as coverage counts the container
+#: instead of the contents.
+LEDGER_ID_KEYS = ("slug", "us_market_slug", "market_slug", "condition_id",
+                  "event_key", "candidate")
+LEDGER_OUTCOME_KEYS = ("refusal", "reason", "first_refusal", "blocker",
+                       "outcome", "state")
 
 
-def census(desk: dict) -> dict:
-    """The evaluation lane's own numbers, with every absent path named."""
-    out = {"paths_absent": []}
+def _counter(value):
+    """(int, None) for a valid counter, or (None, reason) for anything else.
 
-    def take(name, path):
-        val, missing = _dig(desk, *path)
-        if val is ABSENT:
-            out["paths_absent"].append(missing)
+    ONLY A NON-NEGATIVE INTEGER IS A COUNT.
+
+      * `-1` is a corrupt field, and believing it produced
+        `CANDIDATES_WERE_EVALUATED, ok=True` on a cycle that evaluated
+        nothing. The same class of bug as NaN passing `float()`.
+      * `True` is excluded EXPLICITLY. `isinstance(True, int)` holds in
+        Python and `int(True)` is 1, so a boolean would quietly become a
+        count of one.
+      * A float, even 2.0, is not a candidate count; a string is not either.
+        Coercing them hides a producer that changed shape.
+    """
+    if isinstance(value, bool):
+        return None, "a boolean is not a count"
+    if isinstance(value, int):
+        if value < 0:
+            return None, "negative (%d) is not a count" % value
+        return value, None
+    if value is None:
+        return None, "absent"
+    return None, "%s is not an integer" % type(value).__name__
+
+
+def census(payload: dict) -> dict:
+    """The cycle row and its fields, with every absence named for what it is.
+
+    THREE KINDS OF ABSENCE, KEPT APART -- because an older build and an
+    unwritten row and a failed read are three different situations:
+
+      NO SECTION      the route does not carry the cycle path at all.
+      NO ROW          the section is there and the row is null: nothing has
+                      been written.
+      UNREADABLE      the route itself reported it could not read the row.
+      MISSING FIELD   the row is present and this build did not write that
+                      field. NOT a missing heartbeat, and not a claim about
+                      the thing the field would have described.
+    """
+    out = {"paths_absent": [], "invalid_fields": []}
+    row, missing = _dig(payload, *P_CYCLE)
+
+    if row is ABSENT:
+        out.update(cycle=None, desk_has_a_cycle_section=False,
+                   cycle_row_present=False, cycle_row_unreadable=False)
+        out["paths_absent"].append(missing)
+        return out
+    out["desk_has_a_cycle_section"] = True
+    if not isinstance(row, dict) or not row:
+        # `{}` AND `None` BOTH LAND HERE, and neither is a measured empty
+        # funnel. An empty object supports no claim about the world at all;
+        # reporting it as NOTHING_TO_EVALUATE was a positive claim built on
+        # nothing.
+        out.update(cycle=None, cycle_row_present=False,
+                   cycle_row_unreadable=False,
+                   cycle_row_why=("the cycle row is %s -- present as a key and "
+                                  "carrying no measurement"
+                                  % ("an empty object" if row == {}
+                                     else type(row).__name__)))
+        return out
+    if row.get("unreadable"):
+        out.update(cycle=row, cycle_row_present=False,
+                   cycle_row_unreadable=True,
+                   cycle_row_why=("the route could not read the row: %s"
+                                  % row.get("unreadable")))
+        return out
+
+    out["cycle"] = row
+    out["cycle_row_unreadable"] = False
+
+    def take(name, key):
+        if key not in row:
+            out["paths_absent"].append("last_cycle." + key)
             out[name] = None
             out[name + "_is_absent"] = True
         else:
-            out[name] = val
+            out[name] = row[key]
             out[name + "_is_absent"] = False
-        return out[name]
 
-    # THE CYCLE ROW ITSELF. Its presence is established by whether the desk
-    # carries a cycle INSTANT -- not by whether any one field is non-null,
-    # because a cycle that ran and refused everything legitimately has nulls.
-    take("cycle_at", P_CYCLE_AT)
-    take("cycle_state", P_CYCLE_STATE)
-    take("cycle_label", P_CYCLE_LABEL)
-    take("writer", P_WRITER)
-    take("markets_considered", P_CONSIDERED)
-    take("evaluated", P_EVALUATED)
-    take("refusals", P_REFUSALS)
-    take("ledger", P_LEDGER)
-    take("funnel", P_FUNNEL)
-    take("venue_errors", P_VENUE_ERRORS)
-    take("latency", P_LATENCY)
+    for name, key in (("cycle_at", F_AT), ("cycle_state", F_STATE),
+                      ("cycle_label", F_LABEL), ("writer", F_WRITER),
+                      ("refusals", F_REFUSALS), ("ledger", F_LEDGER),
+                      ("venue_sdk", F_VENUE_SDK),
+                      ("venue_rate_controls", F_RATE_CONTROLS)):
+        take(name, key)
+    # THE NESTED ONE, read from where it is actually written.
+    rc = out.get("venue_rate_controls")
+    if isinstance(rc, dict) and "pacer_lanes" in rc:
+        out["pacer_lanes"] = rc["pacer_lanes"]
+        out["pacer_lanes_is_absent"] = False
+    else:
+        out["pacer_lanes"] = None
+        out["pacer_lanes_is_absent"] = True
+        out["paths_absent"].append("last_cycle." + F_PACER_LANES)
 
-    # ── THE REPAIRS OF THIS BATCH, READ BACK FROM THE RUNNING PROCESS ──
-    # Which venue SDK the deployed image resolved, and whether both rate
-    # controls are armed. Absent means THE SERVING BUILD does not report
-    # them -- not that the SDK is unpinned or the cooldown off.
-    take("venue_sdk", P_VENUE_SDK)
-    take("venue_rate_controls", P_RATE_CONTROLS)
-    take("pacer_lanes", P_PACER_LANES)
+    # COUNTERS ARE VALIDATED, not coerced. An invalid one is named and the
+    # value becomes None, so nothing downstream can treat it as a number.
+    for name, key in (("markets_considered", F_CONSIDERED),
+                      ("evaluated", F_EVALUATED), ("written", F_WRITTEN)):
+        if key not in row:
+            out["paths_absent"].append("last_cycle." + key)
+            out[name] = None
+            out[name + "_is_absent"] = True
+            continue
+        out[name + "_is_absent"] = False
+        val, why = _counter(row[key])
+        out[name] = val
+        if val is None and why != "absent":
+            out["invalid_fields"].append("%s (%s)" % (key, why))
 
-    # A CYCLE EXISTS IF THE DESK GAVE US ITS INSTANT. `cycle_at` absent means
-    # the desk has no cycle section at all; `cycle_at` present-but-null means
-    # no cycle has completed, which is a different fact and says so.
-    out["cycle_row_present"] = bool(not out["cycle_at_is_absent"]
-                                    and out["cycle_at"] is not None)
-    out["desk_has_a_cycle_section"] = not out["cycle_at_is_absent"]
+    # A CYCLE EXISTS IF IT HAS AN INSTANT. Counters can legitimately be zero
+    # or absent; an instant cannot be, because the loop writes it first.
+    at_val, at_why = (None, None)
+    if not out["cycle_at_is_absent"]:
+        try:
+            at_val = float(out["cycle_at"])
+            if at_val != at_val or at_val <= 0:      # NaN or non-positive
+                at_val, at_why = None, "not a positive instant"
+        except (TypeError, ValueError):
+            at_val, at_why = None, "not a number"
+    out["cycle_at_epoch_s"] = at_val
+    if at_why:
+        out["invalid_fields"].append("%s (%s)" % (F_AT, at_why))
+    out["cycle_row_present"] = bool(at_val is not None)
     return out
 
 
-def verdict(desk: dict) -> dict:
-    """What the cycle establishes, and whether that should fail a job."""
-    c = census(desk)
-    if not c["desk_has_a_cycle_section"]:
+def _refusal_total(refusals):
+    """Sum the refusal counters, validating each. Returns (total, invalid)."""
+    bad = []
+    total = 0
+    if not isinstance(refusals, dict):
+        return None, (["refusals is not a mapping"] if refusals is not None
+                      else [])
+    for k, v in refusals.items():
+        n, why = _counter(v)
+        if n is None:
+            bad.append("refusals.%s (%s)" % (k, why))
+        else:
+            total += n
+    return total, bad
+
+
+def _ledger_quality(ledger):
+    """How many ledger rows actually identify a candidate AND an outcome.
+
+    A BLANK ROW IS NOT COVERAGE. `[{}]` was read as "this candidate is
+    accounted for", which counted the existence of a row as the content of
+    one. A usable row names WHICH candidate hit WHICH blocker; anything less
+    is a row, not an account.
+    """
+    if not isinstance(ledger, list):
+        return {"rows": 0, "usable": 0, "blank": 0,
+                "not_a_list": ledger is not None}
+    usable = blank = 0
+    for r in ledger:
+        if not isinstance(r, dict):
+            blank += 1
+            continue
+        has_id = any(r.get(k) for k in LEDGER_ID_KEYS)
+        has_outcome = any(r.get(k) for k in LEDGER_OUTCOME_KEYS)
+        if has_id and has_outcome:
+            usable += 1
+        else:
+            blank += 1
+    return {"rows": len(ledger), "usable": usable, "blank": blank,
+            "not_a_list": False}
+
+
+def verdict(payload: dict) -> dict:
+    """What the cycle establishes, and whether that should fail a job.
+
+    ── THE RULE THE OLD VERSION BROKE ───────────────────────────────
+    The presence of A refusal, or A ledger row, does not establish that every
+    candidate is accounted for. One refusal out of a hundred candidates is one
+    accounted candidate and ninety-nine unknown ones. The verdict now
+    RECONCILES before it claims completeness, and when it cannot close the
+    sum it says so instead.
+
+    ── AND IT DOES NOT MANUFACTURE A RECONCILIATION ─────────────────
+    `markets_considered` counts venue markets examined; the refusal counters
+    fire per candidate, most before scoring. They may be different
+    populations, so a difference is UNESTABLISHED -- neither a clean account
+    nor a defect. Summing overlapping reasons to make the totals meet would
+    be inventing the answer.
+    """
+    c = census(payload)
+    if not c.get("desk_has_a_cycle_section"):
         return dict(c, verdict=V_NO_HEARTBEAT, ok=False,
-                    why=("the desk carries no cycle section at %s, so this "
-                         "run establishes nothing about the evaluation lane. "
-                         "That is an unanswered question, not an idle lane -- "
-                         "and if this route changed shape, the absent path is "
-                         "named above rather than shown as an empty census"
-                         % ".".join(P_CYCLE_AT)))
-    if not c["cycle_row_present"]:
+                    why=("the response carries no cycle at %s, so this run "
+                         "establishes nothing about the evaluation lane. If "
+                         "the route changed shape, the absent path is named "
+                         "above rather than shown as an empty census"
+                         % ".".join(P_CYCLE)))
+    if c.get("cycle_row_unreadable"):
+        return dict(c, verdict=V_UNREADABLE, ok=False,
+                    why=c.get("cycle_row_why"))
+    if not c.get("cycle_row_present"):
         return dict(c, verdict=V_NO_HEARTBEAT, ok=False,
-                    why=("the desk has a cycle section but no cycle instant, "
-                         "so no cycle has completed on this build. Reported "
-                         "as unanswered rather than as an idle lane"))
+                    why=(c.get("cycle_row_why")
+                         or "the cycle row carries no valid instant, so no "
+                            "cycle has been recorded. Unanswered, not idle"))
+    if c["invalid_fields"]:
+        # A CORRUPT COUNTER FAILS BEFORE ANY VERDICT IS DRAWN FROM IT.
+        return dict(c, verdict=V_UNACCOUNTED, ok=False,
+                    why=("the cycle row carries field(s) that are not valid "
+                         "counters: %s. No verdict is drawn from a number "
+                         "that is not one" % ", ".join(c["invalid_fields"])))
 
-    refusals = c["refusals"] if isinstance(c["refusals"], dict) else {}
-    ledger = c["ledger"] if isinstance(c["ledger"], list) else []
+    refused, bad = _refusal_total(c["refusals"])
+    if bad:
+        c["invalid_fields"].extend(bad)
+        return dict(c, verdict=V_UNACCOUNTED, ok=False,
+                    refusal_total=None,
+                    why=("the refusal census carries invalid counter(s): %s"
+                         % ", ".join(bad)))
+    lq = _ledger_quality(c["ledger"])
+    c.update(refusal_total=refused,
+             ledger_rows=lq["rows"], ledger_rows_usable=lq["usable"],
+             ledger_rows_blank=lq["blank"])
 
-    def num(x):
-        try:
-            return int(x)
-        except (TypeError, ValueError):
-            return None
+    considered, evaluated = c["markets_considered"], c["evaluated"]
 
-    considered, evaluated = num(c["markets_considered"]), num(c["evaluated"])
-    refused_total = sum(v for v in (num(x) for x in refusals.values())
-                        if v is not None)
-    c.update(refusals=refusals, refusal_total=refused_total,
-             mapped_candidates=len(ledger),
-             markets_considered=considered, evaluated=evaluated)
+    # ── THE RECONCILIATION ───────────────────────────────────────────
+    reconciled = False
+    unexplained = None
+    why_not = None
+    if considered is None:
+        why_not = ("`markets_considered` is absent on this build, so the "
+                   "population the refusals should cover is unknown")
+    elif evaluated is None:
+        why_not = ("`evaluated` is absent on this build, so considered minus "
+                   "refused cannot be closed: the remainder could be "
+                   "evaluations or could be unaccounted candidates")
+    elif refused is None:
+        why_not = "the refusal census is unreadable"
+    else:
+        unexplained = considered - evaluated - refused
+        reconciled = (unexplained == 0)
+        if not reconciled:
+            why_not = (
+                "%d considered - %d evaluated - %d refused = %d unexplained. "
+                "These may also be DIFFERENT POPULATIONS: "
+                "`markets_considered` counts venue markets examined while the "
+                "refusal counters fire per candidate, mostly before scoring. "
+                "So this is UNESTABLISHED coverage rather than a proven gap, "
+                "and it is not closed by summing overlapping reasons"
+                % (considered, evaluated, refused, unexplained))
+    c.update(reconciled=reconciled, unexplained=unexplained,
+             why_not_reconciled=why_not)
 
-    if evaluated:
-        return dict(c, verdict=V_EVALUATED, ok=True,
-                    why="%d candidate(s) reached evaluation" % evaluated)
-
-    # ZERO EVALUATED. Which of the three is it?
-    if not considered and not refused_total and not ledger:
+    # ── NOTHING AT ALL ENTERED THE FUNNEL ────────────────────────────
+    if (considered == 0 and (evaluated in (0, None)) and not refused
+            and lq["rows"] == 0):
         return dict(c, verdict=V_NOTHING_TO_EVALUATE, ok=True,
-                    why=("no candidate entered the funnel at all: the "
-                         "provider supplied nothing, or nothing mapped. A "
-                         "state of the world, not a defect -- and NOT "
-                         "evidence that the lane works"))
-    if refused_total or ledger:
+                    why=("nothing entered the funnel: the provider supplied "
+                         "no fixtures, or nothing mapped. A state of the "
+                         "world, and NOT evidence that the lane works"))
+
+    # ── EVALUATIONS HAPPENED ─────────────────────────────────────────
+    if evaluated:
+        if reconciled:
+            return dict(c, verdict=V_EVALUATED, ok=True,
+                        why=("%d candidate(s) reached evaluation and the "
+                             "census reconciles" % evaluated))
+        return dict(c, verdict=V_REFUSALS_NAMED_NOT_RECONCILED, ok=False,
+                    why=("%d candidate(s) reached evaluation but the census "
+                         "does not reconcile: %s" % (evaluated, why_not)))
+
+    # ── ZERO EVALUATED, SOMETHING IN THE FUNNEL ──────────────────────
+    if reconciled:
         return dict(c, verdict=V_ALL_REFUSED_ACCOUNTED, ok=True,
-                    why=("every candidate was refused for a NAMED reason "
-                         "(%d refusal(s) recorded, %d candidate(s) in the "
-                         "ledger). The named reasons are the finding"
-                         % (refused_total, len(ledger))))
+                    why=("every candidate was refused for a NAMED reason and "
+                         "the counts reconcile (%d considered = 0 evaluated + "
+                         "%d refused). The named reasons are the finding"
+                         % (considered, refused)))
+    if refused or lq["usable"]:
+        # NAMED, BUT NOT COMPLETE. Reported as unestablished coverage, which
+        # is the honest middle the old code collapsed into a green.
+        return dict(c, verdict=V_REFUSALS_NAMED_NOT_RECONCILED, ok=False,
+                    why=("refusals are named (%s refused, %d usable ledger "
+                         "row(s)) but coverage of the candidate population is "
+                         "NOT established: %s"
+                         % (refused, lq["usable"], why_not)))
     return dict(c, verdict=V_UNACCOUNTED, ok=False,
-                why=("%s market(s) were considered and none was evaluated, "
-                     "and the census names no refusal and lists no "
-                     "candidate. The lane is not measuring itself, which is "
-                     "a defect in the instrument rather than a fact about "
-                     "the venue" % considered))
+                why=("%s market(s) were considered, none was evaluated, and "
+                     "the census names no refusal and carries no usable "
+                     "ledger row (%d blank of %d). The lane is not measuring "
+                     "itself, which is a defect in the instrument rather "
+                     "than a fact about the venue"
+                     % (considered, lq["blank"], lq["rows"])))
 
 
 def _main(argv=None) -> int:
@@ -331,7 +560,7 @@ def _main(argv=None) -> int:
                                   "lane being healthy")}, indent=2))
         return 1
 
-    # THE CHEAP QUESTION FIRST, so a slow desk and a dead service are two
+    # THE CHEAP QUESTION FIRST, so a slow route and a dead service are two
     # different verdicts rather than one indistinguishable timeout.
     health = reachable(api)
     if not health.get("ok"):
@@ -351,37 +580,36 @@ def _main(argv=None) -> int:
         print(json.dumps({"verdict": V_UNREADABLE, "ok": False,
                           "status": got.get("status"),
                           "attempts": got.get("attempts"),
+                          "route": got.get("path"),
                           "why": got.get("why"),
-                          "why_not_retried": got.get("why_not_retried"),
-                          "what_this_means": (
-                              "%s answered but %s did not, within %.0fs x %s "
-                              "attempt(s). The service is up; this read is "
-                              "the thing that failed"
-                              % (HEALTH_PATH, DESK_PATH, DESK_TIMEOUT_S,
-                                 got.get("attempts")))}, indent=2))
+                          "why_not_retried": got.get("why_not_retried")},
+                         indent=2))
         return 1
 
     v = verdict(got["body"] or {})
     show = {k: v.get(k) for k in (
         "verdict", "ok", "why", "cycle_at", "cycle_state", "cycle_label",
-        "writer", "markets_considered", "evaluated", "refusal_total",
-        "mapped_candidates", "paths_absent")}
+        "writer", "markets_considered", "evaluated", "written",
+        "refusal_total", "ledger_rows", "ledger_rows_usable",
+        "ledger_rows_blank", "reconciled", "unexplained",
+        "why_not_reconciled", "invalid_fields", "paths_absent")}
     print(json.dumps(show, indent=2, default=str))
     print("\n-- the refusal census, verbatim --")
     print(json.dumps(v.get("refusals") or {}, indent=2, default=str))
-    print("\n-- the venue SDK the deployed process reports --")
-    print(json.dumps(v.get("venue_sdk"), indent=2, default=str)
-          if not v.get("venue_sdk_is_absent")
-          else "ABSENT: the serving build does not report it. That is a "
-               "statement about the BUILD, not about the SDK.")
-    print("\n-- the two rate controls, as they stand --")
-    print(json.dumps(v.get("venue_rate_controls"), indent=2, default=str)
-          if not v.get("venue_rate_controls_is_absent")
-          else "ABSENT: the serving build does not report them.")
-    print("\n-- pacer lanes (research vs servicing contention) --")
-    print(json.dumps(v.get("pacer_lanes"), indent=2, default=str)
-          if not v.get("pacer_lanes_is_absent")
-          else "ABSENT: the serving build does not report them.")
+    for label, key in (("the venue SDK the deployed process reports",
+                        "venue_sdk"),
+                       ("the two rate controls, as they stand",
+                        "venue_rate_controls"),
+                       ("pacer lanes (research vs servicing contention)",
+                        "pacer_lanes")):
+        print("\n-- %s --" % label)
+        if v.get(key + "_is_absent"):
+            print("ABSENT: the heartbeat is present and this SERVING BUILD "
+                  "does not write this field. That is a statement about the "
+                  "BUILD -- not that the dependency is unpinned, and not "
+                  "that rate control is off.")
+        else:
+            print(json.dumps(v.get(key), indent=2, default=str))
     print("\nVERDICT %s (%s)" % (v["verdict"],
                                  "fails this job" if v["verdict"] in FAILING
                                  else "does not fail this job"))
@@ -394,10 +622,10 @@ if __name__ == "__main__":                                     # pragma: no cove
     sys.exit(_main(sys.argv[1:]))
 
 
-__all__ = ["fetch", "reachable", "census", "verdict", "DESK_PATH",
-           "P_CYCLE_AT", "P_CONSIDERED", "P_EVALUATED", "P_REFUSALS",
-           "P_LEDGER", "P_VENUE_SDK", "P_RATE_CONTROLS", "P_PACER_LANES",
-           "HEALTH_PATH", "FAILING", "DESK_TIMEOUT_S", "HEALTH_TIMEOUT_S",
-           "DESK_ATTEMPTS", "V_NO_HEARTBEAT", "V_UNREADABLE",
-           "V_SERVICE_UNREACHABLE", "V_NOTHING_TO_EVALUATE",
-           "V_ALL_REFUSED_ACCOUNTED", "V_UNACCOUNTED", "V_EVALUATED"]
+__all__ = ["fetch", "reachable", "census", "verdict", "STATUSES_PATH",
+           "DESK_PATH", "HEALTH_PATH", "P_CYCLE", "FAILING",
+           "STATUSES_TIMEOUT_S", "DESK_TIMEOUT_S", "HEALTH_TIMEOUT_S",
+           "DESK_ATTEMPTS", "LEDGER_ID_KEYS", "LEDGER_OUTCOME_KEYS",
+           "V_NO_HEARTBEAT", "V_UNREADABLE", "V_SERVICE_UNREACHABLE",
+           "V_NOTHING_TO_EVALUATE", "V_ALL_REFUSED_ACCOUNTED",
+           "V_REFUSALS_NAMED_NOT_RECONCILED", "V_UNACCOUNTED", "V_EVALUATED"]

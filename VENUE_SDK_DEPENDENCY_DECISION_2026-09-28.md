@@ -221,6 +221,15 @@ quietly dropped, because "it went away" is not a diagnosis.
   `SCOPE_CREDENTIAL` by assumption. No cross-service causation is claimed.
 * The restart test uses a connection double. A real PostgreSQL round trip
   belongs in the `funded-pg18` gate job and is not yet added there.
+* **The PostgreSQL 18 job does not apply every migration, and must not be
+  described as if it did.** `031_us_premap_signed.sql` and
+  `055_us_premap_team.sql` are marked `SKIPPED-IN-PG18-VALIDATION`: they
+  depend on `us_premap`, a table the collector builds and no migration
+  creates. What the job establishes is narrower and is asserted by name —
+  migrations 125-128 apply on 18, the funded columns, functions and the
+  `bettor_funded_one_open_position` index exist, and the funded suite and the
+  risk tests ran rather than skipped. The step is named for what it does
+  rather than for what would have been convenient to claim.
 * These are component and integration tests in this container. They are not
   production verification, and release evidence still has to be on the exact
   deployed SHA.
