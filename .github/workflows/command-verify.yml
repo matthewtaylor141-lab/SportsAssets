@@ -6524,7 +6524,8 @@ jobs:
           import asyncpg
 
           DSN = os.environ["DATABASE_URL"]
-          FUNDED = ("125_", "126_", "127_", "128_", "131_", "132_")
+          FUNDED = ("125_", "126_", "127_", "128_", "131_", "132_", "133_",
+                    "134_", "135_")
           skipped, ok = [], False
 
           async def mark(version):
@@ -6603,7 +6604,7 @@ jobs:
           # does. Leaving it out of the assertion let the suite run against a
           # database that might not have it, which is the schema-only pass the
           # owner ruled out.
-          for m in 125 126 127 128 131 132; do
+          for m in 125 126 127 128 131 132 133 134 135; do
             got=$(Q "SELECT count(*) FROM schema_migrations WHERE version LIKE '${m}%' AND coalesce(content_sha,'') <> 'SKIPPED-IN-PG18-VALIDATION'")
             say "migration $m applied        $got"
             [ "$got" = "1" ] || { say "  => migration $m did NOT apply on PostgreSQL 18"; exit 1; }
@@ -6612,7 +6613,9 @@ jobs:
           # applied. The schema probe refuses this state at runtime; the gate
           # must refuse it too.
           for o in bettor_funded_portfolio_groups bettor_funded_leg_reservations \
-                   bettor_funded_decisions; do
+                   bettor_funded_decisions bettor_funded_operation_evidence \
+                   bettor_funded_decision_outcomes bettor_funded_group_results \
+                   bettor_funded_models; do
             got=$(Q "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='$o'")
             say "table $o  $got"
             [ "$got" = "1" ] || exit 1
@@ -6626,6 +6629,32 @@ jobs:
             got=$(Q "SELECT count(*) FROM pg_proc WHERE proname='$f'")
             say "function $f  $got"
             [ "$got" = "1" ] || { say "  => the single closure authority is missing"; exit 1; }
+          done
+          # ── 134 AND 135'S COLUMNS ON THE DECISION LEDGER ─────────────
+          #
+          # A HALF-APPLIED 134 OR 135 IS THE STATE THIS CATCHES. `record_decision`
+          # probes for `bound_action` and `model_version` and writes the columns
+          # only when they exist, so a partial migration reads as a working ledger
+          # that silently drops the scope of every bound and the model behind
+          # every prediction -- and the scope check then reports HELD on a
+          # position nobody measured.
+          for c in bound_action bound_filled_qty bound_holding_policy \
+                   model_key model_version features feature_sha predicted; do
+            got=$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='bettor_funded_decisions' AND column_name='$c'")
+            say "decisions.$c        $got"
+            [ "$got" = "1" ] || exit 1
+          done
+          # ── ONE APPROVED MODEL PER KEY, AS AN INDEX AND NOT A HABIT ──
+          got=$(Q "SELECT count(*) FROM pg_indexes WHERE indexname='bettor_funded_one_approved_model'")
+          say "one-approved-model bound            $got"
+          [ "$got" = "1" ] || { say "  => two models could be approved at once"; exit 1; }
+          # ── AND THE THREE APPEND-ONLY / FIXED-ARITHMETIC TRIGGERS ────
+          for t in bettor_funded_evidence_is_not_rewritten_trg \
+                   bettor_funded_outcome_is_append_only_trg \
+                   bettor_funded_model_arithmetic_is_fixed_trg; do
+            got=$(Q "SELECT count(*) FROM pg_trigger WHERE tgname='$t'")
+            say "trigger $t  $got"
+            [ "$got" = "1" ] || exit 1
           done
           for c in residual_qty kind parent_intent_id closed_at payout_event; do
             got=$(Q "SELECT count(*) FROM information_schema.columns WHERE table_name='bettor_funded_intents' AND column_name='$c'")
@@ -6713,6 +6742,8 @@ jobs:
             tests/test_the_group_lifecycle_is_atomic_and_earned.py \
             tests/test_the_group_holds_under_concurrency.py \
             tests/test_the_reservation_reaches_submission.py \
+            tests/test_the_scheduled_pair_lifecycle.py \
+            tests/test_the_funded_lane_actually_learns.py \
             tests/test_an_indirect_pair_is_valued_on_the_outcomes.py \
             tests/test_the_funded_lane_learns_from_its_own_results.py \
             2>&1 | tail -25 | tee -a "$GITHUB_STEP_SUMMARY"
@@ -6752,6 +6783,8 @@ jobs:
             tests/test_the_group_lifecycle_is_atomic_and_earned.py \
             tests/test_the_group_holds_under_concurrency.py \
             tests/test_the_reservation_reaches_submission.py \
+            tests/test_the_scheduled_pair_lifecycle.py \
+            tests/test_the_funded_lane_actually_learns.py \
             tests/test_the_funded_lane_learns_from_its_own_results.py \
             --junitxml=/tmp/risk.xml 2>&1 | tail -15
           rc=${PIPESTATUS[0]}
