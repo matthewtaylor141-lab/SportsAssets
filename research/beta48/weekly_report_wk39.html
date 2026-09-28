@@ -275,12 +275,21 @@
   <h2>What this edition could not verify</h2>
   <div class="panel"><ul class="plain">
     <li><b>Mon Sep 21 and Tue Sep 22</b> — no venue-truth rows after a fresh crawl. Absent, not zero, and not stale.</li>
-    <li><b>By-sport split, position-size buckets, largest wins and losses, per-whale sleeve detail and whale upstream
-      curves</b> — these fold from engine-diagnostic export blobs. A fresh probe was dispatched for this edition
-      (run 2513) and was still executing its weekly-report and balances steps when this report was issued, so those
-      sections are <b>omitted rather than estimated</b>, as in Week 38.</li>
-    <li><b>Account balances</b> (Polymarket US cash, Kalshi) — same dependency as above. Not carried forward from a
-      previous week.</li>
+    <li><b>By-sport split, position-size buckets, largest wins and losses, per-whale sleeve detail, whale upstream
+      curves and account balances</b> — all fold from the engine-diagnostic probe's export blobs
+      (<span class="mono">PXBLOB</span>, <span class="mono">KXBLOB</span>, <span class="mono">TRBLOB</span>,
+      <span class="mono">RRBLOB</span>, <span class="mono">WDBLOB</span>). A fresh probe was dispatched for this
+      edition (run <b>2513</b>) and <b>its blob-emitting step was cancelled at its 32-minute watchdog</b>
+      (10:17:23 → 10:49:28 UTC) before reaching them. <b>This is a different failure from Week 38's.</b> That edition
+      could not reach the log <i>archive</i> host; this one has the log and the blobs were never written to it,
+      because the step did not finish. Those sections are <b>omitted rather than estimated</b>, and the probe timing
+      out is itself an operational item — see below.</li>
+    <li><b>The probe's own completion</b> — worth management attention in its own right. The blob step ran the full
+      32 minutes and was cut off, so the weekly export path is currently unreliable rather than merely unreachable.
+      The four sibling jobs in the same run (<span class="mono">btc-calibration</span>,
+      <span class="mono">tennis-desk-census</span>, <span class="mono">mirror-cover</span>,
+      <span class="mono">side-truth</span>) all completed successfully, so this is specific to the long live-engine
+      probe and not a runner-wide problem.</li>
     <li><b>Kalshi</b> — no figures.</li>
     <li><b>The site-cap comparison</b> — normally shown beside venue truth, it is served from the homepage rather
       than the database. The venue-truth basis is therefore presented alone, <b>uncapped</b>, as in Week 38.</li>
