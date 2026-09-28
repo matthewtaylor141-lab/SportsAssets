@@ -390,7 +390,18 @@ async def test_case_a_partial_exit_duplicate_delivery_restart_and_late_fill(
         assert pick["selected_qty"] == 8, (
             "the exit should be capped by the 8 contracts of depth, not by "
             "the 20 held; got %s" % pick["selected_qty"])
-        assert svc["exits"][0]["submitted"] is True
+        # THE SEND MOVED TO THE RANKING, AND IT STILL HAPPENS. `manage` now
+        # selects and DEFERS; the exit joins the one ranking that also holds
+        # the indirect hedge and is dispatched from there. The assertion
+        # follows the dispatch rather than being dropped -- and this case is a
+        # LOSS being contained, which must still execute: positive absolute
+        # P&L is not a prerequisite for a correct forward decision.
+        assert svc["exits"] == [], "manage submitted before the ranking ran"
+        assert svc["defer_dispatch"] is True
+        _pcx = (svc.get("pair_cycle") or {}).get("exits") or []
+        assert _pcx and _pcx[0]["submitted"] is True, svc.get("pair_cycle")
+        assert _pcx[0]["quantity"] == pick["selected_qty"]
+        assert _pcx[0]["limit_price"] == pick["limit_price"]
         create = [p for k, p in sent if k == "create"][-1]
         assert create["intent"] == "ORDER_INTENT_SELL_LONG"
         assert create["quantity"] == 8
@@ -582,7 +593,18 @@ async def test_case_b_a_loss_is_contained_and_inventory_remains(monkeypatch):
         assert rank["selected_is_depth_limited"] is True
         assert rank["selected_candidate"]["action"] == rank["selected"]
         assert rank["candidates"], "the candidate table did not travel"
-        assert svc["exits"][0]["submitted"] is True
+        # THE SEND MOVED TO THE RANKING, AND IT STILL HAPPENS. `manage` now
+        # selects and DEFERS; the exit joins the one ranking that also holds
+        # the indirect hedge and is dispatched from there. The assertion
+        # follows the dispatch rather than being dropped -- and this case is a
+        # LOSS being contained, which must still execute: positive absolute
+        # P&L is not a prerequisite for a correct forward decision.
+        assert svc["exits"] == [], "manage submitted before the ranking ran"
+        assert svc["defer_dispatch"] is True
+        _pcx = (svc.get("pair_cycle") or {}).get("exits") or []
+        assert _pcx and _pcx[0]["submitted"] is True, svc.get("pair_cycle")
+        assert _pcx[0]["quantity"] == pick["selected_qty"]
+        assert _pcx[0]["limit_price"] == pick["limit_price"]
 
         after = await _ledger(conn, "dem-loss")
         # ── REMAINING INVENTORY. The position is NOT closed. ────────

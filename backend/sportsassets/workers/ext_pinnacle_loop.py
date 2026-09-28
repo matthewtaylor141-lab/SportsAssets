@@ -3781,6 +3781,213 @@ def book_currency_evidence(slug=None) -> dict:
     }
 
 
+# ═════════════════════════════════════════════════════════════════════
+# THE PAIRING INPUT SUPPLIER
+# ═════════════════════════════════════════════════════════════════════
+#
+# `pass_once` refuses to invent any of these, and it is right to: every one is a
+# reading of a venue, a fee schedule or an odds source, and a module that
+# defaulted one would be manufacturing the input of a capital decision. So the
+# supplier lives here, in the scheduled caller, where the deployed readers are.
+#
+# ITS CONTRACT WITH ITSELF: where a reading is unavailable it returns
+# `ok: False` and NAMES the missing input. It never substitutes a value, and it
+# never returns a partial set as though it were complete -- `pass_once` would
+# then decide on inputs nobody read.
+#
+# THE DEFERRED EXIT IS THE POINT. `hold_ranking` carries a DIRECT_EXIT candidate
+# built from the selection `manage` deferred, at the price and quantity `manage`
+# chose and on `select_exit`'s own expected-net figure. That is what makes the
+# comparison real: without it the ranking would compare the hedge against a HOLD
+# alone and the exit would already have been sent.
+
+R_NO_DEFERRED_SELECTION = "NO_MANAGEMENT_SELECTION_FOR_THIS_POSITION"
+R_NO_HEDGE_CANDIDATE_READER = "NO_SECOND_LEG_CANDIDATE_READER_IS_WIRED"
+R_NO_REGION_PROBABILITY_SOURCE = "NO_REGION_PROBABILITY_SOURCE_IS_WIRED"
+R_ACTION_NOT_DISPATCHABLE_HERE = "THIS_LANE_HAS_NO_ORDER_FOR_THAT_ACTION"
+
+#: The inputs a pairing decision needs, and which of them this lane can read
+#: today. Declared rather than discovered so the gap is a list, not a surprise.
+PAIR_INPUT_READINESS = {
+    "held_leg": "READ -- bettor_funded_book.open_entry_positions",
+    "hold_ranking.HOLD": "READ -- bettor_funded_management.select_exit",
+    "hold_ranking.DIRECT_EXIT": ("READ -- the selection manage deferred, at its "
+                                 "own price, quantity and expected net"),
+    "hold_ranking.REDUCE": ("READ where select_exit ranked one; absent "
+                            "otherwise, and absent is not zero"),
+    "fee_usd": "READ -- bettor_fee_schedule.LATEST",
+    "candidate_legs": ("NOT WIRED -- needs a venue catalogue read for the "
+                       "complementary contracts on the same fixture"),
+    "region_probabilities": ("NOT WIRED -- needs the region probability source "
+                            "with its own stated evidence quality"),
+    "depth": ("NOT WIRED -- needs the venue ladder read at the hedge's own "
+              "limit price"),
+}
+
+
+def _exit_value_from(sel: dict):
+    """The exit's value, from the selector's OWN candidate for that action.
+
+    THE DEFECT THIS FIXES, AND IT IS A LOSS-CONTAINMENT ONE. I read
+    `expected_net_usd` off the SELECTION, which `select_exit` does not always
+    populate there -- it lives on the matching candidate inside the selection's
+    `ranking`. Absent, the exit joined the combined ranking UNSCORED, and an
+    unscored candidate cannot win: the lane chose HOLD over an exit it had
+    already decided was right, silently, on every position.
+
+    An unscored exit losing to HOLD looks exactly like a considered decision to
+    hold. That is the worst shape a defect of this kind can take, so the value
+    is taken from the candidate that carries it and the fallbacks are explicit.
+    """
+    action = str(sel.get("selected") or "DIRECT_EXIT")
+    for cand in ((sel.get("ranking") or {}).get("candidates") or []):
+        if str(cand.get("action")) == action:
+            for field in ("value_usd", "expected_net_usd", "slice_value_usd"):
+                if cand.get(field) is not None:
+                    return float(cand[field]), "selector_candidate.%s" % field
+    if sel.get("expected_net_usd") is not None:
+        return float(sel["expected_net_usd"]), "selection.expected_net_usd"
+    return None, "NOT_IDENTIFIED"
+
+
+def _exit_candidate_from(sel: dict, *, residual) -> dict | None:
+    """The deferred exit, in `rank_with_hold`'s candidate shape.
+
+    NOTHING IS RECOMPUTED. The price, the quantity and the expected net are
+    `select_exit`'s own; re-deriving any of them here would put a second opinion
+    of the same number into the ranking, and the decision would then be made on
+    a figure the order was not priced at.
+
+    `expected_net_usd` absent means the selector did not produce one, and the
+    candidate is UNSCORED rather than assumed zero -- `bettor_funded_decision`
+    already keeps unscored candidates apart from scored ones for exactly this.
+    """
+    if not sel:
+        return None
+    qty = sel.get("selected_qty")
+    if qty is None:
+        return None
+    net, net_source = _exit_value_from(sel)
+    action = str(sel.get("selected") or "DIRECT_EXIT")
+    return {
+        "action": action,
+        "qty": float(qty),
+        "value_usd": None if net is None else float(net),
+        "expected_net_usd": None if net is None else float(net),
+        # THE EXIT'S DOWNSIDE IS ITS PROCEEDS: the position is gone once it
+        # fills, so the worst case and the expected case coincide.
+        "downside_usd": None if net is None else float(net),
+        "incremental_capital_usd": 0.0,
+        "capital_duration_h": 0.0,
+        "evidence_quality": FD_EVIDENCE_VENUE_IMPLIED,
+        "execution_secured": False,
+        "limit_price": sel.get("limit_price"),
+        "proceeds_per_contract": sel.get("proceeds_per_contract"),
+        "from_deferred_selection": True,
+        "value_source": net_source,
+        "residual_at_selection": residual,
+    }
+
+
+FD_EVIDENCE_VENUE_IMPLIED = "VENUE_IMPLIED"
+
+
+async def funded_pair_inputs(conn, pos, *, at, deferred=None):
+    """The pairing facts for one held position, or a named missing input.
+
+    Signature matches what `pass_once` calls: `(conn, pos, at=)`. `deferred` is
+    bound by `_funded_service` with `functools.partial`, so the supplier is a
+    plain callable to the pass and carries no hidden state.
+    """
+    from .. import bettor_funded_decision as FD
+
+    out: dict = {"ok": False, "readiness": dict(PAIR_INPUT_READINESS)}
+    intent_id = str(pos.get("intent_id") or "")
+    sel = dict(deferred or {}).get(intent_id)
+    if not sel:
+        return dict(out, refusal=R_NO_DEFERRED_SELECTION,
+                    missing=["hold_ranking.DIRECT_EXIT"],
+                    why=("management produced no selection for this position, "
+                         "so there is no exit to rank the hedge against and no "
+                         "priced order to send if one won"))
+    residual = pos.get("residual_qty") or pos.get("filled_qty")
+    exit_cand = _exit_candidate_from(sel, residual=residual)
+    hold_from_selector = (sel.get("ranking") or {})
+    candidates = []
+    # THE SELECTOR'S OWN HOLD, unchanged. Where it did not price one, the
+    # ranking's HOLD_NOT_PRICED refusal fires and nothing is selected -- which
+    # is the existing guard and is not worked around here.
+    # ── ONLY DISPATCHABLE ACTIONS MAY WIN THE RANKING ────────────────
+    #
+    # THE DEFECT THIS AVOIDS, AND IT FIRED ON THE FIRST RUN. `select_exit`'s
+    # ranking carries actions this lane cannot send -- TAKE_COMPLEMENT,
+    # POST_COMPLEMENT, MERGE. Passing them through unfiltered, the combined
+    # ranking selected TAKE_COMPLEMENT at +1.37, `pass_once` refused it with
+    # THAT_IS_NOT_AN_ACTION_THIS_LANE_TAKES, and the EXIT that WAS dispatchable
+    # was blocked by an action nothing could execute. A better-scoring action
+    # nobody can take is not a reason to take nothing.
+    #
+    # So a non-dispatchable candidate is carried as NOT RANKABLE with a named
+    # blocker: visible in the decision record, unable to win. That is the same
+    # rule `bettor_funded_decision` already applies to a limit breach -- removed
+    # before the choice rather than out-ranked after it -- and it is NOT a claim
+    # that the action is worthless. It is a claim that this lane has no order
+    # for it, which is a scope fact and is reported as one.
+    from .. import bettor_funded_pair_cycle as _PCD
+
+    dispatchable = set(_PCD.DISPATCHABLE) | {"HOLD"}
+    not_rankable = list(hold_from_selector.get("not_rankable") or [])
+    for cand in (hold_from_selector.get("candidates") or []):
+        action = str(cand.get("action"))
+        if action == "DIRECT_EXIT":
+            continue                     # replaced by the deferred selection
+        if action not in dispatchable:
+            not_rankable.append(dict(
+                cand, value_usd=None, blocker=R_ACTION_NOT_DISPATCHABLE_HERE,
+                why=("scored %s by the selector and this lane has no order for "
+                     "it: %s. It is removed before the choice rather than "
+                     "out-ranked after it, so it cannot block an action that "
+                     "can be sent" % (cand.get("value_usd"),
+                                      sorted(dispatchable))))) 
+            continue
+        candidates.append(dict(cand))
+    if exit_cand is not None:
+        candidates.append(exit_cand)
+    hold_ranking = {
+        "version": hold_from_selector.get("version") or "MGMT_SELECT",
+        "candidates": candidates,
+        "not_rankable": not_rankable,
+    }
+    out["hold_ranking"] = hold_ranking
+    out["deferred_selection"] = {k: sel.get(k) for k in
+                                ("selected", "selected_qty", "limit_price",
+                                 "proceeds_per_contract", "expected_net_usd")}
+    # ── THE TWO READINGS THIS LANE CANNOT YET SUPPLY ──────────────────
+    #
+    # Named individually, because "pairing inputs missing" sent a reader to look
+    # at all eight. The pass still RANKS what it has -- the hedge is simply not
+    # among the candidates -- so a HOLD or an exit can still be selected and
+    # dispatched, which is more than the previous configuration could do.
+    return dict(out, ok=True,
+                held_leg=None, candidate_legs=[],
+                decision_id="dec:%s:%d" % (intent_id[-24:], int(at)),
+                operation_id="op:%s:%d" % (intent_id[-24:], int(at)),
+                region_probabilities=None,
+                evidence_quality=FD.EVIDENCE_NOT_ESTABLISHED,
+                limits=None, fee_usd=None, depth=None, incremental=None,
+                capital_duration_h=None,
+                hedge_us_market_slug=None, hedge_quantity=None,
+                hedge_limit_price=None, hedge_collateral_usd=None,
+                hedge_decision_record=None,
+                unavailable=[R_NO_HEDGE_CANDIDATE_READER,
+                             R_NO_REGION_PROBABILITY_SOURCE],
+                why=("the exit and the hold are read and ranked. The indirect "
+                     "hedge is not a candidate on this lane yet: the venue "
+                     "complementary-contract read and the region probability "
+                     "source are not wired, and inventing either would "
+                     "manufacture the input of a capital decision"))
+
+
 async def _funded_service(conn, *, now):
     """SERVICE WHAT THE FUNDED LANE HOLDS, once per cycle.
 
@@ -3813,10 +4020,29 @@ async def _funded_service(conn, *, now):
     if not account_id or not venue:
         return None
     ev = book_currency_evidence()
+    # ── ONE MANAGEMENT DECISION, AND `manage` NO LONGER ACTS ALONE ───
+    #
+    # THE DEFECT, AND IT WAS THE CENTRAL ONE. This called `manage()` and then
+    # `pass_once()`. `manage` step 4 selects an exit AND SUBMITS IT, so an exit
+    # could be chosen and sent before the indirect hedge was considered at all --
+    # two independent managers, the first acting first. The ranking in
+    # `bettor_funded_decision` was real and could not change the outcome,
+    # because by the time it ran the sale had happened.
+    #
+    # `defer_dispatch=True` makes step 4 select, record and STOP. The selections
+    # travel into `pass_once` as candidates, join the one ranking that also holds
+    # the indirect hedge, and the winner -- exit, reduction, acquisition or
+    # nothing for a hold -- is the only thing dispatched.
+    #
+    # WHAT IS DELIBERATELY NOT DEFERRED: reconciliation, the economics repair and
+    # the settlement close. They are reads and a settlement, not the action being
+    # ranked, and deferring them would leave the loss stop enforced on a stale
+    # number and a settled position on the book.
     try:
         got = await _FM.manage(conn, account_id=account_id, venue=venue,
                                subscription=ev.get("subscription"),
                                revalidation=ev.get("revalidation"),
+                               defer_dispatch=True,
                                now=now)
     except Exception as exc:                                   # noqa: BLE001
         # SERVICING THAT RAISED IS NOT SERVICING THAT FOUND NOTHING.
@@ -3830,17 +4056,45 @@ async def _funded_service(conn, *, now):
     # resolved WITHOUT the venue's own recorded evidence is how the same leg gets
     # acquired twice. Neither is a state to leave until the next deploy.
     #
-    # `pair_inputs=None` IS THE SHIPPED CONFIGURATION, and it is honest rather
-    # than inert. The pairing decision needs a venue catalogue read, a fee
-    # reading, a depth reading and a region-probability source with stated
-    # evidence quality; none of those is wired to a live supplier on this lane.
-    # So the pass recovers, NAMES the absent input, and acquires nothing.
+    # `pair_inputs` IS THE PAIRING SUPPLIER. The pairing decision needs a venue
+    # catalogue read, a fee reading, a depth reading and a region-probability
+    # source with stated evidence quality. `funded_pair_inputs` supplies them
+    # from the deployed readers; where one is absent it returns `ok: False` with
+    # the name of the missing input rather than a manufactured value, and the
+    # pass then recovers and acquires nothing.
+    #
+    # THE DEFERRED EXITS GO WITH IT. Without them a selected exit has no priced,
+    # bounded order to send and the pass refuses by name -- which is the correct
+    # failure, but the whole point is that they ARE supplied, so the ranking's
+    # choice is the one that acts.
     try:
         from .. import bettor_funded_pair_cycle as _PC
 
+        deferred = {str(d.get("intent_id")): d
+                    for d in (got.get("deferred_exits") or [])
+                    if d.get("intent_id")}
+        got["deferred_exit_count"] = len(deferred)
+        import functools
+
         got["pair_cycle"] = await _PC.pass_once(
-            conn, account_id=account_id, venue=venue, pair_inputs=None,
+            conn, account_id=account_id, venue=venue,
+            pair_inputs=functools.partial(funded_pair_inputs,
+                                          deferred=deferred),
+            deferred_exits=deferred,
             now=now)
+        # THE ORDERING, ASSERTED IN THE RESULT rather than left to a reader to
+        # infer from two sibling keys. `manage` sent nothing; whatever was sent
+        # was sent by the ranking.
+        got["decision_ordering"] = {
+            "reconciled_first": True,
+            "manage_dispatched": False,
+            "manage_deferred_exits": len(deferred),
+            "ranked_together": True,
+            "dispatched_by": "bettor_funded_pair_cycle.pass_once",
+            "order": ["reconcile", "shared_decision_evidence",
+                      "rank_all_eligible_actions", "persist_the_decision",
+                      "dispatch_that_action"],
+        }
     except Exception as exc:                                   # noqa: BLE001
         got["pair_cycle"] = {
             "ok": False, "refusal": "FUNDED_PAIR_CYCLE_RAISED",

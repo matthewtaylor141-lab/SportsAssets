@@ -1139,7 +1139,31 @@ async def test_the_scheduled_path_selects_executes_recovers_and_reports(
         assert pick["selected"] in ("DIRECT_EXIT", "REDUCE")
         assert pick["limit_price"] == pytest.approx(0.75)
         assert pick["price_source"].startswith("the best level")
-        assert svc["exits"] and svc["exits"][0]["submitted"] is True
+        # ── THE SEND MOVED, AND THE DISPATCH IS STILL MADE ─────────
+        #
+        # `manage` no longer submits: it selects and DEFERS, so the exit joins
+        # the one ranking that also holds the indirect hedge and is dispatched
+        # from there. That is the ordering repair, and it is why `svc["exits"]`
+        # is empty while the order still goes out.
+        #
+        # THE SUBJECT OF THIS TEST IS UNCHANGED -- select, execute, recover,
+        # report -- so the assertion follows the dispatch to its new home
+        # rather than being dropped.
+        assert svc["exits"] == [], (
+            "manage submitted from step 4; the ranking never got to compare "
+            "the exit against the hedge")
+        assert svc["defer_dispatch"] is True
+        assert svc["deferred_exits"] and (
+            svc["deferred_exits"][0]["selected"] in ("DIRECT_EXIT", "REDUCE"))
+        pcx = (svc.get("pair_cycle") or {}).get("exits") or []
+        import json as _j
+        assert pcx and pcx[0]["submitted"] is True, _j.dumps(
+            svc.get("pair_cycle"), default=str, indent=1)[:2500]
+        assert pcx[0]["action"] in ("DIRECT_EXIT", "REDUCE")
+        # AND IT WAS DISPATCHED AT THE SELECTION'S OWN NUMBERS, not at
+        # anything the dispatcher recomputed.
+        assert pcx[0]["limit_price"] == pick["limit_price"]
+        assert pcx[0]["quantity"] == pick["selected_qty"]
         # THE ADAPTER WAS ASKED TO SELL, with the side we hold named.
         create = [p for k, p in sent if k == "create"][-1]
         assert create["intent"] == "ORDER_INTENT_SELL_LONG"

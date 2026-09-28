@@ -1518,9 +1518,37 @@ async def _approved(conn) -> dict:
 
 # ── 4 · THE RECURRING PASS ───────────────────────────────────────────
 
+#: ── WHY `manage` CAN NOW BE ASKED NOT TO DISPATCH ────────────────────
+#:
+#: THE DEFECT THIS EXISTS FOR, and it is the central one. `_funded_service` ran
+#: `manage()` and then `pass_once()`. `manage` step 4 SELECTS AN EXIT AND
+#: SUBMITS IT, so an exit could be chosen and sent before the indirect hedge was
+#: ever considered -- two independent managers, the first acting first. Proving
+#: "one ranking precedes the action" by calling `pass_once` directly with a
+#: supplied fixture did not test that, because production never calls it that
+#: way.
+#:
+#: With `defer_dispatch=True`, step 4 selects, records, and stops. The selection
+#: travels to the one ranking that also holds the indirect candidate, and
+#: whatever wins there is dispatched -- by `dispatch_selection` below, which is
+#: the same `submit_exit` call, moved rather than duplicated.
+#:
+#: The default is False so every existing caller and test keeps its behaviour;
+#: the scheduled path passes True. Reconciliation, economics repair and
+#: settlement are unaffected: they are reads and a settlement close, they are
+#: not the action being ranked, and deferring them would leave the loss stop
+#: enforced on a stale number.
+DEFER_DISPATCH_MEANS = (
+    "select and record the exit, do not send it. The selection is ranked "
+    "against the indirect hedge by bettor_funded_pair_cycle, and the winner is "
+    "dispatched once")
+R_DISPATCH_DEFERRED = "THE_EXIT_WAS_SELECTED_AND_ITS_DISPATCH_DEFERRED_TO_THE_RANKING"
+
+
 async def manage(conn, *, account_id: str, venue: str, adapter=None,
                  client=None, probe=None, fee_fn=None, book_reader=None,
                  subscription=None, revalidation=None,
+                 defer_dispatch: bool = False,
                  now: float | None = None) -> dict:
     """ONE MANAGEMENT CYCLE over every open funded position.
 
@@ -1556,6 +1584,11 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
            "recovered": None, "settlement": [], "needs_a_decision": [],
            "selection": [], "decisions": [], "exits": [],
            "funded_capability": None,
+           "defer_dispatch": bool(defer_dispatch),
+           "defer_dispatch_means": (DEFER_DISPATCH_MEANS if defer_dispatch
+                                    else None),
+           # THE EXITS SELECTED BUT NOT SENT, in the shape the ranking needs.
+           "deferred_exits": [],
            "what_remains_disabled": disablements()}
     # ── CAPABILITY FIRST, so a scheduled pass REPORTS a blocked schema ──
     #
@@ -1634,6 +1667,40 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
                     "governing_rule"),
                 "why": pick.get("why")})
             continue
+        # ── OR HAND IT TO THE RANKING INSTEAD OF SENDING IT ────────
+        #
+        # This is the whole point of `defer_dispatch`. An evidenced exit is a
+        # CANDIDATE, not yet an action: it has to be compared against the
+        # indirect hedge on the same scale before anything is sent. The
+        # selection is carried out whole -- price, quantity, proceeds, the
+        # inputs' own deadline -- because `dispatch_selection` must be able to
+        # send exactly this and nothing reconstructed.
+        if defer_dispatch:
+            out["deferred_exits"].append({
+                "intent_id": p["intent_id"],
+                "us_market_slug": p.get("us_market_slug"),
+                "selected": pick["selected"],
+                "selected_qty": pick["selected_qty"],
+                "limit_price": pick["limit_price"],
+                "proceeds_per_contract": pick["proceeds_per_contract"],
+                "assessed_at": pick.get("assessed_at"),
+                "inputs_expire_at": pick.get("inputs_expire_at"),
+                "inputs_expiry_governed_by": pick.get(
+                    "inputs_expiry_governed_by"),
+                # THE EXIT'S OWN VALUE, in the unit the ranking compares on.
+                # `select_exit` computes it; re-deriving it here would be a
+                # second opinion about the same number.
+                "expected_net_usd": pick.get("expected_net_usd"),
+                "ranking": pick.get("ranking"),
+                "why": pick.get("why")})
+            out["decisions"].append({
+                "intent_id": p["intent_id"], "selected": pick["selected"],
+                "executed": False, "stopped_at": R_DISPATCH_DEFERRED,
+                "why": ("selected and deferred to the one ranking that also "
+                        "holds the indirect candidate; nothing is sent from "
+                        "here")})
+            continue
+
         # ── EXECUTE IT ─────────────────────────────────────────────
         ex = await submit_exit(conn, intent_id=p["intent_id"],
                               limit_price=pick["limit_price"],
@@ -1740,6 +1807,57 @@ async def manage(conn, *, account_id: str, venue: str, adapter=None,
             "expected_fee_usd": f.get("exp"),
             "observed_fee_usd": f.get("obs")})
     return dict(out, ok=True)
+
+
+async def dispatch_selection(conn, *, selection, adapter=None, venue: str,
+                             now: float | None = None) -> dict:
+    """SEND ONE DEFERRED EXIT, exactly as selected. Never raises.
+
+    THE SAME `submit_exit` CALL AS STEP 4, moved rather than duplicated -- so
+    the deferred path cannot drift from the immediate one, and in particular
+    cannot lose `inputs_expire_at`, without which `submit_exit` refuses to send
+    on an unbounded assessment.
+
+    `selection` is one entry from `manage(defer_dispatch=True)`'s
+    `deferred_exits`. Nothing here re-derives a price, a quantity or a proceeds
+    figure: a dispatcher that recomputed its own would be a second opinion about
+    the number the decision was made on, which is the candidate-to-order binding
+    defect in another place.
+    """
+    sel = dict(selection or {})
+    if not sel.get("intent_id"):
+        return {"ok": False, "submitted": False,
+                "refusal": "NO_DEFERRED_SELECTION_TO_DISPATCH",
+                "why": "dispatch was asked for with no selection"}
+    try:
+        mod = _adapter(adapter)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "submitted": False,
+                "refusal": "ADAPTER_UNAVAILABLE",
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    try:
+        ex = await submit_exit(
+            conn, intent_id=sel["intent_id"],
+            limit_price=sel["limit_price"],
+            quantity=sel["selected_qty"],
+            expect_proceeds_per_contract=sel["proceeds_per_contract"],
+            assessed_at=sel.get("assessed_at"),
+            inputs_expire_at=sel.get("inputs_expire_at"),
+            adapter=mod, venue=venue,
+            now=float(now if now is not None else time.time()))
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "submitted": False,
+                "refusal": "EXIT_DISPATCH_RAISED",
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+    return {"ok": True, "submitted": bool(ex.get("submitted")),
+            "refusal": ex.get("refusal"),
+            "exit_intent_id": ex.get("exit_intent_id"),
+            "venue_calls": ex.get("venue_calls"),
+            "position_after": ex.get("position_after"),
+            "dispatched": sel["selected"],
+            "quantity": sel["selected_qty"],
+            "limit_price": sel["limit_price"],
+            "why": ex.get("why")}
 
 
 def disablements() -> list[dict]:

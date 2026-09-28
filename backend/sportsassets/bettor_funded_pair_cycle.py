@@ -740,9 +740,39 @@ async def operator_view(conn, *, account_id: str | None = None,
 # THE PASS
 # ═════════════════════════════════════════════════════════════════════
 
+ACTION_DIRECT_EXIT = "DIRECT_EXIT"
+ACTION_REDUCE = "REDUCE"
+ACTION_HOLD = "HOLD"
+
+#: Actions this pass can DISPATCH, and what dispatching each one means.
+#:
+#: IT USED TO BE ONE. `pass_once` dispatched only the acquisition; a selected
+#: DIRECT_EXIT or REDUCE was recorded and left for `manage` to act on
+#: independently -- which is how two managers came to choose separately. Now the
+#: exit and the reduction are dispatched from HERE, through the selection
+#: `manage` deferred, so exactly one component sends exactly one action.
+#:
+#: HOLD DISPATCHES NOTHING, deliberately and not as an omission: holding is the
+#: absence of an order, and a HOLD that sent something would be a different
+#: action.
+DISPATCHABLE = {
+    "ACQUIRE_HEDGE": "submit the second leg through acquire_second_leg",
+    ACTION_DIRECT_EXIT: ("send the deferred exit through "
+                         "bettor_funded_management.dispatch_selection"),
+    ACTION_REDUCE: ("send the deferred exit at the reduced quantity, through "
+                    "the same dispatcher"),
+    ACTION_HOLD: "send NOTHING; holding is the absence of an order",
+}
+
+R_NO_DEFERRED_EXIT_TO_DISPATCH = (
+    "THE_RANKING_SELECTED_AN_EXIT_AND_NO_DEFERRED_SELECTION_WAS_SUPPLIED")
+
+
 async def pass_once(conn, *, account_id: str, venue: str,
                     pair_inputs=None, adapter=None,
                     venue_positions: dict | None = None,
+                    deferred_exits=None,
+                    exit_dispatcher=None,
                     venue_reader=None, now: float | None = None) -> dict:
     """ONE SCHEDULED PAIR PASS. Never raises; reports what it did not do.
 
@@ -756,6 +786,16 @@ async def pass_once(conn, *, account_id: str, venue: str,
     of them would be manufacturing the inputs of a capital decision. With no
     supplier the pass RECOVERS -- which needs no inputs and is the half that
     protects money -- and then reports that pairing had nothing to work from.
+
+    `deferred_exits` is `manage(defer_dispatch=True)`'s own selections, keyed by
+    intent id. THIS IS THE ORDERING REPAIR: without them the exit was chosen and
+    SENT by `manage` before this ranking ran, so the comparison this module
+    performs could not change what happened. With them, the exit arrives as a
+    candidate and the winner of the one ranking is the only thing dispatched.
+
+    `exit_dispatcher` is the callable that sends a selected exit. It defaults to
+    `bettor_funded_management.dispatch_selection`, and is injectable so a test
+    can count sends without substituting a venue.
     """
     at = float(now if now is not None else time.time())
     out: dict[str, Any] = {"version": VERSION, "at": at,
@@ -791,23 +831,63 @@ async def pass_once(conn, *, account_id: str, venue: str,
             step["refusal"] = (facts or {}).get("refusal", R_NO_SECOND_CONTRACT)
             step["missing"] = (facts or {}).get("missing")
             continue
-        found = discover(
-            held_leg=facts["held_leg"], candidate_legs=facts["candidate_legs"],
-            sport_permits_tie=bool(facts.get("sport_permits_tie")),
-            fixture_can_void=bool(facts.get("fixture_can_void", True)),
-            fixture_can_postpone=bool(facts.get("fixture_can_postpone", True)))
-        step["discovery"] = {k: found[k] for k in
+        # ── DISCOVERY IS SKIPPED WHEN THERE IS NOTHING TO DISCOVER ──
+        #
+        # A supplier that cannot read the venue's complementary contracts gives
+        # `held_leg=None` and `candidate_legs=[]`. `discover` then crashed on
+        # `None.condition_id` and the whole pass returned
+        # FUNDED_PAIR_CYCLE_RAISED -- which took the EXIT dispatch down with it,
+        # so a lane with no hedge reader could not act on its own held position
+        # at all. That is strictly worse than the behaviour being replaced.
+        #
+        # No hedge candidate is a legitimate state, not an error: the ranking
+        # still holds HOLD and the deferred exit, and one of those is still the
+        # right action. So discovery runs only when there is a held leg to
+        # discover against, and its absence is NAMED.
+        if facts.get("held_leg") is None or not facts.get("candidate_legs"):
+            found = {"ok": False, "refusal": R_NO_SECOND_CONTRACT,
+                     "examined": 0, "rejected": [],
+                     "distinct_settlement_compatible_contracts": 0,
+                     "admitted": [],
+                     "why": ("no second-leg candidate reader supplied a held "
+                             "leg or any candidate contracts, so there is no "
+                             "hedge to rank. HOLD and the deferred exit are "
+                             "still ranked and one of them is still dispatched")}
+        else:
+            found = discover(
+                held_leg=facts["held_leg"],
+                candidate_legs=facts["candidate_legs"],
+                sport_permits_tie=bool(facts.get("sport_permits_tie")),
+                fixture_can_void=bool(facts.get("fixture_can_void", True)),
+                fixture_can_postpone=bool(
+                    facts.get("fixture_can_postpone", True)))
+        step["discovery"] = {k: found.get(k) for k in
                              ("ok", "refusal", "examined", "rejected",
                               "distinct_settlement_compatible_contracts")}
-        best = (found["admitted"] or [None])[0]
+        best = (found.get("admitted") or [None])[0]
         step["admitted_contract"] = None if best is None else best["condition_id"]
         gid = pos.get("portfolio_group_id")
-        if gid is None:
+        if gid is None and best is not None:
+            # A GROUP IS NEEDED TO ACQUIRE A SECOND LEG, not to sell what is
+            # already held. This used to refuse before the decision, so a
+            # position with no group could not be exited through this pass --
+            # which after the ordering change means it could not be exited at
+            # all. It refuses only the acquisition now.
             step["refusal"] = R_NO_GROUP
             continue
         dec = await decide_and_record(
             conn, decision_id=facts["decision_id"], account_id=account_id,
-            venue=venue, fixture=facts["held_leg"].fixture_id, group_id=gid,
+            venue=venue,
+            # THE FIXTURE, FROM WHICHEVER SOURCE HAS IT. The held leg is the
+            # richer record and is absent when no second-leg reader is wired,
+            # so the position's own event key stands in. Same fixture, different
+            # reader -- and without this the pass raised AttributeError and took
+            # the EXIT dispatch down with it, leaving a lane with no hedge
+            # reader unable to act on its own held position at all.
+            fixture=(facts["held_leg"].fixture_id
+                     if facts.get("held_leg") is not None
+                     else (pos.get("event_key") or pos.get("us_market_slug"))),
+            group_id=gid,
             hold_ranking=facts["hold_ranking"], admitted=best,
             region_probabilities=facts.get("region_probabilities"),
             evidence_quality=facts.get("evidence_quality",
@@ -830,10 +910,59 @@ async def pass_once(conn, *, account_id: str, venue: str,
         step["decision"] = {k: dec.get(k) for k in
                             ("ok", "action", "refusal", "policy", "selected",
                              "region_probabilities_came_from")}
-        if dec.get("action") != ACTION_ACQUIRE:
+        # ── DISPATCH THE ONE SELECTED ACTION, WHICHEVER IT IS ───────
+        #
+        # `pass_once` used to dispatch only the acquisition and record anything
+        # else as R_DECISION_IS_NOT_ACQUIRE -- leaving `manage` to act on the
+        # exit independently, which is exactly the two-managers defect. All four
+        # selectable actions are handled here now, and HOLD sending nothing is
+        # one of the four rather than a gap.
+        action = dec.get("action")
+        step["dispatchable"] = sorted(DISPATCHABLE)
+        if action in (ACTION_HOLD, None, ACTION_NOTHING_RANKABLE):
+            step["dispatched"] = None
             step["refusal"] = R_DECISION_IS_NOT_ACQUIRE
-            step["what_was_selected_instead"] = dec.get("action")
+            step["what_was_selected_instead"] = action
+            step["why_nothing_was_sent"] = (
+                "holding is the absence of an order. The decision is recorded "
+                "and no venue call is made, which is the action being taken")
             continue
+        if action in (ACTION_DIRECT_EXIT, ACTION_REDUCE):
+            # THE EXIT `manage` SELECTED AND DID NOT SEND. It is dispatched
+            # exactly as selected -- nothing here recomputes a price, a
+            # quantity or a proceeds figure, because a dispatcher with its own
+            # opinion of the number is the binding defect in another place.
+            sel = dict(deferred_exits or {}).get(pos.get("intent_id"))
+            if not sel:
+                step["refusal"] = R_NO_DEFERRED_EXIT_TO_DISPATCH
+                step["what_was_selected_instead"] = action
+                step["why_nothing_was_sent"] = (
+                    "the ranking selected %s and no deferred selection was "
+                    "supplied for this position, so there is no priced, "
+                    "bounded order to send. Reconstructing one here would be "
+                    "inventing the order the decision was not made on"
+                    % (action,))
+                continue
+            dispatcher = exit_dispatcher
+            if dispatcher is None:
+                from . import bettor_funded_management as _FM
+                dispatcher = _FM.dispatch_selection
+            sent = await dispatcher(conn, selection=sel, adapter=adapter,
+                                    venue=venue, now=at)
+            step["dispatched"] = action
+            step["exit_dispatch"] = {
+                k: sent.get(k) for k in
+                ("ok", "submitted", "refusal", "exit_intent_id", "quantity",
+                 "limit_price", "why")}
+            out.setdefault("exits", []).append(dict(sent, action=action))
+            out["resubmitted_anything"] = bool(
+                out["resubmitted_anything"] or sent.get("submitted"))
+            continue
+        if action != ACTION_ACQUIRE:
+            step["refusal"] = R_DECISION_IS_NOT_ACQUIRE
+            step["what_was_selected_instead"] = action
+            continue
+        step["dispatched"] = ACTION_ACQUIRE
         got = await acquire_second_leg(
             conn, operation_id=facts["operation_id"], group_id=gid,
             us_market_slug=facts["hedge_us_market_slug"],
