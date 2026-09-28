@@ -218,6 +218,11 @@ R_NO_BASIS = "THE_POSITION_HAS_NO_PER_CONTRACT_BASIS_TO_RANK_AGAINST"
 R_NO_ADAPTER = "THE_VENUE_ADAPTER_COULD_NOT_BE_RESOLVED"
 R_SETTLEMENT_NOT_AUTHORITATIVE = "THE_VENUE_STATES_NO_AUTHORITATIVE_OUTCOME"
 R_NO_EXIT_PRICE = "NO_EXIT_LIMIT_WAS_SUPPLIED_AND_THIS_LANE_INVENTS_NONE"
+
+#: A multi-level REDUCE whose marginal level carries no wire price. The
+#: quantity cannot be bounded without under-filling, so nothing is sent.
+R_REDUCE_MARGINAL_WIRE_NOT_SUPPLIED = \
+    "THE_SALE_LADDER_SUPPLIED_NO_WIRE_PRICE_FOR_THE_MARGINAL_LEVEL"
 R_VENUE_GATE_DENIED = "THE_VENUE_BOUNDARY_GATE_DENIED_IT_BEFORE_SENDING"
 R_LOST_ACKNOWLEDGEMENT = "THE_REQUEST_LEFT_AND_THE_ANSWER_WAS_LOST"
 
@@ -748,6 +753,68 @@ async def select_exit(conn, position, *, client=None, now=None,
         # and the proceeds ride beside it as what the decision was made on.
         proceeds_per = float(lad["best_exit_price"])
         wire = float(lad["best_api_price"])
+        # ── A MULTI-LEVEL REDUCE IS BOUNDED AT ITS MARGINAL LEVEL ──────
+        #
+        # THE DEFECT THIS CLOSES. Both actions took the BEST level's price.
+        # For a DIRECT_EXIT that is right: its quantity is `size_at_best`,
+        # so the best level's price clears all of it. For a REDUCE whose
+        # quantity spans several levels it is wrong -- a sell limit at the
+        # best price matches only the best level's depth, so a REDUCE
+        # selected for 10 contracts on a vwap of 0.578 was submitted
+        # bounded at 0.62 and could fill 4.
+        #
+        # It lost no money (the bound is never crossed downward), but the
+        # ACTION'S WHOLE ADVANTAGE over DIRECT_EXIT was unreachable by the
+        # order sent -- and REDUCE is in EXECUTABLE_ACTIONS, so it was
+        # allowed to win on it. An advertised action whose differentiating
+        # case the dispatch cannot execute is not an executable action.
+        #
+        # The marginal level is the worst price the chosen quantity
+        # accepts; a limit there clears every better level too, so one
+        # order fills the whole quantity at the vwap the decision used.
+        _marg = ranked.get("marginal_sale") or {}
+        if sel == "REDUCE" and _marg.get("needs_a_marginal_wire_price"):
+            _mw = _marg.get("marginal_api_price")
+            if _mw is None:
+                # NO GUESS. Without the marginal level's wire price this
+                # quantity cannot be bounded correctly, and bounding it at
+                # the best level would under-fill silently.
+                return dict(out, ok=False,
+                            refusal=R_REDUCE_MARGINAL_WIRE_NOT_SUPPLIED,
+                            selected=sel, selected_qty=float(qty),
+                            levels_spanned=_marg.get("levels_spanned"),
+                            vwap=_marg.get("vwap"),
+                            why=("this REDUCE spans %s levels and the sale "
+                                 "ladder supplied no wire price for the "
+                                 "marginal one. Bounding at the best level "
+                                 "would fill only its depth, so the chosen "
+                                 "quantity is not submittable and nothing "
+                                 "is sent"
+                                 % _marg.get("levels_spanned")))
+            wire = float(_mw)
+            # ── WHICH NUMBER THE ROUNDING GUARD BELOW COMPARES ─────────
+            #
+            # The MARGINAL level's proceeds, not the vwap. The guard asks
+            # "does the wire we round to receive less than the price this
+            # order accepts?", and what this order accepts at its worst IS
+            # the marginal level. My first version set this to the vwap and
+            # the guard refused every multi-level REDUCE: 0.55 at the margin
+            # is CORRECTLY below a 0.578 vwap, because the better levels
+            # make up the difference. Comparing a margin against an average
+            # compares two different quantities.
+            proceeds_per = float(_marg["marginal_proceeds_per_contract"])
+            out["reduce_spans_levels"] = _marg.get("levels_spanned")
+            out["reduce_bounded_at"] = "THE_MARGINAL_LEVEL"
+            # AND THE AGGREGATE THE DECISION RESTS ON, beside it: the vwap
+            # over every level taken. That is what the ranking scored, and
+            # it is NOT the per-contract bound.
+            out["reduce_expected_vwap"] = float(_marg["vwap"])
+            out["reduce_vwap_is_not_the_bound"] = (
+                "the order is bounded at the marginal level (%s) so the "
+                "whole quantity can fill; the vwap (%s) is what the "
+                "selection scored across every level taken. Better levels "
+                "fill at their own better prices"
+                % (_mw, round(float(_marg["vwap"]), 6)))
         rounded = safe_exit_cent(wire, opened_with)
         if rounded is None:
             return dict(out, ok=False, refusal=R_EXIT_WIRE_UNREPRESENTABLE,

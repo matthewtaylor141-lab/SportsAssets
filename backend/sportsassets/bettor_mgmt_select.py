@@ -709,6 +709,13 @@ def marginal_sale_size(ladder, *, hold_value_per_contract, qty,
                         % (net_per, hurdle))})
             break
         out["taken"].append({"level": lv.get("level"), "price": px,
+                             # THE WIRE PRICE OF THIS LEVEL, carried so the
+                             # dispatch can bound a multi-level REDUCE at
+                             # the MARGINAL level instead of the best one.
+                             # None when the ladder does not supply it, on
+                             # which the caller must refuse rather than
+                             # guess a price.
+                             "api_price": lv.get("api_price"),
                              "qty": avail, "net_per_contract": net_per,
                              "fees_usd": fee})
         out["qty"] += avail
@@ -717,6 +724,25 @@ def marginal_sale_size(ladder, *, hold_value_per_contract, qty,
         remaining -= avail
     out["covers_whole_position"] = out["qty"] >= float(qty) - 1e-9
     out["vwap"] = (out["proceeds_usd"] / out["qty"]) if out["qty"] else None
+    # ── THE MARGINAL LEVEL: what a single order must be bounded at ────
+    #
+    # The LAST level taken is the worst price this quantity accepts, so a
+    # sell limit there clears every level above it too. The best level's
+    # price clears only the best level -- which is what the dispatch used
+    # to send, making a multi-level REDUCE unfillable at its chosen size.
+    #
+    # `vwap` is what the DECISION was made on; `marginal_*` is what the
+    # ORDER must carry. They are different numbers and both travel.
+    if out["taken"]:
+        _last = out["taken"][-1]
+        out["marginal_proceeds_per_contract"] = _last["price"]
+        out["marginal_api_price"] = _last.get("api_price")
+        out["levels_spanned"] = len(out["taken"])
+        out["needs_a_marginal_wire_price"] = len(out["taken"]) > 1
+        out["why_the_marginal_level_bounds_the_order"] = (
+            "a sell limit at the worst level taken clears every better "
+            "level as well, so one order fills the whole chosen quantity. "
+            "Bounding at the BEST level fills only the best level's depth")
     return out
 
 

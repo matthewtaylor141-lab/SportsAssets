@@ -845,6 +845,26 @@ def as_sale_ladder(exit_lad: dict) -> dict:
     return {"levels": [{"level": lv["level"],
                         "acquisition_price": lv["exit_price"],
                         "exit_price": lv["exit_price"],
+                        # ── THE WIRE PRICE, CARRIED PER LEVEL ──────────
+                        #
+                        # THE DEFECT THIS CLOSES. This adapter dropped
+                        # `api_price`, so a REDUCE spanning several levels
+                        # had no way to learn the WIRE price of the
+                        # MARGINAL level it intends to clear. The dispatch
+                        # therefore took its limit from the BEST level --
+                        # and a sell limit at the best price matches only
+                        # the best level's depth. A REDUCE selected for 10
+                        # contracts on a multi-level vwap was submitted
+                        # bounded at a price that could fill 4.
+                        #
+                        # Conservative -- it never sells below the bound,
+                        # so no money is lost -- but the action's entire
+                        # advantage over DIRECT_EXIT was unreachable by
+                        # the order actually sent. An advertised action
+                        # whose differentiating case the dispatch cannot
+                        # execute is not an executable action.
+                        "api_price": lv["api_price"],
                         "qty": lv["qty"]} for lv in exit_lad["levels"]],
             "price_space": "EXIT_PROCEEDS_PER_CONTRACT",
+            "wire_price_space": "VENUE_WIRE_CONTRACT_PRICE",
             "why": EXIT_RELATION}
