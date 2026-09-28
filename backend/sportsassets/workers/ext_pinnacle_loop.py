@@ -780,7 +780,8 @@ def _venue_diagnostic(slug, exc, *, stage, code=None, feed=None) -> dict:
     return out
 
 
-def _read_book_blocking(slug: str) -> dict:
+def _read_book_blocking(slug: str, *,
+                        deadline_epoch_s: float | None = None) -> dict:
     """One PACED public book read, off the event loop. Never raises.
 
     `pmus.book_read` rather than `bbo_read`, and that choice is load
@@ -808,33 +809,83 @@ def _read_book_blocking(slug: str) -> dict:
     from .. import venue_http_observer as vho
     from ..venue_pace import pace
 
-    pace()
+    # ── ONE LOGICAL READ, ONE ID, ONE SET OF COUNTERS ────────────────
+    #
+    # `pace()` is NOT called here any more. It is called inside the
+    # transport, per actual request -- because the SDK can retry inside one
+    # logical call and a gap applied out here paces the call rather than
+    # the requests. Pacing here as well would double-charge the first
+    # request's gap.
+    from .. import venue_request_gate as grt
+
+    read_id = grt.begin_read(slug=slug, deadline_epoch_s=deadline_epoch_s)
+    grt.bind_read(read_id)
     try:
-        client = pmus._get_client()
-    except Exception as exc:                                    # noqa: BLE001
-        return {"marketData": None, "error": type(exc).__name__,
-                "diagnostic": _venue_diagnostic(
-                    slug, exc, stage="CLIENT_CONSTRUCTION")}
-    observer = vho.install(client)
-    path = vho.book_path(slug)
-    try:
-        out = pmus.book_read(client, slug)
-    except Exception as exc:                                    # noqa: BLE001
-        return {"marketData": None, "error": type(exc).__name__,
-                "diagnostic": _venue_diagnostic(
-                    slug, exc, stage="BOOK_READ")}
+        try:
+            client = pmus._get_client()
+        except Exception as exc:                                # noqa: BLE001
+            return {"marketData": None, "error": type(exc).__name__,
+                    "diagnostic": _venue_diagnostic(
+                        slug, exc, stage="CLIENT_CONSTRUCTION")}
+        observer = vho.install(client)
+        path = vho.book_path(slug)
+        try:
+            out = pmus.book_read(client, slug)
+        except grt.VenueGateRefusal as ref:
+            # OUR OWN GATE, NAMED AS OURS. Reporting this as a venue error
+            # would send an operator to the venue for a decision we made.
+            return {"marketData": None, "error": ref.refusal,
+                    "refused_by": "OUR_REQUEST_GATE",
+                    "gate_detail": ref.detail,
+                    "attempts": grt.attempts_for_read(read_id),
+                    "diagnostic": dict(ref.detail,
+                                       slug=slug, stage="REQUEST_GATE",
+                                       refusal=ref.refusal)}
+        except Exception as exc:                                # noqa: BLE001
+            return {"marketData": None, "error": type(exc).__name__,
+                    "diagnostic": _venue_diagnostic(
+                        slug, exc, stage="BOOK_READ")}
     # TAKEN, not peeked: a header set left behind and silently reused on a later
     # read is precisely the failure this evidence exists to detect.
-    out["http_observation"] = vho.take(path)
-    out["http_observer"] = observer
-    if out.get("error"):
-        # book_read never raises: it NAMES the failure. Carry the name plus
-        # the request context, because "the venue returned an error" is not
-        # actionable and "this slug, this feed, this code" is.
-        out["diagnostic"] = _venue_diagnostic(
-            slug, None, stage="BOOK_READ", code=out.get("error"),
-            feed=out.get("feed"))
-    return out
+        out["http_observation"] = vho.take(path)
+        out["http_observer"] = observer
+        # ── THE PER-READ ACCOUNTING, CARRIED OUT ─────────────────────
+        out["attempts"] = grt.attempts_for_read(read_id)
+        out["request_accounting"] = grt.read_state(read_id)
+        if out.get("error"):
+            # ── THE REPAIRED DIAGNOSTIC IS CARRIED, NOT REBUILT ──────
+            #
+            # THIS WAS THE THIRD DEFECT. `book_read` now returns
+            # `error_detail` with the real HTTP status, Retry-After and
+            # request id -- and this branch built a FRESH `_venue_diagnostic`
+            # with a null exception and overwrote it. The final scheduled
+            # result still read `status: null, exception: null, detail:
+            # null`, so the repair never reached a reader. Extracting
+            # metadata nobody projects is not a repair.
+            #
+            # The request context `_venue_diagnostic` adds is still wanted,
+            # so the two are MERGED with the preserved fields winning: a
+            # measured status must not be overwritten by an absent one.
+            base = _venue_diagnostic(
+                slug, None, stage="BOOK_READ", code=out.get("error"),
+                feed=out.get("feed")) or {}
+            detail = out.get("error_detail") or {}
+            merged = dict(base)
+            for k, v in detail.items():
+                if v is not None or k not in merged:
+                    merged[k] = v
+            # AND THE PER-READ ACCOUNTING TRAVELS WITH IT.
+            merged["attempts"] = out.get("attempts")
+            merged["cooldown"] = out.get("cooldown")
+            merged["request_accounting"] = out.get("request_accounting")
+            out["diagnostic"] = merged
+        return out
+    finally:
+        # THE READ ID IS ALWAYS CLOSED AND UNBOUND. A leaked binding would
+        # attribute the NEXT read's requests to this one, which is exactly
+        # the cross-read contamination the per-read id exists to prevent.
+        grt.bind_read(None)
+        grt.end_read(read_id)
 
 
 #: Fields a live-progress observation would have to arrive in. Matched

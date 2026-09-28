@@ -520,24 +520,53 @@ async def test_case_b_a_loss_is_contained_and_inventory_remains(monkeypatch):
         pl = await FB.pnl(conn, account_id=ACCT, venue=VENUE)
         # 9 sold at 0.41 = 3.69 against 9 * 0.60 = 5.40 of basis.
         assert pl["exit_proceeds_usd"] == pytest.approx(3.69, abs=1e-6)
-        # ── REALISED IS 0, AND THAT IS THE CONVENTION, NOT A BUG ────
+        # ── REALISED IS -2.01, AND THE OLD 0.0 WAS THE BUG ──────────
         #
-        # `FB.realised` filters `closed_at IS NOT NULL`: a result is
-        # realised when the POSITION closes, not when an exit fill lands.
-        # 6 contracts are still held, so nothing has closed and the lane
-        # reports 0 realised with 0 closed positions rather than booking a
-        # partial result. I expected a negative number here and was wrong
-        # about the code, not the other way round.
-        assert pl["realised_pnl_usd"] == pytest.approx(0.0)
+        # THIS BLOCK ASSERTED THE DEFECT, and its own comment recorded me
+        # concluding otherwise: "I expected a negative number here and was
+        # wrong about the code, not the other way round." The instinct was
+        # right and the conclusion was wrong.
+        #
+        # `FB.realised` DID filter `closed_at IS NOT NULL`, so a position
+        # that had sold 9 of 15 contracts below cost reported 0.00 -- and
+        # every consumer of MAX_DRAWDOWN reads that figure, so the approved
+        # loss stop could be breached without tripping. Calling the filter
+        # "the convention" turned a disarmed control into a requirement, in
+        # a CAPITAL-PATH test.
+        #
+        # An independent audit reproduced the same defect from the other
+        # direction (a $20 drawdown erased by recovery and closure), and
+        # `realised` now books each exit fill as an increment at its own
+        # instant.
+        #
+        # BOTH FACTS COEXIST, which is what the old comment got right:
+        # nothing has CLOSED (6 contracts still held), and a result HAS
+        # been realised on the 9 that were sold. The error was inferring
+        # the second from the first.
+        assert pl["realised_pnl_usd"] == pytest.approx(-2.01, abs=1e-6)
+        assert pl["max_drawdown_usd"] == pytest.approx(2.01, abs=1e-6)
         assert pl["closed_positions"] == 0
+        assert pl["partially_realised_open_positions"] == 1
+        assert pl["partially_realised_usd"] == pytest.approx(-2.01, abs=1e-6)
         # WHERE THE LOSS IS VISIBLE INSTEAD: the open side's net cash.
         # 9.00 of basis out, 3.69 of proceeds back, 0.40 of fees.
         assert pl["cost_basis_usd"] == pytest.approx(9.00, abs=1e-6)
         assert pl["open_position_net_cash_usd"] == pytest.approx(
             -5.71, abs=1e-6)
         assert pl["cash_out_the_door_usd"] == pytest.approx(5.71, abs=1e-6)
-        assert "realised_pnl_usd" in pl and pl[
-            "realised_is_provisional"] is False
+        # ── PROVISIONAL IS NOW True, AND THAT IS CORRECT ────────────
+        #
+        # It read False when the realised total was empty: with no booked
+        # results there were no provisional events to count. Now that the
+        # two exit fills ARE booked, their fee state is counted -- and this
+        # demonstration supplies no venue-stated commission, so the fees
+        # are the schedule's EXPECTED figures. PROVISIONAL is the honest
+        # label for a result whose fees the venue has not confirmed, and
+        # asserting False would now be asserting that an unconfirmed fee is
+        # final.
+        assert "realised_pnl_usd" in pl
+        assert pl["realised_is_provisional"] is True
+        assert pl["realised_provisional_note"], pl
         # ── AND THE SLICE-LEVEL RESULT, WHICH I FIRST DECLINED TO SPLIT ──
         #
         # I wrote here that splitting it "needs a cost-attribution convention

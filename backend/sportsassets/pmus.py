@@ -184,7 +184,66 @@ def _get_client():
         _client = PolymarketUS(key_id=cfg.pmus_key_id, secret_key=cfg.pmus_secret_key)
     else:
         _client = PolymarketUS()  # public endpoints only (market data, mapping)
+    _install_request_gate(_client)
     return _client
+
+
+def _install_request_gate(client) -> dict:
+    """Put the not-before gate and the attempt counter AT THE TRANSPORT.
+
+    ── WHY HERE AND NOT AROUND THE LOGICAL READ ─────────────────────
+    A reproduction showed one paced call producing THREE HTTP attempts,
+    because the SDK retries inside it. Wrapping the transport is the only
+    place that sees every actual request, and `handle_request` is the only
+    honest reading of "recheck immediately before dispatch" -- nothing
+    happens between the check and the send.
+    It also makes the attempt count complete: three attempts ending in
+    `ReadTimeout` produced no responses and so reported `attempts: null`
+    when counted on the response hook.
+
+    THE PROTECTED WORKER IS NOT AFFECTED. This runs only on the client
+    THIS module constructs, for our lane. `bettor_live_loop` builds its
+    own client through `bettor_universe_probe.Pacer` and is untouched.
+
+    NEVER RAISES. A client that cannot be instrumented is still a working
+    client; the verdict is returned so a caller can record that the gate is
+    absent rather than assume it is present.
+    """
+    out = {"installed": False, "why": None}
+    try:
+        from . import venue_request_gate as _grt
+        from .venue_pace import pace as _pace
+    except Exception as exc:                                   # noqa: BLE001
+        out["why"] = "gate module unavailable: %s" % type(exc).__name__
+        return out
+    if _grt.PacedTransport is None:
+        out["why"] = "httpx is unavailable, so no transport can be wrapped"
+        return out
+    for attr in ("_http",):
+        http = getattr(client, attr, None)
+        if http is None:
+            continue
+        try:
+            inner = getattr(http, "_transport", None)
+            if inner is None:
+                out["why"] = "no underlying transport to wrap"
+                return out
+            if isinstance(inner, _grt.PacedTransport):
+                out.update(installed=True, already=True)
+                return out
+            http._transport = _grt.PacedTransport(inner, pace=_pace)
+            # VERIFIED ON THE OBJECT, not assumed from the assignment --
+            # the same lesson as the observer's id cache.
+            ok = isinstance(getattr(http, "_transport", None),
+                            _grt.PacedTransport)
+            out.update(installed=bool(ok), already=False,
+                       why=None if ok else "the client did not retain it")
+            return out
+        except Exception as exc:                               # noqa: BLE001
+            out["why"] = "transport wrap rejected: %s" % type(exc).__name__
+            return out
+    out["why"] = "the SDK client exposes no underlying httpx client"
+    return out
 
 
 def _norm(s: str | None) -> str:
@@ -959,8 +1018,12 @@ def book_read(client, us_slug: str) -> dict:
     except Exception as exc:  # noqa: BLE001 -- named, never swallowed
         try:
             from . import venue_http_error as _vhe
-            attempts = (_vho.attempts_for(obs_path)
-                        if (_vho is not None and obs_path) else None)
+            # PER-READ, FROM THE GATE. The observer's per-PATH counter
+            # accumulated across reads (two consecutive reads reported 3
+            # then 6) and races when two callers read one slug. The gate
+            # counts per logical read id.
+            from . import venue_request_gate as _grt
+            attempts = _grt.attempts_for_read(_grt.current_read())
             diag = _vhe.describe(exc, endpoint="markets.book",
                                  attempts=attempts,
                                  elapsed_s=_time.time() - _t0)
