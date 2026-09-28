@@ -110,10 +110,22 @@ async def _leg(c, iid, slug, gid, role, qty, *, acct=ACCT, event=FIXTURE,
         "VALUES ($1,$2,'PMUS','US',$3,$4,'ORDER_INTENT_BUY_LONG',0.5,$5,"
         "        $6,$7,$8,$9,$10,$11,$12,$13)",
         iid, acct, slug, event, int(qty), float(qty) * 0.5, iid, state, kind,
-        float(qty), gid, role, parent)
+        # RESIDUAL STARTS AT ZERO. An intent holds nothing until a fill
+        # arrives, and `_fill` raises it -- which is the book's own rule and
+        # the reason a fixture that pre-set it disagreed with the schema.
+        0.0, gid, role, parent)
 
 
 async def _fill(c, fid, iid, qty, direction):
+    """Record a fill AND maintain `residual_qty`, as the funded book does.
+
+    WHY THE FIXTURE MUST DO THIS. Inventory is `residual_qty` on unclosed rows
+    -- the book recomputes it from the ledger on every write -- so a fixture
+    that inserts fills and leaves `residual_qty` alone is describing a state
+    the system never produces. These tests asserted against a fills-only sum
+    and disagreed with the schema once the single convention was adopted.
+    """
+    await _bump_residual(c, iid, qty, direction)
     await c.execute(
         "INSERT INTO bettor_funded_fills "
         "(fill_id, intent_id, venue_order_id, venue_fill_id, qty, price, "
@@ -133,6 +145,24 @@ async def _reserve(c, rid, gid, role, slug, qty, state, op, intent=None,
         "VALUES ($1,$2,$3,$4,$5,$6,0.5,$7,$8,$9," + resolved + ",$10)",
         rid, gid, role, slug, float(qty), float(qty) * 0.5, state, op,
         intent, resolution)
+
+
+async def _bump_residual(c, iid, qty, direction):
+    """Move residual the way a real fill does: entry raises the leg's residual
+    from zero, an exit on a CHILD reduces its PARENT's."""
+    row = await c.fetchrow(
+        "SELECT kind, parent_intent_id FROM bettor_funded_intents "
+        "WHERE intent_id = $1", iid)
+    if row is None:
+        return
+    if direction == "ENTRY":
+        target, delta = iid, float(qty)
+    else:
+        target, delta = (row["parent_intent_id"] or iid), -float(qty)
+    await c.execute(
+        "UPDATE bettor_funded_intents "
+        "SET residual_qty = GREATEST(0, COALESCE(residual_qty,0) + $2) "
+        "WHERE intent_id = $1", target, delta)
 
 
 def _why(exc) -> str:
@@ -325,6 +355,12 @@ async def test_an_unresolved_reservation_blocks_closure():
         await _clean(c)
         await _require_free_capacity(c)
         await _group(c, "t131-a")
+        # THE RESERVATION COMES FIRST, which is the real sequence: reserve,
+        # then commit an intent, then send. Creating the leg first let the
+        # group auto-close (no live leg, no reservation yet) before the
+        # reservation could be taken -- my ordering, not a schema defect.
+        await _reserve(c, "t131-r1", "t131-a", "HEDGE", "aec-car-p45", 10,
+                       "HELD", "t131-op-1")
         # A leg in a TERMINAL state with no inventory, so neither inventory nor
         # an outstanding order is what blocks closure here -- the reservation is.
         # CANCELLED, not EXITED_IN_THE_MARKET: that is a CLOSURE value on the
@@ -332,15 +368,6 @@ async def test_an_unresolved_reservation_blocks_closure():
         # it. The two vocabularies are separate and I conflated them.
         await _leg(c, "t131-p", "aec-chi-ml", "t131-a", "PRIMARY", 10,
                    state="CANCELLED")
-        await c.execute("UPDATE bettor_funded_intents SET residual_qty = 0 "
-                        "WHERE intent_id = 't131-p'")
-        # HELD with no intent: a reservation taken before any order exists,
-        # which is the normal first state and needs no intent to name.
-        # (Pointing a HEDGE reservation at the PRIMARY leg's intent is refused
-        # by the role binding -- as another test in this file asserts -- so it
-        # cannot be used to set this case up.)
-        await _reserve(c, "t131-r1", "t131-a", "HEDGE", "aec-car-p45", 10,
-                       "HELD", "t131-op-1")
         with pytest.raises(Exception) as caught:
             await c.execute(
                 "UPDATE bettor_funded_portfolio_groups "
@@ -685,6 +712,301 @@ async def test_an_unknown_group_is_null_not_a_known_empty_one():
         got = await c.fetchval(
             "SELECT bettor_funded_group_paired_qty('t131-a')")
         assert got is not None and float(got) == 0.0
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · THE REAL ENTRY PATH, NOT DIRECT SQL
+# ═════════════════════════════════════════════════════════════════════
+#
+# Migration 131 requires every OPEN entry to belong to a group, and
+# `record_intent` set neither column -- so applying the migration rejected
+# every ordinary funded entry with
+#   violates check constraint "bettor_funded_open_entry_has_a_group_ck"
+# measured before the repair. Direct SQL fixtures could never have shown that,
+# because they supply the columns themselves. These go through the funded book.
+
+@pg
+async def test_an_ordinary_entry_still_works_and_gets_its_own_group():
+    from sportsassets import bettor_funded_book as FB
+    c = await _conn()
+    try:
+        if not await _has_131(c):
+            pytest.skip("migration 131 not applied to this database")
+        await _clean(c)
+        await _require_free_capacity(c)
+        got = await FB.record_intent(
+            c, intent_id="t131-p1", account_id=ACCT, venue="PMUS",
+            venue_class="US", us_market_slug="aec-chi-ml", event_key=FIXTURE,
+            order_intent="ORDER_INTENT_BUY_LONG", limit_price=0.5, quantity=3,
+            collateral_usd=1.5, effective_digest="t131-d1")
+        assert got["ok"] is True, got
+        assert got["leg_role"] == "PRIMARY"
+        assert got["portfolio_group_id"] == "grp:t131-p1"
+        row = await c.fetchrow(
+            "SELECT structure, hedge_intent FROM "
+            "bettor_funded_portfolio_groups WHERE group_id = $1",
+            got["portfolio_group_id"])
+        assert row["structure"] == "SINGLE_LEG"
+        assert row["hedge_intent"] == "NOT_APPLICABLE"
+    finally:
+        await c.execute("DELETE FROM bettor_funded_intents "
+                        "WHERE intent_id LIKE 't131-%'")
+        await c.execute("DELETE FROM bettor_funded_portfolio_groups "
+                        "WHERE group_id LIKE 'grp:t131-%'")
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_a_hedge_acquisition_joins_the_open_group():
+    from sportsassets import bettor_funded_book as FB
+    c = await _conn()
+    try:
+        if not await _has_131(c):
+            pytest.skip("migration 131 not applied to this database")
+        await _clean(c)
+        await _require_free_capacity(c)
+        first = await FB.record_intent(
+            c, intent_id="t131-p1", account_id=ACCT, venue="PMUS",
+            venue_class="US", us_market_slug="aec-chi-ml", event_key=FIXTURE,
+            order_intent="ORDER_INTENT_BUY_LONG", limit_price=0.55, quantity=10,
+            collateral_usd=5.5, effective_digest="t131-d1",
+            group_structure="INDIRECT_MIDDLE")
+        assert first["ok"] is True, first
+        hedge = await FB.record_intent(
+            c, intent_id="t131-h1", account_id=ACCT, venue="PMUS",
+            venue_class="US", us_market_slug="aec-car-p45", event_key=FIXTURE,
+            order_intent="ORDER_INTENT_BUY_LONG", limit_price=0.48, quantity=10,
+            collateral_usd=4.8, effective_digest="t131-d2",
+            portfolio_group_id=first["portfolio_group_id"], leg_role="HEDGE")
+        assert hedge["ok"] is True, hedge
+        assert hedge["leg_role"] == "HEDGE"
+        n = await c.fetchval(
+            "SELECT count(*) FROM bettor_funded_intents "
+            "WHERE portfolio_group_id = $1", first["portfolio_group_id"])
+        assert n == 2
+    finally:
+        await c.execute("DELETE FROM bettor_funded_intents "
+                        "WHERE intent_id LIKE 't131-%'")
+        await c.execute("DELETE FROM bettor_funded_portfolio_groups "
+                        "WHERE group_id LIKE 'grp:t131-%'")
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_a_competing_acquisition_gets_a_named_refusal_not_an_exception():
+    """The bound moved, so the refusal had to move with it.
+
+    126 renamed the index once and this handler was not updated, so a second
+    concurrent submission RAISED instead of refusing. 131 moves it again, to
+    `bettor_funded_one_open_group`, and the named refusal is asserted here so
+    the same regression cannot recur silently.
+    """
+    from sportsassets import bettor_funded_book as FB
+    c = await _conn()
+    try:
+        if not await _has_131(c):
+            pytest.skip("migration 131 not applied to this database")
+        await _clean(c)
+        await _require_free_capacity(c)
+        first = await FB.record_intent(
+            c, intent_id="t131-p1", account_id=ACCT, venue="PMUS",
+            venue_class="US", us_market_slug="aec-chi-ml", event_key=FIXTURE,
+            order_intent="ORDER_INTENT_BUY_LONG", limit_price=0.5, quantity=3,
+            collateral_usd=1.5, effective_digest="t131-d1")
+        assert first["ok"] is True
+        second = await FB.record_intent(
+            c, intent_id="t131-other", account_id=ACCT, venue="PMUS",
+            venue_class="US", us_market_slug="aec-elsewhere",
+            event_key="another-fixture",
+            order_intent="ORDER_INTENT_BUY_LONG", limit_price=0.5, quantity=1,
+            collateral_usd=0.5, effective_digest="t131-d3")
+        assert second["ok"] is False
+        assert second["refusal"] == FB.R_ANOTHER_INTENT_IS_LIVE, second
+    finally:
+        await c.execute("DELETE FROM bettor_funded_intents "
+                        "WHERE intent_id LIKE 't131-%'")
+        await c.execute("DELETE FROM bettor_funded_portfolio_groups "
+                        "WHERE group_id LIKE 'grp:t131-%'")
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_a_hedge_on_the_primarys_own_contract_is_refused_by_name():
+    from sportsassets import bettor_funded_book as FB
+    c = await _conn()
+    try:
+        if not await _has_131(c):
+            pytest.skip("migration 131 not applied to this database")
+        await _clean(c)
+        await _require_free_capacity(c)
+        first = await FB.record_intent(
+            c, intent_id="t131-p1", account_id=ACCT, venue="PMUS",
+            venue_class="US", us_market_slug="aec-chi-ml", event_key=FIXTURE,
+            order_intent="ORDER_INTENT_BUY_LONG", limit_price=0.5, quantity=3,
+            collateral_usd=1.5, effective_digest="t131-d1")
+        bad = await FB.record_intent(
+            c, intent_id="t131-h1", account_id=ACCT, venue="PMUS",
+            venue_class="US", us_market_slug="aec-chi-ml", event_key=FIXTURE,
+            order_intent="ORDER_INTENT_BUY_LONG", limit_price=0.5, quantity=3,
+            collateral_usd=1.5, effective_digest="t131-d2",
+            portfolio_group_id=first["portfolio_group_id"], leg_role="HEDGE")
+        assert bad["ok"] is False
+        assert bad["refusal"] == FB.R_LEGS_ARE_THE_SAME_CONTRACT, bad
+    finally:
+        await c.execute("DELETE FROM bettor_funded_intents "
+                        "WHERE intent_id LIKE 't131-%'")
+        await c.execute("DELETE FROM bettor_funded_portfolio_groups "
+                        "WHERE group_id LIKE 'grp:t131-%'")
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_naming_a_group_without_a_role_is_refused():
+    from sportsassets import bettor_funded_book as FB
+    c = await _conn()
+    try:
+        if not await _has_131(c):
+            pytest.skip("migration 131 not applied to this database")
+        await _clean(c)
+        got = await FB.record_intent(
+            c, intent_id="t131-x", account_id=ACCT, venue="PMUS",
+            venue_class="US", us_market_slug="aec-x", event_key=FIXTURE,
+            order_intent="ORDER_INTENT_BUY_LONG", limit_price=0.5, quantity=1,
+            collateral_usd=0.5, effective_digest="t131-d",
+            portfolio_group_id="grp:whatever")
+        assert got["ok"] is False
+        assert got["refusal"] == FB.R_LEG_ROLE_NOT_STATED, got
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 7 · SETTLEMENT DISPOSES OF INVENTORY WITHOUT AN EXIT FILL
+# ═════════════════════════════════════════════════════════════════════
+
+@pg
+async def test_settlement_releases_paired_inventory_and_capacity():
+    """THE CAPACITY LOCK THIS CLOSES.
+
+    `reconcile_settlement` records a SETTLEMENT event and calls
+    `mark_position_closed`; it writes NO exit fill. The first version of
+    `leg_inventory` summed fills only, so a pair held to settlement reported
+    its bought quantity as paired forever and the closure trigger would have
+    refused to release the group's capacity for good -- the system stopping
+    permanently on a success.
+    """
+    from sportsassets import bettor_funded_book as FB
+    c = await _conn()
+    try:
+        if not await _has_131(c):
+            pytest.skip("migration 131 not applied to this database")
+        await _clean(c)
+        await _require_free_capacity(c)
+        await _group(c, "t131-a")
+        await _leg(c, "t131-p", "aec-chi-ml", "t131-a", "PRIMARY", 10,
+                   state="FILLED")
+        await _leg(c, "t131-h", "aec-car-p45", "t131-a", "HEDGE", 10,
+                   state="FILLED")
+        await _fill(c, "t131-f1", "t131-p", 10, "ENTRY")
+        await _fill(c, "t131-f2", "t131-h", 10, "ENTRY")
+        assert float(await c.fetchval(
+            "SELECT bettor_funded_group_paired_qty('t131-a')")) == 10.0
+
+        # ONE LEG SETTLES FIRST. The pair is no longer paired, and the group
+        # still holds the other leg so capacity is NOT released.
+        await FB.mark_position_closed(c, "t131-p", "SETTLED_BY_THE_VENUE")
+        assert float(await c.fetchval(
+            "SELECT bettor_funded_group_paired_qty('t131-a')")) == 0.0
+        with pytest.raises(Exception) as caught:
+            await c.execute(
+                "UPDATE bettor_funded_portfolio_groups SET closed_at=now(), "
+                "closure='BOTH_LEGS_SETTLED' WHERE group_id='t131-a'")
+        assert "still holds" in _why(caught.value), _why(caught.value)
+
+        # A DUPLICATE SETTLEMENT DELIVERY CHANGES NOTHING.
+        await FB.mark_position_closed(c, "t131-p", "SETTLED_BY_THE_VENUE")
+        assert float(await c.fetchval(
+            "SELECT bettor_funded_group_leg_inventory('t131-a','PRIMARY')")
+        ) == 0.0
+
+        # THE SECOND LEG SETTLES, and capacity is released.
+        await FB.mark_position_closed(c, "t131-h", "SETTLED_BY_THE_VENUE")
+        await c.execute(
+            "UPDATE bettor_funded_portfolio_groups SET closed_at=now(), "
+            "closure='BOTH_LEGS_SETTLED' WHERE group_id='t131-a'")
+        assert await c.fetchval(
+            "SELECT closed_at IS NOT NULL FROM "
+            "bettor_funded_portfolio_groups WHERE group_id='t131-a'")
+
+        # AND HISTORICAL ACQUISITION VOLUME IS PRESERVED.
+        assert float(await c.fetchval(
+            "SELECT bettor_funded_group_matched_volume('t131-a')")) == 10.0
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_a_void_disposes_of_inventory_too():
+    from sportsassets import bettor_funded_book as FB
+    c = await _conn()
+    try:
+        if not await _has_131(c):
+            pytest.skip("migration 131 not applied to this database")
+        await _clean(c)
+        await _require_free_capacity(c)
+        await _group(c, "t131-a")
+        await _leg(c, "t131-p", "aec-chi-ml", "t131-a", "PRIMARY", 10,
+                   state="FILLED")
+        await _fill(c, "t131-f1", "t131-p", 10, "ENTRY")
+        assert float(await c.fetchval(
+            "SELECT bettor_funded_group_leg_inventory('t131-a','PRIMARY')")
+        ) == 10.0
+        await FB.mark_position_closed(c, "t131-p", "VOIDED_BY_THE_VENUE")
+        assert float(await c.fetchval(
+            "SELECT bettor_funded_group_leg_inventory('t131-a','PRIMARY')")
+        ) == 0.0
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_a_partial_exit_then_settlement_disposes_of_the_remainder():
+    """Sell some, settle the rest: inventory reaches zero by both routes."""
+    from sportsassets import bettor_funded_book as FB
+    c = await _conn()
+    try:
+        if not await _has_131(c):
+            pytest.skip("migration 131 not applied to this database")
+        await _clean(c)
+        await _require_free_capacity(c)
+        await _group(c, "t131-a")
+        await _leg(c, "t131-p", "aec-chi-ml", "t131-a", "PRIMARY", 10,
+                   state="FILLED")
+        await _fill(c, "t131-f1", "t131-p", 10, "ENTRY")
+        await _leg(c, "t131-x1", "aec-chi-ml", None, None, 6,
+                   state="FILLED", kind="EXIT", parent="t131-p")
+        await _fill(c, "t131-f2", "t131-x1", 6, "EXIT")
+        assert float(await c.fetchval(
+            "SELECT bettor_funded_group_leg_inventory('t131-a','PRIMARY')")
+        ) == 4.0
+        await FB.mark_position_closed(c, "t131-p", "SETTLED_BY_THE_VENUE")
+        assert float(await c.fetchval(
+            "SELECT bettor_funded_group_leg_inventory('t131-a','PRIMARY')")
+        ) == 0.0
+        # The historical volume still records what was bought.
+        assert float(await c.fetchval(
+            "SELECT bettor_funded_group_matched_volume('t131-a')")) == 0.0, (
+            "no HEDGE leg was ever acquired, so matched volume is zero")
     finally:
         await _clean(c)
         await c.close()

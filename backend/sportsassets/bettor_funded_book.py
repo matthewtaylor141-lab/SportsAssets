@@ -141,6 +141,16 @@ def classify_book(account_id) -> dict:
 
 
 R_ANOTHER_INTENT_IS_LIVE = "ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE"
+
+#: ── PORTFOLIO-GROUP REFUSALS (migration 131) ────────────────────────
+#: Named because a caller receiving a raw PostgresError cannot tell a coding
+#: mistake from an outage, and each of these is a different mistake.
+R_LEG_ROLE_NOT_STATED = "LEG_ROLE_WAS_NOT_STATED"
+R_GROUPS_NOT_IN_THIS_SCHEMA = "PORTFOLIO_GROUPS_ARE_NOT_IN_THIS_SCHEMA"
+R_GROUP_IS_CLOSED = "THE_PORTFOLIO_GROUP_IS_CLOSED"
+R_GROUP_DOES_NOT_EXIST = "THE_PORTFOLIO_GROUP_DOES_NOT_EXIST"
+R_LEG_DOES_NOT_MATCH_ITS_GROUP = "LEG_DOES_NOT_MATCH_ITS_GROUP"
+R_LEGS_ARE_THE_SAME_CONTRACT = "BOTH_LEGS_NAME_THE_SAME_CONTRACT"
 R_NO_EXECUTION_IDENTITY = "THE_VENUE_SUPPLIED_NO_DURABLE_EXECUTION_IDENTITY"
 R_NO_SUCH_INTENT = "NO_SUCH_FUNDED_INTENT"
 
@@ -620,6 +630,40 @@ def fee_for(qty: float, price: float, *, at=None) -> tuple[float, str]:
 
 # ── 1 · INTENT, COMMITTED BEFORE ANYTHING IS SENT ───────────────────
 
+#: Whether this database has migration 131's group tables. Determined by
+#: ASKING, once, and cached per process.
+#:
+#: WHY THIS EXISTS. Setting the group columns unconditionally made the code
+#: REQUIRE 131 -- measured: every funded suite failed with `relation
+#: "bettor_funded_portfolio_groups" does not exist` against a pre-131 schema.
+#: Code and migration do not land at the same instant, and a build that is
+#: live for even a moment before its migration applies would reject every
+#: funded entry. So the schema is asked rather than assumed, and the legacy
+#: path is taken verbatim when the tables are absent.
+_HAS_GROUPS: bool | None = None
+
+
+async def _schema_has_groups(conn) -> bool:
+    global _HAS_GROUPS
+    if _HAS_GROUPS is None:
+        try:
+            _HAS_GROUPS = bool(await conn.fetchval(
+                "SELECT count(*) FROM information_schema.tables "
+                "WHERE table_name = 'bettor_funded_portfolio_groups'"))
+        except Exception:                                   # noqa: BLE001
+            # AN UNREADABLE CATALOGUE IS NOT A PRESENT TABLE. Assuming the
+            # columns exist would break the entry path; assuming they do not
+            # is the behaviour that worked before 131.
+            _HAS_GROUPS = False
+    return bool(_HAS_GROUPS)
+
+
+def _forget_schema_probe() -> None:
+    """Tests only: the probe is per process and a test may switch databases."""
+    global _HAS_GROUPS
+    _HAS_GROUPS = None
+
+
 async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
                         venue_class: str, us_market_slug: str,
                         event_key: str, order_intent: str,
@@ -627,24 +671,117 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
                         collateral_usd: float, effective_digest: str,
                         decision_ref: dict | None = None,
                         payout_event: str | None = None,
-                        held_is_long: bool | None = None) -> dict:
+                        held_is_long: bool | None = None,
+                        portfolio_group_id: str | None = None,
+                        leg_role: str | None = None,
+                        group_structure: str | None = None) -> dict:
     """WRITE THE INTENT AND COMMIT IT. Nothing has been sent yet.
 
     The one-live-intent unique index is what makes the concurrency guarantee
     real: two callers racing here both attempt the insert and the SECOND one
     fails at the database, whatever the interleaving. A SELECT-then-INSERT
     check could not do that.
+
+    ── EVERY OPEN ENTRY BELONGS TO A PORTFOLIO GROUP ────────────────
+    Migration 131 moved the capacity bound from "one open ENTRY row" to "one
+    open GROUP", and enforces it with
+    `bettor_funded_open_entry_has_a_group_ck`: an OPEN entry with no group is
+    rejected outright.
+
+    THIS FUNCTION DID NOT SET EITHER COLUMN, so applying 131 would have made
+    every ordinary funded entry fail with a CheckViolationError. Measured
+    before the repair, not reasoned about: `record_intent` raised
+    `violates check constraint "bettor_funded_open_entry_has_a_group_ck"`.
+    That is why 131 is not in production.
+
+    THE DEFAULT PRESERVES THE EXISTING PATH. A caller that passes no group --
+    which is every existing call site -- gets a SINGLE_LEG group created for
+    it, with this intent as the PRIMARY leg, IN THE SAME TRANSACTION as the
+    insert. Nothing about how those callers behave changes, and the bound they
+    were already subject to is the same bound.
+
+    A HEDGE ACQUISITION PASSES THE GROUP IT JOINS. `portfolio_group_id` with
+    `leg_role='HEDGE'` attaches a second leg to an existing open group. The
+    group's own triggers then require the account, venue and fixture to match
+    and the contract to be distinct, so a caller cannot assemble an incoherent
+    pair by passing the wrong id.
+
+    ATOMIC, because a group without its leg is capacity consumed by nothing.
+    When the caller gives us no transaction we open one; when we are already
+    inside one we join it, so an outer transaction still controls the boundary.
     """
     out = {"intent_id": intent_id, "state": "INTENT_RECORDED"}
+    role = (leg_role or ("PRIMARY" if portfolio_group_id is None else None))
+    if portfolio_group_id is not None and leg_role is None:
+        return dict(out, ok=False, refusal=R_LEG_ROLE_NOT_STATED,
+                    why=("a group was named without a leg role. Which leg this "
+                         "intent is cannot be inferred: PRIMARY and HEDGE are "
+                         "bounded separately and guessing would let a hedge "
+                         "take the primary slot"))
+    if role not in ("PRIMARY", "HEDGE"):
+        return dict(out, ok=False, refusal=R_LEG_ROLE_NOT_STATED,
+                    why="leg role %r is not PRIMARY or HEDGE" % (role,))
+    has_groups = await _schema_has_groups(conn)
+    if not has_groups:
+        if portfolio_group_id is not None or leg_role is not None:
+            # A CALLER ASKING FOR A PAIR ON A SCHEMA THAT CANNOT HOLD ONE must
+            # be refused by name, not silently given a single leg.
+            return dict(out, ok=False, refusal=R_GROUPS_NOT_IN_THIS_SCHEMA,
+                        why=("this database has no portfolio-group tables "
+                             "(migration 131 has not been applied), so a "
+                             "grouped leg cannot be recorded. An ungrouped "
+                             "entry still works"))
+        role = None
+        portfolio_group_id = None
     try:
+        if has_groups and portfolio_group_id is None:
+            # ── AN ORDINARY ENTRY: ITS OWN SINGLE_LEG GROUP ──────────
+            #
+            # The id is DERIVED FROM THE INTENT, so a retry of the same
+            # intent cannot create a second group, and the group is
+            # traceable to the decision that made it.
+            portfolio_group_id = "grp:" + str(intent_id)
+            # ── A CLOSED GROUP CANNOT BE REUSED, SO TAKE A FRESH ID ──
+            #
+            # The id is derived from the intent so a retry does not create a
+            # second group. But an intent id can legitimately reappear after
+            # its group closed -- a replayed lifecycle, a reset fixture -- and
+            # the derived id then points at a CLOSED group, which refuses the
+            # leg with THE_PORTFOLIO_GROUP_IS_CLOSED. Measured: six funded
+            # tests failed exactly that way.
+            #
+            # A NEW ATTEMPT GETS A NEW GROUP, suffixed, because a finished
+            # group is history and must not be reopened -- reopening it would
+            # attach new exposure to a closed record and make its closure
+            # reason a lie.
+            if await conn.fetchval(
+                    "SELECT closed_at IS NOT NULL FROM "
+                    "bettor_funded_portfolio_groups WHERE group_id = $1",
+                    portfolio_group_id):
+                portfolio_group_id = "grp:%s:%s" % (
+                    intent_id, uuid.uuid4().hex[:8])
+            await conn.execute(
+                "INSERT INTO bettor_funded_portfolio_groups "
+                "(group_id, account_id, venue, event_key, structure, "
+                " hedge_intent, decision_ref) "
+                "VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb) "
+                "ON CONFLICT (group_id) DO NOTHING",
+                portfolio_group_id, str(account_id), str(venue),
+                str(event_key), str(group_structure or "SINGLE_LEG"),
+                ("SOUGHT" if group_structure in ("INDIRECT_MIDDLE",
+                                                 "INDIRECT_GAP")
+                 else "NOT_APPLICABLE"),
+                json.dumps(decision_ref or {}))
         await conn.execute(
             "INSERT INTO bettor_funded_intents (intent_id, account_id, venue,"
             " venue_class, us_market_slug, event_key, order_intent,"
             " limit_price, quantity, collateral_usd, effective_digest,"
             " decision_ref, state, provenance, payout_event, held_is_long,"
-            " client_identity_supported) "
-            "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,"
-            "        'INTENT_RECORDED',$13,$14,$15,$16)",
+            " client_identity_supported"
+            + (", portfolio_group_id, leg_role) " if has_groups else ") ")
+            + "VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,"
+            "        'INTENT_RECORDED',$13,$14,$15,$16"
+            + (",$17,$18)" if has_groups else ")"),
             intent_id, str(account_id), str(venue), str(venue_class),
             str(us_market_slug), str(event_key), str(order_intent),
             float(limit_price), int(quantity), float(collateral_usd),
@@ -655,7 +792,8 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
             # rather than being valued against a derived guess.
             (None if payout_event is None else str(payout_event)),
             (None if held_is_long is None else bool(held_is_long)),
-            CLIENT_ORDER_IDENTITY_SUPPORTED)
+            CLIENT_ORDER_IDENTITY_SUPPORTED,
+            *(( portfolio_group_id, role) if has_groups else ()))
     except Exception as exc:                                # noqa: BLE001
         msg = str(exc)
         # BOTH INDEX NAMES ARE MATCHED, and that is not belt-and-braces.
@@ -667,7 +805,17 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
         # unhandled UniqueViolationError rather than
         # ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE. The existing concurrency test
         # is what caught it.
-        if ("bettor_funded_one_open_position" in msg
+        # ── THE CAPACITY BOUND, WHEREVER IT NOW LIVES ────────────────
+        #
+        # 131 moved it from a row index to `bettor_funded_one_open_group`, and
+        # a competing acquisition must still get a NAMED refusal rather than an
+        # unhandled UniqueViolationError -- which is exactly the regression 126
+        # caused when it renamed the index and this handler was not updated.
+        # All three names are matched so a future move is a failed test rather
+        # than a raised exception in a caller.
+        if ("bettor_funded_one_open_group" in msg
+                or "bettor_funded_one_open_leg_per_role" in msg
+                or "bettor_funded_one_open_position" in msg
                 or "bettor_funded_one_live_intent" in msg):
             open_now = await open_entry_positions(conn)
             return dict(out, ok=False, refusal=R_ANOTHER_INTENT_IS_LIVE,
@@ -682,8 +830,26 @@ async def record_intent(conn, *, intent_id: str, account_id: str, venue: str,
                              "holds contracts, so a filled entry keeps the "
                              "slot until an evidenced exit or settlement "
                              "closes it"))
+        # ── A LEG THAT DOES NOT BELONG TO ITS GROUP ──────────────────
+        #
+        # The group triggers refuse a mismatched account, venue or fixture, a
+        # closed group, and two roles on the same contract. Those are CALLER
+        # ERRORS with specific causes, and a caller that receives a raw
+        # PostgresError cannot distinguish them from an outage -- so they are
+        # returned as named refusals carrying the database's own message.
+        for needle, refusal in (
+                ("is closed", R_GROUP_IS_CLOSED),
+                ("netting", R_LEGS_ARE_THE_SAME_CONTRACT),
+                ("does not match group", R_LEG_DOES_NOT_MATCH_ITS_GROUP),
+                ("which does not exist", R_GROUP_DOES_NOT_EXIST)):
+            if needle in msg:
+                return dict(out, ok=False, refusal=refusal,
+                            portfolio_group_id=portfolio_group_id,
+                            leg_role=role,
+                            why=" ".join(msg.split())[:400])
         raise
     return dict(out, ok=True, refusal=None,
+                portfolio_group_id=portfolio_group_id, leg_role=role,
                 committed_before_any_request_left=True)
 
 
@@ -2029,8 +2195,87 @@ async def mark_position_closed(conn, intent_id: str,
         "UPDATE bettor_funded_intents SET closed_at=now(), closed_reason=$2, "
         "  updated_at=now() WHERE intent_id=$1 AND closed_at IS NULL",
         intent_id, reason)
-    return {"intent_id": intent_id, "closed_reason": reason,
-            "exposure": "REMOVED"}
+    out = {"intent_id": intent_id, "closed_reason": reason,
+           "exposure": "REMOVED"}
+    # ── AND THE GROUP RELEASES ITS CAPACITY WHEN NOTHING IS LEFT ──────
+    #
+    # THE LOCK THIS CLOSES, found by running the existing funded suites
+    # against the migrated schema: closing a POSITION left its GROUP open, so
+    # the one-open-group bound was consumed forever by a finished position and
+    # every later entry was refused. Forty-four tests failed on it. A bound
+    # that is never released is worse than no bound -- it stops the system
+    # permanently, on a success.
+    #
+    # THE GROUP IS NOT FORCED CLOSED. The attempt is made and the database's
+    # own `closure_is_earned` trigger decides: if any leg still holds
+    # inventory, any order is outstanding or ambiguous, or any reservation is
+    # unresolved, the UPDATE raises and the group stays open -- which is
+    # exactly right, because the other leg of a pair is still exposure. The
+    # outcome is reported rather than assumed.
+    try:
+        if await _schema_has_groups(conn):
+            out["group_release"] = await try_release_group(conn, intent_id)
+    except Exception as exc:                                # noqa: BLE001
+        out["group_release"] = {"attempted": False,
+                                "why": type(exc).__name__}
+    return out
+
+
+#: What a group's closure is called, derived from why its legs closed. A
+#: group whose legs settled did not "exit", and the distinction survives into
+#: the combined economics.
+_GROUP_CLOSURE_FROM_LEGS = {
+    frozenset({"SETTLED_BY_THE_VENUE"}): "BOTH_LEGS_SETTLED",
+    frozenset({"VOIDED_BY_THE_VENUE"}): "BOTH_LEGS_SETTLED",
+    frozenset({"EXITED_IN_THE_MARKET"}): "ALL_LEGS_EXITED",
+    frozenset({"NEVER_HELD_ANY_INVENTORY"}): "NEVER_HELD_ANY_INVENTORY",
+}
+
+
+async def try_release_group(conn, intent_id: str) -> dict:
+    """Close this intent's group IF the database agrees nothing is left.
+
+    NEVER FORCES IT. The trigger from migration 131 refuses closure while any
+    exposure, outstanding order or unresolved reservation remains, and a
+    refusal here is a correct outcome rather than an error -- the commonest
+    case being the OTHER leg of a pair still being held.
+    """
+    gid = await conn.fetchval(
+        "SELECT portfolio_group_id FROM bettor_funded_intents "
+        "WHERE intent_id = $1", intent_id)
+    if not gid:
+        return {"attempted": False, "why": "this intent has no group"}
+    already = await conn.fetchval(
+        "SELECT closed_at IS NOT NULL FROM bettor_funded_portfolio_groups "
+        "WHERE group_id = $1", gid)
+    if already:
+        return {"attempted": False, "group_id": gid, "why": "already closed"}
+    reasons = {r["closed_reason"] for r in await conn.fetch(
+        "SELECT DISTINCT closed_reason FROM bettor_funded_intents "
+        "WHERE portfolio_group_id = $1 AND kind = 'ENTRY' "
+        "  AND closed_reason IS NOT NULL", gid)}
+    closure = _GROUP_CLOSURE_FROM_LEGS.get(frozenset(reasons))
+    if closure is None:
+        # MIXED OR UNKNOWN LEG REASONS. A group whose legs ended differently
+        # has ended, and "ALL_LEGS_EXITED" is the honest umbrella only when
+        # every one exited. Otherwise the settled label governs, because a
+        # settlement is authoritative and an exit is not more final than it.
+        closure = ("BOTH_LEGS_SETTLED"
+                   if reasons & {"SETTLED_BY_THE_VENUE", "VOIDED_BY_THE_VENUE"}
+                   else "ALL_LEGS_EXITED" if reasons
+                   else "NEVER_HELD_ANY_INVENTORY")
+    try:
+        await conn.execute(
+            "UPDATE bettor_funded_portfolio_groups "
+            "SET closed_at = now(), closure = $2 WHERE group_id = $1 "
+            "  AND closed_at IS NULL", gid, closure)
+        return {"attempted": True, "released": True, "group_id": gid,
+                "closure": closure, "leg_reasons": sorted(reasons)}
+    except Exception as exc:                                # noqa: BLE001
+        # THE DATABASE REFUSED, WHICH IS AN ANSWER. Something is still live.
+        return {"attempted": True, "released": False, "group_id": gid,
+                "closure_would_have_been": closure,
+                "why": " ".join(str(exc).split())[:300]}
 
 
 # ── 3 · RECOVERY: ASK THE VENUE, NEVER RESEND ───────────────────────

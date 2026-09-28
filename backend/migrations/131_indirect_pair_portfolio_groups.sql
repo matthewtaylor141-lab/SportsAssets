@@ -368,31 +368,59 @@ CREATE TRIGGER bettor_funded_reservation_matches_group_trg
 --
 -- HISTORICAL MATCHED VOLUME IS A DIFFERENT QUESTION and gets a different
 -- function, so neither can be read as the other.
+-- ── SETTLEMENT IS A DISPOSAL, AND IT WRITES NO EXIT FILL ────────────
+--
+-- THE DEFECT THIS CLOSES. `reconcile_settlement` records a SETTLEMENT economic
+-- event and calls `mark_position_closed`, which writes `closed_at` and an
+-- enumerated `closed_reason`. It creates NO fill. The first version of this
+-- function summed entry minus exit FILLS only, so a pair held to settlement
+-- kept reporting its bought quantity as paired inventory forever -- and the
+-- closure trigger, reading that, would have refused to release the group's
+-- capacity for good. A bound that can never be released is worse than no
+-- bound: it stops the system permanently on a success.
+--
+-- THE CONVENTION IS THE ONE THE FUNDED BOOK ALREADY USES.
+-- `bettor_funded_holds_inventory(residual, closed)` is `residual > 0 AND
+-- closed_at IS NULL`, so a CLOSED intent holds nothing. That is integrated
+-- here rather than reinvented, which also makes duplicate settlement delivery
+-- harmless: `mark_position_closed` updates only `WHERE closed_at IS NULL`, so
+-- a second delivery changes nothing and the inventory does not move twice.
+--
+-- AND A HOLDING IS NOT ERASED BY AN ARBITRARY FLAG. `closed_reason` is
+-- constrained to the four evidenced reasons (EXITED_IN_THE_MARKET,
+-- SETTLED_BY_THE_VENUE, VOIDED_BY_THE_VENUE, NEVER_HELD_ANY_INVENTORY), and
+-- only a closure carrying one of them disposes of inventory here. A row with
+-- `closed_at` set and no reason cannot exist, and if one somehow did it would
+-- still count as held -- which is the safe direction.
 CREATE OR REPLACE FUNCTION bettor_funded_group_leg_inventory(gid text,
                                                              role text)
 RETURNS numeric AS $$
-    WITH legs AS (
-        SELECT i.intent_id
-        FROM public.bettor_funded_intents i
-        WHERE i.portfolio_group_id = gid
-          AND i.kind = 'ENTRY'
-          AND i.leg_role = role
-    ),
-    -- EVERY FILL ON THE LEG *AND* ON ITS EXIT CHILDREN. An exit recorded as a
-    -- child intent is still this leg's inventory leaving.
-    owned AS (
-        SELECT l.intent_id FROM legs l
-        UNION
-        SELECT c.intent_id
-        FROM public.bettor_funded_intents c
-        JOIN legs l ON c.parent_intent_id = l.intent_id
-    )
-    SELECT COALESCE(SUM(
-               CASE WHEN f.direction = 'ENTRY' THEN f.qty
-                    WHEN f.direction = 'EXIT'  THEN -f.qty
-                    ELSE 0 END), 0)
-    FROM public.bettor_funded_fills f
-    WHERE f.intent_id IN (SELECT intent_id FROM owned);
+    -- ── THE BOOK'S OWN CONVENTION, NOT A SECOND ONE ──────────────────
+    --
+    -- THE DEFECT THIS REPLACES, and it is the one I was warned about. The
+    -- first version recomputed inventory from the fill ledger (entry fills
+    -- minus exit fills). `bettor_funded_intents.residual_qty` is ALREADY that
+    -- number -- migration 126 recomputes it from the ledger on every write,
+    -- never incrementing -- and the two disagreed: a leg read `residual_qty`
+    -- 0 while my sum read 15, so the group trigger refused a closure the
+    -- rest of the system considered complete and RAISED out of an ordinary
+    -- statement. Seventy-three tests failed on that disagreement.
+    --
+    -- A second accounting convention is worse than a wrong one: whichever is
+    -- consulted, something else in the system believes the other. So this now
+    -- reads exactly what `bettor_funded_holds_inventory` reads --
+    -- `residual_qty` on rows that are not closed -- and cannot diverge from
+    -- it by construction.
+    --
+    -- SETTLEMENT AND VOID ARE HANDLED BY THE SAME CONVENTION: they set
+    -- `closed_at`, and a closed row holds nothing. That is why no exit fill
+    -- is needed for them, which was the other half of the defect.
+    SELECT COALESCE(SUM(i.residual_qty), 0)
+    FROM public.bettor_funded_intents i
+    WHERE i.portfolio_group_id = gid
+      AND i.kind = 'ENTRY'
+      AND i.leg_role = role
+      AND public.bettor_funded_holds_inventory(i.residual_qty, i.closed_at);
 $$ LANGUAGE sql STABLE;
 
 -- CURRENTLY PAIRED. NULL for a group that does not exist, because an unknown
@@ -485,5 +513,79 @@ DROP TRIGGER IF EXISTS bettor_funded_group_closure_is_earned_trg
 CREATE TRIGGER bettor_funded_group_closure_is_earned_trg
     BEFORE UPDATE OF closed_at, closure ON bettor_funded_portfolio_groups
     FOR EACH ROW EXECUTE FUNCTION bettor_funded_group_closure_is_earned();
+
+-- ── 11 · A GROUP MUST NOT OUTLIVE ITS LEGS ──────────────────────────
+--
+-- THE LOCK THIS CLOSES, found by running the EXISTING funded suites against
+-- the migrated schema: sixty-eight tests failed with
+-- ANOTHER_FUNDED_INTENT_IS_ALREADY_LIVE because a group whose legs were gone
+-- kept holding the one capacity slot. A group is a bookkeeping wrapper around
+-- legs; with no live leg it is not a position, and a wrapper that outlives its
+-- contents is capacity consumed by nothing.
+--
+-- ENFORCED IN THE DATABASE rather than in the caller that closes a position,
+-- because there is more than one way for a leg to stop being live -- an
+-- evidenced exit, a settlement, a void, an administrative delete -- and a
+-- release that only one of those paths remembers is a release that will be
+-- forgotten.
+--
+-- IT STILL DOES NOT FORCE ANYTHING OPEN CLOSED. The conditions are the same
+-- ones `closure_is_earned` checks; this only fires when they are all met, and
+-- it closes with NEVER_HELD_ANY_INVENTORY only when that is literally true.
+CREATE OR REPLACE FUNCTION bettor_funded_group_follows_its_legs()
+RETURNS trigger AS $$
+DECLARE
+    gid text;
+    live_legs int;
+    live_res int;
+    ever_filled numeric;
+BEGIN
+    FOR gid IN
+        SELECT DISTINCT g.group_id
+          FROM public.bettor_funded_portfolio_groups g
+         WHERE g.closed_at IS NULL
+    LOOP
+        SELECT count(*) INTO live_legs
+          FROM public.bettor_funded_intents i
+         WHERE i.portfolio_group_id = gid
+           AND i.kind = 'ENTRY'
+           AND public.bettor_funded_position_is_open(i.state, i.residual_qty,
+                                                    i.closed_at);
+        IF live_legs > 0 THEN
+            CONTINUE;
+        END IF;
+        SELECT count(*) INTO live_res
+          FROM public.bettor_funded_leg_reservations r
+         WHERE r.group_id = gid
+           AND r.state IN ('HELD','COMMITTED','SEND_ATTEMPTED','AMBIGUOUS');
+        IF live_res > 0 THEN
+            CONTINUE;
+        END IF;
+        -- WHAT TO CALL IT. If any leg ever filled, the group held inventory
+        -- and ended by exit or settlement; if none did, it truly never held
+        -- any. Deriving this wrongly would put a false history on the row.
+        SELECT COALESCE(SUM(f.qty) FILTER (WHERE f.direction = 'ENTRY'), 0)
+          INTO ever_filled
+          FROM public.bettor_funded_fills f
+          JOIN public.bettor_funded_intents i ON i.intent_id = f.intent_id
+         WHERE i.portfolio_group_id = gid;
+        UPDATE public.bettor_funded_portfolio_groups
+           SET closed_at = now(),
+               closure = CASE
+                   WHEN ever_filled > 0 THEN 'ALL_LEGS_EXITED'
+                   ELSE 'NEVER_HELD_ANY_INVENTORY' END
+         WHERE group_id = gid AND closed_at IS NULL;
+    END LOOP;
+    RETURN NULL;
+END;
+$$ LANGUAGE plpgsql;
+
+DROP TRIGGER IF EXISTS bettor_funded_group_follows_its_legs_trg
+    ON bettor_funded_intents;
+CREATE TRIGGER bettor_funded_group_follows_its_legs_trg
+    AFTER DELETE OR UPDATE OF state, residual_qty, closed_at
+    ON bettor_funded_intents
+    FOR EACH STATEMENT
+    EXECUTE FUNCTION bettor_funded_group_follows_its_legs();
 
 COMMIT;
