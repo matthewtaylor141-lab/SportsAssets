@@ -6613,34 +6613,14 @@ jobs:
             tests/test_a_partial_loss_actually_stops_new_exposure.py \
             --junitxml=/tmp/risk.xml 2>&1 | tail -15
           rc=${PIPESTATUS[0]}
-          python3 - <<'PYX'
-import sys
-import xml.etree.ElementTree as ET
-t = ET.parse("/tmp/risk.xml").getroot()
-suites = t.findall(".//testsuite") or [t]
-tests = skipped = failures = errors = 0
-for s in suites:
-    tests += int(s.get("tests") or 0)
-    skipped += int(s.get("skipped") or 0)
-    failures += int(s.get("failures") or 0)
-    errors += int(s.get("errors") or 0)
-ran = tests - skipped
-print("risk tests: collected=%d ran=%d skipped=%d failures=%d errors=%d"
-      % (tests, ran, skipped, failures, errors))
-bad = []
-if ran == 0:
-    bad.append("NOT ONE RISK TEST EXECUTED -- the DSN did not reach pytest, "
-               "so these tests are not evidence of anything")
-if skipped:
-    bad.append("%d risk test(s) SKIPPED; a skip is not a pass" % skipped)
-if failures or errors:
-    bad.append("%d failure(s)/%d error(s)" % (failures, errors))
-if bad:
-    for b in bad:
-        print("REFUSED: " + b)
-    sys.exit(1)
-print("every risk test ran against the migrated database")
-PYX
+          # THE GUARD IS A MODULE, NOT A HEREDOC. A `<<'PYX'` body at column
+          # 0 inside this block scalar ended the scalar early; GitHub then
+          # could not parse the file and reported "Workflow does not have
+          # 'workflow_dispatch' trigger" -- which names nothing about
+          # indentation and sent me hunting a missing trigger that was there.
+          # Local yaml.safe_load had accepted it. The module has no such
+          # failure surface and, better, it has its own tests.
+          PYTHONPATH=. python3 -m sportsassets.assert_tests_ran /tmp/risk.xml
           pyrc=$?
           echo "risk-gate rc=$pyrc pytest rc=$rc"
           [ "$pyrc" = "0" ] && [ "$rc" = "0" ]
