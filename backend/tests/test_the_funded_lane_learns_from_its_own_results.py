@@ -56,6 +56,16 @@ async def _has(c, table) -> bool:
 
 
 async def _clean(c):
+    # ORDER MATTERS: the versioned outcomes and the per-group results reference
+    # the decision and the group, so they go first. Deleting the parent first
+    # raises a foreign-key violation from `finally` and reports a FAILURE for a
+    # test whose assertions all passed.
+    if await _has(c, "bettor_funded_decision_outcomes"):
+        await c.execute("DELETE FROM bettor_funded_decision_outcomes "
+                        "WHERE decision_id LIKE $1", PFX + "%")
+    if await _has(c, "bettor_funded_group_results"):
+        await c.execute("DELETE FROM bettor_funded_group_results "
+                        "WHERE group_id LIKE $1", PFX + "%")
     if await _has(c, "bettor_funded_decisions"):
         await c.execute("DELETE FROM bettor_funded_decisions "
                         "WHERE decision_id LIKE $1", PFX + "%")
@@ -436,12 +446,24 @@ async def test_the_draw_that_nobody_covered_shows_up_as_a_worst_case_violation()
 
 
 @pg
-async def test_a_realised_outcome_is_not_restated():
-    """ONCE, AND ONLY ONCE. A restated result makes the bound unfalsifiable after
-    the fact, so both the module and the database refuse it."""
+async def test_a_final_outcome_is_corrected_by_version_never_by_restatement():
+    """DECISIONS STAY IMMUTABLE; MEASUREMENTS BECOME CORRECTABLE.
+
+    132 accepted a realised net containing PROVISIONAL fee events and then refused
+    to let it be restated, so the first read of an unsettled fee was permanent and
+    the correction that arrives later had nowhere to go. A measurement that cannot
+    be corrected is not a measurement.
+
+    The decision is still never rewritten -- that is what keeps its claim
+    falsifiable. The OUTCOME is now an append-only version, and correcting a FINAL
+    one requires saying what changed and why.
+    """
+    from sportsassets import bettor_funded_learning as FL
     c = await _conn()
     try:
         await _ready(c)
+        if not await _has(c, "bettor_funded_decision_outcomes"):
+            pytest.skip("migration 134 not applied to this database")
         await _group(c, PFX + "g9")
         await _leg(c, PFX + "p9", PFX + "g9", "PRIMARY", SLUG_A,
                    closed_reason="EXITED_IN_THE_MARKET")
@@ -452,14 +474,52 @@ async def test_a_realised_outcome_is_not_restated():
             fixture=FIXTURE, group_id=PFX + "g9", action="EXIT",
             worst_case_usd=-0.20, decided_at=time.time())
         first = await FL.join_realised(c, decision_id=PFX + "d9")
-        assert first["ok"] is True and first["already"] is False
+        assert first["ok"] is True and first["already"] is False, first
+        assert first["outcome_version"] == 1
+        assert first["outcome_is_final"] is True
+
+        # AN UNCHANGED RE-READ IS `already`, not a new version.
         again = await FL.join_realised(c, decision_id=PFX + "d9")
         assert again["ok"] is True and again["already"] is True, again
+        assert again["outcome_version"] == 1
+
+        # A CHANGED RESULT ON A FINAL OUTCOME IS REFUSED WITHOUT A REASON.
+        await _econ(c, PFX + "p9", "FEE_ADJUSTMENT", -0.05, eid=PFX + "p9:adj")
+        silent = await FL.join_realised(c, decision_id=PFX + "d9")
+        assert silent["ok"] is False
+        assert silent["refusal"] == FL.R_ALREADY_REALISED, silent
+        assert "correction_reason" in silent["why"]
+
+        # WITH A STATED REASON IT BECOMES VERSION 2, and version 1 survives.
+        fixed = await FL.join_realised(
+            c, decision_id=PFX + "d9",
+            correction_reason="the venue stated its commission")
+        assert fixed["ok"] is True, fixed
+        assert fixed["outcome_version"] == 2
+        assert fixed["decision"]["realised_net_usd"] == pytest.approx(-0.15)
+        vs = [dict(r) for r in await c.fetch(
+            "SELECT version, realised_net_usd::float8 n, supersedes_version, "
+            "       correction_reason FROM bettor_funded_decision_outcomes "
+            " WHERE decision_id=$1 ORDER BY version", PFX + "d9")]
+        assert [v["version"] for v in vs] == [1, 2]
+        assert vs[0]["n"] == pytest.approx(-0.10)
+        assert vs[1]["supersedes_version"] == 1
+        assert "commission" in vs[1]["correction_reason"]
+
+        # AND A VERSION IS NEVER EDITED OR DELETED.
+        # AND A VERSION IS NEVER EDITED. DELETE is deliberately NOT blocked:
+        # removal is not restatement, it destroys evidence a reader can see
+        # missing, and blocking it would make a legitimately deleted decision
+        # undeletable forever because its outcomes reference it.
         with pytest.raises(Exception) as caught:
-            await c.execute(
-                "UPDATE bettor_funded_decisions SET realised_net_usd=99 "
-                " WHERE decision_id=$1", PFX + "d9")
-        assert "not restated" in str(caught.value), caught.value
+            await c.execute("UPDATE bettor_funded_decision_outcomes SET "
+                            "realised_net_usd = 99 WHERE decision_id=$1",
+                            PFX + "d9")
+        assert "not edited" in str(caught.value), caught.value
+        assert await c.fetchval(
+            "SELECT realised_net_usd::float8 FROM "
+            " bettor_funded_decision_outcomes WHERE decision_id=$1 AND "
+            " version=1", PFX + "d9") == pytest.approx(-0.10)
     finally:
         await _clean(c)
         await c.close()
@@ -513,7 +573,13 @@ async def test_the_score_reports_violations_and_refuses_a_rate():
         assert got["bounds_held"] >= 1
         assert got["bounds_violated"] == 0
         assert got["decisions_by_action"]["HOLD"] >= 1
-        assert got["realised_net_total_usd"] == pytest.approx(5.20)
+        # THE TOTAL IS PER GROUP, NOT PER DECISION. Summing decisions
+        # multiplied one economic result by however many cycles looked at it.
+        assert got["portfolio_pnl"]["realised_net_total_usd"] == \
+            pytest.approx(5.20)
+        assert got["portfolio_pnl"]["groups_with_a_result"] == 1
+        assert "multiplied the same money" in \
+            got["portfolio_pnl"]["why_not_summed_over_decisions"]
         # THE OMISSIONS ARE NAMED.
         assert "win_rate" in got["not_reported"]
         assert "which_action_was_right" in got["not_reported"]
@@ -548,8 +614,163 @@ async def test_the_score_counts_a_withheld_bound_separately_from_a_held_one():
             got["bounds_violated"]
         # THE LOSS IS IN THE TOTAL, but it is not a violated bound, because no
         # bound was claimed.
-        assert got["realised_net_total_usd"] == pytest.approx(-0.80)
+        assert got["portfolio_pnl"]["realised_net_total_usd"] == \
+            pytest.approx(-0.80)
         assert got["bounds_violated"] == 0
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 5 · THE THREE CORRECTIONS, EACH WITH ITS COUNTEREXAMPLE
+# ═════════════════════════════════════════════════════════════════════
+
+@pg
+async def test_five_decisions_on_one_group_do_not_multiply_the_result():
+    """THE COUNTEREXAMPLE FOR THE DOUBLE COUNT.
+
+    A position evaluated on five cycles has FIVE decisions and ONE economic
+    result. `score` used to sum `realised_net_usd` over decisions, so the same
+    $5.20 became $26.00 -- and the error grew with how much attention the position
+    got, which is the worst possible direction for it.
+    """
+    from sportsassets import bettor_funded_learning as FL
+    c = await _conn()
+    try:
+        await _ready(c)
+        if not await _has(c, "bettor_funded_group_results"):
+            pytest.skip("migration 134 not applied to this database")
+        await _group(c, PFX + "gm")
+        await _leg(c, PFX + "pm", PFX + "gm", "PRIMARY", SLUG_A,
+                   closed_reason="SETTLED_BY_THE_VENUE")
+        await _econ(c, PFX + "pm", "ENTRY_COST", -4.80)
+        await _econ(c, PFX + "pm", "SETTLEMENT", 10.00)
+        for n in range(5):
+            await FL.record_decision(
+                c, decision_id="%sdm%d" % (PFX, n), account_id=ACCT,
+                venue="PMUS", fixture=FIXTURE, group_id=PFX + "gm",
+                action="HOLD", worst_case_usd=-4.80,
+                decided_at=time.time() + n)
+            got = await FL.join_realised(c, decision_id="%sdm%d" % (PFX, n))
+            assert got["ok"] is True, got
+
+        s = await FL.score(c, account_id=ACCT)
+        assert s["decisions_recorded"] == 5
+        assert s["outcomes_known"] == 5, (
+            "every decision still gets its own evaluation -- that is the point "
+            "of a decision-level check")
+        # ONE ECONOMIC RESULT, COUNTED ONCE.
+        assert s["portfolio_pnl"]["groups_with_a_result"] == 1
+        assert s["portfolio_pnl"]["realised_net_total_usd"] == \
+            pytest.approx(5.20), (
+            "five decisions multiplied one result: %r" % s["portfolio_pnl"])
+        # AND THE NAIVE SUM IS THE NUMBER THIS TEST EXISTS TO REJECT.
+        naive = sum(
+            float(r["realised_net_usd"]) for r in await c.fetch(
+                "SELECT realised_net_usd FROM bettor_funded_decisions "
+                " WHERE group_id=$1 AND realised_known", PFX + "gm"))
+        assert naive == pytest.approx(26.00), naive
+        assert s["portfolio_pnl"]["realised_net_total_usd"] != \
+            pytest.approx(naive)
+        # ALL FIVE BOUNDS HELD, because the floor was -4.80 and it made 5.20.
+        assert s["bounds_held"] == 5
+        assert s["bounds_violated"] == 0
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_a_bound_is_invalidated_not_violated_when_the_position_changed():
+    """THE COUNTEREXAMPLE FOR THE SCOPE.
+
+    A floor computed for HOLD_TO_SETTLEMENT on 10 filled contracts says nothing
+    about a position that was SOLD on a later cycle. The realised net belongs to a
+    different position, so reporting VIOLATED would send someone to debug
+    settlement arithmetic that was never used.
+    """
+    from sportsassets import bettor_funded_learning as FL
+    c = await _conn()
+    try:
+        await _ready(c)
+        if not await _has(c, "bettor_funded_decision_outcomes"):
+            pytest.skip("migration 134 not applied to this database")
+        await _group(c, PFX + "gs")
+        await _leg(c, PFX + "ps", PFX + "gs", "PRIMARY", SLUG_A,
+                   closed_reason="EXITED_IN_THE_MARKET")
+        await _econ(c, PFX + "ps", "ENTRY_COST", -4.80)
+        await _econ(c, PFX + "ps", "EXIT_PROCEEDS", 1.00)   # sold at a loss
+        await FL.record_decision(
+            c, decision_id=PFX + "ds", account_id=ACCT, venue="PMUS",
+            fixture=FIXTURE, group_id=PFX + "gs", action="HOLD",
+            worst_case_usd=-0.10, decided_at=time.time(),
+            bound_action="HOLD", bound_filled_qty=10,
+            bound_holding_policy=FL.POLICY_HOLD_TO_SETTLEMENT)
+        got = await FL.join_realised(c, decision_id=PFX + "ds")
+        assert got["ok"] is True, got
+        assert got["decision"]["realised_net_usd"] == pytest.approx(-3.80)
+
+        # WITHOUT THE OBSERVATION, the raw comparison looks like a violation ...
+        raw = FL.check_the_worst_case(got["decision"])
+        assert raw["worst_case_check"] == FL.CHECK_VIOLATED
+
+        # ... AND WITH IT, IT IS AN INVALIDATION, which is a different finding.
+        scoped = FL.check_the_worst_case(
+            got["decision"],
+            observed={"action": "DIRECT_EXIT", "filled_qty": 10,
+                      "exited_early": True})
+        assert scoped["worst_case_check"] == FL.CHECK_INVALIDATED, scoped
+        assert scoped["the_model_of_the_world_was_wrong"] is None
+        fields = {d["field"] for d in scoped["divergences"]}
+        assert fields == {"action", "holding_policy"}, scoped["divergences"]
+        assert "must not be filed as one" in scoped["why"]
+
+        # A DIFFERENT FILLED QUANTITY INVALIDATES IT TOO.
+        partial = FL.check_the_worst_case(
+            got["decision"], observed={"action": "HOLD", "filled_qty": 4})
+        assert partial["worst_case_check"] == FL.CHECK_INVALIDATED
+        assert [d["field"] for d in partial["divergences"]] == ["filled_qty"]
+    finally:
+        await _clean(c)
+        await c.close()
+
+
+@pg
+async def test_a_bound_is_withheld_while_the_result_contains_a_provisional_fee():
+    """THE COUNTEREXAMPLE FOR FINALITY. A violation scored against an estimate may
+    evaporate when the fee settles, so the check is withheld and says so rather
+    than reporting a number that will change."""
+    from sportsassets import bettor_funded_learning as FL
+    c = await _conn()
+    try:
+        await _ready(c)
+        if not await _has(c, "bettor_funded_decision_outcomes"):
+            pytest.skip("migration 134 not applied to this database")
+        await _group(c, PFX + "gp")
+        await _leg(c, PFX + "pp", PFX + "gp", "PRIMARY", SLUG_A,
+                   closed_reason="SETTLED_BY_THE_VENUE")
+        await _econ(c, PFX + "pp", "ENTRY_COST", -4.80)
+        await _econ(c, PFX + "pp", "FEE", -0.60, provisional=True)
+        await _econ(c, PFX + "pp", "SETTLEMENT", 5.00)
+        await FL.record_decision(
+            c, decision_id=PFX + "dp", account_id=ACCT, venue="PMUS",
+            fixture=FIXTURE, group_id=PFX + "gp", action="HOLD",
+            worst_case_usd=0.10, decided_at=time.time())
+        got = await FL.join_realised(c, decision_id=PFX + "dp")
+        assert got["ok"] is True, got
+        assert got["outcome_is_final"] is False
+        assert got["worst_case_check"] == FL.CHECK_NOT_FINAL, got
+        assert "an estimate" in got["why"]
+
+        s = await FL.score(c, account_id=ACCT)
+        assert s["bounds_withheld_until_final"] == 1
+        assert s["bounds_violated"] == 0, (
+            "a provisional fee must not produce a violation that may evaporate")
+        # THE DIAGNOSTIC READ IS AVAILABLE AND LABELLED.
+        d = await FL.score(c, account_id=ACCT, require_final=False)
+        assert d["bounds_violated"] == 1
+        assert d["bounds_withheld_until_final"] == 0
     finally:
         await _clean(c)
         await c.close()
