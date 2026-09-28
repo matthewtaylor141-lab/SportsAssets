@@ -3266,7 +3266,26 @@ async def command_center(conn) -> dict:
             "exposure": await exposure(conn, account_id=p["account_id"],
                                       venue=p["venue"]),
             "pnl": await pnl(conn, account_id=p["account_id"],
-                            venue=p["venue"])})
+                            venue=p["venue"]),
+            # ── THE FOUR LOSS QUANTITIES, ON THE OPERATOR SURFACE ────
+            #
+            # WHY THIS BELONGS HERE AND NOT ONLY IN `manage`. `manage` runs
+            # on the scheduled lane; the command centre is what a person
+            # actually reads. Without this, an operator saw `pnl` -- which
+            # carries realised results and cash -- and had no way to see the
+            # WORST-CASE bound beside them, which is precisely the omission
+            # that let a $40 trigger be described as the maximum loss on a
+            # $100 position.
+            #
+            # `approved_limits` is deliberately NOT passed. The limit set is
+            # an owner input read by the management lane; the command centre
+            # reports the MEASUREMENTS and says the threshold is an owner
+            # input, rather than implying an approval this read cannot
+            # verify. `tripped` is therefore None here, with the reason
+            # stated, and that is the honest answer for a read that has not
+            # established the limit.
+            "loss_controls": await loss_controls(
+                conn, account_id=p["account_id"], venue=p["venue"])})
     demo_books = [b for b in books
                   if b["book_class"] == BOOK_CLASS_DEMONSTRATION]
     real_books = [b for b in books if b["book_class"] == BOOK_CLASS_FUNDED]
