@@ -1,138 +1,142 @@
--- READ-ONLY. THE MAPPING FUNNEL AND THE SUPPORTED MARKET UNIVERSE.
+-- READ-ONLY. THE FUNNEL, WITH LABELS THAT MATCH WHAT THE COUNTERS PROVE.
 --
--- Audit A04: "Current candidates usually fail mapping; the one mapped
--- candidate fails currency before economic evaluation." And the handoff:
--- "Verify the current mapping funnel and supported market universe before
--- spending more provider credits."
+-- ── WHAT WAS WRONG WITH MY FIRST VERSION ────────────────────────────
+-- An independent review corrected three identity assumptions, all mine:
 --
--- THE CAPTURED CYCLE THE AUDIT READ: 158 venue markets considered, ZERO
--- evaluated, refusals = 22 missing venue mappings, 9 events without
--- Pinnacle, 1 ambiguous mapping, 1 book-currency contradiction. The sole
--- mapped candidate was `aec-mlb-chc-sd-2026-09-30`.
+--  1 · "70 VENUE MARKETS" WAS NOT 70 US CONTRACTS. `MARKETS_SQL` reads the
+--      GLOBAL `markets` catalogue, and `resolve_venue_identity` documents
+--      in its own refusal text that `markets.slug` is "a GLOBAL id and the
+--      venue does not accept it". A global fixture row is not evidence that
+--      a Polymarket US contract exists.
 --
--- WHAT THIS FILE ESTABLISHES, AND WHAT IT CANNOT. It reads the CURRENT
--- funnel from the heartbeat and the venue catalogue, so it says where
--- candidates are lost NOW. It cannot tell you whether a mapping is
--- ABSENT because the venue lacks the contract or because our resolver
--- cannot see it -- section 4 separates those two by checking whether the
--- venue row exists at all.
+--  2 · `mapped_to_a_venue_contract` INCREMENTS BEFORE RESOLUTION. The loop
+--      bumps it after `vmap.map_event()` and BEFORE
+--      `resolve_venue_identity()` runs. So "mapped 1" for MLB means a
+--      GLOBAL FIXTURE MATCHED -- not that a US contract was resolved. The
+--      counter name overstates the counter.
+--
+--  3 · THE SAME 70 SOCCER ROWS APPEAR TWICE. `venue_markets_open_and_fresh`
+--      is computed per SPORT FAMILY, so soccer_epl and soccer_mexico_ligamx
+--      both report the family's 70. They are not two league inventories and
+--      must not be added or read as such.
+--
+-- AND THE JOIN I USED TO "PROVE" MISSING COVERAGE WAS MEANINGLESS:
+-- `LEFT JOIN us_premap p ON p.market_slug = m.slug` compares the US
+-- contract slug in `us_premap.market_slug` against the GLOBAL slug in
+-- `markets.slug`. Two namespaces. An unmatched row proved nothing. It is
+-- removed rather than loosened -- the resolver's real rules (deterministic
+-- keys, game agreement including the venue's calendar-adjacent dating, and
+-- the venue's own side expansion) are what decide this, and
+-- `premap.resolve_explain()` already reports which of its SIX failure
+-- modes fired. That needs Python, not SQL: see
+-- `research/resolve_explain_census.py`.
+--
+-- THE HONEST STAGE LADDER, and which stages this file can and cannot see:
+--
+--   1 provider event                       heartbeat: provider_events
+--   2 matching global fixture              heartbeat: mapped_to_a_venue_contract
+--   3 resolved US contract                 NOT in the heartbeat counters --
+--                                          only as a ledger refusal
+--   4 correct outcome/intent               ledger refusal
+--   5 successful book read                 ledger refusal + venue_errors
+--   6 qualified evidence (currency)        ledger refusal
+--   7 complete economic evaluation         external_valuations.decision
+--   8 eligible funded decision             funded intents (currently zero)
 
 -- ─────────────────────────────────────────────────────────────────────
--- 1 · THE WRITER, AND THE FUNNEL IT RECORDED. Per sport, per stage.
+-- 1 · THE WRITER AND THE CYCLE.
 -- ─────────────────────────────────────────────────────────────────────
 WITH h AS (SELECT value::jsonb AS v FROM ingestion_state
             WHERE key = 'ext_pinnacle_last_cycle')
 SELECT (v -> 'writer' ->> 'build')                AS writer_build,
        to_timestamp((v ->> 'at')::float8)         AS cycle_at,
        (v ->> 'cycle_label')                      AS cycle_label,
-       (v ->> 'markets_considered')               AS venue_markets,
+       (v ->> 'markets_considered')               AS global_fixtures_considered,
        (v ->> 'evaluated')                        AS evaluated,
        (v ->> 'written')                          AS written
   FROM h;
 
 -- ─────────────────────────────────────────────────────────────────────
--- 2 · PER SPORT: how many provider events arrived, how many carried
---     Pinnacle, how many mapped, how many were evaluated. This is the
---     funnel the audit asked to be reported per stage.
+-- 2 · STAGES 1-2 PER SPORT, RELABELLED. `global_fixtures_in_family` is a
+--     per-FAMILY figure and is repeated across leagues of that family --
+--     it is printed with that warning in its own column name.
 -- ─────────────────────────────────────────────────────────────────────
 WITH h AS (SELECT value::jsonb -> 'funnel_by_provider_sport' AS f
              FROM ingestion_state WHERE key = 'ext_pinnacle_last_cycle')
-SELECT k                                          AS sport_key,
-       (f -> k ->> 'family')                      AS family,
-       (f -> k ->> 'venue_markets_open_and_fresh') AS venue_open,
-       (f -> k ->> 'provider_events')              AS provider_events,
-       (f -> k ->> 'with_pinnacle_h2h')            AS with_pinnacle,
-       (f -> k ->> 'mapped_to_a_venue_contract')   AS mapped,
-       (f -> k ->> 'evaluated')                    AS evaluated,
-       (f -> k -> 'refusals')                      AS refusals
+SELECT k                                           AS provider_sport_key,
+       (f -> k ->> 'family')                       AS family,
+       (f -> k ->> 'venue_markets_open_and_fresh')  AS global_fixtures_in_family,
+       (f -> k ->> 'provider_events')               AS s1_provider_events,
+       (f -> k ->> 'with_pinnacle_h2h')             AS s1b_with_pinnacle,
+       (f -> k ->> 'mapped_to_a_venue_contract')    AS s2_global_fixture_matched,
+       (f -> k ->> 'evaluated')                     AS s7_evaluated,
+       (f -> k -> 'refusals')                       AS refusals
   FROM h, jsonb_object_keys(coalesce(h.f, '{}'::jsonb)) AS k
  ORDER BY (f -> k ->> 'provider_events')::int DESC NULLS LAST;
 
 -- ─────────────────────────────────────────────────────────────────────
--- 3 · EVERY CANDIDATE'S FIRST REFUSAL, from the mapped-candidate ledger.
---     One row per candidate against the ONE reason it stopped -- so a
---     cause and its downstream consequence are not counted as two
---     independent problems, which the audit warns inflates the inventory.
+-- 3 · STAGES 3-6: EVERY CANDIDATE THAT MATCHED A GLOBAL FIXTURE, against
+--     the ONE condition that stopped it. This is where a resolved US
+--     contract, the intent, the book read and the currency are decided,
+--     and it is the only place the heartbeat records them.
 -- ─────────────────────────────────────────────────────────────────────
 WITH h AS (SELECT value::jsonb -> 'mapped_candidate_ledger' AS l
              FROM ingestion_state WHERE key = 'ext_pinnacle_last_cycle')
 SELECT (e ->> 'stage')                            AS stage,
-       (e ->> 'first_refusal')                    AS first_refusal,
+       (e ->> 'first_refusal')                    AS first_blocking_condition,
        count(*)                                   AS candidates,
-       min(e ->> 'us_market_slug')                AS example_slug
+       min(e ->> 'global_slug')                   AS example_global_slug,
+       min(e ->> 'us_market_slug')                AS example_us_slug
   FROM h, jsonb_array_elements(coalesce(h.l, '[]'::jsonb)) AS e
- GROUP BY stage, first_refusal
+ GROUP BY stage, first_blocking_condition
  ORDER BY candidates DESC;
 
--- ─────────────────────────────────────────────────────────────────────
--- 4 · IS THE MAPPING MISSING BECAUSE THE VENUE HAS NO CONTRACT, OR
---     BECAUSE WE CANNOT RESOLVE ONE? Two different owners, and the
---     refusal code alone does not distinguish them.
---
---     TABLE NAMES CORRECTED. My first version queried `us_markets`, which
---     does not exist -- the loop's own MARKETS_SQL reads `markets`, and
---     `us_premap` keys on `market_slug`, not `us_market_slug`. The SQL
---     died at section 4 and sections 1-3 had already returned, which is
---     the right failure order but was avoidable by reading the producer.
--- ─────────────────────────────────────────────────────────────────────
-SELECT count(*)                                              AS markets_total,
-       count(*) FILTER (WHERE NOT closed AND NOT resolved)     AS open_markets,
-       count(DISTINCT sport)                                  AS sports,
-       count(*) FILTER (WHERE condition_id IS NOT NULL)        AS with_condition_id,
-       count(*) FILTER (WHERE NOT closed AND NOT resolved
-                        AND updated_at >= now() - INTERVAL '2 days')
-                                                              AS open_and_fresh
-  FROM markets;
+-- EVERY LEDGER ROW IN FULL, so a single candidate can be traced input by
+-- input rather than summarised. Bounded by the ledger's own size.
+WITH h AS (SELECT value::jsonb -> 'mapped_candidate_ledger' AS l
+             FROM ingestion_state WHERE key = 'ext_pinnacle_last_cycle')
+SELECT jsonb_pretty(e) AS candidate
+  FROM h, jsonb_array_elements(coalesce(h.l, '[]'::jsonb)) AS e;
 
--- WHICH SPORTS THE VENUE ACTUALLY LISTS. A sport the venue does not carry
--- is a universe fact, not a mapper bug. THE DECISIVE QUESTION for the 20
--- EPL refusals: the loop saw 70 open soccer markets and mapped NONE of
--- them, so either those 70 are not EPL, or the mapper cannot match them.
+-- ─────────────────────────────────────────────────────────────────────
+-- 4 · THE BOOK-READ ERROR, IN FULL. The loop stores a sanitized
+--     diagnostic per distinct venue error: stage, resolver, slugs,
+--     intent, refusal and the venue's own message. This is the immediate
+--     actionable item for the one candidate that reached stage 5.
+-- ─────────────────────────────────────────────────────────────────────
+WITH h AS (SELECT value::jsonb -> 'venue_errors' AS v
+             FROM ingestion_state WHERE key = 'ext_pinnacle_last_cycle')
+SELECT jsonb_pretty(e) AS venue_error
+  FROM h, jsonb_array_elements(coalesce(h.v, '[]'::jsonb)) AS e;
+
+-- ─────────────────────────────────────────────────────────────────────
+-- 5 · THE COMPLETE BOUNDED GLOBAL CANDIDATE SET, NOT A 40-ROW SAMPLE.
+--     A sample cannot establish that none of the family's fixtures are
+--     the relevant ones. These are exactly the rows MARKETS_SQL selects.
+-- ─────────────────────────────────────────────────────────────────────
 SELECT sport,
-       count(*)                                     AS markets,
-       count(*) FILTER (WHERE NOT closed AND NOT resolved) AS open_now,
-       count(*) FILTER (WHERE NOT closed AND NOT resolved
-                        AND updated_at >= now() - INTERVAL '2 days')
-                                                    AS open_and_fresh,
-       min(slug)                                    AS example_slug,
-       min(event_title)                             AS example_event
+       count(*)                                   AS open_and_fresh_global,
+       min(updated_at)                            AS oldest_update,
+       max(updated_at)                            AS newest_update
   FROM markets
- GROUP BY sport
- ORDER BY open_and_fresh DESC NULLS LAST, markets DESC;
-
--- THE OPEN SOCCER MARKETS BY EVENT TITLE. If these are not EPL fixtures,
--- the 20 refusals are honest coverage and no mapper change helps.
-SELECT slug, event_title, title, updated_at
-  FROM markets
- WHERE sport = 'soccer' AND NOT closed AND NOT resolved
+ WHERE NOT closed AND NOT resolved
    AND updated_at >= now() - INTERVAL '2 days'
- ORDER BY updated_at DESC
- LIMIT 40;
+ GROUP BY sport
+ ORDER BY open_and_fresh_global DESC;
+
+-- ALL of them for the sports the lane asks for, with the fields the
+-- resolver actually keys on: competition/event title, market title, the
+-- date in the slug, and the condition id.
+SELECT slug, event_slug, event_title, title, condition_id, updated_at
+  FROM markets
+ WHERE NOT closed AND NOT resolved
+   AND updated_at >= now() - INTERVAL '2 days'
+   AND sport IN ('soccer', 'baseball')
+ ORDER BY sport, updated_at DESC;
 
 -- ─────────────────────────────────────────────────────────────────────
--- 5 · THE PREMAP: the resolver's own binding table, keyed on
---     `market_slug`. A market with no premap row cannot be resolved to an
---     instrument regardless of what the catalogue carries -- OUR gap.
--- ─────────────────────────────────────────────────────────────────────
-SELECT count(*)                                              AS premap_rows,
-       count(DISTINCT market_slug)                            AS distinct_slugs,
-       count(*) FILTER (WHERE event_slug IS NOT NULL)          AS with_event_slug
-  FROM us_premap;
-
-SELECT m.sport,
-       count(*)                                     AS open_fresh_without_premap,
-       min(m.slug)                                  AS example
-  FROM markets m
-  LEFT JOIN us_premap p ON p.market_slug = m.slug
- WHERE NOT m.closed AND NOT m.resolved
-   AND m.updated_at >= now() - INTERVAL '2 days'
-   AND p.market_slug IS NULL
- GROUP BY m.sport
- ORDER BY open_fresh_without_premap DESC;
-
--- ─────────────────────────────────────────────────────────────────────
--- 6 · THE 1,126-ROW HISTORY's first failing link, so the CURRENT funnel
---     can be compared against it rather than against a memory of it.
+-- 6 · STAGE 7-8: the evaluation history and the funded book, so "zero
+--     candidates" is distinguished from "evaluated and refused".
 -- ─────────────────────────────────────────────────────────────────────
 SELECT decision,
        count(*)                                   AS rows_,
@@ -142,3 +146,8 @@ SELECT decision,
   FROM external_valuations
  GROUP BY decision
  ORDER BY rows_ DESC;
+
+SELECT count(*) AS funded_intents,
+       count(*) FILTER (WHERE state = 'FILLED')    AS filled,
+       count(*) FILTER (WHERE closed_at IS NULL)   AS open_positions
+  FROM bettor_funded_intents;
