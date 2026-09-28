@@ -180,10 +180,30 @@ def _get_client():
     from polymarket_us import PolymarketUS
 
     cfg = settings()
+    # ── THE SDK'S OWN RETRIES ARE TURNED OFF HERE ────────────────────
+    #
+    # 1.0.2 defaults to `max_retries=2`, retrying inside `_request` with
+    # its own `time.sleep` -- so one logical read becomes up to three HTTP
+    # attempts, and the sleeps spend a decision deadline the SDK knows
+    # nothing about. Stacking that on our bounded retry would make six
+    # requests for one answer.
+    #
+    # `client_kwargs()` returns {} on a build that does not accept the
+    # keyword, because passing it there is a TypeError on every read. It is
+    # never reported as "retries disabled" when it was withheld:
+    # `venue_sdk.report()["sdk_retries_disabled"]` is conditioned on the
+    # constructor having actually accepted it.
+    try:
+        from . import venue_sdk as _vsdk
+        extra = _vsdk.client_kwargs()
+    except Exception:                                          # noqa: BLE001
+        extra = {}
     if cfg.pmus_key_id and cfg.pmus_secret_key:
-        _client = PolymarketUS(key_id=cfg.pmus_key_id, secret_key=cfg.pmus_secret_key)
+        _client = PolymarketUS(key_id=cfg.pmus_key_id,
+                               secret_key=cfg.pmus_secret_key, **extra)
     else:
-        _client = PolymarketUS()  # public endpoints only (market data, mapping)
+        # public endpoints only (market data, mapping)
+        _client = PolymarketUS(**extra)
     _install_request_gate(_client)
     return _client
 
@@ -955,6 +975,54 @@ def bbo_read(client, us_slug: str) -> dict:
     return out
 
 
+#: How many actual dispatches ONE logical book read may make, ours
+#: included. Two, not three: the second exists because a single 429 or a
+#: dropped connection is often transient and a decision deadline usually
+#: has room for one more try; a third mostly spends the deadline to learn
+#: the same thing. The SDK's own default (3) is disabled in `_get_client`,
+#: so this is the whole budget rather than a multiplier on top of it.
+BOOK_READ_MAX_DISPATCHES = 2
+
+#: HTTP statuses where a second dispatch can plausibly answer differently.
+#: 404 and 400 are answers about the market, not transient conditions, and
+#: retrying them spends a deadline to be told the same thing again. 401/403
+#: are about our credential and a retry cannot change it.
+BOOK_READ_RETRYABLE_STATUSES = frozenset({408, 409, 429, 500, 502, 503, 504})
+
+
+def _book_read_worth_retrying(diag: dict) -> bool:
+    """Whether a second dispatch could plausibly answer differently.
+
+    DECIDED FROM THE MEASURED RESPONSE, not from the exception's class
+    name. The old handler reduced the failure to `type(exc).__name__` and
+    so had nothing to decide on -- which is the same missing evidence that
+    left the cooldown unarmed.
+
+    A TRANSPORT FAILURE WITH NO RESPONSE IS RETRYABLE. `http_status` is
+    None there, and that is not "not retryable": a connection reset before
+    any status is exactly the transient case a second attempt is for. It is
+    distinguished from a REFUSAL BY US, which is not retryable and never
+    reaches here -- `VenueGateRefusal` is re-raised above.
+    """
+    if not isinstance(diag, dict):
+        return False
+    status = diag.get("http_status")
+    if status is None:
+        # No response at all. Retryable only if the failure was a transport
+        # or timeout class rather than something we did wrong locally.
+        return bool(diag.get("is_transport_failure")
+                    or diag.get("is_timeout")
+                    or diag.get("error_type") in (
+                        "APIConnectionError", "APITimeoutError",
+                        "ConnectError", "ConnectTimeout", "ReadTimeout",
+                        "ReadError", "RemoteProtocolError", "WriteError",
+                        "PoolTimeout"))
+    try:
+        return int(status) in BOOK_READ_RETRYABLE_STATUSES
+    except (TypeError, ValueError):
+        return False
+
+
 def book_read(client, us_slug: str) -> dict:
     """The venue's `marketData` object, WHOLE. For BETTOR's book capture.
 
@@ -1005,53 +1073,132 @@ def book_read(client, us_slug: str) -> dict:
     # them, and this handler reduced the exception to its class name --
     # discarding the status, the `Retry-After` and the response entirely.
     #
-    # ATTEMPTS ARE COUNTED AT THE RESPONSE BOUNDARY, not here. The
-    # observer's hook fires per RESPONSE, so it sees internal retries that
-    # this frame cannot -- which makes the count correct whatever the
-    # installed SDK does. That matters: the SDK version is not pinned
-    # (`polymarket-us>=0.1.2`), 0.1.2 has no retry logic at all while 1.0.2
-    # retries twice, so the amplification depends on a build-time
-    # resolution the repository does not fix.
+    # ATTEMPTS ARE COUNTED AT THE TRANSPORT, not here and not on the
+    # response hook. The hook fires per RESPONSE, so three attempts ending
+    # in `ReadTimeout` produced none and reported `attempts: null`; the
+    # transport counts BEFORE each dispatch, so a request that never
+    # answers is still counted. Per LOGICAL READ, because a per-path
+    # counter accumulated across reads (two consecutive reads reported 3
+    # then 6) and races when two callers read one slug.
+    #
+    # ── AND THE RETRY IS OURS ────────────────────────────────────────
+    #
+    # The SDK's own retry is turned OFF at construction (`max_retries=0`,
+    # see `venue_sdk`): 1.0.2 retried twice with its own `time.sleep`,
+    # inside one logical call, spending a decision deadline it knows
+    # nothing about -- and stacking that on the loop below would make six
+    # requests for one answer.
+    #
+    # WHAT MAKES THIS ONE DIFFERENT FROM THE SDK'S:
+    #   * bounded by BOOK_READ_MAX_DISPATCHES, counted per logical read;
+    #   * it waits through the GATE, so the wait is the venue's own
+    #     `Retry-After` (seconds or HTTP-date) rather than a guess;
+    #   * the gate re-checks the decision deadline before every dispatch
+    #     and REFUSES BY NAME rather than sleeping past it;
+    #   * it never retries an order submission -- this function reads a
+    #     book, and the SDK independently refuses to retry POST because
+    #     the API has no idempotency key.
     _t0 = _time.time()
-    try:
-        payload = fn(us_slug) or {}
-    except Exception as exc:  # noqa: BLE001 -- named, never swallowed
+    payload = None
+    retries = []
+    for _dispatch in range(BOOK_READ_MAX_DISPATCHES):
         try:
-            from . import venue_http_error as _vhe
-            # PER-READ, FROM THE GATE. The observer's per-PATH counter
-            # accumulated across reads (two consecutive reads reported 3
-            # then 6) and races when two callers read one slug. The gate
-            # counts per logical read id.
-            from . import venue_request_gate as _grt
-            attempts = _grt.attempts_for_read(_grt.current_read())
-            diag = _vhe.describe(exc, endpoint="markets.book",
-                                 attempts=attempts,
-                                 elapsed_s=_time.time() - _t0)
-        except Exception:                                      # noqa: BLE001
-            diag = {"error_type": type(exc).__name__,
-                    "diagnostic_failed": True}
-        out["error"] = diag.get("error_type") or type(exc).__name__
-        out["error_detail"] = diag
-        out["http_observer"] = observer
-        # ── THE COOLDOWN, ACTIVATED FROM THE OBSERVED STATUS ─────────
-        #
-        # It was never activated on this path at all. `penalize()` existed
-        # and nothing on the scheduled read called it, so an observed 429
-        # changed nothing and the next candidate read on the ordinary gap.
-        # `Retry-After` is honoured when the venue supplies one -- a
-        # cooldown shorter than the venue asked for is a guess dressed as
-        # a policy.
-        if diag.get("is_rate_limited"):
+            payload = fn(us_slug) or {}
+            break
+        except Exception as exc:  # noqa: BLE001 -- named, never swallowed
+            # OUR OWN GATE IS NOT A VENUE FAILURE, and it is not retryable:
+            # it refused precisely because there is no time left in which a
+            # send would be useful. Re-raised so the caller names it as ours.
             try:
-                from . import venue_pace as _vp
-                out["cooldown"] = _vp.penalize_observed(
-                    retry_after_s=diag.get("retry_after_s"),
-                    reason="VENUE_429_ON_BOOK_READ")
-            except Exception as pexc:                          # noqa: BLE001
-                out["cooldown"] = {"applied": False,
-                                   "why": type(pexc).__name__}
-        return out
+                from . import venue_request_gate as _grt
+            except Exception:                                  # noqa: BLE001
+                _grt = None
+            if (_grt is not None
+                    and isinstance(exc, _grt.VenueGateRefusal)):
+                raise
+            try:
+                from . import venue_http_error as _vhe
+                attempts = (_grt.attempts_for_read(_grt.current_read())
+                            if _grt is not None else None)
+                diag = _vhe.describe(exc, endpoint="markets.book",
+                                     attempts=attempts,
+                                     elapsed_s=_time.time() - _t0)
+            except Exception:                                  # noqa: BLE001
+                diag = {"error_type": type(exc).__name__,
+                        "diagnostic_failed": True}
+            # ── THE COOLDOWN, ACTIVATED FROM THE OBSERVED STATUS ─────
+            #
+            # It was never activated on this path at all. `penalize()`
+            # existed and nothing on the scheduled read called it, so an
+            # observed 429 changed nothing and the next candidate read
+            # went out on the ordinary gap. `penalize_observed` now sets
+            # BOTH the reduced-rate period AND the hard not-before
+            # instant, which are different quantities and were being
+            # reported as one.
+            if diag.get("is_rate_limited"):
+                try:
+                    from . import venue_pace as _vp
+                    out["cooldown"] = _vp.penalize_observed(
+                        retry_after_s=diag.get("retry_after_s"),
+                        reason="VENUE_429_ON_BOOK_READ")
+                    # DURABLE, so a restart does not resume at full rate
+                    # at the worst possible moment. Queued rather than
+                    # written here: this function has no database handle
+                    # and must not acquire one on a market-data path.
+                    #
+                    # BOTH INSTANTS ARE HANDED OVER. `cooldown_state()`
+                    # knows only the reduced-rate expiry; the prohibition
+                    # is the gate's, and storing one without the other is
+                    # the conflation this repair exists to end.
+                    from . import venue_cooldown_store as _vcs
+                    _cd = out["cooldown"] or {}
+                    _nb = (_cd.get("not_before") or {}) if isinstance(
+                        _cd.get("not_before"), dict) else {}
+                    out["cooldown_persistence"] = _vcs.queue_save({
+                        "not_before_epoch_s": _nb.get("not_before_epoch_s"),
+                        "reduced_rate_until_epoch_s":
+                            _cd.get("expires_at_epoch_s"),
+                        "retry_after_s": _cd.get("retry_after_s"),
+                        "reason": _cd.get("reason")
+                                  or "VENUE_429_ON_BOOK_READ",
+                    })
+                except Exception as pexc:                      # noqa: BLE001
+                    out["cooldown"] = {"applied": False,
+                                       "why": type(pexc).__name__}
+            last = (_dispatch + 1) >= BOOK_READ_MAX_DISPATCHES
+            if last or not _book_read_worth_retrying(diag):
+                out["error"] = diag.get("error_type") or type(exc).__name__
+                out["error_detail"] = diag
+                out["http_observer"] = observer
+                if retries:
+                    out["our_retries"] = retries
+                out["dispatches_we_attempted"] = _dispatch + 1
+                out["why_no_further_attempt"] = (
+                    "BOOK_READ_MAX_DISPATCHES_REACHED" if last
+                    else "THE_FAILURE_IS_NOT_RETRYABLE")
+                return out
+            # WAIT THROUGH THE GATE, WHICH IS WHERE THE DEADLINE LIVES.
+            # Not `time.sleep(backoff)`: the gate holds the venue's own
+            # window and knows the caller's deadline, so a wait that would
+            # outlive the decision raises instead of sleeping. Sleeping
+            # here and letting the transport refuse afterwards would burn
+            # the deadline to earn a refusal.
+            try:
+                waited = _grt.check_before_dispatch(
+                    read_id=_grt.current_read())
+            except Exception:                                  # noqa: BLE001
+                # Including VenueGateRefusal: the cooldown outlasts the
+                # deadline, so there is no retry to make. Re-raised so the
+                # caller attributes the refusal to us.
+                raise
+            retries.append({"after_error": diag.get("error_type"),
+                            "http_status": diag.get("http_status"),
+                            "retry_after_s": diag.get("retry_after_s"),
+                            "waited_s": round(waited.get("waited_s") or 0.0, 3),
+                            "waited_because": waited.get("reason")})
     out["http_observer"] = observer
+    if retries:
+        out["our_retries"] = retries
     # TAKEN, not peeked: a header set reused on a later read is the exact
     # failure this evidence exists to detect.
     out["http_observation"] = (_vho.take(obs_path)

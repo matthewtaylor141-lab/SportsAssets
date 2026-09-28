@@ -52,6 +52,23 @@ except Exception:                                              # noqa: BLE001
 
 R_COOLDOWN_EXCEEDS_DEADLINE = "VENUE_COOLDOWN_EXCEEDS_THE_DECISION_DEADLINE"
 R_DEADLINE_PASSED = "DECISION_DEADLINE_PASSED_BEFORE_DISPATCH"
+R_HOLD_EXCEEDS_UNDEADLINED_CAP = "VENUE_COOLDOWN_EXCEEDS_THE_UNDEADLINED_WAIT_CAP"
+
+#: The longest this gate will sleep for a caller that supplied NO deadline.
+#:
+#: WHY A CAP AND NOT AN HONEST "WAIT AS LONG AS THE HOLD SAYS". Not every
+#: caller on this lane is a scheduled decision with a deadline -- the desk
+#: sweep and the reconciliation reads are not -- and for those `dl` is None,
+#: which took the sleep branch unconditionally. A 600-second `Retry-After`
+#: would then have parked a request thread for ten minutes and dispatched it
+#: afterwards, which is the exact failure the deadline check exists to
+#: prevent, merely reached by the path that has no deadline to check.
+#:
+#: A CAP IS NOT A DEADLINE. It does not pretend to know when the caller
+#: stopped caring; it only refuses to hold a thread open indefinitely on a
+#: guess. A caller that genuinely can wait passes its own deadline and gets
+#: the deadline rule instead.
+MAX_UNDEADLINED_WAIT_S = 20.0
 
 _LOCK = threading.Lock()
 #: The hard gate: no applicable request dispatches before this epoch.
@@ -199,6 +216,20 @@ def check_before_dispatch(*, read_id: str = None, deadline_epoch_s=None,
         return {"waited_s": 0.0, "gated": False}
 
     wait = g["seconds_left"]
+    if dl is None and wait > MAX_UNDEADLINED_WAIT_S:
+        detail = {"refusal": R_HOLD_EXCEEDS_UNDEADLINED_CAP,
+                  "seconds_left": round(wait, 3),
+                  "not_before_epoch_s": g["not_before_epoch_s"],
+                  "cap_s": MAX_UNDEADLINED_WAIT_S,
+                  "reason": g["reason"],
+                  "why": ("this caller supplied no deadline, so there is no "
+                          "instant at which waiting becomes pointless -- and "
+                          "a thread parked for the whole hold would dispatch "
+                          "long after anything was listening. Refused at the "
+                          "cap instead. A caller that can genuinely wait "
+                          "should pass a deadline and be judged against it")}
+        _note_gate_refusal(read_id, detail)
+        raise VenueGateRefusal(R_HOLD_EXCEEDS_UNDEADLINED_CAP, detail)
     if dl is not None and (wall + wait) > float(dl):
         detail = {"refusal": R_COOLDOWN_EXCEEDS_DEADLINE,
                   "seconds_left": round(wait, 3),
@@ -315,4 +346,5 @@ __all__ = ["PacedTransport", "begin_read", "end_read", "read_state",
            "clear_hold", "check_before_dispatch", "note_dispatch",
            "note_response", "bind_read", "current_read",
            "VenueGateRefusal", "R_COOLDOWN_EXCEEDS_DEADLINE",
-           "R_DEADLINE_PASSED"]
+           "R_DEADLINE_PASSED", "R_HOLD_EXCEEDS_UNDEADLINED_CAP",
+           "MAX_UNDEADLINED_WAIT_S"]

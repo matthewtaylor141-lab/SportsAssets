@@ -55,14 +55,45 @@ def _clean_state():
     Both are module globals, so a test that left either armed would make
     the next one pass or fail for the wrong reason.
     """
+    from sportsassets import venue_cooldown_store as VCS
+    from sportsassets import venue_request_gate as GRT
+
     VHO.reset_attempts()
     VP.resume_cooldown(0)
     VP._penalty_until = 0.0
     VP._penalty_until_epoch = 0.0
+    # ── THE HARD GATE TOO, NOW THAT A 429 ACTUALLY ARMS ONE ──────────
+    # `penalize_observed` sets a not-before instant as well as the
+    # reduced-rate period. A test that armed it and did not clear it would
+    # make the NEXT test's first dispatch sleep or refuse -- passing or
+    # failing for a reason that has nothing to do with what it asserts.
+    GRT.clear_hold()
+    VCS.reset_pending()
     yield
     VHO.reset_attempts()
     VP._penalty_until = 0.0
     VP._penalty_until_epoch = 0.0
+    GRT.clear_hold()
+    VCS.reset_pending()
+
+
+class _StatusError(Exception):
+    """A stand-in for the SDK's `APIStatusError`, shaped like the real one.
+
+    `venue_http_error.describe` reads `status_code` off the exception and
+    `headers` off `exception.response`, which is exactly how
+    `polymarket-us` 1.0.2 raises: it passes the whole `httpx.Response`. A
+    double that only carried a status would let the header-parsing paths go
+    untested while looking tested.
+    """
+
+    def __init__(self, status: int, headers: dict = None, *, request=None):
+        super().__init__("status %s" % status)
+        self.status_code = status
+        self.response = httpx.Response(
+            status, headers=dict(headers or {}),
+            request=request or httpx.Request("GET", "https://api.test/x"))
+        self.request_id = "corr-%s" % status
 
 
 def _client_with(transport, path="/v1/markets/aec-mlb-chc-sd-2026-09-30/book"):
@@ -339,16 +370,114 @@ def test_the_sdk_retry_behaviour_is_not_assumed():
         "only place an SDK-internal retry is visible")
 
 
-def test_the_pyproject_range_is_recorded_as_unbounded():
-    """A client whose retry count changes the request rate needs a bound.
+def test_the_venue_sdk_is_pinned_to_exactly_one_version():
+    """The dependency is DECIDED, and the decision is reproducible.
 
-    Not fixed here, because pinning it is a dependency decision with its
-    own release consequences -- but recorded so it is not rediscovered,
-    and so nobody reads the attempt accounting as making the range safe.
+    ── WHAT THIS REPLACES ───────────────────────────────────────────
+    This test used to assert that `pyproject.toml` still read
+    `polymarket-us>=0.1.2` -- that is, its success REQUIRED the dependency
+    to remain unpinned. It was written to stop the defect being
+    rediscovered, and it had the effect of defending it: fixing the range
+    would have failed the suite.
+
+    A test may record an open question. It must not make closing the
+    question a failure. The range is now pinned and this asserts the pin,
+    in both places it has to hold:
+
+      * `pyproject.toml`, which decides what an image INSTALLS;
+      * `venue_sdk.PINNED`, which decides what the running process
+        reports and what `_get_client` constructs against.
+
+    Two files can disagree, and a disagreement means the deployed image
+    and the deployed code's own account of itself have come apart -- so
+    the equality is asserted rather than either one alone.
     """
     import pathlib
 
+    from sportsassets import venue_sdk
+
     root = pathlib.Path(__file__).resolve().parents[1]
     txt = (root / "pyproject.toml").read_text()
-    assert "polymarket-us>=0.1.2" in txt, (
-        "if this pin changes, revisit the attempt-accounting rationale")
+    assert "polymarket-us==%s" % venue_sdk.PINNED in txt, (
+        "pyproject must pin the SDK to exactly the version venue_sdk "
+        "names; a range lets the image resolve a different client than "
+        "the tests ran against, which is how a 3x request amplification "
+        "reached production unseen")
+    assert ">=0.1.2" not in txt.split("polymarket-us")[1][:20], (
+        "an unbounded floor must not survive alongside the pin")
+
+
+def test_the_installed_sdk_is_the_pinned_one_and_its_retries_are_off():
+    """What the tests run against, and what it was told to do.
+
+    THE POINT IS THE CONJUNCTION. A pinned version with SDK retries still
+    enabled would make two retry mechanisms (ours and its) multiply into
+    six requests for one answer; SDK retries off under an unknown version
+    would be a claim about a build we did not identify.
+    """
+    from sportsassets import venue_sdk
+
+    rep = venue_sdk.report()
+    assert rep["installed"] == venue_sdk.PINNED, (
+        "the environment running these tests resolved %r, not the pinned "
+        "%r -- every retry and rate assertion below describes a different "
+        "client than production's" % (rep["installed"], venue_sdk.PINNED))
+    assert rep["pinned_matches_installed"] is True
+    assert rep["max_retries_kwarg_accepted"] is True
+    assert rep["sdk_retries_disabled"] is True
+    assert rep["our_client_kwargs"] == {"max_retries": 0}
+    assert rep["refusals"] == []
+
+
+def test_the_pinned_sdk_never_retries_an_order_submission():
+    """Read out of the installed build, not assumed from its docstring.
+
+    The venue has no idempotency key, so a retried POST can submit a
+    second order. This is the one retry property that cannot be allowed to
+    change quietly under a version bump, and it is asserted against the
+    module that decides it rather than against a comment about it.
+    """
+    from sportsassets import venue_sdk
+
+    facts = venue_sdk.retry_facts()
+    assert facts["module_readable"] is True
+    assert facts["post_is_retried"] is False, (
+        "the installed SDK would retry POST, which on a venue with no "
+        "idempotency key can duplicate an order")
+    assert "POST" not in (facts["idempotent_methods"] or [])
+    # And the retryable set is the one the retry policy was written against.
+    assert facts["matches_expected"] is True, (
+        "the installed build's retryable statuses or methods differ from "
+        "the set this repository's retry policy was designed against: %r"
+        % (facts,))
+
+
+def test_the_sdk_drops_a_date_form_retry_after_and_we_do_not():
+    """Why our own Retry-After parse is not redundant with the SDK's.
+
+    1.0.2's `retry_after_seconds` does `float(header)` and returns None on
+    anything else, so `Retry-After: <HTTP-date>` -- the form RFC 9110
+    §10.2.3 permits -- becomes "no Retry-After" there. Ours parses both,
+    and ours is the one that arms the cooldown. If a future version starts
+    parsing dates this still passes; if OURS stops, it fails.
+    """
+    from datetime import datetime, timedelta, timezone
+    from email.utils import format_datetime
+
+    from sportsassets import venue_http_error as VHE
+    from sportsassets import venue_sdk
+
+    facts = venue_sdk.retry_facts()
+    assert facts["retry_after_header_parsed"]["integer_seconds"] == 30.0
+    assert facts["retry_after_header_parsed"]["http_date"] is None, (
+        "if the SDK now parses HTTP-date Retry-After, that is good news, "
+        "but the cooldown still reads ours -- update this note rather "
+        "than deleting the assertion")
+
+    when = datetime.now(timezone.utc) + timedelta(seconds=90)
+    exc = _StatusError(429, {"retry-after": format_datetime(when)})
+    got = VHE.describe(exc, endpoint="markets.book")
+    assert got["is_rate_limited"] is True
+    assert got["retry_after_s"] is not None, (
+        "a date-form Retry-After must not become 'no Retry-After'")
+    assert 60 <= got["retry_after_s"] <= 120

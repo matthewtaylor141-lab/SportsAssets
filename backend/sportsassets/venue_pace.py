@@ -97,6 +97,14 @@ MIN_GAP_S = 0.35
 # last 429 any lane read
 PENALTY_MULT = 2.0
 PENALTY_S = 600.0
+# ── THE PROHIBITION, WHICH IS NOT PENALTY_S ─────────────────────────
+# The HARD not-before window applied on an observed 429 when the venue
+# supplied no `Retry-After`. A floor, not an estimate of the venue's
+# window: it exists so an unlabelled 429 still stops a send, and it is
+# short because a long hard halt would also stop reconciliation and the
+# servicing of inventory we already hold. When the venue DOES name a
+# window, that window is used and this floor is irrelevant.
+GATE_FLOOR_S = 5.0
 # THE PRIORITY CLAIM'S STARVATION BOUND (E11): at most this many
 # consecutive priority claims while a normal claimant waits, then one
 # normal. Twelve as ratelimit.PRIORITY_BURST: two waves of the live
@@ -283,6 +291,42 @@ def penalize_observed(*, retry_after_s=None, reason=None,
         _penalty_until_epoch = wall + hold
         _penalty_reason = reason
         _penalty_retry_after_s = ra
+    # ── AND NOW THE PART THAT ACTUALLY PREVENTS A REQUEST ────────────
+    #
+    # Everything above this line is a REDUCED RATE: it multiplies the
+    # inter-request gap by PENALTY_MULT for PENALTY_S seconds. An
+    # independent reproduction showed precisely what that is worth --
+    # with `Retry-After: 60` reported as a 600-second hold, the next read
+    # completed ~0.7 s later, which is 0.35 × 2.0. Calling that "the
+    # cooldown armed" was wrong.
+    #
+    # THE TWO QUANTITIES ARE DIFFERENT AND ARE NOW BOTH SET:
+    #
+    #   NOT-BEFORE      a hard instant before which NO request dispatches.
+    #                   `Retry-After` when the venue supplied one, because
+    #                   the venue saying when we may send again is better
+    #                   evidence than a number we chose; otherwise
+    #                   GATE_FLOOR_S, which is a floor and not a guess at
+    #                   the venue's window.
+    #   REDUCED RATE    PENALTY_S at PENALTY_MULT, unchanged, and no longer
+    #                   mistaken for the gate.
+    #
+    # The not-before is deliberately NOT PENALTY_S. A 600-second hard halt
+    # of the whole lane on one 429 would stop reconciliation and servicing
+    # of held inventory, which is the opposite of protective. The venue's
+    # own window is the prohibition; our 600 seconds is the caution.
+    gate = {"armed": False, "why": "gate module unavailable"}
+    try:
+        from . import venue_request_gate as _grt
+        not_before_s = max(float(GATE_FLOOR_S), ra if ra is not None else 0.0)
+        gate = dict(_grt.hold_until(until_epoch_s=wall + not_before_s,
+                                    reason=reason or "VENUE_RATE_LIMITED"),
+                    armed=True, not_before_s=not_before_s,
+                    not_before_is=("RETRY_AFTER" if (ra is not None
+                                                    and ra > GATE_FLOOR_S)
+                                   else "OUR_GATE_FLOOR"))
+    except Exception as exc:                                   # noqa: BLE001
+        gate = {"armed": False, "why": type(exc).__name__}
     return {"applied": True, "hold_s": hold,
             "retry_after_s": ra,
             "floor_s": PENALTY_S,
@@ -290,6 +334,10 @@ def penalize_observed(*, retry_after_s=None, reason=None,
                         else "OUR_FLOOR"),
             "expires_at_epoch_s": wall + hold,
             "reason": reason,
+            # NAMED SO THE TWO CANNOT BE READ AS ONE. `hold_s` is the
+            # reduced-rate period; `not_before` is the prohibition.
+            "what_hold_s_is": "REDUCED_RATE_PERIOD_NOT_A_PROHIBITION",
+            "not_before": gate,
             "portable_expiry_is_epoch_not_monotonic": (
                 "monotonic is comparable only within one process and one "
                 "boot, so the epoch value is the one fit to persist")}
@@ -363,4 +411,5 @@ def effective_gap(min_gap_s: float = MIN_GAP_S) -> float:
 
 __all__ = ["pace", "priority_claims", "waiting", "lane_stats", "penalize", "penalty_left",
            "penalize_observed", "cooldown_state", "resume_cooldown",
-           "effective_gap", "MIN_GAP_S", "PENALTY_MULT", "PENALTY_S", "PACE_PRIORITY_BURST"]
+           "effective_gap", "MIN_GAP_S", "PENALTY_MULT", "PENALTY_S",
+           "GATE_FLOOR_S", "PACE_PRIORITY_BURST"]

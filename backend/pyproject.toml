@@ -17,7 +17,15 @@ dependencies = [
     "pycryptodome>=3.20",
     "reportlab>=4.0",
     "py-clob-client>=0.17",
-    "polymarket-us>=0.1.2",
+    # PINNED EXACTLY, not a floor. `pip install .` in the image resolved
+    # `>=0.1.2` to whatever PyPI had latest at build time -- which is how
+    # this container ran 0.1.2 (no retry logic) while the deployed image ran
+    # 1.0.2 (max_retries=2, so one call makes three HTTP attempts). The
+    # local tests could not have caught the 429 amplification because they
+    # were exercising a different client. 1.0.2 is the version the deployed
+    # image already resolved; the reasoning, the interface check and the
+    # retry facts are in `sportsassets/venue_sdk.py`.
+    "polymarket-us==1.0.2",
     # E35 (2026-09-10): the institutional preprod adapter (sportsassets/pmx.py)
     # signs its RS256 client assertion with PyJWT (cryptography above is
     # its backend) and speaks REST through requests

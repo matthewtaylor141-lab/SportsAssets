@@ -30,7 +30,106 @@ This module does no I/O of its own: the caller supplies the connection, so
 it cannot open a second pool or block an event loop.
 """
 
+import threading
+import time
+
 KEY_PREFIX = "venue_cooldown"
+
+#: ── THE HANDOFF, BECAUSE THE OBSERVER OF A 429 HAS NO DATABASE ──────
+#:
+#: `pmus.book_read` is the only place that sees the rate-limit response, and
+#: it is a synchronous market-data function called from a worker thread. It
+#: has no connection and must not acquire one: opening a pool on a
+#: market-data path, or blocking a thread on a write while a decision
+#: deadline runs down, trades the thing we are protecting for the record of
+#: having protected it.
+#:
+#: So the observation is QUEUED here -- one slot, last writer wins, because
+#: `hold_until` extends only and the newest state already subsumes the older
+#: -- and the loop drains it to the database on its own cycle, where it has
+#: a connection and can await.
+#:
+#: A QUEUED SAVE IS NOT A SAVE, and `queue_save` says so in its return. The
+#: distinction matters: if the process dies between the 429 and the drain,
+#: the hold is lost, and that window is reported rather than papered over.
+_pending_lock = threading.Lock()
+_pending: dict | None = None
+_drain_stats = {"queued": 0, "drained": 0, "dropped_superseded": 0,
+                "save_failed": 0}
+
+
+def queue_save(state: dict) -> dict:
+    """Hand a fresh cooldown to whoever next has a connection.
+
+    Returns what it did, and explicitly does NOT claim the hold is durable
+    yet. Nothing here awaits, raises, or touches a socket.
+    """
+    global _pending
+    if not isinstance(state, dict):
+        return {"queued": False, "why": "no cooldown state to queue"}
+    row = dict(state)
+    row["written_at_epoch_s"] = time.time()
+    with _pending_lock:
+        superseded = _pending is not None
+        _pending = row
+        _drain_stats["queued"] += 1
+        if superseded:
+            _drain_stats["dropped_superseded"] += 1
+    return {"queued": True,
+            "is_durable_yet": False,
+            "superseded_an_undrained_one": superseded,
+            "why_not_written_here": (
+                "the 429 is observed on a synchronous market-data path with "
+                "no connection; writing from here would mean opening a pool "
+                "on the read path or blocking a decision on a write"),
+            "durable_after": "the loop's next drain_pending(conn)"}
+
+
+def pending() -> dict | None:
+    """The undrained cooldown, if any. For tests and for the heartbeat."""
+    with _pending_lock:
+        return dict(_pending) if _pending else None
+
+
+def drain_stats() -> dict:
+    with _pending_lock:
+        return dict(_drain_stats)
+
+
+def reset_pending() -> None:
+    """Tests only."""
+    global _pending
+    with _pending_lock:
+        _pending = None
+        for k in _drain_stats:
+            _drain_stats[k] = 0
+
+
+async def drain_pending(conn, **kw) -> dict:
+    """Write a queued cooldown, if there is one. Called by the loop.
+
+    THE QUEUE IS CLEARED ONLY ON A SUCCESSFUL WRITE. A failed write leaves
+    the observation pending so the next cycle tries again -- dropping it
+    would turn a transient database error into a silently forgotten hold.
+    """
+    global _pending
+    with _pending_lock:
+        row = dict(_pending) if _pending else None
+    if row is None:
+        return {"drained": False, "nothing_pending": True}
+    res = await save(conn, row, **kw)
+    with _pending_lock:
+        if res.get("saved"):
+            # Only if it is still the same observation: a newer 429 during
+            # the write must not be discarded by our success.
+            if _pending is not None and (
+                    _pending.get("written_at_epoch_s")
+                    == row.get("written_at_epoch_s")):
+                _pending = None
+            _drain_stats["drained"] += 1
+        else:
+            _drain_stats["save_failed"] += 1
+    return dict(res, drained=bool(res.get("saved")))
 
 #: The scope a stored hold applies to. `CREDENTIAL` is the default because
 #: an API key is the narrowest thing the venue could plausibly count, and
@@ -60,19 +159,47 @@ async def save(conn, state: dict, *, venue: str = "PMUS",
     import json
 
     k = key_for(venue=venue, scope=scope, credential_id=credential_id)
+    # ── TWO INSTANTS, STORED SEPARATELY, BECAUSE THEY ARE TWO CONTROLS ──
+    #
+    # This row used to hold one number under one name, which is the same
+    # conflation that let a doubled 0.35 s gap be reported as a 600-second
+    # cooldown. They are not the same quantity and they do not expire
+    # together:
+    #
+    #   not_before_epoch_s     the HARD prohibition. The venue's own
+    #                          `Retry-After` when it named one, else our
+    #                          short floor. Usually seconds.
+    #   reduced_rate_until_epoch_s
+    #                          the longer period during which the ordinary
+    #                          gap is multiplied. Usually ten minutes.
+    #
+    # A restart that restored only the first would resume at full rate after
+    # a few seconds; one that restored only the second would be free to send
+    # immediately and merely slowly.
+    nb = state.get("not_before_epoch_s")
+    if nb is None:
+        nb = ((state.get("not_before") or {}).get("not_before_epoch_s")
+              if isinstance(state.get("not_before"), dict) else None)
+    rr = (state.get("reduced_rate_until_epoch_s")
+          or state.get("expires_at_epoch_s"))
     row = {
-        "not_before_epoch_s": state.get("not_before_epoch_s")
-                              or state.get("expires_at_epoch_s"),
+        "not_before_epoch_s": nb,
+        "reduced_rate_until_epoch_s": rr,
         "reason": state.get("reason"),
         "retry_after_s": state.get("retry_after_s"),
         "scope": scope,
         "venue": venue,
         "written_at_epoch_s": state.get("written_at_epoch_s"),
+        "what_these_two_are": (
+            "not_before_epoch_s is a prohibition; "
+            "reduced_rate_until_epoch_s is a slower rate. Separate "
+            "instants, separately restored"),
         "expiry_is_epoch_not_monotonic": (
             "monotonic is comparable only within one process and one boot; "
             "this value is wall-clock and safe to read back elsewhere"),
     }
-    if row["not_before_epoch_s"] is None:
+    if row["not_before_epoch_s"] is None and row[
+            "reduced_rate_until_epoch_s"] is None:
         return {"saved": False, "why": "no expiry instant to store", "key": k}
     try:
         await conn.execute(
@@ -117,14 +244,28 @@ async def load_and_resume(conn, *, venue: str = "PMUS",
     from . import venue_pace as vp
     from . import venue_request_gate as grt
 
-    exp = row.get("not_before_epoch_s")
-    gate = grt.hold_until(until_epoch_s=exp,
+    # EACH CONTROL FROM ITS OWN FIELD. A row written before the two were
+    # separated carries only `not_before_epoch_s`; that value is then used
+    # for both, and `row_predates_the_split` says so rather than letting the
+    # reader assume the reduced-rate period was genuinely that short.
+    nb = row.get("not_before_epoch_s")
+    rr = row.get("reduced_rate_until_epoch_s")
+    predates = rr is None
+    if predates:
+        rr = nb
+    gate = grt.hold_until(until_epoch_s=nb,
                           reason=row.get("reason") or "RESUMED_AFTER_RESTART")
-    rate = vp.resume_cooldown(exp, reason=row.get("reason"))
-    return {"resumed": bool(gate.get("applied") and rate.get("resumed")),
+    rate = vp.resume_cooldown(rr, reason=row.get("reason"))
+    # RESUMED MEANS SOMETHING WAS RE-ARMED, not that both were. An expired
+    # stored instant legitimately re-arms nothing, and that is reported as
+    # expired rather than as a failure.
+    return {"resumed": bool(gate.get("applied") or rate.get("resumed")),
             "key": k, "stored": True, "row": row,
             "gate": gate, "reduced_rate": rate,
-            "both_controls_restored": (
+            "row_predates_the_split": predates,
+            "both_controls_restored": bool(gate.get("applied")
+                                           and rate.get("resumed")),
+            "why_both": (
                 "the not-before gate and the reduced-rate period are "
                 "separate controls and both are re-armed; restoring one "
                 "would leave the process either free to send or merely "
@@ -132,4 +273,6 @@ async def load_and_resume(conn, *, venue: str = "PMUS",
 
 
 __all__ = ["save", "load_and_resume", "key_for", "KEY_PREFIX",
-           "SCOPE_CREDENTIAL", "SCOPE_ACCOUNT", "SCOPE_UNKNOWN"]
+           "SCOPE_CREDENTIAL", "SCOPE_ACCOUNT", "SCOPE_UNKNOWN",
+           "queue_save", "drain_pending", "pending", "drain_stats",
+           "reset_pending"]

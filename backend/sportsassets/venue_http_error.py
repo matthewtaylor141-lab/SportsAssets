@@ -108,6 +108,33 @@ def _safe_url(request) -> dict:
     return out
 
 
+#: Classes that mean "no answer arrived in time". Named rather than
+#: matched on `isinstance`, because this module must classify an exception
+#: from the venue SDK, from `httpx`, or from a test double, and importing
+#: either to compare types would make the diagnostic depend on the thing
+#: it is describing. `_TIMEOUT_CLASSES` is a whitelist; `describe` ALSO
+#: matches any class name containing "timeout", so a renamed or
+#: version-specific timeout class is still recognised.
+_TIMEOUT_CLASSES = frozenset({
+    "APITimeoutError",        # polymarket-us 1.0.2
+    "TimeoutException", "ConnectTimeout", "ReadTimeout",
+    "WriteTimeout", "PoolTimeout",                      # httpx
+})
+
+#: Classes that mean "the connection failed before any response". The
+#: pinned SDK collapses every `httpx.TransportError` into
+#: `APIConnectionError`, so that one name covers the SDK path; the httpx
+#: names are here for the observer and for any caller that sees the raw
+#: exception.
+_TRANSPORT_CLASSES = frozenset({
+    "APIConnectionError",     # polymarket-us 1.0.2
+    "TransportError", "ConnectError", "ReadError", "WriteError",
+    "NetworkError", "ProtocolError", "LocalProtocolError",
+    "RemoteProtocolError", "ProxyError", "UnsupportedProtocol",
+    "CloseError",                                       # httpx
+})
+
+
 def describe(exc, *, endpoint: str = None, attempts: int = None,
              elapsed_s: float = None) -> dict:
     """Everything a reader needs about a failed venue call, and no secrets.
@@ -166,6 +193,19 @@ def describe(exc, *, endpoint: str = None, attempts: int = None,
     except Exception:                                          # noqa: BLE001
         pass
 
+    # THE SDK'S OWN CORRELATION ID, when the headers carried none. 1.0.2
+    # sets `request_id` on every error it raises (its `poly-correlation-id`),
+    # and that is the handle venue-side support can trace -- worth more than
+    # a null field, and it is not a secret.
+    if out["request_id"] is None:
+        try:
+            rid = getattr(exc, "request_id", None)
+            if rid:
+                out["request_id"] = sanitize(str(rid), 80)
+                out["request_id_source"] = "SDK_CORRELATION_ID"
+        except Exception:                                      # noqa: BLE001
+            pass
+
     # RATE LIMITING IS RECOGNISED BY STATUS *OR* CLASS, not one alone. The
     # status is the authority; the class name is the fallback for a
     # transport that raised before a response existed. Requiring both
@@ -173,7 +213,35 @@ def describe(exc, *, endpoint: str = None, attempts: int = None,
     out["is_rate_limited"] = bool(
         out["http_status"] == 429
         or "ratelimit" in out["error_type"].lower().replace("_", ""))
+
+    # ── WHETHER A SECOND DISPATCH COULD ANSWER DIFFERENTLY ───────────
+    #
+    # CLASSIFIED HERE, where the exception is in hand, rather than at the
+    # retry site from a list of class names. A caller matching on names
+    # re-derives this and drifts; and the distinction it needs is not
+    # visible from a name alone:
+    #
+    #   NO RESPONSE AT ALL is not "not retryable". A connection reset or a
+    #   read timeout before any status is exactly the transient case a
+    #   second attempt exists for, and it is the case that reported
+    #   `attempts: null` before the transport counted dispatches.
+    #
+    #   A LOCAL REFUSAL is also response-less and is NOT retryable. Our own
+    #   gate raises its own type and never reaches here; anything else
+    #   response-less that is not a timeout or transport class is reported
+    #   as unclassified rather than assumed transient.
+    out["has_response"] = bool(resp is not None)
+    name = out["error_type"]
+    out["is_timeout"] = bool(name in _TIMEOUT_CLASSES
+                             or "timeout" in name.lower())
+    out["is_transport_failure"] = bool(resp is None
+                                       and (out["is_timeout"]
+                                            or name in _TRANSPORT_CLASSES))
+    out["transience_is_unclassified"] = bool(
+        resp is None and not out["is_transport_failure"]
+        and not out["is_rate_limited"])
     return out
 
 
-__all__ = ["describe", "sanitize", "KEEP_HEADERS", "MAX_TEXT"]
+__all__ = ["describe", "sanitize", "KEEP_HEADERS", "MAX_TEXT",
+           "_TIMEOUT_CLASSES", "_TRANSPORT_CLASSES"]

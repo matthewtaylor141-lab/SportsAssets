@@ -218,6 +218,12 @@ class Leg:
                             "land exactly on it; the venue's push rule was "
                             "not captured, so that region has no known "
                             "payout" % (self.line, self.condition_id))
+            elif self.line.denominator == 1:
+                # Capturing prose is not a parsed payout instruction.
+                # Leg has no explicit push-payout representation yet.
+                gaps.append("integer line %s on %s can push; its push "
+                            "payout is not represented by this classifier"
+                            % (self.line, self.condition_id))
         if self.quantity < 0:
             gaps.append("quantity is negative on %s" % self.condition_id)
         return gaps
@@ -301,8 +307,8 @@ def _leg_payout_cents(leg: Leg, region: Region) -> int | None:
             return None
         if "50-50" in leg.void_rule or "50/50" in leg.void_rule:
             return CENTS // 2
-        if "refund" in leg.void_rule.lower():
-            return CENTS // 2            # refund of a $1 set is $0.50/side
+        # "Refund" alone does not specify fifty cents per contract.
+        # Do not invent a payout from a word in uncodified rule prose.
         return None
     if region.state == STATE_TIE:
         # A regulation tie in a two-outcome US moneyline. Polymarket's
@@ -334,6 +340,8 @@ def _leg_payout_cents(leg: Leg, region: Region) -> int | None:
         probe = region.lo if region.lo is not None else region.hi
         if probe is None:
             return None
+        if Fraction(probe) == leg.line:
+            return None                   # no explicit push payout supplied
         over = Fraction(probe) > leg.line
         if leg.over_under == "OVER":
             return CENTS if over else 0
@@ -351,6 +359,8 @@ def _leg_payout_cents(leg: Leg, region: Region) -> int | None:
     # Spread. `line` is the handicap applied to team A's margin, so the
     # A-side leg wins iff margin + line > 0, and the B-side leg is the
     # complement of that same test on the same condition.
+    if m + leg.line == 0:
+        return None                       # a push is not a B-side win
     a_side_wins = (m + leg.line) > 0
     return CENTS if (a_side_wins == (leg.backs == "A")) else 0
 
@@ -640,6 +650,10 @@ def allocate(legs: list[Leg], *, sport_permits_tie: bool,
     the same shares, so remaining quantity is decremented as structures
     are formed and the number of alternatives each lot HAD is reported
     separately rather than hidden by the choice.
+
+    Preference orders payoff shapes on matched units, independent of lot
+    sizes. This attributes inventory already held; it is not an order
+    selector or a claim that a middle has the best expected return.
     """
     remaining = {l.condition_id: l.quantity for l in legs}
     by_id = {l.condition_id: l for l in legs}
@@ -656,6 +670,18 @@ def allocate(legs: list[Leg], *, sport_permits_tie: bool,
             if s.taxonomy == UNESTABLISHABLE:
                 alloc.refused.append(s)
                 continue
+            if s.taxonomy == PARTIAL:
+                # Unequal quantities describe the unmatched remainder,
+                # not the matched units' payoff shape. Sorting PARTIAL
+                # last used to choose a full direct pair ahead of a
+                # smaller middle, despite the explicit MIDDLE preference.
+                # Validate the original legs above before normalising so
+                # invalid inventory cannot be hidden by setting q=1.
+                s = classify(_with_quantity(by_id[a_id], 1),
+                             _with_quantity(by_id[b_id], 1),
+                             sport_permits_tie=sport_permits_tie,
+                             fixture_can_void=fixture_can_void,
+                             fixture_can_postpone=fixture_can_postpone)
             pairs.append((s, a_id, b_id))
             alloc.ambiguity[a_id] += 1
             alloc.ambiguity[b_id] += 1

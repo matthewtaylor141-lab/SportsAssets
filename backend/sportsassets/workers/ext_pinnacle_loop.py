@@ -4377,6 +4377,95 @@ HEARTBEAT_KEY = "ext_pinnacle_last_cycle"
 #: cycle the thing every read returned.
 STANDBY_KEY = "ext_pinnacle_last_cycle_standby"
 
+#: ITS OWN ROW, WRITTEN ONCE PER BOOT. What the process found in storage at
+#: startup and which controls it re-armed. On the cycle row it would be
+#: overwritten within a cycle and the restart boundary -- the only thing this
+#: record is evidence of -- would be unobservable a minute later.
+COOLDOWN_RESUME_KEY = "ext_pinnacle_cooldown_resume"
+
+
+def _venue_sdk_digest() -> dict:
+    """The dependency position, small enough for a heartbeat row.
+
+    A SUBSET, not the whole report: the heartbeat is read on every cycle
+    and the full retry-facts block belongs in a diagnostic, not in a row
+    written every sixty seconds. The fields kept are the ones an operator
+    would act on -- which build is running, whether it is the chosen one,
+    and whether its own retries are off.
+
+    NEVER RAISES. A heartbeat that can fail on a version lookup would
+    lose the whole refusal census with it.
+    """
+    try:
+        from .. import venue_sdk
+        rep = venue_sdk.report()
+        return {
+            "pinned": rep["pinned"],
+            "installed": rep["installed"],
+            "pinned_matches_installed": rep["pinned_matches_installed"],
+            "sdk_retries_disabled": rep["sdk_retries_disabled"],
+            "our_max_dispatches_per_read": _max_dispatches(),
+            "post_is_retried_by_the_sdk":
+                (rep.get("sdk_retry_facts") or {}).get("post_is_retried"),
+            "refusals": rep["refusals"],
+        }
+    except Exception as exc:                                   # noqa: BLE001
+        return {"unavailable": type(exc).__name__}
+
+
+def _max_dispatches():
+    try:
+        from .. import pmus
+        return pmus.BOOK_READ_MAX_DISPATCHES
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def _rate_control_digest() -> dict:
+    """The prohibition and the reduced rate, SEPARATELY.
+
+    Reported as two fields with two names because they are two controls.
+    The previous single "cooldown" number was a reduced rate being read as
+    a prohibition, and an operator could not have told from the row.
+
+    `queued_but_not_yet_durable` is included deliberately: a cooldown
+    observed on the read path is durable only after the next drain, and
+    that window is a real gap rather than something to leave implicit.
+    """
+    out = {}
+    try:
+        from .. import venue_request_gate as grt
+        g = grt.gate_state()
+        out["not_before"] = {
+            "blocking_right_now": g["blocking"],
+            "seconds_left": round(g["seconds_left"], 3),
+            "reason": g["reason"],
+            "what_this_is": "A PROHIBITION: no request dispatches before it",
+        }
+        out["process_request_totals"] = grt.totals()
+    except Exception as exc:                                   # noqa: BLE001
+        out["not_before"] = {"unavailable": type(exc).__name__}
+    try:
+        from .. import venue_pace as vp
+        c = vp.cooldown_state()
+        out["reduced_rate"] = {
+            "active": c["active"],
+            "seconds_left": round(c["seconds_left"], 3),
+            "multiplier_while_active": c["multiplier_while_active"],
+            "retry_after_s": c["retry_after_s"],
+            "what_this_is": ("A SLOWER RATE, not a prohibition: it "
+                            "multiplies the inter-request gap"),
+        }
+    except Exception as exc:                                   # noqa: BLE001
+        out["reduced_rate"] = {"unavailable": type(exc).__name__}
+    try:
+        from .. import venue_cooldown_store as vcs
+        out["queued_but_not_yet_durable"] = bool(vcs.pending() is not None)
+        out["persistence"] = vcs.drain_stats()
+    except Exception as exc:                                   # noqa: BLE001
+        out["persistence"] = {"unavailable": type(exc).__name__}
+    return out
+
 
 def _code_identity() -> dict:
     """WHAT CODE THE ACTIVE WRITER IS RUNNING, from the writer itself.
@@ -4616,6 +4705,24 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
             key or HEARTBEAT_KEY, json.dumps({
                 "at": time.time(),
                 "writer": _code_identity(),
+                # ── WHICH VENUE CLIENT THIS PROCESS IS ACTUALLY RUNNING ──
+                #
+                # The image resolved `polymarket-us>=0.1.2` at build time,
+                # so the deployed retry behaviour was decided by whatever
+                # PyPI had latest that minute -- and nothing in the running
+                # system could be asked which one it got. This container had
+                # 0.1.2 (no retries) while the deployed image had 1.0.2
+                # (three attempts per call), which is why the local tests
+                # could not have seen the amplification.
+                #
+                # The version is now pinned, and it is REPORTED, because a
+                # build log is not available to an operator reading a
+                # heartbeat. `pinned_matches_installed: false` is the alarm.
+                "venue_sdk": _venue_sdk_digest(),
+                # AND THE TWO RATE CONTROLS AS THEY STAND RIGHT NOW. They
+                # are separate quantities (a prohibition and a slower rate)
+                # and were previously reported as one.
+                "venue_rate_controls": _rate_control_digest(),
                 "state": out.get("state"),
                 "evaluated": out.get("evaluated"),
                 "written": out.get("written"),
@@ -4719,9 +4826,61 @@ async def run(get_pool) -> None:
                 key=STANDBY_KEY)
             await asyncio.sleep(IDLE_POLL_S)
         log.info("ext_pinnacle: writer lock held (key %s)", LOCK_KEY)
+        # ── THE STORED VENUE COOLDOWN, READ BACK BEFORE THE FIRST READ ───
+        #
+        # THE FAIL-OPEN THIS CLOSES. Both rate controls lived in module
+        # globals and died with the process, so a crash-looping worker
+        # resumed at full rate immediately after the venue rate-limited us
+        # -- the worst possible moment, and the one most likely to follow a
+        # 429 storm. `resume_cooldown` and `cooldown_state` existed and a
+        # repository search found no production caller of either: a
+        # capability nothing invokes is not a capability, which is the third
+        # time that shape has been found on this path.
+        #
+        # PLACED AFTER THE LOCK AND BEFORE THE LOOP, deliberately. A standby
+        # process must not re-arm anything (it sends nothing), and the first
+        # cycle must not send before the stored prohibition is in force.
+        #
+        # A FAILED READ IS NOT "NO COOLDOWN". `load_and_resume` reports
+        # `read_failed` and this logs it as a warning rather than proceeding
+        # as though the venue were clear.
+        try:
+            from .. import venue_cooldown_store as _vcs
+            resumed = await _vcs.load_and_resume(conn)
+            if resumed.get("read_failed"):
+                log.warning("ext_pinnacle: the stored venue cooldown could "
+                            "NOT be read (%s) — proceeding without it, and "
+                            "this is unknown rather than clear",
+                            resumed.get("why"))
+            elif resumed.get("resumed"):
+                log.warning("ext_pinnacle: venue cooldown RESUMED from "
+                            "storage: %s", resumed)
+            else:
+                log.info("ext_pinnacle: no venue cooldown to resume (%s)",
+                         resumed.get("why"))
+            await _heartbeat(conn, {"state": "COOLDOWN_RESUME_AT_STARTUP",
+                                    "cooldown_resume": resumed},
+                             key=COOLDOWN_RESUME_KEY)
+        except Exception:                                      # noqa: BLE001
+            log.warning("ext_pinnacle: cooldown resume failed", exc_info=True)
         while True:
             delay = IDLE_POLL_S
             try:
+                # ── THE OTHER HALF OF DURABILITY ─────────────────────
+                # A 429 is observed on a synchronous market-data path with
+                # no connection, so it QUEUES its cooldown. This is where
+                # the connection exists. Drained BEFORE the cycle, so an
+                # observation from the previous cycle is durable before
+                # this one sends anything.
+                try:
+                    from .. import venue_cooldown_store as _vcs2
+                    if _vcs2.pending() is not None:
+                        drained = await _vcs2.drain_pending(conn)
+                        log.warning("ext_pinnacle: venue cooldown persisted "
+                                    "%s", drained)
+                except Exception:                              # noqa: BLE001
+                    log.warning("ext_pinnacle: cooldown drain failed",
+                                exc_info=True)
                 out = await cycle(conn)
                 log.info("ext_pinnacle: %s", out)
                 if out.get("ran"):
