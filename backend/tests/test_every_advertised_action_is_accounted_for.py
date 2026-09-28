@@ -184,3 +184,131 @@ def test_the_register_says_it_is_not_the_gate():
 def test_the_rule_is_quoted_not_paraphrased_away():
     d = AI.describe()
     assert "containment, not" in d["the_rule"]
+
+
+# ═════════════════════════════════════════════════════════════════════
+# 6 · THE VENUE SURFACE IS ENUMERATED, NOT SAMPLED (2026-09-28)
+# ═════════════════════════════════════════════════════════════════════
+#
+# Every "the venue does not support X" verdict in this register used to
+# rest on X not being MENTIONED in whichever pages had been read. That is
+# an argument from silence. Reading the API reference INDEX enumerates the
+# surface, so a missing operation becomes a positive finding -- and the
+# same read turned up TWO capabilities I had not known about, one of which
+# contradicted a conclusion I was about to ship.
+
+
+def test_the_authenticated_api_surface_is_enumerated_with_its_source():
+    s = AI.VENUE_SOURCES["authenticated_api_surface_is_enumerated"]
+    assert s["page"] == "docs.polymarket.us/api-reference/introduction"
+    assert s["retrieved"] == "2026-09-28"
+    # The three groups, in the venue's own words.
+    assert set(s["groups"]) == {"Orders", "Portfolio", "Account"}
+    # The order operations, in full -- so a later reader can check rather
+    # than trust that no merge hides among them.
+    for op in ("create-order", "close-position-order", "cancel-all-open-orders",
+               "modify-multiple-orders", "preview-order"):
+        assert op in s["order_operations"], op
+    for absent in ("merge", "split", "netting", "redeem", "convert",
+                   "combine"):
+        assert absent in s["no_operation_exists_for"], absent
+    # AND THE POINT: close-position is an order, not a merge.
+    assert "ORDER" in s["and_what_close_position_actually_is"]
+    assert "spread" in s["and_what_close_position_actually_is"]
+
+
+def test_merge_and_complete_pair_now_answer_the_venue_question():
+    """Both rested on 'establish whether the venue releases collateral'.
+
+    It is established: no. And both must cite the enumerated surface, so
+    the verdict is traceable to the index rather than to two sampled pages.
+    """
+    for name in ("MERGE", "COMPLETE_PAIR"):
+        a = AI.ACTIONS[name]
+        assert a["venue_question_answered"].startswith("NO")
+        assert "authenticated_api_surface_is_enumerated" in a["rests_on"]
+
+
+def test_merge_is_not_promoted_to_not_applicable_on_a_documentation_read():
+    """Two things are unread and either could change the verdict.
+
+    The register exists to avoid exactly this kind of early claim, so the
+    status must stay REQUIRED_BUT_UNAVAILABLE and say why.
+    """
+    a = AI.ACTIONS["MERGE"]
+    assert a["status"] == AI.REQUIRED_BUT_UNAVAILABLE
+    assert "NOT_APPLICABLE" in a["why_the_status_is_unchanged"]
+    deps = a["specific_remaining_dependencies"]
+    assert len(deps) >= 2
+    joined = " ".join(deps)
+    assert "combo" in joined.lower()
+    assert "Institutional" in joined
+
+
+def test_form_indirect_hedge_records_the_conclusion_i_corrected():
+    """I was about to ship 'needs a SECOND VENUE'. The API contradicts it.
+
+    `POST /v1/combos` takes 2-10 legs with independent sides on different
+    markets, on THIS venue. The correction has to be visible in the
+    register, not silently replaced -- otherwise the next reader inherits
+    my reasoning without knowing it was wrong once.
+    """
+    a = AI.ACTIONS["FORM_INDIRECT_HEDGE"]
+    assert a["status"] == AI.REQUIRED_BUT_UNAVAILABLE
+    cap = a["venue_capability_found"]
+    assert cap["endpoint"] == "POST /v1/combos"
+    assert "2-10" in cap["what_it_does"]
+    assert "second-venue premise" in cap["why_it_matters_here"]
+    # The status note must explain why a capability is not a path.
+    assert "VENUE CAPABILITY, not a verified path" in a["status_note"]
+    # And the open questions must be named, including the shared quota.
+    deps = " ".join(a["specific_remaining_dependencies"])
+    assert "invalid combination" in deps.lower()
+    assert "1,000 new instruments per week" in deps
+    assert "10 requests per 10 seconds" in deps
+
+
+def test_post_complement_names_a_taker_route_that_avoids_p_fill():
+    """P_FILL is about OUR RESTING order. A taker holds no queue position.
+
+    The venue states combos trade directly on the Orders API and that RFQ
+    use is optional, and the RFQ requester ACCEPTS a quote. Both are
+    taker-side, so the unmeasurable input is not on that path -- while the
+    maker path's blocker is unchanged.
+    """
+    a = AI.ACTIONS["POST_COMPLEMENT"]
+    r = a["a_taker_route_may_avoid_p_fill_entirely"]
+    assert "optional" in r["route_1"].lower()
+    assert "accept" in r["route_2"].lower()
+    assert "TAKER-side" in r["why_p_fill_does_not_apply"]
+    assert "no queue position" in r["why_p_fill_does_not_apply"]
+    # IT MUST NOT CLAIM THE ECONOMICS. A taker pays the spread.
+    assert "spread" in r["and_what_is_still_needed"]
+    assert "NOT been run" in r["and_what_is_still_needed"]
+    # AND the submitted-is-not-filled semantic must be carried over.
+    assert "do not mean the orders" in r["and_one_semantic_the_lane_must_carry"]
+    # The maker-side dependency stays exactly as it was.
+    assert "BETTOR_NATIVE_ADMITTED_FILLS_REQUIRED" in a[
+        "specific_remaining_dependency"]
+    assert "DOWNSTREAM of funded activation" in a["cannot_be_completed_before"]
+
+
+def test_the_combo_freshness_blocker_is_not_forgotten():
+    """A combo book needs currency evidence too, and none is available.
+
+    The most likely way to fool oneself here is to treat a newly-found
+    venue capability as a way around the blocker that stops every exit
+    today. It is not: the same freshness mechanism is missing.
+    """
+    a = AI.ACTIONS["POST_COMPLEMENT"]
+    deps = " ".join(a["specific_remaining_dependencies_for_the_taker_route"])
+    assert "freshness" in deps
+    assert "blocks every exit today" in deps
+
+
+def test_the_count_of_unfinished_capabilities_is_still_four():
+    """Nothing was promoted on a documentation read. The system is not
+    complete and the headline number must not have quietly improved."""
+    assert len(AI.unfinished_actions()) == 4
+    assert AI.describe()["unfinished_count"] == 4
+    assert "NOT complete" in AI.describe()["so_the_honest_summary"]
