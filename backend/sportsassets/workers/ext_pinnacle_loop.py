@@ -83,6 +83,56 @@ CYCLE_S = 900.0
 #: without bound is the thing the execution-discipline rule forbids.
 MAX_PER_CYCLE = 40
 
+#: ── HOW MANY EVENTS MAY SHARE ONE ODDS FETCH ────────────────────────
+#:
+#: THE MEASURED PROBLEM THIS EXISTS FOR (2026-09-28, all 1,126 evaluation
+#: rows). 399 rows produced no fair value, and every one of them failed at
+#: the SAME link: QUOTE_STALE. Zero failed at provider coverage, mapping,
+#: the de-vig, calibration, persistence or consumer lookup. Decomposing
+#: `pinnacle_age_s` the way `_entry_freshness` already splits it:
+#:
+#:     provider lag (old on arrival)  median 14.6 s, p95 352 s, max 823 s
+#:     our processing delay           median 28.7 s, p95 64.7 s, max 94.8 s
+#:     already stale on arrival       103 rows  (26%)  -- coverage fact
+#:     WE made it stale               296 rows  (74%)  -- ours to fix
+#:
+#: So on the median row the provider handed us a quote with ~15 s of the
+#: 30 s budget left and we spent ~29 s before deciding. This module's own
+#: freshness note already said which of those is ours: "a slow provider is
+#: a coverage fact, our own delay is ours to fix."
+#:
+#: WHY THE DELAY IS NOT A DEFECT AND CONCURRENCY CANNOT REMOVE IT.
+#: `venue_pace.pace` is a deliberate PROCESS-WIDE SERIAL gate, one request
+#: per MIN_GAP_S, shared with the protected collector because the venue
+#: 429s above ~3 req/s. Each event needs several paced venue reads before
+#: its decision instant, and `received_at` is stamped ONCE per sport, so
+#: event N carries a quote aged by every preceding event's reads too.
+#: Running them concurrently would not help: the gate would serialise them
+#: anyway, and widening it would starve the money path.
+#:
+#: SO THE ONLY LEVER IS HOW MANY EVENTS SHARE ONE FETCH, AND IT COSTS
+#: CREDITS. The provider bills per request x market x region -- one fetch
+#: is ~18-21 credits, ~60 a cycle today. Halving the events per fetch
+#: roughly halves our accumulated delay and roughly doubles the odds
+#: credits. That is a resource decision with a number attached, not a bug,
+#: so the knob EXISTS and DEFAULTS TO TODAY'S BEHAVIOUR: at MAX_PER_CYCLE
+#: no extra fetch is ever issued and the credit spend is unchanged. Lower
+#: it deliberately, and `odds_refetches` on the cycle row says what it
+#: bought.
+EVENTS_PER_ODDS_FETCH = MAX_PER_CYCLE
+
+#: What a re-fetch is allowed to do, so it can never become a retry. It
+#: refreshes the quote for events NOT YET evaluated in this sport; it
+#: never re-evaluates an event already decided, and a failed re-fetch
+#: keeps the quote we have rather than abandoning the sport -- the old
+#: quote then ages normally and QUOTE_STALE refuses it by name, which is
+#: the correct outcome and not a silent downgrade.
+ODDS_REFETCH_IS_NOT_A_RETRY = (
+    "a re-fetch refreshes the provider quote for events still to be "
+    "evaluated in this sport. It never re-decides an evaluated event, and "
+    "when it fails the existing quote is kept and ages normally, so the "
+    "freshness rule refuses it by name instead of the sport being dropped")
+
 #: The venue read is the slow part; bound it so one hanging book cannot
 #: hold the cycle open.
 VENUE_TIMEOUT_S = 10.0
@@ -3051,6 +3101,10 @@ async def cycle(conn) -> dict:
     written = 0
     evaluated = 0
     credits = {"used": None, "remaining": None}
+    # WHAT THE FRESHNESS KNOB ACTUALLY DID THIS CYCLE, reported rather than
+    # inferred from the credit count. Both are 0 at the default setting.
+    odds_refetches = 0
+    odds_refetch_failures = 0
 
     # THE OPEN BOOK, READ ONCE PER CYCLE. The risk rails are measured
     # against it plus the position being proposed, so it has to be read
@@ -3104,9 +3158,54 @@ async def cycle(conn) -> dict:
         received_at = got["received_at"]
         step["provider_events"] = len(got["events"] or [])
 
-        for event in got["events"]:
+        # HOW MANY EVENTS THIS FETCH HAS ALREADY SERVED. Counted per sport,
+        # because `received_at` is stamped per fetch and the accumulated
+        # processing delay is what it governs.
+        served_by_this_fetch = 0
+        # BY INDEX OVER A LOCAL LIST, so a re-fetch can actually replace the
+        # events still to come. `for event in got["events"]` binds the list
+        # once, so rebinding `got` inside it would have changed nothing --
+        # a fresh payload would have been fetched, paid for, and then
+        # ignored for every event but the current one.
+        events = list(got["events"] or [])
+        for _i in range(len(events)):
             if evaluated >= MAX_PER_CYCLE:
                 break
+            # ── REFRESH THE QUOTE BEFORE IT GOES STALE ON OUR CLOCK ────
+            #
+            # At the default (EVENTS_PER_ODDS_FETCH == MAX_PER_CYCLE) this
+            # can never fire, so the credit spend is exactly what it was.
+            # Lowered deliberately, it bounds our OWN contribution to
+            # `pinnacle_age_s` at roughly that many events' worth of paced
+            # venue reads instead of the whole cycle's.
+            if served_by_this_fetch >= EVENTS_PER_ODDS_FETCH:
+                again = await fetch_odds(sport_key, api_key=api_key)
+                credits["used"] = again.get("credits_used") or credits["used"]
+                credits["remaining"] = (again.get("credits_remaining")
+                                        or credits["remaining"])
+                odds_refetches += 1
+                served_by_this_fetch = 0
+                if again.get("ok") and again.get("received_at") is not None:
+                    # THE NEW RECEIPT INSTANT AND THE NEW PAYLOAD'S OWN
+                    # PRICES, together. Taking the stamp without the prices
+                    # would be the worst of both: a fresh-looking age on an
+                    # old quote, which is the exact false certificate this
+                    # module's freshness note warns about twice.
+                    received_at = again["received_at"]
+                    fresh = {(e or {}).get("id"): e
+                             for e in (again["events"] or [])
+                             if isinstance(e, dict) and (e or {}).get("id")}
+                    for _j in range(_i, len(events)):
+                        _r = fresh.get((events[_j] or {}).get("id"))
+                        if _r is not None:
+                            events[_j] = _r
+                else:
+                    # KEPT, NOT DISCARDED. The old quote ages normally and
+                    # QUOTE_STALE names it. Abandoning the sport would turn
+                    # a provider hiccup into missing coverage.
+                    odds_refetch_failures += 1
+            event = events[_i]
+            served_by_this_fetch += 1
             quote = pinnacle_h2h(event, received_at=received_at)
             if quote is None:
                 tally["NO_PINNACLE_ON_EVENT"] = \
@@ -3646,6 +3745,28 @@ async def cycle(conn) -> dict:
            "funded_servicing": funded_service,
            "evaluated": evaluated, "written": written,
            "refusals": tally, "credits": credits,
+           # ── THE FRESHNESS KNOB, AND WHAT IT COST ──────────────────
+           # Both counters are 0 at the default setting, where no extra
+           # fetch is ever issued. Reported unconditionally so that a
+           # change in credit spend can be attributed rather than guessed.
+           "odds_freshness": {
+               "events_per_odds_fetch": EVENTS_PER_ODDS_FETCH,
+               "max_per_cycle": MAX_PER_CYCLE,
+               "is_the_default": EVENTS_PER_ODDS_FETCH >= MAX_PER_CYCLE,
+               "odds_refetches": odds_refetches,
+               "odds_refetch_failures": odds_refetch_failures,
+               "what_it_is_for": (
+                   "399 of 1,126 evaluation rows produced no fair value and "
+                   "every one failed at QUOTE_STALE. 296 of those 399 were "
+                   "stale because of OUR accumulated processing delay, not "
+                   "the provider's lag. This bounds how many events share "
+                   "one provider quote"),
+               "why_it_is_not_on_by_default": (
+                   "lowering it buys freshness with provider credits, "
+                   "roughly in proportion. That is a resource decision, so "
+                   "the default changes nothing"),
+               "refetch_is_not_a_retry": ODDS_REFETCH_IS_NOT_A_RETRY,
+           },
            "venue_errors": venue_errors,
            "markets_considered": len(markets),
            # WHAT WAS AVAILABLE, AND WHERE EACH SPORT STOPPED. See the
