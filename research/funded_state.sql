@@ -66,7 +66,7 @@ SELECT key, length(value::text) AS value_chars
  WHERE key LIKE 'bettor_funded%'
  ORDER BY key;
 
-\echo == 8 · EVERY LANE'S LAST WORD, NEWEST FIRST ==
+\echo == 8 · EVERY LANE LAST WORD, NEWEST FIRST ==
 SELECT service, status,
        beat_at::timestamptz(0) AS beat_at,
        extract(epoch FROM (now() - beat_at))::int AS age_s
@@ -74,7 +74,7 @@ SELECT service, status,
  ORDER BY beat_at DESC
  LIMIT 15;
 
-\echo == 9 · THE ENTRY LANE'S OWN FUNNEL -- what ends every candidate ==
+\echo == 9 · THE ENTRY LANE OWN FUNNEL -- what ends every candidate ==
 SELECT eligibility,
        coalesce(ineligible_reason, '(none)') AS ineligible_reason,
        count(*)                              AS n,
