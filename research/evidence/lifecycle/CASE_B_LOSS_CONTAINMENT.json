@@ -42,7 +42,7 @@
     },
     "exit_intents": [
      {
-      "intent_id": "fpi-8afcecd326d448e4",
+      "intent_id": "fpi-6376daab752845f3",
       "state": "FILLED",
       "qty": 9.0,
       "residual": 0.0,
@@ -60,7 +60,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-8afcecd326d448e4",
+      "intent_id": "fpi-6376daab752845f3",
       "direction": "EXIT",
       "qty": 9.0,
       "price": 0.41,
@@ -88,14 +88,14 @@
     "realised_on_sold_usd": -2.01,
     "residual_qty": 6.0,
     "remaining_basis_usd": 3.6,
+    "net_cash_exceeds_this_by_usd": 3.7,
     "position_closed": false,
     "closed_reason": null,
     "attribution": "AVERAGE_ENTRY_COST_PER_CONTRACT",
     "attribution_is_the_lanes_own": "the same per-contract basis `remaining_basis` uses for a void refund. Not invented here; a second convention on one position would make the two disagree",
     "identity": "realised_on_sold = exit_proceeds - allocated_basis - fees_on_sold",
-    "this_is_not_realised_pnl": "`realised()` books on POSITION CLOSURE and is what the drawdown and the loss stop read. This is the result on the quantity already sold while the position is still open. Both are correct for their own question and they are not interchangeable",
+    "this_is_now_inside_realised_pnl": "CORRECTED 2026-09-28. This field previously read '`realised()` books on POSITION CLOSURE and is what the drawdown and the loss stop read ... both are correct for their own question'. The first half was true and the second was wrong. A loss stop whose measurement omits a loss that has ALREADY BEEN TAKEN is not correct for its own question -- it is a stop that does not stop. `realised()` now folds this result into the realised equity curve at the instant the last exit filled, so the same number the operator reads here is the number MAX_DRAWDOWN is measured against",
     "this_is_not_open_position_net_cash": "net cash is (basis out - proceeds back + fees) over the WHOLE clip, so it mixes the realised result on what was sold with the cost still tied up in what is held. It overstates a partial loss by the remaining basis AND by the residual's share of the entry fee -- TWO terms. A correction: I first wrote that it differed by the remaining basis alone, and on the demonstration's own figures (fees 0.25 entry, 0.15 exit) that identity misses by exactly the 0.10 of entry fee sitting on the 6 contracts still held",
-    "net_cash_exceeds_this_by_usd": 3.7,
     "net_cash_identity": "open_position_net_cash = realised_on_sold - remaining_basis - entry_fees_allocated_to_residual",
     "unrealised_on_the_residual": "NOT_IDENTIFIED",
     "why_unrealised_is_not_identified": "marking the residual needs a funded mark, and this lane has no funded mark source. Reported NOT_IDENTIFIED rather than 0",
@@ -133,7 +133,7 @@
      },
      {
       "fill_id": "fvf:vo-xl-1:vf-1",
-      "intent_id": "fpi-8afcecd326d448e4",
+      "intent_id": "fpi-6376daab752845f3",
       "exp": 0.15,
       "obs": null,
       "fee_state": "PROVISIONAL",
@@ -141,17 +141,32 @@
      }
     ],
     "cash_out_the_door_usd": 5.71,
-    "realised_pnl_usd": 0.0,
-    "realised_basis": "the realised equity curve: each CLOSED position's net economic events, in closure order. An open position contributes nothing -- its cost is an asset, not a loss",
-    "realised_is_provisional": false,
-    "realised_provisional_note": null,
-    "max_drawdown_usd": 0.0,
+    "realised_pnl_usd": -2.01,
+    "realised_basis": "the realised equity curve over every result already TAKEN, in the order it was taken: each closed position's net economic events, AND the realised-on-sold result of each open position that has sold inventory, booked at its last exit fill. The cost of inventory still HELD is not in here -- that is an asset at cost. A loss already realised on a partial exit IS, because the contracts are gone and the cash came back short",
+    "realised_is_provisional": true,
+    "realised_provisional_note": "1 economic event(s) or fill(s) inside the realised total are PROVISIONAL -- the venue has not stated a fee it was charged -- so this number is explicitly incomplete rather than quietly exact",
+    "max_drawdown_usd": 2.01,
     "peak_realised_usd": 0.0,
-    "realised_curve": [],
+    "realised_curve": [
+     {
+      "intent_id": "dem-loss",
+      "at": 1790622245.865594,
+      "component": "EXIT_FILL",
+      "net_usd": -2.01,
+      "cumulative_realised_usd": -2.01,
+      "peak_usd": 0.0,
+      "drawdown_usd": 2.01
+     }
+    ],
     "closed_positions": 0,
+    "booked_results": 1,
+    "partially_realised_usd": -2.01,
+    "partially_realised_open_positions": 1,
+    "realised_not_bookable": [],
     "open_position_net_cash_usd": -5.71,
     "open_position_provisional_events": 2,
-    "unrealised_pnl_usd": null,
+    "open_position_net_cash_is_not_a_result": "it is (basis out - proceeds back + fees) over the whole clip, so it mixes the realised result on what was sold with the cost still tied up in what is held. `partially_realised_usd` is the result; this is cash",
+    "unrealised_pnl_usd": "NOT_IDENTIFIED",
     "unrealised_basis": "UNMEASURED. Marking residual funded inventory needs a funded mark, and this lane has no mark source it would stand behind, so this is reported as unmeasured rather than as zero",
     "economics_by_kind": [
      {
@@ -236,7 +251,7 @@
     "filled_fees_usd": 0.4,
     "contracts_held": 6.0,
     "contracts_net_from_the_fill_ledger": 6.0,
-    "capital_hours_usd_h": 0.000178,
+    "capital_hours_usd_h": 0.000188,
     "per_event_collateral_usd": {
      "ev-bos-lal-2026-09-27": 3.6
     },
@@ -327,7 +342,7 @@
      "filled_fees_usd": 0.4,
      "contracts_held": 6.0,
      "contracts_net_from_the_fill_ledger": 6.0,
-     "capital_hours_usd_h": 0.000195,
+     "capital_hours_usd_h": 0.000203,
      "per_event_collateral_usd": {
       "ev-bos-lal-2026-09-27": 3.6
      },
@@ -367,7 +382,7 @@
       },
       {
        "fill_id": "fvf:vo-xl-1:vf-1",
-       "intent_id": "fpi-8afcecd326d448e4",
+       "intent_id": "fpi-6376daab752845f3",
        "exp": 0.15,
        "obs": null,
        "fee_state": "PROVISIONAL",
@@ -375,17 +390,32 @@
       }
      ],
      "cash_out_the_door_usd": 5.71,
-     "realised_pnl_usd": 0.0,
-     "realised_basis": "the realised equity curve: each CLOSED position's net economic events, in closure order. An open position contributes nothing -- its cost is an asset, not a loss",
-     "realised_is_provisional": false,
-     "realised_provisional_note": null,
-     "max_drawdown_usd": 0.0,
+     "realised_pnl_usd": -2.01,
+     "realised_basis": "the realised equity curve over every result already TAKEN, in the order it was taken: each closed position's net economic events, AND the realised-on-sold result of each open position that has sold inventory, booked at its last exit fill. The cost of inventory still HELD is not in here -- that is an asset at cost. A loss already realised on a partial exit IS, because the contracts are gone and the cash came back short",
+     "realised_is_provisional": true,
+     "realised_provisional_note": "1 economic event(s) or fill(s) inside the realised total are PROVISIONAL -- the venue has not stated a fee it was charged -- so this number is explicitly incomplete rather than quietly exact",
+     "max_drawdown_usd": 2.01,
      "peak_realised_usd": 0.0,
-     "realised_curve": [],
+     "realised_curve": [
+      {
+       "intent_id": "dem-loss",
+       "at": 1790622245.865594,
+       "component": "EXIT_FILL",
+       "net_usd": -2.01,
+       "cumulative_realised_usd": -2.01,
+       "peak_usd": 0.0,
+       "drawdown_usd": 2.01
+      }
+     ],
      "closed_positions": 0,
+     "booked_results": 1,
+     "partially_realised_usd": -2.01,
+     "partially_realised_open_positions": 1,
+     "realised_not_bookable": [],
      "open_position_net_cash_usd": -5.71,
      "open_position_provisional_events": 2,
-     "unrealised_pnl_usd": null,
+     "open_position_net_cash_is_not_a_result": "it is (basis out - proceeds back + fees) over the whole clip, so it mixes the realised result on what was sold with the cost still tied up in what is held. `partially_realised_usd` is the result; this is cash",
+     "unrealised_pnl_usd": "NOT_IDENTIFIED",
      "unrealised_basis": "UNMEASURED. Marking residual funded inventory needs a funded mark, and this lane has no mark source it would stand behind, so this is reported as unmeasured rather than as zero",
      "economics_by_kind": [
       {
@@ -406,6 +436,73 @@
      ],
      "unresolved_intents": [],
      "is_not_summed_with": "the shadow, acceptance, demonstration or UNCLASSIFIED books. This is the funded lane alone"
+    },
+    "loss_controls": {
+     "account_id": "acct-funded-DEMONSTRATION-lifecycle",
+     "venue": "PMUS",
+     "realised_drawdown_usd": 2.01,
+     "realised_drawdown_is_unmeasured_because": null,
+     "realised_not_bookable": [],
+     "why_not_merely_understated": "an exit fill is unbookable when no entry fill precedes it, and the per-contract basis of every other exit on that position comes from those same entry fills. The increments that DID book are therefore also wrong, by an unknown amount in an unknown direction. This is a corrupted basis, not a true curve with a gap, so the drawdown is UNCERTAIN rather than understated",
+     "realised_pnl_usd": -2.01,
+     "realised_basis": "the realised equity curve over every result already TAKEN, in the order it was taken: each closed position's net economic events, AND the realised-on-sold result of each open position that has sold inventory, booked at its last exit fill. The cost of inventory still HELD is not in here -- that is an asset at cost. A loss already realised on a partial exit IS, because the contracts are gone and the cash came back short",
+     "realised_includes_partial_exits": true,
+     "realised_components": "EXIT_FILL + POSITION_TERMINAL",
+     "partially_realised_usd": -2.01,
+     "partially_realised_open_positions": 1,
+     "realised_is_provisional": true,
+     "unrealised_pnl_usd": "NOT_IDENTIFIED",
+     "unrealised_why": "marking open funded inventory needs a funded mark source and this lane has none it would stand behind. UNKNOWN, not 0 -- a zero here would assert that inventory is worth its cost",
+     "unmarked_policy": "WORST_CASE_TOTAL_LOSS_FOR_EXPOSURE_NOT_FOR_REALISED",
+     "unmarked_holdings": 1,
+     "cash_used_usd": 5.71,
+     "cash_used_is_not_a_loss": "cash out minus proceeds back. The remaining basis inside it is INVENTORY, an asset at cost. Reading this as the loss overstates it by exactly that basis plus the residual's share of the entry fee",
+     "entry_cash_usd": 9.0,
+     "entry_fees_usd": 0.4,
+     "exit_proceeds_usd": 3.69,
+     "worst_case_total_loss_usd": 3.6,
+     "worst_case_basis": "every unmarked holding settles worthless (WORST_CASE_TOTAL_LOSS_FOR_EXPOSURE_NOT_FOR_REALISED), plus collateral the venue may take on orders still outstanding. A BOUND on what is still at risk, not a forecast and not a result",
+     "residual_holdings_collateral_usd": 3.6,
+     "outstanding_orders_collateral_usd": 0.0,
+     "remaining_basis_of_partially_exited_usd": 3.6,
+     "contracts_held": 6.0,
+     "controls": [
+      {
+       "control": "MAX_DRAWDOWN",
+       "scope": "the funded lane's realised equity curve for this account and venue. Not the shadow, acceptance or demonstration books",
+       "measures": "realised_drawdown_usd",
+       "trigger": "measured realised drawdown exceeds the owner-approved MAX_DRAWDOWN",
+       "response": "REFUSES NEW EXPOSURE. Every entry goes through bettor_funded_execution.check_rails, which blocks on an EXCEEDED rail. Servicing an existing position is NOT blocked -- that is ownership-bound and gated by check_servicing, not by submission authority -- and neither is reconciliation",
+       "limit_usd": null,
+       "measured_usd": 2.01,
+       "tripped": null,
+       "why_no_verdict": "no owner-approved MAX_DRAWDOWN exists, so there is no threshold to compare against. The measurement is real; the threshold is an owner input",
+       "no_verdict_because": "NO_APPROVED_THRESHOLD",
+       "is_not_a_maximum_loss": "this is a TRIGGER on realised results. It refuses new exposure; it cannot liquidate inventory at a price, so the loss on what is already held can exceed it. worst_case_total_loss_usd is the bound"
+      },
+      {
+       "control": "MAX_RESIDUAL_INVENTORY",
+       "scope": "contracts the funded book holds, net of exits",
+       "measures": "contracts_held",
+       "trigger": "held contracts plus the proposed order exceed it",
+       "response": "refuses the new order; holdings untouched"
+      },
+      {
+       "control": "MAX_CAPITAL_DEPLOYED",
+       "scope": "cash and fees out plus live collateral",
+       "measures": "cash_used_usd and live collateral",
+       "trigger": "the sum plus this order exceeds the limit",
+       "response": "refuses the new order"
+      },
+      {
+       "control": "FUNDED_EXIT_SUBMISSION_ENABLED",
+       "scope": "whether a funded exit may actually be sent",
+       "measures": "not a measurement -- a shipped constant",
+       "trigger": "n/a",
+       "response": "ships False, so an exit is decided, priced and recorded but never submitted. This is CONTAINMENT and it is not one of the four quantities"
+      }
+     ],
+     "four_quantities_are_distinct": "realised_drawdown_usd, unrealised_pnl_usd, cash_used_usd and worst_case_total_loss_usd are four different measurements of four different things. None is defined as another"
     }
    },
    "demonstration_book_count": 1,
@@ -415,7 +512,7 @@
     "intent_id": "dem-loss",
     "residual_qty": 6.0,
     "us_market_slug": "aec-nba-bos-lal-2026-09-27",
-    "settlement": "{\"at\": 1790600043.3326185, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
+    "settlement": "{\"at\": 1790622245.8459213, \"why\": \"no reported settlement, no exact price convergence and no declared void. `closed`, `resolved` and `settledAt` are NOT treated as payout evidence\", \"closed_anything\": false, \"terminal_reading\": \"UNREADABLE\"}",
     "partial_exit_result": {
      "sold_qty": 9.0,
      "exit_proceeds_usd": 3.69,

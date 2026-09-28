@@ -6524,7 +6524,7 @@ jobs:
           import asyncpg
 
           DSN = os.environ["DATABASE_URL"]
-          FUNDED = ("125_", "126_", "127_", "128_", "131_")
+          FUNDED = ("125_", "126_", "127_", "128_", "131_", "132_")
           skipped, ok = [], False
 
           async def mark(version):
@@ -6603,7 +6603,7 @@ jobs:
           # does. Leaving it out of the assertion let the suite run against a
           # database that might not have it, which is the schema-only pass the
           # owner ruled out.
-          for m in 125 126 127 128 131; do
+          for m in 125 126 127 128 131 132; do
             got=$(Q "SELECT count(*) FROM schema_migrations WHERE version LIKE '${m}%' AND coalesce(content_sha,'') <> 'SKIPPED-IN-PG18-VALIDATION'")
             say "migration $m applied        $got"
             [ "$got" = "1" ] || { say "  => migration $m did NOT apply on PostgreSQL 18"; exit 1; }
@@ -6611,7 +6611,8 @@ jobs:
           # AND 131'S OWN OBJECTS, so a half-applied migration cannot read as
           # applied. The schema probe refuses this state at runtime; the gate
           # must refuse it too.
-          for o in bettor_funded_portfolio_groups bettor_funded_leg_reservations; do
+          for o in bettor_funded_portfolio_groups bettor_funded_leg_reservations \
+                   bettor_funded_decisions; do
             got=$(Q "SELECT count(*) FROM information_schema.tables WHERE table_schema='public' AND table_name='$o'")
             say "table $o  $got"
             [ "$got" = "1" ] || exit 1
@@ -6713,6 +6714,7 @@ jobs:
             tests/test_the_group_holds_under_concurrency.py \
             tests/test_the_reservation_reaches_submission.py \
             tests/test_an_indirect_pair_is_valued_on_the_outcomes.py \
+            tests/test_the_funded_lane_learns_from_its_own_results.py \
             2>&1 | tail -25 | tee -a "$GITHUB_STEP_SUMMARY"
           rc=${PIPESTATUS[0]}
           echo '```' >> "$GITHUB_STEP_SUMMARY"
@@ -6750,6 +6752,7 @@ jobs:
             tests/test_the_group_lifecycle_is_atomic_and_earned.py \
             tests/test_the_group_holds_under_concurrency.py \
             tests/test_the_reservation_reaches_submission.py \
+            tests/test_the_funded_lane_learns_from_its_own_results.py \
             --junitxml=/tmp/risk.xml 2>&1 | tail -15
           rc=${PIPESTATUS[0]}
           # THE GUARD IS A MODULE, NOT A HEREDOC. A `<<'PYX'` body at column

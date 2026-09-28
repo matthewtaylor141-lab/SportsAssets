@@ -64,7 +64,7 @@
     },
     "exit_intents": [
      {
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "state": "PARTIALLY_FILLED",
       "qty": 8.0,
       "residual": 0.0,
@@ -82,7 +82,7 @@
      },
      {
       "fill_id": "fvf:vo-xa-1:vx-a1",
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "direction": "EXIT",
       "qty": 5.0,
       "price": 0.72,
@@ -128,7 +128,7 @@
     },
     "exit_intents": [
      {
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "state": "PARTIALLY_FILLED",
       "qty": 8.0,
       "residual": 0.0,
@@ -146,7 +146,7 @@
      },
      {
       "fill_id": "fvf:vo-xa-1:vx-a1",
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "direction": "EXIT",
       "qty": 5.0,
       "price": 0.72,
@@ -160,7 +160,7 @@
    "step": 3,
    "what": "RESTART, LATE EXECUTION INGESTED ON RECOVERY",
    "reconciled": {
-    "intent_id": "fpi-74cec0dc5a454891",
+    "intent_id": "fpi-25e933a9caa847c5",
     "state_was": "PARTIALLY_FILLED",
     "venue_order_id": "vo-xa-1",
     "direction": "EXIT",
@@ -189,7 +189,7 @@
     },
     "exit_intents": [
      {
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "state": "FILLED",
       "qty": 8.0,
       "residual": 0.0,
@@ -207,7 +207,7 @@
      },
      {
       "fill_id": "fvf:vo-xa-1:vx-a1",
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "direction": "EXIT",
       "qty": 5.0,
       "price": 0.72,
@@ -215,7 +215,7 @@
      },
      {
       "fill_id": "fvf:vo-xa-1:vx-a2",
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "direction": "EXIT",
       "qty": 3.0,
       "price": 0.72,
@@ -242,14 +242,14 @@
     },
     "exit_intents": [
      {
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "state": "FILLED",
       "qty": 8.0,
       "residual": 0.0,
       "unresolved_reason": null
      },
      {
-      "intent_id": "fpi-b090f985f5424e8f",
+      "intent_id": "fpi-ad40fb3cf83449e6",
       "state": "FILLED",
       "qty": 12.0,
       "residual": 0.0,
@@ -267,7 +267,7 @@
      },
      {
       "fill_id": "fvf:vo-xa-1:vx-a1",
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "direction": "EXIT",
       "qty": 5.0,
       "price": 0.72,
@@ -275,7 +275,7 @@
      },
      {
       "fill_id": "fvf:vo-xa-1:vx-a2",
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "direction": "EXIT",
       "qty": 3.0,
       "price": 0.72,
@@ -283,7 +283,7 @@
      },
      {
       "fill_id": "fvf:vo-xb-1:vf-1",
-      "intent_id": "fpi-b090f985f5424e8f",
+      "intent_id": "fpi-ad40fb3cf83449e6",
       "direction": "EXIT",
       "qty": 12.0,
       "price": 0.7,
@@ -319,7 +319,7 @@
      },
      {
       "fill_id": "fvf:vo-xa-1:vx-a1",
-      "intent_id": "fpi-74cec0dc5a454891",
+      "intent_id": "fpi-25e933a9caa847c5",
       "exp": 0.07,
       "obs": null,
       "fee_state": "PROVISIONAL",
@@ -327,7 +327,7 @@
      },
      {
       "fill_id": "fvf:vo-xb-1:vf-1",
-      "intent_id": "fpi-b090f985f5424e8f",
+      "intent_id": "fpi-ad40fb3cf83449e6",
       "exp": 0.18,
       "obs": null,
       "fee_state": "PROVISIONAL",
@@ -336,25 +336,58 @@
     ],
     "cash_out_the_door_usd": -2.522,
     "realised_pnl_usd": 2.522,
-    "realised_basis": "the realised equity curve: each CLOSED position's net economic events, in closure order. An open position contributes nothing -- its cost is an asset, not a loss",
+    "realised_basis": "the realised equity curve over every result already TAKEN, in the order it was taken: each closed position's net economic events, AND the realised-on-sold result of each open position that has sold inventory, booked at its last exit fill. The cost of inventory still HELD is not in here -- that is an asset at cost. A loss already realised on a partial exit IS, because the contracts are gone and the cash came back short",
     "realised_is_provisional": true,
-    "realised_provisional_note": "3 economic event(s) inside the realised total are PROVISIONAL -- the venue has not stated a fee it was charged -- so this number is explicitly incomplete rather than quietly exact",
+    "realised_provisional_note": "5 economic event(s) or fill(s) inside the realised total are PROVISIONAL -- the venue has not stated a fee it was charged -- so this number is explicitly incomplete rather than quietly exact",
     "max_drawdown_usd": 0.0,
     "peak_realised_usd": 2.522,
     "realised_curve": [
      {
       "intent_id": "dem-win",
-      "at": 1790600043.271658,
-      "net_usd": 2.522,
+      "at": 1790622245.584575,
+      "component": "EXIT_FILL",
+      "net_usd": 0.695,
+      "cumulative_realised_usd": 0.695,
+      "peak_usd": 0.695,
+      "drawdown_usd": 0.0
+     },
+     {
+      "intent_id": "dem-win",
+      "at": 1790622245.676761,
+      "component": "EXIT_FILL",
+      "net_usd": 0.411,
+      "cumulative_realised_usd": 1.106,
+      "peak_usd": 1.106,
+      "drawdown_usd": 0.0
+     },
+     {
+      "intent_id": "dem-win",
+      "at": 1790622245.745622,
+      "component": "EXIT_FILL",
+      "net_usd": 1.416,
+      "cumulative_realised_usd": 2.522,
+      "peak_usd": 2.522,
+      "drawdown_usd": 0.0
+     },
+     {
+      "intent_id": "dem-win",
+      "at": 1790622245.76111,
+      "component": "POSITION_TERMINAL",
+      "net_usd": 0.0,
       "cumulative_realised_usd": 2.522,
       "peak_usd": 2.522,
       "drawdown_usd": 0.0
      }
     ],
     "closed_positions": 1,
+    "booked_results": 4,
+    "partially_realised_usd": 0,
+    "partially_realised_open_positions": 0,
+    "realised_not_bookable": [],
     "open_position_net_cash_usd": 0.0,
     "open_position_provisional_events": 0,
-    "unrealised_pnl_usd": null,
+    "open_position_net_cash_is_not_a_result": "it is (basis out - proceeds back + fees) over the whole clip, so it mixes the realised result on what was sold with the cost still tied up in what is held. `partially_realised_usd` is the result; this is cash",
+    "unrealised_pnl_usd": "NOT_IDENTIFIED",
     "unrealised_basis": "UNMEASURED. Marking residual funded inventory needs a funded mark, and this lane has no mark source it would stand behind, so this is reported as unmeasured rather than as zero",
     "economics_by_kind": [
      {
@@ -391,7 +424,7 @@
     "filled_fees_usd": 0.638,
     "contracts_held": 0.0,
     "contracts_net_from_the_fill_ledger": 0.0,
-    "capital_hours_usd_h": 0.000491,
+    "capital_hours_usd_h": 0.000704,
     "per_event_collateral_usd": {},
     "per_market_collateral_usd": {},
     "counts_pending_at_full_size": true,
