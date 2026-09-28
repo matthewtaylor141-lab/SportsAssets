@@ -147,21 +147,209 @@ SPORTS_CONFIRMED = (("baseball_mlb", "baseball"),)
 #: The provider's key names are still MINE TO GUESS -- this container has no
 #: provider egress -- so each is confirmed against the provider's own unmetered
 #: catalogue before a metered call is made on it.
+#: EVERY ENTRY CARRIES THE VENUE FIXTURES THAT SUPPORT IT (run 260, statement 4).
+#: A key that exists in the provider's catalogue is not the competition; the
+#: fixtures are what say which competition it is, and two of my thirteen guesses
+#: were refuted by reading them.
 VENUE_TOKEN_TO_PROVIDER_KEY = {
+    # national teams: Belgium vs France, Germany vs Greece, Spain vs Croatia
     "unl": "soccer_uefa_nations_league",
+    # Columbus Crew vs Inter Miami, Seattle Sounders vs Sporting KC
     "mls": "soccer_usa_mls",
+    # Club Leon vs FC Juarez, Club Necaxa vs CF America
     "lmx": "soccer_mexico_ligamx",
+    # AS Roma vs FC Barcelona, Man City WFC vs Real Madrid Femenino
     "uwcl": "soccer_uefa_champs_league_women",
+    # Curacao vs Nicaragua, Jamaica vs Honduras -- CONCACAF national teams
     "cnl": "soccer_concacaf_nations_league",
-    "engnl": "soccer_england_league2",
+    # Brooklyn FC vs Detroit City, FC Tulsa vs New Mexico United
     "uslc": "soccer_usa_usl_championship",
+    # CA Atlanta vs Agropecuario, Club Almagro vs Nueva Chicago -- second tier
     "arg2": "soccer_argentina_primera_nacional",
+    # America FC vs EC Juventude, Botafogo vs Ponte Preta -- Serie B
     "brb": "soccer_brazil_serie_b",
+    # Atletico Nacional vs Junior, Independiente Medellin vs Millonarios
     "lco": "soccer_colombia_primera_a",
+    # Defensor Sporting vs Danubio, Montevideo City Torque vs Penarol
     "uru1": "soccer_uruguay_primera_division",
-    "irl1": "soccer_league_of_ireland",
+    # Bay FC vs Orlando Pride, Utah Royals vs North Carolina Courage
     "nwsl": "soccer_usa_nwsl",
 }
+
+#: ── THE TWO MAPPINGS THE FIXTURES REFUTED, AND WHY THEY ARE OUT ──────
+#:
+#: I mapped these from the token alone and both were wrong by one league tier.
+#: Codex singled out the first; reading the venue's fixtures refuted the second
+#: as well, which is the argument for validating ALL of them the same way rather
+#: than only the one that was challenged.
+VENUE_TOKENS_WITH_A_REFUTED_MAPPING = {
+    "engnl": {
+        "i_mapped_it_to": "soccer_england_league2",
+        "the_venue_fixtures_are": ("AFC Fylde vs Carlisle United, Barrow AFC vs "
+                                   "Scunthorpe United, Boreham Wood vs "
+                                   "Kidderminster Harriers, Gateshead vs "
+                                   "Altrincham, Hornchurch vs Aldershot Town"),
+        "which_competition_that_is": ("the English NATIONAL LEAGUE -- the fifth "
+                                      "tier, and Hornchurch and Worthing are "
+                                      "National League South"),
+        "why_it_is_out": ("`soccer_england_league2` is the EFL League Two, the "
+                          "fourth tier: a different competition with different "
+                          "clubs. The provider may well list that key, which is "
+                          "exactly why key existence cannot confirm a mapping"),
+    },
+    "irl1": {
+        "i_mapped_it_to": "soccer_league_of_ireland",
+        "the_venue_fixtures_are": ("Athlone Town vs Cork City, Bray Wanderers "
+                                   "vs Cobh Ramblers, Finn Harps vs Kerry FC, "
+                                   "Treaty United vs University College Dublin"),
+        "which_competition_that_is": ("the League of Ireland FIRST Division, "
+                                      "the second tier"),
+        "why_it_is_out": ("`soccer_league_of_ireland` is the Premier Division. "
+                          "Not challenged by anyone -- found by applying the "
+                          "same fixture check to every entry instead of only "
+                          "the one that was questioned"),
+    },
+}
+
+R_MAPPING_FIXTURES_DO_NOT_MATCH = (
+    "THE_PROVIDER_COMPETITION_FIXTURES_DO_NOT_MATCH_THE_VENUE_COMPETITION")
+R_MAPPING_UNCONFIRMABLE = (
+    "THE_MAPPING_COULD_NOT_BE_CONFIRMED_AGAINST_ANY_FIXTURE")
+
+
+def _participants(text) -> set:
+    """The side names in an event title, lowercased and stripped of noise.
+
+    Deliberately crude and deliberately NOT a team-alias resolver: the question
+    is whether the provider's competition is the SAME COMPETITION as the
+    venue's, and for that a handful of overlapping surnames or city names across
+    a dozen fixtures is decisive. A near-match on one fixture is not, which is
+    why `confirm_mapping_by_fixtures` needs several.
+    """
+    t = str(text or "").lower()
+    for sep in (" vs. ", " vs ", " v ", " @ ", " - "):
+        t = t.replace(sep, "|")
+    out: set = set()
+    for side in t.split("|"):
+        for word in side.replace(".", " ").replace(",", " ").split():
+            w = word.strip()
+            # Club-form noise carries no discriminating power and matches
+            # across every league, so it is dropped rather than counted.
+            if len(w) < 4 or w in _CLUB_FORM_NOISE:
+                continue
+            out.add(w)
+    return out
+
+
+_CLUB_FORM_NOISE = frozenset((
+    "club", "town", "city", "united", "athletic", "atletico", "sporting",
+    "real", "deportivo", "wanderers", "rovers", "county", "albion",
+    "fútbol", "futbol", "football", "soccer", "association", "asociacion",
+    "clube", "sport", "sports", "the", "and", "de", "del", "la", "le",
+))
+
+#: ── WHAT ACTUALLY CONFIRMS A COMPETITION MAPPING ─────────────────────
+#:
+#: ONE STRONG MATCH: a single provider fixture whose BOTH SIDES are recognized
+#: in the same venue event title. Two named teams playing each other in both
+#: sources is not a coincidence, and it is the thing a wrong mapping cannot
+#: produce -- `soccer_england_league2` against the venue's National League
+#: shares no fixture at all, let alone both sides of one.
+#:
+#: I FIRST REQUIRED TWO MATCHES AND THAT WAS THE WRONG MEASUREMENT, not merely a
+#: strict one. The provider's competition routinely carries MORE fixtures than
+#: the venue lists -- the venue's board is a subset, three MLS events against a
+#: full matchday -- so counting absolute matches measures VENUE COVERAGE, not
+#: whether the two are the same competition. A correctly mapped competition with
+#: one listed fixture would have been refused forever.
+#:
+#: A WEAK match (one shared word) is counted and reported but cannot confirm on
+#: its own: "United" and "City" appear in every English division, and a rule
+#: that accepted them would confirm every tier against every other.
+MIN_STRONG_FIXTURE_MATCHES = 1
+
+#: Kept because it is reported, and because the weak count is still evidence an
+#: operator reads next to the strong one.
+MIN_FIXTURE_MATCHES = 1
+
+
+def confirm_mapping_by_fixtures(*, provider_events, venue_event_titles) -> dict:
+    """Does the provider's competition name the SAME FIXTURES as the venue's?
+
+    THE HOLE THIS CLOSES, AND IT WAS A REAL ONE. `select_sports` confirmed that
+    a provider key EXISTS and is ACTIVE, and reported it under
+    `confirmed_by_provider`. Existence is not identity: `soccer_england_league2`
+    exists, is active, and is not the competition the venue lists under `engnl`.
+    A mismatched key would have been fetched, its events would have failed to
+    resolve, and the funnel would have read as a mapping defect.
+
+    So the mapping is confirmed against the fixtures themselves: the provider's
+    event participants must be recognizable among the venue's event titles for
+    that token, at least `MIN_FIXTURE_MATCHES` times. A key naming a different
+    tier of the same country produces zero matches and is refused by name.
+
+    Pure. Never raises. An empty provider list is UNCONFIRMABLE, not confirmed:
+    a competition between rounds legitimately has no fixtures, and admitting it
+    on that basis would be admitting on absence again.
+    """
+    out: dict = {"ok": False, "matches": 0, "strong_matches": 0, "examined": 0,
+                 "min_required": MIN_FIXTURE_MATCHES, "matched_fixtures": [],
+                 "refusal": R_MAPPING_UNCONFIRMABLE}
+    venue_sets = [(_participants(t), str(t or "")[:60])
+                  for t in (venue_event_titles or ())]
+    if not venue_sets:
+        out["why"] = ("the venue lists no event titles for this competition, so "
+                      "there is nothing to confirm the mapping against")
+        return out
+    events = list(provider_events or ())
+    out["examined"] = len(events)
+    if not events:
+        out["why"] = ("the provider returned no events for this key. That is "
+                      "consistent with a competition between rounds AND with a "
+                      "key that is not this competition; it confirms neither")
+        return out
+    for ev in events:
+        home = _participants((ev or {}).get("home_team") or "")
+        away = _participants((ev or {}).get("away_team") or "")
+        got = home | away
+        if not got:
+            continue
+        for vset, title in venue_sets:
+            if not (got & vset):
+                continue
+            # STRONG means BOTH sides of the provider's fixture are recognized
+            # in the same venue title. One shared word is the weak case and is
+            # counted, but it cannot carry a mapping on its own.
+            strong = bool(home & vset) and bool(away & vset)
+            out["matches"] += 1
+            if strong:
+                out["strong_matches"] += 1
+            if len(out["matched_fixtures"]) < 4:
+                out["matched_fixtures"].append(
+                    {"provider": "%s vs %s" % (
+                        (ev or {}).get("home_team"),
+                        (ev or {}).get("away_team")),
+                     "venue": title, "strong": strong,
+                     "shared": sorted(got & vset)[:4]})
+            break
+    out["min_required"] = MIN_STRONG_FIXTURE_MATCHES
+    if out["strong_matches"] >= MIN_STRONG_FIXTURE_MATCHES:
+        out.update(ok=True, refusal=None,
+                   why=("%d of the provider's %d fixtures match a venue "
+                        "fixture on BOTH sides (%d match on at least one "
+                        "side), so the two are the same competition"
+                        % (out["strong_matches"], out["examined"],
+                           out["matches"])))
+        return out
+    out.update(refusal=R_MAPPING_FIXTURES_DO_NOT_MATCH,
+               why=("none of the provider's %d fixtures matches any of the "
+                    "venue's %d on both sides (%d matched on one side, which "
+                    "'United' and 'City' do across every English division). "
+                    "The key may exist and be active and still be a different "
+                    "competition -- `soccer_england_league2` against the "
+                    "venue's National League is exactly that case"
+                    % (out["examined"], len(venue_sets), out["matches"])))
+    return out
 
 #: `intf` (international friendlies, 15 events) is deliberately ABSENT. The
 #: provider does list friendlies, but a friendly's settlement and team-selection
@@ -175,10 +363,33 @@ VENUE_TOKENS_DELIBERATELY_EXCLUDED = {
              "would reach a rule refusal, not a trade"),
 }
 
+#: ── THE FALLBACK BOARD, AND ITS EXPIRY ──────────────────────────────
+#:
+#: WHAT WAS WRONG WITH IT. `venue_soccer_competitions` fell back to this
+#: snapshot whenever the live read failed, with no time limit -- so a database
+#: read that broke in October would have kept the cycle spending metered credits
+#: on September's board indefinitely, and the heartbeat would have shown a
+#: competition set that no longer existed. A snapshot is evidence of what was
+#: listed ONCE; it is not evidence of current coverage, and the longer it is
+#: used the less it is evidence of anything.
+#:
+#: So the fallback has a stated validity window. Inside it the snapshot is used
+#: and marked STALE_SNAPSHOT. Outside it the board is EXPIRED and the cycle
+#: falls back to the confirmed set alone -- the same place a failed provider
+#: catalogue read leaves it. An old board must not become permanent evidence.
+#: 2026-09-28T00:00:00Z. I first wrote 1759017600, which is 2025-09-28 --
+#: a year early, so the snapshot was born 365 days old and the fallback
+#: reported EXPIRED_SNAPSHOT on its first use. A hand-typed epoch is a
+#: guess like any other; this one is computed and the date is in the
+#: comment so the next reader can check it without a converter.
+VENUE_BOARD_SNAPSHOT_AT = 1790553600.0
+VENUE_BOARD_SNAPSHOT_VALID_S = 7 * 24 * 3600.0  # one week
+R_BOARD_SNAPSHOT_EXPIRED = "THE_FALLBACK_VENUE_BOARD_SNAPSHOT_HAS_EXPIRED"
+
 #: The measured board, 2026-09-28 (research-sql run 259), as
 #: `venue_soccer_competitions` would return it. Kept as the FALLBACK ordering
 #: when the live read fails, and as the record of what the numbers above mean.
-VENUE_SOCCER_BOARD_MEASURED_2026_09_28 = (
+VENUE_BOARD_SNAPSHOT_MEASURED = (
     ("unl", 39), ("intf", 15), ("engnl", 12), ("cnl", 10), ("uwcl", 9),
     ("arg2", 8), ("lco", 7), ("brb", 6), ("uslc", 5), ("irl1", 5),
     ("par2", 4), ("mls", 3), ("lmx", 3), ("uru1", 3), ("nwsl", 2),
@@ -187,73 +398,184 @@ VENUE_SOCCER_BOARD_MEASURED_2026_09_28 = (
 #: The venue's REAL soccer board, by its own league token, newest first. The
 #: simulated exclusion is `bettor_venue_realism`'s, applied in SQL so a
 #: competition of 168 eBattles events cannot outrank a real one.
-VENUE_SOCCER_BOARD_SQL = """
+def _board_sql() -> str:
+    """The board query, with its exclusions GENERATED from the classifier.
+
+    THE INCONSISTENCY THIS REMOVES. This query was hand-written to exclude
+    `%ebattles%` and `%esoccer%` while claiming to share
+    `bettor_venue_realism`'s rule -- which knows sixteen markers and seven
+    simulated `sports_type` prefixes. Two of sixteen is not the same rule, and
+    a new simulated family (`ecricket`, say) would have counted as real soccer
+    here while the per-contract guard refused every one of its contracts. The
+    board would then have ranked a competition the lane cannot trade.
+
+    So the SQL is built from `SIMULATED_MARKERS` and
+    `SIMULATED_SPORTS_TYPE_PREFIXES` themselves. Adding a marker to the module
+    changes this query with it. The markers are fixed identifiers in source, not
+    input, and are asserted to be plain lowercase words before interpolation.
+    """
+    for m in vreal.SIMULATED_MARKERS:
+        assert m.replace("-", "").isalpha() and m.islower(), m
+    for pfx in vreal.SIMULATED_SPORTS_TYPE_PREFIXES:
+        assert pfx.rstrip("_").isalpha() and pfx.islower(), pfx
+    prose = "\n       ".join(
+        "AND lower(coalesce(event_title, '') || ' ' "
+        "|| coalesce(question, '')) NOT LIKE '%%%s%%'" % m
+        for m in vreal.SIMULATED_MARKERS)
+    types = "\n       ".join(
+        "AND coalesce(sports_type, '') NOT LIKE '%s%%'" % pfx
+        for pfx in vreal.SIMULATED_SPORTS_TYPE_PREFIXES)
+    # `sports_type LIKE 'soccer%'` is the POSITIVE half and is the classifier's
+    # affirmative rule too: only a recognized real family counts, so an
+    # unrecognized one is absent from the board rather than ranked.
+    return ("""
     SELECT split_part(market_slug, '-', 2)  AS token,
-           count(DISTINCT event_slug)        AS events
+           count(DISTINCT event_slug)        AS events,
+           (array_agg(DISTINCT left(event_title, 80)))[1:12] AS titles
       FROM us_premap
      WHERE sports_type LIKE 'soccer%'
-       AND lower(coalesce(event_title, '') || ' ' || coalesce(question, ''))
-           NOT LIKE '%ebattles%'
-       AND lower(coalesce(event_title, '')) NOT LIKE '%esoccer%'
+       """ + types + """
+       """ + prose + """
        AND game_start > now() - interval '6 hours'
      GROUP BY 1
      ORDER BY 2 DESC
      LIMIT 30
-"""
+""")
 
 
-async def venue_soccer_competitions(conn) -> dict:
+VENUE_SOCCER_BOARD_SQL = _board_sql()
+
+
+async def venue_soccer_competitions(conn, *, now: float | None = None) -> dict:
     """What the VENUE lists right now, by its own league token.
 
     Read-only, one bounded query, no venue network call -- `us_premap` is the
-    catalogue the collector already maintains. A read failure falls back to the
-    2026-09-28 measurement and says so, because an unread board is not an empty
-    board and the confirmed sport must still run.
+    catalogue the collector already maintains.
+
+    A READ FAILURE FALLS BACK WITH AN EXPIRY, NOT FOREVER. An unread board is
+    not an empty board, so the snapshot stands in for it -- but only inside
+    `VENUE_BOARD_SNAPSHOT_VALID_S`. Past that the board is EXPIRED, the returned
+    board is empty, and the cycle runs the confirmed set alone. Without the
+    expiry a database read that broke in October would have kept this lane
+    spending metered credits on September's competitions and reporting them as
+    current coverage.
+
+    `evidence_age_s` and `evidence` are on every result, including the healthy
+    one, so a reader never has to infer which of the three states produced it.
     """
-    out: dict = {"read": False, "board": [], "source": "us_premap"}
+    at = float(now if now is not None else time.time())
+    out: dict = {"read": False, "board": [], "source": "us_premap",
+                 "evidence": "LIVE_READ", "evidence_age_s": 0.0,
+                 "snapshot_at": VENUE_BOARD_SNAPSHOT_AT,
+                 "snapshot_valid_s": VENUE_BOARD_SNAPSHOT_VALID_S}
     try:
         rows = await conn.fetch(VENUE_SOCCER_BOARD_SQL)
     except Exception as exc:                                   # noqa: BLE001
+        age = at - VENUE_BOARD_SNAPSHOT_AT
         out["error"] = type(exc).__name__
-        out["board"] = list(VENUE_SOCCER_BOARD_MEASURED_2026_09_28)
-        out["why"] = ("the venue board could not be read (%s), so the "
-                      "2026-09-28 measurement is used and marked as such"
-                      % type(exc).__name__)
+        out["evidence_age_s"] = round(age, 1)
+        if age > VENUE_BOARD_SNAPSHOT_VALID_S:
+            out.update(evidence="EXPIRED_SNAPSHOT", board=[],
+                       refusal=R_BOARD_SNAPSHOT_EXPIRED,
+                       why=("the venue board could not be read (%s) and the "
+                            "2026-09-28 snapshot is %.1f days old, past its "
+                            "%.1f-day validity. A snapshot that old is not "
+                            "evidence of current coverage, so no soccer "
+                            "competition is requested and the confirmed set "
+                            "runs alone"
+                            % (type(exc).__name__, age / 86400.0,
+                               VENUE_BOARD_SNAPSHOT_VALID_S / 86400.0)))
+            return out
+        out.update(evidence="STALE_SNAPSHOT",
+                   board=list(VENUE_BOARD_SNAPSHOT_MEASURED),
+                   why=("the venue board could not be read (%s), so the "
+                        "2026-09-28 snapshot is used -- %.1f days old, inside "
+                        "its validity window -- and marked as a snapshot "
+                        "rather than a current reading"
+                        % (type(exc).__name__, age / 86400.0)))
         return out
     out["read"] = True
     out["board"] = [(str(r["token"]), int(r["events"])) for r in rows]
+    # THE VENUE'S OWN FIXTURE TITLES PER TOKEN, so the mapping can be confirmed
+    # against fixtures without a second query for every sport in the cycle.
+    out["titles"] = {str(r["token"]): [str(t) for t in (r["titles"] or [])]
+                     for r in rows}
     out["why"] = ("the venue's own league tokens for REAL soccer events "
                   "starting within the last 6 hours or later, simulated "
                   "competitions excluded by the venue's own words")
     return out
 
 
-def candidates_from_board(board) -> list:
-    """Venue board -> provider-key candidates, in the board's own order."""
+def candidates_from_board(board, titles=None) -> list:
+    """Venue board -> provider-key candidates, in the board's own order.
+
+    `titles` is the venue's own fixture titles per token. They travel WITH the
+    candidate because the mapping is confirmed against fixtures, and a candidate
+    that arrives at the confirmation step without the venue's fixtures cannot be
+    confirmed -- it would be admitted on key existence alone, which is the hole
+    being closed.
+    """
     got = []
+    by_token = dict(titles or {})
     for token, events in (board or ()):
         if token in VENUE_TOKENS_DELIBERATELY_EXCLUDED:
+            continue
+        if token in VENUE_TOKENS_WITH_A_REFUTED_MAPPING:
+            # The fixtures refute the key I mapped it to. Leaving it in to fail
+            # the runtime fixture check would spend a metered fetch to learn
+            # what reading the fixtures already established.
             continue
         key = VENUE_TOKEN_TO_PROVIDER_KEY.get(token)
         if not key:
             continue
         got.append({"key": key, "family": "soccer", "our_token": token,
-                    "venue_events": int(events)})
+                    "venue_events": int(events),
+                    "venue_titles": list(by_token.get(token) or ())})
     return got
 
 #: The board as measured, for the tests and for a caller with no connection.
+#: THE SNAPSHOT CARRIES NO FIXTURE TITLES, and that is a real consequence: a
+#: candidate built from it cannot pass the fixture confirmation, so a cycle
+#: running on the stale snapshot requests the CONFIRMED set only. Stated here
+#: rather than discovered as an empty funnel.
 SPORTS_CANDIDATES = tuple(
-    candidates_from_board(VENUE_SOCCER_BOARD_MEASURED_2026_09_28))
+    candidates_from_board(VENUE_BOARD_SNAPSHOT_MEASURED))
+
+#: The old name, kept so an import of it cannot silently resolve to nothing.
+VENUE_SOCCER_BOARD_MEASURED_2026_09_28 = VENUE_BOARD_SNAPSHOT_MEASURED
 
 R_PROVIDER_DOES_NOT_LIST = "PROVIDER_DOES_NOT_LIST_THIS_COMPETITION"
 R_PROVIDER_LISTS_IT_INACTIVE = "PROVIDER_LISTS_THIS_COMPETITION_AS_INACTIVE"
 
-#: How many METERED competition fetches one cycle may make. The provider bills
-#: per request x market x region, so this IS the budget: at roughly 18-21
-#: credits each, four keys is ~80 a cycle and ~7.7k/day at 15 minutes. It was
-#: three before; the ceiling is stated as a number rather than left to the
-#: length of a tuple so adding a candidate cannot silently raise the spend.
+#: ── THE METERED REQUEST BUDGET, AND THE CHANGE THIS MADE TO IT ───────
+#:
+#: The provider bills per request x market x region, so this number IS the
+#: budget. It is declared as a number rather than left to the length of a tuple
+#: so that adding a candidate cannot silently raise the spend -- which is how
+#: the EPL fetch persisted unnoticed.
+#:
+#: WHAT CHANGED, EXPLICITLY. Before: THREE fetches per cycle (soccer_epl,
+#: soccer_mexico_ligamx, baseball_mlb) at roughly 18-21 credits each -- about 60
+#: a cycle, ~5.8k/day at the 900 s cadence. After: FOUR -- about 80 a cycle,
+#: ~7.7k/day. That is an increase of roughly 1,900 credits a day, and it is a
+#: resource decision rather than a neutral refactor, so it is written here as a
+#: change with its arithmetic instead of appearing as a different tuple length.
+#:
+#: The offsetting fact, and it does not cancel the increase: one of the three
+#: former fetches (soccer_epl, ~20 credits a cycle, ~2k/day) could never reach a
+#: venue contract, so the SPEND THAT CAN REACH A CONTRACT rises from roughly
+#: 40 credits a cycle to 80.
 MAX_METERED_SPORTS_PER_CYCLE = 4
+METERED_BUDGET_CHANGE = {
+    "before": {"keys": 3, "credits_per_cycle": "~60", "per_day": "~5.8k",
+               "keys_named": ["soccer_epl", "soccer_mexico_ligamx",
+                              "baseball_mlb"],
+               "of_which_unreachable": ["soccer_epl"]},
+    "after": {"keys": 4, "credits_per_cycle": "~80", "per_day": "~7.7k"},
+    "net": ("about +1,900 credits a day; reachable spend rises from ~40 to ~80 "
+            "credits a cycle once the unreachable EPL fetch is removed"),
+    "cadence_s": 900.0,
+}
 
 #: The set used when the unmetered catalogue read FAILS. It carries only what is
 #: already confirmed: a failed confirmation must not be a licence to spend on
@@ -287,17 +609,27 @@ def select_sports(catalogue, *, budget=MAX_METERED_SPORTS_PER_CYCLE,
                  "catalogue_read": bool((catalogue or {}).get("ok")),
                  "never_requested": ["soccer_epl"],
                  "why_epl_is_never_requested": (
-                     "the US venue lists zero contracts carrying the token "
-                     "`epl` (research-sql run 258). Its English top-flight "
-                     "rows are eBattles simulations, which the realism guard "
-                     "refuses at the resolver")}
+                     "ON 2026-09-28 the US venue listed zero contracts "
+                     "carrying the token `epl` (research-sql runs 258 and "
+                     "259), and its English top-flight rows were eBattles "
+                     "simulations. That is a SNAPSHOT of one board, not a "
+                     "standing fact about the venue: it may list the "
+                     "competition later, and this exclusion would then be "
+                     "wrong. What makes the exclusion safe regardless is that "
+                     "the soccer set is DERIVED from the board each cycle -- "
+                     "if `epl` appears on it with a confirmable provider "
+                     "mapping, it is requested like any other token. The "
+                     "entry here only keeps it out of the hand-written "
+                     "candidate path"),
+                 "this_is_a_snapshot_not_a_standing_claim": True}
     cands = list(SPORTS_CANDIDATES if candidates is None else candidates)
     out["candidates_considered"] = [c["our_token"] for c in cands]
     if not (catalogue or {}).get("ok"):
         out["why"] = ("the unmetered sport catalogue could not be read, so no "
                       "candidate is confirmed and none is fetched. The "
                       "confirmed set still runs")
-        out["rejected"] = [{"key": c["key"], "refusal": R_PROVIDER_DOES_NOT_LIST,
+        out["rejected"] = [{"key": c["key"], "our_token": c["our_token"],
+                            "refusal": R_PROVIDER_DOES_NOT_LIST,
                             "why": "catalogue unread; not confirmable"}
                            for c in cands]
         return out
@@ -325,6 +657,13 @@ def select_sports(catalogue, *, budget=MAX_METERED_SPORTS_PER_CYCLE,
         out["confirmed_by_provider"].append(
             {"key": cand["key"], "our_token": cand["our_token"],
              "venue_events": cand["venue_events"],
+             # THE VENUE'S FIXTURES COME WITH IT, and this was the omission that
+             # made every mapping UNCONFIRMABLE in the cycle: the titles reached
+             # the candidate and stopped there, so the confirmation step had the
+             # provider's fixtures and none of the venue's to compare them to.
+             # It refused everything, which is the safe direction and still the
+             # wrong reason.
+             "venue_titles": list(cand.get("venue_titles") or ()),
              "provider_title": row.get("title")})
     # ORDER IS MEASURED COVERAGE, and the cap is applied after confirmation so
     # a candidate the provider does not list cannot consume a budget slot.
@@ -3637,7 +3976,8 @@ async def cycle(conn) -> dict:
     _cat = await fetch_sport_catalogue(api_key=api_key)
     _board = await venue_soccer_competitions(conn)
     sports_selection = select_sports(
-        _cat, candidates=candidates_from_board(_board["board"]))
+        _cat, candidates=candidates_from_board(_board["board"],
+                                               _board.get("titles")))
     sports_selection["venue_board"] = _board
     sports_for_cycle = tuple(sports_selection["sports"])
     labels = sorted({lbl for _, fam in sports_for_cycle
@@ -3745,6 +4085,35 @@ async def cycle(conn) -> dict:
             tally[R_PROVIDER_ERROR] = tally.get(R_PROVIDER_ERROR, 0) + 1
             _step_refuse(R_PROVIDER_ERROR)
             continue
+        # ── IS THIS PROVIDER COMPETITION THE VENUE'S COMPETITION? ────
+        #
+        # THE HOLE THIS CLOSES. `select_sports` established that the key EXISTS
+        # and is ACTIVE, which is not the same as its being the competition
+        # mapped to it. `soccer_england_league2` exists, is active, and is the
+        # fourth tier -- the venue's `engnl` is the fifth. A mismatch would have
+        # been fetched, failed to resolve every event, and reported as a
+        # mapping defect in the funnel.
+        #
+        # THIS IS THE FIRST MOMENT THE CHECK IS POSSIBLE: the provider's
+        # fixtures only exist after the fetch. So the metered call is already
+        # spent, and what the check protects is everything after it -- no
+        # resolution attempt, no venue read, no candidate, and the competition
+        # is refused BY NAME rather than appearing as twenty unmappable events.
+        # The credit is reported as spent either way.
+        _cand = next((c for c in sports_selection.get("confirmed_by_provider")
+                      or [] if c.get("key") == sport_key), None)
+        if _cand is not None:
+            conf = confirm_mapping_by_fixtures(
+                provider_events=got.get("events") or [],
+                venue_event_titles=_cand.get("venue_titles") or [])
+            step["mapping_confirmation"] = {
+                k: conf[k] for k in ("ok", "refusal", "matches", "examined",
+                                     "min_required", "matched_fixtures", "why")}
+            _cand["fixture_confirmation"] = step["mapping_confirmation"]
+            if not conf["ok"]:
+                tally[conf["refusal"]] = tally.get(conf["refusal"], 0) + 1
+                _step_refuse(conf["refusal"])
+                continue
         received_at = got["received_at"]
         step["provider_events"] = len(got["events"] or [])
 
@@ -5086,6 +5455,43 @@ def _freshness_digest(out: dict) -> dict | None:
                 % (type(exc).__name__, str(exc)[:160])}
 
 
+def _selection_digest(out: dict) -> dict:
+    """The competition selection, bounded for a heartbeat row.
+
+    Bounded deliberately: `confirmed_by_provider` carries up to twelve venue
+    fixture titles per candidate for the mapping check, and a heartbeat is read
+    by an operator, not archived. The titles are dropped and the CONFIRMATION is
+    kept, because the confirmation is the answer and the titles are its input.
+    """
+    sel = dict(out.get("sports_selection") or {})
+    board = dict(sel.get("venue_board") or {})
+    return {
+        "requested": [k for k, _ in (sel.get("sports") or [])],
+        "metered_budget": sel.get("budget"),
+        "rejected": [{"key": r.get("key"), "our_token": r.get("our_token"),
+                      "refusal": r.get("refusal")}
+                     for r in (sel.get("rejected") or [])][:12],
+        "confirmed_by_provider": [
+            {"key": c.get("key"), "our_token": c.get("our_token"),
+             "venue_events": c.get("venue_events"),
+             "provider_title": c.get("provider_title"),
+             "fixture_confirmation": {
+                 k: (c.get("fixture_confirmation") or {}).get(k)
+                 for k in ("ok", "refusal", "matches", "examined")}}
+            for c in (sel.get("confirmed_by_provider") or [])][:12],
+        "budget_dropped": [{"key": d.get("key"),
+                            "venue_events": d.get("venue_events")}
+                           for d in (sel.get("budget_dropped") or [])][:12],
+        "never_requested": sel.get("never_requested") or [],
+        "catalogue_read": sel.get("catalogue_read"),
+        "venue_board": {"read": board.get("read"),
+                        "evidence": board.get("evidence"),
+                        "evidence_age_s": board.get("evidence_age_s"),
+                        "refusal": board.get("refusal"),
+                        "tokens": [t for t, _ in (board.get("board") or [])][:20]},
+    }
+
+
 async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
     """PERSIST THE CYCLE SUMMARY, because most refusals never reach a row.
 
@@ -5157,6 +5563,16 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                     out.get("venue_universe_by_label") or {},
                 "funnel_by_provider_sport":
                     out.get("funnel_by_provider_sport") or {},
+                # ── WHICH COMPETITIONS WERE REQUESTED, AND WHICH REFUSED ──
+                #
+                # `cycle` computed this and the heartbeat dropped it, so
+                # production could not answer "which competitions did this
+                # build ask for" -- and a cycle running one sport looked
+                # identical to a cycle running four. It carries the venue
+                # board's own evidence state (LIVE_READ / STALE_SNAPSHOT /
+                # EXPIRED_SNAPSHOT) with it, so a set derived from an expired
+                # snapshot cannot be read as current coverage.
+                "sports_selection": _selection_digest(out),
                 # and, for the refusals that have a message, the message.
                 "venue_errors": out.get("venue_errors") or [],
                 # EVERY MAPPED CANDIDATE AGAINST ITS FIRST REFUSAL, so a

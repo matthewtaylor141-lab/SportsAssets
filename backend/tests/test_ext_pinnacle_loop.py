@@ -279,9 +279,21 @@ def _stub_venue_board(monkeypatch, *tokens):
     whatever `us_premap` happens to hold in the test database, which is not the
     subject of any test here.
     """
-    async def _board(conn):
-        return {"read": True, "source": "stub",
-                "board": [(t, 9) for t in tokens], "why": "stubbed"}
+    # THE VENUE'S FIXTURES MUST MATCH THE STUBBED PROVIDER EVENT.
+    #
+    # The mapping is now confirmed against fixtures rather than against key
+    # existence, and these fixtures stub the provider with one Liverpool vs
+    # Manchester City event. A board carrying no titles -- which is what this
+    # helper supplied at first -- makes every competition UNCONFIRMABLE, and
+    # the cycle correctly refuses before resolving anything. That is the check
+    # working, not a fixture problem, so the venue side names the same match.
+    async def _board(conn, *, now=None):
+        return {"read": True, "source": "stub", "evidence": "LIVE_READ",
+                "evidence_age_s": 0.0,
+                "board": [(t, 9) for t in tokens],
+                "titles": {t: ["Liverpool vs. Manchester City",
+                               "Arsenal vs. Chelsea"] for t in tokens},
+                "why": "stubbed"}
 
     monkeypatch.setattr(loop, "venue_soccer_competitions", _board)
 
@@ -610,10 +622,25 @@ async def test_refusals_before_scoring_are_still_counted(monkeypatch):
         _stub_venue_board(monkeypatch, "unl")
         _stub_sport_catalogue(monkeypatch, "baseball_mlb", SOCCER_KEY)
 
+        # TWO EVENTS, AND THE SECOND ONE IS WHY.
+        #
+        # The competition mapping is now confirmed against fixtures before any
+        # event is resolved, so a provider list containing ONLY Real Madrid vs
+        # Barcelona refuses the whole KEY -- correctly, since nothing in it is
+        # recognizable on the venue's board. That is a different refusal from
+        # the one this test is about, and it would have replaced it silently.
+        #
+        # This test's subject is the PER-EVENT mapping refusal: an event with no
+        # venue contract, counted even though it never reaches scoring. So the
+        # competition is made confirmable by a fixture the board does carry, and
+        # the unmapped event is then refused on its own account. Neither
+        # resolves, because this database holds no matching `us_premap` rows, so
+        # `evaluated` stays 0.
+        confirming = _event()          # Liverpool vs Manchester City
         async def fake_fetch(sport_key, *, api_key, timeout=20.0):
             if sport_key != SOCCER_KEY:
                 return {"ok": True, "events": [], "received_at": time.time()}
-            return {"ok": True, "events": [unmapped],
+            return {"ok": True, "events": [confirming, unmapped],
                     "received_at": time.time()}
 
         monkeypatch.setattr(loop, "fetch_odds", fake_fetch)

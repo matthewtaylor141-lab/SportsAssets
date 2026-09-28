@@ -177,30 +177,150 @@ def test_international_friendlies_are_excluded_with_a_stated_reason():
     assert cands == []
 
 
-async def test_an_unreadable_board_falls_back_and_says_so():
-    class _Bad:
-        async def fetch(self, *a):
-            raise RuntimeError("connection reset")
-
-    got = await loop.venue_soccer_competitions(_Bad())
-    assert got["read"] is False
-    assert got["error"] == "RuntimeError"
-    # An unread board is not an empty board.
-    assert got["board"] == list(loop.VENUE_SOCCER_BOARD_MEASURED_2026_09_28)
-    assert "marked as such" in got["why"]
-
-
 async def test_a_read_board_is_used_in_its_own_order():
     class _Good:
         async def fetch(self, *a):
-            return [{"token": "mls", "events": 7},
-                    {"token": "unl", "events": 2}]
+            return [{"token": "mls", "events": 7,
+                     "titles": ["Columbus Crew vs. Inter Miami CF"]},
+                    {"token": "unl", "events": 2,
+                     "titles": ["Belgium vs. France"]}]
 
     got = await loop.venue_soccer_competitions(_Good())
     assert got["read"] is True
     assert got["board"] == [("mls", 7), ("unl", 2)]
-    cands = loop.candidates_from_board(got["board"])
+    cands = loop.candidates_from_board(got["board"], got["titles"])
     assert [c["our_token"] for c in cands] == ["mls", "unl"]
+    # THE VENUE'S FIXTURES TRAVEL WITH THE CANDIDATE, because the mapping is
+    # confirmed against them and a candidate that arrives without them would be
+    # admitted on key existence alone.
+    assert cands[0]["venue_titles"] == ["Columbus Crew vs. Inter Miami CF"]
+
+
+# ── EXISTENCE IS NOT IDENTITY ─────────────────────────────────────────
+
+def test_a_key_that_exists_but_names_another_competition_is_refused():
+    """THE HOLE CODEX REPRODUCED. `select_sports` confirmed that a key EXISTS
+    and is ACTIVE and reported it under `confirmed_by_provider`. That is not
+    identity: `soccer_england_league2` exists, is active, and is the fourth
+    tier -- the venue's `engnl` is the fifth, with entirely different clubs.
+
+    The provider's fixtures are what settle it, so they are compared against
+    the venue's own.
+    """
+    england_league_two = [{"home_team": "Bradford City", "away_team": "Walsall"},
+                          {"home_team": "Notts County",
+                           "away_team": "Crewe Alexandra"}]
+    venue_national_league = ["AFC Fylde vs. Carlisle United",
+                             "Barrow AFC vs. Scunthorpe United",
+                             "Gateshead FC vs. Altrincham FC"]
+    got = loop.confirm_mapping_by_fixtures(
+        provider_events=england_league_two,
+        venue_event_titles=venue_national_league)
+    assert got["ok"] is False
+    assert got["refusal"] == loop.R_MAPPING_FIXTURES_DO_NOT_MATCH
+    assert got["matches"] == 0
+
+
+def test_the_same_competition_confirms_on_its_fixtures():
+    got = loop.confirm_mapping_by_fixtures(
+        provider_events=[
+            {"home_team": "Columbus Crew", "away_team": "Inter Miami CF"},
+            {"home_team": "Seattle Sounders FC",
+             "away_team": "Sporting Kansas City"}],
+        venue_event_titles=["Columbus Crew vs. Inter Miami CF",
+                            "New York Red Bulls vs. St. Louis City SC",
+                            "Seattle Sounders FC vs. Sporting Kansas City"])
+    assert got["ok"] is True
+    assert got["refusal"] is None
+    # BOTH SIDES OF A FIXTURE, which is what confirms it. Counting matches
+    # instead measured venue coverage: the provider's competition routinely
+    # carries more fixtures than the venue lists, so a correctly mapped
+    # competition with one listed fixture would have been refused forever.
+    assert got["strong_matches"] >= loop.MIN_STRONG_FIXTURE_MATCHES
+    assert any(m["strong"] for m in got["matched_fixtures"])
+
+
+def test_no_provider_fixtures_is_unconfirmable_not_confirmed():
+    """A competition between rounds legitimately has no fixtures, and so does a
+    key that is not this competition. Admitting on that basis would be
+    admitting on absence, which is the error this whole batch is correcting."""
+    got = loop.confirm_mapping_by_fixtures(
+        provider_events=[],
+        venue_event_titles=["AFC Fylde vs. Carlisle United"])
+    assert got["ok"] is False
+    assert got["refusal"] == loop.R_MAPPING_UNCONFIRMABLE
+
+
+def test_club_form_words_alone_do_not_confirm_a_mapping():
+    """"United" and "City" appear in every English division. A mapping that
+    confirmed on them would confirm every tier against every other."""
+    got = loop.confirm_mapping_by_fixtures(
+        provider_events=[{"home_team": "Manchester United",
+                          "away_team": "Leeds United"}],
+        venue_event_titles=["Carlisle United vs. Southend United"])
+    assert got["ok"] is False, got
+    assert got["refusal"] == loop.R_MAPPING_FIXTURES_DO_NOT_MATCH
+    # "united" is dropped as club-form noise, so this does not even register as
+    # a weak match -- and if it did, a weak match alone still cannot confirm.
+    assert got["strong_matches"] == 0
+
+
+def test_the_two_refuted_mappings_are_out_with_their_evidence():
+    """I mapped `engnl` to League Two and `irl1` to the Irish Premier Division.
+    The venue's fixtures say fifth tier and Irish FIRST Division. Codex
+    challenged the first; the second was found by applying the same check to
+    every entry rather than only the one questioned."""
+    for token in ("engnl", "irl1"):
+        assert token in loop.VENUE_TOKENS_WITH_A_REFUTED_MAPPING
+        assert token not in loop.VENUE_TOKEN_TO_PROVIDER_KEY
+        rec = loop.VENUE_TOKENS_WITH_A_REFUTED_MAPPING[token]
+        for field in ("i_mapped_it_to", "the_venue_fixtures_are",
+                      "which_competition_that_is", "why_it_is_out"):
+            assert rec[field]
+    # AND THEY CANNOT COME BACK THROUGH THE BOARD.
+    assert loop.candidates_from_board([("engnl", 12), ("irl1", 5)]) == []
+
+
+def test_the_metered_budget_change_is_stated_as_a_change():
+    """Three fetches became four. That is a resource decision, so it is
+    written with its arithmetic rather than appearing as a tuple of a
+    different length."""
+    chg = loop.METERED_BUDGET_CHANGE
+    assert chg["before"]["keys"] == 3
+    assert chg["after"]["keys"] == loop.MAX_METERED_SPORTS_PER_CYCLE == 4
+    assert "soccer_epl" in chg["before"]["keys_named"]
+    assert chg["before"]["of_which_unreachable"] == ["soccer_epl"]
+    assert "1,900" in chg["net"]
+
+
+def test_the_epl_exclusion_is_a_snapshot_not_a_standing_claim():
+    """A catalogue snapshot does not justify a permanent claim about the
+    venue. What makes the exclusion safe is that the soccer set is derived
+    from the board each cycle, so a later appearance is picked up."""
+    got = loop.select_sports({"ok": False})
+    assert got["this_is_a_snapshot_not_a_standing_claim"] is True
+    assert "SNAPSHOT" in got["why_epl_is_never_requested"]
+    assert "DERIVED from the board" in got["why_epl_is_never_requested"]
+
+
+def test_the_snapshot_epoch_is_the_date_it_claims():
+    """I typed 1759017600 for "2026-09-28". That is 2025-09-28, so the snapshot
+    was born a year old and the fallback reported EXPIRED on its first use --
+    which would have silently removed every soccer competition the moment the
+    board read failed. A hand-typed epoch is a guess like any other."""
+    import datetime as _dt
+
+    at = _dt.datetime.fromtimestamp(loop.VENUE_BOARD_SNAPSHOT_AT,
+                                    _dt.timezone.utc)
+    assert (at.year, at.month, at.day) == (2026, 9, 28), at.isoformat()
+
+
+def test_the_rejected_list_names_the_venue_token():
+    """It carried the provider key and a null token, which is the half an
+    operator cannot act on -- the token is what they see on the board."""
+    got = loop.select_sports({"ok": False})
+    assert got["rejected"]
+    assert all(r["our_token"] for r in got["rejected"])
 
 
 async def test_the_catalogue_read_cannot_raise_out_of_the_cycle():
