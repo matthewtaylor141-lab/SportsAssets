@@ -261,8 +261,17 @@ class RecordingVenue:
         return self._submit
 
 
+#: THIS MODULE'S OWN LOOP. `asyncio.get_event_loop()` returns the thread's
+#: CURRENT loop, which an earlier async test in the same process may have
+#: closed or unset -- 33 tests here then failed with "no current event loop"
+#: in the ordered suite while passing alone. One private loop, used for every
+#: call, keeps the FakePool's primitives on one loop and depends on nothing a
+#: previous module left behind.
+_LOOP = asyncio.new_event_loop()
+
+
 def run(coro):
-    return asyncio.get_event_loop().run_until_complete(coro)
+    return _LOOP.run_until_complete(coro)
 
 
 # ── the claim itself ─────────────────────────────────────────────────

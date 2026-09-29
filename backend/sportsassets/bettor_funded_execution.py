@@ -90,6 +90,13 @@ TIF = "TIME_IN_FORCE_FILL_OR_KILL"
 R_VENUE_CLASS = "THIS_CONNECTION_ONLY_RUNS_A_FUNDED_CLASS_VENUE"
 R_NOT_ADMISSIBLE = "THE_DECISION_WAS_NOT_ADMITTED_SO_THERE_IS_NOTHING_TO_SEND"
 R_NO_SIZED_PLAN = "THE_DECISION_CARRIES_NO_SIZED_MARKETABLE_PLAN"
+#: A DECISION WHOSE RISK VERDICT RESTED ON THE RESEARCH WAIVER IS NOT FUNDABLE.
+#: The waiver lets the uncalibrated research lane run its lifecycle in shadow;
+#: it applies whenever the calibration read is not a measurement -- including
+#: a READ FAILURE -- so without this a transient error during an authorized
+#: window would offer a waived decision to the funded connector.
+R_RESEARCH_WAIVER_IS_NOT_FUNDABLE = \
+    "THE_DECISION_RESTED_ON_THE_RESEARCH_WAIVER_AND_IS_NOT_FUNDABLE"
 R_NO_VENUE_CONTRACT = "THE_DECISION_NAMES_NO_VENUE_CONTRACT_TO_SEND_TO"
 R_NO_INTENT = "THE_DECISION_NAMES_NO_SIDE_AND_THE_VENUE_WOULD_PICK_ONE"
 R_LIMITS_NOT_APPROVED = "NO_OWNER_APPROVED_LIMIT_SET_IS_RECORDED"
@@ -198,6 +205,22 @@ def plan_from_decision(rec: dict | None) -> dict:
     """
     out = {"version": VERSION, "ok": False}
     rec = dict(rec or {})
+    waived = []
+    for w in (((rec.get("execution_plan") or {}).get("research_waiver")) or {},
+              rec.get("research_waiver") or {},
+              ((rec.get("execution_plan") or {}).get("risk") or {}).get(
+                  "research_waiver") or {}):
+        if isinstance(w, dict):
+            waived += list(w.get("waived") or [])
+    if waived:
+        # WHATEVER `authorised` SAYS: a gate that was waived was not passed.
+        return dict(out, refusal=R_RESEARCH_WAIVER_IS_NOT_FUNDABLE,
+                    waived=sorted(set(map(str, waived))),
+                    why=("this decision's risk verdict was computed with %s "
+                         "waived. A waived gate is a gate that was not "
+                         "passed, and only a decision that passed every gate "
+                         "on its own evidence may reach a venue"
+                         % sorted(set(map(str, waived)))))
     if not rec.get("admissible"):
         return dict(out, refusal=R_NOT_ADMISSIBLE,
                     refusals=list(rec.get("refusals") or []),

@@ -71,6 +71,7 @@ tests/test_mirror_exit.py
 tests/test_mirror_exit_quantity.py
 tests/test_one_ranking_precedes_the_action_in_production.py
 tests/test_one_shared_freshness_rule_and_the_audit_findings.py
+tests/test_only_a_current_measurement_opens_the_calibration_gate.py
 tests/test_pair_completion.py
 tests/test_partial_exit_pnl_is_separable.py
 tests/test_payout_event_is_priced_once.py

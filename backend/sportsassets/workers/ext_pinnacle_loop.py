@@ -3613,9 +3613,15 @@ def _entry_freshness(quote, vq, now) -> dict:
     return out
 
 
+#: HOW OLD A CALIBRATION MEASUREMENT MAY BE AND STILL OPEN THE GATE. The
+#: evaluator scores a 90-day window; a measurement not repeated for two weeks
+#: describes a source that may have moved since. Stale is NOT MEASURED.
+CALIBRATION_MAX_AGE_S = 14 * 86400.0
+
 CALIBRATION_SQL = """
     SELECT source_version, sample_size, metric, score, tolerance,
-           within_tolerance, measured_by,
+           within_tolerance, measured_by, provenance,
+           extract(epoch FROM measured_at) AS measured_at_epoch_s,
            to_char(measured_at, 'YYYY-MM-DD"T"HH24:MI:SS"Z"') AS measured_at,
            to_char(window_start, 'YYYY-MM-DD"T"HH24:MI:SS"Z"')
                AS window_start,
@@ -3653,7 +3659,52 @@ async def source_calibration(conn, source_version) -> dict:
                         "module says to validate it in shadow, and that "
                         "measurement has not been made" % source_version)}
     d = dict(row)
+    # ── A ROW IS A MEASUREMENT ONLY IF THE CURRENT EVALUATOR MADE IT ──
+    #
+    # THE HOLE (production-prerequisite investigation, 2026-09-29). This read
+    # accepted ANY newest row: a hand-inserted one, one written by an older
+    # evaluator whose acceptance conditions no longer apply, one measured
+    # months ago, or one labelled by a test. `bettor_source_calibration.measure`
+    # is the only production writer and stamps `provenance.evaluator`; a row
+    # without the CURRENT evaluator, below the evaluator's own minimum sample,
+    # or older than CALIBRATION_MAX_AGE_S is reported and NOT counted.
+    from .. import bettor_source_calibration as _CAL
+    prov = d.get("provenance")
+    if isinstance(prov, str):
+        try:
+            prov = __import__("json").loads(prov)
+        except ValueError:
+            prov = {}
+    prov = prov if isinstance(prov, dict) else {}
+    d["provenance"] = prov
+    age = (time.time() - float(d["measured_at_epoch_s"])
+           if d.get("measured_at_epoch_s") is not None else None)
+    not_a_measurement = None
+    if prov.get("evaluator") != _CAL.VERSION:
+        not_a_measurement = ("CALIBRATION_ROW_NOT_FROM_THE_CURRENT_EVALUATOR",
+                             "the newest row names evaluator %r; only %s "
+                             "measurements open this gate"
+                             % (prov.get("evaluator"), _CAL.VERSION))
+    elif int(d.get("sample_size") or 0) < _CAL.MIN_RESOLVED_EVENTS:
+        not_a_measurement = ("CALIBRATION_ROW_BELOW_THE_EVALUATORS_MINIMUM",
+                             "%s resolved events, below the evaluator's own "
+                             "minimum of %d" % (d.get("sample_size"),
+                                                _CAL.MIN_RESOLVED_EVENTS))
+    elif age is None or age > CALIBRATION_MAX_AGE_S:
+        not_a_measurement = ("CALIBRATION_ROW_IS_STALE",
+                             "measured %s ago, past the %.0f-day limit"
+                             % ("an unknown time" if age is None
+                                else "%.1f days" % (age / 86400.0),
+                                CALIBRATION_MAX_AGE_S / 86400.0))
+    if not_a_measurement is not None:
+        return {"measured": False, "error": not_a_measurement[0],
+                "source_version": source_version,
+                "newest_row": {k: d.get(k) for k in
+                               ("measured_at", "measured_by", "sample_size",
+                                "within_tolerance")},
+                "why": not_a_measurement[1]}
     d["measured"] = True
+    d["age_s"] = round(age, 1)
     d["why"] = ("%s = %.6f against a tolerance of %.6f over %d resolved "
                 "observations (%s to %s), measured by %s"
                 % (d["metric"], float(d["score"]), float(d["tolerance"]),

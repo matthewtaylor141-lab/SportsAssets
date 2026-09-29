@@ -357,9 +357,17 @@ async def _calibrate(conn):
         "score, tolerance, within_tolerance, measured_by, provenance) "
         "VALUES ($1, now(), now() - interval '30 days', now(), 412, "
         "'BRIER', 0.2104, 0.2400, TRUE, 'CONTROLLED_INTEGRATION_TEST', "
-        "'{\"note\": \"supplied by a test, not measured in production\"}') "
+        "$2::jsonb) "
         "ON CONFLICT (source_version, measured_at) DO NOTHING",
-        devig.VERSION)
+        devig.VERSION,
+        # THE EVALUATOR THE GATE REQUIRES, stated beside the label that this
+        # row was supplied by a test and never measured in production.
+        __import__("json").dumps({
+            "evaluator": __import__(
+                "sportsassets.bettor_source_calibration",
+                fromlist=["VERSION"]).VERSION,
+            "supplied_by": "TEST_FIXTURE",
+            "note": "supplied by a test, not measured in production"}))
 
 
 def _stub(monkeypatch, *, ladder=LADDER, prose=VENUE_PROSE,
