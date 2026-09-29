@@ -45,8 +45,13 @@ def _report(*, nodes=None, collected=None, exitstatus=1, complete=True,
     full = {}
     for nid, spec in nodes.items():
         if isinstance(spec, str):
-            spec = {"outcome": spec, "decided_by": "call",
-                    "phases": {"call": spec}, "longrepr": None}
+            # THE PHASES PYTEST ACTUALLY RECORDS for each outcome: a skip is
+            # decided in setup and has no call; everything else has all three.
+            phases = ({"setup": "skipped"} if spec == "skipped" else
+                      {"setup": "passed", "call": spec, "teardown": "passed"})
+            spec = {"outcome": spec,
+                    "decided_by": "setup" if spec == "skipped" else "call",
+                    "phases": phases, "longrepr": None}
         full[nid] = spec
     coll = list(collected if collected is not None else full.keys())
     counts = {}
@@ -309,7 +314,7 @@ def test_a_critical_test_failing_in_both_runs_is_not_accepted(tmp_path):
                           "tests/crit.py::proof": "failed"})
     rc, out = _run(tmp_path, base, head, critical=["tests/crit.py::proof"])
     assert rc == RC_NEW_FAILURES, out
-    assert "critical acceptance test(s) FAILED" in out
+    assert "critical acceptance test(s) did not PASS" in out
     assert "tests/crit.py::proof" in out
     # AND WITHOUT THE CRITICAL LIST the same pair is a matched baseline
     rc, out = _run(tmp_path, base, head)
@@ -335,6 +340,66 @@ def test_a_critical_file_means_every_test_it_collects(tmp_path):
     assert "tests/gone.py collected no test at all" in out
     rc, out = _run(tmp_path, base, base, critical=["tests/crit.py"])
     assert rc == RC_ACCEPTED, out
+
+
+def test_an_expected_failure_is_not_a_critical_proof(tmp_path):
+    """REPRODUCED BY INDEPENDENT REVIEW: an `xfailed` critical test was
+    ACCEPTED with exit 0. A test that declares its property does not hold
+    proves nothing, whatever the baseline says."""
+    base = _report(nodes={"tests/crit.py::proof": "xfailed"}, exitstatus=0)
+    head = _report(nodes={"tests/crit.py::proof": "xfailed"}, exitstatus=0)
+    rc, out = _run(tmp_path, base, head, critical=["tests/crit.py::proof"])
+    assert rc == RC_NEW_FAILURES, out
+    assert "XFAILED" in out
+    # ...AND THROUGH A FILE-LEVEL ENTRY TOO
+    rc, out = _run(tmp_path, base, head, critical=["tests/crit.py"])
+    assert rc == RC_NEW_FAILURES, out
+    # THE CONTROL: outside the critical list an xfail is still not a
+    # regression, so the rule is about critical proofs, not about xfail.
+    rc, out = _run(tmp_path, base, head)
+    assert rc == RC_ACCEPTED, out
+
+
+def test_an_unexpected_pass_is_not_a_critical_proof(tmp_path):
+    """DEFINED: an xpass still carries its expected-failure marker, so it is
+    not accepted as a critical proof until the marker is removed."""
+    base = _report(nodes={"tests/crit.py::proof": "passed"}, exitstatus=0)
+    head = _report(nodes={"tests/crit.py::proof": "xpassed"}, exitstatus=0)
+    rc, out = _run(tmp_path, base, head, critical=["tests/crit.py::proof"])
+    assert rc == RC_NEW_FAILURES, out
+    assert "XPASSED" in out
+    rc, out = _run(tmp_path, base, head)
+    assert rc == RC_ACCEPTED, out
+    assert "XPASSED in HEAD: 1" in out
+
+
+def test_an_outcome_the_reporter_never_writes_invalidates_the_report(tmp_path):
+    base = _report(nodes={"tests/a.py::t": "passed"}, exitstatus=0)
+    head = _report(nodes={"tests/a.py::t": "error"}, exitstatus=0)
+    rc, out = _run(tmp_path, base, head)
+    assert rc == RC_INVALID, out
+    assert "outcome the reporter does not write" in out
+    # AN UNKNOWN WORD IN A PHASE IS THE SAME DEFECT
+    head = _report(nodes={"tests/a.py::t": {
+        "outcome": "passed", "decided_by": None, "longrepr": None,
+        "phases": {"setup": "passed", "call": "weird", "teardown": "passed"}}},
+        exitstatus=0)
+    rc, out = _run(tmp_path, base, head)
+    assert rc == RC_INVALID, out
+
+
+def test_a_critical_pass_with_a_missing_phase_is_incomplete(tmp_path):
+    """`passed` with no call or no teardown record is not a complete pass."""
+    base = _report(nodes={"tests/crit.py::proof": "passed"}, exitstatus=0)
+    for phases in ({"setup": "passed"},
+                   {"setup": "passed", "call": "passed"}):
+        head = _report(nodes={"tests/crit.py::proof": {
+            "outcome": "passed", "decided_by": None, "longrepr": None,
+            "phases": phases}}, exitstatus=0)
+        rc, out = _run(tmp_path, base, head,
+                       critical=["tests/crit.py::proof"])
+        assert rc == RC_INVALID, (phases, out)
+        assert "record is incomplete" in out
 
 
 def test_a_present_and_passing_critical_test_is_accepted(tmp_path):

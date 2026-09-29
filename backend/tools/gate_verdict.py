@@ -49,6 +49,30 @@ FAILING = ("failed",)
 #: Reported separately because each is a proof that did not run.
 NOT_RUN = ("skipped",)
 
+#: EVERY OUTCOME THE REPORTER CAN WRITE. A node carrying anything else was not
+#: produced by `gate_report` as written, so the report is not trusted at all.
+KNOWN_OUTCOMES = ("passed", "failed", "skipped", "xfailed", "xpassed")
+
+#: THE ONE OUTCOME A CRITICAL PROOF MAY HAVE, and the three phases it must have
+#: passed. The matched baseline excuses failures elsewhere; for the critical
+#: list nothing but a complete pass is a proof:
+#:
+#:   failed     REJECTED  the property does not hold.
+#:   xfailed    REJECTED  the test DECLARES the property does not hold. An
+#:                        expected failure is a recorded expectation of failure,
+#:                        and a proof that is expected to fail proves nothing.
+#:   xpassed    REJECTED  DEFINED HERE, deliberately: the test still declares
+#:                        the property does not hold, and a pass that
+#:                        contradicts its own marker is not accepted as a proof
+#:                        until the marker is removed and the test passes as an
+#:                        ordinary test. (Outside the critical list an xpass is
+#:                        reported and is not a regression.)
+#:   skipped    INVALID   the proof did not run.
+#:   anything else, or a passed node missing its setup, call or teardown
+#:              record    INVALID   the record is incomplete or not ours.
+CRITICAL_PASS = "passed"
+CRITICAL_PHASES = ("setup", "call", "teardown")
+
 
 def load(path):
     try:
@@ -108,6 +132,14 @@ def validate(doc, label):
     if stray:
         bad.append("%s: %d executed node(s) were not in the collected "
                    "manifest: %s" % (label, len(stray), sorted(stray)[:5]))
+    unknown = sorted(n for n, v in (doc.get("nodes") or {}).items()
+                     if v.get("outcome") not in KNOWN_OUTCOMES
+                     or any(o not in KNOWN_OUTCOMES
+                            for o in (v.get("phases") or {}).values()))
+    if unknown:
+        bad.append("%s: %d node(s) carry an outcome the reporter does not "
+                   "write (%s), so the report is not ours or is damaged"
+                   % (label, len(unknown), unknown[:5]))
     st_ok = st == EXIT_TESTS_FAILED
     fails = failing(doc)
     if st_ok and not fails:
@@ -199,24 +231,46 @@ def main(argv):
             crit_bad.append("%s collected no test at all" % c)
         expanded.extend(mine)
     critical = expanded
+    # ── A CRITICAL PROOF IS ACCEPTED ONLY AS A COMPLETE PASS ─────────
+    #
+    # THE GAPS THIS CLOSES. The first version checked only that a critical test
+    # RAN, so one failing in both runs was "pre-existing" and ACCEPTED. The
+    # second rejected `failed` and nothing else, so an `xfailed` critical test
+    # -- a test declaring that its property does NOT hold -- was ACCEPTED with
+    # exit 0 (reproduced by independent review). The rule is now positive: a
+    # critical node must be `passed` with setup, call and teardown each
+    # recorded as passed. See CRITICAL_PASS for every other outcome.
+    crit_failed = []
     for c in critical:
+        v = hnodes.get(c)
         if c in hdesel:
             crit_bad.append("%s was DESELECTED" % c)
         elif c not in hcoll:
             crit_bad.append("%s was not COLLECTED" % c)
-        elif hnodes.get(c, {}).get("outcome") in NOT_RUN:
-            crit_bad.append("%s was SKIPPED" % c)
-        elif c not in hnodes:
+        elif v is None:
             crit_bad.append("%s produced no phase record" % c)
-    # ── AND A CRITICAL PROOF THAT FAILED IS NOT ACCEPTED EITHER ──────
-    #
-    # THE GAP THIS CLOSES. The check above established only that a critical
-    # test RAN. One that failed in both runs was then "pre-existing" and the
-    # verdict was ACCEPTED -- so a capital-critical proof could be red on every
-    # commit and never stop a release. The critical list is the set that must
-    # PASS, not merely execute; the matched baseline excuses everything else.
-    crit_failed = sorted(c for c in critical
-                         if hnodes.get(c, {}).get("outcome") in FAILING)
+        elif v.get("outcome") in NOT_RUN:
+            crit_bad.append("%s was SKIPPED" % c)
+        elif v.get("outcome") in FAILING:
+            crit_failed.append("%s FAILED" % c)
+        elif v.get("outcome") == "xfailed":
+            crit_failed.append("%s is XFAILED -- it declares its property does "
+                               "not hold" % c)
+        elif v.get("outcome") == "xpassed":
+            crit_failed.append("%s XPASSED -- it still carries an expected-"
+                               "failure marker, so its pass is not accepted "
+                               "as a proof" % c)
+        elif v.get("outcome") != CRITICAL_PASS:
+            crit_bad.append("%s has outcome %r, which is not a pass"
+                            % (c, v.get("outcome")))
+        else:
+            ph = v.get("phases") or {}
+            short = [w for w in CRITICAL_PHASES if ph.get(w) != CRITICAL_PASS]
+            if short:
+                crit_bad.append("%s is recorded as passed without a passing "
+                                "%s phase, so the record is incomplete"
+                                % (c, "/".join(short)))
+    crit_failed.sort()
 
     print("NEW FAILURES (in HEAD, not in the baseline): %d" % len(new))
     for n in new:
@@ -243,8 +297,8 @@ def main(argv):
             print("  ! %s" % c)
         return 2
     if crit_failed:
-        print("VERDICT: NEW_FAILURES -- %d critical acceptance test(s) FAILED. "
-              "A critical proof must pass; the matched baseline does not "
+        print("VERDICT: NEW_FAILURES -- %d critical acceptance test(s) did not "
+              "PASS. A critical proof must pass; the matched baseline does not "
               "excuse it." % len(crit_failed))
         for c in crit_failed:
             print("  ! %s" % c)
