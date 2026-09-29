@@ -117,6 +117,17 @@ RETIRED_EVIDENCE_INVALIDATED = "TRAINING_EVIDENCE_INVALIDATED"
 PROVENANCE_RECORDS = "RECORDS"
 PROVENANCE_DECLARED = "DECLARED"
 
+#: WHERE A RECORD-BOUND MODEL'S RECORDS COME FROM. Funded decisions label only
+#: groups whose both legs were HELD and settled, which the lane cannot produce
+#: without an approved model; non-funded pair observations
+#: (`bettor_pair_observations`, migration 140) are labelled from the venue's own
+#: settlement of both contracts and break that circle. A model names its source
+#: in its provenance and is fit, verified, evaluated and compared on records of
+#: that source only -- the bar and the approver are the same for both.
+SOURCE_FUNDED = "FUNDED_DECISIONS"
+SOURCE_OBSERVATIONS = "PAIR_OBSERVATIONS"
+SOURCES = (SOURCE_FUNDED, SOURCE_OBSERVATIONS)
+
 #: ── THE WEIGHTING EVERY SCORE AND EVERY FIT USES ────────────────────
 #:
 #: EVENT_BALANCED: each decision is weighted 1 / (decisions on its fixture), so
@@ -662,7 +673,8 @@ LABEL_SQL = """
 
 async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
                    account_id: str | None = None, through=None,
-                   outcomes_through=None, decision_ids=None) -> dict:
+                   outcomes_through=None, decision_ids=None,
+                   source: str = SOURCE_FUNDED) -> dict:
     """EVERY DECISION WHOSE FIXTURE HAS RESOLVED, with its prospective vector
     and the evidence its label came from.
 
@@ -677,8 +689,19 @@ async def labelled(conn, *, model_key: str = KEY_MIDDLE, after=None,
     made before T whose outcome was learned after T is not something a fit at
     T could have learned from.
     """
+    if source == SOURCE_OBSERVATIONS:
+        # NON-FUNDED OBSERVATIONS: the same record shape, the same windows;
+        # `account_id` does not apply -- nothing was held by any account.
+        from . import bettor_pair_observations as PO
+        return dict(await PO.labelled(conn, after=after, through=through,
+                                      outcomes_through=outcomes_through,
+                                      ids=decision_ids),
+                    model_key=model_key, source=source)
+    if source != SOURCE_FUNDED:
+        return {"version": VERSION, "ok": False, "source": source,
+                "refusal": "THAT_IS_NOT_A_RECORD_SOURCE"}
     out: dict[str, Any] = {"version": VERSION, "model_key": model_key,
-                           "rows": [], "labels": []}
+                           "rows": [], "labels": [], "source": source}
     sql, args = LABEL_SQL, []
     if after is not None:
         args.append(after)
@@ -804,7 +827,8 @@ def _subset(lab: dict, keep: list) -> dict:
 async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
                            account_id: str | None = None,
                            estimator: str = SCHEDULED_ESTIMATOR,
-                           windows: dict | None = None, **kw) -> dict:
+                           windows: dict | None = None,
+                           source: str = SOURCE_FUNDED, **kw) -> dict:
     """FIT ON THE LEDGER AS IT STOOD AT `through`, AND BIND WHICH ROWS.
 
     `through` is the TRAINING CUTOFF and the LABEL CUTOFF at once: every
@@ -819,9 +843,11 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
     and hashes them; `register` and `promote` re-read and re-hash. `windows`
     is the evaluation plan the caller declared BEFORE fitting, stored with it.
     """
-    out: dict[str, Any] = {"version": VERSION, "estimator": estimator}
+    out: dict[str, Any] = {"version": VERSION, "estimator": estimator,
+                           "source": source}
     lab = await labelled(conn, model_key=model_key, through=through,
-                         outcomes_through=through, account_id=account_id)
+                         outcomes_through=through, account_id=account_id,
+                         source=source)
     if not lab.get("ok"):
         return dict(out, ok=False, refusal=lab.get("refusal"),
                     error=lab.get("error"))
@@ -839,6 +865,7 @@ async def fit_from_records(conn, *, through, model_key: str = KEY_MIDDLE,
         return fitted
     records = _training_records(lab)
     prov = {"kind": PROVENANCE_RECORDS,
+            "source": source,
             "records": records,
             "decision_ids": [r["decision_id"] for r in records],
             "fixtures": sorted({r["fixture"] for r in records}),
@@ -870,11 +897,13 @@ async def verify_provenance(conn, model: dict) -> dict:
     longer exists as it was fit is not a model anyone can vouch for.
     """
     prov = model.get("training_provenance") or {}
+    if isinstance(prov, str):
+        prov = json.loads(prov)
     if prov.get("kind") != PROVENANCE_RECORDS:
         return {"ok": False, "refusal": R_TRAINING_NOT_BOUND_TO_RECORDS}
     ids = list(prov.get("decision_ids") or [])
     lab = await labelled(conn, model_key=model.get("model_key") or KEY_MIDDLE,
-                         decision_ids=ids)
+                         decision_ids=ids, source=source_of(model))
     if not lab.get("ok") or lab["n"] != len(ids) or not ids:
         return {"ok": False, "refusal": R_TRAINING_RECORDS_DO_NOT_REPRODUCE,
                 "why": "%d decision(s) named, %d still labelled"
@@ -891,6 +920,15 @@ async def verify_provenance(conn, model: dict) -> dict:
     return {"ok": True, "records": records, "lab": lab}
 
 
+def source_of(model: dict) -> str:
+    """The record source a model was fit on. A provenance written before
+    sources existed was fit on funded decisions, the only source there was."""
+    prov = (model or {}).get("training_provenance") or {}
+    if isinstance(prov, str):
+        prov = json.loads(prov)
+    return prov.get("source") or SOURCE_FUNDED
+
+
 def _holdout(lab: dict, seen: set) -> dict:
     """The labelled rows with every fixture in `seen` removed, whole."""
     keep = [i for i, fx in enumerate(lab.get("fixtures") or [])
@@ -901,9 +939,14 @@ def _holdout(lab: dict, seen: set) -> dict:
     return out
 
 
-async def _fixtures_seen_through(conn, boundary) -> set:
-    """Every fixture with ANY decision at or before `boundary`: the fit may
-    have seen its outcome, so none of its decisions is held-out evidence."""
+async def _fixtures_seen_through(conn, boundary,
+                                 source: str = SOURCE_FUNDED) -> set:
+    """Every fixture with ANY record at or before `boundary`: the fit may
+    have seen its outcome, so none of its records is held-out evidence."""
+    if source == SOURCE_OBSERVATIONS:
+        return {str(r["fixture"]) for r in await conn.fetch(
+            "SELECT DISTINCT fixture FROM bettor_pair_observations "
+            " WHERE observed_at <= $1", boundary)}
     return {str(r["fixture"]) for r in await conn.fetch(
         "SELECT DISTINCT fixture FROM bettor_funded_decisions "
         " WHERE decided_at <= $1", boundary)}
@@ -915,7 +958,8 @@ def _event_log_loss(obj, lab: dict) -> float:
 
 
 async def evidence_cohorts(conn, *, model_key: str, training_cutoff,
-                           frozen_at, account_id: str | None = None) -> dict:
+                           frozen_at, account_id: str | None = None,
+                           source: str = SOURCE_FUNDED) -> dict:
     """THE TWO KINDS OF EVIDENCE A MODEL CAN HAVE, KEPT APART.
 
       RETROSPECTIVE_OUT_OF_SAMPLE  decisions made after the training cutoff and
@@ -929,10 +973,11 @@ async def evidence_cohorts(conn, *, model_key: str, training_cutoff,
                                    been used.
     """
     lab = await labelled(conn, model_key=model_key, after=training_cutoff,
-                         account_id=account_id)
+                         account_id=account_id, source=source)
     if not lab.get("ok"):
         return {"ok": False, "refusal": lab.get("refusal")}
-    lab = _holdout(lab, await _fixtures_seen_through(conn, training_cutoff))
+    lab = _holdout(lab, await _fixtures_seen_through(conn, training_cutoff,
+                                                     source))
     fz = _epoch(frozen_at)
     retro = _subset(lab, [i for i in range(lab["n"])
                           if lab["decided_at"][i] <= fz])
@@ -996,7 +1041,8 @@ async def evaluate(conn, *, model_id: str, account_id: str | None = None,
     coh = await evidence_cohorts(conn, model_key=mdl["model_key"],
                                  training_cutoff=mdl["fit_through"],
                                  frozen_at=mdl["created_at"],
-                                 account_id=account_id)
+                                 account_id=account_id,
+                                 source=source_of(mdl))
     if not coh.get("ok"):
         return dict(out, ok=False, refusal=coh.get("refusal"))
     obj = load(mdl["params"])
@@ -1019,6 +1065,7 @@ async def evaluate(conn, *, model_id: str, account_id: str | None = None,
                           coh[EVIDENCE_PROSPECTIVE]) for d in c["decided_at"]
               if d <= cut]
     doc = {"weighting": WEIGHTING_EVENT_BALANCED,
+           "record_source": source_of(mdl),
            "training_cutoff_epoch_s": cut,
            "frozen_at_epoch_s": mdl["created_at"].timestamp(),
            "fixtures_held_out_because_the_fit_could_see_them":
@@ -1078,8 +1125,12 @@ async def compare_on_common_cohort(conn, *, candidate: dict,
                            "lower_is_better": True,
                            "frozen_after_epoch_s": _epoch(freeze),
                            "training_cutoff_epoch_s": _epoch(cutoff)}
+    # THE CANDIDATE'S SOURCE decides the cohort, and BOTH models are scored on
+    # it: the features are the same whichever source a model was fit on.
+    out["record_source"] = source_of(candidate)
     coh = await evidence_cohorts(conn, model_key=candidate["model_key"],
-                                 training_cutoff=cutoff, frozen_at=freeze)
+                                 training_cutoff=cutoff, frozen_at=freeze,
+                                 source=source_of(candidate))
     if not coh.get("ok"):
         return dict(out, ok=False, refusal=coh.get("refusal"))
     lab = coh[EVIDENCE_PROSPECTIVE]
@@ -1316,7 +1367,8 @@ async def rollback(conn, *, to_model_id: str, reason: str) -> dict:
 
 
 async def plan_windows(conn, *, now: float, model_key: str = KEY_MIDDLE,
-                       account_id: str | None = None) -> dict:
+                       account_id: str | None = None,
+                       source: str = SOURCE_FUNDED) -> dict:
     """DECLARE THE TRAINING AND EVALUATION WINDOWS BEFORE ANYTHING IS FIT.
 
     From the resolved fixtures whose outcomes are known NOW:
@@ -1332,7 +1384,8 @@ async def plan_windows(conn, *, now: float, model_key: str = KEY_MIDDLE,
     """
     now_dt = _dt_of(now)
     res = await labelled(conn, model_key=model_key, through=now_dt,
-                         outcomes_through=now_dt, account_id=account_id)
+                         outcomes_through=now_dt, account_id=account_id,
+                         source=source)
     if not res.get("ok"):
         return {"ok": False, "refusal": res.get("refusal")}
     first: dict = {}
@@ -1340,6 +1393,7 @@ async def plan_windows(conn, *, now: float, model_key: str = KEY_MIDDLE,
         first[str(f)] = min(t, first.get(str(f), t))
     n = len(first)
     plan = {"ok": True, "declared_before_fitting": True,
+            "record_source": source,
             "planned_at_epoch_s": now,
             "resolved_fixtures_at_planning": n}
     ordered = sorted(first.items(), key=lambda kv: (kv[1], kv[0]))
@@ -1349,7 +1403,7 @@ async def plan_windows(conn, *, now: float, model_key: str = KEY_MIDDLE,
         train = await labelled(conn, model_key=model_key,
                                through=_dt_of(cutoff),
                                outcomes_through=_dt_of(cutoff),
-                               account_id=account_id)
+                               account_id=account_id, source=source)
         if train.get("ok") and train["n_events"] >= MIN_TRAIN_EVENTS:
             straddle = n - train["n_events"] - len(hold)
             return dict(plan, training_cutoff_epoch_s=cutoff,
@@ -1377,7 +1431,8 @@ def _dt_of(epoch: float):
 async def generate_candidate(conn, *, now: float | None = None,
                              model_key: str = KEY_MIDDLE,
                              account_id: str | None = None,
-                             estimator: str = SCHEDULED_ESTIMATOR) -> dict:
+                             estimator: str = SCHEDULED_ESTIMATOR,
+                             source: str = SOURCE_FUNDED) -> dict:
     """THE SCHEDULE'S ONE WAY TO ADD A CANDIDATE: plan the windows, fit on the
     ledger within them, register it, and nothing more.
 
@@ -1406,16 +1461,18 @@ async def generate_candidate(conn, *, now: float | None = None,
     at = float(now if now is not None else time.time())
     out: dict[str, Any] = {"version": VERSION, "at": at,
                            "model_key": model_key, "generated": False,
-                           "promoted": False}
+                           "promoted": False, "record_source": source}
+    if source not in SOURCES:
+        return dict(out, ok=False, refusal="THAT_IS_NOT_A_RECORD_SOURCE")
     if not await has_schema(conn) or not await _has_provenance_columns(conn):
         return dict(out, ok=False, refusal=R_PROVENANCE_SCHEMA)
     async with conn.transaction():
         await conn.execute("SELECT pg_advisory_xact_lock(hashtextextended($1, 0))",
-                           GENERATION_LOCK_PREFIX + model_key)
+                           GENERATION_LOCK_PREFIX + model_key + ":" + source)
         return await _generate_locked(conn, at=at, out=out,
                                       model_key=model_key,
                                       account_id=account_id,
-                                      estimator=estimator)
+                                      estimator=estimator, source=source)
 
 
 #: Namespaces the per-key advisory lock `generate_candidate` holds.
@@ -1423,9 +1480,10 @@ GENERATION_LOCK_PREFIX = "bettor_funded_model.generate:"
 
 
 async def _generate_locked(conn, *, at: float, out: dict, model_key: str,
-                           account_id: str | None, estimator: str) -> dict:
+                           account_id: str | None, estimator: str,
+                           source: str = SOURCE_FUNDED) -> dict:
     plan = await plan_windows(conn, now=at, model_key=model_key,
-                              account_id=account_id)
+                              account_id=account_id, source=source)
     if not plan.get("ok"):
         return dict(out, ok=False, refusal=plan.get("refusal"))
     out["windows"] = {k: v for k, v in plan.items() if k != "ok"}
@@ -1436,8 +1494,9 @@ async def _generate_locked(conn, *, at: float, out: dict, model_key: str,
     last = await conn.fetchrow(
         "SELECT model_id, training_provenance FROM bettor_funded_models "
         " WHERE model_key=$1 AND training_provenance->>'kind' = $2 "
+        "   AND coalesce(training_provenance->>'source', $4) = $3 "
         " ORDER BY created_at DESC, model_id DESC LIMIT 1",
-        model_key, PROVENANCE_RECORDS)
+        model_key, PROVENANCE_RECORDS, source, SOURCE_FUNDED)
     if last is not None:
         prov = last["training_provenance"]
         prov = json.loads(prov) if isinstance(prov, str) else (prov or {})
@@ -1453,12 +1512,14 @@ async def _generate_locked(conn, *, at: float, out: dict, model_key: str,
     cutoff = _dt_of(plan["training_cutoff_epoch_s"])
     fitted = await fit_from_records(
         conn, through=cutoff, model_key=model_key, account_id=account_id,
-        estimator=estimator, windows=out["windows"])
+        estimator=estimator, windows=out["windows"], source=source)
     if not fitted.get("ok"):
         return dict(out, ok=False, refusal=fitted.get("refusal"))
     sha = fitted["training_provenance"]["records_sha"]
-    model_id = "fmc:%s:%s:%s" % (model_key, estimator.lower(), sha[:16])
-    version = "sched-%s-%s" % (estimator.lower(), sha[:12])
+    tag = estimator.lower() if source == SOURCE_FUNDED \
+        else "obs-" + estimator.lower()
+    model_id = "fmc:%s:%s:%s" % (model_key, tag, sha[:16])
+    version = "sched-%s-%s" % (tag, sha[:12])
     reg = await register(conn, model_id=model_id, model_version=version,
                          fitted=fitted, fit_through=cutoff,
                          model_key=model_key)

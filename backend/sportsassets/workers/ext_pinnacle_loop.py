@@ -4391,6 +4391,77 @@ async def _candidate_quote(conn, slug, side, *, now=None) -> dict:
                 inputs_expire_at=expiry)
 
 
+async def observation_quote(slug, side, *, now=None) -> dict:
+    """ONE CONTRACT'S DISPLAYED ACQUISITION PRICE, FOR THE OBSERVATION LEDGER.
+
+    NOT AN ORDER PRICE. `venue_quote` refuses a book whose currency is not
+    established, which is right for anything that could become an order. An
+    observation records what the book displayed and HOW CURRENT that was --
+    the verdict travels on the result as `book_currency`, and
+    `usable_for_orders` is True only when it is ESTABLISHED. Nothing reads
+    this for a trade: it prices features for a record labelled later from
+    the venue's own settlement.
+    """
+    from .. import bettor_book_snapshot as bs
+
+    if side not in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
+        return {"ok": False, "refusal": "OBSERVED_SIDE_NOT_IDENTIFIED"}
+    try:
+        book = await asyncio.wait_for(
+            asyncio.to_thread(_read_book_blocking, str(slug)),
+            timeout=VENUE_TIMEOUT_S)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "refusal": R_VENUE_READ_FAILED,
+                "error": type(exc).__name__}
+    if book.get("error"):
+        return {"ok": False, "refusal": R_VENUE_READ_ERROR}
+    read_at = time.time()
+    lad = bs.acquisition_ladder(book.get("marketData"), intent=side)
+    if not lad.get("ok") or not (lad.get("levels") or []):
+        return {"ok": False, "refusal": lad.get("refusal") or R_NO_DEPTH}
+    snap = bs.snapshot(book.get("marketData"), symbol=str(slug),
+                       captured_at=read_at)
+    vt = None
+    ts = snap.get("TRANSACT_TIME")
+    if ts not in (None, bs.NOT_IDENTIFIED):
+        dt = _stream_parse_ts(ts)
+        vt = None if dt is None else dt.timestamp()
+    currency = vc.evaluate(now=float(now if now is not None else read_at),
+                           observation=book.get("http_observation"),
+                           subscription=None, revalidation=None, venue_ts=vt,
+                           our_receipt_at=read_at,
+                           bound_s=MAX_VENUE_QUOTE_AGE_S)
+    levels = lad["levels"]
+    price = levels[0].get("acquisition_price")
+    return {"ok": price is not None, "price": price, "cost_per_share": price,
+            "depth_qty": sum(float(r["qty"]) for r in levels
+                             if r.get("acquisition_price") == price),
+            "read_at": read_at, "book_currency": currency,
+            "usable_for_orders": currency.get("verdict") == vc.ESTABLISHED,
+            "what_this_is": "A DISPLAYED PRICE FOR AN OBSERVATION, NOT AN "
+                            "ORDER PRICE"}
+
+
+async def _pair_observation_pass(conn, observable, *, now) -> dict:
+    """THE NON-FUNDED PAIR OBSERVER, once per LIVE cycle, never fatal.
+
+    See `bettor_pair_observations`: it records the pairing structures on a few
+    of this cycle's mapped contracts, labels older observations from the
+    venue's own settlements, and offers the registry a CANDIDATE fit on them.
+    It holds, reserves and sends nothing, and promotes nothing.
+    """
+    try:
+        from .. import bettor_pair_observations as _PO
+
+        return await _PO.observation_pass(
+            conn, candidates=observable,
+            quoter=lambda slug, side: observation_quote(slug, side, now=now),
+            prose_reader=_venue_prose, now=now)
+    except Exception as exc:                                    # noqa: BLE001
+        return {"ok": False, "refusal": "PAIR_OBSERVATION_PASS_RAISED",
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+
+
 async def _registry_state(conn) -> dict:
     """IS A MODEL APPROVED FOR THE PAIRING KEY. A read, not a substitute.
 
@@ -5246,6 +5317,7 @@ async def cycle(conn) -> dict:
     # book read -- the clock evidence. Bounded: MAX_PER_CYCLE candidates
     # are evaluated at most, so this list cannot outgrow that.
     ledger: list = []
+    observable: list = []
 
     def _ledger(entry: dict) -> None:
         if _open_ev["row"] is not None:
@@ -5589,6 +5661,12 @@ async def cycle(conn) -> dict:
             ident = await resolve_venue_identity(
                 conn, market_row=mapped["market_row"],
                 priced_outcome=quote["home"])
+            if ident["ok"]:
+                # A CONTRACT WITH A RESOLVED VENUE IDENTITY is something the
+                # non-funded pair observer can start from, whatever this
+                # candidate's own fate below.
+                observable.append((ident.get("us_market_slug"),
+                                   ident.get("intent")))
             if not ident["ok"]:
                 code = ident["refusal"] or R_NO_PREMAP
                 tally[code] = tally.get(code, 0) + 1
@@ -6290,8 +6368,11 @@ async def cycle(conn) -> dict:
     # progress on its own: a calibration that waits for someone to
     # remember to run a backfill is a calibration that never happens.
     joined = await join_outcomes(conn)
+    pair_observation = await _pair_observation_pass(conn, observable,
+                                                    now=time.time())
 
     out = {"ran": True, "state": "LIVE",
+           "pair_observation": pair_observation,
            "experiment_id": ext.EXPERIMENT_ID,
            "outcome_join": joined,
            "funded_servicing": funded_service,

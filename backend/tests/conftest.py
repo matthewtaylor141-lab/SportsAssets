@@ -339,3 +339,30 @@ def pytest_unconfigure(config):
     """Put the caller's shell back where it was."""
     if _CWD_WAS:
         os.chdir(_CWD_WAS)
+
+
+@pytest.fixture(autouse=True)
+def _no_observation_reads_from_tests(monkeypatch):
+    """The non-funded pair observer (2026-09-29) runs inside every LIVE entry
+    cycle and reads the venue: a displayed book price per contract and, later,
+    each contract's settlement. Tests that drive `cycle()` substitute
+    `venue_quote`, not these, so without this the observer would reach the
+    network from the suite. Both reads refuse here, by name; the observer's
+    own tests substitute a quoter and a settlement reader explicitly, and
+    `test_the_pairing_model_bootstraps_from_non_funded_observations` pins the
+    production wiring."""
+    from sportsassets import bettor_pair_observations as po
+    from sportsassets.workers import ext_pinnacle_loop as loop
+
+    async def _no_book(slug, side, *, now=None):
+        return {"ok": False, "refusal": "NO_VENUE_BOOK_READ_FROM_TESTS"}
+
+    def _no_settlement(slug):
+        return {"status": "UNREADABLE", "error": "NO_SETTLEMENT_READ_FROM_TESTS"}
+
+    # The real one stays reachable, by name, for the test that pins it with
+    # its own substituted book read.
+    monkeypatch.setattr(loop, "_real_observation_quote",
+                        loop.observation_quote, raising=False)
+    monkeypatch.setattr(loop, "observation_quote", _no_book)
+    monkeypatch.setattr(po, "_production_settlement", _no_settlement)
