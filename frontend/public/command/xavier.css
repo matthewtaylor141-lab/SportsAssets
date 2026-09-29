@@ -1,0 +1,80 @@
+/* XAVIER PANEL · presentation only. Every class is prefixed `xv-` so it can
+ * sit inside the Command Centre shell without touching its rules, and the
+ * tokens are its own so the standalone page needs no other stylesheet. */
+
+.xv-root, .xv-page {
+  --xv-bg: #0b0f17;
+  --xv-surface: #111723;
+  --xv-line: #1f2a3a;
+  --xv-ink: #e6ebf2;
+  --xv-ink-2: #9fb0c8;
+  --xv-good: #3ddc97;
+  --xv-warn: #f2b544;
+  --xv-bad: #ff6b6b;
+  --xv-accent: #4c9ffe;
+  color: var(--xv-ink);
+}
+
+.xv-page {
+  margin: 0;
+  padding: 16px;
+  background: var(--xv-bg);
+  font: 14px/1.45 system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+.xv-root { display: grid; gap: 14px; max-width: 1100px; margin: 0 auto; }
+
+.xv-panel, .xv-card {
+  background: var(--xv-surface);
+  border: 1px solid var(--xv-line);
+  border-radius: 10px;
+  padding: 14px 16px;
+  min-width: 0;
+}
+
+.xv-head h2 { margin: 0 0 4px; font-size: 20px; }
+.xv-card h4, .xv-panel h4 { margin: 14px 0 6px; font-size: 13px;
+  text-transform: uppercase; letter-spacing: .04em; color: var(--xv-ink-2); }
+.xv-panel h3 { margin: 0 0 8px; font-size: 16px; }
+
+.xv-card-head { display: flex; justify-content: space-between; gap: 12px;
+  align-items: flex-start; flex-wrap: wrap; }
+.xv-slug { margin: 0; font-weight: 600; word-break: break-all; }
+.xv-sub, .xv-note { margin: 4px 0; color: var(--xv-ink-2); font-size: 13px; }
+
+.xv-chosen-action { font-size: 20px; font-weight: 700; padding: 6px 12px;
+  border-radius: 8px; border: 1px solid var(--xv-line); }
+.xv-hold { color: var(--xv-accent); }
+.xv-act { color: var(--xv-warn); }
+.xv-wait { color: var(--xv-ink-2); }
+
+.xv-badge { display: inline-block; padding: 2px 8px; border-radius: 999px;
+  border: 1px solid currentColor; font-size: 12px; margin-right: 8px; }
+.xv-good { color: var(--xv-good); }
+.xv-bad { color: var(--xv-bad); }
+
+.xv-scroll { overflow-x: auto; -webkit-overflow-scrolling: touch; }
+.xv-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.xv-table th, .xv-table td { text-align: left; padding: 6px 8px;
+  border-bottom: 1px solid var(--xv-line); white-space: nowrap; }
+.xv-table th { color: var(--xv-ink-2); font-weight: 600; }
+.xv-chosen td { background: rgba(76, 159, 254, .08); }
+
+.xv-grid { display: grid; gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); }
+.xv-grid dl, .xv-inline { display: grid; grid-template-columns: auto 1fr;
+  gap: 2px 12px; margin: 0; }
+.xv-grid dt, .xv-inline dt { color: var(--xv-ink-2); }
+.xv-grid dd, .xv-inline dd { margin: 0; text-align: right; }
+
+.xv-unknown { color: var(--xv-warn); font-style: normal; font-weight: 600; }
+.xv-json { max-height: 180px; overflow: auto; background: var(--xv-bg);
+  border: 1px solid var(--xv-line); border-radius: 6px; padding: 8px;
+  font-size: 12px; white-space: pre-wrap; word-break: break-word; }
+.xv-blockers { margin: 0; padding-left: 18px; }
+.xv-kind { color: var(--xv-ink-2); font-size: 12px; }
+.xv-hypo { border-left: 3px solid var(--xv-warn); padding: 6px 10px;
+  background: rgba(242, 181, 68, .08); margin: 6px 0; }
+.xv-empty h3 { color: var(--xv-warn); }
+.xv-unavailable h3 { color: var(--xv-bad); }
+.xv-root code { word-break: break-all; }

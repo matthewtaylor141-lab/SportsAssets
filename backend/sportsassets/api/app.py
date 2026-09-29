@@ -3098,6 +3098,79 @@ async def command_center_snapshot(response: Response) -> dict:
         }) from inc
 
 
+# ── XAVIER IN THE COMMAND CENTRE (2026-09-29) ───────────────────────
+#
+# Each position under Xavier's responsibility: the chosen action, every
+# alternative with its value, change vs HOLD, worst case, capital and
+# blocker, the reasoning, expected and realised economics, residual
+# exposure, execution eligibility, obligations and next review -- from the
+# newest persisted Xavier record and the funded book -- plus the latest
+# daily review, whose alternative figures are labelled hypothetical
+# estimates. GETs behind `require_command` like every COMMAND read; the
+# module holds no mutating statement and no venue client. The page route is
+# declared BEFORE the per-position route so `/page` is never read as an id.
+def _xavier_unavailable(exc) -> HTTPException:
+    return HTTPException(status_code=503, detail={
+        "reason": exc.reason, "detail": exc.detail,
+        "note": "xavier records unread -- COMMAND shows unavailable, not an "
+                "empty book"})
+
+
+async def _xavier_read(fn, **kw):
+    """One read on one pooled connection. A pool or connection failure is a
+    named 503 carrying the error's type, never a 500 and never an empty page;
+    a refusal the read model raises keeps its own reason."""
+    from . import command_xavier as CX
+
+    try:
+        pool = await get_pool()
+    except Exception as exc:                                    # noqa: BLE001
+        raise _xavier_unavailable(CX.XavierUnavailable(
+            "NO_DATABASE_POOL", type(exc).__name__)) from exc
+    try:
+        async with pool.acquire() as conn:
+            return await fn(conn, **kw)
+    except CX.XavierUnavailable as exc:
+        raise _xavier_unavailable(exc) from exc
+    except HTTPException:
+        raise
+    except Exception as exc:                                    # noqa: BLE001
+        raise _xavier_unavailable(CX.XavierUnavailable(
+            "XAVIER_READ_FAILED", type(exc).__name__)) from exc
+
+
+@app.get("/api/command/xavier", dependencies=[Depends(require_command)])
+async def command_xavier(response: Response) -> dict:
+    from . import command_xavier as CX
+
+    response.headers["Cache-Control"] = "no-store"
+    return await _xavier_read(CX.overview)
+
+
+@app.get("/api/command/xavier/page", include_in_schema=False,
+         dependencies=[Depends(require_command)])
+async def command_xavier_page():
+    """The Xavier panel as one self-contained page on this origin (generated
+    by `tools/build_xavier_page.py`). Its only fetch is the read above."""
+    from .xavier_page import XAVIER_PAGE_HTML
+
+    return HTMLResponse(content=XAVIER_PAGE_HTML, status_code=200,
+                        headers=_desk_page_headers())
+
+
+@app.get("/api/command/xavier/{intent_id}",
+         dependencies=[Depends(require_command)])
+async def command_xavier_position(intent_id: str, response: Response) -> dict:
+    from . import command_xavier as CX
+
+    response.headers["Cache-Control"] = "no-store"
+    got = await _xavier_read(CX.position_history, intent_id=intent_id)
+    if got is None:
+        raise HTTPException(status_code=404, detail={
+            "reason": CX.R_NO_RECORD, "intent_id": intent_id})
+    return got
+
+
 #: THE CONTROLLED DEMONSTRATION'S OWN EXPERIMENT. It is NOT the acceptance
 #: position and NOT the autonomous lane: it is the CURRENT EV lane's own
 #: writers, driven on a scenario whose inputs are chosen to pass every gate,

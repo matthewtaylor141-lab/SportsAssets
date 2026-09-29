@@ -5587,6 +5587,10 @@ async def cycle(conn) -> dict:
     # It runs here, unconditionally, and its own result says what it did. It
     # submits nothing that the servicing switch does not permit.
     funded_service = await _funded_service(conn, now=time.time())
+    # XAVIER'S DAILY REVIEW, after the learning pass inside servicing and
+    # above every entry gate, so a stopped lane is still reviewed. Once per
+    # UTC day; never fatal. Every heartbeat below carries its digest.
+    xavier_review = await _xavier_daily_review(conn, now=time.time())
 
     # ── A CYCLE THAT ENTERS NOTHING STILL SERVICED, SO IT STILL BEATS ──
     #
@@ -5600,6 +5604,7 @@ async def cycle(conn) -> dict:
     # the table missing, the credential absent. `_beat` writes what was
     # decided and then returns the same dict.
     async def _beat(payload: dict) -> dict:
+        payload.setdefault("xavier_review", xavier_review)
         await _heartbeat(conn, payload)
         return payload
 
@@ -6949,6 +6954,7 @@ async def cycle(conn) -> dict:
            "experiment_id": ext.EXPERIMENT_ID,
            "outcome_join": joined,
            "funded_servicing": funded_service,
+           "xavier_review": xavier_review,
            "evaluated": evaluated, "written": written,
            "refusals": tally, "credits": credits,
            # ── THE FRESHNESS KNOB, AND WHAT IT COST ──────────────────
@@ -7325,6 +7331,44 @@ def _withdraw_digest(w) -> dict | None:
                                   "withdrawn", "reason",
                                   "not_withdrawn_because",
                                   "provenance_verified", "error")}
+
+
+async def _xavier_daily_review(conn, *, now):
+    """XAVIER'S DAILY REVIEW, after the learning pass, once per UTC day.
+
+    RUNS WHETHER OR NOT A FUNDED ACCOUNT IS BOUND: with none bound there are
+    still models to summarise, a calibration to read and past decisions to
+    score. EVERY ACCOUNT'S decisions are reviewed, not only the bound one's:
+    a re-bound account must not leave the previous account's decisions
+    unscored, and the review has no authority, so reading more costs nothing.
+    It writes only its own review row (and retires an approval whose records
+    no longer reproduce, which removes authority and grants none).
+    NEVER FATAL: a failure is returned for the heartbeat and retried next
+    cycle, because the review row for the day was not written."""
+    from .. import bettor_xavier_review as _XR
+
+    try:
+        return await _XR.daily_review(conn, now=now)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"ok": False, "ran": False, "refusal": _XR.R_RAISED,
+                "error": "%s: %s" % (type(exc).__name__, str(exc)[:200])}
+
+
+def _xavier_review_digest(xr) -> dict | None:
+    """The daily review, bounded for the heartbeat: the last review date,
+    how many decisions it read, how many had authoritative outcomes, how many
+    were invalidated, and when the next is due -- or why it did not run."""
+    if not isinstance(xr, dict):
+        return None
+    d = xr.get("digest") if isinstance(xr.get("digest"), dict) else {}
+    return {"ok": xr.get("ok"), "ran": xr.get("ran"),
+            "refusal": xr.get("refusal"), "error": xr.get("error"),
+            "review_date": xr.get("review_date"),
+            "last_review_date": d.get("last_review_date"),
+            "decisions_reviewed": d.get("decisions_reviewed"),
+            "decisions_with_outcomes": d.get("decisions_with_outcomes"),
+            "invalidated": d.get("invalidated"),
+            "next_due_at": d.get("next_due_at")}
 
 
 def _settlement_digest(reads) -> dict | None:
@@ -7799,6 +7843,10 @@ async def _heartbeat(conn, out: dict, *, key: str = None) -> None:
                 # whether it was sent, and the named blocker otherwise.
                 "funded_servicing": _servicing_digest(
                     out.get("funded_servicing")),
+                # XAVIER'S DAILY REVIEW: last date, decisions reviewed, with
+                # outcomes, invalidated, next due -- or why it did not run.
+                "xavier_review": _xavier_review_digest(
+                    out.get("xavier_review")),
                 # WHY A CYCLE STOPPED OR WAS BLOCKED. The early returns
                 # carry it and the heartbeat used to drop it, so a STOPPED
                 # row read `refusals: {}` and did not say why.
