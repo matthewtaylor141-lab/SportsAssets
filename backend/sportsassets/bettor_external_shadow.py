@@ -599,12 +599,36 @@ STAGES = (
         "INDEPENDENT_FAIR_VALUE_NOT_ESTABLISHED",
         "NO_QUALIFIED_MODEL",
         "THIN_OUTCOME_COVERAGE",
-        R_THIN_OUTCOME)),
+        R_THIN_OUTCOME,
+        # NO PROVIDER PRICE AT ALL: the book does not quote this event yet.
+        # No catalogue or alias can repair it, which is why it is a
+        # probability-stage refusal and never an identity one (map4 D9).
+        "NO_PINNACLE_ON_EVENT")),
     ("2_FRESHNESS", (
         "QUOTE_STALE",
         "VENUE_BOOK_STALE",
-        "ONE_CLOCK_IS_NOT_MEASURED")),
+        "ONE_CLOCK_IS_NOT_MEASURED",
+        # Lever A: already past the 30 s rule before any venue read.
+        "QUOTE_STALE_ON_ARRIVAL")),
     ("3_IDENTITY", (
+        # THE GLOBAL CATALOGUE COULD NOT NAME ONE MONEYLINE ROW (map4 D9).
+        "VENUE_MAPPING_AMBIGUOUS",
+        "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE",
+        # THE VENUE'S OWN CATALOGUE, asked by `bettor_venue_native_identity`
+        # when the global one had no usable row.
+        "NO_VENUE_NATIVE_EVENT_FOR_FIXTURE",
+        "VENUE_NATIVE_EVENT_AMBIGUOUS",
+        "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM",
+        "VENUE_NATIVE_TEAM_ASSIGNMENT_AMBIGUOUS",
+        "VENUE_NATIVE_CONTRACT_FOR_THE_PRICED_TEAM_NOT_FOUND",
+        "VENUE_NATIVE_CONTRACT_FOR_THE_PRICED_TEAM_AMBIGUOUS",
+        "VENUE_NATIVE_CONTRACT_SIDES_NOT_ESTABLISHED",
+        "VENUE_NATIVE_FAMILY_NOT_SUPPORTED",
+        "VENUE_NATIVE_PROVIDER_EVENT_NOT_MATCHABLE",
+        "VENUE_NATIVE_CATALOGUE_READ_FAILED",
+        "VENUE_NATIVE_CANDIDATE_READ_TRUNCATED",
+        "VENUE_NATIVE_COMPETITION_NOT_ESTABLISHED",
+        "VENUE_NATIVE_MATCH_RAISED",
         "VENUE_DOES_NOT_LIST_THIS_FIXTURE",
         "NO_PREMAP_CONTRACT_FOR_THIS_FIXTURE",
         "PAYOUT_OUTCOME_INDEX_NOT_BOUND_TO_A_TOKEN",
@@ -760,7 +784,40 @@ EVALUABILITY_OF = {
     "OPEN_SHADOW_BOOK_NOT_READ": COULD_NOT_EVALUATE,
     "SIZING_POLICY_NOT_APPLICABLE": COULD_NOT_EVALUATE,
 
+    # A MEASURED AGE PAST THE LIMIT, measured before the venue read instead
+    # of after it. The same decision as QUOTE_STALE, taken earlier.
+    "QUOTE_STALE_ON_ARRIVAL": DECIDED,
+    # THE GLOBAL MATCH FOUND TWO ROWS AND COULD NOT CHOOSE. Ours: the match
+    # ignores dates, which is why the venue-native path exists.
+    "VENUE_MAPPING_AMBIGUOUS": COULD_NOT_EVALUATE,
+    # THE VENUE-NATIVE MATCHER'S OWN INABILITIES. Each names a comparison it
+    # could not make safely -- two candidates, a swappable assignment, one
+    # team named, a contract whose sides are not shown -- not a verdict on
+    # the fixture.
+    "VENUE_NATIVE_EVENT_AMBIGUOUS": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_EVENT_MATCHES_ONLY_ONE_TEAM": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_TEAM_ASSIGNMENT_AMBIGUOUS": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_CONTRACT_FOR_THE_PRICED_TEAM_AMBIGUOUS": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_CONTRACT_SIDES_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_FAMILY_NOT_SUPPORTED": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_CATALOGUE_READ_FAILED": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_CANDIDATE_READ_TRUNCATED": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_COMPETITION_NOT_ESTABLISHED": COULD_NOT_EVALUATE,
+    "VENUE_NATIVE_MATCH_RAISED": COULD_NOT_EVALUATE,
+
     # ── EXTERNAL DEPENDENCY: the missing input is theirs ──────────────
+    # THE PROVIDER DOES NOT QUOTE IT (yet). Measured 2026-09-29: UNL fixtures
+    # 42-117 h out and Serie B at ~95 h simply carry no Pinnacle h2h.
+    "NO_PINNACLE_ON_EVENT": EXTERNAL_DEPENDENCY,
+    # The catalogue lists only line markets for this fixture: no moneyline
+    # exists there to price, the same kind of absence as no contract at all.
+    "VENUE_CONTRACT_IS_A_LINE_MARKET_NOT_A_MONEYLINE": EXTERNAL_DEPENDENCY,
+    # The venue's own catalogue does not list the fixture, or lists no
+    # contract for the priced team on it, or the provider's own event cannot
+    # be matched (no two distinct teams, no readable start).
+    "NO_VENUE_NATIVE_EVENT_FOR_FIXTURE": EXTERNAL_DEPENDENCY,
+    "VENUE_NATIVE_CONTRACT_FOR_THE_PRICED_TEAM_NOT_FOUND": EXTERNAL_DEPENDENCY,
+    "VENUE_NATIVE_PROVIDER_EVENT_NOT_MATCHABLE": EXTERNAL_DEPENDENCY,
     "VENUE_BOOK_NOT_READ": EXTERNAL_DEPENDENCY,
     "VENUE_BOOK_READ_FAILED": EXTERNAL_DEPENDENCY,
     "VENUE_BOOK_READ_RETURNED_ERROR": EXTERNAL_DEPENDENCY,

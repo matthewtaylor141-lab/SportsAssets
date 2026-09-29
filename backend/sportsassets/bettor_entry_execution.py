@@ -1390,12 +1390,23 @@ def _accrued(cost, opened_at, now):
 
 def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
                        proposed_qty, now=None,
-                       proposed_cost_basis=None) -> dict:
+                       proposed_cost_basis=None,
+                       venue_market_slug=None) -> dict:
     """Measured exposure per rail, including the proposed position.
 
     `rows` is the OPEN shadow book: dicts carrying `condition_id`,
     `event_key`, `cost_usd`, `qty`, `opened_at` (epoch seconds) and
-    optionally `marked_value_usd` and `realized_net_usd`.
+    optionally `marked_value_usd`, `realized_net_usd` and
+    `venue_market_slug`.
+
+    `venue_market_slug` ONLY WIDENS WHAT THE MARKET RAIL COUNTS. A candidate
+    whose identity came from the venue's own catalogue has no global
+    condition id, and an open row entered through the global path on the
+    SAME venue contract carries one -- so matching on the condition alone
+    would leave that row out of MAX_MARKET_EXPOSURE and read the market as
+    emptier than it is. With the slug given, a row counts toward the market
+    when its condition matches (as before) OR its venue contract is the same.
+    Nothing that counted before stops counting; omitted, nothing changes.
 
     `proposed_cost_basis` NAMES WHICH PRICE THE RESERVATION USED. A rail
     reserved at the worst-case limit and one reserved at the modelled
@@ -1444,7 +1455,10 @@ def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
             continue
         total += c
         residual += float(r.get("qty") or 0.0)
-        if str(r.get("condition_id") or "") == str(condition_id or ""):
+        if (str(r.get("condition_id") or "") == str(condition_id or "")
+                or (venue_market_slug
+                    and str(r.get("venue_market_slug") or "")
+                    == str(venue_market_slug))):
             market += c
         if (r.get("event_key") is not None
                 and str(r.get("event_key")) == str(event_key or "")):
@@ -1474,6 +1488,7 @@ def exposure_from_rows(rows, *, condition_id, event_key, proposed_cost_usd,
     out["settled_positions_excluded_from_exposure"] = settled
     out["proposed"] = {"cost_usd": round(cost, 6), "qty": round(qty, 6),
                        "condition_id": condition_id,
+                       "venue_market_slug": venue_market_slug,
                        "event_key": event_key,
                        "cost_basis": (str(proposed_cost_basis)
                                       if proposed_cost_basis
@@ -1550,7 +1565,7 @@ SAFETY_USD = 1e-6
 
 
 def headroom_from_rows(rows, *, condition_id, event_key, now=None,
-                       approved_limits=None) -> dict:
+                       approved_limits=None, venue_market_slug=None) -> dict:
     """What each rail still allows BEFORE anything is proposed.
 
     The SAME measurement function, asked with a proposed position of
@@ -1560,7 +1575,8 @@ def headroom_from_rows(rows, *, condition_id, event_key, now=None,
     used = exposure_from_rows(
         rows, condition_id=condition_id, event_key=event_key,
         proposed_cost_usd=0.0, proposed_qty=0.0, now=now,
-        proposed_cost_basis="NOTHING_PROPOSED_THIS_MEASURES_THE_BOOK_ALONE")
+        proposed_cost_basis="NOTHING_PROPOSED_THIS_MEASURES_THE_BOOK_ALONE",
+        venue_market_slug=venue_market_slug)
     # THE APPROVED SET IS CONSUMED HERE, and it can only tighten. With no
     # approval this is exactly the frozen set, so the unapproved path is
     # unchanged.

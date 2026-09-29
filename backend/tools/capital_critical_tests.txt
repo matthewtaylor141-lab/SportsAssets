@@ -161,6 +161,7 @@ tests/test_the_venue_settlement_probe.py
 tests/test_the_winning_plan_is_the_order_that_is_sent.py
 tests/test_two_detectors_one_exit.py
 tests/test_venue_native_identity.py
+tests/test_venue_native_identity_matches_the_measured_fixture.py
 tests/test_venue_probe_reaches_the_venue.py
 tests/test_venue_settle.py
 tests/test_whale_exit_fail_closed.py
