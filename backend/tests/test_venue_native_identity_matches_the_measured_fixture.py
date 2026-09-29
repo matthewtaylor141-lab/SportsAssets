@@ -219,10 +219,11 @@ def test_it_agrees_with_the_venue_slug_production_resolved_globally():
 
 def test_the_measured_coverage_on_the_priced_events():
     """Of the 28 events that HAVE a Pinnacle price, 21 map and 7 refuse, each
-    by name. The spec's crude count said "at least 11 of 20"; exact names
-    refuse four of those it listed (Lyon v "OL Lyonnes", Austria Wien v "FC
-    Internazionale Milano", Benfica v "FC Bayern Munchen", Belgium v
-    "Turkiye") because no alias is invented."""
+    by name. The spec's crude last-word count said "at least 11 of 20"; exact
+    names map 13 of the 20 NO_VENUE_CONTRACT events, and refuse two of the
+    fixtures it listed (Lyon v "OL Lyonnes", Austria Wien v "FC Internazionale
+    Milano") plus Benfica v "FC Bayern Munchen" and Belgium v "Turkiye",
+    because no alias is invented."""
     priced = [e for e in EVENTS if e["first_refusal"] != "NO_PINNACLE_ON_EVENT"]
     outcomes = [EXPECTED[e["provider_event_id"]][1][0] for e in priced]
     assert len(priced) == 28
